@@ -107,6 +107,21 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         profiles: DRONE,
     },
     PrebuiltBinary {
+        service: "ados-camera-probe",
+        asset: "ados-camera-probe-aarch64",
+        // Published alongside ados-video: same release tag, same camera-path
+        // cadence, so the probe can never be a version behind the pipeline
+        // whose overlay it validates.
+        release_tag: "prebuilt-video",
+        dest: "/opt/ados/bin/ados-camera-probe",
+        // Best-effort, and fetched on every profile even though the CSI camera
+        // is drone-side: the unit is `ConditionPathExists`-gated on the
+        // probation marker, so a node that never staged a camera overlay never
+        // execs it, and any node that DID stage one must be able to revert it.
+        gate: Gate::BestEffort,
+        profiles: ANY,
+    },
+    PrebuiltBinary {
         service: "ados-plugin-host",
         asset: "ados-plugin-host-aarch64",
         release_tag: "prebuilt-plugin-host",
@@ -759,8 +774,35 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_twenty_four_entries() {
-        assert_eq!(PREBUILT.len(), 24);
+    fn catalog_has_twenty_five_entries() {
+        assert_eq!(PREBUILT.len(), 25);
+    }
+
+    /// The camera boot probe is fetched on every profile even though the CSI
+    /// camera is drone-side. Its unit is gated on the probation marker, so a
+    /// node that never staged an overlay never execs it — and any node that DID
+    /// stage one must carry the binary that can revert it, or a blind apply on a
+    /// board with no camera has nothing to undo it.
+    #[test]
+    fn every_profile_fetches_the_camera_boot_probe() {
+        for profile in ["drone", "ground_station", "workstation"] {
+            let svcs: Vec<&str> = for_profile(profile).iter().map(|b| b.service).collect();
+            assert!(
+                svcs.contains(&"ados-camera-probe"),
+                "{profile} must fetch ados-camera-probe"
+            );
+        }
+        let probe = PREBUILT
+            .iter()
+            .find(|b| b.service == "ados-camera-probe")
+            .expect("the camera probe must be in the catalog");
+        // Published with the camera pipeline so the probe can never lag the
+        // overlay it validates.
+        assert_eq!(probe.release_tag, "prebuilt-video");
+        assert_eq!(probe.dest, "/opt/ados/bin/ados-camera-probe");
+        // Best-effort: a fetch miss must not abort an install on a board with no
+        // camera at all.
+        assert_eq!(probe.gate, Gate::BestEffort);
     }
 
     /// Both FC-bearing profiles fetch the swarm bus, matching its supervisor gate. A

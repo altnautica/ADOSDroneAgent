@@ -73,14 +73,13 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
         name=app.config.agent.name,
     )
 
-    # Detect board
-    from ados.hal.detect import detect_board, persist_board_sidecar
+    # Detect board. The fingerprint sidecar (/run/ados/board.json) is written by
+    # the supervisor at startup, in Rust, and has exactly one writer — this
+    # process only needs the detection result in memory.
+    from ados.hal.detect import detect_board
     board = detect_board()
     app.board = board  # store for heartbeat + route access
     app.board_name = board.name
-    # Persist the fingerprint to the board sidecar so the native control surface
-    # reports the true NPU capability + perception tier (nothing else writes it).
-    persist_board_sidecar(board)
     log.info("board_info", name=board.name, tier=board.tier, ram_mb=board.ram_mb)
 
     # Set tier from detection if auto

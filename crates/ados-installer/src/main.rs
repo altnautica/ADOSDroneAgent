@@ -272,6 +272,23 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
     sink.finish();
     render.finish();
 
+    // The single automatic reboot, AFTER the closing card is drawn and the
+    // terminal restored — so the operator reads what is staged and why the box
+    // is about to go away, instead of the screen dying mid-render. `--no-reboot`
+    // defers it; the `reboot` step has already degraded the install and named
+    // the staged provisioning in the summary above.
+    if !ctx.pending_reboot.is_empty() && !ctx.args.no_reboot && status != "failed" {
+        println!(
+            "Rebooting to finish provisioning: {}",
+            ctx.pending_reboot.join(", ")
+        );
+        if !exec::run_ok("systemctl", &["reboot"]) {
+            // Nothing left to fall back on, so say so plainly rather than
+            // exiting as if the box were in its provisioned state.
+            println!("Automatic reboot failed; reboot this node to finish provisioning.");
+        }
+    }
+
     if status == "failed" {
         Ok(ExitCode::from(1))
     } else {
@@ -390,6 +407,7 @@ fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
         ap_passphrase: read_ap_passphrase(),
         failed_steps: ctx.failures.failed.clone(),
         required_failures: ctx.failures.required.clone(),
+        pending_reboot: ctx.pending_reboot.clone(),
     }
 }
 

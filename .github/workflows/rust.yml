@@ -673,15 +673,21 @@ jobs:
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Build static ados-video
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-video
+      # The camera boot probe rides the same release tag as the pipeline whose
+      # overlay it validates, so the probe can never lag the provisioner.
+      - name: Build static ados-video + ados-camera-probe
+        run: |
+          cargo build --release --target aarch64-unknown-linux-musl -p ados-video
+          cargo build --release --target aarch64-unknown-linux-musl -p ados-hal-probe --bin ados-camera-probe
 
-      - name: Stage artifact + checksum
+      - name: Stage artifacts + checksums
         run: |
           set -euo pipefail
           mkdir -p rel
           cp target/aarch64-unknown-linux-musl/release/ados-video rel/ados-video-aarch64
+          cp target/aarch64-unknown-linux-musl/release/ados-camera-probe rel/ados-camera-probe-aarch64
           ( cd rel && sha256sum ados-video-aarch64 > ados-video-aarch64.sha256 )
+          ( cd rel && sha256sum ados-camera-probe-aarch64 > ados-camera-probe-aarch64.sha256 )
 
       - name: Sign artifact (only when the signing key is present)
         env:
@@ -695,6 +701,7 @@ jobs:
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-video-aarch64 -x rel/ados-video-aarch64.minisig
+          minisign -S -s /tmp/sign.key -m rel/ados-camera-probe-aarch64 -x rel/ados-camera-probe-aarch64.minisig
           rm -f /tmp/sign.key
 
       - name: Publish rolling prerelease

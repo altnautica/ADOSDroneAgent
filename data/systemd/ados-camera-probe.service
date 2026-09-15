@@ -1,0 +1,32 @@
+[Unit]
+Description=ADOS camera presence probe (apply-verify-auto-revert)
+# Runs only while a camera overlay is on probation: a CSI camera overlay was
+# written to the boot config before the sensor could be confirmed present,
+# because on most boards the sensor does not enumerate until the overlay is in
+# the device tree and the box has rebooted. This oneshot fires once on the next
+# boot to either CONFIRM the sensor (clear probation, mark the camera present)
+# or AUTO-REVERT the boot config from the snapshot the provisioner saved, so a
+# blind apply on a board with no camera self-heals within one reboot instead of
+# leaving it unbootable.
+ConditionPathExists=/etc/ados/camera.probation
+# The CSI sensor binds through the media/V4L2 stack late in kernel boot, so
+# settle udev + wait for modules before judging presence. Order Before the
+# services that read camera.conf so the verdict is settled before they act on
+# it.
+After=local-fs.target systemd-modules-load.service systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+Before=ados-video.service ados-supervisor.service
+
+[Service]
+Type=oneshot
+# The native boot probe applies the apply-verify-auto-revert logic. The binary
+# is provisioned by the installer before the unit is enabled; a direct exec
+# means a missing binary fails loudly instead of silently skipping the revert.
+ExecStart=/opt/ados/bin/ados-camera-probe
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-camera-probe
+
+[Install]
+WantedBy=multi-user.target

@@ -42,6 +42,7 @@ pub mod npu_provision;
 pub mod portable_python;
 pub mod preflight;
 pub mod purge_residue;
+pub mod reboot;
 pub mod rtl_regulatory;
 pub mod start;
 pub mod systemd;
@@ -92,6 +93,11 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         // opt in, and arming it before the step most likely to stall is wrong on
         // its own merits.
         Box::new(watchdog::Watchdog),
+        // LAST of all: read `/run/ados/reboot-required` and decide whether the
+        // installer performs the single automatic reboot. It only records the
+        // decision — the binary reboots after the closing summary is drawn, so
+        // the operator always sees WHY the box is about to go away.
+        Box::new(reboot::Reboot),
     ]
 }
 
@@ -104,7 +110,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 23);
+        assert_eq!(order.len(), 24);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -149,6 +155,10 @@ mod tests {
         assert!(pos("gpu_provision") < pos("systemd"));
         // The hardware watchdog arms after the apt/systemd upgrade is done.
         assert!(pos("deps") < pos("watchdog"));
+        // The pending-reboot reader runs after the health gate has had its say
+        // on a running agent: the reboot is the last thing that happens to the
+        // box, and a reboot before health would report on a node it never saw.
+        assert!(pos("health") < pos("reboot"));
         assert!(pos("systemd") < pos("start"));
         assert!(pos("fetch_binaries") < pos("start"));
         assert!(pos("start") < pos("health"));

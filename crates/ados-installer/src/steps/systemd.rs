@@ -37,6 +37,13 @@ const UNIVERSAL_UNITS: &[&str] = &[
     "ados-peripherals.service",
     "ados-fbcon-detach.service",
     "ados-display-probe.service",
+    // The camera counterpart of the display probe: a oneshot gated on
+    // /etc/ados/camera.probation that confirms the CSI sensor the overlay was
+    // applied for, or restores the pre-overlay boot config when nothing bound.
+    // Enabled cross-profile because the marker, not the profile, decides
+    // whether it does anything — and a board that staged an overlay must be
+    // able to revert it wherever it is.
+    "ados-camera-probe.service",
     "ados-usb-otg-host.service",
     // mDNS advertiser: registers the `_ados._tcp` service (with the live pair
     // code in the TXT) so Mission Control can find the agent on the LAN and

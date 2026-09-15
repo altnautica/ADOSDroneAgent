@@ -131,6 +131,16 @@ pub fn plain_lines(s: &SummaryData) -> Vec<String> {
         out.push("  This passphrase is unique to this unit. Write it down.".to_string());
     }
 
+    // Before "Next steps": a staged overlay means the hardware it provisions is
+    // NOT working yet, so it outranks anything the operator might type.
+    if !s.pending_reboot.is_empty() {
+        out.push(String::new());
+        out.push("Reboot needed to finish:".to_string());
+        for reason in &s.pending_reboot {
+            out.push(format!("  {reason}"));
+        }
+    }
+
     out.push(String::new());
     out.push("Next steps:".to_string());
     let cmd_w = next_step_cmd_width();
@@ -452,7 +462,33 @@ mod tests {
             ap_ssid: None,
             ap_passphrase: None,
             required_failures: vec![],
+            pending_reboot: vec![],
         }
+    }
+
+    #[test]
+    fn a_pending_reboot_is_named_on_the_closing_card() {
+        // The provisioners have always recorded this; until the card said so an
+        // operator was never told their camera would not work until a reboot.
+        let mut s = sample("degraded");
+        s.pending_reboot = vec!["camera-overlay radxa-camera-13m-214".to_string()];
+        let lines = plain_lines(&s);
+        let body = lines.join("\n");
+        assert!(body.contains("Reboot needed to finish:"), "{body}");
+        assert!(body.contains("camera-overlay radxa-camera-13m-214"), "{body}");
+        // It outranks the next-step commands: the hardware is not working yet.
+        let reboot_at = lines
+            .iter()
+            .position(|l| l.contains("Reboot needed to finish:"))
+            .unwrap();
+        let next_at = lines.iter().position(|l| l == "Next steps:").unwrap();
+        assert!(reboot_at < next_at);
+    }
+
+    #[test]
+    fn no_pending_reboot_renders_no_reboot_block() {
+        let body = plain_lines(&sample("ok")).join("\n");
+        assert!(!body.contains("Reboot needed"));
     }
 
     #[test]

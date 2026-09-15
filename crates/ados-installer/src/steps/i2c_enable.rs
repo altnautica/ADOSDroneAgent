@@ -78,7 +78,10 @@ pub fn ensure_i2c_arm(cfg: &str) -> String {
 
 /// Ensure the boot config enables the ARM I2C bus, snapshotting before any edit.
 /// No-op when the config is absent (a non-Pi board) or already enabled.
-fn provision_i2c_boot_config() {
+///
+/// Returns whether the boot config was CHANGED, i.e. whether a reboot is now
+/// needed before `/dev/i2c-1` exists.
+fn provision_i2c_boot_config() -> bool {
     for cfg_path in PI_CONFIG_PATHS {
         let path = Path::new(cfg_path);
         let current = match std::fs::read_to_string(path) {
@@ -88,23 +91,24 @@ fn provision_i2c_boot_config() {
         let updated = ensure_i2c_arm(&current);
         if updated == current {
             tracing::info!(cfg = cfg_path, "I2C already enabled in the boot config");
-            return;
+            return false;
         }
         let bak = format!("{cfg_path}.ados-bak");
         if let Err(e) = std::fs::write(&bak, &current) {
             tracing::warn!(error = %e, "could not snapshot boot config before I2C enable; skipping");
-            return;
+            return false;
         }
         if let Err(e) = std::fs::write(path, &updated) {
             tracing::warn!(error = %e, "writing I2C-enabled boot config failed");
-        } else {
-            tracing::info!(
-                cfg = cfg_path,
-                "enabled I2C in the boot config (reboot to apply)"
-            );
+            return false;
         }
-        return;
+        tracing::info!(
+            cfg = cfg_path,
+            "enabled I2C in the boot config (reboot to apply)"
+        );
+        return true;
     }
+    false
 }
 
 /// Enable the I2C bus so the ground-station status OLED can bind.
@@ -130,7 +134,13 @@ impl Step for I2cEnable {
         if ctx.profile != "ground_station" {
             return StepOutcome::Skipped;
         }
-        provision_i2c_boot_config();
+        // A fresh `dtparam` needs a reboot before /dev/i2c-1 exists, and
+        // ados-oled-i2c.service is `ConditionPathExists`-gated on that node — so
+        // without the signal the OLED stayed dark until an operator rebooted for
+        // unrelated reasons and nothing ever told them to.
+        if provision_i2c_boot_config() {
+            crate::steps::reboot::signal_required("i2c_arm (I2C bus for the status OLED)");
+        }
         // Load i2c-dev every boot + best-effort now (covers an already-enabled bus).
         if let Err(e) = std::fs::write(MODULES_LOAD_PATH, MODULES_LOAD_BODY) {
             tracing::warn!(error = %e, path = MODULES_LOAD_PATH, "could not write i2c modules-load drop-in");

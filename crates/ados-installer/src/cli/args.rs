@@ -71,6 +71,11 @@ pub struct Args {
     /// `--no-rtl-driver` — skip building the RTL8812EU WFB radio driver (a node
     /// with no long-range radio, e.g. workstation/compute, does not need it).
     pub no_rtl_driver: bool,
+    /// `--no-reboot` — never perform the single automatic reboot, even when
+    /// provisioning is staged that needs one (a camera/display overlay, an I2C
+    /// dtparam). The install then reports `degraded` and NAMES what is staged,
+    /// so a deferred reboot is visible rather than silent.
+    pub no_reboot: bool,
     /// `--yes` / `-y` — accept the auto-detected defaults and skip the
     /// interactive onboarding wizard (the trust-the-defaults fast path).
     pub yes: bool,
@@ -121,6 +126,7 @@ impl Args {
                 "--no-color" => args.no_color = true,
                 "--ascii" => args.ascii = true,
                 "--no-rtl-driver" => args.no_rtl_driver = true,
+                "--no-reboot" => args.no_reboot = true,
                 "--yes" | "-y" => args.yes = true,
                 "--non-interactive" => args.non_interactive = true,
                 "--help" | "-h" => args.help = true,

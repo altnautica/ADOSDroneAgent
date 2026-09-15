@@ -18,6 +18,11 @@ OPTIONS:
                                        Agent profile to install
     --name <hostname>                  mDNS hostname to set
     --no-rtl-driver                    Skip the RTL8812EU WFB radio driver build
+    --no-reboot                        Do not perform the single automatic
+                                       reboot when provisioning needs one (a
+                                       camera/display overlay, an I2C dtparam).
+                                       The install then reports degraded and
+                                       names what is still staged.
     --pair <code>                      Pairing code (or pass it positionally).
                                        On an already-installed box a bare code
                                        does a fast re-pair, not a reinstall.

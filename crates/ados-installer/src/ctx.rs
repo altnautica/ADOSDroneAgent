@@ -61,6 +61,15 @@ pub struct Ctx {
     /// Live-progress sink. Defaults to a no-op; the binary swaps in a real sink
     /// after starting the renderer. Steps and the graph emit progress through it.
     pub progress: ProgressSink,
+    /// Provisioning that is staged but needs a reboot to take effect, one
+    /// reason per entry, as recorded in `/run/ados/reboot-required` by the
+    /// overlay/dtparam provisioners and read back by the `reboot` step.
+    ///
+    /// Carried on the context rather than acted on in the step because the
+    /// reboot has to happen AFTER the closing summary is drawn — a step that
+    /// rebooted mid-graph would kill the renderer and the operator would never
+    /// learn why the box went away.
+    pub pending_reboot: Vec<String>,
 }
 
 /// Resolve the release channel for this run: the `--channel` flag, else the
@@ -147,6 +156,7 @@ impl Ctx {
             source_dir: None,
             rev,
             progress: ProgressSink::default(),
+            pending_reboot: Vec::new(),
         }
     }
 

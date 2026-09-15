@@ -123,6 +123,13 @@ pub struct SummaryData {
     pub failed_steps: Vec<String>,
     /// The subset that were Required (hard failures).
     pub required_failures: Vec<String>,
+    /// Provisioning that is staged but needs a reboot to take effect (a camera
+    /// or display overlay, an I2C dtparam), one reason per entry.
+    ///
+    /// Rendered as its own block: the provisioners have always recorded this in
+    /// `/run/ados/reboot-required`, and until the closing card said so an
+    /// operator was never told their camera would not work until a reboot.
+    pub pending_reboot: Vec<String>,
 }
 
 #[cfg(test)]

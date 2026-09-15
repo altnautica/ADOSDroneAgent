@@ -26,10 +26,18 @@
 # modules_required into /etc/modules-load.d/ados-hardware.conf, and arms a
 # probation marker so a blind overlay self-heals on the next boot.
 #
+# Both signals have named consumers:
+#   * /etc/ados/camera.probation  -> ados-camera-probe.service, a oneshot gated
+#     on the marker that runs after udev-settle on the next boot and either
+#     CONFIRMS the sensor or restores `boot_config` from `snapshot` and marks
+#     the camera absent. `expected_node` + `sensor` in the marker are what it
+#     verifies, which is why they are recorded here.
+#   * /run/ados/reboot-required   -> the installer's `reboot` step, which names
+#     the staged provisioning on the closing summary and performs the single
+#     automatic reboot (deferred, and reported as degraded, under --no-reboot).
+#
 # A newly-staged overlay needs a reboot to take effect (u-boot reads the DT
-# only at boot). The installer signals this by writing /run/ados/reboot-required
-# (and /etc/ados/camera.conf state=pending_reboot); the install flow performs
-# the single reboot. This keeps bring-up 100% automatic (Rule 26).
+# only at boot), which is what keeps bring-up 100% automatic (Rule 26).
 #
 # Idempotent. Re-running on a board whose overlay is already enabled is a no-op
 # for the boot config; camera.conf + modules-load are rewritten with current
@@ -186,6 +194,29 @@ camera_modules_from_yaml() {
     ' "${YAML}" 2>/dev/null
 }
 
+# Echo the FIRST declared mode's video node for the camera id (e.g.
+# /dev/video0). This is what the boot probe verifies: the overlay is applied
+# blind, before the sensor can enumerate, so the expectation has to be carried
+# forward in the probation marker for something to check it against on the next
+# boot. Handles the inline-map form
+# `- {node: /dev/video0, width: 1920, ...}`.
+camera_first_mode_node_from_yaml() {
+    local want="$1"
+    awk -v want="${want}" '
+        /^cameras:/ { in_block=1; next }
+        in_block && /^[^[:space:]]/ { in_block=0 }
+        in_block {
+            if ($0 ~ /^[[:space:]]*-[[:space:]]*id:[[:space:]]*/) {
+                line=$0; sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/,"",line); gsub(/[[:space:]]/,"",line); cur=line
+            }
+            if (cur == want && $0 ~ /node:[[:space:]]*\/dev\/video[0-9]+/) {
+                line=$0; sub(/^.*node:[[:space:]]*/,"",line); sub(/[^A-Za-z0-9\/_.-].*$/,"",line)
+                print line; exit
+            }
+        }
+    ' "${YAML}" 2>/dev/null
+}
+
 # Ensure the userspace packages a CSI/USB camera needs: the gstreamer CLI
 # tools + v4l-utils. The Radxa-patched gstreamer plugins (incl. the vendor v4l2
 # source) ship in the BSP; typically only these CLI tools are absent. Idempotent,
@@ -226,6 +257,7 @@ VENDOR_ISP="$(camera_key_from_yaml "${CAMERA_ID}" vendor_isp)"
 DEFAULT_MODE="$(camera_key_from_yaml "${CAMERA_ID}" default_mode)"
 SENSOR="$(camera_key_from_yaml "${CAMERA_ID}" sensor)"
 MODULES="$(camera_modules_from_yaml "${CAMERA_ID}")"
+EXPECTED_NODE="$(camera_first_mode_node_from_yaml "${CAMERA_ID}")"
 
 # ----------------------------------------------------------------------------
 # Boot mechanism detection (NOT board-id keyed). Returns the activation path
@@ -363,15 +395,24 @@ fi
 
 # ----------------------------------------------------------------------------
 # Probation: a blind overlay self-heals on the next boot.
+#
+# The marker is CONSUMED by ados-camera-probe.service (a oneshot gated on this
+# file, ordered after udev-settle and before the video service): it confirms the
+# sensor, or restores `boot_config` from `snapshot` and marks the camera absent.
+# `expected_node` + `sensor` are what it verifies against, so they have to be
+# recorded here — the overlay is applied before the sensor can enumerate, so
+# nothing on the next boot could otherwise tell a bound sensor from an absent
+# one.
 # ----------------------------------------------------------------------------
 if [ "${OVERLAY_STATE}" = "pending_reboot" ] && [ -n "${BOOT_CONFIG_SNAPSHOT}" ]; then
     install -d -m 0755 "${ETC_ADOS_DIR}"
     { echo "# install-camera-overlay.sh probation: confirm CSI camera on next boot or restore."
       echo "camera_id=${CAMERA_ID}"; echo "board=${BOARD_ID}"
       echo "overlay=${ENABLED_OVERLAY}"; echo "snapshot=${BOOT_CONFIG_SNAPSHOT}"
-      echo "boot_config=${BOOT_CONFIG_PATH}"; } > "${CAMERA_PROBATION_FILE}"
+      echo "boot_config=${BOOT_CONFIG_PATH}"
+      echo "expected_node=${EXPECTED_NODE}"; echo "sensor=${SENSOR}"; } > "${CAMERA_PROBATION_FILE}"
     chmod 0644 "${CAMERA_PROBATION_FILE}"
-    info "Probation armed: ${CAMERA_PROBATION_FILE}."
+    info "Probation armed: ${CAMERA_PROBATION_FILE} (probe verifies ${EXPECTED_NODE:-the sensor name} on next boot)."
 fi
 
 # ----------------------------------------------------------------------------

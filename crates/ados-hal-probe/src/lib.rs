@@ -20,6 +20,8 @@
 //! [`ProbePhase`] permits it (`Setup` / `BootPreArm`, never armed `Runtime`).
 //! Read-only probes (CPU, SoC, USB, serial) run in any phase.
 
+pub mod board_sidecar;
+pub mod camera_probe;
 pub mod probe;
 pub mod runner;
 
