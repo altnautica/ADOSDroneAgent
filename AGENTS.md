@@ -5,8 +5,12 @@ Rust/Python agent for drone companion computers and ground-station Linux nodes.
 
 ## Purpose
 
-Work in this repository as an engineering agent for the Python runtime, CLI,
-API, services, installer, HAL profiles, and plugin host. Keep changes
+Work in this repository as an engineering agent across both halves: the Rust
+crate workspace under `crates/`, which owns the flight-critical services, and
+the Python runtime under `src/ados/`, which owns AI and vision inference, the
+HAL bootstrap glue, the plugin runtime, the SDK, and the residual HTTP surface.
+The CLI, the installer, HAL profiles and the plugin host each have a half on
+both sides, so check which one you are in before you start. Keep changes
 deterministic, typed, testable without hardware where possible, and safe to
 apply through the normal install or upgrade path.
 
@@ -23,18 +27,31 @@ apply through the normal install or upgrade path.
 
 ## Stack and Commands
 
-- Python 3.11+, FastAPI, Click, Pydantic, Rich, structlog, and
-  systemd-oriented services.
-- Package source lives under `src/ados/`.
+- Rust, stable toolchain, MSRV 1.88. The workspace manifest is
+  `crates/Cargo.toml` with 31 members; `cargo` must be run from `crates/`,
+  there is no manifest at the repository root.
+- Python 3.11+, Click, Pydantic, Rich, structlog, and systemd-oriented
+  services. FastAPI is the residual HTTP surface that runs behind the native
+  front, not the primary API layer.
+- Package source lives under `src/ados/`; crate source lives under
+  `crates/<crate-name>/src/`.
 - Version source of truth: `src/ados/__init__.py`.
 - Common commands:
 
 ```bash
+# Python half
 pip install -e ".[dev]"
 pytest
 ruff check .
 mypy src/ados/<touched-module>
 ados status
+
+# Rust half, run from crates/
+cd crates
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+cargo build --release --all-features
 ```
 
 - Useful focused commands:
@@ -45,6 +62,10 @@ pytest tests/path/to/test_file.py -k test_name
 ruff check src/ados/path tests/path
 mypy src/ados/<touched-module>
 ados --help
+
+# Rust, scoped to one crate, still from crates/
+cargo test -p ados-video
+cargo clippy -p ados-video --all-targets -- -D warnings
 ```
 
 Use `python3` for one-off local scripts when a Python command is needed.
@@ -56,9 +77,36 @@ you touched and do not treat the full run as a gate.
 
 ## Architecture Map
 
+Rust, under `crates/`, 31 workspace members. The flight-critical path:
+
+- Service supervision: `crates/ados-supervisor/`
+- MAVLink routing: `crates/ados-mavlink-router/`
+- Video pipeline: `crates/ados-video/`
+- Radio and link control: `crates/ados-radio/`, `crates/ados-rate-control/`
+- HTTP control surface, the native front on `:8080`: `crates/ados-control/`
+- Logging and telemetry store: `crates/ados-logd/`
+- Networking: `crates/ados-net/`, `crates/ados-macpin/`
+- Cloud relay: `crates/ados-cloud/`
+- Ground-station link and mesh: `crates/ados-groundlink/`
+- Installer: `crates/ados-installer/`
+- Plugin host: `crates/ados-plugin-host/`
+- Vision engine: `crates/ados-vision/`
+- World model and offload: `crates/ados-atlas/`,
+  `crates/ados-atlas-transport/`, `crates/ados-offload/`,
+  `crates/ados-compute/`
+- Swarm: `crates/ados-swarm-control/`, `crates/ados-swarmbus/`
+- Peripherals: `crates/ados-crsf/`, `crates/ados-display/`,
+  `crates/ados-hid/`, `crates/ados-gpio/`, `crates/ados-hal-probe/`
+- Shared: `crates/ados-protocol/` (wire contracts and their version
+  registry, `contracts.toml`), `crates/ados-config/`, `crates/ados-sdk/`,
+  `crates/ados-capabilities-codegen/`, `crates/ados-config-tunnel/`,
+  `crates/ados-tui/`
+
+Python, under `src/ados/`:
+
 - CLI: `src/ados/cli/`
-- FastAPI app and routes: `src/ados/api/`
-- Core runtime and supervisor: `src/ados/core/`
+- Residual HTTP surface behind the native front: `src/ados/api/`
+- Core runtime: `src/ados/core/` (config writer, IPC, paths)
 - Services: `src/ados/services/`
 - Ground-station services: `src/ados/services/ground_station/`
 - HAL and board profiles: `src/ados/hal/`
@@ -72,6 +120,13 @@ you touched and do not treat the full run as a gate.
 - Data files (plugin catalog, param metadata): `src/ados/data/`
 - Setup facade and terminal status data: `src/ados/setup/`
 - Tests: `tests/`
+
+`docs/api-surface.md` is the generated table of every HTTP route and which
+half serves it. Do not hand-edit it; regenerate with
+`scripts/gen-api-surface.py`. Two guards keep it true: a crate test fails
+when the native section drifts from the router, and
+`scripts/check-api-surface.py` fails when a client calls a path the table
+does not carry.
 
 Keep files near 300 lines when practical. Split before modules become hard to
 review, except generated files, fixtures, data tables, and vendored code.
@@ -140,8 +195,15 @@ contains before committing.
 - API routes: test request and response models plus failure paths.
 - Services, config migration, installer, HAL, and plugin permissions: add or
   update deterministic tests around the touched behavior.
-- Typed Python changes: run `ruff check .` and `mypy src` when the touched code
-  affects shared types, public APIs, services, or plugin contracts.
+- Typed Python changes: run `ruff check .` and
+  `mypy src/ados/<touched-module>` when the touched code affects shared types,
+  public APIs, services, or plugin contracts. The whole-tree `mypy src` has a
+  known pre-existing backlog and is not a gate (see Stack and Commands).
+- Rust changes: from `crates/`, run `cargo fmt --check`, `cargo clippy -p
+  <crate> --all-targets -- -D warnings`, and `cargo test -p <crate>`. A change
+  to a wire contract or a capability also needs `cargo test -p ados-protocol`
+  and the codegen drift check, because the generated Rust, Python and
+  TypeScript types are asserted against `crates/ados-protocol/contracts.toml`.
 - Hardware-adjacent changes: verify no-hardware fallback behavior in tests or
   demo mode.
 
