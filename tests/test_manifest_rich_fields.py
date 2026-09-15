@@ -211,16 +211,28 @@ def test_vision_nav_rich_field_subset_parses() -> None:
     assert m.version == raw["version"]
     assert m.description_long is not None
     assert m.description_long.strip()
-    assert m.features and len(m.features) >= 6
+    # No count floor: `features` is the other repository's editorial copy and
+    # changes whenever that extension's capability set legitimately changes.
+    # What this case is for is that the rich block parses into the model, so
+    # assert the shape every consumer relies on instead.
+    assert m.features
+    assert all(isinstance(f, str) and f.strip() for f in m.features)
     assert m.hardware_requirements is not None
     assert "USB UVC" in (m.hardware_requirements.cameras or "")
     assert m.resource_impact is not None
     assert m.resource_impact.ram_mb == 512
     assert m.required_fc_parameters is not None
-    assert any(
-        p.param == "EKF_SOURCE_SET"
+    # The parametrised-entry shape is what the model owes its consumers: a
+    # param name plus an optional value, per firmware. Which parameters the
+    # extension needs is that repository's call, so assert the shape rather
+    # than a specific name.
+    assert m.required_fc_parameters.ardupilot
+    assert all(
+        p.param and isinstance(p.param, str)
         for p in m.required_fc_parameters.ardupilot
     )
-    assert "navigation.feature_count" in m.telemetry_fields
+    # Same reasoning: the list belongs to the extension, the parse belongs here.
+    assert m.telemetry_fields
+    assert all(isinstance(f, str) and f.strip() for f in m.telemetry_fields)
     assert m.documentation_url is not None
     assert m.documentation_url.startswith("https://")

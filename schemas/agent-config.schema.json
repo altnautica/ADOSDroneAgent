@@ -2053,7 +2053,7 @@
             "paired_at": null,
             "paired_with_device_id": null,
             "reg_domain": "US",
-            "sei_latency": true,
+            "sei_latency": false,
             "topology": "host_vbus",
             "tx_power_dbm": 5,
             "tx_power_max_dbm": 15,
@@ -2224,7 +2224,7 @@
           "title": "Reg Domain"
         },
         "sei_latency": {
-          "default": true,
+          "default": false,
           "title": "Sei Latency",
           "type": "boolean"
         },
@@ -2742,7 +2742,7 @@
           "paired_at": null,
           "paired_with_device_id": null,
           "reg_domain": "US",
-          "sei_latency": true,
+          "sei_latency": false,
           "topology": "host_vbus",
           "tx_power_dbm": 5,
           "tx_power_max_dbm": 15,

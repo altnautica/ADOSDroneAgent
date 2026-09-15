@@ -89,15 +89,27 @@ class WfbConfig(BaseModel):
     # the canonical surface for fresh installs is here.
     paired_with_device_id: str | None = None
     paired_at: str | None = None  # iso timestamp
-    # Inject H.264 SEI markers carrying time.time_ns() into the wfb-tee
-    # output so the ground side can compute over-the-air video
-    # latency. Adds ~30 bytes per VCL NAL (~900 B/s at 30 fps),
-    # negligible vs a 4 Mbps stream. On by default so the LCD shows
-    # camera→display latency out of the box and the GCS popover can
-    # compute true end-to-end via the browser-side SEI parser.
-    # To disable, set sei_latency: false in /etc/ados/config.yaml
-    # under video.wfb and restart the agent.
-    sei_latency: bool = True
+    # Splice the SEI latency probe into the encode→publish byte path.
+    #
+    # OFF by default, and the default here MUST stay in step with the service
+    # that implements it: `ados-video` reads this key through
+    # `crates/ados-video/src/config.rs` (`WfbVideoConfig::sei_latency`, a
+    # `#[serde(default)]` bool ⇒ false). This model used to default it True,
+    # so on every node with no explicit key the settings surface and
+    # `GET /api/config` advertised the probe as ON while the encoder ran
+    # without it and `/api/video/latency` correctly answered
+    # `{"latency_ms": null, "source": "unavailable"}` — two surfaces
+    # disagreeing about a capability, with the wrong one being the one an
+    # operator reads.
+    #
+    # It is off rather than on because it is not free: the injector is a
+    # Python stage spliced INTO the byte path (a 4 KB chunk ≈ 8 ms at 4 Mbps)
+    # and what it measures is publish-side stamp-to-readback on this node, not
+    # glass-to-glass. It belongs on a bench profile, enabled deliberately:
+    #   curl -X PUT localhost:8080/api/config -H 'Content-Type: application/json' \
+    #        -d '{"key": "video.wfb.sei_latency", "value": true}'
+    #   sudo systemctl restart ados-video
+    sei_latency: bool = False
     # Operator-facing radio link preset. The WfbManager reads this at
     # startup and overrides mcs_index / fec_k / fec_n with the preset
     # values. Lets a bench operator widen the link without remembering
