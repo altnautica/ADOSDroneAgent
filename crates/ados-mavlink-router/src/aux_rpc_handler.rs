@@ -34,6 +34,26 @@ use tokio::net::TcpStream;
 use crate::aux_rpc_dedupe::{Admit, RequestDedupe};
 use crate::aux_uplink_consumer::AuxUplinkConsumerCounters;
 
+/// The one relayed path that stays reachable before any credential exists: the
+/// ground station's delivery of the per-pair secret itself.
+///
+/// It necessarily arrives with no ticket, because the drone cannot verify one
+/// until it holds the secret the call is carrying. Admitting it is not a hole:
+/// [`ados_protocol::relay_ticket::decide_accept`] is first-write-wins, so a
+/// drone holding no secret accepts exactly one offer and a drone already
+/// holding one refuses to be re-keyed over the air. Without this carve-out an
+/// unprovisioned aircraft could never be provisioned, since the delivery rides
+/// the lane it is about to gate.
+const RELAY_BOOTSTRAP_PATH: &[u8] = b"/api/relay/peer-secret";
+
+/// Whether this request is the credential delivery described on
+/// [`RELAY_BOOTSTRAP_PATH`]. Method-exact, and the query string is ignored so a
+/// trailing `?` cannot be used to smuggle a different path past the match.
+fn is_relay_bootstrap(method: RpcMethod, path: &[u8]) -> bool {
+    let bare = path.split(|&b| b == b'?').next().unwrap_or(path);
+    method == RpcMethod::Post && bare == RELAY_BOOTSTRAP_PATH
+}
+
 /// Decide whether a relayed request may proceed to the local HTTP API.
 ///
 /// Pure over its inputs so the decision can be tested without a radio, a
@@ -41,24 +61,54 @@ use crate::aux_uplink_consumer::AuxUplinkConsumerCounters;
 /// credential exists to defend, and a branch buried inside the request handler
 /// would only ever be exercised end to end.
 ///
-/// `held` is the secret this drone was given, or `None` when it has none. None
-/// admits everything, unchanged from the behaviour before the credential
-/// existed. That is deliberate: the gate must be able to ship before the
-/// delivery path does, without the lane going dark in between.
+/// `held` is the secret this drone was given, or `None` when it has none.
+/// **None denies.** A relayed request reaches `ados-control` over genuine
+/// loopback and is therefore treated as on-box, so a drone with no credential
+/// to check would be handing its full authority to anything holding the shared
+/// fleet radio key -- and a fleet shares one key by construction. The only
+/// exception is [`RELAY_BOOTSTRAP_PATH`], which is how a secret gets on file in
+/// the first place.
 pub fn authorize(
     held: Option<&str>,
     ticket: &[u8],
+    method: RpcMethod,
+    path: &[u8],
     own_device_id: &str,
     now: i64,
 ) -> Result<(), ados_protocol::relay_ticket::RelayTicketError> {
     let Some(secret) = held else {
-        return Ok(());
+        if is_relay_bootstrap(method, path) {
+            return Ok(());
+        }
+        return Err(ados_protocol::relay_ticket::RelayTicketError::NoSecret);
     };
     let issuer = ados_protocol::relay_ticket::RelayTicketIssuer::from_secret(secret.as_bytes());
     // A ticket that is not valid UTF-8 cannot be one we minted, and reads as a
     // malformed one rather than being allowed to panic a decode.
     let presented = std::str::from_utf8(ticket).unwrap_or("");
     issuer.verify(presented, own_device_id, now)
+}
+
+/// Whether the "this node holds no relay secret" warning has already been
+/// emitted this boot.
+static RELAY_SECRET_ABSENT_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Say once per boot that this node holds no relay secret.
+///
+/// Without this the ungated state is invisible: the operator sees relayed
+/// calls answered 401 and has no way to tell "the credential never arrived"
+/// apart from "the ground station is presenting a bad one". Once per boot
+/// rather than per request so a ground station retrying every second cannot
+/// flood the Black Box store with one fact.
+fn note_relay_secret_absent() {
+    if RELAY_SECRET_ABSENT_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    tracing::warn!(
+        secret_path = ados_protocol::relay_ticket::RELAY_SECRET_PATH,
+        "aux_rpc_relay_secret_absent"
+    );
 }
 
 /// Wall-clock unix seconds, for the relay ticket's expiry check.
@@ -159,15 +209,21 @@ pub async fn handle(
     // it, the decision has already been made. This is the only place the check
     // can happen while it still means anything.
     //
-    // Inert until a secret exists. A drone that has never been given one admits
-    // the call exactly as it always has, which is what lets this ship ahead of
-    // the delivery path without taking the relay lane offline in between.
+    // No secret on file denies. The window in which an unprovisioned aircraft
+    // served radio-range callers with its full authority is closed; the one
+    // path still served is the credential delivery itself, so the aircraft can
+    // still be provisioned.
     let held = ados_protocol::relay_ticket::load_secret_at(std::path::Path::new(
         ados_protocol::relay_ticket::RELAY_SECRET_PATH,
     ));
+    if held.is_none() {
+        note_relay_secret_absent();
+    }
     if let Err(e) = authorize(
         held.as_deref(),
         request.ticket,
+        request.method,
+        request.path,
         own_device_id,
         now_unix_secs(),
     ) {
@@ -871,11 +927,18 @@ mod tests {
 
     mod relay_authorization {
         use super::super::authorize;
-        use ados_protocol::relay_ticket::{RelayTicketIssuer, DEFAULT_TTL_SECONDS};
+        use ados_protocol::aux_rpc::RpcMethod;
+        use ados_protocol::relay_ticket::{
+            RelayTicketError, RelayTicketIssuer, DEFAULT_TTL_SECONDS,
+        };
 
         const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         const ME: &str = "77735cd38937";
         const NOW: i64 = 1_800_000_000;
+        /// A path with no special standing, used wherever the decision must not
+        /// depend on which route was called.
+        const ORDINARY: &[u8] = b"/api/config";
+        const BOOTSTRAP: &[u8] = b"/api/relay/peer-secret";
 
         fn ticket_for(target: &str) -> String {
             RelayTicketIssuer::from_secret(SECRET.as_bytes()).mint_at(
@@ -886,24 +949,101 @@ mod tests {
         }
 
         #[test]
-        fn a_drone_with_no_secret_admits_the_call_exactly_as_before() {
-            // The inert posture. Until a secret is delivered, the relay lane
-            // must behave precisely as it does today.
-            assert!(authorize(None, b"", ME, NOW).is_ok());
-            assert!(authorize(None, b"any old rubbish", ME, NOW).is_ok());
+        fn a_drone_with_no_secret_refuses_every_relayed_call() {
+            // The close. A relayed request lands on loopback and is treated as
+            // on-box, so an aircraft with no credential to check must refuse
+            // rather than hand radio range its full authority.
+            for method in [
+                RpcMethod::Get,
+                RpcMethod::Post,
+                RpcMethod::Put,
+                RpcMethod::Delete,
+            ] {
+                assert_eq!(
+                    authorize(None, b"", method, ORDINARY, ME, NOW),
+                    Err(RelayTicketError::NoSecret)
+                );
+                assert_eq!(
+                    authorize(None, b"any old rubbish", method, ORDINARY, ME, NOW),
+                    Err(RelayTicketError::NoSecret)
+                );
+            }
+        }
+
+        #[test]
+        fn a_ticket_cannot_open_a_drone_that_holds_no_secret() {
+            // There is nothing to verify against, so a well-formed ticket is
+            // worth no more than an absent one.
+            let t = ticket_for(ME);
+            assert_eq!(
+                authorize(None, t.as_bytes(), RpcMethod::Put, ORDINARY, ME, NOW),
+                Err(RelayTicketError::NoSecret)
+            );
+        }
+
+        #[test]
+        fn the_secret_delivery_stays_reachable_before_a_secret_exists() {
+            // The one carve-out, and the reason denying everything else does
+            // not brick provisioning: the delivery cannot carry a ticket the
+            // drone could check, and first-write-wins bounds it.
+            assert!(authorize(None, b"", RpcMethod::Post, BOOTSTRAP, ME, NOW).is_ok());
+            assert!(authorize(
+                None,
+                b"",
+                RpcMethod::Post,
+                b"/api/relay/peer-secret?whatever=1",
+                ME,
+                NOW
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn the_carve_out_is_that_one_method_and_that_one_path() {
+            // A read of the delivery route, a near-miss path and a prefix
+            // extension all stay refused, so the exception cannot be widened
+            // into a general bypass.
+            for (method, path) in [
+                (RpcMethod::Get, BOOTSTRAP),
+                (RpcMethod::Put, BOOTSTRAP),
+                (RpcMethod::Delete, BOOTSTRAP),
+                (
+                    RpcMethod::Post,
+                    b"/api/relay/peer-secret/../config" as &[u8],
+                ),
+                (RpcMethod::Post, b"/api/relay/peer-secretx"),
+                (RpcMethod::Post, b"/api/relay/peer-secre"),
+            ] {
+                assert_eq!(
+                    authorize(None, b"", method, path, ME, NOW),
+                    Err(RelayTicketError::NoSecret),
+                    "{method:?} {}",
+                    String::from_utf8_lossy(path)
+                );
+            }
         }
 
         #[test]
         fn a_valid_ticket_is_admitted() {
             let t = ticket_for(ME);
-            assert!(authorize(Some(SECRET), t.as_bytes(), ME, NOW).is_ok());
+            assert!(authorize(
+                Some(SECRET),
+                t.as_bytes(),
+                RpcMethod::Put,
+                ORDINARY,
+                ME,
+                NOW
+            )
+            .is_ok());
         }
 
         #[test]
         fn a_drone_holding_a_secret_refuses_a_call_carrying_none() {
-            // The actual close: once the credential exists, an unaccompanied
-            // relayed request no longer inherits on-box authority.
-            assert!(authorize(Some(SECRET), b"", ME, NOW).is_err());
+            // Once the credential exists, an unaccompanied relayed request no
+            // longer inherits on-box authority -- including on the delivery
+            // route, which a re-key attempt would have to use.
+            assert!(authorize(Some(SECRET), b"", RpcMethod::Put, ORDINARY, ME, NOW).is_err());
+            assert!(authorize(Some(SECRET), b"", RpcMethod::Post, BOOTSTRAP, ME, NOW).is_err());
         }
 
         #[test]
@@ -912,7 +1052,15 @@ mod tests {
             // the fleet hears every ticket, so one addressed elsewhere must not
             // open this one.
             let t = ticket_for("some-other-drone");
-            assert!(authorize(Some(SECRET), t.as_bytes(), ME, NOW).is_err());
+            assert!(authorize(
+                Some(SECRET),
+                t.as_bytes(),
+                RpcMethod::Put,
+                ORDINARY,
+                ME,
+                NOW
+            )
+            .is_err());
         }
 
         #[test]
@@ -925,7 +1073,15 @@ mod tests {
                 DEFAULT_TTL_SECONDS,
                 NOW,
             );
-            assert!(authorize(Some(SECRET), t.as_bytes(), ME, NOW).is_err());
+            assert!(authorize(
+                Some(SECRET),
+                t.as_bytes(),
+                RpcMethod::Put,
+                ORDINARY,
+                ME,
+                NOW
+            )
+            .is_err());
         }
 
         #[test]
@@ -934,6 +1090,8 @@ mod tests {
             assert!(authorize(
                 Some(SECRET),
                 t.as_bytes(),
+                RpcMethod::Put,
+                ORDINARY,
                 ME,
                 NOW + DEFAULT_TTL_SECONDS + 1
             )
@@ -942,7 +1100,15 @@ mod tests {
 
         #[test]
         fn a_ticket_that_is_not_utf8_is_refused_rather_than_panicking() {
-            assert!(authorize(Some(SECRET), &[0xFF, 0xFE, 0xFD], ME, NOW).is_err());
+            assert!(authorize(
+                Some(SECRET),
+                &[0xFF, 0xFE, 0xFD],
+                RpcMethod::Put,
+                ORDINARY,
+                ME,
+                NOW
+            )
+            .is_err());
         }
     }
 }

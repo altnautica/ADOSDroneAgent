@@ -193,6 +193,21 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
         "runtimeMode".to_string(),
         json!(crate::state::runtime_mode()),
     );
+    // Whether this node holds the per-pair credential its ground station's
+    // relayed calls must present. Reported because the consequence is
+    // operator-visible: with no secret on file every relayed request but the
+    // credential delivery itself is refused, and without this field a fleet
+    // operator has no way to tell an unprovisioned aircraft apart from a
+    // radio fault.
+    payload.insert(
+        "relaySecretPresent".to_string(),
+        json!(
+            ados_protocol::relay_ticket::load_secret_at(std::path::Path::new(
+                ados_protocol::relay_ticket::RELAY_SECRET_PATH
+            ))
+            .is_some()
+        ),
+    );
 
     // Camera presence + USB-recovery, folded in only when the sidecars are fresh.
     for (k, v) in read_camera_status() {

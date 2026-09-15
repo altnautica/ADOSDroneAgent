@@ -81,6 +81,12 @@ pub const SCOPE_RELAY: &str = "relay.http";
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RelayTicketError {
+    /// This node holds no per-pair secret, so it cannot verify any ticket and
+    /// has nothing to distinguish its own ground station from anything else
+    /// holding the shared fleet radio key. Refusing is the only safe answer:
+    /// admitting would hand radio range this node's full on-box authority.
+    #[error("no relay peer secret on file")]
+    NoSecret,
     #[error("malformed relay ticket")]
     Malformed,
     #[error("relay ticket timestamp is not an integer")]
@@ -231,11 +237,11 @@ pub fn decide_accept(held: Option<&str>, offered: &str) -> AcceptDecision {
 
 /// The secret this drone currently holds, or `None` when it holds none.
 ///
-/// A missing file and an unreadable one are both "none": the drone then has no
-/// credential to verify against and, per the inert posture, admits the call as
-/// it always did. Failing closed on an unreadable secret would take a working
-/// relay offline over a permissions slip, which is a worse outcome than the
-/// exposure that exists today anyway.
+/// A missing file and an unreadable one are both "none", and "none" denies:
+/// the drone has no credential to verify against, so the only relayed call it
+/// will serve is the one that delivers the credential. An unreadable secret
+/// therefore closes the relay lane rather than opening it — the opposite of a
+/// permissions slip silently restoring radio-range full authority.
 pub fn load_secret_at(path: &std::path::Path) -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     let trimmed = raw.trim().to_string();
