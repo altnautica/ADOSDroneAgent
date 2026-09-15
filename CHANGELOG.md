@@ -4,6 +4,61 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.373] - 2026-09-15
+
+### Fixed
+
+- The systemd watchdog is now fed only while the monitor pass is making
+  progress. It used to be pinged by an independent ticker, so a pass wedged
+  inside one stage kept the unit reported healthy forever. Every `nmcli`, `ip`
+  and `iw` call in the pass is also bounded by a 20 s timeout with the child
+  reaped on drop, so one hung external command can no longer stall the pass
+  that the watchdog now depends on.
+- Parked on-demand services are retried. The retry loop skipped everything
+  that was not core or hardware, so `ados-control` could latch its circuit
+  open permanently and stay down until someone restarted it by hand. The
+  cooldown is a fixed 5 s with no attempt cap. `ados-logd` is now supervised.
+- Inbound auxiliary datagrams survive a radio-group respawn. After the first
+  respawn the receive loop was left bound to the retired socket, so auxiliary
+  traffic was lost permanently with no error anywhere.
+- The flight-controller reconnect, ground receive and cloud bridge loops retry
+  on a fixed 2-5 s interval with no attempt cap and no terminal failed state.
+  Exponential backoff on a drone means an aircraft that has stopped trying.
+- A camera overlay is verified on the next boot and reverted if the sensor it
+  provisions does not appear. Confirmation requires evidence of the declared
+  sensor, not merely of some camera, so an unrelated USB webcam cannot confirm
+  a CSI overlay. The probation marker and `/run/ados/reboot-required` are read
+  by something for the first time: the installer reports pending reboot
+  reasons on its closing card and then performs the single reboot itself.
+- `/run/ados/board.json` has a Rust writer, so a node running no Python no
+  longer reports an unknown board and zero NPU capability.
+- Changing the ground station's display renderer requires the renderer to be
+  detected and the operator to confirm. Provisioning a boot-critical display
+  overlay for hardware that is not attached is an unbootable board.
+
+### Changed
+
+- Video publish path: the muxer delay is stripped on every publishing branch,
+  parameter sets repeat per IDR on every encode path, and the separate process
+  that re-read RTSP to produce RTP is gone — one encode now fans out to the
+  RTSP and RTP branches directly, which removes an RTSP session, a demux, a
+  mux and a process boundary per stream.
+- Ground ingest reorder window is 200 ms / 16 packets, down from 2 s / 256;
+  the receiver already delivers in order, and a watchdog rather than a buffer
+  is what catches a stutter.
+- One mediamtx configuration generator instead of three: `ados-groundlink`
+  renders it and the two Python generators are retired.
+- The encoder no longer respawns for an adaptive change under 25 % of the live
+  bitrate at identical geometry and frame rate, and publishes an
+  `encoder_respawns` counter so a respawn storm is visible rather than
+  inferred. Boards with four or more cores now get sliced threading.
+- The heartbeat advertises same-origin relative video URLs the node actually
+  serves, instead of instructing the ground station to build an address on a
+  port the node does not proxy.
+- `video.wfb.sei_latency` defaults off, matching the service that implements
+  it. The two defaults disagreed, so every node with no explicit setting
+  advertised a latency probe that was not running.
+
 ## [0.99.372] - 2026-09-15
 
 ### Security
