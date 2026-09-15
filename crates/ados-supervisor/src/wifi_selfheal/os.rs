@@ -7,6 +7,11 @@
 
 use std::time::Duration;
 
+// Every subprocess here is a network-repair call the monitor pass awaits
+// inline, so all of them run through the bounded helpers: an `nmcli connection
+// up` that never returns must not wedge the pass.
+use crate::oscmd::{run_output, run_status};
+
 use super::decision::{
     iface_is_managed_candidate, looks_like_access_point, parse_active_wifi_connections,
     parse_gateway, parse_neighbor_reachable, WifiConnection,
@@ -18,7 +23,7 @@ use super::decision::{
 /// excluded three ways: it is not usually a managed connection, it runs a WFB
 /// driver, and it is in monitor mode).
 pub(super) async fn enumerate_candidates() -> Vec<WifiConnection> {
-    let Some(terse) = run_cmd_output(
+    let Some(terse) = run_output(
         "nmcli",
         &["-t", "-f", "NAME,TYPE,DEVICE,STATE", "connection", "show"],
     )
@@ -53,7 +58,7 @@ async fn driver_name(iface: &str) -> String {
 /// Read an interface's operating mode ("managed" | "monitor" | …) from
 /// `iw <iface> info`, or `None` when it cannot be read.
 async fn interface_mode(iface: &str) -> Option<String> {
-    let out = run_cmd_output("iw", &[iface, "info"]).await?;
+    let out = run_output("iw", &[iface, "info"]).await?;
     for line in out.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("type ") {
@@ -68,7 +73,7 @@ async fn interface_mode(iface: &str) -> Option<String> {
 
 /// Return the default-route gateway for an interface, or `None`. Read-only.
 pub(super) async fn default_gateway_for_iface(iface: &str) -> Option<String> {
-    let out = run_cmd_output("ip", &["-4", "route", "show", "default", "dev", iface]).await?;
+    let out = run_output("ip", &["-4", "route", "show", "default", "dev", iface]).await?;
     parse_gateway(&out)
 }
 
@@ -78,7 +83,7 @@ pub(super) async fn default_gateway_for_iface(iface: &str) -> Option<String> {
 /// missing or INCOMPLETE/FAILED entry means the gateway does not answer ARP (the
 /// dead-data-path condition).
 pub(super) async fn gateway_reachable(iface: &str, gateway: &str) -> bool {
-    match run_cmd_output("ip", &["neighbor", "show", gateway, "dev", iface]).await {
+    match run_output("ip", &["neighbor", "show", gateway, "dev", iface]).await {
         Some(out) => parse_neighbor_reachable(&out),
         None => false,
     }
@@ -94,9 +99,9 @@ const REASSOC_SETTLE: Duration = Duration::from_millis(500);
 /// connection that was not up returns non-zero on `down`, which is fine — the
 /// `up` still rebuilds it.
 pub(super) async fn reactivate_connection(name: &str) {
-    let _ = run_cmd("nmcli", &["connection", "down", name]).await;
+    let _ = run_status("nmcli", &["connection", "down", name]).await;
     tokio::time::sleep(REASSOC_SETTLE).await;
-    if !run_cmd("nmcli", &["connection", "up", name]).await {
+    if !run_status("nmcli", &["connection", "up", name]).await {
         tracing::warn!(connection = %name, "wifi_selfheal_up_failed");
     } else {
         tracing::info!(connection = %name, "wifi_selfheal_reactivated");
@@ -105,28 +110,5 @@ pub(super) async fn reactivate_connection(name: &str) {
 
 /// True when the `nmcli` binary is on PATH.
 pub(super) async fn nmcli_available() -> bool {
-    run_cmd("sh", &["-c", "command -v nmcli"]).await
-}
-
-/// Run a command, returning true on a zero exit. stdout/stderr are discarded.
-async fn run_cmd(cmd: &str, args: &[&str]) -> bool {
-    tokio::process::Command::new(cmd)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Run a command and capture stdout as a string, or `None` when it could not be
-/// run. A non-zero exit still returns whatever was written to stdout.
-async fn run_cmd_output(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .await
-        .ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).to_string())
+    crate::oscmd::binary_available("nmcli").await
 }

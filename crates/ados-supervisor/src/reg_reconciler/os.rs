@@ -13,6 +13,12 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use crate::config::CONFIG_YAML;
 
+// The `iw reg` shells below run inside the monitor pass, so they route through
+// the crate-wide bounded helpers: an unbounded regulatory call would wedge
+// service reconciliation for the whole process.
+#[cfg(target_os = "linux")]
+use crate::oscmd::{run_output, run_status};
+
 #[cfg(target_os = "linux")]
 use super::config::{read_config_from, read_wanted_from, RegReconcilerConfig, WantedReg};
 #[cfg(target_os = "linux")]
@@ -234,30 +240,6 @@ async fn set_reg_domain(domain: &str) -> bool {
         }
     }
     false
-}
-
-/// Run a command, returning true on a zero exit. stdout/stderr are discarded.
-#[cfg(target_os = "linux")]
-async fn run_status(cmd: &str, args: &[&str]) -> bool {
-    tokio::process::Command::new(cmd)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Run a command and capture stdout, or `None` when it could not be run.
-#[cfg(target_os = "linux")]
-async fn run_output(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .await
-        .ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 #[cfg(test)]

@@ -69,6 +69,20 @@ async fn main() -> Result<()> {
     // auto-restart on a live bind) and the control socket task.
     let bind_orch = Arc::new(bind::orchestrator::BindOrchestrator::new());
 
+    // Publish the board fingerprint sidecar (/run/ados/board.json) BEFORE any
+    // service starts, so the first reader never sees an absent file. This is now
+    // its ONLY writer: every Rust reader of the board's identity (the pairing
+    // route's board field, the status route's board object, the cloud offload
+    // reconciler's npu_tops) used to depend on a Python call inside the FastAPI
+    // runtime, so on the advertised zero-Python headless profile it was never
+    // written — board `unknown`, and an NPU board offloading detection it could
+    // have run onboard. Best-effort: a run dir that is not yet writable is
+    // logged and self-heals on the next start.
+    match ados_hal_probe::board_sidecar::publish() {
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not publish the board fingerprint sidecar"),
+    }
+
     let mut supervisor = Supervisor::new(config, bind_orch.clone());
     supervisor.start().await;
 
@@ -82,13 +96,14 @@ async fn main() -> Result<()> {
     // Tell systemd we are up (no-op off Linux / outside a notify unit).
     sdnotify::ready();
 
-    // Keep the systemd watchdog fed on its OWN timer, independent of the monitor
-    // pass. A single `monitor_pass` can chain `systemctl`/`nmcli` recovery calls
-    // that legitimately exceed WatchdogSec; pinging only after the pass would let
-    // one slow-but-healthy pass starve the watchdog and trigger a SIGKILL
-    // mid-recovery. Liveness = the process alive + the runtime scheduling, which
-    // this dedicated ticker proves.
-    sdnotify::spawn_watchdog_pinger();
+    // Keep the systemd watchdog fed ONLY while the monitor pass keeps making
+    // progress. The pass stamps progress at every stage boundary and every
+    // subprocess it shells is separately bounded (`oscmd`), so a slow-but-
+    // advancing recovery pass stays healthy while a genuinely wedged pass stops
+    // stamping, the pings stop, `WatchdogSec` expires and systemd restarts the
+    // unit. An always-on ticker would instead hold the unit `active` forever
+    // with death-detection, auto-restart and hot-plug handling all dead.
+    sdnotify::spawn_watchdog_pinger(supervisor.progress(), MONITOR_INTERVAL);
 
     // Cross-process bind trigger seam: the FastAPI pairing route + the cloud
     // auto-pair supervisor forward start/cancel/status here over the control
@@ -153,9 +168,8 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                // The watchdog is fed by the independent `spawn_watchdog_pinger`
-                // ticker, NOT here — so a slow monitor pass (a long recovery
-                // chain) can never starve it.
+                // Feeds the watchdog as a side effect: `monitor_pass` stamps the
+                // progress marker the ticker reads at every stage boundary.
                 supervisor.monitor_pass().await;
             }
             Some(kind) = rx.recv() => {

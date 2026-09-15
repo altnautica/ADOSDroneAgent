@@ -513,36 +513,22 @@ fn write_json_atomic<T: serde::Serialize>(
 
 // ---------------------------------------------------------------------------
 // Linux command helpers shared by the submodules (via `super::`).
+//
+// Every repair rung shells `nmcli` / `networkctl` / `ip` against a link that is
+// by definition misbehaving, and the guardian ticks inline inside
+// `monitor_pass`. They therefore route through the crate-wide bounded helpers:
+// `nmcli device connect` on a flapping FullMAC adapter routinely blocks for
+// tens of seconds and can block forever, which used to wedge every service
+// reconciliation in the process.
 // ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+use crate::oscmd::{run_output, run_status};
 
 /// True when the `ip` binary is on PATH.
 #[cfg(target_os = "linux")]
 async fn ip_available() -> bool {
-    run_status("sh", &["-c", "command -v ip"]).await
-}
-
-/// Run a command, returning true on a zero exit. stdout/stderr discarded.
-#[cfg(target_os = "linux")]
-async fn run_status(cmd: &str, args: &[&str]) -> bool {
-    tokio::process::Command::new(cmd)
-        .args(args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Run a command and capture stdout, or `None` when it could not be run.
-#[cfg(target_os = "linux")]
-async fn run_output(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .await
-        .ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).to_string())
+    crate::oscmd::binary_available("ip").await
 }
 
 #[cfg(test)]

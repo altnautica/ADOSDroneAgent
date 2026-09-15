@@ -17,8 +17,11 @@ pub const MAX_FAILURES: usize = 5;
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 /// How often the monitor re-attempts a service parked in `Failed`/`CircuitOpen`
 /// so it self-recovers when the underlying condition (e.g. a hot-plugged
-/// camera) returns, instead of staying dead until a manual restart.
-pub const PARKED_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+/// camera) returns, instead of staying dead until a manual restart. Fixed, in
+/// the 2-5 s recovery band and matching the monitor tick: a recovery loop that
+/// waits longer than that costs a drone whose FC needs one more attempt after
+/// a brownout half a minute per try.
+pub const PARKED_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Service tier. Start order is core first, then hardware, then on-demand;
 /// shutdown tears down in the reverse-ish order handled by the lifecycle.
@@ -131,6 +134,23 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     def("ados-api", Core, None, None),
     def("ados-cloud", Core, None, None),
     def("ados-health", Core, None, None),
+    // The durable logging + telemetry store. Registered so it gets the
+    // monitor's liveness check, the auto-restart, the parked retry and — the
+    // one that matters most — the `systemctl reset-failed` that clears a
+    // `failed (start-limit-hit)` latch. Five restarts in a minute (a store that
+    // re-quarantines, a full /var, a wedged writer tripping the unit's
+    // WatchdogSec) used to leave the black box permanently dead with nothing
+    // in-process able to clear it, so `ados logs query|tail` returned nothing
+    // and every producer's log layer dropped silently — off-box RCA gone.
+    //
+    // In the headless KEEP set: the store is Rust (zero-Python holds) and a
+    // lean flight node is precisely the node an operator cannot reach, so it is
+    // the one that most needs its own flight recorder.
+    //
+    // Gated on `log_store_enabled` in `gate_allows`, not here: the store ships
+    // OFF and the installer MASKS the unit when it is off, so an ungated row
+    // would have the supervisor start-fail a masked unit forever.
+    def_keep("ados-logd", Core, None, None),
     // Hardware-dependent (started on detection). Drone-only: the camera encode
     // pipeline runs on the air side; a ground station receives video through
     // ados-mediamtx-gs, never ados-video. The prebuilt catalog fetches the
@@ -341,12 +361,13 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 31, "service count drifted from the catalog");
-        // Core tier members. ados-mavlink/api/cloud/health are the cross-profile
-        // always-on core (the single cloud unit serves the gateway + heartbeat on
-        // both profiles, spawning the ground-station bridge when the role resolves
-        // to a ground station). ados-compute is the Core service of the workstation
-        // profile (it auto-runs only on a workstation node).
+        assert_eq!(specs.len(), 32, "service count drifted from the catalog");
+        // Core tier members. ados-mavlink/api/cloud/health/logd are the
+        // cross-profile always-on core (the single cloud unit serves the gateway
+        // + heartbeat on both profiles, spawning the ground-station bridge when
+        // the role resolves to a ground station). ados-compute is the Core
+        // service of the workstation profile (it auto-runs only on a workstation
+        // node).
         let core: Vec<_> = specs
             .iter()
             .filter(|s| s.category == Category::Core)
@@ -360,6 +381,7 @@ mod tests {
                 "ados-api",
                 "ados-cloud",
                 "ados-health",
+                "ados-logd",
                 "ados-compute"
             ]
         );
@@ -419,9 +441,12 @@ mod tests {
     #[test]
     fn headless_keep_set_is_exactly_the_lean_core() {
         // The lean headless profile boots only the Rust core: the MAVLink
-        // router, the swarm state bus, the camera encode, the radio TX, and the
-        // native HTTP front. Everything else (FastAPI, cloud, health, GS units,
-        // on-demand) is NOT in the KEEP set, so the headless gate blocks it.
+        // router, the swarm state bus, the durable store, the camera encode, the
+        // radio TX, and the native HTTP front. Everything else (FastAPI, cloud,
+        // health, GS units, on-demand) is NOT in the KEEP set, so the headless
+        // gate blocks it. The store is in the set because it is Rust (zero-Python
+        // holds) and a lean flight node is the node an operator cannot reach —
+        // the one that most needs its own flight recorder.
         let specs = build_specs();
         let kept: Vec<_> = specs
             .iter()
@@ -433,6 +458,7 @@ mod tests {
             vec![
                 "ados-mavlink",
                 "ados-swarmbus",
+                "ados-logd",
                 "ados-video",
                 "ados-wfb",
                 "ados-control"
@@ -442,6 +468,35 @@ mod tests {
         // ados-api (FastAPI) is explicitly NOT kept: headless is zero-Python.
         let api = specs.iter().find(|s| s.name == "ados-api").unwrap();
         assert!(!api.headless_keep);
+    }
+
+    #[test]
+    fn the_log_store_is_supervised_cross_profile_and_kept_headless() {
+        // Regression: an unregistered ados-logd got no liveness check, no
+        // auto-restart, no parked retry and — the one that matters — no
+        // `systemctl reset-failed`, so five restarts in a minute left the black
+        // box permanently dead and only an SSH session could clear it.
+        let specs = build_specs();
+        let logd = specs
+            .iter()
+            .find(|s| s.name == "ados-logd")
+            .expect("ados-logd must be in the supervised set");
+        assert_eq!(logd.category, Category::Core);
+        assert_eq!(logd.profile_gate, None, "the store runs on every profile");
+        assert_eq!(logd.role_gate, None);
+        assert!(
+            logd.headless_keep,
+            "a lean flight node is the node that most needs its own recorder"
+        );
+    }
+
+    #[test]
+    fn the_parked_retry_cadence_is_in_the_fixed_recovery_band() {
+        // A parked service is retried inside the fixed 2-5 s recovery band, not
+        // on a half-minute cooldown: a unit that needs one more attempt after a
+        // brownout must not cost the operator 30 s per try.
+        assert!(PARKED_RETRY_COOLDOWN >= Duration::from_secs(2));
+        assert!(PARKED_RETRY_COOLDOWN <= Duration::from_secs(5));
     }
 
     #[test]

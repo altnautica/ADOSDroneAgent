@@ -14,6 +14,7 @@ use crate::bind::orchestrator::BindOrchestrator;
 use crate::config::AgentConfig;
 use crate::process_manager::{select, ProcessManager};
 use crate::registry::{build_specs, Category, ServiceSpec, ServiceState, PARKED_RETRY_COOLDOWN};
+use crate::sdnotify::MonitorProgress;
 
 /// Units whose auto-restart the monitor skips while a bind handshake owns the
 /// radio adapter. The bind FSM now lives in this supervisor process, so the
@@ -21,6 +22,13 @@ use crate::registry::{build_specs, Category, ServiceSpec, ServiceState, PARKED_R
 /// check read an in-process global that the separate supervisor never saw, so
 /// it was inert in production; hosting the FSM here makes the gate real.)
 const BIND_GATED_UNITS: [&str; 2] = ["ados-wfb", "ados-wfb-rx"];
+
+/// The durable logging + telemetry store's unit. Behind one config key
+/// (`logging.store.enabled`) because it is by far the largest writer on the
+/// box, and the installer masks the unit when that key is off — so the
+/// supervisor must honour the same gate or it start-fails a masked unit on
+/// every pass.
+const LOG_STORE_UNIT: &str = "ados-logd";
 
 /// Whether a service's profile + role gates allow it to run under `config`.
 ///
@@ -38,6 +46,11 @@ pub fn gate_allows(spec: &ServiceSpec, config: &AgentConfig) -> bool {
     // A complete no-op on the full agent (`headless_mode` false), so the profile
     // and role gates below are unchanged for every non-headless rig.
     if config.headless_mode && !spec.headless_keep {
+        return false;
+    }
+    // The store is opt-in and its unit is masked when the key is off, so the
+    // registry row gates on the resolved key rather than on a profile.
+    if spec.name == LOG_STORE_UNIT && !config.log_store_enabled {
         return false;
     }
     if let Some(gate) = spec.profile_gate {
@@ -138,6 +151,12 @@ pub struct Supervisor {
     /// a circuit-breaker open, a stop) off-box and across reboots. Best-effort
     /// and non-blocking, like the other emitters above.
     events: ados_protocol::logd::emitter::EventEmitter,
+    /// Monitor-pass progress, stamped at every stage boundary of
+    /// [`monitor_pass`](Self::monitor_pass) and read by the systemd watchdog
+    /// ticker. The watchdog is fed only while this advances, so a pass wedged
+    /// inside one stage takes the unit down (systemd restarts it) instead of
+    /// reporting healthy forever with death-detection and auto-restart dead.
+    progress: MonitorProgress,
 }
 
 impl Supervisor {
@@ -185,11 +204,19 @@ impl Supervisor {
             janitor: crate::janitor::Janitor::new(ados_protocol::logd::emitter::EventEmitter::new(
                 "ados-supervisor",
             )),
+            progress: MonitorProgress::new(),
         }
     }
 
     pub fn config(&self) -> &AgentConfig {
         &self.config
+    }
+
+    /// A handle on the monitor-pass progress marker, for the systemd watchdog
+    /// ticker. Cloned rather than borrowed so the ticker task outlives any
+    /// borrow of the supervisor.
+    pub fn progress(&self) -> MonitorProgress {
+        self.progress.clone()
     }
 
     fn index_of(&self, name: &str) -> Option<usize> {
@@ -498,39 +525,56 @@ impl Supervisor {
         BIND_GATED_UNITS.contains(&name) && self.bind.session_active()
     }
 
-    /// One monitor pass: detect deaths + auto-restart, retry parked services.
-    pub async fn monitor_pass(&mut self) {
+    /// Names of every parked service whose retry is due at `now`.
+    ///
+    /// Deliberately NOT filtered by category. `Category::OnDemand` used to be
+    /// excluded, which let `ados-control` — the lean headless node's only HTTP
+    /// surface — latch `CircuitOpen` permanently after five failures in a
+    /// minute, clearable only over SSH. A unit the operator never enabled sits
+    /// in `Stopped`, never `Failed`/`CircuitOpen`, so retrying every parked
+    /// service cannot spuriously start one: `gate_allows` plus the unit's own
+    /// `ConditionPathExists` marker remain the gate.
+    fn parked_retries_due(&self, now: Instant) -> Vec<&'static str> {
+        self.services
+            .iter()
+            .filter(|spec| {
+                matches!(
+                    spec.state,
+                    ServiceState::Failed | ServiceState::CircuitOpen
+                ) && spec
+                    .last_retry_at
+                    .map(|t| now.duration_since(t) >= PARKED_RETRY_COOLDOWN)
+                    .unwrap_or(true)
+            })
+            .map(|spec| spec.name)
+            .collect()
+    }
+
+    /// The service half of a monitor pass: detect deaths + auto-restart, then
+    /// retry every parked service whose cooldown has elapsed.
+    ///
+    /// Split out from [`monitor_pass`](Self::monitor_pass) so it is drivable
+    /// without the network/hardware reconcilers, and stamps monitor progress
+    /// per unit: a pass that walks 30-odd `systemctl` calls is advancing, and
+    /// must keep the watchdog fed, while a pass stuck on any one of them is not.
+    pub async fn reconcile_services(&mut self) {
         // Snapshot the names + states we need so we can issue async restarts
         // without holding an immutable borrow across the await.
         let mut to_restart: Vec<&'static str> = Vec::new();
-        let mut to_retry: Vec<&'static str> = Vec::new();
         let now = Instant::now();
 
-        for i in 0..self.services.len() {
-            let spec = &self.services[i];
-            match spec.state {
-                ServiceState::Running | ServiceState::Starting => {
-                    // Checked below via is_active (needs await); collect names.
-                    to_restart.push(spec.name);
-                }
-                ServiceState::Failed | ServiceState::CircuitOpen
-                    if matches!(spec.category, Category::Core | Category::Hardware) =>
-                {
-                    let due = spec
-                        .last_retry_at
-                        .map(|t| now.duration_since(t) >= PARKED_RETRY_COOLDOWN)
-                        .unwrap_or(true);
-                    if due {
-                        to_retry.push(spec.name);
-                    }
-                }
-                _ => {}
+        for spec in &self.services {
+            if matches!(spec.state, ServiceState::Running | ServiceState::Starting) {
+                // Checked below via is_active (needs await); collect names.
+                to_restart.push(spec.name);
             }
         }
+        let to_retry = self.parked_retries_due(now);
 
         // Liveness check + auto-restart for running services.
         for name in to_restart {
             let active = self.pm.is_active(name).await;
+            self.progress.mark();
             let Some(i) = self.index_of(name) else {
                 continue;
             };
@@ -541,6 +585,7 @@ impl Supervisor {
                 if self.services[i].state != ServiceState::CircuitOpen && !blocked {
                     tracing::info!(service = name, "auto-restart");
                     self.start_service(name).await;
+                    self.progress.mark();
                 }
             }
         }
@@ -555,7 +600,23 @@ impl Supervisor {
             }
             tracing::info!(service = name, "parked retry");
             self.start_service(name).await;
+            self.progress.mark();
         }
+    }
+
+    /// One monitor pass: the service half, then the prevention/repair
+    /// reconcilers, in order.
+    ///
+    /// Every stage boundary stamps [`MonitorProgress`], which is what feeds the
+    /// systemd watchdog. A slow-but-advancing recovery pass keeps the unit
+    /// healthy; a pass wedged inside one stage stops stamping and systemd
+    /// restarts the unit rather than reporting `active` while death-detection,
+    /// auto-restart and hot-plug handling are all dead. Each subprocess these
+    /// backends shell is separately bounded by [`crate::oscmd`], so a stall
+    /// here is a real wedge and not a slow external command.
+    pub async fn monitor_pass(&mut self) {
+        self.reconcile_services().await;
+        self.progress.mark();
 
         // Regulatory-domain reconcile (PREVENTION): re-assert the configured
         // wanted domain when a self-managed injection PHY has left a foreign
@@ -565,6 +626,7 @@ impl Supervisor {
         // reactive self-heal so a freshly-reconciled domain heads off the break
         // the self-heal would otherwise have to repair.
         self.reg_reconciler.tick().await;
+        self.progress.mark();
 
         // WiFi power-save runtime reconcile (PREVENTION): the FullMAC onboard-WiFi
         // driver re-enables 802.11 power-save after an NM reconnect / hotplug /
@@ -573,6 +635,7 @@ impl Supervisor {
         // interface and record the verified per-interface state for the heartbeat.
         // Cheap (one `iw get` per iface; a `set` only on a real drift).
         self.wifi_powersave.tick().await;
+        self.progress.mark();
 
         // Reactive network self-heal: detect + rebuild an onboard managed-WiFi
         // link whose data path died under the radio bring-up, so the box keeps a
@@ -580,6 +643,7 @@ impl Supervisor {
         // no onboard managed WiFi or the WiFi is healthy. Kept as the backstop
         // for a link that still needs an explicit rebuild after a domain drift.
         self.wifi_selfheal.tick().await;
+        self.progress.mark();
 
         // Management-link guardian (REACTIVE backstop for the WHOLE link): detect
         // a dead operator management link (no carrier / no lease / unreachable
@@ -588,6 +652,7 @@ impl Supervisor {
         // after the per-connection WiFi self-heal so the cheaper fix gets first
         // crack; cheap when the link is healthy, one repair rung per tick.
         self.mgmt_guardian.tick().await;
+        self.progress.mark();
 
         // Onboard-WiFi heartbeat reach-back (LAST resort): when the wired
         // primary is physically down for a sustained window, declare a
@@ -595,6 +660,7 @@ impl Supervisor {
         // after the guardian (which repairs the link while it physically
         // exists); cheap when the wired primary is up.
         self.mgmt_failover.tick().await;
+        self.progress.mark();
 
         // USB-rehome self-heal (LAST resort for a slow-port, not-radiating
         // adapter): the reconciler decides; if it authorizes an attempt, the
@@ -614,11 +680,14 @@ impl Supervisor {
             if let Some(plan) = self.usb_rehome.decide().await {
                 let unit = plan.unit;
                 self.stop_service(unit).await;
+                self.progress.mark();
                 self.wait_for_stop(&[unit], Duration::from_secs(5)).await;
                 crate::usb_rehome::execute_rebind(&plan).await;
+                self.progress.mark();
                 self.start_service(unit).await;
             }
         }
+        self.progress.mark();
 
         // Camera USB-recovery (force re-enumeration of an absent/wedged camera
         // that failed its cold-boot port-enable). No unit stop: the video
@@ -627,6 +696,7 @@ impl Supervisor {
         if let Some(plan) = self.camera_usb_recovery.decide().await {
             crate::usb_rehome::camera::execute_camera_recovery(&plan).await;
         }
+        self.progress.mark();
 
         // Disk janitor (hourly, not per-tick): reclaim the apt cache, over-long
         // plugin logs and audit trail, aged recordings, and — once free space is
@@ -634,6 +704,7 @@ impl Supervisor {
         // stores. Cheap on the ticks it is not due, and a no-op on the ones it
         // is when nothing is over its cap.
         self.janitor.tick().await;
+        self.progress.mark();
     }
 }
 
@@ -663,6 +734,8 @@ mod tests {
             configured_gs_role: "direct".to_string(),
             raw_agent_profile: Some(profile_wire.replace('-', "_")),
             headless_mode: false,
+            // The store ships off; the tests that care turn it on explicitly.
+            log_store_enabled: false,
             mesh_role_path: role_path.to_path_buf(),
         }
     }
@@ -835,14 +908,18 @@ mod tests {
 
     /// A recording process-manager double: every verb logs `verb:unit` and
     /// reports success so the lifecycle proceeds as if the unit really started.
+    /// `fail_starts` flips `start` to failure so a test can drive a unit into
+    /// the circuit breaker and then let it recover.
     struct MockProcessManager {
         calls: std::sync::Mutex<Vec<String>>,
+        starts_fail: std::sync::atomic::AtomicBool,
     }
 
     impl MockProcessManager {
         fn new() -> Self {
             Self {
                 calls: std::sync::Mutex::new(Vec::new()),
+                starts_fail: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn record(&self, verb: &str, unit: &str) {
@@ -851,13 +928,21 @@ mod tests {
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
         }
+        fn fail_starts(&self) {
+            self.starts_fail
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn let_starts_succeed(&self) {
+            self.starts_fail
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     #[async_trait::async_trait]
     impl ProcessManager for MockProcessManager {
         async fn start(&self, unit: &str) -> bool {
             self.record("start", unit);
-            true
+            !self.starts_fail.load(std::sync::atomic::Ordering::Relaxed)
         }
         async fn stop(&self, unit: &str) -> bool {
             self.record("stop", unit);
@@ -1033,6 +1118,105 @@ mod tests {
             !mock.calls().iter().any(|c| c == "start:ados-vision"),
             "ados-vision must not start on a headless node; calls={:?}",
             mock.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parked_on_demand_service_is_retried_and_recovers() {
+        // Regression: the parked retry used to be filtered to Core|Hardware, so
+        // an OnDemand unit that hit the breaker latched CircuitOpen for the rest
+        // of the process. On a lean headless node ados-control is the ONLY
+        // control surface, so that state left the box flying with no API, no
+        // pairing and no diagnostics, clearable only over SSH.
+        let pm = Arc::new(MockProcessManager::new());
+        pm.fail_starts();
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+        // Six start attempts inside the failure window: five record a failure
+        // and the fifth opens the breaker; the sixth is refused by it.
+        for _ in 0..6 {
+            assert!(!sup.start_service("ados-control").await);
+        }
+        let i = sup.index_of("ados-control").unwrap();
+        assert_eq!(
+            sup.services[i].state,
+            ServiceState::CircuitOpen,
+            "six failures in the window must open the breaker"
+        );
+
+        // The fix: a parked OnDemand unit is queued for retry like any other.
+        let due = sup.parked_retries_due(Instant::now());
+        assert!(
+            due.contains(&"ados-control"),
+            "a parked OnDemand service must be retried; due={due:?}"
+        );
+
+        // Once the failures age out of the window the breaker half-opens (see
+        // `circuit_breaker_half_opens_after_window`); model that prune, let the
+        // unit come up, and drive one service reconcile.
+        sup.services[i].failure_times.clear();
+        pm.let_starts_succeed();
+        sup.reconcile_services().await;
+
+        assert_eq!(
+            sup.services[i].state,
+            ServiceState::Running,
+            "the retried OnDemand service must recover, not stay parked"
+        );
+        // The retry clears the systemd start-limit latch before starting, which
+        // is the half that needed an SSH `reset-failed` before.
+        let calls = pm.calls();
+        assert!(
+            calls.contains(&"reset_failed:ados-control".to_string()),
+            "the retry must clear the start-limit latch; calls={calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_log_store_unit_gates_on_its_config_key() {
+        // The store ships off and the installer MASKS the unit when it is off,
+        // so an ungated row would have the supervisor start-fail a masked unit
+        // on every pass forever.
+        let mut off = cfg("drone");
+        off.log_store_enabled = false;
+        assert!(!gate_allows(&spec("ados-logd"), &off));
+
+        let mut on = cfg("drone");
+        on.log_store_enabled = true;
+        assert!(gate_allows(&spec("ados-logd"), &on));
+
+        // And it is cross-profile: a ground station with the store on runs it.
+        let mut gs = cfg("ground-station");
+        gs.log_store_enabled = true;
+        assert!(gate_allows(&spec("ados-logd"), &gs));
+
+        // Kept in the lean headless set, where it matters most.
+        let mut headless = cfg_headless();
+        headless.log_store_enabled = true;
+        assert!(gate_allows(&spec("ados-logd"), &headless));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_service_reconcile_stamps_monitor_progress() {
+        // The systemd watchdog is fed only while this marker advances, so the
+        // pass advancing MUST stamp it — otherwise the coupling would take a
+        // healthy unit down.
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, mock.clone());
+        assert!(sup.start_service("ados-mavlink").await);
+
+        let progress = sup.progress();
+        tokio::time::advance(Duration::from_secs(40)).await;
+        assert!(
+            progress.since_mark() >= Duration::from_secs(40),
+            "nothing has stamped progress yet"
+        );
+
+        sup.reconcile_services().await;
+        assert!(
+            progress.since_mark() < Duration::from_secs(1),
+            "a reconcile that walked the unit set must stamp progress"
         );
     }
 }

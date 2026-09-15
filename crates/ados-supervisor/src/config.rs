@@ -127,6 +127,16 @@ pub struct AgentConfig {
     /// flight node runs just the Rust core (MAVLink / camera / radio / HTTP
     /// front). A boot-time flag — the supervisor reads it once at config load.
     pub headless_mode: bool,
+    /// Whether the durable logging + telemetry store is wanted on this node:
+    /// `logging.store.enabled` is set AND the Python-fallback pin marker is
+    /// absent. Read through `ados_config::log_store` so the supervisor, the
+    /// installer and the daemon cannot drift on one toggle.
+    ///
+    /// The store ships OFF, and when it is off the installer masks the unit, so
+    /// the `ados-logd` registry row gates on this: without the gate the
+    /// supervisor would start-fail a masked unit on every tick of every node
+    /// that has the store turned off.
+    pub log_store_enabled: bool,
     /// Where the on-disk role sentinel lives. The role gate re-reads this on
     /// every check so an operator-driven role switch (which flips the sentinel
     /// and stops/starts units without restarting this process) is reflected in
@@ -231,6 +241,7 @@ impl AgentConfig {
             raw_agent_profile,
             headless_mode,
             mesh_role_path: mesh_role.to_path_buf(),
+            log_store_enabled: log_store_wanted(config_yaml),
         }
     }
 
@@ -270,6 +281,25 @@ fn read_raw_config(path: &Path) -> (RawConfig, Option<String>) {
         return (RawConfig::default(), None);
     };
     ados_config::yaml_reporting(&text, "supervisor")
+}
+
+/// The name of the marker that pins the durable store off regardless of the
+/// config key. Written next to `config.yaml`, so it follows an `ADOS_CONFIG`
+/// override and stays with the config it belongs to.
+pub const LOGD_PIN_OFF_MARKER: &str = "logd-python-fallback";
+
+/// Whether the logging store is wanted on this node. The config key is read
+/// through the shared `ados_config::log_store` gate — the same one the
+/// installer's enable/mask reconcile and the daemon's own self-gate read — so
+/// the three cannot drift, and the pin marker is honoured because the installer
+/// MASKS the unit when it is present (a start against a masked unit only
+/// produces failures).
+pub fn log_store_wanted(config_yaml: &Path) -> bool {
+    let pinned_off = config_yaml
+        .parent()
+        .map(|dir| dir.join(LOGD_PIN_OFF_MARKER).exists())
+        .unwrap_or(false);
+    !pinned_off && ados_config::log_store::read_gate(config_yaml).enabled
 }
 
 /// Wire-contract profile string from a raw value. `"ground_station"` becomes

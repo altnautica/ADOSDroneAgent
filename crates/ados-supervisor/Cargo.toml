@@ -13,6 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 ados-macpin = { path = "../ados-macpin" }
+# The board fingerprint sidecar writer: the supervisor publishes
+# /run/ados/board.json once at startup so a zero-Python node reports its real
+# board and NPU instead of `unknown` / npu_tops 0.
+ados-hal-probe = { path = "../ados-hal-probe" }
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
@@ -46,3 +50,7 @@ nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Paused-clock harness for the watchdog-coupling tests, which must not spend a
+# real 75 s stall budget. Dev-only: resolver 2 keeps test-util out of the
+# shipped binary's features.
+tokio = { workspace = true, features = ["test-util"] }
