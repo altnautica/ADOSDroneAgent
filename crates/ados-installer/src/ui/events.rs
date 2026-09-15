@@ -100,10 +100,9 @@ pub struct SummaryData {
     pub board: String,
     /// The 12-hex device id.
     pub device_id: String,
-    /// Hostname (drives the `<host>.local` mDNS hint + setup URL).
+    /// Hostname. Drives the `<host>.local` line of the card's reach block, which
+    /// is gated on the name being resolvable — see `summary::console_urls`.
     pub hostname: String,
-    /// The on-box setup URL.
-    pub setup_url: String,
     /// Non-loopback IPv4 addresses the box owns, in interface order. The
     /// success card lists one reach URL per entry so the console stays
     /// reachable even when `<host>.local` mDNS does not resolve.

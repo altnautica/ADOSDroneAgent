@@ -8,6 +8,37 @@
 //! graph aborts BEFORE the systemd step runs. A best-effort binary that fails
 //! is logged and skipped — the agent still comes up and reports the missing
 //! capability.
+//!
+//! # Installing a locally-built binary (`--artifacts <dir>`)
+//!
+//! A bench node validating agent code that has not landed cannot fetch it: the
+//! release host only carries what CI published. `--artifacts <dir>` makes that
+//! directory the byte source for every catalog entry it carries, and leaves the
+//! rest on the release. It is not a second install path — the bytes go through
+//! the same [`install_one`] sequence a fetched asset does, and the table on that
+//! function states exactly which checks apply to each source.
+//!
+//! On the build host, next to the binaries:
+//!
+//! ```text
+//! cargo build --release -p ados-video
+//! install -m 0755 target/release/ados-video /tmp/stage/ados-video
+//! (cd /tmp/stage && sha256sum ados-video > ados-video.sha256)
+//! ```
+//!
+//! On the node (the `.sha256` is mandatory; it is what makes the copy verifiable
+//! rather than trusted):
+//!
+//! ```text
+//! sudo ados-installer --upgrade --profile drone --channel edge \
+//!     --artifacts /tmp/stage
+//! ```
+//!
+//! `scripts/install.sh` forwards the flag verbatim on Linux, so
+//! `scripts/install.sh --upgrade --artifacts /tmp/stage` works the same way —
+//! with the caveat that the bootstrap fetches the RELEASED `ados-installer`
+//! asset, so a node validating an unlanded change to the installer itself has to
+//! run the locally-built `ados-installer` binary directly, as above.
 
 use std::path::{Path, PathBuf};
 
@@ -198,23 +229,369 @@ fn allow_unsigned_for(_channel: Channel) -> bool {
     false
 }
 
-/// Fetch + verify one prebuilt binary, then place it atomically at its
-/// destination. Returns `Ok(())` on success, `Err` on any fetch/verify/place
-/// miss (the caller maps that through the gate). `tmp_dir` holds nothing for the
-/// binary itself — the binary is fetched to a `.dl` sibling of the real dest so
-/// the final placement is a same-filesystem `rename` (see [`place_binary`]); the
-/// dir is retained for callers that want a scratch root and for symmetry.
-/// `rev` is the `--ref` pin, which moves every URL off the rolling tag and onto
-/// that commit's per-revision release (see [`asset_base`]).
+// ---------------------------------------------------------------------------
+// Where one catalog entry's bytes come from.
+// ---------------------------------------------------------------------------
+
+/// The byte source for one catalog entry.
+///
+/// This is a source of BYTES, not a choice of install path: both variants hand
+/// the same three staged files (`<dest>.dl`, `.dl.sha256`, optional
+/// `.dl.minisig`) to the one verify → chmod → atomic-replace → `.prev`
+/// retention sequence in [`install_one`]. Nothing downstream of
+/// [`stage_asset`] knows which variant produced them, so a local artifact
+/// cannot skip a check by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetSource<'a> {
+    /// The GitHub release host: the rolling per-service tag, or that commit's
+    /// `rev-<sha>` release when the install is pinned with `--ref`.
+    Release {
+        /// The `--ref` pin, already expanded to a full object name.
+        rev: Option<&'a str>,
+    },
+    /// A directory of locally-built artifacts (`--artifacts <dir>`).
+    Local {
+        /// The directory holding `<service>` (or `<asset>`) plus its `.sha256`.
+        dir: &'a Path,
+        /// The host architecture the placed binary has to run on, used for the
+        /// ELF gate the release path does not need (CI only publishes aarch64).
+        host_arch: &'a str,
+    },
+}
+
+impl AssetSource<'_> {
+    /// How many times a staging failure is worth retrying.
+    ///
+    /// Three for a release fetch, because the failure it recovers from is a
+    /// transient link drop (the field failure on a flaky USB WiFi). One for a
+    /// local directory: a missing file or a bad digest is not going to fix
+    /// itself, and sleeping 3 s before saying so only delays the message.
+    fn max_attempts(&self) -> u32 {
+        match self {
+            AssetSource::Release { .. } => 3,
+            AssetSource::Local { .. } => 1,
+        }
+    }
+}
+
+/// The local file backing `b`, if the artifacts directory carries one.
+///
+/// Two accepted spellings, in priority order: the release asset name
+/// (`ados-video-aarch64`, i.e. a downloaded asset dropped into the directory)
+/// and the plain service name (`ados-video`, i.e. what `cargo build --release`
+/// leaves in `target/<triple>/release`). Nothing else is guessed — a name close
+/// to but not equal to one of those is reported by
+/// [`unrecognised_artifact_names`] rather than silently ignored.
+pub fn local_artifact(dir: &Path, b: &PrebuiltBinary) -> Option<PathBuf> {
+    for name in [b.asset, b.service] {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// The byte source for `b`: the local directory when it carries the artifact,
+/// the release otherwise.
+///
+/// The per-entry fallback is deliberate and is what makes the flag usable: a
+/// bench validating one unlanded crate copies one binary, and the other fourteen
+/// services still come from the release they would have come from anyway. The
+/// step reports the split so the fallback is never silent.
+fn source_for<'a>(
+    b: &PrebuiltBinary,
+    artifacts: Option<&'a Path>,
+    host_arch: &'a str,
+    rev: Option<&'a str>,
+) -> AssetSource<'a> {
+    match artifacts {
+        Some(dir) if local_artifact(dir, b).is_some() => AssetSource::Local { dir, host_arch },
+        _ => AssetSource::Release { rev },
+    }
+}
+
+/// The failure text when a local artifact has no `.sha256` beside it.
+///
+/// The installer does NOT hash the file itself and call that verified: a digest
+/// computed from the same bytes it is checking proves nothing. The sidecar is
+/// written on the build host, so comparing against it is a real check — it
+/// catches a truncated `scp`, a half-written file, and the wrong binary copied
+/// under the right name. Refusing loudly with the exact command to produce it is
+/// the only honest option; skipping it would leave the local path claiming a
+/// verification it did not perform.
+fn local_sha_missing(service: &str, artifact: &Path) -> String {
+    format!(
+        "{service}: {} has no .sha256 beside it. A local artifact is verified \
+         against the digest its BUILD host recorded, so the installer will not \
+         compute one from the bytes it is checking. On the build host run: \
+         sha256sum {0} > {0}.sha256 (macOS: shasum -a 256), and copy both files.",
+        artifact.display()
+    )
+}
+
+/// Stage one catalog entry's bytes (plus its `.sha256`, plus its `.minisig` when
+/// one exists) at the `.dl` paths [`install_one`] verifies and places.
+///
+/// The two arms differ only in where the bytes come from. Everything that
+/// decides whether they are installable happens after this returns.
+fn stage_asset(
+    b: &PrebuiltBinary,
+    source: &AssetSource<'_>,
+    dl_bin: &Path,
+    dl_sha: &Path,
+    dl_sig: &Path,
+    sink: &ProgressSink,
+) -> anyhow::Result<()> {
+    match *source {
+        AssetSource::Release { rev } => {
+            let asset_url = format!("{}/{}", asset_base(rev, b.release_tag), b.asset);
+            // Stream byte progress so the live pane shows "<service> 4.2/8.1 MB".
+            net::fetch_with_progress(&asset_url, dl_bin, |done, total| {
+                sink.byte_progress("fetch_binaries", done, total, b.service);
+            })?;
+            net::fetch(&format!("{asset_url}.sha256"), dl_sha)?;
+            // Best-effort: verification upgrades to signature-checked
+            // automatically once CI signs. curl is invoked with `-f`, so a 404
+            // leaves no file rather than a saved error page.
+            let _ = net::fetch(&format!("{asset_url}.minisig"), dl_sig);
+            Ok(())
+        }
+        AssetSource::Local { dir, host_arch } => {
+            let src = local_artifact(dir, b).ok_or_else(|| {
+                anyhow::anyhow!("{}: no artifact in {}", b.service, dir.display())
+            })?;
+            let src_sha = sidecar_path(&src, "sha256");
+            if !src_sha.is_file() {
+                anyhow::bail!(local_sha_missing(b.service, &src));
+            }
+            // Refuse a binary this host cannot run BEFORE it replaces a working
+            // one. The release path does not need this (CI publishes aarch64
+            // only); a local directory is exactly where a Mach-O build from the
+            // developer's laptop, or an x86_64 build from the wrong target dir,
+            // gets picked up. Cheap and side-effect-free: 20 bytes of header, no
+            // exec.
+            if let Some(why) = artifact_arch_error(&read_header(&src), host_arch) {
+                anyhow::bail!("{}: {} {why}", b.service, src.display());
+            }
+            std::fs::copy(&src, dl_bin)
+                .map_err(|e| anyhow::anyhow!("copy {} failed: {e}", src.display()))?;
+            std::fs::copy(&src_sha, dl_sha)
+                .map_err(|e| anyhow::anyhow!("copy {} failed: {e}", src_sha.display()))?;
+            let src_sig = sidecar_path(&src, "minisig");
+            if src_sig.is_file() {
+                let _ = std::fs::copy(&src_sig, dl_sig);
+            }
+            let size = std::fs::metadata(dl_bin).map(|m| m.len()).unwrap_or(0);
+            sink.byte_progress("fetch_binaries", size, size, b.service);
+            Ok(())
+        }
+    }
+}
+
+/// The first 20 bytes of a file (an ELF identification block plus `e_machine`),
+/// or an empty vector when it cannot be read. Short reads are fine: the parser
+/// treats anything it cannot decode as not-an-ELF.
+fn read_header(path: &Path) -> Vec<u8> {
+    use std::io::Read;
+    let mut buf = [0u8; 20];
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let mut filled = 0;
+    while filled < buf.len() {
+        match f.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => break,
+        }
+    }
+    buf[..filled].to_vec()
+}
+
+/// The ELF `e_machine` value a binary must declare to run on `arch`, or `None`
+/// for an architecture this check has no opinion about (in which case it does
+/// not run at all — an unknown host is not grounds for refusing an artifact).
+fn expected_elf_machine(arch: &str) -> Option<u16> {
+    match arch {
+        "aarch64" => Some(0xB7),
+        "x86_64" => Some(0x3E),
+        "riscv64" => Some(0xF3),
+        _ => None,
+    }
+}
+
+/// Why `header` cannot run on `host_arch` (pure), or `None` when it can — or
+/// when this check cannot say.
+///
+/// Decodes the ELF identification block: magic, 64-bit class, endianness, and
+/// the `e_machine` at offset 18. A file that is not an ELF at all is named as
+/// such, because the likeliest way to reach that on a bench is copying the Mach-O
+/// the same `cargo build` produced on the developer's Mac.
+fn artifact_arch_error(header: &[u8], host_arch: &str) -> Option<String> {
+    // A host architecture with no table entry: the check has no opinion and does
+    // not run, rather than refusing an artifact it cannot judge.
+    let want = expected_elf_machine(host_arch)?;
+    if header.len() < 20 || &header[..4] != b"\x7fELF" {
+        return Some(format!(
+            "is not an ELF executable, so it cannot run on this {host_arch} host \
+             (a macOS build of the same crate looks like this). Build it for the \
+             node, e.g. cargo build --release --target aarch64-unknown-linux-gnu."
+        ));
+    }
+    if header[4] != 2 {
+        return Some("is a 32-bit ELF; this host runs 64-bit binaries.".to_string());
+    }
+    // EI_DATA: 1 = little-endian, 2 = big-endian. Every target here is LE, but
+    // decode honestly rather than assume.
+    let machine = match header[5] {
+        1 => u16::from_le_bytes([header[18], header[19]]),
+        2 => u16::from_be_bytes([header[18], header[19]]),
+        _ => return Some("has an unreadable ELF data encoding.".to_string()),
+    };
+    if machine == want {
+        return None;
+    }
+    Some(format!(
+        "is built for ELF machine {machine:#x}, not the {host_arch} this node \
+         runs ({want:#x}). Build it for the node, e.g. cargo build --release \
+         --target aarch64-unknown-linux-gnu."
+    ))
+}
+
+/// Names in an artifacts directory this install has no use for: not a sidecar,
+/// not a catalog artifact.
+///
+/// Reported, never fatal, and deliberately so. The natural thing to point the
+/// flag at is a `target/release` directory, which legitimately holds `*.d` dep
+/// files, `lib*.rlib`, and `ados-installer` itself — none of which is a service
+/// this installer places. Rejecting the directory for holding them would make
+/// the flag unusable for its only purpose.
+///
+/// What the report buys is the case that actually matters: a mistyped filename
+/// would otherwise be the worst outcome available here — that service silently
+/// falls back to the release, the install succeeds, and the bench measures the
+/// OLD binary believing it measured the new one. Naming both lists (what was
+/// taken from the directory, what was passed over) puts the typo in front of the
+/// operator, and [`validate_artifacts_dir`] still hard-fails the single-file
+/// typo, where nothing at all is recognised.
+pub fn ignored_artifact_names(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|n| !n.ends_with(".sha256") && !n.ends_with(".minisig"))
+        .filter(|n| !is_catalog_artifact_name(n))
+        .cloned()
+        .collect()
+}
+
+/// Whether `name` is a spelling of some catalog artifact — any profile's, plus
+/// the onnx vision variant and the ONNX Runtime library, since a directory
+/// assembled for one profile may legitimately carry another's binary.
+fn is_catalog_artifact_name(name: &str) -> bool {
+    binaries::PREBUILT
+        .iter()
+        .chain([
+            &binaries::PREBUILT_VISION_ONNX,
+            &binaries::PREBUILT_VISION_ONNX_RUNTIME,
+        ])
+        .any(|b| b.asset == name || b.service == name)
+}
+
+/// The file names directly inside `dir` (no recursion), sorted.
+fn dir_entry_names(dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Refuse an `--artifacts` directory that cannot mean what the operator meant,
+/// and otherwise report what will be taken from it and what will be passed over.
+///
+/// Two refusals:
+///
+/// * The path is not a directory, or cannot be read — a typo, or a
+///   `target/release` that was never built.
+/// * It holds no catalog artifact at all. This is the single-file typo
+///   (`ados-vidoe`) and the wrong-directory case, and it has to be fatal: the
+///   alternative is an install that fetches every binary from the release and
+///   reports success while the operator believes they installed their build.
+///
+/// Names it has no use for are returned, not refused — see
+/// [`ignored_artifact_names`].
+fn validate_artifacts_dir(dir: &Path) -> Result<Vec<String>, String> {
+    if !dir.is_dir() {
+        return Err(format!(
+            "--artifacts {}: not a directory. Point it at the directory holding \
+             the built service binaries (e.g. target/release).",
+            dir.display()
+        ));
+    }
+    let names = dir_entry_names(dir)
+        .map_err(|e| format!("--artifacts {}: cannot be read: {e}", dir.display()))?;
+    if !names.iter().any(|n| is_catalog_artifact_name(n)) {
+        return Err(format!(
+            "--artifacts {}: holds no service binary. Each artifact is named for \
+             its service (e.g. ados-video) or for its release asset (e.g. \
+             ados-video-aarch64), with its .sha256 beside it. Nothing here \
+             matches, so every binary would come from the release instead.",
+            dir.display()
+        ));
+    }
+    Ok(ignored_artifact_names(&names))
+}
+
+/// Obtain + verify one prebuilt binary, then place it atomically at the
+/// destination the catalog names for it.
+///
+/// `source` decides only where the bytes come from — a release asset, or a file
+/// from the `--artifacts` directory (see [`stage_asset`]). Everything after the
+/// staging call is identical for both, which is the point: a local artifact is a
+/// byte source, never a shortcut past the checks. What the two sources actually
+/// get, in order:
+///
+/// | check | release asset | local artifact |
+/// |---|---|---|
+/// | ELF machine matches this host | not applied (CI publishes aarch64 only) | **applied** |
+/// | SHA256 against the `.sha256` sidecar | applied (sidecar fetched) | **applied** (sidecar copied from the build host; a missing one is fatal) |
+/// | minisign against the vendored trust anchor | applied when a `.minisig` exists | applied when a `.minisig` exists — in practice never, since the signing key is a CI secret |
+/// | a signature that cannot be OBTAINED | warn on edge, fatal on stable | same rule; `--artifacts` is refused on stable up front for exactly this reason |
+/// | chmod 0755, atomic rename, `<dest>.prev` retention, Hard/BestEffort gate | applied | applied |
 fn install_one(
     b: &PrebuiltBinary,
+    tmp_dir: &Path,
+    channel: Channel,
+    sink: &ProgressSink,
+    source: &AssetSource<'_>,
+) -> anyhow::Result<()> {
+    install_one_at(b, Path::new(b.dest), tmp_dir, channel, sink, source)
+}
+
+/// Obtain + verify + place one binary at `dest`. Returns `Ok(())` on success,
+/// `Err` on any stage/verify/place miss (the caller maps that through the gate).
+///
+/// `dest` is a parameter rather than read off `b` because placement is a
+/// property of this call, not of the catalog: the sequence is "stage these
+/// bytes, verify them, swap them over THIS path, keep the outgoing copy". Every
+/// production caller passes `b.dest` through [`install_one`]; a test passes a
+/// tempdir, which is what makes the verify-and-rollback ordering assertable
+/// without a writable `/opt/ados/bin`.
+///
+/// `tmp_dir` holds nothing for the binary itself — the bytes are staged at a
+/// `.dl` sibling of `dest` so the final placement is a same-filesystem `rename`
+/// (see [`place_binary`]); the dir is retained for callers that want a scratch
+/// root and for symmetry.
+fn install_one_at(
+    b: &PrebuiltBinary,
+    dest: &Path,
     _tmp_dir: &Path,
     channel: Channel,
     sink: &ProgressSink,
-    rev: Option<&str>,
+    source: &AssetSource<'_>,
 ) -> anyhow::Result<()> {
-    let asset_url = format!("{}/{}", asset_base(rev, b.release_tag), b.asset);
-    let dest = Path::new(b.dest);
 
     // Ensure /opt/ados/bin exists so the `.dl` sibling and the final rename land
     // on the same filesystem as the destination (atomic rename requires it).
@@ -223,32 +600,29 @@ fn install_one(
             .map_err(|e| anyhow::anyhow!("create {} failed: {e}", parent.display()))?;
     }
 
-    // Fetch the binary + its sidecars to siblings of the real dest. The `.sha256`
+    // Stage the binary + its sidecars as siblings of the real dest. The `.sha256`
     // MUST sit next to the binary we verify because `verify_artifact` looks for
-    // `<artifact>.sha256` beside the artifact. The `.minisig` is best-effort so
-    // verification upgrades to signature-checked automatically once CI signs.
+    // `<artifact>.sha256` beside the artifact.
     let dl_bin = dl_sibling(dest);
     let dl_sha = sidecar_path(&dl_bin, "sha256");
     let dl_sig = sidecar_path(&dl_bin, "minisig");
 
     let outcome = (|| {
-        // Stream byte progress so the live pane shows "<service> 4.2/8.1 MB".
-        net::fetch_with_progress(&asset_url, &dl_bin, |done, total| {
-            sink.byte_progress("fetch_binaries", done, total, b.service);
-        })?;
-        net::fetch(&format!("{asset_url}.sha256"), &dl_sha)?;
-        let _ = net::fetch(&format!("{asset_url}.minisig"), &dl_sig);
+        stage_asset(b, source, &dl_bin, &dl_sha, &dl_sig, sink)?;
 
-        // Verify the downloaded temp BEFORE it is placed at the live path. Every
+        // Verify the staged temp BEFORE it is placed at the live path. Every
         // channel checks any `.minisig` that arrived against the vendored trust
         // anchor; only whether a MISSING one is fatal still varies by channel.
         //
-        // The best-effort `.minisig` fetch above is what makes that safe to run
+        // The best-effort `.minisig` staging above is what makes that safe to run
         // on the default channel today: curl is invoked with `-f`, so a 404
-        // leaves no file at all rather than a saved error page, and `net::fetch`
-        // never promotes a failed transfer to the destination. An absent sidecar
-        // therefore reads as "unobtainable" (warn on edge) and not as a
-        // signature that fails to verify.
+        // leaves no file at all rather than a saved error page, `net::fetch`
+        // never promotes a failed transfer to the destination, and the local arm
+        // copies a `.minisig` only when one exists. An absent sidecar therefore
+        // reads as "unobtainable" (warn on edge) and not as a signature that
+        // fails to verify. The `.sha256` is NOT best-effort on either arm: the
+        // fetch fails on a missing one, and the local arm refuses before it
+        // copies anything.
         verify::verify_artifact(
             &dl_bin,
             Some(ADOS_BINARY_PUBKEY),
@@ -281,26 +655,31 @@ fn install_one(
     outcome
 }
 
-/// Fetch + verify + place one binary, retrying on failure with exponential
+/// Obtain + verify + place one binary, retrying on failure with exponential
 /// backoff. A single attempt's curl `--retry` (with `--continue-at -` resume)
 /// already recovers a short drop mid-transfer; this outer loop adds spaced
 /// retries so a longer management-link outage during one binary does not doom
 /// the whole install (the field failure on a flaky USB WiFi where one of ~15
 /// binaries dropped and aborted the install). Bounded so a genuinely
 /// unreachable asset still fails instead of stalling forever.
+///
+/// A local artifact gets ONE attempt ([`AssetSource::max_attempts`]): its
+/// failures — no file, no `.sha256`, wrong architecture, bad digest — are all
+/// terminal, and retrying them only puts 3 s between the operator and the
+/// message that says what to fix.
 fn install_one_with_retry(
     b: &PrebuiltBinary,
     tmp_dir: &Path,
     channel: Channel,
     sink: &ProgressSink,
-    rev: Option<&str>,
+    source: &AssetSource<'_>,
 ) -> anyhow::Result<()> {
-    const MAX_ATTEMPTS: u32 = 3;
+    let max_attempts = source.max_attempts();
     let mut backoff = std::time::Duration::from_secs(1);
-    for attempt in 1..=MAX_ATTEMPTS {
-        match install_one(b, tmp_dir, channel, sink, rev) {
+    for attempt in 1..=max_attempts {
+        match install_one(b, tmp_dir, channel, sink, source) {
             Ok(()) => return Ok(()),
-            Err(e) if attempt < MAX_ATTEMPTS => {
+            Err(e) if attempt < max_attempts => {
                 tracing::warn!(
                     service = b.service,
                     attempt,
@@ -324,35 +703,42 @@ fn install_one_with_retry(
 /// variant (Rule 26 — the default build still installs and honestly reports no
 /// real inference until the onnx variant is available). Every other service
 /// installs its single catalog binary unchanged.
+///
+/// The variant selection is a RELEASE-side choice: it picks between two
+/// published assets. An operator who hands `ados-vision` to `--artifacts` has
+/// already chosen which build they want, so the local arm installs that file and
+/// does not go looking for an onnx variant to prefer over it.
 fn install_service(
     b: &PrebuiltBinary,
     board_model: &str,
     tmp_dir: &Path,
     channel: Channel,
     sink: &ProgressSink,
-    rev: Option<&str>,
+    source: &AssetSource<'_>,
 ) -> anyhow::Result<()> {
-    if b.service == "ados-vision" && binaries::board_prefers_onnx_vision(board_model) {
-        // The onnx binary links the ONNX Runtime dynamically, so the binary AND
-        // its shared library are installed together — either both land or the
-        // install falls back to the default (musl, no-onnx) build. Installing the
-        // onnx binary without its runtime would leave a vision service that
-        // cannot dlopen ORT at start.
-        match install_onnx_vision(tmp_dir, channel, sink, rev) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "onnx vision build fetch failed; falling back to the default vision build"
-                );
-                sink.sub_log(
-                    "fetch_binaries",
-                    "onnx vision build unavailable; using the default vision build",
-                );
+    if let AssetSource::Release { rev } = *source {
+        if b.service == "ados-vision" && binaries::board_prefers_onnx_vision(board_model) {
+            // The onnx binary links the ONNX Runtime dynamically, so the binary AND
+            // its shared library are installed together — either both land or the
+            // install falls back to the default (musl, no-onnx) build. Installing the
+            // onnx binary without its runtime would leave a vision service that
+            // cannot dlopen ORT at start.
+            match install_onnx_vision(tmp_dir, channel, sink, rev) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "onnx vision build fetch failed; falling back to the default vision build"
+                    );
+                    sink.sub_log(
+                        "fetch_binaries",
+                        "onnx vision build unavailable; using the default vision build",
+                    );
+                }
             }
         }
     }
-    install_one_with_retry(b, tmp_dir, channel, sink, rev)
+    install_one_with_retry(b, tmp_dir, channel, sink, source)
 }
 
 /// Whether a freshly-placed binary can actually `execve` on this host — probes
@@ -473,13 +859,22 @@ fn install_onnx_vision(
     sink: &ProgressSink,
     rev: Option<&str>,
 ) -> anyhow::Result<()> {
-    install_one_with_retry(&binaries::PREBUILT_VISION_ONNX, tmp_dir, channel, sink, rev)?;
+    // Both halves of the variant come from the release: this path is only
+    // reached for a release-sourced `ados-vision` (see `install_service`).
+    let source = AssetSource::Release { rev };
+    install_one_with_retry(
+        &binaries::PREBUILT_VISION_ONNX,
+        tmp_dir,
+        channel,
+        sink,
+        &source,
+    )?;
     install_one_with_retry(
         &binaries::PREBUILT_VISION_ONNX_RUNTIME,
         tmp_dir,
         channel,
         sink,
-        rev,
+        &source,
     )
     .map_err(|e| anyhow::anyhow!("ONNX Runtime library fetch failed: {e}"))?;
 
@@ -672,18 +1067,66 @@ impl Step for FetchBinaries {
             }
         }
 
+        // `--artifacts <dir>`: validate the directory BEFORE the loop, for the
+        // same reason the `--ref` probe above runs before it — a request that
+        // cannot mean what the operator meant should cost nothing and say why.
+        let artifacts = ctx.artifacts.clone();
+        let mut ignored: Vec<String> = Vec::new();
+        if let Some(dir) = artifacts.as_deref() {
+            match validate_artifacts_dir(dir) {
+                Ok(names) => ignored = names,
+                Err(msg) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    return StepOutcome::Failed(msg);
+                }
+            }
+        }
+
+        // Resolve each entry's byte source once, and SAY which ones came from
+        // the local directory and which files were passed over. A fallback to the
+        // release is legitimate (a one-crate rebuild) but it must never be
+        // silent: these lines are what tell the operator that the binary they are
+        // about to measure is theirs, and what makes a mistyped filename visible.
+        let host_arch = ctx.env.arch.clone();
+        let sources: Vec<AssetSource<'_>> = bins
+            .iter()
+            .map(|b| source_for(b, artifacts.as_deref(), &host_arch, rev.as_deref()))
+            .collect();
+        if let Some(dir) = artifacts.as_deref() {
+            let local: Vec<&str> = bins
+                .iter()
+                .zip(&sources)
+                .filter(|(_, s)| matches!(s, AssetSource::Local { .. }))
+                .map(|(b, _)| b.service)
+                .collect();
+            let fetched = bins.len() - local.len();
+            sink.sub_log(
+                self.id(),
+                &format!(
+                    "local artifacts: {} ({fetched} from the release)",
+                    local.join(", ")
+                ),
+            );
+            if !ignored.is_empty() {
+                sink.sub_log(
+                    self.id(),
+                    &format!("not a service binary, passed over: {}", ignored.join(", ")),
+                );
+            }
+            tracing::info!(
+                local = %local.join(","),
+                fetched,
+                ignored = %ignored.join(","),
+                dir = %dir.display(),
+                "installing locally-built service binaries"
+            );
+        }
+
         let total = bins.len() as u64;
         sink.sub_progress(self.id(), 0, total);
-        for (i, b) in bins.into_iter().enumerate() {
+        for (i, (b, source)) in bins.iter().zip(&sources).enumerate() {
             sink.activity(self.id(), format!("installing {}", b.service));
-            let ok = match install_service(
-                b,
-                &board_model,
-                &tmp_dir,
-                channel,
-                &sink,
-                rev.as_deref(),
-            ) {
+            let ok = match install_service(b, &board_model, &tmp_dir, channel, &sink, source) {
                 Ok(()) => {
                     // Kept at debug: the live-detail pane names each component as
                     // it lands, so an info line here would just repeat "installed
@@ -1061,6 +1504,398 @@ mod tests {
         assert!(
             !msg.contains("crates/**"),
             "must not misattribute a skipped checkout to the path filter: {msg}"
+        );
+    }
+
+    // ----- `--artifacts <dir>`: locally-built service binaries -----
+
+    /// A minimal well-formed 64-bit little-endian ELF header declaring
+    /// `machine`, followed by `payload` so two artifacts can differ in content.
+    fn fake_elf(machine: u16, payload: &[u8]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(20 + payload.len());
+        v.extend_from_slice(b"\x7fELF");
+        v.push(2); // EI_CLASS: 64-bit
+        v.push(1); // EI_DATA: little-endian
+        v.push(1); // EI_VERSION
+        v.extend_from_slice(&[0u8; 9]); // EI_OSABI .. EI_PAD
+        v.extend_from_slice(&2u16.to_le_bytes()); // e_type: ET_EXEC
+        v.extend_from_slice(&machine.to_le_bytes()); // e_machine
+        v.extend_from_slice(payload);
+        v
+    }
+
+    fn sha256_sidecar_body(bytes: &[u8], name: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(bytes);
+        format!("{:x}  {name}\n", h.finalize())
+    }
+
+    /// Drop `bytes` into `dir` as `name`, with the `sha256sum`-format sidecar a
+    /// build host would have produced beside it.
+    fn write_local_artifact(dir: &Path, name: &str, bytes: &[u8]) {
+        std::fs::write(dir.join(name), bytes).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.sha256")),
+            sha256_sidecar_body(bytes, name),
+        )
+        .unwrap();
+    }
+
+    /// The real `ados-video` catalog entry. Placement is driven through
+    /// `install_one_at` with a tempdir dest, so the assertions exercise the
+    /// shipped entry (asset name, gate, tag) rather than a fabricated one.
+    fn video_entry() -> &'static PrebuiltBinary {
+        PREBUILT.iter().find(|b| b.service == "ados-video").unwrap()
+    }
+
+    #[test]
+    fn a_local_artifact_is_verified_placed_and_leaves_a_rollback_copy() {
+        // The whole point of the flag: a bench node validating unlanded agent
+        // code goes through the product's own install path, not a `cp` over
+        // /opt/ados/bin. So this drives the REAL `install_one` — the same
+        // function the fetched-asset path calls — and asserts the same four
+        // outcomes it guarantees there: digest checked, binary executable,
+        // destination atomically replaced, previous binary retained for
+        // rollback.
+        let host_arch = crate::env::arch();
+        let Some(machine) = expected_elf_machine(host_arch) else {
+            // An architecture the ELF gate has no opinion about; nothing to
+            // assert about a host this test cannot build a header for.
+            return;
+        };
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let dest = dst.path().join("ados-video");
+
+        // A working binary is already installed; it is what rollback must keep.
+        std::fs::write(&dest, fake_elf(machine, b"the binary already installed")).unwrap();
+
+        let new_bytes = fake_elf(machine, b"the locally built binary");
+        write_local_artifact(src.path(), "ados-video", &new_bytes);
+
+        let source = AssetSource::Local {
+            dir: src.path(),
+            host_arch,
+        };
+        install_one_at(
+            video_entry(),
+            &dest,
+            scratch.path(),
+            Channel::Edge,
+            &ProgressSink::default(),
+            &source,
+        )
+        .expect("a local artifact with a matching .sha256 must install");
+
+        assert_eq!(std::fs::read(&dest).unwrap(), new_bytes, "dest was replaced");
+        assert_eq!(
+            std::fs::read(prev_sibling(&dest)).unwrap(),
+            fake_elf(machine, b"the binary already installed"),
+            "the outgoing binary must be retained at <dest>.prev for rollback"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "placed binary must be executable");
+        }
+        // No staging debris left behind.
+        assert!(!dl_sibling(&dest).exists());
+        assert!(!sidecar_path(&dl_sibling(&dest), "sha256").exists());
+    }
+
+    #[test]
+    fn a_local_artifact_that_fails_its_digest_leaves_the_running_binary_alone() {
+        // The verify gate is not decorative on this path. A file that does not
+        // match the digest its build host recorded (a truncated scp, the wrong
+        // binary under the right name) must be refused BEFORE the swap, so the
+        // node keeps running the binary it already had — the same
+        // verify-then-replace ordering the fetched path relies on.
+        let host_arch = crate::env::arch();
+        let Some(machine) = expected_elf_machine(host_arch) else {
+            return;
+        };
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let dest = dst.path().join("ados-video");
+        let installed = fake_elf(machine, b"the binary already installed");
+        std::fs::write(&dest, &installed).unwrap();
+
+        // Sidecar describes one file; the file on disk is a different one.
+        write_local_artifact(src.path(), "ados-video", &fake_elf(machine, b"honest bytes"));
+        std::fs::write(
+            src.path().join("ados-video"),
+            fake_elf(machine, b"tampered bytes"),
+        )
+        .unwrap();
+
+        let err = install_one_at(
+            video_entry(),
+            &dest,
+            scratch.path(),
+            Channel::Edge,
+            &ProgressSink::default(),
+            &AssetSource::Local {
+                dir: src.path(),
+                host_arch,
+            },
+        )
+        .expect_err("a digest mismatch must refuse the install");
+        assert!(
+            err.to_string().contains("SHA256 verification failed"),
+            "must name the check that refused it: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            installed,
+            "a refused artifact must never reach the live path"
+        );
+        assert!(
+            !dl_sibling(&dest).exists(),
+            "the rejected staging copy must be cleared"
+        );
+    }
+
+    #[test]
+    fn a_local_artifact_without_a_sha256_is_refused_with_the_command_to_make_one() {
+        // The installer will NOT hash the file and call that verified: a digest
+        // computed from the bytes being checked proves nothing. So a missing
+        // sidecar is a hard refusal, and the message has to carry the fix or the
+        // operator's next move is to go looking for a way to skip the check.
+        let host_arch = crate::env::arch();
+        let Some(machine) = expected_elf_machine(host_arch) else {
+            return;
+        };
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let dest = dst.path().join("ados-video");
+        std::fs::write(src.path().join("ados-video"), fake_elf(machine, b"unsigned")).unwrap();
+
+        let err = install_one_at(
+            video_entry(),
+            &dest,
+            scratch.path(),
+            Channel::Edge,
+            &ProgressSink::default(),
+            &AssetSource::Local {
+                dir: src.path(),
+                host_arch,
+            },
+        )
+        .expect_err("no .sha256 must refuse the install");
+        let msg = err.to_string();
+        assert!(msg.contains("no .sha256"), "names what is missing: {msg}");
+        assert!(msg.contains("sha256sum"), "names how to produce it: {msg}");
+        assert!(!dest.exists(), "nothing may be placed on a refusal");
+    }
+
+    #[test]
+    fn an_unsigned_local_artifact_installs_on_edge_and_is_refused_on_stable() {
+        // This is the signature story stated exactly. A locally-built binary
+        // cannot carry the CI signature (the key is a CI secret), so it reaches
+        // `verify_minisign`'s "unverifiable" branch: a warning on edge, a refusal
+        // on stable. Nothing special-cases the local path — it gets the same
+        // policy a release asset published before signing existed gets, which is
+        // why `--artifacts` is refused on stable at the command line instead of
+        // being allowed to fail here, one binary at a time.
+        let host_arch = crate::env::arch();
+        let Some(machine) = expected_elf_machine(host_arch) else {
+            return;
+        };
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        write_local_artifact(src.path(), "ados-video", &fake_elf(machine, b"unsigned build"));
+        let source = AssetSource::Local {
+            dir: src.path(),
+            host_arch,
+        };
+
+        let edge_dest = dst.path().join("edge-ados-video");
+        install_one_at(
+            video_entry(),
+            &edge_dest,
+            scratch.path(),
+            Channel::Edge,
+            &ProgressSink::default(),
+            &source,
+        )
+        .expect("edge tolerates a signature it cannot obtain");
+        assert!(edge_dest.exists());
+
+        let stable_dest = dst.path().join("stable-ados-video");
+        let err = install_one_at(
+            video_entry(),
+            &stable_dest,
+            scratch.path(),
+            Channel::Stable,
+            &ProgressSink::default(),
+            &source,
+        )
+        .expect_err("stable refuses an artifact it cannot signature-verify");
+        assert!(
+            err.to_string().contains("stable channel"),
+            "must name the channel that refused it: {err}"
+        );
+        assert!(!stable_dest.exists());
+    }
+
+    #[test]
+    fn a_binary_built_for_the_wrong_machine_is_refused_before_it_replaces_anything() {
+        // The bench mistake this catches: `cargo build --release` on the
+        // developer's Mac, then scp the Mach-O (or an x86_64 ELF) to the node.
+        // Without the gate that lands at /opt/ados/bin and surfaces as a
+        // crash-looping unit with an exec-format error.
+        assert_eq!(artifact_arch_error(&fake_elf(0xB7, b"x"), "aarch64"), None);
+        let wrong = artifact_arch_error(&fake_elf(0x3E, b"x"), "aarch64")
+            .expect("an x86_64 ELF cannot run on an aarch64 node");
+        assert!(wrong.contains("aarch64"), "{wrong}");
+
+        // A Mach-O (the `\xcf\xfa\xed\xfe` magic a Mac build carries).
+        let macho = artifact_arch_error(b"\xcf\xfa\xed\xfe0123456789abcdef", "aarch64")
+            .expect("a Mach-O is not an ELF");
+        assert!(macho.contains("not an ELF"), "{macho}");
+
+        // A host architecture the gate has no table entry for is not grounds for
+        // refusing an artifact; the check simply does not run.
+        assert_eq!(artifact_arch_error(&fake_elf(0x3E, b"x"), "s390x"), None);
+    }
+
+    #[test]
+    fn a_directory_that_supplies_nothing_fails_and_build_debris_is_only_reported() {
+        // The single-file typo is fatal, because the silent outcome is the worst
+        // one available here: that service falls back to the release, the install
+        // reports success, and the bench measures the OLD binary believing it
+        // measured the new one.
+        let typo = tempfile::tempdir().unwrap();
+        std::fs::write(typo.path().join("ados-vidoe"), b"typo").unwrap();
+        let err = validate_artifacts_dir(typo.path())
+            .expect_err("a directory supplying no service binary must fail the step");
+        assert!(
+            err.contains("holds no service binary"),
+            "names the problem: {err}"
+        );
+        assert!(
+            err.contains("ados-video-aarch64"),
+            "names an accepted spelling: {err}"
+        );
+
+        // But a real `target/release` is the natural thing to point the flag at,
+        // and it carries dep files, rlibs and the installer itself. Those are
+        // reported and passed over, never grounds for refusing the directory —
+        // rejecting them would make the flag unusable for its only purpose.
+        let target = tempfile::tempdir().unwrap();
+        for name in [
+            "ados-video",
+            "ados-video.d",
+            "ados-installer",
+            "libados_config.rlib",
+        ] {
+            std::fs::write(target.path().join(name), b"x").unwrap();
+        }
+        let passed_over = validate_artifacts_dir(target.path())
+            .expect("a build directory carrying one service binary is usable");
+        assert_eq!(
+            passed_over,
+            vec![
+                "ados-installer".to_string(),
+                "ados-video.d".to_string(),
+                "libados_config.rlib".to_string()
+            ],
+            "everything that is not a service binary is named, so a mistyped \
+             filename shows up in the report"
+        );
+
+        // Both accepted spellings are recognised, and their sidecars are not
+        // mistaken for artifacts of their own.
+        assert!(ignored_artifact_names(&[
+            "ados-video".to_string(),
+            "ados-supervisor-aarch64".to_string(),
+            "ados-video.sha256".to_string(),
+            "ados-video.minisig".to_string(),
+        ])
+        .is_empty());
+
+        // An empty directory and a path that is not one are both wrong paths.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(validate_artifacts_dir(empty.path()).is_err());
+        assert!(validate_artifacts_dir(&typo.path().join("nope")).is_err());
+    }
+
+    #[test]
+    fn a_service_the_directory_does_not_carry_still_comes_from_the_release() {
+        // One rebuilt crate means one copied file, not fifteen. The entries the
+        // directory does not carry resolve to the release exactly as they would
+        // with no flag at all.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ados-video"), b"local").unwrap();
+        let video = PREBUILT.iter().find(|b| b.service == "ados-video").unwrap();
+        let supervisor = PREBUILT
+            .iter()
+            .find(|b| b.service == "ados-supervisor")
+            .unwrap();
+
+        assert!(matches!(
+            source_for(video, Some(dir.path()), "aarch64", None),
+            AssetSource::Local { .. }
+        ));
+        assert!(matches!(
+            source_for(supervisor, Some(dir.path()), "aarch64", None),
+            AssetSource::Release { rev: None }
+        ));
+        // With no flag every entry is a release fetch, pin and all.
+        assert!(matches!(
+            source_for(video, None, "aarch64", Some("abc")),
+            AssetSource::Release { rev: Some("abc") }
+        ));
+        // The release asset name is accepted as well as the service name.
+        std::fs::write(dir.path().join("ados-supervisor-aarch64"), b"local").unwrap();
+        assert!(matches!(
+            source_for(supervisor, Some(dir.path()), "aarch64", None),
+            AssetSource::Local { .. }
+        ));
+    }
+
+    #[test]
+    fn the_step_refuses_a_bad_artifacts_directory_before_it_installs_anything() {
+        // Wiring, not policy: the validation is reached from `Ctx::artifacts` and
+        // runs BEFORE the install loop, so a wrong path costs nothing and places
+        // nothing. Without this the flag could be parsed, carried onto the
+        // context and never read, and every test above would still pass.
+        let mut ctx = Ctx::for_test(Checkpoint::new());
+        if !ctx.env.supported_arch {
+            // The step skips a non-aarch64 host before it looks at anything.
+            return;
+        }
+        ctx.artifacts = Some(PathBuf::from(
+            "/nonexistent/ados-artifacts-that-cannot-be-a-directory",
+        ));
+        match FetchBinaries.run(&mut ctx) {
+            StepOutcome::Failed(msg) => {
+                assert!(msg.contains("--artifacts"), "names the flag: {msg}");
+                assert!(msg.contains("not a directory"), "names the fault: {msg}");
+            }
+            other => panic!("expected the step to fail before installing: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_local_artifact_failure_is_reported_once_rather_than_retried() {
+        // The retry loop exists for a dropping link. A missing file or a bad
+        // digest is terminal, so retrying it only puts the backoff between the
+        // operator and the message naming what to fix.
+        assert_eq!(AssetSource::Release { rev: None }.max_attempts(), 3);
+        assert_eq!(
+            AssetSource::Local {
+                dir: Path::new("/tmp"),
+                host_arch: "aarch64"
+            }
+            .max_attempts(),
+            1
         );
     }
 }

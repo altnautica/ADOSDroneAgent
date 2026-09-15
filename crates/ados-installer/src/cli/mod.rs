@@ -35,6 +35,16 @@ OPTIONS:
                                        binaries to one revision, from that
                                        commit's rev-<sha> release. Requires the
                                        edge channel.
+    --artifacts <dir>                  Install the service binaries from this
+                                       directory of locally-built artifacts
+                                       instead of fetching them. Each file is
+                                       named for its service (ados-video) or its
+                                       release asset (ados-video-aarch64) and
+                                       needs its <name>.sha256 beside it; a
+                                       service the directory does not carry
+                                       still comes from the release. Requires
+                                       the edge channel; not combinable with
+                                       --ref. Linux only.
     --display <hint>                   Display hardware hint
     --camera <hint>                    Camera hardware hint
     --wifi-ssid <ssid>                 Join this Wi-Fi network during a headless

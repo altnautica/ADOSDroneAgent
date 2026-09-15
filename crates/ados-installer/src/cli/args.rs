@@ -37,6 +37,21 @@ pub struct Args {
     /// Steps read [`crate::ctx::Ctx::rev`], not this field: an abbreviated value
     /// here is expanded to the full object name once the clone can resolve it.
     pub rev: Option<String>,
+    /// `--artifacts <dir>` — install the service binaries from a directory of
+    /// locally-built artifacts instead of fetching them from a release.
+    ///
+    /// This is the bench path: a Linux node (an SBC, or a VM standing in for
+    /// one) validating agent code that has not landed yet, which the release
+    /// host by definition does not carry. The directory is a SOURCE OF BYTES and
+    /// not a bypass — each artifact runs through the same verify → chmod →
+    /// atomic-replace → `.prev` retention path a fetched asset does, and each
+    /// one must be accompanied by the `<name>.sha256` its build host produced.
+    ///
+    /// A catalog entry the directory does not carry still comes from the
+    /// release, so a one-crate rebuild needs one file, not fifteen. Requires the
+    /// `edge` channel (a locally-built artifact cannot carry the CI signature
+    /// `stable` demands) and is mutually exclusive with `--ref`.
+    pub artifacts: Option<String>,
     /// `--display <v>` — display hardware hint.
     pub display: Option<String>,
     /// `--camera <v>` — camera hardware hint.
@@ -137,6 +152,9 @@ impl Args {
                 "--channel" => args.channel = Some(take_value(&tokens, &mut i, "--channel")?),
                 "--version" => args.version = Some(take_value(&tokens, &mut i, "--version")?),
                 "--ref" => args.rev = Some(take_value(&tokens, &mut i, "--ref")?),
+                "--artifacts" => {
+                    args.artifacts = Some(take_value(&tokens, &mut i, "--artifacts")?)
+                }
                 "--display" => args.display = Some(take_value(&tokens, &mut i, "--display")?),
                 "--camera" => args.camera = Some(take_value(&tokens, &mut i, "--camera")?),
                 "--wifi-ssid" => args.wifi_ssid = Some(take_value(&tokens, &mut i, "--wifi-ssid")?),
@@ -343,6 +361,24 @@ mod tests {
         assert_eq!(
             Args::parse(["--ref", "--profile", "drone"]).unwrap_err(),
             ParseError::MissingValue("--ref".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_the_local_artifacts_directory() {
+        let a = Args::parse(["--artifacts", "/srv/build/release"]).unwrap();
+        assert_eq!(a.artifacts.as_deref(), Some("/srv/build/release"));
+        assert!(Args::default().artifacts.is_none());
+        // A value-less flag must not swallow the next one and read as "no local
+        // artifacts": that would silently install the released binaries on a
+        // bench that asked for its own build.
+        assert_eq!(
+            Args::parse(["--artifacts"]).unwrap_err(),
+            ParseError::MissingValue("--artifacts".to_string())
+        );
+        assert_eq!(
+            Args::parse(["--artifacts", "--profile", "drone"]).unwrap_err(),
+            ParseError::MissingValue("--artifacts".to_string())
         );
     }
 }

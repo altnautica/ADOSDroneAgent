@@ -58,6 +58,15 @@ pub struct Ctx {
     /// read this, never `args.rev`, so nothing downstream can see the
     /// unexpanded form.
     pub rev: Option<String>,
+    /// The directory of locally-built service binaries this install places
+    /// instead of fetching (`--artifacts`), or `None` for the normal
+    /// fetch-from-release install.
+    ///
+    /// Read by `fetch_binaries`, which resolves each catalog entry to a local
+    /// file when the directory carries one and to the release otherwise. The
+    /// bytes then take the SAME verify → chmod → atomic-replace → `.prev`
+    /// retention path either way.
+    pub artifacts: Option<std::path::PathBuf>,
     /// Live-progress sink. Defaults to a no-op; the binary swaps in a real sink
     /// after starting the renderer. Steps and the graph emit progress through it.
     pub progress: ProgressSink,
@@ -142,6 +151,7 @@ impl Ctx {
             args.version = crate::env::read_persisted_version();
         }
         let rev = args.rev.clone();
+        let artifacts = args.artifacts.as_deref().map(std::path::PathBuf::from);
         Ctx {
             args,
             env,
@@ -155,6 +165,7 @@ impl Ctx {
             cloud_from_anywhere: false,
             source_dir: None,
             rev,
+            artifacts,
             progress: ProgressSink::default(),
             pending_reboot: Vec::new(),
         }
@@ -195,6 +206,52 @@ pub fn rev_channel_conflict(rev: Option<&str>, channel: &str) -> Option<String> 
          prebuilt binaries to that commit, or drop --ref to install the pinned \
          release."
     ))
+}
+
+/// Why a `--artifacts <dir>` install cannot be honoured alongside `channel` /
+/// `rev` (pure). `None` when the combination is installable.
+///
+/// Two refusals, both because the alternative is a check that silently does not
+/// apply:
+///
+/// * **`--channel stable`.** A locally-built binary carries no `.minisig`: the
+///   signing key is a CI secret, so nothing off the release job can produce one.
+///   `stable` refuses an artifact whose signature cannot be obtained, so the
+///   pair would abort partway through the binary loop with a per-binary
+///   signature message that reads as a broken release rather than as an
+///   impossible request. Said here, before any work, it names the real cause.
+/// * **`--ref`.** The pin exists to guarantee the agent package and every
+///   service binary come from ONE commit. A local artifact directory is by
+///   definition not that commit — honouring both would produce exactly the
+///   wheel-from-one-revision-binary-from-another split `--ref` was added to
+///   close, while still reporting the pin as applied.
+pub fn artifacts_conflict(
+    artifacts: Option<&str>,
+    rev: Option<&str>,
+    channel: &str,
+) -> Option<String> {
+    let dir = artifacts?;
+    if channel == "stable" {
+        return Some(format!(
+            "--artifacts {dir} cannot be honoured on the stable channel: the \
+             stable channel refuses an artifact whose signature it cannot \
+             verify, and a locally-built binary has none (the signing key is a \
+             CI secret). Re-run with `--channel edge --artifacts {dir}`, where a \
+             missing signature is a warning and the SHA256 sidecar is still \
+             mandatory."
+        ));
+    }
+    if let Some(rev) = rev {
+        return Some(format!(
+            "--artifacts {dir} and --ref {rev} both decide where the service \
+             binaries come from. --ref exists to guarantee the agent package \
+             and every binary come from one commit, which a local build is not, \
+             so honouring both would report a pin the binaries do not have. Use \
+             one: --ref {rev} to install that commit's published binaries, or \
+             --artifacts {dir} to install your build."
+        ));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -276,5 +333,47 @@ mod tests {
         // No pin, no conflict — on any channel.
         assert!(rev_channel_conflict(None, "stable").is_none());
         assert!(rev_channel_conflict(None, "edge").is_none());
+    }
+
+    #[test]
+    fn an_artifacts_directory_reaches_the_context_and_defaults_absent() {
+        let a = Args {
+            artifacts: Some("/srv/build/release".to_string()),
+            ..Args::default()
+        };
+        let ctx = Ctx::from_args(a, EnvInfo::probe(), Checkpoint::new());
+        assert_eq!(
+            ctx.artifacts.as_deref(),
+            Some(std::path::Path::new("/srv/build/release"))
+        );
+        let plain = Ctx::from_args(Args::default(), EnvInfo::probe(), Checkpoint::new());
+        assert!(
+            plain.artifacts.is_none(),
+            "an install with no flag must fetch exactly as before"
+        );
+    }
+
+    #[test]
+    fn artifacts_are_refused_on_stable_and_alongside_a_revision_pin() {
+        // Both refusals exist because the alternative is a check that silently
+        // does not apply, so both messages have to name the real cause: on
+        // stable, the signature a local build cannot have; with --ref, the pin it
+        // would contradict.
+        let stable = artifacts_conflict(Some("/srv/build"), None, "stable")
+            .expect("stable cannot verify an unsigned local build");
+        assert!(stable.contains("signature"), "names the cause: {stable}");
+        assert!(
+            stable.contains("--channel edge"),
+            "names the fix: {stable}"
+        );
+
+        let pinned = artifacts_conflict(Some("/srv/build"), Some("3b4b8dee"), "edge")
+            .expect("--ref and --artifacts both decide where binaries come from");
+        assert!(pinned.contains("3b4b8dee"), "names the pin: {pinned}");
+
+        // The supported combination, and the no-flag case on every channel.
+        assert!(artifacts_conflict(Some("/srv/build"), None, "edge").is_none());
+        assert!(artifacts_conflict(None, Some("3b4b8dee"), "edge").is_none());
+        assert!(artifacts_conflict(None, None, "stable").is_none());
     }
 }

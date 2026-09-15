@@ -52,33 +52,24 @@ fn ap_lines(s: &SummaryData) -> Vec<(String, String)> {
 }
 
 /// The reach URLs for the console, most-resolvable first: the `<host>.local`
-/// mDNS name, then one `http://<ip>:8080` per discovered LAN address. A bare
-/// `localhost` is never emitted — it is useless to an operator on another box.
+/// mDNS name, then one `http://<ip>:8080` per discovered LAN address.
+///
+/// The mDNS form comes from [`ados_protocol::reach::mdns_name_for`], the one
+/// definition every surface that hands out a reach name uses. This module used
+/// to carry its own copy of both halves of that rule — the
+/// empty/`localhost`/`127.*` rejection and the dot-vs-`.local` naming — which is
+/// exactly how a card ends up advertising a name the host does not answer to
+/// while the pairing probe advertises a different one. `None` means this box has
+/// no resolvable mDNS name, and the card then lists only addresses.
 fn console_urls(s: &SummaryData) -> Vec<String> {
     let mut urls = Vec::new();
-    if let Some(host) = mdns_host(&s.hostname) {
+    if let Some(host) = ados_protocol::reach::mdns_name_for(&s.hostname) {
         urls.push(format!("http://{host}:8080"));
     }
     for ip in &s.lan_ips {
         urls.push(format!("http://{ip}:8080"));
     }
     urls
-}
-
-/// The `<host>.local` mDNS form for the reach block, or `None` when the
-/// hostname is unusable (empty, `localhost`, or a raw loopback address). A
-/// hostname that already carries a dot is treated as a full DNS name and used
-/// verbatim. Mirrors the server-side `_best_lan_host` preference.
-fn mdns_host(hostname: &str) -> Option<String> {
-    let name = hostname.trim().trim_end_matches('.');
-    if name.is_empty() || name == "localhost" || name.starts_with("127.") {
-        return None;
-    }
-    if name.contains('.') {
-        Some(name.to_string())
-    } else {
-        Some(format!("{name}.local"))
-    }
 }
 
 /// The headline for the summary, e.g. `ADOS Drone Agent 0.51.4 installed`.
@@ -455,7 +446,6 @@ mod tests {
             board: "Raspberry Pi 4 Model B".to_string(),
             device_id: "17bf646b".to_string(),
             hostname: "skynode".to_string(),
-            setup_url: "http://skynode.local:8080/setup".to_string(),
             lan_ips: vec!["192.168.1.42".to_string()],
             paired: true,
             failed_steps: vec![],
@@ -547,15 +537,6 @@ mod tests {
         assert!(joined.contains("ADOS Drone Agent"));
         assert!(joined.contains("skynode.local:8080"));
         assert!(joined.contains("Press Enter to finish"));
-    }
-
-    #[test]
-    fn mdns_host_skips_unusable_hostnames() {
-        assert_eq!(mdns_host("skynode"), Some("skynode.local".to_string()));
-        assert_eq!(mdns_host("box.lan"), Some("box.lan".to_string()));
-        assert_eq!(mdns_host("localhost"), None);
-        assert_eq!(mdns_host("127.0.0.1"), None);
-        assert_eq!(mdns_host("  "), None);
     }
 
     /// The install is the one moment the key appears unprompted. Other surfaces

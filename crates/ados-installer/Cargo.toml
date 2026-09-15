@@ -17,6 +17,11 @@ path = "src/main.rs"
 # daemon's decision to run cannot disagree.
 ados-config = { path = "../ados-config" }
 ados-macpin = { path = "../ados-macpin" }
+# The one definition of a node's resolvable mDNS reach name
+# (`ados_protocol::reach`). The installer's success card hands an operator a
+# hostname to dial, so it applies the same rule the pairing probe and the mDNS
+# advert do rather than formatting its own.
+ados-protocol = { path = "../ados-protocol" }
 # Reused for the launchd plist renderer (`render_plist`) + the reverse-DNS
 # label mapper (`unit_to_label`) the macOS workstation install writes into
 # `~/Library/LaunchAgents`; the runtime `LaunchdManager` in the same module

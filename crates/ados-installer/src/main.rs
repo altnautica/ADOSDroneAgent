@@ -14,7 +14,7 @@ use anyhow::Result;
 use ados_installer::binaries;
 use ados_installer::checkpoint::Checkpoint;
 use ados_installer::cli::{Args, RunMode, USAGE};
-use ados_installer::ctx::{resolve_channel, rev_channel_conflict, Ctx};
+use ados_installer::ctx::{artifacts_conflict, resolve_channel, rev_channel_conflict, Ctx};
 use ados_installer::env::{self, EnvInfo, RESULT_PATH};
 use ados_installer::exec;
 use ados_installer::graph::run_graph;
@@ -90,6 +90,21 @@ async fn main() -> Result<ExitCode> {
             "error: --ref is resolved by scripts/install.sh on macOS, not by the installer. \
              Run `scripts/install.sh --ref {rev}` to pin the tree it builds from, or check \
              {rev} out yourself and re-run without --ref."
+        );
+        return Ok(ExitCode::from(2));
+    }
+
+    // Same reasoning for `--artifacts`: the macOS path builds every workstation
+    // binary from the source tree it is invoked in, so there is no fetch for a
+    // local artifact directory to displace. Accepting it would report a source
+    // selection that had no effect.
+    #[cfg(target_os = "macos")]
+    if let Some(dir) = args.artifacts.as_deref() {
+        eprintln!(
+            "error: --artifacts has nothing to apply on macOS: this path builds \
+             every binary from the source tree it runs in and fetches no \
+             prebuilt asset. Build the tree you want ({dir} is not consulted) \
+             and re-run without --artifacts."
         );
         return Ok(ExitCode::from(2));
     }
@@ -172,6 +187,20 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
     // addressing. Refused here, before the wizard, the UI, and any network
     // work, so a contradictory invocation costs nothing and says why.
     if let Some(conflict) = rev_channel_conflict(
+        args.rev.as_deref(),
+        &resolve_channel(args.channel.as_deref()),
+    ) {
+        eprintln!("error: {conflict}");
+        return Ok(ExitCode::from(2));
+    }
+
+    // A local artifact directory is refused on the channel that would reject
+    // every file in it for a signature it cannot have, and alongside the pin it
+    // would contradict. Same placement, same reason: it costs nothing here and
+    // names the real cause instead of surfacing as a per-binary failure fifteen
+    // steps later.
+    if let Some(conflict) = artifacts_conflict(
+        args.artifacts.as_deref(),
         args.rev.as_deref(),
         &resolve_channel(args.channel.as_deref()),
     ) {
@@ -390,17 +419,23 @@ fn set_pairing_mode(path: &Path) {
 fn set_pairing_mode(_path: &Path) {}
 
 /// Assemble the renderer's closing-summary payload from the resolved context.
+///
+/// No URL is built here. The card's reach block is composed by
+/// `ui::summary::console_urls`, which gates the `<host>.local` form on the
+/// hostname actually being resolvable and otherwise lists the LAN addresses the
+/// box owns. This function used to also carry a `setup_url` of
+/// `http://<hostname>.local:8080/setup` — a name built with no such gate (so a
+/// box named `localhost` was handed `localhost.local`) on a path the control
+/// front does not serve. Nothing rendered it, which is the only reason it never
+/// reached an operator; it is gone rather than repointed.
 fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
-    let hostname = env::read_hostname();
-    let setup_url = format!("http://{hostname}.local:8080/setup");
     ui::SummaryData {
         status: status.to_string(),
         version: installed_version(),
         profile: ctx.profile.clone(),
         board: board_id(),
         device_id: read_device_id(),
-        hostname,
-        setup_url,
+        hostname: env::read_hostname(),
         lan_ips: probe_lan_ips(),
         paired: pairing_present(),
         ap_ssid: read_ap_ssid(&ctx.profile),
