@@ -4,6 +4,60 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.374] - 2026-09-15
+
+### Fixed
+
+- Both pairing responses now report the resolvable system hostname. They used
+  to return a name built from the device id (`ados-<6hex>.local`), which
+  nothing published: an operator was handed an address that does not resolve.
+  The service instance name still carries the short device id, so two nodes on
+  one network stay distinguishable.
+- `_ados._tcp` is advertised at boot on every profile. Without it the ground
+  station's Add-a-Node discovery was always empty and the only route in was to
+  type an address by hand.
+- Recovery instructions no longer point at a page that was deleted. Each one
+  names a command or a surface that exists.
+- The relay denylist literal for factory reset did not match the route it was
+  meant to block, so a factory reset was reachable over the radio relay. The
+  literal and the test that pinned the wrong one are both corrected.
+- The relay proxy carries response headers, so a relayed body arrives with its
+  own `Content-Type` instead of being guessed at by the client.
+- The cloud heartbeat carries the capability fields it was dropping, so a
+  node reached over the relay is no longer a second-class node with half its
+  surfaces hidden.
+- Enabling a plugin now serves its socket and writes its token without a
+  plugin-host restart. A freshly enabled plugin used to be inert while
+  reporting success. Capability grants and revocations take effect at runtime
+  for the same reason, and capability tokens rotate instead of expiring ten
+  minutes into a session.
+- The ten capabilities that were declared and enforced by nothing are now
+  either enforced through systemd device and address-family restrictions or
+  removed. A permission that grants nothing teaches an operator that the
+  permission list is decorative.
+
+### Added
+
+- `docs/api-surface.md`, generated from the control surface's own route table,
+  plus a check that every path literal in every client resolves against it. A
+  client calling a route nothing serves now fails a gate instead of failing in
+  the field.
+- `--artifacts <dir>` installs locally built service binaries on a Linux node,
+  through the same verify, atomic-replace and rollback path a released asset
+  takes. Without it a bench node could not validate agent code that had not
+  shipped yet, which is the one thing a bench is for. Refused on the stable
+  channel, because a local build cannot carry a release signature.
+- Plugin signing key enrolment, revocation distribution and downgrade
+  protection, plus a host-request surface so a plugin's agent half can serve a
+  request from its own GCS half.
+
+### Changed
+
+- `/api/video/latency` reports a stale sidecar as unavailable rather than
+  serving the last number it saw as current.
+- The four `/api/ota*` routes that nothing served are gone, along with the
+  dashboard route that called them.
+
 ## [0.99.373] - 2026-09-15
 
 ### Fixed
