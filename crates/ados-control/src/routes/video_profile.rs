@@ -82,6 +82,15 @@ pub(crate) fn applied_body(applied: &EncoderState) -> Value {
         // on a hero can tell "the link is degraded" from "the wrong profile is
         // live". `null` when unclamped.
         "ceiling_kbps": applied.ceiling_kbps,
+        // True when that clamp has been ACCEPTED but deliberately not pushed to
+        // the encoder, because the change was too small to be worth the respawn
+        // it would cost. `bitrate_kbps` above is then the rate the encoder is
+        // really running, not the ceiling — reporting the ceiling as live would
+        // be reporting a value the encoder never received.
+        "ceiling_deferred": applied.ceiling_deferred,
+        // Encoder-only respawns since the video service started, so a respawn
+        // storm from an oscillating link is visible on this surface.
+        "encoder_respawns": applied.encoder_respawns,
     })
 }
 

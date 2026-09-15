@@ -171,6 +171,12 @@ fn ok_reply(state: &EncoderState, restarted: bool, applied: bool) -> Value {
         "height": state.height,
         "fps": state.fps,
         "bitrate_kbps": state.bitrate_kbps,
+        // The ceiling was accepted but is NOT on the encoder: `bitrate_kbps`
+        // above is what the encoder is really running. A caller that reported
+        // the ceiling as the live rate would be publishing a number the encoder
+        // never received.
+        "ceiling_deferred": state.ceiling_deferred,
+        "encoder_respawns": state.encoder_respawns,
         "restarted": restarted,
         "applied": applied,
     })

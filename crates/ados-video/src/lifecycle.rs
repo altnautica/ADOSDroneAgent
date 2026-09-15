@@ -176,11 +176,16 @@ impl VideoOrchestrator {
         let device_path = primary.device_path.clone();
 
         // Orphan sweeps in the exact Python order: encoder holding the camera
-        // node, rpicam-vid, then the bridge publisher to /main.
+        // node, rpicam-vid, then the bridge publisher to /main. The stale
+        // encoder was already reaped above, so this is also the one window in
+        // which the RTP-sender sweep is safe: with the fan-out in force the
+        // live encoder's own command line matches that pattern, so it can never
+        // be swept from the tap's start/stop paths.
         kill_orphans(&format!("-i {device_path}")).await;
         kill_orphans("rpicam-vid").await;
         let pipe_uri = self.pipe_uri();
         kill_orphans(&pipe_uri).await;
+        kill_orphans(&orphan_pattern()).await;
 
         // Detect the encoder backend for the primary camera.
         let kind = detect_encoder_for_camera(
@@ -216,6 +221,10 @@ impl VideoOrchestrator {
             return false;
         };
         self.encoder_label = Some(crate::encoder::encoder_label(kind, &cmd));
+        // Read the radio fan-out back off the argv that is about to run, so the
+        // wfb-tap branches below (spawn, orphan sweep, health) key off what the
+        // encoder actually does rather than re-deriving the decision.
+        self.encoder_emits_wfb_rtp = crate::wfb_tee::cmd_emits_wfb_rtp(&cmd);
 
         // Configure + start mediamtx (gates on the RTSP port internally). The
         // primary publishes into `main`; any secondary legs are added as their
@@ -285,29 +294,27 @@ impl VideoOrchestrator {
 
         // Publish the attention state the encoder actually cold-started with,
         // so the swarm beacon's hero bit and the adaptive ladder's self-heal
-        // check read truth from the first frame onward.
+        // check read truth from the first frame onward. A cold start applies the
+        // clamp in full (it costs no extra respawn), so nothing is deferred here.
         let (desired, settings) = self.desired_encoder_settings();
-        self.encoder_control.note_applied(
-            crate::profile::EncoderState::new(desired.profile, desired.ceiling_kbps, settings),
-            desired.generation,
-            true,
-        );
-        self.publish_encoder_state(&crate::profile::EncoderState::new(
-            desired.profile,
-            desired.ceiling_kbps,
-            settings,
-        ))
-        .await;
+        let state = self.encoder_state(desired.profile, desired.ceiling_kbps, settings, false);
+        self.encoder_control
+            .note_applied(state, desired.generation, true);
+        self.publish_encoder_state(&state).await;
 
         // Bring up the owned encoders for any LOCAL secondary legs (each
         // publishes its camera into its own mediamtx path). Additive + isolated.
         self.start_secondary_encoders().await;
 
-        // Best-effort radio fan-out + optional SEI tap. Only spawn the tee once
-        // the encoder's RTSP publisher exists; otherwise the first DESCRIBE runs
-        // against a missing path and ffmpeg exits in ~1-2 s. The run-loop ladder
-        // brings the tee up once the path is ready.
-        if self.mediamtx.path_ready(MAIN_PATH).await {
+        // Radio RTP: on the ffmpeg family the encoder emits it itself (one
+        // encode, two muxers) and there is nothing to spawn. On the `bash -c`
+        // pipeline arms the separate tap is still the path — and it may only be
+        // spawned once the encoder's RTSP publisher exists, otherwise its first
+        // DESCRIBE runs against a missing path and ffmpeg exits in ~1-2 s. The
+        // run-loop ladder brings it up when the path is ready.
+        if self.encoder_emits_wfb_rtp {
+            tracing::info!("wfb_rtp_from_encoder: separate re-read tap not spawned");
+        } else if self.mediamtx.path_ready(MAIN_PATH).await {
             self.start_wfb_tee().await;
         } else {
             tracing::debug!("wfb_tee_deferred: mediamtx path not ready at stream start");
@@ -353,6 +360,19 @@ impl VideoOrchestrator {
             // (ffmpeg libx264) so video keeps flowing instead of crash-looping.
             params.encoder = "software".to_string();
         }
+        // Ask the builder for the radio's RTP copy as a second branch of this
+        // encoder's own output, which is what retires the separate re-read tap
+        // (`wfb_tee`) on the ffmpeg family. The builder ignores the request on
+        // the `bash -c` pipeline arms (rpicam / GStreamer), and the caller
+        // decides whether to spawn the tap by reading the built argv back
+        // through `cmd_emits_wfb_rtp`, so there is no second source of truth.
+        //
+        // NOT requested when the opt-in pre-encode vision split is in force:
+        // both features rewrite the same output stage (the split needs the
+        // primary output to stay implicitly mapped, the fan-out needs an
+        // explicit `-map` + tee), and the vision split is the narrower,
+        // explicitly-configured one. Such a node keeps the separate tap.
+        params.rtp_fanout = !self.raw_tap_splice_wanted();
         let cmd = match build_encoder_command(
             &params,
             device_path,
@@ -387,7 +407,7 @@ impl VideoOrchestrator {
         // ending in the RTSP output — bash-pipeline / gstreamer / SEI-wrapped
         // commands fall back to the decoupled third-ffmpeg tap, which never
         // touches the encoder. Off by default.
-        if self.vision_enabled() && self.config.vision.raw_tap {
+        if self.raw_tap_splice_wanted() {
             let v = &self.config.vision;
             let augmented = augment_encoder_with_raw_tap(
                 &cmd,
@@ -409,6 +429,14 @@ impl VideoOrchestrator {
         } else {
             Some(cmd)
         }
+    }
+
+    /// Whether the opt-in pre-encode vision split is in force for the primary
+    /// leg. Read at both decision points — the fan-out request and the splice
+    /// itself — so the two can never disagree about which output stage the
+    /// encoder argv carries.
+    pub(crate) fn raw_tap_splice_wanted(&self) -> bool {
+        self.vision_enabled() && self.config.vision.raw_tap
     }
 
     /// Respawn ONLY the encoder child against the current capture settings.
@@ -441,8 +469,10 @@ impl VideoOrchestrator {
             return false;
         };
         // An attention switch rebuilds the argv, so re-resolve the identity the
-        // sidecar publishes from the command actually about to run.
+        // sidecar publishes from the command actually about to run, and with it
+        // whether that command carries the radio fan-out.
         self.encoder_label = Some(crate::encoder::encoder_label(kind, &cmd));
+        self.encoder_emits_wfb_rtp = crate::wfb_tee::cmd_emits_wfb_rtp(&cmd);
 
         if let Some(mut enc) = self.encoder.take() {
             if enc.is_running() {
@@ -452,6 +482,13 @@ impl VideoOrchestrator {
         // The outgoing encoder held the mediamtx publisher slot; sweep any
         // straggler so the incoming one is not refused the path.
         kill_orphans(&self.pipe_uri()).await;
+        // With the fan-out in force the encoder IS the RTP sender, so this is
+        // the one safe window to sweep a stale sender (ours is down, the fresh
+        // one is not spawned yet). Sweeping at any other time would SIGKILL the
+        // live encoder, whose command line matches the same pattern.
+        if self.encoder_emits_wfb_rtp {
+            kill_orphans(&orphan_pattern()).await;
+        }
 
         let program = cmd[0].clone();
         let args: Vec<String> = cmd[1..].to_vec();
@@ -467,6 +504,10 @@ impl VideoOrchestrator {
             tokio::spawn(crate::stderr_drain::drain_plain(stderr, "encoder"));
         }
         self.encoder = Some(enc);
+        // Count it: this is the event the adaptive ladder can storm on, and the
+        // counter is what makes a storm visible on the sidecar rather than
+        // inferred from a blinking picture.
+        self.encoder_respawns = self.encoder_respawns.saturating_add(1);
 
         // Re-arm the startup-grace window: the fresh encoder has not published
         // yet, and without this the inbound-flow watchdog reads the respawn gap
@@ -477,13 +518,25 @@ impl VideoOrchestrator {
         self.inbound_bytes_value = -1;
         self.inbound_bytes_changed_at = now;
         self.video_inbound_bytes_per_s = 0.0;
-        tracing::info!(encoder = ?kind, "encoder_respawned_for_attention_change");
+        tracing::info!(
+            encoder = ?kind,
+            encoder_respawns = self.encoder_respawns,
+            "encoder_respawned_for_attention_change"
+        );
         true
     }
 
     /// Spawn the wfb radio tap (idempotent). Best-effort: a failure leaves the rest of
     /// the pipeline up.
+    ///
+    /// A no-op when the encoder emits the radio's RTP itself: there is nothing
+    /// to spawn, and the orphan sweep below would match the live encoder's own
+    /// command line and kill it.
     pub async fn start_wfb_tee(&mut self) {
+        if self.encoder_emits_wfb_rtp {
+            tracing::debug!("wfb_tee_not_needed: encoder emits the radio RTP directly");
+            return;
+        }
         if self.state != PipelineState::Running {
             tracing::warn!("wfb_tee_skipped: pipeline not running");
             return;
@@ -513,12 +566,18 @@ impl VideoOrchestrator {
     }
 
     /// Stop the wfb radio tap.
+    ///
+    /// The belt-and-suspenders orphan sweep is skipped when the encoder emits
+    /// the radio RTP itself — the pattern matches the encoder's own command
+    /// line, and teardown order is tap-then-encoder, so sweeping here would
+    /// kill the encoder out from under the graceful stop.
     pub async fn stop_wfb_tee(&mut self) {
         if let Some(mut p) = self.wfb_tee.take() {
             p.terminate(Duration::from_secs(5)).await;
         }
-        // Belt-and-suspenders orphan sweep.
-        kill_orphans(&orphan_pattern()).await;
+        if !self.encoder_emits_wfb_rtp {
+            kill_orphans(&orphan_pattern()).await;
+        }
     }
 
     /// Spawn the decoupled vision frame tap (idempotent). Best-effort and strictly

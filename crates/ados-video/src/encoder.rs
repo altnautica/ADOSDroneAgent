@@ -111,6 +111,20 @@ pub struct EncoderEnv {
     /// injector (`<python> -m ados.services.video.sei_injector`). Equivalent
     /// to Python's `sys.executable`.
     pub python_executable: String,
+    /// Usable CPU parallelism, as the kernel reports it
+    /// ([`std::thread::available_parallelism`]).
+    ///
+    /// This is an encoder LATENCY input, not a throughput one. The software
+    /// x264 path is the only encode path left on Pi-5-class silicon (BCM2712
+    /// dropped the encode block), and its pipeline delay is set by how the
+    /// frame is threaded: frame-level threading holds `threads` frames in
+    /// flight before the first slice comes out, while sliced threading splits
+    /// ONE frame across the cores and emits it whole. `-tune zerolatency`
+    /// already asks for the latter; the builder used to override it back off.
+    /// Emitting the sliced-threads levers needs real cores to split across, so
+    /// the count is probed rather than assumed: on a 1-2 core board the levers
+    /// would oversubscribe and cost more than they save.
+    pub cpu_threads: u32,
 }
 
 impl EncoderEnv {
@@ -154,6 +168,7 @@ impl EncoderEnv {
             encoder_api,
             pi5_class,
             python_executable: current_python_executable(),
+            cpu_threads: detect_cpu_threads(),
         }
     }
 
@@ -168,6 +183,7 @@ impl EncoderEnv {
             encoder_api: "unknown".to_string(),
             pi5_class: false,
             python_executable: current_python_executable(),
+            cpu_threads: detect_cpu_threads(),
         }
     }
 
@@ -192,6 +208,7 @@ impl EncoderEnv {
                 encoder_api: "unknown".to_string(),
                 pi5_class: false,
                 python_executable: current_python_executable(),
+                cpu_threads: detect_cpu_threads(),
             })
     }
 }
@@ -203,6 +220,19 @@ fn gst_element_present(element: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// Usable CPU parallelism, or 1 when the kernel will not say.
+///
+/// `available_parallelism` honours the cgroup CPU quota and the affinity mask,
+/// which is what this decision needs: a video unit pinned to two cores by a
+/// `CPUAffinity=` must not be handed four encode threads. Falling back to 1
+/// (not to a guess of 4) keeps the conservative argv on an unknown host — the
+/// sliced-threads levers are only emitted where the cores are proven present.
+fn detect_cpu_threads() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1)
 }
 
 /// True when a device-tree `compatible` list names Pi-5-class silicon.
@@ -251,6 +281,16 @@ pub struct EncoderParams {
     /// Keyframe (GOP) interval in frames; 0 ⇒ encoder picks a short low-latency
     /// GOP (0.5 s at the configured fps).
     pub keyframe_interval: u32,
+    /// Also emit the wfb radio's RTP copy straight out of this encoder, as a
+    /// second muxer on the SAME encode, instead of letting a separate `ffmpeg`
+    /// re-read the published RTSP stream back out of mediamtx.
+    ///
+    /// This is a pipeline decision, not a camera setting: only the PRIMARY leg
+    /// of a radio-carrying node wants it, and only on the `ffmpeg` family
+    /// (the `rpicam` / GStreamer arms are `bash -c` pipelines and keep the
+    /// separate tap). The caller sets it explicitly;
+    /// [`EncoderParams::from_camera_config`] leaves it off.
+    pub rtp_fanout: bool,
 }
 
 impl EncoderParams {
@@ -269,6 +309,7 @@ impl EncoderParams {
             hflip: cfg.hflip,
             vflip: cfg.vflip,
             keyframe_interval: cfg.keyframe_interval,
+            rtp_fanout: false,
         }
     }
 }
@@ -783,25 +824,58 @@ fn build_ffmpeg_command(
         );
         cmd.push("-g".into());
         cmd.push(gop.to_string());
-        cmd.extend(
-            [
-                "-bf",
-                "0",
-                "-refs",
-                "1",
-                "-threads",
-                "2",
-                "-flush_packets",
-                "1",
-            ]
-            .iter()
-            .map(|s| s.to_string()),
-        );
+        // Threading is a LATENCY decision on this path, not a throughput one.
+        //
+        // Frame-level threading (the x264 default, and what `-threads N` alone
+        // buys) holds N frames in flight before the first one comes out: at
+        // 30 fps and 4 threads that is ~133 ms of pure pipeline delay. SLICED
+        // threading splits one frame across the cores and emits it whole, so
+        // the delay is ~1/2 frame regardless of the thread count. `-tune
+        // zerolatency` already asks x264 for sliced threads — and this builder
+        // used to override it straight back off with `sliced-threads=0`, which
+        // on Pi-5-class silicon (no encode block at all, so x264 IS the
+        // encoder) was the single largest avoidable term left in the encode
+        // hop. `slices=4` pins the split so it does not depend on x264's
+        // thread heuristic.
+        //
+        // Gated on PROBED cores: below four, four encode threads oversubscribe
+        // and the slice split costs more than it saves, so such a board keeps
+        // the conservative two-thread frame-threaded form.
+        let sliced = env.cpu_threads >= 4;
+        cmd.extend(["-bf", "0", "-refs", "1"].iter().map(|s| s.to_string()));
+        cmd.push("-threads".into());
+        cmd.push(if sliced { "4" } else { "2" }.into());
+        cmd.push("-flush_packets".into());
+        cmd.push("1".into());
         cmd.push("-x264-params".into());
-        cmd.push("no-mbtree=1:sync-lookahead=0:rc-lookahead=0:sliced-threads=0:scenecut=0".into());
-        // AVCC length-prefixed NALs → Annex-B start codes for RTSP / WebRTC.
+        cmd.push(
+            if sliced {
+                "no-mbtree=1:sync-lookahead=0:rc-lookahead=0:sliced-threads=1:slices=4:scenecut=0"
+            } else {
+                "no-mbtree=1:sync-lookahead=0:rc-lookahead=0:sliced-threads=0:scenecut=0"
+            }
+            .into(),
+        );
+        // Two bitstream filters, in order:
+        //
+        // * `h264_mp4toannexb` turns AVCC length-prefixed NALs into Annex-B
+        //   start codes for RTSP / WebRTC;
+        // * `dump_extra=freq=keyframe` re-inserts SPS/PPS in-band before every
+        //   IDR. This is NOT redundant with x264's own header repetition: the
+        //   RTSP muxer advertises `AVFMT_GLOBALHEADER`, which makes ffmpeg set
+        //   `AV_CODEC_FLAG_GLOBAL_HEADER`, which makes libx264 emit the
+        //   parameter sets ONLY into extradata (the SDP) and never in-band.
+        //   Measured on ffmpeg 9.0.1 publishing this exact argv into an RTSP
+        //   server: 0 in-band SPS/PPS without this filter, 8 SPS + 8 PPS (one
+        //   pair per IDR, 4 s at a 15-frame GOP) with it, for 280 bytes over
+        //   the same 4 s. Without it a browser that loses sync on the direct
+        //   LAN feed has nothing to re-bootstrap the decoder from and freezes
+        //   on the last decoded frame until the page is reloaded.
+        //   The filter is idempotent — it skips a packet that already starts
+        //   with the extradata — so the paths where x264 does repeat headers
+        //   (a non-global-header muxer) do not double them.
         cmd.push("-bsf:v".into());
-        cmd.push("h264_mp4toannexb".into());
+        cmd.push("h264_mp4toannexb,dump_extra=freq=keyframe".into());
     } else if ffmpeg_codec == "h264_v4l2m2m" {
         // Pi V4L2 M2M HW encoder (`bcm2835-codec` on Pi 4 / CM4): force
         // yuv420p, same short GOP, no B-frames, plus an EXPLICIT quantizer
@@ -839,24 +913,113 @@ fn build_ffmpeg_command(
         cmd.push(V4L2M2M_MIN_QP.to_string());
         cmd.push("-qmax".into());
         cmd.push("51".into());
+        // Per-IDR SPS/PPS, for the same reason as the libx264 branch: the RTSP
+        // muxer's global-header flag keeps the driver's parameter sets
+        // out-of-band, so a mid-stream joiner or a browser that lost sync has
+        // nothing in-band to re-bootstrap from. The M2M driver exposes no
+        // "repeat headers" control, so the bitstream filter is the only lever
+        // on this path. No `h264_mp4toannexb` here — the M2M encoder already
+        // emits Annex-B, and applying it twice would corrupt the NAL
+        // boundaries.
+        cmd.push("-bsf:v".into());
+        cmd.push("dump_extra=freq=keyframe".into());
     }
 
-    // Output muxer.
+    cmd.extend(ffmpeg_output_stage(output, params.rtp_fanout));
+    cmd
+}
+
+/// The output half of an `ffmpeg` publish argv: the muxer flags, the muxer
+/// selection, and the destination(s).
+///
+/// Shared by [`build_ffmpeg_command`] and the SEI-spliced publish stage in
+/// [`wrap_with_sei_inject`] so the two cannot drift — a publish stage that
+/// differs between "SEI off" and "SEI on" is how a latency flag gets fixed on
+/// one path only.
+///
+/// `rtp_fanout` (RTSP destinations only) replaces the single RTSP output with
+/// ffmpeg's `tee` muxer: ONE encode, two muxers, the second emitting the
+/// radio's RTP copy directly. That is what removes the whole extra `ffmpeg`
+/// that used to re-read the published stream back out of mediamtx.
+fn ffmpeg_output_stage(output: &str, rtp_fanout: bool) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     if output.starts_with("rtsp://") {
-        // TCP RTSP avoids UDP fragmentation of large keyframe NALs;
-        // -max_delay 0 flushes encoded frames to the muxer immediately.
-        cmd.extend(
-            ["-max_delay", "0", "-rtsp_transport", "tcp", "-f", "rtsp"]
+        // `-muxdelay 0 -muxpreload 0` strip ffmpeg's default ~0.7 s mux delay
+        // and ~0.5 s preload. Every other ffmpeg in this tree sets them and
+        // says so; the primary encoder — the one a USB or IP camera uses, i.e.
+        // the default path — did not, which left up to 1.2 s of avoidable
+        // latency in front of every downstream hop.
+        //
+        // They are ffmpeg CLI *output* options, NOT `AVFormatContext`
+        // options, so they cannot be passed per-branch inside a tee spec:
+        // ffmpeg answers `Unknown option 'muxdelay'` and the tee aborts the
+        // whole output (verified on ffmpeg 9.0.1). They belong here, ahead of
+        // the muxer selection, on both the plain and the tee form.
+        out.extend(
+            ["-max_delay", "0", "-muxdelay", "0", "-muxpreload", "0"]
                 .iter()
                 .map(|s| s.to_string()),
         );
+        if rtp_fanout {
+            // The tee muxer needs an explicit `-map`; without one ffmpeg
+            // refuses to build the output.
+            out.push("-map".into());
+            out.push("0:v".into());
+            out.push("-f".into());
+            out.push("tee".into());
+            out.push(tee_spec(output));
+        } else {
+            // TCP RTSP avoids UDP fragmentation of large keyframe NALs.
+            out.extend(
+                ["-rtsp_transport", "tcp", "-f", "rtsp"]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+            out.push(output.to_string());
+        }
     } else if output.starts_with("udp://") || output.starts_with("tcp://") {
-        cmd.push("-f".into());
-        cmd.push("mpegts".into());
+        // Same mux-delay strip as the RTSP branch: the MPEG-TS muxer inherits
+        // the same ffmpeg defaults, and this sink is a live feed too.
+        out.extend(
+            ["-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        out.push(output.to_string());
+    } else {
+        out.push(output.to_string());
     }
+    out
+}
 
-    cmd.push(output.to_string());
-    cmd
+/// The `-f tee` branch specification: the RTSP publish into mediamtx, plus the
+/// wfb radio's RTP copy on UDP 5600.
+///
+/// Both branches carry the same already-encoded packets, so the RTP copy costs
+/// no second encode and no re-read. Framing is RTP (RFC 6184) because that is
+/// wfb-ng's contract: each datagram must survive single-packet loss on its own,
+/// and raw H.264 over UDP corrupts silently to the next start code. The payload
+/// type, SSRC, packet size and destination all come from [`crate::wfb_tee`], so
+/// the receiver's static SDP keeps describing the stream exactly.
+///
+/// Deliberately NO `onfail=ignore`: if the radio branch cannot be opened, this
+/// encoder MUST fail and be restarted by the supervisor rather than quietly
+/// serving LAN video with a dead radio leg. That shared fate is what replaces
+/// the retired tap's own progress watchdog — one encode, one process, one
+/// liveness signal, with the bytes-on-air counter (`wfb_tx`) as the
+/// independent downstream check.
+///
+/// Per-branch options are `AVFormatContext` options only (`max_delay`,
+/// `flush_packets`, `rtsp_transport`, `payload_type`, `ssrc`); the CLI-level
+/// mux-delay strip is emitted by [`ffmpeg_output_stage`].
+fn tee_spec(rtsp_output: &str) -> String {
+    format!(
+        "[f=rtsp:rtsp_transport=tcp:max_delay=0:flush_packets=1]{rtsp_output}\
+         |[f=rtp:payload_type={pt}:ssrc={ssrc}:max_delay=0:flush_packets=1]{rtp}",
+        pt = crate::wfb_tee::WFB_TEE_PAYLOAD_TYPE,
+        ssrc = crate::wfb_tee::WFB_TEE_SSRC,
+        rtp = crate::wfb_tee::rtp_destination_url(),
+    )
 }
 
 /// GStreamer pipeline command.
@@ -982,13 +1145,16 @@ fn build_gstreamer_command(
     } else {
         format!("v4l2src device={safe_source} ! {src_caps} ! {decode} ! {flip}{encoder}")
     };
-    // `h264parse config-interval=1` on the OMX path re-stamps SPS/PPS before
-    // every IDR so a radio FEC recovery / late joiner resyncs instantly.
-    let h264parse = if use_omx {
-        " ! h264parse config-interval=1"
-    } else {
-        " ! h264parse"
-    };
+    // `h264parse config-interval=1` re-stamps SPS/PPS in-band before every IDR,
+    // so a radio FEC recovery or a late joiner resyncs at the next keyframe
+    // (≤0.5 s at the contracted GOP) instead of freezing on the last decoded
+    // frame until the pipeline is restarted. It used to be emitted on the OMX
+    // arm only, which left the `x264enc` software arm — the fallback every
+    // board without a VPU lands on — publishing parameter sets at stream start
+    // and never again. `mpph264enc`'s own `header-mode=1` does the same job at
+    // the encoder; the parse element is harmless beside it and the arms now
+    // agree.
+    let h264parse = " ! h264parse config-interval=1";
 
     if output.starts_with("rtsp://") {
         let safe_output = gst_quote(output);
@@ -1010,7 +1176,8 @@ fn build_gstreamer_command(
         let ffmpeg_cmd = format!(
             "ffmpeg -y -fflags nobuffer -f h264 -i pipe:0 \
              -c:v copy \
-             -max_delay 0 -rtsp_transport tcp -f rtsp {safe_output}"
+             -max_delay 0 -muxdelay 0 -muxpreload 0 -flush_packets 1 \
+             -rtsp_transport tcp -f rtsp {safe_output}"
         );
         return vec![
             "bash".into(),
@@ -1084,85 +1251,66 @@ pub fn wrap_with_sei_inject(cmd: &[String], output_uri: &str, env: &EncoderEnv) 
     }
     // Case 2: raw ffmpeg cmd publishing to RTSP/UDP/TCP. Split into two stages.
     else if cmd.first().map(String::as_str) == Some("ffmpeg") {
+        // Did the builder append the radio fan-out? Then the output stage ends
+        // in the tee spec rather than the bare URI, and the rebuilt publish
+        // stage has to carry the same two branches — otherwise turning the SEI
+        // probe on would silently take the radio leg down.
+        let fanout = cmd
+            .last()
+            .is_some_and(|t| t.starts_with("[f=") && t.contains(output_uri));
         let mut encoded: Vec<String> = cmd.to_vec();
-        // Strip the output URI (must be the last token).
-        if encoded.last().map(String::as_str) == Some(output_uri) {
+        // Strip the destination: the output URI, or the tee spec that carries
+        // it (both are the last token).
+        if fanout || encoded.last().map(String::as_str) == Some(output_uri) {
             encoded.pop();
         }
-        // Strip the muxer format specifier (`-f rtsp`, `-f mpegts`, ...).
+        // Strip the output stage's muxer selection + flags, right-to-left, so
+        // the INPUT side's `-f v4l2` / `-fflags` are never touched.
         strip_flag_with_value(&mut encoded, "-f");
-        // Strip RTSP transport hint if present.
+        if fanout {
+            strip_flag_with_value(&mut encoded, "-map");
+        }
         strip_flag_with_value(&mut encoded, "-rtsp_transport");
-        // Strip max_delay if present (was paired with rtsp output).
+        strip_flag_with_value(&mut encoded, "-muxpreload");
+        strip_flag_with_value(&mut encoded, "-muxdelay");
         strip_flag_with_value(&mut encoded, "-max_delay");
         // Encode-only ffmpeg now emits raw Annex-B H.264 on stdout.
         encoded.push("-f".into());
         encoded.push("h264".into());
         encoded.push("-".into());
 
-        // Publish-only ffmpeg pulls Annex-B from stdin and re-mounts the URI.
-        let publish: Vec<String> = if output_uri.starts_with("rtsp://") {
-            vec![
-                "ffmpeg",
-                "-loglevel",
-                "error",
-                "-fflags",
-                "nobuffer",
-                "-flags",
-                "low_delay",
-                "-f",
-                "h264",
-                "-i",
-                "-",
-                "-c",
-                "copy",
-                "-muxdelay",
-                "0",
-                "-muxpreload",
-                "0",
-                "-flush_packets",
-                "1",
-                "-rtsp_transport",
-                "tcp",
-                "-f",
-                "rtsp",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .chain(std::iter::once(output_uri.to_string()))
-            .collect()
-        } else if output_uri.starts_with("udp://") || output_uri.starts_with("tcp://") {
-            vec![
-                "ffmpeg",
-                "-loglevel",
-                "error",
-                "-fflags",
-                "nobuffer",
-                "-flags",
-                "low_delay",
-                "-f",
-                "h264",
-                "-i",
-                "-",
-                "-c",
-                "copy",
-                "-muxdelay",
-                "0",
-                "-muxpreload",
-                "0",
-                "-flush_packets",
-                "1",
-                "-f",
-                "mpegts",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .chain(std::iter::once(output_uri.to_string()))
-            .collect()
-        } else {
+        // Publish-only ffmpeg pulls the SEI-stamped Annex-B from stdin and
+        // re-mounts exactly the destination(s) the builder had chosen, through
+        // the SAME output-stage builder — so the mux-delay strip and the radio
+        // fan-out cannot be present on one path and missing on the other.
+        if !(output_uri.starts_with("rtsp://")
+            || output_uri.starts_with("udp://")
+            || output_uri.starts_with("tcp://"))
+        {
             // Unknown output URI — cannot rebuild the publisher; leave unchanged.
             return cmd.to_vec();
-        };
+        }
+        let mut publish: Vec<String> = [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "nobuffer",
+            "-flags",
+            "low_delay",
+            "-f",
+            "h264",
+            "-i",
+            "-",
+            "-c",
+            "copy",
+            "-flush_packets",
+            "1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        publish.extend(ffmpeg_output_stage(output_uri, fanout));
 
         let encode_str = join_shell(&encoded);
         let publish_str = join_shell(&publish);
@@ -1413,13 +1561,21 @@ mod tests {
 
     /// The frozen argv vectors this builder must reproduce byte for byte.
     ///
-    /// Originally captured from the Python encoder that this module replaced, by
-    /// a script that mocked every runtime probe (the Rockchip `/proc` read, the
-    /// ffmpeg and gst-inspect probes, `sys.executable`) so each vector was
-    /// deterministic on any host. Both the Python builder and that script are
-    /// deleted: this file IS the reference now, and a new case is written here
-    /// by hand rather than captured. See the module test for how each case maps
-    /// onto the Rust builder.
+    /// This file IS the reference for the shipped argv. It is GENERATED from
+    /// [`fixture_cases`] — never hand-edited — by
+    ///
+    /// ```text
+    /// cargo test -p ados-video --lib regenerate_encoder_fixtures -- --ignored --exact
+    /// ```
+    ///
+    /// (on this workspace's macOS dev host, prefix
+    /// `DEVELOPER_DIR=/Library/Developer/CommandLineTools`).
+    ///
+    /// [`fixture_table_matches_the_file`] fails whenever the two disagree, so a
+    /// hand-edit that does not correspond to a real builder output cannot
+    /// survive, and a deliberate argv change is one command away from a
+    /// reviewable diff. Every environment the cases use is fully pinned
+    /// (including the CPU count), so the output is identical on any host.
     const FIXTURES: &str = include_str!("../tests/encoder_fixtures.json");
 
     /// The pinned interpreter path the capture script used for `sys.executable`.
@@ -1495,6 +1651,12 @@ mod tests {
         Probed::absent(AbsenceReason::NodeMissing)
     }
 
+    /// The CPU count every fixture environment is pinned to: four cores, which
+    /// is what the fleet's boards actually have (Pi 4 / CM4, CM5, RK3588) and
+    /// what the sliced-threads levers are gated on. Pinned rather than probed
+    /// so the generated argv is identical on any build host.
+    const FIXTURE_CPUS: u32 = 4;
+
     fn rockchip() -> EncoderEnv {
         EncoderEnv {
             hw_h264: hw_node_missing(),
@@ -1504,6 +1666,7 @@ mod tests {
             encoder_api: "unknown".into(),
             pi5_class: false,
             python_executable: PY_EXE.into(),
+            cpu_threads: FIXTURE_CPUS,
         }
     }
     fn non_rk_sw() -> EncoderEnv {
@@ -1515,6 +1678,7 @@ mod tests {
             encoder_api: "unknown".into(),
             pi5_class: false,
             python_executable: PY_EXE.into(),
+            cpu_threads: FIXTURE_CPUS,
         }
     }
     fn non_rk_hw() -> EncoderEnv {
@@ -1526,6 +1690,7 @@ mod tests {
             encoder_api: "unknown".into(),
             pi5_class: false,
             python_executable: PY_EXE.into(),
+            cpu_threads: FIXTURE_CPUS,
         }
     }
     fn rk_mpp() -> EncoderEnv {
@@ -1537,6 +1702,7 @@ mod tests {
             encoder_api: "rkmpp".into(),
             pi5_class: false,
             python_executable: PY_EXE.into(),
+            cpu_threads: FIXTURE_CPUS,
         }
     }
     fn rk_mpp_noclient() -> EncoderEnv {
@@ -1555,6 +1721,7 @@ mod tests {
             encoder_api: "vendor".into(),
             pi5_class: false,
             python_executable: PY_EXE.into(),
+            cpu_threads: FIXTURE_CPUS,
         }
     }
     /// A Pi-5-class board (BCM2712: Pi 5 / CM5) — no hardware H.264 encoder,
@@ -1562,6 +1729,15 @@ mod tests {
     fn pi5() -> EncoderEnv {
         EncoderEnv {
             pi5_class: true,
+            ..rockchip()
+        }
+    }
+
+    /// A two-core board: below the sliced-threads gate, so the libx264 argv
+    /// must keep the conservative frame-threaded form.
+    fn dual_core() -> EncoderEnv {
+        EncoderEnv {
+            cpu_threads: 2,
             ..rockchip()
         }
     }
@@ -1579,6 +1755,10 @@ mod tests {
             hflip: false,
             vflip: false,
             keyframe_interval: 0,
+            // The shipped default for a primary leg: the radio's RTP copy comes
+            // out of this encoder rather than a second ffmpeg re-reading
+            // mediamtx. Ignored by the rpicam / GStreamer arms.
+            rtp_fanout: true,
         }
     }
 
@@ -1622,6 +1802,459 @@ mod tests {
         } else {
             cmd
         }
+    }
+
+    /// Every case the fixture file pins, as `(name, built argv)`.
+    ///
+    /// This is the generator input AND the completeness guard: the file is
+    /// rendered from here, and [`fixture_table_matches_the_file`] asserts the
+    /// two are identical in both directions, so neither a stale fixture nor an
+    /// unpinned case can hide. Each entry is a real builder invocation; nothing
+    /// here is transcribed by hand.
+    fn fixture_cases() -> Vec<(&'static str, Vec<String>)> {
+        let ff = |rot: u32, h: bool, v: bool| {
+            build(
+                &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "auto", rot, h, v, 0),
+                "/dev/video1",
+                RTSP_OUT,
+                &usb_mjpeg(),
+                &rockchip(),
+                false,
+            )
+        };
+        let gst = |rot: u32, h: bool, v: bool| {
+            build(
+                &params_cfg(
+                    EncoderKind::Gstreamer,
+                    1280,
+                    720,
+                    30,
+                    4000,
+                    "auto",
+                    rot,
+                    h,
+                    v,
+                    0,
+                ),
+                "/dev/video1",
+                RTSP_OUT,
+                &usb_mjpeg(),
+                &non_rk_sw(),
+                false,
+            )
+        };
+        let omx = |encoder: &str, rot: u32| {
+            build(
+                &params_cfg(
+                    EncoderKind::Gstreamer,
+                    1280,
+                    720,
+                    30,
+                    4000,
+                    encoder,
+                    rot,
+                    false,
+                    false,
+                    0,
+                ),
+                "/dev/video2",
+                RTSP_OUT,
+                &usb_yuyv(),
+                &allwinner_omx(),
+                false,
+            )
+        };
+        let hd = |kind: EncoderKind| params(kind, 1280, 720, 30, 4000);
+
+        vec![
+            // --- CSI → rpicam (bash pipeline; the fan-out flag is ignored) ---
+            (
+                "csi_rpicam_rtsp_rk",
+                build(
+                    &hd(EncoderKind::RpicamVid),
+                    "/dev/video0",
+                    RTSP_OUT,
+                    &csi(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            (
+                "csi_rpicam_rtsp_rk_sei",
+                build(
+                    &hd(EncoderKind::RpicamVid),
+                    "/dev/video0",
+                    RTSP_OUT,
+                    &csi(),
+                    &rockchip(),
+                    true,
+                ),
+            ),
+            (
+                "csi_rpicam_file",
+                build(
+                    &params(EncoderKind::RpicamVid, 1920, 1080, 60, 8000),
+                    "/dev/video0",
+                    "/var/lib/ados/out.h264",
+                    &csi(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            // --- USB MJPEG → ffmpeg libx264 --------------------------------
+            (
+                "usb_mjpeg_ffmpeg_rtsp_rk",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            (
+                "usb_mjpeg_ffmpeg_rtsp_rk_sei",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    true,
+                ),
+            ),
+            // The vision raw-tap node (and any non-radio node): no second
+            // output, so the plain single-destination RTSP form.
+            (
+                "usb_mjpeg_ffmpeg_rtsp_rk_no_fanout",
+                build(
+                    &EncoderParams {
+                        rtp_fanout: false,
+                        ..hd(EncoderKind::Ffmpeg)
+                    },
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            // A two-core board: the sliced-threads levers must NOT appear.
+            (
+                "usb_mjpeg_ffmpeg_rtsp_dual_core",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &dual_core(),
+                    false,
+                ),
+            ),
+            (
+                "usb_mjpeg_ffmpeg_rtsp_rk_640x480_15",
+                build(
+                    &params(EncoderKind::Ffmpeg, 640, 480, 15, 1500),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            (
+                "usb_mjpeg_ffmpeg_udp_rk",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "/dev/video1",
+                    UDP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            (
+                "usb_mjpeg_ffmpeg_udp_rk_sei",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "/dev/video1",
+                    UDP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    true,
+                ),
+            ),
+            (
+                "usb_yuyv_ffmpeg_rtsp_rk",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "/dev/video2",
+                    RTSP_OUT,
+                    &usb_yuyv(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            // --- USB on a board with a probed HW encoder (h264_v4l2m2m) ----
+            (
+                "usb_mjpeg_ffmpeg_rtsp_pi_hw",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &non_rk_hw(),
+                    false,
+                ),
+            ),
+            (
+                "usb_mjpeg_ffmpeg_rtsp_pi_hw_sei",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &non_rk_hw(),
+                    true,
+                ),
+            ),
+            (
+                "usb_mjpeg_ffmpeg_rtsp_nonrk_sw",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &non_rk_sw(),
+                    false,
+                ),
+            ),
+            (
+                "ip_ffmpeg_rtsp_rk",
+                build(
+                    &hd(EncoderKind::Ffmpeg),
+                    "rtsp://10.0.0.9:554/live",
+                    RTSP_OUT,
+                    &ip_cam(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            // --- GStreamer arms (bash pipeline / gst-launch) ---------------
+            (
+                "gst_usb_mjpeg_rtsp_rk_mpp",
+                build(
+                    &hd(EncoderKind::Gstreamer),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rk_mpp(),
+                    false,
+                ),
+            ),
+            (
+                "gst_usb_mjpeg_rtsp_rk_mpp_noclient",
+                build(
+                    &hd(EncoderKind::Gstreamer),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rk_mpp_noclient(),
+                    false,
+                ),
+            ),
+            (
+                "gst_usb_yuyv_rtsp_nonrk_x264",
+                build(
+                    &hd(EncoderKind::Gstreamer),
+                    "/dev/video2",
+                    RTSP_OUT,
+                    &usb_yuyv(),
+                    &non_rk_sw(),
+                    false,
+                ),
+            ),
+            (
+                "gst_usb_mjpeg_file_rk_mpp",
+                build(
+                    &hd(EncoderKind::Gstreamer),
+                    "/dev/video1",
+                    "/var/lib/ados/cap.h264",
+                    &usb_mjpeg(),
+                    &rk_mpp(),
+                    false,
+                ),
+            ),
+            (
+                "gst_usb_mjpeg_rtsp_rk_mpp_sei_skip",
+                build(
+                    &hd(EncoderKind::Gstreamer),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rk_mpp(),
+                    true,
+                ),
+            ),
+            // --- ffmpeg orientation / override matrix ----------------------
+            ("ffmpeg_rot90", ff(90, false, false)),
+            ("ffmpeg_rot180", ff(180, false, false)),
+            ("ffmpeg_rot270", ff(270, false, false)),
+            ("ffmpeg_hflip", ff(0, true, false)),
+            ("ffmpeg_vflip", ff(0, false, true)),
+            ("ffmpeg_rot180_hflip", ff(180, true, false)),
+            (
+                "ffmpeg_keyframe5",
+                build(
+                    &params_cfg(
+                        EncoderKind::Ffmpeg,
+                        1280,
+                        720,
+                        30,
+                        4000,
+                        "auto",
+                        0,
+                        false,
+                        false,
+                        5,
+                    ),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            (
+                "ffmpeg_override_software",
+                build(
+                    &params_cfg(
+                        EncoderKind::Ffmpeg,
+                        1280,
+                        720,
+                        30,
+                        4000,
+                        "software",
+                        0,
+                        false,
+                        false,
+                        0,
+                    ),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &non_rk_hw(),
+                    false,
+                ),
+            ),
+            (
+                "ffmpeg_override_v4l2m2m",
+                build(
+                    &params_cfg(
+                        EncoderKind::Ffmpeg,
+                        1280,
+                        720,
+                        30,
+                        4000,
+                        "v4l2m2m",
+                        0,
+                        false,
+                        false,
+                        0,
+                    ),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            // --- Allwinner OMX + GStreamer orientation ---------------------
+            ("gst_omx_argv", omx("auto", 0)),
+            ("gst_omx_rot90", omx("auto", 90)),
+            ("gst_omx_explicit", omx("omx", 0)),
+            ("gst_omx_sw_override", omx("software", 0)),
+            ("gst_x264_rot90", gst(90, false, false)),
+            ("gst_x264_rot180", gst(180, false, false)),
+            ("gst_x264_rot270", gst(270, false, false)),
+            ("gst_x264_hflip", gst(0, true, false)),
+            ("gst_x264_vflip", gst(0, false, true)),
+        ]
+    }
+
+    /// The fixture file's path, for the regenerator.
+    fn fixture_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/encoder_fixtures.json")
+    }
+
+    /// The completeness guard in both directions: every case the builder
+    /// produces is pinned in the file, every key in the file corresponds to a
+    /// case, and the argv match byte for byte. A hand-edited fixture that does
+    /// not correspond to real builder output fails here.
+    #[test]
+    fn fixture_table_matches_the_file() {
+        let file = fixtures();
+        let file_obj = file.as_object().expect("fixtures is a JSON object");
+        let cases = fixture_cases();
+
+        let mut missing: Vec<&str> = Vec::new();
+        for (name, argv) in &cases {
+            match file_obj.get(*name) {
+                None => missing.push(name),
+                Some(_) => assert_eq!(
+                    &expected(name),
+                    argv,
+                    "fixture {name:?} is stale — regenerate with \
+                     `cargo test -p ados-video --lib regenerate_encoder_fixtures -- --ignored --exact`"
+                ),
+            }
+        }
+        assert!(missing.is_empty(), "unpinned fixture case(s): {missing:?}");
+
+        let case_names: Vec<&str> = cases.iter().map(|(n, _)| *n).collect();
+        let orphans: Vec<&String> = file_obj
+            .keys()
+            .filter(|k| !case_names.contains(&k.as_str()))
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "fixture key(s) with no generating case: {orphans:?}"
+        );
+    }
+
+    /// Rewrite `tests/encoder_fixtures.json` from [`fixture_cases`].
+    ///
+    /// Ignored by default (it writes to the source tree). Run it deliberately
+    /// after an intentional argv change:
+    ///
+    /// ```text
+    /// cargo test -p ados-video --lib regenerate_encoder_fixtures -- --ignored --exact
+    /// ```
+    ///
+    /// then read the diff: it is the exact byte-level change every encode path
+    /// will run on the rig.
+    #[test]
+    #[ignore = "writes tests/encoder_fixtures.json; run explicitly to regenerate"]
+    fn regenerate_encoder_fixtures() {
+        // Rendered in case order (not serde's map order) and in the file's
+        // existing 2/4-space shape, so a regeneration diff shows only the argv
+        // that actually changed instead of reshuffling every key.
+        let cases = fixture_cases();
+        let mut body = String::from("{\n");
+        for (i, (name, argv)) in cases.iter().enumerate() {
+            body.push_str(&format!("  {}: [\n", Value::from(*name)));
+            for (j, token) in argv.iter().enumerate() {
+                let comma = if j + 1 < argv.len() { "," } else { "" };
+                body.push_str(&format!("    {}{comma}\n", Value::from(token.as_str())));
+            }
+            let comma = if i + 1 < cases.len() { "," } else { "" };
+            body.push_str(&format!("  ]{comma}\n"));
+        }
+        body.push_str("}\n");
+        let path = fixture_path();
+        std::fs::write(&path, body).expect("fixture file is writable");
+        eprintln!("regenerated {} ({} cases)", path.display(), cases.len());
     }
 
     // --- CSI → rpicam --------------------------------------------------
@@ -2027,15 +2660,7 @@ mod tests {
         // no real V4L2 encoder device. With the probe reporting NodeMissing the
         // builder MUST fall back to software libx264 — never the wrapper, which
         // would make ffmpeg exit at init and stream zero bytes.
-        let env = EncoderEnv {
-            hw_h264: hw_node_missing(),
-            has_mpph264enc: false,
-            has_omxh264videoenc: false,
-            has_rtspclientsink: true,
-            encoder_api: "unknown".into(),
-            pi5_class: false,
-            python_executable: PY_EXE.into(),
-        };
+        let env = rockchip();
         let got = build(
             &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
             "/dev/video1",
@@ -2055,12 +2680,7 @@ mod tests {
         // trial-init → the builder uses the hardware encoder.
         let env = EncoderEnv {
             hw_h264: hw_present(),
-            has_mpph264enc: false,
-            has_omxh264videoenc: false,
-            has_rtspclientsink: true,
-            encoder_api: "unknown".into(),
-            pi5_class: false,
-            python_executable: PY_EXE.into(),
+            ..rockchip()
         };
         let got = build(
             &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
@@ -2261,8 +2881,18 @@ mod tests {
     fn raw_tap_appends_without_changing_encode_prefix() {
         // The existing encode/RTSP output bytes MUST be untouched: the original
         // command is a strict prefix of the augmented one.
+        //
+        // The base is built WITHOUT the radio fan-out because that is the only
+        // configuration this splice ever runs in: the two features rewrite the
+        // same output stage, so the orchestrator requests exactly one of them
+        // (`lifecycle::raw_tap_splice_wanted`). The next test pins that the
+        // splice is a no-op on the tee form, which is what makes the
+        // orchestrator's exclusion load-bearing rather than cosmetic.
         let base = build_encoder_command(
-            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            &EncoderParams {
+                rtp_fanout: false,
+                ..params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000)
+            },
             "/dev/video1",
             RTSP_OUT,
             Some(&usb_mjpeg()),
@@ -2288,6 +2918,34 @@ mod tests {
         assert_eq!(tail.last().unwrap(), "/run/ados/vision-tap-main.sock");
         let pf = tail.iter().position(|t| t == "-pix_fmt").unwrap();
         assert_eq!(tail[pf + 1], "rgb24");
+    }
+
+    #[test]
+    fn raw_tap_is_a_noop_on_the_radio_fanout_form() {
+        // With the fan-out in force the last token is the tee spec, not the
+        // output URI, so the splice refuses to touch the command rather than
+        // corrupting an output stage it does not understand. A node that wants
+        // the pre-encode vision split therefore MUST be built without the
+        // fan-out — which is exactly what the orchestrator does.
+        let base = build_encoder_command(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            Some(&usb_mjpeg()),
+            &rockchip(),
+        )
+        .unwrap();
+        assert!(base.last().unwrap().starts_with("[f=rtsp:"), "fan-out form");
+        let augmented = augment_encoder_with_raw_tap(
+            &base,
+            RTSP_OUT,
+            10,
+            640,
+            480,
+            "rgb24",
+            "/run/ados/vision-tap-main.sock",
+        );
+        assert_eq!(augmented, base);
     }
 
     #[test]
@@ -2820,5 +3478,338 @@ mod tests {
         assert_eq!(sync.encoder_api, async_env.encoder_api);
         assert_eq!(sync.pi5_class, async_env.pi5_class);
         assert_eq!(sync.python_executable, async_env.python_executable);
+        assert_eq!(sync.cpu_threads, async_env.cpu_threads);
+    }
+
+    // --- latency contracts on the publish path -------------------------
+
+    #[test]
+    fn every_rtsp_publishing_ffmpeg_strips_the_muxer_delay() {
+        // ffmpeg's muxer defaults are ~0.7 s of mux delay plus ~0.5 s of
+        // preload. Every other ffmpeg in this tree strips them; the primary
+        // encoder — the USB/IP default path — did not, so a USB-camera drone
+        // shipped with up to 1.2 s of avoidable latency in front of every
+        // other hop, invisible to the SEI probe because the probe reads the
+        // same mediamtx path the delay sits in front of.
+        //
+        // `-muxdelay` / `-muxpreload` are ffmpeg CLI output options, NOT
+        // AVFormatContext options, so they must appear at argv level even on
+        // the tee form: inside a tee branch ffmpeg rejects them ("Unknown
+        // option 'muxdelay'") and aborts the whole output.
+        for (label, cmd) in [
+            (
+                "libx264 + fan-out",
+                build(
+                    &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            (
+                "libx264 plain",
+                build(
+                    &EncoderParams {
+                        rtp_fanout: false,
+                        ..params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000)
+                    },
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            (
+                "h264_v4l2m2m",
+                build(
+                    &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &non_rk_hw(),
+                    false,
+                ),
+            ),
+            (
+                "ip camera",
+                build(
+                    &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+                    "rtsp://10.0.0.9:554/live",
+                    RTSP_OUT,
+                    &ip_cam(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            (
+                "rpicam bash pipeline",
+                build(
+                    &params(EncoderKind::RpicamVid, 1280, 720, 30, 4000),
+                    "/dev/video0",
+                    RTSP_OUT,
+                    &csi(),
+                    &rockchip(),
+                    false,
+                ),
+            ),
+            (
+                "gstreamer → ffmpeg bridge",
+                build(
+                    &params(EncoderKind::Gstreamer, 1280, 720, 30, 4000),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rk_mpp_noclient(),
+                    false,
+                ),
+            ),
+            (
+                "SEI-spliced publish stage",
+                build(
+                    &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+                    "/dev/video1",
+                    RTSP_OUT,
+                    &usb_mjpeg(),
+                    &rockchip(),
+                    true,
+                ),
+            ),
+        ] {
+            assert_eq!(
+                flag_value(&cmd, "-muxdelay").as_deref(),
+                Some("0"),
+                "{label} must strip the mux delay"
+            );
+            assert_eq!(
+                flag_value(&cmd, "-muxpreload").as_deref(),
+                Some("0"),
+                "{label} must strip the mux preload"
+            );
+        }
+    }
+
+    #[test]
+    fn every_encode_path_repeats_parameter_sets_per_idr() {
+        // A decoder that loses sync mid-stream (a browser on the direct LAN
+        // feed, or the ground ingest after an FEC-unrecoverable burst) can only
+        // re-bootstrap from in-band SPS/PPS. The RTSP muxer's global-header
+        // flag keeps libx264's and the M2M driver's parameter sets out-of-band,
+        // so without an explicit lever they appear exactly once, at stream
+        // start, and the picture freezes on the last decoded frame until the
+        // page is reloaded.
+        //
+        // Per path: rpicam `--inline`, libx264/v4l2m2m `dump_extra=freq=
+        // keyframe`, GStreamer `h264parse config-interval=1` (plus
+        // `mpph264enc header-mode=1` at the encoder).
+        let joined = |cmd: &[String]| cmd.join(" ");
+
+        let rpicam = build(
+            &params(EncoderKind::RpicamVid, 1280, 720, 30, 4000),
+            "/dev/video0",
+            RTSP_OUT,
+            &csi(),
+            &rockchip(),
+            false,
+        );
+        assert!(has_flag(&rpicam, "--inline"), "rpicam repeats per IDR");
+
+        for (label, env) in [("libx264", rockchip()), ("h264_v4l2m2m", non_rk_hw())] {
+            let cmd = build(
+                &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+                "/dev/video1",
+                RTSP_OUT,
+                &usb_mjpeg(),
+                &env,
+                false,
+            );
+            let bsf = flag_value(&cmd, "-bsf:v").expect("{label} carries a bitstream filter");
+            assert!(
+                bsf.contains("dump_extra=freq=keyframe"),
+                "{label} must re-insert SPS/PPS per IDR, got {bsf:?}"
+            );
+            // The Annex-B conversion is only correct on the libx264 path; the
+            // M2M encoder already emits Annex-B and applying it twice corrupts
+            // the NAL boundaries.
+            assert_eq!(
+                bsf.contains("h264_mp4toannexb"),
+                label == "libx264",
+                "{label} mp4toannexb placement"
+            );
+        }
+
+        for (label, env) in [
+            ("x264enc software", non_rk_sw()),
+            ("mpph264enc", rk_mpp()),
+            ("omx", allwinner_omx()),
+        ] {
+            let cmd = build(
+                &params(EncoderKind::Gstreamer, 1280, 720, 30, 4000),
+                "/dev/video1",
+                RTSP_OUT,
+                &usb_mjpeg(),
+                &env,
+                false,
+            );
+            assert!(
+                joined(&cmd).contains("h264parse config-interval=1"),
+                "{label} must re-stamp SPS/PPS per IDR"
+            );
+        }
+    }
+
+    #[test]
+    fn the_radio_rtp_copy_comes_out_of_the_encoder_not_a_re_read() {
+        // VID-02: one encode, two muxers. The RTP branch must carry the exact
+        // framing contract the receiver's static SDP describes (payload type
+        // 96, SSRC 0xCAFE, 1316-byte datagrams to 127.0.0.1:5600), and the RTSP
+        // branch must still publish to mediamtx for WHEP.
+        let cmd = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &rockchip(),
+            false,
+        );
+        assert_eq!(flag_value(&cmd, "-f").as_deref(), Some("v4l2"), "input side");
+        let spec = cmd.last().expect("the tee spec is the last token");
+        assert_eq!(
+            cmd[cmd.len() - 2],
+            "tee",
+            "the output muxer is the tee: {cmd:?}"
+        );
+        assert!(spec.contains(&format!("[f=rtsp:rtsp_transport=tcp:max_delay=0:flush_packets=1]{RTSP_OUT}")));
+        assert!(spec.contains(&format!(
+            "[f=rtp:payload_type={}:ssrc={}:max_delay=0:flush_packets=1]{}",
+            crate::wfb_tee::WFB_TEE_PAYLOAD_TYPE,
+            crate::wfb_tee::WFB_TEE_SSRC,
+            crate::wfb_tee::rtp_destination_url(),
+        )));
+        // No `onfail=ignore`: a radio branch that cannot be opened must fail the
+        // encoder (and be restarted) rather than silently serve LAN-only video.
+        assert!(!spec.contains("onfail"), "shared fate, not a silent degrade");
+        // The tee needs the explicit map; without it ffmpeg refuses the output.
+        assert!(cmd.windows(2).any(|w| w[0] == "-map" && w[1] == "0:v"));
+        // And the orchestrator must be able to read the fact back off the argv.
+        assert!(crate::wfb_tee::cmd_emits_wfb_rtp(&cmd));
+
+        // The plain form (vision raw-tap / no radio) keeps the single RTSP
+        // destination and must NOT read as emitting the radio copy.
+        let plain = build(
+            &EncoderParams {
+                rtp_fanout: false,
+                ..params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000)
+            },
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &rockchip(),
+            false,
+        );
+        assert_eq!(plain.last().map(String::as_str), Some(RTSP_OUT));
+        assert!(!crate::wfb_tee::cmd_emits_wfb_rtp(&plain));
+        assert!(!plain.iter().any(|t| t == "tee"));
+
+        // The bash-pipeline arms cannot carry a mapped second output, so they
+        // keep the separate tap and must not claim otherwise.
+        for (label, kind, cam, env) in [
+            ("rpicam", EncoderKind::RpicamVid, csi(), rockchip()),
+            (
+                "gstreamer",
+                EncoderKind::Gstreamer,
+                usb_mjpeg(),
+                rk_mpp_noclient(),
+            ),
+        ] {
+            let cmd = build(
+                &params(kind, 1280, 720, 30, 4000),
+                "/dev/video0",
+                RTSP_OUT,
+                &cam,
+                &env,
+                false,
+            );
+            assert!(
+                !crate::wfb_tee::cmd_emits_wfb_rtp(&cmd),
+                "{label} must keep the separate tap"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sei_splice_keeps_both_publish_branches() {
+        // Turning the SEI probe on rebuilds the publish stage from scratch. If
+        // that rebuild dropped the radio branch, enabling a measurement probe
+        // would take the radio leg down — so the encode half must end at
+        // stdout and the publish half must carry the identical tee spec.
+        let cmd = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &rockchip(),
+            true,
+        );
+        assert_eq!(cmd[0], "bash");
+        let body = &cmd[2];
+        let (encode, publish) = body
+            .split_once("| /opt/ados/venv/bin/python3 -m ados.services.video.sei_injector |")
+            .expect("the injector is spliced between two ffmpeg stages");
+        // The encode half ends at stdout and carries no output-muxer leftovers.
+        assert!(encode.trim_end().ends_with("-f h264 -"));
+        assert!(!encode.contains("-f tee"), "no muxer left on the encode half");
+        assert!(!encode.contains("-map 0:v"));
+        assert!(!encode.contains("-rtsp_transport"));
+        assert!(!encode.contains("-muxdelay"));
+        // The publish half re-mounts BOTH destinations, through the same
+        // output-stage builder the non-SEI path uses.
+        assert!(publish.contains("-f tee"));
+        assert!(publish.contains(RTSP_OUT));
+        assert!(publish.contains(&crate::wfb_tee::rtp_destination_url()));
+        assert!(crate::wfb_tee::cmd_emits_wfb_rtp(&cmd));
+    }
+
+    #[test]
+    fn sliced_threading_is_gated_on_probed_cores() {
+        // Frame-level threading holds `threads` frames in flight; sliced
+        // threading splits one frame across the cores and emits it whole. On
+        // Pi-5-class silicon x264 IS the encoder, so this is the largest
+        // remaining lever in the encode hop — but only where there are cores to
+        // split across. Two cores keep the conservative form.
+        let four = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &rockchip(),
+            false,
+        );
+        assert_eq!(flag_value(&four, "-threads").as_deref(), Some("4"));
+        let x264 = flag_value(&four, "-x264-params").expect("x264 params");
+        assert!(x264.contains("sliced-threads=1"), "{x264}");
+        assert!(x264.contains("slices=4"), "{x264}");
+
+        let two = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &dual_core(),
+            false,
+        );
+        assert_eq!(flag_value(&two, "-threads").as_deref(), Some("2"));
+        let x264_two = flag_value(&two, "-x264-params").expect("x264 params");
+        assert!(x264_two.contains("sliced-threads=0"), "{x264_two}");
+        assert!(!x264_two.contains("slices="), "{x264_two}");
+
+        // Intra-refresh stays forbidden on every path: it removes true IDR NALs
+        // and the ingest parser cannot bootstrap SPS/PPS from a refreshed
+        // stream.
+        for cmd in [&four, &two] {
+            assert!(!cmd.join(" ").contains("intra-refresh"));
+        }
     }
 }

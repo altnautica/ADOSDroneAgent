@@ -178,6 +178,23 @@ pub struct EncoderState {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// The ceiling above was ACCEPTED but has deliberately NOT been pushed to
+    /// the encoder, because applying it would have cost a respawn worth more
+    /// than the change buys (see the orchestrator's ceiling-deferral rule).
+    /// `bitrate_kbps` therefore reports what the encoder is really running, not
+    /// the clamp — the two disagreeing is the whole point of this flag, and a
+    /// consumer that renders the ceiling as the live bitrate would be reporting
+    /// a value the encoder never received.
+    #[serde(default)]
+    pub ceiling_deferred: bool,
+    /// Encoder-only respawns since `ados-video` started. A climbing counter is
+    /// the visible form of a respawn storm: every respawn costs a fresh
+    /// SPS/PPS, a decoder reset and a black frame, so an oscillating adaptive
+    /// ladder is diagnosable from this sidecar instead of from an operator
+    /// reporting a blinking picture. The radio ladder carries its own
+    /// equivalent counter.
+    #[serde(default)]
+    pub encoder_respawns: u64,
 }
 
 impl EncoderState {
@@ -189,7 +206,21 @@ impl EncoderState {
             height: s.height,
             fps: s.fps,
             bitrate_kbps: s.bitrate_kbps,
+            ceiling_deferred: false,
+            encoder_respawns: 0,
         }
+    }
+
+    /// Mark the accepted ceiling as held back from the encoder.
+    pub fn with_ceiling_deferred(mut self, deferred: bool) -> Self {
+        self.ceiling_deferred = deferred;
+        self
+    }
+
+    /// Stamp the encoder-only respawn count the publisher has observed.
+    pub fn with_encoder_respawns(mut self, respawns: u64) -> Self {
+        self.encoder_respawns = respawns;
+        self
     }
 
     pub fn settings(&self) -> EncoderSettings {

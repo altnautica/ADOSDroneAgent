@@ -1,6 +1,12 @@
-//! WFB radio fan-out tap: the `ffmpeg` subprocess that copies the local
-//! mediamtx RTSP stream into RTP datagrams on UDP 5600 for the wfb-ng radio TX
-//! process.
+//! WFB radio fan-out tap: the FALLBACK `ffmpeg` subprocess that copies the
+//! local mediamtx RTSP stream into RTP datagrams on UDP 5600 for the wfb-ng
+//! radio TX process.
+//!
+//! On the `ffmpeg` encoder family the encoder emits those RTP datagrams itself
+//! (a second branch of one `-f tee` output on the same encode), so this tap is
+//! not spawned at all there; it remains the path for the two encoders that
+//! publish through a `bash -c` pipeline, `rpicam-vid` and `gst-launch-1.0`.
+//! See [`spawn_wfb_tee`] and [`cmd_emits_wfb_rtp`].
 //!
 //! The wfb-ng TX subprocess (`wfb_tx -u 5600 ...`) listens on UDP
 //! 127.0.0.1:5600 for self-contained datagrams to encapsulate as 802.11 frames
@@ -9,7 +15,8 @@
 //! packet costs at most one NAL fragment instead of corrupting the byte stream
 //! to the next start code. The receiver wraps with `rtph264depay` against the
 //! SDP at [`WFB_VIDEO_SDP`]. `pkt_size` keeps each datagram under the 802.11
-//! MTU after wfb-ng overhead.
+//! MTU after wfb-ng overhead. The encoder's own fan-out branch uses the same
+//! payload type, SSRC and packet size, so the receiver sees one contract.
 //!
 //! This module is the leaf the orchestrator drives. It provides:
 //! - a pure [`wfb_tee_args`] arg-vector builder (parity-critical: a single
@@ -134,24 +141,48 @@ pub fn rtp_destination_url() -> String {
 /// the fresh one for the socket. This helper composes the source/destination
 /// URLs and the arg vector and hands them to the shared spawner.
 ///
-/// /!\ LATENCY: this whole ffmpeg is a pure re-read hop — it pulls the already-
-/// H.264-encoded RTSP `/main` out of mediamtx and re-mounts it as RTP to UDP
-/// :5600 for the radio. Every packet crosses an extra ffmpeg + the mediamtx
-/// RTSP demux/mux, adding ~glass-to-glass latency. The low-risk fix is to have
-/// the ENCODER itself emit the RTP copy directly (a second output to
-/// `rtp://127.0.0.1:5600?...` in `crates/ados-video/src/encoder.rs`
-/// `build_encoder_command`/`build_ffmpeg_command` — the encoder already knows
-/// the target RTP profile via the `h264_mp4toannexb` bsf) while STILL
-/// publishing the RTSP path for WHEP, then make `VideoPipeline::start_wfb_tee`
-/// (`crates/ados-video/src/lifecycle.rs`) skip spawning this tee.
-/// NOT done here: it restructures the orchestrator/process spawn, which cannot
-/// be captured by this module's byte-exact argv fixtures. Do it on-rig with the
-/// encoder-side fixture test updated in the same commit.
+/// # This is now the FALLBACK path, not the default
+///
+/// This whole ffmpeg is a pure re-read hop: it pulls the already-encoded RTSP
+/// `/main` back out of mediamtx and re-mounts it as RTP on UDP 5600, so every
+/// radio packet crossed an extra RTSP demux, an extra RTP mux and an extra
+/// process boundary (~10-30 ms on a loaded SBC, plus a fourth ffmpeg's CPU and
+/// RSS and its own restart ladder).
+///
+/// The `ffmpeg` encoder family now emits that RTP copy itself, as a second
+/// branch of one `-f tee` output on the SAME encode
+/// ([`crate::encoder::build_ffmpeg_command`] with
+/// [`crate::encoder::EncoderParams::rtp_fanout`]), and the orchestrator does
+/// not spawn this tap at all on that path — see
+/// [`crate::encoder`]'s `tee_spec` for the branch flags and
+/// [`cmd_emits_wfb_rtp`] for how the orchestrator decides.
+///
+/// It stays for the two encoders that publish through a `bash -c` pipeline —
+/// `rpicam-vid` (CSI) and `gst-launch-1.0` — where the publish stage is a shell
+/// string rather than an argv the builder can extend with a mapped second
+/// output.
 pub fn spawn_wfb_tee(rtsp_port: u16) -> std::io::Result<ManagedProcess> {
     let rtsp_in = local_rtsp_url(rtsp_port);
     let rtp_out = rtp_destination_url();
     let args = wfb_tee_args(&rtsp_in, &rtp_out);
     ManagedProcess::spawn("wfb_tee", "ffmpeg", &args)
+}
+
+/// True when `cmd` is an encoder argv that already emits the wfb RTP copy
+/// itself, so this module's separate tap must NOT be spawned.
+///
+/// Read off the built argv rather than re-derived from config, so the decision
+/// cannot drift from what the encoder is actually running: the encoder-kind
+/// override, the software fallback and the vision-tap splice all change which
+/// form the builder emits.
+///
+/// The same fact also disarms the RTP orphan sweep: [`orphan_pattern`] matches
+/// any process whose command line targets UDP 5600, and with the fan-out in
+/// force that includes the live encoder — sweeping it would SIGKILL the encoder
+/// the sweep is supposed to protect.
+pub fn cmd_emits_wfb_rtp(cmd: &[String]) -> bool {
+    let marker = orphan_pattern();
+    cmd.iter().any(|token| token.contains(&marker))
 }
 
 /// The pattern [`crate::process::kill_orphans`] sweeps before a (re)spawn: any

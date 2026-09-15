@@ -100,6 +100,11 @@ pub struct VideoOrchestrator {
     /// secondary analog of the primary's `note_healthy_tick` restart-count reset.
     pub(crate) secondary_started_at: std::collections::HashMap<String, Instant>,
     pub(crate) wfb_tee: Option<ManagedProcess>,
+    /// True when the PRIMARY encoder's own argv carries the radio's RTP output,
+    /// so [`Self::wfb_tee`] is deliberately `None` and must not be spawned,
+    /// swept for, or reported unhealthy. Re-derived from the built argv on every
+    /// (re)start, never from config.
+    pub(crate) encoder_emits_wfb_rtp: bool,
     pub(crate) cloud_push: Option<ManagedProcess>,
     pub(crate) sei_tap: Option<ManagedProcess>,
     /// The decoupled vision frame tap (a third ffmpeg → rawvideo → stdout).
@@ -156,6 +161,16 @@ pub struct VideoOrchestrator {
     pub(crate) cloud_restart_count: u32,
     pub(crate) wfb_tee_restart_count: u32,
     pub(crate) vision_tap_restart_count: u32,
+    /// Encoder-ONLY respawns since this service started: every time an
+    /// attention switch or an adaptive-bitrate change actually re-spawned the
+    /// encoder child. Published on the attention sidecar as `encoder_respawns`.
+    ///
+    /// Each respawn is a fresh SPS/PPS, a decoder reset and a visible black
+    /// frame, so a rig where the adaptive ladder is oscillating shows up here as
+    /// a climbing counter instead of having to be inferred from an operator's
+    /// "the picture keeps blinking". The radio ladder keeps its own equivalent
+    /// counter on the other half of the same loop.
+    pub(crate) encoder_respawns: u64,
     pub(crate) last_start_error: StartError,
     /// Consecutive cold-start attempts whose encoder never produced a first
     /// packet. Drives the software fallback: a hardware / GStreamer encoder that
@@ -271,6 +286,7 @@ impl VideoOrchestrator {
             secondary_respawn_attempts: std::collections::HashMap::new(),
             secondary_started_at: std::collections::HashMap::new(),
             wfb_tee: None,
+            encoder_emits_wfb_rtp: false,
             cloud_push: None,
             sei_tap: None,
             vision_tap: None,
@@ -293,6 +309,7 @@ impl VideoOrchestrator {
             cloud_restart_count: 0,
             wfb_tee_restart_count: 0,
             vision_tap_restart_count: 0,
+            encoder_respawns: 0,
             last_start_error: StartError::None,
             no_first_packet_failures: 0,
             force_software: false,
@@ -356,18 +373,68 @@ impl VideoOrchestrator {
         }
     }
 
+    /// The state to publish and acknowledge: the resolved profile + settings
+    /// plus the two orchestrator-owned observability fields, so no call site
+    /// can publish a sidecar that silently drops the respawn counter.
+    pub(crate) fn encoder_state(
+        &self,
+        profile: VideoProfile,
+        ceiling_kbps: Option<u32>,
+        settings: EncoderSettings,
+        ceiling_deferred: bool,
+    ) -> EncoderState {
+        EncoderState::new(profile, ceiling_kbps, settings)
+            .with_ceiling_deferred(ceiling_deferred)
+            .with_encoder_respawns(self.encoder_respawns)
+    }
+
     /// Reconcile the encoder against the desired profile + bitrate ceiling.
     ///
-    /// Idempotent: resolved settings equal to what is already live acknowledge
-    /// without touching a process. Otherwise ONLY the encoder child is
-    /// restarted — mediamtx, the wfb tap, the cloud push and the vision tap all
-    /// keep running, which is what makes an attention switch cost a sub-second
-    /// encoder respawn instead of a full pipeline cold start.
+    /// Three outcomes, in order:
+    ///
+    /// 1. **Already live** — acknowledge without touching a process.
+    /// 2. **A small ceiling-only change** — acknowledge the ceiling as accepted
+    ///    but HOLD it on the encoder, and stamp `ceiling_deferred` on the
+    ///    sidecar. The radio half of this loop applies FEC and MCS through the
+    ///    `wfb_tx` management socket precisely so a retune costs no video gap;
+    ///    the encoder half has no such channel, so its only actuator is a
+    ///    respawn — a fresh SPS/PPS, a decoder reset and a visible black frame,
+    ///    at exactly the moment the picture matters most. Below
+    ///    [`CEILING_DEFER_PERCENT`] of the live bitrate that trade is not worth
+    ///    making: the FEC ladder absorbs the difference.
+    /// 3. **Anything else** (a profile switch, a geometry or fps change, or a
+    ///    ceiling step at or above the threshold) — respawn only the encoder
+    ///    child. mediamtx, the radio leg, the cloud push and the vision tap all
+    ///    keep running.
+    ///
+    /// The deferral compares the target against what is LIVE, never against the
+    /// previous request, so a sequence of small steps cannot accumulate past
+    /// the threshold unnoticed: once the gap from the running bitrate reaches
+    /// it, the next request applies.
     pub(crate) async fn apply_desired_encoder(&mut self) {
         let (desired, target) = self.desired_encoder_settings();
-        let state = EncoderState::new(desired.profile, desired.ceiling_kbps, target);
+        let live = self.live_encoder_settings();
 
-        if target == self.live_encoder_settings() {
+        if target == live {
+            let state = self.encoder_state(desired.profile, desired.ceiling_kbps, target, false);
+            self.encoder_control
+                .note_applied(state, desired.generation, false);
+            self.publish_encoder_state(&state).await;
+            return;
+        }
+
+        // Case 2: hold the rung. Only while Running — with no encoder up,
+        // applying is free (the next cold start builds from the clamped
+        // settings), so there is nothing to defer.
+        if self.state == PipelineState::Running && ceiling_change_is_deferrable(live, target) {
+            let state = self.encoder_state(desired.profile, desired.ceiling_kbps, live, true);
+            tracing::info!(
+                ceiling_kbps = ?desired.ceiling_kbps,
+                live_bitrate_kbps = live.bitrate_kbps,
+                target_bitrate_kbps = target.bitrate_kbps,
+                threshold_percent = CEILING_DEFER_PERCENT,
+                "video_ceiling_change_deferred: holding the rung instead of respawning the encoder"
+            );
             self.encoder_control
                 .note_applied(state, desired.generation, false);
             self.publish_encoder_state(&state).await;
@@ -392,6 +459,7 @@ impl VideoOrchestrator {
         } else {
             false
         };
+        let state = self.encoder_state(desired.profile, desired.ceiling_kbps, target, false);
         self.encoder_control
             .note_applied(state, desired.generation, restarted);
         self.publish_encoder_state(&state).await;
@@ -700,8 +768,20 @@ impl VideoOrchestrator {
         true
     }
 
-    /// Is the wfb tap alive AND producing? `true` when healthy or never started.
+    /// Is the wfb tap alive AND producing? `true` when healthy, never started,
+    /// or retired in favour of the encoder's own RTP output.
+    ///
+    /// With the fan-out in force there is no tap process and there must be no
+    /// ladder chasing one — the radio leg is a branch of the encoder's single
+    /// output, so it shares the encoder's fate: an RTP branch that cannot be
+    /// opened fails the whole encoder (no `onfail=ignore` on the tee spec), and
+    /// "the shared encode is producing" is already proved by the mediamtx
+    /// inbound-byte delta watchdog. The independent downstream counter is then
+    /// `wfb_tx`'s own injected-bytes rate, which `ados diag video` reads.
     async fn check_wfb_tee_health(&mut self) -> bool {
+        if self.encoder_emits_wfb_rtp {
+            return true;
+        }
         let Some(p) = self.wfb_tee.as_mut() else {
             // No tee yet: the first spawn is deferred until the RTSP source is
             // ready, so report unhealthy WHILE THE PIPELINE IS RUNNING and let
@@ -1232,6 +1312,37 @@ pub(crate) fn apply_settings_to(cfg: &mut CameraConfig, s: EncoderSettings) {
     cfg.bitrate_kbps = s.bitrate_kbps;
 }
 
+/// How far a ceiling-only change has to move the bitrate, as a percentage of
+/// what the encoder is currently running, before it is worth a respawn.
+///
+/// Below this the change is held: an encoder respawn costs a fresh SPS/PPS, a
+/// decoder reset and a ~1-2 s visible gap, and the radio's own FEC ladder —
+/// which retunes through the `wfb_tx` management socket at no video cost —
+/// absorbs a sub-threshold overshoot. At or above it the clamp is real enough
+/// that continuing to transmit the higher rate would put surplus bits into the
+/// FEC block, where they do not become quality, they become queue depth and
+/// then loss.
+pub const CEILING_DEFER_PERCENT: u32 = 25;
+
+/// Whether a desired-vs-live difference is a ceiling-only change small enough
+/// to hold on the encoder (see [`CEILING_DEFER_PERCENT`]).
+///
+/// A profile switch is NEVER deferrable: a hero ⇄ thumbnail change moves
+/// geometry and frame rate, is the operator's explicit request, and cannot be
+/// expressed as a rate nudge. Only the bitrate may be held.
+pub fn ceiling_change_is_deferrable(live: EncoderSettings, target: EncoderSettings) -> bool {
+    if live.width != target.width || live.height != target.height || live.fps != target.fps {
+        return false;
+    }
+    if target.bitrate_kbps == live.bitrate_kbps || live.bitrate_kbps == 0 {
+        return false;
+    }
+    // Integer comparison of |delta| / live < percent / 100, cross-multiplied so
+    // there is no rounding step to argue about at the boundary: a change of
+    // exactly the threshold applies.
+    live.bitrate_kbps.abs_diff(target.bitrate_kbps) * 100 < live.bitrate_kbps * CEILING_DEFER_PERCENT
+}
+
 /// Sleep up to `dur`, waking early on shutdown or (when `wake_on_camera`) on a
 /// camera-plugged SIGUSR1. A zero / negative duration returns immediately.
 async fn interruptible_sleep(
@@ -1387,6 +1498,95 @@ mod tests {
         assert_eq!(applied.generation, generation);
         assert!(!applied.restarted);
         assert_eq!(applied.state.profile, VideoProfile::Thumbnail);
+    }
+
+    #[tokio::test]
+    async fn a_sub_threshold_ceiling_change_holds_the_rung_instead_of_respawning() {
+        // VID-04: the radio half of the adaptive loop retunes FEC and MCS
+        // through the wfb_tx management socket at no video cost; the encoder
+        // half's only actuator is a respawn — a fresh SPS/PPS, a decoder reset
+        // and a ~1-2 s black frame. A clamp that moves the bitrate less than
+        // CEILING_DEFER_PERCENT is not worth that, so it is accepted and held.
+        //
+        // `state = Running` with NO encoder process is exactly the case that
+        // proves it: if the apply path took the respawn branch it would run
+        // `restart_encoder_only`, which tries to spawn ffmpeg and would report
+        // `restarted`. It must not get there.
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("video-profile.json");
+        let mut o = test_orch();
+        o.video_profile_path = Some(sidecar.clone());
+
+        // Promote to hero (4000 kbps) while stopped: free, no respawn.
+        o.encoder_control().request_profile(VideoProfile::Hero);
+        o.apply_desired_encoder().await;
+        assert_eq!(o.live_encoder_settings().bitrate_kbps, 4000);
+        o.state = PipelineState::Running;
+
+        // 4000 → 3400 is 15 %: deferred.
+        let generation = o.encoder_control().request_ceiling(Some(3400));
+        o.apply_desired_encoder().await;
+
+        let applied = o.encoder_control().applied();
+        assert_eq!(applied.generation, generation, "the request is acknowledged");
+        assert!(!applied.restarted, "no encoder respawn for a 15 % clamp");
+        assert_eq!(
+            o.live_encoder_settings().bitrate_kbps,
+            4000,
+            "the encoder keeps running the rung it is on"
+        );
+        assert_eq!(o.encoder_respawns, 0, "nothing respawned");
+
+        // The sidecar tells the truth in both directions: the ceiling is
+        // recorded (so the radio ladder does not republish it every second)
+        // and the suppression is visible, with the LIVE bitrate reported.
+        let published = crate::profile::read_state_from(&sidecar).unwrap();
+        assert_eq!(published.ceiling_kbps, Some(3400));
+        assert!(published.ceiling_deferred);
+        assert_eq!(published.bitrate_kbps, 4000);
+        assert_eq!(published.encoder_respawns, 0);
+    }
+
+    #[test]
+    fn the_deferral_rule_is_a_bitrate_only_threshold_measured_against_the_live_rate() {
+        let hero = EncoderSettings {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+        };
+        let at = |kbps: u32| EncoderSettings {
+            bitrate_kbps: kbps,
+            ..hero
+        };
+
+        // Under 25 % of the live rate: held.
+        assert!(ceiling_change_is_deferrable(hero, at(3400)));
+        assert!(ceiling_change_is_deferrable(hero, at(3001)));
+        // Exactly at the threshold, and beyond: applied. The ladder's own rungs
+        // from a 4000 kbps hero (3000 / 2000 / 1200) are all at or past it, so
+        // a real degradation still reaches the encoder.
+        assert!(!ceiling_change_is_deferrable(hero, at(3000)));
+        assert!(!ceiling_change_is_deferrable(hero, at(2000)));
+        assert!(!ceiling_change_is_deferrable(hero, at(1200)));
+        // A step UP is judged the same way: a small recovery is not worth a
+        // black frame either.
+        assert!(ceiling_change_is_deferrable(hero, at(4900)));
+        assert!(!ceiling_change_is_deferrable(hero, at(5000)));
+        // No change is not a deferral (the caller's idempotent path owns it).
+        assert!(!ceiling_change_is_deferrable(hero, hero));
+        // A profile switch is never deferrable, however small the rate move.
+        let thumb = EncoderSettings {
+            width: 320,
+            height: 180,
+            fps: 1,
+            bitrate_kbps: 3900,
+        };
+        assert!(!ceiling_change_is_deferrable(hero, thumb));
+        assert!(!ceiling_change_is_deferrable(
+            hero,
+            EncoderSettings { fps: 15, ..at(3900) }
+        ));
     }
 
     /// The seam the whole phase rests on: an out-of-process caller dials the
