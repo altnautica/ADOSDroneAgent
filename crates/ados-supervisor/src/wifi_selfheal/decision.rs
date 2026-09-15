@@ -364,6 +364,8 @@ hotspot:802-11-wireless:wlan0:activated
         assert!(looks_like_access_point("field-ap"));
         assert!(looks_like_access_point("ap"));
         assert!(!looks_like_access_point("home"));
-        assert!(!looks_like_access_point("Ajay & Nidhi"));
+        // A multi-word infrastructure SSID containing an ampersand must not be
+        // mistaken for a hosted access point.
+        assert!(!looks_like_access_point("Home & Office"));
     }
 }

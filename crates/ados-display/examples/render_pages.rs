@@ -153,7 +153,7 @@ fn connected_context() -> PageContext {
             hotspot_enabled: true,
             wifi_client: WifiClientCtx {
                 connected: true,
-                ssid: Some("Ajay & Nidhi".to_string()),
+                ssid: Some("HomeNetwork".to_string()),
                 signal_dbm: Some(-52.0),
             },
         },

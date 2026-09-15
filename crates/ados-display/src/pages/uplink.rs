@@ -383,7 +383,7 @@ mod tests {
         let page = UplinkDetailPage;
         let mut ctx = PageContext::default();
         ctx.network.wifi_client.connected = true;
-        ctx.network.wifi_client.ssid = Some("Ajay & Nidhi".to_string());
+        ctx.network.wifi_client.ssid = Some("HomeNetwork".to_string());
         ctx.network.wifi_client.signal_dbm = Some(-47.0);
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
