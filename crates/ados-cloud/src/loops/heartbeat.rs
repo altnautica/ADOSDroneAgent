@@ -522,6 +522,18 @@ pub fn build_payload(
     let native = native_payload(base).to_value();
     let mut obj = native.as_object().cloned().unwrap_or_default();
 
+    // Fold the capability sidecars the LAN `/api/status/full` route already
+    // folds — camera presence + USB recovery, the management-link guardian,
+    // reach-back mode, USB rehome, Wi-Fi power-save, the LCD page. Without
+    // them a cloud-relayed node was a second-class node in the GCS: the same
+    // hardware, four empty cards and a `capability:camera` miss on a drone
+    // with a working camera, purely because of which transport the reading
+    // arrived over. Folded BEFORE the enrichment, so a producer that observes
+    // one of these live still wins.
+    for (k, v) in crate::loops::capabilities::capability_extras() {
+        obj.insert(k, v);
+    }
+
     // Fold the enrichment keys over the base.
     if let Some(serde_json::Value::Object(map)) = enrichment {
         for (k, v) in map {

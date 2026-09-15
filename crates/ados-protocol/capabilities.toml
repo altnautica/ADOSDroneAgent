@@ -8,8 +8,22 @@
 #
 # Two sections:
 #   [[agent]] — capabilities a plugin manifest may declare for the agent half.
-#               `enforced = true` marks those with a runtime gate today.
 #   [[gcs]]   — capabilities for the GCS half (UI slots + GCS data access).
+#
+# `enforced = true` means a grant of this capability changes what the plugin can
+# actually do, through one of exactly three mechanisms:
+#   1. the generated wire-dispatch gate (`[[method]]` below names the cap),
+#   2. a handler-side check finer than a method (topic / message-id classified;
+#      listed in `ados_plugin_host::HANDLER_GATED_CAPS`),
+#   3. the generated systemd unit's sandbox — cgroup device policy, socket
+#      address families, or the mount namespace (listed in
+#      `ados_plugin_host::SANDBOX_ENFORCED_CAPS`).
+# `enforced = false` means the grant is advisory metadata only. A capability
+# that nothing backs does not belong in this file at all: the install dialog
+# renders every declared permission to the operator, so a decorative row teaches
+# them the risk labels are noise. Two guard tests in `ados-plugin-host/src/lib.rs`
+# fail the build in both directions (a claimed gate that does not exist, and a
+# real gate the catalog understates).
 #
 # category is one of: hardware | flight_control | data_network | compute_process | ui_slot
 # risk is one of:     low | medium | high | critical
@@ -17,7 +31,7 @@
 # Edit here, then run codegen. Do not edit the generated files by hand.
 
 # ===========================================================================
-# AGENT capabilities (52)
+# AGENT capabilities (51)
 # ===========================================================================
 
 [[agent]]
@@ -197,8 +211,8 @@ label = "Open UART serial ports on the host"
 description = "Lets the plugin open and exchange data over UART serial ports. Required by GPS, range-finder, and modem drivers."
 category = "hardware"
 risk = "medium"
-risk_reason = "Serial ports may be shared with the autopilot or critical peripherals."
-enforced = false
+risk_reason = "Serial ports may be shared with the autopilot or critical peripherals. Enforced by the generated unit's cgroup device policy: without this grant the plugin's unit carries PrivateDevices=yes and no DeviceAllow for char-ttyUSB / char-ttyACM / char-tty, so an open() of a serial node fails with EPERM."
+enforced = true
 
 [[agent]]
 id = "hardware.i2c"
@@ -206,8 +220,8 @@ label = "Read and write I2C devices on the host"
 description = "Lets the plugin talk to I2C devices on the SBC's I2C buses. Used by sensor drivers and small peripherals."
 category = "hardware"
 risk = "medium"
-risk_reason = "I2C buses are shared; a misbehaving plugin can stall the bus for other devices."
-enforced = false
+risk_reason = "I2C buses are shared; a misbehaving plugin can stall the bus for other devices. Enforced by the generated unit's cgroup device policy: without this grant no DeviceAllow for char-i2c is emitted, so /dev/i2c-* is unreachable."
+enforced = true
 
 [[agent]]
 id = "hardware.spi"
@@ -215,8 +229,8 @@ label = "Read and write SPI devices on the host"
 description = "Lets the plugin talk to SPI devices on the SBC's SPI buses. Used by displays and high-rate sensor drivers."
 category = "hardware"
 risk = "medium"
-risk_reason = "SPI buses are shared with on-board peripherals like the front-panel display."
-enforced = false
+risk_reason = "SPI buses are shared with on-board peripherals like the front-panel display. Enforced by the generated unit's cgroup device policy: without this grant no DeviceAllow for char-spidev is emitted, so /dev/spidev* is unreachable."
+enforced = true
 
 [[agent]]
 id = "hardware.gpio"
@@ -224,8 +238,8 @@ label = "Read and toggle GPIO pins on the host"
 description = "Lets the plugin read input pins and drive output pins on the SBC. Used by switches, LEDs, and discrete peripheral control."
 category = "hardware"
 risk = "medium"
-risk_reason = "GPIO outputs can drive external hardware; mis-driven pins can damage attached devices."
-enforced = false
+risk_reason = "GPIO outputs can drive external hardware; mis-driven pins can damage attached devices. Enforced by the generated unit's cgroup device policy: without this grant no DeviceAllow for char-gpiochip is emitted, so /dev/gpiochip* is unreachable."
+enforced = true
 
 [[agent]]
 id = "hardware.gpio_out"
@@ -242,8 +256,8 @@ label = "Claim raw USB devices on the host"
 description = "Lets the plugin attach to and exchange bulk transfers with USB devices. Required by vendor SDK drivers that talk to specific USB peripherals."
 category = "hardware"
 risk = "medium"
-risk_reason = "Claiming a USB device prevents other software from using it."
-enforced = false
+risk_reason = "Claiming a USB device prevents other software from using it. Enforced by the generated unit's cgroup device policy: without this grant no DeviceAllow for char-usb_device is emitted, so a raw /dev/bus/usb transfer is unreachable."
+enforced = true
 
 [[agent]]
 id = "hardware.usb.uvc"
@@ -251,8 +265,8 @@ label = "Read frames from USB UVC cameras"
 description = "Lets the plugin capture video frames from USB Video Class cameras. Required by webcam and machine-vision drivers."
 category = "hardware"
 risk = "medium"
-risk_reason = "Video frames may be recorded, transmitted, or processed off-vehicle."
-enforced = false
+risk_reason = "Video frames may be recorded, transmitted, or processed off-vehicle. Enforced by the generated unit's cgroup device policy: without this grant no DeviceAllow for char-video4linux is emitted, so /dev/video* is unreachable."
+enforced = true
 
 [[agent]]
 id = "hardware.camera.csi"
@@ -260,8 +274,8 @@ label = "Read frames from MIPI CSI cameras"
 description = "Lets the plugin capture video frames from CSI-attached cameras on the SBC's camera connector. Required by native camera drivers."
 category = "hardware"
 risk = "medium"
-risk_reason = "Video frames may be recorded, transmitted, or processed off-vehicle."
-enforced = false
+risk_reason = "Video frames may be recorded, transmitted, or processed off-vehicle. Enforced by the generated unit's cgroup device policy: without this grant no DeviceAllow for char-video4linux or char-dri is emitted, so the CSI capture nodes are unreachable."
+enforced = true
 
 [[agent]]
 id = "video.source.set"
@@ -271,15 +285,6 @@ category = "data_network"
 risk = "medium"
 risk_reason = "Reconfigures which video sources the vehicle serves and restarts the video pipeline; a wrong source list can black out the operator's video."
 enforced = true
-
-[[agent]]
-id = "vehicle.command"
-label = "Issue high-level vehicle commands"
-description = "Lets the plugin send high-level vehicle commands (arm, takeoff, RTL, land, mode change) through the agent's command pipeline rather than raw MAVLink."
-category = "flight_control"
-risk = "high"
-risk_reason = "Can arm, take off, or land the aircraft."
-enforced = false
 
 [[agent]]
 id = "mission.read"
@@ -305,8 +310,8 @@ label = "Open outbound network connections"
 description = "Lets the plugin make outbound TCP, UDP, and HTTP connections from the agent host. Required by plugins that talk to external services."
 category = "data_network"
 risk = "medium"
-risk_reason = "Exfiltration risk; outbound traffic can carry telemetry off the aircraft."
-enforced = false
+risk_reason = "Exfiltration risk; outbound traffic can carry telemetry off the aircraft. Enforced by the generated unit's socket policy: without this grant the unit carries RestrictAddressFamilies=AF_UNIX and IPAddressDeny=any, so socket(AF_INET) fails with EAFNOSUPPORT."
+enforced = true
 
 [[agent]]
 id = "filesystem.host"
@@ -314,8 +319,8 @@ label = "Read and write files on the host filesystem"
 description = "Lets the plugin read and write files outside its own data directory. Required by plugins that ingest logs, maps, or other host-provided files."
 category = "compute_process"
 risk = "medium"
-risk_reason = "Broad host filesystem access; mis-use can corrupt agent state."
-enforced = false
+risk_reason = "Broad host filesystem access; mis-use can corrupt agent state. Enforced by the generated unit's mount namespace: without this grant the unit carries InaccessiblePaths for the operator data roots and ProtectHome=yes, so a read outside the plugin's own tree fails with EACCES."
+enforced = true
 
 [[agent]]
 id = "recording.write"
@@ -489,7 +494,7 @@ risk_reason = "Publishes a callable interface to an AI client; the effect of any
 enforced = true
 
 # ===========================================================================
-# GCS capabilities (20): 10 UI slots + 10 data/command/mission/cloud
+# GCS capabilities (23): 10 UI slots + 13 data/command/mission/cloud/bus
 # ===========================================================================
 
 [[gcs]]
@@ -651,6 +656,30 @@ description = "Lets the plugin publish its declared GCS-half tools, resources, a
 category = "data_network"
 risk = "medium"
 risk_reason = "Publishes a callable interface to an AI client; effect is bounded by the plugin's other capabilities and the token scope."
+
+[[gcs]]
+id = "event.publish"
+label = "Publish events on the GCS plugin event bus"
+description = "Lets the plugin emit events on the in-memory GCS event bus other installed plugin panels subscribe to. The bus never leaves the browser tab; it carries no host authority of its own."
+category = "data_network"
+risk = "low"
+risk_reason = "In-tab message bus between plugin panels; no host or vehicle effect."
+
+[[gcs]]
+id = "event.subscribe"
+label = "Receive events from the GCS plugin event bus"
+description = "Lets the plugin subscribe to topics on the in-memory GCS event bus and see payloads other installed plugin panels publish."
+category = "data_network"
+risk = "low"
+risk_reason = "Read-only on an in-tab message bus."
+
+[[gcs]]
+id = "agent.request"
+label = "Call the plugin's own agent half"
+description = "Lets the plugin's GCS panel invoke a request handler its OWN agent half registered on this node, and read the reply. The host resolves the target from the install row, so a panel can only ever reach the agent half of the same plugin on the node the operator has open; it cannot address another plugin, another node, or any core agent service. The agent half must also hold mcp.expose for the host to route the call."
+category = "data_network"
+risk = "medium"
+risk_reason = "Reaches the plugin's own on-vehicle process; the effect is bounded by what that agent half's own capabilities already permit."
 
 # ===========================================================================
 # Plugin RPC dispatch table (51): wire method -> dispatch-level required cap.

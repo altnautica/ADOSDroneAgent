@@ -135,6 +135,17 @@ pub struct RpcResponseOwned {
     /// The HTTP response body bytes the drone's API returned, reassembled from
     /// every fragment.
     pub body: Vec<u8>,
+    /// The allow-listed response headers the drone sent with that body, in the
+    /// order it sent them. Empty when the drone carried none — which is also
+    /// what a drone older than the header block reports, so an empty list means
+    /// "no headers crossed", never "the body has no type".
+    ///
+    /// Without these a relayed body is unusable for anything a consumer
+    /// branches on: a downloaded artifact has no `content-type` and no
+    /// `content-disposition` filename, a WHEP `Location` cannot route session
+    /// teardown back through the proxy, and a `text/plain` error renders as a
+    /// download.
+    pub headers: Vec<aux_rpc::ResponseHeader>,
 }
 
 /// Why a call did not complete.
@@ -561,6 +572,7 @@ impl AuxRpcProxy {
                 let _ = call.sender.send(RpcResponseOwned {
                     status: 502,
                     body: b"relay response geometry out of range".to_vec(),
+                    headers: Vec::new(),
                 });
                 return;
             };
@@ -608,9 +620,19 @@ impl AuxRpcProxy {
             Some(aux_rpc::FragmentOutcome::Pending) => {
                 pending.insert(response.id, call);
             }
-            Some(aux_rpc::FragmentOutcome::Complete(body)) => {
+            Some(aux_rpc::FragmentOutcome::Complete(object)) => {
                 self.counters.pending_now.fetch_sub(1, Ordering::Relaxed);
-                let _ = call.sender.send(RpcResponseOwned { status, body });
+                // The reassembled bytes are the encoded object, not the body:
+                // the drone folds an allow-listed header block in after the
+                // body and marks it in the status's top bit. Split it back
+                // apart here, so every caller of `call` sees a real HTTP
+                // status, the body alone, and whatever headers crossed.
+                let (status, body, headers) = aux_rpc::unpack_response(status, object);
+                let _ = call.sender.send(RpcResponseOwned {
+                    status,
+                    body,
+                    headers,
+                });
             }
         }
     }
@@ -645,6 +667,7 @@ impl AuxRpcProxy {
             let _ = call.sender.send(RpcResponseOwned {
                 status: 503,
                 body: Vec::new(),
+                headers: Vec::new(),
             });
         }
         self.counters.pending_now.store(0, Ordering::Relaxed);

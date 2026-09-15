@@ -268,6 +268,7 @@ mod tests {
             unit_dir: dir.join("units"),
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
+            socket_dir: dir.join("sockets"),
         }
     }
 

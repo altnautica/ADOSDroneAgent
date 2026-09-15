@@ -236,7 +236,7 @@ pub async fn handle(
         // Answered rather than dropped: a ground station presenting a bad
         // credential should see it said so, not sit through a call timeout
         // that reads identically to a dead radio.
-        let fragments = encode_fragments(own_device_id.as_bytes(), id, 401, &[]);
+        let fragments = encode_fragments(own_device_id.as_bytes(), id, 401, &[], &[]);
         if !fragments.is_empty() {
             send_fragments(id, egress, &fragments, counters, started).await;
         }
@@ -259,15 +259,17 @@ pub async fn handle(
             cached
         }
         Admit::Fresh => {
-            let (status, body) = match http_call(request.method, request.path, request.body).await {
-                Ok(v) => v,
-                Err(e) => {
-                    let status = e.status();
-                    tracing::warn!(error = %e, request_id = id, status, "aux_rpc_http_call_failed");
-                    (status, Vec::new())
-                }
-            };
-            let fragments = encode_fragments(own_device_id.as_bytes(), id, status, &body);
+            let (status, headers, body) =
+                match http_call(request.method, request.path, request.body).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let status = e.status();
+                        tracing::warn!(error = %e, request_id = id, status, "aux_rpc_http_call_failed");
+                        (status, Vec::new(), Vec::new())
+                    }
+                };
+            let fragments =
+                encode_fragments(own_device_id.as_bytes(), id, status, &headers, &body);
             if fragments.is_empty() {
                 // Nothing encodable to cache or to send. Reopening the id lets
                 // the ground's next retransmit make a real attempt instead of
@@ -333,23 +335,40 @@ async fn send_fragments(
     }
 }
 
-/// Encode a response body as the aux payloads that will carry it.
+/// Encode a response body plus its allow-listed headers as the aux payloads
+/// that will carry them.
+///
+/// The headers are folded into the encoded OBJECT by
+/// [`aux_rpc::pack_response`], not into each fragment, so they cost one
+/// trailer per response rather than one copy per symbol and the fragment
+/// geometry is untouched. With no headers the object is the body verbatim and
+/// the emitted bytes are identical to a build without header support, which is
+/// what keeps a mixed-version fleet's JSON reads working.
 ///
 /// A body past the ground station's reassembly ceiling becomes a single 413
 /// answer: truncating is wrong, because the ground would reassemble garbage
-/// and report it as the drone's answer.
-fn encode_fragments(sender: &[u8], id: u32, status: u16, body: &[u8]) -> Vec<Vec<u8>> {
+/// and report it as the drone's answer. The ceiling is checked against the
+/// packed object, since the trailer is bytes on the air too.
+fn encode_fragments(
+    sender: &[u8],
+    id: u32,
+    status: u16,
+    headers: &[aux_rpc::ResponseHeader],
+    body: &[u8],
+) -> Vec<Vec<u8>> {
     const OVERSIZED: &[u8] = b"response exceeds the relay reassembly ceiling";
-    let (status, symbols) = match aux_rpc::split_response(body) {
-        Some(s) => (status, s),
+    let (wire_status, object) = aux_rpc::pack_response(status, body, headers);
+    let (status, symbols) = match aux_rpc::split_response(&object) {
+        Some(s) => (wire_status, s),
         None => {
             tracing::warn!(
-                len = body.len(),
+                len = object.len(),
                 request_id = id,
                 "aux_rpc_response_too_large"
             );
             // The refusal is 45 bytes, so this arm always encodes; the fallback
             // exists only because `split_response` is fallible in principle.
+            // It carries no headers, so no flag rides with it.
             match aux_rpc::split_response(OVERSIZED) {
                 Some(s) => (413u16, s),
                 None => return Vec::new(),
@@ -425,7 +444,7 @@ async fn http_call(
     method: RpcMethod,
     path: &[u8],
     body: &[u8],
-) -> Result<(u16, Vec<u8>), HttpError> {
+) -> Result<(u16, Vec<aux_rpc::ResponseHeader>, Vec<u8>), HttpError> {
     let path_str = std::str::from_utf8(path).map_err(|_| HttpError::BadPath)?;
     if !path_is_safe(path_str) {
         return Err(HttpError::BadPath);
@@ -498,15 +517,42 @@ fn path_is_safe(path: &str) -> bool {
     !path.bytes().any(|b| b < 0x20 || b == 0x7F)
 }
 
-/// Parse a raw HTTP/1.1 response into (status, body). Extracts the status
-/// code from the first line and the body after the header/body separator.
+/// The response headers that cross the relay.
+///
+/// An allow-list, not the whole header map: the lane's per-response budget is
+/// [`aux_rpc::MAX_RESPONSE_HEADER_BLOCK`] and every byte here is a byte of body
+/// that cannot travel, so only the headers a consumer genuinely branches on
+/// ride along.
+///
+/// - `content-type` — without it a relayed body arrives untyped: a browser or
+///   a strict server-side consumer refuses it or renders it as a download.
+/// - `content-disposition` — the filename of a log artifact or an export.
+/// - `location` — the WHEP proxy's whole value is rewriting this so session
+///   teardown routes back through it; that rewrite could never survive the
+///   relay while headers were dropped.
+/// - `cache-control` — a relayed read that a caching layer then serves stale
+///   is a status surface reporting a value nothing measured.
+///
+/// `content-length` is deliberately absent: the ground rebuilds the body and
+/// axum sets the real length, and forwarding a stale one would describe a body
+/// that is not the one being sent.
+const FORWARDED_RESPONSE_HEADERS: &[&str] = &[
+    "content-type",
+    "content-disposition",
+    "location",
+    "cache-control",
+];
+
+/// Parse a raw HTTP/1.1 response into (status, allow-listed headers, body).
+/// Extracts the status code from the first line, the forwarded headers, and
+/// the body after the header/body separator.
 ///
 /// `Content-Length` is honoured when the server sends one: the read runs to
 /// EOF, so anything past the declared length is not part of this body.
 /// `Transfer-Encoding: chunked` is refused rather than forwarded — the body
 /// would still carry chunk-size framing lines, and handing those to the ground
 /// as the answer produces unparseable JSON with no hint as to why.
-fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), HttpError> {
+fn parse_response(raw: &[u8]) -> Result<(u16, Vec<aux_rpc::ResponseHeader>, Vec<u8>), HttpError> {
     // Find the header/body boundary: \r\n\r\n.
     let boundary = raw
         .windows(4)
@@ -526,6 +572,7 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), HttpError> {
     let status: u16 = status_str.parse().map_err(|_| HttpError::MalformedStatus)?;
 
     let mut content_length: Option<usize> = None;
+    let mut forwarded: Vec<aux_rpc::ResponseHeader> = Vec::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -540,6 +587,15 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), HttpError> {
         }
         if name.eq_ignore_ascii_case("content-length") {
             content_length = value.parse().ok();
+            continue;
+        }
+        // Lowercased on the way out so the ground rebuilds one canonical
+        // spelling regardless of how the upstream cased it.
+        if let Some(canonical) = FORWARDED_RESPONSE_HEADERS
+            .iter()
+            .find(|h| name.eq_ignore_ascii_case(h))
+        {
+            forwarded.push((canonical.to_string(), value.to_string()));
         }
     }
 
@@ -551,7 +607,7 @@ fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), HttpError> {
         _ => body,
     };
 
-    Ok((status, body.to_vec()))
+    Ok((status, forwarded, body.to_vec()))
 }
 
 #[derive(Debug)]
@@ -611,8 +667,12 @@ mod tests {
     const OWN_ID: &[u8] = b"77735cd38937";
 
     /// Rebuild a response from the fragments the handler produced, the way the
-    /// ground station does.
-    fn reassemble(frags: &[Vec<u8>], skip: &[usize]) -> Option<(u16, Vec<u8>)> {
+    /// ground station does — including splitting the encoded object back into
+    /// its status, body and headers.
+    fn reassemble_full(
+        frags: &[Vec<u8>],
+        skip: &[usize],
+    ) -> Option<(u16, Vec<aux_rpc::ResponseHeader>, Vec<u8>)> {
         let mut decoder: Option<aux_rpc::ResponseDecoder> = None;
         for (i, payload) in frags.iter().enumerate() {
             if skip.contains(&i) {
@@ -626,11 +686,18 @@ mod tests {
             assert_eq!(dec.index, i as u16);
             assert_eq!(dec.total, frags.len() as u16);
             let d = decoder.get_or_insert_with(|| aux_rpc::ResponseDecoder::new(dec.oti).unwrap());
-            if let aux_rpc::FragmentOutcome::Complete(body) = d.push(dec.index, dec.body) {
-                return Some((dec.status, body));
+            if let aux_rpc::FragmentOutcome::Complete(object) = d.push(dec.index, dec.body) {
+                let (status, body, headers) = aux_rpc::unpack_response(dec.status, object);
+                return Some((status, headers, body));
             }
         }
         None
+    }
+
+    /// The common case: status + body, with the headers asserted separately by
+    /// the tests that care about them.
+    fn reassemble(frags: &[Vec<u8>], skip: &[usize]) -> Option<(u16, Vec<u8>)> {
+        reassemble_full(frags, skip).map(|(status, _, body)| (status, body))
     }
 
     /// `start_paused` lets the bounded wait expire instantly instead of the
@@ -695,7 +762,7 @@ mod tests {
         let target = sock.local_addr().unwrap();
         sock.connect(target).await.unwrap();
         let egress = AuxEgress::connected_for_test(sock);
-        let fragments = encode_fragments(OWN_ID, 1, 200, br#"{"ok":true}"#);
+        let fragments = encode_fragments(OWN_ID, 1, 200, &[], br#"{"ok":true}"#);
 
         // Hold the slot for longer than a caller would wait.
         let held = RESPONSE_SEND_SLOT.acquire().await.expect("slot");
@@ -727,7 +794,7 @@ mod tests {
 
     #[test]
     fn a_small_body_travels_as_one_symbol_plus_its_repair_set() {
-        let frags = encode_fragments(OWN_ID, 7, 200, br#"{"ok":true}"#);
+        let frags = encode_fragments(OWN_ID, 7, 200, &[], br#"{"ok":true}"#);
         assert_eq!(frags.len(), 1 + aux_rpc::RPC_REPAIR_SYMBOLS as usize);
         assert_eq!(
             reassemble(&frags, &[]),
@@ -740,7 +807,7 @@ mod tests {
         let body: Vec<u8> = (0..MEASURED_SERVICES_BYTES)
             .map(|i| (i % 251) as u8)
             .collect();
-        let frags = encode_fragments(OWN_ID, 7, 200, &body);
+        let frags = encode_fragments(OWN_ID, 7, 200, &[], &body);
         let systematic = MEASURED_SERVICES_BYTES.div_ceil(aux_rpc::MAX_RESPONSE_FRAGMENT);
         assert_eq!(
             frags.len(),
@@ -753,7 +820,7 @@ mod tests {
 
     #[test]
     fn an_empty_body_still_travels_as_one_fragment() {
-        let frags = encode_fragments(OWN_ID, 7, 204, b"");
+        let frags = encode_fragments(OWN_ID, 7, 204, &[], b"");
         assert_eq!(frags.len(), 1, "a 204 has no symbols to protect");
         let dec = aux_rpc::decode_response(&frags[0]).unwrap();
         assert_eq!(dec.status, 204);
@@ -765,7 +832,7 @@ mod tests {
     #[test]
     fn a_body_past_the_ceiling_becomes_a_413() {
         let body = vec![b'x'; 90_000];
-        let frags = encode_fragments(OWN_ID, 7, 200, &body);
+        let frags = encode_fragments(OWN_ID, 7, 200, &[], &body);
         assert_eq!(
             reassemble(&frags, &[]),
             Some((
@@ -792,10 +859,77 @@ mod tests {
     }
 
     #[test]
+    fn the_allow_listed_response_headers_are_collected_and_the_rest_are_not() {
+        let raw = b"HTTP/1.1 200 OK\r\n\
+Content-Type: text/csv; charset=utf-8\r\n\
+Content-Disposition: attachment; filename=\"log.csv\"\r\n\
+Location: /whep/session/abc\r\n\
+Cache-Control: no-store\r\n\
+Server: hyper\r\n\
+Set-Cookie: sid=secret\r\n\
+Content-Length: 3\r\n\r\nabc";
+        let (status, headers, body) = parse_response(raw).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, b"abc");
+        assert_eq!(
+            headers,
+            vec![
+                ("content-type".to_string(), "text/csv; charset=utf-8".to_string()),
+                (
+                    "content-disposition".to_string(),
+                    "attachment; filename=\"log.csv\"".to_string()
+                ),
+                ("location".to_string(), "/whep/session/abc".to_string()),
+                ("cache-control".to_string(), "no-store".to_string()),
+            ],
+            "only the allow-list crosses, lowercased, in wire order"
+        );
+        // Every byte of header is a byte of body that cannot travel, and a
+        // cookie is a credential with no business on a shared radio.
+        assert!(headers.iter().all(|(n, _)| n != "set-cookie" && n != "server"));
+        // Rebuilt by the ground, never forwarded: the body it reassembles is
+        // the one whose length counts.
+        assert!(headers.iter().all(|(n, _)| n != "content-length"));
+    }
+
+    #[test]
+    fn a_content_type_reaches_the_ground_through_the_fragment_codec() {
+        // The end-to-end property GA-01 is about: an artifact body that leaves
+        // the drone typed arrives at the ground still typed.
+        let body: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        let headers = vec![(
+            "content-type".to_string(),
+            "application/octet-stream".to_string(),
+        )];
+        let frags = encode_fragments(OWN_ID, 7, 200, &headers, &body);
+        let (status, got_headers, got_body) =
+            reassemble_full(&frags, &[1]).expect("repair symbols cover one loss");
+        assert_eq!(status, 200, "the header flag never leaks into the status");
+        assert_eq!(got_body, body);
+        assert_eq!(got_headers, headers);
+    }
+
+    #[test]
+    fn a_headerless_answer_puts_the_same_bytes_on_the_air_as_before() {
+        // The mixed-fleet guarantee: a drone on this build answering a relayed
+        // JSON read emits exactly what a drone without header support emits,
+        // so a ground station that has not upgraded keeps working.
+        let body = br#"{"ok":true}"#;
+        let with_support = encode_fragments(OWN_ID, 7, 200, &[], body);
+        let dec = aux_rpc::decode_response(&with_support[0]).unwrap();
+        assert_eq!(
+            dec.status & aux_rpc::RESPONSE_HEADERS_FLAG,
+            0,
+            "no flag set when nothing is carried"
+        );
+        assert_eq!(reassemble(&with_support, &[]), Some((200, body.to_vec())));
+    }
+
+    #[test]
     fn parses_a_200_response_with_a_body() {
         let raw =
             b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 5\r\n\r\nhello";
-        let (status, body) = parse_response(raw).unwrap();
+        let (status, _headers, body) = parse_response(raw).unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, b"hello");
     }
@@ -803,7 +937,7 @@ mod tests {
     #[test]
     fn parses_a_404_response_with_an_empty_body() {
         let raw = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-        let (status, body) = parse_response(raw).unwrap();
+        let (status, _headers, body) = parse_response(raw).unwrap();
         assert_eq!(status, 404);
         assert!(body.is_empty());
     }
@@ -815,7 +949,7 @@ mod tests {
             "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 500\r\n\r\n{}",
             String::from_utf8(body.clone()).unwrap()
         );
-        let (status, parsed_body) = parse_response(raw.as_bytes()).unwrap();
+        let (status, _headers, parsed_body) = parse_response(raw.as_bytes()).unwrap();
         assert_eq!(status, 500);
         assert_eq!(parsed_body, body);
     }
@@ -836,7 +970,7 @@ mod tests {
     fn handles_a_body_that_contains_the_boundary_pattern() {
         // The body itself contains \r\n\r\n — only the FIRST boundary splits.
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\na\r\n\r\nb";
-        let (status, body) = parse_response(raw).unwrap();
+        let (status, _headers, body) = parse_response(raw).unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, b"a\r\n\r\nb");
     }
@@ -881,7 +1015,7 @@ mod tests {
     #[test]
     fn a_declared_content_length_bounds_the_body() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello-and-then-some";
-        let (status, body) = parse_response(raw).unwrap();
+        let (status, _headers, body) = parse_response(raw).unwrap();
         assert_eq!(status, 200);
         assert_eq!(
             body, b"hello",
@@ -890,7 +1024,7 @@ mod tests {
 
         let short = b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\nhello";
         assert_eq!(
-            parse_response(short).unwrap().1,
+            parse_response(short).unwrap().2,
             b"hello",
             "a server that closed early still yields what it did send"
         );

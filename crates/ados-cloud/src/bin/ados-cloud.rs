@@ -133,8 +133,18 @@ async fn main() -> Result<()> {
         // `production()` bakes require_signed=true by default. The grant path
         // refuses any capability the default Rust host cannot back so a remote
         // operator never grants a capability that can only error.
+        //
+        // The board id and tier come from the same HAL sidecar the heartbeat
+        // base reads. Without them this path applied neither the
+        // `supported_boards` gate nor the `min_tier` floor, so a plugin refused
+        // over LAN installed cleanly when pushed through the cloud command
+        // queue and then crash-looped on hardware it was never built for.
+        let (board_name, board_tier, ..) = board_base();
+        let board_id = (board_name != "unknown").then_some(board_name);
+        let tier = (1..=4).contains(&board_tier).then_some(board_tier as u8);
         let mut sup =
-            PluginSupervisor::production(Paths::default(), None, env!("CARGO_PKG_VERSION"))
+            PluginSupervisor::production(Paths::default(), board_id, env!("CARGO_PKG_VERSION"))
+                .with_board_tier(tier)
                 .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());
         if let Err(e) = sup.discover() {
             tracing::warn!(error = %e, "plugin supervisor discover failed; continuing");
@@ -908,6 +918,7 @@ mod tests {
             unit_dir: dir.join("units"),
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
+            socket_dir: dir.join("sockets"),
         };
         Arc::new(Mutex::new(PluginSupervisor::new(
             paths, false, None, "1.0.0",
@@ -936,6 +947,7 @@ mod tests {
             unit_dir: dir.join("units"),
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
+            socket_dir: dir.join("sockets"),
         };
         let sup = PluginSupervisor::production(paths, None, env!("CARGO_PKG_VERSION"))
             .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());

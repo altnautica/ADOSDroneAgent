@@ -12,6 +12,7 @@ pub mod atlas_forwarder;
 pub mod atlas_jobs;
 pub mod aux_status;
 pub mod beacon;
+pub mod capabilities;
 pub mod command_poll;
 pub mod enrichment;
 pub mod heartbeat;

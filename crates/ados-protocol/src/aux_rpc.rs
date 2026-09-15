@@ -50,7 +50,10 @@
 //!   byte 1+S..5+S       id (u32 BE) — matches the request's
 //!   byte 5+S..7+S       status (u16 BE) — HTTP status, repeated identically on
 //!                       every fragment so a reassembler can seed from
-//!                       whichever arrives first
+//!                       whichever arrives first. The top bit
+//!                       ([`response::RESPONSE_HEADERS_FLAG`]) is not part of
+//!                       the status: it marks that the ENCODED OBJECT (not the
+//!                       fragment) carries a trailing header block.
 //!   byte 7+S..9+S       frag_index (u16 BE, 0-based; also the RaptorQ
 //!                       encoding-symbol id)
 //!   byte 9+S..11+S      frag_total (u16 BE, >= 1)
@@ -59,6 +62,13 @@
 //!   byte 15+S..17+S     frag_len (u16 BE) — symbol bytes in THIS fragment
 //!   byte 17+S..         symbol bytes
 //! ```
+//!
+//! The bytes the fragments carry are not the body directly, they are an
+//! **encoded object**. With no headers the object IS the body. With headers it
+//! is `body | header entries | block_len (u32 BE)`, and the status's top bit
+//! says so — see [`response::pack_response`]. Headers therefore cost nothing
+//! per fragment and do not move [`response::MAX_RESPONSE_FRAGMENT`], which the
+//! whole symbol geometry is derived from.
 //!
 //! ## Requests are single-frame; responses fragment
 //!
@@ -96,9 +106,10 @@
 pub mod response;
 
 pub use response::{
-    decode_response, encode_response_fragment, split_response, FragmentOutcome, ResponseDecoder,
-    ResponseSymbols, RpcResponse, MAX_RESPONSE_BODY, MAX_RESPONSE_FRAGMENT, MAX_RESPONSE_FRAGMENTS,
-    RPC_REPAIR_SYMBOLS, RPC_RESPONSE_OVERHEAD_BASE,
+    decode_response, encode_response_fragment, pack_response, split_response, unpack_response,
+    FragmentOutcome, ResponseDecoder, ResponseHeader, ResponseSymbols, RpcResponse,
+    MAX_RESPONSE_BODY, MAX_RESPONSE_FRAGMENT, MAX_RESPONSE_FRAGMENTS, MAX_RESPONSE_HEADER_BLOCK,
+    RESPONSE_HEADERS_FLAG, RPC_REPAIR_SYMBOLS, RPC_RESPONSE_OVERHEAD_BASE,
 };
 
 use crate::aux_mux::AUX_MAX_PAYLOAD;

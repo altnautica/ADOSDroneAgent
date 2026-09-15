@@ -206,6 +206,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "mdns-sd",
  "nix 0.29.0",
  "parking_lot",
  "rmp-serde",
@@ -371,6 +372,7 @@ version = "0.1.0"
 dependencies = [
  "ados-config",
  "ados-macpin",
+ "ados-protocol",
  "ados-supervisor",
  "anyhow",
  "getrandom 0.2.17",

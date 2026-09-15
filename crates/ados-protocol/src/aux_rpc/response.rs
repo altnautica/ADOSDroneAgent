@@ -37,6 +37,39 @@ use crate::node_status::MAX_DEVICE_ID;
 /// 1 sender_len, 4 id, 2 status, 2 frag_index, 2 frag_total, 4 oti, 2 frag_len.
 pub const RPC_RESPONSE_OVERHEAD_BASE: usize = 17;
 
+/// Set on the wire `status` when the reassembled object carries a trailing
+/// header block.
+///
+/// # Why a flag and a trailer rather than per-fragment fields
+///
+/// Headers are per-RESPONSE, not per-fragment. Putting them beside `status` in
+/// the fragment header would replicate them across every fragment (26 of them
+/// on `/api/status/full`) and shrink [`MAX_RESPONSE_FRAGMENT`], which is the
+/// symbol size the whole RaptorQ geometry is derived from. So they ride inside
+/// the encoded object instead, after the body, and the fragment layout does not
+/// move at all.
+///
+/// HTTP statuses are 100..=599, so the top bit of the `u16` is free and
+/// unambiguous. A receiver that sees it knows the object has a trailer; one
+/// that does not see it treats the object as a bare body, which is exactly what
+/// a build without header support sends.
+///
+/// # Mixed builds
+///
+/// A drone older than this field sends no flag and no trailer, and a current
+/// ground reads its answer unchanged — that direction is fully compatible. The
+/// other direction is why [`pack_response`] emits a trailer ONLY when there is
+/// a header worth carrying: a JSON read, which is every relayed call that works
+/// today, stays byte-identical, and the responses that gain a trailer are the
+/// ones a headerless lane could not deliver usably in the first place.
+pub const RESPONSE_HEADERS_FLAG: u16 = 0x8000;
+
+/// Largest header block [`pack_response`] will attach. Headers are metadata
+/// about a body that is itself bounded by [`MAX_RESPONSE_BODY`]; a kilobyte is
+/// four times the allow-listed set's realistic worst case and keeps a
+/// misbehaving upstream from spending the body's airtime on its own headers.
+pub const MAX_RESPONSE_HEADER_BLOCK: usize = 1024;
+
 /// Repair symbols emitted alongside a response's systematic symbols.
 ///
 /// Four is chosen against the measured 0.7% per-fragment loss and the 26-symbol
@@ -164,6 +197,109 @@ pub fn split_response(body: &[u8]) -> Option<ResponseSymbols> {
             .map(|packet| packet.split().1)
             .collect(),
     })
+}
+
+/// One response header carried across the lane.
+pub type ResponseHeader = (String, String);
+
+/// Fold a body and its headers into the object [`split_response`] encodes, and
+/// return the wire `status` that describes it.
+///
+/// With no headers the object IS the body and the status is untouched, so a
+/// build with header support and one without put identical bytes on the air for
+/// the calls that carry none.
+///
+/// Layout of the trailer, appended after the body:
+///
+/// ```text
+///   per entry:  name_len (u8) | name | value_len (u16 BE) | value
+///   then:       block_len (u32 BE) — bytes of entries, NOT counting these 4
+/// ```
+///
+/// The length goes LAST because the reader arrives at the end of the object,
+/// not the start: it reads the final 4 bytes, steps back that far, and the
+/// bytes before that point are the body. A leading length would force the
+/// reader to know where the body ended in order to find where it ended.
+///
+/// An entry whose name or value will not fit its length prefix, or a block past
+/// [`MAX_RESPONSE_HEADER_BLOCK`], is dropped: a header is metadata, and losing
+/// one must never cost the body.
+pub fn pack_response(status: u16, body: &[u8], headers: &[ResponseHeader]) -> (u16, Vec<u8>) {
+    let mut block: Vec<u8> = Vec::new();
+    for (name, value) in headers {
+        if name.is_empty() || name.len() > u8::MAX as usize || value.len() > u16::MAX as usize {
+            continue;
+        }
+        let entry = 1 + name.len() + 2 + value.len();
+        if block.len() + entry > MAX_RESPONSE_HEADER_BLOCK {
+            break;
+        }
+        block.push(name.len() as u8);
+        block.extend_from_slice(name.as_bytes());
+        block.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        block.extend_from_slice(value.as_bytes());
+    }
+    if block.is_empty() {
+        return (status, body.to_vec());
+    }
+    let mut object = Vec::with_capacity(body.len() + block.len() + 4);
+    object.extend_from_slice(body);
+    let block_len = block.len() as u32;
+    object.extend_from_slice(&block);
+    object.extend_from_slice(&block_len.to_be_bytes());
+    (status | RESPONSE_HEADERS_FLAG, object)
+}
+
+/// Split a reassembled object back into its real status, its body, and its
+/// headers. The inverse of [`pack_response`].
+///
+/// A corrupt or self-inconsistent trailer yields no headers and the object
+/// verbatim as the body: the body is the thing the caller asked for, and
+/// guessing at a damaged trailer could truncate it.
+pub fn unpack_response(status: u16, object: Vec<u8>) -> (u16, Vec<u8>, Vec<ResponseHeader>) {
+    if status & RESPONSE_HEADERS_FLAG == 0 {
+        return (status, object, Vec::new());
+    }
+    let status = status & !RESPONSE_HEADERS_FLAG;
+    let Some(len_at) = object.len().checked_sub(4) else {
+        return (status, object, Vec::new());
+    };
+    let block_len = u32::from_be_bytes([
+        object[len_at],
+        object[len_at + 1],
+        object[len_at + 2],
+        object[len_at + 3],
+    ]) as usize;
+    let Some(block_at) = len_at.checked_sub(block_len) else {
+        return (status, object, Vec::new());
+    };
+    let Some(headers) = parse_header_block(&object[block_at..len_at]) else {
+        return (status, object, Vec::new());
+    };
+    let mut body = object;
+    body.truncate(block_at);
+    (status, body, headers)
+}
+
+/// Parse the entry list. `None` on any inconsistency, so the caller keeps the
+/// object whole rather than trusting a half-read trailer.
+fn parse_header_block(mut block: &[u8]) -> Option<Vec<ResponseHeader>> {
+    let mut out = Vec::new();
+    while !block.is_empty() {
+        let name_len = *block.first()? as usize;
+        if name_len == 0 {
+            return None;
+        }
+        let rest = block.get(1..)?;
+        let name = std::str::from_utf8(rest.get(..name_len)?).ok()?;
+        let rest = rest.get(name_len..)?;
+        let value_len = u16::from_be_bytes([*rest.first()?, *rest.get(1)?]) as usize;
+        let rest = rest.get(2..)?;
+        let value = std::str::from_utf8(rest.get(..value_len)?).ok()?;
+        out.push((name.to_string(), value.to_string()));
+        block = rest.get(value_len..)?;
+    }
+    Some(out)
 }
 
 /// Encode one response fragment as an aux payload.
@@ -328,6 +464,92 @@ mod tests {
     use super::*;
 
     const SENDER: &[u8] = b"ados-abc123";
+
+    fn hdr(name: &str, value: &str) -> ResponseHeader {
+        (name.to_string(), value.to_string())
+    }
+
+    #[test]
+    fn a_headerless_response_is_byte_identical_to_a_build_without_header_support() {
+        // The compatibility guarantee: an upgraded drone answering a relayed
+        // JSON read puts exactly the bytes on the air that it always did, so a
+        // ground station that has not upgraded keeps working.
+        let body = br#"{"ok":true}"#;
+        let (status, object) = pack_response(200, body, &[]);
+        assert_eq!(status, 200, "no flag when there is nothing to carry");
+        assert_eq!(object, body);
+    }
+
+    #[test]
+    fn a_content_type_survives_the_round_trip() {
+        let body = b"id,lat,lon\n1,0,0\n";
+        let headers = vec![
+            hdr("content-type", "text/csv; charset=utf-8"),
+            hdr("content-disposition", "attachment; filename=\"log.csv\""),
+        ];
+        let (wire_status, object) = pack_response(200, body, &headers);
+        assert_eq!(wire_status & RESPONSE_HEADERS_FLAG, RESPONSE_HEADERS_FLAG);
+
+        let (status, got_body, got_headers) = unpack_response(wire_status, object);
+        assert_eq!(status, 200, "the flag is stripped, not leaked to the caller");
+        assert_eq!(got_body, body);
+        assert_eq!(got_headers, headers);
+    }
+
+    #[test]
+    fn headers_survive_the_whole_fragment_round_trip_with_a_lost_fragment() {
+        // The end-to-end property: pack → split → lose a symbol → reassemble →
+        // unpack still yields the body AND its content-type.
+        let body = vec![0xABu8; 4000];
+        let headers = vec![hdr("content-type", "application/octet-stream")];
+        let (wire_status, object) = pack_response(200, &body, &headers);
+        let split = split_response(&object).unwrap();
+        let total = split.symbols.len() as u16;
+        let mut decoder = ResponseDecoder::new(split.oti).unwrap();
+        let mut assembled = None;
+        for (i, symbol) in split.symbols.iter().enumerate() {
+            if i == 1 {
+                continue; // radio dropped it; the repair symbols cover it
+            }
+            let payload =
+                encode_response_fragment(SENDER, 9, wire_status, i as u16, total, split.oti, symbol)
+                    .unwrap();
+            let frag = decode_response(&payload).unwrap();
+            assert_eq!(frag.status, wire_status);
+            if let FragmentOutcome::Complete(out) = decoder.push(frag.index, frag.body) {
+                assembled = Some(out);
+                break;
+            }
+        }
+        let (status, got_body, got_headers) =
+            unpack_response(wire_status, assembled.expect("repair symbols must close the block"));
+        assert_eq!(status, 200);
+        assert_eq!(got_body, body);
+        assert_eq!(got_headers, headers);
+    }
+
+    #[test]
+    fn a_damaged_trailer_yields_the_object_verbatim_rather_than_a_truncated_body() {
+        // Never guess at a trailer: a wrong guess silently shortens the body,
+        // which is the one failure the caller cannot detect.
+        let (wire_status, mut object) = pack_response(200, b"payload", &[hdr("a", "b")]);
+        let last = object.len() - 1;
+        object[last] = 0xFF; // block_len now points past the front of the object
+        let (status, body, headers) = unpack_response(wire_status, object.clone());
+        assert_eq!(status, 200);
+        assert_eq!(body, object);
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn a_header_block_past_the_ceiling_is_truncated_not_allowed_to_eat_the_body() {
+        let huge = "x".repeat(MAX_RESPONSE_HEADER_BLOCK);
+        let headers = vec![hdr("content-type", "text/plain"), hdr("bloat", &huge)];
+        let (wire_status, object) = pack_response(200, b"body", &headers);
+        let (_, body, got) = unpack_response(wire_status, object);
+        assert_eq!(body, b"body");
+        assert_eq!(got, vec![hdr("content-type", "text/plain")]);
+    }
 
     /// Encode a whole body the way the drone does, then decode it the way the
     /// ground does, delivering `order` and skipping `drop`.
