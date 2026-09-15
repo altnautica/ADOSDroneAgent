@@ -28,7 +28,7 @@ def _good_manifest_dict() -> dict:
             "isolation": "subprocess",
             "permissions": [
                 "hardware.spi",
-                {"id": "vehicle.command", "required": False},
+                {"id": "hardware.i2c", "required": False},
             ],
             "resources": {
                 "max_ram_mb": 64,
@@ -59,7 +59,7 @@ def test_good_manifest_parses() -> None:
     assert m.agent is not None
     assert m.gcs is not None
     assert "hardware.spi" in m.declared_permissions()
-    assert "vehicle.command" in m.declared_permissions()
+    assert "hardware.i2c" in m.declared_permissions()
     assert "ui.slot.fc-tab" in m.declared_permissions()
     assert m.agent.permissions[0].required is True  # bare-string permission
     assert m.agent.permissions[1].required is False  # object form

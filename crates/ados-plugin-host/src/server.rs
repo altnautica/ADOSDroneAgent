@@ -11,8 +11,9 @@
 //! [`TokenIssuer`] mints and verifies (HMAC-SHA256 over the sorted-caps
 //! payload, 600 s TTL). This server re-implements none of that; it composes it.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
@@ -20,16 +21,28 @@ use ados_protocol::plugin::{CapabilityToken, Envelope, TokenIssuer, PROTOCOL_VER
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::dispatch::{gate, Gate, Method};
 use crate::handlers::{self, Event, EventBus, PublishOutcome};
 use crate::host::HostServices;
 use crate::invoke::{InvokeRegistry, InvokeRequest};
+use crate::token_secret::TokenMint;
 
 /// Default per-plugin socket directory. Part of the plugin wire contract: the
 /// runtime resolves the same path, so changing it breaks every installed plugin.
 pub const DEFAULT_SOCKET_DIR: &str = "/run/ados/plugins";
+
+/// The event method the host pushes a rotated capability token on.
+///
+/// Part of the plugin wire contract: the Python `ipc_client` and the Rust SDK
+/// client both listen for it and replace the token they present on subsequent
+/// requests, so a rotation never costs the plugin a failed call. Args are
+/// `{token, expires_at, granted_caps}` — the grant list rides along so a
+/// plugin can log (or degrade on) a capability it just lost instead of
+/// discovering it through a `capability_denied`.
+pub const TOKEN_REFRESH_METHOD: &str = "token.refresh";
 
 /// Errors raised while running one plugin's socket server.
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +68,58 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Live per-plugin token-refresh channels.
+///
+/// A rotation has to reach the *open connection*, not just the env file: the
+/// connection gates every request against the token it verified at `hello`, so
+/// rewriting the env file alone would leave a running plugin on the old grant
+/// set until it restarted. Each connection registers a sender here for its
+/// session; [`push`](Self::push) hands a freshly minted token to it, the
+/// connection swaps its in-memory token and forwards a `token.refresh` event so
+/// the plugin's own copy (used on reconnect) is current too.
+#[derive(Default)]
+pub struct RefreshRegistry {
+    inner: Mutex<HashMap<String, mpsc::Sender<CapabilityToken>>>,
+}
+
+impl RefreshRegistry {
+    pub fn new() -> Self {
+        RefreshRegistry {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn register(&self, plugin_id: &str, tx: mpsc::Sender<CapabilityToken>) {
+        if let Ok(mut map) = self.inner.lock() {
+            map.insert(plugin_id.to_string(), tx);
+        }
+    }
+
+    /// Drop this session's sender, identity-checked so a superseding reconnect
+    /// is never evicted by an ending session.
+    fn unregister_if(&self, plugin_id: &str, tx: &mpsc::Sender<CapabilityToken>) {
+        if let Ok(mut map) = self.inner.lock() {
+            if map.get(plugin_id).is_some_and(|held| held.same_channel(tx)) {
+                map.remove(plugin_id);
+            }
+        }
+    }
+
+    /// Hand a token to a live connection. `false` when the plugin has no open
+    /// session (nothing to update; the env file the caller already wrote is
+    /// what the plugin will read when it connects).
+    pub fn push(&self, plugin_id: &str, token: CapabilityToken) -> bool {
+        let tx = match self.inner.lock() {
+            Ok(map) => map.get(plugin_id).cloned(),
+            Err(_) => None,
+        };
+        match tx {
+            Some(tx) => tx.try_send(token).is_ok(),
+            None => false,
+        }
+    }
+}
+
 /// A plugin RPC server bound to one socket. Holds the token issuer and the
 /// event bus shared with the rest of the host, plus the host-service facade the
 /// dispatcher routes host-coupled methods through.
@@ -66,6 +131,12 @@ pub struct PluginIpcServer<H: HostServices> {
     /// The host-to-plugin invoke seam: each connection registers its outbound
     /// sender here, and the control socket reaches a plugin's tools through it.
     invoke: Arc<InvokeRegistry>,
+    /// Live token-refresh channels, one per open session.
+    refresh: Arc<RefreshRegistry>,
+    /// Mints a plugin's current token from state. Present in the wired daemon;
+    /// `None` in a bare server (tests, the in-process smoke path), where an
+    /// expired token stays expired.
+    mint: Option<Arc<TokenMint>>,
 }
 
 impl<H: HostServices> PluginIpcServer<H> {
@@ -81,7 +152,23 @@ impl<H: HostServices> PluginIpcServer<H> {
             bus,
             host,
             invoke: Arc::new(InvokeRegistry::new()),
+            refresh: Arc::new(RefreshRegistry::new()),
+            mint: None,
         }
+    }
+
+    /// Attach the token mint so an expired token is re-minted in place rather
+    /// than failing the request.
+    ///
+    /// Without it the server answers `token_expired` and the plugin has no
+    /// recovery path — the whole LIFE-TOKEN-TTL failure. With it, a request
+    /// arriving on an aged-out token triggers a mint from the *current* grant
+    /// set, the connection adopts the new token, the plugin is told, and the
+    /// request is re-gated. A revoked capability is still refused, because the
+    /// re-mint reads state.
+    pub fn with_token_mint(mut self, mint: Arc<TokenMint>) -> Self {
+        self.mint = Some(mint);
+        self
     }
 
     /// The shared invoke registry the control socket forwards a `tool.invoke`
@@ -89,6 +176,12 @@ impl<H: HostServices> PluginIpcServer<H> {
     /// `POST /api/plugins/{id}/tools/{tool}/invoke` reaches a live plugin.
     pub fn invoke_registry(&self) -> Arc<InvokeRegistry> {
         self.invoke.clone()
+    }
+
+    /// The shared refresh registry, so the reconciler can push a rotated token
+    /// into a live session.
+    pub fn refresh_registry(&self) -> Arc<RefreshRegistry> {
+        self.refresh.clone()
     }
 
     /// The socket path for a plugin id.
@@ -112,6 +205,8 @@ impl<H: HostServices> PluginIpcServer<H> {
         let host = self.host.clone();
         let socket_dir = self.socket_dir.clone();
         let invoke = self.invoke.clone();
+        let refresh = self.refresh.clone();
+        let mint = self.mint.clone();
         let task = tokio::spawn(async move {
             loop {
                 let stream = match listener.accept().await {
@@ -125,6 +220,8 @@ impl<H: HostServices> PluginIpcServer<H> {
                     host: host.clone(),
                     socket_dir: socket_dir.clone(),
                     invoke: invoke.clone(),
+                    refresh: refresh.clone(),
+                    mint: mint.clone(),
                 };
                 tokio::spawn(async move {
                     if let Err(err) = conn.run(stream).await {
@@ -168,6 +265,11 @@ struct Connection<H: HostServices> {
     /// The shared invoke registry: this connection registers its outbound
     /// sender here while its session is up so the control socket can reach it.
     invoke: Arc<InvokeRegistry>,
+    /// The shared refresh registry: this connection registers a token sender
+    /// here so a rotation reaches the live session, not just the env file.
+    refresh: Arc<RefreshRegistry>,
+    /// Mints this plugin's current token from state, for the on-expiry re-mint.
+    mint: Option<Arc<TokenMint>>,
 }
 
 impl<H: HostServices> Connection<H> {
@@ -184,7 +286,10 @@ impl<H: HostServices> Connection<H> {
             send_error(&mut write_half, "-", "expected hello envelope").await?;
             return Ok(());
         }
-        let token = match CapabilityToken::from_token_string(&env.token) {
+        // Mutable: a rotation (permission change or TTL refresh) replaces the
+        // session's token in place, so the gate always runs against the
+        // operator's current grant set without tearing the connection down.
+        let mut token = match CapabilityToken::from_token_string(&env.token) {
             Ok(t) => t,
             Err(e) => {
                 send_error(
@@ -312,6 +417,14 @@ impl<H: HostServices> Connection<H> {
         let mut reap = tokio::time::interval(std::time::Duration::from_secs(10));
         reap.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Token rotation: register a token sender so a re-mint (permission
+        // change, or the daemon's proactive pre-expiry refresh) reaches THIS
+        // session. Without it a rotation would only rewrite the env file and
+        // the live connection would keep gating on the token it verified at
+        // `hello` until the plugin restarted.
+        let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel::<CapabilityToken>(4);
+        self.refresh.register(&self.plugin_id, refresh_tx.clone());
+
         // ---- dispatch loop --------------------------------------------
         let result = loop {
             // Race the inbound request against an outgoing event or MAVLink frame
@@ -340,7 +453,7 @@ impl<H: HostServices> Connection<H> {
                     if let Err(e) = self
                         .handle_request(
                             &mut write_half,
-                            &token,
+                            &mut token,
                             env,
                             &mut subscriptions,
                             &mut mavlink_subs,
@@ -506,6 +619,46 @@ impl<H: HostServices> Connection<H> {
                         }
                     }
                 }
+                fresh = refresh_rx.recv() => {
+                    // A rotated token for this session. Adopt it (so the gate
+                    // runs against the operator's current grant set from the
+                    // next request on) and forward it to the plugin, whose own
+                    // copy is what it presents if it reconnects. `None` means
+                    // the registry dropped the sender (session ending); keep
+                    // serving.
+                    if let Some(fresh) = fresh {
+                        let expires_at = fresh.expires_at;
+                        let caps: Vec<Value> = fresh
+                            .granted_caps
+                            .iter()
+                            .map(|c| Value::from(c.as_str()))
+                            .collect();
+                        let wire = fresh.to_token_string();
+                        token = fresh;
+                        let env = Envelope {
+                            version: PROTOCOL_VERSION,
+                            kind: "event".to_string(),
+                            method: TOKEN_REFRESH_METHOD.to_string(),
+                            capability: String::new(),
+                            args: Value::Map(vec![
+                                (Value::from("token"), Value::from(wire)),
+                                (Value::from("expires_at"), Value::from(expires_at)),
+                                (Value::from("granted_caps"), Value::Array(caps)),
+                            ]),
+                            request_id: format!("tok-{}", now_ms()),
+                            token: String::new(),
+                            error: None,
+                        };
+                        if let Err(e) = write_frame(&mut write_half, &env).await {
+                            break Err(e);
+                        }
+                        tracing::info!(
+                            plugin_id = %self.plugin_id,
+                            expires_at,
+                            "pushed rotated capability token to plugin"
+                        );
+                    }
+                }
                 _ = reap.tick() => {
                     // Drop pending invokes whose one-shot reply receiver was
                     // dropped by the registry (timeout/abandon). Cheap; bounds the
@@ -522,6 +675,10 @@ impl<H: HostServices> Connection<H> {
         // drops -> plugin_disconnected), so no control-socket invoke hangs past
         // the session.
         self.invoke.unregister_if(&self.plugin_id, &invoke_tx);
+        // Same for the token sender: a rotation after this session ended has
+        // nothing live to reach, and the env file it also rewrote is what the
+        // plugin reads when it reconnects.
+        self.refresh.unregister_if(&self.plugin_id, &refresh_tx);
 
         // Stop the per-subscription forwarder tasks so none survive the session.
         for f in forwarders {
@@ -535,7 +692,7 @@ impl<H: HostServices> Connection<H> {
     async fn handle_request<W: AsyncWriteExt + Unpin>(
         &self,
         write_half: &mut W,
-        token: &CapabilityToken,
+        token: &mut CapabilityToken,
         env: Envelope,
         subscriptions: &mut Vec<String>,
         mavlink_subs: &mut Vec<String>,
@@ -555,6 +712,58 @@ impl<H: HostServices> Connection<H> {
         forwarders: &mut Vec<JoinHandle<()>>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
+        if token.is_expired(now_secs()) {
+            // The token aged out mid-session. The session itself is still
+            // authenticated (it passed `hello`), so the honest answer is to
+            // re-mint from authoritative state rather than to refuse: the TTL
+            // exists to bound a leaked token, not to end a plugin's access at
+            // the ten-minute mark. `mint_current` re-reads the grant set, so a
+            // capability the operator revoked in the meantime is NOT carried
+            // into the new token, and it rewrites the env file so a reconnect
+            // presents the live token too.
+            match self.mint.as_ref().and_then(|m| m.mint_current(&self.plugin_id)) {
+                Some(fresh) => {
+                    tracing::info!(
+                        plugin_id = %self.plugin_id,
+                        expires_at = fresh.expires_at,
+                        "re-minted an expired capability token mid-session"
+                    );
+                    let wire = fresh.to_token_string();
+                    let expires_at = fresh.expires_at;
+                    let caps: Vec<Value> = fresh
+                        .granted_caps
+                        .iter()
+                        .map(|c| Value::from(c.as_str()))
+                        .collect();
+                    *token = fresh;
+                    let notice = Envelope {
+                        version: PROTOCOL_VERSION,
+                        kind: "event".to_string(),
+                        method: TOKEN_REFRESH_METHOD.to_string(),
+                        capability: String::new(),
+                        args: Value::Map(vec![
+                            (Value::from("token"), Value::from(wire)),
+                            (Value::from("expires_at"), Value::from(expires_at)),
+                            (Value::from("granted_caps"), Value::Array(caps)),
+                        ]),
+                        request_id: format!("tok-{}", now_ms()),
+                        token: String::new(),
+                        error: None,
+                    };
+                    write_frame(write_half, &notice).await?;
+                }
+                // No mint wired, or the plugin is no longer enabled: the
+                // expired token stays expired and the request is refused.
+                None => {
+                    return send_error(
+                        write_half,
+                        &req_id,
+                        crate::dispatch::errors::TOKEN_EXPIRED,
+                    )
+                    .await
+                }
+            }
+        }
         let expired = token.is_expired(now_secs());
         match gate(&env.method, expired, &token.granted_caps) {
             Gate::TokenExpired => {

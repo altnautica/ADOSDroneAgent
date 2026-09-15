@@ -194,7 +194,7 @@ agent:
   entrypoint: agent/plugin.py
   isolation: subprocess
   permissions:
-    - vehicle.command
+    - mavlink.write
 """
     archive = _build_archive(
         tmp_path,

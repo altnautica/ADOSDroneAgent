@@ -103,8 +103,10 @@ def test_render_unit_emits_resource_limits() -> None:
     assert "TasksMax=16" in unit
     assert f"Slice={PLUGIN_SLICE_NAME}" in unit
     assert "Restart=on-failure" in unit
-    assert "StartLimitBurst=5" in unit
-    assert "StartLimitInterval=60s" in unit
+    # No start rate limit: a plugin whose host socket is not up yet must keep
+    # retrying rather than land in a failed state an operator clears by hand.
+    assert "StartLimitIntervalSec=0" in unit
+    assert "StartLimitBurst" not in unit
     assert "PrivateTmp=yes" in unit
     assert "ProtectSystem=strict" in unit
     assert "NoNewPrivileges=yes" in unit

@@ -46,6 +46,18 @@ from ados.plugins.rpc import (
 # generated table names for it, so the two sides cannot drift.
 _TOOL_INVOKE_METHOD = "tool.invoke"
 
+# The event method the host pushes a rotated capability token on. A token has a
+# 600 s TTL and a plugin runs for a whole flight, so the host re-mints ahead of
+# expiry and on every permission change; this is how the plugin's own copy
+# stays current. The args are ``{token, expires_at, granted_caps}``.
+#
+# The plugin MUST adopt it: the token it presents on the next request is what
+# the host gates against, and a stale one is refused. Before this existed
+# nothing rotated at all, so every gated call from every plugin started
+# failing ``token_expired`` ten minutes after the host began serving, with the
+# plugin process still up and only per-call errors in its own log.
+_TOKEN_REFRESH_METHOD = "token.refresh"
+
 # ---------------------------------------------------------------------
 # Typed exceptions surfaced to plugin code
 # ---------------------------------------------------------------------
@@ -529,6 +541,8 @@ class PluginIpcClient:
                         await self._dispatch_button(env)
                     elif env.method == "msp.deliver":
                         await self._dispatch_msp(env)
+                    elif env.method == _TOKEN_REFRESH_METHOD:
+                        self._adopt_refreshed_token(env)
                     else:
                         await self._dispatch_event(env)
                 elif env.type == "request" and env.method == _TOOL_INVOKE_METHOD:
@@ -547,6 +561,48 @@ class PluginIpcClient:
                 plugin_id=self._plugin_id,
                 error=str(exc),
             )
+
+    def _adopt_refreshed_token(self, env: Envelope) -> None:
+        """Replace the token this client presents with the host's fresh one.
+
+        Called for a ``token.refresh`` event. The host re-mints from
+        authoritative state, so the new token reflects the operator's CURRENT
+        grant set — a capability that was just revoked is absent from it, and
+        the plugin's next call using that capability is correctly denied. The
+        granted set is stored too so a ``tool.invoke`` gate and any plugin-side
+        capability introspection stay consistent with the wire.
+
+        A malformed payload is ignored rather than clearing the token: keeping
+        a working token beats dropping to one that cannot authenticate over a
+        bad frame.
+        """
+        token = (env.args or {}).get("token")
+        if not isinstance(token, str) or not token:
+            log.warning(
+                "plugin_token_refresh_malformed", plugin_id=self._plugin_id
+            )
+            return
+        try:
+            parsed = CapabilityToken.from_string(token)
+        except TokenError as exc:
+            log.warning(
+                "plugin_token_refresh_unparseable",
+                plugin_id=self._plugin_id,
+                error=str(exc),
+            )
+            return
+        lost = self._granted_caps - parsed.granted_caps
+        self._token = token
+        self._granted_caps = parsed.granted_caps
+        log.info(
+            "plugin_token_refreshed",
+            plugin_id=self._plugin_id,
+            expires_at=parsed.expires_at,
+            # Named explicitly: a plugin losing a capability mid-flight is
+            # something its author needs to see in the log, not something to
+            # discover through a later capability_denied.
+            revoked=sorted(lost),
+        )
 
     async def _handle_tool_invoke(self, env: Envelope) -> None:
         """Run a declared tool for a host ``tool.invoke`` request and reply.

@@ -45,6 +45,22 @@ pub const METHOD_CONFIG_SET: &str = "config.set";
 /// send on the plugin's own token carrying `mcp.expose`.
 pub const METHOD_TOOL_INVOKE: &str = "tool.invoke";
 
+/// The control method that re-mints one plugin's capability token from the
+/// current grant set and pushes it into the plugin's live session.
+///
+/// This is how a grant or a revoke becomes effective without restarting
+/// anything: the lifecycle controller writes state, then pokes this, and the
+/// plugin's next request is gated against the new set. Args: `{plugin_id}`.
+pub const METHOD_TOKEN_ROTATE: &str = "token.rotate";
+
+/// The control method that re-reads plugin state and brings the served sockets
+/// in line with it.
+///
+/// This is how a freshly enabled plugin gets a socket and a token without a
+/// daemon restart. The controller calls it BEFORE starting the plugin unit, so
+/// the runner finds both already in place. Args: none.
+pub const METHOD_PLUGIN_RECONCILE: &str = "plugin.reconcile";
+
 /// The control socket path under a socket dir.
 pub fn control_socket_path(socket_dir: &Path) -> PathBuf {
     socket_dir.join(CONTROL_SOCKET_NAME)
@@ -65,6 +81,20 @@ pub trait ConfigControl: Send + Sync {
         value: Value,
         scope: &str,
     ) -> Result<String, String>;
+}
+
+/// The lifecycle half of the control surface: the two operations that keep a
+/// live daemon equal to what a lifecycle controller just wrote.
+///
+/// Implemented by [`crate::reconcile::PluginReconciler`]. A trait keeps this
+/// module testable against a stub, and keeps the control socket usable in a
+/// daemon that has no reconciler wired (the methods then answer with an
+/// explicit "not wired" error rather than silently succeeding).
+pub trait LifecycleControl: Send + Sync {
+    /// Re-mint `plugin_id`'s token. `Ok(true)` when a live session received it.
+    fn rotate_token(&self, plugin_id: &str) -> Result<bool, String>;
+    /// Reconcile served sockets against state. Returns `(started, stopped, serving)`.
+    fn reconcile(&self) -> (usize, usize, usize);
 }
 
 fn arg<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
@@ -196,9 +226,85 @@ async fn handle_tool_invoke(invoke: &InvokeRegistry, req: &Envelope) -> Envelope
     }
 }
 
+/// Handle a lifecycle control request (`token.rotate` / `plugin.reconcile`).
+///
+/// A daemon with no reconciler wired answers with an explicit error naming the
+/// gap, never a bare success: the caller is a lifecycle controller that has
+/// just told an operator a revoke took effect, so a false ack here is the exact
+/// failure the control socket exists to close.
+fn handle_lifecycle(lifecycle: Option<&Arc<dyn LifecycleControl>>, req: &Envelope) -> Envelope {
+    let Some(lifecycle) = lifecycle else {
+        return lifecycle_err(
+            &req.request_id,
+            &req.method,
+            "plugin host has no lifecycle reconciler wired; the change applies \
+             when it next reads state"
+                .into(),
+        );
+    };
+    if req.method == METHOD_PLUGIN_RECONCILE {
+        let (started, stopped, serving) = lifecycle.reconcile();
+        return Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "response".to_string(),
+            method: req.method.clone(),
+            capability: String::new(),
+            args: Value::Map(vec![
+                (Value::from("started"), Value::from(started as u64)),
+                (Value::from("stopped"), Value::from(stopped as u64)),
+                (Value::from("serving"), Value::from(serving as u64)),
+            ]),
+            request_id: req.request_id.clone(),
+            token: String::new(),
+            error: None,
+        };
+    }
+    let Some(plugin_id) = arg_str(&req.args, "plugin_id").filter(|s| !s.is_empty()) else {
+        return lifecycle_err(
+            &req.request_id,
+            &req.method,
+            "plugin_id must be a non-empty string".into(),
+        );
+    };
+    match lifecycle.rotate_token(plugin_id) {
+        Ok(pushed) => Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "response".to_string(),
+            method: req.method.clone(),
+            capability: String::new(),
+            args: Value::Map(vec![
+                (Value::from("rotated"), Value::Boolean(true)),
+                // False means the token was written but no session was open to
+                // receive it, which is correct for an enabled plugin that has
+                // not connected yet. The caller reports the difference rather
+                // than claiming the live plugin was updated.
+                (Value::from("delivered"), Value::Boolean(pushed)),
+            ]),
+            request_id: req.request_id.clone(),
+            token: String::new(),
+            error: None,
+        },
+        Err(e) => lifecycle_err(&req.request_id, &req.method, e),
+    }
+}
+
+fn lifecycle_err(request_id: &str, method: &str, message: String) -> Envelope {
+    Envelope {
+        version: PROTOCOL_VERSION,
+        kind: "response".to_string(),
+        method: method.to_string(),
+        capability: String::new(),
+        args: Value::Map(vec![]),
+        request_id: request_id.to_string(),
+        token: String::new(),
+        error: Some(message),
+    }
+}
+
 async fn serve_connection<H: ConfigControl>(
     host: Arc<H>,
     invoke: Arc<InvokeRegistry>,
+    lifecycle: Option<Arc<dyn LifecycleControl>>,
     mut stream: UnixStream,
 ) {
     // One request/response per connection (the client opens fresh per call,
@@ -220,6 +326,11 @@ async fn serve_connection<H: ConfigControl>(
         Ok(req) if req.method == METHOD_TOOL_INVOKE => {
             handle_tool_invoke(invoke.as_ref(), &req).await
         }
+        Ok(req)
+            if req.method == METHOD_TOKEN_ROTATE || req.method == METHOD_PLUGIN_RECONCILE =>
+        {
+            handle_lifecycle(lifecycle.as_ref(), &req)
+        }
         Ok(req) => handle_request(host.as_ref(), &req),
         Err(e) => err_response("", format!("decode control request: {e}")),
     };
@@ -233,9 +344,14 @@ async fn serve_connection<H: ConfigControl>(
 /// [`crate::server::PluginIpcServer::serve_plugin`]'s bind dance: ensure the
 /// dir, unlink a stale socket, bind, set owner+group mode. Returns the bound
 /// path and the accept-task handle so the daemon can unlink + abort on shutdown.
+///
+/// `lifecycle` is the reconciler the `token.rotate` / `plugin.reconcile`
+/// methods act through. `None` is a daemon with no reconciler, where those two
+/// methods answer with an explicit error.
 pub fn serve_control<H: ConfigControl + 'static>(
     host: Arc<H>,
     invoke: Arc<InvokeRegistry>,
+    lifecycle: Option<Arc<dyn LifecycleControl>>,
     socket_dir: PathBuf,
 ) -> std::io::Result<(PathBuf, JoinHandle<()>)> {
     let path = control_socket_path(&socket_dir);
@@ -253,8 +369,9 @@ pub fn serve_control<H: ConfigControl + 'static>(
             };
             let host = host.clone();
             let invoke = invoke.clone();
+            let lifecycle = lifecycle.clone();
             tokio::spawn(async move {
-                serve_connection(host, invoke, stream).await;
+                serve_connection(host, invoke, lifecycle, stream).await;
             });
         }
     });
@@ -398,7 +515,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let host = Arc::new(StubHost::default());
         let invoke = Arc::new(InvokeRegistry::new());
-        let (path, task) = serve_control(host.clone(), invoke, dir.path().to_path_buf()).unwrap();
+        let (path, task) = serve_control(host.clone(), invoke, None, dir.path().to_path_buf()).unwrap();
 
         let req = request(vec![
             (Value::from("plugin_id"), Value::from("p")),

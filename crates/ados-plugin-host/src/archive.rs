@@ -27,9 +27,9 @@
 //! fail at parse with [`ArchiveError`]. Path-traversal entries (`..` segments,
 //! absolute paths) and symlink entries are rejected.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -288,6 +288,85 @@ fn read_signature(
         ));
     }
     Ok((Some(lines[0].to_string()), Some(lines[1].to_string())))
+}
+
+/// The archive-relative files a manifest's declared halves require.
+///
+/// Returns `(label, relative_path)` pairs for every entrypoint that must exist
+/// as a real file: the GCS bundle at `gcs.entrypoint` when a `gcs` block
+/// exists, and the agent binary at `agent.entrypoint` when
+/// `agent.runtime: rust`. A Python agent's `module:Class` entrypoint is
+/// resolved by the runner, not a packed file, so any value containing a `:` is
+/// excluded. Byte-identical to `_required_entrypoints` in
+/// `ados/plugins/archive.py`.
+fn required_entrypoints(manifest: &PluginManifest) -> Vec<(&'static str, &str)> {
+    let mut required: Vec<(&'static str, &str)> = Vec::new();
+    if let Some(gcs) = &manifest.gcs {
+        if !gcs.entrypoint.contains(':') {
+            required.push(("gcs.entrypoint", gcs.entrypoint.as_str()));
+        }
+    }
+    if let Some(agent) = &manifest.agent {
+        if agent.runtime == crate::manifest::AgentRuntime::Rust
+            && !agent.entrypoint.contains(':')
+        {
+            required.push(("agent.entrypoint", agent.entrypoint.as_str()));
+        }
+    }
+    required
+}
+
+/// Assert every must-exist entrypoint is present.
+///
+/// `present_paths` is the set of archive-relative posix paths actually in the
+/// archive (packed or unpacked). Without this check a cloud-relayed install of
+/// an archive whose GCS bundle or agent binary was never built reported
+/// success, then surfaced as an empty iframe or a unit dying with 203/EXEC —
+/// the failure landing two layers away from its cause.
+pub fn verify_entrypoints_present(
+    manifest: &PluginManifest,
+    present_paths: &BTreeSet<String>,
+) -> Result<(), ArchiveError> {
+    for (label, rel) in required_entrypoints(manifest) {
+        if !present_paths.contains(rel) {
+            return Err(ArchiveError(format!(
+                "plugin {}: manifest declares {label} {rel:?} but that file is \
+                 not present in the archive",
+                manifest.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The set of archive-relative posix paths under an unpacked install dir, for
+/// [`verify_entrypoints_present`].
+pub fn unpacked_paths(root: &Path) -> BTreeSet<String> {
+    let mut out: BTreeSet<String> = BTreeSet::new();
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => stack.push(path),
+                Ok(ft) if ft.is_file() => {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        out.insert(
+                            rel.components()
+                                .map(|c| c.as_os_str().to_string_lossy())
+                                .collect::<Vec<_>>()
+                                .join("/"),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 /// Unpack validated archive bytes to `dest`. The caller is responsible for

@@ -189,8 +189,31 @@ pub struct Compatibility {
     pub ados_version: String,
     #[serde(default)]
     pub gcs_version: Option<String>,
+    /// HAL board ids this plugin supports. Empty means any board. A list
+    /// containing the literal `"*"` also means any board — the scaffolder used
+    /// to emit that form and it was an exact-match reject on every real board,
+    /// so both spellings of "any" are accepted (mirrors the Pydantic
+    /// `Compatibility.supported_boards` note).
     #[serde(default)]
     pub supported_boards: Vec<String>,
+    /// Minimum compute tier (1-4) the plugin needs. `None` means no floor.
+    ///
+    /// Present here because the cloud-relay install path runs this parser, and
+    /// dropping the field made the tier floor enforceable over LAN but not
+    /// over the relay: an NPU-dependent plugin refused on a tier-1 board by
+    /// the Python supervisor installed cleanly when pushed from the cloud, then
+    /// crash-looped at runtime instead of being refused up front.
+    #[serde(default)]
+    pub min_tier: Option<u8>,
+}
+
+impl Compatibility {
+    /// True when `board` satisfies `supported_boards`. Empty list or a `"*"`
+    /// entry means any board.
+    pub fn supports_board(&self, board: &str) -> bool {
+        self.supported_boards.is_empty()
+            || self.supported_boards.iter().any(|b| b == "*" || b == board)
+    }
 }
 
 fn default_risk() -> String {
@@ -278,7 +301,7 @@ agent:
   entrypoint: agent/py/thermal.py
   permissions:
     - hardware.spi
-    - id: vehicle.command
+    - id: mission.write
       required: false
 "#;
 
@@ -294,7 +317,7 @@ agent:
         assert!(m.is_subprocess_agent());
         assert_eq!(
             m.declared_permissions(),
-            ["hardware.spi", "vehicle.command"]
+            ["hardware.spi", "mission.write"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect()
@@ -307,7 +330,7 @@ agent:
         let perms = &m.agent.as_ref().unwrap().permissions;
         assert_eq!(perms[0].id, "hardware.spi");
         assert!(perms[0].required);
-        assert_eq!(perms[1].id, "vehicle.command");
+        assert_eq!(perms[1].id, "mission.write");
         assert!(!perms[1].required);
     }
 

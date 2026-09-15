@@ -158,12 +158,12 @@ def test_filter_drops_undeclared_permissions() -> None:
         installed_at=0,
         permissions={
             "event.publish": PermissionGrant(granted=True, granted_at=1),
-            "vehicle.command": PermissionGrant(granted=True, granted_at=2),
+            "hardware.i2c": PermissionGrant(granted=True, granted_at=2),
         },
     )
     declared = {"event.publish"}
     filter_permissions_against_manifest(install, declared)
-    assert "vehicle.command" not in install.permissions
+    assert "hardware.i2c" not in install.permissions
     assert install.permissions["event.publish"].granted is True
 
 

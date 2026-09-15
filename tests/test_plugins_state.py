@@ -36,14 +36,14 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
     install = _basic_install()
     install.permissions = {
         "hardware.spi": PermissionGrant(granted=True, granted_at=1735001000),
-        "vehicle.command": PermissionGrant(granted=False, granted_at=None),
+        "hardware.i2c": PermissionGrant(granted=False, granted_at=None),
     }
     save_state([install], p)
     out = load_state(p)
     assert len(out) == 1
     assert out[0].plugin_id == "com.example.basic"
     assert out[0].permissions["hardware.spi"].granted is True
-    assert out[0].permissions["vehicle.command"].granted is False
+    assert out[0].permissions["hardware.i2c"].granted is False
 
 
 def test_load_missing_file_returns_empty(tmp_path: Path) -> None:

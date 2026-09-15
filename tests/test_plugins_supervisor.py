@@ -304,7 +304,7 @@ def test_grant_undeclared_permission_rejected(
         run_mock.return_value = MagicMock(returncode=0, stderr="")
         sup.install_archive(archive)
     with pytest.raises(SupervisorError):
-        sup.grant_permission("com.example.basic", "vehicle.command")
+        sup.grant_permission("com.example.basic", "hardware.i2c")
 
 
 def test_remove_unknown_plugin_raises(isolated_paths):
@@ -356,10 +356,10 @@ def test_revoke_permission_unknown_id_is_noop(isolated_paths, tmp_path: Path):
         run_mock.return_value = MagicMock(returncode=0, stderr="")
         sup.install_archive(archive)
     # Permission was never granted; revoking is silently a no-op.
-    sup.revoke_permission("com.example.basic", "vehicle.command")
+    sup.revoke_permission("com.example.basic", "hardware.i2c")
     install = sup.find_install("com.example.basic")
     assert install is not None
-    assert "vehicle.command" not in install.permissions
+    assert "hardware.i2c" not in install.permissions
 
 
 def test_compatibility_blocks_install_when_constraint_excludes(

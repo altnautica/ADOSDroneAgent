@@ -65,7 +65,13 @@ def _install_with_perms(plugin_id: str, **grants: bool) -> PluginInstall:
 
 
 def test_catalog_size_matches_spec() -> None:
-    # 52 agent capabilities in the catalog. Beyond the earlier substrate set
+    # 51 agent capabilities in the catalog. `hardware.i2c` was removed: it
+    # had no wire method, no handler gate, and nothing a sandbox can express,
+    # so it rendered a high-risk row in the install dialog that nothing backed.
+    # The authority it named is covered by mavlink.write / msp.write /
+    # flight.guided_setpoint / flight.rate_setpoint, all enforced.
+    #
+    # Beyond the earlier substrate set
     # (button.subscribe, flight.guided_setpoint, mavlink.tunnel,
     # radio.aux_stream, display.oled.page) and the GPIO output + vision
     # designate/subscribe caps (hardware.gpio_out, vision.detection.subscribe,
@@ -77,7 +83,7 @@ def test_catalog_size_matches_spec() -> None:
     # stream sources. msp.read/msp.write gate the MSP lane the way mavlink.read/
     # mavlink.write gate MAVLink, and vision.model.read lets a plugin read the
     # model catalog without being able to register into it.
-    assert len(AGENT_CAPABILITIES) == 52
+    assert len(AGENT_CAPABILITIES) == 51
 
 
 def test_gated_caps_are_marked_enforced() -> None:
@@ -101,6 +107,23 @@ def test_gated_caps_are_marked_enforced() -> None:
             "display.oled.page",
             "estimator.pose.inject",
             "event.publish",
+            # Enforced by the generated systemd unit rather than a wire gate:
+            # a DeviceAllow / RestrictAddressFamilies / InaccessiblePaths line
+            # derived from the granted set (see ados.plugins.systemd
+            # .sandbox_directives and ados_plugin_host::SANDBOX_ENFORCED_CAPS).
+            # These were the ten decorative permissions -- the install dialog
+            # told the operator a plugin had been granted or denied I2C, SPI,
+            # GPIO, USB, host filesystem and outbound network, and nothing
+            # downstream acted on the answer.
+            "filesystem.host",
+            "hardware.camera.csi",
+            "hardware.gpio",
+            "hardware.i2c",
+            "hardware.spi",
+            "hardware.uart",
+            "hardware.usb",
+            "hardware.usb.uvc",
+            "network.outbound",
             "event.subscribe",
             "flight.guided_setpoint",
             "flight.rate_setpoint",
@@ -170,6 +193,6 @@ def test_has_capability_true_when_granted() -> None:
 def test_require_capability_raises_on_missing() -> None:
     sup = _StubSupervisor([_install_with_perms(PLUGIN_ID)])
     with pytest.raises(CapabilityDenied) as excinfo:
-        require_capability(sup, PLUGIN_ID, "vehicle.command")
+        require_capability(sup, PLUGIN_ID, "hardware.i2c")
     assert excinfo.value.plugin_id == PLUGIN_ID
-    assert excinfo.value.capability == "vehicle.command"
+    assert excinfo.value.capability == "hardware.i2c"

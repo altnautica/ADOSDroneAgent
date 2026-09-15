@@ -88,7 +88,6 @@ def test_high_risk_caps_match_spec():
         "mavlink.component.vio",
         "estimator.pose.inject",
         "process.spawn",
-        "vehicle.command",
         "mission.write",
     }
     for cap_id in expected_high_or_critical:

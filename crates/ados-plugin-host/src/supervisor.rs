@@ -123,6 +123,11 @@ pub struct Paths {
     pub unit_dir: PathBuf,
     pub state_path: PathBuf,
     pub log_dir: PathBuf,
+    /// The per-plugin socket dir, which is also where the plugin host's control
+    /// socket lives. The controller reaches the live daemon through it after a
+    /// grant or revoke, so a permission change is effective immediately rather
+    /// than at the next daemon restart.
+    pub socket_dir: PathBuf,
 }
 
 impl Default for Paths {
@@ -132,6 +137,7 @@ impl Default for Paths {
             unit_dir: PathBuf::from(PLUGIN_UNIT_DIR),
             state_path: PathBuf::from(state::PLUGIN_STATE_PATH),
             log_dir: PathBuf::from(PLUGIN_LOG_DIR),
+            socket_dir: PathBuf::from(crate::server::DEFAULT_SOCKET_DIR),
         }
     }
 }
@@ -141,6 +147,11 @@ pub struct PluginSupervisor {
     paths: Paths,
     require_signed: bool,
     current_board_id: Option<String>,
+    /// The current board's compute tier (1-4), for the `min_tier` floor. `None`
+    /// leaves the floor unenforced, matching the `supported_boards` posture: a
+    /// node that cannot tell you its tier does not get to refuse installs over
+    /// a guess.
+    current_board_tier: Option<u8>,
     agent_version: String,
     systemctl: Arc<dyn SystemctlRunner>,
     installs: Vec<PluginInstall>,
@@ -180,6 +191,7 @@ impl PluginSupervisor {
             installs: Vec::new(),
             builtin: std::collections::BTreeMap::new(),
             ungrantable_caps: BTreeSet::new(),
+            current_board_tier: None,
         }
     }
 
@@ -229,6 +241,14 @@ impl PluginSupervisor {
     /// set.
     pub fn with_ungrantable_caps(mut self, caps: BTreeSet<String>) -> Self {
         self.ungrantable_caps = caps;
+        self
+    }
+
+    /// Declare the current board's compute tier so the `compatibility.min_tier`
+    /// floor is enforced. Without it an NPU-dependent plugin installs on a
+    /// tier-1 board and crash-loops instead of being refused up front.
+    pub fn with_board_tier(mut self, tier: Option<u8>) -> Self {
+        self.current_board_tier = tier;
         self
     }
 
@@ -291,12 +311,40 @@ impl PluginSupervisor {
         self.install_contents(contents, archive_path)
     }
 
+    /// Install a `.adosplug` archive, permitting a version lower than the one
+    /// already installed.
+    ///
+    /// The plain [`install_archive`](Self::install_archive) refuses a
+    /// downgrade: a signed older version silently replacing a newer install is
+    /// a rollback attack on any plugin whose key is held, and the operator sees
+    /// only a successful install. A deliberate rollback (a bad release) is a
+    /// real need, so it gets its own explicit entry point rather than a flag on
+    /// the safe path.
+    pub fn install_archive_allowing_downgrade(
+        &mut self,
+        archive_path: &Path,
+    ) -> Result<InstallResult, LifecycleError> {
+        let contents = open_archive(archive_path)?;
+        self.install_contents_with(contents, archive_path, true)
+    }
+
     /// Install from already-parsed archive contents. Splits the parse from the
     /// install so tests can build contents in memory without a temp `.adosplug`.
     pub fn install_contents(
         &mut self,
         contents: ArchiveContents,
         source_path: &Path,
+    ) -> Result<InstallResult, LifecycleError> {
+        self.install_contents_with(contents, source_path, false)
+    }
+
+    /// Install from parsed contents, choosing whether a version downgrade is
+    /// permitted.
+    pub fn install_contents_with(
+        &mut self,
+        contents: ArchiveContents,
+        source_path: &Path,
+        allow_downgrade: bool,
     ) -> Result<InstallResult, LifecycleError> {
         let manifest = contents.manifest.clone();
 
@@ -324,6 +372,9 @@ impl PluginSupervisor {
 
         self.check_compatibility(&manifest, contents.signer_id.as_deref())?;
         self.reject_inline_for_third_party(&manifest, contents.signer_id.as_deref())?;
+        if !allow_downgrade {
+            self.reject_downgrade(&manifest)?;
+        }
 
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
 
@@ -333,11 +384,25 @@ impl PluginSupervisor {
         }
         unpack_to(&contents.raw_archive_bytes, &target)?;
 
-        // Write the systemd unit for subprocess agent halves.
+        // A manifest that declares a GCS half (or a rust agent binary) must
+        // actually ship the file it points at. Fail here rather than letting a
+        // missing bundle surface later as an empty iframe or a unit dying with
+        // 203/EXEC — the operator cannot diagnose either. The half-unpacked
+        // dir goes with it so a retry starts clean.
+        if let Err(e) =
+            crate::archive::verify_entrypoints_present(&manifest, &crate::archive::unpacked_paths(&target))
+        {
+            let _ = std::fs::remove_dir_all(&target);
+            return Err(e.into());
+        }
+
+        // Write the systemd unit for subprocess agent halves. A fresh install
+        // has granted nothing yet, so the unit renders with the most
+        // restrictive sandbox; grant/revoke re-renders it.
         if manifest.is_subprocess_agent() {
             self.ensure_slice_exists()?;
             let unit_path = unit_path_for(&manifest.id, Some(&self.paths.unit_dir));
-            if let Some(unit) = render_unit(&manifest, &self.paths.install_dir) {
+            if let Some(unit) = render_unit(&manifest, &self.paths.install_dir, &BTreeSet::new()) {
                 std::fs::write(&unit_path, unit.as_bytes())?;
             }
             self.systemctl.run(&["daemon-reload"])?;
@@ -416,20 +481,93 @@ impl PluginSupervisor {
         let install = self.require_install_mut(plugin_id)?;
         grant_permission(install, permission_id);
         save_state(&self.installs, Some(&self.paths.state_path))?;
+        drop(_lock);
+        self.apply_permission_change(plugin_id, &manifest)?;
         Ok(())
     }
 
-    /// Revoke a granted permission. The plugin loses access on the next token
-    /// rotation; existing tokens keep their grant until natural expiry.
+    /// Revoke a granted permission.
+    ///
+    /// Takes effect immediately: the sandbox half of the unit is re-rendered
+    /// and the plugin's capability token is re-minted from the new grant set
+    /// (see [`apply_permission_change`](Self::apply_permission_change)). It
+    /// used to take effect only on the next plugin-host restart, so an
+    /// operator revoking `mavlink.write` from a misbehaving plugin saw success
+    /// in the CLI and the GCS while the plugin kept commanding the flight
+    /// controller.
     pub fn revoke_permission(
         &mut self,
         plugin_id: &str,
         permission_id: &str,
     ) -> Result<(), LifecycleError> {
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+        let manifest = self.manifest_for(plugin_id)?;
         let install = self.require_install_mut(plugin_id)?;
         revoke_permission(install, permission_id);
         save_state(&self.installs, Some(&self.paths.state_path))?;
+        drop(_lock);
+        self.apply_permission_change(plugin_id, &manifest)?;
+        Ok(())
+    }
+
+    /// Make a permission change real, right now.
+    ///
+    /// Two mechanisms enforce a plugin's capabilities and both are snapshots
+    /// taken when something was last written, so both have to be refreshed:
+    ///
+    /// 1. **The sandbox.** `hardware.*`, `network.outbound` and
+    ///    `filesystem.host` live in the generated unit (see
+    ///    [`crate::sandbox`]), so the unit is re-rendered and, when the grant
+    ///    set actually changed the text, the plugin is restarted to pick up the
+    ///    new namespace. A restart is the only way: systemd applies
+    ///    `DeviceAllow`/`RestrictAddressFamilies` at exec time.
+    /// 2. **The capability token.** Every wire-gated capability rides in the
+    ///    plugin's HMAC token. The live plugin host re-mints it through the
+    ///    control socket, which also pushes the fresh token to the open
+    ///    connection so the next request re-gates against the new set.
+    ///
+    /// A restart is skipped when the unit text is unchanged (a purely
+    /// wire-gated capability), because bouncing a running geofence plugin to
+    /// apply a token change it can receive live is a needless gap in coverage.
+    fn apply_permission_change(
+        &self,
+        plugin_id: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(), LifecycleError> {
+        let granted = self
+            .find_install(plugin_id)
+            .map(state::granted_caps)
+            .unwrap_or_default();
+
+        if manifest.is_subprocess_agent() {
+            let unit_path = unit_path_for(plugin_id, Some(&self.paths.unit_dir));
+            if let Some(unit) = render_unit(manifest, &self.paths.install_dir, &granted) {
+                let previous = std::fs::read_to_string(&unit_path).unwrap_or_default();
+                if previous != unit {
+                    std::fs::write(&unit_path, unit.as_bytes())?;
+                    self.systemctl.run(&["daemon-reload"])?;
+                    let running = self
+                        .find_install(plugin_id)
+                        .is_some_and(|i| matches!(i.status, PluginStatus::Running));
+                    if running {
+                        self.systemctl.run(&["restart", &unit_name_for(plugin_id)])?;
+                    }
+                }
+            }
+        }
+
+        // Re-mint the live token. A plugin host that is not up has nothing to
+        // re-mint against and will read the new grant set off state when it
+        // starts, so an unreachable control socket is logged, not an error.
+        match crate::rotate_token_via_control(&self.paths.socket_dir, plugin_id) {
+            Ok(()) => tracing::info!(plugin_id, "plugin_token_rotated_after_permission_change"),
+            Err(e) => tracing::info!(
+                plugin_id,
+                detail = %e,
+                "plugin host control socket unreachable; the new grant set applies \
+                 when it next reads state"
+            ),
+        }
         Ok(())
     }
 
@@ -583,7 +721,7 @@ impl PluginSupervisor {
         PluginManifest::from_yaml_text(text).map_err(|e: ManifestError| SupervisorError(e.0))
     }
 
-    /// Run the version + board + inprocess-isolation gates.
+    /// Run the version + board + tier + inprocess-isolation gates.
     fn check_compatibility(
         &self,
         manifest: &PluginManifest,
@@ -604,15 +742,27 @@ impl PluginSupervisor {
             ))
             .into());
         }
-        if !manifest.compatibility.supported_boards.is_empty() {
-            if let Some(board) = &self.current_board_id {
-                if !manifest.compatibility.supported_boards.contains(board) {
-                    return Err(SupervisorError(format!(
-                        "plugin {} does not support board {board}",
-                        manifest.id
-                    ))
-                    .into());
-                }
+        if let Some(board) = &self.current_board_id {
+            if !manifest.compatibility.supports_board(board) {
+                return Err(SupervisorError(format!(
+                    "plugin {} does not support board {board}",
+                    manifest.id
+                ))
+                .into());
+            }
+        }
+        // The compute-tier floor. Lenient when either the floor or the board
+        // tier is unknown, matching `supported_boards`: a node that cannot tell
+        // you its tier does not get to refuse an install over a guess.
+        if let (Some(min_tier), Some(tier)) =
+            (manifest.compatibility.min_tier, self.current_board_tier)
+        {
+            if tier < min_tier {
+                return Err(SupervisorError(format!(
+                    "plugin {} requires compute tier {min_tier}; this board is tier {tier}",
+                    manifest.id
+                ))
+                .into());
             }
         }
         if let Some(agent) = &manifest.agent {
@@ -626,6 +776,41 @@ impl PluginSupervisor {
                 ))
                 .into());
             }
+        }
+        Ok(())
+    }
+
+    /// Refuse an install whose version is lower than the one already installed.
+    ///
+    /// A signed older archive silently replacing a newer install is a rollback
+    /// attack on any plugin whose signing key is held: the signature verifies,
+    /// the operator sees a successful install, and the plugin is back to a
+    /// version with a known hole. Version ordering is the only thing that
+    /// catches it, so it is checked before anything is unpacked.
+    ///
+    /// A deliberate rollback goes through
+    /// [`install_archive_allowing_downgrade`](Self::install_archive_allowing_downgrade).
+    /// An unparseable version on either side is not treated as a downgrade —
+    /// the semver gate above has already had its say, and refusing on a parse
+    /// failure here would block a legitimate install over a formatting detail.
+    fn reject_downgrade(&self, manifest: &PluginManifest) -> Result<(), LifecycleError> {
+        let Some(install) = find_install(&self.installs, &manifest.id) else {
+            return Ok(());
+        };
+        let (Ok(incoming), Ok(installed)) = (
+            semver_tuple(&manifest.version),
+            semver_tuple(&install.version),
+        ) else {
+            return Ok(());
+        };
+        if incoming < installed {
+            return Err(SupervisorError(format!(
+                "plugin {} archive is version {} but {} is installed; refusing a \
+                 downgrade (a signed older version is a rollback attack). Use the \
+                 explicit allow-downgrade path to force it",
+                manifest.id, manifest.version, install.version
+            ))
+            .into());
         }
         Ok(())
     }
@@ -767,6 +952,7 @@ mod tests {
             unit_dir: dir.join("units"),
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
+            socket_dir: dir.join("sockets"),
         }
     }
 
@@ -976,7 +1162,7 @@ mod tests {
             "hardware.spi"
         ));
         let err = sup
-            .grant_permission("com.example.thermal", "vehicle.command")
+            .grant_permission("com.example.thermal", "mission.write")
             .unwrap_err();
         assert!(matches!(err, LifecycleError::Supervisor(_)));
     }
@@ -1201,7 +1387,7 @@ mod tests {
             service_status: None,
         };
         grant_permission(&mut inst, "hardware.spi");
-        grant_permission(&mut inst, "vehicle.command"); // not declared
+        grant_permission(&mut inst, "mission.write"); // not declared
         save_state(&[inst], Some(&state_path)).unwrap();
 
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
@@ -1209,6 +1395,6 @@ mod tests {
         sup.discover().unwrap();
         let install = sup.find_install("com.example.thermal").unwrap();
         assert!(install.permissions.contains_key("hardware.spi"));
-        assert!(!install.permissions.contains_key("vehicle.command"));
+        assert!(!install.permissions.contains_key("mission.write"));
     }
 }

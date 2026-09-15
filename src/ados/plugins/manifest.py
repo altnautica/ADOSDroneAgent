@@ -517,7 +517,17 @@ class Compatibility(_StrictModel):
     """Semver range, e.g. ``>=0.9.0,<1.0.0``."""
 
     gcs_version: str | None = None
+
     supported_boards: list[str] = Field(default_factory=list)
+    """HAL board ids this plugin supports.
+
+    Two spellings mean "any board": an empty list (or an absent field), and a
+    list containing the literal ``"*"``. The wildcard form is accepted
+    because the scaffolder emitted ``supported_boards: ["*"]`` and it was an
+    exact-match reject on every real board — the developer's first
+    end-to-end install failed on a line the tool itself wrote. Use
+    :meth:`supports_board` rather than testing the list directly so both
+    forms behave the same everywhere."""
 
     min_tier: int | None = Field(None, ge=1, le=4)
     """Minimum compute-class tier the plugin needs (1=basic … 4=highest).
@@ -528,6 +538,12 @@ class Compatibility(_StrictModel):
     whose detected tier is below this value. A board with an unknown tier
     is never blocked, so the gate only bites when both the floor and the
     board tier are known."""
+
+    def supports_board(self, board_id: str) -> bool:
+        """True when ``board_id`` satisfies :attr:`supported_boards`."""
+        if not self.supported_boards:
+            return True
+        return "*" in self.supported_boards or board_id in self.supported_boards
 
 
 class HardwareRequirements(_StrictModel):

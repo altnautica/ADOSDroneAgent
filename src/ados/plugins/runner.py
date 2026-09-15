@@ -1,16 +1,20 @@
 """Plugin subprocess runner.
 
 This is the program systemd starts inside the per-plugin
-``ados-plugin-<id>.service`` unit. The supervisor passes the plugin
-id and the path to a Unix-domain socket plus a capability token; the
-runner connects, builds a :class:`PluginContext` bound to that
-connection, imports the entry-point, and runs lifecycle hooks until
-shutdown.
+``ados-plugin-<id>.service`` unit. The plugin host binds a Unix-domain
+socket for the plugin and writes a 0600 env file carrying the capability
+token, which the unit delivers through ``EnvironmentFile=``; the runner
+connects, builds a :class:`PluginContext` bound to that connection, imports
+the entry point, and runs lifecycle hooks until shutdown.
 
-When the supervisor socket / token are not supplied on the command
-line, the runner falls back to a bare context with a null IPC client.
-That path is exercised by tests that just want the lifecycle skeleton
-without a live supervisor.
+**The runner waits for its bridge; it never degrades quietly.** It used to
+fall through to a null IPC client whenever the socket or token was missing,
+which turned every ordering hiccup into a plugin that systemd reported active
+and the GCS reported running while it did nothing at all — no telemetry, no
+MAVLink, no config, and no error anywhere an operator could see. The token
+env file is written by a different process, so "not there yet" is a normal
+transient, not a terminal state. :func:`_await_bridge` therefore retries on a
+fixed interval forever, logging periodically, until both appear.
 
 Exit codes:
 * 0 graceful shutdown
@@ -42,7 +46,6 @@ from ados.plugins.ipc_client import (
     PluginContext,
     PluginIpcClient,
     _BarePluginContext,
-    _NullIpcClient,
 )
 from ados.plugins.manifest import PluginManifest
 from ados.plugins.process_sandbox import (
@@ -56,15 +59,25 @@ from ados.plugins.process_sandbox import (
 log = get_logger("plugins.runner")
 
 
-def _ensure_plugin_src_on_path(install_dir: Path) -> None:
-    """Make a third-party plugin's unpacked source importable.
+#: How often the runner re-checks for its socket and token. Fixed, not backed
+#: off: this is a recovery loop, and widening the interval would turn a
+#: transient into a plugin inert for minutes.
+BRIDGE_RETRY_S = 2.0
 
-    A plugin archive unpacks its agent source under the install dir with no
-    pip/wheel install, so the runner subprocess must put that source root on
-    ``sys.path`` before importing the entry point. Built-in plugins live in the
-    agent's own package and need none of this, but a ``module:Class`` (or a
-    file-path) entry point whose modules ship inside the archive only resolves
-    once their package root is importable.
+#: How many retries between log lines, so a genuinely stuck bridge is visible
+#: in the plugin's log without one line every two seconds forever.
+BRIDGE_LOG_EVERY = 15
+
+
+def _ensure_plugin_src_on_path(install_dir: Path) -> None:
+    """Make a third-party plugin's unpacked source and wheels importable.
+
+    A plugin archive unpacks its agent source under the install dir, so the
+    runner subprocess must put that source root on ``sys.path`` before
+    importing the entry point. Built-in plugins live in the agent's own
+    package and need none of this, but a ``module:Class`` (or a file-path)
+    entry point whose modules ship inside the archive only resolves once their
+    package root is importable.
 
     Every present root among ``agent/src``, ``agent/py``, and a flat ``agent``
     is added (a plugin normally ships one layout, but a mixed one — a package
@@ -73,8 +86,15 @@ def _ensure_plugin_src_on_path(install_dir: Path) -> None:
     agent's own packages or the standard library; the unique top-level packages
     shipped inside the archive still resolve. Each runner runs a single plugin
     in its own subprocess, so the mutation is local.
+
+    ``agent/site`` is the per-plugin dependency dir the install path fills
+    from the archive's vendored ``agent/wheel/*.whl``. It is appended on the
+    same terms as the source roots: a plugin's dependency can never shadow the
+    agent's own copy of a package, which matters because the agent and a
+    plugin may want different versions of the same library and the flight path
+    must keep the one it was tested against.
     """
-    for rel in ("agent/src", "agent/py", "agent"):
+    for rel in ("agent/src", "agent/py", "agent", "agent/site"):
         root = install_dir / rel
         if root.is_dir():
             entry = str(root)
@@ -120,6 +140,97 @@ def _load_plugin_class(install_dir: Path, manifest: PluginManifest):
     return klass
 
 
+def _token_env_path(plugin_id: str) -> Path:
+    """The 0600 env file the plugin host writes this plugin's token into.
+
+    The unit references it through ``EnvironmentFile=-<path>``, whose ``-``
+    prefix tolerates the file's absence so a unit start never fails on it.
+    That tolerance is why the runner has to be able to find the file itself:
+    if the plugin host had not written it yet when systemd exec'd us,
+    ``ADOS_PLUGIN_TOKEN`` is simply unset in our environment and no restart
+    will fix it, because systemd would exec us again just as early.
+    """
+    return PLUGIN_RUN_DIR / f"{plugin_id}.token.env"
+
+
+def _read_token_env(plugin_id: str) -> str | None:
+    """Read ``ADOS_PLUGIN_TOKEN`` out of the plugin's env file, if present."""
+    path = _token_env_path(plugin_id)
+    try:
+        body = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in body.splitlines():
+        key, _, value = line.partition("=")
+        if key == "ADOS_PLUGIN_TOKEN" and value:
+            return value
+    return None
+
+
+async def _await_bridge(
+    plugin_id: str,
+    socket_path: str | None,
+    capability_token: str | None,
+) -> PluginIpcClient:
+    """Connect to the plugin host, waiting as long as it takes.
+
+    Three things have to line up: the socket has to exist, a token has to
+    exist, and the host has to accept the token. All three are produced by a
+    different process (the plugin host, reacting to the state write our
+    ``enable`` made), so any of them being absent for the first moments of our
+    life is ordinary — and permanent from our side if we give up, because
+    systemd would restart us just as early.
+
+    So this loop has no attempt cap and no backoff. It re-reads the token from
+    the env file each pass rather than trusting the copy systemd put in our
+    environment, because a rotation rewrites that file and a stale token from
+    process start would be refused forever.
+
+    Returning only a live client is the point: the caller has no degraded path
+    to fall into, so a plugin that reaches its lifecycle hooks is a plugin
+    with host access.
+    """
+    resolved_socket = socket_path or str(PLUGIN_RUN_DIR / f"{plugin_id}.sock")
+    attempt = 0
+    while True:
+        attempt += 1
+        token = capability_token or _read_token_env(plugin_id)
+        if token:
+            client = PluginIpcClient(
+                plugin_id=plugin_id,
+                token=token,
+                socket_path=Path(resolved_socket),
+            )
+            try:
+                await client.connect()
+                if attempt > 1:
+                    log.info(
+                        "plugin_ipc_connected_after_wait",
+                        plugin_id=plugin_id,
+                        attempts=attempt,
+                    )
+                return client
+            except Exception as exc:  # noqa: BLE001
+                reason = f"connect failed: {exc}"
+                # A token that came from the process environment may be the
+                # one minted before a rotation. Drop it so the next pass
+                # re-reads the env file.
+                capability_token = None
+        else:
+            reason = "no capability token yet"
+
+        if attempt == 1 or attempt % BRIDGE_LOG_EVERY == 0:
+            log.warning(
+                "plugin_ipc_waiting_for_host",
+                plugin_id=plugin_id,
+                socket=resolved_socket,
+                token_env=str(_token_env_path(plugin_id)),
+                attempts=attempt,
+                detail=reason,
+            )
+        await asyncio.sleep(BRIDGE_RETRY_S)
+
+
 async def _run(
     plugin_id: str,
     *,
@@ -160,27 +271,7 @@ async def _run(
 
     plugin = klass()
 
-    ipc_client: PluginIpcClient | _NullIpcClient
-    if socket_path and capability_token:
-        ipc_client = PluginIpcClient(
-            plugin_id=plugin_id,
-            token=capability_token,
-            socket_path=Path(socket_path),
-        )
-        try:
-            await ipc_client.connect()
-        except Exception as exc:  # noqa: BLE001
-            log.error(
-                "plugin_ipc_connect_failed",
-                plugin_id=plugin_id,
-                error=str(exc),
-            )
-            # Fall back to the bare context so the lifecycle can still
-            # run (useful for plugins that do not touch host services
-            # in their on_install / on_disable hooks).
-            ipc_client = _NullIpcClient(plugin_id)
-    else:
-        ipc_client = _NullIpcClient(plugin_id)
+    ipc_client = await _await_bridge(plugin_id, socket_path, capability_token)
 
     static_config = _read_static_config(plugin_id, agent_id)
     data_dir, config_dir, temp_dir = _prepare_plugin_dirs(plugin_id, agent_id)

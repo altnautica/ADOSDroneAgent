@@ -14,8 +14,16 @@
 //! verifies. When the daemon serves a plugin's socket it mints a fresh token
 //! from that shared issuer and writes the 0600 env file the unit references via
 //! `EnvironmentFile=`; the runner reads `ADOS_PLUGIN_TOKEN` / `ADOS_PLUGIN_SOCKET`
-//! from its environment and connects. The token rotates on every serve (daemon
-//! restart) and on every permission change (the granted caps feed the mint).
+//! from its environment and connects.
+//!
+//! Lifecycle: the served set and the minted tokens are *maintained*, not
+//! snapshotted at boot. A [`PluginReconciler`] re-reads the plugin state file
+//! on a fixed two-second poll (and on demand, when a lifecycle controller pokes
+//! `plugin.reconcile` on the control socket), binding sockets for newly enabled
+//! plugins and tearing them down for disabled ones. A second loop re-mints
+//! every served plugin's token at half the TTL. See `reconcile.rs` for what
+//! each of those loops fixed — a freshly enabled plugin that ran inert, tokens
+//! that died at ten minutes, and a revoke that was advisory until restart.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -29,11 +37,45 @@ use ados_plugin_host::manifest::PluginManifest;
 use ados_plugin_host::mavlink_client::MavlinkClient;
 use ados_plugin_host::msp_client::MspClient;
 use ados_plugin_host::realhost::RealHost;
+use ados_plugin_host::reconcile::PluginReconciler;
 use ados_plugin_host::server::DEFAULT_SOCKET_DIR;
-use ados_plugin_host::state::PluginStatus;
+use ados_plugin_host::token_secret::TokenMint;
 use ados_plugin_host::vision_client::VisionClient;
 use ados_plugin_host::{EventBus, PluginIpcServer, PluginSupervisor};
 use ados_protocol::plugin::TokenIssuer;
+
+/// The board id and compute tier from the HAL board sidecar (`<run>/board.json`,
+/// the same document the pairing route and the offload reconciler read).
+///
+/// The daemon used to pass `None` for both, which left the
+/// `compatibility.supported_boards` and `compatibility.min_tier` gates inert on
+/// the cloud-relay install path: a plugin refused over LAN installed cleanly
+/// when pushed from the cloud, then crash-looped on hardware it was never built
+/// for. Reading the sidecar directly (rather than depending on the probe crate)
+/// keeps this to one small JSON read of a document that is already a published
+/// contract. `(None, None)` when the sidecar is absent, which stays lenient
+/// rather than refusing every install on a node that has not probed yet.
+fn read_board_identity(run_dir: &Path) -> (Option<String>, Option<u8>) {
+    let path = run_dir.join("board.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return (None, None);
+    };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        tracing::warn!(path = %path.display(), "board sidecar is not valid JSON");
+        return (None, None);
+    };
+    let id = doc
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let tier = doc
+        .get("tier")
+        .and_then(|v| v.as_i64())
+        .filter(|t| (1..=4).contains(t))
+        .map(|t| t as u8);
+    (id, tier)
+}
 
 /// The run directory holding the IPC sockets the agent's other services bind
 /// (`mavlink.sock`, `state.sock`). Overridable for tests / non-default layouts,
@@ -125,28 +167,28 @@ fn read_plugin_manifest(install_dir: &Path, plugin_id: &str) -> Option<PluginMan
     }
 }
 
-/// The wired daemon: the server, the per-plugin accept handles, and the issuer.
-/// Holding the (id, JoinHandle) map lets shutdown abort every accept task and
-/// unlink every served socket.
+/// The wired daemon: the reconciler that owns the served sockets, the shared
+/// issuer, the control socket, and the two background loops.
 struct WiredDaemon<H: ados_plugin_host::HostServices> {
-    server: PluginIpcServer<H>,
-    served: Vec<(String, JoinHandle<()>)>,
+    reconciler: Arc<PluginReconciler<H>>,
     issuer: Arc<TokenIssuer>,
     /// The daemon-lifetime control socket (the on-box config-write reach for the
-    /// native `ados-control` plugin-config route), and its accept task. Bound
-    /// once for the whole daemon, not per plugin.
+    /// native `ados-control` plugin-config route, plus the lifecycle pokes a
+    /// supervisor sends after an enable or a permission change), and its accept
+    /// task. Bound once for the whole daemon, not per plugin.
     control: Option<(PathBuf, JoinHandle<()>)>,
+    /// The state-poll and token-rotation loops.
+    loops: (JoinHandle<()>, JoinHandle<()>),
 }
 
 impl<H: ados_plugin_host::HostServices> WiredDaemon<H> {
-    /// Abort every accept task and unlink every served socket. New connections
-    /// stop immediately; an in-flight connection's `release_plugin` already runs
-    /// on disconnect.
+    /// Abort every background task and unlink every served socket. New
+    /// connections stop immediately; an in-flight connection's
+    /// `release_plugin` already runs on disconnect.
     fn shutdown(self) {
-        for (id, handle) in self.served {
-            handle.abort();
-            self.server.stop_plugin(&id);
-        }
+        self.loops.0.abort();
+        self.loops.1.abort();
+        self.reconciler.shutdown();
         if let Some((path, handle)) = self.control {
             handle.abort();
             let _ = std::fs::remove_file(&path);
@@ -366,16 +408,18 @@ fn config_store_path() -> PathBuf {
     )
 }
 
-/// Wire the daemon: build the host from the (already-discovered) supervisor,
-/// construct the server, and serve every enabled subprocess plugin. Factored out
-/// of `main` so the smoke test exercises the full wiring without `main()`.
+/// Wire the daemon: build the host, construct the server, attach the token
+/// mint, bind the control socket, and start the reconciler plus its two
+/// background loops. Factored out of `main` so the smoke test exercises the
+/// full wiring without `main()`.
 ///
-/// `supervisor` must already have `discover()`-ed. The socket dir is where the
-/// per-plugin sockets bind; the install dir / run dir feed the host lookups.
-/// `secret_path` is the persisted HMAC secret the issuer is built from; the
-/// same file feeds the unit-generation path, so a runner's token verifies here.
+/// `state_path` is the plugin state file the reconciler watches; the socket dir
+/// is where the per-plugin sockets bind; the install dir / run dir feed the
+/// host lookups. `secret_path` is the persisted HMAC secret the issuer is built
+/// from; the same file feeds the unit-generation path, so a runner's token
+/// verifies here.
 async fn wire(
-    supervisor: &PluginSupervisor,
+    state_path: PathBuf,
     install_dir: PathBuf,
     socket_dir: PathBuf,
     run_dir: PathBuf,
@@ -400,21 +444,46 @@ async fn wire(
     let bus = Arc::new(EventBus::new());
     let host = build_host(install_dir.clone(), run_dir).await;
 
+    // The paired device id scopes each plugin's per-drone data dir, written into
+    // the runner's env file by the mint. Empty on an unpaired node (node scope).
+    let device_id = read_device_id();
+    let mint = Arc::new(TokenMint::new(
+        issuer.clone(),
+        state_path.clone(),
+        socket_dir.clone(),
+        device_id,
+    ));
+
     // Build the per-plugin server first so the control socket can share its
     // invoke registry (the host->plugin tool.invoke seam). The server holds a
-    // clone of the host Arc; the original stays available for the control socket.
-    let server = PluginIpcServer::new(&socket_dir, issuer.clone(), bus, host.clone());
+    // clone of the host Arc; the original stays available for the control
+    // socket. The mint rides on the server so a request arriving on an aged-out
+    // token is answered with a re-mint instead of `token_expired`.
+    let server = Arc::new(
+        PluginIpcServer::new(&socket_dir, issuer.clone(), bus, host.clone())
+            .with_token_mint(mint.clone()),
+    );
+
+    let reconciler = Arc::new(PluginReconciler::new(
+        server.clone(),
+        mint,
+        state_path,
+        install_dir,
+    ));
 
     // The on-box control socket: the native `ados-control` plugin routes reach
     // this daemon through it — a GCS skill toggle / per-drone config write for a
-    // plugin the writer is not, and a `tool.invoke` that runs one of a plugin's
-    // MCP tools on its live connection and returns the result. Bound once for the
-    // whole daemon on the shared host Arc + the server's invoke registry. A bind
-    // failure is non-fatal: plugin RPC still works, only the off-box config-write
-    // and tool-invoke reach are unavailable.
+    // plugin the writer is not, a `tool.invoke` that runs one of a plugin's MCP
+    // tools on its live connection, and the lifecycle pokes a supervisor sends
+    // after an enable (`plugin.reconcile`) or a permission change
+    // (`token.rotate`). Bound once for the whole daemon. A bind failure is
+    // non-fatal: the reconciler's own poll still picks every change up within
+    // one interval, so the loss is latency, not correctness.
+    let lifecycle: Arc<dyn ados_plugin_host::LifecycleControl> = reconciler.clone();
     let control = match ados_plugin_host::serve_control(
         host.clone(),
         server.invoke_registry(),
+        Some(lifecycle),
         socket_dir.clone(),
     ) {
         Ok((path, handle)) => {
@@ -424,77 +493,29 @@ async fn wire(
         Err(e) => {
             tracing::warn!(
                 error = %e,
-                "failed to bind plugin-host control socket; GCS plugin config writes \
-                 and tool invocations will not reach the live host"
+                "failed to bind plugin-host control socket; GCS plugin config writes, \
+                 tool invocations and lifecycle pokes will fall back to the state poll"
             );
             None
         }
     };
 
-    // The paired device id scopes each plugin's per-drone data dir, written into
-    // the runner's env file below. Empty on an unpaired node (node scope).
-    let device_id = read_device_id();
-    let mut served: Vec<(String, JoinHandle<()>)> = Vec::new();
-    for install in supervisor.installs() {
-        // Serve the enabled / running subprocess plugins. A built-in / inprocess
-        // / gcs-only plugin has no per-plugin runner socket. Re-serving on a
-        // later enable happens on daemon restart (the lifecycle controller
-        // writes state; the daemon picks it up on next boot).
-        if !matches!(
-            install.status,
-            PluginStatus::Enabled | PluginStatus::Running
-        ) {
-            continue;
-        }
-        let Some(manifest) = read_plugin_manifest(&install_dir, &install.plugin_id) else {
-            continue;
-        };
-        if !manifest.is_subprocess_agent() {
-            continue;
-        }
-        match server.serve_plugin(&install.plugin_id) {
-            Ok((path, handle)) => {
-                tracing::info!(
-                    plugin_id = %install.plugin_id,
-                    socket = %path.display(),
-                    "serving plugin socket"
-                );
-                // Mint the runner's token from the shared issuer and write the
-                // 0600 env file the unit references. The runner then reads
-                // ADOS_PLUGIN_TOKEN / ADOS_PLUGIN_SOCKET from its environment
-                // and connects. The granted caps come from the install record.
-                let caps = ados_plugin_host::state::granted_caps(install);
-                if let Err(e) = ados_plugin_host::write_token_env(
-                    &issuer,
-                    &install.plugin_id,
-                    &caps,
-                    &path,
-                    &device_id,
-                    Some(&socket_dir),
-                ) {
-                    tracing::warn!(
-                        plugin_id = %install.plugin_id,
-                        error = %e,
-                        "failed to write plugin token env; runner will fall back to null IPC"
-                    );
-                }
-                served.push((install.plugin_id.clone(), handle));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    plugin_id = %install.plugin_id,
-                    error = %e,
-                    "failed to bind plugin socket"
-                );
-            }
-        }
-    }
+    // First pass, then the maintenance loops. The first pass is what boot
+    // serving used to be; the loops are what makes a later enable, a revoke and
+    // an expiring token self-correcting.
+    let first = reconciler.reconcile();
+    tracing::info!(
+        started = first.started,
+        serving = first.serving,
+        "initial plugin socket reconcile"
+    );
+    let loops = ados_plugin_host::reconcile::spawn_loops(reconciler.clone());
 
     WiredDaemon {
-        server,
-        served,
+        reconciler,
         issuer,
         control,
+        loops,
     }
 }
 
@@ -504,6 +525,7 @@ async fn main() -> Result<()> {
 
     let paths = ados_plugin_host::supervisor::Paths::default();
     let install_dir = paths.install_dir.clone();
+    let state_path = paths.state_path.clone();
     // The per-plugin + control + state-sidecar socket dir. Honours
     // `ADOS_PLUGIN_SOCKET_DIR` (the same env `ados-control` reads) so a test /
     // SITL run points both daemons at a writable tempdir instead of
@@ -511,12 +533,15 @@ async fn main() -> Result<()> {
     let socket_dir = plugin_socket_dir();
     let run = run_dir();
     let version = agent_version();
+    let (board_id, board_tier) = read_board_identity(&run);
 
     tracing::info!(
         install_dir = %install_dir.display(),
         socket_dir = %socket_dir.display(),
         run_dir = %run.display(),
         agent_version = %version,
+        board_id = ?board_id,
+        board_tier = ?board_tier,
         "plugin host daemon starting"
     );
 
@@ -524,20 +549,29 @@ async fn main() -> Result<()> {
     // host cannot back (its host method returns not_implemented regardless of
     // wiring) so an operator never hands out a capability that can only error at
     // call time. `require_signed=true` is the safe production default for the
-    // live install path.
-    let mut supervisor = PluginSupervisor::production(paths, None, version)
+    // live install path. The board id and tier come from the HAL sidecar so the
+    // cloud-relay install path applies the same `supported_boards` and
+    // `min_tier` gates the LAN path does.
+    let mut supervisor = PluginSupervisor::production(paths, board_id, version)
+        .with_board_tier(board_tier)
         .with_ungrantable_caps(RealHost::ungrantable_caps());
     if let Err(e) = supervisor.discover() {
         tracing::error!(error = %e, "plugin discovery failed");
     }
+    // Discovery's job here is the state reconciliation + tamper filter it runs
+    // as a side effect; the reconciler reads state itself from now on.
+    drop(supervisor);
 
     let secret = secret_path();
-    let daemon = wire(&supervisor, install_dir, socket_dir, run, &secret).await;
+    let daemon = wire(state_path, install_dir, socket_dir, run, &secret).await;
     // The shared-secret issuer is owned by the daemon for the session lifetime;
-    // it both verifies the runner's `hello` token and (in `wire`) minted the
-    // token env file each served plugin's unit reads.
+    // it both verifies the runner's `hello` token and backs the mint that
+    // writes each served plugin's token env file.
     let _ = &daemon.issuer;
-    tracing::info!(served = daemon.served.len(), "plugin host daemon ready");
+    tracing::info!(
+        served = daemon.reconciler.serving().len(),
+        "plugin host daemon ready"
+    );
 
     sd_ready();
 
@@ -576,6 +610,7 @@ mod tests {
             unit_dir: dir.join("units"),
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
+            socket_dir: dir.join("sockets"),
         }
     }
 
@@ -641,6 +676,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = paths_in(dir.path());
         let install_dir = paths.install_dir.clone();
+        let state_path = paths.state_path.clone();
         let socket_dir = dir.path().join("sockets");
         let run = dir.path().join("run");
 
@@ -662,9 +698,9 @@ mod tests {
         // Wire the daemon (no mavlink router up -> slot stays None, fine).
         // A tempdir secret path makes the issuer persist a shared secret.
         let secret = dir.path().join("secrets/plugin-token-secret");
-        let daemon = wire(&supervisor, install_dir, socket_dir.clone(), run, &secret).await;
+        let daemon = wire(state_path, install_dir, socket_dir.clone(), run, &secret).await;
         assert_eq!(
-            daemon.served.len(),
+            daemon.reconciler.serving().len(),
             1,
             "the enabled plugin should be served"
         );
@@ -707,6 +743,8 @@ mod tests {
 
         send(&mut client, &request("hello", &token)).await;
         let ready = recv(&mut client).await;
+        assert_eq!(ready.error, None, "hello was refused: {ready:?}");
+
         assert_eq!(args_bool(&ready, "ready"), Some(true));
 
         send(&mut client, &request("ping", &token)).await;
@@ -773,7 +811,7 @@ mod tests {
             );
             let manifest =
                 ados_plugin_host::PluginManifest::from_yaml_text(&manifest_yaml).expect("manifest");
-            let unit = render_unit(&manifest, dir.path()).expect("unit");
+            let unit = render_unit(&manifest, dir.path(), &BTreeSet::new()).expect("unit");
             // Both runtimes deliver the token via the same env file + static
             // socket Environment line.
             assert!(

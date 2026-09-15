@@ -409,12 +409,12 @@ mod tests {
     fn filter_drops_undeclared_permissions() {
         let mut inst = sample();
         grant_permission(&mut inst, "hardware.spi");
-        grant_permission(&mut inst, "vehicle.command");
+        grant_permission(&mut inst, "mission.write");
         let mut declared = BTreeSet::new();
         declared.insert("hardware.spi".to_string());
         filter_permissions_against_manifest(&mut inst, &declared);
         assert!(inst.permissions.contains_key("hardware.spi"));
-        assert!(!inst.permissions.contains_key("vehicle.command"));
+        assert!(!inst.permissions.contains_key("mission.write"));
     }
 
     #[test]

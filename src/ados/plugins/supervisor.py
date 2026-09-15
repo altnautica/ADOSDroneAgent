@@ -37,6 +37,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ from ados.core.paths import (
     PLUGIN_LOG_DIR,
     PLUGINS_INSTALL_DIR,
 )
+from ados.plugins import host_control
 from ados.plugins import systemd as _systemd
 from ados.plugins.archive import (
     MANIFEST_FILENAME,
@@ -173,7 +175,9 @@ class PluginSupervisor:
     # Install / enable / disable / remove
     # ------------------------------------------------------------------
 
-    def install_archive(self, archive_path: Path) -> InstallResult:
+    def install_archive(
+        self, archive_path: Path, *, allow_downgrade: bool = False
+    ) -> InstallResult:
         """Install a ``.adosplug`` archive. Returns a summary.
 
         Caller is responsible for prompting the operator to approve
@@ -181,6 +185,14 @@ class PluginSupervisor:
         every requested permission as ``granted=False`` initially; the
         operator-side flow then calls :meth:`grant_permission` per
         approved permission.
+
+        ``allow_downgrade`` permits a version lower than the one already
+        installed. Off by default: a signed older archive silently replacing
+        a newer install is a rollback attack on any plugin whose signing key
+        is held — the signature verifies, the operator sees success, and the
+        plugin is back to a version with a known hole. A deliberate rollback
+        (a bad release) is a real need, so it is explicit rather than
+        implicit.
 
         Wrapped in :func:`state_lock` so concurrent install/remove
         flows on the same host serialize.
@@ -202,6 +214,8 @@ class PluginSupervisor:
 
         self._check_compatibility(manifest, contents.signer_id)
         self._reject_inline_for_third_party(manifest, contents.signer_id)
+        if not allow_downgrade:
+            self._reject_downgrade(manifest)
 
         with state_lock():
             target = self._install_dir / manifest.id
@@ -220,7 +234,16 @@ class PluginSupervisor:
             }
             verify_entrypoints_present(manifest, unpacked)
 
-            # Write systemd unit for subprocess agent halves.
+            # Install the agent half's vendored wheels into a per-plugin site
+            # dir. The archive layout has always documented an
+            # ``agent/wheel/`` slot and nothing installed it, so any agent
+            # half importing a package outside the agent venv died at
+            # entrypoint import with a unit flapping on an ImportError.
+            self._install_agent_wheels(manifest, target)
+
+            # Write systemd unit for subprocess agent halves. A fresh install
+            # has granted nothing yet, so the unit renders with the most
+            # restrictive sandbox; grant/revoke re-renders it.
             if (
                 manifest.agent is not None
                 and manifest.agent.isolation == "subprocess"
@@ -228,7 +251,8 @@ class PluginSupervisor:
                 self._ensure_slice_exists()
                 unit_path = unit_path_for(manifest.id)
                 unit_path.write_text(
-                    render_unit(manifest, self._install_dir), encoding="utf-8"
+                    render_unit(manifest, self._install_dir, ()),
+                    encoding="utf-8",
                 )
                 self._systemctl("daemon-reload")
 
@@ -325,17 +349,81 @@ class PluginSupervisor:
                 )
             grant_permission(install, permission_id)
             save_state(self._installs)
+        self._apply_permission_change(plugin_id, manifest)
 
     def revoke_permission(self, plugin_id: str, permission_id: str) -> None:
-        """Revoke a granted permission on a plugin.
+        """Revoke a granted permission. Takes effect immediately.
 
-        The plugin loses access on the next token rotation; existing
-        tokens keep their grant until natural expiry.
+        See :meth:`_apply_permission_change` for what "immediately" costs
+        and why it is not optional.
         """
         with state_lock():
             install = self._require_install(plugin_id)
+            manifest = self._manifest_for(plugin_id)
             revoke_permission(install, permission_id)
             save_state(self._installs)
+        self._apply_permission_change(plugin_id, manifest)
+
+    def _apply_permission_change(
+        self, plugin_id: str, manifest: PluginManifest
+    ) -> None:
+        """Make a permission change real, right now.
+
+        Two mechanisms enforce a plugin's capabilities and both are snapshots
+        taken when something was last written, so a state write alone changes
+        nothing a running plugin can observe:
+
+        1. **The sandbox.** ``hardware.*``, ``network.outbound`` and
+           ``filesystem.host`` are enforced by the generated unit's cgroup
+           device policy, address-family filter and mount namespace (see
+           :func:`ados.plugins.systemd.sandbox_directives`). systemd applies
+           those at exec time, so the unit is re-rendered and the plugin
+           restarted — but only when the grant actually changed the unit text,
+           because bouncing a running plugin to apply a token change it can
+           receive live would be a needless gap in coverage.
+        2. **The capability token.** Every wire-gated capability rides in the
+           plugin's HMAC token. The live plugin host re-mints it from the new
+           grant set and pushes it into the open connection, so the plugin's
+           next request is gated against the new set with no restart and no
+           dropped session.
+
+        Before this existed a revoke was a security control that reported
+        itself applied: the CLI and the GCS said success while the plugin kept
+        its old grant set until someone restarted ``ados-plugin-host``.
+        """
+        install = find_install(self._installs, plugin_id)
+        granted = (
+            sorted(
+                pid for pid, g in install.permissions.items() if g.granted
+            )
+            if install is not None
+            else []
+        )
+
+        if manifest.agent is not None and manifest.agent.isolation == "subprocess":
+            unit_path = unit_path_for(plugin_id)
+            rendered = render_unit(manifest, self._install_dir, granted)
+            previous = (
+                unit_path.read_text(encoding="utf-8")
+                if unit_path.exists()
+                else ""
+            )
+            if previous != rendered:
+                unit_path.write_text(rendered, encoding="utf-8")
+                self._systemctl("daemon-reload")
+                if install is not None and install.status == "running":
+                    self._systemctl("restart", unit_name_for(plugin_id))
+
+        # Re-mint the live token. A plugin host that is not up has nothing to
+        # re-mint against and picks the new grant set off state on its next
+        # poll, so an unreachable control socket is logged, not an error.
+        if not host_control.rotate_token(plugin_id):
+            log.info(
+                "plugin_permission_change_pending_host_poll",
+                plugin_id=plugin_id,
+                detail="plugin host control socket unreachable; the new grant "
+                "set applies on its next state poll",
+            )
 
     def enable(self, plugin_id: str) -> None:
         with state_lock():
@@ -348,6 +436,18 @@ class PluginSupervisor:
                 install.enabled_at = _now_ms()
                 save_state(self._installs)
                 return
+            # Flip state to enabled and persist BEFORE starting the unit, then
+            # have the plugin host bind the socket and write the token env off
+            # that state. The order is the whole fix for the silently-inert
+            # plugin: the runner reads ADOS_PLUGIN_SOCKET / ADOS_PLUGIN_TOKEN
+            # from its environment at start, so both have to exist first. The
+            # runner retries rather than degrading if they do not, but making
+            # it wait for a poll interval on every enable would be a gratuitous
+            # few seconds of dead plugin.
+            install.status = "enabled"
+            install.enabled_at = _now_ms()
+            save_state(self._installs)
+            host_control.reconcile()
             unit = unit_name_for(plugin_id)
             self._systemctl("enable", unit)
             self._systemctl("start", unit)
@@ -357,7 +457,6 @@ class PluginSupervisor:
             # than crashing the enable — the plugin's main half still runs.
             self._start_declared_services(plugin_id, manifest)
             install.status = "running"
-            install.enabled_at = _now_ms()
             # Probe + persist readiness of the declared services so the
             # heartbeat surfaces it without a separate poll.
             install.service_status = self._compute_service_readiness(
@@ -484,11 +583,8 @@ class PluginSupervisor:
                 f"plugin {manifest.id} requires ADOS version {constraint}; "
                 f"running {agent_version}"
             )
-        if (
-            manifest.compatibility.supported_boards
-            and self._current_board_id
-            and self._current_board_id
-            not in manifest.compatibility.supported_boards
+        if self._current_board_id and not manifest.compatibility.supports_board(
+            self._current_board_id
         ):
             raise SupervisorError(
                 f"plugin {manifest.id} does not support board "
@@ -516,6 +612,90 @@ class PluginSupervisor:
                 f"plugin {manifest.id} requests inprocess isolation but "
                 f"signer {signer_id} is not first-party"
             )
+
+    def _reject_downgrade(self, manifest: PluginManifest) -> None:
+        """Refuse an archive whose version is lower than what is installed.
+
+        An unparseable version on either side is not treated as a downgrade:
+        the semver-range gate has already had its say, and refusing here over
+        a formatting detail would block a legitimate install.
+        """
+        install = find_install(self._installs, manifest.id)
+        if install is None:
+            return
+        try:
+            incoming = _semver_tuple(manifest.version)
+            installed = _semver_tuple(install.version)
+        except SupervisorError:
+            return
+        if incoming < installed:
+            raise SupervisorError(
+                f"plugin {manifest.id} archive is version {manifest.version} "
+                f"but {install.version} is installed; refusing a downgrade "
+                f"(a signed older version is a rollback attack). Pass "
+                f"--allow-downgrade to force it"
+            )
+
+    def _install_agent_wheels(self, manifest: PluginManifest, target: Path) -> None:
+        """Install the agent half's vendored wheels into a per-plugin site dir.
+
+        The archive layout documents ``agent/wheel/<name>-<ver>-*.whl`` and
+        nothing installed it, so an agent half importing anything outside the
+        agent venv died at entrypoint import — the developer saw a unit
+        flapping with an ImportError and a documented wheel slot implying
+        dependency support that did not exist.
+
+        Wheels go to ``<install_dir>/<plugin_id>/agent/site``, which the
+        runner prepends to ``sys.path``, so one plugin's dependency can never
+        shadow another's or the agent's own. ``--no-deps`` is deliberate: a
+        plugin vendors its full closure into the archive, because resolving
+        dependencies at install time would mean a network fetch on a vehicle
+        that may have no route, at the least convenient moment.
+
+        A wheel that fails to install fails the install: a plugin whose
+        dependencies are half-present is worse than one that never installed,
+        because the failure surfaces later and somewhere else.
+        """
+        if manifest.agent is None:
+            return
+        wheel_dir = target / "agent" / "wheel"
+        wheels = sorted(wheel_dir.glob("*.whl")) if wheel_dir.is_dir() else []
+        if not wheels:
+            return
+        site_dir = target / "agent" / "site"
+        site_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-deps",
+            "--no-index",
+            "--quiet",
+            "--target",
+            str(site_dir),
+            *[str(w) for w in wheels],
+        ]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            raise SupervisorError(
+                f"plugin {manifest.id}: installing vendored wheels failed: {exc}"
+            ) from exc
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[:500]
+            raise SupervisorError(
+                f"plugin {manifest.id}: installing vendored wheels failed "
+                f"(exit {proc.returncode}): {detail}"
+            )
+        log.info(
+            "plugin_wheels_installed",
+            plugin_id=manifest.id,
+            count=len(wheels),
+            site_dir=str(site_dir),
+        )
 
     def _reject_inline_for_third_party(
         self, manifest: PluginManifest, signer_id: str | None

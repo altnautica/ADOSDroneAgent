@@ -20,6 +20,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ados_protocol::plugin::{CapabilityToken, TokenIssuer, TOKEN_TTL_SECONDS};
 
@@ -146,6 +147,97 @@ pub fn write_token_env(
     );
     write_owner_only(&path, body.as_bytes())?;
     Ok(token)
+}
+
+/// Mints a plugin's current capability token from authoritative on-disk state.
+///
+/// The token is a snapshot of `(plugin_id, granted_caps, session, exp)` with a
+/// [`TOKEN_TTL_SECONDS`] lifetime, so two things force a re-mint and this type
+/// is what both go through:
+///
+/// * **Expiry.** The TTL is ten minutes and a plugin runs for the whole
+///   flight. Nothing rotated the token, so every gated call from every plugin
+///   started failing `token_expired` ten minutes after the host began serving
+///   — the plugin process stayed up, `Restart=on-failure` never fired, and a
+///   long-running geofence or follow-me plugin went quietly dead in the air.
+/// * **A permission change.** A grant or revoke rewrites state; the live
+///   token still carries the old set until it is re-minted.
+///
+/// Reading the grant set off state on every mint is what makes a revoke real:
+/// the fresh token cannot carry a capability the operator just removed, and
+/// the host re-gates the next request against it.
+pub struct TokenMint {
+    issuer: Arc<TokenIssuer>,
+    state_path: PathBuf,
+    socket_dir: PathBuf,
+    device_id: String,
+}
+
+impl TokenMint {
+    pub fn new(
+        issuer: Arc<TokenIssuer>,
+        state_path: PathBuf,
+        socket_dir: PathBuf,
+        device_id: String,
+    ) -> Self {
+        TokenMint {
+            issuer,
+            state_path,
+            socket_dir,
+            device_id,
+        }
+    }
+
+    /// The plugin's socket path under this mint's socket dir.
+    pub fn socket_path(&self, plugin_id: &str) -> PathBuf {
+        self.socket_dir.join(format!("{plugin_id}.sock"))
+    }
+
+    /// Mint a fresh token for `plugin_id` from the current grant set and
+    /// rewrite its 0600 env file.
+    ///
+    /// Returns `None` when the plugin is not installed or is not in a state
+    /// that should hold a token (disabled, failed, removed) — an expired token
+    /// then stays expired, which is the correct answer for a plugin the
+    /// operator has turned off. The env file is rewritten as well as the token
+    /// returned, so a plugin that restarts after a rotation reads the live
+    /// token rather than the one minted at the last daemon start.
+    pub fn mint_current(&self, plugin_id: &str) -> Option<CapabilityToken> {
+        let installs = crate::state::load_state(Some(&self.state_path));
+        let install = crate::state::find_install(&installs, plugin_id)?;
+        if !matches!(
+            install.status,
+            crate::state::PluginStatus::Enabled | crate::state::PluginStatus::Running
+        ) {
+            return None;
+        }
+        let caps = crate::state::granted_caps(install);
+        let socket_path = self.socket_path(plugin_id);
+        match write_token_env(
+            &self.issuer,
+            plugin_id,
+            &caps,
+            &socket_path,
+            &self.device_id,
+            Some(&self.socket_dir),
+        ) {
+            Ok(token) => Some(token),
+            Err(e) => {
+                tracing::warn!(
+                    plugin_id,
+                    error = %e,
+                    "failed to write rotated plugin token env"
+                );
+                None
+            }
+        }
+    }
+
+    /// Remove a plugin's token env file. Called when a plugin leaves the
+    /// enabled/running states so a stale token does not sit on tmpfs.
+    pub fn forget(&self, plugin_id: &str) {
+        let _ = std::fs::remove_file(token_env_path(plugin_id, Some(&self.socket_dir)));
+    }
 }
 
 /// Write a file with owner-only (0600) permissions, enforced on every write.

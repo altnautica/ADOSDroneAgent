@@ -25,9 +25,11 @@
 //! empty forever. Anything that changes this filename scheme has to keep the
 //! janitor's glob matching, or these go unbounded again.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{AgentIsolation, AgentRuntime, PluginManifest};
+use crate::sandbox::sandbox_directives;
 use crate::server::DEFAULT_SOCKET_DIR;
 
 /// Path to the per-plugin runner binary that systemd starts.
@@ -55,6 +57,12 @@ pub const PLUGIN_LOG_SUFFIX: &str = ".log";
 pub const PLUGIN_LOG_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// The shared cgroup slice file content.
+///
+/// `IOWeight=10` against the default 100 the flight units run at: systemd
+/// cannot bound the bandwidth of an `append:` log destination (see the module
+/// note above), so I/O arbitration is the only lever on a plugin that writes
+/// hard. A plugin loses every contended block against `ados-mavlink` and
+/// `ados-video` rather than delaying telemetry.
 pub const PLUGIN_SLICE_CONTENT: &str = "\
 [Unit]
 Description=ADOS plugin shared cgroup slice
@@ -65,6 +73,7 @@ CPUAccounting=yes
 MemoryAccounting=yes
 TasksAccounting=yes
 IOAccounting=yes
+IOWeight=10
 ";
 
 /// Return the slice file content.
@@ -129,7 +138,11 @@ fn log_path_for(plugin_id: &str) -> String {
 /// `install_dir` is the unpacked-plugin install root (e.g. `/var/ados/plugins`);
 /// the rust `ExecStart` resolves to `{install_dir}/{id}/{entrypoint}`. The slice,
 /// hardening, limits, and log lines are identical for both runtimes.
-pub fn render_unit(manifest: &PluginManifest, install_dir: &Path) -> Option<String> {
+pub fn render_unit(
+    manifest: &PluginManifest,
+    install_dir: &Path,
+    granted: &BTreeSet<String>,
+) -> Option<String> {
     let agent = manifest.agent.as_ref()?;
     if agent.isolation != AgentIsolation::Subprocess {
         return None;
@@ -156,17 +169,25 @@ pub fn render_unit(manifest: &PluginManifest, install_dir: &Path) -> Option<Stri
     };
     // Token delivery: a 0600 EnvironmentFile carries ADOS_PLUGIN_TOKEN (and
     // ADOS_PLUGIN_SOCKET) into the runner, which reads both from its
-    // environment. The file is rewritten with a fresh token on each start, so
-    // the `-` prefix tolerates its absence during install (before the first
-    // mint) without failing the unit. The socket path is also a static
-    // Environment line as a belt-and-suspenders fallback for the env-file race.
+    // environment. The file is rewritten with a fresh token on each start and
+    // on every rotation, so the `-` prefix tolerates its absence during
+    // install (before the first mint) without failing the unit. The runner
+    // waits for it rather than degrading, so the optional prefix cannot
+    // produce a silently token-less plugin.
     let token_env_file = format!("{DEFAULT_SOCKET_DIR}/{}.token.env", manifest.id);
+    // The capability-backed half of the sandbox. Everything above the marker is
+    // fixed hardening; these lines change with the operator's grants, which is
+    // why a grant or revoke re-renders the unit.
+    let sandbox = sandbox_directives(granted).join("\n");
     Some(format!(
         "\
 [Unit]
 Description=ADOS plugin {plugin_id}
 After=ados-supervisor.service
 PartOf=ados-supervisor.service
+# No start rate limit: a plugin whose host socket is not up yet must keep
+# retrying rather than land in a failed state an operator has to clear by hand.
+StartLimitIntervalSec=0
 
 [Service]
 Slice={slice_name}
@@ -176,8 +197,6 @@ EnvironmentFile=-{token_env_file}
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2s
-StartLimitInterval=60s
-StartLimitBurst=5
 MemoryMax={max_ram_mb}M
 CPUQuota={max_cpu_percent}%
 TasksMax={max_pids}
@@ -188,11 +207,17 @@ Group=ados
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/var/ados/plugin-data /var/log/ados/plugins /run/ados/plugins
 LockPersonality=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+# ---- capability sandbox (re-rendered on every grant/revoke) ----
+{sandbox}
 
 [Install]
 WantedBy=ados-supervisor.service
@@ -206,6 +231,7 @@ WantedBy=ados-supervisor.service
         max_cpu_percent = res.max_cpu_percent,
         max_pids = res.max_pids,
         log_path = log_path,
+        sandbox = sandbox,
     ))
 }
 
@@ -255,7 +281,7 @@ mod tests {
 
     #[test]
     fn unit_contains_slice_hardening_execstart_and_limits() {
-        let unit = render_unit(&subprocess_manifest(), Path::new("/var/ados/plugins")).unwrap();
+        let unit = render_unit(&subprocess_manifest(), Path::new("/var/ados/plugins"), &BTreeSet::new()).unwrap();
         assert!(unit.contains("Slice=ados-plugins.slice"));
         // Python runtime (default): the shared runner takes the plugin id.
         assert!(unit.contains(
@@ -288,7 +314,7 @@ mod tests {
             "id: com.example.rustplug\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: agent/bin/com.example.rustplug\n  runtime: rust\n  resources:\n    max_ram_mb: 64\n    max_cpu_percent: 30\n    max_pids: 8\n",
         )
         .unwrap();
-        let unit = render_unit(&m, Path::new("/var/ados/plugins")).unwrap();
+        let unit = render_unit(&m, Path::new("/var/ados/plugins"), &BTreeSet::new()).unwrap();
         // ExecStart points at the unpacked plugin binary, the plugin id as the
         // leading positional (the SDK runner requires it), then the socket path.
         assert!(
@@ -326,13 +352,13 @@ mod tests {
             "id: com.altnautica.builtin\nversion: 0.1.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: pkg:Class\n  isolation: inprocess\n",
         )
         .unwrap();
-        assert!(render_unit(&inproc, Path::new("/var/ados/plugins")).is_none());
+        assert!(render_unit(&inproc, Path::new("/var/ados/plugins"), &BTreeSet::new()).is_none());
 
         let gcs_only = PluginManifest::from_yaml_text(
             "id: com.example.panel\nversion: 0.1.0\ncompatibility:\n  ados_version: \">=0.1.0\"\ngcs:\n  entrypoint: gcs/dist/index.js\n",
         )
         .unwrap();
-        assert!(render_unit(&gcs_only, Path::new("/var/ados/plugins")).is_none());
+        assert!(render_unit(&gcs_only, Path::new("/var/ados/plugins"), &BTreeSet::new()).is_none());
     }
 
     #[test]

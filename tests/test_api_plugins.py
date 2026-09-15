@@ -234,7 +234,7 @@ def test_grant_unknown_permission_returns_permission_deny(
         )
     resp = client.post(
         "/api/plugins/com.example.basic/grant",
-        json={"permission_id": "vehicle.command"},
+        json={"permission_id": "hardware.i2c"},
     )
     assert resp.status_code == 400
     body = resp.json()
