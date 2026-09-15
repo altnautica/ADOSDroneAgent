@@ -11,7 +11,9 @@
 //!
 //! * [`start`](GroundStationRecorder::start) spawns
 //!   `ffmpeg -rtsp_transport tcp -i rtsp://127.0.0.1:8554/main -c copy
-//!   -movflags +faststart <path>.mp4` as its own process-group leader.
+//!   -movflags +frag_keyframe+empty_moov+default_base_moof -flush_packets 1
+//!   <path>.mp4` as its own process-group leader. The fragmented-MP4 muxer is
+//!   the point: whatever reached disk when the power went is playable.
 //! * [`stop`](GroundStationRecorder::stop) sends `SIGTERM` to the group, waits
 //!   up to 5s, escalates to `SIGKILL` on timeout, and reports duration + size.
 //! * [`is_active`](GroundStationRecorder::is_active) reports whether a capture is
@@ -49,6 +51,17 @@ const SIGTERM_GRACE: Duration = Duration::from_secs(5);
 /// Minimum free space on the recordings volume before a start is refused, matching
 /// the Python recorder's `< 64 MiB` guard.
 const MIN_FREE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// MP4 muxer flags that make an interrupted capture playable.
+///
+/// A fragmented MP4 carries an index per fragment, so the file is valid at
+/// every fragment boundary. The alternative — a plain or `+faststart` MP4 —
+/// writes its `moov` atom only when the muxer is closed cleanly, which yields
+/// a ZERO-recoverable file on a power cut, a SIGKILL or a full disk. Air-side
+/// recording gets the same property from mediamtx's native `recordFormat:
+/// fmp4` (see [`crate::mediamtx`]); this is the ground-side equivalent for the
+/// operator-driven capture.
+const RECORDER_MOVFLAGS: &str = "+frag_keyframe+empty_moov+default_base_moof";
 
 /// A recoverable recorder failure, carrying the stable error code the route maps
 /// to an HTTP status. The codes are the exact Python `RecorderError` codes:
@@ -193,10 +206,28 @@ impl GroundStationRecorder {
         let filename = generate_filename(filename_hint);
         let output_path = self.dir.join(&filename);
 
-        // The same ffmpeg invocation the Python recorder spawned: read the local
-        // RTSP source over TCP, remux to MP4 with `-c copy` (no transcode) and a
-        // faststart moov. Spawned as a process-group leader so the whole pipeline
-        // is reaped on stop, never an orphaned child.
+        // Read the local RTSP source over TCP and remux to MP4 with `-c copy`
+        // (no transcode).
+        //
+        // The muxer flags are the crash-safety contract, not tuning. A plain
+        // (or `+faststart`) MP4 writes its `moov` atom only on a clean exit, so
+        // a ground station that loses power, is SIGKILLed or fills its disk
+        // mid-capture leaves a file with no index at all — not a truncated
+        // recording, a zero-recoverable one. This is the recording an operator
+        // reaches for after an incident.
+        //
+        // `empty_moov` puts a valid (empty) index at byte 0 the moment the file
+        // is created; `frag_keyframe` closes a self-describing `moof`+`mdat`
+        // fragment at every IDR, so with the shipped 0.5 s GOP at most half a
+        // second of video is ever un-indexed; `default_base_moof` makes each
+        // fragment's offsets relative to its own `moof` so a demuxer never has
+        // to trust a byte offset written by a part of the file that may not
+        // exist. `-flush_packets 1` pushes each packet out of ffmpeg's AVIO
+        // buffer instead of holding a fragment's tail in userspace, which is
+        // what bounds the loss to the current GOP rather than the buffer.
+        //
+        // Spawned as a process-group leader so the whole pipeline is reaped on
+        // stop, never an orphaned child.
         let args: Vec<String> = vec![
             "-y".to_string(),
             "-rtsp_transport".to_string(),
@@ -206,7 +237,9 @@ impl GroundStationRecorder {
             "-c".to_string(),
             "copy".to_string(),
             "-movflags".to_string(),
-            "+faststart".to_string(),
+            RECORDER_MOVFLAGS.to_string(),
+            "-flush_packets".to_string(),
+            "1".to_string(),
             output_path.to_string_lossy().to_string(),
         ];
 
@@ -546,5 +579,79 @@ mod tests {
         assert!(stopped["stopped_at"].as_str().unwrap().ends_with("+00:00"));
         assert!(stopped["duration_seconds"].as_f64().unwrap() >= 0.0);
         assert_eq!(stopped["size_bytes"].as_u64().unwrap(), 4); // "data"
+    }
+
+    /// The recorder's muxer flags are a data-integrity contract, not tuning.
+    ///
+    /// A plain or `+faststart` MP4 writes its `moov` atom only when the muxer
+    /// closes cleanly, so a ground station that loses power, is SIGKILLed or
+    /// fills its disk mid-capture leaves a file `ffprobe` reports as "moov
+    /// atom not found" — the whole flight recording, not its tail. This test
+    /// captures the literal argv the recorder hands ffmpeg so a future
+    /// simplification of the invocation cannot silently give that back.
+    #[tokio::test]
+    async fn the_capture_is_muxed_as_a_fragmented_mp4() {
+        let _guard = PATH_LOCK.lock().await;
+        let bindir = tempfile::tempdir().unwrap();
+        let fake = bindir.path().join("ffmpeg");
+        // Record the argv beside the output file, then idle so the capture
+        // stays "in flight" while the assertions run.
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nfor out; do :; done\nprintf '%s\\n' \"$@\" > \"$out.argv\"\nsleep 30\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let recdir = tempfile::tempdir().unwrap();
+        let rec = GroundStationRecorder::new(recdir.path(), DEFAULT_RTSP_URL);
+
+        let path_save = std::env::var("PATH").ok();
+        let combined = match &path_save {
+            Some(orig) => format!("{}:{}", bindir.path().display(), orig),
+            None => bindir.path().display().to_string(),
+        };
+        std::env::set_var("PATH", &combined);
+
+        let started = rec.start(Some("frag")).await.expect("start succeeds");
+        let out_path = started["path"].as_str().unwrap().to_string();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let _ = rec.stop().await;
+        if let Some(p) = path_save {
+            std::env::set_var("PATH", p);
+        } else {
+            std::env::remove_var("PATH");
+        }
+
+        let argv: Vec<String> = std::fs::read_to_string(format!("{out_path}.argv"))
+            .expect("the fake ffmpeg recorded its argv")
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        let movflags = argv
+            .iter()
+            .position(|a| a == "-movflags")
+            .expect("the recorder passes -movflags");
+        assert_eq!(argv[movflags + 1], RECORDER_MOVFLAGS);
+        assert!(
+            argv[movflags + 1].contains("frag_keyframe")
+                && argv[movflags + 1].contains("empty_moov")
+                && argv[movflags + 1].contains("default_base_moof"),
+            "a capture killed mid-write is only playable with all three fMP4 flags: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|a| a.contains("faststart")),
+            "+faststart defers the moov atom to a clean exit: {argv:?}"
+        );
+        let flush = argv
+            .iter()
+            .position(|a| a == "-flush_packets")
+            .expect("the recorder flushes each packet out of the AVIO buffer");
+        assert_eq!(argv[flush + 1], "1");
     }
 }

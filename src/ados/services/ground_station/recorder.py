@@ -10,7 +10,10 @@ needs to consume RTSP and remux to MP4 with `-c copy` (no transcode).
 
 Lifecycle mirrors the air-side recorder pattern:
 
-* `start()` spawns `ffmpeg -i rtsp://127.0.0.1:8554/main -c copy <path>.mp4`.
+* `start()` spawns `ffmpeg -i rtsp://127.0.0.1:8554/main -c copy
+  -movflags +frag_keyframe+empty_moov+default_base_moof -flush_packets 1
+  <path>.mp4`. The fragmented-MP4 muxer is the point: whatever reached disk
+  when the power went is playable.
 * `stop()` sends SIGTERM, waits up to 5s, escalates to SIGKILL on timeout.
 * `list_recordings()` enumerates `.mp4` files with size + mtime.
 * `is_active()` reports whether a capture is in flight.
@@ -42,6 +45,18 @@ _DEFAULT_RTSP_URL = "rtsp://127.0.0.1:8554/main"
 
 # Stop sequence timeouts.
 _SIGTERM_GRACE_SECONDS = 5.0
+
+
+# MP4 muxer flags that make an interrupted capture playable.
+#
+# A fragmented MP4 carries an index per fragment, so the file is valid at every
+# fragment boundary. The alternative — a plain or `+faststart` MP4 — writes its
+# `moov` atom only when the muxer is closed cleanly, which yields a
+# ZERO-recoverable file on a power cut, a SIGKILL or a full disk. Air-side
+# recording gets the same property from mediamtx's native `recordFormat: fmp4`;
+# this is the ground-side equivalent for the operator-driven capture, and it is
+# byte-identical to `crates/ados-video/src/recorder.rs::RECORDER_MOVFLAGS`.
+RECORDER_MOVFLAGS = "+frag_keyframe+empty_moov+default_base_moof"
 
 
 @dataclass
@@ -153,13 +168,36 @@ class GroundStationRecorder:
             filename = self._generate_filename(filename_hint)
             output_path = self._dir / filename
 
+            # The muxer flags are the crash-safety contract, not tuning. A
+            # plain (or `+faststart`) MP4 writes its `moov` atom only on a
+            # clean exit, so a ground station that loses power, is SIGKILLed
+            # or fills its disk mid-capture leaves a file with no index at all
+            # — not a truncated recording, a zero-recoverable one. This is the
+            # recording an operator reaches for after an incident.
+            #
+            # `empty_moov` puts a valid (empty) index at byte 0 the moment the
+            # file is created; `frag_keyframe` closes a self-describing
+            # `moof`+`mdat` fragment at every IDR, so with the shipped 0.5 s
+            # GOP at most half a second of video is ever un-indexed;
+            # `default_base_moof` makes each fragment's offsets relative to its
+            # own `moof` so a demuxer never has to trust an offset written by a
+            # part of the file that may not exist. `-flush_packets 1` pushes
+            # each packet out of ffmpeg's AVIO buffer instead of holding a
+            # fragment's tail in userspace, bounding the loss to the current
+            # GOP rather than the buffer.
+            #
+            # Byte-identical to the native recorder's argv
+            # (`crates/ados-video/src/recorder.rs::RECORDER_MOVFLAGS`): both
+            # front ends can serve a start on a ground station, so a capture
+            # must not be crash-safe on only one of them.
             cmd = [
                 ffmpeg_bin,
                 "-y",
                 "-rtsp_transport", "tcp",
                 "-i", self._rtsp_url,
                 "-c", "copy",
-                "-movflags", "+faststart",
+                "-movflags", RECORDER_MOVFLAGS,
+                "-flush_packets", "1",
                 str(output_path),
             ]
 
