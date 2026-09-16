@@ -202,6 +202,12 @@ fn with_added_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// guard that releases on drop; on a non-Linux dev host the guard holds nothing
 /// (the controller logic still serializes within a single process via the
 /// `&mut self` borrow), which keeps the pure-logic core testable off-target.
+// `drop_non_drop` on an explicit `drop(lock)`: on Linux this type owns the
+// `Flock` guard and the drop genuinely releases the lock, which the callers in
+// `supervisor.rs` depend on because they re-enter the state path afterwards. On
+// a non-Linux dev host the struct has no fields, so the same call is a no-op
+// and clippy is right about that build and wrong about the one that ships.
+// The `#[allow]` therefore lives at the two call sites in `supervisor.rs`.
 pub struct StateLock {
     #[cfg(target_os = "linux")]
     _flock: nix::fcntl::Flock<std::fs::File>,

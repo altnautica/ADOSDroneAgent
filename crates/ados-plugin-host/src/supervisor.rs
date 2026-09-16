@@ -454,6 +454,11 @@ impl PluginSupervisor {
     /// declare, and a permission whose capability the active host runtime cannot
     /// back (see [`with_ungrantable_caps`](Self::with_ungrantable_caps)) so an
     /// operator never grants a capability that can only error at call time.
+    // The explicit `drop(_lock)` below releases the state lock before
+    // re-entering the state path. That is load-bearing on Linux, where
+    // `StateLock` owns the `Flock` guard; on a non-Linux dev host the struct
+    // has no fields and the call is a no-op, which is the build clippy sees.
+    #[allow(clippy::drop_non_drop)]
     pub fn grant_permission(
         &mut self,
         plugin_id: &str,
@@ -496,6 +501,11 @@ impl PluginSupervisor {
     /// operator revoking `mavlink.write` from a misbehaving plugin saw success
     /// in the CLI and the GCS while the plugin kept commanding the flight
     /// controller.
+    // The explicit `drop(_lock)` below releases the state lock before
+    // re-entering the state path. That is load-bearing on Linux, where
+    // `StateLock` owns the `Flock` guard; on a non-Linux dev host the struct
+    // has no fields and the call is a no-op, which is the build clippy sees.
+    #[allow(clippy::drop_non_drop)]
     pub fn revoke_permission(
         &mut self,
         plugin_id: &str,

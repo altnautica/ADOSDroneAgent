@@ -90,7 +90,8 @@ pub async fn run_rx_loop(cfg: Arc<WfbConfig>, rx: AuxAppRx) {
                 // retry. The pause is what keeps a persistently erroring socket
                 // from burning a core.
                 recv_errors = recv_errors.saturating_add(1);
-                if recv_errors >= RECV_ERROR_WARN_AFTER && recv_errors % RECV_ERROR_WARN_AFTER == 0
+                if recv_errors >= RECV_ERROR_WARN_AFTER
+                    && recv_errors.is_multiple_of(RECV_ERROR_WARN_AFTER)
                 {
                     tracing::warn!(
                         error = %e,

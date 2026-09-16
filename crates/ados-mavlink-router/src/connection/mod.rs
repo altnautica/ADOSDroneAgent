@@ -1660,16 +1660,12 @@ mod liveness_tests {
         let accepts = std::sync::Arc::new(AtomicUsize::new(0));
         let accept_counter = accepts.clone();
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    // Drop the peer immediately: the router sees EOF, tears the
-                    // session down and re-opens after the fixed interval.
-                    Ok((peer, _)) => {
-                        accept_counter.fetch_add(1, Ordering::Relaxed);
-                        drop(peer);
-                    }
-                    Err(_) => break,
-                }
+            // Drop each peer immediately: the router sees EOF, tears the
+            // session down and re-opens after the fixed interval. The loop ends
+            // when `accept` errors, which is how the test closes the listener.
+            while let Ok((peer, _)) = listener.accept().await {
+                accept_counter.fetch_add(1, Ordering::Relaxed);
+                drop(peer);
             }
         });
 

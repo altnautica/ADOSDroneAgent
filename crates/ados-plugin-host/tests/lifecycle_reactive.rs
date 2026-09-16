@@ -170,7 +170,7 @@ fn harness() -> Harness {
             &socket_dir,
             issuer,
             Arc::new(EventBus::new()),
-            Arc::new(NoopHost::default()),
+            Arc::new(NoopHost),
         )
         .with_token_mint(mint.clone()),
     );
