@@ -203,7 +203,10 @@ pub fn detect_tier(ram_mb: i64) -> i64 {
 /// The first profile with a pattern contained in `model_string`,
 /// case-insensitively. First-match over the filename-ordered list, matching the
 /// Python `_match_profile`.
-pub fn match_profile<'a>(profiles: &'a [BoardProfile], model_string: &str) -> Option<&'a BoardProfile> {
+pub fn match_profile<'a>(
+    profiles: &'a [BoardProfile],
+    model_string: &str,
+) -> Option<&'a BoardProfile> {
     if model_string.is_empty() {
         return None;
     }
@@ -553,8 +556,8 @@ mod tests {
         // The drift guard: a board added to the directory but not to the
         // embedded table would detect as unknown on a Rust-only node, which is
         // exactly the defect this writer exists to fix.
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/ados/hal/boards");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/ados/hal/boards");
         let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
             .expect("the board profile directory must exist")
             .flatten()
@@ -654,7 +657,12 @@ mod tests {
         let profiles = load_profiles();
         let fp = resolve(&profiles, &facts("raspberrypi,5-model-b", "Raspberry Pi 5"));
         let value = serde_json::to_value(&fp).unwrap();
-        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         keys.sort();
         assert_eq!(
             keys,

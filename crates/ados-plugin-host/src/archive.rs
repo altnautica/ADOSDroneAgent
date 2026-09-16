@@ -307,9 +307,7 @@ fn required_entrypoints(manifest: &PluginManifest) -> Vec<(&'static str, &str)> 
         }
     }
     if let Some(agent) = &manifest.agent {
-        if agent.runtime == crate::manifest::AgentRuntime::Rust
-            && !agent.entrypoint.contains(':')
-        {
+        if agent.runtime == crate::manifest::AgentRuntime::Rust && !agent.entrypoint.contains(':') {
             required.push(("agent.entrypoint", agent.entrypoint.as_str()));
         }
     }

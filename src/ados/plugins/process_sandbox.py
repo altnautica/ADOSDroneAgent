@@ -97,7 +97,7 @@ class SpawnedProcess:
     plugin_id: str
     basename: str
     pid: int
-    _popen: subprocess.Popen
+    _popen: subprocess.Popen[bytes]
 
     @property
     def stdin(self) -> IO[bytes] | None:

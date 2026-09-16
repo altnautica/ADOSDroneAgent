@@ -110,7 +110,11 @@ pub struct AdvertPairing {
 /// sees a name that changes between scans). The device id is unique per board
 /// by construction.
 pub fn instance_name(device_id: &str) -> String {
-    let short: String = device_id.chars().take(12).collect::<String>().to_lowercase();
+    let short: String = device_id
+        .chars()
+        .take(12)
+        .collect::<String>()
+        .to_lowercase();
     if short.is_empty() {
         "ados-node".to_string()
     } else {
@@ -291,10 +295,7 @@ pub fn advertise(paths: &PairingPaths, board_path: PathBuf, port: u16) -> Option
                     continue;
                 };
                 match daemon.register(info) {
-                    Ok(()) => tracing::info!(
-                        paired = pairing.paired,
-                        "mdns_txt_refreshed"
-                    ),
+                    Ok(()) => tracing::info!(paired = pairing.paired, "mdns_txt_refreshed"),
                     Err(e) => tracing::warn!(error = %e, "mdns_txt_refresh_failed"),
                 }
             }
@@ -324,9 +325,7 @@ mod tests {
     }
 
     fn txt_map(txt: &[(String, String)]) -> std::collections::HashMap<&str, &str> {
-        txt.iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect()
+        txt.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect()
     }
 
     #[test]

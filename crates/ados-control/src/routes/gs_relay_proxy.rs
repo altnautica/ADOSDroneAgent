@@ -212,7 +212,7 @@ fn path_is_safe(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{relayed_response, path_is_safe};
+    use super::{path_is_safe, relayed_response};
     use ados_protocol::aux_rpc_proxy::RpcResponseOwned;
 
     fn relayed(status: u16, headers: &[(&str, &str)], body: &[u8]) -> axum::response::Response {
@@ -282,7 +282,10 @@ mod tests {
         );
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         assert!(resp.headers().get("x-injected").is_none());
-        assert!(resp.headers().get(axum::http::header::CONTENT_TYPE).is_none());
+        assert!(resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .is_none());
     }
 
     #[test]
@@ -291,7 +294,10 @@ mod tests {
         // an empty list, and the route must behave exactly as it always did.
         let resp = relayed(404, &[], br#"{"detail":"Not Found"}"#);
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
-        assert!(resp.headers().get(axum::http::header::CONTENT_TYPE).is_none());
+        assert!(resp
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .is_none());
     }
 
     #[test]

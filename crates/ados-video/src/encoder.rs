@@ -1814,7 +1814,18 @@ mod tests {
     fn fixture_cases() -> Vec<(&'static str, Vec<String>)> {
         let ff = |rot: u32, h: bool, v: bool| {
             build(
-                &params_cfg(EncoderKind::Ffmpeg, 1280, 720, 30, 4000, "auto", rot, h, v, 0),
+                &params_cfg(
+                    EncoderKind::Ffmpeg,
+                    1280,
+                    720,
+                    30,
+                    4000,
+                    "auto",
+                    rot,
+                    h,
+                    v,
+                    0,
+                ),
                 "/dev/video1",
                 RTSP_OUT,
                 &usb_mjpeg(),
@@ -3674,14 +3685,20 @@ mod tests {
             &rockchip(),
             false,
         );
-        assert_eq!(flag_value(&cmd, "-f").as_deref(), Some("v4l2"), "input side");
+        assert_eq!(
+            flag_value(&cmd, "-f").as_deref(),
+            Some("v4l2"),
+            "input side"
+        );
         let spec = cmd.last().expect("the tee spec is the last token");
         assert_eq!(
             cmd[cmd.len() - 2],
             "tee",
             "the output muxer is the tee: {cmd:?}"
         );
-        assert!(spec.contains(&format!("[f=rtsp:rtsp_transport=tcp:max_delay=0:flush_packets=1]{RTSP_OUT}")));
+        assert!(spec.contains(&format!(
+            "[f=rtsp:rtsp_transport=tcp:max_delay=0:flush_packets=1]{RTSP_OUT}"
+        )));
         assert!(spec.contains(&format!(
             "[f=rtp:payload_type={}:ssrc={}:max_delay=0:flush_packets=1]{}",
             crate::wfb_tee::WFB_TEE_PAYLOAD_TYPE,
@@ -3690,7 +3707,10 @@ mod tests {
         )));
         // No `onfail=ignore`: a radio branch that cannot be opened must fail the
         // encoder (and be restarted) rather than silently serve LAN-only video.
-        assert!(!spec.contains("onfail"), "shared fate, not a silent degrade");
+        assert!(
+            !spec.contains("onfail"),
+            "shared fate, not a silent degrade"
+        );
         // The tee needs the explicit map; without it ffmpeg refuses the output.
         assert!(cmd.windows(2).any(|w| w[0] == "-map" && w[1] == "0:v"));
         // And the orchestrator must be able to read the fact back off the argv.
@@ -3760,7 +3780,10 @@ mod tests {
             .expect("the injector is spliced between two ffmpeg stages");
         // The encode half ends at stdout and carries no output-muxer leftovers.
         assert!(encode.trim_end().ends_with("-f h264 -"));
-        assert!(!encode.contains("-f tee"), "no muxer left on the encode half");
+        assert!(
+            !encode.contains("-f tee"),
+            "no muxer left on the encode half"
+        );
         assert!(!encode.contains("-map 0:v"));
         assert!(!encode.contains("-rtsp_transport"));
         assert!(!encode.contains("-muxdelay"));

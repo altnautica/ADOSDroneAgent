@@ -152,9 +152,7 @@ impl Args {
                 "--channel" => args.channel = Some(take_value(&tokens, &mut i, "--channel")?),
                 "--version" => args.version = Some(take_value(&tokens, &mut i, "--version")?),
                 "--ref" => args.rev = Some(take_value(&tokens, &mut i, "--ref")?),
-                "--artifacts" => {
-                    args.artifacts = Some(take_value(&tokens, &mut i, "--artifacts")?)
-                }
+                "--artifacts" => args.artifacts = Some(take_value(&tokens, &mut i, "--artifacts")?),
                 "--display" => args.display = Some(take_value(&tokens, &mut i, "--display")?),
                 "--camera" => args.camera = Some(take_value(&tokens, &mut i, "--camera")?),
                 "--wifi-ssid" => args.wifi_ssid = Some(take_value(&tokens, &mut i, "--wifi-ssid")?),

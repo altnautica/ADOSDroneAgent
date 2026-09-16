@@ -389,9 +389,10 @@ impl PluginSupervisor {
         // missing bundle surface later as an empty iframe or a unit dying with
         // 203/EXEC — the operator cannot diagnose either. The half-unpacked
         // dir goes with it so a retry starts clean.
-        if let Err(e) =
-            crate::archive::verify_entrypoints_present(&manifest, &crate::archive::unpacked_paths(&target))
-        {
+        if let Err(e) = crate::archive::verify_entrypoints_present(
+            &manifest,
+            &crate::archive::unpacked_paths(&target),
+        ) {
             let _ = std::fs::remove_dir_all(&target);
             return Err(e.into());
         }
@@ -550,7 +551,8 @@ impl PluginSupervisor {
                         .find_install(plugin_id)
                         .is_some_and(|i| matches!(i.status, PluginStatus::Running));
                     if running {
-                        self.systemctl.run(&["restart", &unit_name_for(plugin_id)])?;
+                        self.systemctl
+                            .run(&["restart", &unit_name_for(plugin_id)])?;
                     }
                 }
             }

@@ -228,12 +228,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Six `#[ignore]`d Rust tests are the entire real-model and
+      # Seven `#[ignore]`d Rust tests. Six are the entire real-model and
       # real-hardware proof surface in this repository, and no workflow
       # scheduled any of them, so adding an ignore was a free way to make a
       # test stop mattering. Pinning the count makes the set a reviewed
       # decision: removing an ignore is always fine, adding one requires
       # updating this number and saying why in the same change.
+      #
+      # The seventh is not a proof surface at all: it is
+      # `encoder::tests::regenerate_encoder_fixtures`, the writer for
+      # `crates/ados-video/tests/encoder_fixtures.json`. It is ignored because
+      # it WRITES that file, so running it by default would make the fixture
+      # gate pass by rewriting its own expectation. Its companion,
+      # `fixture_table_matches_the_file`, is NOT ignored and is what actually
+      # holds the argv contract in both directions.
       #
       # This measures source text on purpose. The thing being asserted IS the
       # presence of an attribute, and reading it any other way would require
@@ -241,7 +249,7 @@ jobs:
       - name: Ignored-test count matches the reviewed inventory
         run: |
           set -uo pipefail
-          EXPECTED=6
+          EXPECTED=7
 
           # Attribute position only: a doc comment that mentions the attribute
           # is prose, not an ignored test.

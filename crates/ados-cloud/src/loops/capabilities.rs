@@ -110,7 +110,11 @@ pub fn capability_extras_in(dir: &Path, now: f64) -> Map<String, Value> {
                     // Discovery alone is not health: a detected camera behind a
                     // failed pipeline is an error, not a confident "ready".
                     let failed = cam.get("pipeline_state").and_then(Value::as_str) == Some("error");
-                    let state = if state == "ready" && failed { "error" } else { state };
+                    let state = if state == "ready" && failed {
+                        "error"
+                    } else {
+                        state
+                    };
                     out.insert("cameraState".into(), json!(state));
                 }
             }
@@ -184,7 +188,10 @@ pub fn capability_extras_in(dir: &Path, now: f64) -> Map<String, Value> {
             if let Some(mode) = mf.get("mgmt_link_mode").and_then(Value::as_str) {
                 if matches!(mode, "primary" | "wifi_heartbeat" | "none") {
                     out.insert("mgmtLinkMode".into(), json!(mode));
-                    out.insert("mgmtFailoverIface".into(), or_null(&mf, "mgmt_failover_iface"));
+                    out.insert(
+                        "mgmtFailoverIface".into(),
+                        or_null(&mf, "mgmt_failover_iface"),
+                    );
                     out.insert(
                         "mgmtFailoverReason".into(),
                         or_null(&mf, "mgmt_failover_reason"),
@@ -305,7 +312,11 @@ mod tests {
             "usb-rehome.json",
             r#"{"updated_at_unix":1700000000,"usb_rehome_state":"rehoming","usb_rehome_attempts":3}"#,
         );
-        write(dir.path(), "lcd-state.json", r#"{"active_page_id":"radio"}"#);
+        write(
+            dir.path(),
+            "lcd-state.json",
+            r#"{"active_page_id":"radio"}"#,
+        );
 
         let got = capability_extras_in(dir.path(), NOW);
         assert_eq!(got.get("cameraState"), Some(&json!("ready")));
@@ -334,7 +345,10 @@ mod tests {
             r#"{"updated_at_unix":1699990000,"state":"healthy"}"#,
         );
         let got = capability_extras_in(dir.path(), NOW);
-        assert!(!got.contains_key("cameraState"), "10 000 s past a 300 s window");
+        assert!(
+            !got.contains_key("cameraState"),
+            "10 000 s past a 300 s window"
+        );
         assert!(!got.contains_key("managementLink"), "past the 90 s window");
     }
 
@@ -369,11 +383,7 @@ mod tests {
     #[test]
     fn a_node_with_no_managed_wifi_omits_the_block_instead_of_an_empty_list() {
         let dir = tempfile::tempdir().unwrap();
-        write(
-            dir.path(),
-            "wifi-powersave.json",
-            r#"{"interfaces":{}}"#,
-        );
+        write(dir.path(), "wifi-powersave.json", r#"{"interfaces":{}}"#);
         assert!(!capability_extras_in(dir.path(), NOW).contains_key("wifiPowersave"));
     }
 

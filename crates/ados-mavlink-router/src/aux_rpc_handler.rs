@@ -259,17 +259,21 @@ pub async fn handle(
             cached
         }
         Admit::Fresh => {
-            let (status, headers, body) =
-                match http_call(request.method, request.path, request.body).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let status = e.status();
-                        tracing::warn!(error = %e, request_id = id, status, "aux_rpc_http_call_failed");
-                        (status, Vec::new(), Vec::new())
-                    }
-                };
-            let fragments =
-                encode_fragments(own_device_id.as_bytes(), id, status, &headers, &body);
+            let (status, headers, body) = match http_call(
+                request.method,
+                request.path,
+                request.body,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let status = e.status();
+                    tracing::warn!(error = %e, request_id = id, status, "aux_rpc_http_call_failed");
+                    (status, Vec::new(), Vec::new())
+                }
+            };
+            let fragments = encode_fragments(own_device_id.as_bytes(), id, status, &headers, &body);
             if fragments.is_empty() {
                 // Nothing encodable to cache or to send. Reopening the id lets
                 // the ground's next retransmit make a real attempt instead of
@@ -874,7 +878,10 @@ Content-Length: 3\r\n\r\nabc";
         assert_eq!(
             headers,
             vec![
-                ("content-type".to_string(), "text/csv; charset=utf-8".to_string()),
+                (
+                    "content-type".to_string(),
+                    "text/csv; charset=utf-8".to_string()
+                ),
                 (
                     "content-disposition".to_string(),
                     "attachment; filename=\"log.csv\"".to_string()
@@ -886,7 +893,9 @@ Content-Length: 3\r\n\r\nabc";
         );
         // Every byte of header is a byte of body that cannot travel, and a
         // cookie is a credential with no business on a shared radio.
-        assert!(headers.iter().all(|(n, _)| n != "set-cookie" && n != "server"));
+        assert!(headers
+            .iter()
+            .all(|(n, _)| n != "set-cookie" && n != "server"));
         // Rebuilt by the ground, never forwarded: the body it reassembles is
         // the one whose length counts.
         assert!(headers.iter().all(|(n, _)| n != "content-length"));

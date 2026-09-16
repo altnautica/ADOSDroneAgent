@@ -984,7 +984,8 @@ mod tests {
         // SSH to the box and `pgrep -af sei_injector`.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lcd-latency.json");
-        let body = r#"{"latency_ms": 82.5, "latency_ewma_ms": 80.0, "samples": 30, "source": "sei"}"#;
+        let body =
+            r#"{"latency_ms": 82.5, "latency_ewma_ms": 80.0, "samples": 30, "source": "sei"}"#;
 
         // Inside the window the same bytes are a reading.
         write_sidecar_aged(&path, body, 2);
@@ -1040,9 +1041,7 @@ mod tests {
         // path to the other rather than removing it.
         let now_us = 1_800_000_000_000_000_i64;
         let names = ["video.latency.glass_ms", "video.latency.samples"];
-        let row = |metric: &str, value: f64, age_s: i64| {
-            json!({"metric": metric, "value": value, "ts_us": now_us - age_s * 1_000_000})
-        };
+        let row = |metric: &str, value: f64, age_s: i64| json!({"metric": metric, "value": value, "ts_us": now_us - age_s * 1_000_000});
 
         let fresh = fresh_metric_values(
             &[

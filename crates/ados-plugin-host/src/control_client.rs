@@ -63,8 +63,8 @@ pub fn rotate_token(socket_dir: &Path, plugin_id: &str) -> Result<(), String> {
 /// One request/response round trip. Returns the response args on success.
 fn request(socket_dir: &Path, method: &str, args: Value) -> Result<Value, String> {
     let path = control_socket_path(socket_dir);
-    let mut stream = UnixStream::connect(&path)
-        .map_err(|e| format!("connect {}: {e}", path.display()))?;
+    let mut stream =
+        UnixStream::connect(&path).map_err(|e| format!("connect {}: {e}", path.display()))?;
     stream
         .set_read_timeout(Some(TIMEOUT))
         .and_then(|()| stream.set_write_timeout(Some(TIMEOUT)))

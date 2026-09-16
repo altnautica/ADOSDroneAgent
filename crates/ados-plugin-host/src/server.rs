@@ -721,7 +721,11 @@ impl<H: HostServices> Connection<H> {
             // capability the operator revoked in the meantime is NOT carried
             // into the new token, and it rewrites the env file so a reconnect
             // presents the live token too.
-            match self.mint.as_ref().and_then(|m| m.mint_current(&self.plugin_id)) {
+            match self
+                .mint
+                .as_ref()
+                .and_then(|m| m.mint_current(&self.plugin_id))
+            {
                 Some(fresh) => {
                     tracing::info!(
                         plugin_id = %self.plugin_id,
@@ -755,12 +759,8 @@ impl<H: HostServices> Connection<H> {
                 // No mint wired, or the plugin is no longer enabled: the
                 // expired token stays expired and the request is refused.
                 None => {
-                    return send_error(
-                        write_half,
-                        &req_id,
-                        crate::dispatch::errors::TOKEN_EXPIRED,
-                    )
-                    .await
+                    return send_error(write_half, &req_id, crate::dispatch::errors::TOKEN_EXPIRED)
+                        .await
                 }
             }
         }

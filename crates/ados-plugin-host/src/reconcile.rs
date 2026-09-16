@@ -225,10 +225,7 @@ impl<H: HostServices> PluginReconciler<H> {
                 "plugin {plugin_id} is not installed or is not enabled; nothing to rotate"
             ));
         };
-        Ok(self
-            .server
-            .refresh_registry()
-            .push(plugin_id, token))
+        Ok(self.server.refresh_registry().push(plugin_id, token))
     }
 
     /// Re-mint every served plugin's token. Driven by [`ROTATE_INTERVAL`] so
@@ -302,10 +299,8 @@ pub fn spawn_loops<H: HostServices + 'static>(
         // `interval` fires its first tick immediately; start one period out
         // instead. The caller has already run the first pass synchronously, and
         // an immediate duplicate would re-read state for nothing.
-        let mut ticker = tokio::time::interval_at(
-            tokio::time::Instant::now() + POLL_INTERVAL,
-            POLL_INTERVAL,
-        );
+        let mut ticker =
+            tokio::time::interval_at(tokio::time::Instant::now() + POLL_INTERVAL, POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
@@ -340,7 +335,6 @@ pub fn spawn_loops<H: HostServices + 'static>(
             }
         }
     });
-
 
     (poll, rotate)
 }

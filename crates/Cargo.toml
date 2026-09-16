@@ -12,7 +12,13 @@ edition = "2021"
 # the shipped aarch64 binaries run on hosts this repo does not control, and an
 # undeclared requirement surfaces there as a raw compile error instead of a
 # readable "needs a newer toolchain".
-rust-version = "1.88"
+# Raised from 1.88 because the declaration was false: `rerun` is exact-pinned
+# at `=0.33.1` (ados-compute/Cargo.toml) to match the GCS web-viewer's .rrd
+# encoding, and that release requires 1.92, so the workspace has not built on
+# 1.88 for some time. The MSRV job caught it on every run; what it reported
+# was a false metadata claim, not a build regression. 1.92 is what actually
+# builds. Lowering this is a product decision, not a build fix.
+rust-version = "1.92"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/altnautica/ADOSDroneAgent"
 

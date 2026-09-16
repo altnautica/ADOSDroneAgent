@@ -281,7 +281,12 @@ mod tests {
 
     #[test]
     fn unit_contains_slice_hardening_execstart_and_limits() {
-        let unit = render_unit(&subprocess_manifest(), Path::new("/var/ados/plugins"), &BTreeSet::new()).unwrap();
+        let unit = render_unit(
+            &subprocess_manifest(),
+            Path::new("/var/ados/plugins"),
+            &BTreeSet::new(),
+        )
+        .unwrap();
         assert!(unit.contains("Slice=ados-plugins.slice"));
         // Python runtime (default): the shared runner takes the plugin id.
         assert!(unit.contains(

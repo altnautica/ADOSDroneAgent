@@ -608,11 +608,7 @@ pub struct VideoStreamHb {
     /// can use is the same defect as the absolute port this field replaced. The
     /// agent's own on-box cockpit gets `hls_url` from `/api/status/full`
     /// instead.
-    #[serde(
-        rename = "whepUrl",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "whepUrl", default, skip_serializing_if = "Option::is_none")]
     pub whep_url: Option<String>,
 }
 

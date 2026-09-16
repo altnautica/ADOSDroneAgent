@@ -23,9 +23,7 @@ use std::time::Duration;
 
 use ados_plugin_host::state::{self, PermissionGrant, PluginInstall, PluginSource, PluginStatus};
 use ados_plugin_host::token_secret::TokenMint;
-use ados_plugin_host::{
-    EventBus, NoopHost, PluginIpcServer, PluginReconciler,
-};
+use ados_plugin_host::{EventBus, NoopHost, PluginIpcServer, PluginReconciler};
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::plugin::{CapabilityToken, Envelope, PROTOCOL_VERSION};
 use rmpv::Value;
@@ -105,7 +103,10 @@ fn request(method: &str, token: &str) -> Envelope {
 }
 
 async fn send(stream: &mut UnixStream, env: &Envelope) {
-    stream.write_all(&env.encode_frame().unwrap()).await.unwrap();
+    stream
+        .write_all(&env.encode_frame().unwrap())
+        .await
+        .unwrap();
     stream.flush().await.unwrap();
 }
 
@@ -262,7 +263,11 @@ async fn an_expired_token_is_re_minted_in_place_instead_of_failing() {
         std::iter::once("mavlink.read".to_string()).collect();
     let short_lived = issuer.mint(PLUGIN_ID, &caps, 1);
     let mut client = UnixStream::connect(&sock).await.unwrap();
-    send(&mut client, &request("hello", &short_lived.to_token_string())).await;
+    send(
+        &mut client,
+        &request("hello", &short_lived.to_token_string()),
+    )
+    .await;
     let ready = recv(&mut client).await;
     assert_eq!(ready.error, None, "{ready:?}");
     assert_eq!(arg_bool(&ready, "ready"), Some(true));
@@ -271,10 +276,17 @@ async fn an_expired_token_is_re_minted_in_place_instead_of_failing() {
     // answered `token_expired` and every later call did too, for the life of
     // the process.
     tokio::time::sleep(Duration::from_millis(1400)).await;
-    send(&mut client, &request("ping", &short_lived.to_token_string())).await;
+    send(
+        &mut client,
+        &request("ping", &short_lived.to_token_string()),
+    )
+    .await;
 
     let first = recv(&mut client).await;
-    assert_eq!(first.kind, "event", "expected a token.refresh first: {first:?}");
+    assert_eq!(
+        first.kind, "event",
+        "expected a token.refresh first: {first:?}"
+    );
     assert_eq!(first.method, "token.refresh");
     let refreshed = arg_str(&first, "token").expect("a fresh token in the refresh event");
     let parsed = CapabilityToken::from_token_string(&refreshed).unwrap();
@@ -323,7 +335,10 @@ async fn a_revoke_changes_the_enforcement_decision_on_the_live_session() {
 
     // The operator revokes it: state is rewritten and the daemon re-mints.
     write_state(&h.state_path, PluginStatus::Running, &[]);
-    assert!(h.reconciler.rotate_token(PLUGIN_ID).unwrap(), "a live session must receive it");
+    assert!(
+        h.reconciler.rotate_token(PLUGIN_ID).unwrap(),
+        "a live session must receive it"
+    );
 
     // The session picks the new token up and the SAME call is now refused —
     // with no restart of the daemon or the plugin, and without the session

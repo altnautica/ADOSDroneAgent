@@ -362,10 +362,7 @@ mod tests {
         let stable = artifacts_conflict(Some("/srv/build"), None, "stable")
             .expect("stable cannot verify an unsigned local build");
         assert!(stable.contains("signature"), "names the cause: {stable}");
-        assert!(
-            stable.contains("--channel edge"),
-            "names the fix: {stable}"
-        );
+        assert!(stable.contains("--channel edge"), "names the fix: {stable}");
 
         let pinned = artifacts_conflict(Some("/srv/build"), Some("3b4b8dee"), "edge")
             .expect("--ref and --artifacts both decide where binaries come from");

@@ -491,7 +491,10 @@ mod tests {
         assert_eq!(wire_status & RESPONSE_HEADERS_FLAG, RESPONSE_HEADERS_FLAG);
 
         let (status, got_body, got_headers) = unpack_response(wire_status, object);
-        assert_eq!(status, 200, "the flag is stripped, not leaked to the caller");
+        assert_eq!(
+            status, 200,
+            "the flag is stripped, not leaked to the caller"
+        );
         assert_eq!(got_body, body);
         assert_eq!(got_headers, headers);
     }
@@ -511,9 +514,16 @@ mod tests {
             if i == 1 {
                 continue; // radio dropped it; the repair symbols cover it
             }
-            let payload =
-                encode_response_fragment(SENDER, 9, wire_status, i as u16, total, split.oti, symbol)
-                    .unwrap();
+            let payload = encode_response_fragment(
+                SENDER,
+                9,
+                wire_status,
+                i as u16,
+                total,
+                split.oti,
+                symbol,
+            )
+            .unwrap();
             let frag = decode_response(&payload).unwrap();
             assert_eq!(frag.status, wire_status);
             if let FragmentOutcome::Complete(out) = decoder.push(frag.index, frag.body) {
@@ -521,8 +531,10 @@ mod tests {
                 break;
             }
         }
-        let (status, got_body, got_headers) =
-            unpack_response(wire_status, assembled.expect("repair symbols must close the block"));
+        let (status, got_body, got_headers) = unpack_response(
+            wire_status,
+            assembled.expect("repair symbols must close the block"),
+        );
         assert_eq!(status, 200);
         assert_eq!(got_body, body);
         assert_eq!(got_headers, headers);

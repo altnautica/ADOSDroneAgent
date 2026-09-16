@@ -252,7 +252,10 @@ pub fn revert(
     if let Some(parent) = paths.camera_conf.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let camera_id = marker.get("camera_id").map(|s| s.as_str()).unwrap_or("none");
+    let camera_id = marker
+        .get("camera_id")
+        .map(|s| s.as_str())
+        .unwrap_or("none");
     let board = marker.get("board").map(|s| s.as_str()).unwrap_or("");
     let body = format!(
         "# Written by the camera probe after an unconfirmed CSI overlay failed to\n\
@@ -293,10 +296,7 @@ pub fn apply_decision(
 /// Run the probe: a no-op when no probation marker exists; otherwise poll for
 /// the sensor up to the late-bind window, then confirm or revert.
 pub fn run(paths: &CameraProbePaths) -> std::io::Result<CameraProbeOutcome> {
-    run_with_window(
-        paths,
-        std::time::Duration::from_secs_f64(BIND_POLL_SECONDS),
-    )
+    run_with_window(paths, std::time::Duration::from_secs_f64(BIND_POLL_SECONDS))
 }
 
 /// [`run`] with an explicit late-bind window, so a test drives the whole
@@ -437,7 +437,10 @@ mod tests {
         let before = std::fs::read_to_string(&t.paths.camera_conf).unwrap();
         assert_eq!(run(&t.paths).unwrap(), CameraProbeOutcome::NoProbation);
         // Nothing touched: not the boot config, not camera.conf.
-        assert_eq!(std::fs::read_to_string(&t.paths.camera_conf).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(&t.paths.camera_conf).unwrap(),
+            before
+        );
         assert!(std::fs::read_to_string(&t.boot_config)
             .unwrap()
             .contains("fdtoverlays"));
@@ -474,7 +477,10 @@ mod tests {
         // camera.conf advanced WITHOUT losing the keys the camera service needs
         // to open the sensor.
         let conf = parse_marker(&t.paths.camera_conf);
-        assert_eq!(conf.get("overlay_state").map(String::as_str), Some("confirmed"));
+        assert_eq!(
+            conf.get("overlay_state").map(String::as_str),
+            Some("confirmed")
+        );
         assert_eq!(conf.get("camera_present").map(String::as_str), Some("true"));
         assert_eq!(
             conf.get("default_mode").map(String::as_str),
@@ -543,8 +549,14 @@ mod tests {
         );
         assert!(!t.paths.camera_probation.exists());
         let conf = parse_marker(&t.paths.camera_conf);
-        assert_eq!(conf.get("camera_present").map(String::as_str), Some("false"));
-        assert_eq!(conf.get("overlay_state").map(String::as_str), Some("reverted"));
+        assert_eq!(
+            conf.get("camera_present").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            conf.get("overlay_state").map(String::as_str),
+            Some("reverted")
+        );
     }
 
     #[test]

@@ -465,7 +465,10 @@ mod tests {
         let lines = plain_lines(&s);
         let body = lines.join("\n");
         assert!(body.contains("Reboot needed to finish:"), "{body}");
-        assert!(body.contains("camera-overlay radxa-camera-13m-214"), "{body}");
+        assert!(
+            body.contains("camera-overlay radxa-camera-13m-214"),
+            "{body}"
+        );
         // It outranks the next-step commands: the hardware is not working yet.
         let reboot_at = lines
             .iter()

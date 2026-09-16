@@ -149,9 +149,7 @@ pub fn sandbox_directives(granted: &BTreeSet<String>) -> Vec<String> {
     if granted.contains(NETWORK_OUTBOUND_CAP) {
         // AF_NETLINK rides with the grant because a plugin that may reach the
         // network needs getifaddrs / DNS resolution to do it.
-        lines.push(
-            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string(),
-        );
+        lines.push("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string());
     } else {
         // AF_UNIX stays: the plugin's own host socket is a Unix socket, so
         // denying it would deny the plugin everything.
@@ -161,7 +159,10 @@ pub fn sandbox_directives(granted: &BTreeSet<String>) -> Vec<String> {
 
     // ---- filesystem -------------------------------------------------
     let host_fs = granted.contains(FILESYSTEM_HOST_CAP);
-    let mut rw: Vec<String> = BASE_READ_WRITE_PATHS.iter().map(|p| p.to_string()).collect();
+    let mut rw: Vec<String> = BASE_READ_WRITE_PATHS
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
     if host_fs {
         rw.extend(HOST_DATA_ROOTS.iter().map(|p| p.to_string()));
     }
@@ -218,9 +219,8 @@ mod tests {
     #[test]
     fn network_grant_flips_the_address_family_filter() {
         let lines = sandbox_directives(&caps(&["network.outbound"]));
-        assert!(lines.contains(
-            &"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string()
-        ));
+        assert!(lines
+            .contains(&"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string()));
         assert!(!lines.contains(&"IPAddressDeny=any".to_string()));
     }
 

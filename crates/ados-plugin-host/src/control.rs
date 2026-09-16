@@ -326,9 +326,7 @@ async fn serve_connection<H: ConfigControl>(
         Ok(req) if req.method == METHOD_TOOL_INVOKE => {
             handle_tool_invoke(invoke.as_ref(), &req).await
         }
-        Ok(req)
-            if req.method == METHOD_TOKEN_ROTATE || req.method == METHOD_PLUGIN_RECONCILE =>
-        {
+        Ok(req) if req.method == METHOD_TOKEN_ROTATE || req.method == METHOD_PLUGIN_RECONCILE => {
             handle_lifecycle(lifecycle.as_ref(), &req)
         }
         Ok(req) => handle_request(host.as_ref(), &req),
@@ -515,7 +513,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let host = Arc::new(StubHost::default());
         let invoke = Arc::new(InvokeRegistry::new());
-        let (path, task) = serve_control(host.clone(), invoke, None, dir.path().to_path_buf()).unwrap();
+        let (path, task) =
+            serve_control(host.clone(), invoke, None, dir.path().to_path_buf()).unwrap();
 
         let req = request(vec![
             (Value::from("plugin_id"), Value::from("p")),

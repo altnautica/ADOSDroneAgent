@@ -189,7 +189,10 @@ fn emit_mediamtx_config(args: &[String]) -> Option<i32> {
         port("--rtsp-port", ados_video::mediamtx::DEFAULT_RTSP_PORT),
         port("--webrtc-port", ados_video::mediamtx::DEFAULT_WEBRTC_PORT),
         port("--hls-port", ados_video::mediamtx::DEFAULT_HLS_PORT),
-        port("--playback-port", ados_video::mediamtx::DEFAULT_PLAYBACK_PORT),
+        port(
+            "--playback-port",
+            ados_video::mediamtx::DEFAULT_PLAYBACK_PORT,
+        ),
     );
     let (api, rtsp, webrtc, hls, playback) = match ports {
         (Ok(a), Ok(r), Ok(w), Ok(h), Ok(p)) => (a, r, w, h, p),

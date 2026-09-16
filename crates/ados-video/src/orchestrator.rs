@@ -1340,7 +1340,8 @@ pub fn ceiling_change_is_deferrable(live: EncoderSettings, target: EncoderSettin
     // Integer comparison of |delta| / live < percent / 100, cross-multiplied so
     // there is no rounding step to argue about at the boundary: a change of
     // exactly the threshold applies.
-    live.bitrate_kbps.abs_diff(target.bitrate_kbps) * 100 < live.bitrate_kbps * CEILING_DEFER_PERCENT
+    live.bitrate_kbps.abs_diff(target.bitrate_kbps) * 100
+        < live.bitrate_kbps * CEILING_DEFER_PERCENT
 }
 
 /// Sleep up to `dur`, waking early on shutdown or (when `wake_on_camera`) on a
@@ -1528,7 +1529,10 @@ mod tests {
         o.apply_desired_encoder().await;
 
         let applied = o.encoder_control().applied();
-        assert_eq!(applied.generation, generation, "the request is acknowledged");
+        assert_eq!(
+            applied.generation, generation,
+            "the request is acknowledged"
+        );
         assert!(!applied.restarted, "no encoder respawn for a 15 % clamp");
         assert_eq!(
             o.live_encoder_settings().bitrate_kbps,
@@ -1585,7 +1589,10 @@ mod tests {
         assert!(!ceiling_change_is_deferrable(hero, thumb));
         assert!(!ceiling_change_is_deferrable(
             hero,
-            EncoderSettings { fps: 15, ..at(3900) }
+            EncoderSettings {
+                fps: 15,
+                ..at(3900)
+            }
         ));
     }
 

@@ -592,7 +592,6 @@ fn install_one_at(
     sink: &ProgressSink,
     source: &AssetSource<'_>,
 ) -> anyhow::Result<()> {
-
     // Ensure /opt/ados/bin exists so the `.dl` sibling and the final rename land
     // on the same filesystem as the destination (atomic rename requires it).
     if let Some(parent) = dest.parent() {
@@ -1589,7 +1588,11 @@ mod tests {
         )
         .expect("a local artifact with a matching .sha256 must install");
 
-        assert_eq!(std::fs::read(&dest).unwrap(), new_bytes, "dest was replaced");
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            new_bytes,
+            "dest was replaced"
+        );
         assert_eq!(
             std::fs::read(prev_sibling(&dest)).unwrap(),
             fake_elf(machine, b"the binary already installed"),
@@ -1625,7 +1628,11 @@ mod tests {
         std::fs::write(&dest, &installed).unwrap();
 
         // Sidecar describes one file; the file on disk is a different one.
-        write_local_artifact(src.path(), "ados-video", &fake_elf(machine, b"honest bytes"));
+        write_local_artifact(
+            src.path(),
+            "ados-video",
+            &fake_elf(machine, b"honest bytes"),
+        );
         std::fs::write(
             src.path().join("ados-video"),
             fake_elf(machine, b"tampered bytes"),
@@ -1673,7 +1680,11 @@ mod tests {
         let dst = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let dest = dst.path().join("ados-video");
-        std::fs::write(src.path().join("ados-video"), fake_elf(machine, b"unsigned")).unwrap();
+        std::fs::write(
+            src.path().join("ados-video"),
+            fake_elf(machine, b"unsigned"),
+        )
+        .unwrap();
 
         let err = install_one_at(
             video_entry(),
@@ -1709,7 +1720,11 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
         let scratch = tempfile::tempdir().unwrap();
-        write_local_artifact(src.path(), "ados-video", &fake_elf(machine, b"unsigned build"));
+        write_local_artifact(
+            src.path(),
+            "ados-video",
+            &fake_elf(machine, b"unsigned build"),
+        );
         let source = AssetSource::Local {
             dir: src.path(),
             host_arch,

@@ -538,13 +538,11 @@ impl Supervisor {
         self.services
             .iter()
             .filter(|spec| {
-                matches!(
-                    spec.state,
-                    ServiceState::Failed | ServiceState::CircuitOpen
-                ) && spec
-                    .last_retry_at
-                    .map(|t| now.duration_since(t) >= PARKED_RETRY_COOLDOWN)
-                    .unwrap_or(true)
+                matches!(spec.state, ServiceState::Failed | ServiceState::CircuitOpen)
+                    && spec
+                        .last_retry_at
+                        .map(|t| now.duration_since(t) >= PARKED_RETRY_COOLDOWN)
+                        .unwrap_or(true)
             })
             .map(|spec| spec.name)
             .collect()

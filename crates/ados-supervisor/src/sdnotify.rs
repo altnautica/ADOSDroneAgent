@@ -201,7 +201,10 @@ mod tests {
         // Three 5 s intervals + the 60 s grace: a pass that stamps progress at
         // every stage boundary can spend over a minute in one stage without the
         // watchdog being withheld, while a pass that stops stamping trips it.
-        assert_eq!(stall_budget(Duration::from_secs(5)), Duration::from_secs(75));
+        assert_eq!(
+            stall_budget(Duration::from_secs(5)),
+            Duration::from_secs(75)
+        );
         assert!(stall_budget(Duration::from_secs(5)) > Duration::from_secs(WATCHDOG_SEC));
     }
 
