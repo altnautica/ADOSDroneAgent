@@ -222,3 +222,9 @@ testpaths = ["tests", "tools/api-conformance/tests", "tools/logd-conformance/tes
 # happened the moment these directories were collected for the first time.
 # `importlib` gives each file a unique module identity from its full path.
 addopts = "--import-mode=importlib"
+# `importlib` does not put the rootdir on `sys.path` the way the legacy mode
+# did, and `tests/test_emit_openapi.py` imports `scripts.emit_openapi` from the
+# repo root. That import survived only because `python -m pytest` happens to
+# prepend the cwd; the bare `pytest` console script CI runs does not, so the
+# dependency was on the launcher rather than on anything declared. State it.
+pythonpath = ["."]
