@@ -127,10 +127,18 @@ impl UplinkSnapshot {
     }
 }
 
-/// The 30 s GS status payload posted to `{convex}/agent/status`. A smaller
+/// The ground station's relay-state slice, republished every 30 s for the
+/// node's single `/agent/status` producer to fold onto its heartbeat. A smaller
 /// document than the drone heartbeat: it adds the relay's own forwarding state
 /// on top of the minimum status-mutation contract, not the full board/service
 /// enrichment.
+///
+/// This used to be POSTed straight to `{convex}/agent/status` alongside the
+/// heartbeat loop's own 5 s POST. Two producers on one row is not a merge —
+/// each tick's absences overwrite the other's readings, so the same
+/// `cmd_droneStatus` row alternated between a full board/radio/service shape
+/// and this small one. It is now folded in-process instead, so there is exactly
+/// one producer.
 ///
 /// The whole struct serializes `camelCase` so every field lands in the status
 /// mutation in its canonical shape (`mqttConnected`, `throttleState`,
@@ -195,8 +203,10 @@ pub enum MqttAction {
 pub struct CloudRelayBridge {
     device_id: String,
     drone_id: Option<String>,
-    convex_base: String,
-    api_key: Option<String>,
+    /// The in-process sink the bridge publishes its relay state onto for the
+    /// single `/agent/status` producer to fold. `None` leaves the relay block
+    /// unreported (tests, and a bridge run with no heartbeat loop).
+    relay_state_sink: Option<watch::Sender<Option<GsHeartbeat>>>,
     relay_transport: TransportConfig,
     flag_path: PathBuf,
     mavlink_sock: PathBuf,
@@ -241,24 +251,20 @@ impl CloudRelayBridge {
     /// Build a bridge. `relay_transport` is the dial config for the MAVLink
     /// relay (`ados-{id}` username, broker host/port/password); `drone_id` is
     /// the paired drone id reported on the heartbeat.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device_id: impl Into<String>,
         drone_id: Option<String>,
-        convex_base: impl Into<String>,
-        api_key: Option<String>,
         relay_transport: TransportConfig,
     ) -> Self {
         Self {
             device_id: device_id.into(),
             drone_id,
-            convex_base: convex_base.into().trim_end_matches('/').to_string(),
-            api_key,
             relay_transport,
             flag_path: PathBuf::from(UPLINK_ACTIVE_FLAG),
             mavlink_sock: PathBuf::from(MAVLINK_SOCK),
             msp_sock: PathBuf::from(MSP_SOCK),
             state_source: None,
+            relay_state_sink: None,
             current_uplink: None,
             internet_reachable: false,
             throttle: ThrottleState::None,
@@ -270,6 +276,19 @@ impl CloudRelayBridge {
             msp_relay_task: None,
             started: std::time::Instant::now(),
         }
+    }
+
+    /// Wire the in-process sink the bridge publishes its relay state onto.
+    ///
+    /// The bridge does NOT POST `/agent/status` itself. Two producers per node
+    /// (this one every 30 s with the relay block, the heartbeat loop every 5 s
+    /// with the board/radio/service enrichment) meant each tick overwrote the
+    /// other's columns with its own absences, so the same row alternated between
+    /// two incompatible shapes. There is exactly ONE producer — the heartbeat
+    /// loop — and it folds what is published here.
+    pub fn with_relay_state_sink(mut self, sink: watch::Sender<Option<GsHeartbeat>>) -> Self {
+        self.relay_state_sink = Some(sink);
+        self
     }
 
     /// Override the active-flag path (tests).
@@ -440,19 +459,11 @@ impl CloudRelayBridge {
 
     /// Run the bridge until `shutdown` fires. Polls the active-flag file on a
     /// short cadence and reconciles MQTT on each transition (explicit
-    /// teardown/reconnect on uplink change), and posts the GS heartbeat every
-    /// 30 s. Best-effort throughout: a transport failure schedules a backoff
-    /// retry, never a crash.
-    pub async fn run(
-        &mut self,
-        http: std::sync::Arc<reqwest::Client>,
-        mut shutdown: watch::Receiver<bool>,
-    ) {
-        info!(
-            drone_id = ?self.drone_id,
-            convex_base = %self.convex_base,
-            "cloud_relay.start"
-        );
+    /// teardown/reconnect on uplink change), and republishes the relay state
+    /// onto the heartbeat sink every 30 s. Best-effort throughout: a transport
+    /// failure schedules a backoff retry, never a crash.
+    pub async fn run(&mut self, mut shutdown: watch::Receiver<bool>) {
+        info!(drone_id = ?self.drone_id, "cloud_relay.start");
         // The live relay task handle + its shutdown.
         let mut relay_task: Option<tokio::task::JoinHandle<()>> = None;
         let mut relay_shutdown: Option<watch::Sender<bool>> = None;
@@ -533,20 +544,21 @@ impl CloudRelayBridge {
                     self.refresh_mqtt_connected();
                 }
                 _ = heartbeat.tick() => {
-                    // Read the live connection state at post time so the
+                    // Read the live connection state at publish time so the
                     // mqttConnected the GS reports tracks the broker session
                     // even if the relay flipped between poll ticks.
                     self.refresh_mqtt_connected();
                     let ts_ms = now_ms();
-                    if let Some(body) = self.build_heartbeat(ts_ms) {
-                        self.post_status(&http, &body).await;
-                    }
+                    self.publish_relay_state(self.build_heartbeat(ts_ms));
                 }
             }
         }
 
         teardown_relay(&mut relay_task, &mut relay_shutdown).await;
         self.mark_relay_down();
+        // The bridge is gone: withdraw the relay block rather than leaving the
+        // last forwarding state to be folded onto every later heartbeat.
+        self.publish_relay_state(None);
         info!("cloud_relay.stop");
     }
 
@@ -641,18 +653,18 @@ impl CloudRelayBridge {
         }
     }
 
-    /// POST the GS status heartbeat. Best-effort; a non-2xx / transport error is
-    /// logged at debug.
-    async fn post_status(&self, http: &reqwest::Client, body: &GsHeartbeat) {
-        let url = format!("{}/agent/status", self.convex_base);
-        let mut req = http.post(&url).json(body);
-        if let Some(key) = &self.api_key {
-            req = req.header("x-ados-key", key);
-        }
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => debug!("cloud_relay.convex_ok"),
-            Ok(resp) => debug!(status = resp.status().as_u16(), "cloud_relay.convex_non2xx"),
-            Err(e) => debug!(error = %e, "cloud_relay.convex_post_failed"),
+    /// Publish the relay state for the single `/agent/status` producer to fold.
+    ///
+    /// A `watch` send, so a heartbeat tick always reads the LATEST state rather
+    /// than a queued backlog, and a bridge running with no sink wired (tests) is
+    /// a no-op. `None` withdraws the relay block.
+    fn publish_relay_state(&self, state: Option<GsHeartbeat>) {
+        if let Some(sink) = &self.relay_state_sink {
+            // A closed channel means the heartbeat loop is gone, which is not
+            // the bridge's problem to escalate — it is already shutting down.
+            let _ = sink.send(state);
+        } else {
+            debug!("cloud_relay.relay_state_unwired");
         }
     }
 }
@@ -793,13 +805,7 @@ mod tests {
     }
 
     fn bridge() -> CloudRelayBridge {
-        CloudRelayBridge::new(
-            "dev1",
-            Some("paired-drone".to_string()),
-            "https://convex.example/",
-            Some("api-key".to_string()),
-            transport(),
-        )
+        CloudRelayBridge::new("dev1", Some("paired-drone".to_string()), transport())
     }
 
     struct FixedState(serde_json::Value);
@@ -1066,6 +1072,29 @@ mod tests {
         assert!(wire.get("uptimeSeconds").and_then(|v| v.as_i64()).is_some());
         // No role to report yet → the field is omitted, not null.
         assert!(wire.get("role").is_none());
+    }
+
+    #[test]
+    fn the_relay_state_is_published_for_the_single_status_producer() {
+        // The bridge must not be a second /agent/status producer: it hands its
+        // relay block to the heartbeat loop, which folds it onto the one POST.
+        let (tx, rx) = watch::channel(None);
+        let mut br = bridge().with_relay_state_sink(tx);
+        let snap = UplinkSnapshot {
+            active_uplink: "wlan0".to_string(),
+            internet_reachable: true,
+            data_cap_state: "ok".to_string(),
+        };
+        br.reconcile_uplink(Some(&snap));
+        br.publish_relay_state(br.build_heartbeat(99));
+        let published = rx.borrow().clone().expect("relay state is published");
+        assert_eq!(published.uplink, "wlan0");
+        assert_eq!(published.profile, "ground-station");
+        assert_eq!(published.ts_ms, 99);
+        // Stopping withdraws the block, so a dead bridge's last forwarding
+        // state is not folded onto every later heartbeat.
+        br.publish_relay_state(None);
+        assert!(rx.borrow().is_none());
     }
 
     #[test]

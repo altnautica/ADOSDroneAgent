@@ -13,6 +13,8 @@ install, instead of an out-of-band edit on the box.
   the live unit state.
 * ``ados rust enable <svc>...`` — turn the native implementation on.
 * ``ados rust disable <svc>...`` — fall back to the packaged service.
+  Refused for a service whose native unit is the node's only listener for
+  something an operator needs to reach it by; see ``_disable_refusal``.
 
 ``enable`` / ``disable`` touch ``/etc/ados`` and drive ``systemctl``, so
 they require root. ``status`` is read-only and runs as any user.
@@ -151,10 +153,14 @@ def _require_root() -> None:
 
 
 def _systemctl(*args: str, timeout: float = 60.0) -> int:
-    """Best-effort systemctl call. Returns the exit code (124 on timeout);
-    never raises."""
+    """Best-effort systemctl call. Returns the exit code; never raises.
+
+    124 on timeout, 127 when there is no systemctl on PATH. That last case used
+    to return 0, so on a box without systemd every unit read back as active and
+    every flip reported that it had restarted units it had never touched.
+    """
     if not shutil.which("systemctl"):
-        return 0
+        return 127
     try:
         result = subprocess.run(
             ["systemctl", *args],
@@ -287,7 +293,13 @@ def _front_status_line() -> str:
     return f'  {"front":<11}  {mode:<22}  {flag:<8}  {binp:<7}  —'
 
 
-def _apply(svc: _Service, *, enable: bool) -> None:
+def _apply(svc: _Service, *, enable: bool) -> bool:
+    """Flip one service. Returns whether every systemctl call it made succeeded.
+
+    The return value is what the caller's message is allowed to claim. Ignoring
+    it printed "enabled" / "reverted" over a unit that had not moved.
+    """
+    ok = True
     if enable:
         _set_marker(svc, native=True)
         # Mask the packaged units the native daemon absorbs so they do not
@@ -297,28 +309,59 @@ def _apply(svc: _Service, *, enable: bool) -> None:
         # Swap units carry both implementations: a restart re-execs the
         # native branch. Extra units exist only for the native path.
         for unit in svc.swap_units:
-            _systemctl("restart", unit)
+            ok &= _systemctl("restart", unit) == 0
         for unit in svc.extra_units:
-            _systemctl("enable", unit)
-            _systemctl("restart", unit)
+            ok &= _systemctl("enable", unit) == 0
+            ok &= _systemctl("restart", unit) == 0
     else:
         _set_marker(svc, native=False)
         # Retire the native-only units, then bring the packaged ones back.
         for unit in svc.extra_units:
             _mask_unit(unit)
         for unit in svc.subsumes:
-            _systemctl("enable", unit)
-            _systemctl("restart", unit)
+            ok &= _systemctl("enable", unit) == 0
+            ok &= _systemctl("restart", unit) == 0
         for unit in svc.swap_units:
-            _systemctl("restart", unit)
+            ok &= _systemctl("restart", unit) == 0
+    return ok
+
+
+def _front_owns_lan_port() -> bool:
+    """Whether the native control surface is this node's LAN HTTP front."""
+    return (ADOS_ETC_DIR / _FRONT_MARKER).exists() and os.access(_CONTROL_BIN, os.X_OK)
+
+
+def _disable_refusal(name: str) -> str | None:
+    """Why ``disable <name>`` must not run here, or None when it is safe.
+
+    ``control`` is the case that matters. The unit this would stop is the same
+    process that serves the LAN port whenever ``front-rust-enabled`` is present
+    — and the installer writes that marker on every install, with no operator
+    toggle for it. The residual FastAPI has been moved to an internal socket by
+    the front drop-in, so stopping the unit leaves :8080 with no listener at
+    all: the one command an operator reaches for when the API misbehaves used
+    to take the API away for good, usually over that very network, and print
+    that it had reverted to a packaged service that is not listening.
+    """
+    if name == "control" and _front_owns_lan_port():
+        return (
+            f"the native surface is this node's LAN HTTP front "
+            f"(/etc/ados/{_FRONT_MARKER} present), and stopping ados-control "
+            "would leave :8080 with no listener at all — the residual API "
+            "serves an internal socket only. The LAN front is not an operator "
+            "toggle; install.sh --upgrade reconciles it."
+        )
+    return None
 
 
 @rust_group.command("enable", help="Run the native implementation for one or more services.")
 @click.argument("services", nargs=-1, required=True, type=click.Choice(_FLIP_NAMES))
-def rust_enable(services: tuple[str, ...]) -> None:
+@click.pass_context
+def rust_enable(ctx: click.Context, services: tuple[str, ...]) -> None:
     if _reject_on_macos():
         return
     _require_root()
+    failed = False
     for name in services:
         svc = _SERVICES[name]
         if not _binaries_present(svc):
@@ -328,19 +371,49 @@ def rust_enable(services: tuple[str, ...]) -> None:
                     fg="yellow",
                 )
             )
+            failed = True
             continue
-        _apply(svc, enable=True)
-        click.echo(click.style(f"  {name}: native implementation enabled.", fg="green"))
+        if _apply(svc, enable=True):
+            click.echo(click.style(f"  {name}: native implementation enabled.", fg="green"))
+        else:
+            click.echo(
+                click.style(
+                    f"  {name}: marker written but a unit did not start — see "
+                    f"`systemctl status {' '.join(svc.extra_units + svc.swap_units)}`.",
+                    fg="red",
+                )
+            )
+            failed = True
     rust_status.callback()  # type: ignore[misc]
+    if failed:
+        ctx.exit(1)
 
 
 @rust_group.command("disable", help="Fall back to the packaged service for one or more services.")
 @click.argument("services", nargs=-1, required=True, type=click.Choice(_FLIP_NAMES))
-def rust_disable(services: tuple[str, ...]) -> None:
+@click.pass_context
+def rust_disable(ctx: click.Context, services: tuple[str, ...]) -> None:
     if _reject_on_macos():
         return
     _require_root()
+    failed = False
     for name in services:
-        _apply(_SERVICES[name], enable=False)
-        click.echo(f"  {name}: reverted to the packaged service.")
+        refusal = _disable_refusal(name)
+        if refusal:
+            click.echo(click.style(f"  {name}: refused — {refusal}", fg="red"))
+            failed = True
+            continue
+        if _apply(_SERVICES[name], enable=False):
+            click.echo(f"  {name}: reverted to the packaged service.")
+        else:
+            click.echo(
+                click.style(
+                    f"  {name}: fallback marker written but a unit did not move — "
+                    "the packaged service may not be serving.",
+                    fg="red",
+                )
+            )
+            failed = True
     rust_status.callback()  # type: ignore[misc]
+    if failed:
+        ctx.exit(1)

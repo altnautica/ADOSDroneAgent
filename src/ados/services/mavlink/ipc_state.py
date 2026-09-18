@@ -30,12 +30,30 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 #: Where the native router persists its parameter cache. Mirrors the Rust
 #: ``ados_mavlink_router::param_cache::DEFAULT_PARAMS_PATH``; the two processes
 #: share no code, so the constant is duplicated rather than imported.
 DEFAULT_PARAMS_PATH = "/var/lib/ados/params.json"
+
+#: How long a state IPC snapshot may be served as a live vehicle reading. The
+#: router publishes at ~10 Hz, so anything older than this means it has stopped
+#: publishing — the process died, its FC thread wedged, or the socket dropped.
+#: Past the bound the snapshot is withheld rather than served: a frozen
+#: ``armed`` / battery / GPS triple that still reads as current is how a dead
+#: router looks like a live aircraft to the REST surface, the MQTT gateway and
+#: the photo geotagger.
+STATE_SNAPSHOT_MAX_AGE_S = 3.0
+
+#: How old the vehicle's last decoded POSITION may be and still describe where
+#: it is. The router publishes `position_age_ms` on the snapshot for exactly
+#: this: a GPS that dies while the heartbeat continues leaves a fresh snapshot
+#: wrapped around a frozen fix, which no snapshot-level age bound can catch.
+#: GLOBAL_POSITION_INT arrives at ~5 Hz, so this is ten missed messages.
+POSITION_FRESH_MAX_AGE_MS = 2000.0
 
 
 def params_path() -> Path:
@@ -141,47 +159,92 @@ class IpcVehicleState:
 
     Holds the most recent snapshot dict and exposes the attribute surface
     the former in-process ``VehicleState`` offered to its readers.
+
+    The held snapshot is age-bounded (:data:`STATE_SNAPSHOT_MAX_AGE_S`). An
+    in-process object could not outlive its producer; this view can, because
+    the producer is another process, so without the bound a router that stops
+    publishing leaves the last snapshot being served as a current reading.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_age_s: float = STATE_SNAPSHOT_MAX_AGE_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._d: dict = {}
+        self._max_age_s = max_age_s
+        # Monotonic so a wall-clock step (NTP, GPS) cannot age a fresh snapshot
+        # out or hold a stale one in. Injectable so the age gate is testable
+        # without sleeping.
+        self._clock = clock
+        self._received_at: float | None = None
 
-    def update_from_dict(self, d: dict) -> None:
-        """Replace the held snapshot with a fresh state IPC dict."""
-        if d:
-            self._d = dict(d)
+    def update_from_dict(self, d: dict | None) -> None:
+        """Replace the held snapshot with a fresh state IPC dict.
+
+        ``None`` means "nothing arrived" and leaves the held snapshot and its
+        arrival stamp untouched. Any dict — **including an empty one** — is an
+        authoritative replacement, so the router dropping a key clears it here.
+        Treating a falsy payload as "no update" is what made ``fc_connected`` /
+        ``armed`` / battery / GPS unclearable: once set, no publication could
+        ever take them back down.
+        """
+        if d is None:
+            return
+        self._d = dict(d)
+        self._received_at = self._clock()
+
+    @property
+    def age_s(self) -> float | None:
+        """Seconds since the last snapshot arrived, ``None`` when none has."""
+        if self._received_at is None:
+            return None
+        return max(0.0, self._clock() - self._received_at)
+
+    @property
+    def stale(self) -> bool:
+        """Whether the held snapshot is past the age bound (or never arrived)."""
+        age = self.age_s
+        return age is None or age > self._max_age_s
 
     @property
     def snapshot(self) -> dict:
-        """The raw held snapshot (vehicle keys + service extras)."""
+        """The raw held snapshot (vehicle keys + service extras), age-bounded.
+
+        Empty once :attr:`stale`. Every accessor on this class, and both the
+        param-cache and FC-handle views, read through here, so this single gate
+        is what stops a stalled router being served as a live vehicle.
+        """
+        if self.stale:
+            return {}
         return self._d
 
     @property
     def armed(self) -> bool:
-        return bool(self._d.get("armed", False))
+        return bool(self.snapshot.get("armed", False))
 
     @property
     def mode(self) -> str:
-        return str(self._d.get("mode", "") or "")
+        return str(self.snapshot.get("mode", "") or "")
 
     @property
     def mav_type(self) -> int:
-        return int(self._d.get("mav_type", 0) or 0)
+        return int(self.snapshot.get("mav_type", 0) or 0)
 
     @property
     def autopilot(self) -> int:
-        return int(self._d.get("autopilot", 0) or 0)
+        return int(self.snapshot.get("autopilot", 0) or 0)
 
     @property
     def last_heartbeat(self) -> str:
-        return str(self._d.get("last_heartbeat", "") or "")
+        return str(self.snapshot.get("last_heartbeat", "") or "")
 
     @property
     def last_update(self) -> str:
-        return str(self._d.get("last_update", "") or "")
+        return str(self.snapshot.get("last_update", "") or "")
 
     def _nested(self, group: str, key: str, default: float = 0.0) -> float:
-        sub = self._d.get(group)
+        sub = self.snapshot.get(group)
         if isinstance(sub, dict):
             value = sub.get(key, default)
             return value if value is not None else default
@@ -208,6 +271,39 @@ class IpcVehicleState:
     @property
     def heading(self) -> float:
         return float(self._nested("position", "heading"))
+
+    @property
+    def position_age_ms(self) -> float | None:
+        """Milliseconds since the router last decoded a POSITION, or ``None``.
+
+        ``None`` means no POSITION has ever arrived. Distinct from
+        :attr:`age_s`, which is the age of the whole snapshot, and from
+        ``last_update``, which every frame refreshes: a vehicle whose GPS died
+        while its heartbeat continues keeps publishing a fresh snapshot around
+        a frozen fix, and the snapshot-level gate cannot see that. This is the
+        only reading that catches it.
+        """
+        value = self.snapshot.get("position_age_ms")
+        # A bool is not an age. `bool` subclasses `int`, so `float(True)` is
+        # 1.0 and a JSON `true` would read as a one-millisecond-old fix — the
+        # "cannot tell" case arriving as "current", which is the one outcome
+        # this accessor exists to prevent. `read_param_blob` guards the same
+        # trap the same way.
+        if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return float(value)
+
+    @property
+    def position_fresh(self) -> bool:
+        """Whether lat/lon/alt describe where the vehicle is *now*.
+
+        False once the fix is older than :data:`POSITION_FRESH_MAX_AGE_MS`, and
+        false when the age is unknown: anything that stamps a position onto
+        something durable — a photo's EXIF, a cloud status row — must not read
+        "cannot tell" as "current".
+        """
+        age = self.position_age_ms
+        return age is not None and age <= POSITION_FRESH_MAX_AGE_MS
 
     @property
     def groundspeed(self) -> float:
@@ -238,17 +334,18 @@ class IpcVehicleState:
         moves; the router restarting resets it to 0, which reads as a mismatch and
         costs exactly one refetch.
         """
-        return int(self._d.get("param_generation", 0) or 0)
+        return int(self.snapshot.get("param_generation", 0) or 0)
 
     @property
     def param_count(self) -> int:
-        return int(self._d.get("param_expected_count", 0) or 0)
+        return int(self.snapshot.get("param_expected_count", 0) or 0)
 
     def to_dict(self) -> dict:
         """Vehicle-state dict (service extras stripped)."""
-        if not self._d:
+        held = self.snapshot
+        if not held:
             return _empty_vehicle_dict()
-        return {k: v for k, v in self._d.items() if k not in _EXTRA_KEYS}
+        return {k: v for k, v in held.items() if k not in _EXTRA_KEYS}
 
 
 class _ParamEntry:
@@ -336,12 +433,12 @@ class IpcFcConnection:
     def heartbeat_age_s(self) -> float | None:
         """Seconds since the last decoded HEARTBEAT, or ``None`` when none yet."""
         value = self._vs.snapshot.get("heartbeat_age_s")
-        if value is None:
+        # Same trap as `position_age_ms`: a bool is not an age, and `bool`
+        # subclasses `int`, so `float(True)` would report a 1-second-old
+        # heartbeat on a link nothing has been heard from.
+        if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
+        return float(value)
 
     @property
     def source(self) -> str:
@@ -392,4 +489,10 @@ class IpcFcConnection:
         return bool(self.fc_variant) or self.fc_link_hint == "msp_detected"
 
 
-__all__ = ["IpcVehicleState", "IpcParamCache", "IpcFcConnection"]
+__all__ = [
+    "POSITION_FRESH_MAX_AGE_MS",
+    "STATE_SNAPSHOT_MAX_AGE_S",
+    "IpcVehicleState",
+    "IpcParamCache",
+    "IpcFcConnection",
+]

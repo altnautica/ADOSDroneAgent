@@ -27,7 +27,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::db;
 use crate::ingest::{run_accept_loop, IngestSocket, IngestStats};
 use crate::taps::{spawn_all_taps, TapPaths};
-use crate::writer::{now_us, Writer, WriterConfig};
+use crate::writer::{now_us, Writer, WriterConfig, WriterHealth, WRITER_STALL_BUDGET};
 
 /// Capacity of the bounded channel from the async accept loop to the blocking
 /// writer thread. Bounds memory so a producer flood cannot grow the queue
@@ -130,6 +130,51 @@ fn sd_watchdog() {
 
 #[cfg(not(target_os = "linux"))]
 fn sd_watchdog() {}
+
+/// The watchdog keep-alive loop, coupled to the writer's progress stamp.
+///
+/// Runs until aborted: on each tick it feeds the watchdog ONLY while the
+/// writer is still stamping. A writer that wedged inside a commit, or one
+/// whose loop returned, stops the pings, so `WatchdogSec` expires and systemd
+/// restarts the unit instead of leaving an `active (running)` daemon in front
+/// of a store that is recording nothing.
+///
+/// Generic over the ping so the coupling is testable without systemd; the
+/// supervisor's watchdog is built the same way for the same reason.
+pub(crate) async fn watchdog_loop<F>(
+    interval: Duration,
+    budget: Duration,
+    health: WriterHealth,
+    mut ping: F,
+) where
+    F: FnMut(),
+{
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The first tick fires immediately; skip pinging on it so the cadence
+    // stays a steady `interval`.
+    tick.tick().await;
+    let mut withheld = false;
+    loop {
+        tick.tick().await;
+        if health.is_alive(budget) {
+            if withheld {
+                withheld = false;
+                tracing::warn!("writer resumed; feeding the watchdog again");
+            }
+            ping();
+        } else if !withheld {
+            withheld = true;
+            // One line per stall entry, not one per tick: systemd is about to
+            // restart the unit and this is the only in-process record of why.
+            tracing::error!(
+                since_mark_s = health.since_mark().as_secs(),
+                budget_s = budget.as_secs(),
+                "writer stopped making progress; withholding the systemd watchdog"
+            );
+        }
+    }
+}
 
 /// Open the store and verify it. On a failed check the file is quarantined
 /// (renamed with a timestamp suffix) and a fresh store is created from the
@@ -306,6 +351,11 @@ where
     // reach the single writer; held open for the daemon's lifetime so the
     // writer's control channel never sees a closed sender while serving.
     let mark_synced = writer.control_handle();
+    // The liveness stamp. The read surface answers `/v1/healthz` from it and
+    // the watchdog ticker below feeds systemd only while it advances, so a
+    // writer that wedges or dies is visible instead of being masked by a
+    // process that is still scheduling tasks.
+    let health = writer.health_handle();
     let (writer_result_tx, writer_result_rx) = oneshot::channel();
     let writer_thread = std::thread::Builder::new()
         .name("ados-logd-writer".to_string())
@@ -369,6 +419,7 @@ where
         Arc::clone(&stats),
         paths.pairing_path.clone(),
         mark_synced,
+        health.clone(),
         async move {
             let _ = query_stop_rx.await;
         },
@@ -382,22 +433,40 @@ where
         "logging store ready"
     );
 
-    // Run until the stop trigger fires, pinging the systemd watchdog on a fixed
-    // cadence in between. A wedged async runtime stops pinging and systemd
-    // restarts the unit; a healthy daemon keeps the timer fed. Both arms are
-    // cheap, so the select never blocks shutdown.
-    let mut watchdog = tokio::time::interval(WATCHDOG_PING_INTERVAL);
-    watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // The first immediate tick fires right after READY; skip pinging on it so
-    // the cadence stays a steady WATCHDOG_PING_INTERVAL.
-    watchdog.tick().await;
+    // Feed the systemd watchdog on its own task, coupled to writer progress.
+    // Liveness for this unit is not "the process exists" and not "the tokio
+    // runtime still schedules tasks": a store whose writer has wedged
+    // satisfies both while recording nothing, which is the one failure the
+    // Black Box cannot have. A stalled writer stops the pings, `WatchdogSec`
+    // expires, and systemd restarts the unit.
+    let watchdog_task = tokio::spawn(watchdog_loop(
+        WATCHDOG_PING_INTERVAL,
+        WRITER_STALL_BUDGET,
+        health,
+        sd_watchdog,
+    ));
+
+    // Run until the stop trigger fires OR the writer exits on its own. The
+    // second arm is what turns a dead writer into a dead unit: without it the
+    // daemon kept serving a read surface in front of a store that had stopped
+    // recording, and nothing ever noticed.
     tokio::pin!(shutdown);
-    loop {
-        tokio::select! {
-            _ = &mut shutdown => break,
-            _ = watchdog.tick() => sd_watchdog(),
+    let mut writer_result_rx = writer_result_rx;
+    // The writer's own exit, if it beats the stop trigger. Kept in the shape
+    // `join_writer` already understands (the oneshot's own result) so the
+    // teardown reports a panicked thread and a failed run the same way whether
+    // the exit was observed here or waited for below.
+    type WriterExit = Result<Result<(), crate::writer::WriterError>, oneshot::error::RecvError>;
+    let mut writer_exit: Option<WriterExit> = None;
+    tokio::select! {
+        _ = &mut shutdown => {}
+        res = &mut writer_result_rx => {
+            // However it reported, the store has stopped recording, so the
+            // daemon must not keep serving as though it had not.
+            writer_exit = Some(res);
         }
     }
+    watchdog_task.abort();
     tracing::info!("logging store stopping");
     // Signal the writer before any teardown await so it cannot start a new
     // maintenance pass while the channel is draining toward the bounded join.
@@ -442,7 +511,8 @@ where
 
     // Join the writer thread off the async runtime, bounded so a stuck writer
     // cannot hang shutdown past the unit's stop timeout.
-    join_writer(writer_thread, writer_result_rx).await;
+    let writer_died = writer_exit.is_some();
+    join_writer(writer_thread, writer_result_rx, writer_exit).await;
 
     // tmpfs cleanup: a stale socket path confuses a producer probing for the
     // socket on the next start. The query server unlinks its own socket on the
@@ -450,6 +520,15 @@ where
     let _ = std::fs::remove_file(&paths.ingest_socket);
     let _ = std::fs::remove_file(&paths.query_socket);
 
+    if writer_died {
+        // Not a clean stop: the store stopped recording under a daemon that
+        // was still serving. Exit non-zero so `Restart=on-failure` cycles the
+        // unit, rather than leaving a healthy-looking front over a dead store.
+        tracing::error!("logging store stopped because its writer ended");
+        return Err(anyhow::anyhow!(
+            "logging store writer ended while the daemon was running"
+        ));
+    }
     tracing::info!("logging store stopped");
     Ok(())
 }
@@ -458,11 +537,20 @@ where
 /// writer signals its result over a oneshot the moment `run` returns; the join
 /// of the OS thread itself is then immediate. If the writer overruns the bound
 /// (a wedged commit), the daemon logs and exits rather than hang.
+///
+/// `observed` carries an exit the run loop already saw on its own select arm,
+/// so the writer's result is reported identically whether it ended on its own
+/// or was drained by a requested shutdown.
 async fn join_writer(
     handle: std::thread::JoinHandle<()>,
     result_rx: oneshot::Receiver<Result<(), crate::writer::WriterError>>,
+    observed: Option<Result<Result<(), crate::writer::WriterError>, oneshot::error::RecvError>>,
 ) {
-    match tokio::time::timeout(WRITER_JOIN_TIMEOUT, result_rx).await {
+    let outcome = match observed {
+        Some(already) => Ok(already),
+        None => tokio::time::timeout(WRITER_JOIN_TIMEOUT, result_rx).await,
+    };
+    match outcome {
         Ok(Ok(Ok(()))) => {
             let _ = handle.join();
             tracing::info!("writer drained and committed the final batch");
@@ -746,6 +834,122 @@ mod tests {
         assert!(
             !quarantined,
             "no quarantine copy when there was no prior file"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_watchdog_stops_being_fed_once_the_writer_ends() {
+        use std::sync::atomic::AtomicUsize;
+
+        // Real (short) intervals rather than a paused clock: the progress stamp
+        // is measured on the standard monotonic clock, which tokio's test clock
+        // does not advance, so pausing time would freeze the very thing under
+        // test.
+        let health = WriterHealth::new();
+        let pings = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&pings);
+        let task = tokio::spawn(watchdog_loop(
+            Duration::from_millis(10),
+            Duration::from_secs(60),
+            health.clone(),
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        ));
+
+        // A live writer is fed.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        let fed = pings.load(Ordering::SeqCst);
+        assert!(fed >= 3, "a live writer must be fed: {fed}");
+
+        // The writer's run loop returns — SQLITE_FULL, an I/O error, a corrupt
+        // store or a panic all end here.
+        health.mark_ended();
+        // Let any tick already in flight land, then take the baseline.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let at_death = pings.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            pings.load(Ordering::SeqCst),
+            at_death,
+            "a dead writer must stop the watchdog so systemd restarts the unit"
+        );
+        task.abort();
+    }
+
+    #[test]
+    fn a_writer_that_stops_stamping_is_not_alive_even_before_it_exits() {
+        // The wedge case, distinct from the exit case: a `commit_batch` blocked
+        // forever inside SQLite never returns, so nothing marks it ended. The
+        // stamp is what catches it.
+        let health = WriterHealth::new();
+        health.mark();
+        assert!(health.is_alive(Duration::from_secs(60)));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            !health.is_alive(Duration::from_millis(1)),
+            "a writer that has not stamped within the budget is not alive"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_daemon_exits_non_zero_when_its_writer_dies() {
+        // The store's write path starts failing underneath a running writer —
+        // an SQLITE_FULL, an I/O error or a damaged schema all look like this
+        // from the loop's side. The writer's run loop returns Err, and the
+        // daemon must come down non-zero so `Restart=on-failure` cycles it,
+        // instead of serving a read surface in front of a Black Box that
+        // stopped recording. (A single bad ROW is deliberately skipped, not
+        // fatal, so this fails the session write, which is not skippable.)
+        let dir = tempfile::tempdir().unwrap();
+        let paths = temp_paths(dir.path());
+        let socket_path = paths.ingest_socket.clone();
+        let db_path = paths.db.clone();
+
+        // A stop trigger that is never fired: the only way out is the writer.
+        let (_stop_tx, stop_rx) = oneshot::channel::<()>();
+        let daemon = tokio::spawn(run_with_paths(paths, async move {
+            let _ = stop_rx.await;
+        }));
+
+        for _ in 0..200 {
+            if socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Make the next session write fail, then send the frame that triggers
+        // one (an arm event opens a flight session).
+        {
+            let conn = db::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_sessions BEFORE INSERT ON sessions \
+                 BEGIN SELECT RAISE(ABORT, 'simulated store write failure'); END",
+            )
+            .unwrap();
+        }
+        let mut client = UnixStream::connect(&socket_path).await.unwrap();
+        let mut arm = ados_protocol::logd::EventFrame::new(
+            now_us(),
+            "state.arm",
+            "test-producer",
+            Level::Info,
+        );
+        arm.detail
+            .insert("reason".to_string(), rmpv::Value::from("arm"));
+        let wire = IngestFrame::Event(arm).encode().unwrap();
+        client.write_all(&wire).await.unwrap();
+        client.flush().await.unwrap();
+        drop(client);
+
+        let outcome = tokio::time::timeout(Duration::from_secs(20), daemon)
+            .await
+            .expect("the daemon must come down on its own when the writer dies")
+            .unwrap();
+        assert!(
+            outcome.is_err(),
+            "a writer death must be a non-zero exit, not a clean stop"
         );
     }
 }

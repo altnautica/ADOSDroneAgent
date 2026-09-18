@@ -14,6 +14,15 @@
 //! stick Y → throttle (ch 2, inverted — up is more), left stick X → yaw
 //! (ch 3); the eight face/shoulder buttons ride the aux channels 4..=11 as
 //! two-position switches.
+//!
+//! # Liveness
+//!
+//! A gamepad is not a heartbeat source: evdev delivers edges, so a device that
+//! stops producing without erroring looks exactly like one held still. The
+//! reader therefore re-attests a producing device into the merge on
+//! [`crate::sources::HID_LIVENESS_INTERVAL`], and only a received event
+//! extends the slot's deadline — so silence expires the lane to neutral
+//! instead of latching the last stick.
 
 use std::path::{Path, PathBuf};
 
@@ -237,6 +246,24 @@ pub async fn query_primary(socket: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Whether a received event should be pushed into the merge.
+///
+/// A changed channel value always goes. An UNCHANGED one goes on the
+/// [`crate::sources::HID_LIVENESS_INTERVAL`] cadence, because the push is what
+/// re-arms the slot's deadline: a device delivering steady jitter that never
+/// crosses a channel step is alive and must keep its authority, while locking
+/// the shared merge on every event would put a 1 kHz report rate through a
+/// mutex the transmitter also holds.
+///
+/// `since_last_push` is `None` before the first push of a session.
+///
+/// Pure and un-gated deliberately: the evdev read loop it serves is
+/// Linux-only, and a throttle that stopped re-attesting would silently expire
+/// a live pilot's sticks on every host the loop cannot be tested on.
+pub fn should_reattest(changed: bool, since_last_push: Option<std::time::Duration>) -> bool {
+    changed || since_last_push.is_none_or(|d| d >= crate::sources::HID_LIVENESS_INTERVAL)
+}
+
 /// How often the reader re-resolves the primary gamepad (and notices a
 /// selection change) while idle or while a device is open.
 #[cfg(target_os = "linux")]
@@ -341,6 +368,20 @@ async fn stream_device(
     let mut frame = HidChannels::default();
     let mut resolve_tick = tokio::time::interval(RESOLVE_INTERVAL);
     resolve_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Liveness. evdev is edge-triggered, so a device that goes quiet WITHOUT
+    // erroring — a wireless pad out of range, a wedged driver — is
+    // indistinguishable from a stick held still, and a read error is the only
+    // other signal available. The merge's HID slot therefore carries a deadline
+    // (`sources::HID_STALE_AFTER`) that ONLY a received event extends: an
+    // unchanged frame is re-pushed on this cadence to re-attest a producing
+    // device, and once the events stop the slot ages out and the lane fails
+    // over to the safe neutral set rather than re-sending the last stick to an
+    // armed aircraft for as long as the process lives.
+    let mut liveness_tick = tokio::time::interval(crate::sources::HID_LIVENESS_INTERVAL);
+    liveness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_event = std::time::Instant::now();
+    let mut last_push: Option<std::time::Instant> = None;
+    let mut silent = false;
     loop {
         tokio::select! {
             biased;
@@ -353,8 +394,34 @@ async fn stream_device(
                     return ReaderExit::DeviceLost;
                 }
             }
+            _ = liveness_tick.tick() => {
+                let quiet = last_event.elapsed();
+                if !silent && quiet >= crate::sources::HID_STALE_AFTER {
+                    silent = true;
+                    tracing::warn!(
+                        node,
+                        quiet_ms = quiet.as_millis() as u64,
+                        "hid_source_silent"
+                    );
+                    // The slot's own deadline has already stopped it flying;
+                    // dropping it here makes the transmitted source label
+                    // honest on the same tick rather than one TX period later.
+                    merge.lock().await.clear_hid();
+                }
+            }
             ev = stream.next_event() => match ev {
                 Ok(ev) => {
+                    let now = std::time::Instant::now();
+                    if silent {
+                        // Nothing about the pre-silence axis values is attested
+                        // any more, and the lane has already transmitted neutral
+                        // in their place. Rebuilding from neutral means only
+                        // freshly reported axes leave it, rather than
+                        // resurrecting a stick the lane just refused.
+                        frame = HidChannels::default();
+                        silent = false;
+                        last_push = None;
+                    }
                     let changed = match ev.kind() {
                         InputEventKind::AbsAxis(axis) => {
                             frame.apply_abs(axis.0, ev.value(), &cal)
@@ -364,8 +431,10 @@ async fn stream_device(
                         }
                         _ => false,
                     };
-                    if changed {
-                        if let Err(e) = merge.lock().await.set_hid(frame.values()) {
+                    last_event = now;
+                    if should_reattest(changed, last_push.map(|t| now.duration_since(t))) {
+                        last_push = Some(now);
+                        if let Err(e) = merge.lock().await.set_hid(frame.values(), now) {
                             // Unreachable through the clamped scaler; loud if
                             // the invariant ever breaks.
                             tracing::error!(error = ?e, "hid_scaled_value_rejected");
@@ -550,5 +619,32 @@ mod tests {
         // No listener at all.
         let gone = dir.path().join("nope.sock");
         assert!(query_primary(&gone).await.is_none());
+    }
+
+    #[test]
+    fn an_unchanged_event_still_re_attests_the_device_on_the_cadence() {
+        use crate::sources::{HID_LIVENESS_INTERVAL, HID_STALE_AFTER};
+        use std::time::Duration;
+
+        // A changed channel always goes, and so does the first event of a
+        // session: the slot has no deadline until something arms it.
+        assert!(should_reattest(true, None));
+        assert!(should_reattest(true, Some(Duration::ZERO)));
+        assert!(should_reattest(false, None));
+
+        // Inside the cadence an unchanged event is dropped — that is the whole
+        // point of the throttle.
+        assert!(!should_reattest(
+            false,
+            Some(HID_LIVENESS_INTERVAL - Duration::from_millis(1))
+        ));
+        // At and past it the unchanged event goes, so a device delivering only
+        // sub-step jitter keeps its authority instead of expiring under a pilot
+        // holding position.
+        assert!(should_reattest(false, Some(HID_LIVENESS_INTERVAL)));
+        assert!(should_reattest(false, Some(HID_STALE_AFTER)));
+        // And the re-attest lands strictly inside the deadline it re-arms,
+        // which is what makes the two cooperate rather than race.
+        assert!(HID_LIVENESS_INTERVAL < HID_STALE_AFTER);
     }
 }

@@ -1,7 +1,13 @@
-//! Ground-station pilot-in-command (PIC) write routes.
+//! Ground-station pilot-in-command (PIC) routes.
 //!
-//! The four operator writes that drive the PIC arbiter on a ground station:
+//! The live arbiter read plus the four operator writes that drive it on a
+//! ground station:
 //!
+//! - **`GET /api/v1/ground-station/pic`** — the live arbiter state
+//!   (`{state, claimed_by, claimed_since, claim_counter, primary_gamepad_id}`),
+//!   read through the same control socket the writes use. `503
+//!   E_PIC_ARBITER_UNAVAILABLE` when the arbiter cannot be reached — never a
+//!   fabricated `unclaimed`, which would read as "nobody has the sticks".
 //! - **`POST /api/v1/ground-station/pic/claim`** — claim PIC for a client. The
 //!   body is `{"client_id", "confirm_token"?, "force"?}`; the route returns the
 //!   arbiter outcome dict (`{claimed, claimed_by, claim_counter, ...}` on success,
@@ -29,7 +35,7 @@
 //! arbiter (that would split-brain the state the WS + display read) — it forwards
 //! each write to the daemon's socket with one newline-terminated JSON request,
 //! reads one newline-terminated JSON reply, and translates the reply back into
-//! the exact FastAPI route body. The ops are `claim` / `release` /
+//! the exact FastAPI route body. The ops are `get_state` / `claim` / `release` /
 //! `confirm_token` / `heartbeat`, the same ops the daemon's dispatch implements.
 //!
 //! The socket reply carries a richer shape than the FastAPI body (a transport
@@ -42,8 +48,9 @@
 //! The FastAPI route reaches an in-process arbiter that is always present. This
 //! front cannot — it has no in-process arbiter — so an unreachable / non-replying
 //! socket degrades to the FastAPI `500 E_PIC_*_FAILED` error-object body (the
-//! arm the Python route takes when the arbiter call raises). The write is never
-//! silently dropped.
+//! arm the Python route takes when the arbiter call raises) for the writes, and
+//! to `503 E_PIC_ARBITER_UNAVAILABLE` for the read. The write is never silently
+//! dropped and the read never substitutes a plausible state for an absent one.
 //!
 //! ## The profile gate
 //!
@@ -200,6 +207,75 @@ async fn pic_request_at(sock: &std::path::Path, request: &Value) -> PicReply {
         }
         _ => PicReply::Unavailable,
     }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/ground-station/pic
+// ---------------------------------------------------------------------------
+
+/// The PIC arbiter's live state fields, in `PicArbiter.get_state`'s insertion
+/// order, matching the daemon's `get_state` reply, which carries exactly
+/// these plus the transport `ok` flag.
+const PIC_STATE_FIELDS: [&str; 5] = [
+    "state",
+    "claimed_by",
+    "claimed_since",
+    "claim_counter",
+    "primary_gamepad_id",
+];
+
+/// `GET /api/v1/ground-station/pic` → the live pilot-in-command arbiter state.
+///
+/// `404 E_PROFILE_MISMATCH` off a ground station. Otherwise forwards a
+/// `get_state` op to the PIC control socket and returns the arbiter's own fields
+/// (`state`, `claimed_by`, `claimed_since`, `claim_counter`,
+/// `primary_gamepad_id`) with the transport `ok` dropped. An unreachable /
+/// non-replying socket is `503 E_PIC_ARBITER_UNAVAILABLE` — "we cannot see the
+/// arbiter", which is a different fact from "nobody holds PIC".
+///
+/// ## Why this reads the socket and never answers from a default
+///
+/// This route used to return a hardcoded `{"state":"unclaimed", ...}`, justified
+/// by there being "no in-process arbiter and no on-disk PIC state to read". Both
+/// halves of that are false in this very crate: `ados-pic` owns the single
+/// arbiter on `/run/ados/pic.sock` (the four writes above already reach it) and
+/// mirrors every transition to the `pic-state` sidecar, which
+/// `ados-crsf`'s channel packer and the router's injector gate already read to
+/// decide who has stick authority.
+///
+/// So an operator polling this endpoint while another client held PIC was told
+/// "no pilot in command" — while the router was refusing their injection on the
+/// basis of the real holder. Taking over on that reading is a mid-flight control
+/// conflict, which is why an unreadable arbiter degrades to a 503 the GCS can
+/// render as unknown rather than to a value that reads as safe.
+pub async fn get_pic_state(State(state): State<AppState>) -> Response {
+    if !is_ground_station(&state) {
+        return profile_mismatch();
+    }
+    match pic_request(&json!({"op": "get_state"})).await {
+        PicReply::Obj(reply) => Json(pic_state_body(&reply)).into_response(),
+        PicReply::Unavailable => pic_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "E_PIC_ARBITER_UNAVAILABLE",
+            "PIC control socket unavailable",
+        ),
+    }
+}
+
+/// Project the daemon's `get_state` reply to the arbiter dict: the five state
+/// fields in order, transport `ok` dropped. A field the reply omits is carried as
+/// an explicit `null` rather than dropped from the object, so a consumer reads
+/// "the arbiter did not report this" instead of inferring a value from a missing
+/// key.
+fn pic_state_body(reply: &Map<String, Value>) -> Value {
+    let mut out = Map::new();
+    for key in PIC_STATE_FIELDS {
+        out.insert(
+            key.to_string(),
+            reply.get(key).cloned().unwrap_or(Value::Null),
+        );
+    }
+    Value::Object(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -833,5 +909,94 @@ mod tests {
         assert_eq!(out["status"], json!(200));
         assert_eq!(out["body"]["ttl_seconds"], json!(2));
         assert_eq!(out["body"]["token"].as_str().unwrap().len(), 32);
+    }
+
+    // ── GET /pic: the live arbiter read ─────────────────────────────────────
+
+    /// A claimed arbiter must surface the real holder.
+    ///
+    /// The route previously answered a hardcoded `unclaimed` regardless, so an
+    /// operator was shown "no pilot in command" while another client held the
+    /// sticks and the router was refusing their injection on the basis of the
+    /// real holder.
+    #[tokio::test]
+    async fn pic_read_surfaces_the_live_holder() {
+        let out = with_socket(
+            json!({
+                "ok": true, "state": "claimed", "claimed_by": "op-a",
+                "claimed_since": 1_700_000_000.0, "claim_counter": 3,
+                "primary_gamepad_id": "usb-0000:00:14.0-2",
+            }),
+            |sock| async move {
+                match pic_request_at(&sock, &json!({"op": "get_state"})).await {
+                    PicReply::Obj(reply) => Json(pic_state_body(&reply)).into_response(),
+                    PicReply::Unavailable => pic_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "E_PIC_ARBITER_UNAVAILABLE",
+                        "PIC control socket unavailable",
+                    ),
+                }
+            },
+        )
+        .await;
+        assert_eq!(out["request"]["op"], json!("get_state"));
+        assert_eq!(out["status"], json!(200));
+        assert_eq!(
+            out["body"],
+            json!({
+                "state": "claimed",
+                "claimed_by": "op-a",
+                "claimed_since": 1_700_000_000.0,
+                "claim_counter": 3,
+                "primary_gamepad_id": "usb-0000:00:14.0-2",
+            }),
+            "the transport ok is dropped; every arbiter field is relayed verbatim"
+        );
+    }
+
+    /// An unreachable arbiter is a 503, NOT an unclaimed body. "We cannot see who
+    /// has the sticks" must never render as "nobody has the sticks" — taking over
+    /// on that reading is a mid-flight control conflict.
+    #[tokio::test]
+    async fn pic_read_degrades_to_503_never_to_unclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("pic.sock");
+        let resp = match pic_request_at(&sock, &json!({"op": "get_state"})).await {
+            PicReply::Obj(reply) => Json(pic_state_body(&reply)).into_response(),
+            PicReply::Unavailable => pic_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "E_PIC_ARBITER_UNAVAILABLE",
+                "PIC control socket unavailable",
+            ),
+        };
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["detail"]["error"]["code"],
+            json!("E_PIC_ARBITER_UNAVAILABLE")
+        );
+        assert!(
+            body.get("state").is_none(),
+            "an unreachable arbiter must report no state at all, got {body}"
+        );
+    }
+
+    /// A reply missing a field carries it as an explicit `null` rather than
+    /// dropping the key: a vanished key reads to a consumer as "not reported" and
+    /// gets coerced, which is the same defect one layer up in the cloud path.
+    #[test]
+    fn pic_state_body_nulls_an_unreported_field_rather_than_omitting_it() {
+        let reply = obj(json!({"ok": true, "state": "unclaimed"}));
+        let body = pic_state_body(&reply);
+        assert_eq!(
+            body,
+            json!({
+                "state": "unclaimed",
+                "claimed_by": null,
+                "claimed_since": null,
+                "claim_counter": null,
+                "primary_gamepad_id": null,
+            })
+        );
     }
 }

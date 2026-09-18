@@ -59,8 +59,15 @@ class MqttGateway:
 
         # Configure transport
         transport = self.config.server.mqtt_transport
+        # One ClientID per broker lane, never per device. MQTT requires the
+        # broker to disconnect the existing session when a second client
+        # presents the same ClientID, and the native MAVLink relay holds the
+        # bare `ados-{device_id}` — sharing it made the two evict each other in
+        # a sub-second loop forever (no cloud telemetry, no cloud command
+        # authority, a flapping mqttConnected). The suffixed lanes are
+        # `-msp`, `-atlas`, `-vision` and this one, `-gw`.
         client = mqtt.Client(
-            client_id=f"ados-{self._device_id}",
+            client_id=f"ados-{self._device_id}-gw",
             callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
             transport=transport,
         )

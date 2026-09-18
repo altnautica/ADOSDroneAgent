@@ -366,28 +366,36 @@ fn parse_route_get_dev(text: &str) -> Option<String> {
 /// (mapped to the FastAPI "live re-tag failed" note). Linux-only; a non-Linux
 /// build never reaches this (the management-iface gate refuses first when the
 /// route cannot be determined).
+///
+/// Async because the engine spawns `ip link set` under `tokio::process` with a
+/// timeout: a blocking spawn here stalls every other in-flight request on a
+/// single-core SBC for the whole link down/up.
 #[cfg(target_os = "linux")]
-fn apply_live(iface: &str, mac: &str) -> Result<(), String> {
+async fn apply_live(iface: &str, mac: &str) -> Result<(), String> {
     let parsed = ados_macpin::MacAddr::parse(mac).ok_or_else(|| format!("malformed MAC: {mac}"))?;
-    ados_macpin::engine::apply_live(iface, &parsed).map_err(|e| e.to_string())
+    ados_macpin::engine::apply_live(iface, &parsed)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn apply_live(_iface: &str, _mac: &str) -> Result<(), String> {
+async fn apply_live(_iface: &str, _mac: &str) -> Result<(), String> {
     Err("live re-tag unavailable on this platform".to_string())
 }
 
 /// Remove the pin `.link` for `iface` from `dir`, returning whether a file was
 /// removed. Reuses the shared `ados-macpin` engine on Linux (which also reloads
-/// udev); on a non-Linux dev host it removes the file directly so the
-/// `removedLinkFile` flag is still exercised by tests.
+/// udev, bounded and off the reactor); on a non-Linux dev host it removes the
+/// file directly so the `removedLinkFile` flag is still exercised by tests.
 #[cfg(target_os = "linux")]
-fn remove_link_file(dir: &Path, iface: &str) -> bool {
-    ados_macpin::engine::remove_pin_link(dir, iface).unwrap_or(false)
+async fn remove_link_file(dir: &Path, iface: &str) -> bool {
+    ados_macpin::engine::remove_pin_link(dir, iface)
+        .await
+        .unwrap_or(false)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn remove_link_file(dir: &Path, iface: &str) -> bool {
+async fn remove_link_file(dir: &Path, iface: &str) -> bool {
     let path = dir.join(ados_macpin::engine::link_file_name(iface));
     if path.exists() {
         std::fs::remove_file(&path).is_ok()
@@ -479,16 +487,17 @@ async fn post_mac_pin_at(config_path: &Path, state_path: &Path, req: MacPinReque
     //    determinable, the named iface is NOT the mgmt iface).
     //
     //    The management-interface probe is resolved HERE, on the handler, and
-    //    injected into the gate: `apply_now_outcome` stays a sync, pure decision
-    //    over facts, the way `routes::reachable_addr` takes its route table as a
-    //    parameter. Hoisting rather than making the gate async is what keeps the
-    //    gate testable on both branches without a host default route. It costs
-    //    one read-only `ip route get` on the flag-off path (which previously
-    //    short-circuited before resolving), which is the price of keeping all
-    //    three gate decisions in one place.
+    //    injected into the gate: `apply_now_outcome` decides over facts it is
+    //    given, the way `routes::reachable_addr` takes its route table as a
+    //    parameter, so both refusal branches stay testable without a host
+    //    default route. It costs one read-only `ip route get` on the flag-off
+    //    path (which previously short-circuited before resolving), which is the
+    //    price of keeping all three gate decisions in one place. The gate is
+    //    async only because the live re-tag it may reach spawns `ip` off the
+    //    reactor.
     let outcome = if req.apply_now {
         let mgmt_iface = default_route_iface().await;
-        apply_now_outcome(config_path, &req.iface, &mac, mgmt_iface.as_deref())
+        apply_now_outcome(config_path, &req.iface, &mac, mgmt_iface.as_deref()).await
     } else {
         ApplyOutcome {
             applied_live: false,
@@ -516,9 +525,9 @@ async fn post_mac_pin_at(config_path: &Path, state_path: &Path, req: MacPinReque
 /// otherwise re-tag the live interface and report success (or the failure note).
 ///
 /// `mgmt_iface` is the already-resolved default-route interface (`None` when it
-/// could not be determined), injected by the caller so this remains a pure
-/// function of its inputs.
-fn apply_now_outcome(
+/// could not be determined), injected by the caller so every refusal branch is
+/// a function of its inputs.
+async fn apply_now_outcome(
     config_path: &Path,
     iface: &str,
     mac: &str,
@@ -551,7 +560,7 @@ fn apply_now_outcome(
             ),
         };
     }
-    match apply_live(iface, mac) {
+    match apply_live(iface, mac).await {
         Ok(()) => ApplyOutcome {
             applied_live: true,
             note: "applied to the live interface now".to_string(),
@@ -579,18 +588,18 @@ pub async fn delete_mac_pin(
     State(state): State<AppState>,
     AxumPath(iface): AxumPath<String>,
 ) -> Response {
-    delete_mac_pin_at(&state.pairing_paths.config, &networkd_dir(), &iface)
+    delete_mac_pin_at(&state.pairing_paths.config, &networkd_dir(), &iface).await
 }
 
 /// The unpin logic against explicit config + networkd-dir paths. The public
 /// handler resolves both from the app state / env; this takes them directly so a
 /// test can point them at temp paths.
-fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str) -> Response {
+async fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str) -> Response {
     // Pop the override (re-persist only when it was present; swallow a persist
     // fault, matching the Python `except: pass`).
     let (removed_override, _persist) = config_remove_override(config_path, iface);
     // Remove the `.link` (a file existed → true).
-    let removed_link = remove_link_file(networkd_dir, iface);
+    let removed_link = remove_link_file(networkd_dir, iface).await;
 
     Json(json!({
         "status": "ok",
@@ -918,13 +927,13 @@ mod tests {
 
     // ── apply_now_outcome gate decisions (no ip IO on these paths) ─────────────
 
-    #[test]
-    fn apply_now_outcome_refuses_when_the_flag_is_off() {
+    #[tokio::test]
+    async fn apply_now_outcome_refuses_when_the_flag_is_off() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         // No flag → refused, not permitted. A determinable management interface
         // is passed in so the assertion is that the flag gate wins first.
-        let out = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e", Some("eth0"));
+        let out = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e", Some("eth0")).await;
         assert!(!out.applied_live);
         assert!(out.note.contains("not permitted"));
     }
@@ -937,14 +946,14 @@ mod tests {
     /// The third branch (a determinable mgmt iface that is NOT the named one)
     /// is deliberately not exercised here: it proceeds to `apply_live`, which on
     /// Linux would re-tag a real interface.
-    #[test]
-    fn apply_now_outcome_refuses_on_both_mgmt_iface_branches() {
+    #[tokio::test]
+    async fn apply_now_outcome_refuses_on_both_mgmt_iface_branches() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         std::fs::write(&cfg, "network:\n  mac_pin:\n    apply_live_allowed: true\n").unwrap();
 
         // Undeterminable route → "uncertain", refuse for safety.
-        let undeterminable = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e", None);
+        let undeterminable = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e", None).await;
         assert!(!undeterminable.applied_live);
         assert!(undeterminable
             .note
@@ -952,7 +961,7 @@ mod tests {
 
         // The named interface IS the management interface → refuse rather than
         // drop the operator's own connection.
-        let is_mgmt = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e", Some("wlan0"));
+        let is_mgmt = apply_now_outcome(&cfg, "wlan0", "02:c6:75:83:1a:3e", Some("wlan0")).await;
         assert!(!is_mgmt.applied_live);
         assert!(is_mgmt
             .note
@@ -976,8 +985,8 @@ mod tests {
 
     // ── DELETE handler ────────────────────────────────────────────────────────
 
-    #[test]
-    fn delete_removes_a_present_override_and_link_and_reports_both_true() {
+    #[tokio::test]
+    async fn delete_removes_a_present_override_and_link_and_reports_both_true() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let netd = dir.path().join("networkd");
@@ -995,8 +1004,8 @@ mod tests {
         )
         .unwrap();
 
-        let resp = delete_mac_pin_at(&cfg, &netd, "wlan0");
-        let body = futures_block_on(body_json(resp));
+        let resp = delete_mac_pin_at(&cfg, &netd, "wlan0").await;
+        let body = body_json(resp).await;
         assert_eq!(body["status"], json!("ok"));
         assert_eq!(body["iface"], json!("wlan0"));
         assert_eq!(body["removedOverride"], json!(true));
@@ -1009,16 +1018,16 @@ mod tests {
         assert!(!link.exists());
     }
 
-    #[test]
-    fn delete_of_an_absent_override_and_link_reports_both_false() {
+    #[tokio::test]
+    async fn delete_of_an_absent_override_and_link_reports_both_false() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let netd = dir.path().join("networkd");
         std::fs::create_dir_all(&netd).unwrap();
         std::fs::write(&cfg, "agent:\n  name: my-drone\n").unwrap();
 
-        let resp = delete_mac_pin_at(&cfg, &netd, "wlan0");
-        let body = futures_block_on(body_json(resp));
+        let resp = delete_mac_pin_at(&cfg, &netd, "wlan0").await;
+        let body = body_json(resp).await;
         assert_eq!(body["removedOverride"], json!(false));
         assert_eq!(body["removedLinkFile"], json!(false));
     }
@@ -1031,15 +1040,5 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
-    }
-
-    /// Drive a future to completion on a fresh single-thread runtime so the
-    /// synchronous DELETE-path tests can read the response body.
-    fn futures_block_on<F: std::future::Future>(fut: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(fut)
     }
 }

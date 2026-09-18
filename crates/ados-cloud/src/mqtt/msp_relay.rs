@@ -21,8 +21,8 @@ use ados_plugin_host::mavlink_client::MavlinkClient;
 use tokio::sync::{mpsc, watch};
 
 use super::mavlink_relay::{BoundedPublishQueue, RelayMetrics, QUEUE_MAXSIZE};
-use super::transport::RumqttcTransport;
-use super::{relay_username, topic_msp_rx, topic_msp_tx};
+use super::transport::{MqttQos, MqttTransport, RumqttcTransport};
+use super::{msp_client_id, relay_username, topic_msp_rx, topic_msp_tx};
 use crate::mqtt::transport::TransportConfig;
 
 /// The MSP-over-MQTT relay. Structurally identical to the MAVLink relay (owns its
@@ -39,14 +39,31 @@ impl MspMqttRelay {
     /// Build the relay for a device id + broker dial config. The transport
     /// config's username is the `ados-{id}` relay form; callers wire the broker
     /// host/port/password (the same config the MAVLink relay uses).
+    ///
+    /// The handed-in config's `client_id` is REPLACED with this lane's own
+    /// (`ados-{id}-msp`). Callers pass a clone of the MAVLink relay's config, and
+    /// MQTT requires a broker to evict the existing session when a second client
+    /// presents the same ClientID — so sharing it made the two relays disconnect
+    /// each other in a sub-second loop forever on any MSP rig: no cloud
+    /// telemetry, no cloud command authority, and a flapping `mqttConnected`.
+    /// Rewriting it here rather than at the call sites means a third spawn site
+    /// cannot reintroduce the collision.
     pub fn new(device_id: impl Into<String>, transport_config: TransportConfig) -> Self {
         let device_id = device_id.into();
+        let mut transport_config = transport_config;
+        transport_config.client_id = msp_client_id(&device_id);
         MspMqttRelay {
             topic_tx: topic_msp_tx(&device_id),
             topic_rx: topic_msp_rx(&device_id),
             transport_config,
             device_id,
         }
+    }
+
+    /// The MQTT ClientID this relay dials with (`ados-{device_id}-msp`), its own
+    /// broker principal distinct from the MAVLink relay's.
+    pub fn client_id(&self) -> &str {
+        &self.transport_config.client_id
     }
 
     /// The relay's MQTT username (`ados-{device_id}`), exposed for the dial
@@ -104,9 +121,11 @@ impl MspMqttRelay {
         ipc.declare_off_box_source();
 
         // GCS->FC: subscribe rx and write received payloads to the IPC socket.
+        // Through the transport (NOT the raw client) so the topic is recorded for
+        // replay on the next accepted session; a raw-client subscribe is lost at
+        // the first reconnect and the command path dies silently.
         if let Err(e) = transport
-            .client()
-            .subscribe(self.topic_rx.clone(), rumqttc::QoS::AtMostOnce)
+            .subscribe(&self.topic_rx, MqttQos::AtMostOnce)
             .await
         {
             tracing::warn!(error = %e, "msp relay: rx subscribe failed");
@@ -199,5 +218,37 @@ impl MspMqttRelay {
             "msp relay stopped"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn the_relay_takes_its_own_client_id_off_the_mavlink_relays_config() {
+        // Both spawn sites hand this relay a CLONE of the MAVLink relay's dial
+        // config. Left as-is, the two would present the same MQTT ClientID and
+        // the broker would evict whichever connected first, forever.
+        let mavlink_config = TransportConfig {
+            client_id: "ados-dev1".to_string(),
+            host: "mqtt.example".to_string(),
+            port: 443,
+            ws_path: "/mqtt".to_string(),
+            username: "ados-dev1".to_string(),
+            password: "k".to_string(),
+            inflight: 1000,
+            keep_alive: Duration::from_secs(30),
+        };
+        let relay = MspMqttRelay::new("dev1", mavlink_config.clone());
+        assert_eq!(relay.client_id(), "ados-dev1-msp");
+        assert_ne!(relay.client_id(), mavlink_config.client_id);
+        // The broker ACL keys on the username, which is unchanged: only the
+        // session identity differs between the two lanes.
+        assert_eq!(relay.username(), "ados-dev1");
+        // The rest of the dial config rides through untouched.
+        assert_eq!(relay.transport_config.host, "mqtt.example");
+        assert_eq!(relay.transport_config.password, "k");
     }
 }

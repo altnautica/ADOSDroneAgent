@@ -100,16 +100,28 @@ def _write_exif(path: str, gps_lat: float, gps_lon: float) -> bool:
 async def capture_snapshot(
     camera: CameraInfo,
     output_dir: str,
-    gps_lat: float = 0.0,
-    gps_lon: float = 0.0,
+    gps_lat: float | None = None,
+    gps_lon: float | None = None,
 ) -> str:
     """Capture a single JPEG frame from a camera.
 
     Args:
         camera: The camera to capture from.
         output_dir: Directory to save the JPEG file.
-        gps_lat: GPS latitude for EXIF metadata (decimal degrees).
-        gps_lon: GPS longitude for EXIF metadata (decimal degrees).
+        gps_lat: Latitude for the EXIF geotag, or None for no geotag.
+        gps_lon: Longitude for the EXIF geotag, or None for no geotag.
+
+    A geotag is written only when BOTH coordinates are supplied. The caller
+    is responsible for passing None when the position fix is stale — a
+    photograph is a durable artifact, so a wrong coordinate in its EXIF is
+    wrong forever and will be trusted years later by someone with no way to
+    know the fix was frozen. An absent geotag is honest; a stale one is not.
+
+    The coordinates are Optional rather than defaulting to 0.0 for the same
+    reason the rest of this audit removed zero-as-absent: the old guard was
+    `if gps_lat != 0.0 or gps_lon != 0.0`, which silently refused to geotag
+    a photo taken on the equator or the prime meridian, and accepted a
+    fabricated 0.0 from a caller that had no fix at all.
 
     Returns:
         The path to the captured JPEG file, or empty string on failure.
@@ -144,8 +156,8 @@ async def capture_snapshot(
         log.error("snapshot_capture_timeout", camera=camera.name)
         return ""
 
-    # Write EXIF if GPS coords are provided
-    if gps_lat != 0.0 or gps_lon != 0.0:
+    # Geotag only when the caller supplied a position it stands behind.
+    if gps_lat is not None and gps_lon is not None:
         _write_exif(filepath, gps_lat, gps_lon)
 
     log.info("snapshot_captured", path=filepath)

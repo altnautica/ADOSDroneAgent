@@ -9,6 +9,12 @@
 //! as "the fixtures are stale" — the receiver is the party that has to agree,
 //! and it is not in this repository.
 //!
+//! One deliberate change since the capture: `wfbAdapterChipset` and
+//! `wfbAdapterInjectionOk` now ride as explicit JSON nulls on a rig with no
+//! radio view instead of being omitted. The receiver declares both as
+//! `v.optional(v.union(T, v.null()))` — it agrees, and it needs the null to
+//! clear a previous tick's verdict. The stripped fixture carries them.
+//!
 //! This builds the same logical input in Rust and asserts the Rust
 //! serialization equals the fixture as a `serde_json::Value` — comparing as
 //! values so key ORDER does not matter (the receiver validates by key, not
@@ -61,10 +67,14 @@ fn base_payload() -> HeartbeatPayload {
         fc_link_hint: None,
         fc_variant: None,
         services: Some(vec![]),
-        last_ip: "127.0.0.1".to_string(),
-        mdns_host: String::new(),
-        setup_url: "http://127.0.0.1:8080".to_string(),
-        api_url: "http://127.0.0.1:8080/api".to_string(),
+        // The captured reach: the frozen fixture pins these values, so the model
+        // must still be able to carry them. What changed is that they are now
+        // OPTIONAL, so a producer with no proven reach omits them instead of
+        // overwriting the row with `""` (the native loop does exactly that).
+        last_ip: Some("127.0.0.1".to_string()),
+        mdns_host: Some(String::new()),
+        setup_url: Some("http://127.0.0.1:8080".to_string()),
+        api_url: Some("http://127.0.0.1:8080/api".to_string()),
         agent_version: VERSION.to_string(),
         video_state: Some("stopped".to_string()),
         video_whep_port: 0,
@@ -83,7 +93,10 @@ fn base_payload() -> HeartbeatPayload {
         crsf: None,
         wfb_adapter_chipset: None,
         mac_stability: None,
-        // No radio view in the base ⇒ no injection verdict (key omitted).
+        // No radio view in the base ⇒ no injection verdict. The key rides as an
+        // explicit null (the receiver's column is null-tolerant and clears on
+        // it); omitting it would be indistinguishable from an agent that does
+        // not report the verdict at all.
         wfb_adapter_injection_ok: None,
         lcd_active_page: None,
         ui_theme: None,

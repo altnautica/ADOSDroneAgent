@@ -4,13 +4,28 @@
 //! stable SSID (`ADOS-GS-<short_id>`) and reach the setup webapp, WHEP video,
 //! and agent REST API. A matching `dnsmasq` serves DHCP on 192.168.4.0/24. The
 //! RTL8812 USB adapter is reserved for monitor-mode WFB-ng RX elsewhere and is
-//! never touched here. Ports `hostapd_manager.py`. Solo-benchable: config
-//! rendering + passphrase resolution need no radio; start/stop are systemctl
-//! calls through the injectable command runner.
+//! never touched here. Solo-benchable: config rendering + passphrase resolution
+//! need no radio; start/stop are systemctl calls through the injectable command
+//! runner.
+//!
+//! `ados-hostapd.service` execs `/usr/sbin/hostapd` itself. It used to exec the
+//! Python AP manager, whose own `_HOSTAPD_UNIT` named that same unit, so
+//! "start hostapd" asked systemd to start the process doing the asking and
+//! "is hostapd active?" was answered by "is the asker alive?" — always true.
+//! hostapd was consequently never executed and no SSID was ever broadcast,
+//! while this manager, the REST status routes and dnsmasq's `Requires=` all
+//! read the AP as up.
+//!
+//! Because of that, unit state alone is not accepted as proof here. The radio
+//! itself is asked (`iw dev <iface> info`: interface type plus whether the phy
+//! holds an operating channel, which it only does once the BSS is beaconing),
+//! and a transmit delta counter corroborates it. See [`ApLiveness`].
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
 
 use serde_json::{json, Value};
 use tracing::{error, info, warn};
@@ -26,6 +41,88 @@ const DNSMASQ_UNIT: &str = "ados-dnsmasq-gs.service";
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(10);
 const SHORT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Where the per-interface kernel counters live. A field on the manager so the
+/// delta probe is exercisable off a real radio.
+const SYSFS_NET_ROOT: &str = "/sys/class/net";
+
+/// How long the AP interface's transmit counter may stay flat, *while at least
+/// one station is associated*, before hostapd is judged wedged.
+///
+/// The station qualifier is load-bearing and not conservatism for its own sake:
+/// on mac80211 beacons are emitted by the driver's beacon path and are not
+/// accounted into the netdev `tx_packets` counter, so an idle AP with no client
+/// legitimately shows a flat counter forever. Condemning on the counter alone
+/// would restart a perfectly healthy AP every window. An associated station
+/// that is receiving nothing is the case where flatness does mean a wedge.
+const TX_STALL_WINDOW: Duration = Duration::from_secs(30);
+
+/// How long to wait for the phy to enter AP mode with an operating channel
+/// after `systemctl start`, and how often to re-ask inside that budget.
+/// `Type=simple` means systemctl returns as soon as the fork succeeds, so the
+/// exit code says nothing about whether the BSS came up.
+const AP_SETTLE_BUDGET: Duration = Duration::from_secs(6);
+const AP_SETTLE_POLL: Duration = Duration::from_millis(500);
+
+/// What the radio says about the AP interface. Every field is absent rather
+/// than defaulted when it could not be read: "the probe did not answer" and
+/// "the probe answered, and the answer is no" are different facts and a status
+/// surface that merges them reports a guess as a measurement.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RadioView {
+    /// The `iw dev <iface> info` probe produced a parseable answer at all.
+    pub probe_ok: bool,
+    /// `AP`, `managed`, `monitor`, … as the kernel reports it.
+    pub iface_type: Option<String>,
+    /// The channel the phy currently holds. Present only once the BSS is up,
+    /// which makes it the cheapest honest "the SSID is on the air" signal.
+    pub operating_channel: Option<u32>,
+    /// The SSID the kernel reports for the interface (not the configured one).
+    pub ssid: Option<String>,
+}
+
+/// Verdict of one liveness pass over a unit that is already `active`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApLiveness {
+    /// The phy is in AP mode with an operating channel: the SSID is on the air.
+    Radiating,
+    /// hostapd is alive and the AP is not being served. Carries a stable reason
+    /// string for the log and the sidecar.
+    Stalled(&'static str),
+    /// No usable signal. NEVER acted on: a probe that could not be made is not
+    /// evidence of a fault, and restarting the AP on it would turn a missing
+    /// `iw` binary into a reboot loop of the operator's only reachability.
+    Unknown(&'static str),
+}
+
+/// Last observed transmit counter on the AP interface and when it last moved.
+#[derive(Debug, Clone, Copy)]
+struct TxSample {
+    packets: u64,
+    flat_since: Instant,
+}
+
+/// Parse `iw dev <iface> info`. Pure, so the shape of every kernel answer this
+/// has to survive is pinned by tests rather than by a live radio.
+///
+/// `probe_ok` requires a `type` line: every `iw` version prints one, so its
+/// absence means the interface does not exist, the binary is missing, or the
+/// call timed out — none of which is evidence about the AP.
+pub fn parse_iw_info(stdout: &str) -> RadioView {
+    let mut view = RadioView::default();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("type ") {
+            view.iface_type = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("channel ") {
+            view.operating_channel = rest.split_whitespace().next().and_then(|c| c.parse().ok());
+        } else if let Some(rest) = line.strip_prefix("ssid ") {
+            view.ssid = Some(rest.trim().to_string());
+        }
+    }
+    view.probe_ok = view.iface_type.is_some();
+    view
+}
 
 /// First four hex chars of `device_id`, uppercased; zero-padded when there are
 /// fewer than four after stripping non-hex characters. Mirrors `_short_id`.
@@ -66,6 +163,14 @@ pub struct HostapdManager {
     dnsmasq_conf_path: PathBuf,
     passphrase_path: PathBuf,
     runner: Arc<dyn CmdRunner>,
+    /// Root of the per-interface kernel counter tree (`/sys/class/net`).
+    /// Overridable so the transmit delta probe runs without a radio.
+    sysfs_net_root: PathBuf,
+    /// Last transmit counter seen on the AP interface and when it last moved.
+    /// Interior mutability because the liveness probe runs off `&self` (the
+    /// status and supervise paths hold a shared borrow behind the daemon's
+    /// `Arc<Mutex<..>>`).
+    tx_sample: Mutex<Option<TxSample>>,
 }
 
 impl HostapdManager {
@@ -145,7 +250,15 @@ impl HostapdManager {
             dnsmasq_conf_path,
             passphrase_path,
             runner,
+            sysfs_net_root: PathBuf::from(SYSFS_NET_ROOT),
+            tx_sample: Mutex::new(None),
         }
+    }
+
+    /// Point the transmit delta probe at a different counter tree. Tests only:
+    /// production always reads `/sys/class/net`.
+    pub fn set_sysfs_net_root(&mut self, root: PathBuf) {
+        self.sysfs_net_root = root;
     }
 
     pub fn ssid(&self) -> &str {
@@ -414,18 +527,71 @@ impl HostapdManager {
         self.is_unit_active(HOSTAPD_UNIT).await
     }
 
-    /// Bring the AP up: write configs, assign the gateway IP, start both units.
-    /// Mirrors `start`. Returns whether hostapd started.
+    /// Bring the AP up: write configs, assign the gateway IP, start both units,
+    /// then make the radio prove it.
+    ///
+    /// Returns whether the SSID is actually on the air — not whether
+    /// `systemctl` exited zero. `ados-hostapd.service` is `Type=simple`, so
+    /// systemctl returns the moment the fork succeeds and its exit code says
+    /// nothing about whether hostapd got the phy into AP mode (or exited two
+    /// seconds later on a bad conf). Every caller treats `false` as
+    /// `ap_start_incomplete` and logs it, which is what the operator needs to
+    /// see when the AP they are about to rely on did not come up.
     pub async fn start(&mut self) -> bool {
         if let Err(exc) = self.write_config() {
             error!(error = %exc, "ap_config_write_failed");
             return false;
         }
         self.assign_ip().await;
+        // A fresh start invalidates any transmit baseline from the last run.
+        *self.tx_sample.lock() = None;
         let hostapd_ok = self.systemctl("start", HOSTAPD_UNIT).await;
         let dnsmasq_ok = self.systemctl("start", DNSMASQ_UNIT).await;
-        info!(hostapd = hostapd_ok, dnsmasq = dnsmasq_ok, ssid = %self.ssid, "ap_started");
-        hostapd_ok
+        let radiating = match self.await_ap_mode().await {
+            Some(proved) => proved,
+            // The radio could not be asked at all (no `iw`, interface gone).
+            // Fall back to the start verb's own outcome rather than claiming
+            // either more or less than is known.
+            None => {
+                warn!(iface = %self.interface, "ap_liveness_unprobeable_at_start");
+                hostapd_ok
+            }
+        };
+        info!(
+            hostapd = hostapd_ok,
+            dnsmasq = dnsmasq_ok,
+            radiating,
+            ssid = %self.ssid,
+            "ap_started"
+        );
+        radiating
+    }
+
+    /// Ask the radio whether the AP interface is serving a BSS.
+    ///
+    /// `Some(true)` proved, `Some(false)` disproved within the settle budget,
+    /// `None` when the probe itself could not be made — which is never treated
+    /// as a fault.
+    async fn await_ap_mode(&self) -> Option<bool> {
+        let deadline = Instant::now() + AP_SETTLE_BUDGET;
+        loop {
+            let radio = self.probe_radio().await;
+            if !radio.probe_ok {
+                return None;
+            }
+            if radio.iface_type.as_deref() == Some("AP") && radio.operating_channel.is_some() {
+                return Some(true);
+            }
+            if Instant::now() >= deadline {
+                warn!(
+                    iface = %self.interface,
+                    iface_type = ?radio.iface_type,
+                    "ap_never_entered_ap_mode"
+                );
+                return Some(false);
+            }
+            tokio::time::sleep(AP_SETTLE_POLL).await;
+        }
     }
 
     /// Tear the AP down. Best-effort on both units. Mirrors `stop`.
@@ -468,14 +634,137 @@ impl HostapdManager {
         macs
     }
 
-    /// Live AP status. Mirrors `status`.
+    /// Ask the kernel what the AP interface is actually doing.
+    async fn probe_radio(&self) -> RadioView {
+        let out = self
+            .runner
+            .run(&["iw", "dev", &self.interface, "info"], SHORT_TIMEOUT)
+            .await;
+        if !out.ok() {
+            return RadioView::default();
+        }
+        parse_iw_info(&out.stdout)
+    }
+
+    /// Cumulative frames the AP interface has handed to the driver, or `None`
+    /// when the counter cannot be read.
+    fn read_tx_packets(&self) -> Option<u64> {
+        std::fs::read_to_string(
+            self.sysfs_net_root
+                .join(&self.interface)
+                .join("statistics")
+                .join("tx_packets"),
+        )
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+    }
+
+    /// Fold one transmit-counter reading into the running baseline and report
+    /// how long the counter has been flat, or `None` when there is no reading.
+    ///
+    /// An unreadable counter clears the baseline rather than carrying the old
+    /// one forward: a gap in the samples is not elapsed flatness, and treating
+    /// it as such would let a transient sysfs read failure age straight into a
+    /// stall verdict.
+    fn observe_tx(&self, reading: Option<u64>, now: Instant) -> Option<Duration> {
+        let mut slot = self.tx_sample.lock();
+        let Some(packets) = reading else {
+            *slot = None;
+            return None;
+        };
+        match slot.as_mut() {
+            Some(prev) if prev.packets == packets => Some(now.duration_since(prev.flat_since)),
+            Some(prev) => {
+                prev.packets = packets;
+                prev.flat_since = now;
+                Some(Duration::ZERO)
+            }
+            None => {
+                *slot = Some(TxSample {
+                    packets,
+                    flat_since: now,
+                });
+                Some(Duration::ZERO)
+            }
+        }
+    }
+
+    /// Judge an AP that is supposed to be up. Pure observation — no restart.
+    ///
+    /// Order matters: the interface mode is the load-bearing assertion and the
+    /// transmit delta only ever corroborates it, because a beacon does not move
+    /// the netdev counter (see [`TX_STALL_WINDOW`]).
+    pub async fn check_liveness(&self) -> ApLiveness {
+        let radio = self.probe_radio().await;
+        if !radio.probe_ok {
+            return ApLiveness::Unknown("radio_unprobeable");
+        }
+        if radio.iface_type.as_deref() != Some("AP") {
+            return ApLiveness::Stalled("not_ap_mode");
+        }
+        let stations = self.connected_clients().await.len();
+        let flat_for = self.observe_tx(self.read_tx_packets(), Instant::now());
+        if radio.operating_channel.is_none() && stations == 0 {
+            // In AP mode with no channel context and nobody associated: the
+            // BSS never started, so nothing is being broadcast.
+            return ApLiveness::Stalled("no_operating_channel");
+        }
+        if stations > 0 && flat_for.is_some_and(|d| d >= TX_STALL_WINDOW) {
+            return ApLiveness::Stalled("tx_flat_with_stations");
+        }
+        ApLiveness::Radiating
+    }
+
+    /// One supervision pass over the AP, for the daemon's health tick.
+    ///
+    /// Restarts hostapd when the unit is active but the radio is not serving
+    /// the AP. Only [`ApLiveness::Stalled`] acts; `Unknown` never does, so a
+    /// box without `iw` keeps its AP instead of losing it to a probe gap. The
+    /// unit being inactive is not this method's business — the setup-AP guard
+    /// owns whether the AP should be up at all.
+    pub async fn supervise(&self) -> ApLiveness {
+        if !self.is_unit_active(HOSTAPD_UNIT).await {
+            *self.tx_sample.lock() = None;
+            return ApLiveness::Unknown("unit_inactive");
+        }
+        let verdict = self.check_liveness().await;
+        if let ApLiveness::Stalled(reason) = verdict {
+            warn!(
+                reason,
+                iface = %self.interface,
+                ssid = %self.ssid,
+                "ap_not_radiating_restarting_hostapd"
+            );
+            *self.tx_sample.lock() = None;
+            self.systemctl("restart", HOSTAPD_UNIT).await;
+        }
+        verdict
+    }
+
+    /// Live AP status.
+    ///
+    /// `running` is derived from the RADIO, never from the unit: the unit being
+    /// active only says a process exists. `hostapd_unit_active` carries the
+    /// unit fact separately so a diagnosis can still tell "the daemon is dead"
+    /// apart from "the daemon is alive and not serving the AP", and `probe_ok`
+    /// keeps "could not ask the radio" distinct from "asked, and it is not an
+    /// AP". Field-for-field parity with the Python manager's `status()`.
     pub async fn status(&self) -> Value {
-        let running = self.is_unit_active(HOSTAPD_UNIT).await;
-        let clients = if running {
+        let unit_active = self.is_unit_active(HOSTAPD_UNIT).await;
+        let radio = self.probe_radio().await;
+        let in_ap_mode = radio.iface_type.as_deref() == Some("AP");
+        let clients = if in_ap_mode {
             self.connected_clients().await
         } else {
             Vec::new()
         };
+        let tx_packets = self.read_tx_packets();
+        let flat_for = self.observe_tx(tx_packets, Instant::now());
+        let running = radio.probe_ok
+            && in_ap_mode
+            && (radio.operating_channel.is_some() || !clients.is_empty());
         json!({
             "running": running,
             "ssid": self.ssid,
@@ -483,6 +772,16 @@ impl HostapdManager {
             "interface": self.interface,
             "gateway": AP_ADDR,
             "connected_clients": clients,
+            "hostapd_unit_active": unit_active,
+            "radio": {
+                "probe_ok": radio.probe_ok,
+                "iface_type": radio.iface_type,
+                "operating_channel": radio.operating_channel,
+                "ssid": radio.ssid,
+                "station_count": clients.len(),
+                "tx_packets": tx_packets,
+                "tx_flat_seconds": flat_for.map(|d| d.as_secs()),
+            },
         })
     }
 
@@ -530,6 +829,9 @@ impl HostapdManager {
             error!(error = %exc, "ap_config_write_failed");
             return false;
         }
+        // A restart resets the interface's counters, so the old baseline would
+        // read as a huge backwards jump and then as fresh flatness.
+        *self.tx_sample.lock() = None;
         self.systemctl("restart", HOSTAPD_UNIT).await;
         info!(ssid = %self.ssid, channel = self.channel, "ap_config_applied");
         true
@@ -882,26 +1184,253 @@ no-resolv\n";
             .any(|c| c.contains(&"restart".to_string())));
     }
 
+    /// `iw dev <iface> info` for a ground station whose AP is up.
+    fn iw_info_ap(channel: Option<u32>) -> String {
+        let mut s = String::from(
+            "Interface wlan0\n\tifindex 3\n\twdev 0x1\n\taddr b8:27:eb:11:22:33\n\
+             \tssid ADOS-GS-58C2\n\ttype AP\n\twiphy 0\n",
+        );
+        if let Some(c) = channel {
+            s.push_str(&format!(
+                "\tchannel {c} (2437 MHz), width: 20 MHz, center1: 2437 MHz\n"
+            ));
+        }
+        s.push_str("\ttxpower 31.00 dBm\n");
+        s
+    }
+
+    /// Seed a fake `/sys/class/net/<iface>/statistics/tx_packets`.
+    fn seed_tx(root: &std::path::Path, iface: &str, packets: u64) {
+        let dir = root.join(iface).join("statistics");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tx_packets"), format!("{packets}\n")).unwrap();
+    }
+
+    #[test]
+    fn iw_info_parses_mode_channel_and_ssid_and_flags_an_unusable_answer() {
+        let up = parse_iw_info(&iw_info_ap(Some(6)));
+        assert!(up.probe_ok);
+        assert_eq!(up.iface_type.as_deref(), Some("AP"));
+        assert_eq!(up.operating_channel, Some(6));
+        assert_eq!(up.ssid.as_deref(), Some("ADOS-GS-58C2"));
+
+        // In AP mode but with no channel context: hostapd is alive, the BSS is
+        // not. That distinction is the whole point of reading the channel line.
+        let idle = parse_iw_info(&iw_info_ap(None));
+        assert!(idle.probe_ok);
+        assert_eq!(idle.operating_channel, None);
+
+        // No `type` line at all: the probe did not answer. It must NOT read as
+        // "answered, and it is not an AP" — nothing may be concluded from it.
+        let unusable = parse_iw_info("command failed: No such device (-19)\n");
+        assert!(!unusable.probe_ok);
+        assert_eq!(unusable.iface_type, None);
+    }
+
     #[tokio::test]
-    async fn status_scrapes_station_dump_macs() {
+    async fn status_reports_running_from_the_radio_not_from_the_unit() {
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(ScriptedRunner::new());
         runner.push(CmdOut {
             rc: 0,
             stdout: "active\n".to_string(),
             stderr: String::new(),
-        }); // is-active → active
+        }); // systemctl is-active → active
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: iw_info_ap(Some(6)),
+            stderr: String::new(),
+        }); // iw dev wlan0 info
         runner.push(CmdOut {
             rc: 0,
             stdout: "Station AA:BB:CC:DD:EE:FF (on wlan0)\n\tinactive time:\t10 ms\nStation 11:22:33:44:55:66 (on wlan0)\n".to_string(),
             stderr: String::new(),
-        }); // iw station dump
-        let m = mgr(dir.path(), "58c27faf", runner);
+        }); // iw dev wlan0 station dump
+        let mut m = mgr(dir.path(), "58c27faf", runner);
+        m.set_sysfs_net_root(dir.path().to_path_buf());
+        seed_tx(dir.path(), "wlan0", 4200);
+
         let st = m.status().await;
         assert_eq!(st["running"], true);
+        assert_eq!(st["hostapd_unit_active"], true);
+        assert_eq!(st["radio"]["probe_ok"], true);
+        assert_eq!(st["radio"]["iface_type"], "AP");
+        assert_eq!(st["radio"]["operating_channel"], 6);
+        assert_eq!(st["radio"]["tx_packets"], 4200);
         let clients = st["connected_clients"].as_array().unwrap();
         assert_eq!(clients.len(), 2);
         assert_eq!(clients[0], "aa:bb:cc:dd:ee:ff");
         assert_eq!(clients[1], "11:22:33:44:55:66");
+    }
+
+    #[tokio::test]
+    async fn an_active_unit_whose_radio_is_not_an_ap_reports_not_running() {
+        // The defect this whole change exists for: the unit is `active` and no
+        // SSID is on the air. A status surface that answered `running: true`
+        // here is the one that hid a dead AP on every ground station.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "active\n".to_string(),
+            stderr: String::new(),
+        });
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "Interface wlan0\n\tifindex 3\n\ttype managed\n".to_string(),
+            stderr: String::new(),
+        });
+        let mut m = mgr(dir.path(), "58c27faf", runner);
+        m.set_sysfs_net_root(dir.path().to_path_buf());
+
+        let st = m.status().await;
+        assert_eq!(st["running"], false);
+        // …while still saying plainly that the daemon itself is up, so the
+        // operator can tell "hostapd died" from "hostapd is not serving".
+        assert_eq!(st["hostapd_unit_active"], true);
+        assert_eq!(st["radio"]["iface_type"], "managed");
+        // Nothing was scraped for stations: the interface is not an AP.
+        assert_eq!(st["connected_clients"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn supervise_restarts_hostapd_when_the_radio_is_not_serving_the_ap() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "active\n".to_string(),
+            stderr: String::new(),
+        }); // is-active
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "Interface wlan0\n\ttype managed\n".to_string(),
+            stderr: String::new(),
+        }); // iw info → not an AP
+        let mut m = mgr(dir.path(), "58c27faf", runner.clone());
+        m.set_sysfs_net_root(dir.path().to_path_buf());
+
+        assert_eq!(m.supervise().await, ApLiveness::Stalled("not_ap_mode"));
+        assert!(
+            runner.recorded().iter().any(
+                |c| c.contains(&"restart".to_string()) && c.contains(&HOSTAPD_UNIT.to_string())
+            ),
+            "a wedged AP was not restarted: {:?}",
+            runner.recorded()
+        );
+    }
+
+    #[tokio::test]
+    async fn supervise_never_restarts_on_a_probe_it_could_not_make() {
+        // No `iw`, or the interface is gone. Acting on that would turn a
+        // missing tool into a restart loop of the operator's only reachability.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "active\n".to_string(),
+            stderr: String::new(),
+        }); // is-active
+        runner.push(CmdOut::failed(1, "command failed: No such device (-19)")); // iw info
+        let mut m = mgr(dir.path(), "58c27faf", runner.clone());
+        m.set_sysfs_net_root(dir.path().to_path_buf());
+
+        assert_eq!(
+            m.supervise().await,
+            ApLiveness::Unknown("radio_unprobeable")
+        );
+        assert!(
+            !runner
+                .recorded()
+                .iter()
+                .any(|c| c.contains(&"restart".to_string())),
+            "an unprobeable radio must not trigger a restart: {:?}",
+            runner.recorded()
+        );
+    }
+
+    #[test]
+    fn a_flat_transmit_counter_accumulates_and_a_moving_one_resets_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        let m = mgr(dir.path(), "58c27faf", runner);
+        let t0 = Instant::now();
+
+        // First reading only establishes the baseline.
+        assert_eq!(m.observe_tx(Some(100), t0), Some(Duration::ZERO));
+        // Same value later: that elapsed time IS the flat window.
+        assert_eq!(
+            m.observe_tx(Some(100), t0 + Duration::from_secs(31)),
+            Some(Duration::from_secs(31))
+        );
+        // The counter moves: the window restarts from zero.
+        assert_eq!(
+            m.observe_tx(Some(101), t0 + Duration::from_secs(32)),
+            Some(Duration::ZERO)
+        );
+        // An unreadable counter is a GAP, not elapsed flatness: it clears the
+        // baseline so a transient read failure cannot age into a stall verdict.
+        assert_eq!(m.observe_tx(None, t0 + Duration::from_secs(33)), None);
+        assert_eq!(
+            m.observe_tx(Some(101), t0 + Duration::from_secs(99)),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flat_counter_with_no_station_is_not_a_stall() {
+        // mac80211 does not account beacons into the netdev counter, so an idle
+        // AP with nobody associated legitimately sits flat forever. Condemning
+        // it would restart a healthy AP every window.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: iw_info_ap(Some(6)),
+            stderr: String::new(),
+        }); // iw info → AP on channel 6
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        }); // station dump → nobody associated
+        let mut m = mgr(dir.path(), "58c27faf", runner);
+        m.set_sysfs_net_root(dir.path().to_path_buf());
+        seed_tx(dir.path(), "wlan0", 7);
+        // Age the baseline well past the stall window.
+        *m.tx_sample.lock() = Some(TxSample {
+            packets: 7,
+            flat_since: Instant::now() - TX_STALL_WINDOW * 4,
+        });
+
+        assert_eq!(m.check_liveness().await, ApLiveness::Radiating);
+    }
+
+    #[tokio::test]
+    async fn a_flat_counter_with_an_associated_station_is_a_stall() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: iw_info_ap(Some(6)),
+            stderr: String::new(),
+        }); // iw info → AP on channel 6
+        runner.push(CmdOut {
+            rc: 0,
+            stdout: "Station aa:bb:cc:dd:ee:ff (on wlan0)\n".to_string(),
+            stderr: String::new(),
+        }); // station dump → one client
+        let mut m = mgr(dir.path(), "58c27faf", runner);
+        m.set_sysfs_net_root(dir.path().to_path_buf());
+        seed_tx(dir.path(), "wlan0", 7);
+        *m.tx_sample.lock() = Some(TxSample {
+            packets: 7,
+            flat_since: Instant::now() - TX_STALL_WINDOW * 4,
+        });
+
+        assert_eq!(
+            m.check_liveness().await,
+            ApLiveness::Stalled("tx_flat_with_stations")
+        );
     }
 }

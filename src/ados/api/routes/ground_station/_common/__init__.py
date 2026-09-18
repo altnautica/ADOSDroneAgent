@@ -51,7 +51,6 @@ from .models import (
     PairAcceptRequest,
     PairApproveRequest,
     PairJoinRequest,
-    PairRequest,
     PairRevokeRequest,
     PicClaimRequest,
     PicConfirmTokenRequest,
@@ -59,14 +58,12 @@ from .models import (
     PicReleaseRequest,
     RoleChangeRequest,
     ScreensUpdate,
-    WfbUpdate,
     WifiJoinRequest,
 )
 from .profile import _require_ground_profile, _save_config
 from .system_snapshot import _agent_version, _system_snapshot
 from .ui_config import (
     _load_display_config,
-    _load_ui_config,
     _persist_gs_ui_section,
     _refresh_in_memory_ui,
     _save_ui_config,
@@ -80,7 +77,6 @@ from .validators import (
     _validate_ipv4,
     _validate_ipv4_cidr,
 )
-from .views import _read_wfb_view
 
 __all__ = [
     # paths + defaults
@@ -96,7 +92,6 @@ __all__ = [
     "_require_ground_profile",
     "_save_config",
     # ui config
-    "_load_ui_config",
     "_save_ui_config",
     "_load_display_config",
     "_persist_gs_ui_section",
@@ -106,8 +101,6 @@ __all__ = [
     "_system_snapshot",
     # managers
     "_pair_manager",
-    # views
-    "_read_wfb_view",
     # validators
     "_IPV4_RE",
     "_stock_confirm_token",
@@ -117,8 +110,6 @@ __all__ = [
     "_read_json_or_empty",
     "_read_yaml_or_empty",
     # models
-    "WfbUpdate",
-    "PairRequest",
     "OledUpdate",
     "ButtonsUpdate",
     "ScreensUpdate",

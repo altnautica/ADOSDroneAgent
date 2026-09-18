@@ -23,7 +23,7 @@
     "rpi-v8": ["cm3", "cm4", "rpi3", "rpi4b", "zero2w"],
     "rpi-2712": ["cm5", "rpi5"],
     "radxa-a733": ["cubie-a7s", "cubie-a7z"],
-    "radxa-rk356x": ["radxa-cm3", "rk3566"],
+    "radxa-rk356x": ["rk3566"],
     "armbian-rk35xx": ["orange-pi-5", "rk3588s2", "rock-5c-lite"]
   },
 

@@ -1,8 +1,20 @@
 [Unit]
-Description=ADOS Ground Station WiFi AP
+Description=ADOS Ground Station WiFi AP (hostapd)
 After=network.target
 PartOf=ados-supervisor.service
-ConditionPathExists=/sys/class/net/wlan0
+# Skip cleanly instead of crash-looping before the AP has been provisioned:
+# hostapd exits non-zero on a missing conf, and five of those inside the start
+# limit leave the unit `failed` on a box whose operator simply has not opted in
+# yet. The AP owner (ados-net's HostapdManager) renders the conf and then
+# starts this unit, so the condition is satisfied by the time a start is meant
+# to take.
+ConditionPathExists=/etc/ados/hostapd-gs.conf
+# The setup AP is opt-in; the marker mirrors network.hotspot.enabled and is
+# reconciled by the installer and by the config write path. Gating here is what
+# makes `systemctl is-active ados-hostapd` mean "the SSID is on the air" — the
+# question the AP guard, ados-dnsmasq-gs's Requires=, and every operator-facing
+# AP status surface are all actually asking.
+ConditionPathExists=/etc/ados/hotspot-enabled
 StartLimitInterval=60s
 StartLimitBurst=5
 
@@ -12,17 +24,30 @@ StartLimitBurst=5
 Slice=ados.slice
 Type=simple
 User=root
-ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.hostapd_manager
+# The AP daemon itself, never a manager that shells `systemctl`. This unit used
+# to exec the Python hostapd manager, whose own _HOSTAPD_UNIT named THIS unit —
+# so "start hostapd" asked systemd to start the process doing the asking, and
+# "is hostapd running?" was answered by "is the asker alive?", which is always
+# true. hostapd was therefore never executed on any ground station: the conf was
+# rendered, 192.168.4.1/24 was assigned, dnsmasq served DHCP, and no SSID was
+# ever broadcast while every surface reported the AP up.
+#
+# Defence in depth against the distro-packaged hostapd, exactly as the sibling
+# dnsmasq unit does for its own twin: a stock hostapd.service holding the radio
+# would make this one fail with an error that reads as a driver fault.
+ExecStartPre=-/bin/systemctl stop hostapd.service
+ExecStartPre=-/bin/systemctl disable hostapd.service
+ExecStart=/usr/sbin/hostapd /etc/ados/hostapd-gs.conf
 Restart=on-failure
-RestartSec=10
-Environment=ADOS_CONFIG=/etc/ados/config.yaml
+RestartSec=5
 EnvironmentFile=-/etc/ados/env
 
-# hostapd_manager shells out to `ip`, `iw`, `systemctl` and writes to /etc/ados
+# hostapd drives the radio directly: it brings the interface up, puts the phy
+# into AP mode, and opens a raw 802.11 socket for management frames.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=no
 
-MemoryMax=64M
+MemoryMax=32M
 
 StandardOutput=journal
 StandardError=journal

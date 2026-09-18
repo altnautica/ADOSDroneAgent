@@ -476,6 +476,38 @@ fn read_config_error_sidecars() -> Vec<ConfigErrorEntry> {
 /// Heartbeat cadence: a 5 s base sleep, as the receiver expects.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// The top-level keys whose receiver column is declared NULL-TOLERANT
+/// (`v.optional(v.union(T, v.null()))`) and which this loop's producers are
+/// responsible for. An explicit JSON `null` on one of these means "reported,
+/// not measured", and the null-strip step below must leave it alone.
+///
+/// Why it matters: the receiver builds its patch from its own declared column
+/// list, and Convex drops `undefined`-valued keys during argument
+/// serialization, so a key ABSENT from the body reads as "this agent does not
+/// report this at all" — indistinguishable from an agent that predates the
+/// surface, and nothing the receiver can distinguish from a deliberate
+/// no-reading. An explicit null is the one form that says "I report this and
+/// have no reading", and it CLEARS the column. The `capability_extras` producer
+/// already emits exactly that (see its `or_null`) for the reach-back and
+/// USB-rehome fields; the blanket null-strip that used to run here deleted
+/// those nulls off the wire, so a guardian that went from "failing over on
+/// wlan0" to "nothing to report" left `wlan0` standing in the cloud row.
+///
+/// Everything NOT on this list is `v.optional(T)` on the receiver, which
+/// rejects an explicit null outright, so those keys must still be stripped.
+pub const UNMEASURED_NULL_KEYS: &[&str] = &[
+    // The hoisted WFB adapter verdicts. `null` = no radio view, so no scan and
+    // no chipset; `false` on the injection key is a MEASURED scanned-none.
+    "wfbAdapterChipset",
+    "wfbAdapterInjectionOk",
+    // The management-link guardian's reach-back failover detail, and the
+    // USB-rehome self-heal outcome. Their producer distinguishes "no value" from
+    // "no surface" and emits null for the former.
+    "mgmtFailoverIface",
+    "mgmtFailoverReason",
+    "usbRehomeLastResult",
+];
+
 /// The deterministic, native inputs the loop always has without any probing:
 /// the device identity, version, profile, and uptime. Everything else is
 /// enrichment folded from the sidecar.
@@ -505,8 +537,10 @@ pub struct HeartbeatBase {
 /// its keys are folded OVER the native base, then the required base fields
 /// (`deviceId` / `version` / `uptimeSeconds`) are re-asserted so a producer can
 /// never drop or diverge them, and the top level is null-stripped (Convex
-/// `v.optional` rejects an explicit null). A `None` enrichment yields the
-/// native-only object with an all-`absent` radio block and no optional fields.
+/// `v.optional` rejects an explicit null) EXCEPT for the declared
+/// [`UNMEASURED_NULL_KEYS`], whose null is a meaningful "not measured". A
+/// `None` enrichment yields the native-only object with an all-`absent` radio
+/// block and no optional fields.
 ///
 /// Returns a `serde_json::Value` (the POST body): the producer owns the full
 /// payload shape, and operating at the value level keeps the merge faithful
@@ -550,10 +584,14 @@ pub fn build_payload(
         serde_json::json!(base.uptime_seconds),
     );
 
-    // Null-strip the top level: Convex `v.optional(T)` accepts absent-or-T, not
-    // an explicit null. The nested `radio` object keeps its own nulls (matching
-    // the contract, which strips only top-level keys).
-    obj.retain(|_, v| !v.is_null());
+    // Null-strip the top level: most receiver columns are `v.optional(T)`, which
+    // accepts absent-or-T but not an explicit null. The declared null-tolerant
+    // keys are EXEMPT — for them a null is the "reported, not measured" reading
+    // that clears the column, and stripping it silently left the previous tick's
+    // value standing in the cloud row forever (see [`UNMEASURED_NULL_KEYS`]).
+    // The nested `radio` object keeps its own nulls either way (the strip is
+    // top-level only, matching the contract).
+    obj.retain(|k, v| !v.is_null() || UNMEASURED_NULL_KEYS.contains(&k.as_str()));
     serde_json::Value::Object(obj)
 }
 
@@ -665,10 +703,23 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         // snapshot; the native base leaves it absent (honest "unknown").
         fc_variant: None,
         services: None,
-        last_ip: String::new(),
-        mdns_host: String::new(),
-        setup_url: String::new(),
-        api_url: String::new(),
+        // The node's advertised reach. These used to be sent as `""` every tick,
+        // which is NOT "unknown" on the receiver — `stringField` type-checks an
+        // empty string straight into the column, so each 5 s heartbeat destroyed
+        // a previously-good `lastIp`/`mdnsHost`/`setupUrl`/`apiUrl` and the GCS
+        // then built `http://:8080` out of it.
+        //
+        // `mdnsHost` is the one reach this loop can PROVE: the canonical
+        // resolver reads the system hostname avahi actually answers on and
+        // returns None when the host has no name that could be another
+        // machine's reach. The IP-derived three are proven by nothing here (no
+        // producer in this crate resolves the node's primary address or checks
+        // that :8080 accepts), so they are omitted. Advertise only a reach name
+        // proven to resolve; an unproven one is worse than none.
+        last_ip: None,
+        mdns_host: ados_protocol::reach::mdns_hostname(),
+        setup_url: None,
+        api_url: None,
         agent_version: base.version.clone(),
         video_state: None,
         video_whep_port: 0,
@@ -1129,12 +1180,123 @@ mod tests {
         assert!(!obj.contains_key("fcConnected"));
         assert!(!obj.contains_key("services"));
         assert!(!obj.contains_key("videoState"));
-        // No top-level key is JSON null.
+        // No top-level key is JSON null OUTSIDE the declared null-tolerant set.
         for (k, val) in obj {
-            assert!(!val.is_null(), "{k} must not be null on the wire");
+            assert!(
+                !val.is_null() || UNMEASURED_NULL_KEYS.contains(&k.as_str()),
+                "{k} must not be null on the wire"
+            );
         }
         // radio is the absent block.
         assert_eq!(obj["radio"]["state"], "absent");
+    }
+
+    #[test]
+    fn an_unmeasured_null_tolerant_field_rides_as_an_explicit_null_never_omitted() {
+        // The cross-repo half of the stale-cloud-status defect. The receiver
+        // builds its patch from its own declared column list and Convex drops
+        // undefined-valued keys during argument serialization, so a key this
+        // agent OMITS carries no instruction at all: the previous tick's value
+        // stays in the row and the GCS renders minutes-old radio/link telemetry
+        // as live. A declared-but-unmeasured field must therefore ride as an
+        // explicit null, which is the form the receiver's
+        // `v.optional(v.union(T, v.null()))` column accepts and clears on.
+        let v = build_payload(&base(), None);
+        let obj = v.as_object().unwrap();
+        for key in UNMEASURED_NULL_KEYS {
+            // Only the keys this native base owns are asserted present here;
+            // the capability-sidecar ones appear when their producer runs.
+            if !obj.contains_key(*key) {
+                continue;
+            }
+            assert!(
+                obj[*key].is_null(),
+                "{key} is unmeasured, so it must be an explicit null"
+            );
+        }
+        // The two the native base always owns: no radio view ⇒ no scan ⇒ the
+        // verdict is present-and-null, not missing.
+        assert!(
+            obj.contains_key("wfbAdapterInjectionOk"),
+            "an unmeasured adapter verdict must be SENT as null, not omitted"
+        );
+        assert!(obj["wfbAdapterInjectionOk"].is_null());
+        assert!(obj.contains_key("wfbAdapterChipset"));
+        assert!(obj["wfbAdapterChipset"].is_null());
+
+        // A MEASURED verdict still rides as its value, so null stays distinct
+        // from a real scanned-and-found-none outcome.
+        let enrich = serde_json::json!({ "wfbAdapterInjectionOk": false });
+        let v = build_payload(&base(), Some(&enrich));
+        assert_eq!(v["wfbAdapterInjectionOk"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn a_producers_explicit_null_survives_the_strip() {
+        // `capability_extras` deliberately emits null for a reach-back /
+        // USB-rehome field it has no value for (its `or_null`). The blanket
+        // strip used to delete those nulls off the wire, so a guardian that went
+        // from "failing over on wlan0" to "nothing to report" left `wlan0`
+        // standing in the cloud row forever.
+        let enrich = serde_json::json!({
+            "mgmtLinkMode": "primary",
+            "mgmtFailoverIface": serde_json::Value::Null,
+            "mgmtFailoverReason": serde_json::Value::Null,
+            "usbRehomeState": "idle",
+            "usbRehomeLastResult": serde_json::Value::Null,
+            // A key OUTSIDE the declared set: still stripped, because its
+            // receiver column rejects an explicit null outright.
+            "temperature": serde_json::Value::Null,
+        });
+        let v = build_payload(&base(), Some(&enrich));
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("mgmtFailoverIface"));
+        assert!(obj["mgmtFailoverIface"].is_null());
+        assert!(obj.contains_key("mgmtFailoverReason"));
+        assert!(obj["mgmtFailoverReason"].is_null());
+        assert!(obj.contains_key("usbRehomeLastResult"));
+        assert!(obj["usbRehomeLastResult"].is_null());
+        assert_eq!(obj["mgmtLinkMode"], "primary");
+        assert!(
+            !obj.contains_key("temperature"),
+            "a v.optional(T) column rejects an explicit null, so it stays stripped"
+        );
+    }
+
+    #[test]
+    fn the_advertised_reach_is_omitted_rather_than_blanked() {
+        // `""` is not "unknown" on the receiver: `stringField` type-checks an
+        // empty string straight into the column, so every tick destroyed a
+        // previously-good reach and the GCS built `http://:8080` out of it.
+        let v = build_payload(&base(), None);
+        let obj = v.as_object().unwrap();
+        // Nothing here proves an address or that :8080 accepts, so the three
+        // IP-derived reaches are absent rather than blank.
+        for key in ["lastIp", "setupUrl", "apiUrl"] {
+            assert!(
+                !obj.contains_key(key),
+                "{key} is unproven, so it must be absent — never an empty string"
+            );
+        }
+        // `mdnsHost` is either absent (no hostname that could be another
+        // machine's reach) or the resolvable name — never the empty string this
+        // used to send unconditionally.
+        match obj.get("mdnsHost") {
+            None => {}
+            Some(name) => {
+                let name = name.as_str().expect("mdnsHost is a string when present");
+                assert!(!name.is_empty(), "an advertised reach must not be blank");
+                assert_eq!(
+                    Some(name.to_string()),
+                    ados_protocol::reach::mdns_hostname(),
+                    "the advertised reach must be the canonical resolvable name"
+                );
+            }
+        }
+        // A producer that does prove a reach still overrides the absence.
+        let enrich = serde_json::json!({ "lastIp": "192.168.1.50" });
+        let v = build_payload(&base(), Some(&enrich));
+        assert_eq!(v["lastIp"], "192.168.1.50");
     }
 
     #[test]

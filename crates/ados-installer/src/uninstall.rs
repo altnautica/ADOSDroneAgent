@@ -58,6 +58,7 @@ pub fn dropin_files() -> Vec<&'static str> {
     vec![
         "/etc/tmpfiles.d/ados.conf",
         "/etc/tmpfiles.d/ados-plugins.conf",
+        "/etc/tmpfiles.d/ados-vision.conf",
         "/etc/tmpfiles.d/99-ados-usb-autosuspend.conf",
         "/etc/tmpfiles.d/99-ados-log-retention.conf",
         "/etc/sysctl.d/99-ados-video.conf",

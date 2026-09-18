@@ -8,27 +8,26 @@
 //!
 //! What it does (ground-station profile, Pi only):
 //!   * ensures an active `dtparam=i2c_arm=on` line in the Pi boot config
-//!     (uncomment a commented one, else append) — snapshotting to `<cfg>.ados-bak`
-//!     first, exactly like the SPI-LCD residue path;
+//!     (uncomment a commented one, else append) — through
+//!     [`crate::steps::boot_config`], whose snapshot is KEEP-FIRST, so this
+//!     edit cannot overwrite the pristine baseline the display probe restores
+//!     from when a panel never binds;
 //!   * writes `/etc/modules-load.d/ados-i2c.conf` so `i2c-dev` loads every boot;
 //!   * best-effort `modprobe i2c-dev` so the node appears without a reboot when
 //!     the bus is already enabled in the device tree.
 //!
 //! The boot-config edit is purely ADDITIVE (it never removes or disables an
-//! overlay), so it carries no brick risk — unlike the SPI-LCD overlay it only
-//! turns a bus ON. Idempotent: a no-op when `dtparam=i2c_arm=on` is already
-//! active (the founder's box, and every box after the first install). The
-//! `dtparam` change needs a reboot to create the bus; the module-load + modprobe
-//! cover the already-enabled case.
-
-use std::path::Path;
+//! overlay), so it carries no brick risk of its own — it only turns a bus ON.
+//! Idempotent: a no-op when `dtparam=i2c_arm=on` is already active (the
+//! founder's box, and every box after the first install). The `dtparam` change
+//! needs a reboot to create the bus; the module-load + modprobe cover the
+//! already-enabled case.
 
 use crate::ctx::Ctx;
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use crate::steps::boot_config::{self, BootConfigEdit};
 
-/// The Pi boot-config candidates, current image first.
-const PI_CONFIG_PATHS: &[&str] = &["/boot/firmware/config.txt", "/boot/config.txt"];
 /// The modules-load drop-in that loads `i2c-dev` every boot.
 const MODULES_LOAD_PATH: &str = "/etc/modules-load.d/ados-i2c.conf";
 const MODULES_LOAD_BODY: &str =
@@ -76,39 +75,21 @@ pub fn ensure_i2c_arm(cfg: &str) -> String {
     joined
 }
 
-/// Ensure the boot config enables the ARM I2C bus, snapshotting before any edit.
-/// No-op when the config is absent (a non-Pi board) or already enabled.
+/// Ensure the boot config enables the ARM I2C bus, keep-first snapshotting
+/// before any edit. No-op when the config is absent (a non-Pi board) or already
+/// enabled.
 ///
 /// Returns whether the boot config was CHANGED, i.e. whether a reboot is now
 /// needed before `/dev/i2c-1` exists.
 fn provision_i2c_boot_config() -> bool {
-    for cfg_path in PI_CONFIG_PATHS {
-        let path = Path::new(cfg_path);
-        let current = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let updated = ensure_i2c_arm(&current);
-        if updated == current {
-            tracing::info!(cfg = cfg_path, "I2C already enabled in the boot config");
-            return false;
+    match boot_config::edit_boot_config("i2c_arm enable", ensure_i2c_arm) {
+        BootConfigEdit::Written(_) => true,
+        BootConfigEdit::Unchanged => {
+            tracing::info!("I2C already enabled in the boot config");
+            false
         }
-        let bak = format!("{cfg_path}.ados-bak");
-        if let Err(e) = std::fs::write(&bak, &current) {
-            tracing::warn!(error = %e, "could not snapshot boot config before I2C enable; skipping");
-            return false;
-        }
-        if let Err(e) = std::fs::write(path, &updated) {
-            tracing::warn!(error = %e, "writing I2C-enabled boot config failed");
-            return false;
-        }
-        tracing::info!(
-            cfg = cfg_path,
-            "enabled I2C in the boot config (reboot to apply)"
-        );
-        return true;
+        BootConfigEdit::Absent | BootConfigEdit::Refused(_) => false,
     }
-    false
 }
 
 /// Enable the I2C bus so the ground-station status OLED can bind.

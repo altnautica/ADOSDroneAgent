@@ -28,9 +28,13 @@ model_patterns:
   # 2026-07-20: the model string is the GENERIC "sun60iw2" (shared with the A7Z)
   # while compatible = "radxa,cubie-a7s\0arm,sun60iw2p1\0allwinner,sun60i-a733" —
   # the "radxa,cubie-a7s"/"cubie-a7s" patterns below substring-match that unique
-  # first token, so no board_override is needed. The A733 family strings
-  # (sun60iw2 / sun60i-a733) are intentionally NOT listed: they are shared with
-  # cubie-a7z.yaml and would mis-route a real A7Z.
+  # first token, so no board_override is needed.
+  #
+  # The A733 family strings (sun60iw2 / sun60iw2p1 / sun60i-a733 / "Allwinner
+  # A733") are intentionally NOT listed HERE OR in cubie-a7z.yaml: they name the
+  # SoC both boards share, so they cannot decide between them. A board that
+  # reports only a family string resolves to generic-arm64, and
+  # `/etc/ados/board_override` = `cubie-a7s` (this file's stem) pins it.
   - "radxa,cubie-a7s"
   - "Radxa Cubie A7S"
   - "Cubie A7S"

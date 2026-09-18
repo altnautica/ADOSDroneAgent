@@ -71,7 +71,7 @@ pub async fn serve(
             recv = rx.recv() => {
                 match recv {
                     Ok(desc) => match encode_descriptor_frame(&desc) {
-                        Ok(frame) => server.broadcast(frame).await,
+                        Ok(frame) => server.broadcast(frame.into()).await,
                         Err(e) => tracing::warn!(error = %e, "vision_frames_encode_failed"),
                     },
                     // A lagged subscriber skips to the tail (latest-wins, like the

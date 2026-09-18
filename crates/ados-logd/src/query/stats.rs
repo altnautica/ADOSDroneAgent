@@ -50,7 +50,10 @@ pub struct Health {
     pub ok: bool,
     /// True when the read connection opened.
     pub db_open: bool,
-    /// True when the writer is believed alive (the broadcast channel is open).
+    /// True while the writer's run loop is still stamping progress. False once
+    /// it has exited or has gone longer than its stall budget without a turn —
+    /// which is the difference between a store that is recording and one that
+    /// silently stopped.
     pub writer_alive: bool,
     /// The integrity result (`ok` when healthy, the failure text otherwise).
     pub integrity: String,
@@ -71,8 +74,8 @@ const ALL_TABLES: [&str; 7] = [
 ];
 
 /// Gather the full stats payload from a read-only connection and the live
-/// ingest counters. `writer_alive` is supplied by the daemon (whether the
-/// broadcast channel still has the writer on the far end).
+/// ingest counters. `writer_alive` comes from the writer's own progress stamp,
+/// read by the caller.
 pub fn gather(
     conn: &Connection,
     db_path: &Path,

@@ -14,6 +14,13 @@ StartLimitBurst=5
 # observable per unit (the slice sets MemoryAccounting=yes).
 Slice=ados.slice
 Type=simple
+# Reclaim /dev/shm frame rings a previous run stranded. Every ring is resident
+# tmpfs RAM; Drop unlinks on a clean exit but never runs on SIGKILL or an
+# OOM-kill, and a camera that re-enumerates under a new /dev/videoN leaves its
+# old ring behind. `rm -f` on a glob that matches nothing exits 0, so this
+# never blocks the start. /etc/tmpfiles.d/ados-vision.conf does the same at
+# boot; this covers a restart inside one boot.
+ExecStartPre=/bin/sh -c 'rm -f /dev/shm/ados-vision-*'
 # The native vision engine is the only implementation; there is no Python
 # fallback. exec the binary when present (failing loudly if it is absent rather
 # than running a stale path); the installer provisions it best-effort. `exec`

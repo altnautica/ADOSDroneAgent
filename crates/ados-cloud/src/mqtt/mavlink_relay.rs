@@ -23,7 +23,7 @@ use std::sync::Arc;
 use ados_plugin_host::mavlink_client::MavlinkClient;
 use tokio::sync::{mpsc, watch};
 
-use super::transport::RumqttcTransport;
+use super::transport::{MqttQos, MqttTransport, RumqttcTransport};
 use super::{relay_username, topic_mavlink_rx, topic_mavlink_tx};
 use crate::mqtt::transport::TransportConfig;
 
@@ -236,9 +236,13 @@ impl MavlinkMqttRelay {
         ipc.declare_off_box_source();
 
         // GCS->FC: subscribe rx and write received payloads to the IPC socket.
+        // Taken through the transport (NOT the raw client) so the topic is
+        // recorded for replay: the broker discards the subscription on every
+        // fresh session, and without the replay this uplink dies at the first
+        // reconnect while `mavlink/tx` keeps flowing and the link still reads
+        // connected.
         if let Err(e) = transport
-            .client()
-            .subscribe(self.topic_rx.clone(), rumqttc::QoS::AtMostOnce)
+            .subscribe(&self.topic_rx, MqttQos::AtMostOnce)
             .await
         {
             tracing::warn!(error = %e, "mavlink relay: rx subscribe failed");

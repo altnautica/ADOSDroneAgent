@@ -309,7 +309,15 @@ async fn main() {
         }));
     }
 
-    // 1 Hz companion heartbeat.
+    // 1 Hz companion heartbeat, plus the TX-liveness watchdog that judges it.
+    //
+    // Deliberately the same task and the same tick: the heartbeat is the demand
+    // the watchdog measures against. A writer that exists and a future that has
+    // not returned prove nothing about whether bytes are leaving; the heartbeat
+    // guarantees the TX byte counter advances at least once a second on any live
+    // link, so a flat counter is a dead writer rather than a quiet one. Ordered
+    // heartbeat-then-watchdog so the watchdog reads a counter this tick already
+    // had its chance to move.
     {
         let fc = fc.clone();
         let cancel = cancel.clone();
@@ -317,7 +325,10 @@ async fn main() {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             loop {
                 tokio::select! {
-                    _ = tick.tick() => fc.send_heartbeat().await,
+                    _ = tick.tick() => {
+                        fc.send_heartbeat().await;
+                        fc.tick_tx_watchdog().await;
+                    }
                     _ = cancel.notified() => break,
                 }
             }
@@ -355,7 +366,7 @@ async fn main() {
                 tokio::select! {
                     frame = rx.recv() => match frame {
                         Ok(f) => match encode_frame(&f, MAVLINK_MAX_FRAME) {
-                            Ok(framed) => mavlink_ipc.broadcast(framed).await,
+                            Ok(framed) => mavlink_ipc.broadcast(framed.into()).await,
                             Err(e) => tracing::warn!(error = %e, "mavlink_frame_encode_failed"),
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -556,7 +567,7 @@ async fn main() {
                 tokio::select! {
                     chunk = raw_rx.recv() => match chunk {
                         Ok(bytes) => match encode_frame(&bytes, MAVLINK_MAX_FRAME) {
-                            Ok(framed) => msp_ipc.broadcast(framed).await,
+                            Ok(framed) => msp_ipc.broadcast(framed.into()).await,
                             Err(e) => tracing::warn!(error = %e, "msp_chunk_encode_failed"),
                         },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -710,7 +721,7 @@ async fn main() {
                         let wire = { state.lock().await.to_wire_with(&extras) };
                         let encoded = encode_v2(&wire);
                         match encoded {
-                            Ok(bytes) => state_ipc.broadcast(bytes).await,
+                            Ok(bytes) => state_ipc.broadcast(bytes.into()).await,
                             Err(e) => tracing::warn!(error = %e, "state_encode_failed"),
                         }
                     }
@@ -1406,10 +1417,16 @@ mod extras_key_set_tests {
              10 Hz publish",
             full_len - empty_len
         );
-        // And the shape it replaced was an order of magnitude larger.
+        // And the shape it replaced was an order of magnitude larger. Measured
+        // as the BLOB'S OWN weight, not as a ratio of the two totals: a ratio
+        // silently pins the size of everything else in the snapshot, so adding
+        // any unrelated scalar counter breaks it and tempts whoever hits that
+        // into re-pinning the number rather than reading the assertion.
         assert!(
-            pre_diet_len > 20_000 && pre_diet_len > full_len * 15,
-            "pre-diet {pre_diet_len} B vs current {full_len} B"
+            pre_diet_len - full_len > 15_000,
+            "the `params` blob only accounts for {} B; this guard is measuring \
+             the wrong thing",
+            pre_diet_len - full_len
         );
     }
 }

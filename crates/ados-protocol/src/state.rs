@@ -29,7 +29,20 @@ pub const STATE_V2_MAX_FRAME: usize = 1024 * 1024;
 /// lock-step with the contract registry (`state.v2`) — a test asserts they are
 /// equal so the wire and the registry can never silently diverge. A reader
 /// rejects any frame whose `v` does not match this.
-pub const STATE_WIRE_VERSION: u16 = 2;
+///
+/// **Exact-match, strict lockstep.** [`decode_v2`] skips a frame whose `v` is
+/// anything other than this, and the Python reader
+/// (`ados.core.ipc._decode_state_v2_body`) does the same; neither tolerates an
+/// unknown key. So EVERY change to the body shape bumps this, including a purely
+/// additive one — adding a field without bumping leaves two different payload
+/// shapes wearing the same version number, which no reader can detect. The
+/// bounded restart window a bump costs is the designed behaviour of lockstep; a
+/// silent version is a permanent ambiguity.
+///
+/// The constant tracks the BODY shape, not the framing generation the contract
+/// id is named for: 3 is the body that carries `position_age_ms`, still inside
+/// the length-prefixed-msgpack framing that `state.v2` names.
+pub const STATE_WIRE_VERSION: u16 = 3;
 
 #[derive(Debug, Error)]
 pub enum StateError {

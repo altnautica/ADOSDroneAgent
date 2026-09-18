@@ -15,11 +15,9 @@
 //!   raises when its own socket round-trip fails. When the split topology is off,
 //!   the snapshot is process-local state with no window opened yet, so the route
 //!   reports the same `{"open": false}` a freshly-started agent does.
-//! - **`GET /api/v1/ground-station/pic`** — the pilot-in-command arbiter state.
-//!   The arbiter is in-process state that starts unclaimed on every process start
-//!   and is never persisted, so this front (a separate process with no in-process
-//!   arbiter and no on-disk PIC state to read) reports the same unclaimed default
-//!   a freshly-started agent reports before any client claims PIC.
+//! - **`GET /api/v1/ground-station/pic`** — served by [`crate::routes::gs_pic`],
+//!   which owns the PIC control socket. It is NOT in this module: it used to be,
+//!   answering from a hardcoded unclaimed body.
 //! - **`GET /api/v1/ground-station/captive-token`** — the captive-portal token
 //!   mint for the setup webapp. The FastAPI handler gates on the request peer
 //!   being on the AP hotspot subnet (`192.168.4.0/24`) or loopback, and otherwise
@@ -228,38 +226,10 @@ async fn pairing_daemon_snapshot(socket: &Path) -> std::io::Result<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/ground-station/pic
+// GET /api/v1/ground-station/pic lives in `gs_pic`, which owns the PIC control
+// socket. It used to be served here from a hardcoded `unclaimed` body; see that
+// module for why that was wrong.
 // ---------------------------------------------------------------------------
-
-/// The pilot-in-command arbiter state. Ground-station only; a drone-profile node
-/// gets `404 E_PROFILE_MISMATCH`.
-///
-/// The arbiter is in-process state that starts unclaimed on every process start
-/// and is never persisted to disk. This front is a separate process with no
-/// in-process arbiter and no on-disk PIC state, so it reports the same unclaimed
-/// default a freshly-started agent's arbiter reports before any client claims
-/// PIC: `state` is `"unclaimed"`, the holder / since / counter / primary-gamepad
-/// fields are all `null`/`0`. The field set + insertion order match
-/// `PicArbiter.get_state`.
-pub async fn get_pic_state() -> Response {
-    if !is_ground_station() {
-        return profile_mismatch();
-    }
-    (StatusCode::OK, Json(pic_default_state())).into_response()
-}
-
-/// The unclaimed default PIC state: the body a freshly-started arbiter reports
-/// before any claim. The field set + insertion order match `PicArbiter.get_state`
-/// (`state`, `claimed_by`, `claimed_since`, `claim_counter`, `primary_gamepad_id`).
-fn pic_default_state() -> Value {
-    json!({
-        "state": "unclaimed",
-        "claimed_by": Value::Null,
-        "claimed_since": Value::Null,
-        "claim_counter": 0,
-        "primary_gamepad_id": Value::Null,
-    })
-}
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/ground-station/captive-token
@@ -432,25 +402,6 @@ mod tests {
                 "closes_at_ms": 160,
                 "pending": [],
                 "approvals": {},
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn pic_default_state_is_the_unclaimed_body() {
-        let (status, body) =
-            body_json((StatusCode::OK, Json(pic_default_state())).into_response()).await;
-        assert_eq!(status, StatusCode::OK);
-        // GOLDEN FIXTURE: a freshly-started arbiter is unclaimed, matching
-        // PicArbiter.get_state's field set + values before any claim.
-        assert_eq!(
-            body,
-            json!({
-                "state": "unclaimed",
-                "claimed_by": null,
-                "claimed_since": null,
-                "claim_counter": 0,
-                "primary_gamepad_id": null,
             })
         );
     }

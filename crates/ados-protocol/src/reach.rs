@@ -26,19 +26,78 @@
 /// The system hostname, unadorned, or `None` when the host has none usable.
 ///
 /// Linux exposes it as a file, which is the cheap read on the boards this runs
-/// on; elsewhere (a macOS workstation node, a dev host) fall back to the
-/// `hostname` command. A trailing dot — legal in a FQDN and occasionally
-/// present in `/proc/sys/kernel/hostname` on a host configured from DNS — is
-/// trimmed, because `foo..local` resolves nowhere.
+/// on and which tracks a hostname changed while the process runs. A trailing
+/// dot — legal in a FQDN and occasionally present in
+/// `/proc/sys/kernel/hostname` on a host configured from DNS — is trimmed,
+/// because `foo..local` resolves nowhere.
+///
+/// Everywhere else (a macOS workstation node, a dev host) the portable read is
+/// `hostname(1)`. This function is reached from async route handlers
+/// (`ados-control`'s `/api/pairing/*`), and spawning a process inline on the
+/// reactor parks a worker for the life of the command, so that fallback is
+/// probed at most once per [`HOSTNAME_PROBE_TTL`] rather than per request. No
+/// SBC ever reaches that leg at all.
 pub fn system_hostname() -> Option<String> {
-    let raw = std::fs::read_to_string("/proc/sys/kernel/hostname")
+    if let Ok(raw) = std::fs::read_to_string("/proc/sys/kernel/hostname") {
+        return normalize_hostname(&raw);
+    }
+    probed_hostname_at(
+        std::time::Instant::now(),
+        HOSTNAME_PROBE_TTL,
+        read_hostname_command,
+    )
+}
+
+/// Bounded reuse window for the non-Linux `hostname(1)` probe.
+///
+/// What is held is the PROBE RESULT, not a reach verdict, and it expires. This
+/// name is used to BUILD an advertised reach — `/api/pairing/info`'s
+/// `mdns_host` and the `_ados._tcp` SRV target — and a reach surface may only
+/// advertise a name that resolves. Holding the first answer for the process
+/// lifetime would pin `None` on a node whose hostname was still `localhost`
+/// when the front started, so it would advertise no reach even after the
+/// operator set one, and would pin a dead name on a node that was renamed.
+const HOSTNAME_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The last non-Linux hostname probe: when it was taken, and what it read.
+static HOSTNAME_PROBE: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> =
+    std::sync::Mutex::new(None);
+
+/// The held probe while it is younger than `ttl`, else a fresh one. Clock- and
+/// reader-injectable so the window is a unit under test rather than something a
+/// test has to sleep out.
+fn probed_hostname_at(
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+    probe: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    // A poisoned lock means an earlier holder panicked mid-update. Fall through
+    // to a fresh probe rather than propagate the panic: the pairing routes
+    // behind this are required to answer.
+    if let Ok(held) = HOSTNAME_PROBE.lock() {
+        if let Some((at, value)) = held.as_ref() {
+            if now.duration_since(*at) < ttl {
+                return value.clone();
+            }
+        }
+    }
+    // Deliberately outside the lock: the probe spawns a process, and holding
+    // the mutex across it would queue every concurrent pairing request behind
+    // one `hostname`.
+    let fresh = probe();
+    if let Ok(mut held) = HOSTNAME_PROBE.lock() {
+        *held = Some((now, fresh.clone()));
+    }
+    fresh
+}
+
+/// `hostname(1)`, normalized. Split out so [`probed_hostname_at`] is the only
+/// thing guarding the spawn.
+fn read_hostname_command() -> Option<String> {
+    let raw = std::process::Command::new("hostname")
+        .output()
         .ok()
-        .or_else(|| {
-            std::process::Command::new("hostname")
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-        })?;
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
     normalize_hostname(&raw)
 }
 
@@ -127,5 +186,40 @@ mod tests {
         }
         // A loopback literal is a reach for the caller and nobody else.
         assert!(normalize_hostname("127.0.0.1").is_none());
+    }
+
+    #[test]
+    fn the_hostname_probe_expires_so_a_renamed_or_newly_named_host_is_advertised() {
+        // The probe is cached to keep a process spawn off a per-request path,
+        // but what is cached must expire: this name BUILDS an advertised reach,
+        // and a node whose hostname was still `localhost` when the front
+        // started must stop advertising nothing once the operator sets one.
+        let t0 = std::time::Instant::now();
+        let ttl = std::time::Duration::from_secs(30);
+
+        assert_eq!(
+            probed_hostname_at(t0, ttl, || Some("skynode".to_string())).as_deref(),
+            Some("skynode")
+        );
+        // Inside the window a request costs no spawn: the probe below would
+        // have answered differently, and does not run.
+        assert_eq!(
+            probed_hostname_at(t0 + std::time::Duration::from_secs(1), ttl, || panic!(
+                "the window was not honoured"
+            ))
+            .as_deref(),
+            Some("skynode")
+        );
+        // Past the window a rename reaches the advert.
+        assert_eq!(
+            probed_hostname_at(t0 + ttl, ttl, || Some("skynode-2".to_string())).as_deref(),
+            Some("skynode-2")
+        );
+        // And a `None` verdict is not sticky either.
+        assert!(probed_hostname_at(t0 + ttl * 2, ttl, || None).is_none());
+        assert_eq!(
+            probed_hostname_at(t0 + ttl * 3, ttl, || Some("skynode-3".to_string())).as_deref(),
+            Some("skynode-3")
+        );
     }
 }

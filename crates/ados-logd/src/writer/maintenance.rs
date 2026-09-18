@@ -11,13 +11,61 @@ use std::time::Instant;
 
 use ados_protocol::logd::{EventFrame, IngestFrame, Level};
 
-use crate::retention::{self, MaintenanceReport};
+use crate::retention::{self, ClockTrust, MaintenanceReport, CLOCK_STEP_TOLERANCE};
 
 use super::config::WriterError;
 use super::encode::{insert_frame, now_us};
 use super::Writer;
 
 impl Writer {
+    /// What the retention pass may conclude from the wall clock right now.
+    ///
+    /// Two independent ways an absolute-time cutoff can be a lie on an SBC with
+    /// no RTC:
+    ///
+    /// 1. **The clock was never established.** `/var/lib/systemd/timesync/clock`
+    ///    is absent on a first boot, a reflash, or a read-only `/var`, so the
+    ///    clock starts at the kernel build date. A TTL derived from it deletes
+    ///    by an age nobody measured.
+    /// 2. **The clock stepped after rows were written.** NTP or the GPS jumps
+    ///    the clock forward by months; every row stamped before the step is
+    ///    instantly "older" than the retention window and the very next pass
+    ///    deletes this flight's boot window — with the tool that exists to
+    ///    preserve it.
+    ///
+    /// Either way the TTL deletes are refused, and refused for the rest of this
+    /// writer's life once a step is seen (the mis-stamped rows do not heal).
+    /// The size cap still runs, so the store stays bounded on a node that never
+    /// gets a time source: eviction is oldest-first by stored order and needs
+    /// no trustworthy clock at all.
+    fn clock_trust(&mut self) -> ClockTrust {
+        if self.clock_stepped {
+            return ClockTrust::Unestablished;
+        }
+        // A wall clock that has drifted from the monotonic clock by more than
+        // the tolerance was stepped; slew never gets near it.
+        let elapsed = self.session_start_at.elapsed();
+        let expected_us = self
+            .session_start_us
+            .saturating_add(elapsed.as_micros() as i64);
+        let skew_us = now_us().saturating_sub(expected_us).abs();
+        if skew_us > CLOCK_STEP_TOLERANCE.as_micros() as i64 {
+            self.clock_stepped = true;
+            tracing::warn!(
+                skew_s = skew_us / 1_000_000,
+                "wall clock stepped since this store session opened; \
+                 refusing age-based retention so the pre-step window survives \
+                 (the size cap still bounds the store)"
+            );
+            return ClockTrust::Unestablished;
+        }
+        if retention::wall_clock_established() {
+            ClockTrust::Established
+        } else {
+            ClockTrust::Unestablished
+        }
+    }
+
     /// Run a retention maintenance pass if its deadline has arrived, then advance
     /// the next-maintenance deadline. A pass rolls up closed metric windows,
     /// TTL-deletes aged raw and rollup rows, evicts oldest-first if the store is
@@ -37,7 +85,12 @@ impl Writer {
         }
         self.next_maintenance = now + self.config.retention.maintenance_interval;
 
+        let clock = self.clock_trust();
         let do_vacuum = now >= self.next_vacuum;
+        // Stamp right before the pass, so the stall budget has to cover only
+        // the pass itself rather than the pass plus whatever the loop spent
+        // waiting for a frame beforehand.
+        self.mark_progress();
         let report = retention::run_maintenance(
             &self.conn,
             &self.config.retention,
@@ -45,6 +98,7 @@ impl Writer {
             &self.db_path,
             do_vacuum,
             &self.stop,
+            clock,
         )?;
         // Only the periodic full vacuum resets the cadence. Eviction reclaims
         // incrementally and deliberately does not count as one: letting it push

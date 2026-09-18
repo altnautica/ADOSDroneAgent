@@ -216,6 +216,7 @@ async fn tail_forwarder_stats(stderr: tokio::process::ChildStderr, state: Arc<Mu
 pub async fn run(
     shutdown: Arc<tokio::sync::Notify>,
     ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
+    progress: ados_supervisor::sdnotify::MonitorProgress,
 ) {
     let cfg = GroundStationConfig::load_from(Path::new("/etc/ados/config.yaml"));
     let mesh_iface = cfg.mesh.bat_iface.clone();
@@ -248,8 +249,17 @@ pub async fn run(
                 s.up = false;
             }
             let _ = state.lock().await.write_and_emit(ingest.as_ref());
-            shutdown.notified().await;
-            return;
+            // Correctly parked is not wedged. The systemd watchdog is fed off a
+            // progress marker, so this arm has to keep stamping or a relay with
+            // no adapter would be restarted on a fixed period — which is exactly
+            // the crash-loop the comment above says it exists to avoid.
+            loop {
+                progress.mark();
+                tokio::select! {
+                    _ = shutdown.notified() => return,
+                    _ = tokio::time::sleep(POLL_INTERVAL) => {}
+                }
+            }
         }
     };
     {
@@ -266,6 +276,8 @@ pub async fn run(
     let mut current_receiver: Option<(String, u16)> = None;
 
     loop {
+        // One stamp per pass: mDNS resolve, forwarder reconcile, state write.
+        progress.mark();
         let resolved =
             crate::mdns::resolve_receiver(&service_type, &mesh_iface, RESOLVE_TIMEOUT).await;
         let now = mesh_events::now_ms();

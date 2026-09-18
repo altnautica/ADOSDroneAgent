@@ -23,6 +23,12 @@ ados-hid = { path = "../ados-hid" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }
+# Refcounted frame buffer for the FC fan-out. Every inbound MAVLink frame is
+# handed to the IPC socket, the aux tee, the relayed-vehicle projection and one
+# proxy task per connected GCS client; as `Vec<u8>` each of those was a full
+# copy of the frame, so the per-frame allocation count grew with the number of
+# connected consumers. `Bytes` makes the fan-out refcount bumps.
+bytes = { workspace = true }
 tokio = { workspace = true }
 tokio-serial = "5.4"
 tracing = { workspace = true }

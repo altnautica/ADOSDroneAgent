@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import re
 
-# Canonical local-access endpoints. These mirror the addresses configured by
-# ``services.network.wifi_ap`` (hotspot AP) and ``services.ground_station.usb_gadget``
-# (RNDIS / CDC-NCM USB tether). Keep in sync with those modules.
+# Canonical local-access endpoints. These mirror the addresses the native
+# ``ados-net`` AP manager renders into the hostapd/dnsmasq confs (hotspot AP)
+# and ``services.ground_station.usb_gadget`` (RNDIS / CDC-NCM USB tether).
+# Keep in sync with those.
 _HOTSPOT_IP = "192.168.4.1"
 _USB_GADGET_IP = "192.168.7.1"
 _HOTSPOT_URL = f"http://{_HOTSPOT_IP}"

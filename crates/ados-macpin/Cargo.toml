@@ -13,6 +13,10 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
+# The two entry points an axum handler reaches (`apply_live`, `remove_pin_link`)
+# spawn `ip` / `udevadm`; they run bounded under tokio::process so a wedged
+# netlink or udev settle cannot block the control-plane reactor.
+tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

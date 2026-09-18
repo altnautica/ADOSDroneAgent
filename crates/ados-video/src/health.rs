@@ -73,6 +73,10 @@ pub enum StartError {
     NoEncoder,
     /// The encoder argv could not be composed for the discovered camera.
     EncoderCommandFailed,
+    /// The configured wire codec has no tuning arm in the encoder builder, so
+    /// publishing it would put an unbounded-GOP stream with no in-band
+    /// parameter sets onto an H.264-framed leg. Config error, never transient.
+    UnsupportedCodec,
     /// The encoder subprocess failed to spawn.
     EncoderSpawnFailed,
     /// mediamtx failed to start.
@@ -97,6 +101,11 @@ impl StartError {
             StartError::EncoderCommandFailed => {
                 "the encoder command could not be built for this camera (check the \
                  video.camera source / geometry settings in the agent config)"
+            }
+            StartError::UnsupportedCodec => {
+                "video.camera.codec names a codec this pipeline cannot frame (only \"h264\" \
+                 carries a bounded keyframe interval and in-band SPS/PPS, and the radio leg \
+                 is typed H.264)"
             }
             StartError::EncoderSpawnFailed => {
                 "the encoder process failed to start (check its stderr in the ados-video journal)"

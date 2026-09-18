@@ -83,16 +83,37 @@ fn sd_ready() {
 #[cfg(not(target_os = "linux"))]
 fn sd_ready() {}
 
-/// The agent profile in wire form (`drone` | `ground-station`) and the
-/// auto-pair role (`drone` | `gs`). The config profile may be `auto`; the
-/// resolved profile lives in `/etc/ados/profile.conf` on a real rig (read by the
-/// Python side). Here the configured profile is used directly — an `auto`
-/// profile maps to the drone bind role, which is the safe default for the
-/// auto-pair forwarder (a ground station that means to bind sets its profile).
-fn auto_pair_role(config: &CloudConfig) -> String {
+/// The agent profile in the WIRE form the receiver's fleet view discriminates
+/// on (`drone` | `ground-station` | `workstation` | `compute`).
+///
+/// The config field is the INTERNAL form and may be `ground_station`
+/// (underscore) or `auto`; the heartbeat used to post it verbatim, so a default
+/// install told the cloud its profile was `auto` and an explicit ground station
+/// told it `ground_station` — neither of which the fleet view classifies, so a
+/// ground-station row rendered as neither a drone nor a ground station.
+///
+/// `auto`, empty, and anything unrecognized resolve to `drone`: the resolved
+/// profile lives in `/etc/ados/profile.conf` on a real rig, and a node that
+/// means to be a ground station sets its profile. This is the ONE profile
+/// discrimination in this binary — [`auto_pair_role`] derives from it — so the
+/// bind role and the advertised profile can never disagree about what this node
+/// is.
+fn wire_profile(config: &CloudConfig) -> &'static str {
     match config.agent.profile.as_str() {
-        "ground_station" | "ground-station" => "gs".to_string(),
-        _ => "drone".to_string(),
+        "ground_station" | "ground-station" => "ground-station",
+        "workstation" => "workstation",
+        "compute" => "compute",
+        _ => "drone",
+    }
+}
+
+/// The auto-pair bind role (`drone` | `gs`), derived from the one profile
+/// discrimination above.
+fn auto_pair_role(config: &CloudConfig) -> String {
+    if wire_profile(config) == "ground-station" {
+        "gs".to_string()
+    } else {
+        "drone".to_string()
     }
 }
 
@@ -161,6 +182,16 @@ async fn main() -> Result<()> {
         .expect("reqwest client builds with the rustls config");
     let http = Arc::new(http);
 
+    // The ground-station relay's forwarding state, published in-process by the
+    // GS bridge and folded by the heartbeat loop. There is exactly ONE
+    // `/agent/status` producer per node: the bridge used to POST its own 30 s
+    // document alongside the heartbeat's 5 s one, and two producers on one row
+    // is not a merge — each tick's absences overwrote the other's readings, so
+    // the row alternated between a full board/radio/service shape and the small
+    // relay one. Stays `None` forever on a drone, so the drone payload is
+    // unchanged.
+    let (relay_state_tx, relay_state_rx) = watch::channel::<Option<gs_bridge::GsHeartbeat>>(None);
+
     // Spawn the relay tasks into one runtime. Each gates on the paired state
     // and the effective convex URL; the auto-pair supervisor is hosted here for
     // the no-self-kill invariant.
@@ -170,6 +201,7 @@ async fn main() -> Result<()> {
             config.clone(),
             http.clone(),
             convex_url.clone(),
+            relay_state_rx,
             shutdown_rx.clone(),
         ),
         // ── Command-poll loop ──────────────────────────────────
@@ -241,18 +273,17 @@ async fn main() -> Result<()> {
     // connect/restart loop in the same runtime, gated on the paired state + a
     // live cloud URL. On a ground station the uplink-aware bridge owns the relay
     // lifecycle (explicit teardown/reconnect on every uplink change + data-cap
-    // downshift + the 30 s GS status heartbeat); on a drone a thin supervisor
-    // keeps the relay connected and restarts it on exit with a backoff. Both
-    // gate on the paired state so a LAN-only / unpaired agent stays off the
-    // cloud relay.
+    // downshift + the 30 s relay-state republish the heartbeat folds); on a
+    // drone a thin supervisor keeps the relay connected and restarts it on exit
+    // with a backoff. Both gate on the paired state so a LAN-only / unpaired
+    // agent stays off the cloud relay.
     let mut tasks = tasks;
     if convex_url.is_empty() {
         tracing::info!("relay supervision idle (local mode, no cloud url)");
     } else if auto_pair_role(&config) == "gs" {
         tasks.push(spawn_gs_bridge(
             config.clone(),
-            http.clone(),
-            convex_url.clone(),
+            relay_state_tx,
             shutdown_rx.clone(),
         ));
     } else {
@@ -335,10 +366,17 @@ fn board_base() -> (String, i64, String, String, f64, bool) {
 }
 
 /// Spawn the heartbeat loop: when paired, POST the enriched payload every 5 s.
+///
+/// This is the node's ONLY `/agent/status` producer. On a ground station it
+/// folds the relay state the GS bridge publishes on `relay_state` (uplink,
+/// broker session, throttle, forwarding flags, vehicle telemetry) onto the same
+/// document, so the relay block and the board/radio/service enrichment reach
+/// the row together instead of two producers overwriting each other's absences.
 fn spawn_heartbeat(
     config: Arc<CloudConfig>,
     http: Arc<reqwest::Client>,
     convex_url: String,
+    relay_state: watch::Receiver<Option<gs_bridge::GsHeartbeat>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     let started = std::time::Instant::now();
@@ -368,10 +406,13 @@ fn spawn_heartbeat(
                         board_npu_tops,
                         board_local_inference,
                     ) = board_base();
+                    // The profile in WIRE form. Posting the internal form told
+                    // the cloud `ground_station` or `auto`, neither of which the
+                    // fleet view classifies.
                     let base = heartbeat::HeartbeatBase {
                         device_id: config.agent.device_id.clone(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
-                        profile: Some(config.agent.profile.clone()),
+                        profile: Some(wire_profile(&config).to_string()),
                         role: None,
                         uptime_seconds: started.elapsed().as_secs() as i64,
                         board_name,
@@ -394,12 +435,44 @@ fn spawn_heartbeat(
                     .await
                     .unwrap_or((serde_json::Value::Null, prev_cpu));
                     prev_cpu = next_cpu;
-                    let body = heartbeat::build_payload(&base, Some(&enrich));
+                    let mut body = heartbeat::build_payload(&base, Some(&enrich));
+                    // Fold the ground-station relay block, when the bridge has
+                    // published one. Absent on a drone, so the drone payload is
+                    // byte-unchanged. The bridge owns `profile`/`role` for a GS
+                    // (it reads the live mesh role, which this loop does not),
+                    // and `deviceId`/`version`/`uptimeSeconds` were already
+                    // re-asserted from the base by `build_payload`, so the fold
+                    // cannot divert the row's identity.
+                    fold_relay_state(&mut body, relay_state.borrow().as_ref());
                     heartbeat::post_heartbeat(&http, &convex_url, api_key, &body).await;
                 }
             }
         }
     })
+}
+
+/// Fold the ground-station relay block onto the heartbeat body in place.
+///
+/// `None` (a drone, or a GS bridge that has not published yet) leaves the body
+/// untouched, so the drone payload is byte-unchanged. The relay slice's keys are
+/// already the camelCase wire names the status mutation declares, so they are
+/// copied over verbatim — except the three identity keys, which the heartbeat
+/// base owns and which a folded producer must never be able to divert.
+fn fold_relay_state(body: &mut serde_json::Value, relay: Option<&gs_bridge::GsHeartbeat>) {
+    const BASE_OWNED: [&str; 3] = ["deviceId", "version", "uptimeSeconds"];
+    let Some(relay) = relay else { return };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let Ok(serde_json::Value::Object(slice)) = serde_json::to_value(relay) else {
+        return;
+    };
+    for (k, v) in slice {
+        if BASE_OWNED.contains(&k.as_str()) {
+            continue;
+        }
+        obj.insert(k, v);
+    }
 }
 
 /// Local epoch ms for the compute-jobs sidecar staleness gate.
@@ -835,16 +908,20 @@ fn spawn_drone_relay(
 
 /// Spawn the ground-station cloud relay bridge: uplink-aware MQTT supervision
 /// (explicit teardown/reconnect on every uplink change), data-cap downshift, and
-/// the 30 s GS status heartbeat. Runs only while paired; re-checks the pair
+/// the 30 s relay-state republish. Runs only while paired; re-checks the pair
 /// state between bridge runs.
+///
+/// The bridge does NOT POST `/agent/status`: it publishes its relay state on
+/// `relay_state_tx` and the heartbeat loop — the node's single producer — folds
+/// it. Two producers on one row is not a merge; each tick's absences overwrote
+/// the other's readings.
 fn spawn_gs_bridge(
     config: Arc<CloudConfig>,
-    http: Arc<reqwest::Client>,
-    convex_url: String,
+    relay_state_tx: watch::Sender<Option<gs_bridge::GsHeartbeat>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // The live vehicle-state reader enriches the GS heartbeat telemetry.
+        // The live vehicle-state reader enriches the GS relay telemetry.
         let state_reader = Arc::new(gs_bridge::StateIpcReader::spawn(
             std::path::PathBuf::from(gs_bridge::STATE_SOCK),
             shutdown.clone(),
@@ -860,12 +937,11 @@ fn spawn_gs_bridge(
                 let mut bridge = CloudRelayBridge::new(
                     config.agent.device_id.clone(),
                     pairing.owner_id.clone(),
-                    convex_url.clone(),
-                    Some(api_key.to_string()),
                     transport,
                 )
-                .with_state_source(state_reader.clone());
-                bridge.run(http.clone(), shutdown.clone()).await;
+                .with_state_source(state_reader.clone())
+                .with_relay_state_sink(relay_state_tx.clone());
+                bridge.run(shutdown.clone()).await;
             }
             tokio::select! {
                 _ = shutdown.changed() => { if *shutdown.borrow() { break; } }
@@ -1078,5 +1154,98 @@ mod tests {
         assert!(!should_emit(None, "https://relay.example/convex"));
         // Paired AND a live cloud URL → on.
         assert!(should_emit(Some("k"), "https://relay.example/convex"));
+    }
+
+    fn config_with_profile(profile: &str) -> CloudConfig {
+        let mut config = CloudConfig::default();
+        config.agent.profile = profile.to_string();
+        config
+    }
+
+    #[test]
+    fn the_advertised_profile_is_the_wire_form_and_agrees_with_the_bind_role() {
+        // The internal form reached the cloud verbatim, so a default install
+        // advertised `auto` and a ground station advertised `ground_station` —
+        // neither of which the fleet view classifies.
+        assert_eq!(
+            wire_profile(&config_with_profile("ground_station")),
+            "ground-station"
+        );
+        assert_eq!(
+            wire_profile(&config_with_profile("ground-station")),
+            "ground-station"
+        );
+        assert_eq!(wire_profile(&config_with_profile("drone")), "drone");
+        assert_eq!(
+            wire_profile(&config_with_profile("workstation")),
+            "workstation"
+        );
+        assert_eq!(wire_profile(&config_with_profile("compute")), "compute");
+        // `auto` / empty / unknown resolve to the drone form, which is also the
+        // bind role's safe default — one discrimination, so the two agree.
+        for raw in ["auto", "", "nonsense"] {
+            assert_eq!(wire_profile(&config_with_profile(raw)), "drone");
+        }
+        for raw in ["ground_station", "ground-station"] {
+            assert_eq!(auto_pair_role(&config_with_profile(raw)), "gs");
+        }
+        for raw in ["drone", "auto", "", "workstation"] {
+            assert_eq!(auto_pair_role(&config_with_profile(raw)), "drone");
+        }
+    }
+
+    #[test]
+    fn the_relay_block_folds_onto_the_one_heartbeat_without_diverting_identity() {
+        // The GS relay state reaches the row through the single producer. It
+        // may set the relay + profile/role columns, but never the identity the
+        // heartbeat base owns — a folded producer that could rewrite `deviceId`
+        // would file a ground station's status under another node.
+        let mut body = serde_json::json!({
+            "deviceId": "gs-1",
+            "version": "9.9.9",
+            "uptimeSeconds": 4242,
+            "boardName": "rpi4b",
+            "profile": "ground-station",
+        });
+        let relay = gs_bridge::GsHeartbeat {
+            device_id: "impostor".to_string(),
+            version: "0.0.0".to_string(),
+            uptime_seconds: 1,
+            profile: "ground-station".to_string(),
+            role: Some("receiver".to_string()),
+            uplink: "wlan0".to_string(),
+            mqtt_connected: true,
+            throttle_state: "warn_80".to_string(),
+            forwarding_video: true,
+            forwarding_telemetry: true,
+            ts_ms: 1234,
+            telemetry: Some(serde_json::json!({"armed": true})),
+        };
+        fold_relay_state(&mut body, Some(&relay));
+        // The relay block landed, under the camelCase keys the mutation declares.
+        assert_eq!(body["uplink"], "wlan0");
+        assert_eq!(body["mqttConnected"], true);
+        assert_eq!(body["throttleState"], "warn_80");
+        assert_eq!(body["forwardingVideo"], true);
+        assert_eq!(body["forwardingTelemetry"], true);
+        assert_eq!(body["tsMs"], 1234);
+        assert_eq!(body["role"], "receiver");
+        assert_eq!(body["telemetry"]["armed"], true);
+        // The board enrichment the other producer used to wipe survives.
+        assert_eq!(body["boardName"], "rpi4b");
+        // Identity is the base's, not the folded slice's.
+        assert_eq!(body["deviceId"], "gs-1");
+        assert_eq!(body["version"], "9.9.9");
+        assert_eq!(body["uptimeSeconds"], 4242);
+    }
+
+    #[test]
+    fn a_drone_heartbeat_is_untouched_by_the_relay_fold() {
+        // No bridge published anything (a drone, or a GS before its first
+        // republish): the payload must be byte-identical.
+        let before = serde_json::json!({"deviceId": "d1", "boardName": "rock-5c-lite"});
+        let mut body = before.clone();
+        fold_relay_state(&mut body, None);
+        assert_eq!(body, before);
     }
 }

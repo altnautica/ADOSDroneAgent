@@ -147,7 +147,7 @@ mod tests {
 
         publisher.publish(&sample_batch());
 
-        let pubs = fake.publishes.lock().unwrap();
+        let pubs = fake.publishes.lock();
         assert_eq!(pubs.len(), 1);
         let (topic, qos, payload) = &pubs[0];
         // The exact topic the GCS subscribes to, at q0 (lossy live stream).
@@ -188,6 +188,6 @@ mod tests {
 
         // Local-first (Rule 39): a down session takes no cloud round-trip.
         publisher.publish(&sample_batch());
-        assert!(fake.publishes.lock().unwrap().is_empty());
+        assert!(fake.publishes.lock().is_empty());
     }
 }

@@ -63,7 +63,7 @@ impl AtlasPublisher {
 
     async fn publish(&self, topic: &str, payload: Vec<u8>) {
         match encode_event_frame(topic, payload) {
-            Ok(frame) => self.bus.broadcast(frame).await,
+            Ok(frame) => self.bus.broadcast(frame.into()).await,
             Err(e) => tracing::warn!(topic, error = %e, "atlas_publish_encode_failed"),
         }
     }

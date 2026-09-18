@@ -111,9 +111,8 @@ fn config_yaml_path() -> PathBuf {
 // PUT /api/v1/ground-station/wfb — update the stored radio config.
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../wfb` request body. Mirrors the FastAPI `WfbUpdate`: three
-/// optional fields, each applied only when present (a null / omitted field
-/// leaves the stored value untouched).
+/// The `PUT .../wfb` request body: three optional fields, each applied only
+/// when present (a null or omitted field leaves the stored value untouched).
 #[derive(Debug, Default, Deserialize)]
 pub struct WfbUpdate {
     #[serde(default)]

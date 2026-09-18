@@ -20,21 +20,43 @@ const TABLE: &str = include_str!("../../../docs/api-surface.md");
 const REGENERATE: &str =
     "regenerate with: ADOSDroneAgent/.venv/bin/python scripts/gen-api-surface.py";
 
-/// Every `(METHOD, path)` row in the committed table, from both sections.
+/// Every `(METHOD, path)` row in one `##` section of the committed table.
+///
+/// Section-aware, because a path alone does not identify which half serves
+/// it: `GET /api/video/config` is native and `POST /api/video/config` is
+/// residual. Keying on the path collapses those two into one, which is the
+/// same `(method, path)`-vs-`path` confusion that had the generator erasing
+/// the residual row outright.
+fn rows_in_section(heading_prefix: &str) -> BTreeSet<(String, String)> {
+    let mut rows = BTreeSet::new();
+    let mut inside = false;
+    for line in TABLE.lines() {
+        if let Some(rest) = line.strip_prefix("## ") {
+            inside = rest.starts_with(heading_prefix);
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cells.len() < 4 {
+            continue;
+        }
+        let method = cells[1];
+        let path = cells[2].trim_matches('`');
+        if path.starts_with('/') && method.chars().all(|c| c.is_ascii_uppercase()) {
+            rows.insert((method.to_string(), path.to_string()));
+        }
+    }
+    rows
+}
+
+/// Every `(METHOD, path)` row in the committed table, from every section.
 fn committed_rows() -> BTreeSet<(String, String)> {
-    TABLE
-        .lines()
-        .filter_map(|line| {
-            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
-            if cells.len() < 4 {
-                return None;
-            }
-            let method = cells[1];
-            let path = cells[2].trim_matches('`');
-            (path.starts_with('/') && method.chars().all(|c| c.is_ascii_uppercase()))
-                .then(|| (method.to_string(), path.to_string()))
-        })
-        .collect()
+    let mut rows = rows_in_section("Native");
+    rows.extend(rows_in_section("Residual"));
+    rows.extend(rows_in_section("Logging store"));
+    rows
 }
 
 fn native_rows() -> BTreeSet<(String, String)> {
@@ -59,13 +81,16 @@ fn every_native_route_appears_in_the_committed_table() {
 fn the_table_claims_no_native_route_this_build_does_not_serve() {
     // The dangerous direction: a row for a route that was deleted clears a
     // client still calling it, which is the silent 404 the table exists to
-    // prevent. Restricted to the native section's own paths — a residual
-    // (FastAPI) row is legitimately absent from `native_route_table`.
+    // prevent.
+    //
+    // Compared against the NATIVE SECTION, not against every row whose path
+    // happens to match a native one. The old filter did the latter, so a
+    // residual row sharing a path with a native route under a different
+    // method read as a stale native row — a false positive whose obvious
+    // "fix" is deleting a correct row.
     let native = native_rows();
-    let native_paths: BTreeSet<&str> = native.iter().map(|(_, p)| p.as_str()).collect();
-    let stale: Vec<_> = committed_rows()
+    let stale: Vec<_> = rows_in_section("Native")
         .into_iter()
-        .filter(|(_, p)| native_paths.contains(p.as_str()))
         .filter(|row| !native.contains(row))
         .collect();
     assert!(

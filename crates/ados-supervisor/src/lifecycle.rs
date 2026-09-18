@@ -30,6 +30,31 @@ const BIND_GATED_UNITS: [&str; 2] = ["ados-wfb", "ados-wfb-rx"];
 /// every pass.
 const LOG_STORE_UNIT: &str = "ados-logd";
 
+/// How often the monitor adopts gate-allowed catalog rows that are `active`
+/// but were never started by this process.
+///
+/// Death detection only ever looked at rows the supervisor itself had moved to
+/// `Running`, so the ~20 units the INSTALLER enables and starts — the AP, DHCP,
+/// the kiosk, the OLED, the RC lane, the peripheral registry, the uplink
+/// router, the native HTTP front — were never probed at all. They could die
+/// and stay dead with the supervisor reporting a healthy pass. Adoption closes
+/// that by promoting an already-active row into the supervised set.
+///
+/// Slower than the 5 s monitor tick on purpose: the sweep costs one
+/// `systemctl is-active` per not-yet-adopted row, and a row only needs
+/// adopting once.
+const ADOPTION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Catalog rows the adoption sweep skips because they are MEANT to exit.
+///
+/// `ados-setup-captive` serves the first-boot captive portal and terminates
+/// once `/var/lib/ados/setup-complete` appears; its unit is `Restart=no` and
+/// `ConditionPathExists=!` that same sentinel. Adopting it would turn its
+/// successful completion into a "service died", and every restart attempt
+/// afterwards runs against a condition that can never be met again — a
+/// permanent retry loop against a unit that did its job.
+const SELF_TERMINATING_UNITS: [&str; 1] = ["ados-setup-captive"];
+
 /// Whether a service's profile + role gates allow it to run under `config`.
 ///
 /// The role gate re-reads the on-disk role sentinel on every call rather than
@@ -157,6 +182,15 @@ pub struct Supervisor {
     /// inside one stage takes the unit down (systemd restarts it) instead of
     /// reporting healthy forever with death-detection and auto-restart dead.
     progress: MonitorProgress,
+    /// Per-unit byte-counter history for the units whose `active` state is not
+    /// accepted as proof of work ([`crate::work_proof::WORK_PROVEN_UNITS`]).
+    /// Without it the monitor's only liveness judgement is "has the process
+    /// exited?", which a wedged FC link, a stopped swarm beacon, a frozen RC
+    /// lane and a stalled vision engine all pass.
+    work_proof: crate::work_proof::WorkProof,
+    /// When the adoption sweep last ran. The sweep is what gives the monitor
+    /// any coverage of the catalog rows this process did not itself start.
+    last_adoption_sweep: Option<Instant>,
 }
 
 impl Supervisor {
@@ -205,6 +239,8 @@ impl Supervisor {
                 "ados-supervisor",
             )),
             progress: MonitorProgress::new(),
+            work_proof: crate::work_proof::WorkProof::new(),
+            last_adoption_sweep: None,
         }
     }
 
@@ -309,6 +345,9 @@ impl Supervisor {
             return false;
         };
         let ok = self.pm.stop(name).await;
+        // The replacement process starts its byte counters at zero, so the
+        // dead one's total must not survive as a baseline to compare against.
+        self.work_proof.forget(name);
         self.set_state(i, ServiceState::Stopped, "stopped");
         tracing::info!(service = name, "service stopped");
         ok
@@ -466,6 +505,38 @@ impl Supervisor {
             }
         }
 
+        // Start the world-model capture service on the same terms as the
+        // vision engine it consumes.
+        //
+        // `ados-atlas` was started by NOTHING: it is in no install-time enable
+        // set, `start()` only walks the Core tier, the hardware pass did not
+        // mention it, and no hot-plug class routes to it — so a registered,
+        // profile-gated, packaged unit with a fetched binary never ran on any
+        // node, and an `atlas.enabled: true` config was silently inert.
+        //
+        // Gated on the config flag rather than started unconditionally: the
+        // binary exits cleanly (status 0) when atlas is off, which the monitor
+        // would read as a death and restart-loop against.
+        if self.config.atlas_enabled {
+            if let Some(i) = self.index_of("ados-atlas") {
+                if !gate_allows(&self.services[i], &self.config) {
+                    tracing::warn!(
+                        profile = %self.config.profile_wire,
+                        headless = self.config.headless_mode,
+                        "atlas enabled but ados-atlas is gated off for this node; \
+                         world-model capture runs on the drone profile and is excluded \
+                         from headless mode"
+                    );
+                } else if has_video_source {
+                    self.start_service("ados-atlas").await;
+                } else {
+                    tracing::warn!(
+                        "atlas enabled but no camera source configured; ados-atlas not started"
+                    );
+                }
+            }
+        }
+
         // Start the right side of the radio pair for our profile. Gated on the
         // RAW config profile to match the Python supervisor: a ground station
         // starts ados-wfb-rx, anything else starts the drone-side ados-wfb.
@@ -548,8 +619,76 @@ impl Supervisor {
             .collect()
     }
 
-    /// The service half of a monitor pass: detect deaths + auto-restart, then
-    /// retry every parked service whose cooldown has elapsed.
+    /// Promote gate-allowed catalog rows that are already `active` into the
+    /// supervised set, so the monitor's death detection covers them.
+    ///
+    /// Only ever promotes: a row that is not active stays `Stopped` and is
+    /// never started here. That is what makes the sweep safe — a unit the
+    /// operator never opted into (an unset marker, an unmet
+    /// `ConditionPathExists`) is inactive, so it is not adopted and the
+    /// supervisor does not start it.
+    async fn adopt_active_units(&mut self) {
+        let candidates: Vec<&'static str> = self
+            .services
+            .iter()
+            .filter(|spec| {
+                spec.state == ServiceState::Stopped
+                    && !SELF_TERMINATING_UNITS.contains(&spec.name)
+                    && gate_allows(spec, &self.config)
+            })
+            .map(|spec| spec.name)
+            .collect();
+        for name in candidates {
+            let active = self.pm.is_active(name).await;
+            self.progress.mark();
+            if !active {
+                continue;
+            }
+            if let Some(i) = self.index_of(name) {
+                self.set_state(i, ServiceState::Running, "adopted_already_active");
+                tracing::info!(service = name, "adopted a unit this process did not start");
+            }
+        }
+    }
+
+    /// Judge one active, work-proven unit on its byte-counter delta and
+    /// restart it when the counter has been flat across the whole stall
+    /// window. Returns whether it was judged stalled.
+    ///
+    /// `restart`, not `start`: the process is alive, so there is something to
+    /// tear down. The baseline is dropped either way — the replacement process
+    /// starts its counters at zero.
+    async fn enforce_work_proof(&mut self, name: &'static str) -> bool {
+        use crate::work_proof::WorkVerdict;
+        let counter = self.pm.work_counter(name).await;
+        let verdict = self
+            .work_proof
+            .observe(name, counter, tokio::time::Instant::now());
+        let WorkVerdict::Stalled { flat_for } = verdict else {
+            return false;
+        };
+        tracing::warn!(
+            service = name,
+            flat_for_s = flat_for.as_secs(),
+            "service is active but has moved no bytes; treating as dead"
+        );
+        let Some(i) = self.index_of(name) else {
+            return false;
+        };
+        let _ = self.record_failure_and_emit(i, Instant::now(), "stalled");
+        self.work_proof.forget(name);
+        if self.services[i].state != ServiceState::CircuitOpen
+            && !self.restart_blocked_by_bind(name).await
+        {
+            self.restart_service(name).await;
+            self.work_proof.forget(name);
+        }
+        true
+    }
+
+    /// The service half of a monitor pass: detect deaths and stalls, auto-
+    /// restart, adopt units this process did not start, then retry every
+    /// parked service whose cooldown has elapsed.
     ///
     /// Split out from [`monitor_pass`](Self::monitor_pass) so it is drivable
     /// without the network/hardware reconcilers, and stamps monitor progress
@@ -578,6 +717,7 @@ impl Supervisor {
             };
             if !active && self.services[i].state == ServiceState::Running {
                 tracing::warn!(service = name, "service died");
+                self.work_proof.forget(name);
                 let _ = self.record_failure_and_emit(i, Instant::now(), "died");
                 let blocked = self.restart_blocked_by_bind(name).await;
                 if self.services[i].state != ServiceState::CircuitOpen && !blocked {
@@ -585,7 +725,29 @@ impl Supervisor {
                     self.start_service(name).await;
                     self.progress.mark();
                 }
+                continue;
             }
+            // The unit is alive. For the lanes whose silence is invisible in
+            // `systemctl`, that is not the same as working: ask the delta
+            // counter too. Process liveness is never proof of work.
+            if active
+                && self.services[i].state == ServiceState::Running
+                && crate::work_proof::requires_work_proof(name)
+            {
+                self.enforce_work_proof(name).await;
+                self.progress.mark();
+            }
+        }
+
+        // Adopt the rows the installer started and this process never has, so
+        // they get death detection too. Bounded to its own cadence: a row only
+        // needs adopting once.
+        if self
+            .last_adoption_sweep
+            .is_none_or(|t| now.duration_since(t) >= ADOPTION_SWEEP_INTERVAL)
+        {
+            self.last_adoption_sweep = Some(now);
+            self.adopt_active_units().await;
         }
 
         // Parked-service retry (bounded by the cooldown).
@@ -728,6 +890,7 @@ mod tests {
             video_enabled: true,
             video_network_source: None,
             vision_enabled: false,
+            atlas_enabled: false,
             cloud_relay_enabled: false,
             configured_gs_role: "direct".to_string(),
             raw_agent_profile: Some(profile_wire.replace('-', "_")),
@@ -911,6 +1074,14 @@ mod tests {
     struct MockProcessManager {
         calls: std::sync::Mutex<Vec<String>>,
         starts_fail: std::sync::atomic::AtomicBool,
+        /// The byte counter served for every unit. Only meaningful while
+        /// `work_counter_known` is set; otherwise the backend answers `None`,
+        /// which is the honest "cannot resolve it" and must never read as a
+        /// stall.
+        work_counter: std::sync::atomic::AtomicU64,
+        work_counter_known: std::sync::atomic::AtomicBool,
+        /// When set, every unit reports inactive — a whole-stack death.
+        all_inactive: std::sync::atomic::AtomicBool,
     }
 
     impl MockProcessManager {
@@ -918,6 +1089,9 @@ mod tests {
             Self {
                 calls: std::sync::Mutex::new(Vec::new()),
                 starts_fail: std::sync::atomic::AtomicBool::new(false),
+                work_counter: std::sync::atomic::AtomicU64::new(0),
+                work_counter_known: std::sync::atomic::AtomicBool::new(false),
+                all_inactive: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn record(&self, verb: &str, unit: &str) {
@@ -933,6 +1107,18 @@ mod tests {
         fn let_starts_succeed(&self) {
             self.starts_fail
                 .store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        /// Serve `counter` as every unit's cumulative byte total, or `None` to
+        /// model a backend that cannot read it.
+        fn set_work_counter(&self, counter: Option<u64>) {
+            self.work_counter_known
+                .store(counter.is_some(), std::sync::atomic::Ordering::Relaxed);
+            self.work_counter
+                .store(counter.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+        }
+        fn deactivate_all(&self) {
+            self.all_inactive
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -955,7 +1141,13 @@ mod tests {
         }
         async fn is_active(&self, unit: &str) -> bool {
             self.record("is_active", unit);
-            true
+            !self.all_inactive.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        async fn work_counter(&self, unit: &str) -> Option<u64> {
+            self.record("work_counter", unit);
+            self.work_counter_known
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .then(|| self.work_counter.load(std::sync::atomic::Ordering::Relaxed))
         }
         async fn mask(&self, unit: &str) {
             self.record("mask", unit);
@@ -1216,5 +1408,199 @@ mod tests {
             progress.since_mark() < Duration::from_secs(1),
             "a reconcile that walked the unit set must stamp progress"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_supervised_service_with_a_flat_delta_counter_is_reported_unhealthy() {
+        // The defect: `systemctl is-active` was the supervisor's ONLY liveness
+        // judgement, so a MAVLink router whose serial reader had wedged stayed
+        // `active` forever and the monitor reported a clean pass while the
+        // aircraft had no command-and-control path.
+        let pm = Arc::new(MockProcessManager::new());
+        pm.set_work_counter(Some(4096)); // alive, and never moves again
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+        assert!(sup.start_service("ados-mavlink").await);
+        let i = sup.index_of("ados-mavlink").unwrap();
+
+        // One reading is only a baseline: nothing is concluded from it.
+        sup.reconcile_services().await;
+        assert_eq!(sup.services[i].state, ServiceState::Running);
+        assert!(
+            sup.services[i].failure_times.is_empty(),
+            "a single sample must not condemn a unit"
+        );
+
+        // The unit stays `active` across the whole window and moves no bytes.
+        tokio::time::advance(crate::work_proof::STALL_WINDOW + Duration::from_secs(1)).await;
+        sup.reconcile_services().await;
+
+        assert_eq!(
+            sup.services[i].failure_times.len(),
+            1,
+            "a stalled lane must be recorded as a failure, exactly as a death is"
+        );
+        let calls = pm.calls();
+        assert!(
+            calls.contains(&"stop:ados-mavlink".to_string()),
+            "the stalled unit was never torn down; calls={calls:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_service_whose_counter_keeps_moving_is_left_alone() {
+        let pm = Arc::new(MockProcessManager::new());
+        pm.set_work_counter(Some(1_000));
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+        assert!(sup.start_service("ados-mavlink").await);
+
+        for step in 1..=8u64 {
+            sup.reconcile_services().await;
+            tokio::time::advance(Duration::from_secs(10)).await;
+            pm.set_work_counter(Some(1_000 + step * 512));
+        }
+
+        let i = sup.index_of("ados-mavlink").unwrap();
+        assert!(
+            sup.services[i].failure_times.is_empty(),
+            "a working lane must never be restarted, however long the run"
+        );
+        assert!(
+            !pm.calls().contains(&"stop:ados-mavlink".to_string()),
+            "a healthy unit was torn down"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_counter_the_backend_cannot_read_never_condemns_a_unit() {
+        // The dangerous direction. On a host with no `/proc/<pid>/io` — or in
+        // a PID recycling window — the counter is unreadable, and reading that
+        // as "moved nothing" would restart every supervised lane every window.
+        let pm = Arc::new(MockProcessManager::new());
+        pm.set_work_counter(None);
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+        assert!(sup.start_service("ados-mavlink").await);
+
+        sup.reconcile_services().await;
+        tokio::time::advance(crate::work_proof::STALL_WINDOW * 4).await;
+        sup.reconcile_services().await;
+
+        let i = sup.index_of("ados-mavlink").unwrap();
+        assert!(sup.services[i].failure_times.is_empty());
+        assert!(!pm.calls().contains(&"stop:ados-mavlink".to_string()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_unit_the_installer_started_is_adopted_and_then_death_detected() {
+        // `ados-peripherals` is enabled and started by the INSTALLER, never by
+        // this process, so its row sat at `Stopped` forever and the monitor —
+        // which only walked Running|Starting rows — never probed it once. It
+        // could die on boot and stay dead through every "healthy" pass. Twenty-
+        // odd catalog rows were in that state.
+        let pm = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+        let i = sup.index_of("ados-peripherals").unwrap();
+        assert_eq!(sup.services[i].state, ServiceState::Stopped);
+
+        // Pass 1: systemd reports it active, so the supervisor adopts it.
+        sup.reconcile_services().await;
+        assert_eq!(
+            sup.services[i].state,
+            ServiceState::Running,
+            "an already-active gate-allowed unit must be adopted into the supervised set"
+        );
+
+        // Pass 2: it dies. Now — and only because it was adopted — that is seen.
+        pm.deactivate_all();
+        sup.reconcile_services().await;
+        assert_eq!(
+            sup.services[i].failure_times.len(),
+            1,
+            "the adopted unit's death went unnoticed"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_unit_that_is_meant_to_exit_is_never_adopted() {
+        // ados-setup-captive serves the first-boot portal and terminates for
+        // good once setup completes, against a systemd condition that can then
+        // never be met again. Adopting it would turn that success into a
+        // permanent restart loop.
+        let pm = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("ground-station"), bind, pm.clone());
+        let i = sup.index_of("ados-setup-captive").unwrap();
+
+        sup.reconcile_services().await;
+        assert_eq!(
+            sup.services[i].state,
+            ServiceState::Stopped,
+            "a self-terminating unit must stay outside the supervised set"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adoption_never_starts_a_unit_that_is_not_already_running() {
+        // The safety property of the sweep: it promotes, it does not start. A
+        // unit the operator never opted into is inactive, so it is untouched.
+        let pm = Arc::new(MockProcessManager::new());
+        pm.deactivate_all();
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+
+        sup.reconcile_services().await;
+
+        assert!(
+            sup.services
+                .iter()
+                .all(|s| s.state == ServiceState::Stopped),
+            "the adoption sweep started or promoted an inactive unit"
+        );
+        assert!(
+            !pm.calls().iter().any(|c| c.starts_with("start:")),
+            "the adoption sweep must never issue a start; calls={:?}",
+            pm.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn atlas_enabled_starts_the_world_model_capture_service() {
+        // Regression: `ados-atlas` was started by NOTHING — not the Core tier
+        // walk, not the hardware pass, not a hot-plug class, and it is in no
+        // install-time enable set. A registered, gated, packaged unit with a
+        // fetched binary that never ran on any node.
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut config = cfg("drone");
+        config.atlas_enabled = true;
+        config.video_network_source = Some("rtsp://cam/scene".to_string());
+        let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
+
+        sup.detect_and_start_hardware().await;
+
+        assert!(
+            mock.calls().contains(&"start:ados-atlas".to_string()),
+            "atlas.enabled did not bring the capture service up; calls={:?}",
+            mock.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn atlas_disabled_leaves_the_capture_service_alone() {
+        // The binary exits cleanly when atlas is off, so an unconditional start
+        // would be read as a death and restart-looped.
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut config = cfg("drone");
+        config.atlas_enabled = false;
+        config.video_network_source = Some("rtsp://cam/scene".to_string());
+        let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
+
+        sup.detect_and_start_hardware().await;
+
+        assert!(!mock.calls().contains(&"start:ados-atlas".to_string()));
     }
 }

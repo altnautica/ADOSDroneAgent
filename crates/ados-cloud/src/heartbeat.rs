@@ -16,12 +16,22 @@
 //!    whose keys are snake_case, as the golden fixture pins them. The root struct carries `#[serde(rename_all =
 //!    "camelCase")]`; [`RadioBlock`] uses its own field names (already
 //!    snake_case) with no rename.
-//! 2. **Null-stripping.** The receiver's schema is `v.optional(T)`, which
-//!    accepts "field absent OR T" but rejects an explicit JSON `null`, so every
-//!    absent top-level key must be omitted rather than sent as `null`. Every
-//!    optional field here is `Option<T>` with
+//! 2. **Null-stripping, with a declared exception.** Most of the receiver's
+//!    columns are `v.optional(T)`, which accepts "field absent OR T" but
+//!    rejects an explicit JSON `null`, so those absent top-level keys must be
+//!    omitted. Such fields are `Option<T>` with
 //!    `#[serde(skip_serializing_if = "Option::is_none")]`, so a `None` is
 //!    omitted, never serialized as `null`.
+//!
+//!    A SMALL declared set is instead `v.optional(v.union(T, v.null()))` on the
+//!    receiver, which preserves an explicit null as a value distinct from
+//!    absent. Those fields deliberately carry NO `skip_serializing_if`, because
+//!    for them omission is a different (and false) statement: "this agent does
+//!    not report this at all", indistinguishable from an agent that predates the
+//!    surface, and it leaves the receiver nothing to overwrite a previous tick's
+//!    reading with. `null` says "reported, not measured" and clears the column.
+//!    `crate::loops::heartbeat::UNMEASURED_NULL_KEYS` is the authoritative list
+//!    and the null-strip step honours it.
 //! 3. **Required-on-wire.** `deviceId`, `version`, and `uptimeSeconds` are
 //!    always present, so they are plain (non-`Option`) fields.
 //!
@@ -401,10 +411,20 @@ pub struct HeartbeatPayload {
     // omits it instead of asserting an empty fleet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub services: Option<Vec<ServiceEntry>>,
-    pub last_ip: String,
-    pub mdns_host: String,
-    pub setup_url: String,
-    pub api_url: String,
+    // The node's advertised LAN reach. OPTIONAL + skip: a producer that has not
+    // PROVEN a reach must omit these, never send `""`. An empty string is not
+    // "unknown" on the receiver — `stringField` type-checks it through and the
+    // column is overwritten, so a previously-good `lastIp`/`setupUrl` is
+    // destroyed and the GCS builds `http://:8080`. Only advertise a reach name
+    // proven to resolve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mdns_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
     pub agent_version: String,
 
     // --- video / mavlink discovery ---
@@ -442,14 +462,16 @@ pub struct HeartbeatPayload {
     // service is not running or its sidecar is stale) ---
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crsf: Option<CrsfBlock>,
-    // Adapter verdict hoisted to the root. Both halves strip when absent: a
-    // rig with no radio view has no chipset AND no injection verdict, and an
-    // asserted `false` would claim a measured no-injection scan outcome the
-    // rig never produced. `Some(false)` (a real scanned-none verdict) still
-    // rides the wire.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // Adapter verdict hoisted to the root. Both halves are NULL-TOLERANT on the
+    // receiver (`v.optional(v.union(v.boolean(), v.null()))`), which is what
+    // makes an explicit null meaningful here: it says "this agent reports the
+    // verdict and currently has none", and it CLEARS the column. Omitting them
+    // instead said "this agent does not report the verdict at all", which is
+    // false, and on the receiving side an omitted key is indistinguishable from
+    // an agent that predates the surface. So no `skip_serializing_if`: a `None`
+    // rides as JSON null. `Some(false)` is still the MEASURED
+    // scanned-and-found-none verdict, distinct from both.
     pub wfb_adapter_chipset: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub wfb_adapter_injection_ok: Option<bool>,
     /// Per-adapter stable-MAC verdicts, `{adapters: [...]}` from
     /// `/etc/ados/mac-pins.state`. Omitted on a node that has pinned nothing —
@@ -691,16 +713,22 @@ mod tests {
 
     #[test]
     fn adapter_injection_verdict_defaults_to_unknown_never_false() {
-        // With no radio view there is no injection verdict: the nested block
-        // key reads null and the hoisted root key is stripped — never a
-        // fabricated false, which the three-state consumer would render as a
-        // measured scan outcome for a rig that never scanned.
+        // With no radio view there is no injection verdict. BOTH the nested
+        // block key and the hoisted root key read JSON null — never a fabricated
+        // false (which a three-state consumer would render as a measured scan
+        // outcome for a rig that never scanned) and never omitted (which the
+        // receiver cannot tell from an agent that predates the surface, and
+        // which leaves a previous tick's verdict standing).
         let p = minimal_payload();
         let v = p.to_value();
         let radio = v.get("radio").unwrap().as_object().unwrap();
         assert!(radio.contains_key("adapter_injection_ok"));
         assert!(radio["adapter_injection_ok"].is_null());
-        assert!(!v.as_object().unwrap().contains_key("wfbAdapterInjectionOk"));
+        let root = v.as_object().unwrap();
+        assert!(root.contains_key("wfbAdapterInjectionOk"));
+        assert!(root["wfbAdapterInjectionOk"].is_null());
+        assert!(root.contains_key("wfbAdapterChipset"));
+        assert!(root["wfbAdapterChipset"].is_null());
 
         // A measured verdict rides the wire in both directions.
         let mut p = minimal_payload();
@@ -786,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn none_root_fields_are_omitted_not_null() {
+    fn none_root_fields_are_omitted_not_null_outside_the_declared_null_set() {
         // temperature None must be absent, not JSON null (Convex v.optional).
         let p = minimal_payload();
         let v = p.to_value();
@@ -794,9 +822,21 @@ mod tests {
         assert!(!obj.contains_key("temperature"));
         assert!(!obj.contains_key("missionControlUrl"));
         assert!(!obj.contains_key("peripherals"));
-        // No top-level key serializes as explicit null.
+        // The node's reach is omitted rather than sent as `""`: an empty string
+        // is a reach nothing proved, and it overwrites a good one.
+        assert!(!obj.contains_key("lastIp"));
+        assert!(!obj.contains_key("mdnsHost"));
+        assert!(!obj.contains_key("setupUrl"));
+        assert!(!obj.contains_key("apiUrl"));
+        // No top-level key serializes as explicit null EXCEPT the declared
+        // null-tolerant set, for which null is the "reported, not measured"
+        // reading that clears the receiver's column (wire rule 2).
         for (k, val) in obj.iter() {
-            assert!(!val.is_null(), "root key {k} must not be JSON null");
+            assert!(
+                !val.is_null()
+                    || crate::loops::heartbeat::UNMEASURED_NULL_KEYS.contains(&k.as_str()),
+                "root key {k} must not be JSON null"
+            );
         }
     }
 
@@ -845,10 +885,12 @@ mod tests {
             fc_link_hint: None,
             fc_variant: None,
             services: Some(vec![]),
-            last_ip: "127.0.0.1".to_string(),
-            mdns_host: String::new(),
-            setup_url: "http://127.0.0.1:8080".to_string(),
-            api_url: "http://127.0.0.1:8080/api".to_string(),
+            // Unmeasured reach: the minimal payload proves no LAN name, so it
+            // advertises none.
+            last_ip: None,
+            mdns_host: None,
+            setup_url: None,
+            api_url: None,
             agent_version: "0.1.0".to_string(),
             video_state: Some("stopped".to_string()),
             video_whep_port: 0,

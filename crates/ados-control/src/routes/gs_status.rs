@@ -36,6 +36,7 @@
 //! separate requests), so the recording legs read that singleton directly.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -141,9 +142,26 @@ fn profile_conf_path() -> PathBuf {
     )
 }
 
-/// Read a JSON file into an object map, returning the empty map on absence / a read
+/// How fresh a ground-station snapshot must be to be served as a live reading:
+/// 10 seconds.
+///
+/// The producing loops (relay, receiver, mesh, failover) write at roughly 1 Hz,
+/// so 10 s is ten missed writes — comfortably past jitter, well inside an
+/// operator's reaction window.
+///
+/// ONE threshold for every snapshot surface in this module, including the `link`
+/// block in [`link_view_from`] which carried the only such ceiling before (as its
+/// own literal). Sibling surfaces with independently-maintained staleness
+/// thresholds drift apart, and then two blocks of the same `/status` response
+/// disagree about whether the node is stale.
+const SNAPSHOT_FRESH_S: f64 = 10.0;
+
+/// Read a JSON object sidecar, returning the empty map on absence / a read
 /// error / a parse error / a non-object body. Mirrors the Python
 /// `_read_json_or_empty`.
+///
+/// Carries NO freshness judgement — use [`read_fresh_json`] for anything a client
+/// reads as a current measurement.
 fn read_json_or_empty(path: &Path) -> Map<String, Value> {
     match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
@@ -152,6 +170,42 @@ fn read_json_or_empty(path: &Path) -> Map<String, Value> {
         },
         Err(_) => Map::new(),
     }
+}
+
+/// Read a JSON object sidecar only when its mtime is within
+/// [`SNAPSHOT_FRESH_S`] of `now`; `None` when the file is absent, unreadable,
+/// not an object, empty, or older than that.
+///
+/// mtime is the right clock here: every one of these sidecars is rewritten whole
+/// on each poll tick, so its mtime IS the age of the reading inside it. A
+/// service that died leaves its last file on a tmpfs that survives until reboot,
+/// so without this gate the sidecar fallback re-served that file's `up: true`
+/// forever.
+///
+/// `now` is threaded in (the same shape `ados_hid::pic_view::read_pic_view`
+/// uses) so a test drives the aged case by advancing the clock instead of
+/// back-dating a file.
+fn read_fresh_json(path: &Path, now: SystemTime) -> Option<Map<String, Value>> {
+    let age_s = file_age_s(path, now)?;
+    if age_s > SNAPSHOT_FRESH_S {
+        return None;
+    }
+    match serde_json::from_str::<Value>(&std::fs::read_to_string(path).ok()?) {
+        Ok(Value::Object(map)) if !map.is_empty() => Some(map),
+        _ => None,
+    }
+}
+
+/// A file's mtime age in seconds relative to `now`, or `None` when the file is
+/// absent, its mtime is unreadable, or its mtime is AFTER `now`.
+///
+/// Fails closed on a future mtime rather than treating it as age zero: a clock
+/// that stepped backwards (an RTC-less SBC correcting after boot) makes the age
+/// unprovable, and an unprovable age must not read as a fresh measurement. Same
+/// rule `pic_view` applies to the PIC sidecar.
+fn file_age_s(path: &Path, now: SystemTime) -> Option<f64> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    now.duration_since(modified).ok().map(|d| d.as_secs_f64())
 }
 
 // ---------------------------------------------------------------------------
@@ -194,12 +248,13 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
 
     // Mesh block. Populated only for a relay/receiver node with an active mesh,
     // store-first off the `mesh.state` event, sidecar-fallback off
-    // `mesh-state.json`. A direct node gets `{}` so the OLED + GCS feature-detect
-    // without a round-trip. Mirrors the Python role-gated mesh read.
+    // `mesh-state.json`, both age-gated. A direct node gets `{}` so the OLED +
+    // GCS feature-detect without a round-trip; a relay/receiver with nothing
+    // current gets the nulled `stale: true` block.
     let mesh_block: Value = if role == "relay" || role == "receiver" {
         match latest_status_mesh_block(&state).await {
             Some(stored) => stored,
-            None => mesh_block_from_sidecar(&mesh_state_path()),
+            None => mesh_block_from_sidecar(&mesh_state_path(), SystemTime::now()),
         }
     } else {
         json!({})
@@ -549,8 +604,11 @@ fn link_view_from(path: &Path) -> Value {
     };
     merged.insert("state".to_string(), state);
 
-    // 10 s mtime ceiling — over that the snapshot is suspect; flip to "stale".
-    if age_s > 10.0 {
+    // Over the shared freshness ceiling the snapshot is suspect; flip to "stale".
+    // This used to be its own `10.0` literal. Two independently-maintained
+    // thresholds on sibling surfaces drift, and then two blocks on the same page
+    // disagree about whether the same node is stale.
+    if age_s > SNAPSHOT_FRESH_S {
         merged.insert("state".to_string(), json!("stale"));
     }
     Value::Object(merged)
@@ -667,22 +725,44 @@ fn short_id(device_id: &str) -> String {
 /// The system snapshot the `/status` route carries: `{cpu_pct, ram_used_mb,
 /// ram_total_mb, temp_c, uptime_seconds, agent_version}`.
 ///
-/// The native front does not probe the host directly; CPU / RAM / temperature come
-/// from the most-recent hardware snapshots in the logging store (the continuous
-/// collector samples them), `uptime_seconds` from `/proc/uptime`, and
-/// `agent_version` from the resolved app version. An unreachable store degrades the
-/// CPU/RAM/temp legs to the zero-valued default `{cpu_pct: 0.0, ram_used_mb: 0,
-/// ram_total_mb: 0, temp_c: null}` — the exact shape the Python `_system_snapshot`
-/// returns when its psutil reads raise.
+/// CPU / RAM / temperature come from the most-recent hardware snapshots in the
+/// logging store (the continuous collector samples them) with a direct host read
+/// (`crate::hw_local`) behind them, `uptime_seconds` from `/proc/uptime`, and
+/// `agent_version` from the resolved app version.
+///
+/// A leg neither source supplies is `null`. It used to be `0.0` / `0` — and the
+/// durable store ships OFF, so on a stock ground station every one of these read
+/// zero: the OLED and the GCS Hardware tab rendered an idle CPU and a 0 MB RAM
+/// total as measurements. Same reasoning as `status::derive_health`; the keys
+/// stay present so a client cannot mistake an unreported leg for an absent one.
 async fn system_snapshot(state: &AppState) -> Value {
-    let signals = state.logd.latest_hw_signals().await;
+    let signals = match state.logd.latest_hw_signals().await {
+        Some(s) => Some(s),
+        None => {
+            let local = crate::hw_local::collect_signals();
+            (!local.is_empty()).then_some(local)
+        }
+    };
+    system_block(
+        signals.as_ref(),
+        proc_uptime_seconds(),
+        &state.agent_version(),
+    )
+}
+
+/// Compose the `system` block from an optional signal map. Pure, so the
+/// unreported-leg behaviour is asserted directly instead of through a
+/// re-implementation of it.
+fn system_block(signals: Option<&Map<String, Value>>, uptime_s: i64, version: &str) -> Value {
     let cpu_pct = signals
-        .as_ref()
         .and_then(|s| signal_num(s, "cpu.util.all"))
-        .unwrap_or(0.0);
-    let (ram_used_mb, ram_total_mb) = signals.as_ref().and_then(ram_mb).unwrap_or((0, 0));
+        .map(Value::from)
+        .unwrap_or(Value::Null);
+    let (ram_used_mb, ram_total_mb) = match signals.and_then(ram_mb) {
+        Some((used, total)) => (Value::from(used), Value::from(total)),
+        None => (Value::Null, Value::Null),
+    };
     let temp_c = signals
-        .as_ref()
         .and_then(|s| signal_num(s, "thermal.primary_c"))
         .map(Value::from)
         .unwrap_or(Value::Null);
@@ -692,8 +772,8 @@ async fn system_snapshot(state: &AppState) -> Value {
         "ram_used_mb": ram_used_mb,
         "ram_total_mb": ram_total_mb,
         "temp_c": temp_c,
-        "uptime_seconds": proc_uptime_seconds(),
-        "agent_version": state.agent_version(),
+        "uptime_seconds": uptime_s,
+        "agent_version": version,
     })
 }
 
@@ -728,18 +808,20 @@ fn proc_uptime_seconds() -> i64 {
 // The `mesh` sub-block + the relay/receiver routes (store-first, sidecar-fallback).
 // ---------------------------------------------------------------------------
 
-/// The `/status` `mesh` sub-block from the store's `mesh.state` event, projecting the
-/// five fields the live route reads off `mesh-state.json` (`up`, `peer_count` =
-/// neighbor count, `selected_gateway`, `partition`, `mesh_id`). `None` when the store
-/// is unreachable or holds no such event, so the caller falls back to the sidecar.
+/// The `/status` `mesh` sub-block from the store's `mesh.state` event, projecting
+/// the five fields the live route reads off `mesh-state.json` (`up`, `peer_count`
+/// = neighbor count, `selected_gateway`, `partition`, `mesh_id`). `None` when the
+/// store is unreachable, holds no such event, or holds only a stale one, so the
+/// caller falls back to the sidecar.
 async fn latest_status_mesh_block(state: &AppState) -> Option<Value> {
     let detail = latest_event_detail(state, "mesh.state").await?;
     Some(mesh_block_from_snapshot(&detail))
 }
 
-/// Project the `/status` `mesh` block from a mesh snapshot body (the stored event
-/// detail or the sidecar). Mirrors the Python `bool(...)` / `len(...)` coercions
-/// exactly.
+/// Project the `/status` `mesh` block from a FRESH mesh snapshot body (the stored
+/// event detail or the sidecar). Mirrors the Python `bool(...)` / `len(...)`
+/// coercions exactly, and carries `stale: false` so a client always reads the
+/// verdict off the same key instead of inferring it from a key's absence.
 fn mesh_block_from_snapshot(snap: &Map<String, Value>) -> Value {
     let peer_count = snap
         .get("neighbors")
@@ -752,19 +834,37 @@ fn mesh_block_from_snapshot(snap: &Map<String, Value>) -> Value {
         "selected_gateway": snap.get("selected_gateway").cloned().unwrap_or(Value::Null),
         "partition": snap.get("partition").map(json_truthy).unwrap_or(false),
         "mesh_id": snap.get("mesh_id").cloned().unwrap_or(Value::Null),
+        "stale": false,
+    })
+}
+
+/// The `mesh` block when no current snapshot exists: the same five keys, every
+/// value `null`, `stale: true`.
+///
+/// The keys stay so a consumer reading `up` gets `null` (unknown) rather than
+/// finding the key gone and coercing it — and `up: false` is NOT used, because
+/// "the mesh is down" is a measurement this node cannot make when nothing is
+/// reporting.
+fn mesh_block_stale() -> Value {
+    json!({
+        "up": Value::Null,
+        "peer_count": Value::Null,
+        "selected_gateway": Value::Null,
+        "partition": Value::Null,
+        "mesh_id": Value::Null,
+        "stale": true,
     })
 }
 
 /// The `/status` `mesh` block from the `mesh-state.json` sidecar, projecting the
-/// same five fields. An absent / unparseable / non-object file yields `{}` (the
-/// snapshot read returns the empty map, and the route only enters this leg for a
-/// relay/receiver), matching the Python `if snap_path.is_file(): ...` guard:
-/// without the file the block stays `{}`.
-fn mesh_block_from_sidecar(path: &Path) -> Value {
-    if !path.is_file() {
-        return json!({});
-    }
-    let snap = read_json_or_empty(path);
+/// same five fields. An absent / unparseable / non-object / **stale** file yields
+/// the `stale: true` block: the mesh poll loop rewrites this file each tick, so a
+/// file older than the freshness window is the last thing a dead loop wrote, and
+/// it used to be served verbatim as the current mesh state.
+fn mesh_block_from_sidecar(path: &Path, now: SystemTime) -> Value {
+    let Some(snap) = read_fresh_json(path, now) else {
+        return mesh_block_stale();
+    };
     // Best-effort schema-drift signal (never reject): warn when the mesh-state
     // sidecar was written by an agent with a different schema version, then read
     // anyway. The writer const lives in the groundlink crate, so compare against
@@ -776,11 +876,37 @@ fn mesh_block_from_sidecar(path: &Path) -> Value {
     mesh_block_from_snapshot(&snap)
 }
 
+/// A snapshot body served as live, stamped `stale: false`.
+fn fresh_snapshot_body(mut detail: Map<String, Value>) -> Value {
+    detail.insert("stale".to_string(), Value::Bool(false));
+    Value::Object(detail)
+}
+
+/// The reply for a relay/receiver counter route with no current snapshot: every
+/// key the last known snapshot carried, nulled, plus `stale: true`.
+///
+/// Nulling the stale snapshot's own keys rather than emitting a bare
+/// `{"stale": true}` keeps the key set a client already reads intact — a key that
+/// vanishes reads as "not reported" and gets coerced to 0 or false downstream,
+/// which is the same failure in a different costume. With no snapshot at all the
+/// key set is genuinely unknown, so the body is just the marker.
+fn stale_snapshot_body(last_known: Map<String, Value>) -> Value {
+    let mut out: Map<String, Value> = last_known
+        .into_iter()
+        .map(|(k, _v)| (k, Value::Null))
+        .collect();
+    out.insert("stale".to_string(), Value::Bool(true));
+    Value::Object(out)
+}
+
 /// `GET /api/v1/ground-station/wfb/relay/status` → relay-side fragment counters.
 ///
-/// `404` `E_WRONG_ROLE` off a relay node. On a relay, reads the store's most-recent
-/// `gs.relay_state` event (the relay loop ships the same body it writes to the
-/// sidecar), falling back to the `/run/ados/wfb-relay.json` sidecar.
+/// `404` `E_WRONG_ROLE` off a relay node. On a relay, reads the store's
+/// most-recent `gs.relay_state` event (the relay loop ships the same body it
+/// writes to the sidecar), falling back to the `/run/ados/wfb-relay.json`
+/// sidecar. Both reads are age-gated to [`SNAPSHOT_FRESH_S`]; with neither
+/// current the body is the nulled `stale: true` shape, never the counters a dead
+/// relay loop last wrote.
 pub async fn get_wfb_relay_status(State(state): State<AppState>) -> Response {
     let role = match ground_station_role(&state) {
         Some(r) => r,
@@ -790,9 +916,13 @@ pub async fn get_wfb_relay_status(State(state): State<AppState>) -> Response {
         return wrong_role("relay");
     }
     if let Some(detail) = latest_event_detail(&state, "gs.relay_state").await {
-        return Json(Value::Object(detail)).into_response();
+        return Json(fresh_snapshot_body(detail)).into_response();
     }
-    Json(Value::Object(read_json_or_empty(&wfb_relay_path()))).into_response()
+    let path = wfb_relay_path();
+    match read_fresh_json(&path, SystemTime::now()) {
+        Some(snap) => Json(fresh_snapshot_body(snap)).into_response(),
+        None => Json(stale_snapshot_body(read_json_or_empty(&path))).into_response(),
+    }
 }
 
 /// `GET /api/v1/ground-station/wfb/atlas-relay/status` → the Atlas aux-lane relay's
@@ -802,8 +932,8 @@ pub async fn get_wfb_relay_status(State(state): State<AppState>) -> Response {
 /// `gs.atlas_relay` event (the relay loop ships the same body it writes to the
 /// sidecar), falling back to the `/run/ados/atlas-relay.json` sidecar. The body is
 /// the relay's `{up, datagrams_seen, forwarded, malformed, forward_failed,
-/// compute_url, listen_port, generated_at_ms}` snapshot; an absent store + sidecar
-/// degrade to the empty object, never a 500.
+/// compute_url, listen_port, generated_at_ms}` snapshot; both sources are
+/// age-gated, and with neither current the keys are nulled under `stale: true`.
 pub async fn get_atlas_relay_status(State(state): State<AppState>) -> Response {
     let role = match ground_station_role(&state) {
         Some(r) => r,
@@ -813,16 +943,22 @@ pub async fn get_atlas_relay_status(State(state): State<AppState>) -> Response {
         return wrong_role("relay");
     }
     if let Some(detail) = latest_event_detail(&state, "gs.atlas_relay").await {
-        return Json(Value::Object(detail)).into_response();
+        return Json(fresh_snapshot_body(detail)).into_response();
     }
-    Json(Value::Object(read_json_or_empty(&atlas_relay_path()))).into_response()
+    let path = atlas_relay_path();
+    match read_fresh_json(&path, SystemTime::now()) {
+        Some(snap) => Json(fresh_snapshot_body(snap)).into_response(),
+        None => Json(stale_snapshot_body(read_json_or_empty(&path))).into_response(),
+    }
 }
 
 /// `GET /api/v1/ground-station/wfb/receiver/relays` → per-relay fragment counters.
 ///
 /// `404` `E_WRONG_ROLE` off a receiver node. On a receiver, reads the store's
-/// most-recent `gs.receiver_state` event projected to `{relays}`, falling back to the
-/// `/run/ados/wfb-receiver.json` sidecar (also projected to `{relays}`).
+/// most-recent `gs.receiver_state` event projected to `{relays}`, falling back to
+/// the `/run/ados/wfb-receiver.json` sidecar. Both age-gated; with neither
+/// current, `relays` is `null` under `stale: true` — NOT the empty list, which
+/// reads as "looked, found no relays".
 pub async fn get_wfb_receiver_relays(State(state): State<AppState>) -> Response {
     let role = match ground_station_role(&state) {
         Some(r) => r,
@@ -834,16 +970,20 @@ pub async fn get_wfb_receiver_relays(State(state): State<AppState>) -> Response 
     if let Some(detail) = latest_event_detail(&state, "gs.receiver_state").await {
         return Json(slice_receiver_relays(&detail)).into_response();
     }
-    let snap = read_json_or_empty(&wfb_receiver_path());
-    Json(slice_receiver_relays(&snap)).into_response()
+    match read_fresh_json(&wfb_receiver_path(), SystemTime::now()) {
+        Some(snap) => Json(slice_receiver_relays(&snap)).into_response(),
+        None => Json(json!({"relays": Value::Null, "stale": true})).into_response(),
+    }
 }
 
 /// `GET /api/v1/ground-station/wfb/receiver/combined` → combined FEC output stats.
 ///
 /// `404` `E_WRONG_ROLE` off a receiver node. On a receiver, reads the store's
 /// `gs.receiver_state` event projected to `{fragments_after_dedup, fec_repaired,
-/// output_kbps, up}`, falling back to the `/run/ados/wfb-receiver.json` sidecar (same
-/// projection + per-key defaults).
+/// output_kbps, up}`, falling back to the `/run/ados/wfb-receiver.json` sidecar
+/// (same projection + per-key defaults). Both age-gated; with neither current
+/// every counter is `null` under `stale: true`, because a zeroed counter and a
+/// `up: false` are readings this node cannot make when nothing is reporting.
 pub async fn get_wfb_receiver_combined(State(state): State<AppState>) -> Response {
     let role = match ground_station_role(&state) {
         Some(r) => r,
@@ -855,27 +995,45 @@ pub async fn get_wfb_receiver_combined(State(state): State<AppState>) -> Respons
     if let Some(detail) = latest_event_detail(&state, "gs.receiver_state").await {
         return Json(slice_receiver_combined(&detail)).into_response();
     }
-    let snap = read_json_or_empty(&wfb_receiver_path());
-    Json(slice_receiver_combined(&snap)).into_response()
+    match read_fresh_json(&wfb_receiver_path(), SystemTime::now()) {
+        Some(snap) => Json(slice_receiver_combined(&snap)).into_response(),
+        None => Json(receiver_combined_stale()).into_response(),
+    }
 }
 
-/// Project the `/wfb/receiver/relays` shape from a receiver-state body: `{relays}`, the
-/// `relays` key defaulting to the empty list when absent.
+/// Project the `/wfb/receiver/relays` shape from a FRESH receiver-state body:
+/// `{relays}` (the key defaulting to the empty list when the snapshot itself
+/// omits it — that IS a current reading of "no relays") plus `stale: false`.
 fn slice_receiver_relays(detail: &Map<String, Value>) -> Value {
     json!({
         "relays": detail.get("relays").cloned().unwrap_or_else(|| json!([])),
+        "stale": false,
     })
 }
 
-/// Project the `/wfb/receiver/combined` shape from a receiver-state body, applying the
-/// same per-key defaults the live route applies so an omitted key coalesces identically
-/// whether it is absent from the stored detail or the sidecar.
+/// Project the `/wfb/receiver/combined` shape from a FRESH receiver-state body,
+/// applying the same per-key defaults the live route applies so an omitted key
+/// coalesces identically whether it is absent from the stored detail or the
+/// sidecar.
 fn slice_receiver_combined(detail: &Map<String, Value>) -> Value {
     json!({
         "fragments_after_dedup": detail.get("fragments_after_dedup").cloned().unwrap_or_else(|| json!(0)),
         "fec_repaired": detail.get("fec_repaired").cloned().unwrap_or_else(|| json!(0)),
         "output_kbps": detail.get("output_kbps").cloned().unwrap_or_else(|| json!(0)),
         "up": detail.get("up").cloned().unwrap_or(Value::Bool(false)),
+        "stale": false,
+    })
+}
+
+/// The `/wfb/receiver/combined` shape with nothing current: the same four keys,
+/// nulled, under `stale: true`.
+fn receiver_combined_stale() -> Value {
+    json!({
+        "fragments_after_dedup": Value::Null,
+        "fec_repaired": Value::Null,
+        "output_kbps": Value::Null,
+        "up": Value::Null,
+        "stale": true,
     })
 }
 
@@ -884,10 +1042,9 @@ fn slice_receiver_combined(detail: &Map<String, Value>) -> Value {
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/ground-station/wfb` → the stored radio config `{channel,
-/// bitrate_profile, fec}` from `video.wfb`, defaulting to the Python defaults
-/// (`channel: 0`, `bitrate_profile: "default"`, `fec: "8/12"`) when the section /
-/// a field is absent. `404` `E_PROFILE_MISMATCH` off a ground-station node.
-/// Mirrors the Python `_read_wfb_view`.
+/// bitrate_profile, fec}` from `video.wfb`, defaulting to `channel: 0`,
+/// `bitrate_profile: "default"`, `fec: "8/12"` when the section or a field is
+/// absent. `404` `E_PROFILE_MISMATCH` off a ground-station node.
 pub async fn get_wfb(State(state): State<AppState>) -> Response {
     if ground_station_role(&state).is_none() {
         return profile_mismatch();
@@ -945,16 +1102,57 @@ impl WfbViewConfig {
 // logd query seam: HTTP-over-UDS reads of the store's /v1 events API.
 // ---------------------------------------------------------------------------
 
-/// The newest event's non-empty `detail` map for `event_kind`, or `None` when the store
-/// is unreachable / holds no such event / the detail is absent / non-object / empty.
+/// The newest event's non-empty `detail` map for `event_kind`, or `None` when the
+/// store is unreachable / holds no such event / the detail is absent / non-object
+/// / empty — **or when the row is older than [`SNAPSHOT_FRESH_S`]**.
+///
+/// The age gate is the load-bearing part. These rows are written by poll loops
+/// (relay, receiver, mesh) at roughly 1 Hz; the store keeps them for days. Every
+/// route below served the newest row with no age bound, so once the producing
+/// loop or its whole service died the last row it ever wrote kept being served as
+/// the current state: `up: true`, a peer count, a bitrate. The `link` view in
+/// this same file has applied a 10 s ceiling all along, which is the pattern.
+///
+/// A rejected row is indistinguishable from no row here, on purpose: both mean
+/// "nothing current", and the caller's stale branch says so explicitly rather
+/// than falling through to a number.
 async fn latest_event_detail(state: &AppState, event_kind: &str) -> Option<Map<String, Value>> {
     let rows = logd_query_events(state, event_kind, 1).await?;
     let row = rows.first()?.as_object()?;
+    if !row_is_fresh(row, unix_now_us()?) {
+        return None;
+    }
     let detail = row.get("detail")?.as_object()?;
     if detail.is_empty() {
         return None;
     }
     Some(detail.clone())
+}
+
+/// Whether a store row's `ts_us` (microsecond epoch, the column every `/v1/query`
+/// row carries) is within the freshness window of `now_us`.
+///
+/// A row with no parseable `ts_us` is NOT fresh: an unstamped row cannot be shown
+/// to be current, and this gate exists precisely so an unprovable reading is not
+/// served as a measurement.
+fn row_is_fresh(row: &Map<String, Value>, now_us: i64) -> bool {
+    let Some(ts_us) = row.get("ts_us").and_then(Value::as_i64) else {
+        return false;
+    };
+    let age_s = (now_us - ts_us) as f64 / 1_000_000.0;
+    // A row stamped slightly in the future (a clock step, or a producer whose
+    // clock runs marginally ahead) is fresh, not stale — both processes read the
+    // same host clock, so the skew is jitter, not an unprovable age.
+    age_s <= SNAPSHOT_FRESH_S
+}
+
+/// Wall-clock microseconds since the epoch, or `None` if the clock is before it
+/// (which makes every age unprovable, so the caller treats the reading as stale).
+fn unix_now_us() -> Option<i64> {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_micros() as i64)
 }
 
 /// Query the store for the newest `events` rows of one `event_kind`. Returns the
@@ -1165,6 +1363,7 @@ fn percent_encode(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
 
     fn signals(pairs: &[(&str, Value)]) -> Map<String, Value> {
         pairs
@@ -1341,38 +1540,49 @@ mod tests {
         assert_eq!(short_id("zzzz"), "0000");
     }
 
+    /// With no signal source at all, every measured leg is `null` and the key is
+    /// still there.
+    ///
+    /// This block used to report `cpu_pct: 0.0, ram_used_mb: 0, ram_total_mb: 0`
+    /// — all legal readings — so the OLED and the GCS Hardware tab showed an idle
+    /// CPU and 0 MB of RAM on a stock ground station, where the durable store
+    /// ships off. The old test asserted `unwrap_or(0.0)` against a copy of the
+    /// derivation written inside the test, so it could not have caught it.
     #[test]
-    fn system_snapshot_of_an_absent_store_is_the_zero_default() {
-        // No store rows → cpu 0.0, ram 0/0, temp null; uptime + version are present.
-        let snap = signals(&[]);
-        // Drive the field derivations directly (no AppState).
-        let cpu = signal_num(&snap, "cpu.util.all").unwrap_or(0.0);
-        let (used, total) = ram_mb(&snap).unwrap_or((0, 0));
-        let temp = signal_num(&snap, "thermal.primary_c")
-            .map(Value::from)
-            .unwrap_or(Value::Null);
-        assert_eq!(cpu, 0.0);
-        assert_eq!(used, 0);
-        assert_eq!(total, 0);
-        assert_eq!(temp, Value::Null);
+    fn system_block_with_no_signals_nulls_every_measured_leg() {
+        let block = system_block(None, 1234, "9.9.9");
+        for leg in ["cpu_pct", "ram_used_mb", "ram_total_mb", "temp_c"] {
+            assert_eq!(block[leg], Value::Null, "{leg} must be null, not a number");
+            assert!(
+                block.as_object().unwrap().contains_key(leg),
+                "{leg} must be present as an explicit null"
+            );
+        }
+        // The two legs that are always knowable stay real.
+        assert_eq!(block["uptime_seconds"], json!(1234));
+        assert_eq!(block["agent_version"], json!("9.9.9"));
     }
 
     #[test]
-    fn system_snapshot_derives_ram_and_temp_from_signals() {
+    fn system_block_derives_cpu_ram_and_temp_from_signals() {
         let s = signals(&[
             ("cpu.util.all", json!(12.5)),
             ("mem.total_bytes", json!(4_000_000_000_i64)),
             ("mem.avail_bytes", json!(1_000_000_000_i64)),
             ("thermal.primary_c", json!(47.5)),
         ]);
-        let cpu = signal_num(&s, "cpu.util.all").unwrap_or(0.0);
-        let (used, total) = ram_mb(&s).unwrap();
-        let temp = signal_num(&s, "thermal.primary_c").unwrap();
-        assert_eq!(cpu, 12.5);
-        // (4e9 - 1e9) / 1MiB ≈ 2861 used; 4e9 / 1MiB ≈ 3814 total.
-        assert_eq!(used, ((3_000_000_000_f64) / (1024.0 * 1024.0)) as i64);
-        assert_eq!(total, ((4_000_000_000_f64) / (1024.0 * 1024.0)) as i64);
-        assert_eq!(temp, 47.5);
+        let block = system_block(Some(&s), 7, "1.2.3");
+        assert_eq!(block["cpu_pct"], json!(12.5));
+        // (4e9 - 1e9) / 1MiB used; 4e9 / 1MiB total.
+        assert_eq!(
+            block["ram_used_mb"],
+            json!(((3_000_000_000_f64) / (1024.0 * 1024.0)) as i64)
+        );
+        assert_eq!(
+            block["ram_total_mb"],
+            json!(((4_000_000_000_f64) / (1024.0 * 1024.0)) as i64)
+        );
+        assert_eq!(block["temp_c"], json!(47.5));
     }
 
     #[test]
@@ -1395,30 +1605,175 @@ mod tests {
             "selected_gateway": "node-1",
             "partition": false,
             "mesh_id": "mesh-xyz",
+            "stale": false,
         });
         assert_eq!(block, want);
     }
 
+    /// A clock advanced past the freshness window, used to age a just-written
+    /// sidecar without back-dating the file (there is no portable mtime setter,
+    /// and sleeping for 10 s in a unit test is not a test).
+    fn later_than_the_window() -> SystemTime {
+        SystemTime::now() + Duration::from_secs_f64(SNAPSHOT_FRESH_S + 5.0)
+    }
+
+    /// A mesh sidecar older than the freshness window must NOT be served as the
+    /// current mesh state.
+    ///
+    /// This is the whole finding: the sidecar lives on a tmpfs that outlives the
+    /// process that wrote it, so a dead mesh loop left `up: true` and a peer
+    /// count to be re-served indefinitely. An operator reads a partitioned mesh
+    /// as healthy.
     #[test]
-    fn mesh_sidecar_of_an_absent_file_is_empty_object() {
+    fn an_aged_mesh_sidecar_is_reported_stale_not_served_as_live() {
         let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mesh-state.json");
+        std::fs::write(
+            &path,
+            r#"{"up":true,"neighbors":[{"id":"a"}],"selected_gateway":"node-1",
+                "partition":false,"mesh_id":"mesh-xyz"}"#,
+        )
+        .unwrap();
+
+        // Just written: the real reading comes through.
+        let live = mesh_block_from_sidecar(&path, SystemTime::now());
+        assert_eq!(live["up"], json!(true));
+        assert_eq!(live["peer_count"], json!(1));
+        assert_eq!(live["stale"], json!(false));
+
+        // The same file, read past the window.
+        let stale = mesh_block_from_sidecar(&path, later_than_the_window());
+        assert_eq!(stale["stale"], json!(true));
         assert_eq!(
-            mesh_block_from_sidecar(&dir.path().join("nope.json")),
-            json!({})
+            stale["up"],
+            Value::Null,
+            "an aged snapshot must not keep claiming the mesh is up"
+        );
+        assert_eq!(stale["peer_count"], Value::Null);
+        assert_eq!(stale["mesh_id"], Value::Null);
+        // The key set is unchanged apart from the added flag, so no consumer sees
+        // a field simply vanish (a missing key reads as "not reported" and gets
+        // coerced, which is the same defect wearing a different hat).
+        let mut keys: Vec<&str> = stale
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "mesh_id",
+                "partition",
+                "peer_count",
+                "selected_gateway",
+                "stale",
+                "up",
+            ]
         );
     }
 
     #[test]
-    fn receiver_relays_slice_defaults_to_empty_list() {
+    fn mesh_sidecar_of_an_absent_file_is_the_stale_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let block = mesh_block_from_sidecar(&dir.path().join("nope.json"), SystemTime::now());
+        assert_eq!(block["stale"], json!(true));
+        assert_eq!(block["up"], Value::Null);
+    }
+
+    /// A relay/receiver counter route with an aged sidecar must null the counters
+    /// rather than re-serve them, and must keep the key set so nothing downstream
+    /// reads a vanished key as "not reported" and coerces it.
+    #[test]
+    fn an_aged_relay_sidecar_nulls_its_counters_under_a_stale_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wfb-relay.json");
+        std::fs::write(
+            &path,
+            r#"{"up":true,"fragments_in":9001,"fragments_out":8999}"#,
+        )
+        .unwrap();
+
+        let live =
+            read_fresh_json(&path, SystemTime::now()).expect("a just-written sidecar is fresh");
+        assert_eq!(fresh_snapshot_body(live)["fragments_in"], json!(9001));
+
+        assert!(
+            read_fresh_json(&path, later_than_the_window()).is_none(),
+            "an aged sidecar must not read as fresh"
+        );
+        let stale = stale_snapshot_body(read_json_or_empty(&path));
+        assert_eq!(stale["stale"], json!(true));
+        assert_eq!(stale["up"], Value::Null);
+        assert_eq!(
+            stale["fragments_in"],
+            Value::Null,
+            "a counter from a dead loop must not be served as current"
+        );
+        assert_eq!(stale["fragments_out"], Value::Null);
+    }
+
+    /// A store row older than the window is rejected, so the route falls through
+    /// to its stale branch instead of serving a day-old event as live.
+    #[test]
+    fn a_store_row_is_fresh_only_inside_the_window() {
+        let now_us: i64 = 1_700_000_000_000_000;
+        let row = |ts_us: i64| -> Map<String, Value> {
+            json!({"ts_us": ts_us, "detail": {"up": true}})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        assert!(
+            row_is_fresh(&row(now_us), now_us),
+            "a row stamped now is fresh"
+        );
+        assert!(
+            row_is_fresh(&row(now_us - 5_000_000), now_us),
+            "5 s old is inside the 10 s window"
+        );
+        assert!(
+            !row_is_fresh(&row(now_us - 60_000_000), now_us),
+            "a minute-old row must not be served as the current state"
+        );
+        // An unstamped row cannot be shown to be current, so it is not fresh.
+        assert!(!row_is_fresh(
+            json!({"detail": {"up": true}}).as_object().unwrap(),
+            now_us
+        ));
+    }
+
+    #[test]
+    fn receiver_relays_slice_stamps_fresh_and_defaults_to_empty_list() {
         let empty: Map<String, Value> = Map::new();
-        assert_eq!(slice_receiver_relays(&empty), json!({"relays": []}));
+        assert_eq!(
+            slice_receiver_relays(&empty),
+            json!({"relays": [], "stale": false})
+        );
         let with: Map<String, Value> = json!({"relays": [{"id": "r1"}]})
             .as_object()
             .unwrap()
             .clone();
         assert_eq!(
             slice_receiver_relays(&with),
-            json!({"relays": [{"id": "r1"}]})
+            json!({"relays": [{"id": "r1"}], "stale": false})
+        );
+    }
+
+    /// With nothing current, `relays` is `null` — never `[]`, which reads as
+    /// "this node looked and there are no relays".
+    #[test]
+    fn receiver_combined_stale_nulls_every_counter() {
+        assert_eq!(
+            receiver_combined_stale(),
+            json!({
+                "fragments_after_dedup": Value::Null,
+                "fec_repaired": Value::Null,
+                "output_kbps": Value::Null,
+                "up": Value::Null,
+                "stale": true,
+            })
         );
     }
 
@@ -1430,6 +1785,7 @@ mod tests {
             "fec_repaired": 0,
             "output_kbps": 0,
             "up": false,
+            "stale": false,
         });
         assert_eq!(slice_receiver_combined(&empty), want);
         let full: Map<String, Value> = json!({
@@ -1448,6 +1804,7 @@ mod tests {
                 "fec_repaired": 5,
                 "output_kbps": 4200,
                 "up": true,
+                "stale": false,
             })
         );
     }

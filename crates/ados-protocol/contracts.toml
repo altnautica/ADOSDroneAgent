@@ -118,11 +118,24 @@ description = "Compute-offload job submit and read contract."
 
 [[contract]]
 id = "state.v2"
-version = 2
+version = 3
 wire = "msgpack"
 transport = "unix-stream"
 status = "active"
-description = "Length-prefixed msgpack vehicle-state frame (the current state-socket format)."
+# EXACT-MATCH / STRICT LOCKSTEP. Both readers compare `version != <this>` and
+# skip the frame on ANY mismatch (Rust `state::decode_v2`, Python
+# `ados.core.ipc._decode_state_v2_body`); neither tolerates an unknown key. So
+# EVERY change to the body shape MUST bump this integer, including a purely
+# additive one. Adding a field without bumping produces two different payload
+# shapes wearing the same version number, which is worse than the restart-window
+# flag day a bump costs: the flag day is loud and bounded, whereas a silent
+# version is a permanent ambiguity no reader can detect, and a registry whose
+# version does not move when the shape moves has stopped meaning anything.
+#
+# The id names the FRAMING generation (length-prefixed msgpack, superseding the
+# newline-JSON state.v1); the integer is the registry version of the body shape
+# and moves independently of it.
+description = "Length-prefixed msgpack vehicle-state frame (the current state-socket format). v3 adds position_age_ms: how long since the flight controller's last decoded POSITION, which the swarm beacon's suppression gate reads — without it a consumer cannot tell a live fix from a frozen one under a producer that is still publishing."
 
 [[contract]]
 id = "frame"

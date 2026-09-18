@@ -15,6 +15,37 @@ from ._common import _get_video_pipeline
 router = APIRouter()
 
 
+def _fresh_position(state: object | None) -> tuple[float | None, float | None]:
+    """The vehicle's position, or `(None, None)` when it cannot be trusted.
+
+    A snapshot's geotag is written into the JPEG's EXIF, which makes it a
+    DURABLE artifact: a stale telemetry reading on a live surface is
+    corrected by the next sample, but a wrong coordinate baked into a photo
+    is wrong forever and will be believed later by someone with no way to
+    know the fix was frozen.
+
+    Both callers used to read `state.lat`/`state.lon` with no gate at all,
+    falling back to `0.0` when there was no state — so a node with a dead
+    GPS geotagged every photo at the last place it saw, and a node with no
+    telemetry at all geotagged them at 0°N 0°E, which is a real place in the
+    Gulf of Guinea rather than an obvious sentinel.
+
+    `position_fresh` is false when the fix age is unknown, so "cannot tell"
+    never reads as "current".
+    """
+    if state is None:
+        return (None, None)
+    if not getattr(state, "position_fresh", False):
+        return (None, None)
+    lat = getattr(state, "lat", None)
+    lon = getattr(state, "lon", None)
+    if not isinstance(lat, (int, float)) or isinstance(lat, bool):
+        return (None, None)
+    if not isinstance(lon, (int, float)) or isinstance(lon, bool):
+        return (None, None)
+    return (float(lat), float(lon))
+
+
 @router.get("/video/snapshot.jpg")
 async def get_snapshot_jpg(request: Request) -> Response:
     """Serve the most-recent JPEG snapshot as image/jpeg.
@@ -69,9 +100,7 @@ async def get_snapshot_jpg(request: Request) -> Response:
 
     from ados.services.video.snapshot import capture_snapshot
 
-    state = app.vehicle_state()
-    gps_lat = state.lat if state else 0.0
-    gps_lon = state.lon if state else 0.0
+    gps_lat, gps_lon = _fresh_position(app.vehicle_state())
     if snapshot_dir is None:
         raise HTTPException(status_code=500, detail="snapshot dir unavailable")
     path = await capture_snapshot(primary, str(snapshot_dir), gps_lat, gps_lon)
@@ -110,9 +139,7 @@ async def trigger_snapshot():
     from ados.services.video.snapshot import capture_snapshot
 
     app = get_agent_app()
-    state = app.vehicle_state()
-    gps_lat = state.lat if state else 0.0
-    gps_lon = state.lon if state else 0.0
+    gps_lat, gps_lon = _fresh_position(app.vehicle_state())
 
     recording_dir = app.config.video.recording.path
     snapshot_dir = recording_dir.rstrip("/") + "/snapshots"

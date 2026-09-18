@@ -83,3 +83,7 @@ nix = { workspace = true }
 tempfile = "3"
 # Stand up the compute event router in-process for the Atlas relay round-trip test.
 axum = { workspace = true }
+# Paused-clock harness for the transmitter-liveness tests, which must not spend
+# a real 30 s silence window apiece. Dev-only: resolver 2 keeps test-util out of
+# the shipped binary's features.
+tokio = { workspace = true, features = ["test-util"] }

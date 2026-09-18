@@ -124,6 +124,16 @@ pub fn tx_control_args(iface: &str, cfg: &WfbConfig, key_path: &Path, link_id: u
 /// `link_id` is the GROUND STATION's (`link_id(fleet_id, SLOT_GROUND)`), not
 /// this drone's: the uplink is a single shared transmitter every drone in the
 /// fleet listens to, so a fleet-wide command is one transmission, not N.
+///
+/// `-l 1000` makes this receiver emit the per-second `PKT`/`RX_ANT` stats lines
+/// on stdout, and this is the ONLY link measurement a transmitting drone can
+/// obtain: it is the one `channel_id` frames actually arrive on. A separate
+/// stats receiver used to run alongside it on `-p 0` keyed to this drone's OWN
+/// `link_id` — the drone's own video downlink — which a single radio in monitor
+/// mode cannot capture, and with the wrong key besides, so it decoded nothing
+/// for the process lifetime while `wfb-stats.json` reported the untouched
+/// sentinels as a reading. Meanwhile this receiver's correctly-keyed stats
+/// stream went to `/dev/null`. The caller now pipes and reads it.
 pub fn rx_control_args(iface: &str, key_path: &Path, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
@@ -136,33 +146,6 @@ pub fn rx_control_args(iface: &str, key_path: &Path, link_id: u32) -> Vec<String
         "5810".into(),
         "-K".into(),
         key_str(key_path),
-        "-l".into(),
-        "1000".into(),
-        iface.into(),
-    ]
-}
-
-/// Data-plane stats `wfb_rx` args (radio_id 0). `-l 1000` emits the per-second
-/// PKT/RX_ANT stats lines the link-quality monitor parses. The decoded payload
-/// goes to **127.0.0.1:5601** — deliberately NOT 5600 (the data-plane TX's
-/// video ingress) so the stats receiver can never inject into the video path.
-/// Uses the **rx** key (decrypts the GS uplink).
-///
-/// `link_id` is this drone's OWN: the stats receiver listens to the drone's own
-/// downlink `channel_id` to measure what it is transmitting, so keying it to
-/// the ground slot would report the uplink's health as the video link's.
-pub fn stats_rx_args(iface: &str, rx_key_path: &Path, link_id: u32) -> Vec<String> {
-    vec![
-        "-p".into(),
-        "0".into(),
-        "-i".into(),
-        link_id.to_string(),
-        "-c".into(),
-        "127.0.0.1".into(),
-        "-u".into(),
-        "5601".into(),
-        "-K".into(),
-        key_str(rx_key_path),
         "-l".into(),
         "1000".into(),
         iface.into(),
@@ -263,29 +246,23 @@ impl WfbProcess {
 
     /// Spawn the **rx-control** `wfb_rx` (receives HopAck off the air → 5810).
     /// `link_id` is the ground station's — the shared uplink.
+    ///
+    /// stdout is PIPED because this receiver's `-l 1000` stats stream is the
+    /// drone's only real link measurement (see [`rx_control_args`]); stderr
+    /// still goes to its truncated log file. The caller MUST take the stdout
+    /// handle and keep draining it — an unread pipe fills at 64 KiB and
+    /// `wfb_rx` blocks in `fprintf(stdout)`, which would stall HopAck delivery.
     pub async fn spawn_rx_control(
         iface: &str,
         key_path: &Path,
         link_id: u32,
     ) -> std::io::Result<Self> {
-        Self::spawn_in_group(
+        Self::spawn_in_group_piped_stdout(
             "wfb_rx",
             &rx_control_args(iface, key_path, link_id),
             Some(RX_CONTROL_LOG),
         )
         .await
-    }
-
-    /// Spawn the **stats** `wfb_rx` (data plane, port 5601) with stdout PIPED so
-    /// the caller can read the per-second PKT/RX_ANT stats lines.
-    pub async fn spawn_stats_rx(
-        iface: &str,
-        rx_key_path: &Path,
-        link_id: u32,
-    ) -> std::io::Result<Self> {
-        // stderr → null (we only want stdout's stats stream); stdout piped.
-        Self::spawn_in_group_piped_stdout("wfb_rx", &stats_rx_args(iface, rx_key_path, link_id))
-            .await
     }
 
     /// Spawn the **auxiliary tx** `wfb_tx` (radio_id 2, application ingress).
@@ -357,13 +334,30 @@ impl WfbProcess {
         Self::finish_spawn(cmd)
     }
 
-    /// Like [`spawn_in_group`] but pipes stdout (for the stats reader) and
-    /// discards stderr. setsid + killpg discipline is identical.
-    async fn spawn_in_group_piped_stdout(program: &str, args: &[String]) -> std::io::Result<Self> {
+    /// Like [`spawn_in_group`] but pipes stdout (for the stats reader). When
+    /// `stderr_log` is `Some` stderr is redirected to that truncated file (which
+    /// avoids the PIPE deadlock for a process whose stderr nobody drains);
+    /// otherwise it is discarded. setsid + killpg discipline is identical.
+    async fn spawn_in_group_piped_stdout(
+        program: &str,
+        args: &[String],
+        stderr_log: Option<&str>,
+    ) -> std::io::Result<Self> {
         let mut cmd = tokio::process::Command::new(program);
-        cmd.args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+        cmd.args(args).stdout(std::process::Stdio::piped());
+        match stderr_log {
+            Some(path) => {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(path)?;
+                cmd.stderr(std::process::Stdio::from(file));
+            }
+            None => {
+                cmd.stderr(std::process::Stdio::null());
+            }
+        }
         Self::finish_spawn(cmd)
     }
 
@@ -465,9 +459,9 @@ pub struct RadioProcesses {
     pub data_tx: WfbProcess,
     pub tx_control: WfbProcess,
     pub rx_control: WfbProcess,
-    /// Data-plane stats RX (only when an rx key is present). Drives link stats.
-    stats_rx: Option<WfbProcess>,
-    /// The task reading the stats RX stdout into the shared `LinkStats`.
+    /// The task reading the rx-control receiver's stdout stats stream into the
+    /// shared `LinkStats`. `None` only when the stdout handle could not be
+    /// taken, which would leave the link block at its no-measurement defaults.
     stats_reader: Option<tokio::task::JoinHandle<()>>,
     /// Auxiliary application-stream transmit (radio_id 2). `None` whenever the
     /// aux stream is closed, which is the boot state (safe-by-default): no aux
@@ -486,8 +480,8 @@ pub struct RadioProcesses {
     iface: String,
     tx_key_path: PathBuf,
     /// This node's own wfb-ng `link_id` (`link_id(fleet_id, fleet_slot)`), the
-    /// key for every process the drone TRANSMITS on plus the stats RX that
-    /// listens to its own downlink. Retained rather than recomputed so a channel
+    /// key for every process the drone TRANSMITS on. Retained rather than
+    /// recomputed so a channel
     /// hop or an FEC/MCS respawn re-keys IDENTICALLY: `respawn_data_tx` rebuilds
     /// its cfg view from `WfbConfig::default()`, whose fleet fields are the
     /// unprovisioned defaults, and re-deriving from that would silently move a
@@ -548,13 +542,12 @@ impl AuxSettings {
 }
 
 impl RadioProcesses {
-    /// Spawn the data plane + both control planes, and (when `/etc/ados/wfb/rx.key`
-    /// exists) the stats RX with a reader task that updates `link` from the
-    /// `wfb_rx` stats stream.
+    /// Spawn the data plane + both control planes, and the link-stats reader on
+    /// the rx-control receiver's stats stream.
     ///
     /// The two fleet link ids are derived once from `cfg` here and retained: the
-    /// transmit side and the stats receiver key to this drone's own slot, the
-    /// two uplink receivers key to the ground station's shared slot 0.
+    /// transmit side keys to this drone's own slot, the two uplink receivers key
+    /// to the ground station's shared slot 0.
     pub async fn spawn(
         iface: &str,
         cfg: &WfbConfig,
@@ -565,31 +558,8 @@ impl RadioProcesses {
         let uplink_link_id = crate::config::link_id(cfg.fleet_id, crate::config::SLOT_GROUND);
         let data_tx = WfbProcess::spawn_data_tx(iface, cfg, key_path, own_link_id).await?;
         let tx_control = WfbProcess::spawn_tx_control(iface, cfg, key_path, own_link_id).await?;
-        let rx_control = WfbProcess::spawn_rx_control(iface, key_path, uplink_link_id).await?;
-
-        // Stats RX is best-effort + gated on the rx key (the GS-uplink decryptor).
-        // Without it the link block stays at default sentinels — same as Python.
-        let (stats_rx, stats_reader) = if Path::new(crate::paths::WFB_RX_KEY).exists() {
-            match WfbProcess::spawn_stats_rx(
-                iface,
-                Path::new(crate::paths::WFB_RX_KEY),
-                own_link_id,
-            )
-            .await
-            {
-                Ok(mut p) => {
-                    let stdout = p.take_stdout();
-                    let reader = stdout.map(|out| tokio::spawn(stats_reader_loop(out, link)));
-                    (Some(p), reader)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "stats_rx_spawn_failed");
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
+        let mut rx_control = WfbProcess::spawn_rx_control(iface, key_path, uplink_link_id).await?;
+        let stats_reader = Self::spawn_stats_reader(&mut rx_control, link);
 
         tracing::info!(
             fleet_id = cfg.fleet_id,
@@ -603,7 +573,6 @@ impl RadioProcesses {
             data_tx,
             tx_control,
             rx_control,
-            stats_rx,
             stats_reader,
             // Safe-by-default: the auxiliary stream never starts at boot. It is
             // brought up only by an explicit open_aux_stream call.
@@ -619,6 +588,27 @@ impl RadioProcesses {
             data_mcs_index: cfg.mcs_index,
             applies: ApplyCounters::default(),
         })
+    }
+
+    /// Take the rx-control receiver's stdout and spawn the reader that feeds the
+    /// shared `LinkStats` from its `-l 1000` stats stream.
+    ///
+    /// The handle MUST be taken, not left: that pipe has a 64 KiB kernel buffer
+    /// and `wfb_rx` prints its stats with a blocking `fprintf(stdout)`, so an
+    /// unread stream would eventually wedge the receiver that also delivers
+    /// HopAck. Shared by the initial spawn and the whole-group respawn so the
+    /// two can never diverge on which stream the link block is measured from.
+    fn spawn_stats_reader(
+        rx_control: &mut WfbProcess,
+        link: std::sync::Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        match rx_control.take_stdout() {
+            Some(out) => Some(tokio::spawn(stats_reader_loop(out, link))),
+            None => {
+                tracing::warn!("rx_control_stdout_unavailable: link stats will stay unmeasured");
+                None
+            }
+        }
     }
 
     /// The data-plane PID, for the Rule-37 TX watchdog.
@@ -1032,7 +1022,7 @@ impl RadioProcesses {
                     return false;
                 }
             };
-        let rx_control =
+        let mut rx_control =
             match WfbProcess::spawn_rx_control(&self.iface, &key_path, self.uplink_link_id).await {
                 Ok(p) => p,
                 Err(e) => {
@@ -1040,31 +1030,10 @@ impl RadioProcesses {
                     return false;
                 }
             };
-        let (stats_rx, stats_reader) = if Path::new(crate::paths::WFB_RX_KEY).exists() {
-            match WfbProcess::spawn_stats_rx(
-                &self.iface,
-                Path::new(crate::paths::WFB_RX_KEY),
-                self.own_link_id,
-            )
-            .await
-            {
-                Ok(mut p) => {
-                    let stdout = p.take_stdout();
-                    let reader = stdout.map(|out| tokio::spawn(stats_reader_loop(out, link)));
-                    (Some(p), reader)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "respawn_group_stats_rx_failed");
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
+        let stats_reader = Self::spawn_stats_reader(&mut rx_control, link);
         self.data_tx = data_tx;
         self.tx_control = tx_control;
         self.rx_control = rx_control;
-        self.stats_rx = stats_rx;
         self.stats_reader = stats_reader;
         // kill_all cleared the aux processes but kept aux_settings; re-open the
         // aux pair on the NEW channel iff it was open before the hop. A re-open
@@ -1140,15 +1109,15 @@ impl RadioProcesses {
     /// respawn (a channel hop) can re-open the aux pair on the new channel; a
     /// `close` is what clears the settings.
     pub async fn kill_all(&mut self) {
+        // Abort the reader BEFORE killing its producer: the reader owns the only
+        // read end of rx-control's stats pipe, and leaving it live against a
+        // killed process just makes it return on EOF a moment later.
         if let Some(r) = self.stats_reader.take() {
             r.abort();
         }
         self.data_tx.kill().await;
         self.tx_control.kill().await;
         self.rx_control.kill().await;
-        if let Some(mut s) = self.stats_rx.take() {
-            s.kill().await;
-        }
         if let Some(mut tx) = self.aux_tx.take() {
             tx.kill().await;
         }
@@ -1241,14 +1210,13 @@ mod tests {
         );
     }
 
-    /// The three `wfb_rx` builders must NOT carry `-C`.
+    /// The two `wfb_rx` builders must NOT carry `-C`.
     #[test]
     fn receive_planes_carry_no_management_port() {
         let cfg = WfbConfig::default();
         let key = Path::new("/etc/ados/wfb/rx.key");
         for args in [
             rx_control_args("wlan1", key, link_id(1, 0)),
-            stats_rx_args("wlan1", key, link_id(1, 3)),
             aux_rx_args("wlan1", &cfg, key, link_id(1, 0)),
         ] {
             assert!(
@@ -1562,11 +1530,10 @@ mod tests {
         let key = Path::new("/k");
         let own = link_id(7, 9);
         let up = link_id(7, SLOT_GROUND);
-        let cases: [(&str, Vec<String>, u32); 6] = [
+        let cases: [(&str, Vec<String>, u32); 5] = [
             ("data_tx", data_tx_args("wlan1", &cfg, key, own), own),
             ("tx_control", tx_control_args("wlan1", &cfg, key, own), own),
             ("rx_control", rx_control_args("wlan1", key, up), up),
-            ("stats_rx", stats_rx_args("wlan1", key, own), own),
             ("aux_tx", aux_tx_args("wlan1", &cfg, key, own), own),
             ("aux_rx", aux_rx_args("wlan1", &cfg, key, up), up),
         ];
@@ -1604,9 +1571,17 @@ mod tests {
         let aux_rx = arg_after(&aux_rx_args("wlan1", &cfg, key, up), "-i");
         assert_ne!(aux_tx, aux_rx, "aux TX and aux RX must not share a link_id");
 
-        // The stats receiver is the exception among receivers: it listens to
-        // this drone's OWN downlink to measure what it is transmitting.
-        assert_eq!(arg_after(&stats_rx_args("wlan1", key, own), "-i"), tx);
+        // Every receiver — including the one the link block is measured from —
+        // is keyed to the uplink. A drone cannot measure its own downlink: one
+        // radio in monitor mode does not capture its own injected frames, so a
+        // receiver keyed to this drone's own slot would decode nothing at all.
+        let stats = arg_after(&rx_control_args("wlan1", key, up), "-i");
+        assert_eq!(stats, up.to_string());
+        assert_ne!(
+            stats,
+            own.to_string(),
+            "the link-stats receiver must never be keyed to this drone's own slot"
+        );
     }
 
     #[test]
@@ -1635,15 +1610,9 @@ mod tests {
                 let ch = channel_id_of(&args);
                 assert!(seen.insert(ch), "duplicate channel_id {ch} at slot {slot}");
             }
-            // The stats RX is the one receiver that MUST share a channel_id: it
-            // listens to this drone's own data plane to measure it. Sharing here
-            // is the invariant, not a collision — pin it so a future edit cannot
-            // point the stats receiver at some other slot's video.
-            assert_eq!(
-                channel_id_of(&stats_rx_args("wlan1", key, own)),
-                channel_id_of(&data_tx_args("wlan1", &cfg, key, own)),
-                "the stats RX must listen on this drone's own data channel_id"
-            );
+            // Every receiver is keyed to the uplink, so no receiver contributes a
+            // transmit channel_id here. A drone's own transmit channel_ids must
+            // stay disjoint from the ground station's uplink pair asserted above.
         }
         // 2 ground uplink transmitters + 24 slots x 3 distinct transmit planes.
         assert_eq!(seen.len(), 2 + FLEET_MAX_SLOTS as usize * 3);

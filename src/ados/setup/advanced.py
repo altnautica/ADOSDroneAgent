@@ -7,10 +7,12 @@ Persists the two advanced controls the operator can change:
   ``/etc/ados/config.yaml`` via the runtime's ``save_config``. It takes
   effect the next time a service (re)starts.
 * ``board_override`` is written to ``/etc/ados/board_override`` (the file
-  ``ados.hal.detect`` reads to force a HAL board profile). Clearing it
-  removes the file so detection falls back to auto. The config directory
-  honors the ``ADOS_ETC_DIR`` environment override for test/dev sandboxes,
-  matching the install scripts.
+  ``ados.hal.detect`` and the Rust board-sidecar writer both read to force a
+  HAL board profile). The accepted value is the board-profile YAML filename
+  STEM (``cubie-a7s``, ``rock-5c-lite``) — the one grammar every consumer of
+  that file agrees on. Clearing it removes the file so detection falls back to
+  auto. The config directory honors the ``ADOS_ETC_DIR`` environment override
+  for test/dev sandboxes, matching the install scripts.
 
 A persist failure is surfaced as ``ok=False`` rather than swallowed, so a
 save that never reached disk is never reported as success.
@@ -23,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from ados.core.paths import ADOS_ETC_DIR
+from ados.hal.detect import known_board_stems
 from ados.setup.models import AdvancedApplyRequest, SetupActionResult
 
 _VALID_LOG_LEVELS: frozenset[str] = frozenset(
@@ -142,14 +145,27 @@ def apply_advanced(
 
     if request.board_override is not None:
         override = str(request.board_override).strip()
-        if override and not _is_valid_board_token(override):
-            return SetupActionResult(
-                ok=False,
-                message=(
-                    "board_override must be a short slug (letters, digits, "
-                    "dash, underscore)."
-                ),
-            )
+        if override:
+            if not _is_valid_board_token(override):
+                return SetupActionResult(
+                    ok=False,
+                    message=(
+                        "board_override must be a short slug (letters, digits, "
+                        "dash, underscore)."
+                    ),
+                )
+            # Validated against the real profile set, not just the shape: the
+            # override is the escape hatch for a mis-detected board, and a token
+            # that names no profile silently leaves detection exactly where it
+            # was while reporting success.
+            stems = known_board_stems()
+            if override not in stems:
+                return SetupActionResult(
+                    ok=False,
+                    message=(
+                        f"board_override must name a board profile: {', '.join(stems)}."
+                    ),
+                )
         try:
             write_board_override(override)
         except OSError as exc:

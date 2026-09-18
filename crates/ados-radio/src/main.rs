@@ -263,23 +263,28 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
     // auto/manual link-tier toggle survives a watchdog kill or a channel hop.
     let adaptive_enabled: EnabledHandle = new_enabled(cfg);
 
-    // Application datagram fan-out, shared by the aux-RX receive loop and every
-    // aux `subscribe` connection. Created ONCE, outside the respawn loop, like
-    // `bitrate_snapshot` / `adaptive_enabled` above: a fresh channel per
-    // bring-up left generation N-1's receive task publishing into a channel
-    // with no subscribers while generation N's subscribers attached to a
-    // channel nothing fed, so every inbound auxiliary application datagram
-    // (config-over-radio replies, payload command lanes) was lost for the rest
-    // of the process lifetime after the first respawn — and respawns are
-    // routine (a wfb_tx stall kill, an FEC/MCS retune crash, a hop end).
+    // Application datagram fan-out, shared by every aux `subscribe` connection.
+    // Created ONCE, outside the respawn loop, like `bitrate_snapshot` /
+    // `adaptive_enabled` above: a fresh channel per bring-up left generation
+    // N-1's publisher feeding a channel with no subscribers while generation N's
+    // subscribers attached to a channel nothing fed, so every inbound auxiliary
+    // application datagram (config-over-radio replies, payload command lanes)
+    // was lost for the rest of the process lifetime after the first respawn —
+    // and respawns are routine (a wfb_tx stall kill, an FEC/MCS retune crash, a
+    // hop end).
+    //
+    // This service does NOT bind the aux-RX loopback port. It used to, and so
+    // does `ados-mavlink-router`'s aux-uplink consumer — a different binary and
+    // unit on the same drone profile, resolving the same port through
+    // `ados_protocol::aux_ports`, neither with SO_REUSEADDR. Whichever lost
+    // startup took down a whole lane silently while the link still read healthy:
+    // this service winning killed the entire ground→drone uplink (command
+    // injection, relay-proxy RPC, config-over-radio, link feedback); the router
+    // winning killed every plugin application lane. The consumer is the single
+    // owner now, and it hands the two application channels back here over
+    // `radio-aux.sock`'s `publish` op (see [`ados_radio::aux_cmd`]), which is
+    // what feeds this channel.
     let (aux_app_tx, _) = tokio::sync::broadcast::channel::<(u8, Vec<u8>)>(256);
-    // The receive half is likewise spawned ONCE. It owns the aux-RX loopback
-    // UDP port for the process lifetime, so a second spawn could only fail on
-    // EADDRINUSE against its own predecessor.
-    tokio::spawn(ados_radio::aux_rx::run_rx_loop(
-        Arc::new(cfg.clone()),
-        aux_app_tx.clone(),
-    ));
     loop {
         // Latched shutdown gate at the top of the respawn loop: if SIGTERM flipped
         // the watch while we were tearing down a radio group below, never start
@@ -918,35 +923,65 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                             rx_proven,
                         );
 
-                        // Ship the per-heartbeat link-quality samples (the
-                        // downlink video radio) and a discrete lock/unlock event
-                        // on a real link-state transition. Best-effort; an absent
-                        // logging daemon drops these without disturbing the radio.
+                        // Ship the per-heartbeat link-quality samples and a
+                        // discrete lock/unlock event on a real link-state
+                        // transition. Best-effort; an absent logging daemon drops
+                        // these without disturbing the radio.
+                        //
+                        // The samples describe the UPLINK this drone receives, not
+                        // its own video downlink: a single radio in monitor mode
+                        // cannot capture its own injected frames, so the only link
+                        // this end can measure is the one arriving. The downlink's
+                        // loss is measured by the receiving station and arrives as
+                        // the peer sample the bitrate ladder steps on.
                         {
                             use ados_protocol::logd::{Fields, Level, Value};
                             let mut tags = Fields::new();
-                            tags.insert("direction".to_string(), Value::from("downlink"));
-                            tags.insert("link".to_string(), Value::from("video"));
-                            hb_metrics.emit_metric("link.rssi_dbm", stats.rssi_dbm, tags.clone());
-                            hb_metrics.emit_metric("link.snr_db", stats.snr_db, tags.clone());
+                            tags.insert("direction".to_string(), Value::from("uplink"));
+                            tags.insert("link".to_string(), Value::from("control"));
+                            // Decoded-packet count is the sample DENOMINATOR and is
+                            // always emitted: it is an honest zero, and it is what
+                            // makes the absence of the rows below attributable to
+                            // "nothing was decoded" rather than to a dead emitter.
                             hb_metrics.emit_metric(
-                                "link.fec_uncorrected",
-                                stats.fec_failed as f64,
+                                "link.packets_received",
+                                stats.packets_received as f64,
                                 tags.clone(),
                             );
-                            // Loss + bitrate round out the link-history sample so
-                            // the durable `/api/wfb/history` series is a faithful
-                            // superset of the live monitor sample shape.
-                            hb_metrics.emit_metric(
-                                "link.loss_percent",
-                                stats.loss_percent,
-                                tags.clone(),
-                            );
-                            hb_metrics.emit_metric(
-                                "link.bitrate_kbps",
-                                stats.bitrate_kbps as f64,
-                                tags,
-                            );
+                            // Everything past here requires a real decode. The
+                            // sidecar already nulls these when unmeasured; the
+                            // durable series skipped that gate, so a radio that had
+                            // heard nothing wrote -100 dBm / 0 dB SNR / 0% loss into
+                            // `/api/wfb/history` every 2 s and an operator reading
+                            // the series back saw a weak-but-lossless link that had
+                            // never existed. Absent is the honest record; a
+                            // fabricated row is not recoverable downstream.
+                            if stats.is_measured() {
+                                hb_metrics.emit_metric(
+                                    "link.rssi_dbm",
+                                    stats.rssi_dbm,
+                                    tags.clone(),
+                                );
+                                hb_metrics.emit_metric("link.snr_db", stats.snr_db, tags.clone());
+                                hb_metrics.emit_metric(
+                                    "link.fec_uncorrected",
+                                    stats.fec_failed as f64,
+                                    tags.clone(),
+                                );
+                                // Loss + bitrate round out the link-history sample
+                                // so the durable `/api/wfb/history` series is a
+                                // faithful superset of the live monitor sample shape.
+                                hb_metrics.emit_metric(
+                                    "link.loss_percent",
+                                    stats.loss_percent,
+                                    tags.clone(),
+                                );
+                                hb_metrics.emit_metric(
+                                    "link.bitrate_kbps",
+                                    stats.bitrate_kbps as f64,
+                                    tags,
+                                );
+                            }
                             let locked = state.is_locked();
                             if prev_locked != Some(locked) {
                                 let mut detail = Fields::new();

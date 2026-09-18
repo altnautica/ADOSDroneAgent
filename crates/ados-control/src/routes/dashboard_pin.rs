@@ -16,12 +16,13 @@
 //! - **verify** — public login: rate-limited by the shared limiter + the in-store
 //!   lockout ladder. A correct PIN returns a session.
 //! - **set** — public at the edge, AUTHORIZED IN THE HANDLER: on-box OR a valid
-//!   `X-ADOS-Key` OR a valid current session OR trust-on-first-use (`!pin_set`)
+//!   `X-ADOS-Key` OR a valid current session OR trust-on-first-use (no PIN
+//!   set yet AND the peer is on-box or on the operator's own LAN)
 //!   OR a matching `current_pin`. A change with none of those is `403`.
 //! - **clear** — NOT public: the normal gate already admits only on-box or a
 //!   valid credential (the GCS holds the key), which is exactly reset's audience.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -93,6 +94,7 @@ pub struct SetRequest {
 /// setter is immediately unlocked).
 pub async fn set_pin(
     State(state): State<AppState>,
+    peer: Option<Extension<crate::serve::PeerAddr>>,
     headers: HeaderMap,
     Json(req): Json<SetRequest>,
 ) -> Response {
@@ -113,13 +115,35 @@ pub async fn set_pin(
         .unwrap_or(false);
     let pin_set = state.dashboard_pin.is_set();
 
-    // Trust-on-first-use, then the current-PIN change path (short-circuited so a
-    // wrong current_pin is only consulted when nothing else authorized, and it
-    // counts as a failed attempt against the lockout ladder).
+    // Who may claim an UNSET PIN — trust-on-first-use.
+    //
+    // This used to be a bare `!pin_set`, and `/api/dashboard/pin/set` is a
+    // public path, so on a node with no PIN yet the first caller to reach
+    // this route won the dashboard — from anywhere that could route to the
+    // agent, not just from the operator's own network. The window is the
+    // whole period between a node coming up and its operator getting to it,
+    // which on a fresh install is exactly when nobody is watching.
+    //
+    // Narrowed to the peers a first-boot device is legitimately reached
+    // from: the box itself, and the operator's own LAN. `None` means the
+    // request arrived on the Unix socket, which is the local plane and is
+    // trusted outright; an unidentifiable TCP peer is not.
+    let peer_ip = peer.map(|Extension(p)| p.0.ip());
+    let local_claimant = match peer_ip {
+        None => true,
+        Some(ip) => {
+            ados_protocol::pairing_posture::unpaired_peer_allowed(&ip)
+                || ados_protocol::pairing_posture::trusted_operator_lan_peer(&ip)
+        }
+    };
+
+    // Then the current-PIN change path, short-circuited so a wrong
+    // `current_pin` is only consulted when nothing else authorized — it
+    // counts as a failed attempt against the lockout ladder.
     let authorized = on_box
         || key_valid
         || session_valid
-        || !pin_set
+        || (!pin_set && local_claimant)
         || req
             .current_pin
             .as_deref()
@@ -127,6 +151,17 @@ pub async fn set_pin(
             .unwrap_or(false);
 
     if !authorized {
+        // Two different refusals, because they need different operator
+        // actions: a remote peer on a PIN-less node has to come to the
+        // device or onto its network, not go hunting for a PIN that does
+        // not exist.
+        if !pin_set {
+            tracing::warn!(peer = ?peer_ip, "dashboard_pin_tofu_refused_remote_peer");
+            return detail(
+                StatusCode::FORBIDDEN,
+                "Set the dashboard PIN from the device itself or from its own network.",
+            );
+        }
         return detail(
             StatusCode::FORBIDDEN,
             "A dashboard PIN is already set. Enter the current PIN, or reset it from Mission Control or on the device.",

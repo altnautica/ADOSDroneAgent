@@ -4,6 +4,8 @@
 //! (v1 `0xFE` and v2 `0xFD`), tolerating junk before the next start-of-frame
 //! magic and leaving any partial trailing frame buffered for the next read.
 
+use bytes::Bytes;
+
 /// Both MAVLink start-of-frame magic bytes: `0xFD` (v2) and `0xFE` (v1).
 pub(crate) const STX_V2: u8 = 0xFD;
 pub(crate) const STX_V1: u8 = 0xFE;
@@ -58,10 +60,18 @@ pub(crate) fn frame_total_len(buf: &[u8]) -> Option<usize> {
 }
 
 /// Drain every complete MAVLink frame (v1 `0xFE` and v2 `0xFD`) from the head of
-/// `buf`, returning the raw frame byte vectors and leaving any partial trailing
-/// frame in `buf`. Junk before the next magic byte is dropped. Returns when the
-/// buffer holds only a partial frame.
-pub(crate) fn extract_frames(buf: &mut Vec<u8>) -> Vec<Vec<u8>> {
+/// `buf`, returning the raw frames and leaving any partial trailing frame in
+/// `buf`. Junk before the next magic byte is dropped. Returns when the buffer
+/// holds only a partial frame.
+///
+/// Yields [`Bytes`] rather than `Vec<u8>` because each frame is immediately
+/// handed to every fan-out consumer — the IPC socket, the aux tee, the
+/// relayed-vehicle projection, and one task per connected GCS proxy client.
+/// Copying the frame out of the reassembly buffer once is unavoidable; copying
+/// it again per consumer is not, and that second cost scaled with the number of
+/// connected clients. The bytes themselves are unchanged: the frame is still
+/// forwarded verbatim, which the IPC frame contract requires.
+pub(crate) fn extract_frames(buf: &mut Vec<u8>) -> Vec<Bytes> {
     let mut out = Vec::new();
     loop {
         // Drop bytes before the next start-of-frame magic (either version).
@@ -84,7 +94,7 @@ pub(crate) fn extract_frames(buf: &mut Vec<u8>) -> Vec<Vec<u8>> {
         if buf.len() < total {
             break;
         }
-        out.push(buf[..total].to_vec());
+        out.push(Bytes::copy_from_slice(&buf[..total]));
         buf.drain(..total);
     }
     out

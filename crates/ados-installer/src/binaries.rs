@@ -389,12 +389,20 @@ pub const PREBUILT_VISION_ONNX_RUNTIME: PrebuiltBinary = PrebuiltBinary {
 /// Radxa Cubie A7S) is a deliberate exception: its VIP9000 NPU has no in-tree
 /// backend (no TIM-VX support yet — see `cubie-a7s.yaml`'s Rule-44 note), so it
 /// runs the CPU ONNX build like an NPU-less board until that backend lands.
+///
+/// The board string can also be the operator's `/etc/ados/board_override`,
+/// whose grammar is the board-profile YAML filename STEM — so every onnx board's
+/// stem (`cm5`, `rpi5`, `cubie-a7s`) is listed alongside its display form. A
+/// stem that resolved to no entry here silently downgraded a pinned board to the
+/// non-ONNX build.
 const ONNX_VISION_BOARD_SUBSTRINGS: &[&str] = &[
     "raspberry pi 5",
+    "rpi5",
     "compute module 5",
     "cm5",
     "sun60iw2",
     "cubie a7s",
+    "cubie-a7s",
     "a733",
 ];
 
@@ -1079,6 +1087,23 @@ mod tests {
         // Weaker / unknown boards stay on the default build.
         assert!(!board_prefers_onnx_vision("Raspberry Pi 4 Model B"));
         assert!(!board_prefers_onnx_vision(""));
+    }
+
+    #[test]
+    fn a_board_override_stem_selects_the_same_vision_build_as_the_model_string() {
+        // `/etc/ados/board_override` carries the board-profile YAML filename
+        // stem, and this gate reads that string when it is set. A stem that
+        // matched nothing here downgraded a deliberately-pinned onnx board to
+        // the non-ONNX build with nothing reporting it.
+        for stem in ["rpi5", "cm5", "cubie-a7s"] {
+            assert!(
+                board_prefers_onnx_vision(stem),
+                "override stem {stem} must select the onnx vision build"
+            );
+            assert_eq!(vision_binary(stem).asset, "ados-vision-onnx-aarch64");
+        }
+        // An NPU-sidecar board's stem still resolves to the default build.
+        assert!(!board_prefers_onnx_vision("rock-5c-lite"));
     }
 
     #[test]

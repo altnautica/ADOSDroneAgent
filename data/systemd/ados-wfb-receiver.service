@@ -12,7 +12,13 @@ StartLimitBurst=5
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
 # observable per unit (the slice sets MemoryAccounting=yes).
 Slice=ados.slice
-Type=simple
+# Type=notify + WatchdogSec so systemd can recover a WEDGED role loop, not just
+# a crashed one. The keep-alive ping is coupled to the loop's progress marker
+# (the periodic state write), so a process that still exists while its work has
+# stopped is no longer reported as healthy. Kept in lock-step with
+# ados_supervisor::sdnotify::WATCHDOG_SEC, which sets the ping cadence.
+Type=notify
+WatchdogSec=30
 User=root
 # The native receiver loop is the only implementation; the install verifies the
 # binary is present before this unit starts. The binary takes the role on its

@@ -429,7 +429,7 @@ fn report(counters: &TeeCounters, last: TeeCountersSnapshot) -> TeeCountersSnaps
 /// exercisable against a plain broadcast channel and a fake radio, with no
 /// flight controller and no radio hardware.
 pub async fn run(
-    mut frames: broadcast::Receiver<Vec<u8>>,
+    mut frames: broadcast::Receiver<bytes::Bytes>,
     egress: AuxEgress,
     counters: Arc<TeeCounters>,
     shaper_config: ShaperConfig,
@@ -786,7 +786,7 @@ mod tests {
         let radio = fake_radio(sock_path.clone(), tx_port, disabled);
         await_socket(&sock_path).await;
 
-        let (tx, rx) = broadcast::channel::<Vec<u8>>(64);
+        let (tx, rx) = broadcast::channel::<bytes::Bytes>(64);
         let counters = Arc::new(TeeCounters::default());
         let handle = tokio::spawn(run(
             rx,
@@ -797,7 +797,7 @@ mod tests {
         ));
 
         for frame in frames_to_send {
-            tx.send(frame).unwrap();
+            tx.send(frame.into()).unwrap();
         }
         // Closing the source ends the loop, which is deterministic where a
         // cancellation notify would race the select.
@@ -1007,7 +1007,7 @@ mod tests {
         // means the rest are dropped without touching the command socket.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.sock");
-        let (tx, rx) = broadcast::channel::<Vec<u8>>(64);
+        let (tx, rx) = broadcast::channel::<bytes::Bytes>(64);
         let counters = Arc::new(TeeCounters::default());
         let handle = tokio::spawn(run(
             rx,
@@ -1017,7 +1017,7 @@ mod tests {
             Arc::new(Notify::new()),
         ));
         for _ in 0..8 {
-            tx.send(v2_frame(0, 9)).unwrap();
+            tx.send(v2_frame(0, 9).into()).unwrap();
         }
         drop(tx);
         handle.await.unwrap();
@@ -1035,7 +1035,7 @@ mod tests {
     async fn cancelling_stops_the_tee() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.sock");
-        let (_tx, rx) = broadcast::channel::<Vec<u8>>(8);
+        let (_tx, rx) = broadcast::channel::<bytes::Bytes>(8);
         let cancel = Arc::new(Notify::new());
         let handle = tokio::spawn(run(
             rx,

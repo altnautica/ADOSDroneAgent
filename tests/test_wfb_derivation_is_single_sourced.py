@@ -39,6 +39,7 @@ SINGLE_SOURCED = (
     "radio_absent_block",
     "regulatory_domain",
     "read_regulatory_domain",
+    "refresh_regulatory_domain",
     "get_channel",
 )
 
@@ -47,12 +48,34 @@ MIN_RUST_FILES = 100
 
 
 def _rust_sources() -> list[Path]:
-    """Every crate source file, excluding build artifacts under `target/`."""
-    return [
-        p
-        for p in CRATES.rglob("*.rs")
-        if "target" not in p.relative_to(CRATES).parts
-    ]
+    """Every crate source file, excluding build artifacts under `target/`.
+
+    `target/` is PRUNED during the walk rather than filtered afterwards.
+    `rglob` descends into it either way, and cargo deletes its scratch files
+    (`target/debug/deps/rustcXXXXXX`) while it runs — so a walk racing a
+    concurrent build dies with FileNotFoundError on a path this scan was
+    never going to read. Pruning also makes the walk an order of magnitude
+    cheaper on a warm tree.
+    """
+    sources: list[Path] = []
+    stack = [CRATES]
+    while stack:
+        directory = stack.pop()
+        try:
+            entries = list(directory.iterdir())
+        except OSError:
+            # A directory that vanished mid-walk is build scratch, not source.
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir():
+                    if entry.name != "target":
+                        stack.append(entry)
+                elif entry.suffix == ".rs":
+                    sources.append(entry)
+            except OSError:
+                continue
+    return sources
 
 
 def test_the_wfb_derivation_has_exactly_one_definition_each() -> None:
@@ -70,8 +93,17 @@ def test_the_wfb_derivation_has_exactly_one_definition_each() -> None:
             continue
         rel = str(path.relative_to(CRATES))
         for name in SINGLE_SOURCED:
-            # `fn <name>(` at any visibility, ignoring calls and doc mentions.
-            if re.search(rf"^\s*(?:pub(?:\([^)]*\))?\s+)?fn {name}\s*[(<]", text, re.M):
+            # `fn <name>(` at any visibility and either asyncness, ignoring
+            # calls and doc mentions. `async` is in the pattern because the
+            # regulatory-domain read became `async fn` when it moved off the
+            # blocking path, and without it this scan reported ZERO
+            # definitions of a function that plainly exists — a
+            # single-source check that cannot see the thing it guards.
+            if re.search(
+                rf"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn {name}\s*[(<]",
+                text,
+                re.M,
+            ):
                 definitions[name].append(rel)
 
     problems: list[str] = []

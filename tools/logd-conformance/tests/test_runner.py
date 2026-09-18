@@ -426,9 +426,19 @@ def test_event_kind_filter_excludes_other_events():
     assert all(f.status == "missing-producer" for f in result.fields)
 
 
-def test_unreachable_store_marks_all_missing_producer():
+def test_an_unreachable_store_fails_the_run():
+    """A store the runner could not reach is a FAILED run, not a clean one.
+
+    With no reachable logd there are no field verdicts, so `failed` stays 0
+    — and the report used to call that `ok`. The harness therefore passed
+    hardest exactly when the Black Box was down, which is how a dead writer
+    shipped past it.
+    """
     fetcher = Fetcher([_logd_client({}, reachable=False)], _legacy_client(_LEGACY_LOGS))
     report = run_conformance(fetcher, initial_routes())
+    assert report.ok is False
+    # No field failed and none passed: the verdict rests entirely on
+    # reachability, which is the point.
     assert report.failed == 0
     assert report.passed == 0
     for route in report.routes:

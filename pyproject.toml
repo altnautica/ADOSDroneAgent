@@ -210,4 +210,15 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# The two conformance suites are IN. They were lint-checked and never run —
+# ~59 tests that existed, passed review, and could not have failed a build,
+# which is the same "gate that measures nothing" that let the defects in
+# `logd_conformance.runner` ship.
+testpaths = ["tests", "tools/api-conformance/tests", "tools/logd-conformance/tests"]
+# `importlib`, because the two conformance suites each carry a
+# `tests/test_runner.py` and neither has an `__init__.py`. Under the legacy
+# prepend import mode pytest derives a module name from the basename, the
+# second file collides with the first, and collection aborts — which is what
+# happened the moment these directories were collected for the first time.
+# `importlib` gives each file a unique module identity from its full path.
+addopts = "--import-mode=importlib"

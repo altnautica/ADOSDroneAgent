@@ -1,12 +1,27 @@
 //! Boot-time hardware detection: camera + WFB radio adapter.
 //!
-//! Mirrors the Python supervisor's detect pass. All reads are filesystem /
-//! subprocess probes, so the module compiles on any host (the probes simply
-//! find nothing off a real SBC).
+//! All reads are filesystem / subprocess probes, so the module compiles on any
+//! host (the probes simply find nothing off a real SBC).
+//!
+//! Everything here runs BEFORE the supervisor signals readiness, which is why
+//! every subprocess is bounded: a board that never reaches READY is a board
+//! that never flies, and systemd's own start timeout is the only thing that
+//! would eventually notice.
 
 use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
 
 use tokio::process::Command;
+
+/// Ceiling for the CSI camera probe.
+///
+/// `rpicam-hello --list-cameras` talks to the camera stack, and a camera whose
+/// CSI link has not trained (a marginal ribbon, a half-seated connector — the
+/// failure this probe exists to detect) can leave it blocked indefinitely.
+/// Unbounded, that parked the whole pre-READY startup path on a wedged probe.
+/// Generous enough for a cold libcamera enumeration on a Pi Zero-class SoC.
+const CAMERA_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// True if a video node exists or a CSI camera is present.
 pub async fn has_camera() -> bool {
@@ -22,21 +37,56 @@ pub fn video_node_present() -> bool {
 }
 
 async fn csi_camera_present() -> bool {
-    match Command::new("rpicam-hello")
+    // `kill_on_drop` matters as much as the timeout: without it the timeout
+    // path leaks the wedged probe, which keeps holding the camera stack the
+    // video service is about to want.
+    let child = Command::new("rpicam-hello")
         .arg("--list-cameras")
-        .output()
-        .await
-    {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).contains("Available cameras"),
-        Err(_) => false,
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(CAMERA_PROBE_TIMEOUT, child).await {
+        Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).contains("Available cameras"),
+        Ok(Err(_)) => false, // spawn error (binary absent off a Pi)
+        Err(_) => {
+            tracing::warn!(
+                timeout_s = CAMERA_PROBE_TIMEOUT.as_secs(),
+                "csi_camera_probe_timeout"
+            );
+            false
+        }
     }
 }
 
-/// True if an RTL8812-family WFB adapter is on the USB bus (boot detect set:
-/// the same VID/PID triple the Python `_check_wfb_adapter` uses).
+/// True if a WFB-ng capable adapter is on the USB bus.
+///
+/// Matched against the generated adapter table, which is the single source of
+/// truth (`crates/ados-protocol/wfb-adapters.toml` → `wfb_tables`). This used
+/// to be a three-entry hardcode: a second, silently-diverging table that made
+/// a supported adapter — an RTL8812EU, or either TP-Link variant — read as "no
+/// radio", so the supervisor never started the radio unit and the aircraft
+/// came up with no link on hardware the rest of the stack fully supports.
+///
+/// The vendor deny-set is applied first, matching `ados-radio`'s classifier:
+/// a management-WiFi chip that advertises monitor mode must never be taken for
+/// an injection radio.
 pub fn has_wfb_adapter() -> bool {
-    const WFB_IDS: [(u16, u16); 3] = [(0x0BDA, 0xA81A), (0x0BDA, 0x8812), (0x0BDA, 0x881A)];
-    enumerate_usb_ids().iter().any(|id| WFB_IDS.contains(id))
+    enumerate_usb_ids()
+        .iter()
+        .any(|(vid, pid)| is_wfb_adapter_id(*vid, *pid))
+}
+
+/// Whether one USB `(vid, pid)` is a WFB-ng injection adapter, per the
+/// generated table. Split out so the boot-detect classification is provable
+/// without a USB bus.
+pub fn is_wfb_adapter_id(vid: u16, pid: u16) -> bool {
+    use ados_protocol::wfb_tables::{DENY_VID, WFB_COMPATIBLE};
+    if DENY_VID.contains(&vid) {
+        return false;
+    }
+    WFB_COMPATIBLE
+        .iter()
+        .any(|(v, p, _)| *v == vid && *p == pid)
 }
 
 /// Read `(idVendor, idProduct)` for every device under `/sys/bus/usb/devices`.
@@ -180,5 +230,34 @@ mod tests {
         let bare = dir.path().join("soc-uart");
         std::fs::create_dir_all(&bare).unwrap();
         assert_eq!(usb_id_above(&bare), None);
+    }
+
+    #[test]
+    fn boot_detect_accepts_every_adapter_the_generated_table_declares() {
+        // The regression: this classification was a three-entry hardcode
+        // (a81a / 8812 / 881a), so an RTL8812EU or either TP-Link variant read
+        // as "no radio" and the supervisor never started the radio unit on
+        // hardware the rest of the stack fully supports. Asserting against the
+        // generated table — not a second copy of it — is what stops a future
+        // table entry from silently going undetected at boot again.
+        for (vid, pid, label) in ados_protocol::wfb_tables::WFB_COMPATIBLE {
+            assert!(
+                is_wfb_adapter_id(*vid, *pid),
+                "{label} ({vid:#06x}:{pid:#06x}) is a declared WFB adapter but \
+                 boot detect does not recognise it"
+            );
+        }
+    }
+
+    #[test]
+    fn boot_detect_refuses_a_denied_management_radio_and_an_unknown_id() {
+        // A management-WiFi chip that advertises monitor mode must never be
+        // taken for an injection radio: starting the radio unit on it takes
+        // down the box's own management link and still gives no video.
+        for vid in ados_protocol::wfb_tables::DENY_VID {
+            assert!(!is_wfb_adapter_id(*vid, 0x8812));
+        }
+        // A plain USB-serial bridge is not a radio.
+        assert!(!is_wfb_adapter_id(0x1A86, 0x7523));
     }
 }

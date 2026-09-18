@@ -67,6 +67,9 @@ pub struct AppState {
     /// The control sender to the single writer. The mark-synced handler enqueues
     /// a request here and awaits the reply; it never writes the store itself.
     pub mark_synced: mpsc::Sender<crate::writer::ControlMsg>,
+    /// The writer's liveness stamp. Read (never written) by `healthz` and
+    /// `stats`.
+    pub writer_health: crate::writer::WriterHealth,
 }
 
 impl AppState {
@@ -84,14 +87,19 @@ impl AppState {
         })
     }
 
-    /// Whether the writer is presumed alive. The daemon owns the writer thread
-    /// for its whole lifetime and tears the read surface down before joining the
-    /// writer on shutdown, so a request that reaches a handler is always served
-    /// while the writer is up. A finer per-request liveness signal would need a
-    /// heartbeat the writer does not expose; reporting alive while the daemon
-    /// serves is the honest answer and keeps `healthz` from flapping.
+    /// Whether the writer is still persisting.
+    ///
+    /// Read from the writer's own progress stamp, not assumed: this used to
+    /// return a hardcoded `true`, so a writer that exited on an `SQLITE_FULL`,
+    /// an I/O error or a corrupt store left `/v1/healthz` answering 200
+    /// `{ok:true, writer_alive:true}` while the Black Box recorded nothing.
+    /// The daemon owns the writer thread for its whole lifetime and tears this
+    /// surface down before joining it, so during a clean shutdown this still
+    /// reads alive; what it now catches is the writer dying underneath a daemon
+    /// that is still serving.
     fn writer_alive(&self) -> bool {
-        true
+        self.writer_health
+            .is_alive(crate::writer::WRITER_STALL_BUDGET)
     }
 }
 
@@ -659,6 +667,30 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// An `AppState` over a real store file, wired to `health`. The control
+    /// receiver comes back with it so the caller keeps the channel open (these
+    /// tests never post `/v1/synced`).
+    fn state_for(
+        db_path: std::path::PathBuf,
+        health: crate::writer::WriterHealth,
+    ) -> (AppState, mpsc::Receiver<crate::writer::ControlMsg>) {
+        let (tx, rx) = mpsc::channel::<crate::writer::ControlMsg>(1);
+        let state = AppState {
+            db_path: db_path.clone(),
+            pool: super::super::pool::ConnPool::new(db_path, super::super::pool::DEFAULT_MAX_IDLE),
+            broadcast: broadcast::channel(1).0,
+            ingest: Arc::new(crate::ingest::IngestStats::default()),
+            tail_slots: Arc::new(super::super::sse::TailSlots::default()),
+            export_slots: Arc::new(super::super::sse::ExportSlots::default()),
+            pairing: Arc::new(super::super::auth::PairingState::with_path(
+                std::path::PathBuf::from("/nonexistent/pairing.json"),
+            )),
+            mark_synced: tx,
+            writer_health: health,
+        };
+        (state, rx)
+    }
+
     #[tokio::test]
     async fn synced_rejects_a_backwards_range_before_touching_the_writer() {
         // A control sender whose receiver is dropped: if the handler tried to
@@ -680,6 +712,7 @@ mod tests {
                 std::path::PathBuf::from("/nonexistent/pairing.json"),
             )),
             mark_synced: tx,
+            writer_health: crate::writer::WriterHealth::new(),
         };
         let req = SyncRequest {
             from_us: Some(200),
@@ -689,5 +722,45 @@ mod tests {
         let err = synced(State(state), Json(req)).await.unwrap_err();
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_unhealthy_once_the_writer_has_died() {
+        // The store file itself stays perfectly readable — that is the whole
+        // point. A dead writer used to leave this endpoint answering 200
+        // {ok:true, writer_alive:true} while the Black Box recorded nothing,
+        // so an operator (and any probe) read a store that had silently
+        // stopped as healthy.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("logs.db");
+        crate::db::open(&db_path).unwrap();
+
+        let health = crate::writer::WriterHealth::new();
+        let (state, _control_rx) = state_for(db_path, health.clone());
+
+        let resp = healthz(State(state.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK, "a live writer reads healthy");
+
+        // The writer's run loop returns (an SQLITE_FULL, an I/O error, a
+        // corrupt store, or a panic all land here).
+        health.mark_ended();
+
+        let resp = healthz(State(state)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a dead writer must not be reported as healthy"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let health_json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health_json["ok"], serde_json::json!(false));
+        assert_eq!(health_json["writer_alive"], serde_json::json!(false));
+        assert_eq!(
+            health_json["db_open"],
+            serde_json::json!(true),
+            "the store is still readable; it is the writer that died"
+        );
     }
 }

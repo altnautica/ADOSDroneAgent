@@ -118,10 +118,14 @@ pub(crate) async fn ensure_radiating(
 /// changed) and a hung `iw` both record `false` instead of a false success, so
 /// the caller's hop / return-home outcome reflects reality.
 pub(crate) async fn set_channel(iface: &str, channel: u8) -> bool {
+    // `kill_on_drop` is what makes the timeout a real bound: dropping the
+    // future at the deadline otherwise leaves the wedged `iw` running, one per
+    // timed-out hop, on the board that is already in trouble.
     let status = tokio::time::timeout(
         SET_CHANNEL_TIMEOUT,
         tokio::process::Command::new("iw")
             .args([iface, "set", "channel", &channel.to_string()])
+            .kill_on_drop(true)
             .status(),
     )
     .await;
@@ -162,6 +166,7 @@ pub(crate) async fn channel_from_iface(iface: &str) -> Option<u8> {
         SET_CHANNEL_TIMEOUT,
         tokio::process::Command::new("iw")
             .args([iface, "info"])
+            .kill_on_drop(true)
             .output(),
     )
     .await

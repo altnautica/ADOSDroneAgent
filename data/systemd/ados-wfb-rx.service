@@ -18,7 +18,15 @@ StartLimitBurst=5
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
 # observable per unit (the slice sets MemoryAccounting=yes).
 Slice=ados.slice
-Type=simple
+# Type=notify + WatchdogSec so systemd can recover a WEDGED receive plane, not
+# just a crashed one. The binary's keep-alive ping is coupled to the role loop's
+# progress marker, so the ping stops when the loop stops advancing — a process
+# that still exists and still schedules tasks while the receive plane, the
+# channel acquirer and the hop follower have all stopped is exactly the failure
+# that previously needed a power cycle or SSH on site. Kept in lock-step with
+# ados_supervisor::sdnotify::WATCHDOG_SEC, which sets the ping cadence.
+Type=notify
+WatchdogSec=30
 User=root
 # The native ground-station receive plane (direct role). The install verifies
 # the binary is present before this unit starts, so a normal boot runs it

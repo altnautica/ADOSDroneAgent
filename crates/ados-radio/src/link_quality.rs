@@ -87,6 +87,27 @@ pub struct LinkStats {
     pub timestamp: String,
 }
 
+impl LinkStats {
+    /// True when these numbers come from a real decode rather than the
+    /// no-measurement defaults.
+    ///
+    /// The signal-strength fields are seeded with sentinels (`rssi_dbm -100`,
+    /// `noise_dbm -95`, `snr_db 0`) and the rate fields with zeros, and a radio
+    /// that has decoded nothing still carries exactly those. Published raw they
+    /// are indistinguishable from a measurement: -100 dBm reads as a weak link
+    /// and `loss_percent 0.0` reads as a perfect one, when the truth is that
+    /// nothing was heard at all.
+    ///
+    /// One predicate for every consumer — the `wfb-stats.json` writer, the
+    /// durable link-history emitters on both profiles — so a surface cannot
+    /// start disagreeing with its own sidecar about whether a reading exists.
+    /// Same real-decode gate [`crate::link_state::derive_link_state`] uses, so
+    /// the state and the numbers always agree.
+    pub fn is_measured(&self) -> bool {
+        self.packets_received > 0
+    }
+}
+
 impl Default for LinkStats {
     fn default() -> Self {
         Self {
@@ -317,6 +338,28 @@ mod tests {
     use super::*;
 
     const TS: &str = "2026-05-29T00:00:00+00:00";
+
+    #[test]
+    fn the_sentinel_snapshot_is_not_a_measurement() {
+        // The boundary every link surface depends on. A radio that has decoded
+        // nothing still carries rssi -100 / noise -95 / snr 0 / loss 0.0, and
+        // published raw those read as a weak-but-lossless link that was never
+        // observed. One decoded packet is the whole difference between "no
+        // reading" and "a reading", so pin both sides of it.
+        let none = LinkStats::default();
+        assert!(
+            !none.is_measured(),
+            "the no-decode defaults must never count as a measurement"
+        );
+        assert_eq!(none.rssi_dbm, -100.0, "…and they really are sentinels");
+        assert_eq!(none.loss_percent, 0.0);
+
+        let one = LinkStats {
+            packets_received: 1,
+            ..LinkStats::default()
+        };
+        assert!(one.is_measured(), "one decoded packet is a measurement");
+    }
 
     #[test]
     fn rx_ant_updates_rssi_snr_noise() {

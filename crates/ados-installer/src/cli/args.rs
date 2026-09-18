@@ -216,6 +216,48 @@ pub enum ParseError {
     UnexpectedPositional(String),
 }
 
+/// Why this `--display` value cannot be honoured, given the display ids the
+/// detected board DECLARES (pure). `None` when it is installable.
+///
+/// `auto` and `none` are always legal (auto-detect / explicit opt-out). Any
+/// other value must be a slug the board declares, because only a declared id
+/// has a binding — wiring, overlay, rotation, touch controller — for the
+/// overlay installer to apply. `--display` used to be free-form and unchecked,
+/// so a typo (or a real id belonging to a different board) silently produced a
+/// node with no display and, worse, once drove a hard-coded SPI panel overlay
+/// that took HDMI down with it.
+///
+/// `declared` empty means the board is unknown or declares no display: that
+/// cannot validate anything, so any slug is accepted and the overlay installer
+/// has the final say.
+pub fn display_value_error(value: &str, declared: &[String]) -> Option<String> {
+    let v = value.trim();
+    if v == "auto" || v == "none" {
+        return None;
+    }
+    if v.is_empty()
+        || !v
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Some(format!(
+            "--display {value:?} is not a display id: expected auto, none, or a slug \
+             (letters, digits, dash, underscore)"
+        ));
+    }
+    if declared.is_empty() {
+        return None;
+    }
+    if declared.iter().any(|d| d == v) {
+        return None;
+    }
+    Some(format!(
+        "--display {v} is not declared by this board. Declared: {}. Use auto to \
+         auto-detect, or none to opt out.",
+        declared.join(", ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +420,39 @@ mod tests {
             Args::parse(["--artifacts", "--profile", "drone"]).unwrap_err(),
             ParseError::MissingValue("--artifacts".to_string())
         );
+    }
+
+    #[test]
+    fn display_auto_and_none_are_always_accepted() {
+        let declared = vec!["waveshare35a".to_string()];
+        assert_eq!(display_value_error("auto", &declared), None);
+        assert_eq!(display_value_error("none", &declared), None);
+        assert_eq!(display_value_error("auto", &[]), None);
+    }
+
+    #[test]
+    fn an_id_the_board_does_not_declare_is_refused() {
+        // A real board-declared id belonging to ANOTHER board, and a typo. Both
+        // used to be accepted; on a ground station the second one even drove a
+        // hard-coded SPI panel overlay that took HDMI down with it.
+        let declared = vec!["waveshare35a".to_string()];
+        let err = display_value_error("hdmi_touch_xpt2046", &declared).expect("refused");
+        assert!(err.contains("not declared"), "{err}");
+        assert!(err.contains("waveshare35a"), "{err}");
+        assert!(display_value_error("waveshare35", &declared).is_some());
+        // A declared id passes.
+        assert_eq!(display_value_error("waveshare35a", &declared), None);
+    }
+
+    #[test]
+    fn a_non_slug_is_refused_even_when_the_board_is_unknown() {
+        // Nothing to validate against still rejects a value that cannot be a
+        // display id — it would reach a shell argument.
+        assert!(display_value_error("../../etc/passwd", &[]).is_some());
+        assert!(display_value_error("panel; reboot", &[]).is_some());
+        assert!(display_value_error("", &[]).is_some());
+        // An unknown board cannot validate a well-formed slug, so it accepts
+        // and the overlay installer has the final say.
+        assert_eq!(display_value_error("some_panel-2", &[]), None);
     }
 }

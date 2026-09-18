@@ -33,6 +33,7 @@ pub mod sse;
 pub mod stats;
 
 use std::convert::Infallible;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -148,7 +149,9 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) ->
 /// `db_path` is opened read-only per request, never read-write. `broadcast` is
 /// the writer's sender clone; `ingest` are the live counters; `pairing_path`
 /// points at the agent's `pairing.json` for the TCP-edge auth; `mark_synced` is
-/// the writer's control sender the on-socket mark path enqueues on.
+/// the writer's control sender the on-socket mark path enqueues on;
+/// `writer_health` is the writer's progress stamp, which is what makes
+/// `/v1/healthz` able to report a dead writer instead of assuming a live one.
 // This is a wiring seam: each argument is an independently-owned resource handed
 // in by the daemon, so bundling them into a struct adds indirection without
 // buying clarity. Matches the `query_sessions` precedent in `rows.rs`.
@@ -161,10 +164,11 @@ pub async fn spawn_query_server<F>(
     ingest: Arc<IngestStats>,
     pairing_path: PathBuf,
     mark_synced: mpsc::Sender<ControlMsg>,
+    writer_health: crate::writer::WriterHealth,
     shutdown: F,
 ) -> Result<()>
 where
-    F: std::future::Future<Output = ()> + Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
 {
     let pairing = Arc::new(PairingState::with_path(pairing_path));
     // The shared pool of warm read-only connections the handlers check out from.
@@ -180,6 +184,7 @@ where
         export_slots: Arc::new(ExportSlots::default()),
         pairing: Arc::clone(&pairing),
         mark_synced,
+        writer_health,
     };
 
     // The Unix edge: the bare Router, no auth.
@@ -395,7 +400,15 @@ mod tests {
             let mut rx = mark_rx;
             while rx.blocking_recv().is_some() {}
         });
-        start_with_control(dir, pairing_body, db_path, mark_tx, Some(parked)).await
+        start_with_control(
+            dir,
+            pairing_body,
+            db_path,
+            mark_tx,
+            crate::writer::WriterHealth::new(),
+            Some(parked),
+        )
+        .await
     }
 
     /// The writer-backed harness: spawn a real writer thread over the same store
@@ -416,8 +429,17 @@ mod tests {
         )
         .unwrap();
         let mark_tx = writer.control_handle();
+        let health = writer.health_handle();
         let writer_thread = std::thread::spawn(move || writer.run().unwrap());
-        let h = start_with_control(dir, pairing_body, db_path, mark_tx, Some(writer_thread)).await;
+        let h = start_with_control(
+            dir,
+            pairing_body,
+            db_path,
+            mark_tx,
+            health,
+            Some(writer_thread),
+        )
+        .await;
         (h, ingest_tx)
     }
 
@@ -426,6 +448,7 @@ mod tests {
         pairing_body: Option<&str>,
         db_path: PathBuf,
         mark_tx: mpsc::Sender<ControlMsg>,
+        writer_health: crate::writer::WriterHealth,
         writer: Option<std::thread::JoinHandle<()>>,
     ) -> Harness {
         let socket = dir.join("logd-query.sock");
@@ -453,6 +476,7 @@ mod tests {
                 ingest,
                 pairing_path,
                 mark_tx,
+                writer_health,
                 async move {
                     let _ = stop_rx.await;
                 },

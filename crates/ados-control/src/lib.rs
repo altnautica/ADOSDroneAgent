@@ -480,10 +480,12 @@ where
     // here from the same config the Python agent writes) supplies the configured
     // key + HMAC settings the gate reads. Built once and shared across all
     // connections (it holds the replay-detector nonce store).
-    let proxied_auth = {
-        let sec = crate::config::ControlSecurityConfig::load_from(&paths.config_path);
-        Arc::new(crate::proxy_auth::ProxiedAuth::new(sec.security.clone()))
-    };
+    // One read of the security config, shared by the proxied-auth gate and the
+    // CORS allow-list, so the two cannot be built from different snapshots.
+    let control_security = crate::config::ControlSecurityConfig::load_from(&paths.config_path);
+    let proxied_auth = Arc::new(crate::proxy_auth::ProxiedAuth::new(
+        control_security.security.clone(),
+    ));
 
     // The Unix edge: the bare Router, no auth. The LAN edge: the same Router
     // wrapped with the rate-limit + auth layer keyed on the shared pairing
@@ -496,6 +498,7 @@ where
         Arc::clone(&dashboard_pin),
         Arc::clone(&mcp_tokens),
         paths.config_path.clone(),
+        &control_security,
     );
 
     // Bind every listener up front so a bind failure surfaces here. The LAN front

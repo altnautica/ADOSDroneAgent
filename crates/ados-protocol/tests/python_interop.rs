@@ -131,7 +131,17 @@ fn state_v2_decodes_python_msgpack() {
     // msgpack({"v": 2, "s": state}); the Rust state hub must decode it to the
     // same inner snapshot. (body_hex is the frame payload without the 4-byte
     // length prefix.)
-    assert_eq!(s["version"].as_u64().unwrap(), 2);
+    // Against the Rust constant, NOT a hand-written 2. The whole point of
+    // this file is to catch the two languages disagreeing about the wire, so
+    // a literal here would have to be edited on every bump — and an edit
+    // that has to happen is an edit that eventually does not, leaving the
+    // check asserting an old number against a new fixture. Both sides now
+    // read their own registry.
+    assert_eq!(
+        s["version"].as_u64().unwrap(),
+        u64::from(state::STATE_WIRE_VERSION),
+        "the Python fixture and the Rust constant must name one wire version"
+    );
     let body = hex::decode(s["body_hex"].as_str().unwrap()).unwrap();
     let decoded = state::decode_v2(&body).unwrap();
     assert_eq!(decoded, s["state"]);

@@ -13,7 +13,7 @@
 //! command socket hold, so an `open` reaches the live radio group.
 //!
 //! Wire protocol (mirrors the operator command socket): one newline-terminated
-//! JSON request. `open` / `close` / `status` / `send` reply with one
+//! JSON request. `open` / `close` / `status` / `send` / `publish` reply with one
 //! newline-terminated JSON response and close (one-shot). `subscribe` flips the
 //! connection into a streaming subscriber: it replies `{"ok":true}` then pushes
 //! every decoded application datagram as a newline-terminated JSON line until
@@ -28,11 +28,33 @@
 //!     -> {"ok":true,"active":false}
 //! {"op":"send","frame":[170,2,1,8,0,5,104,101,108,108,111]}
 //!     -> {"ok":true}
+//! {"op":"publish","channel":8,"payload":[104,101,108,108,111]}
+//!     -> {"ok":true,"delivered":1}
 //! {"op":"subscribe"}
 //!     -> {"ok":true}
 //!     -> {"channel":8,"payload":[104,101,108,108,111]}
 //!     -> ...
 //! ```
+//!
+//! ## Why `publish` exists — the inbound half lives in another process
+//!
+//! `send` writes OUTBOUND: an aux-framed datagram to the local transmit
+//! ingress, which `wfb_tx` radiates. `publish` is the INBOUND direction, and it
+//! is a separate op because this service does not own the receive side.
+//!
+//! The aux-RX loopback port that `wfb_rx -p3` decodes onto is owned by
+//! `ados-mavlink-router`'s aux-uplink consumer, which needs it for the MAVLink,
+//! relay-RPC, link-feedback and config-tunnel channels on that same lane. This
+//! service bound it too for a while; nothing set SO_REUSEADDR, so one of the two
+//! always lost and a whole lane went dark with no surface reporting it. One
+//! owner now: the consumer decodes, and the two APPLICATION channels
+//! (`AppStream` 8 / `AppCommand` 9) come back here through `publish`, which
+//! injects them into the same broadcast every `subscribe` connection reads.
+//!
+//! `delivered` is the number of attached subscribers the datagram reached. Zero
+//! is NOT a failure — it is the normal state of a drone with no plugin
+//! subscribed — so a caller counting drops must key on `ok:false`, not on a zero
+//! delivered count, or a healthy rig reports total loss.
 //!
 //! A failed apply (a spawn failure on `open`) replies `{"ok":false,"error":"..."}`
 //! and leaves the aux pair closed, so the host can surface the error. The socket
@@ -42,6 +64,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use ados_protocol::aux_mux::AuxChannel;
 use ados_protocol::ipc::{bind_command_socket, read_newline_line};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -65,10 +88,10 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub struct AuxCmdState {
     pub proc: Arc<Mutex<RadioProcesses>>,
     pub cfg: Arc<WfbConfig>,
-    /// Fan-out for application datagrams decoded off the aux-RX loopback (see
-    /// [`crate::aux_rx`]). `subscribe` connections stream from this; each decoded
-    /// `AppStream` / `AppCommand` frame is broadcast to every attached subscriber
-    /// as `(channel as u8, payload)`. The same sender feeds the receive task.
+    /// Fan-out for inbound application datagrams. `subscribe` connections stream
+    /// from this; the `publish` op is what feeds it, carrying each `AppStream` /
+    /// `AppCommand` payload the aux-uplink consumer decoded in the MAVLink
+    /// router process. Items are `(channel as u8, payload)`.
     pub rx_tx: broadcast::Sender<(u8, Vec<u8>)>,
 }
 
@@ -77,6 +100,13 @@ struct Request {
     op: String,
     #[serde(default)]
     frame: Option<Vec<u8>>,
+    /// `publish` only: the aux channel the payload arrived on (8 or 9).
+    #[serde(default)]
+    channel: Option<u8>,
+    /// `publish` only: the already-decoded application bytes, WITHOUT the aux
+    /// frame header — `subscribe` streams exactly these.
+    #[serde(default)]
+    payload: Option<Vec<u8>>,
 }
 
 /// Bind the aux command socket and serve connections until the listener errors.
@@ -201,6 +231,11 @@ enum Command {
     /// (`127.0.0.1:<cfg.aux_tx_port>`), so `wfb_tx` radiates it to the paired
     /// node. One-shot: no per-send state, the stream is between open and close.
     Send { frame: Vec<u8> },
+    /// Inject one INBOUND application payload into the subscriber fan-out. The
+    /// aux-uplink consumer in the MAVLink router owns the receive port and calls
+    /// this for the two application channels it decodes; see the module doc for
+    /// why the receive side is not in this process.
+    Publish { channel: u8, payload: Vec<u8> },
 }
 
 /// The outcome of parsing a request line: an apply-ready [`Command`], a terminal
@@ -230,6 +265,18 @@ fn parse_command(line: &[u8]) -> Parsed {
         "send" => match req.frame {
             Some(frame) => Parsed::Cmd(Command::Send { frame }),
             None => Parsed::Reply(json!({"ok": false, "error": "E_BAD_REQUEST: missing frame"})),
+        },
+        "publish" => match (req.channel, req.payload) {
+            // The channel is validated on apply, not here: `parse_command` is
+            // pure over the line and the accepted set belongs with the fan-out
+            // it feeds.
+            (Some(channel), Some(payload)) => Parsed::Cmd(Command::Publish { channel, payload }),
+            (None, _) => {
+                Parsed::Reply(json!({"ok": false, "error": "E_BAD_REQUEST: missing channel"}))
+            }
+            (_, None) => {
+                Parsed::Reply(json!({"ok": false, "error": "E_BAD_REQUEST: missing payload"}))
+            }
         },
         "subscribe" => Parsed::Subscribe,
         other => Parsed::Reply(json!({"ok": false, "error": format!("E_UNKNOWN_OP: {other}")})),
@@ -308,7 +355,45 @@ async fn apply(cmd: Command, state: &AuxCmdState) -> Value {
             }
             json!({"ok": true})
         }
+        Command::Publish { channel, payload } => {
+            publish_app_datagram(state.cfg.aux_enable, &state.rx_tx, channel, payload)
+        }
     }
+}
+
+/// Inject one inbound application payload into the subscriber fan-out.
+///
+/// Split out from [`apply`] because it touches no radio state at all — it takes
+/// the dead-switch flag and the sender rather than the whole `AuxCmdState`, so
+/// the accept/refuse decision AND the actual delivery are exercisable without a
+/// live `wfb_tx` process group. The channel gate is the load-bearing part: the
+/// caller is a different process on the other side of a socket, and a frame from
+/// any other plane on that lane must never reach a plugin's application stream.
+fn publish_app_datagram(
+    aux_enable: bool,
+    rx_tx: &broadcast::Sender<(u8, Vec<u8>)>,
+    channel: u8,
+    payload: Vec<u8>,
+) -> Value {
+    // Same operator dead-switch as `send` / `subscribe`: a deployment that
+    // turned the aux lane off must not have application traffic arriving
+    // through the back door either.
+    if let Some(reply) = aux_disabled_reply(aux_enable) {
+        return reply;
+    }
+    // Only the two APPLICATION channels. The other planes on this lane (MAVLink,
+    // relay RPC, link feedback, config tunnel) have their own consumers in the
+    // router process, and leaking one into the application fan-out would corrupt
+    // a plugin's stream with frames it has no framing for.
+    if channel != AuxChannel::AppStream as u8 && channel != AuxChannel::AppCommand as u8 {
+        return json!({"ok": false, "error": "E_BAD_CHANNEL"});
+    }
+    // `send` returns Err only when there is no subscriber, which is the normal
+    // state of a drone with no plugin attached — not a failure. The count is
+    // reported so a caller can distinguish "nobody is listening" from "the lane
+    // is broken" without guessing.
+    let delivered = rx_tx.send((channel, payload)).unwrap_or(0);
+    json!({"ok": true, "delivered": delivered})
 }
 
 #[cfg(test)]
@@ -368,6 +453,100 @@ mod tests {
     #[test]
     fn subscribe_parses_to_the_streaming_request() {
         subscribe(br#"{"op":"subscribe"}"#);
+    }
+
+    #[test]
+    fn publish_parses_the_decoded_channel_and_payload() {
+        // `publish` carries the DECODED inner payload, not an aux frame — the
+        // consumer already stripped the header, and `subscribe` streams exactly
+        // these bytes. A request missing either field is a clean E_BAD_REQUEST
+        // naming which one, so the caller can fix its encoder.
+        let c = cmd(br#"{"op":"publish","channel":8,"payload":[104,105]}"#);
+        assert_eq!(
+            c,
+            Command::Publish {
+                channel: 8,
+                payload: vec![b'h', b'i']
+            }
+        );
+        assert_eq!(
+            reply(br#"{"op":"publish","payload":[1]}"#)["error"],
+            "E_BAD_REQUEST: missing channel"
+        );
+        assert_eq!(
+            reply(br#"{"op":"publish","channel":8}"#)["error"],
+            "E_BAD_REQUEST: missing payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_published_datagram_reaches_every_subscriber() {
+        // The end the aux-uplink consumer now feeds: it decodes off the port it
+        // owns and hands the two application channels back here, so a plugin
+        // holding a `subscribe` connection still receives inbound app traffic
+        // even though this process no longer binds the receive port.
+        let (tx, _keepalive) = broadcast::channel::<(u8, Vec<u8>)>(16);
+        let mut plugin = tx.subscribe();
+        let v = publish_app_datagram(true, &tx, AuxChannel::AppCommand as u8, b"pong".to_vec());
+        assert_eq!(v["ok"], true);
+        assert_eq!(
+            v["delivered"], 2,
+            "the reply counts the subscribers reached"
+        );
+        assert_eq!(
+            plugin.try_recv().expect("the subscriber must receive it"),
+            (AuxChannel::AppCommand as u8, b"pong".to_vec())
+        );
+    }
+
+    #[test]
+    fn publish_refuses_every_channel_that_is_not_an_application_lane() {
+        // The aux lane also carries MAVLink, relay RPC, link feedback and the
+        // config tunnel, each with its own consumer in the router process. The
+        // caller is another process across a socket, so this gate is the only
+        // thing stopping a MAVLink frame from being delivered to a plugin as
+        // application bytes it has no framing for.
+        let (tx, _keepalive) = broadcast::channel::<(u8, Vec<u8>)>(16);
+        for channel in [
+            AuxChannel::Mavlink as u8,
+            AuxChannel::Request as u8,
+            AuxChannel::LinkFeedback as u8,
+            AuxChannel::ConfigTunnel as u8,
+        ] {
+            let v = publish_app_datagram(true, &tx, channel, vec![0xFF]);
+            assert_eq!(v["ok"], false, "channel {channel} must be refused");
+            assert_eq!(v["error"], "E_BAD_CHANNEL");
+        }
+        // And both application channels are accepted.
+        for channel in [AuxChannel::AppStream as u8, AuxChannel::AppCommand as u8] {
+            assert_eq!(
+                publish_app_datagram(true, &tx, channel, vec![1])["ok"],
+                true
+            );
+        }
+    }
+
+    #[test]
+    fn publish_with_no_subscriber_is_success_not_a_drop() {
+        // The normal state of a drone with no plugin attached. Reporting this as
+        // a failure would make a healthy rig's caller count 100% loss on a lane
+        // that is working exactly as designed.
+        let (tx, _) = broadcast::channel::<(u8, Vec<u8>)>(16);
+        let v = publish_app_datagram(true, &tx, AuxChannel::AppStream as u8, vec![7]);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["delivered"], 0);
+    }
+
+    #[test]
+    fn publish_is_refused_when_the_operator_disabled_the_aux_lane() {
+        let (tx, mut sub) = broadcast::channel::<(u8, Vec<u8>)>(16);
+        let v = publish_app_datagram(false, &tx, AuxChannel::AppStream as u8, vec![1]);
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "E_AUX_DISABLED");
+        assert!(
+            sub.try_recv().is_err(),
+            "a refused publish must not reach the fan-out"
+        );
     }
 
     #[test]

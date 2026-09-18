@@ -331,11 +331,41 @@ fn validate_source(source: &str) -> Result<&str, EncoderError> {
     }
 }
 
+/// The only wire codec this builder can produce a shippable stream for.
+///
+/// H.264 is not a preference here, it is the only value with a tuning arm.
+/// `h265` / `hevc` / `mjpeg` parse clean out of `video.camera.codec` and used
+/// to be mapped straight onto `libx265` / `mjpeg`, where **neither** tuning
+/// block in [`build_ffmpeg_command`] fires: no `-g`, so the GOP is whatever
+/// the encoder defaults to, and no in-band parameter-set bitstream filter, so
+/// SPS/PPS/VPS never reach the wire. Meanwhile the primary leg's radio branch
+/// frames every payload as RTP payload type 96 — H.264 per RFC 6184 — against
+/// a fixed receiver SDP, and the browser leg is pinned to an H.264 profile.
+/// A node that configured one of them therefore published an unbounded-GOP
+/// stream with no in-band headers into an H.264-typed leg: nothing decodes on
+/// the ground, and the pipeline still reported `streaming`. Refusing the
+/// build names the real cause instead of shipping that.
+///
+/// Exactly one spelling is accepted. There is no `H264` alias: the `rpicam-vid`
+/// arm passes this value verbatim to `--codec`, which only knows the lowercase
+/// form, so the alias was never a working configuration on that arm.
+fn validate_codec(codec: &str) -> Result<(), EncoderError> {
+    if codec == "h264" {
+        Ok(())
+    } else {
+        Err(EncoderError::UnsupportedCodec(codec.to_string()))
+    }
+}
+
 /// Error from the encoder command builder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncoderError {
     /// A source / output string contained a disallowed character.
     InvalidSource(String),
+    /// The configured wire codec has no tuning arm, so it cannot be published
+    /// without breaking the radio and browser legs. Only `h264` is accepted;
+    /// the `Display` text carries the full reason.
+    UnsupportedCodec(String),
 }
 
 impl std::fmt::Display for EncoderError {
@@ -345,6 +375,15 @@ impl std::fmt::Display for EncoderError {
                 f,
                 "Invalid source path: {s:?}. Only alphanumeric, slashes, dots, \
                  hyphens, underscores, and colons are allowed."
+            ),
+            EncoderError::UnsupportedCodec(c) => write!(
+                f,
+                "Unsupported video codec {c:?}. Only \"h264\" is emitted with a \
+                 bounded keyframe interval (-g) and in-band SPS/PPS before every \
+                 IDR, and the radio leg frames every payload as RTP payload type \
+                 96 (H.264, RFC 6184) against a fixed receiver SDP — so any other \
+                 codec goes on air untuned and undecodable. Set \
+                 video.camera.codec to \"h264\"."
             ),
         }
     }
@@ -492,6 +531,11 @@ pub fn build_encoder_command(
 ) -> Result<Vec<String>, EncoderError> {
     let source = validate_source(source)?;
     let output = validate_source(output)?;
+    // Refuse a codec no arm tunes, BEFORE anything is spawned. All three
+    // builder families are gated here rather than each arm checking for itself:
+    // the GStreamer arm ignores `codec` entirely and the rpicam arm forwards it
+    // verbatim, so a per-arm check would disagree with itself.
+    validate_codec(&params.codec)?;
     // Apply the per-camera encoder override + board HAL encoder_api before
     // dispatching (builder-private; the probed base kind stays on `params.kind`).
     let kind = resolve_kind(params.kind, params, env);
@@ -697,20 +741,17 @@ fn build_ffmpeg_command(
     // level. "omx"/"auto" keep the probe-driven decision.
     let force_sw = params.encoder == "software";
     let force_v4l2m2m = params.encoder == "v4l2m2m";
-    let use_hw_h264 = !force_sw
-        && (force_v4l2m2m
-            || (matches!(params.codec.as_str(), "h264" | "H264") && env.hw_h264.is_present()));
+    let use_hw_h264 = !force_sw && (force_v4l2m2m || env.hw_h264.is_present());
 
+    // H.264 is the only admitted codec (`validate_codec`, applied in
+    // `build_encoder_command` before any arm runs), so the choice left here is
+    // hardware vs software — not which codec. A `libx265`/`mjpeg` mapping used
+    // to live here and fell through BOTH tuning blocks below, emitting no `-g`
+    // and no in-band parameter-set filter onto an H.264-framed RTP leg.
     let ffmpeg_codec: String = if use_hw_h264 {
         "h264_v4l2m2m".to_string()
     } else {
-        match params.codec.as_str() {
-            "h264" => "libx264",
-            "h265" | "hevc" => "libx265",
-            "mjpeg" => "mjpeg",
-            _ => "libx264",
-        }
-        .to_string()
+        "libx264".to_string()
     };
 
     let mut cmd: Vec<String> = vec!["ffmpeg".into(), "-y".into()];
@@ -1326,28 +1367,36 @@ pub fn wrap_with_sei_inject(cmd: &[String], output_uri: &str, env: &EncoderEnv) 
     }
 }
 
-/// Augment a raw `ffmpeg` encoder command with an additive second `rawvideo`
-/// output for the vision frame tap, WITHOUT changing the existing encode/RTSP
-/// output bytes.
+/// Augment a raw `ffmpeg` encoder command with a second `rawvideo` output for
+/// the vision frame tap, keeping the existing encode/RTSP output settings.
 ///
-/// This is the opt-in pre-encode split (gated by `video.vision.raw_tap`). The
-/// strategy is purely additive: the original argv is kept verbatim through its
-/// existing output URI, then a SECOND output is appended that re-reads the same
-/// decoded input via an `-filter_complex` split. ffmpeg's `-filter_complex
-/// split` duplicates the decoded frames into two labelled streams; the first
-/// (`[enc]`) is mapped nowhere extra — the original output keeps consuming the
-/// input exactly as before — and the second (`[vis]`) is throttled, scaled, and
-/// written as `rawvideo` to the sink. Because the original output args are
-/// untouched and appear first, the existing encode bytes are bit-identical;
-/// the tap is a strictly appended `-map [vis] ... <sink>` block.
+/// This is the opt-in pre-encode split (gated by `video.vision.raw_tap`): one
+/// decode, one `-filter_complex split`, two outputs. `[enc]` carries the full-
+/// rate branch into the existing encoder + publish stage; `[vis]` is throttled
+/// and scaled and written as `rawvideo` to the sink.
 ///
-/// Returns the command unchanged when it is not a raw `ffmpeg` command (e.g.
-/// the rpicam / gstreamer `bash -c` pipelines): those callers fall back to the
-/// decoupled third-ffmpeg tap, which never perturbs the encoder at all.
+/// # Every pad has to terminate
 ///
-/// `existing_output` is the original output URI (the last token of the encoder
-/// command). The split feeds it through the named `[enc]` label so the encoder
-/// settings still apply to the wire output.
+/// A labelled complex-filter output is NOT "left alone" when nothing maps it:
+/// ffmpeg fails filtergraph init with an unconnected output and the process
+/// exits before it opens the camera. The earlier form declared `[enc]` and
+/// mapped only `[visout]`, so enabling the tap took the encoder — and with it
+/// every downstream leg — off the air entirely. So `[enc]` is explicitly
+/// `-map`ped into the first output file, and the split's input pad is bound to
+/// `[0:v]` rather than left implicit.
+///
+/// # Why `-vf` moves into the graph
+///
+/// The orientation transform is a SIMPLE filtergraph (`-vf`), and ffmpeg
+/// refuses `-vf` on an output stream fed by a complex filtergraph. It is
+/// therefore lifted out of the argv and spliced in ahead of the split, which
+/// also means the tap sees the same orientation the operator sees.
+///
+/// Returns the command unchanged when it is not a raw `ffmpeg` command (the
+/// rpicam / gstreamer `bash -c` pipelines), when the output URI is not the last
+/// token (the `-f tee` radio fan-out form), or when the argv already maps or
+/// filters its streams. Those callers fall back to the decoupled third-ffmpeg
+/// tap, which never perturbs the encoder at all.
 pub fn augment_encoder_with_raw_tap(
     cmd: &[String],
     existing_output: &str,
@@ -1364,48 +1413,80 @@ pub fn augment_encoder_with_raw_tap(
     }
     // The existing output URI must be the last token; if the command does not
     // end the way we expect, do not risk perturbing it — leave it unchanged.
+    // This is also what excludes the `-f tee` fan-out form, whose last token is
+    // the branch spec.
     if cmd.last().map(String::as_str) != Some(existing_output) {
+        return cmd.to_vec();
+    }
+    // An argv that already routes its own streams owns its output stage; a
+    // second rewrite on top would double-map it. Refuse rather than emit a
+    // graph whose shape depends on which rewrite ran first.
+    if cmd
+        .iter()
+        .any(|t| t == "-map" || t == "-filter_complex" || t == "-filter:v")
+    {
         return cmd.to_vec();
     }
 
     let fps = fps.max(1);
     let mut out: Vec<String> = cmd.to_vec();
-    // Append a strictly additive second output. The split duplicates the input
-    // frames; `[enc]` carries the untouched primary output, `[vis]` carries the
-    // throttled/scaled raw tap. The primary output args above already encode
-    // `[enc]` because, absent an explicit `-map`, ffmpeg routes the single
-    // filtered video stream to the first output — so we keep the original
-    // output as-is and only add the explicitly-mapped `[vis]` sink after it.
-    out.push("-filter_complex".into());
-    out.push(format!(
-        "split=2[enc][vis];[vis]fps={fps},scale={width}:{height}[visout]"
-    ));
-    out.push("-map".into());
-    out.push("[visout]".into());
-    out.push("-an".into());
-    out.push("-pix_fmt".into());
-    out.push(pixel_format.to_string());
-    out.push("-f".into());
-    out.push("rawvideo".into());
-    out.push(sink.to_string());
+
+    // Lift the simple `-vf` chain into the complex graph (see the doc above).
+    let vf = take_flag_value(&mut out, "-vf");
+    let split = match vf.as_deref() {
+        Some(chain) => format!("[0:v]{chain},split=2[enc][vis]"),
+        None => "[0:v]split=2[enc][vis]".to_string(),
+    };
+    let graph = format!("{split};[vis]fps={fps},scale={width}:{height}[visout]");
+
+    // `-map [enc]` is an option of the FIRST output file, so it goes before
+    // that file's URI — which is still the last token at this point.
+    let uri_idx = out.len() - 1;
+    out.splice(uri_idx..uri_idx, ["-map".to_string(), "[enc]".to_string()]);
+    // `-filter_complex` is a global option; emit it ahead of the input so the
+    // argv reads in ffmpeg's documented order.
+    out.splice(1..1, ["-filter_complex".to_string(), graph]);
+
+    // The tap's own output file.
+    out.extend(
+        [
+            "-map",
+            "[visout]",
+            "-an",
+            "-pix_fmt",
+            pixel_format,
+            "-f",
+            "rawvideo",
+            sink,
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
     out
 }
 
 /// Remove the last occurrence of `flag` and its following value from `args`,
-/// scanning right-to-left.
-fn strip_flag_with_value(args: &mut Vec<String>, flag: &str) {
+/// scanning right-to-left, and return the value.
+fn take_flag_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     if args.len() < 2 {
-        return;
+        return None;
     }
     // i runs from len-1 down to 1; act when args[i]==flag
     // and a value follows (i+1 < len). Take the highest such i (right-most).
     for i in (1..args.len()).rev() {
         if args[i] == flag && i + 1 < args.len() {
-            args.remove(i + 1);
+            let value = args.remove(i + 1);
             args.remove(i);
-            return;
+            return Some(value);
         }
     }
+    None
+}
+
+/// Remove the last occurrence of `flag` and its following value from `args`,
+/// discarding the value.
+fn strip_flag_with_value(args: &mut Vec<String>, flag: &str) {
+    let _ = take_flag_value(args, flag);
 }
 
 /// Pick the encoder backend for a camera, given which binaries are present.
@@ -2886,22 +2967,118 @@ mod tests {
         assert_eq!(shell_quote("a|b"), "'a|b'");
     }
 
-    // --- opt-in pre-encode raw tap (Option B) --------------------------
+    // --- opt-in pre-encode raw tap ------------------------------------
 
-    #[test]
-    fn raw_tap_appends_without_changing_encode_prefix() {
-        // The existing encode/RTSP output bytes MUST be untouched: the original
-        // command is a strict prefix of the augmented one.
-        //
-        // The base is built WITHOUT the radio fan-out because that is the only
-        // configuration this splice ever runs in: the two features rewrite the
-        // same output stage, so the orchestrator requests exactly one of them
-        // (`lifecycle::raw_tap_splice_wanted`). The next test pins that the
-        // splice is a no-op on the tee form, which is what makes the
-        // orchestrator's exclusion load-bearing rather than cosmetic.
-        let base = build_encoder_command(
+    const SINK: &str = "/run/ados/vision-tap-main.sock";
+
+    /// The pads of an ffmpeg `-filter_complex` string: `(inputs, outputs)`.
+    ///
+    /// Chains are `;`-separated. Bracketed labels before the first filter name
+    /// are that chain's inputs; bracketed labels after the last filter are its
+    /// outputs. Deriving them from the emitted string is what lets the tests
+    /// below assert graph well-formedness on real builder output instead of
+    /// eyeballing a literal.
+    fn graph_pads(graph: &str) -> (Vec<String>, Vec<String>) {
+        let mut ins: Vec<String> = Vec::new();
+        let mut outs: Vec<String> = Vec::new();
+        for chain in graph.split(';') {
+            let mut rest = chain.trim();
+            while let Some(stripped) = rest.strip_prefix('[') {
+                let end = stripped.find(']').expect("filter label is terminated");
+                ins.push(stripped[..end].to_string());
+                rest = &stripped[end + 1..];
+            }
+            let mut tail = rest;
+            let mut trailing: Vec<String> = Vec::new();
+            while tail.ends_with(']') {
+                let start = tail.rfind('[').expect("filter label is terminated");
+                trailing.push(tail[start + 1..tail.len() - 1].to_string());
+                tail = &tail[..start];
+            }
+            trailing.reverse();
+            outs.extend(trailing);
+        }
+        (ins, outs)
+    }
+
+    /// The label of every `-map` target in `cmd`, brackets stripped.
+    fn mapped_labels(cmd: &[String]) -> Vec<String> {
+        cmd.windows(2)
+            .filter(|w| w[0] == "-map")
+            .map(|w| {
+                w[1].trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn has_pair(cmd: &[String], flag: &str, value: &str) -> bool {
+        cmd.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    /// `Ok(())` when the emitted graph is one ffmpeg will accept: every filter
+    /// output pad terminates (consumed by another chain or `-map`ped), every
+    /// filter input pad has a producer, every `-map` names a pad that exists,
+    /// and each output file is explicitly mapped. `Err(reason)` otherwise.
+    ///
+    /// A predicate rather than a bare assertion so the test below can feed it
+    /// the broken shape as a negative control.
+    fn graph_termination_check(cmd: &[String]) -> Result<(), String> {
+        let Some(fc) = cmd.iter().position(|t| t == "-filter_complex") else {
+            return Err("no -filter_complex emitted".into());
+        };
+        let graph = &cmd[fc + 1];
+        let (ins, outs) = graph_pads(graph);
+        let mapped = mapped_labels(cmd);
+
+        // Guard against a vacuous pass: the whole point is a fan-out.
+        if outs.len() < 2 {
+            return Err(format!("graph does not fan out: {graph}"));
+        }
+        for pad in &outs {
+            if !mapped.contains(pad) && !ins.contains(pad) {
+                return Err(format!(
+                    "filter output [{pad}] terminates nowhere. ffmpeg cannot bind the \
+                     graph and the encoder exits before it opens the camera, so the node \
+                     loses ALL video. graph={graph} maps={mapped:?}"
+                ));
+            }
+        }
+        for pad in &ins {
+            // A `file:stream` reference (`0:v`) is produced by the input file,
+            // not by the graph.
+            if !pad.contains(':') && !outs.contains(pad) {
+                return Err(format!(
+                    "filter input [{pad}] has no producer. graph={graph}"
+                ));
+            }
+        }
+        for label in &mapped {
+            if !outs.contains(label) {
+                return Err(format!(
+                    "-map [{label}] names no graph output. graph={graph}"
+                ));
+            }
+        }
+        // One `-map` per output file: the encode/publish file and the tap file.
+        // An unmapped output file falls back to ffmpeg's automatic stream
+        // selection, which claims the raw input stream, bypasses the split and
+        // leaves the split's own input pad unfed.
+        if mapped.len() != 2 {
+            return Err(format!("expected one -map per output file: {mapped:?}"));
+        }
+        Ok(())
+    }
+
+    /// The base argv the splice is defined against: no radio fan-out, because
+    /// the two features rewrite the same output stage and the orchestrator
+    /// requests exactly one of them (`lifecycle::raw_tap_splice_wanted`).
+    fn raw_tap_base(rotation: u32) -> Vec<String> {
+        build_encoder_command(
             &EncoderParams {
                 rtp_fanout: false,
+                rotation,
                 ..params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000)
             },
             "/dev/video1",
@@ -2909,26 +3086,108 @@ mod tests {
             Some(&usb_mjpeg()),
             &rockchip(),
         )
-        .unwrap();
-        let augmented = augment_encoder_with_raw_tap(
-            &base,
+        .unwrap()
+    }
+
+    #[test]
+    fn raw_tap_graph_terminates_every_branch() {
+        let cmd =
+            augment_encoder_with_raw_tap(&raw_tap_base(0), RTSP_OUT, 10, 640, 480, "rgb24", SINK);
+        graph_termination_check(&cmd).expect("emitted graph must be fully terminated");
+
+        // Negative control — the shape this replaced: `[enc]` declared, only
+        // `[visout]` mapped, the split's input pad left implicit and the first
+        // output file left to automatic stream selection. Measured on ffmpeg
+        // 9.0.1: "Cannot find an unused video input stream to feed the unlabeled
+        // input pad split:default / Error binding filtergraph inputs/outputs",
+        // exit 234, zero bytes on either output. The checker must reject it, or
+        // the assertion above proves nothing.
+        let unterminated: Vec<String> = [
+            "ffmpeg",
+            "-filter_complex",
+            "split=2[enc][vis];[vis]fps=10,scale=640:480[visout]",
+            "-i",
+            "/dev/video1",
+            "-f",
+            "rtsp",
             RTSP_OUT,
-            10,
-            640,
-            480,
-            "rgb24",
-            "/run/ados/vision-tap-main.sock",
+            "-map",
+            "[visout]",
+            "-f",
+            "rawvideo",
+            SINK,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert!(
+            graph_termination_check(&unterminated).is_err(),
+            "the unterminated-[enc] form must be rejected"
         );
-        // Every original token, in order, comes first.
-        assert!(augmented.len() > base.len());
-        assert_eq!(&augmented[..base.len()], base.as_slice());
-        // The appended block is the additive raw-tap output.
-        let tail = &augmented[base.len()..];
-        assert!(tail.iter().any(|t| t == "-filter_complex"));
-        assert!(tail.iter().any(|t| t == "rawvideo"));
-        assert_eq!(tail.last().unwrap(), "/run/ados/vision-tap-main.sock");
-        let pf = tail.iter().position(|t| t == "-pix_fmt").unwrap();
-        assert_eq!(tail[pf + 1], "rgb24");
+    }
+
+    #[test]
+    fn raw_tap_preserves_the_encode_and_publish_settings() {
+        // The wire output has to come out of the same encoder at the same
+        // settings — the tap adds a branch, it does not re-tune the stream.
+        let base = raw_tap_base(0);
+        let cmd = augment_encoder_with_raw_tap(&base, RTSP_OUT, 10, 640, 480, "rgb24", SINK);
+
+        for (flag, value) in [
+            ("-c:v", "libx264"),
+            ("-b:v", "4000k"),
+            ("-g", "15"),
+            ("-pix_fmt", "yuv420p"),
+            ("-bsf:v", "h264_mp4toannexb,dump_extra=freq=keyframe"),
+            ("-rtsp_transport", "tcp"),
+            ("-f", "rtsp"),
+        ] {
+            assert!(
+                has_pair(&base, flag, value) && has_pair(&cmd, flag, value),
+                "{flag} {value} must survive the splice"
+            );
+        }
+        // The publish destination is unchanged and is still the FIRST output
+        // file: it precedes the tap's sink.
+        let uri_at = cmd.iter().position(|t| t == RTSP_OUT).expect("publish URI");
+        let sink_at = cmd.iter().position(|t| t == SINK).expect("tap sink");
+        assert!(
+            uri_at < sink_at,
+            "publish output comes before the tap output"
+        );
+        // The tap's own output file: raw frames at the requested format.
+        assert!(has_pair(&cmd, "-pix_fmt", "rgb24"));
+        assert!(has_pair(&cmd, "-f", "rawvideo"));
+        assert_eq!(cmd.last().unwrap(), SINK);
+        // And the throttle/scale the tap asked for reached the graph.
+        let fc = cmd.iter().position(|t| t == "-filter_complex").unwrap();
+        assert!(cmd[fc + 1].contains("fps=10"));
+        assert!(cmd[fc + 1].contains("scale=640:480"));
+    }
+
+    #[test]
+    fn raw_tap_folds_the_orientation_transform_into_the_graph() {
+        // `-vf` is a SIMPLE filtergraph and ffmpeg refuses it on a stream fed
+        // by a complex one ("-vf/-filter_complex cannot be used together for
+        // the same stream"), so a rotated camera would abort the encoder. The
+        // transform moves inside the split instead, ahead of the fan-out, which
+        // also means the vision tap sees the same orientation as the operator.
+        let base = raw_tap_base(90);
+        assert!(has_pair(&base, "-vf", "transpose=1"), "base carries -vf");
+
+        let cmd = augment_encoder_with_raw_tap(&base, RTSP_OUT, 10, 640, 480, "rgb24", SINK);
+        assert!(
+            !cmd.iter().any(|t| t == "-vf"),
+            "no -vf may survive beside -filter_complex: {cmd:?}"
+        );
+        let fc = cmd.iter().position(|t| t == "-filter_complex").unwrap();
+        let graph = &cmd[fc + 1];
+        let rot = graph
+            .find("transpose=1")
+            .expect("transform is in the graph");
+        let split = graph.find("split=2").expect("split is in the graph");
+        assert!(rot < split, "the transform feeds the split: {graph}");
+        graph_termination_check(&cmd).expect("rotated graph must be fully terminated");
     }
 
     #[test]
@@ -3000,6 +3259,67 @@ mod tests {
             "/s.sock",
         );
         assert_eq!(augmented, base);
+    }
+
+    // --- wire-codec gate ----------------------------------------------
+
+    #[test]
+    fn unsupported_codecs_are_refused_on_every_builder_arm() {
+        // h265 / hevc / mjpeg parse clean out of `video.camera.codec` and used
+        // to map onto libx265 / mjpeg, which fell through BOTH tuning blocks —
+        // no `-g` and no in-band parameter-set bitstream filter — while the
+        // radio leg still framed the payload as RTP type 96 (H.264). Publishing
+        // that is worse than refusing it, so no argv is produced at all.
+        for codec in ["h265", "hevc", "mjpeg", "av1", "H264", ""] {
+            for (kind, source, camera, env) in [
+                (EncoderKind::Ffmpeg, "/dev/video1", usb_mjpeg(), rockchip()),
+                (EncoderKind::RpicamVid, "/dev/video0", csi(), rockchip()),
+                (EncoderKind::Gstreamer, "/dev/video1", usb_mjpeg(), rk_mpp()),
+            ] {
+                let err = build_encoder_command(
+                    &EncoderParams {
+                        codec: codec.into(),
+                        ..params(kind, 1280, 720, 30, 4000)
+                    },
+                    source,
+                    RTSP_OUT,
+                    Some(&camera),
+                    &env,
+                )
+                .expect_err("an untunable codec must not produce an argv");
+                assert_eq!(err, EncoderError::UnsupportedCodec(codec.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_codec_error_names_the_framing_reason() {
+        // The operator reads this text in the journal and on the camera card,
+        // so it has to say WHY, not just "unsupported".
+        let text = EncoderError::UnsupportedCodec("h265".into()).to_string();
+        for needle in ["h265", "-g", "SPS/PPS", "payload type", "h264"] {
+            assert!(text.contains(needle), "{needle:?} missing from: {text}");
+        }
+    }
+
+    #[test]
+    fn h264_still_builds_on_every_arm() {
+        // The gate must not be a blanket refusal: the shipped codec builds.
+        for (kind, source, camera, env) in [
+            (EncoderKind::Ffmpeg, "/dev/video1", usb_mjpeg(), rockchip()),
+            (EncoderKind::RpicamVid, "/dev/video0", csi(), rockchip()),
+            (EncoderKind::Gstreamer, "/dev/video1", usb_mjpeg(), rk_mpp()),
+        ] {
+            let cmd = build_encoder_command(
+                &params(kind, 1280, 720, 30, 4000),
+                source,
+                RTSP_OUT,
+                Some(&camera),
+                &env,
+            )
+            .expect("h264 builds");
+            assert!(!cmd.is_empty());
+        }
     }
 
     // --- Allwinner OMX hardware encode (A733) ------------------------

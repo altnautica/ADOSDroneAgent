@@ -109,6 +109,62 @@ pub const BUCKET_1M_US: i64 = 60_000_000;
 /// The one-hour rollup bucket width in microseconds.
 pub const BUCKET_1H_US: i64 = 3_600_000_000;
 
+/// How far the wall clock may drift from the monotonic clock before it counts
+/// as a STEP rather than slew. NTP disciplines in milliseconds and slews small
+/// offsets; the failure this catches is a jump of months, when an RTC-less
+/// board that booted at the kernel build date first reaches a time source.
+pub const CLOCK_STEP_TOLERANCE: Duration = Duration::from_secs(60);
+
+/// The systemd-timesyncd marker: written once a reference is acquired. Its
+/// presence is the cheapest on-box evidence that the wall clock means
+/// something, and it is a single tmpfs `stat`, which matters because the
+/// writer thread reads it.
+const TIMESYNC_MARKER: &str = "/run/systemd/timesync/synchronized";
+
+/// Whether the retention pass may delete by absolute time.
+///
+/// Deleting by a `now - window` cutoff asserts that `now` and the row stamps
+/// were taken from the same, correct clock. On an SBC with no RTC that is a
+/// claim, not a fact, and getting it wrong deletes the flight's own boot window
+/// — the thing the Black Box exists to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClockTrust {
+    /// Confirmed against a time source and unstepped since the rows in this
+    /// session were stamped: the TTL cutoff means what it says.
+    Established,
+    /// Never confirmed, or stepped after rows were already written. Age-based
+    /// deletes are refused; the size cap, which orders by stored timestamp
+    /// rather than trusting it as an age, still bounds the store.
+    Unestablished,
+}
+
+impl ClockTrust {
+    fn allows_ttl(self) -> bool {
+        matches!(self, ClockTrust::Established)
+    }
+}
+
+/// Whether this box's wall clock has been established against a time source.
+///
+/// Linux: the systemd-timesyncd marker. A synchronous `stat` on tmpfs, so it is
+/// safe on the writer thread and needs no subprocess — deliberately narrower
+/// than the control front's `ntp_synced` probe, which shells out to `chronyc`
+/// and `timedatectl` and cannot run here.
+#[cfg(target_os = "linux")]
+pub fn wall_clock_established() -> bool {
+    std::path::Path::new(TIMESYNC_MARKER).is_file()
+}
+
+/// Off Linux there is no RTC-less-SBC failure to guard: a dev host's clock is
+/// set by the OS before anything runs. Reporting established keeps retention
+/// behaving identically under test on any host, and the deterministic proof of
+/// the gate itself is driven by passing [`ClockTrust`] explicitly.
+#[cfg(not(target_os = "linux"))]
+pub fn wall_clock_established() -> bool {
+    let _ = TIMESYNC_MARKER;
+    true
+}
+
 /// Tunable retention knobs, all in one place. Defaults are baked in; the config
 /// layer overrides them at start. `max_bytes` is floored so the store always
 /// keeps a usable window even if a config sets it absurdly low.
@@ -226,6 +282,14 @@ const RAW_TABLES: [&str; 4] = ["logs", "metrics", "events", "hw"];
 /// flight so it can never overrun the writer-join bound and get torn mid-rewrite
 /// (which would leave the WAL needing recovery on the next start). The file simply
 /// stays above the low-water mark until the next pass after a clean start vacuums.
+///
+/// `clock` decides whether the two TTL steps run at all. They are the only
+/// steps that treat a stored timestamp as an *age*, and an age is meaningless
+/// on a board whose clock has not been established or has stepped since the
+/// rows were stamped — the first pass after an RTC-less board first reaches
+/// NTP would otherwise delete that flight's whole boot window. Rollup and the
+/// size cap are unaffected: they order rows, they do not date them, so the
+/// store stays bounded even on a node that never sees a time source.
 pub fn run_maintenance(
     conn: &Connection,
     cfg: &RetentionConfig,
@@ -233,17 +297,23 @@ pub fn run_maintenance(
     db_path: &Path,
     do_vacuum: bool,
     stop: &AtomicBool,
+    clock: ClockTrust,
 ) -> Result<MaintenanceReport, rusqlite::Error> {
     // Step 1: roll up closed metric windows before any raw row can age out.
     let rolled_up_rows = roll_up(conn, now_us)?;
 
-    // Step 2: TTL-delete aged raw rows.
-    let raw_cutoff = now_us.saturating_sub(cfg.raw_retention.as_micros() as i64);
-    let ttl_deleted_rows = ttl_delete_raw(conn, raw_cutoff)?;
-
-    // Step 3: TTL-delete aged rollup rows (a much longer window).
-    let rollup_cutoff = now_us.saturating_sub(cfg.rollup_retention.as_micros() as i64);
-    let rollup_ttl_deleted_rows = ttl_delete_rollups(conn, rollup_cutoff)?;
+    // Steps 2 and 3: TTL-delete aged raw rows, then aged rollup rows (a much
+    // longer window). Both are refused outright on an untrustworthy clock.
+    let (ttl_deleted_rows, rollup_ttl_deleted_rows) = if clock.allows_ttl() {
+        let raw_cutoff = now_us.saturating_sub(cfg.raw_retention.as_micros() as i64);
+        let rollup_cutoff = now_us.saturating_sub(cfg.rollup_retention.as_micros() as i64);
+        (
+            ttl_delete_raw(conn, raw_cutoff)?,
+            ttl_delete_rollups(conn, rollup_cutoff)?,
+        )
+    } else {
+        (0, 0)
+    };
 
     // Step 4: size-cap eviction, the safety net.
     let eviction = enforce_size_cap(conn, cfg, db_path)?;
@@ -878,8 +948,16 @@ mod tests {
         seed_metric(&conn, recent, "cpu.util.all", 2.0);
         seed_log(&conn, recent);
 
-        let report =
-            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            false,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(report.ttl_deleted_rows >= 2, "old rows were TTL-deleted");
         // The old metric was rolled up before deletion, so its long-horizon shape
         // survives even though the raw row is gone.
@@ -900,6 +978,91 @@ mod tests {
             .query_row("SELECT count(*) FROM metrics_1m", [], |r| r.get(0))
             .unwrap();
         assert!(rolled >= 1, "rolled bucket survives raw TTL");
+    }
+
+    #[test]
+    fn an_unestablished_clock_refuses_the_ttl_but_still_enforces_the_size_cap() {
+        // The RTC-less board: it booted at the kernel build date, so `now` is
+        // not a time anybody measured. Deleting by `now - window` would take
+        // the flight's own boot window with it, which is the one thing the
+        // Black Box exists to keep.
+        let (_dir, path, conn) = temp_store();
+        let cfg = RetentionConfig::default();
+        let now = BASE_US;
+        let old = now - (40 * 24 * 60 * 60) * 1_000_000;
+
+        seed_metric(&conn, old, "cpu.util.all", 1.0);
+        seed_log(&conn, old);
+
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            false,
+            &AtomicBool::new(false),
+            ClockTrust::Unestablished,
+        )
+        .unwrap();
+        assert_eq!(report.ttl_deleted_rows, 0, "no age-based delete may run");
+        assert_eq!(report.rollup_ttl_deleted_rows, 0);
+        assert_eq!(count(&conn, "metrics"), 1, "the row survives the pass");
+        assert_eq!(count(&conn, "logs"), 1);
+        // Rollup still runs: it folds rows into buckets, it never deletes.
+        assert!(report.rolled_up_rows >= 1);
+
+        // And the same rows go on the first pass once the clock is trustworthy,
+        // so this is a hold, not a permanent leak.
+        let after = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            false,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
+        assert!(after.ttl_deleted_rows >= 2);
+    }
+
+    #[test]
+    fn the_size_cap_still_evicts_on_a_node_whose_clock_is_never_established() {
+        // The bound that keeps a permanently-offline drone from filling its
+        // card must not depend on the clock: eviction orders rows, it does not
+        // date them. Without this the TTL gate above would trade a deleted
+        // boot window for an unbounded store.
+        let (_dir, path, conn) = temp_store();
+        let now = BASE_US;
+        seed_bulk_logs(&conn, now, 70_000, 512);
+        conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")
+            .unwrap();
+        let cfg = RetentionConfig {
+            max_bytes: MIN_MAX_BYTES,
+            low_water_ratio: 0.5,
+            ..RetentionConfig::default()
+        }
+        .clamped();
+        // Assert the precondition against the measure eviction arms on, so the
+        // test fails loudly rather than silently skipping the eviction path.
+        let used = used_store_bytes(&conn, &path).unwrap();
+        assert!(used > cfg.max_bytes, "{used} <= {}", cfg.max_bytes);
+
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            false,
+            &AtomicBool::new(false),
+            ClockTrust::Unestablished,
+        )
+        .unwrap();
+        assert!(
+            report.had_eviction(),
+            "the size cap is the bound that does not need a clock"
+        );
+        assert_eq!(report.ttl_deleted_rows, 0, "still no age-based delete");
     }
 
     #[test]
@@ -926,8 +1089,16 @@ mod tests {
         )
         .unwrap();
 
-        let report =
-            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            false,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(
             report.rollup_ttl_deleted_rows >= 1,
             "the two-year-old rollup bucket was reaped"
@@ -999,8 +1170,16 @@ mod tests {
             cfg.max_bytes
         );
 
-        let report =
-            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            false,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(report.had_eviction(), "eviction ran when over the cap");
         assert!(report.evicted_rows > 0);
         // Oldest-first: the freed span starts at the very oldest row.
@@ -1054,8 +1233,16 @@ mod tests {
         }
         .clamped();
 
-        let first =
-            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
+        let first = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            false,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(
             first.had_eviction(),
             "the first pass evicts down to low water"
@@ -1066,8 +1253,16 @@ mod tests {
         // Nothing new was written between passes, so the next two passes must be
         // clean no-ops on the eviction path.
         for pass in 0..2 {
-            let again =
-                run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
+            let again = run_maintenance(
+                &conn,
+                &cfg,
+                now,
+                &path,
+                false,
+                &AtomicBool::new(false),
+                ClockTrust::Established,
+            )
+            .unwrap();
             assert!(
                 !again.had_eviction(),
                 "pass {pass} evicted again from a store already under the cap"
@@ -1127,8 +1322,16 @@ mod tests {
         // The periodic vacuum — the one rewrite that was going to happen
         // anyway — is where the conversion rides along.
         let cfg = RetentionConfig::default();
-        let report =
-            run_maintenance(&conn, &cfg, BASE_US, &path, true, &AtomicBool::new(false)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            BASE_US,
+            &path,
+            true,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(report.vacuumed);
         assert_eq!(
             db::auto_vacuum_mode(&conn).unwrap(),
@@ -1158,8 +1361,16 @@ mod tests {
         seed_metric(&conn, now - 1_000, "cpu.util.all", 1.0);
         // The default 1 GB cap is far above a tiny store: no eviction.
         let cfg = RetentionConfig::default();
-        let report =
-            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(false)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            false,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(!report.had_eviction());
         assert_eq!(report.evicted_rows, 0);
         assert_eq!(report.evicted_from_us, None);
@@ -1179,8 +1390,16 @@ mod tests {
         let now = BASE_US;
         seed_metric(&conn, now - 1_000, "cpu.util.all", 1.0);
         let cfg = RetentionConfig::default();
-        let report =
-            run_maintenance(&conn, &cfg, now, &path, true, &AtomicBool::new(false)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            true,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(
             !report.vacuumed,
             "a healthy incremental store must not rewrite itself on a cadence"
@@ -1213,8 +1432,16 @@ mod tests {
         );
 
         let cfg = RetentionConfig::default();
-        let report =
-            run_maintenance(&conn, &cfg, now, &path, true, &AtomicBool::new(false)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            true,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(
             report.vacuumed,
             "a file carrying real slack is still compacted"
@@ -1240,8 +1467,16 @@ mod tests {
         assert_eq!(db::auto_vacuum_mode(&conn).unwrap(), 0, "starts legacy");
 
         let cfg = RetentionConfig::default();
-        let report =
-            run_maintenance(&conn, &cfg, BASE_US, &path, true, &AtomicBool::new(false)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            BASE_US,
+            &path,
+            true,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(report.vacuumed, "the conversion rewrite still runs");
         assert_eq!(
             db::auto_vacuum_mode(&conn).unwrap(),
@@ -1257,8 +1492,16 @@ mod tests {
         let cfg = RetentionConfig::default();
         // Even with the periodic cadence due (`do_vacuum = true`), a stop in flight
         // must skip the rewrite so it cannot overrun the shutdown join.
-        let report =
-            run_maintenance(&conn, &cfg, now, &path, true, &AtomicBool::new(true)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            true,
+            &AtomicBool::new(true),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(
             !report.vacuumed,
             "the periodic vacuum is skipped while stopping"
@@ -1285,8 +1528,16 @@ mod tests {
         );
         // The cheap deletes still run; only the reclaim is withheld, so the file
         // stays at its high-water mark until a pass after a clean start reclaims.
-        let report =
-            run_maintenance(&conn, &cfg, now, &path, false, &AtomicBool::new(true)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            now,
+            &path,
+            false,
+            &AtomicBool::new(true),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert!(report.had_eviction(), "eviction still runs while stopping");
         assert!(report.evicted_rows > 0);
         assert!(!report.vacuumed, "no full vacuum while stopping");
@@ -1320,8 +1571,16 @@ mod tests {
     fn maintenance_on_an_empty_store_is_a_clean_no_op() {
         let (_dir, path, conn) = temp_store();
         let cfg = RetentionConfig::default();
-        let report =
-            run_maintenance(&conn, &cfg, BASE_US, &path, false, &AtomicBool::new(false)).unwrap();
+        let report = run_maintenance(
+            &conn,
+            &cfg,
+            BASE_US,
+            &path,
+            false,
+            &AtomicBool::new(false),
+            ClockTrust::Established,
+        )
+        .unwrap();
         assert_eq!(report, MaintenanceReport::default());
     }
 

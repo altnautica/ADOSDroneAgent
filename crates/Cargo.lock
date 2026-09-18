@@ -100,6 +100,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "hex",
+ "parking_lot",
  "reqwest",
  "rumqttc-next",
  "rustls",
@@ -371,6 +372,7 @@ name = "ados-installer"
 version = "0.1.0"
 dependencies = [
  "ados-config",
+ "ados-hal-probe",
  "ados-macpin",
  "ados-protocol",
  "ados-supervisor",
@@ -437,6 +439,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -451,6 +454,7 @@ dependencies = [
  "ados-swarm-control",
  "ados-swarmbus",
  "anyhow",
+ "bytes",
  "futures-util",
  "nix 0.29.0",
  "serde",
@@ -475,6 +479,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "nix 0.29.0",
+ "parking_lot",
  "sd-notify",
  "serde",
  "serde_json",
@@ -531,6 +536,7 @@ name = "ados-protocol"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "getrandom 0.2.17",
  "hex",
  "hmac",

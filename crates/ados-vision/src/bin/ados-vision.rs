@@ -128,7 +128,18 @@ async fn main() {
     );
     tracing::info!(soc = %soc, backend = backend.name(), "vision backend selected");
 
-    let slot_count = config.effective_slot_count();
+    // Reclaim any ring a previous run stranded before opening new ones. `Drop`
+    // unlinks on a clean exit but does not run on SIGKILL or an OOM-kill, and a
+    // camera that re-enumerates under a new /dev/videoN mints a ring under a
+    // new name — either way the old mapping holds tmpfs RAM until it is
+    // unlinked. The unit's ExecStartPre does this too; doing it here as well
+    // means the guarantee does not depend on how the engine was started.
+    ados_vision::ring::sweep_stale_rings();
+
+    let sizing = ados_vision::engine::RingSizing::new(
+        config.effective_slot_count(),
+        config.effective_shm_budget_bytes(),
+    );
     // The tracker is off unless the config opts in. When on, the published
     // detection batch carries a stable track_id + lock_state on the locked
     // object; when off, the engine publishes raw detections. When re-id is on
@@ -137,7 +148,7 @@ async fn main() {
     let reid_model_id = config.reid.as_ref().map(|r| r.model_id.clone());
     let engine = VisionEngine::with_tracker_reid(
         backend,
-        slot_count,
+        sizing,
         config.tracker_enabled,
         ados_vision::tracker::TrackerConfig::default(),
         config.reid_enabled,

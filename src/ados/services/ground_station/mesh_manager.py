@@ -16,6 +16,12 @@ Non-goals for this module:
 - WFB fragment forwarding. That is `wfb_relay` / `wfb_receiver`.
 - Cloud uplink bringup. `uplink_router` owns the decision; we read the
   result and advertise it as a batman gateway when local.
+- Publishing `/run/ados/mesh-state.json`. The native groundlink mesh poll
+  loop (`ados-groundlink`, started by the same relay/receiver role) is the
+  sidecar's single writer and stamps the schema `version` its readers check.
+  This module wrote the same path every 2 s from a second process, so the
+  file's content came down to which write landed last and a version-less
+  body tripped every reader's drift warning.
 
 This service shells out to userland tools (`batctl`, `iw`, `ip`,
 `modprobe`, `wpa_supplicant`). pyroute2 was considered but the existing
@@ -53,9 +59,6 @@ from ados.core.paths import (
 from ados.core.paths import (
     MESH_PSK_PATH as _MESH_PSK_PATH,
 )
-from ados.core.paths import (
-    MESH_STATE_JSON as _MESH_STATE_JSON,
-)
 
 from .events import MeshEvent, get_mesh_event_bus
 from .role_manager import get_current_role
@@ -63,7 +66,6 @@ from .role_manager import get_current_role
 log = get_logger("ground_station.mesh_manager")
 
 MESH_STATE_PATH = MESH_SOCK
-MESH_STATE_JSON = _MESH_STATE_JSON
 MESH_ID_PATH = _MESH_ID_PATH
 MESH_PSK_PATH = _MESH_PSK_PATH
 
@@ -493,33 +495,6 @@ async def _poll_once(
     return current_neighbors, snap.selected_gateway
 
 
-def _write_state_json(snap: MeshSnapshot) -> None:
-    """Write a JSON snapshot so the REST layer can serve `/api/v1/mesh/*`
-    without calling back into the service (file is the IPC).
-    """
-    try:
-        MESH_STATE_JSON.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "role": snap.role,
-            "bat_iface": snap.bat_iface,
-            "mesh_iface": snap.mesh_iface,
-            "carrier": snap.carrier,
-            "mesh_id": snap.mesh_id,
-            "up": snap.up,
-            "neighbors": [n.__dict__ for n in snap.neighbors],
-            "gateways": [g.__dict__ for g in snap.gateways],
-            "selected_gateway": snap.selected_gateway,
-            "partition": snap.partition,
-            "started_at_ms": snap.started_at_ms,
-            "last_poll_ms": snap.last_poll_ms,
-        }
-        tmp = MESH_STATE_JSON.with_suffix(MESH_STATE_JSON.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(str(tmp), str(MESH_STATE_JSON))
-    except OSError as exc:
-        log.debug("mesh_state_write_failed", error=str(exc))
-
-
 class MeshManager:
     """Main service class. One instance per process."""
 
@@ -617,7 +592,6 @@ class MeshManager:
         self._snapshot.mesh_id = mesh_id
         self._snapshot.up = True
         self._snapshot.started_at_ms = int(time.time() * 1000)
-        _write_state_json(self._snapshot)
         return True
 
     async def teardown(self) -> None:
@@ -627,9 +601,14 @@ class MeshManager:
             _run(["ip", "link", "set", self._mesh_iface, "down"], timeout=5.0)
         _run(["ip", "link", "set", self._bat_iface, "down"], timeout=5.0)
         self._snapshot.up = False
-        _write_state_json(self._snapshot)
 
     async def run_poll_loop(self) -> None:
+        """Refresh the in-process snapshot and publish membership events.
+
+        Deliberately writes nothing: `/run/ados/mesh-state.json` has one writer,
+        the native groundlink mesh poll loop, which runs under the same
+        relay/receiver role as this service.
+        """
         self._running = True
         prev_neighbors: set[str] = set()
         prev_selected_gw: str | None = None
@@ -638,7 +617,6 @@ class MeshManager:
                 prev_neighbors, prev_selected_gw = await _poll_once(
                     self._snapshot, prev_neighbors, prev_selected_gw,
                 )
-                _write_state_json(self._snapshot)
             except Exception as exc:
                 log.debug("mesh_poll_error", error=str(exc))
             await asyncio.sleep(_POLL_INTERVAL_S)

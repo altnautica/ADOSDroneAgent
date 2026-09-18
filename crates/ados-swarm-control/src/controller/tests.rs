@@ -142,6 +142,56 @@ fn formation_falls_back_to_hold_when_this_drone_has_no_station() {
 }
 
 #[test]
+fn a_zero_position_beacon_leaves_the_formation_command_unchanged() {
+    let t = t0();
+    let slots = [1u8, 2];
+    // What a fleet member on the ground without a 3-D lock actually beacons:
+    // lat/lon/alt all zero, `gps_ok` clear. (0, 0, 0) is a real geodetic point
+    // thousands of kilometres from any site, and the centroid anchor is the one
+    // law that averages every neighbour with no range bound — so ungated, this
+    // single row moved the anchor by roughly half that distance and commanded
+    // every armed drone in the fleet at full rate toward it. The barrier cannot
+    // catch that: it caps closure on in-range neighbours and passes a command
+    // aimed at empty space straight through.
+    let zero = NeighborFix {
+        slot: 2,
+        lat_deg: 0.0,
+        lon_deg: 0.0,
+        alt_m: 0.0,
+        vn: 0.0,
+        ve: 0.0,
+        vd: 0.0,
+        status: STATUS_ARMED | STATUS_GUIDED,
+    };
+
+    let mut alone = controller("formation", &slots);
+    let baseline = alone.tick(&own(1), &[], t);
+    let baseline_cmd = baseline
+        .setpoint
+        .expect("a lone drone still flies its own station");
+
+    let mut with_zero = controller("formation", &slots);
+    let got = with_zero.tick(&own(1), &[zero], t);
+
+    assert_eq!(
+        got.setpoint,
+        Some(baseline_cmd),
+        "a member with no fix must not move the anchor"
+    );
+    assert_eq!(got.precedence, ModePrecedence::Formation);
+    // The comparison only means something while the baseline is unsaturated: two
+    // commands both clamped to the ceiling would compare equal no matter which
+    // direction they pointed.
+    let speed =
+        (baseline_cmd.vn.powi(2) + baseline_cmd.ve.powi(2) + baseline_cmd.vd.powi(2)).sqrt() as f64;
+    assert_eq!(baseline_cmd.kind, SetpointKind::Velocity);
+    assert!(
+        speed > COMMAND_DEADBAND_MPS && speed < MAX_COMMAND_SPEED_MPS,
+        "baseline speed {speed} must be a real, unsaturated command"
+    );
+}
+
+#[test]
 fn the_active_level_is_reported_not_the_commanded_one() {
     let t = t0();
     let mut c = controller("formation", &[1, 2]);

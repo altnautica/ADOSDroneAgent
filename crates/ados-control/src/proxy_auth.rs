@@ -42,11 +42,16 @@ type HmacSha256 = Hmac<Sha256>;
 pub const DEFAULT_SETUP_TOKEN_PATH: &str = "/etc/ados/secrets/setup-token";
 
 /// Routes that never require authentication.
+///
+/// `/docs`, `/redoc` and `/openapi.json` are NOT here. They enumerated the
+/// agent's entire route surface — including every path this file then tries
+/// to gate — to any unauthenticated peer, which is a map of the attack
+/// surface handed out for free. The residual FastAPI app now constructs with
+/// `docs_url=None, redoc_url=None, openapi_url=None`, so they do not exist
+/// to serve; keeping them exempt here would only have re-opened them the
+/// moment someone re-enabled the app's defaults.
 const EXEMPT_PATHS: &[&str] = &[
     "/",
-    "/docs",
-    "/openapi.json",
-    "/redoc",
     "/api/pairing/info",
     "/api/pairing/code",
     "/api/pairing/claim",
@@ -496,25 +501,60 @@ impl ProxiedAuth {
     }
 }
 
-/// `path in EXEMPT_PATHS or path.startswith("/docs") or not path.startswith("/api/")`.
-/// Mirrors `auth.py` `is_exempt`: the exempt set, `/docs*`, and every non-`/api/`
-/// path (the static SPA assets served from `/`).
+/// Non-`/api/` paths that are a DATA plane, not the operator's browser shell.
+///
+/// This list, not a path-shape heuristic, is what keeps the SPA fallback from
+/// being a hole. Every entry is a prefix; see [`is_non_api_data_plane`].
+const NON_API_DATA_PLANES: &[&str] = &[
+    // Live video. Whoever can read these watches what the aircraft sees.
+    "/whep",
+    "/hls",
+    // The route-surface enumeration. The residual app is now constructed
+    // with `docs_url=None, redoc_url=None, openapi_url=None`, so these serve
+    // nothing — they stay listed so re-enabling the app's defaults cannot
+    // quietly re-open them.
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+];
+
+/// Whether a non-`/api/` path is a data plane rather than the SPA shell.
+///
+/// Prefix-matched on a segment boundary, so `/whep/main` is covered and
+/// `/whepinar` is not.
+pub(crate) fn is_non_api_data_plane(path: &str) -> bool {
+    NON_API_DATA_PLANES.iter().any(|denied| {
+        path.starts_with(denied) && matches!(path.as_bytes().get(denied.len()), None | Some(b'/'))
+    })
+}
+
+/// Whether a proxied route needs no credential.
+///
+/// Non-`/api/` paths fall through to the SPA, because the dashboard is
+/// mounted at `/` with a 404-to-index fallback and its client-side routes
+/// are genuinely not enumerable from here — `/settings/region` is a real
+/// operator-UI path with no server-side registration to look up. An
+/// allow-list of literal SPA routes cannot be written, and one that tried
+/// would break a route the day the dashboard added it.
+///
+/// What IS enumerable is the other direction: the non-`/api/` paths that
+/// are a data plane. `/whep` and `/hls` are the reason this matters —
+/// under the old blanket rule a live camera feed was served to any peer on
+/// the LAN of a PAIRED node with no credential at all, a posture LOOSER
+/// than the same node has while unpaired. They are denied by name now,
+/// alongside the docs surface, and
+/// `tests::every_non_api_route_is_classified` fails when a new non-`/api/`
+/// route appears that nobody has classified either way. That converts
+/// "nobody has to notice" into "CI notices", enforced against the route
+/// table rather than guessed from the shape of a URL.
+///
+/// `path` is the normalized decision path from `tcp_edge`, never a raw target.
 fn is_exempt(path: &str) -> bool {
-    if contains(EXEMPT_PATHS, path) || path.starts_with("/docs") {
-        return true;
-    }
-    // The media plane is never exempt, even though it sits outside `/api/`.
-    //
-    // The blanket "anything outside /api/ needs no credential" rule was written
-    // for the static SPA, whose client-side routes are not enumerable (the
-    // dashboard is mounted at `/` with a 404 -> index.html fallback, so
-    // `/settings/region` is a legitimate non-API path). But `/whep` and `/hls`
-    // are a live video stream, and the rule handed them to any peer on the LAN
-    // of a PAIRED node with no credential at all — a posture LOOSER than the
-    // same node has while unpaired, where `auth::is_operator_ui` deliberately
-    // refuses them for exactly this reason.
-    if is_media_plane(path) {
+    if is_non_api_data_plane(path) {
         return false;
+    }
+    if contains(EXEMPT_PATHS, path) {
+        return true;
     }
     !path.starts_with("/api/")
 }
@@ -675,7 +715,53 @@ mod tests {
                 "{path} is operator UI and must stay served"
             );
         }
-        assert!(is_exempt("/docs"), "the docs surface is explicitly exempt");
+        // `/docs` is NOT exempt any more. It enumerated the whole route
+        // surface — including every path this file gates — to any peer that
+        // could reach the proxy, and the residual app no longer serves it.
+        for path in ["/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"] {
+            assert!(!is_exempt(path), "{path} must not be public");
+        }
+        // The live video lane is a data plane, not the shell.
+        for path in ["/whep", "/whep/main", "/hls", "/hls/main/index.m3u8"] {
+            assert!(!is_exempt(path), "{path} must not be public");
+        }
+        // Boundary: a path that merely SHARES a prefix with a denied one is
+        // still SPA. A bare `starts_with` here would take a real UI route
+        // down while reading as a tightening.
+        assert!(is_exempt("/whepinar"), "/whepinar is not the video lane");
+        assert!(is_exempt("/documentation"), "/documentation is not /docs");
+    }
+
+    /// Every non-`/api/` route the front serves natively is classified: it is
+    /// either a data plane this file denies, or it is the operator UI.
+    ///
+    /// This is the gate that makes the SPA fallback safe. The fallback has to
+    /// stay open — the dashboard's client-side routes are not enumerable — so
+    /// the property that actually protects the surface is that a NEW
+    /// non-`/api/` route cannot appear without someone deciding which side of
+    /// the line it is on. Enforced against the real route table rather than
+    /// guessed from the shape of a URL.
+    #[test]
+    fn every_non_api_route_is_classified() {
+        // Public by design: the liveness probe carries no data and a watchdog
+        // must never be gated. Extend deliberately, with a reason.
+        const KNOWN_PUBLIC: &[&str] = &["/healthz"];
+
+        let unclassified: Vec<&str> = crate::routing::native_route_table()
+            .into_iter()
+            .map(|(_, path)| path)
+            .filter(|path| !path.starts_with("/api/"))
+            .filter(|path| !is_non_api_data_plane(path))
+            .filter(|path| !KNOWN_PUBLIC.contains(path))
+            .filter(|path| !crate::auth::is_operator_ui(path))
+            .collect();
+
+        assert!(
+            unclassified.is_empty(),
+            "these non-/api/ routes are served with no credential and nobody \
+             classified them — add each to NON_API_DATA_PLANES (if it carries \
+             data) or to KNOWN_PUBLIC (with a reason): {unclassified:?}",
+        );
     }
 
     use super::*;
@@ -720,11 +806,12 @@ mod tests {
     }
 
     #[test]
-    fn docs_prefix_and_static_assets_accept() {
+    fn the_docs_surface_is_refused_and_static_assets_are_served() {
         let auth = auth_basic();
         let p = paired("k");
-        // /docs* prefix.
-        assert_eq!(
+        // `/docs*` is REFUSED on a paired node. It enumerates the route
+        // surface, and the residual app no longer constructs it at all.
+        assert!(matches!(
             auth.decide_api_key(
                 &Method::GET,
                 "/docs/oauth2-redirect",
@@ -732,8 +819,8 @@ mod tests {
                 false,
                 &p
             ),
-            Decision::Accept
-        );
+            Decision::Reject { .. }
+        ));
         // Non-/api/ static SPA asset.
         assert_eq!(
             auth.decide_api_key(

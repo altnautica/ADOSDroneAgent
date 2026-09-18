@@ -1383,6 +1383,11 @@ use tokio::sync::Mutex;
 struct MockMavlinkServer {
     path: PathBuf,
     received: Arc<Mutex<Option<COMMAND_LONG_DATA>>>,
+    /// Every complete length-prefixed frame this socket has read, decodable or
+    /// not. This is the router's TX counter as seen from the FC side: the check
+    /// a refusal test needs is "no bytes were forwarded", which a decoded-command
+    /// slot alone cannot prove.
+    frames: Arc<std::sync::atomic::AtomicUsize>,
     stop: Option<oneshot::Sender<()>>,
     join: tokio::task::JoinHandle<()>,
 }
@@ -1393,6 +1398,8 @@ impl MockMavlinkServer {
         let listener = UnixListener::bind(&path).unwrap();
         let received: Arc<Mutex<Option<COMMAND_LONG_DATA>>> = Arc::new(Mutex::new(None));
         let received_w = Arc::clone(&received);
+        let frames = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frames_w = Arc::clone(&frames);
         let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
         let join = tokio::spawn(async move {
             loop {
@@ -1413,6 +1420,7 @@ impl MockMavlinkServer {
                             if conn.read_exact(&mut body).await.is_err() {
                                 continue;
                             }
+                            frames_w.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             if let Ok((_h, MavMessage::COMMAND_LONG(d))) =
                                 ados_protocol::mavlink::parse_v2(&body)
                             {
@@ -1437,9 +1445,34 @@ impl MockMavlinkServer {
         Self {
             path,
             received,
+            frames,
             stop: Some(stop_tx),
             join,
         }
+    }
+
+    /// How many complete frames this socket has read — the FC-side view of the
+    /// router's TX counter.
+    fn frames_seen(&self) -> usize {
+        self.frames.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Assert that nothing was forwarded, after giving a frame time to arrive.
+    ///
+    /// The window matters: asserting immediately would pass even if the route
+    /// DID send, because the write is a separate task from the HTTP response.
+    async fn assert_no_frame_forwarded(&self, why: &str) {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            self.frames_seen(),
+            0,
+            "{why}: {} frame(s) reached the MAVLink socket",
+            self.frames_seen()
+        );
+        assert!(
+            self.received.lock().await.is_none(),
+            "{why}: a COMMAND_LONG was decoded off the socket"
+        );
     }
 
     /// Wait until a command frame has been received + decoded, returning it.
@@ -1829,4 +1862,70 @@ async fn the_pair_read_serves_the_fleet_roster() {
         "the relay secret reached the pair read: {body}"
     );
     h.stop().await;
+}
+
+// --- takeoff altitude validation (no frame reaches the FC on a refusal) ---
+
+/// A takeoff arg that cannot be an altitude is a 400 AND emits nothing.
+///
+/// The response status alone is not the property that matters — the property is
+/// that no `COMMAND_LONG` reaches the socket the router forwards to the flight
+/// controller. So this asserts the mock router's frame counter is still zero
+/// after the request, with a window for a frame to have arrived.
+///
+/// `NaN`, `-inf` and `1e39` are the three that used to get through: Rust's
+/// `f32: FromStr` accepts the first two case-insensitively and saturates the
+/// third to `+inf`, and all three landed in `param7` of `MAV_CMD_NAV_TAKEOFF`
+/// verbatim.
+#[tokio::test]
+async fn takeoff_with_a_non_finite_altitude_is_refused_and_sends_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    // One harness for the whole table: the counter must still be zero after ALL
+    // of them, which is a stronger statement than per-request isolation.
+    for arg in ["\"NaN\"", "\"-inf\"", "\"1e39\"", "-5", "0", "\"thirty\""] {
+        let body = format!(r#"{{"cmd":"takeoff","args":[{arg}]}}"#);
+        let (status, resp) = post_command(&h.socket, &body).await;
+        assert!(
+            status.contains("400"),
+            "takeoff arg {arg} must be refused with 400, was {status} / {resp}"
+        );
+    }
+    mav_mock
+        .assert_no_frame_forwarded("every takeoff arg above was refused")
+        .await;
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+}
+
+/// The control case: a flyable altitude still reaches the FC, so the refusal
+/// above is not just a broken route.
+#[tokio::test]
+async fn takeoff_with_a_flyable_altitude_still_reaches_the_fc() {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+
+    let (status, _b) = post_command(&h.socket, r#"{"cmd":"takeoff","args":["120.5"]}"#).await;
+    assert!(status.contains("200"), "{status}");
+    let d = mav_mock.await_command().await;
+    assert_eq!(d.command, MavCmd::MAV_CMD_NAV_TAKEOFF);
+    assert_eq!(d.param7, 120.5);
+    // At least one frame, not exactly one. The mock never sends COMMAND_ACK,
+    // so `send_awaiting_ack` legitimately re-sends up to its attempt budget —
+    // that retry is what gets a command through a lossy radio, and pinning
+    // the count to 1 would pin the absence of it. The assertion carrying the
+    // weight is the contrast with the refusal case above, where the count is
+    // exactly 0.
+    assert!(
+        mav_mock.frames_seen() >= 1,
+        "a flyable takeoff must reach the FC, saw {} frames",
+        mav_mock.frames_seen()
+    );
+
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
 }

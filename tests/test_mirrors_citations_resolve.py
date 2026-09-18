@@ -53,7 +53,13 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: silently. It sits below the sweep's own tally because several comments were
 #: rewritten after it, in the same pass, and a citation went with each. Lowering
 #: it is a deliberate act and belongs in the same commit as the deletion.
-MIN_CITATIONS = 163
+#:
+#: 163 -> 161: the ground-station WFB routes lost their citations when the
+#: FastAPI handlers they named (`PUT /wfb`, `POST /wfb/pair`, `GET /ui`) were
+#: deleted as dead. A comment asserting "mirrors X" outlives X and then reads
+#: as a live contract with a file that no longer exists, so the citation goes
+#: with the predecessor and the Rust says what it does instead.
+MIN_CITATIONS = 161
 
 
 def _rust_sources() -> list[Path]:

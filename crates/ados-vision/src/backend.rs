@@ -21,11 +21,17 @@ use ados_protocol::framebus::{
 use anyhow::{anyhow, Context, Result};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Cap on a single framed message, matching the sidecar's `MAX_FRAME_BYTES`.
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// How long one liveness observation of a sidecar is trusted before it is
+/// re-taken. Short enough that a sidecar that died reads as not-capable within
+/// a single `/api/status` poll, long enough that a status flood does not open a
+/// socket per request.
+const SIDECAR_LIVENESS_TTL: Duration = Duration::from_secs(3);
 
 /// A loaded, ready-to-run model.
 pub trait LoadedModel: Send + Sync {
@@ -61,11 +67,13 @@ pub trait VisionBackend: Send + Sync {
     fn load(&self, meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>>;
     /// Short backend name for logs and the registry (`mock`, `onnx`, `rknn`, `hailo`).
     fn name(&self) -> &str;
-    /// Whether this backend actually runs inference. The mock backend returns
-    /// no detections, so a vision engine wired to it produces a silently-empty
-    /// detection stream; a status surface should flag that to the operator
-    /// rather than presenting it as a working pipeline. Real backends override
-    /// to `true`.
+    /// Whether this backend is actually able to run inference right now. The
+    /// mock backend returns no detections, and a sidecar backend whose sidecar
+    /// is not answering returns none either; a vision engine wired to one
+    /// produces a silently-empty detection stream, which `/api/status` must
+    /// report as such rather than as a working accelerator. An in-process
+    /// runtime that is linked in is always capable, so the default is `true`;
+    /// a backend whose runtime lives somewhere that can be absent overrides.
     fn is_inference_capable(&self) -> bool {
         true
     }
@@ -276,6 +284,50 @@ pub use onnx_backend::OnnxBackend;
 pub struct SidecarBackend {
     socket_path: String,
     name: String,
+    /// Observed liveness of the sidecar behind `socket_path`, shared with every
+    /// model this backend loads so a real exchange updates the same state the
+    /// status surface reads.
+    health: Arc<SidecarHealth>,
+}
+
+/// Observed liveness of one sidecar socket.
+///
+/// [`SidecarBackend::load`] cannot tell whether the sidecar is up — the
+/// handshake is deliberately deferred to the first `infer` so the registry
+/// records the model either way. Without this, capability fell through to the
+/// trait default `true`, so `/api/status` advertised `perception_tier: "local"`
+/// for a socket nothing was listening on: a permanently empty detection stream
+/// reported as a working accelerator.
+#[derive(Debug, Default)]
+struct SidecarHealth {
+    /// The most recent observation: when it was taken, and whether the sidecar
+    /// answered. `None` until the first attempt.
+    last: Mutex<Option<(Instant, bool)>>,
+}
+
+impl SidecarHealth {
+    /// Record the outcome of a real exchange or a connect probe.
+    fn record(&self, reachable: bool) {
+        *self.last.lock().expect("sidecar health lock") = Some((Instant::now(), reachable));
+    }
+
+    /// The last observation while it is still inside [`SIDECAR_LIVENESS_TTL`].
+    fn fresh(&self) -> Option<bool> {
+        match *self.last.lock().expect("sidecar health lock") {
+            Some((at, reachable)) if at.elapsed() < SIDECAR_LIVENESS_TTL => Some(reachable),
+            _ => None,
+        }
+    }
+}
+
+/// Is anything listening on the sidecar socket right now?
+///
+/// A connect, not a `Path::exists`: a sidecar killed with SIGKILL leaves its
+/// socket inode behind, so an existence check reports the dead case as healthy,
+/// which is the exact fabrication this guards against. The connection is closed
+/// immediately; the sidecar's accept loop treats it as a client that hung up.
+fn probe_sidecar(socket_path: &str) -> bool {
+    UnixStream::connect(socket_path).is_ok()
 }
 
 impl SidecarBackend {
@@ -287,6 +339,7 @@ impl SidecarBackend {
         Self {
             socket_path: socket_path.into(),
             name: name.into(),
+            health: Arc::new(SidecarHealth::default()),
         }
     }
 
@@ -310,6 +363,10 @@ struct SidecarModel {
     /// handshake once (lazily, on the first infer) and re-send it only if the
     /// sidecar reports the model is no longer loaded (it was restarted).
     loaded: Mutex<bool>,
+    /// The backend's liveness state. Every exchange this model makes updates
+    /// it, so the capability the status surface reads is the outcome of real
+    /// traffic rather than a guess.
+    health: Arc<SidecarHealth>,
 }
 
 impl VisionBackend for SidecarBackend {
@@ -328,14 +385,45 @@ impl VisionBackend for SidecarBackend {
             class_labels: meta.output_classes.clone(),
             head: head_str(meta.head).to_string(),
             loaded: Mutex::new(false),
+            health: Arc::clone(&self.health),
         }))
     }
     fn name(&self) -> &str {
         &self.name
     }
+
+    /// Capable only while the sidecar is actually answering.
+    ///
+    /// The vendor runtime is in another process, so "the backend was selected"
+    /// says nothing about whether inference can run: the sidecar may never have
+    /// started, may have died, or may have been killed with its socket inode
+    /// left behind. A recent real exchange is the strongest evidence and is
+    /// used when there is one; otherwise a connect probe answers, and the
+    /// result is cached for [`SIDECAR_LIVENESS_TTL`] so a status poll never
+    /// turns into a connect per request.
+    fn is_inference_capable(&self) -> bool {
+        if let Some(reachable) = self.health.fresh() {
+            return reachable;
+        }
+        let reachable = probe_sidecar(&self.socket_path);
+        self.health.record(reachable);
+        reachable
+    }
 }
 
 impl SidecarModel {
+    /// One round trip that also records what it learned about the sidecar.
+    ///
+    /// Every exchange this model makes is evidence of liveness, and it is
+    /// stronger evidence than a connect probe, so the capability the status
+    /// surface reads tracks real traffic: an infer that reaches the sidecar
+    /// marks it reachable, and the first one that cannot marks it dead.
+    fn exchange(&self, req: &rmpv::Value) -> Result<rmpv::Value> {
+        let out = round_trip(&self.socket_path, req);
+        self.health.record(out.is_ok());
+        out
+    }
+
     /// Send `load_model` to the sidecar once. Idempotent: a no-op after the
     /// first success until [`mark_unloaded`] resets it.
     fn ensure_loaded(&self) -> Result<()> {
@@ -352,7 +440,7 @@ impl SidecarModel {
             &self.class_labels,
             &self.head,
         );
-        let resp = round_trip(&self.socket_path, &req)?;
+        let resp = self.exchange(&req)?;
         check_ok(&resp).context("sidecar load_model")?;
         *loaded = true;
         Ok(())
@@ -374,17 +462,15 @@ impl LoadedModel for SidecarModel {
         let fmt = fmt_str(format);
         self.ensure_loaded()?;
         let req = infer_request(&self.model_id, frame, width, height, fmt);
-        let resp = round_trip(&self.socket_path, &req)?;
+        let resp = self.exchange(&req)?;
         match decode_detections(&resp) {
             Ok(dets) => Ok(dets),
             Err(e) if is_not_loaded(&e) => {
                 // The sidecar restarted and dropped the model: reload once and retry.
                 self.mark_unloaded();
                 self.ensure_loaded()?;
-                let resp2 = round_trip(
-                    &self.socket_path,
-                    &infer_request(&self.model_id, frame, width, height, fmt),
-                )?;
+                let resp2 =
+                    self.exchange(&infer_request(&self.model_id, frame, width, height, fmt))?;
                 decode_detections(&resp2)
             }
             Err(e) => Err(e),
@@ -401,17 +487,15 @@ impl LoadedModel for SidecarModel {
         let fmt = fmt_str(format);
         self.ensure_loaded()?;
         let req = embed_request(&self.model_id, crop, width, height, fmt);
-        let resp = round_trip(&self.socket_path, &req)?;
+        let resp = self.exchange(&req)?;
         match decode_embedding(&resp) {
             Ok(emb) => Ok(Some(emb)),
             Err(e) if is_not_loaded(&e) => {
                 // The sidecar restarted and dropped the model: reload + retry once.
                 self.mark_unloaded();
                 self.ensure_loaded()?;
-                let resp2 = round_trip(
-                    &self.socket_path,
-                    &embed_request(&self.model_id, crop, width, height, fmt),
-                )?;
+                let resp2 =
+                    self.exchange(&embed_request(&self.model_id, crop, width, height, fmt))?;
                 decode_embedding(&resp2).map(Some)
             }
             Err(e) => Err(e),
@@ -707,16 +791,20 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
         }
     };
     if !backend.is_inference_capable() {
-        // Loud, not silent: the engine will run but inference is a no-op, so an
-        // enabled vision pipeline on this board produces no detections. The
-        // engine surfaces the same fact through `is_inference_capable` on its
-        // status so the GCS can show "no real inference running".
+        // Loud, not silent: the engine will run but no detection will come out
+        // of it — either because the backend is the mock, or because the chosen
+        // accelerator sidecar is not answering on its socket. The engine
+        // surfaces the same fact through `is_inference_capable` on its status,
+        // so `/api/status` reports the offload tier instead of claiming local
+        // inference that cannot happen.
         tracing::warn!(
             soc = %soc,
+            backend = backend.name(),
             preference = prefs.preference,
             onnx_compiled = ONNX_COMPILED,
-            "vision backend resolved to the mock: no real inference will run; \
-             build with the onnx feature or attach an accelerator sidecar"
+            "vision backend cannot run inference: the detection stream will stay \
+             empty until an accelerator sidecar answers, or the binary is built \
+             with the onnx feature"
         );
     }
     backend
@@ -867,11 +955,47 @@ mod tests {
     }
 
     #[test]
-    fn mock_backend_is_flagged_as_not_inference_capable() {
-        // The status surface keys on this to tell the operator no real inference
-        // runs; the real backends report capable.
+    fn a_sidecar_that_is_not_answering_is_not_inference_capable() {
+        // The status surface keys on this: an unreachable sidecar means a
+        // permanently empty detection stream, so reporting it capable made
+        // /api/status advertise perception_tier "local" for an accelerator that
+        // was not there.
         assert!(!MockBackend.is_inference_capable());
-        assert!(SidecarBackend::new("/x", "rknn").is_inference_capable());
+        assert!(
+            !SidecarBackend::new("/nonexistent/ados-vision-rknn.sock", "rknn")
+                .is_inference_capable()
+        );
+
+        // The residue case: a sidecar killed with SIGKILL leaves its socket
+        // inode behind, so an existence check would report this as healthy.
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("rknn.sock");
+        std::fs::write(&stale, b"").unwrap();
+        assert!(!SidecarBackend::new(stale.to_str().unwrap(), "rknn").is_inference_capable());
+    }
+
+    #[test]
+    fn a_sidecar_that_dies_stops_reporting_capable_on_the_failed_exchange() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("rknn.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let backend = SidecarBackend::new(sock.to_str().unwrap(), "rknn");
+        assert!(
+            backend.is_inference_capable(),
+            "a sidecar that is listening is capable"
+        );
+        let model = backend.load(&meta()).unwrap();
+
+        // The sidecar goes away mid-flight, socket and all.
+        drop(listener);
+        std::fs::remove_file(&sock).unwrap();
+        assert!(model.infer(&[0u8; 4], 1, 1, FrameFormat::Rgb24).is_err());
+
+        // A failed exchange is stronger evidence than the cached probe, so the
+        // capability flips on the failure rather than after the liveness TTL.
+        assert!(!backend.is_inference_capable());
     }
 
     #[test]

@@ -38,7 +38,7 @@ pub use control::{ControlMsg, MarkResult};
 pub use encode::now_us;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,6 +51,95 @@ use crate::db;
 
 use self::config::{DRAIN_POLL, IDLE_WAKE};
 use self::session::open_session;
+
+/// How long the writer may go without stamping progress before it is judged
+/// stalled.
+///
+/// The run loop stamps once per turn and turns at least every [`IDLE_WAKE`]
+/// (250 ms) when nothing is flowing, so this is three orders of magnitude of
+/// slack over the idle cadence. The size is set by the one legitimate step
+/// that cannot be interrupted or subdivided: the periodic full `VACUUM`, which
+/// rewrites the whole file in a single SQLite call and on a gigabyte store on
+/// tired flash takes minutes. Withholding the watchdog under that would have
+/// systemd SIGKILL the daemon mid-rewrite, which is precisely how the store
+/// gets torn — a worse failure than the one this guards.
+///
+/// The common case does not wait for it: a writer whose loop RETURNS is
+/// reported dead immediately by the terminal `ended` flag, with no timing
+/// involved. This budget only covers a writer that is still inside a call and
+/// never coming back.
+pub const WRITER_STALL_BUDGET: Duration = Duration::from_secs(600);
+
+/// The writer's liveness stamp, shared with the daemon and the read surface.
+///
+/// Without it, `/v1/healthz` answered `writer_alive: true` unconditionally and
+/// the daemon fed the systemd watchdog from a timer that knew nothing about the
+/// writer — so a writer that died mid-flight left the Black Box silently not
+/// recording behind a 200 `{ok:true}` and an `active (running)` unit. The
+/// supervisor's `MonitorProgress` couples its watchdog to real pass progress
+/// the same way; this is that pattern for the store.
+///
+/// Cheap enough to stamp every turn of the run loop: two relaxed atomics, no
+/// lock, so the stamp can never be the thing that blocks the writer.
+#[derive(Clone, Debug)]
+pub struct WriterHealth {
+    inner: Arc<WriterHealthInner>,
+}
+
+#[derive(Debug)]
+struct WriterHealthInner {
+    /// Process-start epoch the millisecond stamps are measured from.
+    epoch: Instant,
+    /// Milliseconds since `epoch` at the last stamp.
+    last_ms: AtomicU64,
+    /// Set once the writer's run loop has returned, for any reason. Terminal:
+    /// the writer thread is not restarted in place.
+    ended: AtomicBool,
+}
+
+impl WriterHealth {
+    /// Start marked fresh and running, so the read surface and the watchdog
+    /// report healthy from the moment the writer is spawned.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(WriterHealthInner {
+                epoch: Instant::now(),
+                last_ms: AtomicU64::new(0),
+                ended: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Stamp progress. Called once per turn of the writer's run loop.
+    pub fn mark(&self) {
+        let ms = self.inner.epoch.elapsed().as_millis() as u64;
+        self.inner.last_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Record that the run loop has returned. After this the writer is dead
+    /// whatever the stamp says.
+    pub fn mark_ended(&self) {
+        self.inner.ended.store(true, Ordering::SeqCst);
+    }
+
+    /// How long since the last stamp.
+    pub fn since_mark(&self) -> Duration {
+        let now_ms = self.inner.epoch.elapsed().as_millis() as u64;
+        Duration::from_millis(now_ms.saturating_sub(self.inner.last_ms.load(Ordering::Relaxed)))
+    }
+
+    /// Whether the writer is actually still persisting: its loop has not
+    /// returned and it stamped progress within `budget`.
+    pub fn is_alive(&self, budget: Duration) -> bool {
+        !self.inner.ended.load(Ordering::SeqCst) && self.since_mark() <= budget
+    }
+}
+
+impl Default for WriterHealth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// The dedicated-thread writer. Owns the only read-write connection, the ingest
 /// receiver, the live-tail broadcaster, and the current session bookkeeping.
@@ -86,6 +175,18 @@ pub struct Writer {
     /// maintenance pass and skips the `VACUUM` inside one already mid-flight, so a
     /// long rewrite can never overrun the shutdown bound and be torn mid-write.
     pub(super) stop: Arc<AtomicBool>,
+    /// The liveness stamp the read surface and the systemd watchdog read. The
+    /// run loop stamps it once per turn and marks it ended when it returns.
+    health: WriterHealth,
+    /// Wall clock read once when this writer opened, and the monotonic instant
+    /// it was read at. Comparing the two later detects a clock STEP, which is
+    /// what makes an absolute-time retention cutoff unsafe.
+    pub(super) session_start_us: i64,
+    pub(super) session_start_at: Instant,
+    /// Set once a clock step has been observed in this session. Sticky: the
+    /// rows already written carry stamps from the pre-step clock, so absolute
+    /// age is a lie about them for as long as this writer lives.
+    pub(super) clock_stepped: bool,
 }
 
 impl Writer {
@@ -117,6 +218,7 @@ impl Writer {
         let now = Instant::now();
         let next_maintenance = now + config.retention.maintenance_interval;
         let next_vacuum = now + config.retention.vacuum_interval;
+        let session_start_us = now_us();
         Ok(Self {
             conn,
             rx,
@@ -131,7 +233,23 @@ impl Writer {
             next_maintenance,
             next_vacuum,
             stop,
+            health: WriterHealth::new(),
+            session_start_us,
+            session_start_at: now,
+            clock_stepped: false,
         })
+    }
+
+    /// A handle the daemon clones into the read surface and the watchdog ticker
+    /// so both read the writer's real liveness instead of assuming it.
+    pub fn health_handle(&self) -> WriterHealth {
+        self.health.clone()
+    }
+
+    /// Stamp liveness from a sibling module mid-turn, so a long-running step
+    /// inside one loop turn is not mistaken for a stall.
+    pub(super) fn mark_progress(&self) {
+        self.health.mark();
     }
 
     /// A handle the daemon clones to wire the future live-tail consumer. Holding
@@ -173,9 +291,24 @@ impl Writer {
     /// at the clock, and goes back to waiting — cheap, and reactive to its own
     /// retention timer. Maintenance runs on the same connection the inserts use;
     /// there is never a second read-write connection.
+    ///
+    /// Every turn stamps [`WriterHealth`], and the return marks it ended. That
+    /// stamp is the only evidence anything else has that the store is still
+    /// recording: `/v1/healthz` reads it, and the daemon feeds the systemd
+    /// watchdog only while it advances, so a writer that wedges or exits stops
+    /// being reported healthy instead of leaving a dead Black Box behind a
+    /// green probe.
     pub fn run(mut self) -> Result<(), WriterError> {
+        let health = self.health.clone();
+        let out = self.run_inner();
+        health.mark_ended();
+        out
+    }
+
+    fn run_inner(&mut self) -> Result<(), WriterError> {
         let mut batch: Vec<IngestFrame> = Vec::with_capacity(self.config.batch_max_rows);
         loop {
+            self.health.mark();
             // Wait for the first frame of an otherwise-empty batch, but no longer
             // than the next maintenance deadline (capped by IDLE_WAKE so a long
             // interval still wakes regularly). `recv_with_deadline` returns the

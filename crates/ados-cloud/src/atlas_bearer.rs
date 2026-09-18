@@ -190,7 +190,7 @@ mod tests {
         let ev = event("atlas.occupancy", vec![1, 2, 3]);
         bearer.send(&ev).await.unwrap();
 
-        let pubs = fake.publishes.lock().unwrap();
+        let pubs = fake.publishes.lock();
         assert_eq!(pubs.len(), 1);
         let (topic, qos, payload) = &pubs[0];
         assert_eq!(topic, "ados/dev1/atlas/occupancy");
@@ -216,7 +216,7 @@ mod tests {
             err.is_retriable(),
             "a fatter lane (LAN) carries the keyframe"
         );
-        assert!(fake.publishes.lock().unwrap().is_empty());
+        assert!(fake.publishes.lock().is_empty());
     }
 
     #[tokio::test]
@@ -236,6 +236,6 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, TransportError::Unavailable));
         assert!(err.is_retriable());
-        assert!(fake.publishes.lock().unwrap().is_empty());
+        assert!(fake.publishes.lock().is_empty());
     }
 }

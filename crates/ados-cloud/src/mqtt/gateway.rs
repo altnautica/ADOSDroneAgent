@@ -101,7 +101,7 @@ mod tests {
         let telemetry = serde_json::json!({"lat": 12.34, "lon": 56.78, "armed": false});
         gw.publish_tick(&telemetry, &status_doc()).await.unwrap();
 
-        let pubs = gw.transport.publishes.lock().unwrap();
+        let pubs = gw.transport.publishes.lock();
         assert_eq!(pubs.len(), 2);
         // First: telemetry at q0.
         assert_eq!(pubs[0].0, "ados/dev1/telemetry");

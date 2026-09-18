@@ -178,7 +178,10 @@ impl MavlinkIpcClient {
             );
             e
         })?;
-        Ok(AckStream { stream })
+        Ok(AckStream {
+            stream,
+            desynced: false,
+        })
     }
 }
 
@@ -188,8 +191,10 @@ pub enum FrameRead {
     /// A complete raw MAVLink frame payload (the bytes after the length prefix),
     /// ready to parse.
     Frame(Vec<u8>),
-    /// No frame arrived within the read budget. The caller decides whether to
-    /// keep waiting, resend, or give up.
+    /// No frame arrived within the read budget. The bounded read was cancelled
+    /// mid-frame, so the stream it came from is retired (see [`AckStream`]): the
+    /// caller resends on a FRESH stream or gives up, it never reads this one
+    /// again.
     Timeout,
     /// The connection closed (or a read/framing error ended it). No more frames
     /// will arrive on this stream.
@@ -204,9 +209,30 @@ pub enum FrameRead {
 /// pulls the next broadcast FC frame under a bounded budget. The stream is owned
 /// (not shared), so its reads are exclusive and it is dropped when the exchange
 /// ends.
+///
+/// ## One bounded read that expires retires the stream
+///
+/// `read_frame` bounds `read_exact` with `tokio::time::timeout`, and `read_exact`
+/// is explicitly NOT cancellation-safe: when the timeout fires, the future is
+/// dropped after having possibly consumed part of a length prefix or part of a
+/// payload, and those bytes are gone. The stream is then at an unknown offset
+/// inside a frame, and a raw byte stream carries no resync marker to recover
+/// with — so every later read parses a shifted window and silently misparses
+/// real frames. On the command path that meant an ACCEPTED arm / disarm /
+/// mode-set ACK was missed and the request reported "no ack observed" for a
+/// command the FC had executed.
+///
+/// So a timeout marks the stream `desynced` and every subsequent call refuses:
+/// reads report [`FrameRead::Eof`] (this connection will never yield another
+/// parseable frame) and writes error. The caller's recovery is to open a fresh
+/// stream, which is what [`crate::routes`]' command retry loop does per attempt.
 #[derive(Debug)]
 pub struct AckStream {
     stream: UnixStream,
+    /// Set once a bounded read was cancelled mid-frame. The stream is at an
+    /// unknown byte offset from that point on and must not be read or written
+    /// again — only replaced.
+    desynced: bool,
 }
 
 impl AckStream {
@@ -214,7 +240,17 @@ impl AckStream {
     /// big-endian length prefix the router reads (the same `ados.core.ipc`
     /// contract [`MavlinkIpcClient::send`] uses). A write failure means the link
     /// dropped; the caller maps it to a 503.
+    ///
+    /// Refuses on a desynced stream. The write direction is technically still
+    /// intact, but a command written here is one whose ACK this stream can no
+    /// longer read, so sending it would repeat the flight command while
+    /// guaranteeing the caller cannot observe the result.
     pub async fn write_frame(&mut self, frame: &[u8]) -> Result<(), SendError> {
+        if self.desynced {
+            return Err(SendError::Io(std::io::Error::other(
+                "ack stream desynced by a cancelled read; open a fresh stream",
+            )));
+        }
         let wire = encode_frame(frame, MAVLINK_MAX_FRAME)?;
         self.stream.write_all(&wire).await?;
         self.stream.flush().await?;
@@ -224,14 +260,23 @@ impl AckStream {
     /// Read the next raw MAVLink frame from the broadcast stream, bounded by
     /// `budget`. Returns [`FrameRead::Frame`] with the payload (the bytes after
     /// the length prefix), [`FrameRead::Timeout`] if nothing arrived in time, or
-    /// [`FrameRead::Eof`] if the connection closed or a framing error ended it.
+    /// [`FrameRead::Eof`] if the connection closed, a framing error ended it, or
+    /// an earlier timeout already retired it.
     /// A read error is never surfaced as an `Err`: the command was already sent,
     /// so a broken read stream just ends the correlation window (the route then
     /// reports an honest "no ack observed"), it does not fail the request.
+    ///
+    /// A `Timeout` return is terminal for this stream — see the type docs.
     pub async fn read_frame(&mut self, budget: Duration) -> FrameRead {
+        if self.desynced {
+            return FrameRead::Eof;
+        }
         let mut header = [0u8; HEADER_SIZE];
         match tokio::time::timeout(budget, self.stream.read_exact(&mut header)).await {
-            Err(_elapsed) => return FrameRead::Timeout,
+            Err(_elapsed) => {
+                self.desynced = true;
+                return FrameRead::Timeout;
+            }
             Ok(Err(_io)) => return FrameRead::Eof,
             Ok(Ok(_)) => {}
         }
@@ -248,10 +293,20 @@ impl AckStream {
         }
         let mut payload = vec![0u8; len];
         match tokio::time::timeout(budget, self.stream.read_exact(&mut payload)).await {
-            Err(_elapsed) => FrameRead::Timeout,
+            Err(_elapsed) => {
+                self.desynced = true;
+                FrameRead::Timeout
+            }
             Ok(Err(_io)) => FrameRead::Eof,
             Ok(Ok(_)) => FrameRead::Frame(payload),
         }
+    }
+
+    /// Whether a cancelled read has retired this stream. The command loop opens a
+    /// fresh stream per attempt, so this is the property a test asserts rather
+    /// than a branch production code takes.
+    pub fn is_desynced(&self) -> bool {
+        self.desynced
     }
 }
 
@@ -420,6 +475,63 @@ mod tests {
                 FrameRead::Timeout
             ),
             "an idle stream reports Timeout"
+        );
+        server.await.unwrap();
+    }
+
+    /// A frame that arrives AFTER the read budget expired must never be parsed
+    /// off the timed-out stream.
+    ///
+    /// This is the desync: `read_exact` is not cancellation-safe, so the expired
+    /// read may already have eaten part of the length prefix. The bytes that land
+    /// next are therefore at an unknown offset, and parsing them produced a
+    /// misread ACK — the command route then reported "no ack observed" for an arm
+    /// or mode-set the FC had accepted. Asserted behaviourally: the server sends
+    /// a complete, well-formed frame after the timeout, and the stream still
+    /// refuses to yield it.
+    #[tokio::test]
+    async fn a_frame_arriving_after_a_timeout_is_never_read_off_that_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mavlink.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let late = b"\xfd\x03\x04late-frame".to_vec();
+        let late_w = late.clone();
+        let server = tokio::spawn(async move {
+            let (mut conn, _addr) = listener.accept().await.unwrap();
+            // Stay silent past the client's read budget, then send a good frame.
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            let framed = encode_frame(&late_w, MAVLINK_MAX_FRAME).unwrap();
+            conn.write_all(&framed).await.unwrap();
+            conn.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let client = MavlinkIpcClient::new(path.clone());
+        let mut stream = client.open_ack_stream().await.expect("stream opens");
+        assert!(
+            matches!(
+                stream.read_frame(Duration::from_millis(30)).await,
+                FrameRead::Timeout
+            ),
+            "the idle window must report Timeout"
+        );
+        assert!(stream.is_desynced(), "a timed-out read retires the stream");
+
+        // The late frame is now on the wire. A read must NOT hand it back.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            matches!(
+                stream.read_frame(Duration::from_millis(200)).await,
+                FrameRead::Eof
+            ),
+            "a retired stream reports Eof, never a frame read at an unknown offset"
+        );
+        // And a resend on the retired stream is refused rather than duplicating a
+        // flight command whose ACK could not be observed.
+        assert!(
+            stream.write_frame(&late).await.is_err(),
+            "a retired stream refuses writes"
         );
         server.await.unwrap();
     }

@@ -240,13 +240,13 @@ mod tests {
         relay.subscribe_offers().await.unwrap();
         relay.handle_offer("v=0\noffer-sdp").await.unwrap();
 
-        let subs = relay.transport.subscriptions.lock().unwrap();
+        let subs = relay.transport.subscriptions.lock();
         assert_eq!(
             subs[0],
             ("ados/dev1/webrtc/offer".to_string(), MqttQos::AtLeastOnce)
         );
         drop(subs);
-        let pubs = relay.transport.publishes.lock().unwrap();
+        let pubs = relay.transport.publishes.lock();
         assert_eq!(pubs.len(), 1);
         assert_eq!(pubs[0].0, "ados/dev1/webrtc/answer");
         assert_eq!(pubs[0].1, MqttQos::AtLeastOnce);
@@ -259,7 +259,7 @@ mod tests {
         let relay =
             WebrtcSignalingRelay::new("dev1", FakeTransport::default(), FakeWhep::http_error(500));
         relay.handle_offer("v=0\noffer").await.unwrap();
-        let pubs = relay.transport.publishes.lock().unwrap();
+        let pubs = relay.transport.publishes.lock();
         let body: serde_json::Value = serde_json::from_slice(&pubs[0].2).unwrap();
         assert_eq!(body["error"], "whep_failed");
         assert_eq!(body["status"], 500);
@@ -272,7 +272,7 @@ mod tests {
         let relay =
             WebrtcSignalingRelay::new("dev1", FakeTransport::default(), FakeWhep::exception());
         relay.handle_offer("v=0\noffer").await.unwrap();
-        let pubs = relay.transport.publishes.lock().unwrap();
+        let pubs = relay.transport.publishes.lock();
         let body: serde_json::Value = serde_json::from_slice(&pubs[0].2).unwrap();
         assert_eq!(body["error"], "whep_exception");
         assert_eq!(body["status"], 0);

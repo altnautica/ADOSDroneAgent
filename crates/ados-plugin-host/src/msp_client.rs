@@ -183,7 +183,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await; // let the subscription register
         let reply = ados_protocol::msp::encode_v2(101, &[1, 2, 3]);
         server
-            .broadcast(encode_frame(&reply, MAVLINK_MAX_FRAME).unwrap())
+            .broadcast(encode_frame(&reply, MAVLINK_MAX_FRAME).unwrap().into())
             .await;
         let delivered = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await

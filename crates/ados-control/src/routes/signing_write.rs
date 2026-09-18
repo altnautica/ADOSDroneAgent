@@ -185,11 +185,25 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
     }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     if let Err(e) = state.mavlink.send(&frame).await {
-        // The first frame already reached the FC; a second-send failure is a
-        // degraded enrollment. Match the Python 500 enrollment-failed path rather
-        // than claiming success.
-        tracing::error!(error = %e, "signing enroll send (2/2) failed");
-        return detail(StatusCode::INTERNAL_SERVER_ERROR, "enrollment failed");
+        // The FIRST frame already reached the FC, so the key may well be
+        // enrolled and the FC may already be rejecting unsigned frames. A bare
+        // 500 "enrollment failed" tells the operator the opposite and invites
+        // them to walk away from an aircraft they can no longer command.
+        // Report the ambiguity instead, and hand back the fingerprint so the
+        // GCS can name the key the operator must keep.
+        tracing::error!(error = %e, key_id = %key_id, "signing enroll send (2/2) failed after first frame was sent");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "detail": "enrollment may have partially applied: the first SETUP_SIGNING frame \
+                           was sent but the confirming repeat failed. Treat the FC as possibly \
+                           enrolled with this key — verify signing state before flying, and keep \
+                           the key.",
+                "partially_applied": true,
+                "key_id": key_id,
+            })),
+        )
+            .into_response();
     }
 
     let enrolled_at = iso8601_seconds_utc(OffsetDateTime::now_utc());

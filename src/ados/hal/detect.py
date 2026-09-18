@@ -274,6 +274,34 @@ class GpioOutput(BaseModel):
     function: str
 
 
+class BoardVariantMatch(BaseModel):
+    """The host facts a board variant can be discriminated on.
+
+    Only ``cpu_cores`` today, because that is what separates the two SoC bins
+    a vendor can ship behind ONE device tree."""
+
+    cpu_cores: int | None = None
+
+
+class BoardVariant(BaseModel):
+    """A same-device-tree hardware variant of a board.
+
+    Radxa publishes a single device tree for the ROCK 5C (RK3588S2, 8 cores)
+    and the ROCK 5C Lite (RK3582, 6 cores), so pattern matching cannot tell
+    them apart and whichever profile filename sorted first won — a full 5C
+    published ``soc: RK3582`` and a name ending in "Lite" all the way out to
+    Mission Control. A variant names the discriminator explicitly and overrides
+    only the identity fields that actually differ."""
+
+    id: str
+    # An EMPTY match never selects: a catch-all variant would silently rename
+    # every unit of the board.
+    when: BoardVariantMatch = Field(default_factory=BoardVariantMatch)
+    name: str | None = None
+    soc: str | None = None
+    default_tier: int | None = None
+
+
 class BoardProfile(BaseModel):
     """Pydantic model for YAML board profile validation."""
 
@@ -307,6 +335,12 @@ class BoardProfile(BaseModel):
     flight_controller: FlightControllerSection = Field(
         default_factory=FlightControllerSection
     )
+    variants: list[BoardVariant] = Field(default_factory=list)
+
+    # The profile's YAML filename stem (``cubie-a7s``, ``rock-5c-lite``). Not a
+    # YAML key: ``_load_board_profiles`` stamps it from the file name, and it is
+    # the ONE canonical token ``/etc/ados/board_override`` accepts.
+    stem: str = ""
 
 
 @dataclass
@@ -395,8 +429,26 @@ def _load_board_profiles() -> list[BoardProfile]:
             with open(yaml_file) as f:
                 data = yaml.safe_load(f)
                 if data:
-                    profiles.append(BoardProfile(**data))
+                    profile = BoardProfile(**data)
+                    # The filename stem is the canonical board-override token;
+                    # it is not a YAML key, so it is stamped here.
+                    profile.stem = yaml_file.stem
+                    profiles.append(profile)
     return profiles
+
+
+def known_board_stems() -> list[str]:
+    """Every legal ``/etc/ados/board_override`` value, sorted.
+
+    The override grammar is the board-profile YAML filename stem
+    (``cubie-a7s``, ``rock-5c-lite``) and nothing else. It used to be matched
+    against ``profile.name``, i.e. the display name — and the setup facade
+    rejects anything outside ``[A-Za-z0-9_-]``, so 20 of the 21 display names
+    could not be entered at all and the documented escape hatch for a
+    mis-detected board was unusable. The stem is a legal slug, unambiguous, and
+    what the shell scripts and the Rust sidecar writer can pass.
+    """
+    return sorted(p.stem for p in _load_board_profiles() if p.stem)
 
 
 def _read_device_model() -> str:
@@ -454,7 +506,11 @@ def _read_cpuinfo_model() -> str:
 
 
 def _read_board_override() -> str:
-    """Check /etc/ados/board_override for a forced board name."""
+    """The operator's forced board — a board-profile YAML filename STEM.
+
+    ``/etc/ados/board_override`` has five consumers across two languages; the
+    stem is the one grammar all of them accept (see ``known_board_stems``).
+    """
     try:
         if BOARD_OVERRIDE_PATH.exists():
             content = BOARD_OVERRIDE_PATH.read_text().strip()
@@ -477,13 +533,61 @@ def _match_profile(
     return None
 
 
+def _match_override(
+    profiles: list[BoardProfile], token: str
+) -> BoardProfile | None:
+    """Resolve a board-override token (a YAML filename stem) to its profile."""
+    wanted = token.strip().lower()
+    if not wanted:
+        return None
+    for profile in profiles:
+        if profile.stem.lower() == wanted:
+            return profile
+    return None
+
+
+def _select_variant(profile: BoardProfile, cpu_cores: int) -> BoardVariant | None:
+    """The variant whose ``when`` holds for these facts, if any.
+
+    An empty ``when`` never selects — a catch-all variant would rename every
+    unit of the board silently.
+    """
+    for variant in profile.variants:
+        if variant.when.cpu_cores is not None and variant.when.cpu_cores == cpu_cores:
+            return variant
+    return None
+
+
+def _apply_variant(profile: BoardProfile, cpu_cores: int) -> BoardProfile:
+    """Return `profile` with its matching same-device-tree variant applied.
+
+    Returned as a copy so the loaded profile list stays the file's own content
+    and a second resolution with different facts cannot see the first's
+    overrides.
+    """
+    variant = _select_variant(profile, cpu_cores)
+    if variant is None:
+        return profile
+    updates: dict[str, object] = {}
+    if variant.name is not None:
+        updates["name"] = variant.name
+    if variant.soc is not None:
+        updates["soc"] = variant.soc
+    if variant.default_tier is not None:
+        updates["default_tier"] = variant.default_tier
+    if not updates:
+        return profile
+    return profile.model_copy(update=updates)
+
+
 def _board_from_profile(
     profile: BoardProfile,
     model_string: str,
     ram_mb: int,
     cpu_cores: int,
 ) -> BoardInfo:
-    """Build a BoardInfo from a matched profile."""
+    """Build a BoardInfo from a matched profile, variant applied."""
+    profile = _apply_variant(profile, cpu_cores)
     tier = profile.default_tier
     return BoardInfo(
         name=profile.name,
@@ -520,10 +624,11 @@ def detect_board(force: bool = False) -> BoardInfo:
     """Detect the current board.
 
     Detection order:
-    1. /etc/ados/board_override, if present, load that profile by name
-    2. /proc/device-tree/model, match against board profile patterns
-    3. /proc/cpuinfo Hardware/model, fallback pattern matching
-    4. Platform-based fallback (macOS dev, generic-x86_64, generic-<arch>)
+    1. /etc/ados/board_override, resolved by board-profile YAML filename stem
+    2. /proc/device-tree/compatible first token (uniquely identifies a board)
+    3. /proc/device-tree/model, matched against board profile patterns
+    4. /proc/cpuinfo Hardware/model, fallback pattern matching
+    5. The generic profile for this architecture (never a profile-less record)
 
     Result is cached for the service lifetime. Pass force=True to bypass
     the cache and re-run detection.
@@ -539,35 +644,91 @@ def detect_board(force: bool = False) -> BoardInfo:
         return info
 
 
-def _match_current_profile() -> BoardProfile | None:
-    """Run the override/device-tree/cpuinfo match and return the BoardProfile.
+def _resolve_profile_match(
+    profiles: list[BoardProfile],
+) -> tuple[BoardProfile, str, str] | None:
+    """Resolve the board profile for this host.
 
-    Mirrors the matching order of ``_detect_board_uncached`` but returns the
-    full validated profile (with the declarative cameras/radios/video/FC
-    blocks) instead of the flat ``BoardInfo``. Returns None when nothing
-    matches (generic fallback).
+    Returns ``(profile, model_string, source)`` or ``None`` when nothing
+    matches. Mirrors the Rust ``board_sidecar::resolve_profile`` exactly — the
+    two halves must name the same board for the same hardware, because one
+    writes ``/run/ados/board.json`` and the other answers the Python services.
+
+    An override naming no profile falls THROUGH to auto-detection with a
+    warning rather than minting a profile-less board: the override exists to
+    correct a mis-detection, and a typo must not cost the node its UART
+    candidates and its perception tier.
     """
-    profiles = _load_board_profiles()
-    override_name = _read_board_override()
-    if override_name:
-        for profile in profiles:
-            if profile.name.lower() == override_name.lower():
-                return profile
+    model_string = _read_device_model()
     compat_string = _read_device_compatible()
+    cpuinfo_model = _read_cpuinfo_model()
+
+    token = _read_board_override()
+    if token:
+        matched = _match_override(profiles, token)
+        if matched:
+            detected = model_string or compat_string or cpuinfo_model
+            return matched, detected or token, "override"
+        log.warning(
+            "board_override_unknown",
+            token=token,
+            hint="expected a board-profile YAML filename stem, e.g. rock-5c-lite",
+        )
+
     if compat_string:
         matched = _match_profile(profiles, compat_string)
         if matched:
-            return matched
-    model_string = _read_device_model()
+            return matched, model_string or compat_string, "compatible"
     if model_string:
         matched = _match_profile(profiles, model_string)
         if matched:
-            return matched
-    cpuinfo_model = _read_cpuinfo_model()
+            return matched, model_string, "model"
     if cpuinfo_model:
         matched = _match_profile(profiles, cpuinfo_model)
         if matched:
-            return matched
+            return matched, cpuinfo_model, "cpuinfo"
+    return None
+
+
+def _generic_identity() -> tuple[str, str]:
+    """The generic profile stem for this architecture, and the name an
+    unmatched board is published under.
+
+    Kept together because the Rust sidecar writer resolves the identical pair.
+    The two used to disagree: Rust resolved an unmatched board through the
+    ``generic-arm64`` profile (keeping its fallback UART candidates), while this
+    half minted a bare ``generic-aarch64`` record that matches no profile at all
+    — so the half that answers the FC-link probe had no candidates to offer on
+    exactly the hardware that needs a fallback most.
+    """
+    machine = platform.machine()
+    stem = "generic-x86_64" if machine in ("x86_64", "AMD64") else "generic-arm64"
+    # A dev Mac is not a board; say so rather than claiming an SBC profile.
+    name = "macOS (dev)" if platform.system() == "Darwin" else stem
+    return stem, name
+
+
+def _match_current_profile() -> BoardProfile | None:
+    """Run the override/device-tree/cpuinfo match and return the BoardProfile.
+
+    Returns the full validated profile (with the declarative
+    cameras/radios/video/FC blocks) instead of the flat ``BoardInfo``, with any
+    same-device-tree variant applied. An unmatched board resolves through the
+    generic profile for its architecture — the same degradation the Rust half
+    performs — so a caller still gets the fallback UART candidates. ``None``
+    only when even that profile is missing.
+    """
+    import psutil
+
+    profiles = _load_board_profiles()
+    cpu_cores = psutil.cpu_count(logical=True) or 1
+    matched = _resolve_profile_match(profiles)
+    if matched is not None:
+        return _apply_variant(matched[0], cpu_cores)
+    generic_stem, _name = _generic_identity()
+    for profile in profiles:
+        if profile.stem == generic_stem:
+            return profile
     return None
 
 
@@ -577,7 +738,9 @@ def detect_board_profile(force: bool = False) -> BoardProfile | None:
     Services that need the declarative blocks (``cameras``, ``radios``,
     ``video.encoder_api``, ``flight_controller``) call this; everything else
     uses the lighter ``detect_board``. Cached for the service lifetime.
-    Returns None on the generic fallback (no matching profile).
+    An unmatched board resolves through the generic profile for its
+    architecture, so the fallback UART candidates exist; ``None`` only when
+    even that profile is missing from the directory.
     """
     global _BOARD_PROFILE_CACHE
     if not force and _BOARD_PROFILE_CACHE is not None:
@@ -597,81 +760,44 @@ def _detect_board_uncached() -> BoardInfo:
     cpu_cores = psutil.cpu_count(logical=True) or 1
     profiles = _load_board_profiles()
 
-    # 1. Board override file
-    override_name = _read_board_override()
-    if override_name:
-        for profile in profiles:
-            if profile.name.lower() == override_name.lower():
-                board = _board_from_profile(profile, override_name, ram_mb, cpu_cores)
-                log.info("board_override", board=board.name, tier=board.tier)
-                return board
-        # Override name did not match any profile, use it as a raw name
-        tier = detect_tier(ram_mb)
-        board = BoardInfo(
-            name=override_name,
-            model=override_name,
-            tier=tier,
+    matched = _resolve_profile_match(profiles)
+    if matched is not None:
+        profile, model_string, source = matched
+        board = _board_from_profile(profile, model_string, ram_mb, cpu_cores)
+        log.info(
+            "board_detected",
+            board=board.name,
+            source=source,
+            tier=board.tier,
             ram_mb=ram_mb,
-            cpu_cores=cpu_cores,
         )
-        log.info("board_override_unmatched", board=board.name, tier=board.tier)
         return board
 
-    # 2. Device-tree detection. Match the most-specific compatible token first
-    #    (it uniquely identifies the board), then the model string (which can be
-    #    a generic SoC-family name shared by several boards -- every Allwinner
-    #    A733 board reports "sun60iw2" as the model, so only the compatible node
-    #    tells the Cubie A7S apart from the A7Z).
-    model_string = _read_device_model()
-    compat_string = _read_device_compatible()
-    if compat_string:
-        matched = _match_profile(profiles, compat_string)
-        if matched:
+    # Unmatched. Resolve through the generic profile for this architecture
+    # rather than minting a bare record: that profile exists to carry the
+    # fallback UART candidates and camera defaults, and a board with no profile
+    # at all is worse off on exactly the hardware that needs a fallback most.
+    # The Rust sidecar writer degrades identically.
+    generic_stem, fallback_name = _generic_identity()
+    detected_model = (
+        _read_device_model() or _read_cpuinfo_model() or _read_device_compatible()
+    )
+    for profile in profiles:
+        if profile.stem == generic_stem:
             board = _board_from_profile(
-                matched, model_string or compat_string, ram_mb, cpu_cores
+                profile, detected_model or fallback_name, ram_mb, cpu_cores
             )
-            log.info(
-                "board_detected_compatible",
-                board=board.name,
-                tier=board.tier,
-                ram_mb=ram_mb,
-            )
-            return board
-    if model_string:
-        matched = _match_profile(profiles, model_string)
-        if matched:
-            board = _board_from_profile(matched, model_string, ram_mb, cpu_cores)
-            log.info("board_detected", board=board.name, tier=board.tier, ram_mb=ram_mb)
+            board.name = fallback_name
+            # The generic profile's default_tier is a placeholder; an unknown
+            # board is tiered from what it actually has.
+            board.tier = detect_tier(ram_mb)
+            log.info("board_fallback", board=board.name, tier=board.tier, ram_mb=ram_mb)
             return board
 
-    # 3. /proc/cpuinfo fallback
-    cpuinfo_model = _read_cpuinfo_model()
-    if cpuinfo_model:
-        matched = _match_profile(profiles, cpuinfo_model)
-        if matched:
-            board = _board_from_profile(matched, cpuinfo_model, ram_mb, cpu_cores)
-            log.info(
-                "board_detected_cpuinfo",
-                board=board.name,
-                tier=board.tier,
-                ram_mb=ram_mb,
-            )
-            return board
-
-    # 4. Platform fallback
-    tier = detect_tier(ram_mb)
-    system = platform.system()
-    machine = platform.machine()
-    if system == "Darwin":
-        fallback_name = "macOS (dev)"
-    elif machine in ("x86_64", "AMD64"):
-        fallback_name = "generic-x86_64"
-    else:
-        fallback_name = f"generic-{machine}"
     board = BoardInfo(
         name=fallback_name,
-        model=model_string or cpuinfo_model or f"{system} {machine}",
-        tier=tier,
+        model=detected_model or fallback_name,
+        tier=detect_tier(ram_mb),
         ram_mb=ram_mb,
         cpu_cores=cpu_cores,
     )

@@ -194,7 +194,7 @@ mod tests {
 
         let payload = b"\xfd\x09\x00\x00\x00\x01\x01\x00\x00\x00rest";
         server
-            .broadcast(encode_frame(payload, MAVLINK_MAX_FRAME).unwrap())
+            .broadcast(encode_frame(payload, MAVLINK_MAX_FRAME).unwrap().into())
             .await;
 
         let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())

@@ -324,6 +324,7 @@ async fn watch_relay_churn(state: Arc<Mutex<ReceiverState>>, mesh_iface: String)
 pub async fn run(
     shutdown: Arc<tokio::sync::Notify>,
     ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
+    progress: ados_supervisor::sdnotify::MonitorProgress,
 ) {
     let cfg = GroundStationConfig::load_from(Path::new("/etc/ados/config.yaml"));
     let mesh_iface = cfg.mesh.bat_iface.clone();
@@ -414,6 +415,11 @@ pub async fn run(
         let ingest = ingest.clone();
         tokio::spawn(async move {
             loop {
+                // The receiver's steady-state work is this periodic state write;
+                // it is therefore the honest progress stamp for the systemd
+                // watchdog. A free-running ping would report a wedged receiver
+                // as healthy, which is the hole the coupling exists to close.
+                progress.mark();
                 if let Err(e) = state.lock().await.write_and_emit(ingest.as_ref()) {
                     tracing::debug!(error = %e, "receiver_state_write_failed");
                 }

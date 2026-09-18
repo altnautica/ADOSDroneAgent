@@ -72,7 +72,7 @@ pub async fn serve(
                 match recv {
                     Ok(batch) => {
                         match encode_batch_frame(&batch) {
-                            Ok(frame) => server.broadcast(frame).await,
+                            Ok(frame) => server.broadcast(frame.into()).await,
                             Err(e) => {
                                 tracing::warn!(error = %e, "vision_detections_encode_failed");
                             }

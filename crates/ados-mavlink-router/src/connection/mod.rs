@@ -40,11 +40,12 @@ pub mod attitude_setpoint;
 pub mod swarm_setpoint;
 pub(crate) mod transport;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ados_protocol::mavlink::ardupilotmega::MavMessage;
 use ados_protocol::mavlink::{self, MavHeader};
+use bytes::Bytes;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::{broadcast, Mutex};
@@ -123,14 +124,21 @@ pub struct FcConnection {
     cfg: MavlinkConfig,
     state: std::sync::Arc<Mutex<VehicleState>>,
     params: std::sync::Arc<Mutex<ParamCache>>,
-    frame_tx: broadcast::Sender<Vec<u8>>,
+    /// Inbound MAVLink frame fan-out.
+    ///
+    /// Carries [`Bytes`], not `Vec<u8>`: one frame goes to the IPC socket task,
+    /// the aux tee, the relayed-vehicle projection and one task per connected
+    /// GCS proxy client, so with a `Vec` the per-frame allocation count grew
+    /// with the number of attached consumers. The bytes are unchanged — a frame
+    /// is still forwarded verbatim.
+    frame_tx: broadcast::Sender<Bytes>,
     /// Raw FC->host byte lane. Populated only for an MSP FC (Betaflight/iNav),
     /// whose FC->host bytes are MSP responses, not MAVLink frames, so they never
     /// appear on `frame_tx` (extract_frames yields nothing). Empty for a MAVLink
     /// FC. The direct-GCS proxies subscribe to both lanes and forward whichever
     /// carries bytes, so a polling MSP GCS receives the FC's responses while the
     /// MAVLink frame path stays byte-unchanged.
-    raw_tx: broadcast::Sender<Vec<u8>>,
+    raw_tx: broadcast::Sender<Bytes>,
     // pub(crate): visible crate-wide only so a sibling module's tests (e.g.
     // aux_uplink_consumer's) can install a fake writer and assert what
     // send_bytes actually wrote, the same way connection::send_scheduler's
@@ -141,6 +149,15 @@ pub struct FcConnection {
     /// write error must not permanently declare the FC disconnected, so the run
     /// loop owns recovery rather than latching the writer to `None`.
     reconnect: tokio::sync::Notify,
+    /// Monotonic count of bytes successfully written to the flight controller.
+    ///
+    /// The quantity the TX watchdog takes deltas of. A live writer and an
+    /// unreturned future are not evidence that bytes are moving; a counter that
+    /// advances is, and the unconditional 1 Hz companion heartbeat is what makes
+    /// "flat" unambiguous rather than merely quiet.
+    tx_bytes: AtomicU64,
+    /// Reference sample for the TX watchdog's rolling window.
+    tx_liveness: Mutex<send_scheduler::TxLiveness>,
     seq: AtomicU8,
     /// FC system id learned from inbound heartbeats (default 1 = ArduPilot).
     target_system: AtomicU8,
@@ -232,6 +249,8 @@ impl FcConnection {
             raw_tx,
             writer: Mutex::new(None),
             reconnect: tokio::sync::Notify::new(),
+            tx_bytes: AtomicU64::new(0),
+            tx_liveness: Mutex::new(send_scheduler::TxLiveness::new()),
             seq: AtomicU8::new(0),
             target_system: AtomicU8::new(1),
             connected: AtomicBool::new(false),
@@ -258,12 +277,12 @@ impl FcConnection {
     }
 
     /// Subscribe to the raw inbound frame stream (the MAVLink socket + proxies).
-    pub fn subscribe(&self) -> broadcast::Receiver<Vec<u8>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Bytes> {
         self.frame_tx.subscribe()
     }
 
     /// Subscribe to the raw inbound FC byte lane (populated only for an MSP FC).
-    pub fn subscribe_raw(&self) -> broadcast::Receiver<Vec<u8>> {
+    pub fn subscribe_raw(&self) -> broadcast::Receiver<Bytes> {
         self.raw_tx.subscribe()
     }
 
@@ -291,7 +310,7 @@ impl FcConnection {
     /// Returns whether any consumer was subscribed. `false` means the frame was
     /// dropped for want of a listener, which is a normal idle state (no ground
     /// control station connected) and not an error.
-    pub fn inject_frame(&self, frame: Vec<u8>) -> bool {
+    pub fn inject_frame(&self, frame: Bytes) -> bool {
         self.frame_tx.send(frame).is_ok()
     }
 
@@ -674,7 +693,7 @@ impl FcConnection {
                             sequence: self.next_seq(),
                         };
                         if let Ok(bytes) = mavlink::serialize_v2(header, &msg) {
-                            let _ = self.frame_tx.send(bytes);
+                            let _ = self.frame_tx.send(bytes.into());
                         }
                         // Drive the shared state through the normal aggregator.
                         let persist = {
@@ -732,7 +751,7 @@ impl FcConnection {
             // framing path below is byte-unchanged; the MSP link hint comes from the
             // USB-descriptor variant, so the MSP-start sniff is unnecessary here too.
             if is_msp {
-                let _ = self.raw_tx.send(chunk[..n].to_vec());
+                let _ = self.raw_tx.send(Bytes::copy_from_slice(&chunk[..n]));
                 continue;
             }
             buf.extend_from_slice(&chunk[..n]);
@@ -763,7 +782,24 @@ impl FcConnection {
                     }
                 }
             }
-            for frame in extract_frames(&mut buf) {
+            let frames = extract_frames(&mut buf);
+            if frames.is_empty() {
+                continue;
+            }
+            // The arrival timestamp is taken here, before any state lock and
+            // before the fan-out, so the measurement describes when the bytes
+            // reached this process rather than when they won a contended mutex.
+            // The state mutex is fair, not priority-ordered, so that wait is
+            // exactly the thing a loop-rate question is asking about and must
+            // not be folded into the answer.
+            //
+            // One formatted stamp per `read()`, not per frame: every frame in a
+            // chunk arrived in the same `read()`, so a per-frame stamp bought no
+            // extra resolution while allocating an RFC3339 `String` each time —
+            // at the measured 66 frames/s ArduPilot ingest that was the largest
+            // avoidable allocation left in this loop.
+            let now = now_iso();
+            for frame in frames {
                 // Fan the raw frame out verbatim (drop if no consumers / lagging).
                 // The original bytes are forwarded unchanged for both protocol
                 // versions; nothing here re-encodes a received frame. This same
@@ -813,13 +849,9 @@ impl FcConnection {
                             msp_count = 0;
                         }
                     }
-                    let now = now_iso();
-                    // Timestamp the arrival before the state lock, so the
-                    // measurement describes when the frame reached this process
-                    // rather than when it won a contended mutex. The writer
-                    // mutex is fair, not priority-ordered, so that wait is
-                    // exactly the thing a loop-rate question is asking about and
-                    // must not be folded into the answer.
+                    // `Instant::now()` rather than the hoisted `now`: the
+                    // cadence tracker measures inter-arrival gaps and needs a
+                    // monotonic clock, which the ISO stamp is not.
                     if matches!(msg, MavMessage::ATTITUDE(_)) {
                         self.attitude_cadence.lock().await.record(Instant::now());
                     }
@@ -1915,7 +1947,7 @@ mod passthrough_tests {
                         chunk = raw_rx.recv() => match chunk {
                             Ok(bytes) => {
                                 if let Ok(framed) = encode_frame(&bytes, MAVLINK_MAX_FRAME) {
-                                    msp_ipc.broadcast(framed).await;
+                                    msp_ipc.broadcast(framed.into()).await;
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1937,7 +1969,7 @@ mod passthrough_tests {
                         frame = frame_rx.recv() => match frame {
                             Ok(f) => {
                                 if let Ok(framed) = encode_frame(&f, MAVLINK_MAX_FRAME) {
-                                    mav_ipc.broadcast(framed).await;
+                                    mav_ipc.broadcast(framed.into()).await;
                                 }
                             }
                             Err(broadcast::error::RecvError::Lagged(_)) => continue,

@@ -52,9 +52,55 @@ pub struct ComputeSection {
     pub local_inference: Option<String>,
 }
 
+/// One display the board declares, by id. Only the id is parsed here: it is
+/// what validates an operator's `--display <id>` against the board.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DisplayBinding {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DisplaysSection {
+    #[serde(default)]
+    pub supported: Vec<DisplayBinding>,
+}
+
+/// The host facts a variant can be discriminated on.
+///
+/// Only `cpu_cores` today, because that is what separates the two SoC bins
+/// Radxa ships behind ONE device tree.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VariantMatch {
+    #[serde(default)]
+    pub cpu_cores: Option<i64>,
+}
+
+/// A same-device-tree hardware variant of a board.
+///
+/// Radxa publishes a single DT for the ROCK 5C (RK3588S2, 8 cores) and the
+/// ROCK 5C Lite (RK3582, 6 cores), so a pattern match cannot tell them apart
+/// and whichever profile filename sorted first won — a full 5C published
+/// `soc: RK3582` and a name ending in "Lite" into `/run/ados/board.json` and
+/// on to the operator's screen. A variant names the discriminator explicitly
+/// and overrides only the identity fields that actually differ.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BoardVariant {
+    pub id: String,
+    /// Facts that must hold for this variant. An EMPTY match never selects:
+    /// a catch-all variant would silently rename every unit.
+    #[serde(default)]
+    pub when: VariantMatch,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub soc: Option<String>,
+    #[serde(default)]
+    pub default_tier: Option<i64>,
+}
+
 /// The slice of a board-profile YAML the fingerprint is built from. Every other
-/// section (displays, cameras, radios, gpio, flight_controller…) is ignored
-/// here; the services that need them read the YAML themselves.
+/// section (cameras, radios, gpio, flight_controller…) is ignored here; the
+/// services that need them read the YAML themselves.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BoardProfile {
     pub name: String,
@@ -72,6 +118,15 @@ pub struct BoardProfile {
     pub hw_video_codecs: Vec<String>,
     #[serde(default)]
     pub compute: ComputeSection,
+    #[serde(default)]
+    pub displays: DisplaysSection,
+    #[serde(default)]
+    pub variants: Vec<BoardVariant>,
+    /// The profile's YAML filename stem (`cubie-a7s`, `rock-5c-lite`). Not a
+    /// YAML key: [`load_profiles`] stamps it from the embedded file name, and it
+    /// is the ONE canonical token `/etc/ados/board_override` accepts.
+    #[serde(skip)]
+    pub stem: String,
 }
 
 fn unknown() -> String {
@@ -121,10 +176,6 @@ pub const BOARD_PROFILE_YAML: &[(&str, &str)] = &[
     (
         "orange-pi-5",
         include_str!("../../../src/ados/hal/boards/orange-pi-5.yaml"),
-    ),
-    (
-        "radxa-cm3",
-        include_str!("../../../src/ados/hal/boards/radxa-cm3.yaml"),
     ),
     (
         "rdk-x3",
@@ -179,7 +230,12 @@ pub fn load_profiles() -> Vec<BoardProfile> {
     let mut out = Vec::with_capacity(BOARD_PROFILE_YAML.len());
     for (stem, body) in BOARD_PROFILE_YAML {
         match serde_norway::from_str::<BoardProfile>(body) {
-            Ok(p) => out.push(p),
+            Ok(mut p) => {
+                // The filename stem is the canonical board-override token; it
+                // is not a YAML key, so it is stamped here.
+                p.stem = (*stem).to_string();
+                out.push(p);
+            }
             Err(e) => tracing::warn!(board = stem, error = %e, "board profile did not parse"),
         }
     }
@@ -256,29 +312,143 @@ pub struct HostFacts {
     pub cpu_cores: i64,
     /// `uname -m`, for the unknown-board fallback name.
     pub machine: String,
+    /// The operating-system id (`std::env::consts::OS`), so a dev host is
+    /// labelled the same way the Python detector labels it.
+    pub os: String,
+    /// `/etc/ados/board_override`: the board-profile YAML filename STEM
+    /// (`cubie-a7s`, `rock-5c-lite`). Empty when unset.
+    pub board_override: String,
+}
+
+/// Which profile a resolution matched, and the model string to record with it.
+#[derive(Debug, Clone)]
+pub struct ProfileMatch<'a> {
+    pub profile: &'a BoardProfile,
+    pub model: String,
+    /// How it matched: `override` | `compatible` | `model` | `cpuinfo`.
+    pub source: &'static str,
+}
+
+/// The variant whose `when` holds for these facts, if any (pure).
+///
+/// An empty `when` never selects — a catch-all variant would rename every unit
+/// of the board silently.
+pub fn select_variant(profile: &BoardProfile, cpu_cores: i64) -> Option<&BoardVariant> {
+    profile.variants.iter().find(|v| match v.when.cpu_cores {
+        Some(n) => n == cpu_cores,
+        None => false,
+    })
+}
+
+/// Resolve the board profile for these facts, mirroring the Python
+/// `_resolve_profile_match` exactly.
+///
+/// Order: the operator's `/etc/ados/board_override` stem, then the device-tree
+/// `compatible` first token (which uniquely identifies a board), then the model
+/// string (which can be a generic SoC-family name shared by several boards),
+/// then `/proc/cpuinfo`.
+///
+/// An override that names no profile falls THROUGH to auto-detection with a
+/// warning rather than minting a profile-less board: the override exists to
+/// correct a mis-detection, and a typo must not cost the node its UART
+/// candidates and its perception tier.
+pub fn resolve_profile<'a>(
+    profiles: &'a [BoardProfile],
+    facts: &HostFacts,
+) -> Option<ProfileMatch<'a>> {
+    let detected = [
+        facts.model.as_str(),
+        facts.compatible.as_str(),
+        facts.cpuinfo_model.as_str(),
+    ]
+    .into_iter()
+    .find(|s| !s.is_empty())
+    .unwrap_or("");
+
+    let token = facts.board_override.trim();
+    if !token.is_empty() {
+        match profiles
+            .iter()
+            .find(|p| p.stem.eq_ignore_ascii_case(token))
+        {
+            Some(p) => {
+                return Some(ProfileMatch {
+                    profile: p,
+                    model: if detected.is_empty() {
+                        token.to_string()
+                    } else {
+                        detected.to_string()
+                    },
+                    source: "override",
+                })
+            }
+            None => tracing::warn!(
+                token,
+                "board_override names no board profile (expected a YAML filename stem, e.g. rock-5c-lite); auto-detecting"
+            ),
+        }
+    }
+
+    if let Some(p) = match_profile(profiles, &facts.compatible) {
+        return Some(ProfileMatch {
+            profile: p,
+            model: if facts.model.is_empty() {
+                facts.compatible.clone()
+            } else {
+                facts.model.clone()
+            },
+            source: "compatible",
+        });
+    }
+    if let Some(p) = match_profile(profiles, &facts.model) {
+        return Some(ProfileMatch {
+            profile: p,
+            model: facts.model.clone(),
+            source: "model",
+        });
+    }
+    if let Some(p) = match_profile(profiles, &facts.cpuinfo_model) {
+        return Some(ProfileMatch {
+            profile: p,
+            model: facts.cpuinfo_model.clone(),
+            source: "cpuinfo",
+        });
+    }
+    None
 }
 
 /// Build the fingerprint from a matched profile, keeping the detected model
-/// string. Mirrors the Python `_board_from_profile`.
+/// string and applying the matching same-device-tree variant. Mirrors the
+/// Python `_board_from_profile`.
 fn from_profile(profile: &BoardProfile, model_string: &str, facts: &HostFacts) -> BoardFingerprint {
     let local_inference = profile
         .compute
         .local_inference
         .clone()
         .unwrap_or_else(|| "none".to_string());
+    let variant = select_variant(profile, facts.cpu_cores);
+    let name = variant
+        .and_then(|v| v.name.clone())
+        .unwrap_or_else(|| profile.name.clone());
+    let soc = variant
+        .and_then(|v| v.soc.clone())
+        .unwrap_or_else(|| profile.soc.clone());
+    let tier = variant
+        .and_then(|v| v.default_tier)
+        .unwrap_or(profile.default_tier);
     BoardFingerprint {
         version: BOARD_SIDECAR_VERSION,
-        name: profile.name.clone(),
         model: if model_string.is_empty() {
-            profile.name.clone()
+            name.clone()
         } else {
             model_string.to_string()
         },
-        tier: profile.default_tier,
+        name,
+        tier,
         ram_mb: facts.ram_mb,
         cpu_cores: facts.cpu_cores,
         vendor: profile.vendor.clone(),
-        soc: profile.soc.clone(),
+        soc,
         arch: profile.arch.clone(),
         hw_video_codecs: profile.hw_video_codecs.clone(),
         npu_tops: profile.compute.npu_tops,
@@ -288,44 +458,38 @@ fn from_profile(profile: &BoardProfile, model_string: &str, facts: &HostFacts) -
     }
 }
 
-/// Resolve the board fingerprint from host facts.
-///
-/// Detection order matches the Python pipeline exactly, and for the same
-/// reasons: the device-tree `compatible` first token uniquely identifies a
-/// board, while the model string can be a generic SoC-family name shared by
-/// several boards (every Allwinner A733 board reports `sun60iw2`, so only the
-/// compatible token tells the Cubie A7S from the A7Z). `/proc/cpuinfo` is the
-/// fallback, and an unmatched board falls back to the generic profile for its
-/// architecture so it keeps that profile's declarations instead of nothing.
-pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint {
-    if let Some(p) = match_profile(profiles, &facts.compatible) {
-        return from_profile(
-            p,
-            if facts.model.is_empty() {
-                &facts.compatible
-            } else {
-                &facts.model
-            },
-            facts,
-        );
-    }
-    if let Some(p) = match_profile(profiles, &facts.model) {
-        return from_profile(p, &facts.model, facts);
-    }
-    if let Some(p) = match_profile(profiles, &facts.cpuinfo_model) {
-        return from_profile(p, &facts.cpuinfo_model, facts);
-    }
-
-    // Unmatched. Resolve through the generic profile for this architecture
-    // rather than minting a bare record: the generic profile exists to carry
-    // the fallback UART candidates and camera defaults, and a board with no
-    // profile at all is worse off on exactly the hardware that needs a fallback
-    // most.
-    let generic_name = if facts.machine == "x86_64" || facts.machine == "AMD64" {
+/// The generic profile stem for an architecture, and the name an unmatched
+/// board is published under. Kept together because the Python half resolves the
+/// identical pair — the two used to disagree (Rust resolved through
+/// `generic-arm64`, Python minted a bare `generic-aarch64` with no profile and
+/// therefore no fallback UART candidates).
+fn generic_identity(facts: &HostFacts) -> (&'static str, String) {
+    let stem = if facts.machine == "x86_64" || facts.machine == "AMD64" {
         "generic-x86_64"
     } else {
         "generic-arm64"
     };
+    let name = if facts.os == "macos" {
+        // A dev Mac is not a board; say so rather than claiming an SBC profile.
+        "macOS (dev)".to_string()
+    } else {
+        stem.to_string()
+    };
+    (stem, name)
+}
+
+/// Resolve the board fingerprint from host facts.
+///
+/// Detection order is [`resolve_profile`]'s. An unmatched board resolves
+/// through the generic profile for its architecture so it keeps that profile's
+/// declarations (the fallback UART candidates, the camera defaults) instead of
+/// nothing, and is tiered from the RAM it actually has.
+pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint {
+    if let Some(m) = resolve_profile(profiles, facts) {
+        return from_profile(m.profile, &m.model, facts);
+    }
+
+    let (generic_stem, generic_name) = generic_identity(facts);
     let detected_model = [
         facts.model.as_str(),
         facts.cpuinfo_model.as_str(),
@@ -335,8 +499,12 @@ pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint
     .find(|s| !s.is_empty())
     .unwrap_or("")
     .to_string();
-    if let Some(p) = profiles.iter().find(|p| p.name == generic_name) {
+    if let Some(p) = profiles.iter().find(|p| p.stem == generic_stem) {
         let mut fp = from_profile(p, &detected_model, facts);
+        fp.name = generic_name;
+        if fp.model.is_empty() {
+            fp.model = fp.name.clone();
+        }
         // The generic profile's default_tier is a placeholder; an unknown board
         // is tiered from what it actually has.
         fp.tier = detect_tier(facts.ram_mb);
@@ -344,8 +512,12 @@ pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint
     }
     BoardFingerprint {
         version: BOARD_SIDECAR_VERSION,
-        name: generic_name.to_string(),
-        model: detected_model,
+        model: if detected_model.is_empty() {
+            generic_name.clone()
+        } else {
+            detected_model
+        },
+        name: generic_name,
         tier: detect_tier(facts.ram_mb),
         ram_mb: facts.ram_mb,
         cpu_cores: facts.cpu_cores,
@@ -361,6 +533,24 @@ pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint
         has_accelerator: false,
         local_inference: "none".to_string(),
         has_local_inference: false,
+    }
+}
+
+/// The display ids the resolved board declares, for validating an operator's
+/// `--display <id>`. Empty when the board is unknown or declares none, which a
+/// caller must treat as "cannot validate", never as "invalid".
+pub fn declared_display_ids() -> Vec<String> {
+    let profiles = load_profiles();
+    let facts = probe_host_facts();
+    match resolve_profile(&profiles, &facts) {
+        Some(m) => m
+            .profile
+            .displays
+            .supported
+            .iter()
+            .map(|d| d.id.clone())
+            .collect(),
+        None => Vec::new(),
     }
 }
 
@@ -407,7 +597,30 @@ pub fn probe_host_facts() -> HostFacts {
         ram_mb: read_ram_mb(),
         cpu_cores: read_cpu_cores(),
         machine: read_machine(),
+        os: std::env::consts::OS.to_string(),
+        board_override: read_board_override(),
     }
+}
+
+/// The path of the board-override file, honouring `ADOS_ETC_DIR` like the
+/// Python `ados.setup.advanced` writer and the install scripts.
+pub fn board_override_path() -> std::path::PathBuf {
+    match std::env::var_os("ADOS_ETC_DIR") {
+        Some(dir) => std::path::PathBuf::from(dir).join("board_override"),
+        None => std::path::PathBuf::from("/etc/ados/board_override"),
+    }
+}
+
+/// The operator's forced board — a board-profile YAML filename STEM — or `""`.
+///
+/// This writer used to ignore the override entirely, so a correctly-spelled
+/// override reached the Python detector and never reached `/run/ados/board.json`
+/// (and therefore never reached `/api/status` or Mission Control): the two
+/// halves reported different boards on the same node.
+pub fn read_board_override() -> String {
+    std::fs::read_to_string(board_override_path())
+        .map(|s| s.trim().trim_matches('\0').trim().to_string())
+        .unwrap_or_default()
 }
 
 fn read_device_tree_model() -> String {
@@ -548,6 +761,8 @@ mod tests {
             ram_mb: 8192,
             cpu_cores: 8,
             machine: "aarch64".to_string(),
+            os: "linux".to_string(),
+            board_override: String::new(),
         }
     }
 
@@ -618,6 +833,14 @@ mod tests {
         assert_ne!(a7z.tier, a7s.tier);
         // The detected model string is preserved, not replaced by the profile.
         assert_eq!(a7z.model, "sun60iw2");
+
+        // With NO compatible token the shared SoC-family string identifies
+        // nothing: it must resolve to neither board rather than to whichever
+        // profile happened to list it (the A7Z listed `sun60iw2`, which is the
+        // A7S's own verified on-rig model string, so a real A7S came up with
+        // the A7Z's FC UART and a 40-pin GPIO map it does not have).
+        let ambiguous = resolve(&profiles, &facts("", "sun60iw2"));
+        assert_eq!(ambiguous.name, "generic-arm64", "{ambiguous:?}");
     }
 
     #[test]
@@ -727,5 +950,163 @@ mod tests {
             "BCM2835"
         );
         assert_eq!(parse_cpuinfo_model("flags : none\n"), "");
+    }
+
+    /// The board-override grammar: the YAML filename STEM, and nothing else.
+    ///
+    /// Asserted over EVERY embedded board so a new profile cannot be added with
+    /// an unreachable override. The Python half asserts the same property over
+    /// the same directory (`tests/test_hal.py::TestBoardOverride`), which is
+    /// what makes the two halves resolve one token to one board.
+    #[test]
+    fn every_board_stem_is_a_resolvable_override_token() {
+        let profiles = load_profiles();
+        for (stem, _) in BOARD_PROFILE_YAML {
+            let mut f = facts("", "");
+            f.board_override = (*stem).to_string();
+            let fp = resolve(&profiles, &f);
+            let expected = profiles
+                .iter()
+                .find(|p| &p.stem == stem)
+                .expect("every embedded stem parses");
+            // The variant-aware name for these facts, so the 8-core Rock 5C row
+            // compares against its own variant rather than the Lite's name.
+            let expected_name = select_variant(expected, f.cpu_cores)
+                .and_then(|v| v.name.clone())
+                .unwrap_or_else(|| expected.name.clone());
+            assert_eq!(fp.name, expected_name, "override {stem} resolved wrong");
+        }
+    }
+
+    #[test]
+    fn the_override_stem_pins_the_a7s_against_its_shared_soc_family_string() {
+        // The documented escape hatch for a mis-detected board. `cubie-a7s` is
+        // a legal slug (the display-name form never was), so this is the token
+        // an operator and a shell script can actually write.
+        let profiles = load_profiles();
+        let mut f = facts("", "sun60iw2");
+        f.board_override = "cubie-a7s".to_string();
+        let fp = resolve(&profiles, &f);
+        assert_eq!(fp.name, "Radxa Cubie A7S");
+        assert_eq!(fp.soc, "Allwinner A733");
+        // The real device-tree model is still recorded, not replaced by the token.
+        assert_eq!(fp.model, "sun60iw2");
+    }
+
+    #[test]
+    fn an_override_naming_no_profile_falls_through_to_auto_detection() {
+        // A typo must not cost the node its profile: the override exists to
+        // correct a mis-detection, so an unresolvable token degrades to what the
+        // hardware says rather than to a profile-less phantom board.
+        let profiles = load_profiles();
+        let mut f = facts("raspberrypi,5-model-b", "Raspberry Pi 5");
+        f.board_override = "Radxa ROCK 5C Lite (RK3582)".to_string();
+        let fp = resolve(&profiles, &f);
+        assert!(fp.name.contains("Raspberry Pi 5"), "fingerprint: {fp:?}");
+    }
+
+    /// The Rock 5C / 5C Lite share ONE device tree, so the core count decides.
+    /// Filename order used to, which published `soc: RK3582` and a name ending
+    /// in "Lite" for a full 8-core RK3588S2 board.
+    #[test]
+    fn the_shared_rock_5c_device_tree_is_split_by_core_count() {
+        let profiles = load_profiles();
+        let mut lite = facts("radxa,rock-5c", "Radxa ROCK 5C ");
+        lite.cpu_cores = 6;
+        let lite = resolve(&profiles, &lite);
+        assert_eq!(lite.name, "Radxa ROCK 5C Lite (RK3582)");
+        assert_eq!(lite.soc, "RK3582");
+
+        let mut full = facts("radxa,rock-5c", "Radxa ROCK 5C ");
+        full.cpu_cores = 8;
+        let full = resolve(&profiles, &full);
+        assert_eq!(full.name, "Radxa ROCK 5C (RK3588S2)");
+        assert_eq!(full.soc, "RK3588S2");
+        // Both bins keep the NPU and the VPU, so the perception tier is the same.
+        assert_eq!(full.npu_tops, lite.npu_tops);
+        assert!(full.has_accelerator);
+    }
+
+    /// No two boards may claim one device-tree string. The three collisions this
+    /// guards were invisible to a byte-identical-pattern comparison because they
+    /// were substring overlaps, a shared SoC-family name, and a shared DT.
+    #[test]
+    fn real_device_tree_strings_resolve_to_exactly_one_board() {
+        let profiles = load_profiles();
+        // (compatible, model, cpu_cores) -> resolved name.
+        let cases: &[(&str, &str, i64, &str)] = &[
+            ("radxa,cubie-a7s", "sun60iw2", 8, "Radxa Cubie A7S"),
+            ("radxa,cubie-a7z", "sun60iw2", 8, "Radxa Cubie A7Z"),
+            (
+                "radxa,rock-5c",
+                "Radxa ROCK 5C ",
+                6,
+                "Radxa ROCK 5C Lite (RK3582)",
+            ),
+            (
+                "radxa,rock-5c",
+                "Radxa ROCK 5C ",
+                8,
+                "Radxa ROCK 5C (RK3588S2)",
+            ),
+            ("radxa,cm3", "Radxa CM3 IO Board", 4, "Radxa CM3 (RK3566)"),
+            ("rockchip,rk3566", "RK3566 EVB", 4, "Radxa CM3 (RK3566)"),
+            ("radxa,cm4", "Radxa CM4", 8, "Radxa CM4 (RK3588S2)"),
+            (
+                "raspberrypi,4-model-b",
+                "Raspberry Pi 4 Model B Rev 1.4",
+                4,
+                "Raspberry Pi 4B",
+            ),
+            (
+                "raspberrypi,3-model-b-plus",
+                "Raspberry Pi 3 Model B Plus Rev 1.3",
+                4,
+                "Raspberry Pi 3",
+            ),
+            (
+                "raspberrypi,3-compute-module",
+                "Raspberry Pi Compute Module 3 Plus Rev 1.0",
+                4,
+                "Raspberry Pi Compute Module 3",
+            ),
+        ];
+        for (compatible, model, cores, expected) in cases {
+            let mut f = facts(compatible, model);
+            f.cpu_cores = *cores;
+            let fp = resolve(&profiles, &f);
+            assert_eq!(
+                fp.name, *expected,
+                "{compatible} / {model} / {cores} cores resolved to {}",
+                fp.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_rk3566_board_keeps_its_npu_and_its_third_uart() {
+        // Two profiles used to claim RK3566 with different `npu_tops` (0.0 vs
+        // 0.8) and different UART sets, so `has_accelerator` and the perception
+        // tier flipped on identical hardware depending on which filename sorted
+        // first. One profile survives, and it is the measured one.
+        let profiles = load_profiles();
+        let fp = resolve(&profiles, &facts("radxa,cm3", "Radxa CM3 IO Board"));
+        assert_eq!(fp.npu_tops, 0.8);
+        assert!(fp.has_accelerator);
+        assert!(fp.hw_video_codecs.iter().any(|c| c == "vp9_dec"));
+    }
+
+    #[test]
+    fn a_dev_mac_is_labelled_as_one_but_still_carries_the_generic_declarations() {
+        // Parity with the Python fallback: same name, and the generic profile's
+        // declarations (the fallback UART candidates) rather than nothing.
+        let profiles = load_profiles();
+        let mut f = facts("", "");
+        f.os = "macos".to_string();
+        f.machine = "aarch64".to_string();
+        let fp = resolve(&profiles, &f);
+        assert_eq!(fp.name, "macOS (dev)");
+        assert_eq!(fp.tier, detect_tier(8192));
+        assert_eq!(fp.vendor, "unknown");
     }
 }

@@ -28,12 +28,21 @@ pub enum RunMode {
 impl RunMode {
     /// Derive the mode from flags. Precedence: explicit actions
     /// (status, uninstall) first, then force, then upgrade, else a fresh
-    /// install.
+    /// install or — on a box that already carries an install — an upgrade.
     ///
     /// `already_installed` is the result of the install-presence probe. A bare
     /// pair code against an existing install with neither `--force` nor
     /// `--upgrade` is a `PairOnly`; on a fresh box the same pair code falls
     /// through to `FreshInstall` (which pairs at the end of the chain).
+    ///
+    /// A FLAGLESS re-run on an installed box is an `Upgrade`, not a
+    /// `FreshInstall`. It used to resolve to `FreshInstall`, which does not
+    /// clear checkpoints — so the resume markers from the first install made
+    /// the graph skip every provisioning step and the run reported `ok` having
+    /// changed nothing. Re-running the documented one-liner is exactly what an
+    /// operator does to pick up a fix, and it is the one command they reach for
+    /// when something is wrong; reporting success for a no-op install is the
+    /// green check that measures nothing.
     pub fn resolve(args: &Args, already_installed: bool) -> RunMode {
         if args.status {
             return RunMode::Status;
@@ -48,7 +57,7 @@ impl RunMode {
         if already_installed && args.pair.is_some() && !args.upgrade {
             return RunMode::PairOnly;
         }
-        if args.upgrade {
+        if args.upgrade || already_installed {
             return RunMode::Upgrade;
         }
         RunMode::FreshInstall
@@ -135,6 +144,23 @@ mod tests {
         // actually refetch — otherwise the resume checkpoints make it a no-op.
         assert!(m.clears_checkpoints());
         assert!(m.runs_install_chain());
+    }
+
+    #[test]
+    fn flagless_rerun_on_an_installed_box_is_an_upgrade_that_reprovisions() {
+        // Re-running the documented one-liner to pick up a fix used to resolve
+        // to FreshInstall, which preserves the first install's resume
+        // checkpoints — so every provisioning step was skipped and the run
+        // still reported ok. It must clear them and actually do the work.
+        let m = RunMode::resolve(&Args::default(), true);
+        assert_eq!(m, RunMode::Upgrade);
+        assert!(m.clears_checkpoints());
+        assert!(m.runs_install_chain());
+        // A fresh box is unaffected: still a full first install.
+        assert_eq!(
+            RunMode::resolve(&Args::default(), false),
+            RunMode::FreshInstall
+        );
     }
 
     #[test]

@@ -1,12 +1,18 @@
 //! The MAC-pin engine: sysfs enumeration, the per-adapter decision, and the
 //! `systemd-networkd` `.link` provisioning. The pure parts (`render_link_file`,
-//! `parse_match_block`, `classify_adapter`) are unit-tested without I/O; the
-//! sysfs / `udevadm` / subprocess parts are Linux-gated.
+//! `parse_match_block`, `match_block_is_specific`, `parse_udev_id_path`,
+//! `classify_adapter`) are unit-tested without I/O; the sysfs / `udevadm` /
+//! subprocess parts are Linux-gated.
 //!
 //! The provisioning path only ever writes a `.link` file (effective on the next
 //! boot) — it never changes a live interface's address, so it cannot drop the
 //! operator's management link. Re-tagging the live interface is a separate,
 //! caller-gated action ([`apply_live`]).
+//!
+//! Two entry points are reached from an axum handler and are therefore `async`
+//! with bounded, `kill_on_drop` subprocesses ([`apply_live`],
+//! [`remove_pin_link`]); the synchronous `reconcile` path belongs to the
+//! installer step and the supervisor, which run off the reactor.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -73,8 +79,9 @@ pub fn link_file_name(iface: &str) -> String {
 }
 
 /// Render the full `.link` body (pure). `match_block` is the body of the
-/// `[Match]` section (without the `[Match]` header) — mirroring the stock board
-/// file's match so this file claims the same adapter. `NamePolicy=kernel`
+/// `[Match]` section (without the `[Match]` header) and MUST name this one
+/// adapter: `[Link] MACAddress=` is unconditional, so a wildcard match applies
+/// the pinned address to EVERY interface on the box. `NamePolicy=kernel`
 /// preserves the kernel interface name so a `wpa_supplicant@<iface>` binding
 /// keeps working; an explicit `MACAddress=` sets the address unconditionally
 /// (unlike `MACAddressPolicy=persistent`, which never fires on an adapter whose
@@ -84,7 +91,9 @@ pub fn render_link_file(match_block: &str, mac: &MacAddr) -> String {
         "# Pin a stable MAC on an onboard adapter with no efuse MAC (it would\n\
 # otherwise randomize each boot and churn the DHCP lease). Managed by the\n\
 # ADOS agent; remove this file to revert. NamePolicy=kernel keeps the kernel\n\
-# interface name so the wpa_supplicant binding survives.\n\
+# interface name so the wpa_supplicant binding survives. The [Match] block\n\
+# names exactly one adapter: MACAddress= below is unconditional, so a glob\n\
+# here would give every interface on this box the same address.\n\
 [Match]\n\
 {}\n\
 \n\
@@ -94,6 +103,38 @@ MACAddress={}\n",
         match_block.trim_end(),
         mac
     )
+}
+
+/// The `[Match]` keys that identify ONE adapter. A pin `.link` is only safe
+/// when at least one of these carries a glob-free value.
+const IDENTITY_MATCH_KEYS: [&str; 4] =
+    ["Path", "OriginalName", "PermanentMACAddress", "MACAddress"];
+
+/// True when a `[Match]` block names one specific adapter (pure).
+///
+/// The pin used to COPY the `[Match]` of whichever stock `.link` won for the
+/// interface — and on a stock systemd that is `99-default.link`, whose match is
+/// `OriginalName=*`. Pairing that wildcard with our unconditional
+/// `MACAddress=` handed the pinned address to every interface on the box: the
+/// management NIC, the second WFB radio, everything. So a pin is now refused
+/// unless the match carries a glob-free identity key.
+pub fn match_block_is_specific(match_block: &str) -> bool {
+    match_block.lines().any(|raw| {
+        let line = raw.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            return false;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        IDENTITY_MATCH_KEYS
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(key))
+            && !value.is_empty()
+            && !value.contains(['*', '?', '['])
+            // A leading `!` is a systemd negation: "any adapter EXCEPT this
+            // one", which is the opposite of specific.
+            && !value.starts_with('!')
+    })
 }
 
 /// Extract the `[Match]` section body from a `.link` file (pure). Returns the
@@ -122,6 +163,26 @@ pub fn parse_match_block(link_body: &str) -> Option<String> {
     } else {
         Some(lines.join("\n"))
     }
+}
+
+/// The `ID_PATH` value from a `udevadm info --query=property` body (pure).
+///
+/// `ID_PATH` is the stable per-port topology id (`platform-xhci-hcd.0-usb-0:1.3:1.0`)
+/// that systemd's `.link` `Path=` key matches on, so it pins the adapter in a
+/// given USB port rather than whatever currently answers to `wlan0`. Returns
+/// `None` when the property is absent or carries a glob character (which would
+/// make the match non-specific).
+pub fn parse_udev_id_path(props: &str) -> Option<String> {
+    for line in props.lines() {
+        let line = line.trim();
+        if let Some(value) = line.strip_prefix("ID_PATH=") {
+            let value = value.trim().trim_matches('"');
+            if !value.is_empty() && !value.contains(['*', '?', '[']) {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// The pure per-adapter decision. `learner` is the adapter's record AFTER the
@@ -385,6 +446,15 @@ pub fn read_machine_id() -> Option<String> {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const UDEV_RELOAD_ARGV: &[&[&str]] = &[&["control", "--reload"]];
 
+/// Cap on one `ip link set` invocation on the live re-tag path. A netlink call
+/// that never returns must not park the request handler that issued it.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const IP_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Cap on one `udevadm` invocation on the async unpin path.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const UDEV_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 // ── Linux device + .link I/O ─────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -476,46 +546,53 @@ mod linux {
         Path::new("/run/udev").exists() || Path::new("/run/systemd/netif").exists()
     }
 
-    /// Ask `udevadm` which `.link` currently wins for an interface and return
-    /// that file's `[Match]` block, so our drop-in claims the exact same adapter.
-    /// `None` when udevadm is unavailable or the file cannot be read.
-    pub fn winning_match_block(iface: &str) -> Option<String> {
+    /// The adapter's udev `ID_PATH` (its stable USB-port topology id), or
+    /// `None` when `udevadm` is unavailable or the property is absent.
+    fn udev_id_path(iface: &str) -> Option<String> {
         let target = format!("/sys/class/net/{iface}");
         let out = Command::new("udevadm")
-            .args(["test-builtin", "net_setup_link", &target])
+            .args(["info", "--query=property", "--path", &target])
             .output()
             .ok()?;
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        let path = text.lines().find_map(|l| {
-            let l = l.trim();
-            let i = l.find("Config file ")?;
-            let rest = &l[i + "Config file ".len()..];
-            let end = rest.find(" is applied")?;
-            Some(rest[..end].trim().to_string())
-        })?;
-        let body = std::fs::read_to_string(&path).ok()?;
-        parse_match_block(&body)
+        parse_udev_id_path(&String::from_utf8_lossy(&out.stdout))
     }
 
-    /// Resolve the `[Match]` block to use for `iface`: the winning stock file's
-    /// match, or a fallback that matches this interface by its kernel name.
+    /// Resolve the `[Match]` block for `iface`: the adapter's stable USB-port
+    /// path when udev knows it, else this interface's kernel name.
+    ///
+    /// It deliberately does NOT mirror whichever stock `.link` wins for the
+    /// interface. That file is normally `99-default.link`, whose match is
+    /// `OriginalName=*`, and copying it into a drop-in carrying an
+    /// unconditional `MACAddress=` pinned ONE adapter's address onto every
+    /// interface on the box. Both forms below name a single adapter, and
+    /// [`match_block_is_specific`] is the write-time backstop.
     pub fn resolve_match_block(iface: &str) -> String {
-        winning_match_block(iface).unwrap_or_else(|| format!("OriginalName={iface}"))
+        match udev_id_path(iface) {
+            // Path= survives a kernel rename (wlan0 -> wlan1) because it names
+            // the port, not the interface.
+            Some(p) => format!("Path={p}"),
+            None => format!("OriginalName={iface}"),
+        }
     }
 
     /// Write the pin `.link` for `iface`. Idempotent: a no-op when the file
     /// already has identical content. Reloads udev so a later boot applies it;
     /// never touches the live interface. Returns the file path.
+    ///
+    /// Refused when `match_block` is not specific to one adapter: the file
+    /// carries an unconditional `MACAddress=`, so a glob match would give every
+    /// interface on the box the same address.
     pub fn write_pin_link(
         dir: &Path,
         iface: &str,
         match_block: &str,
         mac: &MacAddr,
     ) -> std::io::Result<PathBuf> {
+        if !match_block_is_specific(match_block) {
+            return Err(std::io::Error::other(format!(
+                "refusing to pin {iface}: [Match] block {match_block:?} does not name one adapter"
+            )));
+        }
         let path = dir.join(link_file_name(iface));
         let body = render_link_file(match_block, mac);
         let unchanged = std::fs::read_to_string(&path)
@@ -529,11 +606,16 @@ mod linux {
     }
 
     /// Remove the pin `.link` for `iface`. Returns whether a file was removed.
-    pub fn remove_pin_link(dir: &Path, iface: &str) -> std::io::Result<bool> {
+    ///
+    /// Async because its only caller is the `DELETE /api/v1/network/mac/{iface}`
+    /// handler: the udev reload is a subprocess whose settle would otherwise
+    /// block the reactor and stall every other in-flight request on a
+    /// single-core SBC.
+    pub async fn remove_pin_link(dir: &Path, iface: &str) -> std::io::Result<bool> {
         let path = dir.join(link_file_name(iface));
         if path.exists() {
             std::fs::remove_file(&path)?;
-            reload_udev();
+            reload_udev_async().await;
             Ok(true)
         } else {
             Ok(false)
@@ -542,16 +624,29 @@ mod linux {
 
     /// Re-tag the LIVE interface now (drops any connection over it). Opt-in; the
     /// caller is responsible for the safety gate (never the management iface).
-    pub fn apply_live(iface: &str, mac: &MacAddr) -> std::io::Result<()> {
+    ///
+    /// Async + bounded: it is called from an axum handler, and a blocking
+    /// `ip link set` on the reactor stalls every other request for the duration
+    /// of the link down/up. Each invocation is capped by [`IP_CMD_TIMEOUT`] with
+    /// `kill_on_drop`, so a wedged netlink call cannot park the handler forever.
+    pub async fn apply_live(iface: &str, mac: &MacAddr) -> std::io::Result<()> {
         let mac = mac.to_string();
-        run_ip(&["link", "set", "dev", iface, "down"])?;
-        run_ip(&["link", "set", "dev", iface, "address", &mac])?;
-        run_ip(&["link", "set", "dev", iface, "up"])?;
+        run_ip(&["link", "set", "dev", iface, "down"]).await?;
+        run_ip(&["link", "set", "dev", iface, "address", &mac]).await?;
+        run_ip(&["link", "set", "dev", iface, "up"]).await?;
         Ok(())
     }
 
-    fn run_ip(args: &[&str]) -> std::io::Result<()> {
-        let status = Command::new("ip").args(args).status()?;
+    async fn run_ip(args: &[&str]) -> std::io::Result<()> {
+        let status = tokio::time::timeout(
+            IP_CMD_TIMEOUT,
+            tokio::process::Command::new("ip")
+                .args(args)
+                .kill_on_drop(true)
+                .status(),
+        )
+        .await
+        .map_err(|_| std::io::Error::other(format!("ip {args:?} timed out")))??;
         if status.success() {
             Ok(())
         } else {
@@ -563,9 +658,28 @@ mod linux {
     /// the next boot) picks up the new/removed `.link` file. Runs only the
     /// invocations in [`super::UDEV_RELOAD_ARGV`] — which deliberately excludes
     /// any `udevadm trigger` of the `net` subsystem (see that const's docs).
+    ///
+    /// Blocking form, for the SYNCHRONOUS pin path only: the installer step and
+    /// the supervisor reconciler drive `reconcile` off the reactor. The async
+    /// route path uses [`reload_udev_async`].
     fn reload_udev() {
         for argv in UDEV_RELOAD_ARGV {
             let _ = Command::new("udevadm").args(*argv).status();
+        }
+    }
+
+    /// [`reload_udev`] for an async caller: bounded and `kill_on_drop`, so a
+    /// udev settle can neither block the reactor nor outlive the request.
+    async fn reload_udev_async() {
+        for argv in UDEV_RELOAD_ARGV {
+            let _ = tokio::time::timeout(
+                UDEV_CMD_TIMEOUT,
+                tokio::process::Command::new("udevadm")
+                    .args(*argv)
+                    .kill_on_drop(true)
+                    .status(),
+            )
+            .await;
         }
     }
 
@@ -683,7 +797,7 @@ mod linux {
 #[cfg(target_os = "linux")]
 pub use linux::{
     apply_live, enumerate_net_adapters, link_mechanism_available, reconcile, remove_pin_link,
-    resolve_match_block, winning_match_block, write_pin_link,
+    resolve_match_block, write_pin_link,
 };
 
 // Non-Linux stubs so the crate builds + unit-tests on a dev host.
@@ -776,8 +890,8 @@ mod tests {
     #[test]
     fn render_carries_match_namepolicy_and_mac() {
         let mac = MacAddr::parse("02:c6:75:83:1a:3e").unwrap();
-        let body = render_link_file("OriginalName=wlan*\nDriver=usb", &mac);
-        assert!(body.contains("[Match]\nOriginalName=wlan*\nDriver=usb"));
+        let body = render_link_file("Path=platform-xhci-hcd.0-usb-0:1.3:1.0", &mac);
+        assert!(body.contains("[Match]\nPath=platform-xhci-hcd.0-usb-0:1.3:1.0"));
         assert!(body.contains("NamePolicy=kernel"));
         assert!(body.contains("MACAddress=02:c6:75:83:1a:3e"));
     }
@@ -797,6 +911,43 @@ mod tests {
             parse_match_block(&rendered).as_deref(),
             Some("OriginalName=wlan0")
         );
+    }
+
+    #[test]
+    fn a_wildcard_match_is_not_specific_enough_to_pin() {
+        // The stock `99-default.link` match. Pairing it with our unconditional
+        // MACAddress= handed one adapter's pinned MAC to every interface.
+        assert!(!match_block_is_specific("OriginalName=*"));
+        assert!(!match_block_is_specific("OriginalName=wlan*"));
+        assert!(!match_block_is_specific("Driver=usb\nType=wlan"));
+        assert!(!match_block_is_specific("OriginalName=!eth0"));
+        assert!(!match_block_is_specific(""));
+        // The two forms the resolver emits, and a permanent-MAC match.
+        assert!(match_block_is_specific("OriginalName=wlan0"));
+        assert!(match_block_is_specific(
+            "Path=platform-xhci-hcd.0-usb-0:1.3:1.0"
+        ));
+        assert!(match_block_is_specific(
+            "Driver=usb\nPermanentMACAddress=00:c0:ca:b1:0d:a2"
+        ));
+        // A glob ANDed with a specific key is still one adapter.
+        assert!(match_block_is_specific(
+            "OriginalName=wlan*\nPath=pci-0000:01:00.0"
+        ));
+    }
+
+    #[test]
+    fn id_path_is_read_from_udev_properties() {
+        let props = "ID_BUS=usb\nID_PATH=platform-xhci-hcd.0-usb-0:1.3:1.0\nID_PATH_TAG=platform_xhci_hcd_0_usb_0_1_3_1_0\n";
+        assert_eq!(
+            parse_udev_id_path(props).as_deref(),
+            Some("platform-xhci-hcd.0-usb-0:1.3:1.0")
+        );
+        // Absent property, and a value carrying a glob (never usable as a
+        // specific match), both decline.
+        assert_eq!(parse_udev_id_path("ID_BUS=usb\n"), None);
+        assert_eq!(parse_udev_id_path("ID_PATH=usb-*\n"), None);
+        assert_eq!(parse_udev_id_path("ID_PATH=\n"), None);
     }
 
     #[test]

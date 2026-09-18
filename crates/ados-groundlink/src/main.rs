@@ -61,6 +61,19 @@ const UNPAIRED_SIDECAR_REFRESH: Duration = Duration::from_secs(20);
 /// already back.
 const RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
+/// The cadence every role loop stamps its progress marker at, and therefore the
+/// interval the systemd watchdog budget is derived from.
+///
+/// The ping is COUPLED to that marker rather than free-running, for the same
+/// reason as the supervisor's: liveness for this unit is not "the process
+/// exists" and not "the tokio runtime still schedules tasks". A wedged role loop
+/// satisfies both while the receive plane, the channel acquirer and the hop
+/// follower have all stopped — which is precisely the failure that previously
+/// needed a power cycle or SSH, because the unit was `Type=simple` and nothing
+/// could observe it. A free-running ping would reproduce that hole with a green
+/// check on top.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
+
 /// The run role the service dispatches on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -251,6 +264,12 @@ async fn main() -> Result<()> {
     // Tell systemd we are up (reuses the orchestrator's notify shim).
     ados_supervisor::sdnotify::ready();
 
+    // The systemd watchdog keep-alive, fed only while the running role loop
+    // keeps stamping progress. Each role marks it at its own stage boundaries;
+    // see [`PROGRESS_INTERVAL`] for why the ping is coupled rather than free.
+    let progress = ados_supervisor::sdnotify::MonitorProgress::new();
+    ados_supervisor::sdnotify::spawn_watchdog_pinger(progress.clone(), PROGRESS_INTERVAL);
+
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
@@ -272,14 +291,14 @@ async fn main() -> Result<()> {
     match role {
         Role::Relay => {
             tracing::info!("ground-station relay role starting");
-            run_relay_or_receiver(true, &mut sigterm, &mut sigint).await;
+            run_relay_or_receiver(true, progress, &mut sigterm, &mut sigint).await;
         }
         Role::Receiver => {
             tracing::info!("ground-station receiver role starting");
-            run_relay_or_receiver(false, &mut sigterm, &mut sigint).await;
+            run_relay_or_receiver(false, progress, &mut sigterm, &mut sigint).await;
         }
         Role::Direct => {
-            run_direct(&mut sigterm, &mut sigint).await?;
+            run_direct(progress, &mut sigterm, &mut sigint).await?;
         }
     }
 
@@ -292,6 +311,7 @@ async fn main() -> Result<()> {
 /// a SIGTERM/SIGINT fires the shared `Notify` so the loop tears down cleanly.
 async fn run_relay_or_receiver(
     is_relay: bool,
+    progress: ados_supervisor::sdnotify::MonitorProgress,
     sigterm: &mut tokio::signal::unix::Signal,
     sigint: &mut tokio::signal::unix::Signal,
 ) {
@@ -324,9 +344,9 @@ async fn run_relay_or_receiver(
         let ingest = Some(ingest.clone());
         tokio::spawn(async move {
             if is_relay {
-                relay::run(shutdown, ingest).await;
+                relay::run(shutdown, ingest, progress).await;
             } else {
-                receiver::run(shutdown, ingest).await;
+                receiver::run(shutdown, ingest, progress).await;
             }
         })
     };
@@ -417,10 +437,11 @@ fn maybe_spawn_atlas_relay(
 
 /// The standalone (`direct`) receive plane.
 async fn run_direct(
+    progress: ados_supervisor::sdnotify::MonitorProgress,
     sigterm: &mut tokio::signal::unix::Signal,
     sigint: &mut tokio::signal::unix::Signal,
 ) -> Result<()> {
-    let config = match wait_for_fleet_identity(sigterm, sigint).await {
+    let config = match wait_for_fleet_identity(&progress, sigterm, sigint).await {
         Some(c) => c,
         None => return Ok(()),
     };
@@ -633,7 +654,13 @@ async fn run_direct(
 
     // Run the receive loop until a shutdown signal arrives.
     tokio::select! {
-        _ = receive_loop(&config, presence_cache, resolved_iface.clone(), aux_counters) => {}
+        _ = receive_loop(
+            &config,
+            presence_cache,
+            resolved_iface.clone(),
+            aux_counters,
+            progress,
+        ) => {}
         _ = sigterm.recv() => {
             tracing::info!("received SIGTERM");
         }
@@ -689,11 +716,16 @@ fn aux_slots_to_bind(want: &[u8], bound: &std::collections::BTreeSet<u8>) -> Vec
 /// than exiting — means an identity written by the pair flow is picked up
 /// without a service restart.
 async fn wait_for_fleet_identity(
+    progress: &ados_supervisor::sdnotify::MonitorProgress,
     sigterm: &mut tokio::signal::unix::Signal,
     sigint: &mut tokio::signal::unix::Signal,
 ) -> Option<WfbConfig> {
     let mut logged = false;
     loop {
+        // Parked-and-re-reading is progress: this loop is doing exactly its job
+        // on an unprovisioned node, and withholding the watchdog here would put
+        // a box that is waiting to be paired into a restart loop.
+        progress.mark();
         let config = WfbConfig::load_from(std::path::Path::new(CONFIG_YAML));
         let Some(err) = ados_radio::config::fleet_identity_error(
             config.fleet_id,
@@ -757,6 +789,7 @@ async fn receive_loop(
     presence_cache: GsPresenceCache,
     resolved_iface: Arc<Mutex<Option<String>>>,
     aux_counters: ados_groundlink::AuxCounters,
+    progress: ados_supervisor::sdnotify::MonitorProgress,
 ) {
     let mut manager = WfbRxManager::new(config.clone());
     let clock: Arc<dyn ados_groundlink::watchdog::Clock> = Arc::new(SystemClock::default());
@@ -773,6 +806,11 @@ async fn receive_loop(
     // fresh, not be rewritten twelve times a minute on a flash card.
     let mut unpaired_published: Option<std::time::Instant> = None;
     loop {
+        // One stamp per pass, before the pairing gate. Every arm below either
+        // completes a pass and comes back here or is itself inside a generation
+        // whose 1 s hero tick stamps again, so a healthy service always feeds
+        // the watchdog and a loop wedged inside any one stage does not.
+        progress.mark();
         // Pairing gate: without the rx key on disk there is nothing to receive.
         // (The Python side blocks here too; the pairing flow lands the key.)
         if !std::path::Path::new(RX_KEY).exists() {
@@ -859,6 +897,11 @@ async fn receive_loop(
                 continue;
             }
         };
+        // Stage boundary: the adapter is resolved. Stamped here as well as at the
+        // top of the pass so the regulatory gate + monitor-mode + txpower
+        // bring-up below — the longest legitimate single stage on this path —
+        // cannot be mistaken for a wedge.
+        progress.mark();
 
         // Bring the interface to receive-ready BEFORE the spawn, in the
         // kernel-required order: the regulatory gate (set + verify the domain,
@@ -936,10 +979,18 @@ async fn receive_loop(
         );
 
         let stdout = chain.video.take_stdout();
+        let mut tx_control = chain.tx_control;
+        let mut aux_tx = chain.aux_tx;
+        // Each transmitter's per-second `PKT` stats stream, taken before the
+        // processes are parked for the generation. These MUST be drained: an
+        // unread pipe eventually blocks the transmitter in `fprintf(stdout)`,
+        // which would wedge the very lane the watchdog exists to protect.
+        let tx_control_stats = tx_control.take_stdout();
+        let aux_tx_stats = aux_tx.take_stdout();
         // The rest of the chain (the primary's aux + control receivers and the
         // two ground transmitters) is held for the generation's lifetime; its
         // `Drop` killpg's each process group when this iteration ends.
-        let _primary_rest = (chain.aux, chain.control, chain.tx_control, chain.aux_tx);
+        let _primary_rest = (chain.aux, chain.control, tx_control, aux_tx);
         let rx_handle = DataRxHandle::new(chain.video);
 
         // Shared liveness state for this generation.
@@ -1084,6 +1135,46 @@ async fn receive_loop(
             watchdog.run().await;
         });
 
+        // Transmitter liveness. Both GS transmitters were previously held only
+        // so their `Drop` would killpg them — nothing observed either one, so a
+        // `wfb_tx` that went silently dead without exiting took down HopAck and
+        // the presence beacon (`tx_control`) or the ENTIRE ground→drone uplink
+        // (`aux_tx`: arm, disarm, mode, mission upload, param writes, relay RPC,
+        // link feedback) while video RX kept decoding and every surface still
+        // read `active`. These watchers assert the delta counters off each
+        // transmitter's own `PKT` stats stream and end the generation on a
+        // stall, which respawns the whole chain. `&mut` in the select below for
+        // the same reason as the two watchdogs above: the arm that did not win
+        // must not be dropped-and-detached into the next generation.
+        //
+        // A transmitter whose stdout handle could not be taken is watched by
+        // nothing rather than reported as stalled — a missing handle is this
+        // process's own plumbing fault, and restarting the radio on it would be
+        // a fabricated verdict about the transmitter.
+        let mut tx_control_watch = tx_control_stats.map(|out| {
+            tokio::spawn(ados_groundlink::watch_tx_liveness(
+                "tx_control",
+                out,
+                ados_groundlink::TX_POLL_INTERVAL,
+                ados_groundlink::TX_SILENCE_WINDOW,
+            ))
+        });
+        let mut aux_tx_watch = aux_tx_stats.map(|out| {
+            tokio::spawn(ados_groundlink::watch_tx_liveness(
+                "aux_tx",
+                out,
+                ados_groundlink::TX_POLL_INTERVAL,
+                ados_groundlink::TX_SILENCE_WINDOW,
+            ))
+        });
+        if tx_control_watch.is_none() || aux_tx_watch.is_none() {
+            tracing::warn!(
+                tx_control_watched = tx_control_watch.is_some(),
+                aux_tx_watched = aux_tx_watch.is_some(),
+                "ground_tx_liveness_unwatched: a transmitter stats stream was unavailable"
+            );
+        }
+
         // Re-read the fleet registry on a slow tick and add/remove the SECONDARY
         // slots' receivers in place. Pairing a 25th drone must not interrupt the
         // other 24, so a registry change reconciles inside the generation rather
@@ -1147,6 +1238,11 @@ async fn receive_loop(
                     // it (killpg) when it is unpromoted. `aux` + `control` were
                     // spawned unconditionally and stay up either way.
                     _ = hero_tick.tick() => {
+                        // The steady-state progress stamp. A healthy generation
+                        // can hold the select for hours, so without a stamp from
+                        // inside it the watchdog would conclude the loop had
+                        // wedged and restart a perfectly good receive plane.
+                        progress.mark();
                         let hero = fanout::resolve_fanout_slot(
                             primary_slot,
                             &hero_path,
@@ -1176,8 +1272,9 @@ async fn receive_loop(
         };
 
         // The generation ends when any of: the data RX exits, the zombie
-        // watchdog kills it, the valid-packet watchdog terminates it, or the
-        // primary slot leaves the fleet.
+        // watchdog kills it, the valid-packet watchdog terminates it, either
+        // ground transmitter stops producing bytes, or the primary slot leaves
+        // the fleet.
         // `&mut` the watchdog handles so the arm that did NOT win is not
         // dropped-and-detached here — a dropped JoinHandle leaves the task
         // running, so the zombie + valid-packet watchdogs would pile up across
@@ -1189,6 +1286,8 @@ async fn receive_loop(
             }
             _ = &mut zombie_task => {}
             _ = &mut watchdog_task => {}
+            _ = wait_tx_stall(&mut tx_control_watch) => {}
+            _ = wait_tx_stall(&mut aux_tx_watch) => {}
             _ = reconcile => {}
         }
 
@@ -1205,6 +1304,13 @@ async fn receive_loop(
         if let Some(t) = stats_task {
             t.abort();
         }
+        // The transmitter watchers hold the read end of a pipe whose writer is
+        // about to be killpg'd with the generation; aborting them here keeps a
+        // previous generation's watcher from surviving to judge the next one's
+        // radio, exactly as for the two watchdogs above.
+        for t in [tx_control_watch, aux_tx_watch].into_iter().flatten() {
+            t.abort();
+        }
 
         tokio::time::sleep(RETRY_INTERVAL).await;
     }
@@ -1219,6 +1325,23 @@ async fn wait_for_exit(rx: Arc<DataRxHandle>) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// One generation-completion arm per ground transmitter: resolve when its
+/// liveness watcher reports a stall.
+///
+/// A transmitter with no stats handle has no watcher, and this arm then parks
+/// forever rather than resolving. That is deliberate: the alternative — treating
+/// a missing pipe as a stall — would restart the radio on this process's own
+/// plumbing fault and report it as a transmitter failure. The other arms still
+/// end the generation, and the missing handle is logged where it happens.
+async fn wait_tx_stall(watch: &mut Option<tokio::task::JoinHandle<ados_groundlink::TxVerdict>>) {
+    match watch {
+        Some(handle) => {
+            let _ = handle.await;
+        }
+        None => std::future::pending::<()>().await,
     }
 }
 

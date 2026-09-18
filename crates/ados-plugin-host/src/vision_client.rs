@@ -503,7 +503,7 @@ mod tests {
             byte_len: (64 * 48 * 3) as u32,
         };
         let bytes = descriptor.to_msgpack().unwrap();
-        server.broadcast(deliver_envelope(&bytes)).await;
+        server.broadcast(deliver_envelope(&bytes).into()).await;
 
         let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
@@ -548,7 +548,9 @@ mod tests {
             detections: vec![],
         };
         let bytes = batch.to_msgpack().unwrap();
-        server.broadcast(deliver_detection_envelope(&bytes)).await;
+        server
+            .broadcast(deliver_detection_envelope(&bytes).into())
+            .await;
 
         let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
             .await
@@ -567,7 +569,9 @@ mod tests {
 
         // The engine answers the next request with a fixed response.
         let result = Value::Map(vec![(Value::from("registered"), Value::Boolean(true))]);
-        server.broadcast(response_envelope(result.clone())).await;
+        server
+            .broadcast(response_envelope(result.clone()).into())
+            .await;
 
         let args = Value::Map(vec![(Value::from("model_id"), Value::from("m1"))]);
         let got = client.register_model(&args).await.unwrap();
@@ -594,7 +598,7 @@ mod tests {
         };
         let body = env.to_msgpack().unwrap();
         server
-            .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap())
+            .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap().into())
             .await;
 
         let args = Value::Map(vec![(Value::from("model_id"), Value::from("missing"))]);
@@ -636,7 +640,7 @@ mod tests {
                 };
                 let body = reply.to_msgpack().unwrap();
                 engine_server
-                    .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap())
+                    .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap().into())
                     .await;
             }
             seen
@@ -679,10 +683,12 @@ mod tests {
         // The reader must stay on the wire: dropping the push must not consume
         // or reorder the response behind it.
         server
-            .broadcast(deliver_envelope(b"not-a-descriptor"))
+            .broadcast(deliver_envelope(b"not-a-descriptor").into())
             .await;
         let result = Value::Map(vec![(Value::from("registered"), Value::Boolean(true))]);
-        server.broadcast(response_envelope(result.clone())).await;
+        server
+            .broadcast(response_envelope(result.clone()).into())
+            .await;
 
         let args = Value::Map(vec![(Value::from("model_id"), Value::from("m1"))]);
         let got = client.register_model(&args).await.unwrap();

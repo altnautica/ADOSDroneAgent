@@ -29,6 +29,7 @@ use crate::graph::Step;
 pub mod aic8800_tune;
 pub mod appliance;
 pub mod apt_reclaim;
+pub mod boot_config;
 pub mod config_identity;
 pub mod config_migrate;
 pub mod deps;

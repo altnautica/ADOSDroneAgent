@@ -45,6 +45,9 @@ socket2 = { version = "0.5", features = ["all"] }
 # Same crate + version the sibling MAVLink router uses, so the serial backend is
 # shared in the lockfile.
 tokio-serial = "5.4"
+# Non-async mutex for the AP transmit-counter baseline the liveness probe keeps
+# across ticks. Never held across an await, so it stays off tokio::sync.
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

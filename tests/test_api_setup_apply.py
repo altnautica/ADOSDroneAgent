@@ -240,6 +240,21 @@ def test_apply_advanced_rejects_bad_board_override(client) -> None:
     assert data["sections"]["advanced"]["ok"] is False
 
 
+def test_apply_advanced_rejects_a_board_override_that_names_no_profile(client) -> None:
+    # A well-formed slug that is not a board-profile stem is refused rather than
+    # written: the override is the escape hatch for a mis-detected board, so a
+    # token that changes nothing must not be reported as applied.
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"advanced": {"board_override": "rock5c"}},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["sections"]["advanced"]["ok"] is False
+    # The message names the legal values (the YAML filename stems).
+    assert "rock-5c-lite" in data["sections"]["advanced"]["message"]
+
+
 def test_apply_ui_theme_writes_to_live_config(client, agent_app) -> None:
     # Default config theme is "dark"; flipping to "light" via /apply must
     # land on the live config and report through the section response.

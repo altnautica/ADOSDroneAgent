@@ -259,6 +259,7 @@ absent (a known feature, not on this profile) rather than `404`.
 | GET | `/api/video` |  |
 | POST | `/api/video/camera/switch` |  |
 | GET | `/api/video/cameras` |  |
+| POST | `/api/video/config` |  |
 | POST | `/api/video/record/start` |  |
 | POST | `/api/video/record/stop` |  |
 | POST | `/api/video/snapshot` |  |
@@ -276,7 +277,7 @@ absent (a known feature, not on this profile) rather than `404`.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-85 residual routes.
+86 residual routes.
 
 ## Logging store — `ados-logd` on :8090
 

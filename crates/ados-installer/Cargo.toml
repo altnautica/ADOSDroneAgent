@@ -17,6 +17,11 @@ path = "src/main.rs"
 # daemon's decision to run cannot disagree.
 ados-config = { path = "../ados-config" }
 ados-macpin = { path = "../ados-macpin" }
+# The board-profile reader (the YAMLs are embedded there, and it is the sidecar
+# writer). Used to validate `--display <id>` against the ids the detected
+# board actually declares, so a typo is refused before the install starts
+# instead of producing a node with no display.
+ados-hal-probe = { path = "../ados-hal-probe" }
 # The one definition of a node's resolvable mDNS reach name
 # (`ados_protocol::reach`). The installer's success card hands an operator a
 # hostname to dial, so it applies the same rule the pairing probe and the mDNS

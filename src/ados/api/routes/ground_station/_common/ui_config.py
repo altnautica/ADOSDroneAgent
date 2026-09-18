@@ -2,8 +2,9 @@
 
 Two layers of UI state live in this module:
 
-* ``_load_ui_config`` / ``_save_ui_config`` — the legacy JSON side-file
-  consumed by the OLED service and exposed for backward compatibility.
+* ``_save_ui_config`` — the legacy JSON side-file consumed by the OLED
+  service. Its matching reader went with ``GET /ui``, which ``ados-control``
+  now serves natively off the same file.
 * ``_persist_gs_ui_section`` / ``_refresh_in_memory_ui`` — the
   authoritative path that writes ``ground_station.ui.<section>`` into
   the YAML-backed ``ADOSConfig`` and mirrors it into the running
@@ -20,28 +21,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ._paths import (
-    _DEFAULT_BUTTONS,
-    _DEFAULT_DISPLAY,
-    _DEFAULT_OLED,
-    _DEFAULT_SCREENS,
-    _UI_CONFIG_PATH,
-)
-
-
-def _load_ui_config() -> dict[str, Any]:
-    """Load the UI config blob, filling any missing keys with defaults."""
-    data: dict[str, Any] = {}
-    try:
-        if _UI_CONFIG_PATH.is_file():
-            data = json.loads(_UI_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        data = {}
-
-    oled = {**_DEFAULT_OLED, **(data.get("oled") or {})}
-    buttons = {**_DEFAULT_BUTTONS, **(data.get("buttons") or {})}
-    screens = {**_DEFAULT_SCREENS, **(data.get("screens") or {})}
-    return {"oled": oled, "buttons": buttons, "screens": screens}
+from ._paths import _DEFAULT_DISPLAY, _UI_CONFIG_PATH
 
 
 def _save_ui_config(data: dict[str, Any]) -> None:
@@ -129,7 +109,6 @@ def _refresh_in_memory_ui(app: Any, section: str, value: dict[str, Any]) -> None
 
 
 __all__ = [
-    "_load_ui_config",
     "_save_ui_config",
     "_load_display_config",
     "_persist_gs_ui_section",

@@ -57,9 +57,11 @@ pub const EXTRA_EMERGENCY: &str = "swarm_emergency";
 /// Writes into `out` rather than returning a `Vec`: this runs at 10 Hz on an SBC
 /// that is also encoding video.
 ///
-/// An entry missing any field it needs is SKIPPED rather than defaulted. A
-/// neighbour with no position is not a neighbour at the origin — that would put a
-/// phantom aircraft at the equator and drag the whole flock toward it.
+/// An entry missing any field it needs is SKIPPED rather than defaulted, and so
+/// is an entry whose position is PRESENT but is not a measurement — see
+/// [`is_measured_fix`]. A neighbour with no position is not a neighbour at the
+/// origin: that would put a phantom aircraft at the equator and drag the whole
+/// flock toward it.
 pub fn fixes_from_payload(
     payload: &Value,
     since_received: std::time::Duration,
@@ -81,6 +83,10 @@ pub fn fixes_from_payload(
         ) else {
             continue;
         };
+        let status = status_byte(n);
+        if !is_measured_fix(lat_deg, lon_deg, alt_m, status) {
+            continue;
+        }
         let age_ms = n
             .get("age_ms")
             .and_then(Value::as_u64)
@@ -105,9 +111,42 @@ pub fn fixes_from_payload(
             vn,
             ve,
             vd,
-            status: status_byte(n),
+            status,
         });
     }
+}
+
+/// Whether a beacon's reported position is a MEASUREMENT rather than the
+/// producer's no-fix placeholder.
+///
+/// A fleet member with no usable GPS still beacons: the vehicle half fills
+/// lat/lon/alt with zeros and leaves the `gps_ok` bit clear rather than
+/// withholding the row. Absence is already skipped above; a PRESENT zero is the
+/// dangerous half, because (0, 0, 0) is a real geodetic point — thousands of
+/// kilometres from any operating site — and the one law with no range bound of
+/// its own, `formation::anchor_position(Centroid)`, averages it straight into
+/// the fleet anchor. One member sitting on the ground without a lock would
+/// otherwise move every armed drone's anchor by `distance / (N + 1)` metres and
+/// saturate the commanded velocity toward it.
+///
+/// The `gps_ok` bit is the primary test: a member that says its fix is bad is
+/// telling us its position is not a measurement, whatever numbers it carried.
+/// The rest catch a producer that raises the bit anyway.
+fn is_measured_fix(lat_deg: f64, lon_deg: f64, alt_m: f64, status: u8) -> bool {
+    if status & crate::neighbor::STATUS_GPS_OK == 0 {
+        return false;
+    }
+    if !lat_deg.is_finite() || !lon_deg.is_finite() || !alt_m.is_finite() {
+        return false;
+    }
+    // Null island is the placeholder, never a site. Altitude is deliberately
+    // not part of the test: zero AGL is a legitimate reading for an aircraft on
+    // the ground, and a producer that zeroes only the position is the same
+    // failure.
+    if lat_deg == 0.0 && lon_deg == 0.0 {
+        return false;
+    }
+    lat_deg.abs() <= 90.0 && lon_deg.abs() <= 180.0
 }
 
 /// Rebuild the beacon status byte from the payload's decoded booleans.
@@ -286,6 +325,79 @@ mod tests {
         fixes_from_payload(&p, Duration::ZERO, &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!((out[0].vn, out[0].ve, out[0].vd), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn a_zero_position_is_skipped_even_though_every_field_is_present() {
+        // What a member that booted without a lock actually beacons: the vehicle
+        // half zeroes the position rather than withholding the row. Present-and-
+        // zero is not the same shape as absent, and only the absent case was
+        // being refused.
+        let mut out = Vec::new();
+        let mut p = payload(0, 0.0);
+        let obj = p["neighbors"][0].as_object_mut().expect("object");
+        obj.insert("lat".into(), json!(0.0));
+        obj.insert("lon".into(), json!(0.0));
+        obj.insert("alt_m".into(), json!(0.0));
+        fixes_from_payload(&p, Duration::ZERO, &mut out);
+        assert!(
+            out.is_empty(),
+            "a member with no fix is not a member at the equator"
+        );
+
+        // Even with gps_ok raised: a producer that zeroes the position and still
+        // claims a lock is the same phantom aircraft.
+        let obj = p["neighbors"][0].as_object_mut().expect("object");
+        obj.insert("gps_ok".into(), json!(true));
+        fixes_from_payload(&p, Duration::ZERO, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_cleared_gps_ok_bit_skips_the_row_whatever_position_it_carried() {
+        // A member reporting its own fix as bad is telling us its position is
+        // not a measurement. Flying geometry against it fabricates a lattice.
+        let mut out = Vec::new();
+        let mut p = payload(0, 0.0);
+        p["neighbors"][0]
+            .as_object_mut()
+            .expect("object")
+            .insert("gps_ok".into(), json!(false));
+        fixes_from_payload(&p, Duration::ZERO, &mut out);
+        assert!(out.is_empty(), "no lock means no usable position");
+
+        // Absent reads the same as false — the payload publishes the bit
+        // decoded, so a producer that dropped it is not asserting a fix.
+        let mut p = payload(0, 0.0);
+        p["neighbors"][0]
+            .as_object_mut()
+            .expect("object")
+            .remove("gps_ok");
+        fixes_from_payload(&p, Duration::ZERO, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_position_outside_the_geodetic_range_is_skipped() {
+        // A garbage number is not a position. `json!` folds NaN and infinity to
+        // null (which the missing-field path already refuses), so the reachable
+        // shape of the same fault is a finite value out of range.
+        let mut out = Vec::new();
+        for (lat, lon) in [
+            (91.0, 10.0),
+            (-91.0, 10.0),
+            (10.0, 181.0),
+            (10.0, -181.0),
+            (f64::MAX, 10.0),
+            (10.0, -f64::MAX),
+        ] {
+            let mut p = payload(0, 0.0);
+            let obj = p["neighbors"][0].as_object_mut().expect("object");
+            obj.insert("lat".into(), json!(lat));
+            obj.insert("lon".into(), json!(lon));
+            fixes_from_payload(&p, Duration::ZERO, &mut out);
+            assert!(out.is_empty(), "({lat}, {lon}) is not a position");
+        }
     }
 
     #[test]

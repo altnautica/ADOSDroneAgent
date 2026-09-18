@@ -21,7 +21,7 @@ use crate::encoder::{
 use crate::health::{PipelineState, StartError};
 use crate::mediamtx::MAIN_PATH;
 use crate::orchestrator::VideoOrchestrator;
-use crate::process::{kill_orphans, ManagedProcess};
+use crate::process::{kill_orphans, kill_publisher_orphans, ManagedProcess};
 use crate::tap::{self, spawn_vision_tap};
 
 /// Give up respawning a local secondary encoder after this many attempts, so a
@@ -181,10 +181,14 @@ impl VideoOrchestrator {
         // which the RTP-sender sweep is safe: with the fan-out in force the
         // live encoder's own command line matches that pattern, so it can never
         // be swept from the tap's start/stop paths.
+        //
+        // The `/main` sweep is PUBLISHER-scoped: every tap reads that same URI,
+        // so a plain pattern sweep would kill a cloud push or SEI tap that a
+        // partial teardown legitimately left running.
         kill_orphans(&format!("-i {device_path}")).await;
         kill_orphans("rpicam-vid").await;
         let pipe_uri = self.pipe_uri();
-        kill_orphans(&pipe_uri).await;
+        kill_publisher_orphans(&pipe_uri).await;
         kill_orphans(&orphan_pattern()).await;
 
         // Detect the encoder backend for the primary camera.
@@ -209,16 +213,20 @@ impl VideoOrchestrator {
         // Build the encoder command. Shared with the attention-switch
         // encoder-only respawn below, so a hero/thumbnail change produces
         // byte-identical argv to a cold start at the same settings.
-        let Some(cmd) = self.build_primary_encoder_command(&primary, &device_path, kind) else {
-            // Distinct from the spawn and mediamtx failures: without its own
-            // variant this bail publishes whichever reason the previous cycle
-            // left behind, sending the operator after the wrong subsystem.
-            self.encoder_label = None;
-            self.last_start_error = StartError::EncoderCommandFailed;
-            self.state = PipelineState::Error;
-            self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error)
-                .await;
-            return false;
+        let cmd = match self.build_primary_encoder_command(&primary, &device_path, kind) {
+            Ok(c) => c,
+            Err(reason) => {
+                // Distinct from the spawn and mediamtx failures, and the builder's
+                // own distinction between "bad geometry/source" and "codec this
+                // pipeline cannot frame" is carried through: without it this bail
+                // points the operator at the wrong config key.
+                self.encoder_label = None;
+                self.last_start_error = reason;
+                self.state = PipelineState::Error;
+                self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Error)
+                    .await;
+                return false;
+            }
         };
         self.encoder_label = Some(crate::encoder::encoder_label(kind, &cmd));
         // Read the radio fan-out back off the argv that is about to run, so the
@@ -345,13 +353,15 @@ impl VideoOrchestrator {
     /// ([`Self::restart_encoder_only`]) reuses the identical composition — the
     /// optional SEI wrap and the opt-in pre-encode vision-tap splice included.
     /// Duplicating it would let a hero switch silently drop the vision tap.
-    /// `None` on any build failure (already logged).
+    /// `Err(StartError)` on any build failure (already logged), tagged so the
+    /// camera-state sidecar names the real cause rather than the generic
+    /// "command could not be built".
     fn build_primary_encoder_command(
         &self,
         primary: &CameraInfo,
         device_path: &str,
         kind: crate::encoder::EncoderKind,
-    ) -> Option<Vec<String>> {
+    ) -> Result<Vec<String>, StartError> {
         let pipe_uri = self.pipe_uri();
         let mut params = EncoderParams::from_camera_config(kind, &self.camera_cfg);
         if self.force_software {
@@ -368,9 +378,9 @@ impl VideoOrchestrator {
         // through `cmd_emits_wfb_rtp`, so there is no second source of truth.
         //
         // NOT requested when the opt-in pre-encode vision split is in force:
-        // both features rewrite the same output stage (the split needs the
-        // primary output to stay implicitly mapped, the fan-out needs an
-        // explicit `-map` + tee), and the vision split is the narrower,
+        // both features rewrite the same output stage (the split needs its own
+        // `-map [enc]` on the primary output, the fan-out needs `-map 0:v` plus
+        // the tee spec), and the vision split is the narrower,
         // explicitly-configured one. Such a node keeps the separate tap.
         params.rtp_fanout = !self.raw_tap_splice_wanted();
         let cmd = match build_encoder_command(
@@ -383,11 +393,15 @@ impl VideoOrchestrator {
             Ok(c) if !c.is_empty() => c,
             Ok(_) => {
                 tracing::error!("encoder_command_empty");
-                return None;
+                return Err(StartError::EncoderCommandFailed);
+            }
+            Err(e @ crate::encoder::EncoderError::UnsupportedCodec(_)) => {
+                tracing::error!(error = %e, "encoder_command_build_failed");
+                return Err(StartError::UnsupportedCodec);
             }
             Err(e) => {
                 tracing::error!(error = %e, "encoder_command_build_failed");
-                return None;
+                return Err(StartError::EncoderCommandFailed);
             }
         };
 
@@ -400,10 +414,10 @@ impl VideoOrchestrator {
             cmd
         };
 
-        // Opt-in pre-encode vision tap: augment the encoder command with a
-        // strictly-appended second rawvideo output to the vision sink, WITHOUT
-        // changing the existing encode/RTSP output bytes. No-op (returns the
-        // command unchanged) unless the command is a raw ffmpeg invocation
+        // Opt-in pre-encode vision tap: one decode, a `-filter_complex split`,
+        // and a second explicitly-mapped rawvideo output to the vision sink,
+        // with the existing encode/publish settings preserved. No-op (returns
+        // the command unchanged) unless the command is a raw ffmpeg invocation
         // ending in the RTSP output — bash-pipeline / gstreamer / SEI-wrapped
         // commands fall back to the decoupled third-ffmpeg tap, which never
         // touches the encoder. Off by default.
@@ -418,16 +432,16 @@ impl VideoOrchestrator {
                 v.pixel_format(),
                 &v.sink,
             );
-            if augmented.len() != cmd.len() {
+            if augmented != cmd {
                 tracing::info!(sink = %v.sink, "vision_raw_tap_spliced_into_encoder");
             } else {
                 tracing::info!(
                     "vision_raw_tap_requested_but_command_not_eligible; using decoupled tap"
                 );
             }
-            Some(augmented)
+            Ok(augmented)
         } else {
-            Some(cmd)
+            Ok(cmd)
         }
     }
 
@@ -465,8 +479,14 @@ impl VideoOrchestrator {
             return false;
         };
         let device_path = primary.device_path.clone();
-        let Some(cmd) = self.build_primary_encoder_command(&primary, &device_path, kind) else {
-            return false;
+        let cmd = match self.build_primary_encoder_command(&primary, &device_path, kind) {
+            Ok(c) => c,
+            Err(reason) => {
+                // Stamp the cause: without it the sidecar carries whatever the
+                // last cold start left behind while the respawn silently failed.
+                self.last_start_error = reason;
+                return false;
+            }
         };
         // An attention switch rebuilds the argv, so re-resolve the identity the
         // sidecar publishes from the command actually about to run, and with it
@@ -481,7 +501,14 @@ impl VideoOrchestrator {
         }
         // The outgoing encoder held the mediamtx publisher slot; sweep any
         // straggler so the incoming one is not refused the path.
-        kill_orphans(&self.pipe_uri()).await;
+        //
+        // PUBLISHER-scoped, and that is the whole point of this call: the radio
+        // tap, the cloud push, the vision tap and the SEI tap all read this
+        // exact URI, so the raw-pattern sweep this replaces SIGKILLed all four
+        // on every attention switch and every adaptive-bitrate step — dropping
+        // the operator's radio picture, the cloud feed and the detection stream
+        // to change one encoder parameter, against the contract stated above.
+        kill_publisher_orphans(&self.pipe_uri()).await;
         // With the fan-out in force the encoder IS the RTP sender, so this is
         // the one safe window to sweep a stale sender (ours is down, the fresh
         // one is not spawned yet). Sweeping at any other time would SIGKILL the
@@ -723,8 +750,18 @@ impl VideoOrchestrator {
                 &self.env,
             ) {
                 Ok(c) if !c.is_empty() => c,
-                _ => {
-                    tracing::warn!(id = %leg.id, "secondary_encoder_command_build_failed");
+                Ok(_) => {
+                    tracing::warn!(id = %leg.id, "secondary_encoder_command_empty");
+                    continue;
+                }
+                Err(e) => {
+                    // The reason matters here: an unsupported per-leg codec is
+                    // the most likely cause and it is invisible without it.
+                    tracing::warn!(
+                        id = %leg.id,
+                        error = %e,
+                        "secondary_encoder_command_build_failed"
+                    );
                     continue;
                 }
             };
@@ -888,14 +925,7 @@ impl VideoOrchestrator {
             tracing::debug!("sei_tap_deferred: mediamtx path not ready");
             return;
         }
-        let pipe_uri = self.pipe_uri();
-        let args: Vec<String> = vec![
-            "-m".into(),
-            "ados.services.video.sei_tap".into(),
-            "--once".into(),
-            "--rtsp".into(),
-            pipe_uri,
-        ];
+        let args = sei_tap_args(&self.pipe_uri());
         let mut tap = match ManagedProcess::spawn("sei_tap", &self.python_executable, &args) {
             Ok(p) => p,
             Err(e) => {
@@ -935,33 +965,8 @@ impl VideoOrchestrator {
                 return true;
             }
         }
-        let local_rtsp = format!("rtsp://localhost:{}/main", self.mediamtx.rtsp_port());
         let push_url = format!("{cloud_url}/main");
-        let args: Vec<String> = vec![
-            "-rtsp_transport".into(),
-            "tcp".into(),
-            "-timeout".into(),
-            "5000000".into(),
-            "-i".into(),
-            local_rtsp,
-            "-c".into(),
-            "copy".into(),
-            "-f".into(),
-            "rtsp".into(),
-            "-rtsp_transport".into(),
-            "tcp".into(),
-            // Force the status report to stderr as flushed `key=value` lines
-            // once per second. This is the liveness signal, not decoration:
-            // ffmpeg suppresses the status line entirely when stderr is not a
-            // tty, and `total_size=N` (bytes the muxer has written to the
-            // relay) is the only OUTPUT-side proof the push is still moving.
-            // Without it the health check had nothing but `is_running()`, and
-            // a cloud push wedged on a half-open relay socket is alive and
-            // mute — the exact state process liveness cannot see.
-            "-progress".into(),
-            "pipe:2".into(),
-            push_url.clone(),
-        ];
+        let args = cloud_push_args(&self.pipe_uri(), &push_url);
         let mut push = match ManagedProcess::spawn("cloud_push", "ffmpeg", &args) {
             Ok(p) => p,
             Err(e) => {
@@ -1005,5 +1010,238 @@ impl VideoOrchestrator {
         }
         self.mediamtx.stop().await;
         self.state = PipelineState::Error;
+    }
+}
+
+/// The headless SEI latency tap's argv (arguments only — the program is the
+/// agent's Python interpreter).
+///
+/// Pure and separate from the spawn so the sweep-classification test can feed
+/// the REAL command line in. `--rtsp` marks `pipe_uri` as this process's INPUT,
+/// which is what keeps it out of the publisher orphan sweep.
+pub fn sei_tap_args(pipe_uri: &str) -> Vec<String> {
+    vec![
+        "-m".into(),
+        "ados.services.video.sei_tap".into(),
+        "--once".into(),
+        "--rtsp".into(),
+        pipe_uri.to_string(),
+    ]
+}
+
+/// The cloud-relay push's `ffmpeg` arguments: re-mux the local `main` stream to
+/// the relay with no transcode.
+///
+/// `-progress pipe:2` forces the status report to stderr as flushed `key=value`
+/// lines once per second. This is the liveness signal, not decoration: ffmpeg
+/// suppresses the status line entirely when stderr is not a tty, and
+/// `total_size=N` (bytes the muxer has written to the relay) is the only
+/// OUTPUT-side proof the push is still moving. Without it the health check had
+/// nothing but `is_running()`, and a cloud push wedged on a half-open relay
+/// socket is alive and mute — the exact state process liveness cannot see.
+///
+/// Pure and separate from the spawn for the same reason as [`sei_tap_args`].
+pub fn cloud_push_args(local_rtsp: &str, push_url: &str) -> Vec<String> {
+    vec![
+        "-rtsp_transport".into(),
+        "tcp".into(),
+        "-timeout".into(),
+        "5000000".into(),
+        "-i".into(),
+        local_rtsp.to_string(),
+        "-c".into(),
+        "copy".into(),
+        "-f".into(),
+        "rtsp".into(),
+        "-rtsp_transport".into(),
+        "tcp".into(),
+        "-progress".into(),
+        "pipe:2".into(),
+        push_url.to_string(),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoder::{EncoderEnv, EncoderKind};
+    use crate::process::cmdline_publishes_to;
+    use ados_protocol::hwcaps::{AbsenceReason, Probed};
+
+    const RTSP_PORT: u16 = 8554;
+
+    fn env() -> EncoderEnv {
+        EncoderEnv {
+            hw_h264: Probed::absent(AbsenceReason::NodeMissing),
+            has_mpph264enc: false,
+            has_omxh264videoenc: false,
+            has_rtspclientsink: true,
+            encoder_api: "unknown".into(),
+            pi5_class: false,
+            python_executable: "/opt/ados/venv/bin/python3".into(),
+            cpu_threads: 4,
+        }
+    }
+
+    fn encoder_params(kind: EncoderKind, rtp_fanout: bool) -> EncoderParams {
+        EncoderParams {
+            kind,
+            codec: "h264".into(),
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+            encoder: "auto".into(),
+            rotation: 0,
+            hflip: false,
+            vflip: false,
+            keyframe_interval: 0,
+            rtp_fanout,
+        }
+    }
+
+    fn usb_cam() -> CameraInfo {
+        CameraInfo {
+            camera_type: CameraType::Usb,
+            device_path: "/dev/video1".into(),
+            capabilities: vec!["mjpeg".into()],
+        }
+    }
+
+    fn csi_cam() -> CameraInfo {
+        CameraInfo {
+            camera_type: CameraType::Csi,
+            device_path: "/dev/video0".into(),
+            capabilities: vec!["h264".into()],
+        }
+    }
+
+    /// How procfs presents a process: argv joined by spaces.
+    fn cmdline(program: &str, args: &[String]) -> String {
+        std::iter::once(program.to_string())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// An attention switch (and every adaptive-bitrate step) respawns ONLY the
+    /// encoder. The pre-respawn sweep that clears a stale publisher off
+    /// mediamtx's `main` slot used to match the bare URI — which the radio tap,
+    /// the cloud push, the vision tap and the SEI tap all carry too, because
+    /// they read that exact stream. So a routine bitrate step SIGKILLed all
+    /// four and dropped the operator's radio picture, the cloud feed, the
+    /// detection stream and the latency probe.
+    ///
+    /// Every command line here comes from the real argv builders, so the test
+    /// cannot drift away from what actually runs.
+    #[test]
+    fn encoder_respawn_sweep_kills_publishers_and_spares_every_reader() {
+        let uri = crate::wfb_tee::local_rtsp_url(RTSP_PORT);
+
+        // --- must be swept: everything that can hold the `main` publisher slot.
+        let ffmpeg_plain = build_encoder_command(
+            &encoder_params(EncoderKind::Ffmpeg, false),
+            "/dev/video1",
+            &uri,
+            Some(&usb_cam()),
+            &env(),
+        )
+        .unwrap();
+        let ffmpeg_fanout = build_encoder_command(
+            &encoder_params(EncoderKind::Ffmpeg, true),
+            "/dev/video1",
+            &uri,
+            Some(&usb_cam()),
+            &env(),
+        )
+        .unwrap();
+        let rpicam = build_encoder_command(
+            &encoder_params(EncoderKind::RpicamVid, true),
+            "/dev/video0",
+            &uri,
+            Some(&csi_cam()),
+            &env(),
+        )
+        .unwrap();
+        let gstreamer = build_encoder_command(
+            &encoder_params(EncoderKind::Gstreamer, false),
+            "/dev/video1",
+            &uri,
+            Some(&usb_cam()),
+            &env(),
+        )
+        .unwrap();
+        // The SEI-spliced form the latency bench runs: a `bash -c` pipeline
+        // whose publish stage still names the URI as its destination.
+        let sei_spliced = wrap_with_sei_inject(&ffmpeg_fanout, &uri, &env());
+        // The GStreamer arm on a board without `rtspclientsink`: gst → ffmpeg
+        // publish, also a `bash -c` pipeline.
+        let gst_via_ffmpeg = build_encoder_command(
+            &encoder_params(EncoderKind::Gstreamer, false),
+            "/dev/video1",
+            &uri,
+            Some(&usb_cam()),
+            &EncoderEnv {
+                has_rtspclientsink: false,
+                ..env()
+            },
+        )
+        .unwrap();
+
+        for (name, argv) in [
+            ("ffmpeg plain publish", &ffmpeg_plain),
+            ("ffmpeg radio fan-out", &ffmpeg_fanout),
+            ("rpicam bash pipeline", &rpicam),
+            ("gstreamer rtspclientsink", &gstreamer),
+            ("sei-spliced bash pipeline", &sei_spliced),
+            ("gstreamer via ffmpeg publish", &gst_via_ffmpeg),
+        ] {
+            let line = cmdline(&argv[0], &argv[1..]);
+            assert!(
+                cmdline_publishes_to(&line, &uri),
+                "{name} publishes into `main` and MUST be swept: {line}"
+            );
+        }
+
+        // --- must survive: every consumer of the same stream.
+        let readers: [(&str, String); 4] = [
+            (
+                "wfb radio tap",
+                cmdline(
+                    "ffmpeg",
+                    &crate::wfb_tee::wfb_tee_args(&uri, &crate::wfb_tee::rtp_destination_url()),
+                ),
+            ),
+            (
+                "vision tap",
+                cmdline("ffmpeg", &tap::vision_tap_args(&uri, 10, 640, 480, "rgb24")),
+            ),
+            (
+                "cloud push",
+                cmdline(
+                    "ffmpeg",
+                    &cloud_push_args(&uri, "rtsp://relay.example.com/main"),
+                ),
+            ),
+            (
+                "sei tap",
+                cmdline("/opt/ados/venv/bin/python3", &sei_tap_args(&uri)),
+            ),
+        ];
+        for (name, line) in &readers {
+            // Negative control. The sweep this replaced was
+            // `pgrep -f -- <uri>`, i.e. it matched any command line CONTAINING
+            // the URI — so this assertion is simultaneously the proof that the
+            // old sweep did kill this reader, and the guard that keeps the next
+            // assertion from passing vacuously.
+            assert!(
+                line.contains(&uri),
+                "{name} must carry the URI, or this test proves nothing: {line}"
+            );
+            assert!(
+                !cmdline_publishes_to(line, &uri),
+                "{name} only reads `main` and MUST survive an encoder respawn: {line}"
+            );
+        }
     }
 }

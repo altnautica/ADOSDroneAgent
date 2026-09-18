@@ -231,9 +231,11 @@ pub(crate) fn build_stats_value(
     // decodes no inbound stream sits here. Reporting them as null (no
     // measurement) rather than -100 dBm keeps a healthy injecting drone from
     // looking like a weak-signal link, and lets the GCS show its air-side hint.
-    // Same real-decode gate `derive_link_state` uses, so the state and the
-    // numbers agree.
-    let measured = link.packets_received > 0;
+    // The predicate lives on `LinkStats` so the durable link-history emitters
+    // apply the SAME gate: a sidecar that nulls a sentinel while the telemetry
+    // series records it is worse than either alone, because the two surfaces
+    // then disagree about whether the reading exists.
+    let measured = link.is_measured();
     let v = json!({
         // Sidecar schema version (best-effort drift signal for readers). Shared
         // with the ground-station writer via the one const so both agree.

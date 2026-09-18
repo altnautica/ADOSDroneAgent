@@ -41,6 +41,103 @@ use std::time::{Duration, Instant};
 pub use ados_protocol::pairing_posture::{
     constant_time_eq, is_on_box, load_pairing, Pairing, FORWARDED_HEADERS,
 };
+
+/// Why a request path cannot be used to make an authorization decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathRejection {
+    /// A `%` survived one round of decoding, i.e. the path was encoded twice.
+    DoubleEncoded,
+    /// A `%` sequence that is not two hex digits.
+    MalformedEscape,
+    /// A `.` or `..` segment.
+    DotSegment,
+    /// An empty segment (`//`), which collapses differently in different routers.
+    EmptySegment,
+    /// A control byte or a NUL, decoded or literal.
+    ControlByte,
+    /// The decoded bytes are not UTF-8.
+    NotUtf8,
+}
+
+impl PathRejection {
+    /// Operator-facing reason. Deliberately generic: it says the path was
+    /// refused, not which check caught it, so the response is not a probe
+    /// oracle for the normalizer itself.
+    pub const MESSAGE: &'static str =
+        "The request path is not in canonical form and cannot be authorized.";
+}
+
+/// Decode a request path ONCE into the single string every authorization
+/// predicate is then asked about.
+///
+/// Why this exists. Every gate on this edge — the relay denylist, the
+/// unpaired-node gate, the public-path list, the native/proxied split and the
+/// proxied API-key decision — used to call `request.uri().path()` for itself.
+/// That string is the RAW target from the request line, so `%61pi` is six
+/// characters that match no literal in any of those lists. The request then
+/// misses `is_native`, falls through to the reverse proxy, and the residual
+/// FastAPI — which decodes before routing, as every WSGI/ASGI server does —
+/// serves `/api/v1/setup/reboot` to a caller who presented no credential.
+/// `//api/...` and `/api/%2e%2e/...` are the same bug wearing different hats.
+///
+/// So: decode exactly once, then REFUSE anything still ambiguous rather than
+/// trying to canonicalize it. A path that needs a second decode, or that
+/// carries a dot segment, an empty segment or a control byte, has no
+/// legitimate caller — every real client emits a canonical path — and
+/// refusing is the only answer that cannot differ from what the next hop
+/// will do with it.
+///
+/// Returning a decoded string rather than validating in place matters: the
+/// decision must be made on the bytes the LAST hop will route on, and the
+/// caller must thread this one value everywhere so no predicate can quietly
+/// re-read the raw path and disagree.
+pub fn decision_path(raw: &str) -> Result<String, PathRejection> {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'%' {
+            let hi = bytes
+                .get(i + 1)
+                .and_then(|c| (*c as char).to_digit(16))
+                .ok_or(PathRejection::MalformedEscape)?;
+            let lo = bytes
+                .get(i + 2)
+                .and_then(|c| (*c as char).to_digit(16))
+                .ok_or(PathRejection::MalformedEscape)?;
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else {
+            out.push(b);
+            i += 1;
+        }
+    }
+
+    let decoded = String::from_utf8(out).map_err(|_| PathRejection::NotUtf8)?;
+
+    // One decode only. A surviving `%` means the caller encoded twice, which
+    // no client does by accident and which the next hop may well decode again.
+    if decoded.contains('%') {
+        return Err(PathRejection::DoubleEncoded);
+    }
+    if decoded.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err(PathRejection::ControlByte);
+    }
+    for segment in decoded.split('/').skip(1) {
+        if segment.is_empty() {
+            // Trailing `/` is the one legitimate empty segment.
+            if decoded.ends_with('/') && decoded.matches("//").count() == 0 {
+                continue;
+            }
+            return Err(PathRejection::EmptySegment);
+        }
+        if segment == "." || segment == ".." {
+            return Err(PathRejection::DotSegment);
+        }
+    }
+    Ok(decoded)
+}
 use ados_protocol::pairing_posture::{data_plane_access, Access};
 
 /// Default pairing-state path: the agent's `pairing.json`.
@@ -169,34 +266,40 @@ pub const RELAYED_HEADER: &str = "x-ados-relayed";
 /// `/api/v1/ground-station/ui/factory-reset` — a path no router has ever
 /// registered — sat here guarding nothing while
 /// `/api/v1/ground-station/factory-reset` was relay-reachable.
+/// Takes the normalized [`decision_path`], never `request.uri().path()`.
+/// Matching the raw target here is how `/api/pairing/%75npair` walked past a
+/// list that names `/api/pairing/unpair`.
+///
+/// Prefix, not equality. An exact `matches!` guards one spelling of a route
+/// and nothing beneath it, so a sub-path a router happens to serve — a
+/// trailing slash, a path parameter, a future `/api/plugins/install/resume` —
+/// is open while the list reads as covering it. Every entry below names a
+/// whole subtree that must not be reachable over the radio.
 pub fn relay_forbidden(path: &str) -> bool {
-    matches!(
-        path,
-        "/api/pairing/unpair"
-            | "/api/pairing/accept"
-            | "/api/mcp/tokens"
-            | "/api/mcp/revoke"
-            | "/api/dashboard/pin/set"
-            | "/api/dashboard/pin/clear"
-            | "/api/wfb/pair/local-bind"
-            | "/api/wfb/pair/unpair"
-            | "/api/v1/ground-station/wfb/pair"
-            | "/api/plugins/install"
-            | "/api/plugins/install_from_url"
-            | "/api/plugins/capability-token"
-            | "/api/v1/setup/reset"
-            | "/api/v1/setup/reboot"
-            | "/api/v1/setup/cloud-choice"
-            | "/api/v1/setup/remote-access/cloudflare"
-            | "/api/v1/system/restart-supervisor"
-            | "/api/v1/ground-station/factory-reset"
-    )
+    RELAY_FORBIDDEN_PATHS
+        .iter()
+        .any(|denied| path_covers(denied, path))
 }
 
-/// Every path [`relay_forbidden`] refuses, as data. The predicate stays a
-/// `matches!` (one branch, no allocation, on the hot edge path); this mirror
-/// exists so the route-table test can enumerate the list, and the two are kept
-/// in lockstep by [`tests::the_predicate_and_the_enumeration_agree`].
+/// Whether `denied` covers `path`: the same route, or anything beneath it.
+///
+/// `"/api/plugins/install"` covers `/api/plugins/install`,
+/// `/api/plugins/install/` and `/api/plugins/install/resume`, but NOT
+/// `/api/plugins/installer` — a prefix test without the boundary check would
+/// deny an unrelated sibling and, worse, would let someone believe a subtree
+/// is covered because its name happens to share a prefix.
+fn path_covers(denied: &str, path: &str) -> bool {
+    if !path.starts_with(denied) {
+        return false;
+    }
+    matches!(path.as_bytes().get(denied.len()), None | Some(b'/'))
+}
+
+/// Every subtree [`relay_forbidden`] refuses, as data. The predicate reads
+/// this list directly, so the two cannot drift; the route-table test still
+/// enumerates it to assert each entry names a path something actually serves.
+/// A denylist entry that matches no served path is worse than no entry: it
+/// reads as covered while the real path is wide open.
 pub const RELAY_FORBIDDEN_PATHS: &[&str] = &[
     "/api/pairing/unpair",
     "/api/pairing/accept",

@@ -169,6 +169,14 @@ const AUTOPILOT_PX4: i64 = 12;
 /// matching the FastAPI route's `float(req.args[0]) if req.args else 10.0`.
 const DEFAULT_TAKEOFF_ALT_M: f32 = 10.0;
 
+/// The upper bound the takeoff route accepts, in metres above the takeoff point.
+///
+/// 1000 m AGL is above every civil altitude limit, so a larger number is a unit
+/// or typing error (feet entered as metres, a trailing digit) rather than an
+/// intent — and `param7` reaches the FC as the climb target either way. Refusing
+/// it names the mistake while the aircraft is still on the ground.
+const MAX_TAKEOFF_ALT_M: f32 = 1000.0;
+
 /// The custom-mode flag the DO_SET_MODE param1 carries, matching
 /// `MAV_MODE_FLAG_CUSTOM_MODE_ENABLED` (1).
 const CUSTOM_MODE_ENABLED: f32 = 1.0;
@@ -430,7 +438,7 @@ fn build_command(
             json!({"status": "ok", "cmd": "disarm"}),
         )),
         "takeoff" => {
-            let alt = takeoff_altitude(args);
+            let alt = takeoff_altitude(args)?;
             Ok((
                 command_long(
                     MavCmd::MAV_CMD_NAV_TAKEOFF,
@@ -578,17 +586,40 @@ fn command_long(command: MavCmd, params: [f32; 7]) -> COMMAND_LONG_DATA {
 }
 
 /// The takeoff altitude from `args[0]`, defaulting to [`DEFAULT_TAKEOFF_ALT_M`]
-/// when absent. Mirrors `float(req.args[0]) if req.args else 10.0`: a numeric
-/// `args[0]` is used as-is; a stringly-typed numeric arg is parsed; a non-numeric
-/// or absent first arg falls back to the default.
-fn takeoff_altitude(args: &[Value]) -> f32 {
-    match args.first() {
-        Some(Value::Number(n)) => n
-            .as_f64()
-            .map(|v| v as f32)
-            .unwrap_or(DEFAULT_TAKEOFF_ALT_M),
-        Some(Value::String(s)) => s.trim().parse::<f32>().unwrap_or(DEFAULT_TAKEOFF_ALT_M),
-        _ => DEFAULT_TAKEOFF_ALT_M,
+/// only when the request carries no args at all. Every arg that IS present is
+/// validated, never coerced: a 400 here happens before any frame is built.
+///
+/// The value lands in `param7` of `MAV_CMD_NAV_TAKEOFF` and goes on the wire
+/// verbatim, so an unchecked arg is a climb target the FC acts on. Rust's
+/// `f32: FromStr` accepts `nan` / `inf` / `infinity` case-insensitively, and an
+/// out-of-range magnitude (`1e39`, or a JSON number past f32) saturates to
+/// `±inf` on the cast — so the coercing version of this function handed the
+/// flight controller a non-finite altitude, which ArduPilot and PX4 each resolve
+/// in their own undefined way, and a negative one commands a descent from a
+/// takeoff request. A non-numeric arg was worse than either: it silently became
+/// 10 m, so the aircraft flew to an altitude nobody asked for.
+///
+/// The finiteness check must run AFTER the `f32` cast, because that is where a
+/// legal-but-oversized `f64` becomes an infinity. Same refusal the param write
+/// applies to a non-finite value (`params_write::set_param`).
+fn takeoff_altitude(args: &[Value]) -> Result<f32, CommandError> {
+    let Some(arg) = args.first() else {
+        return Ok(DEFAULT_TAKEOFF_ALT_M);
+    };
+    let parsed = match arg {
+        Value::Number(n) => n.as_f64().map(|v| v as f32),
+        Value::String(s) => s.trim().parse::<f32>().ok(),
+        _ => None,
+    };
+    match parsed {
+        Some(alt) if alt.is_finite() && alt > 0.0 && alt <= MAX_TAKEOFF_ALT_M => Ok(alt),
+        _ => Err(CommandError {
+            status: StatusCode::BAD_REQUEST,
+            detail: format!(
+                "takeoff altitude must be a finite number greater than 0 and at \
+                 most {MAX_TAKEOFF_ALT_M} metres"
+            ),
+        }),
     }
 }
 
@@ -624,13 +655,31 @@ fn px4_mode_number(name: &str) -> Option<(u8, u8)> {
 
 /// Send `base_long` and correlate the FC's `COMMAND_ACK`.
 ///
-/// Opens a dedicated MAVLink-socket connection, writes the command (with
-/// `confirmation = 0`), and reads the broadcast FC frame stream for a matching
-/// `COMMAND_ACK`. On a timeout with no ACK it resends with `confirmation++` up to
-/// the configured retry budget; on `IN_PROGRESS` it waits (longer) for a final
-/// result and stops resending; on a rejection it attaches any `STATUSTEXT` seen
-/// in the window. Returns [`AckOutcome::NoAck`] if the retry window closes with no
-/// ACK. An absent socket / write failure is an `Err` the route maps to a 503.
+/// Opens a dedicated MAVLink-socket connection per attempt, writes the command
+/// (with `confirmation = attempt`), and reads the broadcast FC frame stream for a
+/// matching `COMMAND_ACK`. On a timeout with no ACK it resends with
+/// `confirmation++` up to the configured retry budget; on `IN_PROGRESS` it waits
+/// (longer) for a final result and stops resending; on a rejection it attaches
+/// any `STATUSTEXT` seen in the window. Returns [`AckOutcome::NoAck`] if the
+/// retry window closes with no ACK. An absent socket / write failure on the FIRST
+/// attempt is an `Err` the route maps to a 503.
+///
+/// ## Why the stream is re-opened per attempt
+///
+/// `AckStream::read_frame` bounds its read with `tokio::time::timeout` around
+/// `read_exact`, which is not cancellation-safe: on expiry the future is dropped
+/// having possibly consumed part of a length prefix or payload, so the byte
+/// stream is at an unknown offset. Reusing it across a resend made every
+/// subsequent frame parse against a shifted window, so `match_command_ack` missed
+/// an ACK the FC really sent and this function reported `NoAck` for an ACCEPTED
+/// arm / disarm / mode-set — the operator told a flight command failed when it
+/// succeeded, and the retry re-sent it. The stream now marks itself desynced on
+/// any timeout (refusing further use) and the attempt loop opens a fresh
+/// connection, which is also the only way to resynchronise a raw byte stream.
+///
+/// A re-open that fails on a RETRY is not a 503: the first frame did reach the
+/// socket, so the honest outcome is `NoAck` (sent, no ACK observed) rather than
+/// "no MAVLink connection".
 async fn send_awaiting_ack(
     client: &MavlinkIpcClient,
     base_long: &COMMAND_LONG_DATA,
@@ -639,9 +688,25 @@ async fn send_awaiting_ack(
     let expected_cmd = base_long.command;
     let expected_src = base_long.target_system;
 
-    let mut stream = client.open_ack_stream().await?;
-
     for attempt in 0..=cfg.retries {
+        // A fresh connection per attempt: the previous one may have been left at
+        // an unknown byte offset by a cancelled bounded read.
+        let mut stream = match client.open_ack_stream().await {
+            Ok(s) => s,
+            // The first attempt never wrote anything, so an unreachable socket is
+            // the route's 503. A later attempt has already put a frame on the
+            // wire; report that honestly instead.
+            Err(e) if attempt == 0 => return Err(e),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    attempt,
+                    "ack-stream re-open failed on a resend; reporting no-ack observed"
+                );
+                return Ok(AckOutcome::NoAck);
+            }
+        };
+
         // (Re)send with confirmation = attempt (0 on the first send).
         let mut long = base_long.clone();
         long.confirmation = attempt.min(u8::MAX as u32) as u8;
@@ -687,8 +752,9 @@ async fn send_awaiting_ack(
                         last_statustext = Some(txt);
                     }
                 }
-                // Nothing arrived in the window: resend (unless we already saw
-                // IN_PROGRESS, handled below), or give up after the budget.
+                // Nothing arrived in the window: the read was cancelled, so this
+                // stream is now desynced and unusable. Break to the next attempt,
+                // which opens a fresh one (or give up after the budget).
                 FrameRead::Timeout => break,
                 // The stream closed; no more frames will arrive.
                 FrameRead::Eof => return Ok(AckOutcome::NoAck),
@@ -703,8 +769,8 @@ async fn send_awaiting_ack(
                 statustext: None,
             });
         }
-        // else: timed out with no ACK → loop to resend with confirmation++,
-        // unless the retry budget is exhausted.
+        // else: timed out with no ACK → loop to resend with confirmation++ on a
+        // fresh connection, unless the retry budget is exhausted.
     }
 
     Ok(AckOutcome::NoAck)
@@ -846,6 +912,53 @@ mod tests {
         // A stringly-typed numeric arg parses, matching Python float().
         let (d2, _b) = build_command("takeoff", &[json!("30")], ARDUPILOT).unwrap();
         assert_eq!(d2.param7, 30.0);
+    }
+
+    /// Every arg that cannot be a real altitude is a 400 and builds NO frame.
+    ///
+    /// `build_command` is the only producer of the `COMMAND_LONG`, so an `Err`
+    /// here means nothing reaches the encoder, let alone the FC. `f32: FromStr`
+    /// accepts `nan`/`inf`/`infinity` case-insensitively and saturates `1e39` to
+    /// `+inf`, and all three used to land in `param7` verbatim; a negative value
+    /// commanded a descent from a takeoff request, and an unparseable string
+    /// silently became 10 m.
+    #[test]
+    fn takeoff_refuses_every_unflyable_altitude_arg() {
+        for arg in [
+            json!("NaN"),
+            json!("nan"),
+            json!("inf"),
+            json!("-inf"),
+            json!("Infinity"),
+            json!("1e39"),      // overflows f32 → +inf on the cast
+            json!(1e39),        // same, as a JSON number
+            json!(-10.0),       // a takeoff that descends
+            json!(0),           // a takeoff to the ground
+            json!(5000.0),      // past MAX_TAKEOFF_ALT_M
+            json!("thirty"),    // unparseable: must not become the default
+            json!(""),          // ditto
+            json!(true),        // wrong type
+            json!(Value::Null), // wrong type
+            json!([25.0]),      // wrong type
+        ] {
+            let err = build_command("takeoff", std::slice::from_ref(&arg), ARDUPILOT)
+                .expect_err(&format!("{arg} must be refused, not flown"));
+            assert_eq!(err.status, StatusCode::BAD_REQUEST, "arg {arg}");
+        }
+    }
+
+    /// The boundaries of the accepted range, so the refusal is not so wide that
+    /// it rejects a real operation.
+    #[test]
+    fn takeoff_accepts_the_bounded_positive_range() {
+        for arg in [json!(0.5), json!(10), json!("120.5"), json!(1000.0)] {
+            let (d, _b) = build_command("takeoff", std::slice::from_ref(&arg), ARDUPILOT)
+                .unwrap_or_else(|_| panic!("{arg} is a flyable altitude"));
+            assert!(d.param7.is_finite() && d.param7 > 0.0);
+        }
+        // Absent args keep the documented default; only a PRESENT arg is judged.
+        let (d, _b) = build_command("takeoff", &[], ARDUPILOT).unwrap();
+        assert_eq!(d.param7, DEFAULT_TAKEOFF_ALT_M);
     }
 
     #[test]

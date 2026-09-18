@@ -99,8 +99,9 @@ pub struct VisionEngine {
     accel_lease: Semaphore,
     frame_tx: broadcast::Sender<FrameDescriptor>,
     detection_tx: broadcast::Sender<DetectionBatch>,
-    /// Ring slot count and downscale target, from config.
-    slot_count: u32,
+    /// How camera rings are sized: the requested depth and the hard ceiling on
+    /// one ring's shared-memory footprint.
+    sizing: RingSizing,
     /// Per-camera single-object tracker. Built lazily on the first detection or
     /// an operator designation for a camera. Only consulted when
     /// `tracker_enabled`.
@@ -123,11 +124,42 @@ pub struct VisionEngine {
     timings: Mutex<HashMap<String, ModelTiming>>,
 }
 
+/// How a camera ring is sized.
+///
+/// Two independent bounds, deliberately separate: `slot_count` is the recycling
+/// depth an operator asks for, and `budget_bytes` is the ceiling on what one
+/// ring may occupy in `/dev/shm`. The depth alone cannot bound the memory,
+/// because the slot size is decided at runtime by the camera's frame size — the
+/// engine reduces the depth to fit the budget, and refuses the camera outright
+/// when a single frame cannot fit.
+#[derive(Debug, Clone, Copy)]
+pub struct RingSizing {
+    pub slot_count: u32,
+    pub budget_bytes: usize,
+}
+
+impl RingSizing {
+    pub fn new(slot_count: u32, budget_bytes: usize) -> Self {
+        Self {
+            slot_count,
+            budget_bytes,
+        }
+    }
+}
+
+/// A bare depth carries the default budget, so a caller that has no opinion on
+/// the memory ceiling still gets one.
+impl From<u32> for RingSizing {
+    fn from(slot_count: u32) -> Self {
+        Self::new(slot_count, crate::ring::DEFAULT_RING_BUDGET_BYTES)
+    }
+}
+
 impl VisionEngine {
     /// Build the engine around a chosen backend. The tracker is off: the engine
     /// publishes raw detections (the long-standing behaviour).
-    pub fn new(backend: Box<dyn VisionBackend>, slot_count: u32) -> Arc<Self> {
-        Self::with_tracker(backend, slot_count, false, TrackerConfig::default())
+    pub fn new(backend: Box<dyn VisionBackend>, sizing: impl Into<RingSizing>) -> Arc<Self> {
+        Self::with_tracker(backend, sizing, false, TrackerConfig::default())
     }
 
     /// Build the engine with the per-camera tracker explicitly enabled or
@@ -138,18 +170,11 @@ impl VisionEngine {
     /// [`new`]: Self::new
     pub fn with_tracker(
         backend: Box<dyn VisionBackend>,
-        slot_count: u32,
+        sizing: impl Into<RingSizing>,
         tracker_enabled: bool,
         tracker_cfg: TrackerConfig,
     ) -> Arc<Self> {
-        Self::with_tracker_reid(
-            backend,
-            slot_count,
-            tracker_enabled,
-            tracker_cfg,
-            false,
-            None,
-        )
+        Self::with_tracker_reid(backend, sizing, tracker_enabled, tracker_cfg, false, None)
     }
 
     /// Build the engine with the tracker and the learned-appearance (re-id) path
@@ -160,7 +185,7 @@ impl VisionEngine {
     /// degrades cleanly to motion-only rather than rejecting the build.
     pub fn with_tracker_reid(
         backend: Box<dyn VisionBackend>,
-        slot_count: u32,
+        sizing: impl Into<RingSizing>,
         tracker_enabled: bool,
         tracker_cfg: TrackerConfig,
         reid_enabled: bool,
@@ -168,6 +193,8 @@ impl VisionEngine {
     ) -> Arc<Self> {
         let (frame_tx, _) = broadcast::channel(BROADCAST_DEPTH);
         let (detection_tx, _) = broadcast::channel(BROADCAST_DEPTH);
+        let mut sizing = sizing.into();
+        sizing.slot_count = sizing.slot_count.max(crate::ring::MIN_SLOT_COUNT);
         Arc::new(Self {
             backend,
             cameras: Mutex::new(HashMap::new()),
@@ -175,7 +202,7 @@ impl VisionEngine {
             accel_lease: Semaphore::new(1),
             frame_tx,
             detection_tx,
-            slot_count: slot_count.max(2),
+            sizing,
             trackers: Mutex::new(HashMap::new()),
             tracker_enabled,
             tracker_cfg,
@@ -225,6 +252,12 @@ impl VisionEngine {
 
     /// Ensure a ring exists for `camera_id`, sized for `width` x `height` in
     /// `format`. Re-sizes (recreates) the ring when a larger frame arrives.
+    ///
+    /// The depth is the configured one only while it fits the ring's byte
+    /// budget: the slot size is not known until a frame arrives, so a depth
+    /// that is fine for a 480p tap is gigabytes at 4K. Over budget the depth is
+    /// reduced (a shallower ring still streams; an exhausted `/dev/shm` takes
+    /// the box down), and a frame too large to hold two of is refused outright.
     async fn ensure_ring(
         &self,
         camera_id: &str,
@@ -239,14 +272,29 @@ impl VisionEngine {
             None => true,
         };
         if recreate {
-            let layout = ados_protocol::framebus::RingLayout::for_frame(
-                self.slot_count,
-                width,
-                height,
-                format,
-            );
-            let shm_name = format!("ados-vision-{camera_id}");
-            let writer = RingWriter::open_or_create(&shm_name, layout)
+            let budget = self.sizing.budget_bytes;
+            let slots = crate::ring::fit_slot_count(self.sizing.slot_count, needed, budget)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "ring for {camera_id}: a {needed}-byte frame does not fit \
+                         {} slots in the {budget}-byte budget",
+                        crate::ring::MIN_SLOT_COUNT
+                    )
+                })?;
+            if slots < self.sizing.slot_count {
+                tracing::warn!(
+                    camera = camera_id,
+                    requested = self.sizing.slot_count,
+                    slots,
+                    frame_bytes = needed,
+                    budget_bytes = budget,
+                    "ring depth reduced to fit the shared-memory budget"
+                );
+            }
+            let layout =
+                ados_protocol::framebus::RingLayout::for_frame(slots, width, height, format);
+            let shm_name = format!("{}{camera_id}", crate::ring::RING_NAME_PREFIX);
+            let writer = RingWriter::open_or_create(&shm_name, layout, budget)
                 .map_err(|e| anyhow!("ring open for {camera_id}: {e}"))?;
             cams.insert(camera_id.to_string(), CameraRing { writer });
         }
@@ -905,6 +953,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(d.width, 16);
+    }
+
+    #[tokio::test]
+    async fn a_frame_too_large_for_the_ring_budget_is_refused() {
+        // 1080p rgb24 is ~6.2 MB per slot, so a 4 MB budget cannot hold even
+        // the two-slot floor. The u16 slot-count header field would have
+        // accepted this ring; the byte budget is what actually bounds the
+        // tmpfs the board has, so the publish is refused rather than mapped.
+        let e = VisionEngine::new(Box::new(MockBackend), RingSizing::new(4, 4 * 1024 * 1024));
+        let frame = vec![0u8; FrameFormat::Rgb24.frame_bytes(1920, 1080)];
+        let err = e
+            .publish_frame(
+                "budget-refuse",
+                1,
+                0,
+                1920,
+                1080,
+                FrameFormat::Rgb24,
+                &frame,
+            )
+            .await
+            .expect_err("a frame the budget cannot hold two of must be refused");
+        assert!(err.to_string().contains("does not fit"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn ring_depth_is_reduced_to_fit_the_byte_budget() {
+        // A depth of 64 at 640x480 rgb24 is ~59 MB. Under an 8 MB budget the
+        // engine streams at the depth that fits instead of exhausting /dev/shm.
+        const BUDGET: usize = 8 * 1024 * 1024;
+        let frame_bytes = FrameFormat::Rgb24.frame_bytes(640, 480);
+        let fitted = crate::ring::fit_slot_count(64, frame_bytes as u32, BUDGET).unwrap();
+        assert!(
+            fitted < 64,
+            "the budget must bite for this test to mean anything"
+        );
+
+        let e = VisionEngine::new(Box::new(MockBackend), RingSizing::new(64, BUDGET));
+        let frame = vec![0u8; frame_bytes];
+        let mut slots = Vec::new();
+        for id in 1..=(fitted as u64 + 1) {
+            let d = e
+                .publish_frame("budget-fit", id, 0, 640, 480, FrameFormat::Rgb24, &frame)
+                .await
+                .unwrap();
+            slots.push(d.slot);
+        }
+        assert!(
+            slots.iter().all(|s| *s < fitted),
+            "no descriptor may name a slot outside the ring that was created: {slots:?}"
+        );
+        // It recycles at the reduced depth: the ring really is `fitted` deep.
+        assert_eq!(slots[0], slots[fitted as usize]);
     }
 
     #[tokio::test]

@@ -166,9 +166,14 @@ def run_conformance(
 ) -> Report:
     """Run every route and fold the per-field verdicts into one report.
 
-    ``ok`` is true when no field failed; ``strict`` additionally requires that no
-    field is missing a producer (a stricter gate for an on-rig run where every
-    producer is expected to be live).
+    ``ok`` requires three things: no field failed, every route reached a live
+    logd, and — under ``strict`` — no field is missing a producer.
+
+    The reachability term is the one that was absent. A store the runner
+    could not reach produces no field verdicts at all, so ``failed`` stayed 0
+    and the run reported ``ok``: the conformance harness passed hardest
+    exactly when the Black Box was down. That is the same shape as the
+    defects it exists to catch, and it is why a dead writer could ship.
     """
     results = [run_route(fetcher, route) for route in routes]
     passed = failed = missing = 0
@@ -180,7 +185,8 @@ def run_conformance(
                 failed += 1
             else:
                 missing += 1
-    ok = failed == 0 and (not strict or missing == 0)
+    reachable = all(r.logd_reachable for r in results)
+    ok = failed == 0 and reachable and (not strict or missing == 0)
     return Report(
         ok=ok,
         strict=strict,

@@ -1,6 +1,11 @@
 [Unit]
 Description=ADOS Logging and Telemetry Store
-After=ados-supervisor.service
+# Order after time sync where one exists, so the store's age-based retention is
+# not the first thing to run against a clock that is still the kernel build
+# date. Ordering only (no Wants): on a board with no time source the unit must
+# still start, and the writer refuses age-based deletes on its own until the
+# clock is established, so nothing here depends on the target being reached.
+After=ados-supervisor.service time-sync.target
 PartOf=ados-supervisor.service
 StartLimitInterval=60s
 StartLimitBurst=5
@@ -46,9 +51,11 @@ ReadWritePaths=/var/ados /run/ados
 # or a runaway query can never starve the box of memory.
 MemoryMax=256M
 
-# The daemon pings the watchdog from its run loop; a hung writer or accept
-# loop trips this and systemd restarts the unit. Matches the daemon's
-# sd_notify cadence.
+# The daemon's watchdog ping is coupled to the WRITER's progress stamp, not to
+# the fact that the process still runs: a writer wedged inside a commit stops
+# the pings and systemd restarts the unit, and a writer that exits brings the
+# daemon down non-zero for Restart=on-failure. The ping cadence is a third of
+# this deadline, so two consecutive misses are tolerated.
 WatchdogSec=30s
 
 StandardOutput=journal

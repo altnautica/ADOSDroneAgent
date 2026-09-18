@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ados_protocol::frame::{decode_len, FrameError, HEADER_SIZE, PLUGIN_MAX_FRAME};
-use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
+use ados_protocol::plugin::{CapabilityToken, Envelope, PROTOCOL_VERSION};
 use rmpv::Value;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,6 +34,12 @@ use tokio::task::JoinHandle;
 
 /// Default per-request timeout. Mirrors `DEFAULT_REQUEST_TIMEOUT_S = 5.0`.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The host's token-rotation push. Wire contract, pinned here because the
+/// plugin side must adopt the token the host re-minted or it cannot reconnect
+/// after the rotation; the host half is `ados_plugin_host::TOKEN_REFRESH_METHOD`
+/// and the Python client's is `_TOKEN_REFRESH_METHOD`.
+const TOKEN_REFRESH_METHOD: &str = "token.refresh";
 
 /// A callback invoked for each delivered event or MAVLink frame. The argument
 /// is the delivered envelope's `args` map (topic + payload for events; the
@@ -75,7 +81,12 @@ type CallbackMap = Arc<Mutex<HashMap<String, Vec<EventCallback>>>>;
 /// Async client. One instance per plugin runner process.
 pub struct PluginIpcClient {
     plugin_id: String,
-    token: String,
+    /// The capability token this client presents, shared with the reader loop
+    /// because the host ROTATES it: a permission change or a pre-expiry
+    /// re-mint arrives as a `token.refresh` push, and the copy presented at
+    /// the next `hello` has to be the current one or the plugin cannot
+    /// reconnect.
+    token: Arc<Mutex<String>>,
     socket_path: PathBuf,
     /// The write half is shared behind an async mutex so concurrent request
     /// senders serialize their frame writes.
@@ -122,7 +133,7 @@ impl PluginIpcClient {
     ) -> Self {
         Self {
             plugin_id: plugin_id.into(),
-            token: token.into(),
+            token: Arc::new(Mutex::new(token.into())),
             socket_path: socket_path.as_ref().to_path_buf(),
             writer: Arc::new(AsyncMutex::new(None)),
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -871,7 +882,9 @@ impl PluginIpcClient {
             capability: capability.to_string(),
             args,
             request_id: rid.clone(),
-            token: self.token.clone(),
+            // Read per request, not captured at construction: a rotation mid
+            // session must be what the next frame carries.
+            token: self.token.lock().expect("token lock").clone(),
             error: None,
         };
         let frame = env.encode_frame()?;
@@ -920,8 +933,9 @@ impl PluginIpcClient {
     }
 
     /// Spawn the reader loop. Owns the read half; routes responses by
-    /// `request_id` and dispatches `event` / `mavlink.deliver` pushes to the
-    /// registered callbacks. Mirrors `_reader_loop`.
+    /// `request_id`, adopts a rotated capability token, and dispatches
+    /// `event` / `mavlink.deliver` pushes to the registered callbacks.
+    /// Mirrors `_reader_loop`.
     fn spawn_reader_loop(&self, read_half: OwnedReadHalf) -> JoinHandle<()> {
         let pending = self.pending.clone();
         let event_callbacks = self.event_callbacks.clone();
@@ -931,6 +945,7 @@ impl PluginIpcClient {
         let button_callbacks = self.button_callbacks.clone();
         let msp_callbacks = self.msp_callbacks.clone();
         let aux_callbacks = self.aux_callbacks.clone();
+        let token = self.token.clone();
         let plugin_id = self.plugin_id.clone();
         tokio::spawn(async move {
             let mut reader = read_half;
@@ -951,6 +966,8 @@ impl PluginIpcClient {
                                 dispatch_button(&button_callbacks, &env);
                             } else if env.method == "msp.deliver" {
                                 dispatch_button(&msp_callbacks, &env);
+                            } else if env.method == TOKEN_REFRESH_METHOD {
+                                adopt_refreshed_token(&token, &plugin_id, &env);
                             } else if env.method == "radio.aux_stream.deliver" {
                                 // Wildcard-only fan-out, exactly like buttons:
                                 // every aux subscriber receives every datagram
@@ -1020,6 +1037,58 @@ fn dispatch_event(map: &CallbackMap, env: &Envelope) {
         return;
     };
     invoke_matching(map, topic, &env.args);
+}
+
+/// Replace the capability token this client presents with the host's freshly
+/// minted one.
+///
+/// The host re-mints from authoritative state — on a permission change, and
+/// proactively before the TTL — and gates the LIVE session on its own copy, so
+/// dropping this push costs nothing until the connection breaks. What it costs
+/// then is everything: `hello` presents the plugin's copy, the issuer has
+/// already rotated past it, and the handshake is refused with
+/// `capability token invalid`. One socket blip past the first rotation and the
+/// plugin is off the bus for the rest of the flight.
+///
+/// A malformed or unparseable payload is ignored rather than adopted: keeping a
+/// token that still authenticates beats replacing it with one that cannot over
+/// a single bad frame.
+fn adopt_refreshed_token(slot: &Arc<Mutex<String>>, plugin_id: &str, env: &Envelope) {
+    let Some(wire) = map_get_str(&env.args, "token").filter(|s| !s.is_empty()) else {
+        tracing::warn!(plugin_id = %plugin_id, "plugin_token_refresh_malformed");
+        return;
+    };
+    let parsed = match CapabilityToken::from_token_string(wire) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(
+                plugin_id = %plugin_id,
+                error = %e,
+                "plugin_token_refresh_unparseable"
+            );
+            return;
+        }
+    };
+    let mut held = slot.lock().expect("token lock");
+    // A capability the operator revoked mid-flight is simply absent from the new
+    // grant set. Naming it here is how a plugin author sees the cause, rather
+    // than meeting it later as an unexplained capability_denied.
+    let revoked: Vec<String> = CapabilityToken::from_token_string(held.as_str())
+        .map(|old| {
+            old.granted_caps
+                .difference(&parsed.granted_caps)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    *held = wire.to_string();
+    drop(held);
+    tracing::info!(
+        plugin_id = %plugin_id,
+        expires_at = parsed.expires_at,
+        revoked = ?revoked,
+        "plugin_token_refreshed"
+    );
 }
 
 /// Dispatch a `mavlink.deliver` to every callback whose pattern matches the
@@ -1496,5 +1565,114 @@ mod tests {
         assert_eq!(map_get_str(&args, "topic"), Some("plugin.demo.x"));
         assert_eq!(map_get_i64(&args, "delivered"), Some(3));
         assert!(map_get(&args, "missing").is_none());
+    }
+
+    fn token_string(caps: &[&str], expires_at: i64) -> String {
+        CapabilityToken {
+            plugin_id: "p".to_string(),
+            session_id: "s".to_string(),
+            granted_caps: caps.iter().map(|c| (*c).to_string()).collect(),
+            issued_at: 0,
+            expires_at,
+            signature: "00".repeat(32),
+        }
+        .to_token_string()
+    }
+
+    fn response(request_id: &str) -> Envelope {
+        Envelope {
+            version: ados_protocol::plugin::PROTOCOL_VERSION,
+            kind: "response".to_string(),
+            method: String::new(),
+            capability: String::new(),
+            args: Value::Map(vec![(Value::from("ready"), Value::Boolean(true))]),
+            request_id: request_id.to_string(),
+            token: String::new(),
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rotated_token_is_adopted_and_presented_on_later_requests() {
+        // The host re-mints on a permission change and before the TTL, then
+        // gates the live session on ITS copy — so ignoring the push is free
+        // until the socket breaks, at which point `hello` presents a token the
+        // issuer has rotated past and the plugin is refused for the rest of the
+        // flight. The observable contract is therefore what the client puts in
+        // the `token` field after the push.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("p.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).expect("bind");
+
+        let first = token_string(&["event.publish", "mission.read"], 100);
+        let rotated = token_string(&["event.publish"], 900);
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let pushed = rotated.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let (mut r, mut w) = stream.into_split();
+            let hello = read_envelope(&mut r)
+                .await
+                .expect("hello read")
+                .expect("hello frame");
+            recorded.lock().expect("seen").push(hello.token.clone());
+            w.write_all(&response(&hello.request_id).encode_frame().unwrap())
+                .await
+                .expect("ready");
+            let refresh = event_envelope(
+                TOKEN_REFRESH_METHOD,
+                Value::Map(vec![
+                    (Value::from("token"), Value::from(pushed.as_str())),
+                    (Value::from("expires_at"), Value::from(900i64)),
+                    (
+                        Value::from("granted_caps"),
+                        Value::Array(vec![Value::from("event.publish")]),
+                    ),
+                ]),
+            );
+            w.write_all(&refresh.encode_frame().unwrap())
+                .await
+                .expect("push refresh");
+            while let Ok(Some(req)) = read_envelope(&mut r).await {
+                recorded.lock().expect("seen").push(req.token.clone());
+                if w.write_all(&response(&req.request_id).encode_frame().unwrap())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let client = PluginIpcClient::new("p", first.as_str(), &sock);
+        client.connect().await.expect("connect");
+
+        // The push and the next request race on the reader task, so poll rather
+        // than sleep a fixed amount: bounded, so a dropped push fails the test
+        // instead of hanging it.
+        let mut adopted = false;
+        for _ in 0..50 {
+            client.ping().await.expect("ping");
+            if seen.lock().expect("seen").last() == Some(&rotated) {
+                adopted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let tokens = seen.lock().expect("seen").clone();
+        client.close().await;
+        server.abort();
+
+        assert_eq!(
+            tokens.first().map(String::as_str),
+            Some(first.as_str()),
+            "the handshake presents the token the process was given"
+        );
+        assert!(
+            adopted,
+            "the rotated token must be presented after the push, saw {tokens:?}"
+        );
     }
 }

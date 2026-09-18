@@ -23,7 +23,9 @@
 //!   registry, rendered through the same function the pair write uses.
 //! - **`GET /api/wfb/pair/failover-status`** — the local-bind to cloud-relay
 //!   failover state, from the store's most-recent `wfb.pair.failover` event, else
-//!   the `/run/ados/wfb_failover.json` sidecar, defaulting to `"local"`.
+//!   the `/run/ados/wfb_failover.json` sidecar. Both are age-gated; with neither
+//!   current the state is `null` under `stale: true`, never the healthy
+//!   `"local"`.
 //!
 //! Every read is fault-tolerant: an absent store / sidecar / key file degrades to
 //! the same empty/default shape the FastAPI route returns when its own source is
@@ -32,6 +34,7 @@
 //! the residual surface.
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use ados_protocol::wfb_status::{
     build_status_from_stats_file_at, derive_wfb_status, WfbStatusConfig,
@@ -418,55 +421,95 @@ fn current_role(config_profile: &str) -> (String, String) {
 /// produced.
 const FAILOVER_STATES: [&str; 3] = ["local", "cloud_relay", "failed"];
 
-/// `GET /api/wfb/pair/failover-status` → `{"failover_state": <state>}`.
+/// How fresh a failover reading must be to be reported as the current state: 10
+/// seconds, the same window the ground-station snapshot routes apply.
+const FAILOVER_FRESH_S: f64 = 10.0;
+
+/// `GET /api/wfb/pair/failover-status` →
+/// `{"failover_state": <state>|null, "stale": <bool>}`.
 ///
 /// Reads the store's most-recent `wfb.pair.failover` event, falling back to the
-/// `wfb_failover.json` sidecar, defaulting to `"local"` when neither has a value. An
-/// unrecognized sidecar value also reads as `"local"`.
+/// `wfb_failover.json` sidecar. Both are age-gated; with neither current the
+/// state is `null` under `stale: true`.
+///
+/// ## Why `"local"` is not the fallback any more
+///
+/// `local` is the good state — the pair lane is bound locally, no cloud relay in
+/// the path. Reporting it for "we have no idea" meant that a node which had
+/// failed over to the cloud relay and then lost the producer of this event read
+/// as locally bound, and that a node with no failover tracking at all read as
+/// affirmatively healthy. Both directions of that mistake change what an
+/// operator does about the link. The `stale` flag is always present so the
+/// verdict is read off a key rather than inferred from one's absence.
 pub async fn get_failover_status(State(state): State<AppState>) -> Json<Value> {
     if let Some(s) = latest_wfb_failover(&state).await {
-        return Json(json!({"failover_state": s}));
+        return Json(failover_body(Some(&s)));
     }
 
     let path = wfb_failover_path();
-    if !path.exists() {
-        return Json(json!({"failover_state": "local"}));
+    let Some(map) = fresh_failover_sidecar(&path, SystemTime::now()) else {
+        return Json(failover_body(None));
+    };
+    // Best-effort schema-drift signal (never reject): warn on a producer/reader
+    // version mismatch, then read anyway.
+    let got = map.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
+    if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb_failover") {
+        ados_protocol::sidecar::check_sidecar_version("wfb_failover", got, ours);
     }
-    let state_str = match std::fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => {
-                // Best-effort schema-drift signal (never reject): warn on a
-                // producer/reader version mismatch, then read anyway.
-                let got = map.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
-                if let Some(ours) = ados_protocol::contracts::sidecar_version("wfb_failover") {
-                    ados_protocol::sidecar::check_sidecar_version("wfb_failover", got, ours);
-                }
-                map.get("state")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "local".to_string())
-            }
-            // A well-formed-but-non-object body → "local", matching the Python
-            // `data.get(...) if isinstance(data, dict) else "local"`.
-            Ok(_) => "local".to_string(),
-            Err(_) => return Json(json!({"failover_state": "local"})),
-        },
-        Err(_) => return Json(json!({"failover_state": "local"})),
-    };
-    let validated = if FAILOVER_STATES.contains(&state_str.as_str()) {
-        state_str
-    } else {
-        "local".to_string()
-    };
-    Json(json!({"failover_state": validated}))
+    Json(failover_body(map.get("state").and_then(Value::as_str)))
 }
 
-/// The store's most-recent failover state, validated to the accepted set, or `None`
-/// when the store is unreachable / has no such event / carries an unrecognized value,
-/// so the route falls back to the sidecar.
+/// The response body for a resolved (or unresolvable) failover state.
+///
+/// A state inside [`FAILOVER_STATES`] is reported with `stale: false`. Anything
+/// else — no current source, an absent `state`, or a value this build does not
+/// recognise — is `failover_state: null` with `stale: true`. It is NOT coerced to
+/// `"local"`: that is the healthy state, and claiming it for an unknown one
+/// tells the operator the pair lane is locally bound when nothing established
+/// that.
+fn failover_body(state: Option<&str>) -> Value {
+    match state {
+        Some(s) if FAILOVER_STATES.contains(&s) => json!({"failover_state": s, "stale": false}),
+        _ => json!({"failover_state": Value::Null, "stale": true}),
+    }
+}
+
+/// The failover sidecar as an object, only when its mtime is within
+/// [`FAILOVER_FRESH_S`] of `now`. `None` for an absent / unreadable / unparseable
+/// / non-object / aged file.
+///
+/// The producer rewrites this file whole on each transition check, so its mtime
+/// is the age of the reading. A file left behind by a dead producer used to be
+/// served verbatim forever.
+fn fresh_failover_sidecar(path: &Path, now: SystemTime) -> Option<Map<String, Value>> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    // A future mtime makes the age unprovable (a backward clock step on an
+    // RTC-less SBC), which must not read as fresh.
+    let age_s = now.duration_since(modified).ok()?.as_secs_f64();
+    if age_s > FAILOVER_FRESH_S {
+        return None;
+    }
+    match serde_json::from_str::<Value>(&std::fs::read_to_string(path).ok()?) {
+        Ok(Value::Object(map)) => Some(map),
+        _ => None,
+    }
+}
+
+/// The store's most-recent failover state, validated to the accepted set, or
+/// `None` when the store is unreachable / has no such event / carries an
+/// unrecognized value / the row is older than [`FAILOVER_FRESH_S`], so the route
+/// falls back to the sidecar and then to the stale reply.
 async fn latest_wfb_failover(state: &AppState) -> Option<String> {
     let rows = logd_query_events(state, "wfb.pair.failover", 1).await?;
     let row = rows.first()?.as_object()?;
+    let ts_us = row.get("ts_us").and_then(Value::as_i64)?;
+    let now_us = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_micros() as i64;
+    if (now_us - ts_us) as f64 / 1_000_000.0 > FAILOVER_FRESH_S {
+        return None;
+    }
     let detail = row.get("detail")?.as_object()?;
     let s = detail.get("state")?.as_str()?;
     if FAILOVER_STATES.contains(&s) {
@@ -834,7 +877,26 @@ mod tests {
     fn base_block_is_the_zero_default_for_an_empty_config() {
         let cfg = WfbStatusConfig::default();
         let b = base_block_fixed_reg(&cfg, "unknown");
-        // The exact 27-field zero-default block the FastAPI `_base_block` returns.
+
+        // The signal triple is the point of this test. This block is the body a
+        // node with NO radio serves — no adapter, no producer, nothing ever
+        // sampled — and it used to carry `rssi_dbm: -100.0`, `noise_dbm: -95.0`,
+        // `snr_db: 0.0`: a complete, credible weak link that the GCS signal
+        // meter, the durable link series and the operator all read as a
+        // measurement. Only `rssi_dbm` was folded back to null downstream, so
+        // the noise floor and the SNR rode the heartbeat verbatim. Asserted by
+        // name as well as inside the shape below, so a future edit cannot quietly
+        // substitute another plausible number.
+        for key in ["rssi_dbm", "noise_dbm", "snr_db"] {
+            assert_eq!(
+                b.get(key),
+                Some(&Value::Null),
+                "{key} must carry no reading on a node with no radio"
+            );
+        }
+
+        // The 27-field key set, pinned as a whole so a field cannot appear or
+        // vanish from the served body unnoticed.
         let want = json!({
             "state": "disabled",
             "interface": "",
@@ -846,9 +908,9 @@ mod tests {
             // Null, never false: the base means "no adapter scan reading", and
             // a false would be a fabricated measured no-injection claim.
             "adapter_injection_ok": null,
-            "rssi_dbm": -100.0,
-            "noise_dbm": -95.0,
-            "snr_db": 0.0,
+            "rssi_dbm": null,
+            "noise_dbm": null,
+            "snr_db": null,
             "packets_received": 0,
             "packets_lost": 0,
             "loss_percent": 0.0,
@@ -1002,12 +1064,56 @@ mod tests {
         assert!(!json_truthy(&json!({})));
     }
 
+    /// A failover sidecar past the freshness window must not be read as a
+    /// current state.
+    ///
+    /// The route's fallback used to be the string `"local"` — the HEALTHY state —
+    /// for an absent, unparseable or arbitrarily old file, so a node that had
+    /// failed over to the cloud relay and then lost the producer of this reading
+    /// reported itself locally bound.
     #[test]
-    fn failover_validation_accepts_the_known_set_and_rejects_others() {
-        assert!(FAILOVER_STATES.contains(&"local"));
-        assert!(FAILOVER_STATES.contains(&"cloud_relay"));
-        assert!(FAILOVER_STATES.contains(&"failed"));
-        assert!(!FAILOVER_STATES.contains(&"bogus"));
+    fn an_aged_failover_sidecar_does_not_read_as_a_current_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wfb_failover.json");
+        std::fs::write(&path, r#"{"state":"cloud_relay","version":1}"#).unwrap();
+
+        let fresh =
+            fresh_failover_sidecar(&path, SystemTime::now()).expect("a just-written file is fresh");
+        assert_eq!(fresh.get("state"), Some(&json!("cloud_relay")));
+
+        let aged = SystemTime::now() + std::time::Duration::from_secs_f64(FAILOVER_FRESH_S + 5.0);
+        assert!(
+            fresh_failover_sidecar(&path, aged).is_none(),
+            "a file older than the window must not be readable as current"
+        );
+    }
+
+    /// An absent sidecar is not a state at all — in particular not `"local"`.
+    #[test]
+    fn an_absent_failover_sidecar_is_not_a_state() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(fresh_failover_sidecar(&dir.path().join("nope.json"), SystemTime::now()).is_none());
+    }
+
+    /// The body an unresolvable failover reading produces: `null` + `stale: true`,
+    /// never the healthy `"local"`.
+    #[test]
+    fn an_unknown_failover_state_reports_null_and_stale_not_local() {
+        // A recognised state is reported as current.
+        assert_eq!(
+            failover_body(Some("cloud_relay")),
+            json!({"failover_state": "cloud_relay", "stale": false})
+        );
+        // Nothing current, an absent `state`, and a value this build does not
+        // recognise all report the same honest unknown.
+        let unknown = json!({"failover_state": Value::Null, "stale": true});
+        assert_eq!(failover_body(None), unknown);
+        assert_eq!(failover_body(Some("bogus")), unknown);
+        // The key is present and explicitly null rather than dropped.
+        assert!(failover_body(None)
+            .as_object()
+            .unwrap()
+            .contains_key("failover_state"));
     }
 
     #[test]

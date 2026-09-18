@@ -27,6 +27,8 @@ struct RawConfig {
     #[serde(default)]
     vision: VisionSection,
     #[serde(default)]
+    atlas: AtlasSection,
+    #[serde(default)]
     ground_station: GroundStationSection,
     #[serde(default)]
     server: ServerSection,
@@ -71,6 +73,17 @@ struct VisionSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct AtlasSection {
+    /// `atlas.enabled`: opt-in for the world-model capture service. Mirrors
+    /// the key `ados-atlas` itself reads (`AtlasRuntimeConfig::enabled`), so
+    /// the supervisor starts it only when it will actually do work. Starting
+    /// it unconditionally is not an option: the binary exits cleanly when
+    /// atlas is off, which the monitor would read as a death and restart-loop.
+    #[serde(default)]
+    enabled: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct GroundStationSection {
     #[serde(default)]
     role: Option<String>,
@@ -110,6 +123,11 @@ pub struct AgentConfig {
     /// `vision.enabled: true` config would never bring the vision → world-model
     /// pipeline up.
     pub vision_enabled: bool,
+    /// `atlas.enabled` is set. Like `vision_enabled`, and for the same reason:
+    /// `ados-atlas` is in no install-time enable set, so until the hardware
+    /// pass started it the world-model capture service was started by NOTHING
+    /// on any node — a registered, gated, packaged unit that never ran.
+    pub atlas_enabled: bool,
     /// `server.mode` is a cloud posture (`cloud` / `self_hosted`), i.e. the
     /// cloud relay is configured. Default `local` → false. The WFB auto-pair
     /// loop only fails over to the cloud relay when this is true; a local-first
@@ -216,6 +234,7 @@ impl AgentConfig {
             .map(str::to_string);
 
         let vision_enabled = raw.vision.enabled;
+        let atlas_enabled = raw.atlas.enabled;
 
         let cloud_relay_enabled = matches!(
             raw.server.mode.as_deref(),
@@ -236,6 +255,7 @@ impl AgentConfig {
             video_enabled,
             video_network_source,
             vision_enabled,
+            atlas_enabled,
             cloud_relay_enabled,
             configured_gs_role,
             raw_agent_profile,

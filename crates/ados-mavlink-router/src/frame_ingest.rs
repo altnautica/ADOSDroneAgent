@@ -187,7 +187,10 @@ pub fn publish(
         }
     }
 
-    let delivered = fc.inject_frame(frame);
+    // One allocation-free handoff: the inbound `Vec` becomes the `Bytes` the
+    // fan-out clones per consumer, so republishing to N transports costs N
+    // refcount bumps rather than N copies of the frame.
+    let delivered = fc.inject_frame(frame.into());
     counters.frames_published.fetch_add(1, Ordering::Relaxed);
     counters.bytes_published.fetch_add(len, Ordering::Relaxed);
     if !delivered {

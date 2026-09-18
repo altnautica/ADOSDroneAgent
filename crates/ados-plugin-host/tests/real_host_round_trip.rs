@@ -368,7 +368,7 @@ async fn mavlink_subscribe_pushes_a_deliver_envelope() {
     // with the subscribed name, carrying the raw frame bytes.
     let frame = b"\xfd\x09\x00\x00\x00\x01\x01\x00\x00\x00body";
     router
-        .broadcast(encode_frame(frame, MAVLINK_MAX_FRAME).unwrap())
+        .broadcast(encode_frame(frame, MAVLINK_MAX_FRAME).unwrap().into())
         .await;
 
     let push = tokio::time::timeout(Duration::from_secs(2), recv(&mut plugin))

@@ -104,7 +104,10 @@ pub struct CameraConfig {
     /// "csi" | "usb" | "ip" device hint, or a device path / RTSP URL.
     #[serde(default = "default_source")]
     pub source: String,
-    /// Wire codec: "h264" (default), "h265", "hevc", or "mjpeg".
+    /// Wire codec. `"h264"` is the only value the encoder builder accepts —
+    /// `crate::encoder::validate_codec` refuses anything else and the pipeline
+    /// reports `UnsupportedCodec` rather than publishing an untuned stream onto
+    /// the H.264-framed radio leg.
     #[serde(default = "default_codec")]
     pub codec: String,
     #[serde(default = "default_width")]
@@ -260,6 +263,8 @@ pub struct CameraLeg {
     /// first leg is the primary.
     #[serde(default)]
     pub role: Option<String>,
+    /// Wire codec for this leg. Same single accepted value as
+    /// [`CameraConfig::codec`]: `"h264"`.
     #[serde(default = "default_codec")]
     pub codec: String,
     #[serde(default = "default_width")]

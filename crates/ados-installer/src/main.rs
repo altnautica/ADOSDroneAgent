@@ -208,6 +208,18 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
         return Ok(ExitCode::from(2));
     }
 
+    // An explicit `--display <id>` that the detected board does not declare has
+    // no binding to apply, so it silently produces a node with no display.
+    // Refused here, before any work, against the ids the board's own profile
+    // declares (empty = unknown board, which cannot validate and so accepts).
+    if let Some(display) = args.display.as_deref() {
+        let declared = ados_hal_probe::board_sidecar::declared_display_ids();
+        if let Some(err) = ados_installer::cli::display_value_error(display, &declared) {
+            eprintln!("error: {err}");
+            return Ok(ExitCode::from(2));
+        }
+    }
+
     // Interactive onboarding: only on a fresh, interactive install where the
     // operator has not already pinned the answers with flags. It collects the
     // choices into `args` + `wizard_extras`, then the install proceeds exactly

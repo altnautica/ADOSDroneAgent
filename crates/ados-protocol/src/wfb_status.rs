@@ -29,12 +29,15 @@
 //!
 //! Every file read is path-injectable so a caller's test drives a tempdir without
 //! touching the process-global run dir. The one impure edge that is not injected
-//! is [`regulatory_domain`], which forks `iw reg get` behind a short TTL cache —
-//! the domain changes only when something explicitly sets it, and a per-request
-//! (or per-heartbeat-tick) fork is a cost with no reading behind it.
+//! is [`regulatory_domain`], and it is read by a background task rather than on
+//! the caller's path: every caller here is on the tokio reactor (an axum route
+//! handler, the cloud heartbeat tick), and `iw reg get` on a wedged RTL driver
+//! does not return, so forking it inline parked a reactor worker indefinitely.
 
 use std::path::Path;
-use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
@@ -164,99 +167,163 @@ impl WfbStatusConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Regulatory domain: one `iw reg get` reading, held for a bounded window.
+// Regulatory domain: one `iw reg get` reading, taken off the caller's path.
 // ---------------------------------------------------------------------------
 
-/// How long one `iw reg get` reading is reused.
+/// How long one `iw reg get` reading is served before a refresh is scheduled.
 ///
-/// The regulatory domain changes only when something explicitly sets it — never
-/// on its own — while the GCS radio panel polls the status route about once a
-/// second and the cloud heartbeat ticks every few seconds. Every one of those
-/// used to fork `iw` twice (once to seed the base block, once to re-assert the
-/// domain over the payload). Reusing a reading for this window collapses a poll
-/// to at most one fork, and a real domain change still surfaces inside it. The
-/// value stays the freshest thing in the body by a wide margin: the link figures
-/// beside it come off a sidecar the route only calls stale after ten seconds.
-const REG_DOMAIN_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+/// The regulatory domain changes only when something explicitly sets it — the
+/// radio's bring-up gate and the supervisor's reconciler both issue
+/// `iw reg set` — never on its own, while the GCS radio panel polls the status
+/// route about once a second and the cloud heartbeat ticks every few seconds.
+/// Serving one reading for this window keeps a real domain change visible
+/// inside it without taking a reading per request. The value stays the freshest
+/// thing in the body by a wide margin: the link figures beside it come off a
+/// sidecar the route only calls stale after ten seconds.
+const REG_DOMAIN_TTL: Duration = Duration::from_secs(3);
 
-/// One string reading held for a bounded window.
+/// Upper bound on one `iw reg get`.
 ///
-/// What it serves is always a reading this process genuinely took; the window
-/// bounds only how often the reading is refreshed, so the age of an answer is a
-/// stated number rather than an unknown. Nothing is ever synthesised when the
-/// underlying read fails — that failure has its own value (`"unknown"`) and is
-/// cached like any other, so a wedged `iw` is not retried once per request either.
-struct TimedCache {
-    inner: std::sync::Mutex<Option<(std::time::Instant, String)>>,
+/// A wedged RTL driver — the failure `rtl_modprobe` exists to recover from —
+/// can leave `iw` blocked in the kernel. Without this bound the refresh task
+/// never completes, the in-flight flag never clears, and the served reading
+/// freezes at whatever was true before the wedge instead of degrading to
+/// `"unknown"`.
+const REG_DOMAIN_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// What is served when no reading has landed yet, and when a read fails.
+///
+/// Never a plausible country this process did not read: a status surface
+/// reporting `"US"` it never measured is the same defect class as a fabricated
+/// RSSI, and a regulatory domain is what an operator checks before radiating.
+const REG_DOMAIN_UNKNOWN: &str = "unknown";
+
+/// One string reading, served without ever taking it on the caller's path.
+///
+/// What it serves is always a reading this process genuinely took, or the
+/// honest [`REG_DOMAIN_UNKNOWN`] when none has landed; nothing is synthesised,
+/// and a failed read has its own value which is cached like any other, so a
+/// wedged `iw` is not retried once per request.
+struct RegDomainCache {
+    held: Mutex<Option<(Instant, String)>>,
+    /// Set while a refresh is in flight, so a burst of concurrent polls
+    /// schedules one `iw` rather than one per request.
+    refreshing: AtomicBool,
 }
 
-impl TimedCache {
+impl RegDomainCache {
     const fn new() -> Self {
         Self {
-            inner: std::sync::Mutex::new(None),
+            held: Mutex::new(None),
+            refreshing: AtomicBool::new(false),
         }
     }
 
-    /// The held reading while it is younger than `ttl`, else a fresh one.
-    fn get_or_read(&self, ttl: std::time::Duration, read: impl FnOnce() -> String) -> String {
-        self.get_or_read_at(std::time::Instant::now(), ttl, read)
+    /// The held reading, and whether it is due a refresh.
+    ///
+    /// A poisoned lock means an earlier holder panicked mid-update; report no
+    /// reading rather than propagate the panic, because the routes behind this
+    /// are required to answer.
+    fn peek_at(&self, now: Instant, ttl: Duration) -> (String, bool) {
+        match self.held.lock() {
+            Ok(held) => match held.as_ref() {
+                Some((at, value)) if now.duration_since(*at) < ttl => (value.clone(), false),
+                Some((_, value)) => (value.clone(), true),
+                None => (REG_DOMAIN_UNKNOWN.to_string(), true),
+            },
+            Err(_) => (REG_DOMAIN_UNKNOWN.to_string(), true),
+        }
     }
 
-    /// The clock-injectable core of [`TimedCache::get_or_read`], so the reuse
-    /// window is a unit under test instead of something a test has to sleep out.
-    fn get_or_read_at(
-        &self,
-        now: std::time::Instant,
-        ttl: std::time::Duration,
-        read: impl FnOnce() -> String,
-    ) -> String {
-        // A poisoned lock means an earlier holder panicked mid-update. Fall
-        // through to a fresh read rather than propagate the panic: the routes
-        // behind this are required to answer.
-        if let Ok(held) = self.inner.lock() {
-            if let Some((at, value)) = held.as_ref() {
-                if now.duration_since(*at) < ttl {
-                    return value.clone();
-                }
-            }
+    fn store_at(&self, now: Instant, value: String) {
+        if let Ok(mut held) = self.held.lock() {
+            *held = Some((now, value));
         }
-        // Deliberately outside the lock: the read forks a process, and holding
-        // the mutex across it would queue every concurrent status request behind
-        // one `iw` invocation.
-        let fresh = read();
-        if let Ok(mut held) = self.inner.lock() {
-            *held = Some((now, fresh.clone()));
-        }
-        fresh
+    }
+
+    /// True when this caller took the right to run the one in-flight refresh.
+    fn claim_refresh(&self) -> bool {
+        self.refreshing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn release_refresh(&self) {
+        self.refreshing.store(false, Ordering::Release);
     }
 }
 
 /// The process-wide reading every status caller shares.
-static REG_DOMAIN_CACHE: TimedCache = TimedCache::new();
+static REG_DOMAIN_CACHE: RegDomainCache = RegDomainCache::new();
 
-/// The live regulatory domain, re-read at most once per [`REG_DOMAIN_TTL`].
+/// The last regulatory-domain reading, scheduling a refresh when it is due.
+///
+/// Never blocks and never spawns a process on the calling thread: past the TTL
+/// the read goes onto the current tokio runtime and this returns the reading it
+/// already holds (or `"unknown"` before the first one lands, which self-heals
+/// on the next poll). A caller that wants the value present in its very first
+/// response seeds it by awaiting [`refresh_regulatory_domain`] at startup.
 pub fn regulatory_domain() -> String {
-    REG_DOMAIN_CACHE.get_or_read(REG_DOMAIN_TTL, read_regulatory_domain)
+    let (value, due) = REG_DOMAIN_CACHE.peek_at(Instant::now(), REG_DOMAIN_TTL);
+    if due {
+        schedule_regulatory_refresh();
+    }
+    value
 }
 
-/// Best-effort `iw reg get` first-line parse, returning the two-letter country
-/// code, `"global"`, or `"unknown"` on any failure.
-fn read_regulatory_domain() -> String {
-    let output = match Command::new("iw").args(["reg", "get"]).output() {
-        Ok(o) => o,
-        Err(_) => return "unknown".to_string(),
+/// Take a reading now and hold it, for a caller already on an async path.
+pub async fn refresh_regulatory_domain() -> String {
+    let value = read_regulatory_domain().await;
+    REG_DOMAIN_CACHE.store_at(Instant::now(), value.clone());
+    value
+}
+
+/// Put the one in-flight `iw reg get` on the current runtime, if there is one.
+///
+/// Off-runtime (a unit test, a sync tool) there is nothing to spawn onto, so no
+/// reading is taken and the caller keeps the honest `"unknown"` — the blocking
+/// fork is never smuggled back onto the calling thread as a fallback.
+fn schedule_regulatory_refresh() {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
     };
-    if !output.status.success() {
-        return "unknown".to_string();
+    if !REG_DOMAIN_CACHE.claim_refresh() {
+        return;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    handle.spawn(async {
+        let value = read_regulatory_domain().await;
+        REG_DOMAIN_CACHE.store_at(Instant::now(), value);
+        REG_DOMAIN_CACHE.release_refresh();
+    });
+}
+
+/// Bounded `iw reg get`, parsed by [`parse_reg_get`]. `"unknown"` on a spawn
+/// failure, a non-zero exit, or the timeout.
+///
+/// `kill_on_drop` carries as much of the bound as the timeout does: without it
+/// the timeout would leave a wedged `iw` behind as an unreaped child on every
+/// refresh, which is how a bounded-looking probe still exhausts a box.
+async fn read_regulatory_domain() -> String {
+    let reading = tokio::process::Command::new("iw")
+        .args(["reg", "get"])
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(REG_DOMAIN_READ_TIMEOUT, reading).await {
+        Ok(Ok(out)) if out.status.success() => parse_reg_get(&String::from_utf8_lossy(&out.stdout)),
+        _ => REG_DOMAIN_UNKNOWN.to_string(),
+    }
+}
+
+/// The two-letter country code, `"global"`, or `"unknown"` from `iw reg get`
+/// output. Pure, so the parse is a unit under test on a host without `iw`.
+fn parse_reg_get(stdout: &str) -> String {
     for line in stdout.lines() {
         let stripped = line.trim();
         if let Some(rest) = stripped.strip_prefix("country ") {
             // Format: "country US: DFS-FCC" — keep the two-letter code.
             let code = rest.split(':').next().unwrap_or("").trim();
             if code.is_empty() {
-                return "unknown".to_string();
+                return REG_DOMAIN_UNKNOWN.to_string();
             }
             return code.to_string();
         }
@@ -264,7 +331,7 @@ fn read_regulatory_domain() -> String {
             return "global".to_string();
         }
     }
-    "unknown".to_string()
+    REG_DOMAIN_UNKNOWN.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -301,9 +368,16 @@ pub fn wfb_base_block(cfg: &WfbStatusConfig) -> Map<String, Value> {
     // block's null contract exists to prevent. A real sidecar always carries the
     // key, so a genuine verdict overwrites this on merge.
     block.insert("adapter_injection_ok".to_string(), Value::Null);
-    block.insert("rssi_dbm".to_string(), json!(-100.0));
-    block.insert("noise_dbm".to_string(), json!(-95.0));
-    block.insert("snr_db".to_string(), json!(0.0));
+    // Null, not a plausible reading. This base is what a node with NO radio
+    // serves: no adapter, no producer, nothing ever sampled. A `-100.0` RSSI
+    // beside a `-95.0` noise floor and a `0.0` SNR is a complete, credible weak
+    // link, and it reaches the GCS signal meter, the durable link series and the
+    // operator as a measurement. The sentinel-to-null fold in
+    // `build_radio_block` only covered `rssi_dbm`, so the noise floor and SNR
+    // rode the heartbeat verbatim.
+    block.insert("rssi_dbm".to_string(), Value::Null);
+    block.insert("noise_dbm".to_string(), Value::Null);
+    block.insert("snr_db".to_string(), Value::Null);
     block.insert("packets_received".to_string(), json!(0));
     block.insert("packets_lost".to_string(), json!(0));
     block.insert("loss_percent".to_string(), json!(0.0));
@@ -877,55 +951,109 @@ mod tests {
     }
 
     #[test]
-    fn a_regulatory_reading_is_reused_inside_its_window_and_re_read_after_it() {
+    fn a_regulatory_reading_is_served_inside_its_window_and_falls_due_after_it() {
         // The radio panel polls this route about once a second and each poll
-        // used to fork `iw` twice. The reading is reused for the window, so a
-        // poll costs at most one fork; past the window it is taken again.
-        let cache = TimedCache::new();
-        let reads = std::cell::Cell::new(0u32);
-        let read = || {
-            reads.set(reads.get() + 1);
-            "US".to_string()
-        };
+        // used to fork `iw` twice, inline, on the reactor. One reading serves
+        // the window; past it the reading falls due so a real domain change
+        // reaches the body rather than being pinned to whatever was true at
+        // boot.
+        let cache = RegDomainCache::new();
+        let t0 = Instant::now();
 
-        let t0 = std::time::Instant::now();
-        assert_eq!(cache.get_or_read_at(t0, REG_DOMAIN_TTL, read), "US");
-        assert_eq!(reads.get(), 1);
+        // Nothing read yet: the honest unknown, and a refresh is due.
+        assert_eq!(
+            cache.peek_at(t0, REG_DOMAIN_TTL),
+            (REG_DOMAIN_UNKNOWN.to_string(), true)
+        );
 
-        // A second poll one second later, and the two calls a single request
-        // makes, all ride the one reading.
-        let t1 = t0 + std::time::Duration::from_secs(1);
-        assert_eq!(cache.get_or_read_at(t1, REG_DOMAIN_TTL, read), "US");
-        assert_eq!(cache.get_or_read_at(t1, REG_DOMAIN_TTL, read), "US");
-        assert_eq!(reads.get(), 1, "the window was not honoured");
+        cache.store_at(t0, "US".to_string());
+        let t1 = t0 + Duration::from_secs(1);
+        assert_eq!(cache.peek_at(t1, REG_DOMAIN_TTL), ("US".to_string(), false));
+        assert_eq!(cache.peek_at(t1, REG_DOMAIN_TTL), ("US".to_string(), false));
 
-        // Past the window the domain is read again, so a real change reaches
-        // the body rather than being pinned to whatever was true at boot.
+        // Past the window the held reading is still served — a stale country is
+        // better than a blank one, and it is a value this process did read —
+        // but it is marked due so the refresh is scheduled.
         let t2 = t0 + REG_DOMAIN_TTL;
-        assert_eq!(cache.get_or_read_at(t2, REG_DOMAIN_TTL, read), "US");
-        assert_eq!(reads.get(), 2);
+        assert_eq!(cache.peek_at(t2, REG_DOMAIN_TTL), ("US".to_string(), true));
+
+        // A changed domain is served as soon as it is read, and a failed read
+        // stores as the honest unknown rather than holding the last good answer
+        // forever.
+        cache.store_at(t2, "IN".to_string());
+        assert_eq!(cache.peek_at(t2, REG_DOMAIN_TTL), ("IN".to_string(), false));
+        cache.store_at(t2, REG_DOMAIN_UNKNOWN.to_string());
+        assert_eq!(
+            cache.peek_at(t2, REG_DOMAIN_TTL),
+            (REG_DOMAIN_UNKNOWN.to_string(), false)
+        );
     }
 
     #[test]
-    fn a_cached_reading_is_never_a_value_nothing_read() {
-        // The cache must not outlive its usefulness by inventing continuity: a
-        // domain that genuinely changed is served as soon as the window is out,
-        // and a failed read caches as the honest "unknown" rather than holding
-        // the last good answer forever.
-        let cache = TimedCache::new();
-        let t0 = std::time::Instant::now();
-        assert_eq!(
-            cache.get_or_read_at(t0, REG_DOMAIN_TTL, || "US".to_string()),
-            "US"
-        );
-        assert_eq!(
-            cache.get_or_read_at(t0 + REG_DOMAIN_TTL, REG_DOMAIN_TTL, || "IN".to_string()),
-            "IN"
-        );
-        assert_eq!(
-            cache.get_or_read_at(t0 + REG_DOMAIN_TTL * 2, REG_DOMAIN_TTL, || "unknown"
-                .to_string()),
-            "unknown"
-        );
+    fn only_one_refresh_is_in_flight_at_a_time() {
+        // A burst of concurrent polls past the TTL must schedule one `iw`, not
+        // one per request: the whole point of moving the read off the caller's
+        // path is that a poll storm cannot multiply into a fork storm.
+        let cache = RegDomainCache::new();
+        assert!(cache.claim_refresh());
+        assert!(!cache.claim_refresh());
+        assert!(!cache.claim_refresh());
+        cache.release_refresh();
+        assert!(cache.claim_refresh());
+    }
+
+    #[test]
+    fn regulatory_domain_never_spawns_on_the_callers_thread() {
+        // Off a tokio runtime there is nothing to spawn onto, so the answer is
+        // the honest unknown. The property under test is that the fallback is
+        // NOT an inline fork: this assertion holds on a host where `iw reg get`
+        // would have answered "US".
+        assert_eq!(regulatory_domain(), REG_DOMAIN_UNKNOWN);
+    }
+
+    #[test]
+    fn the_reg_get_parse_reads_a_country_a_global_domain_and_nothing_else() {
+        assert_eq!(parse_reg_get("global\ncountry US: DFS-FCC\n"), "global");
+        assert_eq!(parse_reg_get("country US: DFS-FCC\n"), "US");
+        assert_eq!(parse_reg_get("  country IN: DFS-ETSI\n"), "IN");
+        // A country line with no code is not a domain.
+        assert_eq!(parse_reg_get("country : DFS-FCC\n"), REG_DOMAIN_UNKNOWN);
+        assert_eq!(parse_reg_get(""), REG_DOMAIN_UNKNOWN);
+        assert_eq!(parse_reg_get("phy#0\n\tband 1:\n"), REG_DOMAIN_UNKNOWN);
+    }
+
+    #[test]
+    fn a_node_with_no_radio_reports_no_signal_measurement_at_all() {
+        // The base block is the body a node with no adapter, no producer and no
+        // sample serves. It used to carry `rssi_dbm: -100.0`, `noise_dbm:
+        // -95.0`, `snr_db: 0.0` — a complete, credible weak link that the GCS
+        // signal meter, the durable link series and the operator all read as a
+        // measurement. Only `rssi_dbm` was folded back to null downstream, so
+        // the noise floor and SNR rode the heartbeat verbatim.
+        let base = wfb_base_block(&WfbStatusConfig::default());
+        for key in ["rssi_dbm", "noise_dbm", "snr_db"] {
+            assert_eq!(
+                base.get(key),
+                Some(&Value::Null),
+                "{key} must not fabricate a reading on a node with no radio"
+            );
+        }
+
+        // And the same through the projection every transport ships.
+        let block = build_radio_block(Some(&base));
+        for key in ["rssi_dbm", "noise_dbm", "snr_db"] {
+            assert_eq!(block[key], Value::Null, "{key} reached the heartbeat");
+        }
+
+        // A real producer still overwrites the nulls on merge, including a
+        // genuine 0.0 dB SNR, which is a measurement and must survive.
+        let mut merged = wfb_base_block(&WfbStatusConfig::default());
+        merged.insert("rssi_dbm".to_string(), json!(-62.0));
+        merged.insert("noise_dbm".to_string(), json!(-94.0));
+        merged.insert("snr_db".to_string(), json!(0.0));
+        let live = build_radio_block(Some(&merged));
+        assert_eq!(live["rssi_dbm"], json!(-62.0));
+        assert_eq!(live["noise_dbm"], json!(-94.0));
+        assert_eq!(live["snr_db"], json!(0.0));
     }
 }

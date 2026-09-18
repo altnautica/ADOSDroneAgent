@@ -11,7 +11,8 @@
 //! - **agent info** (`version`, `uptime_seconds`, `board`, `health`,
 //!   `fc_connected`/`fc_port`/`fc_baud`) — the same seams `/api/status` reads: the
 //!   version string, the state snapshot's runtime extras, the board sidecar, and
-//!   the logging store's hardware snapshots.
+//!   the logging store's hardware snapshots with a direct host read behind them.
+//!   A field neither source supplies is `null`, never `0`.
 //! - **`services`** — the systemd-fallback inventory (`systemctl list-units
 //!   ados-*.service`), one object per unit shaped `{name, state, status,
 //!   task_done, uptimeSeconds, memory_mb}`, the exact shape the FastAPI route's
@@ -103,7 +104,22 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     let board = crate::routes::status::read_board(&state.board_path);
 
     // Hardware signals, read once and reused for health + resources.
-    let signals = state.logd.latest_hw_signals().await;
+    //
+    // Store first, then a direct host read. `/api/status` has done this since the
+    // zero-health bug was fixed there; this route did not, so on a stock node it
+    // reported literal 0% CPU / 0% memory / 0% disk — the durable store ships
+    // OFF and the installer masks its unit, so `latest_hw_signals()` is `None` on
+    // every install that has not turned the key. Zeros are a legal reading, so
+    // the GCS rendered a healthy idle node. The fallback is the same
+    // `crate::hw_local` read the sibling route uses; when neither source answers
+    // `derive_health` emits nulls rather than numbers.
+    let signals = match state.logd.latest_hw_signals().await {
+        Some(s) => Some(s),
+        None => {
+            let local = crate::hw_local::collect_signals();
+            (!local.is_empty()).then_some(local)
+        }
+    };
     let health = crate::routes::status::derive_health(signals.as_ref());
     let resources = derive_resources_subset(signals.as_ref());
 

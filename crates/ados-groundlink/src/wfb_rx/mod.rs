@@ -447,10 +447,17 @@ impl WfbRxManager {
             Some("/run/ados/wfb-gs-aux-rx.log"),
         )
         .await?;
+        // stdout PIPED, not discarded: the per-second `PKT` stats line is the
+        // only per-transmitter proof that bytes offered to this `wfb_tx`
+        // actually reached the radio. Nothing read it before, so a silently
+        // dead transmitter took down HopAck / presence (here) or the whole
+        // uplink (below) while every surface still read `active`. See
+        // [`crate::tx_liveness`]. The caller MUST drain it — an unread 64 KiB
+        // pipe blocks the transmitter in `fprintf(stdout)`.
         let tx_control = GsWfbProcess::spawn(
             "wfb_tx",
             &gs_tx_control_args(iface, &rx_key, self.config.mcs_index, ground),
-            Stdout::Null,
+            Stdout::Piped,
             Some("/run/ados/wfb-gs-tx-control.log"),
         )
         .await?;
@@ -470,7 +477,7 @@ impl WfbRxManager {
                 ground,
                 self.config.aux_tx_port,
             ),
-            Stdout::Null,
+            Stdout::Piped,
             Some("/run/ados/wfb-gs-aux-tx.log"),
         )
         .await?;

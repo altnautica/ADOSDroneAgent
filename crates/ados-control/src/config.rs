@@ -149,10 +149,77 @@ fn device_id_from_identity(file: &Path, env: Option<String>) -> String {
 /// The `security.api:` slice the proxied-route auth gate reads. Only the
 /// manually-configured key is typed; every other field is tolerated. Mirrors
 /// the Python `ApiSecurityConfig.api_key` (default `""`).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ApiSecuritySection {
     #[serde(default)]
     pub api_key: String,
+    /// Browser origins allowed to make cross-origin calls to this edge.
+    ///
+    /// Mirrors the Python `ApiSecurityConfig.cors_origins` field name and
+    /// default so a config either half wrote reads identically here. The
+    /// defaults ALWAYS apply on top (see
+    /// [`ApiSecuritySection::effective_cors_origins`]), for the same reason
+    /// the Python side does it: a deployment yaml that sets this key was
+    /// otherwise dropping the local-dev Mission Control origin and silently
+    /// breaking it.
+    #[serde(default = "default_cors_origins")]
+    pub cors_origins: Vec<String>,
+    /// Extra origins added on top of the defaults. This is the key an ops
+    /// file should populate.
+    #[serde(default)]
+    pub cors_origins_extra: Vec<String>,
+}
+
+impl Default for ApiSecuritySection {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
+            cors_origins: default_cors_origins(),
+            cors_origins_extra: Vec::new(),
+        }
+    }
+}
+
+/// The Mission Control dev origins, matching `DEFAULT_CORS_ORIGINS` in
+/// `src/ados/core/config/security.py`. Two lists, one contract.
+pub fn default_cors_origins() -> Vec<String> {
+    [
+        "http://localhost:4000",
+        "http://127.0.0.1:4000",
+        "http://localhost:4001",
+        "http://127.0.0.1:4001",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
+}
+
+impl ApiSecuritySection {
+    /// The deduped union of the defaults, the configured list and the extras,
+    /// or the full replacement named by `ADOS_CORS_ORIGINS_OVERRIDE`.
+    ///
+    /// Same merge and same env override as the Python half, so the two
+    /// surfaces cannot disagree about who may call the agent from a browser.
+    pub fn effective_cors_origins(&self) -> Vec<String> {
+        if let Ok(raw) = std::env::var("ADOS_CORS_ORIGINS_OVERRIDE") {
+            let listed: Vec<String> = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if !listed.is_empty() {
+                return listed;
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        default_cors_origins()
+            .into_iter()
+            .chain(self.cors_origins.iter().cloned())
+            .chain(self.cors_origins_extra.iter().cloned())
+            .filter(|o| !o.is_empty() && seen.insert(o.clone()))
+            .collect()
+    }
 }
 
 /// The `security:` section of `/etc/ados/config.yaml` the proxied-route auth

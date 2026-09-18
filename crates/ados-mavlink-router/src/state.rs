@@ -244,8 +244,14 @@ pub struct VehicleState {
     /// arrives and the position does not — the exact partial stall a consumer
     /// checking freshness needs to catch. `None` until the first position.
     ///
-    /// Not serialised: an `Instant` has no meaning off this process, and the
-    /// consumer that needs it computes an age in-process.
+    /// The `Instant` itself is not serialised — it has no meaning off this
+    /// process. [`Self::to_wire`] publishes the derived AGE instead
+    /// (`position_age_ms`), which is what an out-of-process consumer actually
+    /// needs and which no consumer could compute before: the swarm beacon has to
+    /// know how old this node's fix is, because a frozen fix radiated at 2 Hz is
+    /// dead-reckoned FORWARD by every other drone in the fleet. An age rather
+    /// than a wall-clock stamp so a clock step cannot make a stale fix look
+    /// fresh, and so no consumer needs an RFC3339 parser to gate on it.
     pub position_at: Option<std::time::Instant>,
     // The FC-advertised parameter total. The VALUES are not mirrored here: the
     // persistent [`crate::param_cache::ParamCache`] owns them, and this type's
@@ -425,7 +431,21 @@ impl VehicleState {
     }
 
     /// The vehicle-derived wire snapshot (the Python `to_dict()` shape).
+    ///
+    /// `position_age_ms` is evaluated against the clock at call time, so this is
+    /// a snapshot-at-an-instant rather than a pure projection of the struct.
+    /// That is the point: the age has to describe the moment the frame is
+    /// published, because the consumer that reads it is deciding whether this
+    /// node's fix is alive enough to broadcast to the fleet.
     pub fn to_wire(&self) -> Value {
+        // `null`, never a number, when no position has ever been decoded. A
+        // sentinel like 0 would read as "fixed a moment ago" — the single worst
+        // possible reading, since it is the one a freshness gate passes.
+        let position_age_ms = self.position_at.map(|at| {
+            std::time::Instant::now()
+                .saturating_duration_since(at)
+                .as_millis() as u64
+        });
         json!({
             "mav_type": self.mav_type,
             "autopilot": self.autopilot,
@@ -471,6 +491,12 @@ impl VehicleState {
             "throttle": self.throttle,
             "last_heartbeat": self.last_heartbeat,
             "last_update": self.last_update,
+            // Milliseconds since the last decoded POSITION, or `null` when none
+            // has ever arrived. Separate from `last_update`, which every frame
+            // refreshes: a vehicle whose GPS died but whose heartbeat continues
+            // has a fresh `last_update` and an ever-growing `position_age_ms`,
+            // and only the second one catches it.
+            "position_age_ms": position_age_ms,
         })
     }
 
@@ -691,6 +717,58 @@ mod tests {
     }
 
     #[test]
+    fn the_wire_snapshot_reports_the_position_age_an_out_of_process_consumer_gates_on() {
+        // The in-process `Instant` is invisible to the swarm bus, which runs in
+        // another process and has to decide whether this node's fix is alive
+        // enough to radiate to the fleet. Before the age was published it could
+        // only ask "did a state frame arrive recently", which a heartbeat
+        // answers yes to on a vehicle whose GPS has died.
+        let mut s = VehicleState::default();
+        assert_eq!(
+            s.to_wire()["position_age_ms"],
+            json!(null),
+            "no position ever decoded must not read as a fresh fix"
+        );
+
+        // A heartbeat refreshes `last_update` and nothing else, so the age is
+        // still absent while the frame stream is demonstrably live.
+        s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 0, true), TS);
+        let wire = s.to_wire();
+        assert!(!wire["last_update"].as_str().unwrap().is_empty());
+        assert_eq!(wire["position_age_ms"], json!(null));
+
+        s.update_from_message(
+            &MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {
+                time_boot_ms: 0,
+                lat: 129_716_000,
+                lon: 775_946_000,
+                alt: 120_000,
+                relative_alt: 50_000,
+                vx: 0,
+                vy: 0,
+                vz: 0,
+                hdg: 0,
+            }),
+            TS,
+        );
+        let fresh = s.to_wire()["position_age_ms"]
+            .as_u64()
+            .expect("a decoded position publishes an age");
+        assert!(fresh < 1_000, "a just-decoded fix is young, got {fresh}ms");
+
+        // Age is derived at publish time, so a snapshot taken later reports a
+        // larger age from the SAME position — that monotonic growth is the whole
+        // signal a stale-fix gate reads.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 0, true), TS);
+        let later = s.to_wire()["position_age_ms"].as_u64().unwrap();
+        assert!(
+            later >= fresh + 15,
+            "a heartbeat must not rejuvenate the fix age: {fresh}ms -> {later}ms"
+        );
+    }
+
+    #[test]
     fn battery_status_filters_unfilled_cells_and_temp_sentinel() {
         let mut s = VehicleState::default();
         let mut voltages = [0xFFFFu16; 10];
@@ -757,6 +835,7 @@ mod tests {
             "throttle",
             "last_heartbeat",
             "last_update",
+            "position_age_ms",
         ] {
             assert!(wire.get(key).is_some(), "missing wire key {key}");
         }

@@ -9,12 +9,19 @@
 //! owns its own rumqttc client so it can apply the bounded-queue + inflight gate
 //! directly (see [`super::mavlink_relay`]). The trait covers the
 //! request/response-shaped surfaces where a test fake is the most useful.
+//!
+//! Every consumer MUST take its subscriptions through [`MqttTransport::subscribe`]
+//! rather than through the raw [`RumqttcTransport::client`], because that is the
+//! one path that records the topic for replay on the next accepted session. A
+//! subscribe issued straight at the client is held by the broker only until the
+//! first reconnect and then silently vanishes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use rumqttc::{
     AsyncClient, ConnectReturnCode, Event, Incoming, MqttOptions, QoS as RumqttcQoS,
     TlsConfiguration, Transport,
@@ -51,6 +58,137 @@ pub enum TransportError {
     Client(String),
     #[error("transport closed")]
     Closed,
+}
+
+/// The subscriptions a connection must hold for its whole life.
+///
+/// rumqttc asks the broker for a clean session on every dial, so a reconnect
+/// gets a FRESH broker session with an empty subscription list and rumqttc
+/// replays only pending publishes. A consumer that subscribes once before
+/// entering its loop therefore loses every subscription at the first tunnel
+/// blip or keep-alive timeout: on the MAVLink relay that means
+/// `ados/{id}/mavlink/tx` (telemetry out of the aircraft) keeps flowing while
+/// `ados/{id}/mavlink/rx` (the operator's commands INTO the flight controller)
+/// is permanently dead, with `connected()` still reporting true. A one-way
+/// flight-control link that advertises itself as healthy.
+#[derive(Debug, Default)]
+struct SubscriptionSet {
+    topics: Mutex<Vec<(String, MqttQos)>>,
+}
+
+impl SubscriptionSet {
+    /// Record a subscription, replacing any earlier QoS for the same topic so a
+    /// re-subscribe at a different QoS cannot double-issue on the next replay.
+    fn record(&self, topic: &str, qos: MqttQos) {
+        let mut topics = self.topics.lock();
+        match topics.iter_mut().find(|(t, _)| t == topic) {
+            Some(entry) => entry.1 = qos,
+            None => topics.push((topic.to_string(), qos)),
+        }
+    }
+
+    /// Every tracked subscription, in the order it was first taken. Clones out
+    /// so the lock is never held across the replay's awaits.
+    fn snapshot(&self) -> Vec<(String, MqttQos)> {
+        self.topics.lock().clone()
+    }
+}
+
+/// What one polled broker event means to this transport's own bookkeeping.
+///
+/// The rumqttc event is reduced to this the moment it is polled, so the part
+/// carrying the logic — the confirmed-session flag and the subscription replay —
+/// is driven by a value a test can build without a broker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionEvent {
+    /// The broker ACCEPTED the session. Every tracked subscription is re-issued
+    /// here, including on the first connect.
+    SessionUp,
+    /// The broker REFUSED the session (bad auth, unavailable, banned). Not a
+    /// session, so nothing is replayed onto it.
+    SessionRefused,
+    /// The session is gone: a broker disconnect, a poll error, or the loop end.
+    SessionDown,
+    /// An inbound publish to fan out to the consumer.
+    Message(IncomingMessage),
+    /// Outgoing acks, pings, and everything else with no bookkeeping.
+    Ignored,
+}
+
+/// Reduce a polled rumqttc event to the transport's own session vocabulary.
+fn classify_event(event: &Event) -> SessionEvent {
+    match event {
+        Event::Incoming(Incoming::Publish(p)) => SessionEvent::Message(IncomingMessage {
+            topic: String::from_utf8_lossy(&p.topic).into_owned(),
+            payload: p.payload.to_vec(),
+        }),
+        // A successful ConnAck is the only signal the broker accepted the
+        // session; a refusal code (bad auth, service unavailable) is NOT
+        // connected and must not be replayed onto.
+        Event::Incoming(Incoming::ConnAck(ack)) => {
+            if ack.code == ConnectReturnCode::Success {
+                SessionEvent::SessionUp
+            } else {
+                SessionEvent::SessionRefused
+            }
+        }
+        Event::Incoming(Incoming::Disconnect(_)) => SessionEvent::SessionDown,
+        _ => SessionEvent::Ignored,
+    }
+}
+
+/// The seam a subscription replay is issued through. [`AsyncClient`] is the
+/// production impl; a test recorder proves the replay without a broker.
+#[async_trait]
+trait SubscribeIssuer: Send + Sync {
+    async fn issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError>;
+}
+
+#[async_trait]
+impl SubscribeIssuer for AsyncClient {
+    async fn issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
+        self.subscribe(topic.to_string(), qos.into())
+            .await
+            .map_err(|e| TransportError::Client(e.to_string()))
+    }
+}
+
+/// Apply one session event: drive the confirmed-connection flag, REPLAY the
+/// subscription set onto a freshly accepted session, and fan an inbound publish
+/// out to the consumer. Returns `false` when the event loop must stop (the
+/// consumer dropped its receiver).
+async fn apply_session_event<I: SubscribeIssuer + ?Sized>(
+    event: SessionEvent,
+    connected: &AtomicBool,
+    subs: &SubscriptionSet,
+    issuer: &I,
+    tx: &mpsc::Sender<IncomingMessage>,
+) -> bool {
+    match event {
+        SessionEvent::Message(msg) => return tx.send(msg).await.is_ok(),
+        SessionEvent::SessionUp => {
+            connected.store(true, Ordering::Release);
+            // The broker granted a fresh session with no subscriptions, so
+            // every topic this transport holds is re-issued now. Best-effort
+            // per topic: one failed re-issue must not abandon the rest.
+            for (topic, qos) in subs.snapshot() {
+                if let Err(e) = issuer.issue(&topic, qos).await {
+                    tracing::warn!(topic = %topic, error = %e, "mqtt resubscribe failed");
+                }
+            }
+            tracing::debug!("mqtt broker connack success");
+        }
+        SessionEvent::SessionRefused => {
+            connected.store(false, Ordering::Release);
+            tracing::warn!("mqtt broker connack refused");
+        }
+        SessionEvent::SessionDown => {
+            connected.store(false, Ordering::Release);
+            tracing::debug!("mqtt broker session down");
+        }
+        SessionEvent::Ignored => {}
+    }
+    true
 }
 
 /// The async broker surface. `publish` and `subscribe` are request-shaped; the
@@ -126,6 +264,10 @@ pub struct RumqttcTransport {
     /// rumqttc dials lazily and retries a down broker forever, so the existence
     /// of this transport (or of its event-loop task) is NOT proof of a session.
     connected: Arc<AtomicBool>,
+    /// Every subscription taken on this transport, replayed on each accepted
+    /// session. Without it a reconnect silently drops the inbound half of the
+    /// link (see [`SubscriptionSet`]).
+    subs: Arc<SubscriptionSet>,
     _eventloop: tokio::task::JoinHandle<()>,
 }
 
@@ -139,45 +281,29 @@ impl RumqttcTransport {
         let (tx, rx) = mpsc::channel::<IncomingMessage>(256);
         let connected = Arc::new(AtomicBool::new(false));
         let connected_task = connected.clone();
+        let subs = Arc::new(SubscriptionSet::default());
+        let subs_task = subs.clone();
+        // The replay is issued through the same client the consumer publishes
+        // on, so a re-subscribe rides the connection that just came up.
+        let replay_client = client.clone();
         let eventloop = tokio::spawn(async move {
             loop {
-                match eventloop.poll().await {
-                    Ok(Event::Incoming(Incoming::Publish(p))) => {
-                        let msg = IncomingMessage {
-                            topic: String::from_utf8_lossy(&p.topic).into_owned(),
-                            payload: p.payload.to_vec(),
-                        };
-                        if tx.send(msg).await.is_err() {
-                            break; // consumer gone
-                        }
-                    }
-                    // A successful ConnAck is the only signal the broker accepted
-                    // the session; a refusal code (bad auth, service unavailable)
-                    // is NOT connected.
-                    Ok(Event::Incoming(Incoming::ConnAck(ack))) => {
-                        let up = ack.code == ConnectReturnCode::Success;
-                        connected_task.store(up, Ordering::Release);
-                        if up {
-                            tracing::debug!("mqtt broker connack success");
-                        } else {
-                            tracing::warn!(code = ?ack.code, "mqtt broker connack refused");
-                        }
-                    }
-                    // A broker-initiated disconnect drops the session.
-                    Ok(Event::Incoming(Incoming::Disconnect(_))) => {
-                        connected_task.store(false, Ordering::Release);
-                        tracing::debug!("mqtt broker disconnect");
-                    }
-                    Ok(_) => {}
+                let event = match eventloop.poll().await {
+                    Ok(event) => classify_event(&event),
                     // A connection error is transient; rumqttc reconnects on the
                     // next poll. The session is down until the next ConnAck, so
                     // clear the flag. Back off briefly so a hard-down broker does
                     // not spin the loop.
                     Err(e) => {
-                        connected_task.store(false, Ordering::Release);
                         tracing::debug!(error = %e, "mqtt event loop poll error");
                         tokio::time::sleep(Duration::from_millis(500)).await;
+                        SessionEvent::SessionDown
                     }
+                };
+                if !apply_session_event(event, &connected_task, &subs_task, &replay_client, &tx)
+                    .await
+                {
+                    break; // consumer gone
                 }
             }
             // The loop has ended (consumer dropped): the link is no longer live.
@@ -187,6 +313,7 @@ impl RumqttcTransport {
             client,
             incoming: tokio::sync::Mutex::new(Some(rx)),
             connected,
+            subs,
             _eventloop: eventloop,
         })
     }
@@ -248,17 +375,17 @@ impl MqttTransport for RumqttcTransport {
     }
 
     async fn subscribe(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
-        self.client
-            .subscribe(topic.to_string(), qos.into())
-            .await
-            .map_err(|e| TransportError::Client(e.to_string()))
+        // RECORD before issuing: a subscribe taken while the session is dying
+        // must still be replayed on the next accepted session, otherwise the
+        // topic is lost even though the caller saw an Ok.
+        self.subs.record(topic, qos);
+        self.client.issue(topic, qos).await
     }
 }
 
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
-    use std::sync::Mutex;
 
     /// One recorded publish: `(topic, qos, payload)`.
     pub type RecordedPublish = (String, MqttQos, Vec<u8>);
@@ -282,7 +409,6 @@ pub(crate) mod test_support {
         ) -> Result<(), TransportError> {
             self.publishes
                 .lock()
-                .unwrap()
                 .push((topic.to_string(), qos, payload));
             Ok(())
         }
@@ -295,16 +421,12 @@ pub(crate) mod test_support {
         ) -> Result<(), TransportError> {
             self.publishes
                 .lock()
-                .unwrap()
                 .push((topic.to_string(), qos, payload));
             Ok(())
         }
 
         async fn subscribe(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
-            self.subscriptions
-                .lock()
-                .unwrap()
-                .push((topic.to_string(), qos));
+            self.subscriptions.lock().push((topic.to_string(), qos));
             Ok(())
         }
     }
@@ -354,5 +476,172 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!handle.load(Ordering::Acquire));
         assert!(!transport.connected());
+    }
+
+    /// A [`SubscribeIssuer`] that records what was re-issued, so the replay is
+    /// observable without a broker.
+    #[derive(Default)]
+    struct RecordingIssuer {
+        issued: Mutex<Vec<(String, MqttQos)>>,
+    }
+
+    impl RecordingIssuer {
+        /// Drain what has been issued since the last call.
+        fn taken(&self) -> Vec<(String, MqttQos)> {
+            std::mem::take(&mut *self.issued.lock())
+        }
+    }
+
+    #[async_trait]
+    impl SubscribeIssuer for RecordingIssuer {
+        async fn issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
+            self.issued.lock().push((topic.to_string(), qos));
+            Ok(())
+        }
+    }
+
+    fn connack(code: ConnectReturnCode) -> Event {
+        Event::Incoming(Incoming::ConnAck(rumqttc::ConnAck {
+            session_present: false,
+            code,
+            properties: None,
+        }))
+    }
+
+    #[test]
+    fn a_connack_after_a_disconnect_is_a_fresh_session_not_a_resumed_one() {
+        // The boundary that feeds the replay: a broker restart shows up as
+        // Disconnect then ConnAck(Success), and BOTH acks must read SessionUp
+        // so the second one triggers a replay rather than being treated as a
+        // continuation of the first session.
+        assert_eq!(
+            classify_event(&connack(ConnectReturnCode::Success)),
+            SessionEvent::SessionUp
+        );
+        assert_eq!(
+            classify_event(&Event::Incoming(Incoming::Disconnect(
+                rumqttc::Disconnect {
+                    reason_code: rumqttc::DisconnectReasonCode::NormalDisconnection,
+                    properties: None,
+                }
+            ))),
+            SessionEvent::SessionDown
+        );
+        // A refusal is not a session, so nothing may be replayed onto it.
+        assert_eq!(
+            classify_event(&connack(ConnectReturnCode::BadUserNamePassword)),
+            SessionEvent::SessionRefused
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broker_reconnect_reissues_every_subscription() {
+        // The GCS->FC uplink lives entirely on a subscription. The broker
+        // discards it on every fresh session, so without this replay
+        // `ados/{id}/mavlink/rx` (operator commands INTO the flight controller)
+        // dies at the first tunnel blip while `mavlink/tx` keeps flowing and
+        // mqttConnected still reports true.
+        let subs = SubscriptionSet::default();
+        subs.record("ados/dev1/mavlink/rx", MqttQos::AtMostOnce);
+        subs.record("ados/dev1/webrtc/offer", MqttQos::AtLeastOnce);
+        let issuer = RecordingIssuer::default();
+        let connected = AtomicBool::new(false);
+        let (tx, _rx) = mpsc::channel::<IncomingMessage>(4);
+
+        // First accepted session: the set is issued and the link reads up.
+        let alive = apply_session_event(
+            classify_event(&connack(ConnectReturnCode::Success)),
+            &connected,
+            &subs,
+            &issuer,
+            &tx,
+        )
+        .await;
+        assert!(alive);
+        assert!(connected.load(Ordering::Acquire));
+        assert_eq!(
+            issuer.taken(),
+            vec![
+                ("ados/dev1/mavlink/rx".to_string(), MqttQos::AtMostOnce),
+                ("ados/dev1/webrtc/offer".to_string(), MqttQos::AtLeastOnce),
+            ]
+        );
+
+        // The broker goes away (restart / keep-alive timeout).
+        apply_session_event(SessionEvent::SessionDown, &connected, &subs, &issuer, &tx).await;
+        assert!(!connected.load(Ordering::Acquire));
+        assert!(
+            issuer.taken().is_empty(),
+            "a disconnect issues nothing; there is no session to subscribe on"
+        );
+
+        // rumqttc reconnects: the WHOLE set is re-issued, so the uplink is live
+        // again rather than silently dead.
+        apply_session_event(
+            classify_event(&connack(ConnectReturnCode::Success)),
+            &connected,
+            &subs,
+            &issuer,
+            &tx,
+        )
+        .await;
+        assert!(connected.load(Ordering::Acquire));
+        assert_eq!(
+            issuer.taken(),
+            vec![
+                ("ados/dev1/mavlink/rx".to_string(), MqttQos::AtMostOnce),
+                ("ados/dev1/webrtc/offer".to_string(), MqttQos::AtLeastOnce),
+            ]
+        );
+
+        // A refused reconnect (rotated key) replays nothing and reads down.
+        apply_session_event(
+            classify_event(&connack(ConnectReturnCode::NotAuthorized)),
+            &connected,
+            &subs,
+            &issuer,
+            &tx,
+        )
+        .await;
+        assert!(!connected.load(Ordering::Acquire));
+        assert!(issuer.taken().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_resubscribe_at_a_new_qos_replaces_rather_than_duplicates() {
+        let subs = SubscriptionSet::default();
+        subs.record("ados/dev1/mavlink/rx", MqttQos::AtMostOnce);
+        subs.record("ados/dev1/mavlink/rx", MqttQos::AtLeastOnce);
+        let issuer = RecordingIssuer::default();
+        let connected = AtomicBool::new(false);
+        let (tx, _rx) = mpsc::channel::<IncomingMessage>(4);
+        apply_session_event(SessionEvent::SessionUp, &connected, &subs, &issuer, &tx).await;
+        assert_eq!(
+            issuer.taken(),
+            vec![("ados/dev1/mavlink/rx".to_string(), MqttQos::AtLeastOnce)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_consumer_ends_the_loop() {
+        // The one event that must stop the event loop: the receiver is gone, so
+        // there is nothing to fan messages out to.
+        let subs = SubscriptionSet::default();
+        let issuer = RecordingIssuer::default();
+        let connected = AtomicBool::new(false);
+        let (tx, rx) = mpsc::channel::<IncomingMessage>(1);
+        drop(rx);
+        let alive = apply_session_event(
+            SessionEvent::Message(IncomingMessage {
+                topic: "ados/dev1/mavlink/rx".to_string(),
+                payload: vec![1],
+            }),
+            &connected,
+            &subs,
+            &issuer,
+            &tx,
+        )
+        .await;
+        assert!(!alive);
     }
 }

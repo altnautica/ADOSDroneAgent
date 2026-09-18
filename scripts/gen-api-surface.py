@@ -39,7 +39,6 @@ OUT = REPO / "docs" / "api-surface.md"
 # added there and not here is a surface the table would silently omit, which
 # ``check-api-surface.py`` then reports as an unresolvable client path.
 API_ROUTERS = [
-    "version",
     "config",
     "logs",
     "observability",
@@ -189,15 +188,32 @@ def note_for(method: str, path: str) -> str:
     return "; ".join(notes)
 
 
+def shadow_native(
+    native: list[tuple[str, str]], residual: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Drop the residual copies of routes the front answers itself.
+
+    A route the front serves natively is answered by the front even when the
+    residual also declares it, so the residual copy is recorded as shadowed
+    rather than listing one route twice with two different owners.
+
+    Keyed on ``(method, path)``, NOT on path alone. ``routing::is_native`` is
+    method-scoped, so one path can be split between the two producers:
+    ``GET /api/video/config`` is native while ``POST /api/video/config`` is
+    proxied to the residual. Shadowing by path erased that POST from the table
+    entirely — the table asserted the front owned a route it forwards, and the
+    client calling the write had no row of its own to resolve against. The
+    failure mode is invisible from the output: a table missing a row looks
+    exactly like a complete one.
+    """
+    native_pairs = set(native)
+    return [(m, p) for m, p in residual if (m, p) not in native_pairs]
+
 
 def main() -> int:
     native = sorted(set(native_routes()), key=lambda r: (r[1], r[0]))
     residual = sorted(set(residual_routes()), key=lambda r: (r[1], r[0]))
-    native_paths = {p for _, p in native}
-    # A path the front serves natively is answered by the front even when the
-    # residual also declares it; record the residual copy as shadowed rather
-    # than listing one path twice with two different owners.
-    residual = [(m, p) for m, p in residual if p not in native_paths]
+    residual = shadow_native(native, residual)
 
     body: list[str] = [
         "# Agent HTTP surface",

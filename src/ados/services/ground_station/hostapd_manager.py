@@ -1,45 +1,39 @@
-"""WiFi AP lifecycle for the ground-station profile.
+"""WiFi AP configuration for the ground-station profile.
 
-The ground-station Pi 4B runs `hostapd` on the onboard wlan0 so phones,
-tablets, and laptops can join a stable SSID (`ADOS-GS-<short_id>`) and
-reach the setup webapp, WHEP video, and agent REST API. The RTL8812
-USB adapter is reserved for monitor-mode WFB-ng RX by `wfb_rx.py` and
-is never touched here.
+The ground station runs `hostapd` on the onboard wlan0 so phones, tablets, and
+laptops can join a stable SSID (`ADOS-GS-<short_id>`) and reach the setup
+webapp, WHEP video, and agent REST API. The RTL8812 USB adapter is reserved for
+monitor-mode WFB-ng RX and is never touched here.
 
-Lifecycle:
-1. Load or generate a per-device passphrase at `/etc/ados/ap-passphrase`.
-2. Render `hostapd.conf` at `/etc/ados/hostapd-gs.conf` (SSID, channel,
-   WPA2-PSK, country IN).
-3. Render a matching `dnsmasq` conf at `/etc/ados/dnsmasq-gs.conf` with
-   DHCP range 192.168.4.10-100, lease 12h.
-4. Assign 192.168.4.1/24 to wlan0.
-5. Start hostapd and dnsmasq via systemd units
-   (`data/systemd/ados-hostapd.service`).
-6. Scrape `iw dev wlan0 station dump` for connected client MACs.
+This module is a library, not a service. Two owners sit above it:
 
-Exits non-zero if config write fails. systemd restart policy handles
-the retry loop, same pattern as the WFB RX service.
+* `ados-hostapd.service` execs `/usr/sbin/hostapd /etc/ados/hostapd-gs.conf` —
+  the daemon itself, so `systemctl is-active ados-hostapd` means "the SSID is
+  on the air". It used to exec this module, whose own `_HOSTAPD_UNIT` named
+  that same unit, so "start hostapd" asked systemd to start the process doing
+  the asking and hostapd was never executed at all.
+* `ados-net`'s in-process AP owner renders the confs, assigns
+  192.168.4.1/24, and starts/stops that unit on every ground station.
+
+What stays here: the passphrase authority (`read_ap_passphrase`,
+`generate_ap_passphrase`), the driver-based AP-interface resolver
+(`resolve_ap_interface`, shared with the captive-portal AP and the WiFi client
+manager so the two cannot name different radios), the country resolver, and the
+conf renderers on `HostapdManager`.
+
+`HostapdManager.status()` answers "is an access point on the air" from the radio
+(`iw dev <iface> info`), never from a systemd unit — see that method.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
 import secrets
-import signal
-import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
 
-import structlog
-
-if TYPE_CHECKING:
-    from ados.services.ground_station.mdns_announce import APAnnouncer
-
-from ados.core.config import load_config
-from ados.core.logging import configure_logging, get_logger
+from ados.core.logging import get_logger
 from ados.core.paths import (
     AP_PASSPHRASE_PATH,
     DNSMASQ_CONF_PATH,
@@ -234,6 +228,15 @@ _DHCP_RANGE = "192.168.4.10,192.168.4.100,12h"
 _HOSTAPD_UNIT = "ados-hostapd.service"
 _DNSMASQ_UNIT = "ados-dnsmasq-gs.service"
 
+# `iw dev <iface> info` field parsers. Anchored per line so an SSID that
+# happens to contain "type" or "channel" cannot be mistaken for the field.
+# nl80211 reports `type AP` only for an interface in AP mode, and fills the
+# operating channel only once START_AP has completed — so the pair is the
+# radio's own account of beaconing, which is the thing a client needs.
+_IW_TYPE_RE = re.compile(r"^\s*type\s+(\S+)\s*$", re.MULTILINE)
+_IW_CHANNEL_RE = re.compile(r"^\s*channel\s+(\d+)", re.MULTILINE)
+_IW_SSID_RE = re.compile(r"^\s*ssid\s+(.+?)\s*$", re.MULTILINE)
+
 
 def _short_id(device_id: str) -> str:
     """Return the first 4 hex chars of device_id, uppercased.
@@ -272,7 +275,8 @@ class HostapdManager:
         self._interface = interface
         self._configured_passphrase = passphrase
         self._passphrase: str = ""
-        self._running = False
+        # No `_running` flag: whether an access point exists is a property of
+        # the radio, not of this object's memory of its own last start call.
 
     @property
     def ssid(self) -> str:
@@ -527,7 +531,11 @@ class HostapdManager:
             return False
 
     def start(self) -> bool:
-        """Bring the AP up: write configs, assign IP, start units."""
+        """Bring the AP up: write configs, assign IP, start units.
+
+        Returns whether the start command was accepted, which is not the same
+        as an access point existing — ask :meth:`status` for that.
+        """
         if os.geteuid() != 0:
             log.warning(
                 "hostapd_start_non_root",
@@ -540,11 +548,10 @@ class HostapdManager:
         hostapd_ok = self._systemctl("start", _HOSTAPD_UNIT)
         dnsmasq_ok = self._systemctl("start", _DNSMASQ_UNIT)
 
-        self._running = hostapd_ok
         log.info(
-            "ap_started",
-            hostapd=hostapd_ok,
-            dnsmasq=dnsmasq_ok,
+            "ap_start_commanded",
+            hostapd_start_ok=hostapd_ok,
+            dnsmasq_start_ok=dnsmasq_ok,
             ssid=self._ssid,
         )
         return hostapd_ok
@@ -553,10 +560,19 @@ class HostapdManager:
         """Tear the AP down. Best-effort on both units."""
         self._systemctl("stop", _DNSMASQ_UNIT)
         self._systemctl("stop", _HOSTAPD_UNIT)
-        self._running = False
         log.info("ap_stopped")
 
     def _is_unit_active(self, unit: str) -> bool:
+        """Whether systemd reports `unit` active.
+
+        Diagnostic only, never evidence that an access point exists. Two
+        independent reasons: the AP unit has idled in place rather than exiting
+        when the operator did not opt the hotspot in (deliberate, so the
+        supervisor does not read an exit as a crash), and hostapd's own process
+        stays up while the driver refuses START_AP. Deriving AP state from this
+        reported a broadcasting SSID on every ground station with the hotspot
+        switched off.
+        """
         try:
             result = run_cmd_sync(
                 ["systemctl", "is-active", unit],
@@ -565,6 +581,45 @@ class HostapdManager:
             return result.stdout.strip() == "active"
         except (OSError, CmdTimeout):
             return False
+
+    def _radio_ap_state(self) -> dict:
+        """The radio's own account of the AP, from `iw dev <iface> info`.
+
+        ``probe_ok`` false means the question could not be asked at all (no
+        ``iw``, interface absent, timeout) — which is distinct from an answer of
+        "not an AP" and must not be reported as either an AP or a definite
+        absence of one.
+        """
+        try:
+            result = run_cmd_sync(
+                ["iw", "dev", self._interface, "info"],
+                timeout=5.0,
+            )
+        except (OSError, CmdTimeout) as exc:
+            log.debug("iw_dev_info_failed", iface=self._interface, error=str(exc))
+            return {
+                "probe_ok": False,
+                "iface_type": None,
+                "operating_channel": None,
+                "ssid": None,
+            }
+        if not result.ok:
+            return {
+                "probe_ok": False,
+                "iface_type": None,
+                "operating_channel": None,
+                "ssid": None,
+            }
+        text = result.stdout
+        type_match = _IW_TYPE_RE.search(text)
+        channel_match = _IW_CHANNEL_RE.search(text)
+        ssid_match = _IW_SSID_RE.search(text)
+        return {
+            "probe_ok": True,
+            "iface_type": type_match.group(1) if type_match else None,
+            "operating_channel": int(channel_match.group(1)) if channel_match else None,
+            "ssid": ssid_match.group(1) if ssid_match else None,
+        }
 
     def _connected_clients(self) -> list[str]:
         """Scrape `iw dev wlan0 station dump` for associated MAC addresses."""
@@ -591,16 +646,41 @@ class HostapdManager:
         return macs
 
     def status(self) -> dict:
-        """Return live status for the AP."""
-        running = self._is_unit_active(_HOSTAPD_UNIT)
-        clients = self._connected_clients() if running else []
+        """Live AP status, derived from the radio rather than from systemd.
+
+        ``running`` means "this interface is in AP mode and beaconing", proven
+        by nl80211 reporting ``type AP`` plus either an operating channel
+        (START_AP completed) or an associated station. The ``radio`` block
+        carries the evidence so a consumer can tell "no AP" from "could not
+        ask"; the Rust ground-station status routes read the same shape.
+        """
+        radio = self._radio_ap_state()
+        is_ap = radio["iface_type"] == "AP"
+        # Only ask an AP-mode interface for stations: in managed mode
+        # `station dump` lists the upstream AP, which would count the network
+        # this box JOINED as a client of an access point it is not running.
+        clients = self._connected_clients() if is_ap else []
+        beaconing = is_ap and (
+            radio["operating_channel"] is not None or bool(clients)
+        )
         return {
-            "running": running,
+            "running": beaconing,
             "ssid": self._ssid,
             "channel": self._channel,
             "interface": self._interface,
             "gateway": _AP_ADDR,
             "connected_clients": clients,
+            "radio": {
+                "probe_ok": radio["probe_ok"],
+                "iface_type": radio["iface_type"],
+                "operating_channel": radio["operating_channel"],
+                "beaconing": beaconing,
+                "station_count": len(clients),
+                "ssid": radio["ssid"],
+            },
+            # systemd's view of the AP unit, named for what it measures. Kept
+            # for diagnosis when `running` is false; never a substitute for it.
+            "hostapd_unit_active": self._is_unit_active(_HOSTAPD_UNIT),
         }
 
     def apply_ap_config(
@@ -648,141 +728,3 @@ class HostapdManager:
             channel=self._channel,
         )
         return True
-
-
-async def _run_ap_announcer(
-    announcer: APAnnouncer,
-    shutdown: asyncio.Event,
-    slog: Any,
-    initial_delay: float = 2.0,
-    retry_interval: float = 5.0,
-) -> None:
-    """Background task: keep an mDNS announcement alive while the AP is up.
-
-    Polls the wlan0 address until it matches the expected AP IP, then
-    registers the service. If the IP disappears later (interface flap,
-    operator turning the AP off), unregisters and waits for it to come
-    back. Runs until `shutdown` is set.
-    """
-    await asyncio.sleep(initial_delay)
-    registered = False
-    while not shutdown.is_set():
-        ap_up = announcer.is_ap_up()
-        if ap_up and not registered:
-            registered = announcer.start()
-            if not registered:
-                slog.warning("ap_announce_start_failed_will_retry")
-        elif not ap_up and registered:
-            announcer.stop()
-            registered = False
-            slog.info("ap_announce_paused_iface_down")
-        try:
-            await asyncio.wait_for(shutdown.wait(), timeout=retry_interval)
-        except TimeoutError:
-            continue
-    if registered:
-        announcer.stop()
-
-
-async def main() -> None:
-    """Service entry point. Invoked by systemd via `python -m`."""
-    from ados import __version__ as agent_version
-    from ados.services.ground_station.mdns_announce import APAnnouncer
-
-    config = load_config()
-    configure_logging(config.logging.level)
-    slog = structlog.get_logger()
-    slog.info("ground_hostapd_service_starting")
-
-    device_id = config.agent.device_id
-    hotspot = config.network.hotspot
-
-    # Opt-in gate. The hotspot is off by default; operators who want
-    # it enable it via the Setup webapp Network step or by writing
-    # network.hotspot.enabled=true into /etc/ados/config.yaml. Without
-    # this gate the systemd unit would attempt to bind hostapd to
-    # wlan0 even when the operator left the field on the default
-    # false, which on a box that's already a WiFi client gives the
-    # interface two IPs (DHCP + 192.168.4.1) and tends to break the
-    # home-WiFi association.
-    #
-    # Idle-sleep (not exit) so systemd keeps the unit in `active` state
-    # and the supervisor's monitor loop doesn't see a Type=simple
-    # process exit as `service_died` and start retrying. The operator
-    # restarts the unit after toggling hotspot.enabled=true via the
-    # Setup webapp; on the next start the idle branch is skipped.
-    if not hotspot.enabled:
-        slog.info(
-            "hotspot_disabled_by_config",
-            note="operator opt-in not set; idling. Toggle via Setup webapp to activate.",
-        )
-        # Park forever; systemd considers the service active.
-        while True:
-            await asyncio.sleep(3600)
-
-    # If the user set a literal SSID in config (no template), honor it.
-    ssid_override: str | None = None
-    if hotspot.ssid and "{device_id}" not in hotspot.ssid and hotspot.ssid.strip():
-        if hotspot.ssid.startswith("ADOS-GS-"):
-            ssid_override = hotspot.ssid
-
-    manager = HostapdManager(
-        device_id=device_id,
-        ssid=ssid_override,
-        channel=hotspot.channel,
-        passphrase=hotspot.password,
-        # Resolved here rather than defaulted: the interface names race at boot,
-        # so "wlan0" is right only about two boots in three on this hardware.
-        interface=resolve_ap_interface(hotspot.interface),
-    )
-    manager.ensure_passphrase()
-
-    ok = manager.start()
-    if not ok:
-        slog.error("ground_hostapd_start_failed")
-        sys.exit(2)
-
-    slog.info(
-        "ground_hostapd_service_ready",
-        ssid=manager.ssid,
-        channel=manager.channel,
-    )
-
-    shutdown = asyncio.Event()
-    loop = asyncio.get_event_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, shutdown.set)
-
-    # Advertise the agent REST/WS surface on the AP so the Android
-    # client and any other LAN consumer can discover the endpoint
-    # without hardcoding the IP. Announcement lifecycle follows wlan0.
-    announcer = APAnnouncer(
-        port=8080,
-        device_id=device_id,
-        version=agent_version,
-        iface=manager.interface,
-    )
-    announcer_task = asyncio.create_task(
-        _run_ap_announcer(announcer, shutdown, slog)
-    )
-
-    await shutdown.wait()
-
-    slog.info("ground_hostapd_service_stopping")
-    announcer_task.cancel()
-    try:
-        await announcer_task
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        pass
-    manager.stop()
-    slog.info("ground_hostapd_service_stopped")
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
-    sys.exit(0)

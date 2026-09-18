@@ -20,6 +20,24 @@ pub const FORMATION_GAIN: f64 = 1.0;
 /// Default spacing between formation stations, metres (`swarm.default_spacing`).
 pub const DEFAULT_SPACING_M: f64 = 10.0;
 
+/// How many of the formation's own diameters out a fleet member may be and
+/// still be averaged into the centroid anchor.
+///
+/// Four is generous: a member four formation-widths from us is still forming
+/// up, and pulling the anchor toward it is the whole point of the law. What the
+/// gate is for is the fix that is not a MEASUREMENT at all — see
+/// [`anchor_position`].
+pub const ANCHOR_RANGE_SLACK: f64 = 4.0;
+
+/// Floor under the centroid anchor's range gate, metres.
+///
+/// A tight formation has a small diameter, so the slack alone would gate a
+/// legitimately out-of-station member out of the anchor and stall the fleet
+/// short of its shape. This floor keeps the gate wide enough to be invisible to
+/// every real geometry — it is six times the flocking radius — while still
+/// four orders of magnitude below the distance a bogus fix lands at.
+pub const ANCHOR_RANGE_MIN_M: f64 = 200.0;
+
 /// The five built-in formation shapes. Closed by design; see the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormationName {
@@ -176,6 +194,24 @@ impl Formation {
             .get(&slot)
             .map(|o| Ned::new(o[0] as f64, o[1] as f64, o[2] as f64))
     }
+
+    /// How far from this drone a fleet member may be and still resolve the
+    /// anchor, metres.
+    ///
+    /// Derived from the table rather than configured, so it scales with spacing
+    /// and fleet size automatically and there is no second number to keep in
+    /// step with the shape. Two stations are at most one diameter apart, so
+    /// `SLACK` diameters covers a fleet still converging onto the shape.
+    pub fn anchor_range_m(&self) -> f64 {
+        let mut max_sq = 0.0f64;
+        for o in self.offsets.values() {
+            let r_sq = (o[0] as f64).powi(2) + (o[1] as f64).powi(2) + (o[2] as f64).powi(2);
+            if r_sq.is_finite() && r_sq > max_sq {
+                max_sq = r_sq;
+            }
+        }
+        (2.0 * max_sq.sqrt() * ANCHOR_RANGE_SLACK).max(ANCHOR_RANGE_MIN_M)
+    }
 }
 
 /// Grid width: `ceil(sqrt(n))`, at least 1.
@@ -192,26 +228,52 @@ fn grid_columns(n: usize) -> usize {
 
 /// The anchor's position in the local NED frame (this drone at the origin).
 ///
-/// `Centroid` averages this drone and every visible neighbour. `Slot(s)` resolves
-/// to the origin when `s` is this drone, else to that neighbour's position, and
-/// to `None` when the designated slot is not being heard — a formation with a
-/// missing anchor must decline, not fall back to some other reference and fly the
-/// fleet somewhere nobody commanded.
+/// `Centroid` averages this drone and every fleet member whose fix is inside
+/// `radius_m` ([`Formation::anchor_range_m`]). `Slot(s)` resolves to the origin
+/// when `s` is this drone, else to that neighbour's position, and to `None`
+/// when the designated slot is not being heard OR its fix is outside the gate —
+/// a formation with a missing anchor must decline, not fall back to some other
+/// reference and fly the fleet somewhere nobody commanded.
+///
+/// # Why the centroid needs a range gate at all
+///
+/// This is the only law in the crate that weights EVERY neighbour: the flocking
+/// terms, the repulsive term and the closing-rate barrier all build a
+/// [`crate::neighbor::NearestSet`] first, so an implausible fix falls out of
+/// each of them on range. Ungated, one member beaconing the no-fix placeholder
+/// position — a real geodetic point thousands of kilometres from any operating
+/// site — moves the anchor by `distance / (N + 1)` metres, which saturates
+/// [`crate::setpoint::MAX_COMMAND_SPEED_MPS`] for every drone in the fleet at
+/// once. The closing-rate barrier cannot catch it either: it caps closure on
+/// in-range neighbours and passes a command aimed at empty space straight
+/// through. So the transport-side skip in [`crate::swarmbus::fixes_from_payload`]
+/// is the first line and this gate is the backstop for any other producer.
 pub fn anchor_position(
     anchor: FormationAnchor,
     own_slot: u8,
     neighbors: &[NeighborState],
+    radius_m: f64,
 ) -> Option<Ned> {
     match anchor {
         FormationAnchor::Centroid => {
             let mut sum = Ned::ZERO;
+            let mut used = 0usize;
             for n in neighbors {
-                sum = sum + n.pos;
+                if n.is_within(radius_m) {
+                    sum = sum + n.pos;
+                    used += 1;
+                }
             }
-            Some(sum.scale(1.0 / (neighbors.len() + 1) as f64))
+            // Divide by what was actually summed, never by the table length: a
+            // gated-out member left in the divisor would shrink the anchor
+            // toward this drone and bias the whole shape inward.
+            Some(sum.scale(1.0 / (used + 1) as f64))
         }
         FormationAnchor::Slot(s) if s == own_slot => Some(Ned::ZERO),
-        FormationAnchor::Slot(s) => neighbors.iter().find(|n| n.slot == s).map(|n| n.pos),
+        FormationAnchor::Slot(s) => neighbors
+            .iter()
+            .find(|n| n.slot == s && n.is_within(radius_m))
+            .map(|n| n.pos),
     }
 }
 
@@ -225,7 +287,12 @@ pub fn command(
     cruise: f64,
 ) -> Option<Ned> {
     let station = formation.station(own_slot)?;
-    let anchor = anchor_position(formation.anchor, own_slot, neighbors)?;
+    let anchor = anchor_position(
+        formation.anchor,
+        own_slot,
+        neighbors,
+        formation.anchor_range_m(),
+    )?;
     // Own position is the frame origin, so the error IS anchor + station.
     Some((anchor + station).scale(gain).clamp_norm(cruise))
 }
@@ -440,30 +507,82 @@ mod tests {
             NeighborState::new(2, Ned::new(30.0, 0.0, 0.0), Ned::ZERO, 0),
             NeighborState::new(3, Ned::new(0.0, 30.0, 0.0), Ned::ZERO, 0),
         ];
-        let c = anchor_position(FormationAnchor::Centroid, 1, &ns).expect("always resolvable");
+        let c = anchor_position(FormationAnchor::Centroid, 1, &ns, ANCHOR_RANGE_MIN_M)
+            .expect("always resolvable");
         assert!(
             (c.n - 10.0).abs() < 1e-12 && (c.e - 10.0).abs() < 1e-12,
             "{c:?}"
         );
         // Alone: the centroid is this drone.
         assert_eq!(
-            anchor_position(FormationAnchor::Centroid, 1, &[]),
+            anchor_position(FormationAnchor::Centroid, 1, &[], ANCHOR_RANGE_MIN_M),
             Some(Ned::ZERO)
         );
+    }
+
+    #[test]
+    fn a_fix_outside_the_gate_leaves_the_anchor_exactly_where_it_was() {
+        // The no-fix placeholder position, as the local frame sees it: a real
+        // geodetic point thousands of kilometres away. Averaged in, it would put
+        // the anchor half a continent north and saturate the command.
+        let bogus = NeighborState::new(3, Ned::new(8.5e6, -1.4e6, 0.0), Ned::ZERO, 0);
+        let real = NeighborState::new(2, Ned::new(30.0, 0.0, 0.0), Ned::ZERO, 0);
+
+        let without = anchor_position(FormationAnchor::Centroid, 1, &[real], ANCHOR_RANGE_MIN_M);
+        let with = anchor_position(
+            FormationAnchor::Centroid,
+            1,
+            &[real, bogus],
+            ANCHOR_RANGE_MIN_M,
+        );
+        assert_eq!(with, without, "a gated fix must not enter the average");
+        // Including the divisor: counting it would bias the anchor inward.
+        assert!((with.expect("resolves").n - 15.0).abs() < 1e-12);
+
+        // And a designated anchor slot that is out of range declines outright
+        // rather than anchoring the fleet on a position nobody is at.
+        assert_eq!(
+            anchor_position(FormationAnchor::Slot(3), 1, &[bogus], ANCHOR_RANGE_MIN_M),
+            None
+        );
+    }
+
+    #[test]
+    fn the_anchor_gate_is_wide_enough_to_be_invisible_to_a_real_formation() {
+        // A full fleet at the default spacing. The gate is measured from THIS
+        // drone, so the case it has to clear is the two stations furthest apart:
+        // a drone on one of them must still see the other, or the law would
+        // refuse to form up the shape it just generated.
+        for name in FormationName::ALL {
+            let f = Formation::built_in(name, &slots(24), SPACING, FormationAnchor::Centroid);
+            let gate = f.anchor_range_m();
+            let ps = stations(&f);
+            let worst = ps
+                .iter()
+                .flat_map(|a| ps.iter().map(move |b| (*a - *b).norm()))
+                .fold(0.0f64, f64::max);
+            assert!(
+                worst < gate,
+                "{name:?} spans {worst} m against a {gate} m gate"
+            );
+        }
     }
 
     #[test]
     fn slot_anchor_declines_when_the_designated_slot_is_not_heard() {
         let ns = [NeighborState::new(2, Ned::new(5.0, 0.0, 0.0), Ned::ZERO, 0)];
         assert_eq!(
-            anchor_position(FormationAnchor::Slot(1), 1, &ns),
+            anchor_position(FormationAnchor::Slot(1), 1, &ns, ANCHOR_RANGE_MIN_M),
             Some(Ned::ZERO)
         );
         assert_eq!(
-            anchor_position(FormationAnchor::Slot(2), 1, &ns),
+            anchor_position(FormationAnchor::Slot(2), 1, &ns, ANCHOR_RANGE_MIN_M),
             Some(Ned::new(5.0, 0.0, 0.0))
         );
-        assert_eq!(anchor_position(FormationAnchor::Slot(9), 1, &ns), None);
+        assert_eq!(
+            anchor_position(FormationAnchor::Slot(9), 1, &ns, ANCHOR_RANGE_MIN_M),
+            None
+        );
         let f = Formation::built_in(
             FormationName::Line,
             &[1, 2],

@@ -170,10 +170,10 @@ fn read_public_fingerprint(path: &std::path::Path) -> Option<String> {
 // POST /api/v1/ground-station/wfb/pair — install the GS rx-side key.
 // ---------------------------------------------------------------------------
 
-/// The `POST .../wfb/pair` body. Mirrors the FastAPI `PairRequest`: a base64
-/// `blob_b64` (the 64-byte wfb-ng key), an optional `drone_device_id`, an
-/// optional `shared_key_b64`, and the legacy `pair_key` kept only so an old
-/// client gets a clear 400 instead of a 422.
+/// The `POST .../wfb/pair` body: a base64 `blob_b64` (the 64-byte wfb-ng
+/// key), an optional `drone_device_id`, an optional `shared_key_b64`, and
+/// the legacy `pair_key` kept only so an old client gets a clear 400 instead
+/// of a 422.
 #[derive(Debug, Default, Deserialize)]
 pub struct PairRequest {
     #[serde(default)]

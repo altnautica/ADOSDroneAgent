@@ -265,10 +265,23 @@ pub async fn get_telemetry(State(state): State<AppState>) -> Json<Value> {
 ///
 /// `cpu_percent` is the aggregate CPU utilization, `memory_percent` and
 /// `disk_percent` are derived used/total ratios (the same arithmetic `psutil`
-/// reports), `temperature` is the primary thermal zone. A `None` signal map (the
-/// store unreachable) — or an individual missing signal — degrades that field to
-/// the `SystemHealth` default: `0.0` for the percentages, `null` for temperature.
-/// The timestamp is stamped at request time, as the Python `check_system()` does.
+/// reports), `temperature` is the primary thermal zone. The timestamp is stamped
+/// at request time, as the Python `check_system()` does.
+///
+/// ## An unmeasured field is `null`, never `0.0`
+///
+/// A `None` signal map (no store AND no local read) — or an individual missing
+/// signal — carries that field as an explicit `null`. It used to carry `0.0`,
+/// which is a legal reading: 0% CPU is an idle node and 0% disk is an empty one,
+/// so a consumer had no way to tell "nothing is reporting" from "everything is
+/// fine". `/api/status/full` reported exactly that on every stock node, because
+/// the durable store ships off there and nothing fell back to a local read.
+///
+/// The key is always present and always serializes (an `Option` skipped from the
+/// object would put the same ambiguity back one layer up, where a consumer reads
+/// a missing key as "not reported" and coerces it). The sibling
+/// `diagnostics::collect_system` and `system_resources` blocks already degrade
+/// this way.
 ///
 /// Shared with the consolidated `/api/status/full` route, which carries the same
 /// `health` block sourced from the same store signals.
@@ -279,9 +292,9 @@ pub(crate) fn derive_health(signals: Option<&Map<String, Value>>) -> Value {
     let temp = signals.and_then(|s| signal_num(s, "thermal.primary_c"));
 
     json!({
-        "cpu_percent": cpu.map(round1).unwrap_or(0.0),
-        "memory_percent": mem.map(round1).unwrap_or(0.0),
-        "disk_percent": disk.map(round1).unwrap_or(0.0),
+        "cpu_percent": cpu.map(round1).map(Value::from).unwrap_or(Value::Null),
+        "memory_percent": mem.map(round1).map(Value::from).unwrap_or(Value::Null),
+        "disk_percent": disk.map(round1).map(Value::from).unwrap_or(Value::Null),
         "temperature": temp.map(Value::from).unwrap_or(Value::Null),
         "timestamp": iso8601_utc_now(),
     })
@@ -1359,25 +1372,44 @@ mod tests {
         assert!(ts.ends_with("+00:00") && ts.contains('T'), "ts: {ts}");
     }
 
+    /// No signal source at all: every percentage is `null`, and the KEY is still
+    /// there.
+    ///
+    /// This pinned `0.0` before, which is the defect: 0% CPU is a legal reading
+    /// for an idle node, so a consumer could not tell an unreporting agent from a
+    /// healthy one — and `/api/status/full` served exactly that on every stock
+    /// node. The key must survive serialization as an explicit null, because a
+    /// key that vanishes reads as "not reported" and gets coerced downstream.
     #[test]
-    fn health_of_an_absent_store_is_the_zero_default() {
+    fn health_of_an_absent_store_reports_null_not_zero() {
         let h = derive_health(None);
-        assert_eq!(h["cpu_percent"], json!(0.0));
-        assert_eq!(h["memory_percent"], json!(0.0));
-        assert_eq!(h["disk_percent"], json!(0.0));
-        assert_eq!(h["temperature"], Value::Null);
+        for field in [
+            "cpu_percent",
+            "memory_percent",
+            "disk_percent",
+            "temperature",
+        ] {
+            assert_eq!(h[field], Value::Null, "{field} must be null, not a number");
+            assert!(
+                h.as_object().unwrap().contains_key(field),
+                "{field} must still be present as an explicit null"
+            );
+        }
         // Even with no store the shape carries all five keys.
         assert!(h["timestamp"].is_string());
     }
 
+    /// A partially-sampled store reports the signals it has and nulls the rest,
+    /// per field — a measured 5% CPU beside an unmeasured memory reading.
     #[test]
-    fn health_missing_temperature_is_null_others_default() {
-        // Signals present but the thermal zone has not been sampled yet.
+    fn health_nulls_only_the_signals_that_are_missing() {
+        // Signals present but neither the thermal zone nor memory sampled yet.
         let s = signals(&[("cpu.util.all", json!(5.0))]);
         let h = derive_health(Some(&s));
         assert_eq!(h["cpu_percent"], json!(5.0));
         assert_eq!(h["temperature"], Value::Null);
-        assert_eq!(h["memory_percent"], json!(0.0));
+        assert_eq!(h["memory_percent"], Value::Null);
+        assert_eq!(h["disk_percent"], Value::Null);
     }
 
     #[test]

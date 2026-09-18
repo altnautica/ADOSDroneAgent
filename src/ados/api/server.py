@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ados import __version__
 from ados.api.deps import set_agent_app
+from ados.api.onbox_origin import OnboxOriginMiddleware
 from ados.api.routes import (
     config,
     dashboard,
@@ -25,7 +26,6 @@ from ados.api.routes import (
     peripherals_v1,
     plugins,
     setup,
-    version,
     video,
     vision_detections,
     vision_models,
@@ -43,7 +43,14 @@ def create_app(agent: Any) -> FastAPI:
     app = FastAPI(
         title="ADOS Drone Agent",
         version=__version__,
-        docs_url="/docs",
+        # No interactive docs, no schema. This app is reached only through the
+        # native front's reverse proxy; nothing legitimate browses it. Serving
+        # them published a complete map of the agent's route surface —
+        # including every path the front's auth gate then tries to cover — to
+        # any peer that could reach the proxy.
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
 
     # CORS
@@ -57,10 +64,16 @@ def create_app(agent: Any) -> FastAPI:
             allow_headers=["*"],
         )
 
-    # API-key auth and HMAC/replay protection are enforced by the native control
-    # front, which authenticates every route it serves or forwards to this
-    # surface. This residual API binds only the internal socket behind the front,
-    # so it no longer carries its own auth layers.
+    # The native control front is the single authenticator for every route it
+    # serves or forwards, so this residual API carries no auth layers of its
+    # own — AND it refuses anything that did not arrive through the front.
+    #
+    # The comment that used to sit here asserted only the first half, while
+    # `crates/ados-control/src/serve.rs` carried a comment asserting the
+    # opposite contract. Two comments claiming opposite things is how a gap
+    # survives review: this app trusted a property nothing checked. The
+    # middleware below makes the claim true instead of stated.
+    app.add_middleware(OnboxOriginMiddleware)
 
     # Rate limiting middleware — added after CORS.
     # Execution order: CORS → Rate Limit → Route handler.
@@ -79,11 +92,11 @@ def create_app(agent: Any) -> FastAPI:
         await observability.aclose_client()
         await telemetry_source.aclose()
 
-    # /healthz is served by the native control front; the residual no longer
-    # registers it (the front owns the LAN port and answers the liveness probe).
+    # /healthz and /api/version are served by the native control front; the
+    # residual registers neither (the front owns the LAN port, answers the
+    # liveness probe, and reports the capability contract).
 
     # Mount routes
-    app.include_router(version.router, prefix="/api")
     app.include_router(config.router, prefix="/api")
     app.include_router(logs.router, prefix="/api")
     # Reverse-proxy bridge to the local logging and telemetry store's query

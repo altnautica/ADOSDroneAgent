@@ -71,6 +71,32 @@ impl NeighborState {
     pub fn distance(&self) -> f64 {
         self.pos.norm()
     }
+
+    /// The squared distance to this neighbour, when its fix is admissible at
+    /// `radius_m`: finite, and strictly inside the radius.
+    ///
+    /// The one admission test every law shares. [`NearestSet::build`] ranks on
+    /// the value it returns and [`crate::formation::anchor_position`] gates the
+    /// centroid anchor on whether it returns at all. A second copy of the
+    /// predicate is how a law ends up weighting a fix another law already
+    /// rejected — and the centroid anchor is the law where that costs the most,
+    /// because it is the only one that averages over the WHOLE fleet with no
+    /// range bound of its own.
+    ///
+    /// Squared, so a caller ranking candidates pays no sqrt per candidate.
+    pub fn range_sq(&self, radius_m: f64) -> Option<f64> {
+        if !radius_m.is_finite() || radius_m <= 0.0 {
+            return None;
+        }
+        let d_sq = self.pos.norm_sq();
+        (d_sq.is_finite() && d_sq < radius_m * radius_m).then_some(d_sq)
+    }
+
+    /// Whether this neighbour's fix is admissible at `radius_m`. See
+    /// [`Self::range_sq`].
+    pub fn is_within(&self, radius_m: f64) -> bool {
+        self.range_sq(radius_m).is_some()
+    }
 }
 
 /// Upper bound on the neighbour count any single law weights.
@@ -124,12 +150,10 @@ impl NearestSet {
         if k == 0 || !radius.is_finite() || radius <= 0.0 {
             return out;
         }
-        let r_sq = radius * radius;
         for (i, n) in neighbors.iter().enumerate().take(u8::MAX as usize) {
-            let d_sq = n.pos.norm_sq();
-            if !d_sq.is_finite() || d_sq >= r_sq {
+            let Some(d_sq) = n.range_sq(radius) else {
                 continue;
-            }
+            };
             let len = out.len as usize;
             // Rank against the entries already held. A candidate is better than an
             // entry when it is nearer, or exactly as near with a lower slot — the

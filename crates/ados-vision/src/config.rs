@@ -23,6 +23,12 @@ fn default_backend() -> String {
 fn default_slot_count() -> u32 {
     4
 }
+/// Default per-camera ring budget in megabytes, matching
+/// [`crate::ring::DEFAULT_RING_BUDGET_BYTES`]. `/dev/shm` is tmpfs, so this is
+/// resident RAM taken from the same pool the encoder and the model use.
+fn default_shm_budget_mb() -> u32 {
+    (crate::ring::DEFAULT_RING_BUDGET_BYTES / (1024 * 1024)) as u32
+}
 
 /// One explicitly-configured camera. When the `cameras` list is empty the
 /// engine falls back to HAL discovery (`python -m ados.hal.camera --json`).
@@ -199,6 +205,11 @@ pub struct VisionConfig {
     /// Slots per camera ring (latest-wins recycling depth).
     #[serde(default = "default_slot_count")]
     pub slot_count: u32,
+    /// Ceiling, in megabytes, on ONE camera ring's `/dev/shm` footprint. The
+    /// depth above is reduced to fit it, because the slot size is the camera's
+    /// frame size and is not known until a frame arrives.
+    #[serde(default = "default_shm_budget_mb")]
+    pub shm_budget_mb: u32,
     /// Backend preference: "auto" (pick by SoC) | "mock" | "onnx" | "rknn" | "hailo".
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -241,6 +252,7 @@ impl Default for VisionConfig {
             downscale_width: default_downscale_width(),
             downscale_height: default_downscale_height(),
             slot_count: default_slot_count(),
+            shm_budget_mb: default_shm_budget_mb(),
             backend: default_backend(),
             tracker_enabled: false,
             reid_enabled: false,
@@ -284,6 +296,8 @@ impl VisionConfig {
             downscale_height: u32,
             #[serde(default = "default_slot_count")]
             slot_count: u32,
+            #[serde(default = "default_shm_budget_mb")]
+            shm_budget_mb: u32,
             #[serde(default = "default_backend")]
             backend: String,
             #[serde(default)]
@@ -321,6 +335,7 @@ impl VisionConfig {
             downscale_width: v.downscale_width,
             downscale_height: v.downscale_height,
             slot_count: v.slot_count,
+            shm_budget_mb: v.shm_budget_mb,
             backend: v.backend,
             tracker_enabled: v.tracker_enabled,
             reid_enabled: v.reid_enabled,
@@ -338,9 +353,24 @@ impl VisionConfig {
     /// here keeps the writer and every consumer in agreement. A value below 2 is
     /// raised to 2 (the engine needs at least two slots to recycle without
     /// every read racing the single live frame).
+    ///
+    /// This is only the header-representability bound. What the depth costs in
+    /// RAM depends on the camera's frame size, which is not known until a frame
+    /// arrives, so the memory bound is [`Self::effective_shm_budget_bytes`] and
+    /// the engine reduces the depth to fit it.
     pub fn effective_slot_count(&self) -> u32 {
-        self.slot_count
-            .clamp(2, ados_protocol::framebus::MAX_SLOT_COUNT)
+        self.slot_count.clamp(
+            crate::ring::MIN_SLOT_COUNT,
+            ados_protocol::framebus::MAX_SLOT_COUNT,
+        )
+    }
+
+    /// The per-camera ring byte budget, floored so a zero or absurdly small
+    /// configured value cannot leave the engine unable to open a ring at all.
+    /// One 1080p rgb24 frame is ~6 MB, so the floor holds two of them.
+    pub fn effective_shm_budget_bytes(&self) -> usize {
+        const FLOOR_MB: u32 = 16;
+        self.shm_budget_mb.max(FLOOR_MB) as usize * 1024 * 1024
     }
 
     /// The `vision.sock` path under the configured socket directory.

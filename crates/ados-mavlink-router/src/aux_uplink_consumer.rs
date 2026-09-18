@@ -72,11 +72,18 @@ static REQUEST_SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
 struct CountersInner {
     datagrams_received: AtomicU64,
     mavlink_frames: AtomicU64,
+    /// MAVLink frames the FC write path confirmed it delivered in full — to the
+    /// local flight controller, or onto the aux uplink when this node is
+    /// relaying one. Confirmed delivery, not a future that merely returned: a
+    /// frame the PIC arbiter refused, or one dropped for want of both a writer
+    /// and an uplink, is not an injection and must not read as one.
     mavlink_injected: AtomicU64,
-    /// MAVLink frames dropped because the FC write did not finish inside
-    /// [`FC_WRITE_TIMEOUT`]. Non-zero means the FC link is wedged or flow-
-    /// controlled; the uplink itself is fine, and bounding the write is what
-    /// keeps a relay-proxy Request behind it from being dropped by the kernel.
+    /// MAVLink frames that did not reach the flight controller: the write did
+    /// not finish inside [`FC_WRITE_TIMEOUT`], the write failed, the PIC arbiter
+    /// refused an injector's frame, or there was neither a local writer nor an
+    /// aux uplink to take it. Non-zero with a healthy uplink means the FC link
+    /// is wedged or flow-controlled; bounding the write is what keeps a
+    /// relay-proxy Request behind it from being dropped by the kernel.
     mavlink_write_timeouts: AtomicU64,
     decode_foreign: AtomicU64,
     decode_damaged: AtomicU64,
@@ -149,6 +156,20 @@ struct CountersInner {
     /// `config_tunnel_frames`. Not the same thing as the service being absent,
     /// which this cannot see.
     config_tunnel_undelivered: AtomicU64,
+    /// Application datagrams received on the two reserved application channels
+    /// (`AppStream` 8 / `AppCommand` 9): ground → drone traffic addressed to an
+    /// on-board plugin, not to the flight controller. Republished to the radio
+    /// service's app fan-out so a plugin subscribed to `radio-aux.sock` receives
+    /// it; these must NEVER go down the FC serial cable.
+    app_datagrams: AtomicU64,
+    /// Application datagrams the republish refused or could not deliver: a
+    /// missing or wedged radio command socket, or the operator's aux dead-switch
+    /// off. Sub-tally of `app_datagrams`.
+    ///
+    /// A republish that reached ZERO subscribers is NOT counted here. That is
+    /// the normal state of a node with no plugin subscribed, and counting it
+    /// would make a healthy lane report total loss.
+    app_datagrams_undelivered: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -178,6 +199,8 @@ pub struct AuxUplinkConsumerSnapshot {
     pub config_tunnel_frames: u64,
     pub config_tunnel_forwarded: u64,
     pub config_tunnel_undelivered: u64,
+    pub app_datagrams: u64,
+    pub app_datagrams_undelivered: u64,
 }
 
 impl AuxUplinkConsumerCounters {
@@ -210,6 +233,8 @@ impl AuxUplinkConsumerCounters {
             config_tunnel_frames: c.config_tunnel_frames.load(Ordering::Relaxed),
             config_tunnel_forwarded: c.config_tunnel_forwarded.load(Ordering::Relaxed),
             config_tunnel_undelivered: c.config_tunnel_undelivered.load(Ordering::Relaxed),
+            app_datagrams: c.app_datagrams.load(Ordering::Relaxed),
+            app_datagrams_undelivered: c.app_datagrams_undelivered.load(Ordering::Relaxed),
         }
     }
 
@@ -398,40 +423,48 @@ async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsume
                 // saw the operator's command).
                 if let Some(pt) = ados_protocol::mavlink::tunnel_payload_type(frame) {
                     if pt > ados_protocol::mavlink::TUNNEL_RESERVED_PAYLOAD_TYPE_MAX {
-                        deps.fc.inject_frame(frame.to_vec());
+                        deps.fc.inject_frame(bytes::Bytes::copy_from_slice(frame));
                         counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
                 }
                 // Item 14 (safety-critical) — a genuine FC-bound uplink frame is
                 // routed through the ARBITRATED client path, not the ungated
-                // serial write it used to take. `send_client_bytes` is the single
-                // PIC choke point the drone's own autonomous injector also passes
-                // through, so a relayed operator command and an autonomous write
-                // are adjudicated by one decision function and cannot drift. The
-                // relayed frame carries no injector claim — it is the human path,
-                // and the operator beats the injector by construction; the
-                // autonomous guidance write declares its injector and is gated.
+                // serial write it used to take. `send_client_bytes_bounded` is
+                // the single PIC choke point the drone's own autonomous injector
+                // also passes through, so a relayed operator command and an
+                // autonomous write are adjudicated by one decision function and
+                // cannot drift. The relayed frame carries no injector claim — it
+                // is the human path, and the operator beats the injector by
+                // construction; the autonomous guidance write declares its
+                // injector and is gated.
                 // A wedged or flow-controlled FC must not stall this recv loop,
-                // which also feeds the relay-proxy Request lane. Bound the write to
-                // FC_WRITE_TIMEOUT: a write that does not finish in time is dropped
-                // and counted rather than blocking the loop.
-                match tokio::time::timeout(
-                    FC_WRITE_TIMEOUT,
-                    deps.fc
-                        .send_client_bytes(frame, ClientOrigin::Relayed, None),
-                )
-                .await
+                // which also feeds the relay-proxy Request lane. The bound is
+                // FC_WRITE_TIMEOUT.
+                //
+                // It is applied INSIDE the writer lock, by
+                // `send_bytes_bounded`. Wrapping the write in
+                // `tokio::time::timeout` out here was the bug: on expiry the
+                // future was dropped while `write_all` may already have put an
+                // arbitrary PREFIX of this frame on the serial line, and the
+                // writer mutex was released with the stream in that unknown
+                // state and the writer still installed. The next frame was then
+                // written straight onto the prefix, so the flight controller saw
+                // a corrupt frame, reported it as a CRC failure, and the blame
+                // landed on the radio. A bounded write instead drops the writer
+                // and asks for a reconnect: one frame lost and the link
+                // re-opened, which is the honest outcome.
+                if deps
+                    .fc
+                    .send_client_bytes_bounded(frame, ClientOrigin::Relayed, None, FC_WRITE_TIMEOUT)
+                    .await
                 {
-                    Ok(_) => {
-                        counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Err(_) => {
-                        counters
-                            .0
-                            .mavlink_write_timeouts
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
+                    counters.0.mavlink_injected.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    counters
+                        .0
+                        .mavlink_write_timeouts
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -583,6 +616,50 @@ async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsume
                         .0
                         .config_tunnel_undelivered
                         .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        // Ground → drone APPLICATION traffic, addressed to an on-board plugin
+        // rather than to the flight controller. It must never reach the FC
+        // serial cable, and until it was routed here it fell through to the
+        // unknown-channel tally and was dropped — so an operator-side plugin
+        // could send to its on-board counterpart and the counterpart never saw
+        // it, with nothing anywhere naming the loss.
+        //
+        // The radio service owns the socket plugins already subscribe to, so the
+        // decoded payload goes BACK over that command socket's `publish` op
+        // rather than being re-radiated. The egress handle is the same one the
+        // RPC responder uses, so this adds no new seam and no new socket.
+        AuxChannel::AppStream | AuxChannel::AppCommand => {
+            counters.0.app_datagrams.fetch_add(1, Ordering::Relaxed);
+            let Some(egress) = deps.egress.as_ref() else {
+                counters
+                    .0
+                    .app_datagrams_undelivered
+                    .fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            match egress.publish_app(channel, inner).await {
+                // `delivered == 0` is the normal state of a node with no plugin
+                // subscribed, NOT a drop — counting it would make a healthy lane
+                // report total loss.
+                Ok(delivered) => {
+                    tracing::debug!(
+                        channel = channel as u8,
+                        len = inner.len(),
+                        delivered,
+                        "aux_app_datagram_published"
+                    );
+                }
+                // Debug, not warn: the dead-switch case is an operator choice,
+                // and a warn per datagram would flood a deliberately disabled
+                // deployment's log.
+                Err(e) => {
+                    counters
+                        .0
+                        .app_datagrams_undelivered
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(error = %e, channel = channel as u8, "aux_app_publish_failed");
                 }
             }
         }
@@ -1260,5 +1337,54 @@ mod tests {
             snap.non_mavlink_channel, 0,
             "a known channel must not fall through to the unknown-channel tally"
         );
+    }
+
+    /// Ground → drone APPLICATION datagrams are plugin traffic, not flight
+    /// controller traffic.
+    ///
+    /// Before they were routed they fell through to the unknown-channel tally
+    /// and were dropped, so an operator-side plugin could send to its on-board
+    /// counterpart and the counterpart never saw it, with nothing naming the
+    /// loss. Both application channels must now be recognised, counted, and —
+    /// the load-bearing half — must NEVER be written to the FC serial cable.
+    #[tokio::test]
+    async fn an_application_datagram_is_recognised_and_never_reaches_the_flight_controller() {
+        for channel in [AuxChannel::AppStream, AuxChannel::AppCommand] {
+            let (fc, captured) = test_connection();
+            fc.connected
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            *fc.writer.lock().await = Some(Box::pin(CapturingWriter(captured.clone())));
+
+            let counters = AuxUplinkConsumerCounters::new();
+            let datagram = aux_mux::encode(channel, b"plugin-payload").unwrap();
+            dispatch(
+                &datagram,
+                &UplinkDeps {
+                    fc,
+                    // No radio command socket on this rig, so the republish
+                    // cannot complete — which is the case that must be COUNTED
+                    // rather than silently swallowed.
+                    egress: None,
+                    own_device_id: OWN_ID.into(),
+                    dedupe: dedupe(),
+                    config_tunnel: None,
+                },
+                &counters,
+            )
+            .await;
+
+            assert!(
+                captured.lock().unwrap().is_empty(),
+                "{channel:?} must never be written to the FC"
+            );
+            let snap = counters.snapshot();
+            assert_eq!(snap.app_datagrams, 1, "{channel:?}");
+            assert_eq!(snap.app_datagrams_undelivered, 1, "{channel:?}");
+            assert_eq!(snap.mavlink_injected, 0, "{channel:?}");
+            assert_eq!(
+                snap.non_mavlink_channel, 0,
+                "{channel:?} must not fall through to the unknown-channel tally"
+            );
+        }
     }
 }

@@ -342,6 +342,11 @@ async fn main() -> Result<()> {
                 // guard so a client link that comes up (or drops) after boot is
                 // followed within one health cycle.
                 ap_guard.reconcile(false).await;
+                // Then prove the AP the guard just decided to keep is actually
+                // on the air. `systemctl is-active` only says a process exists;
+                // this asks the radio and restarts hostapd when the phy is not
+                // serving the BSS. A probe that cannot be made never acts.
+                hostapd.lock().await.supervise().await;
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("uplink router stopping (SIGINT)");

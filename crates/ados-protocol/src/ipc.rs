@@ -39,6 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
@@ -163,10 +164,50 @@ fn peer_identity(stream: &UnixStream) -> IpcPeer {
     }
 }
 
+/// How long the accept loops back off after a failed `accept()` before
+/// retrying. Long enough that a persistent error cannot hot-spin the reactor,
+/// short enough that a transient one costs a client no perceptible delay.
+/// Shared by [`IpcBroadcast`] and [`serve_rpc`] so the two accept loops cannot
+/// drift into different recovery policies.
+const ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Where an accept loop gets its client connections.
+///
+/// The real implementation is the bound [`UnixListener`]. It is a trait purely
+/// so the accept-ERROR branch is reachable from a test: a live `accept()` only
+/// fails under process-wide fd exhaustion or a kernel resource shortage, which
+/// cannot be induced in-process without wrecking every other test sharing the
+/// runtime. That is exactly why the branch which decides whether these sockets
+/// survive an accept error carried no coverage, and why it was a `break`.
+///
+/// Written as `-> impl Future<..> + Send` rather than `async fn` on purpose, and
+/// `clippy::manual_async_fn` is allowed for exactly that reason: the accept loop
+/// runs under `tokio::spawn`, so the returned future MUST be `Send`, and an
+/// `async fn` in a trait gives no way to say so. Simplifying to `async fn` makes
+/// the spawn fail to compile.
+trait ClientSource: Send + 'static {
+    #[allow(clippy::manual_async_fn)]
+    fn next_client(&mut self) -> impl Future<Output = io::Result<UnixStream>> + Send;
+}
+
+impl ClientSource for UnixListener {
+    #[allow(clippy::manual_async_fn)]
+    fn next_client(&mut self) -> impl Future<Output = io::Result<UnixStream>> + Send {
+        async move {
+            UnixListener::accept(self)
+                .await
+                .map(|(stream, _addr)| stream)
+        }
+    }
+}
+
 /// One connected client: its outbound queue plus the writer and reader tasks,
 /// so both can be aborted when the client is pruned or the server is dropped.
+///
+/// The queue carries [`Bytes`], not `Vec<u8>`: one broadcast buffer is handed to
+/// every attached client, so a `Vec` made that a full copy per client per frame.
 struct ClientHandle {
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<Bytes>,
     writer: JoinHandle<()>,
     reader: JoinHandle<()>,
 }
@@ -177,7 +218,7 @@ pub struct IpcBroadcast {
     path: PathBuf,
     queue_depth: usize,
     clients: Arc<Mutex<Vec<ClientHandle>>>,
-    last: Arc<Mutex<Option<Vec<u8>>>>,
+    last: Arc<Mutex<Option<Bytes>>>,
     keep_last: bool,
     accept_task: JoinHandle<()>,
     /// Monotonic count of clients evicted for falling behind — a full outbound
@@ -223,8 +264,29 @@ impl IpcBroadcast {
         // through the plugin host rather than by opening these sockets.
         let listener = bind_command_socket(&path, 0o660)?;
 
+        Ok(Self::from_source(
+            path,
+            listener,
+            queue_depth,
+            keep_last,
+            inbound,
+        ))
+    }
+
+    /// Start the server over an arbitrary [`ClientSource`].
+    ///
+    /// Split out of [`Self::bind`] so the accept loop's error-recovery branch is
+    /// exercisable: the source is the only part of the loop a test cannot drive
+    /// through a real socket.
+    fn from_source<S: ClientSource>(
+        path: PathBuf,
+        mut source: S,
+        queue_depth: usize,
+        keep_last: bool,
+        inbound: Option<usize>,
+    ) -> (Self, Option<mpsc::Receiver<InboundCommand>>) {
         let clients: Arc<Mutex<Vec<ClientHandle>>> = Arc::new(Mutex::new(Vec::new()));
-        let last: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let last: Arc<Mutex<Option<Bytes>>> = Arc::new(Mutex::new(None));
         let dropped_clients = Arc::new(AtomicU64::new(0));
 
         let (inbound_tx, inbound_rx) = match inbound {
@@ -239,9 +301,29 @@ impl IpcBroadcast {
         let accept_last = last.clone();
         let accept_task = tokio::spawn(async move {
             loop {
-                let stream = match listener.accept().await {
-                    Ok((s, _addr)) => s,
-                    Err(_) => break,
+                let stream = match source.next_client().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        // Never exit. This was `break`, which ended the accept
+                        // task for the life of the process on ONE transient
+                        // error — EMFILE/ENFILE under fd pressure, ENOBUFS,
+                        // ECONNABORTED — while leaving the struct looking
+                        // healthy: `client_count()` still reported the
+                        // already-connected clients and `dropped_clients()`
+                        // never ticked, so nothing anywhere could tell the
+                        // socket had stopped accepting. Both the MAVLink and the
+                        // state socket are bound through this one function, so a
+                        // single hiccup silently closed the FC command surface
+                        // and the telemetry snapshot to every future client
+                        // until a manual restart.
+                        //
+                        // Back off so a persistent error cannot hot-spin, then
+                        // retry forever — the same policy `serve_rpc` below
+                        // already applies to the command sockets.
+                        tracing::warn!(error = %e, "ipc broadcast socket accept failed");
+                        tokio::time::sleep(ACCEPT_RETRY_BACKOFF).await;
+                        continue;
+                    }
                 };
                 Self::on_client(
                     stream,
@@ -255,7 +337,7 @@ impl IpcBroadcast {
             }
         });
 
-        Ok((
+        (
             Self {
                 path,
                 queue_depth,
@@ -266,7 +348,7 @@ impl IpcBroadcast {
                 dropped_clients,
             },
             inbound_rx,
-        ))
+        )
     }
 
     async fn on_client(
@@ -274,12 +356,12 @@ impl IpcBroadcast {
         queue_depth: usize,
         keep_last: bool,
         clients: Arc<Mutex<Vec<ClientHandle>>>,
-        last: Arc<Mutex<Option<Vec<u8>>>>,
+        last: Arc<Mutex<Option<Bytes>>>,
         inbound_tx: Option<mpsc::Sender<InboundCommand>>,
     ) {
         let peer = peer_identity(&stream);
         let (mut read_half, mut write_half) = stream.into_split();
-        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(queue_depth);
+        let (tx, mut rx) = mpsc::channel::<Bytes>(queue_depth);
 
         // Replay the last buffer immediately for the state socket.
         if keep_last {
@@ -364,7 +446,15 @@ impl IpcBroadcast {
     /// Broadcast a byte buffer to all connected clients. Clients whose queue is
     /// full are dropped. If `keep_last` is set, the buffer is also stored as the
     /// last-state replayed to future clients.
-    pub async fn broadcast(&self, buf: Vec<u8>) {
+    ///
+    /// Takes [`Bytes`] rather than `Vec<u8>` because every clone below — one per
+    /// attached client, plus one for the retained last-state — used to be a full
+    /// copy of the buffer. On the FC frame lane that is ~66 copies/s per
+    /// connected consumer, growing with the number of consumers; as `Bytes` each
+    /// is a refcount bump and the cost stops scaling with the client count. A
+    /// producer holding a freshly built `Vec<u8>` converts with `.into()`, which
+    /// is a move, not a copy.
+    pub async fn broadcast(&self, buf: Bytes) {
         if self.keep_last {
             *self.last.lock().await = Some(buf.clone());
         }
@@ -532,7 +622,7 @@ where
                 // Backoff so a persistent accept error cannot hot-spin; never
                 // exit, so the command surface survives transient fd pressure.
                 tracing::warn!(error = %e, "command socket accept failed");
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(ACCEPT_RETRY_BACKOFF).await;
                 continue;
             }
         };
@@ -651,6 +741,96 @@ mod tests {
         p
     }
 
+    /// A client source that fails a fixed number of times before delegating to
+    /// a real listener.
+    ///
+    /// EMFILE is chosen because it is the error that actually happens: the agent
+    /// runs a dozen services against one fd table, and a burst of plugin or
+    /// proxy connections is the realistic way `accept()` fails on a flight
+    /// daemon. It cannot be induced in-process without lowering the whole
+    /// process's fd limit, which is why this seam exists.
+    struct FlakyAcceptor {
+        listener: UnixListener,
+        failures_left: usize,
+    }
+
+    impl ClientSource for FlakyAcceptor {
+        // Same reason as the trait: the accept loop is spawned, so the future
+        // must be `Send`, which `async fn` in a trait cannot state.
+        #[allow(clippy::manual_async_fn)]
+        fn next_client(&mut self) -> impl Future<Output = io::Result<UnixStream>> + Send {
+            async move {
+                if self.failures_left > 0 {
+                    self.failures_left -= 1;
+                    // 24 == EMFILE on both Linux and macOS.
+                    return Err(io::Error::from_raw_os_error(24));
+                }
+                self.listener.accept().await.map(|(s, _addr)| s)
+            }
+        }
+    }
+
+    /// One transient `accept()` error must not close the socket for the life of
+    /// the process.
+    ///
+    /// Why the `Err(_) => break` this replaces survived review: nothing observable
+    /// changes when the accept task exits. The socket is still bound and the
+    /// kernel still accepts into its backlog, so a client's `connect()` SUCCEEDS
+    /// and the client then hangs forever with no frames. Meanwhile
+    /// `client_count()` keeps reporting the clients that connected before the
+    /// error and `dropped_clients()` never ticks, so no counter, log line or
+    /// health probe anywhere can tell that the socket stopped accepting. Both
+    /// `mavlink.sock` and `state.sock` are bound through this one function, so a
+    /// single hiccup under fd pressure silently closed the FC command surface and
+    /// the telemetry snapshot to every future client until a manual restart.
+    ///
+    /// The assertion is therefore on DELIVERY to a client accepted after the
+    /// errors, not on the loop's internal state — which is the only thing that
+    /// distinguishes the two behaviours from outside.
+    #[tokio::test]
+    async fn the_accept_loop_survives_an_accept_error_and_still_serves_the_next_client() {
+        let path = temp_sock("acceptretry");
+        let listener = bind_command_socket(&path, 0o660).unwrap();
+        let (server, _inbound) = IpcBroadcast::from_source(
+            path.clone(),
+            FlakyAcceptor {
+                listener,
+                failures_left: 2,
+            },
+            256,
+            false,
+            None,
+        );
+
+        // A client that connects only AFTER the loop has already absorbed two
+        // accept failures. Before the fix the loop had exited on the first one,
+        // so this connect succeeded at the kernel (the socket is still bound and
+        // its backlog still accepts) and then hung forever with no frames — the
+        // failure mode that made this invisible.
+        let mut client = connect_with_retry(&path, 200, Duration::from_millis(20))
+            .await
+            .unwrap();
+        // Two backoffs plus registration.
+        tokio::time::sleep(ACCEPT_RETRY_BACKOFF * 3).await;
+        assert_eq!(server.client_count().await, 1);
+
+        server
+            .broadcast(
+                encode_frame(b"post-emfile", MAVLINK_MAX_FRAME)
+                    .unwrap()
+                    .into(),
+            )
+            .await;
+        let got = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_length_prefixed(&mut client, MAVLINK_MAX_FRAME, false),
+        )
+        .await
+        .expect("a frame must reach a client accepted after an accept error")
+        .unwrap();
+        assert_eq!(got.as_deref(), Some(&b"post-emfile"[..]));
+    }
+
     #[tokio::test]
     async fn broadcasts_framed_payloads_to_all_clients() {
         let path = temp_sock("bcast");
@@ -667,7 +847,7 @@ mod tests {
         assert_eq!(server.client_count().await, 2);
 
         server
-            .broadcast(encode_frame(b"hello", MAVLINK_MAX_FRAME).unwrap())
+            .broadcast(encode_frame(b"hello", MAVLINK_MAX_FRAME).unwrap().into())
             .await;
 
         let f1 = read_length_prefixed(&mut c1, MAVLINK_MAX_FRAME, false)
@@ -686,7 +866,9 @@ mod tests {
         let (server, _inbound) = IpcBroadcast::bind(&path, 32, true, None).await.unwrap();
 
         // Publish before any client connects.
-        server.broadcast(b"{\"armed\":false}\n".to_vec()).await;
+        server
+            .broadcast(Bytes::from_static(b"{\"armed\":false}\n"))
+            .await;
 
         let mut client = connect_with_retry(&path, 10, Duration::from_millis(20))
             .await
@@ -725,7 +907,7 @@ mod tests {
         let big = vec![0xABu8; 60_000];
         for _ in 0..60u32 {
             server
-                .broadcast(encode_frame(&big, MAVLINK_MAX_FRAME).unwrap())
+                .broadcast(encode_frame(&big, MAVLINK_MAX_FRAME).unwrap().into())
                 .await;
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
@@ -761,7 +943,7 @@ mod tests {
         let big = vec![0x5Au8; 60_000];
         for _ in 0..60u32 {
             server
-                .broadcast(encode_frame(&big, MAVLINK_MAX_FRAME).unwrap())
+                .broadcast(encode_frame(&big, MAVLINK_MAX_FRAME).unwrap().into())
                 .await;
             tokio::time::sleep(Duration::from_millis(2)).await;
             if server.client_count().await == 0 {
@@ -778,7 +960,7 @@ mod tests {
         // The counter is monotonic: it does not reset across further broadcasts
         // once the client is gone (no remaining client to drop).
         server
-            .broadcast(encode_frame(b"tail", MAVLINK_MAX_FRAME).unwrap())
+            .broadcast(encode_frame(b"tail", MAVLINK_MAX_FRAME).unwrap().into())
             .await;
         assert_eq!(server.dropped_clients(), 1);
     }
@@ -790,7 +972,7 @@ mod tests {
         let path = temp_sock("cleandisconnect");
         let (server, _inbound) = IpcBroadcast::bind(&path, 32, true, None).await.unwrap();
         server
-            .broadcast(encode_frame(b"snapshot", MAVLINK_MAX_FRAME).unwrap())
+            .broadcast(encode_frame(b"snapshot", MAVLINK_MAX_FRAME).unwrap().into())
             .await;
 
         // This is exactly the `ados-cloud` enrichment pattern: connect, take the
@@ -809,7 +991,7 @@ mod tests {
             // guaranteed to meet a closed channel.
             for _ in 0..2u32 {
                 server
-                    .broadcast(encode_frame(b"tick", MAVLINK_MAX_FRAME).unwrap())
+                    .broadcast(encode_frame(b"tick", MAVLINK_MAX_FRAME).unwrap().into())
                     .await;
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }

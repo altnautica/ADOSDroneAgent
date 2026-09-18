@@ -25,21 +25,19 @@
 //!   (`iw dev <iface> station dump`) while running. `wifi_client` from the `ados-net` Wi-Fi
 //!   command socket's `wifi_status` op (+ the on-boot flag from the client config
 //!   file), degrading to the all-default shape when the socket is unreachable.
-//!   `ethernet` to its all-default shape (no live seam on the front). `modem_4g`
-//!   from the modem config file (enabled / apn / cap) with the connectivity legs
-//!   carrying the live manager's no-modem defaults (`iface:"wwan0"`,
-//!   `signal_quality:-1`, `technology:"unknown"`, `operator:""`) and the
-//!   cumulative-usage legs overlaid from the store's most-recent
+//!   `ethernet` to `null` (no live seam on the front — not a fabricated
+//!   no-connection shape). `modem_4g` from the modem config file (enabled / apn
+//!   / cap) with every connectivity leg `null` (this front has no modem-status
+//!   seam) and the cumulative-usage legs overlaid from the store's most-recent
 //!   `net.modem_usage` event. `active_uplink` from the store's most-recent
 //!   `net.uplink_active` event (the daemon's selected uplink), else `null`.
 //!   `priority` from the uplink priority file (the default chain when absent).
 //!   `share_uplink` from the config flag.
-//! - **`GET .../network/ethernet`** — the no-connection default shape for the
-//!   live IPv4 / link legs, with `connection_name` reproduced from a read-only
-//!   `nmcli` connection list (the active ethernet profile's name, else `null`).
-//! - **`GET .../network/client/scan`** — nearby-network scan; the front has no
-//!   scan seam, so it returns the empty-list shape (`{"networks": []}`), the
-//!   same body the Python route returns when the scan finds nothing.
+//! - **`GET .../network/ethernet`** — `connection_name` from a read-only `nmcli`
+//!   connection list (the active ethernet profile's name, else `null`); every
+//!   other leg `null`, because nothing here probes the link.
+//! - **`GET .../network/client/scan`** — `503 E_SCAN_UNAVAILABLE`: this front has
+//!   no scan seam, and an empty list would claim a scan that never ran.
 //! - **`GET .../network/modem`** — the modem view (same leg as `modem_4g`).
 //! - **`GET .../network/priority`** — the uplink priority list.
 //! - **`GET .../modem-status`** — the cellular detail snapshot; the front has no
@@ -172,7 +170,15 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
     let body = json!({
         "ap": ap_view(&cfg).await,
         "wifi_client": wifi_client_view().await,
-        "ethernet": ethernet_view_default(),
+        // No live ethernet seam exists on this front (the `ados-net` command
+        // socket has an `eth_config` write and no status op), so the honest leg
+        // is `null` = not probed. It used to be a fabricated
+        // `{link:false, speed_mbps:null, ip:null, gateway:null}`, and `link:
+        // false` is a measurement: it tells an operator the cable is unplugged.
+        // Chasing a phantom cable fault is the cheap version of that mistake; the
+        // expensive one is concluding the uplink cannot be ethernet and
+        // re-planning around a modem that is not needed.
+        "ethernet": Value::Null,
         "modem_4g": modem_view(&state).await,
         "active_uplink": active_uplink,
         "priority": priority_list(),
@@ -441,33 +447,40 @@ async fn wifi_client_view() -> Value {
     })
 }
 
-/// The ethernet leg of the aggregate view: the no-live-seam default shape
-/// `{link:false, speed_mbps:null, ip:null, gateway:null}`, the same shape the
-/// Python `_ethernet_view` returns when its manager raises.
-fn ethernet_view_default() -> Value {
-    json!({
-        "link": false,
-        "speed_mbps": Value::Null,
-        "ip": Value::Null,
-        "gateway": Value::Null,
-    })
-}
-
 /// The modem leg of the aggregate view (also the `GET .../network/modem` body).
 ///
-/// The front has no live modem-status seam, so the connectivity legs are the no-modem
-/// defaults the live `ModemManager.status()` returns when no modem is connected:
-/// `iface:"wwan0"`, `signal_quality:-1`, `technology:"unknown"`, `operator:""`,
-/// `connected:false`. The `enabled` / `apn` / cap come off the modem config file, and
-/// the cumulative-usage legs (`data_used_mb`, `cap_mb`, `percent`) are overlaid from
-/// the store's most-recent `net.modem_usage` event when present.
+/// Two kinds of field, kept distinct:
+///
+/// - **Configured** (`enabled`, `apn`, `cap_mb`) — read from the modem config
+///   file. A real answer even when no modem is attached, because it describes
+///   what the operator asked for, not what the hardware is doing.
+/// - **Measured** (`connected`, `iface`, `ip`, `signal_quality`, `technology`,
+///   `operator`, `state`, `data_used_mb`, `percent`) — `null` unless something
+///   reported them. The front has no `mmcli` polling seam, so the connectivity
+///   legs are always `null` here; the usage legs come from the store's
+///   most-recent `net.modem_usage` event when it has one.
+///
+/// They used to be run together: `connected:false`, `iface:"wwan0"`,
+/// `signal_quality:-1`, `technology:"unknown"`, `operator:""`,
+/// `state:"disconnected"` and `data_used_mb:0` were emitted unconditionally, as
+/// the values a live `ModemManager.status()` returns when it has looked and found
+/// no modem. This front never looked. So a working modem read as disconnected
+/// with a named interface and a zero data allowance consumed — and
+/// `signal_quality: -1` is the textbook absent-data-as-plausible-measurement
+/// sentinel the GCS then renders on a bar meter.
 ///
 /// Shared with the `PUT .../network/modem` write route, which returns the same
-/// `_modem_view()` body after persisting the config sidecar (exactly as the
-/// FastAPI modem PUT returns `_modem_view()` after `configure()`), so the PUT
-/// response is the GET response over the freshly-persisted config.
+/// `_modem_view()` body after persisting the config sidecar, so the PUT response
+/// is the GET response over the freshly-persisted config.
 pub(crate) async fn modem_view(state: &AppState) -> Value {
     let cfg = load_json_object(&gs_modem_json()).unwrap_or_default();
+    modem_body(&cfg, latest_modem_usage(state).await.as_ref())
+}
+
+/// Compose the modem body from the modem config object and the store's usage
+/// block. Pure, so the configured-vs-measured split is asserted against this
+/// function rather than against a copy of it written inside a test.
+fn modem_body(cfg: &Map<String, Value>, usage: Option<&Map<String, Value>>) -> Value {
     let enabled = cfg.get("enabled").map(json_truthy).unwrap_or(false);
     let apn = cfg
         .get("apn")
@@ -476,41 +489,44 @@ pub(crate) async fn modem_view(state: &AppState) -> Value {
         .unwrap_or(Value::Null);
 
     // cap_mb from the config cap_gb, mirroring the Python int(float(cap_gb)*1024).
-    let mut cap_mb: i64 = cfg
+    // A configured cap is a config value, so an absent one is `null` — no cap
+    // configured is not a cap of 0 MB, which reads as "no data allowed".
+    let mut cap_mb: Value = cfg
         .get("cap_gb")
         .and_then(json_to_f64)
-        .map(|gb| (gb * 1024.0) as i64)
-        .unwrap_or(0);
-    let mut data_used_mb: i64 = 0;
-    let mut percent: f64 = 0.0;
+        .map(|gb| Value::from((gb * 1024.0) as i64))
+        .unwrap_or(Value::Null);
+    let mut data_used_mb = Value::Null;
+    let mut percent = Value::Null;
 
     // Store overlay: the daemon's data-cap tracker ships the cumulative usage as
-    // a net.modem_usage event; a hit carries the daemon's truth.
-    if let Some(store) = latest_modem_usage(state).await {
-        if let Some(v) = store.get("data_used_mb").and_then(json_to_f64) {
-            data_used_mb = v as i64;
+    // a net.modem_usage event; a hit is the only source of a real usage figure.
+    if let Some(usage) = usage {
+        if let Some(v) = usage.get("data_used_mb").and_then(json_to_f64) {
+            data_used_mb = Value::from(v as i64);
         }
-        if let Some(v) = store.get("cap_mb").and_then(json_to_f64) {
-            cap_mb = v as i64;
+        if let Some(v) = usage.get("cap_mb").and_then(json_to_f64) {
+            cap_mb = Value::from(v as i64);
         }
-        if let Some(v) = store.get("percent").and_then(json_to_f64) {
-            percent = round2(v);
+        if let Some(v) = usage.get("percent").and_then(json_to_f64) {
+            percent = Value::from(round2(v));
         }
     }
 
     json!({
         "enabled": enabled,
-        "connected": false,
-        "iface": "wwan0",
-        "ip": Value::Null,
-        "signal_quality": -1,
-        "technology": "unknown",
         "apn": apn,
-        "operator": "",
-        "data_used_mb": data_used_mb,
         "cap_mb": cap_mb,
+        // Unprobed on this front: no modem-status seam exists here.
+        "connected": Value::Null,
+        "iface": Value::Null,
+        "ip": Value::Null,
+        "signal_quality": Value::Null,
+        "technology": Value::Null,
+        "operator": Value::Null,
+        "state": Value::Null,
+        "data_used_mb": data_used_mb,
         "percent": percent,
-        "state": "disconnected",
     })
 }
 
@@ -518,17 +534,21 @@ pub(crate) async fn modem_view(state: &AppState) -> Value {
 // GET /api/v1/ground-station/network/ethernet — ethernet profile + live link.
 // ---------------------------------------------------------------------------
 
-/// `GET .../network/ethernet` → the persisted ethernet profile config plus live
-/// link state. 404s on a drone.
+/// `GET .../network/ethernet` → the discovered ethernet connection name plus the
+/// link legs. 404s on a drone.
 ///
-/// The front has no live ethernet IPv4 / link seam, so the `mode` / IP / gateway
-/// / dns / link legs degrade to the no-connection default shape (`mode:"dhcp"`,
-/// every other live field empty / false / null). The `connection_name` leg is
-/// the exception: the Python `config()` reports the discovered NM connection
-/// name, so the front reproduces that source with a read-only `nmcli` connection
-/// list (`discover_primary_connection_name`), reporting the active ethernet
-/// profile's name (e.g. `"netplan-eth0"`) and `null` only when no NM-managed
-/// ethernet profile exists, matching the Python `_discover_primary_connection`.
+/// `connection_name` is real: the Python `config()` reports the discovered NM
+/// connection name, and the front reproduces that source with a read-only
+/// `nmcli` connection list (`discover_primary_connection_name`), reporting the
+/// active ethernet profile's name (e.g. `"netplan-eth0"`) and `null` only when no
+/// NM-managed ethernet profile exists.
+///
+/// Every other leg is `null`, because this front has no live ethernet IPv4 / link
+/// seam to read (the `ados-net` command socket carries an `eth_config` write and
+/// no status op). They used to be a no-connection default — `mode: "dhcp"`,
+/// `link: false`, `dns: []` — which are all assertions: "DHCP is configured",
+/// "the cable is out", "no resolvers are set". An operator debugging an uplink
+/// acts on each of those differently than on "not probed".
 pub async fn get_network_ethernet() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
@@ -537,18 +557,23 @@ pub async fn get_network_ethernet() -> Response {
         .await
         .map(Value::String)
         .unwrap_or(Value::Null);
-    Json(json!({
-        "mode": "dhcp",
+    Json(ethernet_body(connection_name)).into_response()
+}
+
+/// Compose the `.../network/ethernet` body: the one discovered field, and `null`
+/// for every leg nothing on this front probes.
+fn ethernet_body(connection_name: Value) -> Value {
+    json!({
         "connection_name": connection_name,
+        "mode": Value::Null,
         "ip": Value::Null,
         "gateway": Value::Null,
-        "dns": [],
-        "link": false,
+        "dns": Value::Null,
+        "link": Value::Null,
         "speed_mbps": Value::Null,
         "current_ip": Value::Null,
         "current_gateway": Value::Null,
-    }))
-    .into_response()
+    })
 }
 
 /// The ethernet interface the connection discovery prefers, mirroring the Python
@@ -693,15 +718,29 @@ fn parse_nmcli_terse_line(line: &str) -> Vec<String> {
 // GET /api/v1/ground-station/network/client/scan — nearby-network scan.
 // ---------------------------------------------------------------------------
 
-/// `GET .../network/client/scan` → nearby Wi-Fi networks. 404s on a drone. The
-/// front has no scan seam (it must not drive `nmcli` on `wlan0` and race the
-/// daemon), so it returns the empty-list shape, the same `{"networks": []}` the
-/// Python route returns when the scan finds nothing.
+/// `GET .../network/client/scan` → `503 E_SCAN_UNAVAILABLE`. 404s on a drone.
+///
+/// This front has no scan seam. It must not drive `nmcli dev wifi list` on
+/// `wlan0` itself — that races the `ados-net` daemon which owns the interface,
+/// and on a ground station `wlan0` may be the AP carrying the operator's own
+/// session — and the daemon's command socket exposes no scan op to forward to.
+///
+/// So the route reports that it cannot answer. It used to return
+/// `{"networks": []}`, described as "the same body the Python route returns when
+/// the scan finds nothing" — but the two are not the same claim: the Python
+/// route scanned and found nothing, this one never scanned. An operator reading
+/// "no networks found" concludes the band is empty or the antenna is dead and
+/// stops looking for their SSID; the honest 503 sends them to the surface that
+/// can actually scan.
 pub async fn get_network_client_scan() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    Json(json!({"networks": []})).into_response()
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"detail": {"error": {"code": "E_SCAN_UNAVAILABLE"}}})),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,7 +1121,6 @@ mod tests {
             false,
             Vec::new(),
         );
-        let ethernet = ethernet_view_default();
         let priority = priority_list_from(None);
         let share = share_uplink_flag(&cfg);
 
@@ -1091,7 +1129,8 @@ mod tests {
         // tested separately).
         let body = json!({
             "ap": ap,
-            "ethernet": ethernet,
+            // Nothing on this front probes ethernet, so the leg is null.
+            "ethernet": Value::Null,
             "priority": priority,
             "share_uplink": share,
         });
@@ -1111,12 +1150,7 @@ mod tests {
                 "gateway": null,
                 "connected_clients": [],
             },
-            "ethernet": {
-                "link": false,
-                "speed_mbps": null,
-                "ip": null,
-                "gateway": null,
-            },
+            "ethernet": null,
             "priority": ["eth0", "wlan0_client", "wwan0", "usb0"],
             "share_uplink": false,
         });
@@ -1309,48 +1343,68 @@ mod tests {
         assert_eq!(resolve_ap_ssid("Other-1234", "abcd"), "ADOS-GS-ABCD");
     }
 
+    /// The configured legs are real; every measured leg this front cannot probe
+    /// is `null`.
+    ///
+    /// The old expectations were `connected:false`, `iface:"wwan0"`,
+    /// `signal_quality:-1`, `technology:"unknown"`, `operator:""`,
+    /// `state:"disconnected"`, `data_used_mb:0`, `percent:0.0`, commented as "the
+    /// live manager's no-modem defaults, NOT nulls". They were exactly the wrong
+    /// thing: the live manager returns those after looking at a modem-less box,
+    /// and this front never looks — so a working modem read as disconnected on a
+    /// named interface with a -1 signal bar and zero data consumed.
     #[test]
-    fn modem_view_default_legs_without_a_store() {
-        // The config legs (enabled / apn) come off the modem JSON; the cap is
-        // computed from cap_gb; the usage legs are zero with no store overlay.
+    fn modem_body_reports_config_legs_and_nulls_every_unprobed_leg() {
         let cfg: Map<String, Value> =
             serde_json::from_value(json!({"enabled": true, "apn": "internet", "cap_gb": 2.0}))
                 .unwrap();
-        let v = modem_view_from(&cfg, None);
+        let v = modem_body(&cfg, None);
+        // Configured: real.
         assert_eq!(v["enabled"], json!(true));
         assert_eq!(v["apn"], json!("internet"));
         assert_eq!(v["cap_mb"], json!(2048)); // 2 GB → 2048 MB
-        assert_eq!(v["data_used_mb"], json!(0));
-        assert_eq!(v["percent"], json!(0.0));
-        assert_eq!(v["connected"], json!(false));
-        assert_eq!(v["state"], json!("disconnected"));
-        // The connectivity legs carry the live manager's no-modem defaults, NOT
-        // nulls: iface "wwan0", signal_quality -1, technology "unknown",
-        // operator "".
-        assert_eq!(v["iface"], json!("wwan0"));
-        assert_eq!(v["signal_quality"], json!(-1));
-        assert_eq!(v["technology"], json!("unknown"));
-        assert_eq!(v["operator"], json!(""));
-        // An absent apn reads as null, matching the Python st.get("apn") or
-        // cfg.get("apn") over an empty modem config.
-        let empty = Map::new();
-        let v2 = modem_view_from(&empty, None);
+                                              // Measured but unprobed on this front: null, with the key present.
+        for leg in [
+            "connected",
+            "iface",
+            "ip",
+            "signal_quality",
+            "technology",
+            "operator",
+            "state",
+            "data_used_mb",
+            "percent",
+        ] {
+            assert_eq!(v[leg], Value::Null, "{leg} must be null, not a default");
+            assert!(
+                v.as_object().unwrap().contains_key(leg),
+                "{leg} must be present as an explicit null"
+            );
+        }
+        // An empty modem config: nothing is configured, so nothing is claimed.
+        let v2 = modem_body(&Map::new(), None);
         assert_eq!(v2["apn"], Value::Null);
         assert_eq!(v2["enabled"], json!(false));
-        assert_eq!(v2["cap_mb"], json!(0));
+        assert_eq!(
+            v2["cap_mb"],
+            Value::Null,
+            "no configured cap is not a 0 MB cap"
+        );
     }
 
     #[test]
-    fn modem_view_overlays_the_store_usage_block() {
+    fn modem_body_overlays_the_store_usage_block() {
         let cfg: Map<String, Value> =
             serde_json::from_value(json!({"enabled": true, "cap_gb": 1.0})).unwrap();
-        let store: Map<String, Value> =
+        let usage: Map<String, Value> =
             serde_json::from_value(json!({"data_used_mb": 512, "cap_mb": 1000, "percent": 51.234}))
                 .unwrap();
-        let v = modem_view_from(&cfg, Some(&store));
+        let v = modem_body(&cfg, Some(&usage));
         assert_eq!(v["data_used_mb"], json!(512));
         assert_eq!(v["cap_mb"], json!(1000)); // store cap wins over the config cap
         assert_eq!(v["percent"], json!(51.23)); // rounded to 2 decimals
+                                                // The connectivity legs are still unprobed even when usage is known.
+        assert_eq!(v["connected"], Value::Null);
     }
 
     #[test]
@@ -1436,22 +1490,34 @@ mod tests {
         ));
     }
 
+    /// Only the discovered connection name is a claim; every link leg is `null`.
+    ///
+    /// The old expectation was `mode: "dhcp"`, `link: false`, `dns: []` — three
+    /// assertions ("DHCP is configured", "the cable is out", "no resolvers") from
+    /// a route that probes none of them. It also compared against a copy of the
+    /// route body written inside the test, so it could not have failed if the
+    /// route drifted.
     #[test]
-    fn ethernet_view_default_is_the_no_connection_shape() {
-        // The live IPv4 / link legs degrade to the no-connection defaults; the
-        // connection_name is `null` only when no NM ethernet profile is found.
-        let want = json!({
-            "mode": "dhcp",
-            "connection_name": null,
-            "ip": null,
-            "gateway": null,
-            "dns": [],
-            "link": false,
-            "speed_mbps": null,
-            "current_ip": null,
-            "current_gateway": null,
-        });
-        assert_eq!(ethernet_config_default(), want);
+    fn ethernet_body_claims_only_the_discovered_connection_name() {
+        assert_eq!(
+            ethernet_body(json!("netplan-eth0")),
+            json!({
+                "connection_name": "netplan-eth0",
+                "mode": null,
+                "ip": null,
+                "gateway": null,
+                "dns": null,
+                "link": null,
+                "speed_mbps": null,
+                "current_ip": null,
+                "current_gateway": null,
+            })
+        );
+        // No NM ethernet profile found: even the name is null, and `link` still
+        // does not claim the cable is out.
+        let none = ethernet_body(Value::Null);
+        assert_eq!(none["connection_name"], Value::Null);
+        assert_eq!(none["link"], Value::Null);
     }
 
     #[test]
@@ -1638,49 +1704,6 @@ mod tests {
         }
     }
 
-    /// The `modem_4g` leg as composed from the modem config + an optional store
-    /// usage block, without the file / store IO.
-    fn modem_view_from(cfg: &Map<String, Value>, store: Option<&Map<String, Value>>) -> Value {
-        let enabled = cfg.get("enabled").map(json_truthy).unwrap_or(false);
-        let apn = cfg
-            .get("apn")
-            .filter(|v| v.is_string())
-            .cloned()
-            .unwrap_or(Value::Null);
-        let mut cap_mb: i64 = cfg
-            .get("cap_gb")
-            .and_then(json_to_f64)
-            .map(|gb| (gb * 1024.0) as i64)
-            .unwrap_or(0);
-        let mut data_used_mb: i64 = 0;
-        let mut percent: f64 = 0.0;
-        if let Some(s) = store {
-            if let Some(v) = s.get("data_used_mb").and_then(json_to_f64) {
-                data_used_mb = v as i64;
-            }
-            if let Some(v) = s.get("cap_mb").and_then(json_to_f64) {
-                cap_mb = v as i64;
-            }
-            if let Some(v) = s.get("percent").and_then(json_to_f64) {
-                percent = round2(v);
-            }
-        }
-        json!({
-            "enabled": enabled,
-            "connected": false,
-            "iface": "wwan0",
-            "ip": Value::Null,
-            "signal_quality": -1,
-            "technology": "unknown",
-            "apn": apn,
-            "operator": "",
-            "data_used_mb": data_used_mb,
-            "cap_mb": cap_mb,
-            "percent": percent,
-            "state": "disconnected",
-        })
-    }
-
     /// The priority list as composed from an optional priority-file object.
     fn priority_list_from(obj: Option<&Map<String, Value>>) -> Value {
         let default = || Value::Array(DEFAULT_PRIORITY.iter().map(|s| json!(s)).collect());
@@ -1692,20 +1715,5 @@ mod tests {
             return default();
         }
         Value::Array(arr.clone())
-    }
-
-    /// The ethernet `config()` no-connection default, mirroring the route body.
-    fn ethernet_config_default() -> Value {
-        json!({
-            "mode": "dhcp",
-            "connection_name": Value::Null,
-            "ip": Value::Null,
-            "gateway": Value::Null,
-            "dns": [],
-            "link": false,
-            "speed_mbps": Value::Null,
-            "current_ip": Value::Null,
-            "current_gateway": Value::Null,
-        })
     }
 }

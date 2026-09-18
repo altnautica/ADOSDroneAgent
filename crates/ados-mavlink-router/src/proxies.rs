@@ -689,7 +689,11 @@ async fn handle_ws_client(
                     Err(RecvError::Closed) => break,
                 },
             };
-            if write.send(Message::Binary(bytes)).await.is_err() {
+            // tungstenite 0.24's `Binary` owns a `Vec`, so this lane pays one
+            // copy per frame per WebSocket client — exactly what it paid before,
+            // when the fan-out handed every consumer its own `Vec`. Every other
+            // consumer now avoids that copy.
+            if write.send(Message::Binary(bytes.to_vec())).await.is_err() {
                 break;
             }
         }

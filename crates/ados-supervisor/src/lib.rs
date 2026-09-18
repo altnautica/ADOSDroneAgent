@@ -29,3 +29,4 @@ pub mod usb_rehome;
 pub mod video_cmd;
 pub mod wifi_powersave;
 pub mod wifi_selfheal;
+pub mod work_proof;

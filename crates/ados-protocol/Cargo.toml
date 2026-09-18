@@ -10,6 +10,13 @@ description = "Canonical implementation of the ADOS Drone Agent IPC wire contrac
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Refcounted buffer for the IPC broadcast fan-out. `IpcBroadcast::broadcast`
+# hands one buffer to every attached client, and with `Vec<u8>` that was a full
+# memcpy per client per frame — a cost that grew with the number of connected
+# consumers on the FC frame lane at ~66 frames/s. `Bytes` makes each of those a
+# refcount bump, and `Vec<u8> -> Bytes` is a move, so the producer pays nothing
+# extra to opt in.
+bytes = { workspace = true }
 # Group ownership for the shared command sockets. Binding a socket 0o660 grants
 # nobody but root until the group actually owns the file, so the chgrp and the
 # mode have to live together in `bind_command_socket` rather than being left to

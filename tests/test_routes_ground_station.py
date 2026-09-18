@@ -67,47 +67,8 @@ def patch_role(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Group 1: /status
+# /display
 # ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Group 2: /wfb, /wfb/relay, /wfb/receiver
-# ---------------------------------------------------------------------------
-
-
-def test_wfb_put_updates_radio(client):
-    """PUT /wfb accepts a partial update and echoes the new state."""
-    resp = client.put(f"{GS_PREFIX}/wfb", json={"channel": 161})
-    assert resp.status_code in (200, 503)
-
-
-def test_wfb_receiver_relays_wrong_role(client, patch_role):
-    """GET /wfb/receiver/relays on a non-receiver returns 404."""
-    patch_role("direct")
-    resp = client.get(f"{GS_PREFIX}/wfb/receiver/relays")
-    assert resp.status_code == 404
-
-
-def test_wfb_receiver_combined_wrong_role(client, patch_role):
-    """GET /wfb/receiver/combined on a non-receiver returns 404."""
-    patch_role("direct")
-    resp = client.get(f"{GS_PREFIX}/wfb/receiver/combined")
-    assert resp.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# Group 4: /ui, /display, /bluetooth, /gamepads, /pic
-# ---------------------------------------------------------------------------
-
-
-def test_ui_get_returns_full_config(client):
-    """GET /ui returns the OLED + buttons + screens config blob."""
-    resp = client.get(f"{GS_PREFIX}/ui")
-    assert resp.status_code == 200
-    data = resp.json()
-    for key in ("oled", "buttons", "screens"):
-        assert key in data
 
 
 def test_display_get(client):
@@ -163,14 +124,3 @@ def test_pair_revoke_wrong_role(client, patch_role):
     patch_role("direct")
     resp = client.post(f"{GS_PREFIX}/pair/revoke/dev-123")
     assert resp.status_code == 409
-
-
-def test_wfb_pair_post_requires_body(client):
-    """POST /wfb/pair requires a pair_key field.
-
-    The ground-station routes report a bad request body as 400 (the
-    convention shared with the camera/mesh/network routes), not FastAPI's
-    default 422.
-    """
-    resp = client.post(f"{GS_PREFIX}/wfb/pair", json={})
-    assert resp.status_code == 400

@@ -37,7 +37,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::oneshot;
 use tower::{Service, ServiceBuilder};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use crate::auth::{self, Pairing, PairingState, RateLimiter};
 use crate::config::{ControlSecurityConfig, PairingConfig};
@@ -59,8 +59,17 @@ pub const ONBOX_HEADER: &str = "x-ados-onbox";
 /// The peer address of the accepted connection, attached to each LAN-edge
 /// request as an extension so the auth middleware can apply on-box loopback
 /// trust. Absent on the Unix edge (which is trusted outright).
+///
+/// `pub`, not `pub(crate)`, because route handlers extract it as an axum
+/// `Extension` and a handler's signature is part of its public type — the
+/// dashboard-PIN route needs the peer to decide who may claim an unset PIN,
+/// and a private type in a `pub fn` signature is a `private_interfaces`
+/// warning that fails a `-D warnings` gate.
+///
+/// It cannot be forged: the accept loop inserts it from the real socket, and
+/// nothing reads it from a header.
 #[derive(Clone, Copy, Debug)]
-struct PeerAddr(SocketAddr);
+pub struct PeerAddr(pub SocketAddr);
 
 /// Per-edge auth state attached to the TCP layer. The Unix listener does not
 /// install the layer at all, so on-box callers are never gated.
@@ -156,7 +165,27 @@ impl EdgeAuth {
 ///    SKIPPED and the residual FastAPI applies its own auth on the forwarded
 ///    request (which now carries the trustworthy `X-ADOS-Onbox`).
 async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next) -> Response {
-    let path = request.uri().path().to_string();
+    // ONE normalized path, computed once, threaded through every gate below.
+    //
+    // Each predicate used to call `request.uri().path()` for itself. That is
+    // the raw target from the request line, so `/%61pi/v1/setup/reboot` misses
+    // the relay denylist, misses the public list, misses `routing::is_native`
+    // — and therefore falls through to the reverse proxy, where the residual
+    // FastAPI decodes it the way every ASGI server does and serves
+    // `/api/v1/setup/reboot` to a caller with no credential. A refusal is the
+    // only safe answer for a path this layer and the next would read
+    // differently.
+    let path = match auth::decision_path(request.uri().path()) {
+        Ok(p) => p,
+        Err(reason) => {
+            tracing::warn!(
+                raw = %request.uri().path(),
+                ?reason,
+                "non_canonical_path_refused"
+            );
+            return detail(StatusCode::BAD_REQUEST, auth::PathRejection::MESSAGE);
+        }
+    };
 
     // On-box loopback trust: a request whose peer is loopback and that carries no
     // proxy-forwarding header is the local operator (the `ados` CLI over
@@ -291,6 +320,10 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
             edge.pairing.clone(),
             edge.dashboard_pin.clone(),
             on_box,
+            // The SAME normalized path, not a second read of the raw target.
+            // A second read is how the two halves of this edge ended up
+            // authorizing different strings for one request.
+            path,
             request,
             next,
         )
@@ -407,11 +440,16 @@ async fn proxied_auth_then_forward(
     pairing_state: Arc<PairingState>,
     dashboard_pin: Arc<crate::dashboard_pin::DashboardPin>,
     on_box: bool,
+    // `path` is the normalized decision path from `tcp_edge`. Taken as an
+    // argument rather than re-read from the request: a second read of
+    // `request.uri().path()` gives the RAW target, so this half of the edge
+    // would authorize a different string than the half that already ran —
+    // which is precisely the percent-encoding bypass.
+    path: String,
     request: Request,
     next: Next,
 ) -> Response {
     let method = request.method().clone();
-    let path = request.uri().path().to_string();
     let headers = collect_headers(request.headers());
     // The pairing posture comes from the SAME short-TTL-cached reader the native
     // edge uses, so the gate and every other surface agree on one posture.
@@ -603,6 +641,7 @@ pub fn tcp_app(
     dashboard_pin: Arc<crate::dashboard_pin::DashboardPin>,
     mcp_tokens: Arc<McpTokenStore>,
     config_path: std::path::PathBuf,
+    security: &ControlSecurityConfig,
 ) -> Router {
     let edge = EdgeAuth {
         pairing,
@@ -612,18 +651,40 @@ pub fn tcp_app(
         mcp_tokens,
         config_path,
     };
-    // CORS wraps OUTSIDE the auth layer (ServiceBuilder applies the first layer
-    // outermost). A browser cross-origin call to this LAN edge sends a custom
-    // `X-ADOS-Key` header, which forces a preflight `OPTIONS` that carries no
-    // key — the CORS layer must answer it before `tcp_edge` can 401 it, and it
-    // stamps `Access-Control-Allow-Origin` onto every response (incl. auth
-    // rejections) so the GCS reads the real status instead of a CORS error.
-    // Auth stays the X-ADOS-Key (CORS is not a security boundary here), so any
-    // GCS origin is allowed. Restores the CORS the FastAPI front carried before
-    // the native front took over :8080.
+    // CORS wraps OUTSIDE the auth layer (ServiceBuilder applies the first
+    // layer outermost). A browser cross-origin call to this LAN edge sends a
+    // custom `X-ADOS-Key` header, which forces a preflight `OPTIONS` that
+    // carries no key — the CORS layer must answer it before `tcp_edge` can
+    // 401 it, and it stamps `Access-Control-Allow-Origin` onto every response
+    // (including auth rejections) so the GCS reads the real status instead of
+    // a CORS error.
+    //
+    // An ALLOW-LIST, not `CorsLayer::permissive()`. The old comment argued
+    // CORS is not a security boundary here because auth is the `X-ADOS-Key` —
+    // true for the routes that need a key, and false for the ones that do
+    // not. `/api/pairing/{info,code}` are public by necessity, so
+    // `Access-Control-Allow-Origin: *` let ANY page the operator happened to
+    // visit walk the local network, read an unclaimed agent's pairing code
+    // and claim the aircraft from the browser. The allow-list is the same
+    // one the residual Python half enforces, read from the same config keys,
+    // so the two surfaces cannot disagree about who may call this agent.
+    //
+    // `expose_headers(Any)` is also gone: nothing on this edge needs a
+    // non-simple response header readable cross-origin.
+    let origins: Vec<axum::http::HeaderValue> = security
+        .security
+        .api
+        .effective_cors_origins()
+        .iter()
+        .filter_map(|o| axum::http::HeaderValue::from_str(o).ok())
+        .collect();
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods(AllowMethods::mirror_request())
+        .allow_headers(AllowHeaders::mirror_request());
     router.layer(
         ServiceBuilder::new()
-            .layer(CorsLayer::permissive())
+            .layer(cors)
             .layer(middleware::from_fn_with_state(edge, tcp_edge)),
     )
 }
@@ -1111,6 +1172,176 @@ mod tests {
         ] {
             assert!(!crate::proxy_auth::is_media_plane(p), "{p} is NOT media");
         }
+    }
+
+    // --- the path-normalization bypass table ---------------------------------
+    //
+    // Every gate on this edge used to call `request.uri().path()` for itself.
+    // That is the RAW target from the request line, so `%61pi` is six
+    // characters matching no literal in the relay denylist, the public list
+    // or `routing::is_native`. The request therefore missed every gate AND
+    // missed the native router, fell through to the reverse proxy, and the
+    // residual FastAPI decoded it the way every ASGI server does — serving
+    // `/api/v1/setup/reboot` to a caller holding no credential.
+    //
+    // This is the test that would have caught the whole class.
+
+    /// The edge harness for a PAIRED node, where every non-public route needs
+    /// `X-ADOS-Key`.
+    fn paired_edge(dir: &std::path::Path) -> EdgeAuth {
+        let pairing_path = dir.join("pairing.json");
+        std::fs::write(
+            &pairing_path,
+            r#"{"paired": true, "api_key": "ados_secret"}"#,
+        )
+        .unwrap();
+        EdgeAuth {
+            pairing: Arc::new(PairingState::with_path(pairing_path)),
+            rate: Arc::new(RateLimiter::default_control()),
+            proxied: Arc::new(ProxiedAuth::new(crate::config::SecuritySection::default())),
+            dashboard_pin: Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.join("dashboard-pin.json"),
+            )),
+            mcp_tokens: Arc::new(McpTokenStore::with_path(dir.join("mcp-token.json"))),
+            config_path: dir.join("config.yaml"),
+        }
+    }
+
+    /// Every spelling of a privileged path that is not its canonical form is
+    /// refused BEFORE any gate reads it, on a paired node, with no credential.
+    #[tokio::test]
+    async fn encoded_paths_never_reach_a_handler_without_a_credential() {
+        use tower::util::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let app = lan_app(paired_edge(dir.path()));
+
+        // An off-box peer, so on-box loopback trust cannot mask the result.
+        let peer = PeerAddr(SocketAddr::from(([192, 168, 1, 50], 45678)));
+
+        for uri in [
+            // The percent-encoded first letter: the original bypass.
+            "/%61pi/v1/setup/reboot",
+            // The media plane, which is deliberately NOT exempt.
+            "/%77hep",
+            // An encoded dot segment, which a downstream router may collapse.
+            "/api/%2e%2e/v1/setup/reboot",
+            // An empty segment, which different routers collapse differently.
+            "/api//v1/setup/reboot",
+            // A literal dot segment.
+            "/api/../api/v1/setup/reboot",
+            // Double encoding: `%2561pi` decodes once to `%61pi`.
+            "/%2561pi/v1/setup/reboot",
+        ] {
+            let req = Request::builder()
+                .uri(uri)
+                .extension(peer)
+                .body(Body::empty())
+                .unwrap();
+            let status = app.clone().oneshot(req).await.unwrap().status();
+            assert!(
+                status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED,
+                "{uri} must be refused before any handler, got {status}",
+            );
+        }
+    }
+
+    /// The canonical spelling of the same route still behaves normally: the
+    /// normalizer must not have turned the gate into a blanket refusal.
+    #[tokio::test]
+    async fn the_canonical_path_still_reaches_the_gate() {
+        use tower::util::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let app = lan_app(paired_edge(dir.path()));
+        let peer = PeerAddr(SocketAddr::from(([192, 168, 1, 50], 45678)));
+
+        // No key: the ordinary 401, not the 400 the normalizer emits.
+        let req = Request::builder()
+            .uri("/api/status")
+            .extension(peer)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED,
+        );
+
+        // With the key: served.
+        let req = Request::builder()
+            .uri("/api/status")
+            .header("X-ADOS-Key", "ados_secret")
+            .extension(peer)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+    }
+
+    /// The same table against the RADIO RELAY denylist. A relayed caller is
+    /// on-box by construction (the relay lands on loopback), so an encoded
+    /// path that slips the denylist is served with full node authority.
+    #[tokio::test]
+    async fn encoded_paths_cannot_slip_the_relay_denylist() {
+        use tower::util::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let app = lan_app(paired_edge(dir.path()));
+
+        for uri in [
+            "/api/pairing/%75npair",
+            "/%61pi/pairing/unpair",
+            "/api//pairing/unpair",
+            "/api/pairing/%2e/unpair",
+            // Prefix coverage: anything beneath a denied route is denied too.
+            "/api/plugins/install/resume",
+        ] {
+            let req = Request::builder()
+                .uri(uri)
+                .header(auth::RELAYED_HEADER, "1")
+                .extension(PeerAddr(SocketAddr::from(([127, 0, 0, 1], 45678))))
+                .body(Body::empty())
+                .unwrap();
+            let status = app.clone().oneshot(req).await.unwrap().status();
+            assert!(
+                status == StatusCode::BAD_REQUEST || status == StatusCode::FORBIDDEN,
+                "{uri} must not be reachable over the relay, got {status}",
+            );
+        }
+    }
+
+    /// The normalizer's own contract, unit-level, so a failure names the rule
+    /// rather than a status code.
+    #[test]
+    fn decision_path_decodes_once_and_refuses_ambiguity() {
+        use crate::auth::{decision_path, PathRejection};
+
+        assert_eq!(decision_path("/api/status").unwrap(), "/api/status");
+        assert_eq!(decision_path("/%61pi/status").unwrap(), "/api/status");
+        // A trailing slash is the one legitimate empty segment.
+        assert_eq!(decision_path("/api/status/").unwrap(), "/api/status/");
+
+        assert_eq!(
+            decision_path("/%2561pi/status"),
+            Err(PathRejection::DoubleEncoded),
+        );
+        assert_eq!(
+            decision_path("/api//status"),
+            Err(PathRejection::EmptySegment)
+        );
+        assert_eq!(
+            decision_path("/api/../status"),
+            Err(PathRejection::DotSegment)
+        );
+        assert_eq!(
+            decision_path("/api/%2e%2e/status"),
+            Err(PathRejection::DotSegment),
+        );
+        assert_eq!(decision_path("/api/%00"), Err(PathRejection::ControlByte));
+        assert_eq!(
+            decision_path("/api/%zz"),
+            Err(PathRejection::MalformedEscape)
+        );
+        assert_eq!(
+            decision_path("/api/%a"),
+            Err(PathRejection::MalformedEscape)
+        );
     }
 
     /// A tiny Debug shim so a failing Admit assertion can print the variant.

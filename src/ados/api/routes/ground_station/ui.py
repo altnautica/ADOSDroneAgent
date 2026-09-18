@@ -1,19 +1,17 @@
 """Ground-station UI surfaces.
 
 Covers:
-* /ui (OLED, buttons, screens persisted UI config)
 * /factory-reset (pair + mesh wipe with fingerprint confirm)
 * /display (HDMI kiosk config)
 
-The PIC claim/release/confirm-token/heartbeat REST routes, the gamepad +
-Bluetooth read/write routes, and the ``/pic/events`` WebSocket relay of the
-arbiter's transition stream are served natively by ``ados-control`` (the Rust
+``GET /ui``, the three ``PUT /ui/<section>`` writes, the PIC
+claim/release/confirm-token/heartbeat REST routes, the gamepad + Bluetooth
+read/write routes, and the ``/pic/events`` WebSocket relay of the arbiter's
+transition stream are served natively by ``ados-control`` (the Rust
 ``ados-pic`` / ``ados-input`` daemons own the arbiter + input state).
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 import structlog
 from fastapi import (
@@ -32,18 +30,6 @@ router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 
 
 # ---------------------------------------------------------------------------
-# /ui
-# ---------------------------------------------------------------------------
-
-
-@router.get("/ui")
-async def get_ground_station_ui() -> dict[str, Any]:
-    """Return the full UI config (OLED, buttons, screens)."""
-    _gs._require_ground_profile()
-    return _gs._load_ui_config()
-
-
-# ---------------------------------------------------------------------------
 # /factory-reset
 # ---------------------------------------------------------------------------
 
@@ -59,17 +45,31 @@ async def post_factory_reset(
     active pair key fingerprint. When unpaired, the token must match
     `factory-reset-unpaired`. This stops a casual curl from bricking a
     live device.
+
+    Authorization is "the request reached this residual app from on-box, or it
+    carries a live captive-portal token", and the fingerprint above is the
+    destructive-action confirmation on top of it.
+
+    The peer check has to treat "no peer address" as on-box. The native front
+    owns the LAN port and proxies `/api/*` to this app over
+    `/run/ados/api-internal.sock` after applying its own key/HMAC auth, and a
+    Unix-socket request has `request.client is None`. The gate used to demand a
+    captive token for exactly that case and for every LAN caller, which closed
+    the route permanently: `CaptiveTokenStore.generate()` has no caller
+    anywhere in the tree, so the store is always empty and `consume()` can only
+    ever return False. A ground station therefore had no reachable factory
+    reset at all — and there is no native route serving this path, so nothing
+    else provided one. The captive branch is kept because the hotspot
+    setup-webapp flow is designed around it; it is inert until something mints.
     """
     _gs._require_ground_profile()
 
-    # Captive-portal single-use token check. Only factory reset is
-    # gated. The header is optional when called from loopback to keep
-    # CLI test paths open.
-    captive_header = request.headers.get("x-ados-captive-key")
     client_host = request.client.host if request.client else None
-    if client_host not in ("127.0.0.1", "::1"):
+    on_box = client_host in (None, "127.0.0.1", "::1")
+    if not on_box:
         from ados.services.setup_webapp.captive_token import get_captive_token_store
 
+        captive_header = request.headers.get("x-ados-captive-key")
         if not captive_header or not get_captive_token_store().consume(captive_header):
             raise HTTPException(
                 status_code=401,

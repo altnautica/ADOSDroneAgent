@@ -50,8 +50,16 @@ use crate::vision_client::VisionClient;
 
 /// Message ids the pose-injection path covers. A send whose msg id is in this set
 /// demands `estimator.pose.inject` on top of `mavlink.write`.
+///
+/// Membership is decided by what the message REACHES, not by its name: every id
+/// here lands in the flight controller's state estimator, where a fabricated
+/// sample moves the vehicle's idea of where it is. `mavlink.write` alone is the
+/// permission to talk to the FC; this one is the permission to tell it where it
+/// is. An estimator message missing from the set is a plugin holding only the
+/// former that can corrupt the position solution of an armed aircraft.
 pub const POSE_INJECT_MSG_IDS: &[u32] = &[
     331,   // ODOMETRY
+    101,   // GLOBAL_VISION_POSITION_ESTIMATE
     102,   // VISION_POSITION_ESTIMATE
     11011, // VISION_POSITION_DELTA
     104,   // VICON_POSITION_ESTIMATE
@@ -3937,6 +3945,31 @@ mod tests {
     }
 
     #[test]
+    fn the_global_frame_vision_estimate_is_gated_like_its_local_frame_sibling() {
+        // GLOBAL_VISION_POSITION_ESTIMATE (101) reaches the same estimator as
+        // VISION_POSITION_ESTIMATE (102) — it differs only in the frame the pose
+        // is expressed in. Gating one and not the other leaves a plugin holding
+        // `mavlink.write` alone able to drive the FC's position solution, which
+        // is the whole reason the estimator capability is separate.
+        let host = RealHost::new();
+        let args = map(&[("msg_bytes", Value::Binary(v2_frame(101)))]);
+        assert_eq!(
+            err_body(host.mavlink_send("p", &args, &caps(&["mavlink.write"]))),
+            "capability_denied: estimator.pose.inject"
+        );
+        // And it is not a ban: with the capability the send proceeds.
+        let m = ok_map(host.mavlink_send(
+            "p",
+            &args,
+            &caps(&["mavlink.write", "estimator.pose.inject"]),
+        ));
+        assert_eq!(
+            field(&m, "error").and_then(Value::as_str),
+            Some("not_available")
+        );
+    }
+
+    #[test]
     fn a_buffer_that_is_not_whole_frames_is_refused_rather_than_guessed() {
         // The splitter stops at the first incomplete frame and returns what was
         // whole, but the router forwards the buffer INCLUDING the remainder.
@@ -4793,7 +4826,7 @@ gcs:
         };
         let body = reply.to_msgpack().unwrap();
         server
-            .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap())
+            .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap().into())
             .await;
 
         let res = host

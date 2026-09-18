@@ -23,6 +23,7 @@ use crate::ctx::Ctx;
 use crate::env::{self, CONFIG_DIR, DEVICE_ID_FILE, INSTALL_DIR};
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use crate::steps::boot_config;
 
 /// Where unit files + dropins are deployed.
 const SYSTEMD_DIR: &str = "/etc/systemd/system";
@@ -478,15 +479,18 @@ const USB_OLD_SCHEME_ARG: &str = "usbcore.old_scheme_first=1";
 /// probe order + the pure writers. Idempotent (a no-op when already present).
 /// Returns the boot file matched, or `None` when no known cmdline file exists.
 /// Takes effect on the next reboot.
+///
+/// Every write goes through [`crate::steps::boot_config`], so the file gains a
+/// KEEP-FIRST `<file>.ados-bak` baseline and a malformed cmdline is recoverable
+/// — and an existing pristine snapshot (the display installer's, on a board
+/// whose panel overlay lives in the same `extlinux.conf`) is never overwritten.
 fn apply_cmdline_arg(arg: &str) -> Option<&'static str> {
     // Armbian / many Rockchip boards: the extraargs= line in armbianEnv.txt.
     let armbian = Path::new("/boot/armbianEnv.txt");
     if armbian.is_file() {
-        if let Ok(content) = std::fs::read_to_string(armbian) {
-            if let Some(new) = armbian_extraargs_with(&content, arg) {
-                let _ = std::fs::write(armbian, new);
-            }
-        }
+        boot_config::edit_boot_config_at(&[armbian], "kernel cmdline arg", |c| {
+            armbian_extraargs_with(c, arg).unwrap_or_else(|| c.to_string())
+        });
         return Some("/boot/armbianEnv.txt");
     }
 
@@ -494,11 +498,9 @@ fn apply_cmdline_arg(arg: &str) -> Option<&'static str> {
     for cmd in ["/boot/firmware/cmdline.txt", "/boot/cmdline.txt"] {
         let p = Path::new(cmd);
         if p.is_file() {
-            if let Ok(content) = std::fs::read_to_string(p) {
-                if let Some(new) = cmdline_txt_with(&content, arg) {
-                    let _ = std::fs::write(p, new);
-                }
-            }
+            boot_config::edit_boot_config_at(&[p], "kernel cmdline arg", |c| {
+                cmdline_txt_with(c, arg).unwrap_or_else(|| c.to_string())
+            });
             return Some(cmd);
         }
     }
@@ -506,11 +508,9 @@ fn apply_cmdline_arg(arg: &str) -> Option<&'static str> {
     // Generic extlinux: the APPEND line.
     let extlinux = Path::new("/boot/extlinux/extlinux.conf");
     if extlinux.is_file() {
-        if let Ok(content) = std::fs::read_to_string(extlinux) {
-            if let Some(new) = extlinux_append_with(&content, arg) {
-                let _ = std::fs::write(extlinux, new);
-            }
-        }
+        boot_config::edit_boot_config_at(&[extlinux], "kernel cmdline arg", |c| {
+            extlinux_append_with(c, arg).unwrap_or_else(|| c.to_string())
+        });
         return Some("/boot/extlinux/extlinux.conf");
     }
 
@@ -729,6 +729,31 @@ r! /run/ados/plugins/*.sock\n";
     }
     set_mode(Path::new(DEST), 0o644);
     // Materialize the dir now (idempotent); the drop-in handles reboots.
+    let _ = exec::run("systemd-tmpfiles", &["--create", DEST]);
+}
+
+/// Install the vision framebus tmpfiles drop-in so a stale `/dev/shm` frame
+/// ring is swept at boot.
+///
+/// The ring is unlinked by its writer's `Drop`, which does not run on SIGKILL
+/// or an OOM kill — and the file is named after the camera's `/dev/videoN`
+/// index, which re-enumerates on USB hot-plug, so each new node number stranded
+/// the previous run's ring in RAM permanently. Shipped in the tree but not
+/// installed by name is the same as not shipped: the install must place it.
+fn install_vision_tmpfiles(source: Option<&Path>) {
+    const DEST: &str = "/etc/tmpfiles.d/ados-vision.conf";
+    let Some(src) = source.map(|s| s.join("etc/tmpfiles.d/ados-vision.conf")) else {
+        return;
+    };
+    if !src.is_file() {
+        tracing::warn!(path = %src.display(), "vision tmpfiles drop-in missing from the source tree");
+        return;
+    }
+    if let Err(e) = std::fs::copy(&src, DEST) {
+        tracing::warn!(error = %e, "installing the vision tmpfiles drop-in failed");
+        return;
+    }
+    set_mode(Path::new(DEST), 0o644);
     let _ = exec::run("systemd-tmpfiles", &["--create", DEST]);
 }
 
@@ -1734,6 +1759,7 @@ impl Step for Systemd {
         write_env_file();
         install_plugin_slice(Some(&source));
         install_plugin_tmpfiles(Some(&source));
+        install_vision_tmpfiles(Some(&source));
         install_logd_store_dir();
         let udev_src = source.join("data/udev");
         let udev_count = deploy_udev_rules(&udev_src);

@@ -4,11 +4,17 @@
 //!
 //! * **HID** — stick/switch intent read from the primary gamepad the
 //!   `ados-input` daemon selects, gated by the PIC arbiter (the `hid` module
-//!   owns the device read; this module owns only the merged values).
+//!   owns the device read; this module owns only the merged values). Each
+//!   sample carries a freshness deadline the reader must keep refreshing, so a
+//!   device that goes quiet WITHOUT erroring stops flying instead of having its
+//!   last stick re-sent forever.
 //! * **Injection** — explicit channel values set programmatically over the
 //!   command socket, each write carrying a time-to-live. An injector that goes
-//!   silent past its TTL decays to the safe neutral set — the lane never
-//!   holds a stale stick.
+//!   silent past its TTL decays to the safe neutral set.
+//!
+//! Neither lane may hold a stale stick. Both are therefore time-bounded: the
+//! transmitted set is only ever a sample its producer has re-attested inside
+//! its window.
 //!
 //! The configured `channel_source` mode decides authority. In `hybrid` the
 //! PIC arbiter's holder wins: while a client holds the PIC claim the lane
@@ -48,6 +54,26 @@ pub fn clamp_ttl(requested: Duration) -> Duration {
     requested.clamp(MIN_INJECT_TTL, MAX_INJECT_TTL)
 }
 
+/// How often the HID reader must re-attest that its device is still producing.
+///
+/// The reader stamps every evdev event it receives; between events it
+/// re-stamps on this cadence so a still-but-live device keeps its slot, and it
+/// stops stamping the moment the device stops delivering.
+pub const HID_LIVENESS_INTERVAL: Duration = Duration::from_millis(200);
+
+/// How long a HID sample stays transmittable without a refresh.
+///
+/// Three [`HID_LIVENESS_INTERVAL`]s: the smallest multiple that tolerates a
+/// missed refresh under load without holding a dead stick for long.
+///
+/// Without this bound the lane has no way to tell a silent source from a held
+/// stick — evdev is edge-triggered, so a read ERROR is the only other liveness
+/// signal available, and a wireless pad out of range, a wedged driver and a
+/// starved reader task all produce silence with no error. Any of them would
+/// otherwise leave the last non-neutral stick packed into every RC frame to an
+/// armed aircraft for as long as the process lives.
+pub const HID_STALE_AFTER: Duration = Duration::from_millis(600);
+
 /// The source a transmitted value set actually came from, reported on the
 /// sidecar (`channel_source`). `None` (⇒ a JSON null) means the neutral
 /// fallback — no live source, never a fabricated label.
@@ -80,6 +106,18 @@ struct Injected {
     verified_client: Option<String>,
 }
 
+/// A live HID channel set with the deadline its producer must beat.
+///
+/// `fresh_until` is the whole point: the reader re-attests a live device on
+/// [`HID_LIVENESS_INTERVAL`], so a sample that has aged past
+/// [`HID_STALE_AFTER`] is one no device has confirmed — not a stick somebody
+/// is holding.
+#[derive(Debug, Clone)]
+struct HidHeld {
+    bank: ChannelBank,
+    fresh_until: Instant,
+}
+
 /// The merged channel state the fixed-cadence transmitter reads each tick.
 /// Shared behind a mutex between the command socket (injection writer), the
 /// HID reader (hid writer), the heartbeat (PIC refresh + label read), and the
@@ -88,7 +126,7 @@ struct Injected {
 pub struct SourceMerge {
     mode: ChannelSourceMode,
     inject: Option<Injected>,
-    hid: Option<ChannelBank>,
+    hid: Option<HidHeld>,
     /// The PIC arbiter's latest report: `Some` for a fresh claimed/unclaimed
     /// view, `None` when the arbiter is not reporting (absent / stale sidecar).
     /// Starts `None` — before the first sidecar read the arbiter's verdict is
@@ -157,15 +195,31 @@ impl SourceMerge {
         Ok(())
     }
 
-    /// Update the HID source's latest channel set. HID values stay valid while
-    /// the device reader is alive (evdev is edge-triggered — a held stick
-    /// produces no events, so time-based expiry would be wrong here); the
-    /// reader clears the slot when the device goes away.
-    pub fn set_hid(&mut self, values: [u16; CHANNEL_COUNT]) -> Result<(), BankError> {
-        let mut bank = self.hid.take().unwrap_or_default();
+    /// Update the HID source's latest channel set and re-arm its freshness
+    /// deadline.
+    ///
+    /// The reader calls this on every evdev event AND on the
+    /// [`HID_LIVENESS_INTERVAL`] cadence while the device is still delivering,
+    /// so the deadline is an attestation that the device is producing — not a
+    /// guess about whether a stick is being held. Only a received event may
+    /// extend it: evdev is edge-triggered, so without that attestation a silent
+    /// device and a held stick are the same observation, and resolving the
+    /// ambiguity in the source's favour flies its last sample forever.
+    pub fn set_hid(&mut self, values: [u16; CHANNEL_COUNT], now: Instant) -> Result<(), BankError> {
+        let mut bank = match self.hid.take() {
+            Some(held) => held.bank,
+            None => ChannelBank::default(),
+        };
         bank.set_all(values)?;
-        self.hid = Some(bank);
+        self.hid = Some(HidHeld {
+            bank,
+            fresh_until: now + HID_STALE_AFTER,
+        });
         Ok(())
+    }
+
+    fn live_hid(&self, now: Instant) -> Option<&HidHeld> {
+        self.hid.as_ref().filter(|h| now < h.fresh_until)
     }
 
     /// Drop the HID source (device lost / reader exiting): its last stick must
@@ -203,8 +257,8 @@ impl SourceMerge {
                 Some(live) => (live.bank.values(), Some(ChannelSource::Inject)),
                 None => (ChannelBank::neutral(), None),
             },
-            Authority::Hid => match &self.hid {
-                Some(bank) => (bank.values(), Some(ChannelSource::Hid)),
+            Authority::Hid => match self.live_hid(now) {
+                Some(held) => (held.bank.values(), Some(ChannelSource::Hid)),
                 None => (ChannelBank::neutral(), None),
             },
         }
@@ -238,7 +292,7 @@ mod tests {
         merge
             .inject_all(injected, DEFAULT_INJECT_TTL, now, Some("ai".into()))
             .unwrap();
-        merge.set_hid(hid).unwrap();
+        merge.set_hid(hid, now).unwrap();
 
         // A fresh unclaimed report: the injection flies.
         merge.set_pic(Some(PicView::default()));
@@ -280,7 +334,7 @@ mod tests {
         // control, the injector still never wins.
         let mut hid = ChannelBank::neutral();
         hid[0] = CHANNEL_MAX;
-        merge.set_hid(hid).unwrap();
+        merge.set_hid(hid, now).unwrap();
         assert_eq!(merge.current(now), (hid, Some(ChannelSource::Hid)));
 
         // A FRESH unclaimed report finally arrives: only now may the
@@ -437,19 +491,48 @@ mod tests {
     // ── HID slot lifecycle ───────────────────────────────────────────────────
 
     #[test]
-    fn hid_values_hold_until_cleared() {
-        // evdev is edge-triggered: a held stick produces no events, so HID
-        // values persist while the reader lives and vanish when it clears.
+    fn a_silent_hid_source_stops_flying_instead_of_holding_its_last_stick() {
+        // The hazard: an evdev source that goes quiet WITHOUT erroring — a
+        // wireless pad out of range, a wedged driver, a starved reader task.
+        // The reader's only liveness signal was a read error, so the last
+        // NON-NEUTRAL stick kept being packed into every RC frame at the full
+        // transmit cadence for as long as the process lived.
         let mut merge = SourceMerge::new(ChannelSourceMode::Hid);
         let now = t0();
         let mut hid = ChannelBank::neutral();
         hid[0] = CHANNEL_MAX;
-        merge.set_hid(hid).unwrap();
+        merge.set_hid(hid, now).unwrap();
+
+        // Inside the window the stick flies: a live device that simply has not
+        // moved keeps its authority.
         assert_eq!(
-            merge.current(now + Duration::from_secs(3600)),
+            merge.current(now + HID_LIVENESS_INTERVAL),
             (hid, Some(ChannelSource::Hid))
         );
+        // Past it the lane fails over to the safe neutral set, with no
+        // fabricated source label.
+        assert_eq!(
+            merge.current(now + HID_STALE_AFTER),
+            (ChannelBank::neutral(), None)
+        );
+
+        // A refresh re-arms it: recovery needs no reopen, just a live device.
+        let later = now + HID_STALE_AFTER;
+        merge.set_hid(hid, later).unwrap();
+        assert_eq!(merge.current(later), (hid, Some(ChannelSource::Hid)));
+
+        // And an explicit clear still drops it immediately.
         merge.clear_hid();
-        assert_eq!(merge.current(now), (ChannelBank::neutral(), None));
+        assert_eq!(merge.current(later), (ChannelBank::neutral(), None));
+    }
+
+    #[test]
+    fn the_hid_deadline_is_a_small_multiple_of_the_refresh_cadence() {
+        // Load-bearing relation, not a restatement: a cadence at or past the
+        // deadline expires a live device's slot between its own refreshes, and
+        // a deadline far past the cadence is how long a dead stick keeps
+        // flying. Both faults are silent.
+        assert!(HID_LIVENESS_INTERVAL < HID_STALE_AFTER);
+        assert_eq!(HID_STALE_AFTER, HID_LIVENESS_INTERVAL * 3);
     }
 }

@@ -128,10 +128,13 @@ def _run_systemctl(args: list[str], timeout: float = 15.0) -> tuple[bool, str]:
         log.error("systemctl_timeout", args=args)
         return False, "timeout"
     except FileNotFoundError:
-        # systemctl is missing (unit test env). Treat as success so the
-        # function stays callable under pytest without mocking.
-        log.debug("systemctl_missing", args=args)
-        return True, ""
+        # No systemctl on PATH means the transition did not happen. Reporting
+        # success here made `apply_role` claim a role change on any box without
+        # systemd — the mask/unmask never ran, no unit moved, and the sentinel
+        # file said "relay" over a node still wired for "direct". A test
+        # environment gets the honest answer and mocks what it needs.
+        log.error("systemctl_missing", args=args)
+        return False, "systemctl not found"
 
 
 def _mask_unit(unit: str) -> None:

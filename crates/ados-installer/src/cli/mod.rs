@@ -3,7 +3,7 @@
 pub mod args;
 pub mod mode;
 
-pub use args::{Args, ParseError};
+pub use args::{display_value_error, Args, ParseError};
 pub use mode::RunMode;
 
 /// Usage text printed for `--help`. Mirrors the bash installer's flag surface.
@@ -45,7 +45,10 @@ OPTIONS:
                                        still comes from the release. Requires
                                        the edge channel; not combinable with
                                        --ref. Linux only.
-    --display <hint>                   Display hardware hint
+    --display <auto|none|id>           Display selection. `auto` (the ground-
+                                       station default) auto-detects a panel;
+                                       `none` opts out; an explicit id must be
+                                       one the detected board declares.
     --camera <hint>                    Camera hardware hint
     --wifi-ssid <ssid>                 Join this Wi-Fi network during a headless
                                        install (so the wired cable can be unplugged)

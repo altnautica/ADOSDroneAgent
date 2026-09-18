@@ -34,7 +34,7 @@ model_patterns:
   # /proc/device-tree/model on Rock 5C Lite hardware reports
   # "Radxa ROCK 5C " (no "Lite" suffix). Radxa uses the same DT for
   # both Rock 5C and Rock 5C Lite variants. Without the no-suffix
-  # pattern, detect.py's substring match falls back to generic-aarch64.
+  # pattern, detect.py's substring match falls back to generic-arm64.
   - "Radxa ROCK 5C Lite"
   - "Radxa Rock 5C Lite"
   - "Radxa ROCK 5C"
@@ -43,6 +43,22 @@ model_patterns:
   - "rock-5c"
   - "rk3582"
 default_tier: 4
+
+# The SAME device tree serves both SoC bins, so a pattern match cannot tell
+# them apart and nothing else could: a full ROCK 5C (RK3588S2, 4x A76 + 4x A55)
+# published this profile's `soc: RK3582` and a name ending in "Lite" into
+# /run/ados/board.json, /api/status and Mission Control. The core count is the
+# discriminator — the Lite is the binned part with 2 of the 4 A76 cores fused
+# off (6 online cores vs 8) — and it overrides only the two identity fields
+# that actually differ. Everything else (NPU, VPU, UARTs, header pinout,
+# displays) is shared: it is the same PCB, and GPU presence is runtime-probed
+# (/dev/mali0), never assumed from this file.
+variants:
+  - id: rock-5c
+    when:
+      cpu_cores: 8
+    name: "Radxa ROCK 5C (RK3588S2)"
+    soc: "RK3588S2"
 
 gpio_pins:
   - 3   # SDA

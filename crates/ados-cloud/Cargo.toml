@@ -54,6 +54,10 @@ anyhow = { workspace = true }
 tokio = { workspace = true }
 # Async methods on the transport trait, kept object-safe behind a Box<dyn>.
 async-trait = { workspace = true }
+# Non-poisoning mutex for the broker transport's subscription set: the guard is
+# never held across an await (the replay clones the set out first), and a
+# poisoned std lock there would silently disarm the reconnect replay.
+parking_lot = { workspace = true }
 
 # TLS stack: pure-Rust rustls with the RustCrypto crypto provider. This keeps
 # the cross-compile to aarch64-unknown-linux-musl free of any C toolchain

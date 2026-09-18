@@ -447,13 +447,14 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
             "/api/v1/ground-station/modem-status",
             get(gs_network::get_modem_status),
         )
-        // Ground-station reads (profile-gated): the mesh pairing snapshot, the PIC
-        // arbiter state, and the captive-portal token mint.
+        // Ground-station reads (profile-gated): the mesh pairing snapshot and the
+        // captive-portal token mint. The PIC arbiter READ sits with the PIC
+        // writes in `gs_pic`, which owns the arbiter's control socket.
         .route(
             "/api/v1/ground-station/pair/pending",
             get(gs_pairing::get_pair_pending),
         )
-        .route("/api/v1/ground-station/pic", get(gs_pairing::get_pic_state))
+        .route("/api/v1/ground-station/pic", get(gs_pic::get_pic_state))
         .route(
             "/api/v1/ground-station/captive-token",
             get(gs_pairing::get_captive_token),

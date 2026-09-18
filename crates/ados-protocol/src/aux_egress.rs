@@ -159,25 +159,86 @@ impl AuxEgress {
 
     /// One newline-JSON request/response round trip, bounded by the configured
     /// timeout.
-    async fn request(&self, op: &str) -> Result<serde_json::Value, AuxEgressError> {
+    async fn request_body(
+        &self,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, AuxEgressError> {
+        let line = format!("{body}\n");
         let work = async {
             let stream = UnixStream::connect(&self.cmd_sock)
                 .await
                 .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
             let (rx, mut tx) = stream.into_split();
-            tx.write_all(format!("{{\"op\":\"{op}\"}}\n").as_bytes())
+            tx.write_all(line.as_bytes())
                 .await
                 .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
-            let mut line = String::new();
+            let mut reply = String::new();
             BufReader::new(rx)
-                .read_line(&mut line)
+                .read_line(&mut reply)
                 .await
                 .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
-            serde_json::from_str(&line).map_err(|e| AuxEgressError::Unavailable(e.to_string()))
+            serde_json::from_str(&reply).map_err(|e| AuxEgressError::Unavailable(e.to_string()))
         };
         tokio::time::timeout(self.request_timeout, work)
             .await
             .map_err(|_| AuxEgressError::Unavailable("command socket timed out".into()))?
+    }
+
+    /// One bare `{"op": "<op>"}` round trip.
+    async fn request(&self, op: &str) -> Result<serde_json::Value, AuxEgressError> {
+        self.request_body(&serde_json::json!({"op": op})).await
+    }
+
+    /// Hand an inbound APPLICATION datagram to the radio service's app fan-out,
+    /// so a plugin subscribed to `radio-aux.sock` receives it.
+    ///
+    /// This is the INBOUND direction and deliberately does not touch the UDP
+    /// egress socket: the payload is not going on air, it is going to a local
+    /// subscriber. The radio service owns that fan-out because it owns the
+    /// socket plugins already subscribe to, so the decoded payload has to travel
+    /// back over the command socket rather than being re-radiated.
+    ///
+    /// `channel` must be one of the two reserved application channels; the radio
+    /// refuses anything else, so a mis-tagged frame cannot be injected into a
+    /// plugin's stream with framing it has no decoder for.
+    ///
+    /// Returns the number of attached subscribers that received it. **Zero is
+    /// not a failure** — it is the normal state of a node with no plugin
+    /// subscribed, and treating it as a drop makes a healthy lane report total
+    /// loss.
+    pub async fn publish_app(
+        &self,
+        channel: AuxChannel,
+        payload: &[u8],
+    ) -> Result<u64, AuxEgressError> {
+        if !matches!(channel, AuxChannel::AppStream | AuxChannel::AppCommand) {
+            return Err(AuxEgressError::Refused(format!(
+                "channel {} is not an application channel",
+                channel as u8
+            )));
+        }
+        let reply = self
+            .request_body(&serde_json::json!({
+                "op": "publish",
+                "channel": channel as u8,
+                "payload": payload,
+            }))
+            .await?;
+        if reply.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+            let err = reply
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unspecified");
+            return Err(if err == E_AUX_DISABLED {
+                AuxEgressError::Disabled
+            } else {
+                AuxEgressError::Refused(err.to_string())
+            });
+        }
+        Ok(reply
+            .get("delivered")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default())
     }
 
     /// Whether the radio reports the aux pair already up, without opening it.

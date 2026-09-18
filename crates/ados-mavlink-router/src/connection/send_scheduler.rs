@@ -106,6 +106,77 @@ impl ClientOrigin {
     }
 }
 
+/// Wall bound applied to every write to the flight controller.
+///
+/// No write may hold the writer mutex indefinitely. The mutex is the one choke
+/// point every FC-bound byte passes through, including the unconditional 1 Hz
+/// companion heartbeat, so a single unbounded write starves that heartbeat for
+/// as long as the kernel takes to drain it — at 57600 baud a 64 KB blob from an
+/// IPC client is roughly eleven seconds, long enough for the autopilot to trip
+/// its own GCS failsafe while every surface on this node still reads connected.
+const FC_WRITE_BUDGET: Duration = Duration::from_millis(500);
+
+/// Largest single write admitted to the flight-controller writer.
+///
+/// A MAVLink v2 frame is at most 280 bytes and the batching producers cap a
+/// concatenation at [`ados_protocol::aux_mux::AUX_MAX_PAYLOAD`] (1200), while
+/// the IPC MAVLink socket will hand over anything up to the 64 KB frame cap.
+/// Refusing an oversized blob BEFORE the lock is taken is strictly better than
+/// starting it and hitting [`FC_WRITE_BUDGET`] partway, which costs a link
+/// reconnect for one malformed client write. 4 KiB is comfortably above every
+/// legitimate producer and is ~0.7 s of wire time on the slowest supported
+/// link.
+const FC_MAX_SINGLE_WRITE: usize = 4096;
+
+/// How long the flight-controller TX byte counter may stay flat, on a link with
+/// a writer installed, before the writer is declared dead.
+///
+/// This is the delta-counter half of the liveness judgement, and it exists
+/// because "the writer mutex is held" and "the future has not returned" are
+/// necessary but never sufficient evidence that bytes are moving. The demand
+/// side needs no guessing: the 1 Hz companion heartbeat is unconditional
+/// whenever a writer exists, so a healthy link advances this counter at least
+/// once per second. Four seconds is four consecutive missed heartbeats — a
+/// margin no scheduling jitter explains — and is shorter than the autopilot's
+/// own GCS-failsafe windows, so the link is rebuilt before the vehicle reacts.
+const FC_TX_STALL: Duration = Duration::from_secs(4);
+
+/// The writer-liveness reference sample: the TX byte count last observed and
+/// when it last actually moved.
+#[derive(Debug)]
+pub(super) struct TxLiveness {
+    last_bytes: u64,
+    last_progress_at: Instant,
+}
+
+impl TxLiveness {
+    pub(super) fn new() -> Self {
+        Self {
+            last_bytes: 0,
+            last_progress_at: Instant::now(),
+        }
+    }
+
+    /// Re-arm the reference so the next window is judged from `at` onward. Used
+    /// when a fresh writer is installed or when nothing is expected to move.
+    fn rearm(&mut self, bytes: u64, at: Instant) {
+        self.last_bytes = bytes;
+        self.last_progress_at = at;
+    }
+}
+
+/// Whether the writer must be torn down: `bytes` has not advanced for at least
+/// `stall` since it last did. Advancing the counter re-arms the window.
+///
+/// Pure so the window itself is testable without a serial port.
+fn tx_is_stalled(bytes: u64, state: &mut TxLiveness, at: Instant, stall: Duration) -> bool {
+    if bytes != state.last_bytes {
+        state.rearm(bytes, at);
+        return false;
+    }
+    at.saturating_duration_since(state.last_progress_at) >= stall
+}
+
 impl FcConnection {
     pub(super) fn next_seq(&self) -> u8 {
         self.seq.fetch_add(1, Ordering::Relaxed)
@@ -120,31 +191,18 @@ impl FcConnection {
     }
 
     /// Write raw bytes to the FC (a client command). No-op when disconnected.
-    /// On a write/flush error the current writer is dropped and a reconnect is
-    /// signalled so the run loop tears the link down and re-opens it with a
-    /// fresh writer. The write path deliberately does NOT clear `connected`:
-    /// the run loop owns that lifecycle, so a transient write error during a
-    /// heavy parameter dump (with reads still flowing) recovers to a live link
-    /// rather than latching the FC permanently "disconnected".
+    ///
+    /// Bounded by [`FC_WRITE_BUDGET`], so no caller can hold the writer mutex —
+    /// and therefore block the companion heartbeat — for an unbounded time.
+    /// There is deliberately no unbounded write path left on this type.
     pub async fn send_bytes(&self, data: &[u8]) {
-        let mut guard = self.writer.lock().await;
-        if let Some(w) = guard.as_mut() {
-            match write_then_flush(w, data).await {
-                Ok(()) => {}
-                Err(e) => {
-                    *guard = None;
-                    drop(guard);
-                    tracing::warn!(error = %e, "fc_write_failed");
-                    self.reconnect.notify_one();
-                }
-            }
-        }
+        self.send_bytes_bounded(data, FC_WRITE_BUDGET).await;
     }
 
     /// Write raw bytes with a wall bound, treating a timeout as a broken link.
     ///
-    /// The bound has to be applied here, inside the writer lock, rather than by
-    /// wrapping [`Self::send_bytes`] at the call site. Cancelling that future
+    /// The bound is applied here, inside the writer lock, rather than by
+    /// wrapping this call in `tokio::time::timeout`. Cancelling the write future
     /// mid-flight is not free: `write_then_flush` may already have put an
     /// arbitrary prefix of the frame on the wire, and dropping it releases the
     /// lock with the stream in an unknown state. The next frame is then written
@@ -158,12 +216,30 @@ impl FcConnection {
     ///
     /// Returns whether the frame was written in full.
     pub async fn send_bytes_bounded(&self, data: &[u8], budget: Duration) -> bool {
+        // Refused before the lock is taken: an oversized blob must not get the
+        // chance to occupy the writer at all, and abandoning it partway would
+        // force a reconnect for what is one bad client write.
+        if data.len() > FC_MAX_SINGLE_WRITE {
+            tracing::warn!(
+                len = data.len(),
+                cap = FC_MAX_SINGLE_WRITE,
+                "fc_write_refused_oversize"
+            );
+            return false;
+        }
         let mut guard = self.writer.lock().await;
         let Some(w) = guard.as_mut() else {
             return false;
         };
         match tokio::time::timeout(budget, write_then_flush(w, data)).await {
-            Ok(Ok(())) => true,
+            Ok(Ok(())) => {
+                // The delta the TX watchdog reads. Bumped only on a completed
+                // write-and-flush, so the counter means bytes handed to the
+                // transport rather than bytes a caller offered.
+                self.tx_bytes
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
+                true
+            }
             Ok(Err(e)) => {
                 *guard = None;
                 drop(guard);
@@ -184,6 +260,57 @@ impl FcConnection {
                 false
             }
         }
+    }
+
+    /// Monotonic count of bytes this process has successfully written to the
+    /// flight controller since start. The quantity the TX watchdog takes deltas
+    /// of; also the honest answer to "is the host->FC direction moving".
+    pub fn tx_bytes(&self) -> u64 {
+        self.tx_bytes.load(Ordering::Relaxed)
+    }
+
+    /// One tick of the FC writer's TX-liveness watchdog. Call at ~1 Hz.
+    ///
+    /// A writer that exists and whose future has not returned is NOT evidence
+    /// that bytes are reaching the flight controller: a wedged USB CDC-ACM node
+    /// accepts writes into a driver buffer that never drains, and a caller
+    /// blocked forever on the writer mutex leaves every send path silently
+    /// stalled while the transport still reads open. This asserts the delta
+    /// instead — [`Self::tx_bytes`] must advance, which the unconditional 1 Hz
+    /// companion heartbeat guarantees on any live link — and tears the writer
+    /// down when it does not, so the run loop rebuilds the link.
+    pub async fn tick_tx_watchdog(&self) {
+        let now = Instant::now();
+        let bytes = self.tx_bytes.load(Ordering::Relaxed);
+
+        // Nothing is expected to move with no writer installed: the link is
+        // down, or this is the deliberately command-down-gated MAVLink-over-ELRS
+        // lane, which installs no writer by design. Re-arm so a writer that
+        // appears later is judged over a full window rather than inheriting a
+        // stale one.
+        if !self.transport_open() || self.writer.lock().await.is_none() {
+            self.tx_liveness.lock().await.rearm(bytes, now);
+            return;
+        }
+
+        let stalled = {
+            let mut state = self.tx_liveness.lock().await;
+            tx_is_stalled(bytes, &mut state, now, FC_TX_STALL)
+        };
+        if !stalled {
+            return;
+        }
+
+        *self.writer.lock().await = None;
+        tracing::warn!(
+            stall_ms = FC_TX_STALL.as_millis() as u64,
+            tx_bytes = bytes,
+            "fc_tx_stalled_reconnecting"
+        );
+        self.reconnect.notify_one();
+        // Re-arm so the replacement writer gets its own full window instead of
+        // being torn down again on the next tick.
+        self.tx_liveness.lock().await.rearm(bytes, now);
     }
 
     /// Write raw bytes toward the flight controller on behalf of a connected
@@ -241,6 +368,48 @@ impl FcConnection {
         caller: ClientOrigin,
         injector: Option<&ados_protocol::ipc::InjectorClaim>,
     ) {
+        self.send_client_bytes_with_budget(data, caller, injector, None)
+            .await;
+    }
+
+    /// [`Self::send_client_bytes`] with a wall bound on the local-FC write.
+    ///
+    /// For a caller on a loop that must not stall behind a wedged or
+    /// flow-controlled flight controller. The bound is applied INSIDE the writer
+    /// lock, by [`Self::send_bytes_bounded`] — the caller must not wrap this (or
+    /// the unbounded form) in `tokio::time::timeout`, because cancelling the
+    /// future can drop it after `write_all` has already put an arbitrary prefix
+    /// of the frame on the serial line, releasing the lock with the stream
+    /// desynchronised so the next frame is written onto that prefix. The flight
+    /// controller then reports a CRC failure that looks like line noise and gets
+    /// attributed to the radio rather than to us.
+    ///
+    /// Returns `false` when the frame did not reach the flight controller in
+    /// full (timed out, failed, or no writer and no aux uplink installed). A
+    /// timeout also drops the writer and asks for a reconnect.
+    ///
+    /// The aux-uplink fallback is unbounded because it is a `send_to` on a
+    /// loopback UDP socket, which does not block on a wedged FC.
+    pub async fn send_client_bytes_bounded(
+        &self,
+        data: &[u8],
+        caller: ClientOrigin,
+        injector: Option<&ados_protocol::ipc::InjectorClaim>,
+        budget: Duration,
+    ) -> bool {
+        self.send_client_bytes_with_budget(data, caller, injector, Some(budget))
+            .await
+    }
+
+    /// The shared body of the two public client-write entry points. `budget`
+    /// `None` is the unbounded write; `Some` bounds it inside the writer lock.
+    async fn send_client_bytes_with_budget(
+        &self,
+        data: &[u8],
+        caller: ClientOrigin,
+        injector: Option<&ados_protocol::ipc::InjectorClaim>,
+        budget: Option<Duration>,
+    ) -> bool {
         // PIC-arbiter gate. A writer that declared itself an autonomous injector
         // is refused whenever a human holds manual control (or the arbiter is not
         // reporting — fail closed). An undeclared writer (injector = None) is the
@@ -252,13 +421,22 @@ impl FcConnection {
                     len = data.len(),
                     "injector_command_refused_operator_holds_pic"
                 );
-                return;
+                return false;
             }
         }
         let has_writer = { self.writer.lock().await.is_some() };
         if has_writer {
-            self.send_bytes(data).await;
-            return;
+            return match budget {
+                // Bounded INSIDE the writer lock. This is the whole point of the
+                // budget: the caller cannot get the same effect by wrapping this
+                // future in a timeout, because cancelling it can leave a partial
+                // frame on the serial line.
+                Some(budget) => self.send_bytes_bounded(data, budget).await,
+                None => {
+                    self.send_bytes(data).await;
+                    true
+                }
+            };
         }
         if let Some(uplink) = self.aux_uplink.lock().await.as_ref() {
             // The amplifying case: no local vehicle, so these bytes leave over
@@ -273,7 +451,7 @@ impl FcConnection {
                             len = data.len(),
                             "relay_uplink_refused_unauthenticated_client"
                         );
-                        return;
+                        return false;
                     }
                     tracing::warn!(len = data.len(), "relay_uplink_from_unauthenticated_client");
                 }
@@ -293,7 +471,9 @@ impl FcConnection {
                 ClientOrigin::Trusted => {}
             }
             uplink.send(data);
+            return true;
         }
+        false
     }
 
     /// Write raw bytes toward an MSP flight controller on behalf of a client,

@@ -46,10 +46,13 @@ const REGISTRY_REFRESH: Duration = Duration::from_secs(10);
 
 /// The latest vehicle-state snapshot, with the instant it was RECEIVED.
 ///
-/// The timestamp is what makes the snapshot's age measurable at all. Without it
-/// the cell holds a value that looks identical whether the flight controller
-/// published it a moment ago or stopped publishing a minute ago, and the beacon
-/// loop reading that cell had no way to ask.
+/// The timestamp is what makes the snapshot's *arrival* age measurable. It is
+/// NOT the age of the position in it: the MAVLink router publishes on an
+/// unconditional cadence off `state.sock`, so `received` keeps advancing on a
+/// vehicle whose GPS has stopped while its heartbeat continues. The router
+/// therefore also publishes `position_age_ms` — how long since it last decoded a
+/// POSITION — and both ages have to clear the window before this node's body is
+/// broadcast.
 #[derive(Debug, Clone)]
 struct StateSnapshot {
     value: Value,
@@ -59,13 +62,49 @@ struct StateSnapshot {
 /// Shared latest vehicle-state snapshot.
 type SharedState = Arc<Mutex<Option<StateSnapshot>>>;
 
+/// Age of the FC's position fix as the producer reported it, or `None` when the
+/// snapshot does not state one.
+///
+/// Absence is NOT freshness. A snapshot with no `position_age_ms` is a producer
+/// that has never decoded a POSITION (the field is `null` until the first one),
+/// and the caller must treat that as unbroadcastable rather than as "no reason
+/// to worry" — the whole hazard here is a plausible-looking frozen fix.
+fn fix_age(snapshot: &StateSnapshot) -> Option<std::time::Duration> {
+    snapshot
+        .value
+        .get("position_age_ms")
+        .and_then(Value::as_u64)
+        .map(std::time::Duration::from_millis)
+}
+
 /// The snapshot body this node may broadcast as its own state, or `None` when
 /// there is none fresh enough to stand for it. Pure, so the window is testable
 /// without a socket or a radio.
+///
+/// Two independent ages must both clear [`OWN_STATE_STALE`], because they fail
+/// independently:
+///
+/// - **Arrival age** (`now - received`) catches the MAVLink router dying. This
+///   was the only gate, and it fires only when the router stops publishing
+///   altogether.
+/// - **Fix age** (`position_age_ms`) catches the far more likely partial stall:
+///   the FC keeps heartbeating, the router keeps publishing at its unconditional
+///   cadence, and the position inside the snapshot stops moving. On the old gate
+///   that node kept beaconing its last fix at 2 Hz with `ARMED|GUIDED|GPS_OK`
+///   set, and every neighbour dead-reckoned that frozen fix FORWARD at the
+///   frozen velocity — so a dead GPS did not read across the fleet as a node
+///   gone quiet, it read as a node still flying, on a track it had left behind.
 fn beacon_body(snapshot: Option<&StateSnapshot>, now: Instant) -> Option<&Value> {
-    snapshot
-        .filter(|s| now.saturating_duration_since(s.received) < OWN_STATE_STALE)
-        .map(|s| &s.value)
+    let snapshot = snapshot?;
+    if now.saturating_duration_since(snapshot.received) >= OWN_STATE_STALE {
+        return None;
+    }
+    // Fail closed on an unstated age: a producer that cannot say how old its fix
+    // is has not earned the fleet's trust in that fix.
+    if fix_age(snapshot)? >= OWN_STATE_STALE {
+        return None;
+    }
+    Some(&snapshot.value)
 }
 
 /// Run the service until `cancel` fires.
@@ -240,18 +279,28 @@ async fn transmit_loop(
         // Fresh jitter every transmission, not once at startup: a fleet powered up
         // together must not stay in lockstep.
         tokio::time::sleep(beacon_delay(random_word())).await;
-        // A snapshot older than the window is not broadcast as this node's
-        // state. Every receiving drone dead-reckons the position and velocity in
-        // a beacon FORWARD from the moment it arrives, so a frozen fix does not
-        // read across the fleet as a node gone quiet — it reads as a node still
-        // flying, on a track it left behind. Dropping the body (rather than the
-        // beacon) keeps this node visible on the bus with no position and no
-        // condition bits, which is exactly the reading a receiver needs: present,
-        // not locatable.
+        // A snapshot whose ARRIVAL or whose FC POSITION FIX is older than the
+        // window is not broadcast as this node's state. Every receiving drone
+        // dead-reckons the position and velocity in a beacon FORWARD from the
+        // moment it arrives, so a frozen fix does not read across the fleet as a
+        // node gone quiet — it reads as a node still flying, on a track it left
+        // behind. Dropping the body (rather than the beacon) keeps this node
+        // visible on the bus with no position and no condition bits, which is
+        // exactly the reading a receiver needs: present, not locatable.
         let held = state.lock().clone();
-        let body = beacon_body(held.as_ref(), Instant::now());
-        if held.is_some() && body.is_none() {
-            tracing::debug!("swarm_beacon_own_state_stale");
+        let now = Instant::now();
+        let body = beacon_body(held.as_ref(), now);
+        if let Some(snapshot) = held.as_ref() {
+            if body.is_none() {
+                // Which age tripped, because they mean different faults: a
+                // stalled router versus a live router publishing a dead fix.
+                tracing::debug!(
+                    arrival_age_ms =
+                        now.saturating_duration_since(snapshot.received).as_millis() as u64,
+                    fix_age_ms = fix_age(snapshot).map(|d| d.as_millis() as u64),
+                    "swarm_beacon_own_state_stale"
+                );
+            }
         }
         // Sender uptime, truncated to 16 bits. It wraps every 65.5 s, which is far
         // longer than the staleness window it feeds.
@@ -292,7 +341,7 @@ async fn publish_loop(
             guard.prune(now);
             neighbors_payload(cfg.fleet_id, &guard, &device_ids, now)
         };
-        publisher.broadcast(encode_line(&payload)).await;
+        publisher.broadcast(encode_line(&payload).into()).await;
     }
 }
 
@@ -450,6 +499,8 @@ mod tests {
                 "mode": "GUIDED",
                 "position": {"lat": 12.34, "lon": 56.78, "alt_rel": 40.0},
                 "velocity": {"vx": 8.0, "vy": 0.0, "vz": 0.0},
+                // A live fix: the router decoded a POSITION a moment ago.
+                "position_age_ms": 40,
             }),
             received: Instant::now(),
         };
@@ -479,12 +530,99 @@ mod tests {
         assert_eq!(stale.slot, 3, "the node is still on the bus");
     }
 
+    /// A node whose GPS has died but whose flight controller keeps heartbeating
+    /// must not keep radiating its last fix to the formation.
+    ///
+    /// This is the case the arrival-age gate cannot see: the MAVLink router is
+    /// alive and publishing on its unconditional cadence, so every snapshot
+    /// arrives a few milliseconds ago and looks perfectly fresh. Only the
+    /// producer-reported fix age distinguishes it — and a frozen fix is worse
+    /// than a missing one, because every receiving drone dead-reckons the
+    /// position and velocity in the beacon FORWARD at the frozen velocity.
+    #[test]
+    fn a_frozen_fix_under_a_live_producer_is_not_broadcast() {
+        use crate::beacon::{STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED};
+        use crate::vehicle::beacon_from_state;
+
+        let flying = serde_json::json!({
+            "armed": true,
+            "mode": "GUIDED",
+            "position": {"lat": 12.34, "lon": 56.78, "alt_rel": 40.0},
+            "velocity": {"vx": 8.0, "vy": 0.0, "vz": 0.0},
+            "gps": {"fix_type": 3},
+        });
+
+        // The producer is alive: this snapshot arrived just now. The ONLY
+        // difference between the two cases below is how old the FC's position
+        // fix is.
+        let live_fix = StateSnapshot {
+            value: {
+                let mut v = flying.clone();
+                v["position_age_ms"] = serde_json::json!(50);
+                v
+            },
+            received: Instant::now(),
+        };
+        let frozen_fix = StateSnapshot {
+            value: {
+                let mut v = flying.clone();
+                v["position_age_ms"] = serde_json::json!(OWN_STATE_STALE.as_millis() as u64 + 500);
+                v
+            },
+            received: Instant::now(),
+        };
+
+        let now = Instant::now();
+        let good = beacon_from_state(beacon_body(Some(&live_fix), now), 4, 0);
+        assert_ne!(good.lat, 0, "a live fix is broadcast");
+        assert_ne!(good.vx_cms, 0);
+        assert_eq!(good.status & STATUS_ARMED, STATUS_ARMED);
+        assert_eq!(good.status & STATUS_GUIDED, STATUS_GUIDED);
+        assert_eq!(good.status & STATUS_GPS_OK, STATUS_GPS_OK);
+
+        let suppressed = beacon_from_state(beacon_body(Some(&frozen_fix), now), 4, 0);
+        assert_eq!(suppressed.lat, 0, "a frozen fix must not be radiated");
+        assert_eq!(suppressed.lon, 0);
+        assert_eq!(
+            suppressed.vx_cms, 0,
+            "a velocity the neighbours dead-reckon forward is the actual hazard"
+        );
+        assert_eq!(
+            suppressed.status, 0,
+            "GPS_OK on a dead fix is the bit that makes a neighbour trust it"
+        );
+        assert_eq!(suppressed.slot, 4, "the node is still on the bus");
+    }
+
+    /// A producer that does not state a fix age has not earned the fleet's
+    /// trust in its position. Absence must fail CLOSED: reading it as "no
+    /// reason to worry" is exactly how a frozen fix gets radiated.
+    #[test]
+    fn a_snapshot_with_no_stated_fix_age_is_not_broadcast() {
+        let no_age = StateSnapshot {
+            value: serde_json::json!({
+                "armed": true,
+                "position": {"lat": 12.34, "lon": 56.78},
+            }),
+            received: Instant::now(),
+        };
+        assert!(beacon_body(Some(&no_age), Instant::now()).is_none());
+
+        // An explicit null (the producer has never decoded a POSITION) reads the
+        // same way, and must never read as age zero.
+        let never_fixed = StateSnapshot {
+            value: serde_json::json!({"armed": true, "position_age_ms": null}),
+            received: Instant::now(),
+        };
+        assert!(beacon_body(Some(&never_fixed), Instant::now()).is_none());
+    }
+
     /// The boundary is exclusive on the near side, matching the control loop's
     /// own reading of the same window.
     #[test]
     fn the_freshness_window_is_the_shared_one() {
         let held = StateSnapshot {
-            value: serde_json::json!({"armed": true}),
+            value: serde_json::json!({"armed": true, "position_age_ms": 0}),
             received: Instant::now(),
         };
         let just_inside = held.received + OWN_STATE_STALE - Duration::from_millis(1);
@@ -508,7 +646,11 @@ mod tests {
         let shared = spawn_state_reader(sock.to_string_lossy().into_owned(), cancel.clone());
 
         server
-            .broadcast(encode_v2(&serde_json::json!({"armed": true})).unwrap())
+            .broadcast(
+                encode_v2(&serde_json::json!({"armed": true}))
+                    .unwrap()
+                    .into(),
+            )
             .await;
         for _ in 0..100 {
             if shared.lock().is_some() {

@@ -15,6 +15,17 @@
 //! username inconsistency is preserved exactly from the Python source (the
 //! broker ACL pattern keys on the bare-id form for the gateway's own topic
 //! subtree).
+//!
+//! ## One ClientID per lane, never per device
+//!
+//! MQTT requires a broker to DISCONNECT the existing session when a second
+//! client presents the same ClientID, so every process/lane that dials the
+//! broker for one device must carry its own id: `ados-{id}` (MAVLink relay),
+//! `ados-{id}-msp` (MSP byte plane), `ados-{id}-atlas`, `ados-{id}-vision`,
+//! `ados-{id}-gw` (the Python telemetry gateway). Two lanes sharing an id do not
+//! degrade — they evict each other in a sub-second loop forever, which reads as
+//! a flapping `mqttConnected` with no cloud telemetry and no cloud command
+//! authority.
 
 pub mod gateway;
 pub mod mavlink_relay;
@@ -101,6 +112,16 @@ pub fn relay_username(device_id: &str) -> String {
     format!("ados-{device_id}")
 }
 
+/// The MSP byte-plane relay's MQTT ClientID: `ados-{device_id}-msp`.
+///
+/// Its own broker principal, distinct from the MAVLink relay's `ados-{device_id}`
+/// — see the ClientID rule in the module docs. The two relays run side by side
+/// on an MSP rig against the same broker, so sharing the id disconnected both in
+/// a permanent loop.
+pub fn msp_client_id(device_id: &str) -> String {
+    format!("ados-{device_id}-msp")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +144,25 @@ mod tests {
         // The gateway uses the bare device id; the relays prefix `ados-`.
         assert_eq!(gateway_username("dev1"), "dev1");
         assert_eq!(relay_username("dev1"), "ados-dev1");
+    }
+
+    #[test]
+    fn every_broker_lane_for_one_device_has_its_own_client_id() {
+        // A duplicate ClientID makes the broker evict the sibling session, so
+        // the lanes kick each other in a permanent loop rather than degrading.
+        // The MAVLink relay holds the bare `ados-{id}`; every other lane suffixes.
+        let ids = [
+            relay_username("dev1"),
+            msp_client_id("dev1"),
+            format!("ados-{}-atlas", "dev1"),
+            format!("ados-{}-vision", "dev1"),
+        ];
+        assert_eq!(msp_client_id("dev1"), "ados-dev1-msp");
+        let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "client ids must be distinct: {ids:?}"
+        );
     }
 }

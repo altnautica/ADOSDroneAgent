@@ -1,4 +1,4 @@
-"""Version + capability negotiation endpoint.
+"""Version + capability negotiation contract.
 
 The GCS calls /api/version on first connect to find out which agent
 features it can rely on. Capabilities are stable string flags; new
@@ -7,13 +7,15 @@ This avoids the GCS hitting a 404 on a feature endpoint when paired
 with an older agent, and lets a newer GCS keep working with an older
 agent (gracefully hides the unavailable surface) without releasing
 both repos in lockstep.
+
+`/api/version` itself is served natively by ``ados-control``. This module
+carries no router: it had an ``APIRouter()`` with no route on it, which the
+residual app still mounted — a registration that advertised a surface it did
+not serve. What remains is the cross-repo contract data, which
+``tests/test_api_version.py`` locks against the GCS's own frozen copy.
 """
 
 from __future__ import annotations
-
-from fastapi import APIRouter
-
-router = APIRouter()
 
 # Wire-protocol contract version. Bump when the request/response shape
 # of any /api/* endpoint changes in a way the GCS must adapt to. The
