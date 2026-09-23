@@ -164,7 +164,11 @@ fn err_response(request_id: &str, message: String) -> Envelope {
 fn handle_config_get<H: ConfigControl>(host: &H, req: &Envelope) -> Envelope {
     let method = METHOD_CONFIG_GET;
     let Some(plugin_id) = arg_str(&req.args, "plugin_id").filter(|s| !s.is_empty()) else {
-        return lifecycle_err(&req.request_id, method, "plugin_id must be a non-empty string".into());
+        return lifecycle_err(
+            &req.request_id,
+            method,
+            "plugin_id must be a non-empty string".into(),
+        );
     };
     match host.config_snapshot(plugin_id) {
         Ok(values) => Envelope {

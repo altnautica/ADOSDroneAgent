@@ -291,7 +291,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // MAVLink v2 signing: FC capability, the observational counters, and the
         // enroll/disable writes that push a key to the FC and clear its store.
         .route("/api/mavlink/signing/capability", get(signing::capability))
-                .route("/api/mavlink/signing/counters", get(signing::counters))
+        .route("/api/mavlink/signing/counters", get(signing::counters))
         .route(
             "/api/mavlink/signing/enroll-fc",
             post(signing_write::enroll_fc),

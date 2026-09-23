@@ -225,12 +225,6 @@ REGISTRY: list[RouteCase] = [
         method="GET",
         path="/api/mavlink/signing/capability",
     ),
-    # The current SIGNING_REQUIRE param value from the cached param blob. Stable.
-    RouteCase(
-        name="signing-require",
-        method="GET",
-        path="/api/mavlink/signing/require",
-    ),
     # The observational signed-frame counters. The last-signed timestamp moves
     # when an observer is present, so it is masked.
     RouteCase(
@@ -641,18 +635,6 @@ REGISTRY: list[RouteCase] = [
         method="POST",
         path="/api/mavlink/signing/disable-on-fc",
         paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
-        require_sandbox=True,
-    ),
-    # Toggle SIGNING_REQUIRE on the FC (PARAM_SET). A side effect, so sandboxed.
-    # The body is the {require} flag; the response echoes it in
-    # {"success": true, "require": <bool>}.
-    RouteCase(
-        name="signing-require-set",
-        method="PUT",
-        path="/api/mavlink/signing/require",
-        paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
-        body=b'{"require":true}',
-        content_type="application/json",
         require_sandbox=True,
     ),
     # Restart a single agent unit. A write with side effects, so it is sandboxed

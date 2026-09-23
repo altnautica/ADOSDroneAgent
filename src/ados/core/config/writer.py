@@ -131,13 +131,13 @@ def read_config_mapping(path: str | Path | None = None) -> dict[str, Any]:
 
 
 def _sync_markers(config_path: Path, previous: dict[str, Any], merged: dict[str, Any]) -> None:
-    """Keep the sidecar enable-markers true to the document just written.
+    """Keep the sidecar enable-markers and units true to the document just written.
 
     Three lanes mirror a config flag onto a ``/etc/ados`` marker plus a
     ``systemctl try-reload-or-restart``: CRSF, the config-over-radio tunnel and
-    the setup AP. Each no-ops unless its own slice changed. Best-effort by
-    contract — a marker or systemd hiccup never fails a write that has already
-    landed on disk.
+    the setup AP. A fourth starts or stops the remote-access tunnel unit. Each
+    no-ops unless its own slice changed. Best-effort by contract — a marker or
+    systemd hiccup never fails a write that has already landed on disk.
 
     Only runs for the node's canonical document. A staging or fixture path does
     not describe this node, so syncing this node's markers from it would be
@@ -153,6 +153,7 @@ def _sync_markers(config_path: Path, previous: dict[str, Any], merged: dict[str,
         ("ados.core.crsf_marker", "crsf"),
         ("ados.core.tunnel_marker", "tunnel"),
         ("ados.core.hotspot_marker", "hotspot"),
+        ("ados.core.remote_access_sync", "remote_access"),
     ):
         try:
             module = __import__(module_name, fromlist=["sync_after_config_write"])

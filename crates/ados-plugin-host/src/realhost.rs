@@ -3611,7 +3611,10 @@ impl crate::control::ConfigControl for RealHost {
             .expect("config mutex poisoned")
             .effective(plugin_id, &agent_id);
         Ok(Value::Map(
-            values.into_iter().map(|(k, v)| (Value::from(k), v)).collect(),
+            values
+                .into_iter()
+                .map(|(k, v)| (Value::from(k), v))
+                .collect(),
         ))
     }
 }
@@ -4634,17 +4637,24 @@ mod tests {
     fn config_snapshot_is_what_the_plugin_reads_on_this_drone() {
         use crate::control::ConfigControl;
         let host = RealHost::new().with_agent_id_lookup(Box::new(|_pid| "agent-1".to_string()));
-        host.apply_config_set("p", "mode", Value::from("global-mode"), "global").unwrap();
-        host.apply_config_set("p", "distance", Value::from(10), "global").unwrap();
-        host.apply_config_set("p", "distance", Value::from(25), "drone").unwrap();
-        host.apply_config_set("other", "distance", Value::from(99), "drone").unwrap();
+        host.apply_config_set("p", "mode", Value::from("global-mode"), "global")
+            .unwrap();
+        host.apply_config_set("p", "distance", Value::from(10), "global")
+            .unwrap();
+        host.apply_config_set("p", "distance", Value::from(25), "drone")
+            .unwrap();
+        host.apply_config_set("other", "distance", Value::from(99), "drone")
+            .unwrap();
 
         let snap = host.config_snapshot("p").unwrap();
         let snap = snap.as_map().expect("a map");
         // The drone's own value wins over the global one, a global-only key is
         // still there, and another plugin's config never appears.
         assert_eq!(field(snap, "distance").and_then(Value::as_i64), Some(25));
-        assert_eq!(field(snap, "mode").and_then(Value::as_str), Some("global-mode"));
+        assert_eq!(
+            field(snap, "mode").and_then(Value::as_str),
+            Some("global-mode")
+        );
         assert_eq!(snap.len(), 2);
     }
 

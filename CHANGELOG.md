@@ -4,6 +4,45 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.377] - 2026-09-23
+
+### Security
+
+- Plugins granted network access are kept off the agent's own loopback
+  services by an nftables rule matched on the plugin user. When the rule
+  cannot be loaded, network grants are refused and the verdict is reported as
+  `plugin_loopback_guard` in the full status. `nftables` is now a core
+  install package.
+- `GET /api/plugins/{plugin_id}/config` needs the `secret_read` MCP scope,
+  since a plugin's stored config can hold a credential.
+
+### Added
+
+- `GET /api/plugins/{plugin_id}/config` returns a plugin's effective per-drone
+  config (global keys with the drone's own keys over them) from the live
+  plugin host, so a GCS can hand a plugin's UI its current settings.
+- A plugin's `telemetry.extend` channels are written to its published state as
+  `telemetry.<channel>`, so the GCS can serve them to that plugin's UI.
+- The plugin host publishes vehicle and agent lifecycle events on the plugin
+  bus.
+- Changing `remote_access` settings starts or stops the tunnel unit.
+
+### Changed
+
+- The swarm controller re-reads its config block while running and applies a
+  changed formation, spacing or participation within a few seconds. An
+  engaged hard-separation latch is left alone.
+- Config writes go through one store.
+- The Wi-Fi client routes are served natively on every profile.
+- The per-plugin config store is bounded in value size, total size and key
+  count.
+
+### Removed
+
+- `GET`/`PUT /api/mavlink/signing/require`. No flight-controller firmware
+  exposes a require-signing parameter; ArduPilot rejects unsigned commands on
+  every non-USB link once it holds a key.
+
 ## [0.99.376] - 2026-09-23
 
 ### Security

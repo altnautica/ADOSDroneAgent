@@ -628,8 +628,9 @@ async fn main() {
     // through this router's own send path. `SwarmSetpointStatus` is the reverse
     // direction: the active precedence level and the emergency condition, which the
     // state snapshot below republishes for `ados-swarmbus` to fold into the beacon.
-    // Returns immediately when the swarm is disabled or no drone slot is assigned,
-    // so an operator who has not turned it on pays for no socket and no timer.
+    // While the swarm is disabled or no drone slot is assigned the loop holds no
+    // socket: it re-checks the config file every 2 s and starts (or stands down)
+    // when the `swarm:` block changes, so a settings write needs no restart.
     let swarm_status: Option<Arc<SwarmSetpointStatus>> = {
         let status = Arc::new(SwarmSetpointStatus::default());
         let fc = fc.clone();

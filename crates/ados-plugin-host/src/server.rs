@@ -1235,10 +1235,16 @@ impl<H: HostServices> Connection<H> {
     /// write fault is logged, never returned.
     fn record_extended_channel(&self, args: &Value) {
         let field = |key: &str| match args {
-            Value::Map(m) => m.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v),
+            Value::Map(m) => m
+                .iter()
+                .find(|(k, _)| k.as_str() == Some(key))
+                .map(|(_, v)| v),
             _ => None,
         };
-        let Some(channel) = field("channel").and_then(Value::as_str).filter(|c| !c.is_empty()) else {
+        let Some(channel) = field("channel")
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty())
+        else {
             return;
         };
         let payload = match field("payload") {
@@ -1246,9 +1252,13 @@ impl<H: HostServices> Connection<H> {
             _ => Value::Map(vec![]),
         };
         let topic = format!("telemetry.{channel}");
-        if let Err(e) =
-            crate::state_sidecar::record(&self.socket_dir, &self.plugin_id, &topic, &payload, now_ms())
-        {
+        if let Err(e) = crate::state_sidecar::record(
+            &self.socket_dir,
+            &self.plugin_id,
+            &topic,
+            &payload,
+            now_ms(),
+        ) {
             tracing::warn!(
                 plugin_id = %self.plugin_id,
                 topic = %topic,

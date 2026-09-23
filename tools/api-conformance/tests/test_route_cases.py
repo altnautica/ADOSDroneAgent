@@ -24,7 +24,6 @@ def test_registry_covers_the_migrated_routes():
         "params",
         "services",
         "signing-capability",
-        "signing-require",
         "signing-counters",
         "wfb",
         "wfb-history",

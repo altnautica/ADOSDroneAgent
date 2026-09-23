@@ -44,9 +44,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
-use ados_protocol::mavlink::ardupilotmega::{
-    MavMessage, SETUP_SIGNING_DATA,
-};
+use ados_protocol::mavlink::ardupilotmega::{MavMessage, SETUP_SIGNING_DATA};
 use ados_protocol::mavlink::{self, MavHeader};
 
 use crate::routes::detail;
