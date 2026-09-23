@@ -57,6 +57,11 @@ pub fn core_packages() -> &'static [&'static str] {
         "rfkill",
         "ethtool",
         "wireless-regdb",
+        // The plugin host loads an nftables rule at startup that keeps a
+        // network-capable plugin off the agent's own loopback listeners.
+        // Without `nft` that rule cannot load and every `network.outbound`
+        // grant is refused.
+        "nftables",
     ]
 }
 

@@ -220,7 +220,11 @@ fn table_from_the_air(now: Instant) -> (NeighborTable, [String; 2]) {
 
 /// The whole chain: peer bytes on the air become the JSON the operator's fleet view
 /// reads, over a real socket and a real HTTP request.
-#[tokio::test]
+///
+/// Multi-threaded like the daemon's own runtime: `/api/status/full` does blocking
+/// host reads inline, and on a single-threaded test runtime those also freeze the
+/// swarm reader, so a loaded run ages the held table past its stale bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
     let dir = tempfile::tempdir().unwrap();
     let swarm_sock = dir.path().join("swarm.sock");

@@ -144,10 +144,14 @@ fn log_path_for(plugin_id: &str) -> String {
 /// would split an `ExecStart` argument and a newline or other control character
 /// would start a new directive (an `ExecStartPre=+...` runs as root). A value
 /// that is not is refused, never escaped into a unit systemd would still run.
+///
+/// `loopback_guard_active` is the [`crate::loopback_guard`] verdict; without
+/// it a `network.outbound` grant renders the no-grant socket policy.
 pub fn render_unit(
     manifest: &PluginManifest,
     install_dir: &Path,
     granted: &BTreeSet<String>,
+    loopback_guard_active: bool,
 ) -> Result<Option<String>, SupervisorError> {
     let Some(agent) = manifest.agent.as_ref() else {
         return Ok(None);
@@ -187,7 +191,7 @@ pub fn render_unit(
     // The capability-backed half of the sandbox. Everything above the marker is
     // fixed hardening; these lines change with the operator's grants, which is
     // why a grant or revoke re-renders the unit.
-    let sandbox = sandbox_directives(granted).join("\n");
+    let sandbox = sandbox_directives(granted, loopback_guard_active).join("\n");
     Ok(Some(format!(
         "\
 [Unit]
@@ -305,6 +309,7 @@ mod tests {
             &subprocess_manifest(),
             Path::new("/var/ados/plugins"),
             &BTreeSet::new(),
+            false,
         )
         .unwrap()
         .unwrap();
@@ -340,7 +345,7 @@ mod tests {
             "id: com.example.rustplug\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: agent/bin/com.example.rustplug\n  runtime: rust\n  resources:\n    max_ram_mb: 64\n    max_cpu_percent: 30\n    max_pids: 8\n",
         )
         .unwrap();
-        let unit = render_unit(&m, Path::new("/var/ados/plugins"), &BTreeSet::new())
+        let unit = render_unit(&m, Path::new("/var/ados/plugins"), &BTreeSet::new(), false)
             .unwrap()
             .unwrap();
         // ExecStart points at the unpacked plugin binary, the plugin id as the
@@ -380,21 +385,27 @@ mod tests {
             "id: com.altnautica.builtin\nversion: 0.1.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: pkg:Class\n  isolation: inprocess\n",
         )
         .unwrap();
-        assert!(
-            render_unit(&inproc, Path::new("/var/ados/plugins"), &BTreeSet::new())
-                .unwrap()
-                .is_none()
-        );
+        assert!(render_unit(
+            &inproc,
+            Path::new("/var/ados/plugins"),
+            &BTreeSet::new(),
+            false
+        )
+        .unwrap()
+        .is_none());
 
         let gcs_only = PluginManifest::from_yaml_text(
             "id: com.example.panel\nversion: 0.1.0\ncompatibility:\n  ados_version: \">=0.1.0\"\ngcs:\n  entrypoint: gcs/dist/index.js\n",
         )
         .unwrap();
-        assert!(
-            render_unit(&gcs_only, Path::new("/var/ados/plugins"), &BTreeSet::new())
-                .unwrap()
-                .is_none()
-        );
+        assert!(render_unit(
+            &gcs_only,
+            Path::new("/var/ados/plugins"),
+            &BTreeSet::new(),
+            false
+        )
+        .unwrap()
+        .is_none());
     }
 
     /// A manifest deserialized without the parser's validation, as one would be
@@ -424,15 +435,21 @@ mod tests {
             ("com.example.x y", "bin/x"),
         ] {
             let m = unvalidated_rust_manifest(id, entrypoint);
-            let err = render_unit(&m, install_dir, &BTreeSet::new())
+            let err = render_unit(&m, install_dir, &BTreeSet::new(), false)
                 .expect_err(&format!("{id:?} / {entrypoint:?} must be refused"));
             assert!(err.0.contains("refusing to render"), "{}", err.0);
         }
         // An install dir with whitespace is refused on the rust ExecStart too.
         let m = unvalidated_rust_manifest("com.example.x", "bin/x");
-        assert!(render_unit(&m, Path::new("/var/ados/my plugins"), &BTreeSet::new()).is_err());
+        assert!(render_unit(
+            &m,
+            Path::new("/var/ados/my plugins"),
+            &BTreeSet::new(),
+            false
+        )
+        .is_err());
         // The same manifest renders under a clean install dir.
-        assert!(render_unit(&m, install_dir, &BTreeSet::new())
+        assert!(render_unit(&m, install_dir, &BTreeSet::new(), false)
             .unwrap()
             .is_some());
     }

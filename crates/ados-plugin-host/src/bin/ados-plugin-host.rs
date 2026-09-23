@@ -34,6 +34,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinHandle;
 
 use ados_plugin_host::frame_link::{Declarations, FrameLink};
+use ados_plugin_host::loopback_guard;
 use ados_plugin_host::manifest::PluginManifest;
 use ados_plugin_host::realhost::RealHost;
 use ados_plugin_host::reconcile::PluginReconciler;
@@ -189,6 +190,8 @@ struct WiredDaemon<H: ados_plugin_host::HostServices> {
     control: Option<(PathBuf, JoinHandle<()>)>,
     /// The state-poll and token-rotation loops.
     loops: (JoinHandle<()>, JoinHandle<()>),
+    /// The plugin event bus the host publishes its own lifecycle topics on.
+    bus: Arc<EventBus>,
 }
 
 impl<H: ados_plugin_host::HostServices> WiredDaemon<H> {
@@ -196,6 +199,11 @@ impl<H: ados_plugin_host::HostServices> WiredDaemon<H> {
     /// connections stop immediately; an in-flight connection's
     /// `release_plugin` already runs on disconnect.
     fn shutdown(self) {
+        ados_plugin_host::vehicle_events::publish_host_event(
+            &self.bus,
+            ados_plugin_host::vehicle_events::TOPIC_AGENT_SHUTDOWN,
+            rmpv::Value::Map(vec![]),
+        );
         self.loops.0.abort();
         self.loops.1.abort();
         self.reconciler.shutdown();
@@ -273,7 +281,7 @@ fn parse_injector_arbitration(yaml: &str) -> bool {
 /// The MAVLink and MSP links are always wired. Each reconnects on its own, so a
 /// router that is not up yet (or restarts later) heals without a host restart;
 /// until it is up a send answers `sent: false` with reason `disconnected`.
-async fn build_host(install_dir: PathBuf, run_dir: PathBuf) -> Arc<RealHost> {
+async fn build_host(install_dir: PathBuf, run_dir: PathBuf, bus: &Arc<EventBus>) -> Arc<RealHost> {
     let mut host = RealHost::new();
 
     // Injector arbitration (default off). When armed, the MAVLink + MSP links
@@ -305,11 +313,15 @@ async fn build_host(install_dir: PathBuf, run_dir: PathBuf) -> Arc<RealHost> {
 
     // (a) MAVLink and MSP router links. MSP carries raw bytes for a Betaflight /
     //     iNav FC; on a node with no MSP FC its link simply stays disconnected.
+    let mavlink = Arc::new(FrameLink::spawn(
+        run_dir.join("mavlink.sock"),
+        declarations(),
+    ));
+    // The host is the only publisher of the public vehicle topics; it derives
+    // them from the flight controller's own frames on the router link.
+    ados_plugin_host::vehicle_events::spawn_vehicle_events(Arc::clone(bus), mavlink.subscribe());
     host = host
-        .with_mavlink(Arc::new(FrameLink::spawn(
-            run_dir.join("mavlink.sock"),
-            declarations(),
-        )))
+        .with_mavlink(mavlink)
         .with_msp(Arc::new(FrameLink::spawn(
             run_dir.join("msp.sock"),
             declarations(),
@@ -428,7 +440,7 @@ async fn wire(
         }
     });
     let bus = Arc::new(EventBus::new());
-    let host = build_host(install_dir.clone(), run_dir).await;
+    let host = build_host(install_dir.clone(), run_dir, &bus).await;
 
     // The paired device id scopes each plugin's per-drone data dir, written into
     // the runner's env file by the mint. Empty on an unpaired node (node scope).
@@ -446,7 +458,7 @@ async fn wire(
     // socket. The mint rides on the server so a request arriving on an aged-out
     // token is answered with a re-mint instead of `token_expired`.
     let server = Arc::new(
-        PluginIpcServer::new(&socket_dir, issuer.clone(), bus, host.clone())
+        PluginIpcServer::new(&socket_dir, issuer.clone(), Arc::clone(&bus), host.clone())
             .with_token_mint(mint.clone()),
     );
 
@@ -502,6 +514,7 @@ async fn wire(
         issuer,
         control,
         loops,
+        bus,
     }
 }
 
@@ -532,6 +545,20 @@ async fn main() -> Result<()> {
         "plugin host daemon starting"
     );
 
+    // Load the loopback guard before any plugin starts. Its verdict gates the
+    // `network.outbound` grant and the rendered sandbox of every unit, so the
+    // units are refreshed against it right after discovery.
+    let guard_state_path = paths.loopback_guard_state.clone();
+    let ws_port = std::fs::read_to_string(config_yaml_path())
+        .map(|y| loopback_guard::configured_ws_port(&y))
+        .unwrap_or(loopback_guard::DEFAULT_MAVLINK_WS_PORT);
+    let ruleset = loopback_guard::render_ruleset(
+        &loopback_guard::tcp_ports(ws_port),
+        loopback_guard::AGENT_UDP_PORTS,
+    );
+    tokio::task::spawn_blocking(move || loopback_guard::install(&ruleset, &guard_state_path))
+        .await?;
+
     // The lifecycle controller refuses to grant a capability the default Rust
     // host cannot back (its host method returns not_implemented regardless of
     // wiring) so an operator never hands out a capability that can only error at
@@ -545,6 +572,7 @@ async fn main() -> Result<()> {
     if let Err(e) = supervisor.discover() {
         tracing::error!(error = %e, "plugin discovery failed");
     }
+    supervisor.refresh_all_units();
     // Discovery's job here is the state reconciliation + tamper filter it runs
     // as a side effect; the reconciler reads state itself from now on.
     drop(supervisor);
@@ -569,6 +597,11 @@ async fn main() -> Result<()> {
     );
 
     sd_ready();
+    ados_plugin_host::vehicle_events::publish_host_event(
+        &daemon.bus,
+        ados_plugin_host::vehicle_events::TOPIC_AGENT_READY,
+        rmpv::Value::Map(vec![]),
+    );
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -606,6 +639,7 @@ mod tests {
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
+            loopback_guard_state: dir.join("plugin-loopback-guard.json"),
         }
     }
 
@@ -771,7 +805,12 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(plugin_dir.join("manifest.yaml"), SUBPROC_MANIFEST).unwrap();
 
-        let host = build_host(install_dir, dir.path().join("run")).await;
+        let host = build_host(
+            install_dir,
+            dir.path().join("run"),
+            &Arc::new(EventBus::new()),
+        )
+        .await;
 
         use ados_plugin_host::HostServices;
         let hit = Value::Map(vec![(Value::from("basename"), Value::from("ffmpeg"))]);
@@ -814,7 +853,7 @@ mod tests {
             );
             let manifest =
                 ados_plugin_host::PluginManifest::from_yaml_text(&manifest_yaml).expect("manifest");
-            let unit = render_unit(&manifest, dir.path(), &BTreeSet::new())
+            let unit = render_unit(&manifest, dir.path(), &BTreeSet::new(), false)
                 .expect("render")
                 .expect("unit");
             // Both runtimes deliver the token via the same env file + static

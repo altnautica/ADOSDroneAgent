@@ -39,6 +39,7 @@ fn paths_in(dir: &Path) -> Paths {
         state_path: dir.join("state/plugin-state.json"),
         log_dir: dir.join("logs"),
         control_dir: dir.join("plugin-host"),
+        loopback_guard_state: dir.join("plugin-loopback-guard.json"),
     }
 }
 

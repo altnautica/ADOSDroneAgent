@@ -409,6 +409,16 @@ pub const CONFIG_VALUE_MAX_BYTES: usize = 64 * 1024;
 /// its encoded value.
 pub const CONFIG_PLUGIN_MAX_BYTES: usize = 1024 * 1024;
 
+/// Most keys a plugin's config may hold across both scopes. Bounds the
+/// per-write accounting and the persisted record count, which the byte cap
+/// alone does not when keys are tiny.
+pub const CONFIG_PLUGIN_MAX_KEYS: usize = 256;
+
+/// Largest persisted config file the host will load. A file past it was not
+/// written under the caps above; loading it would put an attacker-sized
+/// document in memory at every start, so the host starts empty instead.
+pub const CONFIG_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 /// The msgpack size of `value`. An unencodable value counts as unbounded so the
 /// caps refuse it.
 fn encoded_len(value: &Value) -> usize {
@@ -425,6 +435,17 @@ impl ConfigStore {
             persist_path: Some(path.clone()),
             ..ConfigStore::default()
         };
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.len() > CONFIG_FILE_MAX_BYTES => {
+                tracing::error!(
+                    path = %path.display(),
+                    bytes = meta.len(),
+                    "plugin config file over the size cap; starting empty"
+                );
+                return store;
+            }
+            _ => {}
+        }
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(records) = serde_json::from_str::<Vec<ConfigRecord>>(&text) {
                 for r in records {
@@ -492,8 +513,13 @@ impl ConfigStore {
         } else {
             self.global.get(&global_key)
         }
-        .map(|old| key.len() + encoded_len(old))
-        .unwrap_or(0);
+        .map(|old| key.len() + encoded_len(old));
+        if replaced.is_none() && self.plugin_keys(plugin_id) >= CONFIG_PLUGIN_MAX_KEYS {
+            return Err(format!(
+                "config for {plugin_id} already holds {CONFIG_PLUGIN_MAX_KEYS} keys"
+            ));
+        }
+        let replaced = replaced.unwrap_or(0);
         let total = self.plugin_bytes(plugin_id) - replaced + key.len() + size;
         if total > CONFIG_PLUGIN_MAX_BYTES {
             return Err(format!(
@@ -508,6 +534,12 @@ impl ConfigStore {
         }
         self.persist();
         Ok(())
+    }
+
+    /// Keys `plugin_id` holds across both scopes.
+    fn plugin_keys(&self, plugin_id: &str) -> usize {
+        self.drone.keys().filter(|(p, _, _)| p == plugin_id).count()
+            + self.global.keys().filter(|(p, _)| p == plugin_id).count()
     }
 
     /// Bytes `plugin_id` holds across both scopes: every key plus its encoded
@@ -4196,6 +4228,39 @@ mod tests {
         ok_map(set("p", "k0"));
         // Another plugin has its own budget.
         ok_map(set("q", "k0"));
+    }
+
+    #[test]
+    fn config_set_caps_the_key_count_per_plugin() {
+        let host = RealHost::new();
+        let set = |plugin: &str, key: &str| {
+            host.config_set(
+                plugin,
+                &map(&[("key", Value::from(key)), ("value", Value::from(1))]),
+            )
+        };
+        for i in 0..CONFIG_PLUGIN_MAX_KEYS {
+            ok_map(set("p", &format!("k{i}")));
+        }
+        let err = err_body(set("p", "one-more"));
+        assert!(err.contains("keys"), "{err}");
+        // Rewriting a held key is not a new key.
+        ok_map(set("p", "k0"));
+        ok_map(set("q", "k0"));
+    }
+
+    #[test]
+    fn an_oversized_persisted_config_is_not_loaded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-config.json");
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(CONFIG_FILE_MAX_BYTES + 1).unwrap();
+        let host = RealHost::new().with_config_persistence(path);
+        let got = ok_map(host.config_get(
+            "p",
+            &map(&[("key", Value::from("k")), ("default", Value::from("none"))]),
+        ));
+        assert_eq!(field(&got, "value"), Some(&Value::from("none")));
     }
 
     #[test]

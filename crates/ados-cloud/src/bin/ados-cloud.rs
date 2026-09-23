@@ -995,6 +995,7 @@ mod tests {
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
+            loopback_guard_state: dir.join("plugin-loopback-guard.json"),
         };
         Arc::new(Mutex::new(PluginSupervisor::new(
             paths, false, None, "1.0.0",
@@ -1024,6 +1025,7 @@ mod tests {
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
+            loopback_guard_state: dir.join("plugin-loopback-guard.json"),
         };
         let sup = PluginSupervisor::production(paths, None, env!("CARGO_PKG_VERSION"))
             .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());

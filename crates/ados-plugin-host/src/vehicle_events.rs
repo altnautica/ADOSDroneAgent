@@ -121,7 +121,10 @@ impl VehicleEventDeriver {
                     out.push((
                         "vehicle.geofence_breach",
                         Value::Map(vec![
-                            (Value::from("breach_type"), Value::from(f.breach_type as i64)),
+                            (
+                                Value::from("breach_type"),
+                                Value::from(f.breach_type as i64),
+                            ),
                             (Value::from("breach_count"), Value::from(f.breach_count)),
                         ]),
                     ));
@@ -178,7 +181,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use ados_protocol::mavlink::ardupilotmega::{
-        FENCE_STATUS_DATA, HEARTBEAT_DATA, MavType, SYS_STATUS_DATA,
+        MavType, FENCE_STATUS_DATA, HEARTBEAT_DATA, SYS_STATUS_DATA,
     };
     use ados_protocol::mavlink::Message;
 
@@ -218,7 +221,10 @@ mod tests {
                 (Value::from("custom_mode"), Value::from(6u32)),
             ])
         );
-        assert_eq!(topics(d.observe(&heartbeat(false, 6))), ["vehicle.disarmed"]);
+        assert_eq!(
+            topics(d.observe(&heartbeat(false, 6))),
+            ["vehicle.disarmed"]
+        );
     }
 
     #[test]
@@ -274,8 +280,7 @@ mod tests {
     #[test]
     fn a_fence_breach_publishes_on_entry_including_the_first_report() {
         let fence = |status: u8| {
-            let MavMessage::FENCE_STATUS(mut f) =
-                MavMessage::default_message_from_id(162).unwrap()
+            let MavMessage::FENCE_STATUS(mut f) = MavMessage::default_message_from_id(162).unwrap()
             else {
                 unreachable!()
             };
@@ -285,16 +290,10 @@ mod tests {
             MavMessage::FENCE_STATUS(f)
         };
         let mut d = VehicleEventDeriver::default();
-        assert_eq!(
-            topics(d.observe(&fence(1))),
-            ["vehicle.geofence_breach"]
-        );
+        assert_eq!(topics(d.observe(&fence(1))), ["vehicle.geofence_breach"]);
         assert!(d.observe(&fence(1)).is_empty());
         assert!(d.observe(&fence(0)).is_empty());
-        assert_eq!(
-            topics(d.observe(&fence(1))),
-            ["vehicle.geofence_breach"]
-        );
+        assert_eq!(topics(d.observe(&fence(1))), ["vehicle.geofence_breach"]);
     }
 
     #[tokio::test]

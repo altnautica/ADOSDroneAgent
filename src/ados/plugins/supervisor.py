@@ -88,6 +88,8 @@ from ados.plugins.state import (
     upsert_install,
 )
 from ados.plugins.systemd import (
+    NETWORK_OUTBOUND_CAP,
+    plugin_loopback_guard_active,
     probe_command,
     render_service_unit,
     render_unit,
@@ -348,6 +350,17 @@ class PluginSupervisor:
             if permission_id not in manifest.declared_permissions():
                 raise SupervisorError(
                     f"plugin {plugin_id} did not declare permission {permission_id}"
+                )
+            # Network access is only safe to hold while the plugin host's
+            # loopback guard keeps the plugin off the agent's own listeners.
+            if (
+                permission_id == NETWORK_OUTBOUND_CAP
+                and not plugin_loopback_guard_active()
+            ):
+                raise SupervisorError(
+                    f"plugin {plugin_id}: {permission_id} refused: the plugin "
+                    "loopback guard is unavailable, so a network-capable plugin "
+                    "could reach the agent's own loopback services"
                 )
             grant_permission(install, permission_id)
             save_state(self._installs)

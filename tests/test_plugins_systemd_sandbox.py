@@ -25,6 +25,11 @@ two-language edit.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
+import ados.plugins.systemd as systemd_mod
 from ados.plugins.manifest import PluginManifest
 from ados.plugins.systemd import (
     DEVICE_CAP_RULES,
@@ -60,7 +65,7 @@ def _manifest() -> PluginManifest:
 
 
 def test_no_grant_gives_a_private_dev_and_no_outbound_sockets() -> None:
-    lines = sandbox_directives([])
+    lines = sandbox_directives([], True)
     assert "PrivateDevices=yes" in lines
     assert "RestrictAddressFamilies=AF_UNIX" in lines
     assert "IPAddressDeny=any" in lines
@@ -68,7 +73,7 @@ def test_no_grant_gives_a_private_dev_and_no_outbound_sockets() -> None:
 
 
 def test_granting_i2c_does_not_also_open_the_camera() -> None:
-    lines = sandbox_directives(["hardware.i2c"])
+    lines = sandbox_directives(["hardware.i2c"], True)
     assert "DevicePolicy=closed" in lines
     assert "DeviceAllow=char-i2c rw" in lines
     # The narrowness is the point: a plugin approved for the I2C bus must not
@@ -79,22 +84,42 @@ def test_granting_i2c_does_not_also_open_the_camera() -> None:
     assert "PrivateDevices=yes" not in lines
 
 
-def test_network_grant_flips_the_address_family_filter_but_keeps_loopback_closed() -> None:
-    """Restated as the literal ``ados-plugin-host/src/sandbox.rs`` also pins.
+def test_network_grant_opens_the_inet_families_when_the_loopback_guard_is_active() -> None:
+    """Restated as the literals ``ados-plugin-host/src/sandbox.rs`` also pins.
 
-    A granted plugin reaches the network but not the agent's loopback
-    listeners, which trust a loopback peer as on-box.
+    No systemd address filter: it would also cut ingress to the plugin's own
+    listener. The plugin host's nftables guard closes the agent ports instead.
     """
-    lines = sandbox_directives(["network.outbound"])
+    lines = sandbox_directives(["network.outbound"], True)
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK" in lines
-    assert "IPAddressDeny=any" not in lines
-    assert "IPAddressDeny=localhost" in lines
+    assert not [line for line in lines if line.startswith("IPAddressDeny=")]
     assert not [line for line in lines if line.startswith("IPAddressAllow=")]
 
 
+def test_network_grant_without_the_loopback_guard_keeps_the_no_grant_socket_policy() -> None:
+    lines = sandbox_directives(["network.outbound"], False)
+    assert "RestrictAddressFamilies=AF_UNIX" in lines
+    assert "IPAddressDeny=any" in lines
+    assert lines == sandbox_directives([], False)
+
+
+def test_the_guard_verdict_is_read_from_the_plugin_host_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sidecar = tmp_path / "plugin-loopback-guard.json"
+    monkeypatch.setattr(systemd_mod, "PLUGIN_LOOPBACK_GUARD_JSON", sidecar)
+    assert systemd_mod.plugin_loopback_guard_active() is False
+    sidecar.write_text("not json")
+    assert systemd_mod.plugin_loopback_guard_active() is False
+    sidecar.write_text('{"active": false, "reason": "nft missing"}')
+    assert systemd_mod.plugin_loopback_guard_active() is False
+    sidecar.write_text('{"active": true, "reason": ""}')
+    assert systemd_mod.plugin_loopback_guard_active() is True
+
+
 def test_filesystem_grant_moves_the_data_roots_from_blocked_to_writable() -> None:
-    without = sandbox_directives([])
-    with_grant = sandbox_directives(["filesystem.host"])
+    without = sandbox_directives([], True)
+    with_grant = sandbox_directives(["filesystem.host"], True)
     rw_without = next(line for line in without if line.startswith("ReadWritePaths="))
     rw_with = next(line for line in with_grant if line.startswith("ReadWritePaths="))
     assert "/mnt" not in rw_without
@@ -110,12 +135,16 @@ def test_filesystem_grant_moves_the_data_roots_from_blocked_to_writable() -> Non
     assert "-/etc/ados/secrets" in inacc_with
 
 
-def test_every_sandbox_capability_changes_the_rendered_unit() -> None:
+def test_every_sandbox_capability_changes_the_rendered_unit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The load-bearing assertion behind the ``enforced = true`` rows.
 
     A capability that renders identically granted and ungranted is decorative
-    again, with a catalog flag vouching for it.
+    again, with a catalog flag vouching for it. Rendered with the loopback
+    guard loaded, the only posture in which ``network.outbound`` is grantable.
     """
+    monkeypatch.setattr(systemd_mod, "plugin_loopback_guard_active", lambda: True)
     baseline = render_unit(_manifest(), _INSTALL_DIR, ())
     for cap in sorted(sandbox_enforced_caps()):
         granted = render_unit(_manifest(), _INSTALL_DIR, [cap])
@@ -148,7 +177,7 @@ def test_the_same_grant_set_renders_identically() -> None:
 
 
 def test_uvc_and_csi_together_emit_one_video4linux_rule() -> None:
-    lines = sandbox_directives(["hardware.usb.uvc", "hardware.camera.csi"])
+    lines = sandbox_directives(["hardware.usb.uvc", "hardware.camera.csi"], True)
     assert lines.count("DeviceAllow=char-video4linux rw") == 1
     assert "DeviceAllow=char-dri rw" in lines
 
@@ -191,10 +220,10 @@ def test_agent_command_sockets_are_hidden_like_the_rust_renderer() -> None:
         "-/run/ados/atlas-control.sock -/run/ados/pairing.sock "
         "-/run/ados/logd-query.sock -/srv -/mnt -/media -/boot"
     )
-    lines = sandbox_directives([])
+    lines = sandbox_directives([], True)
     assert next(line for line in lines if line.startswith("InaccessiblePaths=")) == expected
 
-    everything = sandbox_directives(sandbox_enforced_caps())
+    everything = sandbox_directives(sandbox_enforced_caps(), True)
     hidden = next(line for line in everything if line.startswith("InaccessiblePaths="))
     for path in ("/run/ados/plugin-host", "/run/ados/control.sock", "/run/ados/gpio-cmd.sock"):
         assert f" -{path}" in hidden

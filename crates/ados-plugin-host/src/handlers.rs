@@ -116,16 +116,14 @@ fn fnmatch(pattern: &str, text: &str) -> bool {
 }
 
 /// Topics any plugin may subscribe to without an explicit allowlist entry.
-/// Mirrors `events._PUBLIC_TOPICS_FOR_SUBSCRIBE`.
+/// Every topic here has a host publisher (`crate::vehicle_events`); a topic
+/// nothing publishes is not advertised, so a subscription to it fails loudly.
 pub const PUBLIC_TOPICS_FOR_SUBSCRIBE: &[&str] = &[
     "vehicle.armed",
     "vehicle.disarmed",
     "vehicle.mode_changed",
     "vehicle.battery_low",
     "vehicle.geofence_breach",
-    "mission.started",
-    "mission.completed",
-    "mission.aborted",
     "agent.ready",
     "agent.shutdown",
 ];

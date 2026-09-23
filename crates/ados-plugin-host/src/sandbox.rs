@@ -22,11 +22,13 @@
 //!   `RestrictAddressFamilies=AF_UNIX` (the plugin still needs its own IPC
 //!   socket) plus `IPAddressDeny=any`; `socket(AF_INET)` then fails with
 //!   `EAFNOSUPPORT` inside the plugin. Granted, `AF_INET`/`AF_INET6`/
-//!   `AF_NETLINK` are added and the address filter narrows to
-//!   `IPAddressDeny=localhost`: the plugin reaches the network but never the
-//!   agent's own loopback listeners, where a loopback peer is trusted as
-//!   on-box. systemd filters by address, not port, so all of loopback is
-//!   closed, including a local DNS stub on 127.0.0.53.
+//!   `AF_NETLINK` are added and the address filter is lifted; the agent's own
+//!   loopback listeners, where a loopback peer is trusted as on-box, stay
+//!   closed through the nftables rule in [`crate::loopback_guard`], which
+//!   matches the plugin user and the agent ports only (a systemd address
+//!   filter would also cut the host's probe of the plugin's own listener).
+//!   When that guard is not loaded, a granted unit keeps the no-grant socket
+//!   policy: the capability is not safe to hold without it.
 //! * **`filesystem.host`** maps to the mount namespace. Ungranted, the operator
 //!   data roots are `InaccessiblePaths`; granted, they become writable and
 //!   `ProtectHome` relaxes to read-only.
@@ -158,8 +160,10 @@ pub fn sandbox_enforced_caps() -> BTreeSet<&'static str> {
 /// Deterministic for a given grant set: the device rules follow
 /// [`DEVICE_CAP_RULES`] order and the path lists follow their constants, so
 /// re-rendering an unchanged grant set produces a byte-identical unit and the
-/// supervisors can skip the restart.
-pub fn sandbox_directives(granted: &BTreeSet<String>) -> Vec<String> {
+/// supervisors can skip the restart. `loopback_guard_active` is the verdict of
+/// [`crate::loopback_guard`]; without it a `network.outbound` grant renders the
+/// no-grant socket policy.
+pub fn sandbox_directives(granted: &BTreeSet<String>, loopback_guard_active: bool) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
     // ---- devices ----------------------------------------------------
@@ -186,13 +190,11 @@ pub fn sandbox_directives(granted: &BTreeSet<String>) -> Vec<String> {
     }
 
     // ---- sockets ----------------------------------------------------
-    if granted.contains(NETWORK_OUTBOUND_CAP) {
+    if granted.contains(NETWORK_OUTBOUND_CAP) && loopback_guard_active {
         // AF_NETLINK rides with the grant because a plugin that may reach the
-        // network needs getifaddrs / DNS resolution to do it. Loopback stays
-        // closed: the agent's HTTP, WebSocket and MAVLink listeners treat a
-        // loopback peer as on-box, and a plugin is not on-box trust.
+        // network needs getifaddrs / DNS resolution to do it. The agent's own
+        // loopback listeners stay closed through the nftables guard.
         lines.push("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string());
-        lines.push("IPAddressDeny=localhost".to_string());
     } else {
         // AF_UNIX stays: the plugin's own host socket is a Unix socket, so
         // denying it would deny the plugin everything.
@@ -241,7 +243,7 @@ mod tests {
 
     #[test]
     fn no_grant_gives_private_dev_and_no_outbound_sockets() {
-        let lines = sandbox_directives(&caps(&[]));
+        let lines = sandbox_directives(&caps(&[]), true);
         assert!(lines.contains(&"PrivateDevices=yes".to_string()));
         assert!(lines.contains(&"RestrictAddressFamilies=AF_UNIX".to_string()));
         assert!(lines.contains(&"IPAddressDeny=any".to_string()));
@@ -250,7 +252,7 @@ mod tests {
 
     #[test]
     fn granting_i2c_does_not_also_open_the_camera() {
-        let lines = sandbox_directives(&caps(&["hardware.i2c"]));
+        let lines = sandbox_directives(&caps(&["hardware.i2c"]), true);
         assert!(lines.contains(&"DevicePolicy=closed".to_string()));
         assert!(lines.contains(&"DeviceAllow=char-i2c rw".to_string()));
         assert!(!lines
@@ -261,20 +263,28 @@ mod tests {
     }
 
     #[test]
-    fn network_grant_flips_the_address_family_filter_but_keeps_loopback_closed() {
-        let lines = sandbox_directives(&caps(&["network.outbound"]));
+    fn network_grant_opens_the_inet_families_when_the_loopback_guard_is_active() {
+        let lines = sandbox_directives(&caps(&["network.outbound"]), true);
         assert!(lines
             .contains(&"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string()));
-        assert!(!lines.contains(&"IPAddressDeny=any".to_string()));
-        // Restated as the literal the Python renderer's test also pins.
-        assert!(lines.contains(&"IPAddressDeny=localhost".to_string()));
+        // No systemd address filter: it would also cut ingress to the plugin's
+        // own listener. The nftables guard closes the agent ports instead.
+        assert!(!lines.iter().any(|l| l.starts_with("IPAddressDeny=")));
         assert!(!lines.iter().any(|l| l.starts_with("IPAddressAllow=")));
     }
 
     #[test]
+    fn network_grant_without_the_loopback_guard_keeps_the_no_grant_socket_policy() {
+        let lines = sandbox_directives(&caps(&["network.outbound"]), false);
+        assert!(lines.contains(&"RestrictAddressFamilies=AF_UNIX".to_string()));
+        assert!(lines.contains(&"IPAddressDeny=any".to_string()));
+        assert_eq!(lines, sandbox_directives(&caps(&[]), false));
+    }
+
+    #[test]
     fn filesystem_grant_moves_the_data_roots_from_inaccessible_to_writable() {
-        let without = sandbox_directives(&caps(&[]));
-        let with = sandbox_directives(&caps(&["filesystem.host"]));
+        let without = sandbox_directives(&caps(&[]), true);
+        let with = sandbox_directives(&caps(&["filesystem.host"]), true);
         let rw_without = without
             .iter()
             .find(|l| l.starts_with("ReadWritePaths="))
@@ -315,7 +325,7 @@ mod tests {
     #[test]
     fn agent_command_sockets_are_hidden_whatever_is_granted() {
         let inaccessible = |granted: &BTreeSet<String>| {
-            sandbox_directives(granted)
+            sandbox_directives(granted, true)
                 .into_iter()
                 .find(|l| l.starts_with("InaccessiblePaths="))
                 .unwrap()
@@ -338,7 +348,7 @@ mod tests {
 
     #[test]
     fn uvc_and_csi_together_emit_one_video4linux_rule() {
-        let lines = sandbox_directives(&caps(&["hardware.usb.uvc", "hardware.camera.csi"]));
+        let lines = sandbox_directives(&caps(&["hardware.usb.uvc", "hardware.camera.csi"]), true);
         let count = lines
             .iter()
             .filter(|l| l.as_str() == "DeviceAllow=char-video4linux rw")
@@ -349,8 +359,8 @@ mod tests {
 
     #[test]
     fn the_same_grant_set_renders_identically() {
-        let a = sandbox_directives(&caps(&["hardware.i2c", "network.outbound"]));
-        let b = sandbox_directives(&caps(&["network.outbound", "hardware.i2c"]));
+        let a = sandbox_directives(&caps(&["hardware.i2c", "network.outbound"]), true);
+        let b = sandbox_directives(&caps(&["network.outbound", "hardware.i2c"]), true);
         assert_eq!(a, b);
     }
 

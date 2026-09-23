@@ -19,7 +19,11 @@ from ados.plugins.errors import SupervisorError
 from ados.plugins.supervisor import PluginSupervisor
 
 
-def _build_archive(tmp_path: Path, plugin_id: str = "com.example.basic") -> Path:
+def _build_archive(
+    tmp_path: Path,
+    plugin_id: str = "com.example.basic",
+    permissions: str = '["event.publish"]',
+) -> Path:
     manifest_yaml = f"""\
 schema_version: 1
 id: {plugin_id}
@@ -32,7 +36,7 @@ compatibility:
 agent:
   entrypoint: agent/plugin.py
   isolation: subprocess
-  permissions: ["event.publish"]
+  permissions: {permissions}
   resources:
     max_ram_mb: 32
     max_cpu_percent: 10
@@ -305,6 +309,35 @@ def test_grant_undeclared_permission_rejected(
         sup.install_archive(archive)
     with pytest.raises(SupervisorError):
         sup.grant_permission("com.example.basic", "hardware.i2c")
+
+
+def test_network_grant_needs_the_loopback_guard(
+    isolated_paths, tmp_path: Path, monkeypatch
+):
+    archive = _build_archive(tmp_path, permissions='["network.outbound"]')
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+    )
+    sup.discover()
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        sup.install_archive(archive)
+        monkeypatch.setattr(
+            "ados.plugins.supervisor.plugin_loopback_guard_active", lambda: False
+        )
+        with pytest.raises(SupervisorError, match="loopback guard is unavailable"):
+            sup.grant_permission("com.example.basic", "network.outbound")
+        install = sup.find_install("com.example.basic")
+        assert install is not None
+        refused = install.permissions.get("network.outbound")
+        assert refused is None or refused.granted is False
+
+        monkeypatch.setattr(
+            "ados.plugins.supervisor.plugin_loopback_guard_active", lambda: True
+        )
+        sup.grant_permission("com.example.basic", "network.outbound")
+        assert install.permissions["network.outbound"].granted is True
 
 
 def test_remove_unknown_plugin_raises(isolated_paths):

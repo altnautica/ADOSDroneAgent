@@ -50,6 +50,7 @@ pub mod handlers;
 pub mod host;
 pub mod inventory;
 pub mod invoke;
+pub mod loopback_guard;
 pub mod manifest;
 pub mod realhost;
 pub mod reconcile;
@@ -61,6 +62,7 @@ pub mod state_sidecar;
 pub mod supervisor;
 pub mod systemd;
 pub mod token_secret;
+pub mod vehicle_events;
 pub mod vision_client;
 
 pub use control::{
@@ -239,10 +241,10 @@ mod capability_enforcement_guard {
         // every sandbox-enforced capability, granting it must produce different
         // unit text. A cap that renders identically granted and ungranted is
         // decorative again, with a guard test vouching for it.
-        let none = super::sandbox::sandbox_directives(&BTreeSet::new());
+        let none = super::sandbox::sandbox_directives(&BTreeSet::new(), true);
         for cap in SANDBOX_ENFORCED_CAPS {
             let one: BTreeSet<String> = std::iter::once(cap.to_string()).collect();
-            let with = super::sandbox::sandbox_directives(&one);
+            let with = super::sandbox::sandbox_directives(&one, true);
             assert_ne!(
                 none, with,
                 "{cap} is declared sandbox-enforced but changes nothing in the unit"

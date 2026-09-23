@@ -31,9 +31,6 @@ PUBLIC_TOPICS: tuple[str, ...] = (
     "vehicle.mode_changed",
     "vehicle.battery_low",
     "vehicle.geofence_breach",
-    "mission.started",
-    "mission.completed",
-    "mission.aborted",
     "agent.ready",
     "agent.shutdown",
 )

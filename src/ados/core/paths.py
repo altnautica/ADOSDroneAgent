@@ -191,6 +191,13 @@ HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
 # JSON object, atomic write, mode 0o644; default ``local`` when absent.
 WFB_FAILOVER_STATE_JSON = ADOS_RUN_DIR / "wfb_failover.json"
 
+# Plugin loopback-guard verdict (``{"active": bool, "reason": str}``). Written
+# by the plugin-host daemon once it has loaded (or failed to load) the nftables
+# rule that keeps a network-capable plugin off the agent's own loopback
+# listeners. A ``network.outbound`` grant needs it to read active; absent reads
+# as unavailable.
+PLUGIN_LOOPBACK_GUARD_JSON = ADOS_RUN_DIR / "plugin-loopback-guard.json"
+
 # Sentinel files
 UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
 

@@ -43,11 +43,13 @@ async def _captured_argv(
     fake = bindir / "ffmpeg"
     # `exec` so the idling process IS the shell: a forked child would inherit
     # the stderr pipe and outlive the kill below, and `proc.wait()` would then
-    # block on the pipe rather than on the process.
+    # block on the pipe rather than on the process. The argv file appears by
+    # rename, so the poll below never reads it half-written.
     fake.write_text(
         "#!/bin/sh\n"
         "for out; do :; done\n"
-        "printf '%s\\n' \"$@\" > \"$out.argv\"\n"
+        "printf '%s\\n' \"$@\" > \"$out.argv.tmp\"\n"
+        "mv \"$out.argv.tmp\" \"$out.argv\"\n"
         "exec sleep 30\n",
         encoding="utf-8",
     )

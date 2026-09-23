@@ -224,6 +224,14 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
             .is_some()
         ),
     );
+    // Whether the rule keeping a network-capable plugin off this node's own
+    // loopback listeners is loaded. While it reads `unavailable`, a
+    // `network.outbound` grant is refused and a unit holding one keeps the
+    // no-network sandbox, so an operator can see why a plugin has no network.
+    payload.insert(
+        "plugin_loopback_guard".to_string(),
+        json!(ados_protocol::plugin_loopback_guard::read_state().label()),
+    );
 
     // Camera presence + USB-recovery, folded in only when the sidecars are fresh.
     for (k, v) in read_camera_status() {

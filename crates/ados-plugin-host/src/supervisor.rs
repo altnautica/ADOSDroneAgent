@@ -128,6 +128,9 @@ pub struct Paths {
     /// revoke, so a permission change is effective immediately rather than at
     /// the next daemon restart.
     pub control_dir: PathBuf,
+    /// The loopback-guard verdict sidecar the plugin-host daemon writes at
+    /// startup. A `network.outbound` grant needs it to read active.
+    pub loopback_guard_state: PathBuf,
 }
 
 impl Default for Paths {
@@ -138,6 +141,7 @@ impl Default for Paths {
             state_path: PathBuf::from(state::PLUGIN_STATE_PATH),
             log_dir: PathBuf::from(PLUGIN_LOG_DIR),
             control_dir: PathBuf::from(crate::control::DEFAULT_CONTROL_DIR),
+            loopback_guard_state: ados_protocol::plugin_loopback_guard::sidecar_path(),
         }
     }
 }
@@ -403,7 +407,9 @@ impl PluginSupervisor {
         if manifest.is_subprocess_agent() {
             self.ensure_slice_exists()?;
             let unit_path = unit_path_for(&manifest.id, Some(&self.paths.unit_dir));
-            if let Some(unit) = render_unit(&manifest, &self.paths.install_dir, &BTreeSet::new())? {
+            if let Some(unit) =
+                render_unit(&manifest, &self.paths.install_dir, &BTreeSet::new(), false)?
+            {
                 std::fs::write(&unit_path, unit.as_bytes())?;
             }
             self.systemctl.run(&["daemon-reload"])?;
@@ -484,6 +490,22 @@ impl PluginSupervisor {
             ))
             .into());
         }
+        // Network access is only safe to hold while the loopback guard keeps
+        // the plugin off the agent's own listeners.
+        if permission_id == crate::sandbox::NETWORK_OUTBOUND_CAP {
+            let guard = ados_protocol::plugin_loopback_guard::read_state_at(
+                &self.paths.loopback_guard_state,
+            );
+            if !guard.active {
+                return Err(SupervisorError(format!(
+                    "plugin {plugin_id}: {permission_id} refused: the plugin loopback guard is \
+                     unavailable ({}), so a network-capable plugin could reach the agent's own \
+                     loopback services",
+                    guard.reason
+                ))
+                .into());
+            }
+        }
         let install = self.require_install_mut(plugin_id)?;
         grant_permission(install, permission_id);
         save_state(&self.installs, Some(&self.paths.state_path))?;
@@ -540,33 +562,65 @@ impl PluginSupervisor {
     /// A restart is skipped when the unit text is unchanged (a purely
     /// wire-gated capability), because bouncing a running geofence plugin to
     /// apply a token change it can receive live is a needless gap in coverage.
+    /// Re-render every installed plugin's unit against the current grant set
+    /// and loopback-guard verdict, restarting a running plugin whose sandbox
+    /// changed. The plugin-host daemon calls it at startup, after loading the
+    /// guard, so a unit rendered while the guard was active cannot keep network
+    /// access into a boot where it is not.
+    pub fn refresh_all_units(&self) {
+        let ids: Vec<String> = self.installs.iter().map(|i| i.plugin_id.clone()).collect();
+        for plugin_id in ids {
+            let result = self
+                .manifest_for(&plugin_id)
+                .map_err(LifecycleError::from)
+                .and_then(|m| self.refresh_unit(&plugin_id, &m));
+            if let Err(e) = result {
+                tracing::error!(plugin_id, error = %e, "plugin_unit_refresh_failed");
+            }
+        }
+    }
+
+    /// Rewrite one plugin's unit when its rendered sandbox differs from disk,
+    /// then restart it if it is running (systemd applies the sandbox at exec).
+    fn refresh_unit(
+        &self,
+        plugin_id: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(), LifecycleError> {
+        if !manifest.is_subprocess_agent() {
+            return Ok(());
+        }
+        let granted = self
+            .find_install(plugin_id)
+            .map(state::granted_caps)
+            .unwrap_or_default();
+        let guard =
+            ados_protocol::plugin_loopback_guard::read_state_at(&self.paths.loopback_guard_state);
+        let unit_path = unit_path_for(plugin_id, Some(&self.paths.unit_dir));
+        if let Some(unit) = render_unit(manifest, &self.paths.install_dir, &granted, guard.active)?
+        {
+            let previous = std::fs::read_to_string(&unit_path).unwrap_or_default();
+            if previous != unit {
+                std::fs::write(&unit_path, unit.as_bytes())?;
+                self.systemctl.run(&["daemon-reload"])?;
+                let running = self
+                    .find_install(plugin_id)
+                    .is_some_and(|i| matches!(i.status, PluginStatus::Running));
+                if running {
+                    self.systemctl
+                        .run(&["restart", &unit_name_for(plugin_id)])?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn apply_permission_change(
         &self,
         plugin_id: &str,
         manifest: &PluginManifest,
     ) -> Result<(), LifecycleError> {
-        let granted = self
-            .find_install(plugin_id)
-            .map(state::granted_caps)
-            .unwrap_or_default();
-
-        if manifest.is_subprocess_agent() {
-            let unit_path = unit_path_for(plugin_id, Some(&self.paths.unit_dir));
-            if let Some(unit) = render_unit(manifest, &self.paths.install_dir, &granted)? {
-                let previous = std::fs::read_to_string(&unit_path).unwrap_or_default();
-                if previous != unit {
-                    std::fs::write(&unit_path, unit.as_bytes())?;
-                    self.systemctl.run(&["daemon-reload"])?;
-                    let running = self
-                        .find_install(plugin_id)
-                        .is_some_and(|i| matches!(i.status, PluginStatus::Running));
-                    if running {
-                        self.systemctl
-                            .run(&["restart", &unit_name_for(plugin_id)])?;
-                    }
-                }
-            }
-        }
+        self.refresh_unit(plugin_id, manifest)?;
 
         // Re-mint the live token. A plugin host that is not up has nothing to
         // re-mint against and will read the new grant set off state when it
@@ -983,6 +1037,7 @@ mod tests {
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
+            loopback_guard_state: dir.join("plugin-loopback-guard.json"),
         }
     }
 
@@ -1255,6 +1310,52 @@ mod tests {
             sup.find_install("com.example.mission").unwrap(),
             "hardware.spi"
         ));
+    }
+
+    #[test]
+    fn network_access_follows_the_loopback_guard_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("plugin-loopback-guard.json");
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_systemctl(Arc::new(RecordingSystemctl::default()));
+        let manifest = "id: com.example.net\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0,<2.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n  permissions:\n    - network.outbound\n";
+        let contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
+        sup.install_contents(contents, Path::new("/tmp/net.adosplug"))
+            .unwrap();
+        let unit = || {
+            std::fs::read_to_string(unit_path_for(
+                "com.example.net",
+                Some(&dir.path().join("units")),
+            ))
+            .unwrap()
+        };
+
+        // No guard loaded yet: the grant is refused and nothing is recorded.
+        let err = sup
+            .grant_permission("com.example.net", "network.outbound")
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("loopback guard is unavailable"),
+            "{err}"
+        );
+        assert!(!state::is_permission_granted(
+            sup.find_install("com.example.net").unwrap(),
+            "network.outbound"
+        ));
+
+        // Guard active: the grant opens the inet families.
+        std::fs::write(&sidecar, r#"{"active":true,"reason":""}"#).unwrap();
+        sup.grant_permission("com.example.net", "network.outbound")
+            .unwrap();
+        assert!(unit().contains("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"));
+        assert!(!unit().contains("IPAddressDeny="));
+
+        // A later boot where the guard cannot load re-renders the held grant
+        // back to the no-grant socket policy.
+        std::fs::write(&sidecar, r#"{"active":false,"reason":"nft missing"}"#).unwrap();
+        sup.refresh_all_units();
+        assert!(unit().contains("RestrictAddressFamilies=AF_UNIX\n"));
+        assert!(unit().contains("IPAddressDeny=any"));
     }
 
     #[test]

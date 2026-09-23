@@ -13,8 +13,9 @@ import into the supervisor's address space.
 direct syscalls inside the plugin's own process; there is no RPC the
 host could gate, so the grant has to change the sandbox instead. The
 ``hardware.*`` grants become cgroup ``DeviceAllow=`` rules,
-``network.outbound`` becomes the ``RestrictAddressFamilies`` /
-``IPAddressDeny`` pair, and ``filesystem.host`` becomes the
+``network.outbound`` lifts the ``RestrictAddressFamilies`` /
+``IPAddressDeny`` pair (only while the plugin host's nftables loopback
+guard is loaded), and ``filesystem.host`` becomes the
 ``InaccessiblePaths`` / ``ReadWritePaths`` split. :func:`render_unit`
 therefore takes the granted set, and the supervisor re-renders and
 restarts on every grant and revoke — a grant that only took effect at
@@ -32,6 +33,7 @@ asserts the two renderers agree line for line.
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from collections.abc import Iterable
@@ -39,6 +41,7 @@ from pathlib import Path
 
 from ados.core.paths import (
     PLUGIN_LOG_DIR,
+    PLUGIN_LOOPBACK_GUARD_JSON,
     PLUGIN_RUN_DIR,
     PLUGIN_UNIT_DIR,
     PLUGIN_UNIT_PREFIX,
@@ -159,8 +162,26 @@ def sandbox_enforced_caps() -> frozenset[str]:
     )
 
 
-def sandbox_directives(granted: Iterable[str]) -> list[str]:
+def plugin_loopback_guard_active() -> bool:
+    """Whether the plugin host has loaded the loopback guard.
+
+    Reads the verdict sidecar the plugin-host daemon writes at startup. Absent
+    or unreadable reads as inactive: nothing may assume the rule is loaded.
+    """
+    try:
+        data = json.loads(PLUGIN_LOOPBACK_GUARD_JSON.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("active") is True
+
+
+def sandbox_directives(
+    granted: Iterable[str], loopback_guard_active: bool
+) -> list[str]:
     """The ``[Service]`` lines expressing ``granted`` as a sandbox.
+
+    ``loopback_guard_active`` is the plugin host's guard verdict; without it a
+    ``network.outbound`` grant renders the no-grant socket policy.
 
     Deterministic for a given grant set, so an unchanged set re-renders to
     identical bytes and the supervisor can skip the restart.
@@ -187,15 +208,13 @@ def sandbox_directives(granted: Iterable[str]) -> list[str]:
                 lines.append(f"DeviceAllow={rule}")
 
     # ---- sockets ----------------------------------------------------
-    if NETWORK_OUTBOUND_CAP in granted_set:
+    if NETWORK_OUTBOUND_CAP in granted_set and loopback_guard_active:
         # AF_NETLINK rides with the grant: a plugin that may reach the network
-        # needs getifaddrs / DNS resolution to do it. Loopback stays closed: the
-        # agent's listeners treat a loopback peer as on-box, and a plugin is not
-        # on-box trust. systemd filters by address, not port.
+        # needs getifaddrs / DNS resolution to do it. The agent's own loopback
+        # listeners stay closed through the plugin host's nftables guard.
         lines.append(
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"
         )
-        lines.append("IPAddressDeny=localhost")
     else:
         # AF_UNIX stays: the plugin's own host socket is a Unix socket.
         lines.append("RestrictAddressFamilies=AF_UNIX")
@@ -366,7 +385,7 @@ def render_unit(
         max_pids=res.max_pids,
         log_path=log_path,
         hardening="\n".join(HARDENING_DIRECTIVES),
-        sandbox="\n".join(sandbox_directives(granted)),
+        sandbox="\n".join(sandbox_directives(granted, plugin_loopback_guard_active())),
     )
 
 
@@ -412,7 +431,7 @@ def render_service_unit(
         max_pids=res.max_pids,
         log_path=log_path,
         hardening="\n".join(HARDENING_DIRECTIVES),
-        sandbox="\n".join(sandbox_directives(granted)),
+        sandbox="\n".join(sandbox_directives(granted, plugin_loopback_guard_active())),
     )
 
 
@@ -442,7 +461,7 @@ def probe_command(
         f"CPUQuota={res.max_cpu_percent}%",
         f"TasksMax={res.max_pids}",
         f"RuntimeMaxSec={PROBE_TIMEOUT_S}",
-        *sandbox_directives(granted),
+        *sandbox_directives(granted, plugin_loopback_guard_active()),
     ]
     return [
         "systemd-run",
