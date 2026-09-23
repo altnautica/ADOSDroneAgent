@@ -11,8 +11,7 @@ PartOf=ados-supervisor.service
 # failure for a binary that SHOULD be present. A compute host whose CPU arch the
 # prebuilt pipeline does not cover builds the binary from source to this path.
 ConditionPathExists=/opt/ados/bin/ados-compute
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are observable per
@@ -23,7 +22,7 @@ Type=simple
 # The native compute daemon is the only implementation. exec the binary when
 # present (failing loudly if absent rather than running a stale path).
 ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-compute ]; then exec /opt/ados/bin/ados-compute; else echo "ados-compute binary missing; reinstall or build from source to fetch it" >&2; exit 1; fi'
-Restart=on-failure
+Restart=always
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 # Serve the job API on the LAN (not just loopback) so a drone/GCS on the same

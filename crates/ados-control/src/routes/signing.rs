@@ -6,23 +6,25 @@
 //! All three read from the same vehicle-state snapshot the MAVLink service
 //! publishes on `/run/ados/state.sock` (held by the [`StateIpcClient`](crate::ipc)):
 //!
-//! - **`/api/mavlink/signing/capability`** runs the strict capability check over
-//!   the FC connection flag, the autopilot id, and the cached param tree, all
-//!   from the snapshot. The check is intentionally strict: ArduPilot + at least
-//!   one `SIGNING_*` param present. Any other firmware, or a missing param tree,
-//!   reports unsupported with a specific reason enum.
+//! - **`/api/mavlink/signing/capability`** runs the capability check over the FC
+//!   connection flag and the autopilot id from the snapshot. ArduPilot keeps the
+//!   signing key in its own persistent store, written with `SETUP_SIGNING`, and
+//!   exposes no `SIGNING_*` parameter, so support is decided by the autopilot
+//!   family, not by the param tree. Any other firmware reports unsupported with a
+//!   specific reason enum.
 //! - **`/api/mavlink/signing/require`** reads `SIGNING_REQUIRE` from the cached
 //!   param blob. `{require: bool}` when the param has been seen, `{require: null}`
 //!   when it has not.
 //! - **`/api/mavlink/signing/counters`** reports signed-frame counters. The agent
-//!   validates nothing (it holds no key); the counters only confirm signed frames
-//!   are transiting. In the multi-process supervisor the REST surface has no
-//!   in-process frame observer, so the counters are the zero default — the same
-//!   shape the FastAPI route emits when its observer is absent.
+//!   validates nothing (it holds no key); the counters would only confirm signed
+//!   frames are transiting. No process on the node observes frames for signing
+//!   today, so nothing is measured and the route says so: `observed: false` with
+//!   every count `null`. A zero would read as "measured, and no signed frame was
+//!   seen", which is a different and usually false claim.
 //!
 //! With no agent running (an empty snapshot), capability reports
-//! `fc_not_connected`, require reports `{require: null}`, and counters report the
-//! zero default — each a valid, GCS-parseable body rather than a failure.
+//! `fc_not_connected`, require reports `{require: null}`, and counters report
+//! unmeasured — each a valid, GCS-parseable body rather than a failure.
 
 use axum::extract::State;
 use axum::Json;
@@ -42,12 +44,13 @@ const MAV_AUTOPILOT_PX4: i64 = 12;
 /// MAVLink v2 signing.
 ///
 /// Reads the FC connection flag and the autopilot id from the live state snapshot
-/// and the cached param tree from the router's on-disk cache, then runs the strict
-/// capability check. Returns
+/// and runs the capability check. Returns
 /// `{supported, reason, firmware_name, firmware_version, signing_params_present}`.
-/// The `reason` enum: `ok | fc_not_connected | firmware_not_supported |
-/// firmware_too_old | firmware_px4_no_persistent_store | msp_protocol`. An absent
-/// snapshot reads as disconnected → `fc_not_connected`. Guaranteed-200, never 500.
+/// `signing_params_present` is informational only (whether the cached param tree
+/// carries any `SIGNING_*` name); it does not gate support. The `reason` enum:
+/// `ok | fc_not_connected | firmware_not_supported |
+/// firmware_px4_no_persistent_store | msp_protocol`. An absent snapshot reads as
+/// disconnected → `fc_not_connected`. Guaranteed-200, never 500.
 pub async fn capability(State(state): State<AppState>) -> Json<Value> {
     let snapshot = state.state.snapshot();
     let connected = fc_connected_from_snapshot(snapshot.as_ref());
@@ -74,16 +77,14 @@ pub async fn require(State(state): State<AppState>) -> Json<Value> {
 
 /// `GET /api/mavlink/signing/counters` → the observational signed-frame counters.
 ///
-/// The agent holds no signing key and validates nothing; these counters only
-/// confirm signed frames are transiting. The multi-process supervisor runs the
-/// REST surface as its own service, which carries no in-process frame observer,
-/// so the counters are the zero default: `{tx_signed_count: 0, rx_signed_count:
-/// 0, last_signed_rx_at: null}`. This is the exact shape the FastAPI route emits
-/// when its observer is `None`, which is the production posture.
+/// The agent holds no signing key and validates nothing. No process on the node
+/// observes frames for signing, so nothing is measured: `{observed: false,
+/// tx_signed_count: null, rx_signed_count: null, last_signed_rx_at: null}`.
 pub async fn counters() -> Json<Value> {
     Json(json!({
-        "tx_signed_count": 0,
-        "rx_signed_count": 0,
+        "observed": false,
+        "tx_signed_count": Value::Null,
+        "rx_signed_count": Value::Null,
         "last_signed_rx_at": Value::Null,
     }))
 }
@@ -111,10 +112,9 @@ fn autopilot_from_snapshot(snapshot: Option<&Value>) -> i64 {
         .unwrap_or(0)
 }
 
-/// Whether any `SIGNING_*` param is present in the cached param map. An empty map (no
-/// cache file, an unreadable one, or an FC that has not answered a `PARAM_REQUEST_LIST`
-/// yet) reads as not present. This is the same reading the capability detection's
-/// `SIGNING_*` scan consumes.
+/// Whether any `SIGNING_*` param is present in the cached param map. Reported as
+/// information only: ArduPilot's signing store is not a parameter, so a real
+/// ArduPilot FC normally reports `false` here and is still supported.
 fn signing_params_present(params: &serde_json::Map<String, Value>) -> bool {
     params.keys().any(|name| name.starts_with("SIGNING_"))
 }
@@ -135,10 +135,9 @@ fn get_require(value: Option<&Value>) -> Value {
     }
 }
 
-/// The strict capability check, mirroring the Python `detect_capability`. The FC
-/// must be connected, the autopilot must be ArduPilot, and at least one
-/// `SIGNING_*` param must be present in the cache. Any other firmware, or a
-/// missing param tree, reports unsupported with a specific reason enum.
+/// The capability check. The FC must be connected and the autopilot must be
+/// ArduPilot, whose `SETUP_SIGNING` store is persistent. PX4, the MSP path and any
+/// other autopilot report unsupported with a specific reason enum.
 fn detect_capability(connected: bool, autopilot: i64, signing_params_present: bool) -> Value {
     if !connected {
         return json!({
@@ -169,21 +168,7 @@ fn detect_capability(connected: bool, autopilot: i64, signing_params_present: bo
             "reason": reason,
             "firmware_name": firmware_name,
             "firmware_version": Value::Null,
-            "signing_params_present": false,
-        });
-    }
-
-    // ArduPilot. The presence of any SIGNING_* param is the strictest gate: a
-    // build that stripped signing won't expose these params. The agent can't
-    // derive major/minor from the autopilot id alone, so an absent param tree is
-    // treated as too-old (or signing-stripped).
-    if !signing_params_present {
-        return json!({
-            "supported": false,
-            "reason": "firmware_too_old",
-            "firmware_name": firmware_name,
-            "firmware_version": Value::Null,
-            "signing_params_present": false,
+            "signing_params_present": signing_params_present,
         });
     }
 
@@ -193,7 +178,7 @@ fn detect_capability(connected: bool, autopilot: i64, signing_params_present: bo
         "firmware_name": firmware_name,
         // The GCS populates firmware_version when it reads AUTOPILOT_VERSION.
         "firmware_version": Value::Null,
-        "signing_params_present": true,
+        "signing_params_present": signing_params_present,
     })
 }
 
@@ -234,9 +219,10 @@ mod tests {
     }
 
     #[test]
-    fn capability_ardupilot_with_signing_params_is_supported() {
-        // The golden "supported" body: ArduPilot, a SIGNING_* param present.
-        let got = detect_capability(true, MAV_AUTOPILOT_ARDUPILOTMEGA, true);
+    fn capability_ardupilot_is_supported_without_signing_params() {
+        // A real ArduPilot FC carries no SIGNING_* param: its key store is written
+        // with SETUP_SIGNING. Support must not hinge on the param tree.
+        let got = detect_capability(true, MAV_AUTOPILOT_ARDUPILOTMEGA, false);
         assert_eq!(
             got,
             json!({
@@ -244,24 +230,16 @@ mod tests {
                 "reason": "ok",
                 "firmware_name": "ArduPilot",
                 "firmware_version": Value::Null,
-                "signing_params_present": true,
+                "signing_params_present": false,
             })
         );
     }
 
     #[test]
-    fn capability_ardupilot_without_signing_params_is_too_old() {
-        let got = detect_capability(true, MAV_AUTOPILOT_ARDUPILOTMEGA, false);
-        assert_eq!(
-            got,
-            json!({
-                "supported": false,
-                "reason": "firmware_too_old",
-                "firmware_name": "ArduPilot",
-                "firmware_version": Value::Null,
-                "signing_params_present": false,
-            })
-        );
+    fn capability_ardupilot_reports_signing_params_as_information() {
+        let got = detect_capability(true, MAV_AUTOPILOT_ARDUPILOTMEGA, true);
+        assert_eq!(got["supported"], json!(true));
+        assert_eq!(got["signing_params_present"], json!(true));
     }
 
     #[test]
@@ -274,7 +252,7 @@ mod tests {
                 "reason": "firmware_px4_no_persistent_store",
                 "firmware_name": "PX4",
                 "firmware_version": Value::Null,
-                "signing_params_present": false,
+                "signing_params_present": true,
             })
         );
     }
@@ -389,15 +367,16 @@ mod tests {
     // ── counters: the golden parity fixture ──────────────────────────────────
 
     #[tokio::test]
-    async fn counters_is_the_zero_default() {
-        // The golden body: the production multi-process posture has no in-process
-        // observer, so the counters are the zero default.
+    async fn counters_report_unmeasured_rather_than_zero() {
+        // No frame observer exists, so a count of 0 would be a fabricated
+        // measurement. The body must say nothing was observed.
         let Json(body) = counters().await;
         assert_eq!(
             body,
             json!({
-                "tx_signed_count": 0,
-                "rx_signed_count": 0,
+                "observed": false,
+                "tx_signed_count": Value::Null,
+                "rx_signed_count": Value::Null,
                 "last_signed_rx_at": Value::Null,
             })
         );

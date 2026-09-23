@@ -15,6 +15,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod config_store;
 pub mod dashboard_pin;
 pub mod hw_local;
 pub mod ipc;

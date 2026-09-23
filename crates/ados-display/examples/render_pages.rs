@@ -23,8 +23,7 @@ use ados_display::pages::{
     radio_link::RadioLinkDetailPage, settings::SettingsPage, uplink::UplinkDetailPage,
     video::VideoPage, CloudCtx, DeviceCtx, DiagnosticsCtx, DroneCtx, FcCtx, HardwareItem,
     HealthCtx, HopEntry, HoppingCtx, LinkCtx, MeshCtx, MeshPeer, NetworkCtx, Page, PageContext,
-    PairedDroneCtx, PairingCtx, RadioCtx, RoleCtx, SettingsCtx, SettingsRow, SystemCtx, UplinkCtx,
-    VideoCtx, WifiClientCtx,
+    PairedDroneCtx, PairingCtx, RadioCtx, RoleCtx, SystemCtx, UplinkCtx, VideoCtx, WifiClientCtx,
 };
 
 /// Build a 60-sample series that wanders around `base` with amplitude `amp`, so
@@ -92,7 +91,7 @@ fn connected_context() -> PageContext {
         fc: FcCtx {
             vehicle: Some("Multirotor".to_string()),
             mode: Some("LOITER".to_string()),
-            armed: false,
+            armed: Some(false),
             battery_voltage: Some(15.7),
             battery_remaining: Some(78.0),
             gps_fix_type: Some(4),
@@ -254,50 +253,6 @@ fn connected_context() -> PageContext {
             primary_mac: Some("DC:A6:32:1A:2B:3C".to_string()),
             build_stamp: Some("2026-05-31T22:14:00Z".to_string()),
         },
-        settings: SettingsCtx {
-            rows: vec![
-                SettingsRow {
-                    id: "theme".to_string(),
-                    label: "Theme".to_string(),
-                    variant: "default".to_string(),
-                    value: Some("Dark".to_string()),
-                    toggle_on: None,
-                },
-                SettingsRow {
-                    id: "hotspot".to_string(),
-                    label: "WiFi hotspot".to_string(),
-                    variant: "toggle".to_string(),
-                    value: None,
-                    toggle_on: Some(true),
-                },
-                SettingsRow {
-                    id: "logging".to_string(),
-                    label: "Log level".to_string(),
-                    variant: "default".to_string(),
-                    value: Some("INFO".to_string()),
-                    toggle_on: None,
-                },
-                SettingsRow {
-                    id: "rotation".to_string(),
-                    label: "Display rotation".to_string(),
-                    variant: "default".to_string(),
-                    value: Some("0°".to_string()),
-                    toggle_on: None,
-                },
-                SettingsRow {
-                    id: "restart".to_string(),
-                    label: "Restart agent".to_string(),
-                    variant: "action".to_string(),
-                    value: None,
-                    toggle_on: None,
-                },
-            ],
-            pending_reboot_count: 1,
-            theme: Some("dark".to_string()),
-            logging_level: Some("INFO".to_string()),
-            display_rotation_degrees: Some(0),
-            server_mode: Some("local".to_string()),
-        },
         diagnostics: DiagnosticsCtx {
             agent_logs: vec![
                 "INFO  supervisor: all services healthy".to_string(),
@@ -450,36 +405,6 @@ fn unpaired_context() -> PageContext {
             primary_mac: Some("DC:A6:32:1A:2B:3C".to_string()),
             build_stamp: Some("2026-05-31T22:14:00Z".to_string()),
         },
-        settings: SettingsCtx {
-            rows: vec![
-                SettingsRow {
-                    id: "theme".to_string(),
-                    label: "Theme".to_string(),
-                    variant: "default".to_string(),
-                    value: Some("Dark".to_string()),
-                    toggle_on: None,
-                },
-                SettingsRow {
-                    id: "hotspot".to_string(),
-                    label: "WiFi hotspot".to_string(),
-                    variant: "toggle".to_string(),
-                    value: None,
-                    toggle_on: Some(true),
-                },
-                SettingsRow {
-                    id: "logging".to_string(),
-                    label: "Log level".to_string(),
-                    variant: "default".to_string(),
-                    value: Some("DEBUG".to_string()),
-                    toggle_on: None,
-                },
-            ],
-            pending_reboot_count: 0,
-            theme: Some("dark".to_string()),
-            logging_level: Some("DEBUG".to_string()),
-            display_rotation_degrees: Some(0),
-            server_mode: Some("local".to_string()),
-        },
         diagnostics: DiagnosticsCtx {
             agent_logs: vec![
                 "INFO  bootstrap: first boot, profile=ground_station".to_string(),
@@ -523,7 +448,7 @@ fn all_pages() -> Vec<PageEntry> {
         },
         PageEntry {
             file_id: "more",
-            page: Box::new(MorePage),
+            page: Box::new(MorePage::default()),
         },
         PageEntry {
             file_id: "radio_link",

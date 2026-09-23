@@ -452,6 +452,7 @@ async fn systemd_services_fallback() -> Vec<Value> {
             "--all",
             "--no-pager",
             "--no-legend",
+            "--plain",
             "ados-*.service",
         ],
         crate::probe::PROBE_TIMEOUT,
@@ -464,42 +465,18 @@ async fn systemd_services_fallback() -> Vec<Value> {
 /// Parse one `systemctl list-units` row into the fallback service object, or
 /// `None` when the row is blank, has too few columns, or is not a `.service` unit.
 ///
-/// Mirrors the Python `parts = line.split(None, 4)` (split on whitespace runs into
-/// at most five tokens) with the `len(parts) < 4` guard. The unit is `parts[0]`
-/// with leading `●`/`*` status glyphs stripped; the sub-state is `parts[3]`.
-/// `state` is `"running"` when the sub-state is `running`, else the sub-state (or
-/// `"unknown"`); `status` mirrors `state`; `task_done` is `state != "running"`.
+/// The row itself is parsed by the one unit-row parser the services route uses
+/// ([`crate::routes::services::parse_unit_line`]), which strips a leading status
+/// glyph. A failed unit is exactly the row the dashboard most needs, and older
+/// systemd builds prefix it with `●`/`*` even under `--plain`. This projects the
+/// parsed row onto the status/full shape: `state` is `"running"` when the
+/// sub-state is `running`, else the sub-state (or `"unknown"`); `status` mirrors
+/// `state`; `task_done` is `state != "running"`.
 fn parse_fallback_line(line: &str) -> Option<Value> {
-    // The Python uses str.split(None, 4): leading/trailing whitespace trimmed,
-    // runs collapsed. A glyph token (`●`/`×`) becomes its own token and the unit
-    // basename then carries a `.lstrip("●*")`. Collect the whitespace tokens.
-    let cols: Vec<&str> = line.split_whitespace().collect();
-    if cols.len() < 4 {
-        return None;
-    }
-
-    // The Python parses `parts[0]` then `.lstrip("●*")`. When systemd prepends a
-    // glyph as its own token (`● ados-x.service ...`), that token is `parts[0]`
-    // and the actual unit is `parts[1]`; the lstrip leaves the empty token "".
-    // Mirror that: take the first non-empty post-lstrip token as the unit.
-    let unit = cols[0].trim_start_matches(['●', '*']).trim();
-    // `parts[3]` is the sub-state column. When a glyph token shifted the columns,
-    // the row still has the unit at index 0 in the Python split because the glyph
-    // and the unit are space-separated tokens; we match by indexing the same way
-    // the Python does (`parts[3]`), so use cols[3] verbatim.
-    let sub = cols[3].trim();
-
-    if !unit.ends_with(".service") {
-        return None;
-    }
-    let name = &unit[..unit.len() - ".service".len()];
-    let state = if sub == "running" {
-        "running"
-    } else if sub.is_empty() {
-        "unknown"
-    } else {
-        sub
-    };
+    let unit = crate::routes::services::parse_unit_line(line)?;
+    let name = unit["name"].as_str()?.to_string();
+    let sub = unit["sub_state"].as_str().unwrap_or("").trim();
+    let state = if sub.is_empty() { "unknown" } else { sub };
 
     Some(json!({
         "name": name,
@@ -2119,6 +2096,21 @@ mod tests {
         assert_eq!(svc["state"], json!("dead"));
         assert_eq!(svc["status"], json!("dead"));
         assert_eq!(svc["task_done"], json!(true));
+    }
+
+    #[test]
+    fn fallback_line_keeps_a_failed_unit_behind_a_status_glyph() {
+        // A failed unit is the row the dashboard most needs, and systemd prefixes
+        // it with a glyph token (`●`, or `*` under LANG=C). It must not vanish.
+        for row in [
+            "● ados-x.service loaded failed failed X",
+            "* ados-x.service loaded failed failed X",
+        ] {
+            let svc = parse_fallback_line(row).unwrap_or_else(|| panic!("dropped: {row}"));
+            assert_eq!(svc["name"], json!("ados-x"));
+            assert_eq!(svc["state"], json!("failed"));
+            assert_eq!(svc["task_done"], json!(true));
+        }
     }
 
     #[test]

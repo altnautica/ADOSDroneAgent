@@ -29,7 +29,7 @@ use serde_json::Value;
 use crate::pages::{
     CloudCtx, DeviceCtx, DroneCtx, FcCtx, HardwareItem, HealthCtx, HopEntry, HoppingCtx, LinkCtx,
     MeshCtx, MeshPeer, NetworkCtx, PageContext, PairedDroneCtx, PairingCtx, RadioCtx, RoleCtx,
-    SystemCtx, UplinkCtx, VideoCtx, WifiClientCtx,
+    SystemCtx, UplinkCtx, VideoCtx, WifiClientCtx, LINK_STATE_STALE,
 };
 
 /// The agent's local HTTP API base. Matches the Python LCD service's
@@ -319,12 +319,26 @@ fn bool_field(v: &Value, key: &str) -> bool {
 
 // ── per-context mappers ─────────────────────────────────────────────
 
+/// The `link` block as the pages read it.
+///
+/// A `stale` block keeps only its state. The agent flips a snapshot older than
+/// its freshness window to `stale` but still carries the dead producer's last
+/// RSSI, bitrate, FEC, channel and TX power; painting those would show a dead
+/// radio as a live one, so every measured field is dropped here, once, for
+/// every page.
 fn link_ctx(v: Option<&Value>) -> LinkCtx {
     let Some(v) = v else {
         return LinkCtx::default();
     };
+    let state = string_field(v, "state");
+    if state.as_deref() == Some(LINK_STATE_STALE) {
+        return LinkCtx {
+            state,
+            ..LinkCtx::default()
+        };
+    }
     LinkCtx {
-        state: string_field(v, "state"),
+        state,
         rssi_dbm: f64_field(v, "rssi_dbm"),
         snr_db: f64_field(v, "snr_db"),
         noise_dbm: f64_field(v, "noise_dbm"),
@@ -395,7 +409,7 @@ fn fc_ctx(v: Option<&Value>) -> FcCtx {
     FcCtx {
         vehicle: string_field(v, "vehicle"),
         mode: string_field(v, "mode"),
-        armed: bool_field(v, "armed"),
+        armed: v.get("armed").and_then(Value::as_bool),
         battery_voltage: f64_field(v, "battery_voltage"),
         battery_remaining: f64_field(v, "battery_remaining"),
         gps_fix_type: i64_field(v, "gps_fix_type"),
@@ -677,7 +691,7 @@ fn hop_entry(v: &Value) -> Option<HopEntry> {
 /// Read the `X-ADOS-Key` from `pairing.json`. `None` when the file is absent,
 /// unreadable, malformed, or carries no `api_key` — all of which are the
 /// unpaired case where the header should simply be omitted.
-fn load_api_key(path: &Path) -> Option<String> {
+pub(crate) fn load_api_key(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let blob: Value = serde_json::from_str(&text).ok()?;
     blob.get("api_key")
@@ -845,6 +859,47 @@ mod tests {
         assert!(ctx.video.recording);
         assert_eq!(ctx.video.camera_count, 1);
         assert!(ctx.video.mediamtx_ready);
+    }
+
+    /// A stale radio snapshot is no data: the dead producer's last RSSI,
+    /// bitrate, FEC, channel and TX power never reach a page, and the RSSI
+    /// trend breaks instead of carrying the frozen value forward.
+    #[test]
+    fn a_stale_link_block_carries_no_readings() {
+        let mut src = source();
+        let status = json!({
+            "link": {
+                "state": "stale",
+                "rssi_dbm": -58.0,
+                "bitrate_kbps": 20000,
+                "bitrate_mbps": 20.0,
+                "fec_recovered": 12,
+                "fec_failed": 1,
+                "channel": 149,
+                "tx_power_dbm": 10
+            }
+        });
+        let ctx = src.compose(Some(&status), None, None, None);
+        assert!(ctx.link.is_stale());
+        assert_eq!(ctx.link.rssi_dbm, None);
+        assert_eq!(ctx.link.bitrate_mbps, None);
+        assert_eq!(ctx.link.bitrate_kbps, None);
+        assert_eq!(ctx.link.fec_recovered, None);
+        assert_eq!(ctx.link.fec_lost, None);
+        assert_eq!(ctx.link.channel, None);
+        assert_eq!(ctx.link.tx_power_dbm, None);
+        assert_eq!(ctx.link.rssi_history.last(), Some(&None));
+    }
+
+    /// No `armed` in the FC block is an unknown arm state, not DISARMED.
+    #[test]
+    fn an_absent_arm_report_stays_unknown() {
+        let mut src = source();
+        let ctx = src.compose(Some(&json!({"fc": {"mode": "LOITER"}})), None, None, None);
+        assert_eq!(ctx.fc.armed, None);
+        assert_eq!(ctx.drone.armed, None);
+        let ctx = src.compose(Some(&json!({"fc": {"armed": false}})), None, None, None);
+        assert_eq!(ctx.fc.armed, Some(false));
     }
 
     #[test]

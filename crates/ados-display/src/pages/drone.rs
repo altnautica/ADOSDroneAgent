@@ -6,8 +6,8 @@
 //!   key-fingerprint short form, paired-at relative time, and a 2-column grid
 //!   covering vehicle / mode / armed / battery / GPS on the left and a battery
 //!   graphic plus a 60-second battery sparkline on the right.
-//! * **Unpaired** — show a NOT PAIRED banner, the pairing code, a QR of the
-//!   pair URL, and an "Open pairing window" button.
+//! * **Unpaired** — show a NOT PAIRED banner, the pairing code and a QR of the
+//!   pair URL.
 //!
 //! Live FC telemetry comes from [`PageContext::fc`]; the paired-drone identity
 //! comes from [`PageContext::paired_drone`]; the unpaired code/URL come from
@@ -18,7 +18,7 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, fill_rect_outline, text, Canvas};
 use crate::graphics::qr::render_qr;
 use crate::graphics::sparkline::draw_sparkline;
-use crate::pages::{blank_panel, HitAction, HitZone, Page, PageContext};
+use crate::pages::{blank_panel, ArmState, Chrome, HitAction, HitZone, Page, PageContext};
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
 /// Layout reference width of the detail-modal surface.
@@ -52,6 +52,10 @@ impl Page for DroneDetailPage {
         "details.drone"
     }
 
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
+    }
+
     fn refresh_hz(&self) -> f32 {
         2.0
     }
@@ -75,24 +79,8 @@ impl Page for DroneDetailPage {
         canvas
     }
 
-    fn hit_zones(&self, ctx: &PageContext) -> Vec<HitZone> {
-        let mut zones = vec![HitZone::new(8, 8, 40, 32, HitAction::Back)];
-        let paired = ctx
-            .paired_drone
-            .device_id
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
-        if !paired {
-            zones.push(HitZone::new(
-                140,
-                188,
-                200,
-                40,
-                HitAction::Custom("drone.open_pairing".to_string()),
-            ));
-        }
-        zones
+    fn hit_zones(&self, _ctx: &PageContext) -> Vec<HitZone> {
+        vec![HitZone::new(8, 8, 40, 32, HitAction::Back)]
     }
 }
 
@@ -180,18 +168,14 @@ fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
         grid_y + 30,
         palette.text_secondary,
     );
-    let (arm_label, arm_color) = if armed {
-        ("ARMED", palette.status_success)
-    } else {
-        ("DISARMED", palette.text_secondary)
-    };
+    let arm = ArmState::from_report(armed);
     text(
         canvas,
         &body_font,
-        arm_label,
+        arm.label(),
         col_left_x,
         grid_y + 46,
-        arm_color,
+        arm.color(palette),
     );
     let bat_text = match (bat_v, bat_pct) {
         (Some(v), Some(p)) => format!("bat {v:.1}V  {}%", p as i64),
@@ -286,7 +270,7 @@ fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     }
 }
 
-/// Paint the unpaired body: NOT PAIRED banner + pair code + QR + button.
+/// Paint the unpaired body: NOT PAIRED banner + pair code + QR.
 fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     let code = ctx
         .cloud
@@ -338,32 +322,6 @@ fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
             }
         }
     }
-
-    // Open pairing window button: 200x40 centered at y=188.
-    let btn_w = 200;
-    let btn_h = 40;
-    let btn_x = (PAGE_W - btn_w) / 2;
-    let btn_y = 188;
-    fill_rect_outline(
-        canvas,
-        btn_x,
-        btn_y,
-        btn_x + btn_w - 1,
-        btn_y + btn_h - 1,
-        palette.accent_primary,
-        palette.text_primary,
-    );
-    let btn_label = "Open pairing window";
-    let btn_font = LoadedFont::new(FontFace::SansBold, 12);
-    let (bw, bh) = btn_font.text_size(btn_label);
-    text(
-        canvas,
-        &btn_font,
-        btn_label,
-        btn_x + (btn_w - bw as i32) / 2,
-        btn_y + (btn_h - bh as i32) / 2 - 1,
-        palette.text_primary,
-    );
 }
 
 #[cfg(test)]
@@ -372,24 +330,31 @@ mod tests {
     use crate::graphics::palette::DARK;
     use crate::pages::PANEL_W;
 
+    /// With no FC report the arm row reads `ARM —`, never DISARMED.
     #[test]
-    fn unpaired_has_open_pairing_zone() {
+    fn an_unreported_arm_state_is_not_shown_as_disarmed() {
+        assert_eq!(ArmState::from_report(None).label(), "ARM —");
+        assert_eq!(ArmState::from_report(Some(false)).label(), "DISARMED");
+        assert_eq!(ArmState::from_report(Some(true)).label(), "ARMED");
         let page = DroneDetailPage;
         let mut ctx = PageContext::default();
-        ctx.cloud.pairing_code = Some("ABC123".to_string());
+        ctx.paired_drone.device_id = Some("ados-58c27faf".to_string());
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
-        let zones = page.hit_zones(&ctx);
-        assert_eq!(zones.len(), 2);
-        assert_eq!(zones[0].action, HitAction::Back);
-        assert_eq!(
-            zones[1].action,
-            HitAction::Custom("drone.open_pairing".to_string())
-        );
     }
 
     #[test]
-    fn paired_drops_the_open_pairing_zone() {
+    fn unpaired_offers_no_control_without_an_endpoint() {
+        let page = DroneDetailPage;
+        let mut ctx = PageContext::default();
+        ctx.cloud.pairing_code = Some("ABC123".to_string());
+        let zones = page.hit_zones(&ctx);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].action, HitAction::Back);
+    }
+
+    #[test]
+    fn paired_renders_the_telemetry_grid() {
         let page = DroneDetailPage;
         let mut ctx = PageContext::default();
         ctx.paired_drone.device_id = Some("ados-58c27faf".to_string());
@@ -397,7 +362,7 @@ mod tests {
         ctx.paired_drone.paired_at_seconds = Some(125.0);
         ctx.fc.vehicle = Some("quad".to_string());
         ctx.fc.mode = Some("LOITER".to_string());
-        ctx.fc.armed = true;
+        ctx.fc.armed = Some(true);
         ctx.fc.battery_voltage = Some(16.4);
         ctx.fc.battery_remaining = Some(72.0);
         ctx.fc.gps_fix_type = Some(3);

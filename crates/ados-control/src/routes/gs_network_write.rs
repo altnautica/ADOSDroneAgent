@@ -54,6 +54,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use crate::config_store::{section, section_path, update_config};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -388,33 +389,37 @@ pub async fn put_network_ap(
         NetCmd::Unavailable => return socket_unavailable("E_AP_APPLY_FAILED"),
     };
 
-    // Persist channel / SSID back to the agent config for reboot survival, the
-    // same best-effort `_save_config` the FastAPI route performs after the apply
-    // (only when a value was supplied). A persist fault does not change the
-    // response — the FastAPI route swallows it too.
+    // Persist channel / SSID back to the agent config for reboot survival (only
+    // when a value was supplied). The AP already carries the change, so a persist
+    // failure does not fail the request, but the body says whether it will
+    // survive a restart.
+    let mut view = view;
     if update.channel.is_some() || update.ssid.is_some() {
-        let _ = persist_hotspot(&config_yaml_path(), update.channel, update.ssid.as_deref());
+        match persist_hotspot(&config_yaml_path(), update.channel, update.ssid.as_deref()) {
+            Ok(()) => {
+                view.insert("persisted".to_string(), json!(true));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "hotspot settings applied but not persisted");
+                view.insert("persisted".to_string(), json!(false));
+                view.insert("persist_error".to_string(), json!(e));
+            }
+        }
     }
 
     Json(Value::Object(view)).into_response()
 }
 
-/// Merge the supplied `network.hotspot.channel` / `ssid` into the agent config,
-/// preserving every other key, the same surgical YAML merge the sibling config
-/// writes use. Returns the error string on any I/O / serialize fault (the caller
-/// swallows it, matching the FastAPI best-effort persist).
+/// Merge the supplied `network.hotspot.channel` / `ssid` into the agent config
+/// through the shared config store, preserving every other key.
 fn persist_hotspot(
     config_path: &Path,
     channel: Option<i64>,
     ssid: Option<&str>,
 ) -> Result<(), String> {
     use serde_norway::Value as Yaml;
-    let mut data = load_yaml_doc(config_path);
-    {
-        let hotspot = match hotspot_section_mut(&mut data) {
-            Some(m) => m,
-            None => return Err("config root is not a mapping".to_string()),
-        };
+    update_config(config_path, |root| {
+        let hotspot = section_path(root, &["network", "hotspot"]);
         if let Some(c) = channel {
             hotspot.insert(Yaml::String("channel".to_string()), Yaml::Number(c.into()));
         }
@@ -424,31 +429,10 @@ fn persist_hotspot(
                 Yaml::String(s.to_string()),
             );
         }
-    }
-    write_yaml_atomic(config_path, &data)
-}
-
-/// Navigate/create `network.hotspot` as a mutable mapping. A non-mapping `network`
-/// / `hotspot` node is replaced with an empty mapping (matching the sibling
-/// config-merge create-on-conflict behaviour); only a non-mapping document root
-/// fails.
-fn hotspot_section_mut(data: &mut serde_norway::Value) -> Option<&mut serde_norway::Mapping> {
-    use serde_norway::Value as Yaml;
-    let root = data.as_mapping_mut()?;
-    let network = root
-        .entry(Yaml::String("network".to_string()))
-        .or_insert_with(|| Yaml::Mapping(serde_norway::Mapping::new()));
-    if !network.is_mapping() {
-        *network = Yaml::Mapping(serde_norway::Mapping::new());
-    }
-    let network_map = network.as_mapping_mut()?;
-    let hotspot = network_map
-        .entry(Yaml::String("hotspot".to_string()))
-        .or_insert_with(|| Yaml::Mapping(serde_norway::Mapping::new()));
-    if !hotspot.is_mapping() {
-        *hotspot = Yaml::Mapping(serde_norway::Mapping::new());
-    }
-    hotspot.as_mapping_mut()
+        Ok(())
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -664,70 +648,20 @@ pub async fn put_network_share_uplink(
     .into_response()
 }
 
-/// Merge `ground_station.share_uplink` into the agent config, preserving every other
-/// key. Returns the error string on any I/O / serialize fault so the route can surface
-/// `E_UI_SAVE_FAILED`, mirroring the Python `OSError` path.
+/// Merge `ground_station.share_uplink` into the agent config through the shared
+/// config store, preserving every other key. Returns the error string so the route
+/// can surface `E_UI_SAVE_FAILED`.
 fn persist_share_uplink(config_path: &Path, enabled: bool) -> Result<(), String> {
     use serde_norway::Value as Yaml;
-    let mut data = load_yaml_doc(config_path);
-    {
-        let root = match data.as_mapping_mut() {
-            Some(m) => m,
-            None => return Err("config root is not a mapping".to_string()),
-        };
-        let gs = root
-            .entry(Yaml::String("ground_station".to_string()))
-            .or_insert_with(|| Yaml::Mapping(serde_norway::Mapping::new()));
-        if !gs.is_mapping() {
-            *gs = Yaml::Mapping(serde_norway::Mapping::new());
-        }
-        let gs_map = gs
-            .as_mapping_mut()
-            .ok_or_else(|| "ground_station section is not a mapping".to_string())?;
-        gs_map.insert(
+    update_config(config_path, |root| {
+        section(root, "ground_station").insert(
             Yaml::String("share_uplink".to_string()),
             Yaml::Bool(enabled),
         );
-    }
-    write_yaml_atomic(config_path, &data)
-}
-
-// ---------------------------------------------------------------------------
-// Shared YAML config-merge helpers (the surgical merge the sibling writes use).
-// ---------------------------------------------------------------------------
-
-/// Load the agent config as a serde_norway document, seeding an empty mapping on
-/// absence / a parse error / a non-mapping root (matching the Python `data: dict =
-/// {}` seed the config writers use).
-fn load_yaml_doc(config_path: &Path) -> serde_norway::Value {
-    use serde_norway::Value as Yaml;
-    match std::fs::read_to_string(config_path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(serde_norway::Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(serde_norway::Mapping::new()),
-    }
-}
-
-/// Serialize `data` to YAML and write it to `path` atomically (ensure the parent
-/// dir, write a `.tmp` sibling, rename over the target). Returns the error string
-/// on any serialize / I/O fault.
-fn write_yaml_atomic(path: &Path, data: &serde_norway::Value) -> Result<(), String> {
-    let body = serde_norway::to_string(data).map_err(|e| e.to_string())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = {
-        let mut ext = path
-            .extension()
-            .map(|e| e.to_os_string())
-            .unwrap_or_default();
-        ext.push(".tmp");
-        path.with_extension(ext)
-    };
-    std::fs::write(&tmp, body.as_bytes()).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+        Ok(())
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

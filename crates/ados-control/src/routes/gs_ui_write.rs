@@ -31,8 +31,8 @@
 //! FastAPI handlers, which mutate the in-memory `_load_ui_config()` dict (sourced
 //! from the side-file), call `_persist_gs_ui_section(...)` (which writes the YAML
 //! config), and return the mutated in-memory dict. The front reproduces both legs:
-//! the YAML-config merge (the same atomic `serde_norway` tmp+rename the MAC-pin /
-//! WFB writes use) for the persist, and the side-file read + in-memory section
+//! the YAML-config merge (through the shared config store every native config
+//! write uses) for the persist, and the side-file read + in-memory section
 //! overlay for the response body.
 //!
 //! The `/display` write is the single-source-of-truth path: it seeds from, and
@@ -82,6 +82,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use crate::config_store::{section_path, update_config};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -428,57 +429,25 @@ fn yaml_to_json(value: &serde_norway::Value) -> Value {
 // YAML config persist: ground_station.ui.<section> (the authoritative path).
 // ---------------------------------------------------------------------------
 
-/// Merge `value` into `ground_station.ui.<section>` of the on-disk YAML config,
-/// atomically (tmp + rename), preserving every other key and the mapping insertion
-/// order (the Python `yaml.safe_dump(sort_keys=False)`). Returns `Ok(())` on
-/// success, `Err(message)` on any read/parse/serialize/write fault so the caller
-/// can map it to the `E_UI_SAVE_FAILED` 500 — including the EPERM a non-root front
-/// gets on the 0600 root-owned config, matching the FastAPI `_persist_gs_ui_section`
-/// raising `OSError` when `_save_config_dict` returns `False`.
-fn persist_gs_ui_section(config_path: &Path, section: &str, value: &Value) -> Result<(), String> {
-    use serde_norway::{Mapping, Value as Yaml};
-
-    // An absent / non-mapping config starts from an empty mapping (the Python
-    // `_load_config_dict()` returns `{}` when the file is absent / unparseable).
-    let mut data: Yaml = match std::fs::read_to_string(config_path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(Mapping::new()),
-    };
-
-    {
-        let root = data
-            .as_mapping_mut()
-            .ok_or_else(|| "config root is not a mapping".to_string())?;
-        let gs = root
-            .entry(Yaml::String("ground_station".to_string()))
-            .or_insert_with(|| Yaml::Mapping(Mapping::new()));
-        if !gs.is_mapping() {
-            *gs = Yaml::Mapping(Mapping::new());
-        }
-        let gs_map = gs
-            .as_mapping_mut()
-            .ok_or_else(|| "ground_station section is not a mapping".to_string())?;
-        let ui = gs_map
-            .entry(Yaml::String("ui".to_string()))
-            .or_insert_with(|| Yaml::Mapping(Mapping::new()));
-        if !ui.is_mapping() {
-            *ui = Yaml::Mapping(Mapping::new());
-        }
-        let ui_map = ui
-            .as_mapping_mut()
-            .ok_or_else(|| "ui section is not a mapping".to_string())?;
-        // Convert the JSON section value into a YAML value so it nests under the
-        // config tree (the Python writes the raw dict; the round-trip through YAML
-        // preserves the same scalar/list/map shape).
-        let yaml_value: Yaml = json_to_yaml(value);
-        ui_map.insert(Yaml::String(section.to_string()), yaml_value);
-    }
-
-    let body = serde_norway::to_string(&data).map_err(|e| e.to_string())?;
-    write_atomic_bytes(config_path, body.as_bytes())
+/// Merge `value` into `ground_station.ui.<ui_section>` of the on-disk YAML config
+/// through the shared config store, preserving every other key and the mapping
+/// insertion order. Returns `Err(message)` on any read/parse/serialize/write
+/// fault so the caller can map it to the `E_UI_SAVE_FAILED` 500 — including a
+/// document the store refuses to write over and the EPERM a non-root front gets
+/// on the 0600 root-owned config.
+fn persist_gs_ui_section(
+    config_path: &Path,
+    ui_section: &str,
+    value: &Value,
+) -> Result<(), String> {
+    use serde_norway::Value as Yaml;
+    update_config(config_path, |root| {
+        section_path(root, &["ground_station", "ui"])
+            .insert(Yaml::String(ui_section.to_string()), json_to_yaml(value));
+        Ok(())
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 /// Convert a `serde_json::Value` into a `serde_norway::Value`, preserving the
@@ -518,72 +487,21 @@ fn json_to_yaml(value: &Value) -> serde_norway::Value {
 // ---------------------------------------------------------------------------
 
 /// Merge the supplied kiosk fields into `ground_station.kiosk` of the on-disk YAML
-/// config, atomically (tmp + rename), preserving every other key (e.g. an
-/// operator-set `minimal_layer`) and the mapping insertion order. Returns `Ok(())`
-/// on success, `Err(message)` on any read/parse/serialize/write fault so the caller
-/// maps it to the `E_UI_SAVE_FAILED` 500 — including the EPERM a non-root front gets
-/// on the 0600 root-owned config.
+/// config through the shared config store, preserving every other key (e.g. an
+/// operator-set `minimal_layer`) and the mapping insertion order. Returns
+/// `Err(message)` on any fault so the caller maps it to the `E_UI_SAVE_FAILED`
+/// 500.
 fn persist_gs_kiosk_fields(config_path: &Path, fields: &[(&str, Value)]) -> Result<(), String> {
-    use serde_norway::{Mapping, Value as Yaml};
-
-    // An absent / non-mapping config starts from an empty mapping (the same seed the
-    // sibling `persist_gs_ui_section` uses).
-    let mut data: Yaml = match std::fs::read_to_string(config_path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(Mapping::new()),
-    };
-
-    {
-        let root = data
-            .as_mapping_mut()
-            .ok_or_else(|| "config root is not a mapping".to_string())?;
-        let gs = root
-            .entry(Yaml::String("ground_station".to_string()))
-            .or_insert_with(|| Yaml::Mapping(Mapping::new()));
-        if !gs.is_mapping() {
-            *gs = Yaml::Mapping(Mapping::new());
-        }
-        let gs_map = gs
-            .as_mapping_mut()
-            .ok_or_else(|| "ground_station section is not a mapping".to_string())?;
-        let kiosk = gs_map
-            .entry(Yaml::String("kiosk".to_string()))
-            .or_insert_with(|| Yaml::Mapping(Mapping::new()));
-        if !kiosk.is_mapping() {
-            *kiosk = Yaml::Mapping(Mapping::new());
-        }
-        let kiosk_map = kiosk
-            .as_mapping_mut()
-            .ok_or_else(|| "kiosk section is not a mapping".to_string())?;
+    use serde_norway::Value as Yaml;
+    update_config(config_path, |root| {
+        let kiosk = section_path(root, &["ground_station", "kiosk"]);
         for (k, v) in fields {
-            kiosk_map.insert(Yaml::String((*k).to_string()), json_to_yaml(v));
+            kiosk.insert(Yaml::String((*k).to_string()), json_to_yaml(v));
         }
-    }
-
-    let body = serde_norway::to_string(&data).map_err(|e| e.to_string())?;
-    write_atomic_bytes(config_path, body.as_bytes())
-}
-
-/// Write `bytes` to `path` atomically: ensure the parent dir, write a `.tmp`
-/// sibling, then rename over the target. Mirrors the Python tmp-write +
-/// `os.replace` / `tmp.replace` idiom. Returns `Err(message)` on any I/O fault.
-fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = {
-        let mut ext = path
-            .extension()
-            .map(|e| e.to_os_string())
-            .unwrap_or_default();
-        ext.push(".tmp");
-        path.with_extension(ext)
-    };
-    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+        Ok(())
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -240,6 +240,33 @@ pub fn write_pair_proof_to(path: &Path, proof: &PairProof) -> std::io::Result<()
     Ok(())
 }
 
+/// The operator's "retry the local link" request, consumed by the supervisor's
+/// auto-pair loop.
+///
+/// Once the loop has spent its local-bind attempts it parks on the cloud relay
+/// and stops trying. Re-arming the flag in the config does not reach that
+/// in-memory verdict, so the auto-pair route drops this file and the loop takes
+/// it on its next tick: it clears the park and the attempt count and binds
+/// again. `/run`, deliberately: a supervisor restart resets the park anyway, so
+/// a request must not outlive the boot it was made in.
+pub const AUTO_PAIR_RETRY_PATH: &str = "/run/ados/auto-pair-retry.request";
+
+/// Record a local-retry request at `path` (the content is informational; the
+/// file's presence is the request).
+pub fn request_local_retry_at(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, b"retry-local\n")
+}
+
+/// Consume a pending local-retry request at `path`. `true` exactly once per
+/// request: the removal is the acknowledgement, so two ticks cannot both act on
+/// one request. An unreadable directory reads as no request.
+pub fn take_local_retry_request_at(path: &Path) -> bool {
+    std::fs::remove_file(path).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +412,17 @@ mod tests {
         // And it can be rewritten over rather than crashing the caller.
         write_pair_proof_to(&junk, &loaded.proof).unwrap();
         assert!(read_pair_proof_from(&junk).is_some());
+    }
+
+    #[test]
+    fn a_local_retry_request_is_consumed_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run").join("auto-pair-retry.request");
+        assert!(!take_local_retry_request_at(&path));
+        request_local_retry_at(&path).unwrap();
+        // A second request before the loop ticks is still one request.
+        request_local_retry_at(&path).unwrap();
+        assert!(take_local_retry_request_at(&path));
+        assert!(!take_local_retry_request_at(&path));
     }
 }

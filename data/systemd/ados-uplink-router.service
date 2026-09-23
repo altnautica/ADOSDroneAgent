@@ -3,8 +3,7 @@ Description=ADOS Uplink Router (ground-station profile)
 After=NetworkManager.service
 PartOf=ados-supervisor.service
 Requires=ados-supervisor.service
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -18,8 +17,8 @@ User=root
 # subsumed packaged units are masked (handled by the installer). The packaged
 # Python uplink entrypoints were deleted, so there is no fallback branch.
 ExecStart=/opt/ados/bin/ados-net
-Restart=on-failure
-RestartSec=10
+Restart=always
+RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
 

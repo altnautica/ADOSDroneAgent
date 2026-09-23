@@ -109,10 +109,10 @@ EOF
     # rather than granted: nothing in these tests reaches a real path.
     root_id() { printf '#!/bin/sh\necho 0\n' > "${BIN}/id"; chmod +x "${BIN}/id"; }
 
-    # The bootstrap best-effort installs minisign before verifying. A no-op stub
-    # keeps the suite from touching a package manager on any host; the fetch then
-    # reports its sha256-only posture and continues, exactly as on a board with
-    # no package index.
+    # The bootstrap installs minisign before verifying when it is missing. A
+    # no-op stub keeps the suite from touching a package manager on any host;
+    # the real minisign on PATH (a suite prerequisite, as in CI) does the
+    # verification.
     stub_apt() { printf '#!/bin/sh\nexit 0\n' > "${BIN}/apt-get"; chmod +x "${BIN}/apt-get"; }
 
     # A fake release tree the bootstrap and the installer both fetch from over
@@ -146,6 +146,13 @@ EOF
         chmod +x "${REL}/prebuilt-installer/ados-installer-aarch64"
         ( cd "${REL}/prebuilt-installer" \
             && sha256sum ados-installer-aarch64 > ados-installer-aarch64.sha256 )
+        # The bootstrap refuses an installer without a valid signature on every
+        # channel, so the fake release is signed with a throwaway key the run
+        # trusts through ADOS_INSTALLER_PUBKEY.
+        minisign -G -W -p "${TMP}/release.pub" -s "${TMP}/release.key" >/dev/null
+        minisign -S -s "${TMP}/release.key" -m "${REL}/prebuilt-installer/ados-installer-aarch64" >/dev/null
+        ADOS_INSTALLER_PUBKEY="$(tail -n 1 "${TMP}/release.pub")"
+        export ADOS_INSTALLER_PUBKEY
         printf 'pinned-supervisor-bytes\n' > "${REL}/rev-${TIP_SHA}/ados-supervisor-aarch64"
         ( cd "${REL}/rev-${TIP_SHA}" \
             && sha256sum ados-supervisor-aarch64 > ados-supervisor-aarch64.sha256 )

@@ -9,8 +9,7 @@ PartOf=ados-supervisor.service
 # receiver operator can open a pairing window even when wfb-receiver is
 # not yet up.
 ConditionPathExists=/etc/ados/profile.conf
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -19,8 +18,8 @@ Slice=ados.slice
 Type=simple
 User=root
 ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.pairing_daemon
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
 

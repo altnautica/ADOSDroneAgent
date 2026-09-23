@@ -46,104 +46,30 @@ log = get_logger("api.plugins.helpers")
 # WebSocket auth helpers
 # ---------------------------------------------------------------------
 #
-# The plugin install-job WebSocket has its own ticket flow that binds
-# each ticket to a specific ``job_id`` and uses the historical
-# ``ados-job-ticket`` subprotocol marker. The underlying ticket store
-# and the credential-check logic live in
-# :mod:`ados.api.middleware.ws_auth` so other routes can reuse the
-# same code paths.
-#
-# Two accepted credentials per the WebSocket auth contract:
+# The install-job progress WebSocket uses the same credentials as every
+# other agent stream (see :mod:`ados.api.middleware.ws_auth`):
 #
 #   * ``X-ADOS-Key`` header — native clients (``ados`` CLI, agent
 #     integration tests) that can set arbitrary headers on the
 #     handshake.
-#   * ``Sec-WebSocket-Protocol: ados-job-ticket, <ticket-hex>`` — the
-#     subprotocol-based ticket flow for browser clients. The GCS
-#     first mints a one-shot ticket via
-#     ``POST /api/plugins/jobs/{job_id}/ticket`` (which the HTTP
-#     middleware still authenticates with the pairing key) and then
-#     hands the ticket to ``new WebSocket(url, ["ados-job-ticket",
-#     ticket])``. The ticket is consumed on first use and expires
-#     within 30 s. Replaces the previous ``?api_key=`` query-string
-#     fallback so the pairing key never reaches DevTools, HAR
-#     exports, or reverse-proxy access logs.
+#   * ``Sec-WebSocket-Protocol: ados-ws-ticket, <ticket>`` — browser
+#     clients mint a ticket for :data:`JOB_STREAM_TICKET_SCOPE` via the
+#     native ``POST /api/_ws/ticket`` and hand it to
+#     ``new WebSocket(url, ["ados-ws-ticket", ticket])``. The front
+#     admits the upgrade on the same self-contained HMAC ticket, so the
+#     handshake reaches this route on a paired node.
 
-
-from ados.api.middleware.ws_auth import (
-    WS_JOB_TICKET_PROTOCOL,  # noqa: F401  re-exported from historical location
-    ws_ticket_store,
-)
-from ados.api.middleware.ws_auth import (
-    WS_TICKET_PROTOCOL as _WS_TICKET_PROTOCOL,  # noqa: F401  re-exported
-)
 from ados.api.middleware.ws_auth import (
     authenticate_websocket as _authenticate_websocket_unified,
 )
 
-# Re-export so the test suite and any external callers can pick the
-# marker up from the historical location.
-__all_ws = ["WS_JOB_TICKET_PROTOCOL", "_WS_TICKET_PROTOCOL"]
+# The ticket scope for the install-job progress stream. Must match the
+# scope the native mint allows (ados-control ``TICKET_SCOPES``).
+JOB_STREAM_TICKET_SCOPE = "plugins.install_job"
 
 
-def _job_ticket_scope(job_id: str) -> str:
-    """Map an install-job id onto the unified ticket store's scope key."""
-    return f"plugin-job:{job_id}"
-
-
-class _JobTicketStoreShim:
-    """Thin shim around the unified ticket store.
-
-    Existing tests reach into ``job_ticket_store`` to issue or reset
-    tickets without going through the route layer. Preserve that
-    surface while the underlying storage moves to the unified store.
-    """
-
-    @property
-    def HEX_LEN(self) -> int:  # noqa: N802 — back-compat constant name
-        return ws_ticket_store.HEX_LEN
-
-    async def issue(
-        self,
-        job_id: str,
-        *,
-        ttl_seconds: int = 30,
-        now_ms: int | None = None,
-    ) -> tuple[str, int]:
-        return await ws_ticket_store.issue(
-            _job_ticket_scope(job_id),
-            ttl_seconds=ttl_seconds,
-            now_ms=now_ms,
-        )
-
-    async def consume(
-        self,
-        ticket: str,
-        *,
-        job_id: str,
-        now_ms: int | None = None,
-    ) -> bool:
-        return await ws_ticket_store.consume(
-            ticket,
-            scope=_job_ticket_scope(job_id),
-            now_ms=now_ms,
-        )
-
-    def _reset_for_tests(self) -> None:
-        ws_ticket_store._reset_for_tests()
-
-
-# Module-level singleton kept for back-compat with tests and any
-# external caller that imported the symbol directly.
-job_ticket_store = _JobTicketStoreShim()
-
-
-async def authenticate_job_websocket(
-    websocket: Any,
-    *,
-    job_id: str,
-) -> str | None:
-    """Validate either the ``X-ADOS-Key`` header or a one-shot ticket.
+async def authenticate_job_websocket(websocket: Any) -> str | None:
+    """Validate either the ``X-ADOS-Key`` header or an ``ados-ws-ticket``.
 
     Returns the subprotocol the route should echo back in
     ``websocket.accept(subprotocol=...)`` when the ticket path is
@@ -152,9 +78,7 @@ async def authenticate_job_websocket(
     echo), or ``None`` on rejection.
     """
     return await _authenticate_websocket_unified(
-        websocket,
-        scope=_job_ticket_scope(job_id),
-        allow_legacy_job_protocol=True,
+        websocket, scope=JOB_STREAM_TICKET_SCOPE
     )
 
 

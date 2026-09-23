@@ -16,6 +16,10 @@
 //! - **Derived fields are computed here, not on the client.** `heading_deg` and
 //!   `age_ms` are emitted so every consumer agrees on them; two clients deriving
 //!   heading with different argument orders would mirror the map.
+//! - **`sender_id` is the bus identity of one sender run**: the 16-hex nonce
+//!   prefix its beacons are sealed under. Two senders provisioned into one slot
+//!   carry different ids, and the separation layer breaks their tie on them. The
+//!   top-level `sender_id` is this node's own, `null` until its radio has opened.
 //! - **`neighbors` is who is heard; `slots` is who is registered.** The
 //!   `neighbors` array holds only slots this node's radio has actually received a
 //!   beacon from since it started; `slots` holds the fleet's whole registered-slot
@@ -30,7 +34,13 @@ use std::time::Instant;
 
 use serde_json::{json, Value};
 
+use crate::crypto::NONCE_PREFIX_LEN;
 use crate::neighbors::{NeighborTable, SwarmCounters};
+
+/// A nonce prefix as the published `sender_id`: lowercase hex, big-endian.
+pub fn sender_id_hex(prefix: &[u8; NONCE_PREFIX_LEN]) -> String {
+    prefix.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 /// Build the payload published on the swarm socket.
 ///
@@ -67,6 +77,7 @@ pub fn neighbors_payload(
                 "mode_precedence": b.precedence().as_wire(),
                 "age_ms": n.age(now).as_millis(),
                 "rssi_dbm": n.rssi_dbm,
+                "sender_id": sender_id_hex(&n.sender),
             })
         })
         .collect();
@@ -74,6 +85,7 @@ pub fn neighbors_payload(
     json!({
         "fleet_id": fleet_id,
         "slot": table.own_slot(),
+        "sender_id": table.own_sender().as_ref().map(sender_id_hex),
         "slot_conflict": table.slot_conflict(),
         "neighbors": neighbors,
         "counters": counters_value(table.counters(), table.len()),
@@ -116,6 +128,7 @@ pub fn empty_payload() -> Value {
     json!({
         "fleet_id": Value::Null,
         "slot": Value::Null,
+        "sender_id": Value::Null,
         "slot_conflict": Value::Null,
         "neighbors": [],
         "counters": counters_value(SwarmCounters::default(), 0),
@@ -166,9 +179,10 @@ pub fn encode_line(payload: &Value) -> Vec<u8> {
 /// The top-level keys of the published payload. `slot_conflict` is `true` while a
 /// peer is beaconing this node's own slot, `false` when none is, and `null` when
 /// no running bus has reported.
-pub const PAYLOAD_KEYS: [&str; 6] = [
+pub const PAYLOAD_KEYS: [&str; 7] = [
     "fleet_id",
     "slot",
+    "sender_id",
     "slot_conflict",
     "neighbors",
     "counters",
@@ -177,7 +191,7 @@ pub const PAYLOAD_KEYS: [&str; 6] = [
 
 /// The keys the contract requires on a neighbour row. Exported so the shape is
 /// asserted from one list rather than a hand-copied one per test.
-pub const NEIGHBOR_KEYS: [&str; 18] = [
+pub const NEIGHBOR_KEYS: [&str; 19] = [
     "slot",
     "device_id",
     "seq_ms",
@@ -196,6 +210,7 @@ pub const NEIGHBOR_KEYS: [&str; 18] = [
     "mode_precedence",
     "age_ms",
     "rssi_dbm",
+    "sender_id",
 ];
 
 /// The keys the contract requires in the counter block.
@@ -269,6 +284,7 @@ mod tests {
             json!({
                 "fleet_id": 1,
                 "slot": 0,
+                "sender_id": null,
                 "slot_conflict": false,
                 "neighbors": [{
                     "slot": 3,
@@ -289,6 +305,7 @@ mod tests {
                     "mode_precedence": "hold",
                     "age_ms": 420,
                     "rssi_dbm": -48,
+                    "sender_id": "0303030303030303",
                 }],
                 "counters": {
                     "beacons_tx": 0,
@@ -316,6 +333,19 @@ mod tests {
         assert_exact_keys(&payload["neighbors"][0], &NEIGHBOR_KEYS, "neighbor row");
         assert_exact_keys(&payload["counters"], &COUNTER_KEYS, "counters");
         assert_exact_keys(&payload["slots"][0], &SLOT_KEYS, "slot row");
+    }
+
+    /// This node's own bus identity is published once the radio half has recorded
+    /// it, in the same encoding as a neighbour row's, so a consumer comparing the
+    /// two compares like with like.
+    #[test]
+    fn the_own_sender_id_is_published_in_the_row_encoding() {
+        let t0 = Instant::now();
+        let mut table = table_with_one(t0);
+        table.set_own_sender([0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0xff]);
+        let p = neighbors_payload(1, &table, &ids(), t0);
+        assert_eq!(p["sender_id"], json!("00112233445566ff"));
+        assert_eq!(p["neighbors"][0]["sender_id"], json!("0303030303030303"));
     }
 
     /// A missing reading must be `null`. A fabricated `-100 dBm` or `""` would

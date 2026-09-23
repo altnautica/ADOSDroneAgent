@@ -46,10 +46,10 @@ use ados_protocol::atlas::{
 };
 use ados_protocol::sidecar::check_sidecar_version;
 
+use crate::config_store::{section, update_config};
 use crate::ipc::atlas_control_client::{AtlasControlClient, AtlasControlError};
 use crate::routes::detail;
 use crate::routes::service_control::restart_unit;
-use crate::routes::wfb_pair_write::write_atomic;
 
 /// The unit that runs the capture service; restarting it applies a config change.
 const ATLAS_UNIT: &str = "ados-atlas";
@@ -344,38 +344,16 @@ pub async fn put_atlas_config(Json(body): Json<AtlasConfigBody>) -> Response {
     .into_response()
 }
 
-/// Surgically write the provided `atlas.*` fields, preserving every other key +
-/// section. An absent file starts from an empty mapping; a non-mapping `atlas`
-/// node is replaced with an empty mapping. Returns the effective `enabled` after
-/// the write for the response.
+/// Surgically write the provided `atlas.*` fields through the shared config
+/// store, preserving every other key + section. An absent file starts from an
+/// empty mapping; a non-mapping `atlas` node is replaced with an empty mapping; a
+/// document that cannot be read or parsed is refused. Returns the effective
+/// `enabled` after the write for the response.
 fn write_atlas_block(config_path: &Path, body: &AtlasConfigBody) -> Result<bool, String> {
-    use serde_norway::{Mapping, Value as Yaml};
+    use serde_norway::Value as Yaml;
 
-    let mut data: Yaml = match std::fs::read_to_string(config_path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(Mapping::new()),
-    };
-
-    let effective_enabled;
-    {
-        let root = data
-            .as_mapping_mut()
-            .ok_or_else(|| "config root is not a mapping".to_string())?;
-        // Get-or-create the top-level `atlas:` mapping (replace a non-mapping).
-        if !root.get("atlas").map(|v| v.is_mapping()).unwrap_or(false) {
-            root.insert(
-                Yaml::String("atlas".to_string()),
-                Yaml::Mapping(Mapping::new()),
-            );
-        }
-        let atlas = root
-            .get_mut("atlas")
-            .and_then(|v| v.as_mapping_mut())
-            .ok_or_else(|| "atlas section is not a mapping".to_string())?;
-
+    update_config(config_path, |root| {
+        let atlas = section(root, "atlas");
         if let Some(enabled) = body.enabled {
             atlas.insert(Yaml::String("enabled".into()), Yaml::Bool(enabled));
         }
@@ -393,16 +371,13 @@ fn write_atlas_block(config_path: &Path, body: &AtlasConfigBody) -> Result<bool,
             let yaml_cams = serde_norway::to_value(cameras).map_err(|e| e.to_string())?;
             atlas.insert(Yaml::String("cameras".into()), yaml_cams);
         }
-
-        effective_enabled = atlas
+        Ok(atlas
             .get("enabled")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-    }
-
-    let out = serde_norway::to_string(&data).map_err(|e| e.to_string())?;
-    write_atomic(config_path, out.as_bytes())?;
-    Ok(effective_enabled)
+            .unwrap_or(false))
+    })
+    .map(|w| w.value)
+    .map_err(|e| e.to_string())
 }
 
 /// Forward a capture command to the control socket and shape the reply. An

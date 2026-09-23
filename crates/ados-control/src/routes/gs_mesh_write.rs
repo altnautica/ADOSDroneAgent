@@ -50,6 +50,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use crate::config_store::{section, section_path, update_config};
 use crate::routes::gs_cmd::groundlink_cmd_roundtrip;
 use crate::state::AppState;
 
@@ -243,10 +244,20 @@ pub async fn put_role(
         }
     };
 
-    // Best-effort persist of `ground_station.role` so the value survives a reboot
-    // even if the sentinel is wiped, mirroring the FastAPI post-apply save (which
-    // is wrapped in a try/except pass and never affects the response).
-    let _ = merge_ground_station_role(&config_yaml_path(), &role);
+    // Persist `ground_station.role` so the value survives a reboot even if the
+    // sentinel is wiped. The role is already applied, so a persist failure does
+    // not fail the request, but the body says whether it will survive a restart.
+    let mut result = result;
+    match merge_ground_station_role(&config_yaml_path(), &role) {
+        Ok(()) => {
+            result.insert("persisted".to_string(), json!(true));
+        }
+        Err(e) => {
+            tracing::error!(error = %e, role = %role, "ground station role applied but not persisted");
+            result.insert("persisted".to_string(), json!(false));
+            result.insert("persist_error".to_string(), json!(e));
+        }
+    }
 
     Json(Value::Object(result)).into_response()
 }
@@ -369,14 +380,20 @@ pub async fn put_mesh_config(
 /// file). The response mirrors the FastAPI handler, which echoes the post-mutation
 /// `mesh.{mesh_id,carrier,channel}` model values + `applied`.
 fn put_mesh_config_at(config_path: &Path, update: &MeshConfigUpdate) -> Response {
-    let (mesh_id, carrier, channel, applied) = merge_mesh_config(config_path, update);
-    Json(json!({
-        "mesh_id": mesh_id,
-        "carrier": carrier,
-        "channel": channel,
-        "applied": applied,
-    }))
-    .into_response()
+    match merge_mesh_config(config_path, update) {
+        Ok((mesh_id, carrier, channel, applied)) => Json(json!({
+            "mesh_id": mesh_id,
+            "carrier": carrier,
+            "channel": channel,
+            "applied": applied,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": {"error": {"code": "E_CONFIG_WRITE_FAILED", "message": e}}})),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,21 +415,19 @@ fn current_role() -> String {
     "direct".to_string()
 }
 
-/// Merge `ground_station.role` into the on-disk config (atomic, preserving every
-/// other key), the best-effort persist the FastAPI route does after a successful
-/// `apply_role`. Returns the IO error string on a write fault (the caller ignores
-/// it — the persist never affects the response, matching the FastAPI try/except).
+/// Merge `ground_station.role` into the on-disk config through the shared config
+/// store, preserving every other key.
 fn merge_ground_station_role(config_path: &Path, role: &str) -> Result<(), String> {
     use serde_norway::Value as Yaml;
-    let mut data: Yaml = load_or_empty_mapping(config_path);
-    {
-        let gs = section_path_mut(&mut data, &["ground_station"]).ok_or("config root not a map")?;
-        gs.insert(
+    update_config(config_path, |root| {
+        section(root, "ground_station").insert(
             Yaml::String("role".to_string()),
             Yaml::String(role.to_string()),
         );
-    }
-    write_atomic(config_path, &data)
+        Ok(())
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 /// Merge the supplied `ground_station.mesh` fields into the on-disk config and
@@ -420,17 +435,20 @@ fn merge_ground_station_role(config_path: &Path, role: &str) -> Result<(), Strin
 /// resolves the FastAPI way over the post-mutation model: the request value when
 /// supplied, else the existing on-disk value, else the config-model default
 /// (`mesh_id: null`, `carrier: "802.11s"`, `channel: 1`). `applied` is true iff at
-/// least one field was supplied (the FastAPI `changed` flag).
-fn merge_mesh_config(config_path: &Path, update: &MeshConfigUpdate) -> (Value, String, i64, bool) {
+/// least one field was supplied and written. A document the config store refuses
+/// to write over is an `Err`, never a silent `applied: true`.
+fn merge_mesh_config(
+    config_path: &Path,
+    update: &MeshConfigUpdate,
+) -> Result<(Value, String, i64, bool), String> {
     use serde_norway::Value as Yaml;
-
-    let mut data: Yaml = load_or_empty_mapping(config_path);
-    let existing = existing_mesh(&data);
 
     let applied = update.mesh_id.is_some() || update.carrier.is_some() || update.channel.is_some();
 
-    if applied {
-        if let Some(mesh) = section_path_mut(&mut data, &["ground_station", "mesh"]) {
+    let existing = update_config(config_path, |root| {
+        let existing = existing_mesh(root);
+        if applied {
+            let mesh = section_path(root, &["ground_station", "mesh"]);
             if let Some(id) = &update.mesh_id {
                 mesh.insert(
                     Yaml::String("mesh_id".to_string()),
@@ -443,11 +461,11 @@ fn merge_mesh_config(config_path: &Path, update: &MeshConfigUpdate) -> (Value, S
             if let Some(ch) = update.channel {
                 mesh.insert(Yaml::String("channel".to_string()), Yaml::Number(ch.into()));
             }
-            // Persist is best-effort: a write fault still answers the resolved view
-            // (the FastAPI route only saves when `changed`, swallowing failures).
-            let _ = write_atomic(config_path, &data);
         }
-    }
+        Ok(existing)
+    })
+    .map_err(|e| e.to_string())?
+    .value;
 
     // The resolved view: request → existing → config-model default. The FastAPI
     // route returns the post-mutation model fields, where an unset request field
@@ -466,7 +484,7 @@ fn merge_mesh_config(config_path: &Path, update: &MeshConfigUpdate) -> (Value, S
         .or(existing.channel)
         .unwrap_or(DEFAULT_MESH_CHANNEL);
 
-    (mesh_id, carrier, channel, applied)
+    Ok((mesh_id, carrier, channel, applied))
 }
 
 /// The existing `ground_station.mesh` view fields already on disk. `mesh_id` is a
@@ -480,12 +498,12 @@ struct ExistingMesh {
     channel: Option<i64>,
 }
 
-/// Read the existing `ground_station.mesh` view fields from a parsed config value.
-/// An absent section reads `mesh_id: null` + no carrier/channel, so the resolved
-/// view falls through to the config-model defaults — byte-identical to the FastAPI
-/// route reading the default-constructed `MeshConfig`.
-fn existing_mesh(data: &serde_norway::Value) -> ExistingMesh {
-    let mesh = data.get("ground_station").and_then(|v| v.get("mesh"));
+/// Read the existing `ground_station.mesh` view fields from the parsed config
+/// mapping. An absent section reads `mesh_id: null` + no carrier/channel, so the
+/// resolved view falls through to the config-model defaults — byte-identical to
+/// the FastAPI route reading the default-constructed `MeshConfig`.
+fn existing_mesh(root: &serde_norway::Mapping) -> ExistingMesh {
+    let mesh = root.get("ground_station").and_then(|v| v.get("mesh"));
     let Some(mesh) = mesh else {
         return ExistingMesh::default();
     };
@@ -503,40 +521,6 @@ fn existing_mesh(data: &serde_norway::Value) -> ExistingMesh {
     }
 }
 
-/// Load the config as a YAML mapping, seeding an empty mapping when the file is
-/// absent / unreadable / non-mapping (matching the Python `data: dict = {}` seed).
-fn load_or_empty_mapping(config_path: &Path) -> serde_norway::Value {
-    use serde_norway::Value as Yaml;
-    match std::fs::read_to_string(config_path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(serde_norway::Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(serde_norway::Mapping::new()),
-    }
-}
-
-/// Navigate/create a nested mapping path, replacing a non-mapping node along the
-/// way with an empty mapping (the create-on-conflict behaviour the sibling config
-/// merges use). Returns `None` only when the document root is not a mapping.
-fn section_path_mut<'a>(
-    data: &'a mut serde_norway::Value,
-    path: &[&str],
-) -> Option<&'a mut serde_norway::Mapping> {
-    use serde_norway::Value as Yaml;
-    let mut cur = data.as_mapping_mut()?;
-    for key in path {
-        let entry = cur
-            .entry(Yaml::String((*key).to_string()))
-            .or_insert_with(|| Yaml::Mapping(serde_norway::Mapping::new()));
-        if !entry.is_mapping() {
-            *entry = Yaml::Mapping(serde_norway::Mapping::new());
-        }
-        cur = entry.as_mapping_mut()?;
-    }
-    Some(cur)
-}
-
 /// Coerce a serde_norway scalar to `i64`, accepting an integer or a float (the
 /// Python `int(...)` over a numeric config value). `None` for a non-number.
 fn norway_to_i64(v: &serde_norway::Value) -> Option<i64> {
@@ -544,27 +528,6 @@ fn norway_to_i64(v: &serde_norway::Value) -> Option<i64> {
         serde_norway::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
         _ => None,
     }
-}
-
-/// Serialize `data` to YAML and write it to `path` atomically (ensure the parent
-/// dir, write a `.tmp` sibling, rename over the target). Returns the error string
-/// on any serialize / I/O fault. Mirrors the tmp-write + `os.replace` idiom the
-/// config persist uses.
-fn write_atomic(path: &Path, data: &serde_norway::Value) -> Result<(), String> {
-    let body = serde_norway::to_string(data).map_err(|e| e.to_string())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = {
-        let mut ext = path
-            .extension()
-            .map(|e| e.to_os_string())
-            .unwrap_or_default();
-        ext.push(".tmp");
-        path.with_extension(ext)
-    };
-    std::fs::write(&tmp, body.as_bytes()).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -878,13 +841,13 @@ mod tests {
             "ground_station:\n  mesh:\n    mesh_id: site-a\n    channel: 11\n",
         )
         .unwrap();
-        let e = existing_mesh(&data);
+        let e = existing_mesh(data.as_mapping().unwrap());
         assert_eq!(e.mesh_id, json!("site-a"));
         assert_eq!(e.carrier, None);
         assert_eq!(e.channel, Some(11));
         // No section at all → null mesh_id + no carrier/channel.
         let empty: serde_norway::Value = serde_norway::from_str("agent:\n  name: x\n").unwrap();
-        let e2 = existing_mesh(&empty);
+        let e2 = existing_mesh(empty.as_mapping().unwrap());
         assert_eq!(e2.mesh_id, Value::Null);
         assert!(e2.carrier.is_none() && e2.channel.is_none());
     }

@@ -28,5 +28,12 @@ ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", \
 # the operator does not wait up to 30 s for the no_primary_camera
 # backoff loop to retry. The pipeline traps SIGUSR1 and short-circuits
 # its sleep, re-discovering the camera within ~1 s.
+#
+# Only the main process traps SIGUSR1. `systemctl kill` signals every process
+# in the unit's cgroup by default, and the encoder, tee and SEI children keep
+# the default action for SIGUSR1, which terminates them, so a second camera
+# plugged in mid-stream would kill the running pipeline. `--kill-who=main`
+# targets the main PID alone (systemd 252+ also spells it --kill-whom and
+# still accepts this form, which older boards require).
 ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video[0-9]*", \
-    RUN+="/bin/systemctl kill --signal=SIGUSR1 ados-video.service"
+    RUN+="/bin/systemctl kill --kill-who=main --signal=SIGUSR1 ados-video.service"

@@ -2,9 +2,9 @@
 //!
 //! The top-level Video tab. It reserves the upper 480x176 region of the content
 //! area for the decoded video frame and the lower 480x68 strip for a permanent
-//! metrics row. A REC chip lives over the top-left of the video plane and a
-//! camera-switch chip over the top-right (the chip is hidden when only one
-//! camera is enumerated). When no decoded frame is present the video plane shows
+//! metrics row. A REC chip over the top-left of the video plane starts or stops
+//! a ground-station recording; a camera chip over the top-right names the active
+//! camera (hidden when only one camera is enumerated). When no decoded frame is present the video plane shows
 //! a centered "waiting for stream" card rather than a black hole.
 //!
 //! The metrics strip is a 4-column, 2-row grid: latency, RSSI, bitrate, and TX
@@ -17,16 +17,16 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_circle, fill_rect, fill_rect_outline, line, text, Canvas};
 use crate::pages::{
-    blank_panel, HitAction, HitZone, LinkCtx, Page, PageContext, VideoCtx, CONTENT_H, CONTENT_Y,
-    PANEL_W,
+    blank_panel, AgentRequest, Chrome, HitAction, HitZone, LinkCtx, Page, PageContext, PanelAction,
+    VideoCtx, CONTENT_H, CONTENT_Y, PANEL_W,
 };
 use crate::widgets::{bottom_bar_zones, draw_bottom_bar, draw_top_bar};
 
 /// Height of the decoded-frame plane at the top of the content region.
 const VIDEO_H: i32 = 176;
-/// Height of the metrics strip below the video plane (content height minus the
-/// video plane: `244 - 176 = 68`).
-const METRICS_H: i32 = CONTENT_H as i32 - VIDEO_H;
+
+/// The REC chip's custom key.
+const REC_KEY: &str = "video.rec_button";
 
 /// REC / camera chip dimensions.
 const CHIP_W: i32 = 80;
@@ -38,6 +38,10 @@ pub struct VideoPage;
 impl Page for VideoPage {
     fn id(&self) -> &'static str {
         "video"
+    }
+
+    fn chrome(&self) -> Chrome {
+        Chrome::Tabbed
     }
 
     fn refresh_hz(&self) -> f32 {
@@ -62,44 +66,40 @@ impl Page for VideoPage {
         canvas
     }
 
-    fn hit_zones(&self, ctx: &PageContext) -> Vec<HitZone> {
-        // The REC button and the camera chip take dispatch precedence, so they
-        // come first. The surface zone covers the rest of the video plane and
-        // toggles the detail overlay; the metrics strip absorbs taps so they
-        // do not leak into a navigation gesture. The bottom-bar tab zones close
-        // out the list.
+    fn hit_zones(&self, _ctx: &PageContext) -> Vec<HitZone> {
+        // The REC chip is the one control on the page; the camera chip and the
+        // metrics are read-outs. The bottom-bar tab zones close out the list.
         let mut zones = vec![HitZone::new(
             8,
             8,
             CHIP_W,
             CHIP_H,
-            HitAction::Custom("video.rec_button".to_string()),
+            HitAction::Custom(REC_KEY.to_string()),
         )];
-        if ctx.video.camera_count > 1 {
-            zones.push(HitZone::new(
-                PANEL_W as i32 - 88,
-                8,
-                CHIP_W,
-                CHIP_H,
-                HitAction::Custom("video.cam_chip".to_string()),
-            ));
-        }
-        zones.push(HitZone::new(
-            0,
-            0,
-            PANEL_W as i32,
-            VIDEO_H,
-            HitAction::Custom("video.surface".to_string()),
-        ));
-        zones.push(HitZone::new(
-            0,
-            VIDEO_H,
-            PANEL_W as i32,
-            METRICS_H,
-            HitAction::Custom("video.metrics_strip".to_string()),
-        ));
         zones.extend(bottom_bar_zones());
         zones
+    }
+
+    fn on_custom(&self, key: &str, ctx: &PageContext) -> Option<PanelAction> {
+        if key != REC_KEY {
+            return None;
+        }
+        // The chip toggles against the recording state the agent reports.
+        Some(PanelAction::Agent(if ctx.video.recording {
+            AgentRequest {
+                method: "POST",
+                path: "/api/v1/ground-station/recording/stop",
+                body: None,
+                label: "Stop recording".to_string(),
+            }
+        } else {
+            AgentRequest {
+                method: "POST",
+                path: "/api/v1/ground-station/recording/start",
+                body: Some(serde_json::json!({})),
+                label: "Start recording".to_string(),
+            }
+        }))
     }
 }
 
@@ -267,8 +267,8 @@ fn draw_rec_button(canvas: &mut Canvas, palette: &Palette, x: i32, y: i32, recor
     }
 }
 
-/// Paint the camera-switch chip at `(x, y)`. Hidden when only one camera is
-/// present so the operator is not drawn into a no-op picker.
+/// Paint the camera chip at `(x, y)`: the active camera's label and the camera
+/// count. Hidden when only one camera is present.
 fn draw_camera_chip(
     canvas: &mut Canvas,
     palette: &Palette,
@@ -391,29 +391,36 @@ mod tests {
         let ctx = PageContext::default();
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
-        // REC button + surface + metrics strip + five tabs = 8 (no cam chip
-        // with a single camera).
-        assert_eq!(page.hit_zones(&ctx).len(), 8);
+        // REC button + five tabs.
+        assert_eq!(page.hit_zones(&ctx).len(), 6);
         assert_eq!(page.id(), "video");
     }
 
+    /// REC starts a recording when idle and stops the one the agent reports.
     #[test]
-    fn camera_chip_zone_appears_with_multiple_cameras() {
+    fn rec_toggles_against_the_reported_recording_state() {
         let page = VideoPage;
-        let ctx = ctx_with_video(
-            VideoCtx {
-                camera_count: 2,
-                camera_label: Some("CAM 2".to_string()),
-                ..Default::default()
-            },
-            LinkCtx::default(),
+        let path = |recording: bool| {
+            let ctx = ctx_with_video(
+                VideoCtx {
+                    recording,
+                    ..Default::default()
+                },
+                LinkCtx::default(),
+            );
+            match page.on_custom(REC_KEY, &ctx) {
+                Some(PanelAction::Agent(req)) => (req.method, req.path),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            path(false),
+            ("POST", "/api/v1/ground-station/recording/start")
         );
-        let zones = page.hit_zones(&ctx);
-        // The cam chip zone joins the list when more than one camera exists.
-        assert_eq!(zones.len(), 9);
-        assert!(zones
-            .iter()
-            .any(|z| z.action == HitAction::Custom("video.cam_chip".to_string())));
+        assert_eq!(
+            path(true),
+            ("POST", "/api/v1/ground-station/recording/stop")
+        );
     }
 
     #[test]

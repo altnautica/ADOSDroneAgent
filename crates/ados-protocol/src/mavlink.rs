@@ -13,7 +13,7 @@ use std::io::Cursor;
 use thiserror::Error;
 
 pub use rust_mavlink::dialects::ardupilotmega::MavMessage;
-pub use rust_mavlink::{MavHeader, MavlinkVersion};
+pub use rust_mavlink::{MavHeader, MavlinkVersion, Message};
 
 // Re-export the dialect module so services built on this crate (the router)
 // can construct and match the concrete message payloads and enums without
@@ -57,6 +57,88 @@ pub fn parse_any(bytes: &[u8]) -> Result<(MavHeader, MavMessage), MavlinkError> 
         ))),
         None => Err(MavlinkError::Read("empty MAVLink frame".to_string())),
     }
+}
+
+/// The message id the ardupilotmega dialect assigns to `name` (e.g.
+/// `"GLOBAL_POSITION_INT"` → 33), or `None` for a name the dialect does not
+/// define.
+#[must_use]
+pub fn message_id_from_name(name: &str) -> Option<u32> {
+    <MavMessage as rust_mavlink::Message>::message_id_from_name(name)
+}
+
+/// The one incompat flag MAVLink 2 defines (`MAVLINK_IFLAG_SIGNED`).
+const IFLAG_SIGNED: u8 = 0x01;
+
+/// Decode `frame` as exactly one whole MAVLink frame, with no resynchronisation.
+///
+/// [`parse_any`] is a stream reader: on a bad checksum it steps one byte and
+/// scans on for the next start byte, so it can return a message that begins
+/// INSIDE the bytes it was handed. That is the wrong question for a gate
+/// deciding what a buffer carries. This answers "is this buffer one frame a
+/// receiver consumes whole", and refuses everything a receiving parser would
+/// drop partway and rescan from:
+///
+/// * a v2 frame carrying an incompat flag other than the signing bit (the
+///   reference parser drops it at byte 2 and rescans the rest);
+/// * a declared length that does not match the buffer;
+/// * a message id the dialect does not define;
+/// * a payload longer than the message's full encoded length (a parser that
+///   checks message length drops it at the header and rescans);
+/// * a checksum that does not match with the message's CRC_EXTRA;
+/// * a payload that does not parse as the message.
+pub fn decode_exact_frame(frame: &[u8]) -> Result<MavMessage, MavlinkError> {
+    let bad = |why: &str| MavlinkError::Read(why.to_string());
+    let (version, header_len, msg_id, signature_len) = match frame.first() {
+        Some(&0xFD) => {
+            if frame.len() < 10 {
+                return Err(bad("truncated MAVLink v2 header"));
+            }
+            let incompat = frame[2];
+            if incompat & !IFLAG_SIGNED != 0 {
+                return Err(bad("unsupported MAVLink v2 incompat flag"));
+            }
+            let signature = if incompat & IFLAG_SIGNED != 0 { 13 } else { 0 };
+            let id = u32::from_le_bytes([frame[7], frame[8], frame[9], 0]);
+            (MavlinkVersion::V2, 10usize, id, signature)
+        }
+        Some(&0xFE) => {
+            if frame.len() < 6 {
+                return Err(bad("truncated MAVLink v1 header"));
+            }
+            (MavlinkVersion::V1, 6usize, u32::from(frame[5]), 0usize)
+        }
+        Some(_) => return Err(bad("unknown MAVLink start-of-frame byte")),
+        None => return Err(bad("empty MAVLink frame")),
+    };
+    let payload_len = frame[1] as usize;
+    let crc_at = header_len + payload_len;
+    if frame.len() != crc_at + 2 + signature_len {
+        return Err(bad("declared MAVLink length does not match the frame"));
+    }
+    let Some(template) = <MavMessage as rust_mavlink::Message>::default_message_from_id(msg_id)
+    else {
+        return Err(bad("message id is not in the dialect"));
+    };
+    // A v1 serialize never truncates, so it reports the full encoded length.
+    let mut scratch = [0u8; 255];
+    let max_len = rust_mavlink::Message::ser(&template, MavlinkVersion::V1, &mut scratch);
+    if payload_len > max_len {
+        return Err(bad("payload is longer than the message"));
+    }
+    let mut crc = X25_INIT;
+    for &b in &frame[1..crc_at] {
+        crc = x25_accumulate(b, crc);
+    }
+    crc = x25_accumulate(
+        <MavMessage as rust_mavlink::Message>::extra_crc(msg_id),
+        crc,
+    );
+    if frame[crc_at..crc_at + 2] != crc.to_le_bytes() {
+        return Err(bad("MAVLink checksum mismatch"));
+    }
+    <MavMessage as rust_mavlink::Message>::parse(version, msg_id, &frame[header_len..crc_at])
+        .map_err(|e| MavlinkError::Read(e.to_string()))
 }
 
 /// Serialize a message into a complete MAVLink v2 frame.
@@ -1516,5 +1598,96 @@ mod tests {
         let header = MavHeader::default();
         let frame = serialize_v2(header, &heartbeat()).unwrap();
         assert_eq!(tunnel_payload_type(&frame), None);
+    }
+
+    /// A v2 frame for `msg_id` over `payload` with a checksum computed the way
+    /// a sender would (the dialect's CRC_EXTRA for that id).
+    fn v2_frame_with(msg_id: u32, payload: &[u8], incompat: u8) -> Vec<u8> {
+        let id = msg_id.to_le_bytes();
+        let mut frame = vec![
+            0xFD,
+            payload.len() as u8,
+            incompat,
+            0,
+            0,
+            1,
+            1,
+            id[0],
+            id[1],
+            id[2],
+        ];
+        frame.extend_from_slice(payload);
+        let mut crc = X25_INIT;
+        for &b in &frame[1..] {
+            crc = x25_accumulate(b, crc);
+        }
+        crc = x25_accumulate(
+            <MavMessage as rust_mavlink::Message>::extra_crc(msg_id),
+            crc,
+        );
+        frame.extend_from_slice(&crc.to_le_bytes());
+        frame
+    }
+
+    #[test]
+    fn exact_decode_accepts_whole_v1_and_v2_frames() {
+        let header = MavHeader::default();
+        let v2 = serialize_v2(header, &heartbeat()).unwrap();
+        assert!(matches!(
+            decode_exact_frame(&v2),
+            Ok(MavMessage::HEARTBEAT(_))
+        ));
+        let v1 = serialize_v1(header, &heartbeat()).unwrap();
+        assert!(matches!(
+            decode_exact_frame(&v1),
+            Ok(MavMessage::HEARTBEAT(_))
+        ));
+        // A hand-built frame with the sender's checksum decodes too.
+        assert!(decode_exact_frame(&v2_frame_with(0, &[0; 9], 0)).is_ok());
+    }
+
+    #[test]
+    fn exact_decode_refuses_an_unsupported_incompat_flag() {
+        // Checksum and length are right; only the flag is foreign. A receiver
+        // drops this at byte 2 and rescans the payload for a new frame.
+        let frame = v2_frame_with(0, &[0; 9], 0x02);
+        assert!(decode_exact_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn exact_decode_refuses_a_bad_checksum_without_resyncing() {
+        // A whole ODOMETRY frame hides inside a heartbeat-length buffer whose own
+        // checksum is wrong. The stream reader resyncs onto it; this must not.
+        let odometry = <MavMessage as rust_mavlink::Message>::default_message_from_id(331).unwrap();
+        let inner = serialize_v2(MavHeader::default(), &odometry).unwrap();
+        let mut outer = v2_frame_with(0, &[0; 9], 0);
+        let last = outer.len() - 1;
+        outer[last] ^= 0xFF;
+        outer.extend_from_slice(&inner);
+        assert!(parse_v2(&outer).is_ok(), "the stream reader resyncs");
+        assert!(decode_exact_frame(&outer).is_err());
+        let mut bad_crc = v2_frame_with(0, &[0; 9], 0);
+        bad_crc[last] ^= 0xFF;
+        assert!(decode_exact_frame(&bad_crc).is_err());
+    }
+
+    #[test]
+    fn exact_decode_refuses_unknown_ids_overlong_payloads_and_length_mismatch() {
+        assert!(decode_exact_frame(&v2_frame_with(0x00AB_CDEF, &[1, 2, 3], 0)).is_err());
+        // HEARTBEAT encodes in 9 bytes; a tenth is past the message.
+        assert!(decode_exact_frame(&v2_frame_with(0, &[0; 10], 0)).is_err());
+        let whole = v2_frame_with(0, &[0; 9], 0);
+        assert!(decode_exact_frame(&whole[..whole.len() - 1]).is_err());
+        let mut trailing = whole.clone();
+        trailing.push(0);
+        assert!(decode_exact_frame(&trailing).is_err());
+    }
+
+    #[test]
+    fn message_names_resolve_to_dialect_ids() {
+        assert_eq!(message_id_from_name("HEARTBEAT"), Some(0));
+        assert_eq!(message_id_from_name("GLOBAL_POSITION_INT"), Some(33));
+        assert_eq!(message_id_from_name("ODOMETRY"), Some(331));
+        assert_eq!(message_id_from_name("NOT_A_MESSAGE"), None);
     }
 }

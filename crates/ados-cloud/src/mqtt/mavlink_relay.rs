@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use ados_plugin_host::mavlink_client::MavlinkClient;
+use ados_plugin_host::frame_link::FrameLink;
 use tokio::sync::{mpsc, watch};
 
 use super::transport::{MqttQos, MqttTransport, RumqttcTransport};
@@ -217,23 +217,15 @@ impl MavlinkMqttRelay {
             .await
             .ok_or_else(|| anyhow::anyhow!("transport incoming channel already taken"))?;
 
-        // Connect the IPC client (FC frames in, commands out). Best-effort: a
-        // missing socket is logged and the relay exits so systemd restarts it,
-        // matching the Python relay's behavior.
-        let ipc = match MavlinkClient::connect(ipc_sock).await {
-            Ok(c) => std::sync::Arc::new(c),
-            Err(e) => {
-                tracing::warn!(error = %e, "mavlink relay: ipc unavailable");
-                return Ok(());
-            }
-        };
-        // Say what this connection is before anything is written on it. Every
-        // command that follows arrived over the broker, so the router must not
-        // read them as produced on the node — which is exactly what it did while
-        // the on-box socket stamped one provenance on all its writers alike. The
-        // declaration is sent before the rx subscription below, so it cannot be
-        // overtaken by the first forwarded command.
-        ipc.declare_off_box_source();
+        // The IPC link (FC frames in, commands out). It reconnects on its own,
+        // so a router restart heals without restarting the relay. Its one
+        // declaration says what this connection is and is written before any
+        // command on every connection: every command that follows arrived over
+        // the broker, so the router must not read it as produced on the node.
+        let ipc = std::sync::Arc::new(FrameLink::spawn(
+            ipc_sock,
+            Box::new(|| vec![ados_protocol::ipc::IPC_DECLARE_OFF_BOX_SOURCE.to_vec()]),
+        ));
 
         // GCS->FC: subscribe rx and write received payloads to the IPC socket.
         // Taken through the transport (NOT the raw client) so the topic is
@@ -299,7 +291,9 @@ impl MavlinkMqttRelay {
                 msg = incoming.recv() => {
                     match msg {
                         Some(m) if m.topic == self.topic_rx && !m.payload.is_empty() => {
-                            ipc.send_bytes(&m.payload);
+                            if let Err(e) = ipc.send(&m.payload) {
+                                tracing::debug!(reason = e.reason(), "mavlink relay: command not forwarded");
+                            }
                         }
                         Some(_) => {}
                         None => {}

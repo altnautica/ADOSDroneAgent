@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect_outline, text, Canvas};
-use crate::pages::{blank_panel, HitAction, HitZone, Page, PageContext};
+use crate::pages::{blank_panel, Chrome, HitAction, HitZone, Page, PageContext};
 use crate::sidecar::{LcdPluginPage, LCD_PLUGIN_PAGE_PATH};
 use crate::widgets::{detail_back_zone, draw_detail_header, DETAIL_HEADER_H};
 
@@ -79,6 +79,10 @@ impl Default for PluginPage {
 impl Page for PluginPage {
     fn id(&self) -> &'static str {
         PLUGIN_PAGE_ID
+    }
+
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
     }
 
     fn refresh_hz(&self) -> f32 {

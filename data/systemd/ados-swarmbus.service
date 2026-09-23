@@ -11,8 +11,7 @@ PartOf=ados-supervisor.service
 # crash-looping "binary missing"; the installer's health gate is the loud
 # failure for a binary that SHOULD be present.
 ConditionPathExists=/opt/ados/bin/ados-swarmbus
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are observable per
@@ -24,7 +23,7 @@ Type=simple
 # stale path); the installer provisions it best-effort. `exec` replaces the shell
 # image so the chosen binary owns the cgroup + restart track.
 ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-swarmbus ]; then exec /opt/ados/bin/ados-swarmbus; else echo "ados-swarmbus binary missing; reinstall to fetch it" >&2; exit 1; fi'
-Restart=on-failure
+Restart=always
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env

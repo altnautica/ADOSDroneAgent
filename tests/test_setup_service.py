@@ -881,7 +881,7 @@ async def _video(monkeypatch, tmp_path, *, ready: bool):
 
     monkeypatch.setattr(_video_routes, "_probe_mediamtx", _probe)
     monkeypatch.setattr(_video_routes, "_probe_mediamtx_via_whep", _probe_whep)
-    return await _video_access(_NoPipelineRuntime(), "node.local", None)
+    return await _video_access(_NoPipelineRuntime(), None)
 
 
 @pytest.mark.asyncio
@@ -912,7 +912,7 @@ async def test_video_access_reports_running_only_when_the_pipeline_says_streamin
     )
     v = await _video(monkeypatch, tmp_path, ready=True)
     assert v.state == "running"
-    assert v.whep_url == "http://node.local:8889/main/whep"
+    assert v.whep_url == "/whep"
     assert v.encoder == "ffmpeg-h264_v4l2m2m" and v.encoder_hw is True
 
 

@@ -35,6 +35,10 @@ pub struct NeighborState {
     /// helpers below; bits 5..7 are the mode-precedence field
     /// ([`crate::ModePrecedence::from_status_bits`]).
     pub status: u8,
+    /// This drone's bus sender id compared with this neighbour's
+    /// (`own.cmp(&neighbour)`). `Equal` when either id is unknown. The separation
+    /// layer reads it only to break a tie between two drones sharing a slot.
+    pub sender_order: std::cmp::Ordering,
 }
 
 impl NeighborState {
@@ -44,7 +48,14 @@ impl NeighborState {
             pos,
             vel,
             status,
+            sender_order: std::cmp::Ordering::Equal,
         }
+    }
+
+    /// This neighbour with its sender-id comparison set.
+    pub const fn with_sender_order(mut self, sender_order: std::cmp::Ordering) -> Self {
+        self.sender_order = sender_order;
+        self
     }
 
     pub const fn armed(&self) -> bool {

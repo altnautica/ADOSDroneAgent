@@ -15,8 +15,7 @@ ConditionPathExists=/etc/ados/hostapd-gs.conf
 # question the AP guard, ados-dnsmasq-gs's Requires=, and every operator-facing
 # AP status surface are all actually asking.
 ConditionPathExists=/etc/ados/hotspot-enabled
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -38,8 +37,8 @@ User=root
 ExecStartPre=-/bin/systemctl stop hostapd.service
 ExecStartPre=-/bin/systemctl disable hostapd.service
 ExecStart=/usr/sbin/hostapd /etc/ados/hostapd-gs.conf
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 EnvironmentFile=-/etc/ados/env
 
 # hostapd drives the radio directly: it brings the interface up, puts the phy

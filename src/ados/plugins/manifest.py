@@ -167,17 +167,19 @@ class ServiceSpec(_StrictModel):
       build the unit name (``ados-plugin-<id>-<name>.service``, with
       dots and underscores sanitized to hyphens) and to key the
       readiness entry. Lowercase alnum plus ``.``, ``_``, ``-``.
-    * ``command`` — the exec line the unit runs. Treated as a verbatim
-      ``ExecStart``; the plugin author is responsible for an absolute
-      path or a binary on ``PATH``.
+    * ``command`` — the exec line the unit runs, as an argv (POSIX quoting,
+      never a shell). The renderer re-quotes each word for systemd and
+      refuses control characters and systemd exec prefixes; the plugin
+      author is responsible for an absolute path or a binary on ``PATH``.
     * ``ready_check`` — how readiness is probed. ``None`` ⇒ the service
       is ready iff its unit is active. An ``http(s)://127.0.0.1:<port>``
       URL ⇒ an HTTP GET, ready on a 2xx status. Any other value ⇒ an
       argv (POSIX quoting, never a shell) run as the plugin user inside
       the plugin's sandbox, ready on exit code 0.
     * ``restart`` — systemd restart policy for the unit.
-    * ``slice`` — cgroup slice the unit runs in; defaults to the shared
-      plugin slice so resource accounting stays grouped.
+    * ``slice`` — cgroup slice the unit runs in. Always the shared plugin
+      slice; any other value is refused, so a plugin cannot move its own
+      service out of the plugin resource envelope.
 
     Backward-compatible: a bare string element in ``services`` is
     coerced to ``{"name": <s>, "command": <s>}`` so existing
@@ -197,6 +199,16 @@ class ServiceSpec(_StrictModel):
             raise ManifestError(
                 f"service name {v!r} must be lowercase alnum plus ._- , "
                 "starting with an alnum"
+            )
+        return v
+
+    @field_validator("slice")
+    @classmethod
+    def _validate_slice(cls, v: str) -> str:
+        if v != "ados-plugins.slice":
+            raise ManifestError(
+                f"service slice {v!r} is not allowed; plugin services run in "
+                "ados-plugins.slice"
             )
         return v
 

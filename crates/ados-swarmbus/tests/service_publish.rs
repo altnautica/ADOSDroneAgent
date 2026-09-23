@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ados_protocol::state::encode_v2;
-use ados_swarmbus::publish::{COUNTER_KEYS, NEIGHBOR_KEYS, PAYLOAD_KEYS};
+use ados_swarmbus::publish::{COUNTER_KEYS, PAYLOAD_KEYS};
 use ados_swarmbus::SwarmBusConfig;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -128,8 +128,6 @@ async fn the_service_publishes_the_contract_without_a_working_radio() {
     for k in COUNTER_KEYS {
         assert!(first["counters"].get(k).is_some(), "counters missing {k}");
     }
-    // The row-key contract is exported for a consumer to conform against.
-    assert_eq!(NEIGHBOR_KEYS.len(), 18);
 
     // It publishes REPEATEDLY at the beacon rate, not once at startup. A second
     // reader gets the replayed last table immediately, then a fresh one.

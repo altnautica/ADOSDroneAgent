@@ -190,6 +190,8 @@ async fn radio_supervisor(
 ) {
     let mut keys = FleetKeyWatch::new(ados_radio::paths::DRONE_KEY);
     let mut cipher = Arc::new(SwarmCipher::new(keys.key()));
+    // The prefix survives every re-key below, so recording it once is enough.
+    table.lock().set_own_sender(cipher.sender_prefix());
     loop {
         // A key that changed while the radio was down is picked up before reopening.
         if let Some(key) = keys.poll() {

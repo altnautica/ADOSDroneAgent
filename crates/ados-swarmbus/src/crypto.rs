@@ -268,6 +268,11 @@ impl SwarmCipher {
         nonce.prefix == self.prefix
     }
 
+    /// This node's per-process nonce prefix: its identity on the bus for this run.
+    pub fn sender_prefix(&self) -> [u8; NONCE_PREFIX_LEN] {
+        self.prefix
+    }
+
     /// Seal one frame: `nonce || ChaCha20-Poly1305(version || kind || body)`.
     ///
     /// The version and kind are inside the ciphertext rather than in the clear, so

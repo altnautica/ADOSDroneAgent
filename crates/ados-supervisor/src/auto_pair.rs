@@ -128,6 +128,17 @@ pub fn failover_reached(attempt: u32) -> bool {
     attempt >= MAX_LOCAL_BIND_ATTEMPTS
 }
 
+/// Apply an operator local-retry request to the loop's failover state: clear the
+/// cloud-relay park and restart the attempt count. Returns whether a request was
+/// applied. Pure for testing.
+pub fn apply_retry_request(requested: bool, attempt: &mut u32, parked_on_cloud: &mut bool) -> bool {
+    if requested {
+        *attempt = 0;
+        *parked_on_cloud = false;
+    }
+    requested
+}
+
 /// The two failover states the sidecar can hold.
 ///
 /// `Local` means the rig is still trying to bind over its own radio; `CloudRelay`
@@ -409,6 +420,18 @@ async fn run_with_failover(
         if *shutdown.borrow() {
             break;
         }
+        // The operator's "retry local" request: the one thing that revisits a
+        // parked verdict for a rig with no key (the latch below only acts on a
+        // key). Handled like a fresh run: local again, attempts from zero.
+        let retry_requested = ados_protocol::pair_proof::take_local_retry_request_at(
+            std::path::Path::new(ados_protocol::pair_proof::AUTO_PAIR_RETRY_PATH),
+        );
+        if apply_retry_request(retry_requested, &mut attempt, &mut parked_on_cloud) {
+            tracing::info!(role = role.as_str(), "auto_pair_local_retry_requested");
+            if failover.sync(FailoverState::Local) {
+                emit_failover(&events, FailoverState::Local);
+            }
+        }
         let armed = read_armed();
         let fingerprint = key_fingerprint(role);
         let paired = fingerprint.is_some();
@@ -649,6 +672,29 @@ mod tests {
         assert!(parked_on_cloud);
         // ...but the loop kept running every tick rather than exiting.
         assert_eq!(ticks_evaluated, MAX_LOCAL_BIND_ATTEMPTS + 20);
+    }
+
+    #[test]
+    fn a_local_retry_request_unparks_a_rig_and_restarts_the_attempts() {
+        // A rig with no key that spent its attempts is parked; only the operator's
+        // retry request brings it back, and it gets the full attempt budget again.
+        let mut attempt = MAX_LOCAL_BIND_ATTEMPTS;
+        let mut parked_on_cloud = true;
+        assert!(!apply_retry_request(
+            false,
+            &mut attempt,
+            &mut parked_on_cloud
+        ));
+        assert!(parked_on_cloud);
+        assert!(apply_retry_request(
+            true,
+            &mut attempt,
+            &mut parked_on_cloud
+        ));
+        assert!(!parked_on_cloud);
+        assert_eq!(attempt, 0);
+        // Unparked, an armed unpaired rig attempts again on the next tick.
+        assert!(should_attempt(true, false) && !parked_on_cloud);
     }
 
     #[test]

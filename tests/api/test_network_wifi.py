@@ -71,3 +71,68 @@ class TestNetworkWifi:
         )
         assert resp.status_code == 200
         assert resp.json()["autoconnect"] is False
+
+    # The drone path: no uplink daemon, so the native front forwards status and
+    # the join/leave/forget writes here. These used to have no handler at all.
+
+    def test_status_reports_the_manager_state(self, client, fake_manager):
+        fake_manager.status.return_value = {
+            "connected": True,
+            "ssid": "BenchNet",
+            "bssid": None,
+            "signal": 70,
+            "ip": "192.168.1.50",
+            "gateway": "192.168.1.1",
+            "security": "WPA2",
+        }
+        resp = client.get("/api/v1/network/client/status")
+        assert resp.status_code == 200
+        assert resp.json()["connected"] is True
+
+    def test_status_is_unknown_when_the_manager_fails(self, client, fake_manager):
+        fake_manager.status.side_effect = RuntimeError("nmcli missing")
+        resp = client.get("/api/v1/network/client/status")
+        assert resp.status_code == 503
+        assert resp.json()["detail"]["error"]["code"] == "E_WIFI_STATUS_UNAVAILABLE"
+
+    def test_join_returns_the_join_body(self, client, fake_manager):
+        fake_manager.join.return_value = {
+            "joined": True,
+            "ip": "192.168.1.50",
+            "gateway": "192.168.1.1",
+            "error": None,
+        }
+        resp = client.put(
+            "/api/v1/network/client/join", json={"ssid": "BenchNet", "passphrase": "pw"}
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "joined": True,
+            "ip": "192.168.1.50",
+            "gateway": "192.168.1.1",
+            "error": None,
+        }
+
+    def test_join_with_an_active_ap_needs_force(self, client, fake_manager):
+        fake_manager.join.return_value = {
+            "joined": False,
+            "error": "station_busy_ap_active",
+            "hint": "Stop AP first or force",
+        }
+        resp = client.put("/api/v1/network/client/join", json={"ssid": "BenchNet"})
+        assert resp.status_code == 409
+        assert resp.json()["needs_force"] is True
+
+    def test_leave_and_forget(self, client, fake_manager):
+        fake_manager.leave.return_value = {"left": True, "previous_ssid": "BenchNet"}
+        resp = client.delete("/api/v1/network/client")
+        assert resp.status_code == 200
+        assert resp.json()["left"] is True
+
+        fake_manager.forget.return_value = {"forgot": True, "name": "BenchNet", "error": None}
+        assert client.delete("/api/v1/network/client/configured/BenchNet").status_code == 200
+
+        fake_manager.forget.return_value = {"forgot": False, "name": "Nope", "error": "not_found"}
+        resp = client.delete("/api/v1/network/client/configured/Nope")
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["error"]["message"] == "not_found"

@@ -22,13 +22,14 @@
 //!
 //! ## Config write + restart seam
 //!
-//! The config edit reuses the surgical YAML merge helpers the WFB auto-pair write
-//! uses (`section_mut` / `write_atomic`): an absent file starts from an empty
-//! mapping, a non-mapping `vision` / `detector` node is replaced with an empty
-//! mapping, and every sibling key under `vision` (and every other top-level
-//! section) is preserved. The restart goes through the same `ados-*` allowlisted
-//! restart path the service-control route uses, so the unit name is validated
-//! before any `systemctl` runs.
+//! The config edit goes through the shared config store (`crate::config_store`):
+//! an absent file starts from an empty mapping, a non-mapping `vision` /
+//! `detector` node is replaced with an empty mapping, every sibling key under
+//! `vision` (and every other top-level section) is preserved, and a document
+//! that cannot be read or parsed is refused rather than written over. The
+//! restart goes through the same `ados-*` allowlisted restart path the
+//! service-control route uses, so the unit name is validated before any
+//! `systemctl` runs.
 //!
 //! ## Auth posture
 //!
@@ -45,9 +46,9 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::config_store::{section_path, update_config};
 use crate::routes::detail;
 use crate::routes::service_control::restart_unit;
-use crate::routes::wfb_pair_write::{section_mut, write_atomic};
 use crate::state::AppState;
 
 /// The unit that runs the vision engine; restarting it reloads the detector.
@@ -116,29 +117,18 @@ pub async fn delete_detector(State(_state): State<AppState>) -> Response {
 }
 
 /// Surgically write `vision.detector.{model_id, enabled}` (plus `model_path` when
-/// supplied), preserving every other key. Reuses the shared YAML merge helpers so
-/// the edit is atomic and never clobbers a sibling `vision` field (cameras,
-/// backend, tracker_enabled, …) or any other top-level section.
+/// supplied), preserving every other key, so the edit never clobbers a sibling
+/// `vision` field (cameras, backend, tracker_enabled, …) or any other top-level
+/// section.
 fn write_detector_block(
     config_path: &Path,
     model_id: &str,
     model_path: Option<&str>,
 ) -> Result<(), String> {
-    use serde_norway::{Mapping, Value as Yaml};
+    use serde_norway::Value as Yaml;
 
-    let mut data: Yaml = match std::fs::read_to_string(config_path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(Mapping::new()),
-    };
-
-    {
-        let root = data
-            .as_mapping_mut()
-            .ok_or_else(|| "config root is not a mapping".to_string())?;
-        let detector = section_mut(root, "vision", "detector")?;
+    update_config(config_path, |root| {
+        let detector = section_path(root, &["vision", "detector"]);
         detector.insert(
             Yaml::String("model_id".to_string()),
             Yaml::String(model_id.to_string()),
@@ -157,42 +147,24 @@ fn write_detector_block(
                 detector.remove("model_path");
             }
         }
-    }
-
-    let body = serde_norway::to_string(&data).map_err(|e| e.to_string())?;
-    write_atomic(config_path, body.as_bytes())
+        Ok(())
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 /// Remove the `vision.detector` block so the engine reverts to inert. A missing
-/// block (or a missing/empty file) is a no-op success. Every other key survives.
+/// block (or a missing/empty file) is a no-op success that writes nothing. Every
+/// other key survives.
 fn remove_detector_block(config_path: &Path) -> Result<(), String> {
-    use serde_norway::Value as Yaml;
-
-    let text = match std::fs::read_to_string(config_path) {
-        Ok(t) => t,
-        // No file ⇒ no detector block ⇒ nothing to remove.
-        Err(_) => return Ok(()),
-    };
-    let mut data: Yaml = match serde_norway::from_str::<Yaml>(&text) {
-        Ok(v) if v.is_mapping() => v,
-        // A non-mapping/empty config has no detector block.
-        _ => return Ok(()),
-    };
-
-    let mut changed = false;
-    if let Some(root) = data.as_mapping_mut() {
+    update_config(config_path, |root| {
         if let Some(vision) = root.get_mut("vision").and_then(|v| v.as_mapping_mut()) {
-            if vision.remove("detector").is_some() {
-                changed = true;
-            }
+            vision.remove("detector");
         }
-    }
-    if !changed {
-        return Ok(());
-    }
-
-    let body = serde_norway::to_string(&data).map_err(|e| e.to_string())?;
-    write_atomic(config_path, body.as_bytes())
+        Ok(())
+    })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

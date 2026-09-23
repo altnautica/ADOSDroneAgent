@@ -888,20 +888,26 @@ impl<H: HostServices> Connection<H> {
                     Err(e) => send_error(write_half, &env.request_id, &e.0).await,
                 }
             }
-            // mavlink.subscribe both validates (the host method shapes the
-            // response) and arms the per-connection push stream. The host
+            // mavlink.subscribe both validates and arms the per-connection push
+            // stream. The name must be a message the dialect defines; it is
+            // resolved to its id once, and the forwarder passes on only frames
+            // whose header carries that id, each tagged with the name. The host
             // returns `{"already_subscribed": true}` or `{"subscribed": true,
-            // "msg_name": <m>}`; on the first subscribe to a name we obtain a
-            // frame receiver from the host's MAVLink client (if wired) and spawn
-            // a forwarder that tags each frame with the msg_name into the merged
-            // delivery channel, so the select loop pushes `mavlink.deliver`
-            // envelopes.
+            // "msg_name": <m>}`.
             Method::MavlinkSubscribe => {
                 let Some(name) = mavlink_subscribe_msg_name(&env.args) else {
                     return send_error(
                         write_half,
                         &env.request_id,
                         "msg_name must be a non-empty string",
+                    )
+                    .await;
+                };
+                let Some(msg_id) = ados_protocol::mavlink::message_id_from_name(&name) else {
+                    return send_error(
+                        write_half,
+                        &env.request_id,
+                        &format!("unknown MAVLink message name: {name}"),
                     )
                     .await;
                 };
@@ -913,23 +919,26 @@ impl<H: HostServices> Connection<H> {
                     return send_response(write_half, &env.request_id, result).await;
                 }
                 mavlink_subs.push(name.clone());
-                // Arm the push stream when the host has a MAVLink client. The
-                // forwarder tags every frame with this name and forwards into the
-                // merged channel; it forwards every frame the host fans out (no
-                // per-name byte filtering), matching the Python pump.
+                // Arm the push stream when the host has a MAVLink link. A router
+                // chunk may batch several frames, so each is checked on its own.
                 if let Some(mut rx) = self.host.mavlink_subscribe_stream(&self.plugin_id, &name) {
                     let tx = mav_tx.clone();
                     let fwd_name = name.clone();
                     forwarders.push(tokio::spawn(async move {
                         loop {
                             match rx.recv().await {
-                                Ok(frame) => {
-                                    let delivery = MavlinkDelivery {
-                                        msg_name: fwd_name.clone(),
-                                        frame,
-                                    };
-                                    if tx.send(delivery).await.is_err() {
-                                        break; // connection gone
+                                Ok(chunk) => {
+                                    for frame in ados_protocol::aux_mux::split_frames(&chunk) {
+                                        if crate::realhost::mavlink_msg_id(frame) != Some(msg_id) {
+                                            continue;
+                                        }
+                                        let delivery = MavlinkDelivery {
+                                            msg_name: fwd_name.clone(),
+                                            frame: frame.to_vec(),
+                                        };
+                                        if tx.send(delivery).await.is_err() {
+                                            return; // connection gone
+                                        }
                                     }
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {

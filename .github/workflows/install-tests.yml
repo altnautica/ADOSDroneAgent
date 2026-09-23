@@ -78,7 +78,7 @@ jobs:
       # ...and assert the run collected what it should have. `bats` over a
       # glob that matches nothing, or over a file whose @test blocks were
       # commented out, prints a plan of zero and exits 0 — indistinguishable
-      # in the log from a suite that passed. These 34 tests are the only thing
+      # in the log from a suite that passed. These 42 tests are the only thing
       # that executes scripts/install.sh anywhere in CI (against a file://
       # fake release tree, via ADOS_RELEASE_BASE), so a silent collection of
       # zero would leave the installer bootstrap with no coverage at all while
@@ -89,7 +89,7 @@ jobs:
       - name: bats suite collected the reviewed number of tests
         run: |
           set -uo pipefail
-          FLOOR=34
+          FLOOR=42
 
           declared="$(grep -h -c '^@test' scripts/test/*.bats | paste -sd+ - | bc)"
           counted="$(bats --count scripts/test/*.bats)"

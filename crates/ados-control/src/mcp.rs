@@ -423,7 +423,7 @@ fn is_plugin_config(path: &str) -> bool {
 /// `secret_read` scope rather than plain `read`. Empty today: no native GET returns
 /// the pairing key, the WFB bind key, or a WS ticket (`/api/pairing/code` is public
 /// and 409s when paired, `wfb/pair` returns only a fingerprint, `signing/counters`
-/// returns zeros). Add any future secret-bearing GET here, or a plain `read` token
+/// reports unmeasured nulls). Add any future secret-bearing GET here, or a plain `read` token
 /// would reach it; this is a deliberate security surface, not a convenience list.
 const SECRET_GET_ROUTES: &[&str] = &[];
 

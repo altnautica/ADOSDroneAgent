@@ -128,7 +128,7 @@ async fn systemd_inventory() -> (Vec<Value>, bool) {
 /// four are taken; the unit basename has `.service` stripped to form `name`.
 /// `active` is `active_state == "active"`, `pid` is always `null` on this
 /// fallback path. Mirrors the Python parser, including the four-column minimum.
-fn parse_unit_line(line: &str) -> Option<Value> {
+pub(crate) fn parse_unit_line(line: &str) -> Option<Value> {
     let mut stripped = line.trim();
     if stripped.is_empty() {
         return None;

@@ -1,26 +1,38 @@
 # Cutting a release
 
-The agent ships in two pieces from one push to `main`:
+The agent ships through two channels:
 
-- **Rolling native binaries.** Every push to `main` runs the Rust workflow,
-  which builds the static `aarch64` service binaries (`ados-radio`,
-  `ados-groundlink`, `ados-supervisor`, the installer, and so on) and publishes
-  them to rolling `prebuilt-*` prerelease tags. `scripts/install.sh` fetches the
-  prebuilt installer and the installer fetches the rest, so a fresh
-  `install.sh --upgrade` picks up the latest binaries without any tag.
+- **Edge (the default).** Every push to `main` that touches the Rust tree runs
+  the Rust workflow, which builds the static `aarch64` service binaries
+  (`ados-radio`, `ados-groundlink`, `ados-supervisor`, the installer, and so
+  on), publishes them to rolling `prebuilt-*` prerelease tags, and mirrors the
+  same bytes into a per-revision `rev-<sha>` release. An edge install clones
+  `main` (or `--ref <sha>`) and fetches those binaries.
 
-- **Versioned wheel + deploy bundle.** Pushing a `v<version>` tag runs the
-  release workflow, which builds and signs the Python wheel and the deploy
-  bundle and publishes them to a GitHub Release named for that version.
+- **Stable.** Pushing a `v<version>` tag runs the release workflow, which
+  publishes one release holding everything a stable install places: the Python
+  wheel, the deploy bundle (`scripts/`, `data/`, the vendored radio source), the
+  installer, and the service binaries built from the tagged Rust tree. A stable
+  install (`--channel stable --version <version>`) takes every artifact from
+  that release and never from the rolling tags.
+
+Every artifact on both channels is signed with the release minisign key. Its
+public half is embedded in the installer and vendored in `scripts/install.sh`;
+the private half is the `ADOS_DRIVER_SIGNING_KEY` repository secret. The
+bootstrap refuses to run an installer whose signature is missing or does not
+verify, on every channel, and the stable channel refuses any unsigned artifact.
 
 ## Steps
 
 1. Bump the version in `src/ados/__init__.py` (the single source of truth;
    `pyproject.toml` reads it back through the package metadata).
 2. Add the matching `## [<version>]` section to `CHANGELOG.md`.
-3. Commit and push to `main`. The native binaries rebuild and republish
-   automatically.
-4. Tag and push the tag to publish the versioned wheel + bundle:
+3. Commit and push to `main`, and wait for the Rust workflow to finish if the
+   release changes anything under `crates/`, `data/systemd/`, or the generated
+   contract files. The release takes its service binaries from the nearest
+   commit that published a `rev-<sha>` release, and refuses to publish if the
+   Rust tree changed after that commit.
+4. Tag and push the tag to publish the stable release:
 
    ```bash
    V=$(python -c "import ados; print(ados.__version__)")

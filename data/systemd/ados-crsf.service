@@ -1,13 +1,12 @@
 [Unit]
 Description=ADOS CRSF RC Control Lane
 PartOf=ados-supervisor.service
-StartLimitInterval=60s
-StartLimitBurst=5
 # Opt-in: the lane runs only on a node whose config enables it. The marker
 # mirrors `radio.crsf.enabled` and is reconciled by the installer and the
 # config persist path — never hand-managed — so a node that never opts in
 # skips this unit cleanly at boot.
 ConditionPathExists=/etc/ados/crsf-enabled
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.
@@ -21,8 +20,12 @@ ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-crsf ]; then exec /opt/ados/bin
 # SIGHUP and re-runs its gates, so a config change applies without dropping
 # the unit (and without an operator systemctl).
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=5
+Restart=always
+# Exit 0 means this node has nothing for the unit to run (feature off, role
+# not applicable, display absent); it must not respawn every RestartSec. Any
+# other exit, signal or watchdog timeout restarts forever (no start limit).
+RestartPreventExitStatus=0
+RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 Environment=RUST_LOG=info
 EnvironmentFile=-/etc/ados/env

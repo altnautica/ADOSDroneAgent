@@ -71,6 +71,7 @@ pub fn fixes_from_payload(
     let Some(neighbors) = payload.get("neighbors").and_then(Value::as_array) else {
         return;
     };
+    let own_sender = sender_id(payload.get("sender_id"));
     let extra_ms = since_received.as_millis() as u64;
     for n in neighbors {
         let Some(slot) = n.get("slot").and_then(Value::as_u64) else {
@@ -112,8 +113,23 @@ pub fn fixes_from_payload(
             ve,
             vd,
             status,
+            sender_order: match (own_sender, sender_id(n.get("sender_id"))) {
+                (Some(own), Some(peer)) => own.cmp(&peer),
+                _ => std::cmp::Ordering::Equal,
+            },
         });
     }
+}
+
+/// A published `sender_id` (16 lowercase hex digits, the sender's nonce prefix
+/// big-endian) as an integer that orders the same way the prefix bytes do.
+/// Anything else is unknown.
+fn sender_id(v: Option<&Value>) -> Option<u64> {
+    let s = v?.as_str()?;
+    if s.len() != 16 {
+        return None;
+    }
+    u64::from_str_radix(s, 16).ok()
 }
 
 /// Whether a beacon's reported position is a MEASUREMENT rather than the
@@ -248,6 +264,52 @@ mod tests {
             ModePrecedence::Formation,
             "a neighbour's ACTIVE level has to survive the seam"
         );
+    }
+
+    /// The tie-break key crosses the seam from the real producer: each of a
+    /// same-slot pair publishes its own sender id and the other's, and the fixes
+    /// carry opposite orders, so the pair resolves to exactly one climber.
+    #[test]
+    fn a_same_slot_pair_reads_opposite_sender_orders_off_the_published_payload() {
+        use ados_swarmbus::beacon::{SwarmBeacon, STATUS_GPS_OK};
+        use ados_swarmbus::crypto::SenderNonce;
+        use ados_swarmbus::neighbors::NeighborTable;
+        use ados_swarmbus::publish::neighbors_payload;
+        use std::collections::BTreeMap;
+        use std::time::Instant;
+
+        let now = Instant::now();
+        let a = [0x10u8; 8];
+        let b = [0x20u8; 8];
+        let order_seen_by = |own: [u8; 8], peer: [u8; 8]| {
+            let mut table = NeighborTable::new(5);
+            table.set_own_sender(own);
+            let beacon = SwarmBeacon {
+                slot: 5,
+                lat: 129_716_000,
+                lon: 775_946_000,
+                alt_dm: 300,
+                status: STATUS_ARMED | STATUS_GPS_OK,
+                ..SwarmBeacon::default()
+            };
+            let sender = SenderNonce {
+                prefix: peer,
+                counter: 0,
+            };
+            table.record(beacon, sender, None, now);
+            let p = neighbors_payload(1, &table, &BTreeMap::new(), now);
+            let mut out = Vec::new();
+            fixes_from_payload(&p, Duration::ZERO, &mut out);
+            assert_eq!(out.len(), 1);
+            out[0].sender_order
+        };
+        assert_eq!(order_seen_by(a, b), std::cmp::Ordering::Less);
+        assert_eq!(order_seen_by(b, a), std::cmp::Ordering::Greater);
+
+        // No own id published yet: unknown, never a guess.
+        let mut out = Vec::new();
+        fixes_from_payload(&payload(0, 0.0), Duration::ZERO, &mut out);
+        assert_eq!(out[0].sender_order, std::cmp::Ordering::Equal);
     }
 
     #[test]

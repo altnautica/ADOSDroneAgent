@@ -68,6 +68,7 @@ use serde_json::{json, Value};
 
 use ados_macpin::engine::{NETWORKD_DIR, STATE_PATH};
 
+use crate::config_store::{section_path, update_config};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -192,123 +193,34 @@ fn apply_live_allowed(config_path: &Path) -> bool {
 /// on success, `Err(message)` on any read/parse/write fault so the caller can map
 /// it to the `E_PERSIST` 500.
 fn config_set_override(config_path: &Path, iface: &str, mac: &str) -> Result<(), String> {
-    mutate_overrides(config_path, |overrides| {
-        overrides.insert(
+    update_config(config_path, |root| {
+        section_path(root, &["network", "mac_pin", "overrides"]).insert(
             serde_norway::Value::String(iface.to_string()),
             serde_norway::Value::String(mac.to_string()),
         );
+        Ok(())
     })
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 /// Remove `overrides[iface]` from the `network.mac_pin.overrides` block of the
-/// on-disk config, returning `(removed, persist_result)`. `removed` reflects
-/// whether the key was present (matching the Python `overrides.pop(iface, None) is
-/// not None`); the config is only re-persisted when a key was removed, and a
-/// persist fault on that path is reported in `persist_result` but not surfaced as
-/// an error (the Python swallows it with `except: pass`).
-fn config_remove_override(config_path: &Path, iface: &str) -> (bool, Result<(), String>) {
-    // Read first to learn whether the key is present without forcing a write when
-    // it is not (the Python only re-persists when it removed something).
-    let present = read_overrides(config_path)
-        .map(|m| m.contains_key(iface))
-        .unwrap_or(false);
-    if !present {
-        return (false, Ok(()));
-    }
-    let result = mutate_overrides(config_path, |overrides| {
-        overrides.remove(iface);
-    });
-    (true, result)
-}
-
-/// Read the `network.mac_pin.overrides` mapping from the config, or `None` when
-/// the file / section is absent or unparseable.
-fn read_overrides(config_path: &Path) -> Option<serde_norway::Mapping> {
-    let text = std::fs::read_to_string(config_path).ok()?;
-    let doc: serde_norway::Value = serde_norway::from_str(&text).ok()?;
-    doc.get("network")
-        .and_then(|n| n.get("mac_pin"))
-        .and_then(|m| m.get("overrides"))
-        .and_then(serde_norway::Value::as_mapping)
-        .cloned()
-}
-
-/// Load the full config as a YAML value, apply `f` to the
-/// `network.mac_pin.overrides` mapping (creating the `network` / `mac_pin` /
-/// `overrides` nodes as needed), and write it back atomically. Shared by the
-/// set + remove paths so both preserve the rest of the file identically. The
-/// same tmp-write + rename idiom the WFB tx-power persist uses.
-fn mutate_overrides<F>(config_path: &Path, f: F) -> Result<(), String>
-where
-    F: FnOnce(&mut serde_norway::Mapping),
-{
-    use serde_norway::{Mapping, Value as Yaml};
-
-    // An absent / non-mapping file starts from an empty mapping (the Python
-    // `data = {}` seed when the config is fresh).
-    let mut data: Yaml = match std::fs::read_to_string(config_path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(Mapping::new()),
-    };
-
-    {
-        let root = data
-            .as_mapping_mut()
-            .ok_or_else(|| "config root is not a mapping".to_string())?;
-        let network = root
-            .entry(Yaml::String("network".to_string()))
-            .or_insert_with(|| Yaml::Mapping(Mapping::new()));
-        if !network.is_mapping() {
-            *network = Yaml::Mapping(Mapping::new());
-        }
-        let network_map = network
-            .as_mapping_mut()
-            .ok_or_else(|| "network section is not a mapping".to_string())?;
-        let mac_pin = network_map
-            .entry(Yaml::String("mac_pin".to_string()))
-            .or_insert_with(|| Yaml::Mapping(Mapping::new()));
-        if !mac_pin.is_mapping() {
-            *mac_pin = Yaml::Mapping(Mapping::new());
-        }
-        let mac_pin_map = mac_pin
-            .as_mapping_mut()
-            .ok_or_else(|| "mac_pin section is not a mapping".to_string())?;
-        let overrides = mac_pin_map
-            .entry(Yaml::String("overrides".to_string()))
-            .or_insert_with(|| Yaml::Mapping(Mapping::new()));
-        if !overrides.is_mapping() {
-            *overrides = Yaml::Mapping(Mapping::new());
-        }
-        let overrides_map = overrides
-            .as_mapping_mut()
-            .ok_or_else(|| "overrides section is not a mapping".to_string())?;
-        f(overrides_map);
-    }
-
-    let body = serde_norway::to_string(&data).map_err(|e| e.to_string())?;
-    write_atomic(config_path, body.as_bytes())
-}
-
-/// Write `bytes` to `path` atomically: ensure the parent dir, write a `.tmp`
-/// sibling, then rename over the target. Mirrors the Python tmp-write +
-/// `os.replace` idiom. Returns `Err(message)` on any I/O fault.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = {
-        let mut ext = path
-            .extension()
-            .map(|e| e.to_os_string())
-            .unwrap_or_default();
-        ext.push(".tmp");
-        path.with_extension(ext)
-    };
-    std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+/// on-disk config through the shared config store. `Ok(true)` when the key was
+/// present and the removal landed, `Ok(false)` when there was nothing to remove
+/// (nothing is written), `Err` when the document could not be read, parsed or
+/// written.
+fn config_remove_override(config_path: &Path, iface: &str) -> Result<bool, String> {
+    update_config(config_path, |root| {
+        let removed = root
+            .get_mut("network")
+            .and_then(|n| n.get_mut("mac_pin"))
+            .and_then(|m| m.get_mut("overrides"))
+            .and_then(serde_norway::Value::as_mapping_mut)
+            .is_some_and(|overrides| overrides.remove(iface).is_some());
+        Ok(removed)
+    })
+    .map(|w| w.value)
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -595,20 +507,29 @@ pub async fn delete_mac_pin(
 /// handler resolves both from the app state / env; this takes them directly so a
 /// test can point them at temp paths.
 async fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str) -> Response {
-    // Pop the override (re-persist only when it was present; swallow a persist
-    // fault, matching the Python `except: pass`).
-    let (removed_override, _persist) = config_remove_override(config_path, iface);
+    // Pop the override. A config the store refuses (or cannot write) leaves the
+    // pin in place, so the body says so rather than reporting a clean unpin.
+    let (removed_override, persist_error) = match config_remove_override(config_path, iface) {
+        Ok(removed) => (removed, None),
+        Err(e) => {
+            tracing::error!(error = %e, iface, "mac pin override not removed from the config");
+            (false, Some(e))
+        }
+    };
     // Remove the `.link` (a file existed → true).
     let removed_link = remove_link_file(networkd_dir, iface).await;
 
-    Json(json!({
+    let mut body = json!({
         "status": "ok",
         "iface": iface,
         "removedOverride": removed_override,
         "removedLinkFile": removed_link,
         "note": NOTE_UNPIN,
-    }))
-    .into_response()
+    });
+    if let Some(e) = persist_error {
+        body["persist_error"] = json!(e);
+    }
+    Json(body).into_response()
 }
 
 #[cfg(test)]
@@ -730,9 +651,8 @@ mod tests {
             "agent:\n  name: my-drone\nnetwork:\n  mac_pin:\n    overrides:\n      wlan0: 02:c6:75:83:1a:3e\n",
         )
         .unwrap();
-        let (removed, persist) = config_remove_override(&cfg, "wlan0");
+        let removed = config_remove_override(&cfg, "wlan0").unwrap();
         assert!(removed);
-        assert!(persist.is_ok());
         // The key is gone; agent.name survived.
         let parsed: serde_norway::Value =
             serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
@@ -758,9 +678,8 @@ mod tests {
         let cfg = dir.path().join("config.yaml");
         std::fs::write(&cfg, "agent:\n  name: my-drone\n").unwrap();
         let before = std::fs::read_to_string(&cfg).unwrap();
-        let (removed, persist) = config_remove_override(&cfg, "wlan0");
+        let removed = config_remove_override(&cfg, "wlan0").unwrap();
         assert!(!removed);
-        assert!(persist.is_ok());
         // The file is unchanged (the Python only re-persists when it popped a key).
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), before);
     }

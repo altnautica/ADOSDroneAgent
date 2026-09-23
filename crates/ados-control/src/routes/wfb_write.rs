@@ -49,9 +49,11 @@
 //!    the no-manager `503 {"detail": "WFB-ng service not running"}` (no persist on
 //!    that path, matching the FastAPI route, which only persists after a
 //!    non-raising apply).
-//! 4. On accept the value is persisted to `video.wfb.tx_power_dbm` (atomic
-//!    tmp+rename, every other config key preserved) and the route returns `200
-//!    {"requested_dbm", "effective_dbm", "tx_power_max_dbm"}`.
+//! 4. On accept the value is persisted to `video.wfb.tx_power_dbm` through the
+//!    shared config store (every other key preserved; a document that cannot be
+//!    read or parsed is never written over) and the route returns `200
+//!    {"requested_dbm", "effective_dbm", "tx_power_max_dbm", "persisted"}`, plus
+//!    `persist_error` when the value was applied but will not survive a restart.
 
 use std::path::{Path, PathBuf};
 
@@ -61,6 +63,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::config_store::{section_path, update_config, ConfigWriteError};
 use crate::routes::detail;
 
 // ---------------------------------------------------------------------------
@@ -321,14 +324,11 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
     };
 
     // 4. Persist the accepted value so it survives a restart, regardless of the
-    //    driver's effective value, then return the success body. A persist failure
-    //    does not change the response, matching the FastAPI route (which ignores
-    //    the `_persist_tx_power` boolean result).
-    if let Err(e) = persist_tx_power(config_path, requested) {
-        // The radio accepted the value, so the response still reports success:
-        // what failed is only durability. Naming it here is the difference
-        // between "the setting reverted after a reboot" being diagnosable and
-        // being a mystery.
+    //    driver's effective value. The radio already took the value, so a persist
+    //    failure does not turn the apply into an error; the body says whether the
+    //    setting will survive a restart (`persisted`) and, when not, why.
+    let persist = persist_tx_power(config_path, requested);
+    if let Err(e) = &persist {
         tracing::error!(
             path = %config_path.display(),
             requested_dbm = requested,
@@ -337,15 +337,16 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
         );
     }
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "requested_dbm": requested,
-            "effective_dbm": effective,
-            "tx_power_max_dbm": ceiling,
-        })),
-    )
-        .into_response()
+    let mut body = json!({
+        "requested_dbm": requested,
+        "effective_dbm": effective,
+        "tx_power_max_dbm": ceiling,
+        "persisted": persist.is_ok(),
+    });
+    if let Err(e) = persist {
+        body["persist_error"] = json!(e.to_string());
+    }
+    (StatusCode::OK, Json(body)).into_response()
 }
 
 /// The effective dBm from a `set_tx_power` reply, mirroring the Python
@@ -413,89 +414,20 @@ fn norway_to_i64(v: &serde_norway::Value) -> Option<i64> {
     }
 }
 
-/// Atomically merge `tx_power_dbm` into the `video.wfb` block of the on-disk
-/// config at `path` so the operator's tuning survives a service restart,
-/// preserving every other config key. Reads the full config as a YAML value,
-/// navigates/creates `video.wfb`, sets the field, and writes via a tmp sibling +
-/// rename.
-///
-/// `Err` carries why the persist failed. The HTTP response is deliberately
-/// unchanged by a failure here (the radio already accepted the value; the write
-/// only decides whether it survives a restart), but the reason must not vanish:
-/// without it a config the service cannot write looks identical to a successful
-/// save, and the setting silently reverts on the next reboot with nothing in the
-/// log to explain it. The caller logs the message.
-fn persist_tx_power(path: &Path, dbm: i64) -> Result<(), String> {
+/// Merge `tx_power_dbm` into the `video.wfb` block of the on-disk config at
+/// `path` so the operator's tuning survives a service restart, preserving every
+/// other config key. Goes through the shared config store, so a document that
+/// cannot be read or parsed is left untouched and the error says why.
+fn persist_tx_power(path: &Path, dbm: i64) -> Result<(), ConfigWriteError> {
     use serde_norway::Value as Yaml;
-
-    // Load the existing config (an absent / non-mapping file starts from an empty
-    // mapping, matching the Python `data: dict = {}` seed).
-    let mut data: Yaml = match std::fs::read_to_string(path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(serde_norway::Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(serde_norway::Mapping::new()),
-    };
-
-    // Navigate/create `video.wfb` and set `tx_power_dbm`, preserving every other
-    // key (and the mapping's insertion order, like the Python sort_keys=False).
-    {
-        let root = match data.as_mapping_mut() {
-            Some(m) => m,
-            None => return Err("config root is not a mapping".to_string()),
-        };
-        let video = root
-            .entry(Yaml::String("video".to_string()))
-            .or_insert_with(|| Yaml::Mapping(serde_norway::Mapping::new()));
-        if !video.is_mapping() {
-            *video = Yaml::Mapping(serde_norway::Mapping::new());
-        }
-        let video_map = match video.as_mapping_mut() {
-            Some(m) => m,
-            None => return Err("video section is not a mapping".to_string()),
-        };
-        let wfb = video_map
-            .entry(Yaml::String("wfb".to_string()))
-            .or_insert_with(|| Yaml::Mapping(serde_norway::Mapping::new()));
-        if !wfb.is_mapping() {
-            *wfb = Yaml::Mapping(serde_norway::Mapping::new());
-        }
-        let wfb_map = match wfb.as_mapping_mut() {
-            Some(m) => m,
-            None => return Err("video.wfb section is not a mapping".to_string()),
-        };
-        wfb_map.insert(
+    update_config(path, |root| {
+        section_path(root, &["video", "wfb"]).insert(
             Yaml::String("tx_power_dbm".to_string()),
             Yaml::Number(dbm.into()),
         );
-    }
-
-    let body = match serde_norway::to_string(&data) {
-        Ok(b) => b,
-        Err(e) => return Err(format!("serializing the merged config failed: {e}")),
-    };
-    write_atomic(path, body.as_bytes()).map_err(|e| format!("writing {}: {e}", path.display()))
-}
-
-/// Write `bytes` to `path` atomically: ensure the parent dir, write a `.tmp`
-/// sibling, then rename over the target. Mirrors the Python tmp-write +
-/// `os.replace` idiom. The io error is propagated rather than collapsed into a
-/// bool so a caller can say which step failed and why.
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = {
-        let mut ext = path
-            .extension()
-            .map(|e| e.to_os_string())
-            .unwrap_or_default();
-        ext.push(".tmp");
-        path.with_extension(ext)
-    };
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -780,7 +712,7 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(
             body,
-            json!({"requested_dbm": 10, "effective_dbm": 10, "tx_power_max_dbm": 18})
+            json!({"requested_dbm": 10, "effective_dbm": 10, "tx_power_max_dbm": 18, "persisted": true})
         );
 
         // The persist wrote tx_power_dbm into video.wfb and kept the rest.
@@ -801,6 +733,40 @@ mod tests {
                 .and_then(|n| n.as_str()),
             Some("my-drone")
         );
+    }
+
+    #[tokio::test]
+    async fn an_unparseable_config_is_not_overwritten_and_the_body_says_so() {
+        // A hand edit left a duplicate `video:` key, which this parser refuses.
+        // The radio still takes the value, but the operator's config must come
+        // through byte-for-byte and the body must say the value will not persist.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("wfb-cmd.sock");
+        let cfg = dir.path().join("config.yaml");
+        let original = "agent:\n  name: my-drone\nvideo:\n  wfb:\n    tx_power_max_dbm: 18\nvideo:\n  wfb:\n    channel: 149\n";
+        std::fs::write(&cfg, original).unwrap();
+
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).await.unwrap();
+            conn.write_all(b"{\"ok\": true, \"effective_dbm\": 10}\n")
+                .await
+                .unwrap();
+        });
+
+        let resp = set_wfb_tx_power_at(&sock, &cfg, 10).await;
+        server.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["persisted"], json!(false));
+        assert!(body["persist_error"]
+            .as_str()
+            .unwrap()
+            .contains("unparseable"));
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original);
     }
 
     // ── persist: preserves the rest of the file + creates missing sections ─────
@@ -885,7 +851,9 @@ mod tests {
             return; // running as a user the mode does not bind (e.g. root)
         }
 
-        let msg = err.expect_err("a read-only config dir must not report success");
+        let msg = err
+            .expect_err("a read-only config dir must not report success")
+            .to_string();
         assert!(
             msg.contains("config.yaml"),
             "the message must name the path it failed to write, got: {msg}"

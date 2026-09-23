@@ -33,9 +33,8 @@ use anyhow::Result;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinHandle;
 
+use ados_plugin_host::frame_link::{Declarations, FrameLink};
 use ados_plugin_host::manifest::PluginManifest;
-use ados_plugin_host::mavlink_client::MavlinkClient;
-use ados_plugin_host::msp_client::MspClient;
 use ados_plugin_host::realhost::RealHost;
 use ados_plugin_host::reconcile::PluginReconciler;
 use ados_plugin_host::server::DEFAULT_SOCKET_DIR;
@@ -213,10 +212,10 @@ impl<H: ados_plugin_host::HostServices> WiredDaemon<H> {
 /// refuses them.
 const INJECTOR_CLIENT_ID: &str = "plugin-host";
 
-/// TTL for the host's injector attestation. The declaration is sent once per
-/// connection and the router verifies it once (the claim is sticky), so this
-/// only has to cover the window from arming to first command; a reconnect
-/// re-mints. Generous so a slow bench setup never expires it mid-arm.
+/// TTL for the host's injector attestation. A fresh ticket is minted for every
+/// router connection and the router verifies it once (the claim is sticky), so
+/// this only has to cover the window from connect to first command. Generous
+/// so a slow bench setup never expires it mid-arm.
 const INJECTOR_TICKET_TTL_SECS: i64 = 3600;
 
 /// The agent config path, `ADOS_CONFIG`-overridable like every other surface.
@@ -268,78 +267,53 @@ fn parse_injector_arbitration(yaml: &str) -> bool {
 }
 
 /// Build the real host from a discovered supervisor: the five facades plus the
-/// MAVLink client (best-effort), the runtime lookup (install dir + spawn
-/// allowlist from each plugin's manifest), and the agent-id lookup.
+/// router links, the runtime lookup (install dir + spawn allowlist from each
+/// plugin's manifest), and the agent-id lookup.
 ///
-/// The MAVLink slot stays `None` when the router socket is not up yet, which is
-/// the correct `not_available` posture (a `mavlink.send` then returns the
-/// structured `not_available` shape rather than failing the daemon).
+/// The MAVLink and MSP links are always wired. Each reconnects on its own, so a
+/// router that is not up yet (or restarts later) heals without a host restart;
+/// until it is up a send answers `sent: false` with reason `disconnected`.
 async fn build_host(install_dir: PathBuf, run_dir: PathBuf) -> Arc<RealHost> {
     let mut host = RealHost::new();
 
-    // Injector arbitration (default off). When armed, the MAVLink + MSP lanes
-    // declare themselves autonomous injectors so the router's PIC gate subjects
-    // their commands to an operator's manual-control claim. The ticket attests
-    // the id against the pairing key; `None` on an unpaired node (the verifier
-    // accepts the asserted id there). Minted once and reused on both lanes.
+    // Injector arbitration (default off). When armed, the MAVLink + MSP links
+    // declare themselves autonomous injectors on every connection so the
+    // router's PIC gate subjects their commands to an operator's manual-control
+    // claim. The ticket attests the id against the pairing key (`None` on an
+    // unpaired node, where the verifier accepts the asserted id) and is minted
+    // per connection, so a reconnect never replays an expired one.
     let armed = injector_arbitration_armed();
-    let injector_ticket: Option<String> = if armed {
-        let t = ados_protocol::ws_ticket::mint_scoped_ticket(
-            &pairing_json_path(),
-            &ados_protocol::ws_ticket::crsf_inject_scope(INJECTOR_CLIENT_ID),
-            INJECTOR_TICKET_TTL_SECS,
-        );
-        tracing::info!(
-            paired = t.is_some(),
-            "injector arbitration armed (mavlink.injector_arbitration)"
-        );
-        t
-    } else {
-        None
+    if armed {
+        tracing::info!("injector arbitration armed (mavlink.injector_arbitration)");
+    }
+    let declarations = move || -> Declarations {
+        if !armed {
+            return Box::new(Vec::new);
+        }
+        Box::new(|| {
+            let ticket = ados_protocol::ws_ticket::mint_scoped_ticket(
+                &pairing_json_path(),
+                &ados_protocol::ws_ticket::crsf_inject_scope(INJECTOR_CLIENT_ID),
+                INJECTOR_TICKET_TTL_SECS,
+            );
+            vec![ados_protocol::ipc::encode_injector_declaration(
+                INJECTOR_CLIENT_ID,
+                ticket.as_deref(),
+            )]
+        })
     };
 
-    // (a) MAVLink client: best-effort connect to the router's socket. A connect
-    //     failure is logged and the slot stays None.
-    let mavlink_sock = run_dir.join("mavlink.sock");
-    match MavlinkClient::connect(&mavlink_sock).await {
-        Ok(client) => {
-            tracing::info!(path = %mavlink_sock.display(), "mavlink client connected");
-            // Declare BEFORE any traffic, so every command carries the claim.
-            if armed {
-                client.declare_injector(INJECTOR_CLIENT_ID, injector_ticket.as_deref());
-            }
-            host = host.with_mavlink(Arc::new(client));
-        }
-        Err(e) => {
-            tracing::warn!(
-                path = %mavlink_sock.display(),
-                error = %e,
-                "mavlink router socket unavailable; mavlink.send will report not_available"
-            );
-        }
-    }
-
-    // (a2) MSP client: best-effort connect to the router's MSP byte-plane socket
-    //      so msp.send forwards to a Betaflight/iNav FC and msp.subscribe arms.
-    //      A connect failure (no MSP FC on this node) leaves the slot None and
-    //      the MSP methods report not_available, matching the MAVLink posture.
-    let msp_sock = run_dir.join("msp.sock");
-    match MspClient::connect(&msp_sock).await {
-        Ok(client) => {
-            tracing::info!(path = %msp_sock.display(), "msp client connected");
-            if armed {
-                client.declare_injector(INJECTOR_CLIENT_ID, injector_ticket.as_deref());
-            }
-            host = host.with_msp(Arc::new(client));
-        }
-        Err(e) => {
-            tracing::warn!(
-                path = %msp_sock.display(),
-                error = %e,
-                "msp router socket unavailable; msp.send will report not_available"
-            );
-        }
-    }
+    // (a) MAVLink and MSP router links. MSP carries raw bytes for a Betaflight /
+    //     iNav FC; on a node with no MSP FC its link simply stays disconnected.
+    host = host
+        .with_mavlink(Arc::new(FrameLink::spawn(
+            run_dir.join("mavlink.sock"),
+            declarations(),
+        )))
+        .with_msp(Arc::new(FrameLink::spawn(
+            run_dir.join("msp.sock"),
+            declarations(),
+        )));
 
     // (b) Vision client: best-effort connect to the engine's socket so the
     //     three vision request methods proxy to it and the frame-descriptor

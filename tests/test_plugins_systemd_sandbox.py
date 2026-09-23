@@ -79,10 +79,17 @@ def test_granting_i2c_does_not_also_open_the_camera() -> None:
     assert "PrivateDevices=yes" not in lines
 
 
-def test_network_grant_flips_the_address_family_filter() -> None:
+def test_network_grant_flips_the_address_family_filter_but_keeps_loopback_closed() -> None:
+    """Restated as the literal ``ados-plugin-host/src/sandbox.rs`` also pins.
+
+    A granted plugin reaches the network but not the agent's loopback
+    listeners, which trust a loopback peer as on-box.
+    """
     lines = sandbox_directives(["network.outbound"])
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK" in lines
     assert "IPAddressDeny=any" not in lines
+    assert "IPAddressDeny=localhost" in lines
+    assert not [line for line in lines if line.startswith("IPAddressAllow=")]
 
 
 def test_filesystem_grant_moves_the_data_roots_from_blocked_to_writable() -> None:

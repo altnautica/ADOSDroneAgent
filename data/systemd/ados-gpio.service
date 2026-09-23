@@ -1,8 +1,7 @@
 [Unit]
 Description=ADOS GPIO Output Service (status buzzer / LED)
 PartOf=ados-supervisor.service
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.
@@ -14,8 +13,12 @@ Slice=ados.slice
 #   touch /etc/ados/gpio-rust-enabled && systemctl restart ados-gpio
 Type=simple
 ExecStart=/bin/sh -c 'if [ -e /etc/ados/gpio-rust-enabled ] && [ -x /opt/ados/bin/ados-gpio ]; then exec /opt/ados/bin/ados-gpio; else exec /bin/true; fi'
-Restart=on-failure
-RestartSec=5
+Restart=always
+# Exit 0 means this node has nothing for the unit to run (feature off, role
+# not applicable, display absent); it must not respawn every RestartSec. Any
+# other exit, signal or watchdog timeout restarts forever (no start limit).
+RestartPreventExitStatus=0
+RestartSec=3
 Environment=RUST_LOG=info
 EnvironmentFile=-/etc/ados/env
 

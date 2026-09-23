@@ -241,12 +241,16 @@ fi
 #    command line at all.
 saw_ref=0
 saw_stable=0
+channel=""
+version=""
 prev=""
 for a in "$@"; do
     [ "$a" = "--ref" ] && saw_ref=1
     if [ "$prev" = "--channel" ] && [ "$a" = "stable" ]; then
         saw_stable=1
     fi
+    [ "$prev" = "--channel" ] && channel="$a"
+    [ "$prev" = "--version" ] && version="$a"
     prev="$a"
 done
 if [ "$saw_ref" -eq 1 ] && [ "$saw_stable" -eq 1 ]; then
@@ -256,6 +260,23 @@ if [ "$saw_ref" -eq 1 ] && [ "$saw_stable" -eq 1 ]; then
     echo "       there is no per-revision wheel to pin." >&2
     echo "       Use: --channel edge --ref <commit>" >&2
     exit 2
+fi
+
+# 0b. The stable channel installs ONE pinned release: the installer, the wheel,
+#     the deploy bundle and every service binary all come from `v<X.Y.Z>`,
+#     never from the rolling tags `main` rebuilds. A box whose profile.conf
+#     already records `stable` stays on its recorded release when the command
+#     line names no channel, exactly as the installer resolves it.
+if [ -z "$channel" ] && [ -r /etc/ados/profile.conf ]; then
+    channel="$(sed -n 's/^channel:[[:space:]]*//p' /etc/ados/profile.conf | head -n 1)"
+    [ -n "$version" ] || version="$(sed -n 's/^version:[[:space:]]*//p' /etc/ados/profile.conf | head -n 1)"
+fi
+if [ "$channel" = "stable" ]; then
+    if [ -z "$version" ]; then
+        echo "ERROR: --channel stable requires --version <X.Y.Z> (the release to install)." >&2
+        exit 2
+    fi
+    REL_BASE="${ADOS_RELEASE_BASE}/v${version#v}"
 fi
 
 # 1. Root requirement (Linux). Every later step writes under /opt, /etc, and
@@ -318,41 +339,65 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp" 2>/dev/null || true' EXIT
 
 # Trust anchor for the prebuilt installer binary: the vendored public half of
-# the ADOS_DRIVER_SIGNING_KEY minisign keypair. An operator may override it with
-# their own key. When a signed .minisig exists (CI signs once the secret is set)
-# it is verified below; until then the mandatory sha256 is the only gate.
+# the minisign keypair CI signs every release artifact with. An operator may
+# override it with their own key (a self-hosted release tree signed by them).
 : "${ADOS_INSTALLER_PUBKEY:=RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN}"
 
-# The bootstrap carries its own verifier.
+# The installer runs as root, so it is executed only after BOTH its sha256 and
+# its minisign signature verify, on every channel. The .sha256 comes from the
+# same host as the binary and proves integrity only; the signature is what
+# proves the binary came from the release key. A missing signature, a missing
+# verifier, or a signature that does not match the trust anchor all abort:
+# there is no sha256-only fallback, because an attacker who controls the
+# download would simply withhold the signature to take it.
 #
-# Signature checking below is conditional on minisign being present, and a
-# stock board image does not ship it — so on the path that matters, a fresh
-# install, verification silently did not happen and the only gate was sha256
-# (which a compromised release host controls just as easily as the binary).
-# Install it before the check rather than skipping the check. Best-effort: a
-# box with no package manager or no network still installs, still enforces
-# sha256, and says which posture it is in.
-if ! command -v minisign >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
-        echo "Installing minisign to verify the download…" >&2
-        # `update` first. A freshly flashed image ships an emptied package
-        # index to save space, so the install below fails with "unable to
-        # locate package" on exactly the path this matters most — a fresh
-        # install — and the whole verification step silently does nothing.
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq minisign >/dev/null 2>&1; then
-            # Say why, rather than leaving the operator to infer it from the
-            # posture line below.
-            echo "WARNING: could not install minisign from apt." >&2
-        fi
-    else
-        echo "WARNING: no apt-get; cannot install a signature verifier." >&2
+# verify_download <file>
+#   Checks <file> against <file>.sha256 and <file>.minisig. Prints the reason
+#   and returns non-zero on any failure; never exits, so the caller decides.
+verify_download() {
+    vd_file="$1"
+    vd_dir="$(dirname "$vd_file")"
+    vd_name="$(basename "$vd_file")"
+    if [ ! -s "${vd_file}.sha256" ]; then
+        echo "ERROR: no sha256 published for ${vd_name}" >&2
+        return 1
     fi
+    if ! ( cd "$vd_dir" && sha256sum -c "${vd_name}.sha256" >/dev/null 2>&1 ); then
+        echo "ERROR: sha256 verification failed for ${vd_name}" >&2
+        return 1
+    fi
+    if [ -z "${ADOS_INSTALLER_PUBKEY:-}" ]; then
+        echo "ERROR: no signing public key configured to verify ${vd_name}" >&2
+        return 1
+    fi
+    if ! command -v minisign >/dev/null 2>&1; then
+        echo "ERROR: minisign is not installed, so the signature of ${vd_name} cannot be verified" >&2
+        return 1
+    fi
+    if [ ! -s "${vd_file}.minisig" ]; then
+        echo "ERROR: no signature published for ${vd_name}" >&2
+        return 1
+    fi
+    if ! minisign -V -q -P "$ADOS_INSTALLER_PUBKEY" -m "$vd_file" -x "${vd_file}.minisig" >/dev/null 2>&1; then
+        echo "ERROR: minisign signature of ${vd_name} does not match the release key" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Install the verifier first. A stock board image does not ship minisign and a
+# freshly flashed one ships an emptied package index, so `update` runs before
+# the install. If minisign still cannot be obtained the install stops here.
+if ! command -v minisign >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    echo "Installing minisign to verify the download…" >&2
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq minisign >/dev/null 2>&1 || true
 fi
-if command -v minisign >/dev/null 2>&1; then
-    echo "Signature verification: enabled." >&2
-else
-    echo "Signature verification: unavailable (minisign not installed); sha256 only." >&2
+if ! command -v minisign >/dev/null 2>&1; then
+    echo "ERROR: minisign is required to verify the ADOS installer and could not be installed." >&2
+    echo "       Install it (apt-get install minisign) and re-run. An unverified installer" >&2
+    echo "       is never run as root." >&2
+    exit 1
 fi
 
 # A line of feedback for the short pre-binary window; the installer renders its
@@ -360,27 +405,14 @@ fi
 echo "Fetching ADOS installer…" >&2
 get "${REL_BASE}/${asset}" "${tmp}/${asset}"
 get "${REL_BASE}/${asset}.sha256" "${tmp}/${asset}.sha256"
-# Fetch the signature whenever verification can run. Every artifact in the
-# catalog is signed, so a missing one is now worth reporting rather than
-# passing over in silence.
-if [ -n "${ADOS_INSTALLER_PUBKEY:-}" ] && command -v minisign >/dev/null 2>&1; then
-    get "${REL_BASE}/${asset}.minisig" "${tmp}/${asset}.minisig" 2>/dev/null || true
-    [ -s "${tmp}/${asset}.minisig" ] || \
-        echo "WARNING: no signature published for ${asset}; sha256 only." >&2
-fi
+# A failed signature fetch is reported by verify_download, which names it.
+get "${REL_BASE}/${asset}.minisig" "${tmp}/${asset}.minisig" 2>/dev/null || rm -f "${tmp}/${asset}.minisig"
 
-# 5. Verify. sha256 is mandatory; abort loudly on mismatch.
-( cd "$tmp" && sha256sum -c "${asset}.sha256" ) || {
-    echo "ERROR: sha256 verification failed for ${asset} — aborting (no fallback)" >&2
+# 5. Verify: sha256 and signature, both mandatory, on every channel.
+verify_download "${tmp}/${asset}" || {
+    echo "ERROR: refusing to run an unverified ${asset} (no fallback)" >&2
     exit 1
 }
-# Optional minisign verification when sig + pubkey + tool are all present.
-if [ -s "${tmp}/${asset}.minisig" ] && [ -n "${ADOS_INSTALLER_PUBKEY:-}" ] && command -v minisign >/dev/null 2>&1; then
-    minisign -V -P "$ADOS_INSTALLER_PUBKEY" -m "${tmp}/${asset}" -x "${tmp}/${asset}.minisig" || {
-        echo "ERROR: minisign verification failed for ${asset} — aborting (no fallback)" >&2
-        exit 1
-    }
-fi
 
 # 6. Install + exec, passing all flags through verbatim.
 install -m 0755 "${tmp}/${asset}" "${tmp}/ados-installer"

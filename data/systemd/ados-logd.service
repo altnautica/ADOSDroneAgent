@@ -7,8 +7,7 @@ Description=ADOS Logging and Telemetry Store
 # clock is established, so nothing here depends on the target being reached.
 After=ados-supervisor.service time-sync.target
 PartOf=ados-supervisor.service
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -19,8 +18,8 @@ Slice=ados.slice
 # lifecycle rather than assuming readiness at fork.
 Type=notify
 ExecStart=/opt/ados/bin/ados-logd
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 # Headroom for the boot-path store check on a large store (the retention cap is
 # gigabytes). The daemon gates READY on a fast quick_check, but give ample slack
 # over the 90s default so a slow open on aged flash never trips a restart loop.
@@ -54,7 +53,7 @@ MemoryMax=256M
 # The daemon's watchdog ping is coupled to the WRITER's progress stamp, not to
 # the fact that the process still runs: a writer wedged inside a commit stops
 # the pings and systemd restarts the unit, and a writer that exits brings the
-# daemon down non-zero for Restart=on-failure. The ping cadence is a third of
+# daemon down non-zero for Restart=always. The ping cadence is a third of
 # this deadline, so two consecutive misses are tolerated.
 WatchdogSec=30s
 

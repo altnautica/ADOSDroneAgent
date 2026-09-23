@@ -161,10 +161,12 @@ pub fn state_label(value: &str) -> String {
 }
 
 /// Derive the browser viewer URL from a WHEP URL: strip a trailing `/whep`,
-/// then end with `/`.
+/// then end with `/`. A relative WHEP URL lives on the agent's own front, where
+/// the viewer is the cockpit link the status already carries in `access_urls`,
+/// so it yields `None` rather than a host-less path.
 pub fn viewer_url_from_whep(whep_url: Option<&str>) -> Option<String> {
     let whep = whep_url?;
-    if whep.is_empty() {
+    if whep.is_empty() || whep.starts_with('/') {
         return None;
     }
     let mut base = whep.trim_end_matches('/').to_string();
@@ -872,6 +874,7 @@ mod tests {
         );
         assert_eq!(viewer_url_from_whep(None), None);
         assert_eq!(viewer_url_from_whep(Some("")), None);
+        assert_eq!(viewer_url_from_whep(Some("/whep")), None);
     }
 
     #[test]

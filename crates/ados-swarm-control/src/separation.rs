@@ -15,6 +15,8 @@
 //! swarm mode. A drone in `hold` with a neighbour closing on it still gets out
 //! of the way.
 
+use std::cmp::Ordering;
+
 use crate::geo::Ned;
 use crate::neighbor::{NearestSet, NeighborState};
 
@@ -101,6 +103,9 @@ pub struct HardBreach {
     /// The offender's altitude offset from this drone, metres UP-positive. Needed
     /// because the climb datum has to be shared; see [`climb_datum_m`].
     pub relative_alt_m: f64,
+    /// This drone's bus sender id compared with the offender's; see
+    /// [`NeighborState::sender_order`]. Only consulted when the slots tie.
+    pub sender_order: Ordering,
 }
 
 /// The soft repulsive velocity contribution, m/s in the local NED frame.
@@ -141,13 +146,32 @@ pub fn hard_breach(neighbors: &[NeighborState], t: &SeparationTuning) -> Option<
         distance_m: d,
         // `pos.d` is down-positive, so a neighbour above us has negative `d`.
         relative_alt_m: -neighbors[i].pos.d,
+        sender_order: neighbors[i].sender_order,
     })
 }
 
-/// Altitude this slot climbs above the offender, metres.
+/// Whether this drone is the one of a converging pair that climbs: the LOWER of
+/// the two in `(slot, bus sender id)` order.
 ///
-/// `HARD_CLIMB_STEP_M · (offender_slot − own_slot)` for the LOWER slot, and zero
-/// for the higher one: of a converging pair, exactly one climbs.
+/// Slots are unique in a correctly provisioned fleet, so the slot alone decides.
+/// Two drones misprovisioned into one slot tie on it, and a slot-only rule then
+/// has both hold and neither separate; the bus sender id breaks the tie. Each side
+/// compares the same two ids from opposite ends, so exactly one of them climbs.
+/// When either id is unknown (`Ordering::Equal`) the rule cannot pick one and both
+/// hold, which is the behaviour of a slot-only rule.
+pub fn climbs(own_slot: u8, offender_slot: u8, sender_order: Ordering) -> bool {
+    match own_slot.cmp(&offender_slot) {
+        Ordering::Less => true,
+        Ordering::Greater => false,
+        Ordering::Equal => sender_order == Ordering::Less,
+    }
+}
+
+/// Altitude this drone climbs above the offender, metres.
+///
+/// `HARD_CLIMB_STEP_M · (offender_slot − own_slot)` for the lower of the pair (see
+/// [`climbs`]), at least one step when the slots tie, and zero for the higher one:
+/// of a converging pair, exactly one climbs.
 ///
 /// # Why only one of them climbs
 ///
@@ -164,20 +188,20 @@ pub fn hard_breach(neighbors: &[NeighborState], t: &SeparationTuning) -> Option<
 /// vehicles still compute it from data both already have — the beacon carries the
 /// neighbour's slot and altitude — so it is still a deterministic rule needing no
 /// negotiation, which is the property that makes it safe on a lossy broadcast.
-pub fn climb_offset_m(own_slot: u8, offender_slot: u8) -> f64 {
-    if own_slot >= offender_slot {
-        0.0
-    } else {
-        HARD_CLIMB_STEP_M * (offender_slot - own_slot) as f64
+pub fn climb_offset_m(own_slot: u8, offender_slot: u8, sender_order: Ordering) -> f64 {
+    if !climbs(own_slot, offender_slot, sender_order) {
+        return 0.0;
     }
+    let gap = offender_slot.saturating_sub(own_slot).max(1);
+    HARD_CLIMB_STEP_M * gap as f64
 }
 
 /// The altitude the hard override climbs to.
 ///
 /// Three cases, and each one exists to kill a specific failure:
 ///
-/// * The HIGHER slot holds. Exactly one of a pair manoeuvres, which is what makes
-///   the climber's target stationary (see [`climb_offset_m`]).
+/// * The HIGHER of the pair holds. Exactly one of a pair manoeuvres, which is
+///   what makes the climber's target stationary (see [`climb_offset_m`]).
 /// * A lower slot already BELOW its offender holds too. It already has vertical
 ///   separation; climbing would spend it, and a vehicle that flies UP into the
 ///   aircraft it is avoiding is worse than one that holds. Measured: without this
@@ -194,12 +218,13 @@ pub fn hard_climb_target_m(
     own_alt_m: f64,
     own_slot: u8,
     offender_slot: u8,
+    sender_order: Ordering,
     offender_relative_alt_m: f64,
 ) -> f64 {
-    if own_slot >= offender_slot || offender_relative_alt_m > 0.0 {
+    if !climbs(own_slot, offender_slot, sender_order) || offender_relative_alt_m > 0.0 {
         return own_alt_m;
     }
-    own_alt_m + offender_relative_alt_m + climb_offset_m(own_slot, offender_slot)
+    own_alt_m + offender_relative_alt_m + climb_offset_m(own_slot, offender_slot, sender_order)
 }
 
 /// The hard override's velocity command: no horizontal component at all, and a
@@ -353,7 +378,7 @@ mod tests {
         // slot numbers grows.
         let mut last = f64::NEG_INFINITY;
         for own in (1..=23u8).rev() {
-            let o = climb_offset_m(own, 24);
+            let o = climb_offset_m(own, 24, Ordering::Equal);
             assert!(
                 o > last,
                 "own {own} offset {o} did not increase past {last}"
@@ -363,24 +388,49 @@ mod tests {
         }
         // Deterministic: the same pair always yields the same answer, so both
         // drones compute it without exchanging a byte.
-        assert_eq!(climb_offset_m(1, 3), climb_offset_m(1, 3));
-        assert!(climb_offset_m(1, 2) < climb_offset_m(1, 3));
-        // Exactly ONE of a pair climbs, and it is the lower slot.
-        assert!(climb_offset_m(1, 2) > 0.0);
-        assert_eq!(climb_offset_m(2, 1), 0.0);
         assert_eq!(
-            climb_offset_m(5, 5),
-            0.0,
-            "a slot never deconflicts with itself"
+            climb_offset_m(1, 3, Ordering::Equal),
+            climb_offset_m(1, 3, Ordering::Equal)
         );
+        assert!(climb_offset_m(1, 2, Ordering::Equal) < climb_offset_m(1, 3, Ordering::Equal));
+        // Exactly ONE of a pair climbs, and it is the lower slot, whatever the
+        // sender ids say.
+        assert!(climb_offset_m(1, 2, Ordering::Greater) > 0.0);
+        assert_eq!(climb_offset_m(2, 1, Ordering::Less), 0.0);
+    }
+
+    /// Two drones misprovisioned into one slot each see the other as an offender
+    /// on their own slot. The slot cannot pick one, so the bus sender id does:
+    /// each side compares the same two ids from opposite ends and exactly one of
+    /// the pair climbs a full step. With a slot-only rule both held.
+    #[test]
+    fn a_same_slot_pair_breaks_the_tie_on_the_sender_id_so_exactly_one_climbs() {
+        let a = [0x10u8; 8];
+        let b = [0x20u8; 8];
+        // Drone A's view of B, and B's view of A: level, at 30 m.
+        let a_target = hard_climb_target_m(30.0, 5, 5, a.cmp(&b), 0.0);
+        let b_target = hard_climb_target_m(30.0, 5, 5, b.cmp(&a), 0.0);
+        let climbers = [a_target, b_target].iter().filter(|t| **t > 30.0).count();
+        assert_eq!(climbers, 1, "a {a_target}, b {b_target}");
+        assert!(
+            (a_target - (30.0 + HARD_CLIMB_STEP_M)).abs() < 1e-12,
+            "{a_target}"
+        );
+        assert_eq!(b_target, 30.0);
+        // With no id to compare, neither can be picked and both hold.
+        assert_eq!(hard_climb_target_m(30.0, 5, 5, Ordering::Equal, 0.0), 30.0);
+        // The breach carries the order through from the neighbour.
+        let t = SeparationTuning::default();
+        let n = nbr(5, 2.0, 0.0, 0.0).with_sender_order(Ordering::Less);
+        assert_eq!(hard_breach(&[n], &t).unwrap().sender_order, Ordering::Less);
     }
 
     #[test]
     fn the_climb_target_is_stationary_so_a_pair_cannot_ratchet() {
         // Slots 1 and 4 level at 30 m. Slot 1 climbs 1.5 m above slot 4; slot 4
         // holds.
-        let low = hard_climb_target_m(30.0, 1, 4, 0.0);
-        let high = hard_climb_target_m(30.0, 4, 1, 0.0);
+        let low = hard_climb_target_m(30.0, 1, 4, Ordering::Equal, 0.0);
+        let high = hard_climb_target_m(30.0, 4, 1, Ordering::Equal, 0.0);
         assert!((low - 31.5).abs() < 1e-12, "{low}");
         assert_eq!(
             high, 30.0,
@@ -390,12 +440,15 @@ mod tests {
         // Re-evaluated once the climber has arrived, the answer is UNCHANGED. This
         // is the property whose absence ratchets a held pair forty metres upward
         // over ninety seconds.
-        let again = hard_climb_target_m(31.5, 1, 4, 30.0 - 31.5);
+        let again = hard_climb_target_m(31.5, 1, 4, Ordering::Equal, 30.0 - 31.5);
         assert!((again - 31.5).abs() < 1e-12, "{again}");
-        assert_eq!(hard_climb_target_m(30.0, 4, 1, 31.5 - 30.0), 30.0);
+        assert_eq!(
+            hard_climb_target_m(30.0, 4, 1, Ordering::Equal, 31.5 - 30.0),
+            30.0
+        );
 
         // A climber already above its station is not commanded down.
-        let above = hard_climb_target_m(40.0, 1, 4, 30.0 - 40.0);
+        let above = hard_climb_target_m(40.0, 1, 4, Ordering::Equal, 30.0 - 40.0);
         assert!((above - 31.5).abs() < 1e-12);
         assert_eq!(
             hard_override(40.0, above),

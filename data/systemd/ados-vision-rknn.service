@@ -7,8 +7,7 @@ PartOf=ados-supervisor.service
 # without the NPU runtime the unit is a clean no-op rather than a crash loop.
 # The installer's npu-provision step places this library on rknn-class boards.
 ConditionPathExists=/usr/lib/librknnrt.so
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -20,7 +19,7 @@ Type=simple
 # engine's load_model / infer requests. Run from the agent venv where the wheel
 # is installed; pass the socket explicitly so the path is unambiguous.
 ExecStart=/opt/ados/venv/bin/python -m ados.services.vision.rknn_sidecar --socket /run/ados/vision-rknn.sock
-Restart=on-failure
+Restart=always
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env

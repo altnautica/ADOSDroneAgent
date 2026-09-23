@@ -348,6 +348,9 @@ impl SimWorld {
                     ve,
                     vd,
                     status: b.status,
+                    // Every simulated drone owns a distinct slot, so the tie-break
+                    // never decides anything here.
+                    sender_order: std::cmp::Ordering::Equal,
                 })
             })
             .collect()

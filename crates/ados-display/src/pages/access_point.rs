@@ -18,7 +18,9 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{text, Canvas};
 use crate::graphics::qr::render_qr;
-use crate::pages::{blank_panel, HitAction, HitZone, NetworkCtx, Page, PageContext, PANEL_W};
+use crate::pages::{
+    blank_panel, Chrome, HitAction, HitZone, NetworkCtx, Page, PageContext, PANEL_W,
+};
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
 /// A WiFi join string, the format every phone camera understands.
@@ -76,6 +78,10 @@ pub struct AccessPointDetailPage;
 impl Page for AccessPointDetailPage {
     fn id(&self) -> &'static str {
         "details.access_point"
+    }
+
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
     }
 
     fn refresh_hz(&self) -> f32 {

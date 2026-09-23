@@ -1,7 +1,7 @@
 # Full agent release pipeline (stable channel).
 #
-# Triggers on `v*` tag push. Produces, signs, and publishes the artifacts the
-# stable install channel consumes:
+# Triggers on `v*` tag push. Produces, signs, and publishes every artifact the
+# stable install channel consumes, all in the one `v<X.Y.Z>` release:
 #
 #   ados_drone_agent-<X.Y.Z>-py3-none-any.whl   the Python package (pure)
 #   ados-drone-agent-deploy-<X.Y.Z>.tar.gz       the deploy-bundle: every
@@ -14,11 +14,18 @@
 #                                                installer can unpack it into
 #                                                the same repo/ layout a git
 #                                                clone would produce.
+#   ados-installer-aarch64                       the installer the bootstrap
+#                                                execs for `--channel stable`
+#   <service>-aarch64 (the prebuilt catalog)     the service binaries built
+#                                                from this tag's Rust tree
 #
-# Both artifacts are signed with Ed25519 via minisign (gated on the signing
-# secret being present, so forks and dry-runs skip signing cleanly). Each
-# gets a .sha256 and a .minisig sidecar; a single SHA256SUMS lists them all.
-# The wheel is also published to PyPI.
+# Every artifact is signed with Ed25519 via minisign using the release key
+# (the `ADOS_DRIVER_SIGNING_KEY` secret), whose public half is embedded in the
+# installer and vendored in scripts/install.sh. Signing is mandatory: the
+# stable channel refuses any artifact without a signature from that key, so a
+# release that cannot be signed fails here instead of publishing something no
+# board will install. Each artifact gets a .sha256 and a .minisig sidecar; a
+# single SHA256SUMS lists them all. The wheel is also published to PyPI.
 #
 # The edge channel (the installer default) needs no artifact from this
 # workflow: edge clones the branch and builds from source on the device.
@@ -35,15 +42,54 @@ permissions:
   contents: write
 
 jobs:
+  # The installer the stable bootstrap execs, built from this tag. The rolling
+  # `prebuilt-installer` is whatever main last built, which a pinned release
+  # must not depend on.
+  installer:
+    name: build installer
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (musl target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build static ados-installer
+        working-directory: crates
+        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-installer
+
+      - name: Stage installer
+        run: |
+          set -euo pipefail
+          mkdir -p installer
+          cp crates/target/aarch64-unknown-linux-musl/release/ados-installer installer/ados-installer-aarch64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: installer/ados-installer-aarch64
+          if-no-files-found: error
+          retention-days: 14
+
   build:
     name: build + sign artifacts
+    needs: installer
     runs-on: ubuntu-latest
-    # Lift the signing secret into a job-level env so the step-level `if:`
-    # condition can read it. The `secrets` context is not available to
-    # step-level `if:` directly.
+    # Lift the signing secret into a job-level env so a step can refuse to run
+    # without it.
     env:
-      MINISIGN_KEY: ${{ secrets.LITE_AGENT_MINISIGN_KEY }}
-      MINISIGN_PASSWORD: ${{ secrets.LITE_AGENT_MINISIGN_PASSWORD }}
+      MINISIGN_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+      # The public half the stable install verifies against. A signature made
+      # by any other key is useless to a board, so the job checks each one
+      # against this before publishing.
+      RELEASE_PUBKEY: RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN
 
     steps:
       - uses: actions/checkout@v4
@@ -52,6 +98,10 @@ jobs:
           # vendor/rtl8812eu) the on-device install builds against, so the
           # submodules must be present in the checkout.
           submodules: recursive
+          # Full history: the service binaries are resolved from the nearest
+          # ancestor commit that published a per-revision release, and the
+          # guard below diffs the Rust tree between it and this tag.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -114,47 +164,99 @@ jobs:
           echo "bundle=${BUNDLE}" >> "$GITHUB_OUTPUT"
           ls -l "${BUNDLE}"
 
+      - name: Collect service binaries built from this tag's Rust tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The Rust workflow publishes a `rev-<sha>` release for every commit
+          # to main that touches its path filter, so this tag's binaries are
+          # the ones in the nearest ancestor's rev release — provided nothing
+          # the Rust workflow builds from changed between that commit and the
+          # tag. Refuse otherwise rather than ship binaries from another tree.
+          RUST_PATHS="crates src/ados/plugins/_capabilities_generated.py src/ados/plugins/_dispatch_generated.py src/ados/services/wfb/_wfb_tables_generated.py src/ados/core/_contracts_generated.py data/systemd .github/workflows/rust.yml"
+          found=""
+          for sha in $(git rev-list --max-count=200 HEAD); do
+            if gh release view "rev-${sha}" >/dev/null 2>&1; then
+              found="$sha"
+              break
+            fi
+          done
+          if [ -z "$found" ]; then
+            echo "No rev-<sha> release among the last 200 commits; the tag has no published binaries." >&2
+            exit 1
+          fi
+          # shellcheck disable=SC2086
+          if ! git diff --quiet "$found" HEAD -- $RUST_PATHS; then
+            echo "rev-${found} is the nearest published binary set, but the Rust tree changed after it:" >&2
+            # shellcheck disable=SC2086
+            git diff --stat "$found" HEAD -- $RUST_PATHS >&2
+            echo "Wait for the Rust workflow to publish rev-$(git rev-parse HEAD), then re-run." >&2
+            exit 1
+          fi
+          echo "Service binaries: rev-${found}"
+          mkdir -p binaries
+          gh release download "rev-${found}" --dir binaries
+          ls -l binaries
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer
+          path: installer
+
       - name: Collect artifacts + checksums
         id: collect
         run: |
+          set -euo pipefail
           OUT="release-assets"
           mkdir -p "${OUT}"
           cp dist/*.whl "${OUT}/"
           cp "${{ steps.bundle.outputs.bundle }}" "${OUT}/"
+          cp installer/ados-installer-aarch64 "${OUT}/"
+          # The service binaries keep the .sha256 and .minisig the Rust workflow
+          # signed them with (the same release key); they are verified again
+          # below with everything else.
+          cp binaries/* "${OUT}/"
 
-          # Per-artifact .sha256 sidecars (the install verifier checks each
-          # artifact against its own ARTIFACT.sha256 via `sha256sum -c`).
-          ( cd "${OUT}" && for f in *.whl *.tar.gz; do
-              [ -e "$f" ] || continue
+          # Per-artifact .sha256 sidecars for the artifacts built here (the
+          # install verifier checks each artifact against its own
+          # ARTIFACT.sha256 via `sha256sum -c`).
+          ( cd "${OUT}" && for f in *.whl *.tar.gz ados-installer-aarch64; do
               sha256sum "$f" > "$f.sha256"
             done )
           ls -l "${OUT}"
 
-      - name: Sign artifacts (minisign Ed25519)
-        # The job-level env block lifts the secret into env so this
-        # step-level `if:` can gate on it. When the secret is unset (forks,
-        # dry-runs) signing is skipped cleanly; the upload step tolerates the
-        # missing .minisig with if-no-files-found: warn, and the stable
-        # channel install refuses to install an unsigned artifact — which is
-        # correct, an unsigned build must not pass as stable.
-        if: ${{ env.MINISIGN_KEY != '' }}
+      - name: Sign artifacts (minisign Ed25519, mandatory)
         run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_KEY}" ]; then
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. The stable channel refuses unsigned artifacts, so an unsigned release is not published." >&2
+            exit 1
+          fi
           OUT="release-assets"
           KEY_FILE="$(mktemp)"
           printf '%s' "${MINISIGN_KEY}" > "${KEY_FILE}"
-          for f in "${OUT}"/*.whl "${OUT}"/*.tar.gz; do
-            [ -e "$f" ] || continue
-            echo "${MINISIGN_PASSWORD}" | minisign -S -s "${KEY_FILE}" -m "$f"
+          for f in "${OUT}"/*.whl "${OUT}"/*.tar.gz "${OUT}/ados-installer-aarch64"; do
+            minisign -S -s "${KEY_FILE}" -m "$f" -x "$f.minisig"
           done
           shred -u "${KEY_FILE}"
+
+          # Every artifact must verify against the key a board embeds, sidecars
+          # included, before anything is published.
+          for f in "${OUT}"/*; do
+            case "$f" in *.sha256|*.minisig|*/SHA256SUMS) continue ;; esac
+            ( cd "${OUT}" && sha256sum -c "$(basename "$f").sha256" )
+            minisign -V -q -P "${RELEASE_PUBKEY}" -m "$f" -x "$f.minisig"
+          done
           ls -l "${OUT}"
 
       - name: Build SHA256SUMS
         working-directory: release-assets
         run: |
+          set -euo pipefail
           rm -f SHA256SUMS
-          for f in *.whl *.tar.gz; do
-            [ -e "$f" ] || continue
+          for f in *; do
+            case "$f" in *.sha256|*.minisig|SHA256SUMS) continue ;; esac
             sha256sum "$f" >> SHA256SUMS
           done
           cat SHA256SUMS
@@ -192,22 +294,17 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ADOS Drone Agent ${{ steps.meta.outputs.tag }}
           prerelease: false
-          files: |
-            release-assets/*.whl
-            release-assets/*.whl.sha256
-            release-assets/*.whl.minisig
-            release-assets/*.tar.gz
-            release-assets/*.tar.gz.sha256
-            release-assets/*.tar.gz.minisig
-            release-assets/SHA256SUMS
+          files: release-assets/*
           body: |
-            Signed prebuilt release for the stable install channel.
+            Signed release for the stable install channel: the Python wheel,
+            the deploy bundle, the installer, and the service binaries built
+            from this tag, all signed with the release key.
 
             Install (stable, signed, pinned to this tag):
-              curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | sudo bash -s -- --channel stable --pair CODE
+              curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | sudo bash -s -- --channel stable --version ${{ steps.meta.outputs.tag }} --pair CODE
 
             Verify before installing:
-              minisign -V -p <vendored-public-key> -m <artifact>
+              minisign -V -P RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN -m <artifact>
               sha256sum -c SHA256SUMS
 
             The default (edge) channel still installs from source and needs

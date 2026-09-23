@@ -52,7 +52,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::routes::detail;
-use crate::routes::wfb_pair_write::write_atomic;
 use crate::state::AppState;
 
 /// The models directory the engine + the model manager resolve files under. The
@@ -397,7 +396,26 @@ fn upsert_catalog(
     }));
 
     let body = serde_json::to_vec_pretty(&Value::Array(entries)).map_err(|e| e.to_string())?;
-    write_atomic(&catalog_path, &body)
+    write_catalog(&catalog_path, &body)
+}
+
+/// Replace the catalog atomically: a temp sibling, fsynced, renamed over the
+/// target, so the engine never reads a half-written list.
+fn write_catalog(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    let written = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

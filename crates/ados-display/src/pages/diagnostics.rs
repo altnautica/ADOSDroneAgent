@@ -23,7 +23,7 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{line, text, Canvas};
 use crate::graphics::sparkline::draw_sparkline;
-use crate::pages::{blank_panel, HitAction, HitZone, Page, PageContext};
+use crate::pages::{blank_panel, Chrome, HitAction, HitZone, Page, PageContext};
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
 /// Layout reference width of the detail-modal surface.
@@ -102,6 +102,10 @@ impl Page for DiagnosticsDetailPage {
         "details.diagnostics"
     }
 
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
+    }
+
     fn refresh_hz(&self) -> f32 {
         1.0
     }
@@ -117,17 +121,8 @@ impl Page for DiagnosticsDetailPage {
     }
 
     fn hit_zones(&self, _ctx: &PageContext) -> Vec<HitZone> {
-        let log_top = HEADER_H + METRICS_H + IDENTITY_H;
-        vec![
-            HitZone::new(8, 8, 40, 32, HitAction::Back),
-            HitZone::new(
-                0,
-                log_top,
-                PAGE_W,
-                PAGE_H - log_top,
-                HitAction::Custom("diagnostics.log_scroll".to_string()),
-            ),
-        ]
+        // The log tail is a read-out; the page has no scroll handler.
+        vec![HitZone::new(8, 8, 40, 32, HitAction::Back)]
     }
 }
 
@@ -378,18 +373,14 @@ mod tests {
     }
 
     #[test]
-    fn diagnostics_renders_with_back_and_scroll_zones() {
+    fn diagnostics_renders_with_a_back_zone() {
         let page = DiagnosticsDetailPage;
         let ctx = ctx_with_diag();
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
         let zones = page.hit_zones(&ctx);
-        assert_eq!(zones.len(), 2);
+        assert_eq!(zones.len(), 1);
         assert_eq!(zones[0].action, HitAction::Back);
-        assert_eq!(
-            zones[1].action,
-            HitAction::Custom("diagnostics.log_scroll".to_string())
-        );
     }
 
     #[test]

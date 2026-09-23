@@ -283,11 +283,8 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
             // old flat refusal; with a valid session the data loads. The node is
             // unpaired here, so the session validates under the empty-key issuer
             // used when the data plane had no pairing key.
-            let session_ok = request
-                .headers()
-                .get(crate::dashboard_pin::DASHBOARD_SESSION_HEADER)
-                .and_then(|v| v.to_str().ok())
-                .map(|tok| edge.dashboard_pin.session_valid_unpaired(tok))
+            let session_ok = presented_session(&path, &request)
+                .map(|tok| edge.dashboard_pin.session_valid_unpaired(&tok))
                 .unwrap_or(false);
             if !session_ok {
                 tracing::warn!(
@@ -371,28 +368,9 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         // place the PIN record is read on the native path, and only on a
         // would-be-401 — an on-box or key-bearing request already passed above, so
         // an authenticated dashboard poll does not stat the record every request.
-        // The media plane additionally accepts the session in the QUERY STRING.
-        //
-        // Not a convenience. A plain `<video>` element cannot attach a custom
-        // header to the requests it makes for a playlist or its segments — the
-        // element does the fetching, and there is no hook. So a header-only
-        // credential is unreachable for any element-driven playback, and the
-        // operator gets a black frame with no way to authenticate it.
-        //
-        // Deliberately confined to `/whep` and `/hls`. A credential in a URL
-        // lands in access logs, browser history and `Referer`, which is why it
-        // is not accepted anywhere on `/api/*` — those callers are all code that
-        // can set a header. Same token, same validation, narrower surface.
-        let query_session = crate::proxy_auth::is_media_plane(&path)
-            .then(|| session_token_from_query(request.uri().query()))
-            .flatten();
-        let session_ok = request
-            .headers()
-            .get(crate::dashboard_pin::DASHBOARD_SESSION_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-            .or(query_session)
-            .as_deref()
+        // The media plane additionally accepts the session in the QUERY STRING
+        // (see [`presented_session`]).
+        let session_ok = presented_session(&path, &request)
             // `session_valid`, not `session_valid_for`: the latter returns false
             // whenever the node is unpaired, because an unpaired node mints its
             // sessions under a different issuer. This edge used it anyway, which
@@ -403,7 +381,7 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
             // session accepted by one layer and refused by the next.
             .map(|tok| {
                 edge.dashboard_pin
-                    .session_valid(&edge.pairing.current(), tok)
+                    .session_valid(&edge.pairing.current(), &tok)
             })
             .unwrap_or(false);
         if !session_ok {
@@ -476,10 +454,8 @@ async fn proxied_auth_then_forward(
         message,
     } = proxied.decide_api_key(&method, &path, &headers, on_box, &pairing)
     {
-        let session_ok = headers
-            .x_ados_dashboard_session
-            .as_deref()
-            .map(|tok| dashboard_pin.session_valid(&pairing, tok))
+        let session_ok = presented_session(&path, &request)
+            .map(|tok| dashboard_pin.session_valid(&pairing, &tok))
             .unwrap_or(false);
         // A browser cannot set `X-ADOS-Key` on a WebSocket handshake, so a
         // proxied WS route (e.g. the vision-detections stream) authenticates via
@@ -572,7 +548,34 @@ fn ws_upgrade_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing) -> boo
         .is_ok()
 }
 
-/// Wall-clock unix milliseconds, matching the MCP token's millisecond expiry.
+/// The dashboard session a request presents: the `X-ADOS-Dashboard-Session`
+/// header, or, on the media plane only, the `ados_session` query parameter.
+///
+/// The query form is not a convenience. A plain `<video>` element cannot attach
+/// a custom header to the requests it makes for a playlist or its segments (the
+/// element does the fetching, and there is no hook), so a header-only credential
+/// is unreachable for element-driven playback and the operator gets a black
+/// frame with no way to authenticate it.
+///
+/// It is confined to `/whep` and `/hls`. A credential in a URL lands in access
+/// logs, browser history and `Referer`, which is why it is not accepted on
+/// `/api/*`: those callers are all code that can set a header. Every branch of
+/// the edge (unpaired PIN gate, native routes, proxied routes) reads the session
+/// through this one function, because `/whep` and `/hls` are proxied and a
+/// check that only the native branch applied never ran for them.
+fn presented_session(path: &str, request: &Request) -> Option<String> {
+    request
+        .headers()
+        .get(crate::dashboard_pin::DASHBOARD_SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| {
+            crate::proxy_auth::is_media_plane(path)
+                .then(|| session_token_from_query(request.uri().query()))
+                .flatten()
+        })
+}
+
 /// The query-string parameter carrying a dashboard session on the media plane.
 pub(crate) const MEDIA_SESSION_QUERY_KEY: &str = "ados_session";
 
@@ -580,16 +583,39 @@ pub(crate) const MEDIA_SESSION_QUERY_KEY: &str = "ados_session";
 ///
 /// Hand-parsed rather than pulled through a URL crate: the input is a raw query
 /// fragment, the only key that matters is one exact name, and an empty value is
-/// treated as absent so `?ados_session=` cannot read as a credential. Percent
-/// decoding is deliberately not done — the token alphabet is URL-safe, so a
-/// value needing decoding is not one we issued.
+/// treated as absent so `?ados_session=` cannot read as a credential. The value
+/// is percent-decoded once: the token's field separator is `|`, which the
+/// clients' `encodeURIComponent` sends as `%7C`. A malformed escape is absent.
 pub(crate) fn session_token_from_query(query: Option<&str>) -> Option<String> {
     query?.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;
-        (k == MEDIA_SESSION_QUERY_KEY && !v.is_empty()).then(|| v.to_string())
+        if k != MEDIA_SESSION_QUERY_KEY || v.is_empty() {
+            return None;
+        }
+        percent_decode_once(v)
     })
 }
 
+/// Decode `%XX` escapes once. `None` on a malformed escape or non-UTF-8 result.
+fn percent_decode_once(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = (*bytes.get(i + 1)? as char).to_digit(16)?;
+            let lo = (*bytes.get(i + 2)? as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Wall-clock unix milliseconds, matching the MCP token's millisecond expiry.
 fn now_unix_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -1146,6 +1172,12 @@ mod tests {
             Some("abc123".to_string()),
             "the parameter need not be first"
         );
+        // `encodeURIComponent` sends the token's `|` separators as `%7C`.
+        assert_eq!(
+            session_token_from_query(Some("ados_session=v1%7C1%7C2%7Cff")),
+            Some("v1|1|2|ff".to_string())
+        );
+        assert_eq!(session_token_from_query(Some("ados_session=v1%7")), None);
     }
 
     #[test]
@@ -1286,6 +1318,91 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+    }
+
+    /// The media plane through the WHOLE edge on a paired node. `/whep` and
+    /// `/hls` are proxied routes, so this exercises the proxied lane, where the
+    /// query-string session used to be ignored: a `<video>` element holding a
+    /// valid PIN session got 401 and a black frame.
+    #[tokio::test]
+    async fn the_proxied_media_plane_accepts_a_query_session_and_refuses_no_credential() {
+        use tower::util::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let edge = paired_edge(dir.path());
+        edge.dashboard_pin.set_pin("1234", 0.0).unwrap();
+        let sess = edge
+            .dashboard_pin
+            .mint_session("ados_secret")
+            .expect("a set PIN mints a session");
+        // What a browser's `encodeURIComponent` puts on the wire.
+        let sess_q = sess.token.replace('|', "%7C");
+        let app = axum::Router::new()
+            .route(
+                "/hls/main/index.m3u8",
+                axum::routing::get(|| async { "ok" }),
+            )
+            .route("/whep", axum::routing::post(|| async { "ok" }))
+            .route("/api/status", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(edge.clone(), tcp_edge))
+            .with_state(edge);
+        let peer = PeerAddr(SocketAddr::from(([192, 168, 1, 50], 45678)));
+        let status = |method: &str, uri: String, key: Option<&str>| {
+            let app = app.clone();
+            let mut b = Request::builder().method(method).uri(uri).extension(peer);
+            if let Some(k) = key {
+                b = b.header("X-ADOS-Key", k);
+            }
+            async move {
+                app.oneshot(b.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        // No credential: the credentialed proxy refuses.
+        assert_eq!(
+            status("GET", "/hls/main/index.m3u8".into(), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status("POST", "/whep".into(), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // A forged session in the query is refused.
+        assert_eq!(
+            status(
+                "GET",
+                "/hls/main/index.m3u8?ados_session=v1%7C1%7C2%7Cff".into(),
+                None
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        // A valid session in the query is served, on both media routes.
+        assert_eq!(
+            status(
+                "GET",
+                format!("/hls/main/index.m3u8?ados_session={sess_q}"),
+                None
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("POST", format!("/whep?ados_session={sess_q}"), None).await,
+            StatusCode::OK
+        );
+        // The pairing key still works.
+        assert_eq!(
+            status("GET", "/hls/main/index.m3u8".into(), Some("ados_secret")).await,
+            StatusCode::OK
+        );
+        // Off the media plane the URL never carries a credential.
+        assert_eq!(
+            status("GET", format!("/api/status?ados_session={sess_q}"), None).await,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     /// The same table against the RADIO RELAY denylist. A relayed caller is

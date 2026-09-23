@@ -68,6 +68,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use crate::config_store::{section_path, update_config};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -171,66 +172,40 @@ fn put_wfb_at(config_path: &Path, update: &WfbUpdate) -> Response {
 /// Each view value resolves the way the FastAPI `_read_wfb_view` does over the
 /// post-mutation model: the request value when supplied, else the existing
 /// on-disk value, else the Python default (`channel: 0`, `bitrate_profile:
-/// "default"`, `fec: "8/12"`). The atomic merge preserves every other config
-/// key. `persist_error` is `None` on a clean write and `Some(message)` on any
-/// read/parse/write fault (e.g. the EPERM a non-root front gets on the 0600
-/// config), mirroring the FastAPI `save_config()` exception path that flags
-/// `persisted: false` with the exception text.
+/// "default"`, `fec: "8/12"`). The merge goes through the shared config store,
+/// which preserves every other config key and refuses to write over a document
+/// it could not read or parse. `persist_error` is `None` on a clean write and
+/// `Some(message)` on any fault (a refused document, the EPERM a non-root front
+/// gets on the 0600 config), flagged as `persisted: false`.
 fn merge_wfb_fields(
     config_path: &Path,
     update: &WfbUpdate,
 ) -> (i64, String, String, Option<String>) {
     use serde_norway::Value as Yaml;
 
-    // Load the existing config (an absent / non-mapping file starts from an
-    // empty mapping, matching the Python `data: dict = {}` seed).
-    let mut data: Yaml = match std::fs::read_to_string(config_path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(serde_norway::Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(serde_norway::Mapping::new()),
+    let outcome = update_config(config_path, |root| {
+        // The pre-existing values, so a field the request omits keeps its on-disk
+        // value (and falls through to the Python default only when truly absent).
+        let existing = existing_wfb(root);
+        let wfb_map = section_path(root, &["video", "wfb"]);
+        if let Some(ch) = update.channel {
+            wfb_map.insert(Yaml::String("channel".to_string()), Yaml::Number(ch.into()));
+        }
+        if let Some(bp) = &update.bitrate_profile {
+            wfb_map.insert(
+                Yaml::String("bitrate_profile".to_string()),
+                Yaml::String(bp.clone()),
+            );
+        }
+        if let Some(f) = &update.fec {
+            wfb_map.insert(Yaml::String("fec".to_string()), Yaml::String(f.clone()));
+        }
+        Ok(existing)
+    });
+    let (existing, persist_error) = match outcome {
+        Ok(w) => (w.value, None),
+        Err(e) => (ExistingWfb::default(), Some(e.to_string())),
     };
-
-    // The pre-existing values, so a field the request omits keeps its on-disk
-    // value (and falls through to the Python default only when truly absent).
-    let existing = existing_wfb(&data);
-
-    // Navigate/create `video.wfb` and set each supplied field, preserving every
-    // other key and the mapping's insertion order (Python `sort_keys=False`).
-    // If the document is shaped so a section cannot be a mapping, the merge is
-    // abandoned and the persist is reported failed — the view still answers from
-    // the resolved values.
-    let mut persist_error: Option<String> = None;
-    {
-        match wfb_section_mut(&mut data) {
-            Some(wfb_map) => {
-                if let Some(ch) = update.channel {
-                    wfb_map.insert(Yaml::String("channel".to_string()), Yaml::Number(ch.into()));
-                }
-                if let Some(bp) = &update.bitrate_profile {
-                    wfb_map.insert(
-                        Yaml::String("bitrate_profile".to_string()),
-                        Yaml::String(bp.clone()),
-                    );
-                }
-                if let Some(f) = &update.fec {
-                    wfb_map.insert(Yaml::String("fec".to_string()), Yaml::String(f.clone()));
-                }
-            }
-            None => {
-                persist_error = Some("config root is not a mapping".to_string());
-            }
-        }
-    }
-
-    // Write the merged document atomically. Any serialize / write fault becomes a
-    // persist error; a non-root front gets the OS EPERM string here.
-    if persist_error.is_none() {
-        if let Err(e) = write_atomic(config_path, &data) {
-            persist_error = Some(e);
-        }
-    }
 
     // The resolved view values: request → existing → Python default.
     let channel = update.channel.or(existing.channel).unwrap_or(0);
@@ -259,9 +234,9 @@ struct ExistingWfb {
     fec: Option<String>,
 }
 
-/// Read the existing `video.wfb` view fields from a parsed config value.
-fn existing_wfb(data: &serde_norway::Value) -> ExistingWfb {
-    let wfb = data.get("video").and_then(|v| v.get("wfb"));
+/// Read the existing `video.wfb` view fields from the parsed config mapping.
+fn existing_wfb(root: &serde_norway::Mapping) -> ExistingWfb {
+    let wfb = root.get("video").and_then(|v| v.get("wfb"));
     let wfb = match wfb {
         Some(w) => w,
         None => return ExistingWfb::default(),
@@ -276,30 +251,6 @@ fn existing_wfb(data: &serde_norway::Value) -> ExistingWfb {
     }
 }
 
-/// Navigate/create `video.wfb` as a mutable mapping, returning `None` when a
-/// node along the path exists but is not a mapping AND cannot be replaced
-/// without clobbering the document root (only the root being a non-mapping fails;
-/// a non-mapping `video` / `wfb` is replaced with an empty mapping, matching the
-/// tx-power persist's create-on-conflict behavior).
-fn wfb_section_mut(data: &mut serde_norway::Value) -> Option<&mut serde_norway::Mapping> {
-    use serde_norway::Value as Yaml;
-    let root = data.as_mapping_mut()?;
-    let video = root
-        .entry(Yaml::String("video".to_string()))
-        .or_insert_with(|| Yaml::Mapping(serde_norway::Mapping::new()));
-    if !video.is_mapping() {
-        *video = Yaml::Mapping(serde_norway::Mapping::new());
-    }
-    let video_map = video.as_mapping_mut()?;
-    let wfb = video_map
-        .entry(Yaml::String("wfb".to_string()))
-        .or_insert_with(|| Yaml::Mapping(serde_norway::Mapping::new()));
-    if !wfb.is_mapping() {
-        *wfb = Yaml::Mapping(serde_norway::Mapping::new());
-    }
-    wfb.as_mapping_mut()
-}
-
 /// Coerce a serde_norway scalar to `i64`, accepting an integer or a float.
 /// `None` for a non-number. Mirrors the Python `int(...)` over a numeric config
 /// value.
@@ -308,27 +259,6 @@ fn norway_to_i64(v: &serde_norway::Value) -> Option<i64> {
         serde_norway::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
         _ => None,
     }
-}
-
-/// Serialize `data` to YAML and write it to `path` atomically (ensure the parent
-/// dir, write a `.tmp` sibling, rename over the target). Returns the error string
-/// on any serialize / I/O fault so the route can flag the persist failure.
-/// Mirrors the tmp-write + `os.replace` idiom the config persist uses.
-fn write_atomic(path: &Path, data: &serde_norway::Value) -> Result<(), String> {
-    let body = serde_norway::to_string(data).map_err(|e| e.to_string())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = {
-        let mut ext = path
-            .extension()
-            .map(|e| e.to_os_string())
-            .unwrap_or_default();
-        ext.push(".tmp");
-        path.with_extension(ext)
-    };
-    std::fs::write(&tmp, body.as_bytes()).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -500,7 +430,7 @@ mod tests {
 
     #[test]
     fn existing_wfb_reads_typed_fields_and_skips_missing() {
-        let data: serde_norway::Value =
+        let data: serde_norway::Mapping =
             serde_norway::from_str("video:\n  wfb:\n    channel: 153\n    bitrate_profile: low\n")
                 .unwrap();
         let e = existing_wfb(&data);
@@ -508,7 +438,7 @@ mod tests {
         assert_eq!(e.bitrate_profile.as_deref(), Some("low"));
         assert_eq!(e.fec, None);
         // No video section at all → all None.
-        let empty: serde_norway::Value = serde_norway::from_str("agent:\n  name: x\n").unwrap();
+        let empty: serde_norway::Mapping = serde_norway::from_str("agent:\n  name: x\n").unwrap();
         let e2 = existing_wfb(&empty);
         assert!(e2.channel.is_none() && e2.bitrate_profile.is_none() && e2.fec.is_none());
     }

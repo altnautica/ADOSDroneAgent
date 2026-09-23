@@ -25,7 +25,7 @@ use ratatui::crossterm::{execute, ExecutableCommand};
 use ratatui::Terminal;
 use serde_json::Value;
 
-use crate::action::{Action, ACTIONS, UPDATE_NOW};
+use crate::action::{update_request, Action, ACTIONS};
 use crate::model::{Dashboard, History};
 
 /// Where the agent stores the pairing key (matches `ados.core.paths.PAIRING_JSON`).
@@ -80,24 +80,61 @@ fn install_panic_hook() {
     }));
 }
 
+/// Put the cockpit back after a shell-out: raw mode, alt screen, full redraw.
+fn restore_cockpit(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    enable_raw_mode()?;
+    std::io::stdout().execute(EnterAlternateScreen)?;
+    terminal.clear()?;
+    Ok(())
+}
+
+fn read_line() -> String {
+    let mut buf = String::new();
+    let _ = std::io::stdin().read_line(&mut buf);
+    buf
+}
+
+/// Hold the plain terminal until the operator presses Enter, then restore the
+/// cockpit.
+fn pause_then_restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    print!("\nPress Enter to return to the dashboard… ");
+    let _ = std::io::stdout().flush();
+    let _ = read_line();
+    restore_cockpit(terminal)
+}
+
+/// Show why a request was refused on the plain terminal, in the same frame an
+/// action's own output would appear in, so the refusal is not a silent no-op.
+fn show_refusal(terminal: &mut Terminal<CrosstermBackend<Stdout>>, why: &str) -> Result<()> {
+    restore_terminal();
+    println!("\n{why}");
+    pause_then_restore(terminal)
+}
+
+/// Run an update request: the confirming update action, or the refusal while the
+/// vehicle reports armed.
+fn request_update(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    armed: Option<bool>,
+) -> Result<()> {
+    match update_request(armed) {
+        Ok(action) => run_action(terminal, action),
+        Err(why) => show_refusal(terminal, why),
+    }
+}
+
+/// Whether a key pressed on the launch update splash asks for the update. Only
+/// `u`: every other key, Enter included, is the "later" the splash offers.
+fn splash_requests_update(code: KeyCode) -> bool {
+    matches!(code, KeyCode::Char('u') | KeyCode::Char('U'))
+}
+
 /// Run a quick action by shelling out to the real terminal (Pattern A). The
 /// cockpit leaves the alt screen so the command's own output — and any sudo
 /// prompt or the command's own confirmation — is visible, optionally confirms
 /// first, then restores the cockpit. The command shells an existing `ados` (or
 /// `systemctl`) verb, so no write path to the agent is opened here.
 fn run_action(terminal: &mut Terminal<CrosstermBackend<Stdout>>, action: &Action) -> Result<()> {
-    fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
-        enable_raw_mode()?;
-        std::io::stdout().execute(EnterAlternateScreen)?;
-        terminal.clear()?;
-        Ok(())
-    }
-    fn read_line() -> String {
-        let mut buf = String::new();
-        let _ = std::io::stdin().read_line(&mut buf);
-        buf
-    }
-
     restore_terminal();
     // The terminal is now in cooked mode (Ctrl-C raises SIGINT). Ignore SIGINT +
     // SIGQUIT in this process for the duration of the action so a Ctrl-C used to
@@ -111,7 +148,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<Stdout>>, action: &Action
         print!("\n{} — proceed? [y/N] ", action.label);
         let _ = std::io::stdout().flush();
         if !read_line().trim().eq_ignore_ascii_case("y") {
-            return restore(terminal);
+            return restore_cockpit(terminal);
         }
     }
 
@@ -123,10 +160,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<Stdout>>, action: &Action
         Err(e) => println!("\n[could not run {}: {e}]", action.program),
         _ => {}
     }
-    print!("\nPress Enter to return to the dashboard… ");
-    let _ = std::io::stdout().flush();
-    let _ = read_line();
-    restore(terminal)
+    pause_then_restore(terminal)
 }
 
 /// Spawn a quick-action child inheriting this terminal, resetting SIGINT/SIGQUIT
@@ -295,16 +329,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                     return Ok(());
                 }
                 // The launch update splash takes precedence: any key dismisses it
-                // for the session; [u]/Enter runs the update first (reusing the
-                // installer's full-screen UI via `ados update`).
+                // for the session, as its "any key: later" says. Only [u] asks for
+                // the update, and that goes through the same y/N-confirmed action
+                // as the dashboard key, refused while the vehicle reports armed.
                 if update_splash {
                     update_splash = false;
                     update_splash_done = true;
-                    if matches!(
-                        key.code,
-                        KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Enter
-                    ) {
-                        run_action(terminal, &UPDATE_NOW)?;
+                    if splash_requests_update(key.code) {
+                        request_update(terminal, dash.as_ref().and_then(|d| d.armed))?;
                         last_fetch = None;
                     }
                     continue;
@@ -321,7 +353,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                         }
                         KeyCode::Enter => {
                             actions_selected = None;
-                            run_action(terminal, &ACTIONS[sel])?;
+                            let action = &ACTIONS[sel];
+                            if action.args.first().copied() == Some("update") {
+                                request_update(terminal, dash.as_ref().and_then(|d| d.armed))?;
+                            } else {
+                                run_action(terminal, action)?;
+                            }
                             last_fetch = None; // refresh right after returning
                         }
                         _ => {}
@@ -334,13 +371,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                         // `[u] update` (shown in the footer only when a newer
                         // version is available) runs the agent update, y/N-gated.
                         KeyCode::Char('u') | KeyCode::Char('U') if update_available => {
-                            if let Some(action) = ACTIONS
-                                .iter()
-                                .find(|a| a.args.first().copied() == Some("update"))
-                            {
-                                run_action(terminal, action)?;
-                                last_fetch = None;
-                            }
+                            request_update(terminal, dash.as_ref().and_then(|d| d.armed))?;
+                            last_fetch = None;
                         }
                         KeyCode::Char(c) => {
                             let c = c.to_ascii_lowercase();
@@ -354,5 +386,20 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_u_on_the_update_splash_asks_for_the_update() {
+        assert!(splash_requests_update(KeyCode::Char('u')));
+        assert!(splash_requests_update(KeyCode::Char('U')));
+        // Enter is the "any key: later" the splash advertises, not an update.
+        assert!(!splash_requests_update(KeyCode::Enter));
+        assert!(!splash_requests_update(KeyCode::Esc));
+        assert!(!splash_requests_update(KeyCode::Char('q')));
     }
 }

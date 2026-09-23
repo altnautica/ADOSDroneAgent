@@ -7,8 +7,10 @@
 //! gateway short-id plus a partition badge.
 //!
 //! Tapping the switch-role button toggles a role-picker overlay over the bottom
-//! half of the page; tapping a choice commits it. The role / mesh / peer data
-//! all come from [`PageContext::role`] and [`PageContext::mesh`].
+//! half of the page; tapping a choice closes the picker and writes the role
+//! through `PUT /api/v1/ground-station/role`. The peer rows are a read-out, not
+//! controls. The role / mesh / peer data all come from [`PageContext::role`] and
+//! [`PageContext::mesh`].
 
 use std::cell::Cell;
 
@@ -17,7 +19,9 @@ use embedded_graphics::pixelcolor::Rgb888;
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_circle, fill_rect, fill_rect_outline, line, text, Canvas};
-use crate::pages::{blank_panel, HitAction, HitZone, MeshCtx, Page, PageContext};
+use crate::pages::{
+    blank_panel, AgentRequest, Chrome, HitAction, HitZone, MeshCtx, Page, PageContext, PanelAction,
+};
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
 /// Layout reference width / height of the detail-modal surface.
@@ -102,6 +106,10 @@ impl MeshDetailPage {
 impl Page for MeshDetailPage {
     fn id(&self) -> &'static str {
         "details.mesh"
+    }
+
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
     }
 
     fn refresh_hz(&self) -> f32 {
@@ -241,18 +249,25 @@ impl Page for MeshDetailPage {
                     HitAction::Custom(format!("mesh.role.{choice}")),
                 ));
             }
-        } else {
-            for i in 0..PEER_ROWS_VISIBLE {
-                zones.push(HitZone::new(
-                    8,
-                    PEER_LIST_Y + i * PEER_ROW_H,
-                    PAGE_W - 16,
-                    PEER_ROW_H,
-                    HitAction::Custom(format!("mesh.peer.{i}")),
-                ));
-            }
         }
         zones
+    }
+
+    fn on_custom(&self, key: &str, _ctx: &PageContext) -> Option<PanelAction> {
+        if key == "mesh.switch_role" {
+            self.toggle_picker();
+            return Some(PanelAction::Repaint);
+        }
+        let role = ROLE_CHOICES
+            .iter()
+            .find(|r| key.strip_prefix("mesh.role.") == Some(**r))?;
+        self.close_picker();
+        Some(PanelAction::Agent(AgentRequest {
+            method: "PUT",
+            path: "/api/v1/ground-station/role",
+            body: Some(serde_json::json!({ "role": role })),
+            label: format!("Mesh role {role}"),
+        }))
     }
 }
 
@@ -450,8 +465,8 @@ mod tests {
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
         let zones = page.hit_zones(&ctx);
-        // Back + switch + six peer rows.
-        assert_eq!(zones.len(), 2 + PEER_ROWS_VISIBLE as usize);
+        // Back + switch; the peer rows are a read-out.
+        assert_eq!(zones.len(), 2);
         assert_eq!(zones[0].action, HitAction::Back);
         assert_eq!(
             zones[1].action,
@@ -480,6 +495,28 @@ mod tests {
         );
         page.close_picker();
         assert!(!page.picker_open());
+    }
+
+    /// Switch opens the picker; a choice closes it and writes that role.
+    #[test]
+    fn a_role_choice_writes_the_role() {
+        let page = MeshDetailPage::new();
+        let ctx = PageContext::default();
+        assert_eq!(
+            page.on_custom("mesh.switch_role", &ctx),
+            Some(PanelAction::Repaint)
+        );
+        assert!(page.picker_open());
+        let Some(PanelAction::Agent(req)) = page.on_custom("mesh.role.relay", &ctx) else {
+            panic!("a role choice must reach the agent");
+        };
+        assert_eq!(
+            (req.method, req.path),
+            ("PUT", "/api/v1/ground-station/role")
+        );
+        assert_eq!(req.body, Some(serde_json::json!({"role": "relay"})));
+        assert!(!page.picker_open());
+        assert!(page.on_custom("mesh.role.bogus", &ctx).is_none());
     }
 
     #[test]

@@ -11,8 +11,7 @@ Description=ADOS Drone Agent Supervisor
 # Per Rule 26: "the install must be 100% AUTOMATIC" — an operator
 # on a deserted island with both rigs powered must see video.
 After=local-fs.target
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -26,7 +25,7 @@ Type=notify
 # track the real PID.
 ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-supervisor ]; then exec /opt/ados/bin/ados-supervisor; else echo "ados-supervisor binary missing; reinstall to fetch it" >&2; exit 1; fi'
 Restart=always
-RestartSec=1
+RestartSec=3
 WatchdogSec=30
 TimeoutStartSec=180
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

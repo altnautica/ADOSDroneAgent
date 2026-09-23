@@ -5,8 +5,7 @@ PartOf=ados-supervisor.service
 # crash-looping; the installer health gate is the loud failure for a binary
 # that should be present on a ground station.
 ConditionPathExists=/opt/ados/bin/ados-input
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -20,8 +19,8 @@ EnvironmentFile=-/etc/ados/env
 # Native-only: the packaged Python input manager was deleted, so the daemon runs
 # its binary directly.
 ExecStart=/opt/ados/bin/ados-input
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 
 StandardOutput=journal
 StandardError=journal

@@ -2401,6 +2401,93 @@ mod tests {
         );
     }
 
+    /// Every long-running agent unit restarts forever: `Restart=always`,
+    /// `RestartSec=3`, and `StartLimitIntervalSec=0` in `[Unit]` (the only
+    /// section that reads it). A start limit latches a unit `failed` after a
+    /// burst of quick exits and nothing re-arms it until a reboot or an
+    /// operator's `reset-failed`, which for the supervisor means MAVLink, radio,
+    /// video and the control surface all stay down. Oneshots are exempt: they
+    /// run to completion by design.
+    #[test]
+    fn every_long_running_unit_restarts_without_a_start_limit() {
+        /// The restart-policy violations in one unit body (pure).
+        fn restart_policy_problems(name: &str, body: &str) -> Vec<String> {
+            let mut section = "";
+            let mut kv: Vec<(&str, &str, &str)> = Vec::new();
+            for line in body.lines().map(str::trim) {
+                if line.starts_with('[') && line.ends_with(']') {
+                    section = line;
+                    continue;
+                }
+                if line.starts_with('#') || line.starts_with(';') {
+                    continue;
+                }
+                if let Some((k, v)) = line.split_once('=') {
+                    kv.push((section, k.trim(), v.trim()));
+                }
+            }
+            let has = |sec: &str, key: &str, val: &str| {
+                kv.iter()
+                    .any(|(s, k, v)| *s == sec && *k == key && *v == val)
+            };
+            if has("[Service]", "Type", "oneshot") {
+                return Vec::new();
+            }
+            let mut out = Vec::new();
+            if !has("[Service]", "Restart", "always") {
+                out.push(format!("  {name}: [Service] needs Restart=always"));
+            }
+            if !has("[Service]", "RestartSec", "3") {
+                out.push(format!("  {name}: [Service] needs RestartSec=3"));
+            }
+            if !has("[Unit]", "StartLimitIntervalSec", "0") {
+                out.push(format!("  {name}: [Unit] needs StartLimitIntervalSec=0"));
+            }
+            for (_, k, _) in &kv {
+                if *k == "StartLimitBurst" || *k == "StartLimitInterval" {
+                    out.push(format!("  {name}: {k}= re-imposes a start limit"));
+                }
+            }
+            out
+        }
+
+        // The shape that latched: a burst limit and on-failure.
+        let latched = "[Unit]\nDescription=x\nStartLimitInterval=60s\nStartLimitBurst=5\n\n\
+                       [Service]\nType=simple\nExecStart=/bin/x\nRestart=on-failure\nRestartSec=1\n";
+        assert_eq!(restart_policy_problems("latched.service", latched).len(), 5);
+        // The limit written under [Service] is ignored by systemd: still flagged.
+        let misplaced = "[Unit]\nDescription=x\n\n[Service]\nExecStart=/bin/x\n\
+                         Restart=always\nRestartSec=3\nStartLimitIntervalSec=0\n";
+        assert_eq!(
+            restart_policy_problems("misplaced.service", misplaced).len(),
+            1
+        );
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
+        let mut checked = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("data/systemd is readable") {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            if !(name.starts_with("ados-") && name.ends_with(".service")) {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("unit is readable");
+            checked += 1;
+            problems.extend(restart_policy_problems(name, &body));
+        }
+        assert!(
+            checked >= 40,
+            "parsed only {checked} ados-*.service files under {}",
+            dir.display()
+        );
+        assert!(
+            problems.is_empty(),
+            "these units can give up restarting:\n{}",
+            problems.join("\n")
+        );
+    }
+
     #[test]
     fn gs_enable_list_is_subset_of_other_profile_drone_teardown() {
         // Everything the GS install enables, the drone install must explicitly

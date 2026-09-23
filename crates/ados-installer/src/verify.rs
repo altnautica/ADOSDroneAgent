@@ -25,6 +25,16 @@ use sha2::{Digest, Sha256};
 
 use crate::exec;
 
+/// The trust anchor for every artifact the installer fetches from a release:
+/// the public half of the minisign keypair CI signs each asset's `.minisig`
+/// with (the private half is the `ADOS_DRIVER_SIGNING_KEY` CI secret). One key
+/// signs every artifact class — the service binaries, the bootstrap installer,
+/// the kernel modules, and the stable-channel wheel and deploy bundle — and the
+/// same public half is vendored in `scripts/install.sh` and
+/// `scripts/drivers/lib-prebuilt.sh`. EMBEDDED, not fetched, so a MITM on the
+/// release host cannot swap the key. Key id `8DEB4E827E9D083F` (rotated 2026-07).
+pub const RELEASE_PUBKEY: &str = "RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN";
+
 /// Release channel — governs whether a signature we cannot OBTAIN is fatal.
 ///
 /// It does not govern whether signatures are checked at all: a signature that is
@@ -51,10 +61,12 @@ impl Channel {
     /// channel string we do not understand is not a licence to skip a signature.
     ///
     /// This mirrors `ados_channel_is_lenient` in `scripts/lib/verify.sh`, which
-    /// gates the bootstrap and kernel-module fetches and was already corrected
-    /// to name its lenient channel explicitly. A test reads that function's
-    /// literals and asserts the two sets still agree, because a drift means one
-    /// entry point verifies while the other does not.
+    /// gates the kernel-module fetches and was already corrected to name its
+    /// lenient channel explicitly. (The bootstrap in `scripts/install.sh` has no
+    /// lenient channel at all: it requires a valid signature on every channel.)
+    /// A test reads that function's literals and asserts the two sets still
+    /// agree, because a drift means one entry point verifies while the other
+    /// does not.
     pub fn from_name(name: &str) -> Channel {
         if name == EDGE_CHANNEL {
             Channel::Edge

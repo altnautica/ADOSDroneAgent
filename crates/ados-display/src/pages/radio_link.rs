@@ -5,20 +5,19 @@
 //! (SNR/noise/loss, bitrate/FEC, channel/band), and a TX-power slider with
 //! stepper buttons along the bottom.
 //!
-//! The slider value tracks the snapshot `tx_power_dbm` clamped into the
-//! `1..=15` dBm envelope. The ± stepper buttons and the slider track expose
-//! their own hit zones; the navigator commits the new TX power over REST when
-//! one is tapped, then the next snapshot reflects the change. An optimistic
-//! target is held on the page so a tap reads back immediately, before the
-//! round-trip lands.
-
-use std::cell::Cell;
+//! The slider shows the snapshot `tx_power_dbm` clamped into the `1..=15` dBm
+//! envelope. The ± stepper buttons write one step up or down through
+//! `PUT /api/wfb/tx-power`; the next snapshot shows what the radio accepted.
+//! With no current TX power (no snapshot, or a stale one) the steppers are
+//! inert and the slider reads `--`, so a tap never sends a step from a guess.
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, fill_rect_outline, line, text, Canvas};
 use crate::graphics::sparkline::draw_sparkline;
-use crate::pages::{blank_panel, HitAction, HitZone, Page, PageContext};
+use crate::pages::{
+    blank_panel, AgentRequest, Chrome, HitAction, HitZone, Page, PageContext, PanelAction,
+};
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
 /// Layout reference height of the detail-modal surface. The radio-link layout
@@ -53,48 +52,43 @@ const PLUS_W: i32 = 44;
 const PLUS_H: i32 = 44;
 
 /// The radio-link detail view, registered as `details.radio_link`.
-pub struct RadioLinkDetailPage {
-    /// Optimistic TX-power target so a stepper tap reads back before the
-    /// snapshot round-trip lands. `None` until the first snapshot or tap seeds
-    /// it.
-    tx_target_dbm: Cell<Option<i64>>,
-}
-
-impl Default for RadioLinkDetailPage {
-    fn default() -> Self {
-        Self {
-            tx_target_dbm: Cell::new(None),
-        }
-    }
-}
+#[derive(Default)]
+pub struct RadioLinkDetailPage;
 
 impl RadioLinkDetailPage {
-    /// Build a fresh radio-link detail page.
+    /// Build a radio-link detail page.
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
+}
 
-    /// The TX-power value to paint: the optimistic target if one is held,
-    /// otherwise the snapshot value clamped into the envelope, otherwise the
-    /// floor.
-    fn display_tx(&self, ctx: &PageContext) -> i64 {
-        if let Some(t) = self.tx_target_dbm.get() {
-            return t.clamp(TX_MIN_DBM, TX_MAX_DBM);
-        }
-        match ctx.link.tx_power_dbm {
-            Some(v) => {
-                let clamped = v.clamp(TX_MIN_DBM, TX_MAX_DBM);
-                self.tx_target_dbm.set(Some(clamped));
-                clamped
-            }
-            None => TX_MIN_DBM,
-        }
-    }
+/// The TX power to paint and step from: the snapshot value clamped into the
+/// envelope, or `None` when the snapshot carries none.
+fn current_tx(ctx: &PageContext) -> Option<i64> {
+    ctx.link
+        .tx_power_dbm
+        .map(|v| v.clamp(TX_MIN_DBM, TX_MAX_DBM))
+}
+
+/// The TX-power write for one stepper tap: `delta` dBm from the current value,
+/// clamped into the envelope. `None` when there is no current value.
+fn tx_step(ctx: &PageContext, delta: i64) -> Option<PanelAction> {
+    let next = (current_tx(ctx)? + delta).clamp(TX_MIN_DBM, TX_MAX_DBM);
+    Some(PanelAction::Agent(AgentRequest {
+        method: "PUT",
+        path: "/api/wfb/tx-power",
+        body: Some(serde_json::json!({ "tx_power_dbm": next })),
+        label: format!("TX power {next} dBm"),
+    }))
 }
 
 impl Page for RadioLinkDetailPage {
     fn id(&self) -> &'static str {
         "details.radio_link"
+    }
+
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
     }
 
     fn refresh_hz(&self) -> f32 {
@@ -170,6 +164,7 @@ impl Page for RadioLinkDetailPage {
             None => String::new(),
         };
         let summary = match link.rssi_dbm {
+            None if link.is_stale() => "link stale: no current readings".to_string(),
             Some(rssi) => {
                 format!(
                     "rssi {} dBm  (peak {peak} / floor {floor}){mode_suffix}",
@@ -272,35 +267,37 @@ impl Page for RadioLinkDetailPage {
         );
 
         // TX-power slider y=188..236.
-        draw_slider(&mut canvas, palette, self.display_tx(ctx));
+        draw_slider(&mut canvas, palette, current_tx(ctx));
         canvas
     }
 
-    fn hit_zones(&self, _ctx: &PageContext) -> Vec<HitZone> {
-        vec![
-            HitZone::new(8, 8, 40, 32, HitAction::Back),
-            HitZone::new(
-                SLIDER_X,
-                SLIDER_Y,
-                SLIDER_W,
-                THUMB_H,
-                HitAction::Custom("radio.tx_slider".to_string()),
-            ),
-            HitZone::new(
+    fn hit_zones(&self, ctx: &PageContext) -> Vec<HitZone> {
+        let mut zones = vec![HitZone::new(8, 8, 40, 32, HitAction::Back)];
+        if current_tx(ctx).is_some() {
+            zones.push(HitZone::new(
                 MINUS_X,
                 MINUS_Y,
                 MINUS_W,
                 MINUS_H,
                 HitAction::Custom("radio.tx_minus".to_string()),
-            ),
-            HitZone::new(
+            ));
+            zones.push(HitZone::new(
                 PLUS_X,
                 PLUS_Y,
                 PLUS_W,
                 PLUS_H,
                 HitAction::Custom("radio.tx_plus".to_string()),
-            ),
-        ]
+            ));
+        }
+        zones
+    }
+
+    fn on_custom(&self, key: &str, ctx: &PageContext) -> Option<PanelAction> {
+        match key {
+            "radio.tx_minus" => tx_step(ctx, -1),
+            "radio.tx_plus" => tx_step(ctx, 1),
+            _ => None,
+        }
     }
 }
 
@@ -345,7 +342,7 @@ fn draw_column(
 }
 
 /// Paint the TX-power slider, value chip, and ± stepper buttons.
-fn draw_slider(canvas: &mut Canvas, palette: &Palette, value_dbm: i64) {
+fn draw_slider(canvas: &mut Canvas, palette: &Palette, value_dbm: Option<i64>) {
     // Stepper button backgrounds.
     for (x0, y0) in [(MINUS_X, MINUS_Y), (PLUS_X, PLUS_Y)] {
         fill_rect_outline(
@@ -402,6 +399,22 @@ fn draw_slider(canvas: &mut Canvas, palette: &Palette, value_dbm: i64) {
         palette.bg_tertiary,
         palette.border_default,
     );
+
+    // With no current value there is no thumb: a thumb parked at the floor
+    // would read as a real 1 dBm setting.
+    let Some(value_dbm) = value_dbm else {
+        let chip_font = LoadedFont::new(FontFace::MonoBold, 11);
+        let (cw, ch) = chip_font.text_size("-- dBm");
+        text(
+            canvas,
+            &chip_font,
+            "-- dBm",
+            SLIDER_X + (SLIDER_W - cw as i32) / 2,
+            SLIDER_Y - ch as i32 - 4,
+            palette.text_tertiary,
+        );
+        return;
+    };
 
     // Filled portion to the thumb.
     let clamped = value_dbm.clamp(TX_MIN_DBM, TX_MAX_DBM);
@@ -479,35 +492,43 @@ mod tests {
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
         let zones = page.hit_zones(&ctx);
-        assert_eq!(zones.len(), 4);
+        assert_eq!(zones.len(), 3);
         assert_eq!(zones[0].action, HitAction::Back);
         assert_eq!(
-            zones[2].action,
+            zones[1].action,
             HitAction::Custom("radio.tx_minus".to_string())
         );
         assert_eq!(
-            zones[3].action,
+            zones[2].action,
             HitAction::Custom("radio.tx_plus".to_string())
         );
     }
 
+    /// The steppers write one clamped step through the tx-power route.
     #[test]
-    fn slider_seeds_from_snapshot_tx_power() {
+    fn steppers_write_one_clamped_step() {
         let page = RadioLinkDetailPage::new();
-        let ctx = ctx_with_link();
-        // First display seeds the optimistic target from the snapshot.
-        assert_eq!(page.display_tx(&ctx), 10);
-        assert_eq!(page.tx_target_dbm.get(), Some(10));
+        let mut ctx = ctx_with_link();
+        let body = |key: &str, ctx: &PageContext| match page.on_custom(key, ctx) {
+            Some(PanelAction::Agent(req)) => {
+                assert_eq!((req.method, req.path), ("PUT", "/api/wfb/tx-power"));
+                req.body.expect("a body")["tx_power_dbm"].as_i64()
+            }
+            other => panic!("{key}: {other:?}"),
+        };
+        assert_eq!(body("radio.tx_plus", &ctx), Some(11));
+        assert_eq!(body("radio.tx_minus", &ctx), Some(9));
+        ctx.link.tx_power_dbm = Some(TX_MAX_DBM);
+        assert_eq!(body("radio.tx_plus", &ctx), Some(TX_MAX_DBM));
     }
 
+    /// With no current TX power the steppers neither paint a zone nor write.
     #[test]
-    fn slider_clamps_out_of_range_target() {
+    fn an_unknown_tx_power_disables_the_steppers() {
         let page = RadioLinkDetailPage::new();
         let ctx = PageContext::default();
-        page.tx_target_dbm.set(Some(99));
-        assert_eq!(page.display_tx(&ctx), TX_MAX_DBM);
-        page.tx_target_dbm.set(Some(-5));
-        assert_eq!(page.display_tx(&ctx), TX_MIN_DBM);
+        assert_eq!(page.hit_zones(&ctx).len(), 1);
+        assert!(page.on_custom("radio.tx_plus", &ctx).is_none());
     }
 
     #[test]

@@ -15,8 +15,7 @@ After=ados-control.service
 # never churns.
 ConditionPathExists=/dev/i2c-1
 ConditionPathExists=/opt/ados/bin/ados-oled-i2c
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are observable per
@@ -25,8 +24,8 @@ Slice=ados.slice
 Type=simple
 User=root
 ExecStart=/opt/ados/bin/ados-oled-i2c
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
 

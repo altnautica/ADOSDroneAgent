@@ -2,7 +2,8 @@
 //! per-path API queries the orchestrator's watchdog reads.
 //!
 //! mediamtx is the local RTSP/WebRTC/HLS server the encoder publishes into and
-//! the browser pulls WHEP from. This module owns:
+//! the browser pulls WHEP from, through the agent's credentialed LAN front (its
+//! HTTP listeners bind loopback). This module owns:
 //! - a pure [`mediamtx_config_yaml`] that renders the exact `mediamtx.yml` the
 //!   predecessor generated (ports, WebRTC ICE binding, STUN list, the `main`
 //!   publisher path);
@@ -357,6 +358,11 @@ struct MediamtxConfig {
     // all, so wfb_tx's control sockets never race it for 8000/8001.
     #[serde(rename = "rtspTransports")]
     rtsp_transports: Vec<String>,
+    /// Off. mediamtx enables RTMP (:1935) and SRT (:8890) by default on every
+    /// interface; nothing here publishes or reads over either, so they would
+    /// only be two more network-facing ways into the stream.
+    rtmp: bool,
+    srt: bool,
     webrtc: bool,
     #[serde(rename = "webrtcAddress")]
     webrtc_address: String,
@@ -399,6 +405,64 @@ struct MediamtxConfig {
     #[serde(rename = "pathDefaults")]
     path_defaults: PathDefaults,
     paths: std::collections::BTreeMap<String, PathConfig>,
+    #[serde(rename = "authInternalUsers")]
+    auth_internal_users: Vec<AuthInternalUser>,
+}
+
+/// One `authInternalUsers` entry: who (`any` = no credential) may do what,
+/// from which source addresses (empty = any address).
+#[derive(Debug, Serialize)]
+struct AuthInternalUser {
+    user: String,
+    pass: String,
+    ips: Vec<String>,
+    permissions: Vec<AuthPermission>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthPermission {
+    action: String,
+}
+
+/// Every HTTP listener (WHEP signalling, HLS, the control API, the playback
+/// server) binds this address. They are reached only through the agent's
+/// credentialed `/whep`, `/hls` and recording routes on the LAN front, so
+/// nothing off-box may dial mediamtx directly. The ICE media socket is the one
+/// listener that faces the network, because the browser's media flows to it.
+const LOOPBACK_BIND: &str = "127.0.0.1";
+
+/// Source addresses mediamtx treats as on-box.
+const LOOPBACK_SOURCES: [&str; 2] = ["127.0.0.1", "::1"];
+
+/// The permission table. Upstream's default lets any address publish, which
+/// would let a LAN peer push its own stream onto `main` and evict the encoder.
+/// Publishing (and the playback, API, metrics and pprof actions) is therefore
+/// loopback-only. Reading stays open to any address because the RTSP listener
+/// still faces the network: an offload compute node pulls the live feed from
+/// `rtsp://<node>:8554/main`, and the HTTP listeners are loopback-bound anyway.
+fn auth_internal_users() -> Vec<AuthInternalUser> {
+    let permissions = |actions: &[&str]| {
+        actions
+            .iter()
+            .map(|a| AuthPermission {
+                action: (*a).to_string(),
+            })
+            .collect()
+    };
+    vec![
+        AuthInternalUser {
+            user: "any".into(),
+            pass: String::new(),
+            ips: LOOPBACK_SOURCES.iter().map(|s| (*s).to_string()).collect(),
+            permissions: permissions(&["publish", "read", "playback", "api", "metrics", "pprof"]),
+        },
+        AuthInternalUser {
+            user: "any".into(),
+            pass: String::new(),
+            ips: Vec::new(),
+            permissions: permissions(&["read"]),
+        },
+    ]
 }
 
 /// Inputs to the pure config renderer.
@@ -478,7 +542,7 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
     let config = MediamtxConfig {
         log_level: "warn".into(),
         api: true,
-        api_address: format!(":{}", params.api_port),
+        api_address: format!("{LOOPBACK_BIND}:{}", params.api_port),
         read_timeout: RTSP_IO_TIMEOUT.into(),
         write_timeout: RTSP_IO_TIMEOUT.into(),
         write_queue_size: WRITE_QUEUE_SIZE,
@@ -488,12 +552,17 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
         // an operator who just turned recording off still wants to export the
         // flight they recorded a minute ago.
         playback: true,
-        playback_address: format!(":{}", params.playback_port),
+        playback_address: format!("{LOOPBACK_BIND}:{}", params.playback_port),
+        // All interfaces: the encoder publishes over loopback, but an offload
+        // compute node on the LAN pulls the live feed from this listener. Who may
+        // publish is restricted by `authInternalUsers` instead.
         rtsp: true,
         rtsp_address: format!(":{}", params.rtsp_port),
         rtsp_transports: vec!["tcp".into()],
+        rtmp: false,
+        srt: false,
         webrtc: true,
-        webrtc_address: format!(":{}", params.webrtc_port),
+        webrtc_address: format!("{LOOPBACK_BIND}:{}", params.webrtc_port),
         webrtc_allow_origin: "*".into(),
         webrtc_ips_from_interfaces: true,
         webrtc_ips_from_interfaces_list: phys_ifaces,
@@ -503,7 +572,7 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
         webrtc_local_tcp_address: params.profile.webrtc_local_tcp_address(),
         webrtc_ice_servers2: params.profile.ice_servers(),
         hls: true,
-        hls_address: format!(":{}", params.hls_port),
+        hls_address: format!("{LOOPBACK_BIND}:{}", params.hls_port),
         // Remux HLS only while something is actually watching it.
         //
         // With this on, mediamtx keeps a low-latency muxer segmenting the
@@ -539,6 +608,7 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
             run_on_record_segment_complete: rec.on_segment_complete.clone(),
         },
         paths,
+        auth_internal_users: auth_internal_users(),
     };
 
     serde_norway::to_string(&config).expect("mediamtx config serializes")
@@ -957,10 +1027,10 @@ mod tests {
         // whole document (mediamtx, not the test, defines acceptable YAML).
         let v: Value = serde_norway::from_str(&yaml).unwrap();
 
-        assert_eq!(v["apiAddress"], ":9997");
+        assert_eq!(v["apiAddress"], "127.0.0.1:9997");
         assert_eq!(v["rtspAddress"], ":8554");
-        assert_eq!(v["webrtcAddress"], ":8889");
-        assert_eq!(v["hlsAddress"], ":8888");
+        assert_eq!(v["webrtcAddress"], "127.0.0.1:8889");
+        assert_eq!(v["hlsAddress"], "127.0.0.1:8888");
         assert_eq!(v["api"], true);
         assert_eq!(v["rtsp"], true);
         // UDP RTSP transport disabled: mediamtx's own default `rtpAddress`/
@@ -988,7 +1058,7 @@ mod tests {
         // listens even when `record` is off so already-captured segments stay
         // exportable.
         assert_eq!(v["playback"], true);
-        assert_eq!(v["playbackAddress"], ":9996");
+        assert_eq!(v["playbackAddress"], "127.0.0.1:9996");
 
         // WebRTC media binds all interfaces (:8189); ICE host candidates are
         // gathered from the physical interfaces per session so the media path
@@ -1114,6 +1184,8 @@ mod tests {
             "rtsp",
             "rtspAddress",
             "rtspTransports",
+            "rtmp",
+            "srt",
             "webrtc",
             "webrtcAddress",
             "webrtcAllowOrigin",
@@ -1131,6 +1203,7 @@ mod tests {
             "hlsPartDuration",
             "hlsAllowOrigin",
             "pathDefaults",
+            "authInternalUsers",
             "paths",
         ];
 
@@ -1169,6 +1242,81 @@ mod tests {
         );
     }
 
+    /// The media server never faces the network over HTTP. The agent's front
+    /// credential-gates `/whep` and `/hls`; an HTTP listener on all interfaces
+    /// would serve the same streams, the recordings and the control API one
+    /// port away with no credential. Only the RTSP listener (an offload node
+    /// pulls the feed) and the ICE media socket stay on all interfaces, and a
+    /// LAN peer may read but never publish.
+    #[test]
+    fn http_listeners_bind_loopback_and_publish_is_loopback_only() {
+        let lan = vec!["192.168.1.50".to_string()];
+        let streams = vec![("main".to_string(), "publisher".to_string())];
+        for profile in [
+            MediamtxProfile::Air,
+            MediamtxProfile::Ground,
+            MediamtxProfile::CloudRelay,
+        ] {
+            let v: Value = serde_norway::from_str(&mediamtx_config_yaml(&ConfigParams::new(
+                profile, &lan, &streams,
+            )))
+            .unwrap();
+            for key in [
+                "apiAddress",
+                "webrtcAddress",
+                "hlsAddress",
+                "playbackAddress",
+            ] {
+                let addr = v[key].as_str().unwrap();
+                assert!(
+                    addr.starts_with("127.0.0.1:"),
+                    "{profile:?} {key}={addr} must bind loopback"
+                );
+            }
+            // Metrics and pprof are HTTP listeners too; they stay off.
+            assert!(v.get("metrics").is_none() && v.get("pprof").is_none());
+            // RTMP and SRT are unused and would face the network.
+            assert_eq!(v["rtmp"], false);
+            assert_eq!(v["srt"], false);
+            assert_eq!(v["webrtcLocalUDPAddress"], ":8189");
+
+            let users = v["authInternalUsers"].as_array().unwrap();
+            let actions = |u: &Value| -> Vec<String> {
+                u["permissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p["action"].as_str().unwrap().to_string())
+                    .collect()
+            };
+            for u in users {
+                assert_eq!(u["user"], "any");
+                let ips: Vec<&str> = u["ips"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i.as_str().unwrap())
+                    .collect();
+                let from_anywhere = ips.is_empty();
+                if from_anywhere {
+                    assert_eq!(
+                        actions(u),
+                        vec!["read"],
+                        "{profile:?}: off-box may only read"
+                    );
+                } else {
+                    assert_eq!(ips, vec!["127.0.0.1", "::1"]);
+                }
+            }
+            assert!(
+                users
+                    .iter()
+                    .any(|u| actions(u).contains(&"publish".to_string())),
+                "{profile:?}: the local encoder must still be able to publish"
+            );
+        }
+    }
+
     /// The native fMP4 recorder must render on BOTH profiles when enabled: the
     /// drone had no recording of any kind and the ground station had a single
     /// whole-stream `+faststart` MP4 whose moov atom is written only on a clean
@@ -1203,7 +1351,7 @@ mod tests {
             // Without the playback server the segments are unreachable, so
             // recording without it is a write-only store.
             assert_eq!(v["playback"], true);
-            assert_eq!(v["playbackAddress"], ":9996");
+            assert_eq!(v["playbackAddress"], "127.0.0.1:9996");
             // mediamtx's default REPLACES each frame's timestamp with the
             // current time, destroying capture-time information.
             assert_eq!(pd["useAbsoluteTimestamp"], true);
@@ -1304,7 +1452,7 @@ mod tests {
         assert_eq!(v["pathDefaults"]["record"], true);
         assert_eq!(v["pathDefaults"]["recordDeleteAfter"], "6h");
         assert_eq!(v["pathDefaults"]["recordFormat"], "fmp4");
-        assert_eq!(v["playbackAddress"], ":9996");
+        assert_eq!(v["playbackAddress"], "127.0.0.1:9996");
     }
 
     // --- HTTP client against an in-test listener -----------------------

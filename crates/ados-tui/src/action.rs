@@ -23,18 +23,26 @@ pub struct Action {
     pub args: &'static [&'static str],
 }
 
-/// Run the agent update non-interactively — used by the launch update splash,
-/// whose `[u]` press is itself the confirmation, so it skips the y/N prompt and
-/// passes `--yes`. `ados update` re-runs the installer's full-screen upgrade UI.
-pub const UPDATE_NOW: Action = Action {
-    key: None,
-    short: "",
-    label: "Update agent",
-    desc: "Update the agent to the latest",
-    confirm: false,
-    program: "ados",
-    args: &["update", "--yes"],
-};
+/// Shown instead of running an update while the vehicle reports armed. An update
+/// rebuilds and restarts the agent, which drops the MAVLink router, video and
+/// radio mid-flight.
+pub const UPDATE_REFUSED_ARMED: &str =
+    "Update refused: the vehicle reports ARMED. Disarm first; an update restarts \
+     the MAVLink router, video and radio.";
+
+/// Resolve an operator's update request to the confirming "Update agent" entry
+/// of [`ACTIONS`] (y/N prompt, no `--yes`), or refuse it while `armed` reads
+/// true. An unknown arm state is not a refusal: the y/N prompt still stands
+/// between the key and the upgrade.
+pub fn update_request(armed: Option<bool>) -> Result<&'static Action, &'static str> {
+    if armed == Some(true) {
+        return Err(UPDATE_REFUSED_ARMED);
+    }
+    Ok(ACTIONS
+        .iter()
+        .find(|a| a.args.first().copied() == Some("update"))
+        .expect("ACTIONS carries the update entry"))
+}
 
 /// The quick actions, in overlay order. The first three carry direct hotkeys.
 pub const ACTIONS: &[Action] = &[
@@ -111,3 +119,17 @@ pub const ACTIONS: &[Action] = &[
         args: &["systemctl", "reboot"],
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_update_request_is_confirmed_and_refused_while_armed() {
+        let a = update_request(Some(false)).expect("disarmed runs");
+        assert!(a.confirm, "the update always asks y/N");
+        assert_eq!(a.args, &["update"], "never the non-interactive --yes form");
+        assert!(update_request(None).is_ok_and(|a| a.confirm));
+        assert_eq!(update_request(Some(true)).err(), Some(UPDATE_REFUSED_ARMED));
+    }
+}

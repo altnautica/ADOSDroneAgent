@@ -202,7 +202,6 @@ absent (a known feature, not on this profile) rather than `404`.
 | POST | `/api/plugins/install` | relay-forbidden |
 | POST | `/api/plugins/install_from_url` | relay-forbidden |
 | GET | `/api/plugins/jobs/{job_id}` |  |
-| POST | `/api/plugins/jobs/{job_id}/ticket` |  |
 | POST | `/api/plugins/parse` |  |
 | POST | `/api/plugins/parse_from_url` |  |
 | DELETE | `/api/plugins/{plugin_id}` |  |

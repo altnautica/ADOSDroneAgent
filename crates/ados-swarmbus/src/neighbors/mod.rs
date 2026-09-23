@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use ados_radio::config::{FLEET_MAX_SLOTS, SLOT_GROUND};
 
 use crate::beacon::SwarmBeacon;
-use crate::crypto::SenderNonce;
+use crate::crypto::{SenderNonce, NONCE_PREFIX_LEN};
 
 pub use counters::SwarmCounters;
 pub use geo::{dead_reckon, distance_m, R_EARTH};
@@ -51,6 +51,10 @@ pub struct Neighbor {
     pub received_at: Instant,
     /// Radiotap antenna signal in dBm, or `None` when the capture carried none.
     pub rssi_dbm: Option<i8>,
+    /// The nonce prefix the beacon was sealed under: the sender's identity on the
+    /// bus for its current run. Distinct for two senders that share a slot, which
+    /// is what lets separation tell a misprovisioned same-slot pair apart.
+    pub sender: [u8; NONCE_PREFIX_LEN],
 }
 
 impl Neighbor {
@@ -93,6 +97,8 @@ pub struct NeighborTable {
     /// matters more than lookup speed at N=24.
     by_slot: BTreeMap<u8, Neighbor>,
     own_slot: u8,
+    /// This node's own nonce prefix, once the radio half has built its cipher.
+    own_sender: Option<[u8; NONCE_PREFIX_LEN]>,
     counters: SwarmCounters,
     senders: SenderMarks,
 }
@@ -108,6 +114,7 @@ impl NeighborTable {
         Self {
             by_slot: BTreeMap::new(),
             own_slot,
+            own_sender: None,
             counters: SwarmCounters::default(),
             senders: SenderMarks::default(),
         }
@@ -116,6 +123,17 @@ impl NeighborTable {
     /// This node's own fleet slot.
     pub fn own_slot(&self) -> u8 {
         self.own_slot
+    }
+
+    /// This node's own nonce prefix, or `None` before the radio half has opened.
+    pub fn own_sender(&self) -> Option<[u8; NONCE_PREFIX_LEN]> {
+        self.own_sender
+    }
+
+    /// Record this node's own nonce prefix. The cipher keeps its prefix across a
+    /// re-key, so this is set once per process in practice.
+    pub fn set_own_sender(&mut self, prefix: [u8; NONCE_PREFIX_LEN]) {
+        self.own_sender = Some(prefix);
     }
 
     /// Whether a peer is currently beaconing this node's own slot. Always false on
@@ -222,6 +240,7 @@ impl NeighborTable {
                 beacon,
                 received_at: now,
                 rssi_dbm,
+                sender: sender.prefix,
             },
         );
         self.counters.beacons_rx += 1;

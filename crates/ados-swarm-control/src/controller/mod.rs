@@ -170,6 +170,10 @@ pub struct NeighborFix {
     /// Down-positive, MAVLink convention: a climbing neighbour is negative.
     pub vd: f64,
     pub status: u8,
+    /// This drone's bus sender id compared with the neighbour's
+    /// (`own.cmp(&neighbour)`), `Equal` when either is unknown. Breaks the hard
+    /// override's tie when two drones share a slot.
+    pub sender_order: std::cmp::Ordering,
 }
 
 /// Why a tick emitted nothing.
@@ -377,12 +381,10 @@ impl SwarmController {
             if !pos.is_finite() {
                 continue;
             }
-            self.scratch.push(NeighborState::new(
-                f.slot,
-                pos,
-                Ned::new(f.vn, f.ve, f.vd),
-                f.status,
-            ));
+            self.scratch.push(
+                NeighborState::new(f.slot, pos, Ned::new(f.vn, f.ve, f.vd), f.status)
+                    .with_sender_order(f.sender_order),
+            );
         }
         if !self.scratch.is_empty() {
             self.last_neighbors_at = Some(now);
@@ -543,16 +545,18 @@ impl SwarmController {
         breach: Option<HardBreach>,
         pinned_by: Option<u8>,
     ) {
-        let trigger = breach.map(|b| (b.slot, b.relative_alt_m)).or_else(|| {
-            pinned_by.and_then(|slot| {
-                self.scratch
-                    .iter()
-                    .find(|n| n.slot == slot)
-                    .map(|n| (slot, -n.pos.d))
-            })
-        });
+        let trigger = breach
+            .map(|b| (b.slot, b.relative_alt_m, b.sender_order))
+            .or_else(|| {
+                pinned_by.and_then(|slot| {
+                    self.scratch
+                        .iter()
+                        .find(|n| n.slot == slot)
+                        .map(|n| (slot, -n.pos.d, n.sender_order))
+                })
+            });
         match (self.hard, trigger) {
-            (None, Some((offender, relative_alt_m))) => {
+            (None, Some((offender, relative_alt_m, sender_order))) => {
                 self.counters.hard_engagements += 1;
                 self.hard = Some(HardLatch {
                     engaged_at: now,
@@ -563,6 +567,7 @@ impl SwarmController {
                         own.alt_rel_m,
                         own.slot,
                         offender,
+                        sender_order,
                         relative_alt_m,
                     ),
                     offender,

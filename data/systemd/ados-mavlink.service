@@ -2,8 +2,7 @@
 Description=ADOS MAVLink Proxy
 After=network-online.target
 PartOf=ados-supervisor.service
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -12,14 +11,14 @@ Slice=ados.slice
 Type=simple
 # The native router owns the FC link, the direct-GCS proxies, and the state
 # IPC publish. It is the only MAVLink command-and-control path; there is no
-# packaged fallback. If the binary is absent the unit fails visibly
-# (Restart=on-failure). The installer Hard-gates the router's fetch and
+# packaged fallback. If the binary is absent the unit fails visibly and keeps
+# retrying (Restart=always, no start limit). The installer Hard-gates the router's fetch and
 # re-checks its on-disk presence in the health gate, so a missing binary fails
 # the install rather than reporting OK while this unit crash-loops with no FC
 # link.
 ExecStart=/opt/ados/bin/ados-mavlink-router
-Restart=on-failure
-RestartSec=1
+Restart=always
+RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
 

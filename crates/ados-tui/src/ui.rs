@@ -359,9 +359,10 @@ fn actions_overlay(frame: &mut Frame, selected: usize) {
 }
 
 /// A centered, dismissible splash prompting an agent update, shown once on
-/// launch when the background check finds a newer version. `[u]` runs the
-/// update (reusing the installer's full-screen UI via `ados update`); any other
-/// key drops into the cockpit, where the footer badge stays as a reminder.
+/// launch when the background check finds a newer version. `[u]` asks for the
+/// update through the y/N-confirmed action (refused while the vehicle reports
+/// armed); any other key drops into the cockpit, where the footer badge stays as
+/// a reminder.
 fn update_splash_overlay(frame: &mut Frame, installed: &str, latest: &str) {
     let area = centered_rect(60, 7, frame.area());
     frame.render_widget(Clear, area);

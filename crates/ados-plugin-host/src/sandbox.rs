@@ -22,7 +22,11 @@
 //!   `RestrictAddressFamilies=AF_UNIX` (the plugin still needs its own IPC
 //!   socket) plus `IPAddressDeny=any`; `socket(AF_INET)` then fails with
 //!   `EAFNOSUPPORT` inside the plugin. Granted, `AF_INET`/`AF_INET6`/
-//!   `AF_NETLINK` are added and the address filter is dropped.
+//!   `AF_NETLINK` are added and the address filter narrows to
+//!   `IPAddressDeny=localhost`: the plugin reaches the network but never the
+//!   agent's own loopback listeners, where a loopback peer is trusted as
+//!   on-box. systemd filters by address, not port, so all of loopback is
+//!   closed, including a local DNS stub on 127.0.0.53.
 //! * **`filesystem.host`** maps to the mount namespace. Ungranted, the operator
 //!   data roots are `InaccessiblePaths`; granted, they become writable and
 //!   `ProtectHome` relaxes to read-only.
@@ -184,8 +188,11 @@ pub fn sandbox_directives(granted: &BTreeSet<String>) -> Vec<String> {
     // ---- sockets ----------------------------------------------------
     if granted.contains(NETWORK_OUTBOUND_CAP) {
         // AF_NETLINK rides with the grant because a plugin that may reach the
-        // network needs getifaddrs / DNS resolution to do it.
+        // network needs getifaddrs / DNS resolution to do it. Loopback stays
+        // closed: the agent's HTTP, WebSocket and MAVLink listeners treat a
+        // loopback peer as on-box, and a plugin is not on-box trust.
         lines.push("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string());
+        lines.push("IPAddressDeny=localhost".to_string());
     } else {
         // AF_UNIX stays: the plugin's own host socket is a Unix socket, so
         // denying it would deny the plugin everything.
@@ -254,11 +261,14 @@ mod tests {
     }
 
     #[test]
-    fn network_grant_flips_the_address_family_filter() {
+    fn network_grant_flips_the_address_family_filter_but_keeps_loopback_closed() {
         let lines = sandbox_directives(&caps(&["network.outbound"]));
         assert!(lines
             .contains(&"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string()));
         assert!(!lines.contains(&"IPAddressDeny=any".to_string()));
+        // Restated as the literal the Python renderer's test also pins.
+        assert!(lines.contains(&"IPAddressDeny=localhost".to_string()));
+        assert!(!lines.iter().any(|l| l.starts_with("IPAddressAllow=")));
     }
 
     #[test]

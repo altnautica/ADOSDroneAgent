@@ -11,8 +11,7 @@ Description=ADOS WFB-ng RX (ground-station profile)
 After=network.target ados-mavlink.service
 PartOf=ados-supervisor.service
 ConditionKernelCommandLine=!no-wfb
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -35,8 +34,8 @@ User=root
 # relay/receiver roles are native-only too; their packaged modules were
 # deleted, so no role keeps a Python fallback.)
 ExecStart=/opt/ados/bin/ados-groundlink
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
 

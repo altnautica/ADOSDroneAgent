@@ -142,7 +142,7 @@ impl VisionClient {
 
     /// A fresh receiver for the engine's frame-descriptor fanout. Each subscribed
     /// plugin holds its own receiver; a slow consumer lags to the tail rather
-    /// than blocking the reader. Mirrors [`crate::mavlink_client::MavlinkClient::subscribe`].
+    /// than blocking the reader. Mirrors [`crate::frame_link::FrameLink::subscribe`].
     pub fn subscribe_frames(&self) -> broadcast::Receiver<Vec<u8>> {
         self.frames.subscribe()
     }

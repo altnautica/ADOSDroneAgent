@@ -26,7 +26,9 @@ use ados_swarmbus::crypto::{derive_fleet_key, SwarmCipher};
 use ados_swarmbus::frame::{build_frame, SwarmFrameKind};
 use ados_swarmbus::ingest::{ingest_frame, Ingest};
 use ados_swarmbus::neighbors::NeighborTable;
-use ados_swarmbus::publish::{encode_line, neighbors_payload, COUNTER_KEYS, NEIGHBOR_KEYS};
+use ados_swarmbus::publish::{
+    encode_line, neighbors_payload, sender_id_hex, COUNTER_KEYS, NEIGHBOR_KEYS,
+};
 use ados_swarmbus::ModePrecedence;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -150,15 +152,19 @@ fn peers() -> (SwarmBeacon, SwarmBeacon) {
 
 /// Build the neighbour table the way the bus does: real frames in, real
 /// classification, real table. The peers seal with their own cipher on the
-/// fleet key; the ground station opens with its own, as on the air.
-fn table_from_the_air(now: Instant) -> NeighborTable {
+/// fleet key; the ground station opens with its own, as on the air. Returns the
+/// table with the published sender ids of the two peers, in beacon order.
+fn table_from_the_air(now: Instant) -> (NeighborTable, [String; 2]) {
     let fleet_key = derive_fleet_key(Some(&[7u8; 64]));
     let ground = SwarmCipher::new(&fleet_key);
     let mut table = NeighborTable::new(OWN_SLOT);
+    table.set_own_sender(ground.sender_prefix());
     let (hero, degraded) = peers();
+    let mut sender_ids: [String; 2] = Default::default();
 
     for (seq, beacon) in [hero, degraded].into_iter().enumerate() {
         let sender = SwarmCipher::new(&fleet_key);
+        sender_ids[seq] = sender_id_hex(&sender.sender_prefix());
         let frame = build_frame(
             FLEET,
             seq as u16,
@@ -205,7 +211,7 @@ fn table_from_the_air(now: Instant) -> NeighborTable {
         1,
         "the forgery was counted"
     );
-    table
+    (table, sender_ids)
 }
 
 /// The whole chain: peer bytes on the air become the JSON the operator's fleet view
@@ -216,7 +222,8 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
     let swarm_sock = dir.path().join("swarm.sock");
 
     let now = Instant::now();
-    let table = table_from_the_air(now);
+    let (table, sender_ids) = table_from_the_air(now);
+    let own_sender_id = table.own_sender().as_ref().map(sender_id_hex);
     let device_ids = std::collections::BTreeMap::from([
         (3u8, "ados-abc123".to_string()),
         (9u8, "ados-def456".to_string()),
@@ -239,6 +246,14 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
+    // The table just arrived, so it is served as fresh; the age is volatile, so it
+    // is checked and then set aside for the value-for-value comparison.
+    assert_eq!(body["table_state"], json!("fresh"));
+    assert!(body["table_age_ms"].is_u64(), "{body}");
+    let freshness = body.as_object_mut().unwrap();
+    freshness.remove("table_state");
+    freshness.remove("table_age_ms");
+
     // The full contract, value for value. This is the body Mission Control's beacon
     // store is typed against.
     assert_eq!(
@@ -246,6 +261,7 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
         json!({
             "fleet_id": 7,
             "slot": 0,
+            "sender_id": own_sender_id,
             "slot_conflict": false,
             "neighbors": [
                 {
@@ -267,6 +283,7 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
                     "mode_precedence": "hold",
                     "age_ms": 420,
                     "rssi_dbm": Value::Null,
+                    "sender_id": sender_ids[0],
                 },
                 {
                     "slot": 9,
@@ -287,6 +304,7 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
                     "mode_precedence": "hard-separation",
                     "age_ms": 420,
                     "rssi_dbm": Value::Null,
+                    "sender_id": sender_ids[1],
                 },
             ],
             "counters": {

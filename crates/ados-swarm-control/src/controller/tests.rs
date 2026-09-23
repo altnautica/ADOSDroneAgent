@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::time::Duration;
 
 use super::*;
@@ -50,6 +51,7 @@ fn fix(slot: u8, offset: Ned) -> NeighborFix {
         ve: 0.0,
         vd: 0.0,
         status: STATUS_ARMED | STATUS_GUIDED | STATUS_GPS_OK,
+        sender_order: std::cmp::Ordering::Equal,
     }
 }
 
@@ -162,6 +164,7 @@ fn a_zero_position_beacon_leaves_the_formation_command_unchanged() {
         ve: 0.0,
         vd: 0.0,
         status: STATUS_ARMED | STATUS_GUIDED,
+        sender_order: std::cmp::Ordering::Equal,
     };
 
     let mut alone = controller("formation", &slots);
@@ -445,7 +448,7 @@ fn the_climb_target_is_latched_and_ordered_by_slot() {
         let (offender, target) = c.hard_latch().expect("engaged");
         assert_eq!(offender, 9);
         assert!(
-            (target - (ALT + climb_offset_m(slot, 9))).abs() < 1e-6,
+            (target - (ALT + climb_offset_m(slot, 9, Ordering::Equal))).abs() < 1e-6,
             "slot {slot} target {target}"
         );
         // The target does NOT walk upward as the vehicle climbs toward it.
@@ -472,8 +475,28 @@ fn the_climb_target_is_latched_and_ordered_by_slot() {
 
     // Ordered by slot, so two converging drones always deconflict the same way
     // with no negotiation.
-    assert!(climb_offset_m(1, 9) > climb_offset_m(2, 9));
-    assert_eq!(climb_offset_m(9, 1), 0.0);
+    assert!(climb_offset_m(1, 9, Ordering::Equal) > climb_offset_m(2, 9, Ordering::Equal));
+    assert_eq!(climb_offset_m(9, 1, Ordering::Equal), 0.0);
+}
+
+/// Two drones misprovisioned into one slot, level and converging. Each engages
+/// the override against the other; the bus sender id decides which climbs, and
+/// exactly one does.
+#[test]
+fn a_same_slot_pair_engages_with_exactly_one_climber() {
+    let t = t0();
+    let target_for = |order: Ordering| {
+        let mut c = controller("hold", &[5]);
+        let mut peer = fix(5, Ned::new(1.0, 0.0, 0.0));
+        peer.sender_order = order;
+        c.tick(&own(5), &[peer], t);
+        c.hard_latch().expect("engaged").1
+    };
+    // A's id sorts below B's: A sees Less, B sees Greater.
+    let a = target_for(Ordering::Less);
+    let b = target_for(Ordering::Greater);
+    assert!(a > ALT + 0.1, "the lower id climbs: {a}");
+    assert!((b - ALT).abs() < 1e-9, "the higher id holds: {b}");
 }
 
 #[test]

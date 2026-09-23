@@ -16,8 +16,10 @@
 //!      or, with `--ref <rev>`, clone then fetch + detached-checkout that exact
 //!      revision (a clone's `--branch` never takes a SHA) and hand the expanded
 //!      40-char object name to the binary fetch
-//!      stable — download + SHA256-verify the release wheel for `--version`,
-//!      then `pip install <wheel>` (no on-disk source tree)
+//!      stable — download the release wheel and deploy bundle for `--version`,
+//!      verify each against its SHA256 and its minisign signature (both
+//!      mandatory), `pip install <wheel>`, and unpack the bundle into the
+//!      persisted source tree the OS steps read their unit files from
 //!
 //! The venv-path + pip-args + wheel-URL + git-args builders are pure so a unit
 //! test exercises them without a real interpreter or the network.
@@ -31,6 +33,7 @@ use crate::env;
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::net;
+use crate::steps::fetch_binaries;
 use crate::ui::{activity, ProgressSink};
 use crate::verify;
 
@@ -56,11 +59,6 @@ fn on_pip_line(sink: &ProgressSink) -> impl FnMut(&str) + '_ {
 
 /// The agent's git repo URL (edge channel clones from here, honoring --branch).
 const REPO_URL: &str = "https://github.com/altnautica/ADOSDroneAgent.git";
-
-/// GitHub release-download base; the stable channel hangs the wheel asset off
-/// `<base>/v<version>/<wheel>` (plus its `.sha256` sidecar). Mirrors the same
-/// base the prebuilt-binary fetch uses.
-const RELEASE_BASE: &str = "https://github.com/altnautica/ADOSDroneAgent/releases/download";
 
 /// The venv interpreter path (`/opt/ados/venv/bin/python`). Pure.
 pub fn venv_python() -> String {
@@ -115,7 +113,25 @@ pub fn wheel_filename(version: &str) -> String {
 /// (`v<X.Y.Z>`) while the wheel filename uses the bare `<X.Y.Z>`; `version` here
 /// is the already-normalized bare form.
 pub fn wheel_url(version: &str) -> String {
-    format!("{RELEASE_BASE}/v{version}/{}", wheel_filename(version))
+    release_asset_url(version, &wheel_filename(version))
+}
+
+/// The deploy-bundle asset name for a release: every install asset that lives
+/// outside the wheel (`scripts/`, `data/`, the vendored radio source), staged
+/// under a top-level `repo/` directory. `version` is the bare form.
+pub fn bundle_filename(version: &str) -> String {
+    format!("ados-drone-agent-deploy-{version}.tar.gz")
+}
+
+/// The URL of one asset in the `v<version>` release (pure apart from the
+/// test-only release-base override the binary fetch honours too, so one
+/// override points both halves of a stable install at the same fake release).
+pub fn release_asset_url(version: &str, name: &str) -> String {
+    format!(
+        "{}/{}/{name}",
+        fetch_binaries::release_base(),
+        fetch_binaries::version_release_tag(version)
+    )
 }
 
 /// Build the `git clone` args for the edge channel (pure). Honors an optional
@@ -471,57 +487,123 @@ fn install_agent_edge(ctx: &mut Ctx) -> anyhow::Result<PathBuf> {
 }
 
 /// Install the agent package on the stable channel: download the release wheel
-/// for the pinned `--version` plus its `.sha256` sidecar, verify the SHA256, then
-/// `pip install <wheel>` into the venv. Unlike the edge path there is NO on-disk
-/// source tree, so the caller records no `ctx.source_dir`; the downstream OS
-/// steps resolve their unit files / udev rules / driver scripts from the
-/// persisted `/opt/ados/source` (left by a prior install or the package data)
-/// instead. Temp downloads are cleaned up on every exit path.
+/// and the deploy bundle for the pinned `--version`, verify each against its
+/// `.sha256` AND its `.minisig` (the signature is mandatory: a missing one, a
+/// host without `minisign`, or a signature that does not match the embedded
+/// trust anchor all refuse the install), `pip install <wheel>`, then unpack the
+/// bundle into the persisted source tree. Returns that tree so the caller records
+/// it into `ctx.source_dir`: the systemd, udev and radio steps read `data/` and
+/// `scripts/` from it, exactly as they read an edge clone.
+///
+/// Nothing is installed until BOTH artifacts have verified, so a release with a
+/// bad bundle never leaves a new wheel beside an old tree. Temp downloads are
+/// cleaned up on every exit path.
 ///
 /// A `--ref` pin never reaches here: `ctx::rev_channel_conflict` refuses the
 /// stable+`--ref` pair before the install starts, because a `v<X.Y.Z>` release
 /// tag addresses a version and not a commit, so there is no per-revision wheel
 /// this could fetch.
-fn install_agent_stable(ctx: &Ctx) -> anyhow::Result<()> {
+fn install_agent_stable(ctx: &Ctx) -> anyhow::Result<PathBuf> {
     let raw = ctx.args.version.as_deref().ok_or_else(|| {
         anyhow::anyhow!("stable channel requires --version (the release to install)")
     })?;
     let version = normalize_version(raw);
-    let url = wheel_url(&version);
 
-    // Stage the wheel + its sidecar under a unique temp dir so a partial fetch
-    // never collides with a concurrent run and cleanup is a single dir remove.
+    // Stage every download under a unique temp dir so a partial fetch never
+    // collides with a concurrent run and cleanup is a single dir remove.
     let dir = wheel_tmp_dir()?;
-    let wheel_path = dir.join(wheel_filename(&version));
-    let sha_path = sidecar(&wheel_path, "sha256");
-
     let sink = ctx.progress.clone();
     let outcome = (|| {
-        net::fetch(&url, &wheel_path)?;
-        net::fetch(&format!("{url}.sha256"), &sha_path)?;
-
-        // A SHA256 mismatch (tamper / truncation) is a hard failure.
-        verify::verify_sha256(&wheel_path, &sha_path)?;
+        let wheel_path = fetch_signed_release_asset(&version, &wheel_filename(&version), &dir)?;
+        let bundle_path = fetch_signed_release_asset(&version, &bundle_filename(&version), &dir)?;
+        sink.sub_log(
+            "venv_agent",
+            &format!("✓ v{version} wheel and deploy bundle signature-verified"),
+        );
 
         let wheel_s = wheel_path.to_string_lossy().into_owned();
         let pip = pip_install_wheel_args(&wheel_s);
         let pip_argv: Vec<&str> = pip.iter().map(String::as_str).collect();
         let pip_res = exec::run_streamed(&venv_pip(), &pip_argv, on_pip_line(&sink));
-        if pip_res.success() {
-            Ok(())
-        } else if !pip_res.spawned {
+        if !pip_res.spawned {
             anyhow::bail!("venv pip {} could not be spawned", venv_pip());
-        } else {
+        }
+        if !pip_res.success() {
             anyhow::bail!(
                 "pip install of the agent wheel failed: {}",
                 pip_res.stderr.trim()
             );
         }
+
+        let repo = clone_dest()?;
+        unpack_bundle(&bundle_path, &repo)?;
+        Ok(repo)
     })();
 
     // Always remove the temp download tree, success or failure.
     let _ = std::fs::remove_dir_all(&dir);
     outcome
+}
+
+/// Fetch one asset of the `v<version>` release plus its `.sha256` and
+/// `.minisig` into `dir`, and verify it on the stable posture: SHA256 and the
+/// signature against [`verify::RELEASE_PUBKEY`] are both mandatory.
+///
+/// The `.minisig` fetch is allowed to fail on its own so the refusal comes from
+/// the verifier, which names the artifact and the reason, rather than from a
+/// bare 404.
+fn fetch_signed_release_asset(version: &str, name: &str, dir: &Path) -> anyhow::Result<PathBuf> {
+    let url = release_asset_url(version, name);
+    let path = dir.join(name);
+    net::fetch(&url, &path)?;
+    net::fetch(&format!("{url}.sha256"), &sidecar(&path, "sha256"))?;
+    let _ = net::fetch(&format!("{url}.minisig"), &sidecar(&path, "minisig"));
+    verify_release_asset(&path)?;
+    Ok(path)
+}
+
+/// The stable-channel gate for a downloaded release asset: its `.sha256` AND a
+/// `.minisig` from [`verify::RELEASE_PUBKEY`], both mandatory. A sha-only asset
+/// is refused: the sidecar comes from the same host as the asset, so on its own
+/// it proves integrity, not origin.
+fn verify_release_asset(path: &Path) -> anyhow::Result<()> {
+    verify::verify_artifact(
+        path,
+        Some(verify::RELEASE_PUBKEY),
+        verify::Channel::Stable,
+        false,
+    )
+}
+
+/// Unpack a verified deploy bundle into the live source tree at `repo`.
+///
+/// The archive's single top-level `repo/` directory is extracted into a staging
+/// sibling and promoted over the live tree only once extraction succeeded, the
+/// same swap the edge clone uses, so a failed unpack leaves the previous tree
+/// (and its `scripts/install.sh`) in place.
+pub fn unpack_bundle(bundle: &Path, repo: &Path) -> anyhow::Result<()> {
+    let staging = staging_dest(repo);
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)
+        .with_context(|| format!("create the bundle staging dir {}", staging.display()))?;
+    let bundle_s = bundle.to_string_lossy().into_owned();
+    let staging_s = staging.to_string_lossy().into_owned();
+    let res = exec::run("tar", &["-xzf", &bundle_s, "-C", &staging_s]);
+    let unpacked = staging.join("repo");
+    if !res.success() || !unpacked.is_dir() {
+        let _ = std::fs::remove_dir_all(&staging);
+        if !res.spawned {
+            anyhow::bail!("tar is not installed; cannot unpack the deploy bundle");
+        }
+        anyhow::bail!(
+            "could not unpack the deploy bundle {} (no top-level repo/ directory): {}",
+            bundle.display(),
+            res.stderr.trim()
+        );
+    }
+    let promoted = promote_staging(&unpacked, repo);
+    let _ = std::fs::remove_dir_all(&staging);
+    promoted
 }
 
 /// `<path>.<ext>` sidecar next to `path` (matches `verify_sha256`'s lookup).
@@ -634,18 +716,16 @@ impl Step for VenvAgent {
         }
 
         // (3) Install the agent package per channel. The stable path installs a
-        // verified release wheel (no on-disk source tree); the edge path clones
-        // the repo and records the tree into `ctx.source_dir`.
+        // signature-verified release wheel and unpacks the release's deploy
+        // bundle; the edge path clones the repo. Both return the source tree.
         let repo = if ctx.channel == "stable" {
-            if let Err(e) = install_agent_stable(ctx) {
-                return StepOutcome::Failed(e.to_string());
-            }
-            None
+            install_agent_stable(ctx)
         } else {
-            match install_agent_edge(ctx) {
-                Ok(repo) => Some(repo),
-                Err(e) => return StepOutcome::Failed(e.to_string()),
-            }
+            install_agent_edge(ctx)
+        };
+        let repo = match repo {
+            Ok(repo) => repo,
+            Err(e) => return StepOutcome::Failed(e.to_string()),
         };
 
         // (4) Post-provision dependency health gate. The state IPC wire is
@@ -665,11 +745,9 @@ impl Step for VenvAgent {
             );
         }
 
-        // Record the cloned tree (edge channel only) so the downstream OS steps
-        // find the unit files, udev rules, and driver scripts under it. The
-        // stable channel has no source tree, so it leaves `ctx.source_dir` unset
-        // and the OS steps resolve from the persisted `/opt/ados/source`.
-        ctx.source_dir = repo;
+        // Record the source tree so the downstream OS steps find the unit files,
+        // udev rules, and driver scripts under it.
+        ctx.source_dir = Some(repo);
         StepOutcome::Ok
     }
 }
@@ -800,6 +878,93 @@ mod tests {
         );
         // A v-prefixed input normalizes to the identical URL.
         assert_eq!(wheel_url(&normalize_version("v0.93.0")), from_bare);
+    }
+
+    #[test]
+    fn the_deploy_bundle_hangs_off_the_same_release_as_the_wheel() {
+        assert_eq!(
+            release_asset_url("0.93.0", &bundle_filename("0.93.0")),
+            "https://github.com/altnautica/ADOSDroneAgent/releases/download/v0.93.0/ados-drone-agent-deploy-0.93.0.tar.gz"
+        );
+    }
+
+    /// A release asset with a matching `.sha256` beside it.
+    fn asset_with_sha(dir: &Path, name: &str) -> PathBuf {
+        use sha2::{Digest, Sha256};
+        let path = dir.join(name);
+        std::fs::write(&path, b"release bytes").unwrap();
+        let digest = hex::encode(Sha256::digest(b"release bytes"));
+        std::fs::write(sidecar(&path, "sha256"), format!("{digest}  {name}\n")).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_stable_release_asset_with_only_a_sha256_is_refused() {
+        // The sidecar comes from the same host as the wheel, so an attacker who
+        // replaces one replaces both. Only the signature proves origin, and the
+        // wheel is pip-installed into a venv whose services run as root.
+        let dir = tempfile::tempdir().unwrap();
+        let wheel = asset_with_sha(dir.path(), "ados_drone_agent-0.93.0-py3-none-any.whl");
+        assert!(verify::verify_sha256(&wheel, &sidecar(&wheel, "sha256")).is_ok());
+        let err = verify_release_asset(&wheel).unwrap_err().to_string();
+        assert!(err.contains("could not be signature-verified"), "{err}");
+    }
+
+    #[test]
+    fn a_stable_release_asset_with_a_foreign_signature_is_refused() {
+        // A `.minisig` that does not come from the embedded release key is not a
+        // signature at all as far as the install is concerned.
+        let dir = tempfile::tempdir().unwrap();
+        let wheel = asset_with_sha(dir.path(), "ados_drone_agent-0.93.0-py3-none-any.whl");
+        std::fs::write(
+            sidecar(&wheel, "minisig"),
+            "untrusted comment: signature\nRWQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n",
+        )
+        .unwrap();
+        assert!(verify_release_asset(&wheel).is_err());
+    }
+
+    #[test]
+    fn a_deploy_bundle_replaces_the_source_tree_with_its_repo_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        std::fs::create_dir_all(stage.join("repo/data/systemd")).unwrap();
+        std::fs::write(stage.join("repo/data/systemd/ados-x.service"), b"unit").unwrap();
+        let bundle = dir.path().join("bundle.tar.gz");
+        let ok = std::process::Command::new("tar")
+            .arg("-czf")
+            .arg(&bundle)
+            .arg("-C")
+            .arg(&stage)
+            .arg("repo")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+
+        let live = dir.path().join("source");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join("stale"), b"old").unwrap();
+        unpack_bundle(&bundle, &live).unwrap();
+        assert_eq!(
+            std::fs::read(live.join("data/systemd/ados-x.service")).unwrap(),
+            b"unit"
+        );
+        assert!(!live.join("stale").exists());
+        assert!(!staging_dest(&live).exists());
+    }
+
+    #[test]
+    fn a_bundle_that_does_not_unpack_leaves_the_source_tree_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("bundle.tar.gz");
+        std::fs::write(&bundle, b"not a tarball").unwrap();
+        let live = dir.path().join("source");
+        std::fs::create_dir_all(live.join("scripts")).unwrap();
+        std::fs::write(live.join("scripts/install.sh"), b"#!/bin/sh\n").unwrap();
+        assert!(unpack_bundle(&bundle, &live).is_err());
+        assert!(live.join("scripts/install.sh").exists());
+        assert!(!staging_dest(&live).exists());
     }
 
     #[test]

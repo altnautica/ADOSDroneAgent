@@ -134,8 +134,10 @@ pub enum HitAction {
     Custom(String),
 }
 
-/// A rectangular touch target on a page, in page-local content coordinates
-/// (origin at the top-left of the 480x244 content region).
+/// A rectangular touch target on a page, in the page's own coordinate frame:
+/// panel-global for a [`Chrome::FullScreen`] page, content-local (origin at the
+/// top-left of the 480x244 content region) for a [`Chrome::Tabbed`] one. See
+/// [`Chrome::origin_y`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HitZone {
     pub x: i32,
@@ -166,7 +168,9 @@ impl HitZone {
 /// surfaces care about.
 #[derive(Debug, Clone, Default)]
 pub struct LinkCtx {
-    /// Link-layer connection state (`connected`, `connecting`, `unpaired`, …).
+    /// Link-layer connection state (`connected`, `connecting`, `stale`, …).
+    /// On `stale` every measured field below is `None`: the producer stopped
+    /// writing and its last numbers are not a reading.
     pub state: Option<String>,
     pub rssi_dbm: Option<f64>,
     pub snr_db: Option<f64>,
@@ -193,6 +197,57 @@ pub struct LinkCtx {
     pub packets_lost: Option<i64>,
     /// 60-sample RSSI trend for the sparkline surfaces (`None` marks a gap).
     pub rssi_history: Vec<Option<f64>>,
+}
+
+impl LinkCtx {
+    /// Whether the agent reports the radio snapshot as stale (the producer has
+    /// stopped refreshing it).
+    pub fn is_stale(&self) -> bool {
+        self.state.as_deref() == Some(LINK_STATE_STALE)
+    }
+}
+
+/// The `link.state` the agent reports once the radio snapshot has aged past its
+/// freshness window.
+pub const LINK_STATE_STALE: &str = "stale";
+
+/// What a panel may say about the vehicle's arm state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmState {
+    Armed,
+    Disarmed,
+    /// No telemetry reports it. Never shown as DISARMED: an unknown vehicle may
+    /// be armed and flying.
+    Unknown,
+}
+
+impl ArmState {
+    pub fn from_report(armed: Option<bool>) -> Self {
+        match armed {
+            Some(true) => Self::Armed,
+            Some(false) => Self::Disarmed,
+            None => Self::Unknown,
+        }
+    }
+
+    /// The panel label: `ARMED`, `DISARMED`, or `ARM —` when unknown.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Armed => "ARMED",
+            Self::Disarmed => "DISARMED",
+            Self::Unknown => "ARM —",
+        }
+    }
+
+    /// The label colour: success when armed, secondary when disarmed, tertiary
+    /// (no-data) when unknown.
+    pub fn color(self, palette: &Palette) -> embedded_graphics::pixelcolor::Rgb888 {
+        match self {
+            Self::Armed => palette.status_success,
+            Self::Disarmed => palette.text_secondary,
+            Self::Unknown => palette.text_tertiary,
+        }
+    }
 }
 
 /// Radio topology — the power-supply path that drives the brownout badge.
@@ -231,7 +286,8 @@ pub struct PairedDroneCtx {
 pub struct FcCtx {
     pub vehicle: Option<String>,
     pub mode: Option<String>,
-    pub armed: bool,
+    /// `None` when no telemetry reports it; see [`ArmState`].
+    pub armed: Option<bool>,
     pub battery_voltage: Option<f64>,
     pub battery_remaining: Option<f64>,
     pub gps_fix_type: Option<i64>,
@@ -442,33 +498,6 @@ pub struct DeviceCtx {
     pub build_stamp: Option<String>,
 }
 
-/// One settings-list row's resolved label + current value for the settings
-/// surface.
-#[derive(Debug, Clone, Default)]
-pub struct SettingsRow {
-    pub id: String,
-    pub label: String,
-    /// `default`, `toggle`, or `action`.
-    pub variant: String,
-    /// The right-column value text (for default rows).
-    pub value: Option<String>,
-    /// The on/off state (for toggle rows).
-    pub toggle_on: Option<bool>,
-}
-
-/// Display / radio / network / logging / theme settings snapshot for the
-/// settings surface.
-#[derive(Debug, Clone, Default)]
-pub struct SettingsCtx {
-    pub rows: Vec<SettingsRow>,
-    /// Count of changes pending a reboot (drives the reboot banner).
-    pub pending_reboot_count: i64,
-    pub theme: Option<String>,
-    pub logging_level: Option<String>,
-    pub display_rotation_degrees: Option<i64>,
-    pub server_mode: Option<String>,
-}
-
 /// The diagnostics agent-log buffer (last journal lines) for the diagnostics
 /// surface.
 #[derive(Debug, Clone, Default)]
@@ -510,11 +539,57 @@ pub struct PageContext {
     pub video: VideoCtx,
     pub health: HealthCtx,
     pub device: DeviceCtx,
-    pub settings: SettingsCtx,
     pub diagnostics: DiagnosticsCtx,
 }
 
 // ── page trait ──────────────────────────────────────────────────────
+
+/// Which chrome a page paints, and so which coordinate frame its hit zones use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chrome {
+    /// Top status bar + bottom tab bar. Zones are content-local: y = 0 is the
+    /// first row under the top bar, and taps in the tab band switch tabs.
+    Tabbed,
+    /// The whole 480x320 panel is the page (detail pages, the overflow menu, the
+    /// plugin page). Zones are panel-global and there is no tab band.
+    FullScreen,
+}
+
+impl Chrome {
+    /// Panel-global y of the page's zone frame origin.
+    pub fn origin_y(self) -> i32 {
+        match self {
+            Self::Tabbed => CONTENT_Y as i32,
+            Self::FullScreen => 0,
+        }
+    }
+
+    /// Whether the page paints the bottom tab bar (and so owns the tab band).
+    pub fn has_tab_bar(self) -> bool {
+        matches!(self, Self::Tabbed)
+    }
+}
+
+/// An agent write a panel control performs over the local API.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentRequest {
+    /// `POST`, `PUT` or `DELETE`.
+    pub method: &'static str,
+    pub path: &'static str,
+    /// The JSON body, when the route takes one.
+    pub body: Option<serde_json::Value>,
+    /// What the operator asked for, for the acknowledgement line.
+    pub label: String,
+}
+
+/// What a page does with one of its own custom hit-zone keys.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PanelAction {
+    /// Handled inside the page (an overlay opened or closed); repaint now.
+    Repaint,
+    /// Perform this agent write and show its outcome.
+    Agent(AgentRequest),
+}
 
 /// The contract every LCD page implements.
 ///
@@ -527,14 +602,24 @@ pub trait Page {
     /// Stable route id the navigator and persistence key on.
     fn id(&self) -> &'static str;
 
+    /// The chrome the page paints, which fixes the frame of its hit zones.
+    fn chrome(&self) -> Chrome;
+
     /// Preferred redraw cadence in hertz.
     fn refresh_hz(&self) -> f32;
 
     /// Paint the full 480x320 panel for this page (chrome included).
     fn render(&self, ctx: &PageContext, palette: &Palette) -> Canvas;
 
-    /// Return the page's active hit zones in page-local content coordinates.
+    /// Return the page's active hit zones, in the frame [`Page::chrome`] names.
     fn hit_zones(&self, ctx: &PageContext) -> Vec<HitZone>;
+
+    /// Resolve one of this page's [`HitAction::Custom`] keys. `None` when the
+    /// key does nothing right now (for example a stepper whose current value is
+    /// unknown). Pages without custom zones keep the default.
+    fn on_custom(&self, _key: &str, _ctx: &PageContext) -> Option<PanelAction> {
+        None
+    }
 }
 
 /// Allocate a blank full-panel canvas filled with the palette background.

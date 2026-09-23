@@ -1,12 +1,10 @@
-"""WebSocket ticket flow for the in-flight install-job progress route.
+"""WebSocket auth for the in-flight install-job progress route.
 
-Previously the route accepted ``?api_key=<pairing_key>`` in the URL
-query string so browsers could authenticate the handshake. That leaks
-the pairing key into DevTools, HAR exports, and reverse-proxy access
-logs. The route now requires either the ``X-ADOS-Key`` header (native
-clients) or a one-shot ticket passed through the
-``Sec-WebSocket-Protocol: ados-job-ticket, <ticket>`` subprotocol
-header.
+The route accepts either the ``X-ADOS-Key`` header (native clients) or
+an ``ados-ws-ticket`` minted for the ``plugins.install_job`` scope and
+passed through ``Sec-WebSocket-Protocol: ados-ws-ticket, <ticket>``,
+the same self-contained HMAC ticket the control front admits for every
+other stream. The pairing key never rides the URL.
 """
 
 from __future__ import annotations
@@ -16,16 +14,16 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from ados.api.middleware.ws_auth import WS_TICKET_PROTOCOL
 from ados.api.routes import _plugins_helpers as helpers
 from ados.api.routes import plugins as plugins_route
-from ados.api.routes._plugins_helpers import (
-    WS_JOB_TICKET_PROTOCOL,
-    job_ticket_store,
-    write_sidecar,
-)
+from ados.api.routes._plugins_helpers import JOB_STREAM_TICKET_SCOPE, write_sidecar
 from ados.api.server import create_app
+from ados.core.ws_ticket import mint_ticket
 from ados.plugins.supervisor import PluginSupervisor
 from tests.api_runtime_utils import build_api_runtime
+
+PAIR_KEY = "valid-pair-key"
 
 
 @pytest.fixture
@@ -42,21 +40,15 @@ def quick_ws(monkeypatch):
 
 
 @pytest.fixture
-def reset_ticket_store():
-    """Each test starts with a clean ticket dict so cross-test state
-    cannot mask issues."""
-    job_ticket_store._reset_for_tests()
-    yield
-    job_ticket_store._reset_for_tests()
-
-
-@pytest.fixture
 def paired_client(monkeypatch):
     app_double = build_api_runtime(uptime_seconds=0.0)
     app_double.pairing_manager.is_paired = True
-    app_double.pairing_manager.api_key = "valid-pair-key"
-    app_double.pairing_manager.validate_key = (
-        lambda k: k == "valid-pair-key"
+    app_double.pairing_manager.api_key = PAIR_KEY
+    app_double.pairing_manager.validate_key = lambda k: k == PAIR_KEY
+    # The ticket key is read from pairing.json in production.
+    monkeypatch.setattr(
+        "ados.api.middleware.ws_auth.load_pairing_api_key",
+        lambda *a, **k: PAIR_KEY,
     )
     return TestClient(create_app(app_double))
 
@@ -86,120 +78,67 @@ def _expect_ws_rejected(client_inst, url: str, **kwargs) -> None:
 
 
 # ---------------------------------------------------------------------
-# Ticket mint endpoint
-# ---------------------------------------------------------------------
-
-
-def test_ticket_mint_returns_hex_and_expiry(
-    paired_client, isolated_sidecar, isolated_supervisor, reset_ticket_store
-):
-    job_id = "job-mint-1"
-    resp = paired_client.post(
-        f"/api/plugins/jobs/{job_id}/ticket",
-        headers={"X-ADOS-Key": "valid-pair-key"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["ok"] is True
-    assert isinstance(body["ticket"], str)
-    assert len(body["ticket"]) == 64
-    assert all(c in "0123456789abcdef" for c in body["ticket"])
-    assert isinstance(body["expiresAt"], int)
-    assert body["expiresAt"] > 0
-
-
-# ---------------------------------------------------------------------
 # WebSocket subprotocol path
 # ---------------------------------------------------------------------
 
 
-def test_ws_accepts_with_valid_ticket_subprotocol(
-    paired_client,
-    isolated_sidecar,
-    isolated_supervisor,
-    quick_ws,
-    reset_ticket_store,
+def test_ws_accepts_an_install_job_ticket(
+    paired_client, isolated_sidecar, isolated_supervisor, quick_ws
 ):
     job_id = "job-ticket-ok"
     write_sidecar(job_id, {"stage": "completed", "pluginId": "p.x"})
-    mint = paired_client.post(
-        f"/api/plugins/jobs/{job_id}/ticket",
-        headers={"X-ADOS-Key": "valid-pair-key"},
-    ).json()
-    ticket = mint["ticket"]
+    ticket = mint_ticket(JOB_STREAM_TICKET_SCOPE, api_key=PAIR_KEY)
 
     with paired_client.websocket_connect(
         f"/api/plugins/jobs/{job_id}",
-        subprotocols=[WS_JOB_TICKET_PROTOCOL, ticket],
+        subprotocols=[WS_TICKET_PROTOCOL, ticket],
     ) as ws:
         frame = ws.receive_json()
     assert frame["stage"] == "completed"
     assert frame["jobId"] == job_id
 
 
-def test_ws_ticket_is_one_shot(
-    paired_client,
-    isolated_sidecar,
-    isolated_supervisor,
-    quick_ws,
-    reset_ticket_store,
+def test_ws_rejects_a_ticket_for_another_scope(
+    paired_client, isolated_sidecar, isolated_supervisor, quick_ws
 ):
-    job_id = "job-ticket-once"
+    job_id = "job-wrong-scope"
     write_sidecar(job_id, {"stage": "completed", "pluginId": "p.x"})
-    ticket = paired_client.post(
+    ticket = mint_ticket("vision.detections", api_key=PAIR_KEY)
+    _expect_ws_rejected(
+        paired_client,
+        f"/api/plugins/jobs/{job_id}",
+        subprotocols=[WS_TICKET_PROTOCOL, ticket],
+    )
+
+
+def test_ws_rejects_a_ticket_signed_by_another_key(
+    paired_client, isolated_sidecar, isolated_supervisor, quick_ws
+):
+    job_id = "job-forged"
+    ticket = mint_ticket(JOB_STREAM_TICKET_SCOPE, api_key="some-other-key")
+    _expect_ws_rejected(
+        paired_client,
+        f"/api/plugins/jobs/{job_id}",
+        subprotocols=[WS_TICKET_PROTOCOL, ticket],
+    )
+
+
+def test_the_retired_job_ticket_protocol_is_refused(
+    paired_client, isolated_sidecar, isolated_supervisor, quick_ws
+):
+    job_id = "job-old-marker"
+    ticket = mint_ticket(JOB_STREAM_TICKET_SCOPE, api_key=PAIR_KEY)
+    _expect_ws_rejected(
+        paired_client,
+        f"/api/plugins/jobs/{job_id}",
+        subprotocols=["ados-job-ticket", ticket],
+    )
+    # And the old per-job mint route is gone.
+    resp = paired_client.post(
         f"/api/plugins/jobs/{job_id}/ticket",
-        headers={"X-ADOS-Key": "valid-pair-key"},
-    ).json()["ticket"]
-
-    with paired_client.websocket_connect(
-        f"/api/plugins/jobs/{job_id}",
-        subprotocols=[WS_JOB_TICKET_PROTOCOL, ticket],
-    ) as ws:
-        ws.receive_json()
-
-    # Same ticket again — must be rejected.
-    _expect_ws_rejected(
-        paired_client,
-        f"/api/plugins/jobs/{job_id}",
-        subprotocols=[WS_JOB_TICKET_PROTOCOL, ticket],
+        headers={"X-ADOS-Key": PAIR_KEY},
     )
-
-
-def test_ws_ticket_must_match_job_id(
-    paired_client,
-    isolated_sidecar,
-    isolated_supervisor,
-    quick_ws,
-    reset_ticket_store,
-):
-    issuing_job = "job-A"
-    target_job = "job-B"
-    write_sidecar(target_job, {"stage": "completed", "pluginId": "p.x"})
-    ticket = paired_client.post(
-        f"/api/plugins/jobs/{issuing_job}/ticket",
-        headers={"X-ADOS-Key": "valid-pair-key"},
-    ).json()["ticket"]
-
-    _expect_ws_rejected(
-        paired_client,
-        f"/api/plugins/jobs/{target_job}",
-        subprotocols=[WS_JOB_TICKET_PROTOCOL, ticket],
-    )
-
-
-def test_ws_rejects_unknown_ticket(
-    paired_client,
-    isolated_sidecar,
-    isolated_supervisor,
-    quick_ws,
-    reset_ticket_store,
-):
-    job_id = "job-unknown-ticket"
-    _expect_ws_rejected(
-        paired_client,
-        f"/api/plugins/jobs/{job_id}",
-        subprotocols=[WS_JOB_TICKET_PROTOCOL, "f" * 64],
-    )
+    assert resp.status_code in (404, 405)
 
 
 def test_ws_rejects_api_key_query_param(
@@ -207,14 +146,13 @@ def test_ws_rejects_api_key_query_param(
     isolated_sidecar,
     isolated_supervisor,
     quick_ws,
-    reset_ticket_store,
 ):
     """The old query-param fallback is gone; passing ``?api_key=``
     must no longer authenticate the handshake."""
     job_id = "job-no-qp"
     _expect_ws_rejected(
         paired_client,
-        f"/api/plugins/jobs/{job_id}?api_key=valid-pair-key",
+        f"/api/plugins/jobs/{job_id}?api_key={PAIR_KEY}",
     )
 
 
@@ -223,14 +161,13 @@ def test_ws_header_still_accepts(
     isolated_sidecar,
     isolated_supervisor,
     quick_ws,
-    reset_ticket_store,
 ):
     """Native clients keep using ``X-ADOS-Key`` on the handshake."""
     job_id = "job-hdr-keep"
     write_sidecar(job_id, {"stage": "completed", "pluginId": "p.x"})
     with paired_client.websocket_connect(
         f"/api/plugins/jobs/{job_id}",
-        headers={"X-ADOS-Key": "valid-pair-key"},
+        headers={"X-ADOS-Key": PAIR_KEY},
     ) as ws:
         frame = ws.receive_json()
     assert frame["stage"] == "completed"

@@ -7,8 +7,9 @@
 //!   device id, the key-fingerprint short form, the paired-at relative time plus
 //!   a short absolute clock, and a destructive "Unpair" button bottom-right.
 //! * **Unpaired** — show a NOT PAIRED banner, the local pairing code, a QR of
-//!   the pair URL on the right half, and an "Open pairing" accent button. While
-//!   a pairing window is open the button is replaced by a countdown pill.
+//!   the pair URL on the right half, and, while a pairing window is open, a
+//!   countdown pill. The window is opened from Mission Control; the panel has
+//!   no agent route to open one, so it offers no button for it.
 //!
 //! The paired identity comes from [`PageContext::paired_drone`]; the unpaired
 //! code/URL come from [`PageContext::pairing`] and [`PageContext::cloud`]; the
@@ -18,7 +19,9 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, fill_rect_outline, text, Canvas};
 use crate::graphics::qr::render_qr;
-use crate::pages::{blank_panel, HitAction, HitZone, Page, PageContext};
+use crate::pages::{
+    blank_panel, AgentRequest, Chrome, HitAction, HitZone, Page, PageContext, PanelAction,
+};
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
 /// Layout reference width of the detail-modal surface.
@@ -34,9 +37,8 @@ const BTN_H: i32 = 40;
 const BTN_RIGHT_PAD: i32 = 12;
 const BTN_BOTTOM_PAD: i32 = 12;
 
-/// Custom hit-zone keys the navigator routes to REST calls.
+/// The Unpair button's custom key: `DELETE /api/v1/ground-station/wfb/pair`.
 const UNPAIR_KEY: &str = "pair.unpair";
-const OPEN_WINDOW_KEY: &str = "pair.open_window";
 
 /// Format an elapsed-seconds count as a short relative-time string.
 fn format_relative(seconds: Option<f64>) -> String {
@@ -105,6 +107,10 @@ impl Page for PairDroneDetailPage {
         "details.pair_drone"
     }
 
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
+    }
+
     fn refresh_hz(&self) -> f32 {
         2.0
     }
@@ -133,16 +139,19 @@ impl Page for PairDroneDetailPage {
                 BTN_H,
                 HitAction::Custom(UNPAIR_KEY.to_string()),
             ));
-        } else if !ctx.pairing.window_active {
-            zones.push(HitZone::new(
-                btn_x,
-                btn_y,
-                BTN_W,
-                BTN_H,
-                HitAction::Custom(OPEN_WINDOW_KEY.to_string()),
-            ));
         }
         zones
+    }
+
+    fn on_custom(&self, key: &str, ctx: &PageContext) -> Option<PanelAction> {
+        (key == UNPAIR_KEY && is_paired(ctx)).then(|| {
+            PanelAction::Agent(AgentRequest {
+                method: "DELETE",
+                path: "/api/v1/ground-station/wfb/pair",
+                body: None,
+                label: "Unpair".to_string(),
+            })
+        })
     }
 }
 
@@ -199,7 +208,7 @@ fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     );
 }
 
-/// Paint the unpaired body: NOT PAIRED banner + code + QR + button/countdown.
+/// Paint the unpaired body: NOT PAIRED banner + code + QR + window countdown.
 fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     let code = ctx
         .pairing
@@ -259,7 +268,7 @@ fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     let btn_y = PAGE_H - BTN_H - BTN_BOTTOM_PAD;
 
     if ctx.pairing.window_active {
-        // Countdown pill where the button would normally sit.
+        // Countdown pill, bottom-right.
         let secs = ctx
             .pairing
             .window_remaining_seconds
@@ -289,29 +298,7 @@ fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
             btn_y + (BTN_H - ch as i32) / 2 - 1,
             palette.accent_primary,
         );
-        return;
     }
-
-    // Idle — the call-to-action button.
-    fill_rect(
-        canvas,
-        btn_x,
-        btn_y,
-        btn_x + BTN_W - 1,
-        btn_y + BTN_H - 1,
-        palette.accent_primary,
-    );
-    let btn_label = "Open pairing";
-    let btn_font = LoadedFont::new(FontFace::SansBold, 14);
-    let (bw, bh) = btn_font.text_size(btn_label);
-    text(
-        canvas,
-        &btn_font,
-        btn_label,
-        btn_x + (BTN_W - bw as i32) / 2,
-        btn_y + (BTN_H - bh as i32) / 2 - 1,
-        palette.text_primary,
-    );
 }
 
 #[cfg(test)]
@@ -327,23 +314,8 @@ mod tests {
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
         let zones = page.hit_zones(&ctx);
-        assert_eq!(zones.len(), 2);
+        assert_eq!(zones.len(), 1, "unpaired: no control without an endpoint");
         assert_eq!(zones[0].action, HitAction::Back);
-    }
-
-    #[test]
-    fn unpaired_idle_exposes_open_window_zone() {
-        let page = PairDroneDetailPage;
-        let mut ctx = PageContext::default();
-        ctx.pairing.code = Some("ABC123".to_string());
-        let c = page.render(&ctx, &DARK);
-        assert_eq!(c.width(), PANEL_W);
-        let zones = page.hit_zones(&ctx);
-        assert_eq!(zones.len(), 2);
-        assert_eq!(
-            zones[1].action,
-            HitAction::Custom("pair.open_window".to_string())
-        );
     }
 
     #[test]
@@ -376,6 +348,18 @@ mod tests {
             zones[1].action,
             HitAction::Custom("pair.unpair".to_string())
         );
+        // The tap is the station-wide unpair route.
+        let Some(PanelAction::Agent(req)) = page.on_custom("pair.unpair", &ctx) else {
+            panic!("unpair must reach the agent");
+        };
+        assert_eq!(
+            (req.method, req.path),
+            ("DELETE", "/api/v1/ground-station/wfb/pair")
+        );
+        // Unpaired, the key does nothing.
+        assert!(page
+            .on_custom("pair.unpair", &PageContext::default())
+            .is_none());
     }
 
     #[test]

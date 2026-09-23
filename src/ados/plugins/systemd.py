@@ -32,6 +32,8 @@ asserts the two renderers agree line for line.
 
 from __future__ import annotations
 
+import re
+import shlex
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -42,7 +44,7 @@ from ados.core.paths import (
     PLUGIN_UNIT_PREFIX,
 )
 from ados.plugins.manifest import PluginManifest
-from ados.plugins.ready_check import PROBE_TIMEOUT_S
+from ados.plugins.ready_check import PROBE_TIMEOUT_S, has_control_char
 
 PLUGIN_RUNNER_BINARY = "/opt/ados/venv/bin/ados-plugin-runner"
 PLUGIN_SLICE_NAME = "ados-plugins.slice"
@@ -187,10 +189,13 @@ def sandbox_directives(granted: Iterable[str]) -> list[str]:
     # ---- sockets ----------------------------------------------------
     if NETWORK_OUTBOUND_CAP in granted_set:
         # AF_NETLINK rides with the grant: a plugin that may reach the network
-        # needs getifaddrs / DNS resolution to do it.
+        # needs getifaddrs / DNS resolution to do it. Loopback stays closed: the
+        # agent's listeners treat a loopback peer as on-box, and a plugin is not
+        # on-box trust. systemd filters by address, not port.
         lines.append(
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"
         )
+        lines.append("IPAddressDeny=localhost")
     else:
         # AF_UNIX stays: the plugin's own host socket is a Unix socket.
         lines.append("RestrictAddressFamilies=AF_UNIX")
@@ -252,6 +257,54 @@ def _sanitize_unit_name(plugin_id: str) -> str:
     file basenames before ``.service``; hyphens are.
     """
     return plugin_id.replace(".", "-")
+
+
+#: An ``ExecStart`` word that needs no quoting: nothing systemd splits on,
+#: unquotes, or expands (``%`` specifiers and ``$`` variables are excluded).
+_EXEC_PLAIN_WORD = re.compile(r"^[A-Za-z0-9_./:=,@+-]+$")
+
+#: Leading characters systemd reads as ``ExecStart`` prefixes rather than part
+#: of the path. ``+`` and ``!`` lift the sandbox and run the command with full
+#: privileges, so a plugin-authored command may not start with any of them.
+_EXEC_PREFIX_CHARS = "-@:+!|"
+
+
+def exec_start_value(command: str) -> str:
+    """Render a plugin-authored ``command`` as one ``ExecStart=`` value.
+
+    The command is split as argv (POSIX quoting, never a shell) and each word
+    is re-emitted in systemd's own quoting, with ``%`` and ``$`` doubled so
+    no specifier or variable expands. Refused with ``ValueError``: a control
+    character (a newline would start a new directive, such as an
+    ``ExecStartPre=+`` that runs as root), unbalanced quoting, an empty command,
+    a first word carrying a systemd prefix character, and a lone ``;`` word
+    (systemd's command separator).
+    """
+    if has_control_char(command):
+        raise ValueError("service command must not contain control characters")
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise ValueError(f"service command is not a valid argv: {exc}") from exc
+    if not argv or not argv[0]:
+        raise ValueError("service command must not be empty")
+    if argv[0][0] in _EXEC_PREFIX_CHARS:
+        raise ValueError(
+            f"service command must not start with a systemd prefix ({argv[0][0]!r})"
+        )
+    if ";" in argv:
+        raise ValueError("service command must not contain a lone ';' word")
+    return " ".join(_exec_word(word) for word in argv)
+
+
+def _exec_word(word: str) -> str:
+    """One argv word in systemd ``ExecStart`` quoting."""
+    if _EXEC_PLAIN_WORD.match(word):
+        return word
+    escaped = word.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = escaped.replace("%", "%%").replace("$", "$$")
+    return f'"{escaped}"'
+
 
 
 def render_unit(
@@ -325,12 +378,13 @@ def render_service_unit(
 ) -> str:
     """Render a systemd unit for one plugin-declared extra service.
 
-    The service runs its own ``ExecStart`` (``service.command``) in the
-    plugin's install directory, under the spec's slice (defaulting to
-    the shared plugin slice so resource accounting stays grouped), with
-    the same hardening flags as the main plugin unit. Resource limits
-    come from the plugin's ``agent.resources`` so a declared service is
-    bounded by the same envelope the operator approved at install.
+    The service runs its own ``ExecStart`` (``service.command``, validated and
+    re-quoted by :func:`exec_start_value`) in the plugin's install directory,
+    always in the shared plugin slice so resource accounting and the slice's
+    I/O weight apply to it, with the same hardening flags as the main plugin
+    unit. Resource limits come from the plugin's ``agent.resources`` so a
+    declared service is bounded by the same envelope the operator approved at
+    install. Raises ``ValueError`` for a command that cannot be rendered safely.
 
     ``service`` is a ``ServiceSpec`` from
     ``manifest.agent.contributes.services``.
@@ -349,9 +403,9 @@ def render_service_unit(
     return SERVICE_UNIT_TEMPLATE.format(
         plugin_id=manifest.id,
         service_name=service.name,
-        slice_name=service.slice or PLUGIN_SLICE_NAME,
+        slice_name=PLUGIN_SLICE_NAME,
         working_dir=plugin_dir,
-        exec_start=service.command,
+        exec_start=exec_start_value(service.command),
         restart=service.restart,
         max_ram_mb=res.max_ram_mb,
         max_cpu_percent=res.max_cpu_percent,

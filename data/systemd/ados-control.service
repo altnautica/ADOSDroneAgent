@@ -5,8 +5,7 @@ Description=ADOS Native Control API
 # (health source) is best-effort: an absent store degrades health, never blocks.
 After=ados-mavlink.service
 PartOf=ados-supervisor.service
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.
@@ -22,8 +21,12 @@ Slice=ados.slice
 # /bin/true branch never signals readiness; this matches the other guarded units.
 Type=simple
 ExecStart=/bin/sh -c 'if { [ -e /etc/ados/control-rust-enabled ] || [ -e /etc/ados/front-rust-enabled ]; } && [ -x /opt/ados/bin/ados-control ]; then exec /opt/ados/bin/ados-control; else exec /bin/true; fi'
-Restart=on-failure
-RestartSec=5
+Restart=always
+# Exit 0 means this node has nothing for the unit to run (feature off, role
+# not applicable, display absent); it must not respawn every RestartSec. Any
+# other exit, signal or watchdog timeout restarts forever (no start limit).
+RestartPreventExitStatus=0
+RestartSec=3
 Environment=RUST_LOG=info
 EnvironmentFile=-/etc/ados/env
 

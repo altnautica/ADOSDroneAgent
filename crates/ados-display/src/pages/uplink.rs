@@ -13,7 +13,7 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_circle, fill_rect_outline, text, Canvas};
 use crate::pages::{
-    blank_panel, CloudCtx, HitAction, HitZone, NetworkCtx, Page, PageContext, UplinkCtx,
+    blank_panel, Chrome, CloudCtx, HitAction, HitZone, NetworkCtx, Page, PageContext, UplinkCtx,
 };
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
@@ -81,6 +81,10 @@ pub struct UplinkDetailPage;
 impl Page for UplinkDetailPage {
     fn id(&self) -> &'static str {
         "details.uplink"
+    }
+
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
     }
 
     fn refresh_hz(&self) -> f32 {

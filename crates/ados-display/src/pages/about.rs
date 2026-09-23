@@ -16,7 +16,7 @@
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{text, Canvas};
-use crate::pages::{blank_panel, HitZone, Page, PageContext};
+use crate::pages::{blank_panel, Chrome, HitZone, Page, PageContext};
 use crate::widgets::{detail_back_zone, draw_detail_header, DETAIL_HEADER_H};
 
 /// Header band height shared by every detail modal.
@@ -45,6 +45,10 @@ pub struct AboutDetailPage;
 impl Page for AboutDetailPage {
     fn id(&self) -> &'static str {
         "details.about"
+    }
+
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
     }
 
     fn refresh_hz(&self) -> f32 {

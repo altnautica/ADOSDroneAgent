@@ -10,8 +10,7 @@ ConditionPathExists=/etc/ados/dnsmasq-gs.conf
 # radio is a WiFi client, where it would fail to bind an address already
 # carrying a lease and burn its restart budget into a permanently failed unit.
 ConditionPathExists=/etc/ados/hotspot-enabled
-StartLimitInterval=60s
-StartLimitBurst=5
+StartLimitIntervalSec=0
 
 [Service]
 # Join the shared accounting slice so MemoryCurrent/CPUUsage are
@@ -27,8 +26,8 @@ User=root
 ExecStartPre=-/bin/systemctl stop dnsmasq.service
 ExecStartPre=-/bin/systemctl disable dnsmasq.service
 ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=/etc/ados/dnsmasq-gs.conf
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 
 # dnsmasq binds UDP/53 and UDP/67 on wlan0
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW

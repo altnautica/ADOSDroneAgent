@@ -19,7 +19,7 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_circle, fill_rect, fill_rect_outline, line, text, Canvas};
 use crate::pages::{
-    blank_panel, HitZone, HopEntry, Page, PageContext, CONTENT_H, CONTENT_Y, PANEL_W,
+    blank_panel, Chrome, HitZone, HopEntry, Page, PageContext, CONTENT_H, CONTENT_Y, PANEL_W,
 };
 use crate::widgets::{bottom_bar_zones, draw_bottom_bar, draw_top_bar};
 
@@ -55,6 +55,10 @@ pub struct ChannelHopsPage;
 impl Page for ChannelHopsPage {
     fn id(&self) -> &'static str {
         "channel_hops"
+    }
+
+    fn chrome(&self) -> Chrome {
+        Chrome::Tabbed
     }
 
     fn refresh_hz(&self) -> f32 {

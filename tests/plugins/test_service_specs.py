@@ -178,6 +178,57 @@ def test_render_service_unit_emits_command_and_limits() -> None:
     )
 
 
+def _spec(command: str) -> ServiceSpec:
+    return ServiceSpec.model_validate({"name": "worker", "command": command})
+
+
+def test_service_command_cannot_inject_a_unit_directive() -> None:
+    """A newline in the command would start a new directive; an
+    ``ExecStartPre=+`` runs as root outside the sandbox."""
+    from ados.plugins.systemd import render_service_unit
+
+    manifest = _service_manifest()
+    for command in (
+        "/bin/worker\nExecStartPre=+/bin/sh -c id",
+        "/bin/worker\rUser=root",
+        "+/bin/sh -c id",
+        "!/bin/worker",
+        "/bin/worker ; /bin/sh",
+        "'unbalanced",
+    ):
+        with pytest.raises(ValueError):
+            render_service_unit(manifest, _spec(command), Path("/var/ados/plugins"))
+
+
+def test_service_command_words_are_quoted_for_systemd() -> None:
+    from ados.plugins.systemd import exec_start_value
+
+    assert exec_start_value("/bin/worker --flag") == "/bin/worker --flag"
+    # Spaces stay inside one argument; specifiers and variables never expand.
+    assert (
+        exec_start_value("/bin/worker 'two words' 100% $HOME")
+        == '/bin/worker "two words" "100%%" "$$HOME"'
+    )
+    assert exec_start_value('/bin/worker "a\\"b"') == '/bin/worker "a\\"b"'
+
+
+def test_service_slice_is_always_the_plugin_slice() -> None:
+    from ados.plugins.errors import ManifestError
+    from ados.plugins.systemd import render_service_unit
+
+    with pytest.raises(ManifestError):
+        ServiceSpec.model_validate(
+            {"name": "worker", "command": "/bin/worker", "slice": "system.slice"}
+        )
+    # Even a spec built without validation renders into the plugin slice.
+    spec = ServiceSpec.model_construct(
+        name="worker", command="/bin/worker", slice="system.slice"
+    )
+    unit = render_service_unit(_service_manifest(), spec, Path("/var/ados/plugins"))
+    assert "Slice=ados-plugins.slice" in unit
+    assert "system.slice" not in unit
+
+
 # ---------------------------------------------------------------------
 # Supervisor lifecycle: declared service units start/stop/remove
 # ---------------------------------------------------------------------

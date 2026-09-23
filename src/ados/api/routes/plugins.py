@@ -48,7 +48,6 @@ from ados.api.routes._plugins_helpers import (
     TOKEN_TTL_SECONDS_DEFAULT,
     authenticate_job_websocket,
     compute_granted_caps_for_token,
-    job_ticket_store,
     mint_agent_capability_token,
     run_job_progress_stream,
     write_sidecar,
@@ -973,33 +972,6 @@ async def get_plugin_readiness(plugin_id: str):
 
 
 # ---------------------------------------------------------------------
-# One-shot WebSocket ticket mint
-# ---------------------------------------------------------------------
-
-
-@router.post("/plugins/jobs/{job_id}/ticket")
-async def mint_install_job_ticket(job_id: str) -> dict:
-    """Issue a one-shot ticket the GCS uses to open the progress WS.
-
-    Browsers cannot set ``X-ADOS-Key`` on a WebSocket handshake, so
-    the previous design fell back to ``?api_key=<pairing_key>`` in
-    the URL — which leaks into DevTools, HAR exports, and any
-    reverse-proxy access log. This route lets the GCS exchange its
-    pairing key (enforced on the REST middleware) for a short-lived
-    random ticket and hand the ticket to ``new WebSocket(url,
-    ["ados-job-ticket", ticket])``. The agent validates and consumes
-    the ticket on the WebSocket handshake.
-
-    Ticket lifetime: 30 s. One-shot: the second connect with the
-    same ticket fails.
-    """
-    if not job_id:
-        return _err(2, "usage_error", "job_id required", 400)
-    ticket, expires_at = await job_ticket_store.issue(job_id)
-    return {"ok": True, "ticket": ticket, "expiresAt": expires_at}
-
-
-# ---------------------------------------------------------------------
 # WebSocket: in-flight install job progress
 # ---------------------------------------------------------------------
 
@@ -1014,13 +986,11 @@ async def stream_install_job(websocket: WebSocket, job_id: str) -> None:
     The Starlette HTTP middleware does not process WebSocket
     handshakes, so the paired-key check runs inline before
     ``accept()``. Native clients can pass ``X-ADOS-Key``; browsers
-    pass a one-shot ticket via the ``ados-job-ticket`` subprotocol.
-    The previous ``?api_key=`` query-string fallback is gone — the
-    URL must not carry the pairing key.
+    pass an ``ados-ws-ticket`` minted for the ``plugins.install_job``
+    scope at ``POST /api/_ws/ticket``. The URL never carries the
+    pairing key.
     """
-    accept_subprotocol = await authenticate_job_websocket(
-        websocket, job_id=job_id
-    )
+    accept_subprotocol = await authenticate_job_websocket(websocket)
     if accept_subprotocol is None:
         return
     if accept_subprotocol:

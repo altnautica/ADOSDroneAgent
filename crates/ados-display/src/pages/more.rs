@@ -1,17 +1,25 @@
 //! More page — overflow menu of secondary actions.
 //!
-//! A short list of operator actions that drill into detail pages or fire a
-//! confirm-dialog action: pair drone, diagnostics, restart agent, about. Each
+//! A short list of operator actions that drill into detail pages or run an
+//! agent action: pair drone, diagnostics, restart agent, about. Restart takes
+//! two taps: the first arms it (the row reads "Tap again to restart") for
+//! [`RESTART_CONFIRM_WINDOW`], the second sends
+//! `POST /api/v1/system/restart-supervisor`. Each
 //! row is a 48 px list row in the shared list styling — a left-aligned label
 //! with a right-pointing chevron — and the four rows fit inside the content
 //! area without a scroll envelope (`4 * 48 = 192` px).
+
+use std::cell::Cell;
+use std::time::{Duration, Instant};
 
 use embedded_graphics::pixelcolor::Rgb888;
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, line, text, Canvas};
-use crate::pages::{blank_panel, HitAction, HitZone, Page, PageContext, PANEL_W};
+use crate::pages::{
+    blank_panel, AgentRequest, Chrome, HitAction, HitZone, Page, PageContext, PanelAction, PANEL_W,
+};
 
 /// Height of one overflow list row.
 pub const ROW_H: i32 = 48;
@@ -21,13 +29,29 @@ const LEFT_PAD: i32 = 12;
 /// Pixel padding from the right edge for the chevron.
 const RIGHT_PAD: i32 = 12;
 
+/// How long a first tap on "Restart agent" stays armed for the confirming tap.
+pub const RESTART_CONFIRM_WINDOW: Duration = Duration::from_secs(5);
+
+/// The restart row's custom key.
+const RESTART_KEY: &str = "more.restart";
+
 /// The overflow menu, registered as `more`.
-pub struct MorePage;
+#[derive(Default)]
+pub struct MorePage {
+    /// When the restart row was armed by a first tap.
+    restart_armed_at: Cell<Option<Instant>>,
+}
 
 impl MorePage {
+    fn restart_armed(&self) -> bool {
+        self.restart_armed_at
+            .get()
+            .is_some_and(|t| t.elapsed() < RESTART_CONFIRM_WINDOW)
+    }
+
     /// The rows, in display order: `(zone key, operator label, drill-into page
-    /// id or action)`. A `None` target marks an action row handled by the
-    /// navigator (the restart confirm dialog).
+    /// id or action)`. A `None` target marks an agent-action row resolved by
+    /// [`Page::on_custom`].
     const ROWS: [(&'static str, &'static str, Option<&'static str>); 4] = [
         ("more.pair", "Pair drone", Some("details.pair_drone")),
         (
@@ -35,7 +59,7 @@ impl MorePage {
             "Diagnostics",
             Some("details.diagnostics"),
         ),
-        ("more.restart", "Restart agent", None),
+        (RESTART_KEY, "Restart agent", None),
         ("more.about", "About", Some("details.about")),
     ];
 }
@@ -45,14 +69,23 @@ impl Page for MorePage {
         "more"
     }
 
+    fn chrome(&self) -> Chrome {
+        Chrome::FullScreen
+    }
+
     fn refresh_hz(&self) -> f32 {
         2.0
     }
 
     fn render(&self, _ctx: &PageContext, palette: &Palette) -> Canvas {
         let mut canvas = blank_panel(palette);
-        for (i, (_key, label, _target)) in Self::ROWS.iter().enumerate() {
+        for (i, (key, label, _target)) in Self::ROWS.iter().enumerate() {
             let row_y = i as i32 * ROW_H;
+            let label = if *key == RESTART_KEY && self.restart_armed() {
+                "Tap again to restart"
+            } else {
+                label
+            };
             draw_list_row(&mut canvas, palette, row_y, label);
         }
         canvas
@@ -70,6 +103,23 @@ impl Page for MorePage {
                 HitZone::new(0, i as i32 * ROW_H, PANEL_W as i32, ROW_H, action)
             })
             .collect()
+    }
+
+    fn on_custom(&self, key: &str, _ctx: &PageContext) -> Option<PanelAction> {
+        if key != RESTART_KEY {
+            return None;
+        }
+        if !self.restart_armed() {
+            self.restart_armed_at.set(Some(Instant::now()));
+            return Some(PanelAction::Repaint);
+        }
+        self.restart_armed_at.set(None);
+        Some(PanelAction::Agent(AgentRequest {
+            method: "POST",
+            path: "/api/v1/system/restart-supervisor",
+            body: None,
+            label: "Restart agent".to_string(),
+        }))
     }
 }
 
@@ -129,7 +179,7 @@ mod tests {
 
     #[test]
     fn more_has_four_row_zones() {
-        let page = MorePage;
+        let page = MorePage::default();
         let ctx = PageContext::default();
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
@@ -145,7 +195,7 @@ mod tests {
 
     #[test]
     fn each_row_paints_a_chevron_and_divider() {
-        let page = MorePage;
+        let page = MorePage::default();
         let c = page.render(&PageContext::default(), &DARK);
         // A divider line sits at the bottom edge of every row.
         for i in 0..4 {
@@ -162,5 +212,28 @@ mod tests {
             }
         }
         assert!(inked, "the row label should ink at least one pixel");
+    }
+
+    /// Restart needs a confirming second tap before it reaches the agent.
+    #[test]
+    fn restart_takes_two_taps() {
+        let page = MorePage::default();
+        let ctx = PageContext::default();
+        assert_eq!(
+            page.on_custom(RESTART_KEY, &ctx),
+            Some(PanelAction::Repaint)
+        );
+        let Some(PanelAction::Agent(req)) = page.on_custom(RESTART_KEY, &ctx) else {
+            panic!("the confirming tap must reach the agent");
+        };
+        assert_eq!(
+            (req.method, req.path),
+            ("POST", "/api/v1/system/restart-supervisor")
+        );
+        // Sent once; the next tap arms again rather than restarting again.
+        assert_eq!(
+            page.on_custom(RESTART_KEY, &ctx),
+            Some(PanelAction::Repaint)
+        );
     }
 }

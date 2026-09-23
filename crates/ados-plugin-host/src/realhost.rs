@@ -39,9 +39,8 @@ use ados_compute::{
 use ados_protocol::offload_link::{read_offload_link_from, OFFLOAD_LINK_SIDECAR};
 use ados_protocol::pairing_posture::{load_pairing, Pairing};
 
+use crate::frame_link::{FrameLink, SendError};
 use crate::host::{not_implemented, HostError, HostResult, HostServices};
-use crate::mavlink_client::MavlinkClient;
-use crate::msp_client::MspClient;
 use crate::vision_client::VisionClient;
 
 // ---------------------------------------------------------------------
@@ -61,9 +60,12 @@ pub const POSE_INJECT_MSG_IDS: &[u32] = &[
     331,   // ODOMETRY
     101,   // GLOBAL_VISION_POSITION_ESTIMATE
     102,   // VISION_POSITION_ESTIMATE
+    103,   // VISION_SPEED_ESTIMATE (external-nav velocity)
     11011, // VISION_POSITION_DELTA
     104,   // VICON_POSITION_ESTIMATE
     138,   // ATT_POS_MOCAP (vicon-equivalent attitude path)
+    232,   // GPS_INPUT (a MAVLink GPS the estimator fuses)
+    113,   // HIL_GPS (the same GPS driver, HIL form)
 ];
 
 /// Component ids the VIO permission covers. Registering one of these requires
@@ -397,6 +399,22 @@ fn decode_value(encoded: &str) -> Option<Value> {
     rmp_serde::from_slice(&bytes).ok()
 }
 
+/// Largest single config value a plugin may store (msgpack-encoded bytes). A
+/// config value is a setting, not a blob store; every write rewrites the whole
+/// persisted file, so an unbounded value is a memory and card-wear lever any
+/// plugin holds without a grant.
+pub const CONFIG_VALUE_MAX_BYTES: usize = 64 * 1024;
+
+/// Largest total a plugin's config may hold across both scopes: every key plus
+/// its encoded value.
+pub const CONFIG_PLUGIN_MAX_BYTES: usize = 1024 * 1024;
+
+/// The msgpack size of `value`. An unencodable value counts as unbounded so the
+/// caps refuse it.
+fn encoded_len(value: &Value) -> usize {
+    rmp_serde::to_vec(value).map_or(usize::MAX, |b| b.len())
+}
+
 impl ConfigStore {
     /// An in-memory store bound to a persistence path. Loads any existing
     /// records so prior plugin config survives a restart; a missing or
@@ -442,7 +460,17 @@ impl ConfigStore {
         default
     }
 
-    fn set(&mut self, plugin_id: &str, key: &str, value: Value, scope: &str, agent_id: &str) {
+    /// Store `value`, refusing a value over [`CONFIG_VALUE_MAX_BYTES`] or a write
+    /// that would take the plugin's whole store over [`CONFIG_PLUGIN_MAX_BYTES`].
+    /// Sizes are the msgpack encoding, the form every read and persist handles.
+    fn set(
+        &mut self,
+        plugin_id: &str,
+        key: &str,
+        value: Value,
+        scope: &str,
+        agent_id: &str,
+    ) -> Result<(), String> {
         // drone scope with no bound agent degrades to global, matching the
         // Python store. With a real agent-id lookup wired (build_host reads the
         // paired device id), a drone-scoped write now isolates per drone.
@@ -451,16 +479,51 @@ impl ConfigStore {
         } else {
             scope
         };
-        if effective_scope == "drone" {
-            self.drone.insert(
-                (plugin_id.to_string(), agent_id.to_string(), key.to_string()),
-                value,
-            );
+        let size = encoded_len(&value);
+        if size > CONFIG_VALUE_MAX_BYTES {
+            return Err(format!(
+                "value for '{key}' is {size} bytes, over the {CONFIG_VALUE_MAX_BYTES}-byte limit"
+            ));
+        }
+        let drone_key = (plugin_id.to_string(), agent_id.to_string(), key.to_string());
+        let global_key = (plugin_id.to_string(), key.to_string());
+        let replaced = if effective_scope == "drone" {
+            self.drone.get(&drone_key)
         } else {
-            self.global
-                .insert((plugin_id.to_string(), key.to_string()), value);
+            self.global.get(&global_key)
+        }
+        .map(|old| key.len() + encoded_len(old))
+        .unwrap_or(0);
+        let total = self.plugin_bytes(plugin_id) - replaced + key.len() + size;
+        if total > CONFIG_PLUGIN_MAX_BYTES {
+            return Err(format!(
+                "config for {plugin_id} would hold {total} bytes, over the \
+                 {CONFIG_PLUGIN_MAX_BYTES}-byte limit"
+            ));
+        }
+        if effective_scope == "drone" {
+            self.drone.insert(drone_key, value);
+        } else {
+            self.global.insert(global_key, value);
         }
         self.persist();
+        Ok(())
+    }
+
+    /// Bytes `plugin_id` holds across both scopes: every key plus its encoded
+    /// value.
+    fn plugin_bytes(&self, plugin_id: &str) -> usize {
+        let drone = self
+            .drone
+            .iter()
+            .filter(|((p, _, _), _)| p == plugin_id)
+            .map(|((_, _, k), v)| k.len() + encoded_len(v));
+        let global = self
+            .global
+            .iter()
+            .filter(|((p, _), _)| p == plugin_id)
+            .map(|((_, k), v)| k.len() + encoded_len(v));
+        drone.chain(global).sum()
     }
 
     /// Flush the whole store to the persistence path (atomic temp-then-rename,
@@ -727,9 +790,19 @@ fn gpio_socket_roundtrip(
 // MAVLink frame classification
 // ---------------------------------------------------------------------
 
-/// Best-effort MAVLink message id from a raw frame. Returns `None` when the frame is
-/// too short to classify.
-fn mavlink_msg_id(frame: &[u8]) -> Option<u32> {
+/// The response for a command that did not reach the router socket:
+/// `sent: false` plus the reason, so a plugin never reads a dropped command as
+/// delivered. A graceful-degrade map like `not_available`, not an error.
+fn send_refused(err: SendError) -> HostResult {
+    Value::Map(vec![
+        (Value::from("sent"), Value::Boolean(false)),
+        (Value::from("reason"), Value::from(err.reason())),
+    ])
+}
+
+/// Best-effort MAVLink message id from a raw frame header. Returns `None` when
+/// the frame is too short to classify.
+pub(crate) fn mavlink_msg_id(frame: &[u8]) -> Option<u32> {
     let stx = *frame.first()?;
     if stx == 0xFD && frame.len() >= 10 {
         // v2: bytes 7..10 little-endian 24-bit msgid.
@@ -751,8 +824,9 @@ pub(crate) enum PoseScan {
     Clear,
     /// At least one frame carries a pose-injection message id.
     RequiresCap,
-    /// The buffer does not consist purely of whole frames, so it cannot be
-    /// classified. Refused rather than guessed — see [`scan_pose_inject`].
+    /// The buffer is not a run of whole frames that each decode on their own,
+    /// so it cannot be classified. Refused rather than guessed — see
+    /// [`scan_pose_inject`].
     Unclassifiable,
 }
 
@@ -768,30 +842,40 @@ pub(crate) enum PoseScan {
 /// description names that as a fly-away risk, and the whole buffer fits
 /// hundreds of pose frames.
 ///
-/// The walk is header-only ([`ados_protocol::aux_mux::frame_len`]), so a message
-/// id this build's dialect does not know still yields a correct boundary and
-/// cannot desynchronise the rest of the batch.
+/// The walk splits on header lengths ([`ados_protocol::aux_mux::split_frames`]),
+/// then every piece must decode as exactly one frame of the dialect
+/// ([`ados_protocol::mavlink::decode_exact_frame`]): right length, known id,
+/// payload within the message, matching checksum, and no incompat flag beyond
+/// signing. The reason is the receiver. The flight controller's parser drops a
+/// frame it rejects after a byte or two and rescans the rest for a start byte,
+/// so any frame it would reject is a container: a benign-looking outer header
+/// with a foreign incompat flag or a bad checksum can carry a whole pose frame
+/// in its payload, and the FC would fuse the inner one. Only a frame the FC
+/// consumes whole is classified by its own id; everything else is refused.
 ///
-/// A trailing partial frame is [`PoseScan::Unclassifiable`] rather than ignored.
-/// The splitter stops at the first incomplete frame and returns what was whole,
-/// but the router forwards the buffer INCLUDING that remainder — so treating an
-/// unparseable tail as empty would reopen the same hole one truncation further
-/// along. Refusing is also the honest answer: a buffer that is not whole frames
-/// is malformed on its own terms.
+/// A trailing partial frame is [`PoseScan::Unclassifiable`] for the same reason:
+/// the router forwards the buffer INCLUDING that remainder, so treating an
+/// unparseable tail as empty would reopen the hole one truncation further along.
 pub(crate) fn scan_pose_inject(msg_bytes: &[u8]) -> PoseScan {
     let frames = ados_protocol::aux_mux::split_frames(msg_bytes);
     let consumed: usize = frames.iter().map(|f| f.len()).sum();
     if consumed != msg_bytes.len() {
         return PoseScan::Unclassifiable;
     }
-    if frames
-        .iter()
-        .filter_map(|f| mavlink_msg_id(f))
-        .any(|id| POSE_INJECT_MSG_IDS.contains(&id))
-    {
-        return PoseScan::RequiresCap;
+    let mut requires_cap = false;
+    for frame in frames {
+        if ados_protocol::mavlink::decode_exact_frame(frame).is_err() {
+            return PoseScan::Unclassifiable;
+        }
+        // The frame decoded whole, so its header id is the message it carries.
+        let id = mavlink_msg_id(frame).unwrap_or(u32::MAX);
+        requires_cap |= POSE_INJECT_MSG_IDS.contains(&id);
     }
-    PoseScan::Clear
+    if requires_cap {
+        PoseScan::RequiresCap
+    } else {
+        PoseScan::Clear
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1248,12 +1332,13 @@ pub struct RealHost {
     drivers: Mutex<DriverRegistry>,
     cameras: Mutex<CameraClaimTracker>,
     config: Mutex<ConfigStore>,
-    mavlink: Option<Arc<MavlinkClient>>,
-    /// The MSP byte-plane client (Betaflight / iNav / KISS FC). `None` until the
-    /// supervisor wires a connection to `/run/ados/msp.sock`; `msp_send` /
-    /// `msp_subscribe_stream` return the not-available posture while unwired,
-    /// exactly like the MAVLink slot.
-    msp: Option<Arc<MspClient>>,
+    /// The MAVLink router link. `None` only on a host built without one (tests);
+    /// the daemon always wires it, and a router that is down shows up as
+    /// `sent: false` with reason `disconnected`, not as a missing slot.
+    mavlink: Option<Arc<FrameLink>>,
+    /// The MSP router link (Betaflight / iNav / KISS FC), wired like the
+    /// MAVLink link.
+    msp: Option<Arc<FrameLink>>,
     vision: Option<Arc<VisionClient>>,
     /// The paired compute node's offload client. `None` until the supervisor
     /// wires a discovered/paired node; the `compute_*` methods return
@@ -1495,16 +1580,16 @@ impl RealHost {
         self
     }
 
-    /// Wire the MAVLink client (builder style).
-    pub fn with_mavlink(mut self, mavlink: Arc<MavlinkClient>) -> Self {
+    /// Wire the MAVLink router link (builder style).
+    pub fn with_mavlink(mut self, mavlink: Arc<FrameLink>) -> Self {
         self.mavlink = Some(mavlink);
         self
     }
 
-    /// Wire the MSP byte-plane client (builder style). When wired, `msp.send`
+    /// Wire the MSP router link (builder style). When wired, `msp.send`
     /// forwards raw bytes to the FC and `msp_subscribe_stream` hands out the
     /// FC->host fanout; when unwired both return the not-available posture.
-    pub fn with_msp(mut self, msp: Arc<MspClient>) -> Self {
+    pub fn with_msp(mut self, msp: Arc<FrameLink>) -> Self {
         self.msp = Some(msp);
         self
     }
@@ -1851,7 +1936,7 @@ impl HostServices for RealHost {
                 }
                 PoseScan::Unclassifiable => {
                     return Err(HostError::Rpc(
-                        "msg_bytes is not a whole number of MAVLink frames".to_string(),
+                        "msg_bytes is not a run of whole, valid MAVLink frames".to_string(),
                     ));
                 }
             }
@@ -1889,9 +1974,9 @@ impl HostServices for RealHost {
                 (Value::from("method"), Value::from("mavlink.send")),
             ])),
             Some(client) => {
-                // Best-effort send; failures are swallowed by send_bytes, so the
-                // success shape stands, matching the Python slice.
-                client.send_bytes(&msg_bytes);
+                if let Err(e) = client.send(&msg_bytes) {
+                    return Ok(send_refused(e));
+                }
                 Ok(Value::Map(vec![
                     (Value::from("sent"), Value::Boolean(true)),
                     (
@@ -1907,7 +1992,7 @@ impl HostServices for RealHost {
         // The MSP byte plane is opaque: validate that msg_bytes are bytes and
         // non-empty, then forward raw. No pose-inject scan or component gate (MSP
         // carries no such frames); the dispatch-level msp.write cap is the whole
-        // gate. Best-effort send, matching mavlink.send.
+        // gate. Failures are reported, matching mavlink.send.
         let msg_value = arg_owned(args, "msg_bytes");
         let msg_bytes = match &msg_value {
             Value::Array(_) | Value::Binary(_) => {
@@ -1924,7 +2009,9 @@ impl HostServices for RealHost {
                 (Value::from("method"), Value::from("msp.send")),
             ])),
             Some(client) => {
-                client.send_bytes(&msg_bytes);
+                if let Err(e) = client.send(&msg_bytes) {
+                    return Ok(send_refused(e));
+                }
                 Ok(Value::Map(vec![
                     (Value::from("sent"), Value::Boolean(true)),
                     (
@@ -1996,9 +2083,9 @@ impl HostServices for RealHost {
                 (Value::from("method"), Value::from("mavlink.tunnel.send")),
             ])),
             Some(client) => {
-                // Best-effort send (send_bytes swallows a full queue / write
-                // error, matching mavlink.send), so the success shape stands.
-                client.send_bytes(&frame);
+                if let Err(e) = client.send(&frame) {
+                    return Ok(send_refused(e));
+                }
                 Ok(Value::Map(vec![
                     (Value::from("sent"), Value::Boolean(true)),
                     (
@@ -2306,7 +2393,8 @@ impl HostServices for RealHost {
         self.config
             .lock()
             .expect("config mutex poisoned")
-            .set(plugin_id, key, value, scope, &agent_id);
+            .set(plugin_id, key, value, scope, &agent_id)
+            .map_err(HostError::Rpc)?;
         Ok(Value::Map(vec![
             (Value::from("set"), Value::Boolean(true)),
             (Value::from("scope"), Value::from(scope)),
@@ -2656,9 +2744,9 @@ impl HostServices for RealHost {
                 ),
             ])),
             Some(client) => {
-                // Best-effort send (send_bytes swallows a full queue / write
-                // error, matching mavlink.send), so the success shape stands.
-                client.send_bytes(&frame);
+                if let Err(e) = client.send(&frame) {
+                    return Ok(send_refused(e));
+                }
                 Ok(Value::Map(vec![
                     (Value::from("sent"), Value::Boolean(true)),
                     (
@@ -2712,7 +2800,9 @@ impl HostServices for RealHost {
                 ),
             ])),
             Some(client) => {
-                client.send_bytes(&frame);
+                if let Err(e) = client.send(&frame) {
+                    return Ok(send_refused(e));
+                }
                 Ok(Value::Map(vec![
                     (Value::from("sent"), Value::Boolean(true)),
                     (
@@ -3437,7 +3527,7 @@ impl RealHost {
         self.config
             .lock()
             .expect("config mutex poisoned")
-            .set(plugin_id, key, value, scope, &agent_id);
+            .set(plugin_id, key, value, scope, &agent_id)?;
         let effective = if scope == "drone" && agent_id.is_empty() {
             "global"
         } else {
@@ -3505,23 +3595,21 @@ fn sorted_formats() -> Vec<&'static str> {
 mod tests {
     use super::*;
 
-    /// A whole, well-formed v1 frame carrying `msgid` and an empty payload.
-    ///
-    /// Eight bytes, because the gate now classifies the WHOLE buffer and a
-    /// buffer that is not a whole number of frames is refused. The six-byte
-    /// stubs these tests used to carry were enough to read a message id out of
-    /// but were not frames, and building real ones here is what lets the gate
-    /// fail closed on a truncated tail — the case an attacker would otherwise
-    /// use to smuggle a pose frame across two sends.
+    /// A whole v1 frame of the dialect message `msgid`, default fields, with a
+    /// real checksum. The gate classifies the WHOLE buffer and refuses anything
+    /// a flight controller would not consume whole, so these fixtures are
+    /// genuine frames rather than header stubs.
     fn v1_frame(msgid: u8) -> Vec<u8> {
-        vec![0xFE, 0, 0, 0, 0, msgid, 0, 0]
+        use ados_protocol::mavlink::{MavHeader, MavMessage, Message};
+        let msg = MavMessage::default_message_from_id(u32::from(msgid)).expect("dialect id");
+        ados_protocol::mavlink::serialize_v1(MavHeader::default(), &msg).expect("serialize")
     }
 
-    /// A whole, well-formed v2 frame carrying `msgid` and an empty payload.
-    /// Twelve bytes: ten of header, then the two checksum bytes.
+    /// A whole v2 frame of the dialect message `msgid`, default fields.
     fn v2_frame(msgid: u32) -> Vec<u8> {
-        let id = msgid.to_le_bytes();
-        vec![0xFD, 0, 0, 0, 0, 0, 0, id[0], id[1], id[2], 0, 0]
+        use ados_protocol::mavlink::{MavHeader, MavMessage, Message};
+        let msg = MavMessage::default_message_from_id(msgid).expect("dialect id");
+        ados_protocol::mavlink::serialize_v2(MavHeader::default(), &msg).expect("serialize")
     }
 
     fn caps(items: &[&str]) -> BTreeSet<String> {
@@ -3839,8 +3927,10 @@ mod tests {
     #[test]
     fn config_drone_scope_shadows_global_and_degrades_when_unbound() {
         let mut cfg = ConfigStore::default();
-        cfg.set("p", "k", Value::from("global-v"), "global", "");
-        cfg.set("p", "k", Value::from("drone-v"), "drone", "agent-1");
+        cfg.set("p", "k", Value::from("global-v"), "global", "")
+            .unwrap();
+        cfg.set("p", "k", Value::from("drone-v"), "drone", "agent-1")
+            .unwrap();
         // With agent bound, drone scope wins.
         assert_eq!(
             cfg.get("p", "k", "agent-1", Value::Nil).as_str(),
@@ -3849,7 +3939,8 @@ mod tests {
         // Without an agent, falls back to global.
         assert_eq!(cfg.get("p", "k", "", Value::Nil).as_str(), Some("global-v"));
         // drone scope with no agent degrades to global.
-        cfg.set("p", "g", Value::from("via-degrade"), "drone", "");
+        cfg.set("p", "g", Value::from("via-degrade"), "drone", "")
+            .unwrap();
         assert_eq!(
             cfg.get("p", "g", "", Value::Nil).as_str(),
             Some("via-degrade")
@@ -3872,8 +3963,9 @@ mod tests {
         // value and the request default — matching the _MISSING sentinel, which
         // treats a stored None as present.
         let mut cfg = ConfigStore::default();
-        cfg.set("p", "k", Value::from("global-v"), "global", "");
-        cfg.set("p", "k", Value::Nil, "drone", "agent-1");
+        cfg.set("p", "k", Value::from("global-v"), "global", "")
+            .unwrap();
+        cfg.set("p", "k", Value::Nil, "drone", "agent-1").unwrap();
         let got = cfg.get("p", "k", "agent-1", Value::from("default-v"));
         assert!(matches!(got, Value::Nil));
     }
@@ -3983,7 +4075,7 @@ mod tests {
         let args = map(&[("msg_bytes", Value::Binary(buf))]);
         assert_eq!(
             err_body(host.mavlink_send("p", &args, &caps(&["mavlink.write"]))),
-            "msg_bytes is not a whole number of MAVLink frames"
+            "msg_bytes is not a run of whole, valid MAVLink frames"
         );
     }
 
@@ -4023,6 +4115,87 @@ mod tests {
         }
         assert_eq!(scan_pose_inject(&[0xFD, 9]), PoseScan::Unclassifiable);
         assert_eq!(scan_pose_inject(b"not a frame"), PoseScan::Unclassifiable);
+    }
+
+    #[test]
+    fn estimator_velocity_and_gps_inputs_demand_the_pose_capability() {
+        // External-nav velocity and the MAVLink GPS driver's two inputs feed the
+        // position solution as directly as a vision pose does.
+        for id in [103u32, 232, 113] {
+            assert_eq!(
+                scan_pose_inject(&v2_frame(id)),
+                PoseScan::RequiresCap,
+                "message id {id} must demand the capability"
+            );
+        }
+    }
+
+    /// A frame the flight controller would reject partway is a container: its
+    /// parser drops the outer frame after the incompat byte and rescans the
+    /// payload, so a pose frame inside it reaches the estimator. Only frames
+    /// consumed whole are classified by their own id.
+    #[test]
+    fn a_pose_frame_hidden_in_a_rejected_outer_frame_is_refused() {
+        let inner = v2_frame(331);
+        let mut outer = vec![0xFD, inner.len() as u8, 0x02, 0, 0, 1, 1, 0, 0, 0];
+        outer.extend_from_slice(&inner);
+        outer.extend_from_slice(&[0, 0]);
+        assert_eq!(scan_pose_inject(&outer), PoseScan::Unclassifiable);
+
+        // The same container with no foreign flag still fails: a heartbeat
+        // cannot carry that payload, and its checksum does not match.
+        outer[2] = 0;
+        assert_eq!(scan_pose_inject(&outer), PoseScan::Unclassifiable);
+
+        // A well-formed frame with a corrupted checksum is refused too.
+        let mut bad = v2_frame(0);
+        let last = bad.len() - 1;
+        bad[last] ^= 0xFF;
+        assert_eq!(scan_pose_inject(&bad), PoseScan::Unclassifiable);
+    }
+
+    #[test]
+    fn config_set_refuses_an_oversized_value() {
+        let host = RealHost::new();
+        let big = map(&[
+            ("key", Value::from("k")),
+            ("value", Value::Binary(vec![0u8; CONFIG_VALUE_MAX_BYTES])),
+        ]);
+        let err = err_body(host.config_set("p", &big));
+        assert!(err.contains("over the 65536-byte limit"), "{err}");
+        // Nothing was stored.
+        let got = ok_map(host.config_get("p", &map(&[("key", Value::from("k"))])));
+        assert_eq!(field(&got, "value"), Some(&Value::Nil));
+        // The on-box control path is bounded the same way.
+        assert!(host
+            .apply_config_set(
+                "p",
+                "k",
+                Value::Binary(vec![0u8; CONFIG_VALUE_MAX_BYTES]),
+                "global"
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn config_set_bounds_each_plugin_store_without_touching_others() {
+        let host = RealHost::new();
+        let chunk = || Value::Binary(vec![0u8; 60 * 1024]);
+        let set = |plugin: &str, key: &str| {
+            host.config_set(
+                plugin,
+                &map(&[("key", Value::from(key)), ("value", chunk())]),
+            )
+        };
+        for i in 0..17 {
+            ok_map(set("p", &format!("k{i}")));
+        }
+        let err = err_body(set("p", "k17"));
+        assert!(err.contains("over the 1048576-byte limit"), "{err}");
+        // Rewriting an existing key replaces its bytes rather than adding them.
+        ok_map(set("p", "k0"));
+        // Another plugin has its own budget.
+        ok_map(set("q", "k0"));
     }
 
     #[test]
@@ -5560,20 +5733,24 @@ gcs:
         // With a live mavlink client wired to a stub router socket, the handler
         // builds the SET_POSITION_TARGET_LOCAL_NED (84) frame and writes it; the
         // router side reads it back and it decodes to the same message + fields.
-        use crate::mavlink_client::{MavlinkClient, MAVLINK_BROADCAST_DEPTH};
+        use crate::frame_link::{FrameLink, LINK_DEPTH};
         use ados_protocol::ipc::IpcBroadcast;
         use ados_protocol::mavlink::{ardupilotmega, parse_v2, MavMessage};
 
         let mut sock = std::env::temp_dir();
         sock.push(format!("ados-realhost-sp-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
-        let (_server, inbound) =
-            IpcBroadcast::bind(&sock, MAVLINK_BROADCAST_DEPTH, false, Some(16))
-                .await
-                .unwrap();
+        let (_server, inbound) = IpcBroadcast::bind(&sock, LINK_DEPTH, false, Some(16))
+            .await
+            .unwrap();
         let mut inbound = inbound.expect("inbound channel requested");
 
-        let client = std::sync::Arc::new(MavlinkClient::connect(&sock).await.unwrap());
+        let client = std::sync::Arc::new(FrameLink::spawn(&sock, Box::new(Vec::new)));
+        assert!(
+            client
+                .connected_within(std::time::Duration::from_secs(2))
+                .await
+        );
         let host = RealHost::new().with_mavlink(client);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -5608,20 +5785,24 @@ gcs:
     async fn guided_setpoint_global_int_builds_and_decodes() {
         // A global-int setpoint with a commanded position decodes back to msg 86
         // with the scaled lat/lon and altitude intact.
-        use crate::mavlink_client::{MavlinkClient, MAVLINK_BROADCAST_DEPTH};
+        use crate::frame_link::{FrameLink, LINK_DEPTH};
         use ados_protocol::ipc::IpcBroadcast;
         use ados_protocol::mavlink::{parse_v2, MavMessage};
 
         let mut sock = std::env::temp_dir();
         sock.push(format!("ados-realhost-sp-gi-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
-        let (_server, inbound) =
-            IpcBroadcast::bind(&sock, MAVLINK_BROADCAST_DEPTH, false, Some(16))
-                .await
-                .unwrap();
+        let (_server, inbound) = IpcBroadcast::bind(&sock, LINK_DEPTH, false, Some(16))
+            .await
+            .unwrap();
         let mut inbound = inbound.expect("inbound channel requested");
 
-        let client = std::sync::Arc::new(MavlinkClient::connect(&sock).await.unwrap());
+        let client = std::sync::Arc::new(FrameLink::spawn(&sock, Box::new(Vec::new)));
+        assert!(
+            client
+                .connected_within(std::time::Duration::from_secs(2))
+                .await
+        );
         let host = RealHost::new().with_mavlink(client);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -5732,20 +5913,24 @@ gcs:
         // builds the TUNNEL (385) frame and writes it; the router side reads it
         // back, the classifier recovers the private payload_type off the wire,
         // and the application payload round-trips byte-for-byte.
-        use crate::mavlink_client::{MavlinkClient, MAVLINK_BROADCAST_DEPTH};
+        use crate::frame_link::{FrameLink, LINK_DEPTH};
         use ados_protocol::ipc::IpcBroadcast;
         use ados_protocol::mavlink::{tunnel_payload_type, MSG_ID_TUNNEL};
 
         let mut sock = std::env::temp_dir();
         sock.push(format!("ados-realhost-tun-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&sock);
-        let (_server, inbound) =
-            IpcBroadcast::bind(&sock, MAVLINK_BROADCAST_DEPTH, false, Some(16))
-                .await
-                .unwrap();
+        let (_server, inbound) = IpcBroadcast::bind(&sock, LINK_DEPTH, false, Some(16))
+            .await
+            .unwrap();
         let mut inbound = inbound.expect("inbound channel requested");
 
-        let client = std::sync::Arc::new(MavlinkClient::connect(&sock).await.unwrap());
+        let client = std::sync::Arc::new(FrameLink::spawn(&sock, Box::new(Vec::new)));
+        assert!(
+            client
+                .connected_within(std::time::Duration::from_secs(2))
+                .await
+        );
         let host = RealHost::new().with_mavlink(client);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 

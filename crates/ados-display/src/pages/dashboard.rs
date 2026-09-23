@@ -33,9 +33,9 @@ use crate::graphics::primitives::{fill_rect, text, Canvas};
 use crate::graphics::qr::render_qr;
 use crate::graphics::status_dot::draw_dot;
 use crate::pages::{
-    blank_panel, tile_rects, CloudCtx, DroneCtx, HardwareItem, HitAction, HitZone, LinkCtx,
-    MeshCtx, NetworkCtx, Page, PageContext, PairingCtx, RadioCtx, RoleCtx, CONTENT_H, CONTENT_Y,
-    PANEL_W,
+    blank_panel, tile_rects, ArmState, Chrome, CloudCtx, DroneCtx, HardwareItem, HitAction,
+    HitZone, LinkCtx, MeshCtx, NetworkCtx, Page, PageContext, PairingCtx, RadioCtx, RoleCtx,
+    CONTENT_H, CONTENT_Y, PANEL_W,
 };
 use crate::widgets::{bottom_bar_zones, draw_big_number, draw_bottom_bar, draw_tile, draw_top_bar};
 
@@ -64,6 +64,10 @@ impl DashboardPage {
 impl Page for DashboardPage {
     fn id(&self) -> &'static str {
         "dashboard"
+    }
+
+    fn chrome(&self) -> Chrome {
+        Chrome::Tabbed
     }
 
     fn refresh_hz(&self) -> f32 {
@@ -314,6 +318,24 @@ fn draw_radio_link_tile(
     }
     draw_topology_badge(canvas, palette, chip_anchor_x, y + 3, &topology);
 
+    // A stale snapshot carries no readings (the context nulls them); say why the
+    // tile is empty rather than leaving a blank that reads as a dead radio.
+    if link.is_stale() {
+        let chip_font = LoadedFont::new(FontFace::SansBold, 10);
+        let label = "STALE";
+        let (cw, ch) = chip_font.text_size(label);
+        let cx0 = bx + bw - cw as i32 - 6;
+        fill_rect(
+            canvas,
+            cx0 - 3,
+            by + 4,
+            cx0 + cw as i32 + 2,
+            by + 4 + ch as i32 + 3,
+            palette.status_warning,
+        );
+        text(canvas, &chip_font, label, cx0, by + 5, palette.bg_primary);
+    }
+
     // Big RSSI value with threshold color.
     let (rssi_text, rssi_color, rssi_unit) = match rssi {
         None => ("— dBm".to_string(), palette.text_tertiary, ""),
@@ -527,18 +549,18 @@ fn draw_drone_tile(
     }
 
     // Mode + arm row.
-    let armed = fc_mode
-        .map(|m| m.eq_ignore_ascii_case("ARMED"))
-        .unwrap_or(false)
-        || drone.armed == Some(true);
-    let arm_label = if armed { "ARMED" } else { "DISARMED" };
-    let arm_color = if armed {
-        palette.status_success
-    } else {
-        palette.text_secondary
-    };
+    // Arm state only as reported: with no report it reads `ARM —`, never
+    // DISARMED, since an unreported vehicle may be armed and flying.
+    let arm = ArmState::from_report(drone.armed);
     let arm_font = LoadedFont::new(FontFace::SansBold, 14);
-    text(canvas, &arm_font, arm_label, bx, by + 4, arm_color);
+    text(
+        canvas,
+        &arm_font,
+        arm.label(),
+        bx,
+        by + 4,
+        arm.color(palette),
+    );
     if let Some(mode) = fc_mode {
         if !mode.is_empty() {
             let mode_font = LoadedFont::new(FontFace::MonoBold, 16);

@@ -8,16 +8,20 @@
 //! Routing
 //! -------
 //!
-//! * A tab-bar tap (in the bottom 44 px strip) maps the x position to one of the
-//!   five tabs (dashboard, video, settings, link-stats, channel-hops), pops any
-//!   open modal, and switches to that tab's root page.
-//! * A content-area tap is offset into page-local coordinates (subtract the
-//!   32 px top chrome) and tested against the active page's
+//! * Every page names its [`crate::pages::Chrome`]. A tabbed page paints the
+//!   32 px top bar and the 44 px bottom tab bar: a tap in the bottom strip maps
+//!   its x position to one of the five tabs (dashboard, video, settings,
+//!   link-stats, channel-hops), and any other tap is shifted into the page's
+//!   content-local frame (subtract the top bar). A full-screen page (detail
+//!   pages, the overflow menu, the plugin page) paints the whole panel with no
+//!   tab bar, so its zones are panel-global and the bottom strip is page area.
+//! * The shifted tap is tested against the active page's
 //!   [`crate::pages::HitZone`]s. The first zone that contains the point has its
 //!   [`crate::pages::HitAction`] dispatched: `GoTab` switches tabs, `OpenDetail`
-//!   pushes a detail page as a modal, `Back` pops the modal stack, and `Custom`
-//!   is handed back to the caller as a [`Dispatch::Custom`] so the owning surface
-//!   (settings rows, sliders, list rows) can act on it.
+//!   pushes a detail page as a modal, `Back` pops the modal stack (or returns a
+//!   non-tab route to the dashboard), and `Custom` is handed back to the caller
+//!   as a [`Dispatch::Custom`], which resolves it through
+//!   [`PageNavigator::custom_action`].
 //! * The four front-panel buttons resolve their action through the
 //!   [`ados_hid::buttons`] mapping; the navigator maps `back` to a modal pop,
 //!   `cycle_screen` to the next tab, and the menu / pairing / network / qr
@@ -42,7 +46,7 @@ use ados_hid::touch::{GestureKind, TouchGesture};
 
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
-use crate::pages::{HitAction, Page, PageContext, BOTTOM_BAR_H, PANEL_H, PANEL_W, TOP_BAR_H};
+use crate::pages::{HitAction, Page, PageContext, PanelAction, BOTTOM_BAR_H, PANEL_H, PANEL_W};
 use crate::sidecar::{self, LcdState, LCD_PAGE_REQUEST_PATH, LCD_STATE_PATH};
 
 /// The route the navigator falls back to when no page is persisted (and the
@@ -286,40 +290,45 @@ impl PageNavigator {
 
     /// Route one classified touch gesture against the live [`PageContext`] (some
     /// pages, e.g. the settings list, lay their hit zones out from context).
-    /// Taps in the bottom 44 px strip switch tabs; other taps test the active
-    /// page's hit zones. Non-tap gestures (swipe / drag / long press) are tested
-    /// against the active page's zones too so a page that wants drag-on-a-zone
-    /// (slider thumb, list scroll) sees them via the returned
+    /// On a tabbed page a tap in the bottom 44 px strip switches tabs; every
+    /// other gesture is tested against the active page's zones in the page's own
+    /// frame. Non-tap gestures (swipe / drag / long press) are tested too so a
+    /// page that wants drag-on-a-zone sees them via the returned
     /// [`Dispatch::Custom`]. Returns what the event resolved to.
     pub fn on_touch(&mut self, ctx: &PageContext, gesture: &TouchGesture, now_ms: i64) -> Dispatch {
         let start_x = gesture.start_x;
         let start_y = gesture.start_y;
 
-        // Tab-bar band: a tap in the bottom strip routes to a tab.
-        if start_y >= TAB_BAR_TOP_Y && gesture.kind == GestureKind::Tap {
+        // Tab-bar band: only a page that paints the tab bar owns it.
+        let chrome = self.current_page().chrome();
+        if chrome.has_tab_bar() && start_y >= TAB_BAR_TOP_Y && gesture.kind == GestureKind::Tap {
             return self.route_tab_tap(start_x, now_ms);
         }
 
-        // Content band: translate to page-local coordinates by dropping the top
-        // chrome offset, then dispatch to the first zone that contains the point.
-        let local_x = start_x;
-        let local_y = start_y - TOP_BAR_H as i32;
-        // A tap above the content region (in the top status bar) is inert.
-        if local_y < 0 {
-            return Dispatch::None;
-        }
-        // Resolve the first zone that contains the point, cloning the action so
-        // the immutable page borrow ends before the mutable dispatch.
-        let action = self
-            .current_page()
-            .hit_zones(ctx)
-            .into_iter()
-            .find(|z| z.contains(local_x, local_y))
-            .map(|z| z.action);
-        match action {
+        match self.zone_at(ctx, start_x, start_y) {
             Some(action) => self.dispatch_action(action, now_ms),
             None => Dispatch::None,
         }
+    }
+
+    /// The action of the first zone of the current page under the panel-global
+    /// point `(x, y)`, after shifting it into the page's frame. A point above a
+    /// tabbed page's content region (the top status bar) resolves to nothing.
+    pub fn zone_at(&self, ctx: &PageContext, x: i32, y: i32) -> Option<HitAction> {
+        let page = self.current_page();
+        let local_y = y - page.chrome().origin_y();
+        if local_y < 0 {
+            return None;
+        }
+        page.hit_zones(ctx)
+            .into_iter()
+            .find(|z| z.contains(x, local_y))
+            .map(|z| z.action)
+    }
+
+    /// Resolve a [`Dispatch::Custom`] key against the page that emitted it.
+    pub fn custom_action(&self, key: &str, ctx: &PageContext) -> Option<PanelAction> {
+        self.current_page().on_custom(key, ctx)
     }
 
     /// Map an x position in the tab bar to a tab and switch to it, popping any
@@ -360,13 +369,7 @@ impl PageNavigator {
                     Dispatch::None
                 }
             }
-            HitAction::Back => {
-                if self.pop_modal().is_some() {
-                    Dispatch::ModalChanged(self.current_page_id().to_string())
-                } else {
-                    Dispatch::None
-                }
-            }
+            HitAction::Back => self.back(),
             HitAction::Custom(key) => Dispatch::Custom(key),
         }
     }
@@ -383,14 +386,8 @@ impl PageNavigator {
             return Dispatch::None;
         };
         match action {
-            // Back: pop one modal; on the tab root it is inert.
-            "back" => {
-                if self.pop_modal().is_some() {
-                    Dispatch::ModalChanged(self.current_page_id().to_string())
-                } else {
-                    Dispatch::None
-                }
-            }
+            // Back: pop one modal, or leave a non-tab route for the dashboard.
+            "back" => self.back(),
             // Carousel-style next: advance to the next tab in bar order, wrapping.
             "cycle_screen" => {
                 let next = self.next_tab_id();
@@ -431,6 +428,19 @@ impl PageNavigator {
             // to the caller as a named action.
             other => Dispatch::Custom(other.to_string()),
         }
+    }
+
+    /// Pop one modal. With no modal open, a non-tab route (the overflow menu or
+    /// the plugin page, reached by a button or a remote page request) returns to
+    /// the dashboard, so a painted Back is never inert. On a tab root it is.
+    fn back(&mut self) -> Dispatch {
+        if self.pop_modal().is_some() {
+            return Dispatch::ModalChanged(self.current_page_id().to_string());
+        }
+        if !TAB_PAGE_IDS.contains(&self.active_page_id.as_str()) && self.go(DEFAULT_PAGE_ID) {
+            return Dispatch::RouteChanged(DEFAULT_PAGE_ID.to_string());
+        }
+        Dispatch::None
     }
 
     /// The tab id one step right of the active tab (wraps). When the active page
@@ -587,7 +597,7 @@ mod tests {
             Box::new(SettingsPage),
             Box::new(LinkStatsPage),
             Box::new(ChannelHopsPage),
-            Box::new(MorePage),
+            Box::new(MorePage::default()),
             Box::new(RadioLinkDetailPage::new()),
             Box::new(UplinkDetailPage),
             Box::new(DroneDetailPage),
@@ -725,15 +735,16 @@ mod tests {
     }
 
     #[test]
-    fn tab_tap_pops_modal_back_to_root() {
+    fn bottom_strip_tap_does_not_escape_a_full_screen_page() {
         let dir = tempfile::tempdir().unwrap();
         let mut n = nav(dir.path());
         let ctx = PageContext::default();
         n.push_modal("details.radio_link");
-        // A tab tap from inside a drilldown returns to the tab root.
-        let d = n.on_touch(&ctx, &tap(10, 300), 1000); // band 0 -> dashboard
-        assert_eq!(d, Dispatch::RouteChanged("dashboard".to_string()));
-        assert!(n.modal_stack().is_empty());
+        // A detail page is full-screen: the bottom strip is page area, so a tap
+        // there must not switch tabs or pop the modal.
+        let d = n.on_touch(&ctx, &tap(10, 300), 1000);
+        assert_eq!(d, Dispatch::None);
+        assert_eq!(n.current_page_id(), "details.radio_link");
     }
 
     #[test]
@@ -754,26 +765,123 @@ mod tests {
         let mut n = nav(dir.path());
         let ctx = PageContext::default();
         n.push_modal("details.radio_link");
-        // The detail Back chip lives at page-local (8,8,40,32). Tap its centre.
-        let d = n.on_touch(&ctx, &tap(8 + 20, 32 + 8 + 16), 1000);
+        // A detail page is full-screen: the Back chevron is painted at panel
+        // (8,8,40,32), so its centre is (28,24).
+        let d = n.on_touch(&ctx, &tap(28, 24), 1000);
         assert_eq!(d, Dispatch::ModalChanged("dashboard".to_string()));
         assert!(n.modal_stack().is_empty());
+    }
+
+    #[test]
+    fn a_full_screen_page_owns_the_bottom_strip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = nav(dir.path());
+        let mut ctx = PageContext::default();
+        ctx.paired_drone.device_id = Some("drone-a".to_string());
+        n.push_modal("details.pair_drone");
+        // The Unpair button sits in the bottom strip; a tap on it is the button,
+        // not a tab switch.
+        let zone = n
+            .current_page()
+            .hit_zones(&ctx)
+            .into_iter()
+            .find(|z| z.action == HitAction::Custom("pair.unpair".to_string()))
+            .expect("paired page paints Unpair");
+        let d = n.on_touch(&ctx, &tap(zone.x + zone.w / 2, zone.y + zone.h / 2), 1000);
+        assert_eq!(d, Dispatch::Custom("pair.unpair".to_string()));
+        assert_eq!(n.current_page_id(), "details.pair_drone");
+    }
+
+    #[test]
+    fn more_rows_open_the_row_that_is_painted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = nav(dir.path());
+        let ctx = PageContext::default();
+        n.go("more");
+        // Row 1 (Diagnostics) is painted at panel y 48..96; its middle is 72.
+        let d = n.on_touch(&ctx, &tap(200, 72), 1000);
+        assert_eq!(d, Dispatch::ModalChanged("details.diagnostics".to_string()));
+    }
+
+    #[test]
+    fn back_from_a_non_tab_route_returns_to_the_dashboard() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = nav(dir.path());
+        let ctx = PageContext::default();
+        n.go("plugin");
+        let d = n.on_touch(&ctx, &tap(28, 24), 1000);
+        assert_eq!(d, Dispatch::RouteChanged("dashboard".to_string()));
+    }
+
+    /// Every zone of every registered page is tapped at its centre, in panel
+    /// coordinates, and must resolve to itself; and every zone must cover
+    /// painted pixels, so a zone cannot drift away from the control it names.
+    #[test]
+    fn every_zone_resolves_where_its_control_is_painted() {
+        use crate::graphics::palette::DARK;
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = nav(dir.path());
+        let mut ctx = PageContext::default();
+        ctx.paired_drone.device_id = Some("drone-a".to_string());
+        ctx.link.tx_power_dbm = Some(10);
+        ctx.link.state = Some("connected".to_string());
+        let ids: Vec<&'static str> = n.known_page_ids().to_vec();
+        for id in ids {
+            n.pop_all_modals();
+            if id.starts_with("details.") {
+                n.go(DEFAULT_PAGE_ID);
+                assert!(n.push_modal(id));
+            } else {
+                n.go(id);
+            }
+            let page = n.current_page();
+            assert_eq!(page.id(), id);
+            let origin = page.chrome().origin_y();
+            let canvas = page.render(&ctx, &DARK);
+            for z in page.hit_zones(&ctx) {
+                let (cx, cy) = (z.x + z.w / 2, z.y + z.h / 2 + origin);
+                assert_eq!(
+                    n.zone_at(&ctx, cx, cy),
+                    Some(z.action.clone()),
+                    "{id}: centre of {:?} resolves elsewhere",
+                    z.action
+                );
+                let painted = (z.y + origin..z.y + origin + z.h).any(|y| {
+                    (z.x..z.x + z.w).any(|x| {
+                        x >= 0
+                            && y >= 0
+                            && (x as u32) < canvas.width()
+                            && (y as u32) < canvas.height()
+                            && canvas.pixel(x, y) != DARK.bg_primary
+                    })
+                });
+                assert!(painted, "{id}: zone {:?} covers nothing painted", z.action);
+            }
+        }
     }
 
     #[test]
     fn custom_zone_returns_the_key() {
         let dir = tempfile::tempdir().unwrap();
         let mut n = nav(dir.path());
-        let ctx = PageContext::default();
-        n.go("settings");
-        // A settings list row reports a `row:<id>` custom key. Tap into the
-        // list region (below the chrome). The exact row depends on the
-        // settings layout; assert we get *some* custom dispatch, not a route.
-        let d = n.on_touch(&ctx, &tap(100, 32 + 80), 1000);
-        match d {
-            Dispatch::Custom(_) | Dispatch::None => {}
-            other => panic!("settings list tap should be custom or none, got {other:?}"),
-        }
+        let mut ctx = PageContext::default();
+        ctx.link.tx_power_dbm = Some(10);
+        n.push_modal("details.radio_link");
+        let zone = n
+            .current_page()
+            .hit_zones(&ctx)
+            .into_iter()
+            .find(|z| matches!(z.action, HitAction::Custom(_)))
+            .expect("the radio page has a stepper");
+        let HitAction::Custom(key) = zone.action.clone() else {
+            unreachable!()
+        };
+        let d = n.on_touch(&ctx, &tap(zone.x + zone.w / 2, zone.y + zone.h / 2), 1000);
+        assert_eq!(d, Dispatch::Custom(key.clone()));
+        assert!(matches!(
+            n.custom_action(&key, &ctx),
+            Some(PanelAction::Agent(_))
+        ));
     }
 
     #[test]

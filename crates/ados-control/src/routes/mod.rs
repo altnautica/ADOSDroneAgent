@@ -515,13 +515,10 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
         )
         .route("/api/v1/ground-station/ws/mesh", get(gs_ws::ws_mesh))
         .route("/api/v1/ground-station/ws/buttons", get(gs_ws::ws_buttons))
-        // Wi-Fi client reads (profile-agnostic): the live station status off the
-        // uplink daemon's command socket, and the saved NM profiles. The scan stays
+        // Wi-Fi client saved-profile read (profile-agnostic): a read-only nmcli
+        // listing. The live station status is registered below with the writes,
+        // because it reads the same uplink-daemon socket they drive. The scan stays
         // proxied (its rescan is a side effect with no daemon-socket op).
-        .route(
-            "/api/v1/network/client/status",
-            get(network_client_read::get_client_status),
-        )
         .route(
             "/api/v1/network/client/configured",
             get(network_client_read::get_client_configured),
@@ -658,11 +655,17 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
                 .delete(gs_relay_proxy::handle),
         );
 
-    // Wi-Fi client writes (profile-agnostic) are served natively only where the
-    // ados-net uplink daemon runs (a ground station); elsewhere the route is not
-    // registered and falls through to the residual's in-process nmcli handler.
+    // The Wi-Fi client station status and writes are served natively only where
+    // the ados-net uplink daemon runs (a ground station), because they go through
+    // its command socket. On a drone there is no such daemon: the routes are not
+    // registered and fall through to the residual, whose packaged Wi-Fi manager
+    // drives NetworkManager directly.
     if net_native {
         router = router
+            .route(
+                "/api/v1/network/client/status",
+                get(network_client_read::get_client_status),
+            )
             .route(
                 "/api/v1/network/client/join",
                 put(network_write::put_client_join),

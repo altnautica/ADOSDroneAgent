@@ -12,12 +12,12 @@
 //! The hot-path design — a bounded drop-oldest queue plus an in-flight gate — is
 //! shared with the MAVLink relay via [`BoundedPublishQueue`] and is unchanged
 //! here. The socket is a transparent byte pipe (no MSP is parsed), so the same
-//! [`MavlinkClient`] byte client reads it; the name is historical.
+//! [`FrameLink`] byte link reads it.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use ados_plugin_host::mavlink_client::MavlinkClient;
+use ados_plugin_host::frame_link::FrameLink;
 use tokio::sync::{mpsc, watch};
 
 use super::mavlink_relay::{BoundedPublishQueue, RelayMetrics, QUEUE_MAXSIZE};
@@ -107,18 +107,14 @@ impl MspMqttRelay {
             .await
             .ok_or_else(|| anyhow::anyhow!("transport incoming channel already taken"))?;
 
-        // Connect the IPC client (FC bytes in, commands out). Best-effort: a
-        // missing socket is logged and the relay exits so systemd restarts it.
-        let ipc = match MavlinkClient::connect(ipc_sock).await {
-            Ok(c) => std::sync::Arc::new(c),
-            Err(e) => {
-                tracing::warn!(error = %e, "msp relay: ipc unavailable");
-                return Ok(());
-            }
-        };
-        // See the MAVLink relay: every byte this connection writes reached the
-        // node over the broker, so it declares that before writing any.
-        ipc.declare_off_box_source();
+        // The IPC link (FC bytes in, commands out). It reconnects on its own;
+        // see the MAVLink relay. Every byte this connection writes reached the
+        // node over the broker, so the link declares that on every connection
+        // before writing any.
+        let ipc = std::sync::Arc::new(FrameLink::spawn(
+            ipc_sock,
+            Box::new(|| vec![ados_protocol::ipc::IPC_DECLARE_OFF_BOX_SOURCE.to_vec()]),
+        ));
 
         // GCS->FC: subscribe rx and write received payloads to the IPC socket.
         // Through the transport (NOT the raw client) so the topic is recorded for
@@ -180,7 +176,9 @@ impl MspMqttRelay {
                 msg = incoming.recv() => {
                     match msg {
                         Some(m) if m.topic == self.topic_rx && !m.payload.is_empty() => {
-                            ipc.send_bytes(&m.payload);
+                            if let Err(e) = ipc.send(&m.payload) {
+                                tracing::debug!(reason = e.reason(), "msp relay: command not forwarded");
+                            }
                         }
                         Some(_) => {}
                         None => {}

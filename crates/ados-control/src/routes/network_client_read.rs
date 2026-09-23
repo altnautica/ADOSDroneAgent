@@ -8,14 +8,14 @@
 //! Two of the three Python reads (`network.py`) are served here:
 //!
 //! - **`GET /api/v1/network/client/status`** — the live station connection
-//!   state `{connected, ssid, bssid, signal, ip, gateway, security}`. On this
-//!   native front the uplink runs in a sibling `ados-net` daemon, so the front
-//!   reads the station state off that daemon's Wi-Fi command socket's
-//!   `wifi_status` op (the exact same socket seam the ground-station network
-//!   view reuses), reshaping the reply to the seven-key body the Python route
-//!   returns. An unreachable socket degrades to the no-connection default shape
-//!   (`connected:false`, every other field null), the same body the Python
-//!   `status()` returns when no station is joined.
+//!   state `{connected, ssid, bssid, signal, ip, gateway, security}`, served
+//!   natively where the `ados-net` uplink daemon runs (a ground station): the
+//!   front reads the station state off that daemon's Wi-Fi command socket's
+//!   `wifi_status` op and reshapes the reply to the seven-key body. An
+//!   unreachable socket is a `503 E_WIFI_STATUS_UNAVAILABLE`: the station state
+//!   is unknown, and `connected:false` would claim a fact nobody measured. On a
+//!   drone the route is not registered here and the residual's packaged Wi-Fi
+//!   manager answers it.
 //! - **`GET /api/v1/network/client/configured`** — the saved NetworkManager
 //!   Wi-Fi profiles `{connections:[{name, type, device, autoconnect}, …]}`.
 //!   A read-only `nmcli -t -f NAME,TYPE,DEVICE,AUTOCONNECT connection show`
@@ -30,6 +30,7 @@
 //! scan (a side effect), and there is no scan op on the daemon command socket.
 //! That route stays proxied.
 
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
@@ -41,29 +42,31 @@ use crate::routes::gs_network::{json_truthy, nmcli_connections, wifi_status};
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/network/client/status` → the live Wi-Fi station connection
-/// state. Profile-agnostic (served on a drone and a ground station alike), so
-/// there is no profile gate.
-///
-/// Reads the station status from the `ados-net` daemon's Wi-Fi command socket's
-/// `wifi_status` op and reshapes it to the seven-key body the Python route
-/// returns. An unreachable socket / a `wifi_status` failure degrades to the
-/// no-connection default shape (`connected:false`, every other field null), the
-/// same body the Python `WifiClientManager.status()` returns when no station is
-/// joined.
+/// state, off the `ados-net` daemon's Wi-Fi command socket's `wifi_status` op,
+/// reshaped to the seven-key body. An unreachable socket / a `wifi_status`
+/// failure is a `503`: the station state is unknown.
 pub async fn get_client_status() -> Response {
-    Json(client_status_view(wifi_status().await)).into_response()
+    match client_status_view(wifi_status().await) {
+        Some(view) => Json(view).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"detail": {"error": {
+                "code": "E_WIFI_STATUS_UNAVAILABLE",
+                "message": "Wi-Fi manager unreachable; station state unknown",
+            }}})),
+        )
+            .into_response(),
+    }
 }
 
-/// Reshape an optional `wifi_status` reply into the seven-key client-status body.
-/// Split out (taking the already-fetched reply) so the shape + the degrade are
-/// unit tested without the socket IO. The reply already carries the
-/// `{connected, ssid, bssid, signal, ip, gateway, security}` keys (the daemon's
-/// `status()` shape, with an `ok` flag the view drops); a `None` reply degrades
-/// every field to its no-connection default.
-fn client_status_view(reply: Option<serde_json::Map<String, Value>>) -> Value {
-    let reply = reply.unwrap_or_default();
+/// Reshape a `wifi_status` reply into the seven-key client-status body, or
+/// `None` when there is no reply. Split out so the shape is unit tested without
+/// the socket IO. The reply carries the `{connected, ssid, bssid, signal, ip,
+/// gateway, security}` keys plus an `ok` flag the view drops.
+fn client_status_view(reply: Option<serde_json::Map<String, Value>>) -> Option<Value> {
+    let reply = reply?;
     let field = |key: &str| reply.get(key).cloned().unwrap_or(Value::Null);
-    json!({
+    Some(json!({
         "connected": reply.get("connected").map(json_truthy).unwrap_or(false),
         "ssid": field("ssid"),
         "bssid": field("bssid"),
@@ -71,7 +74,7 @@ fn client_status_view(reply: Option<serde_json::Map<String, Value>>) -> Value {
         "ip": field("ip"),
         "gateway": field("gateway"),
         "security": field("security"),
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -123,21 +126,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn client_status_default_shape_when_the_socket_is_down() {
-        // No wifi_status reply (the daemon socket unreachable) → the
-        // no-connection default shape, matching the Python status() when no
-        // station is joined: connected false, every other field null.
-        let v = client_status_view(None);
-        let want = json!({
-            "connected": false,
-            "ssid": null,
-            "bssid": null,
-            "signal": null,
-            "ip": null,
-            "gateway": null,
-            "security": null,
-        });
-        assert_eq!(v, want);
+    fn client_status_is_unknown_when_the_socket_is_down() {
+        // No wifi_status reply (the daemon socket unreachable): the state is
+        // unknown, never a measured "not connected".
+        assert_eq!(client_status_view(None), None);
     }
 
     #[test]
@@ -155,7 +147,7 @@ mod tests {
             "security": "WPA2",
         }))
         .unwrap();
-        let v = client_status_view(Some(reply));
+        let v = client_status_view(Some(reply)).unwrap();
         let want = json!({
             "connected": true,
             "ssid": "BenchNet",
@@ -185,7 +177,7 @@ mod tests {
             "security": null,
         }))
         .unwrap();
-        let v = client_status_view(Some(reply));
+        let v = client_status_view(Some(reply)).unwrap();
         assert_eq!(v["connected"], json!(false));
         assert_eq!(v["ssid"], Value::Null);
         assert_eq!(v["security"], Value::Null);

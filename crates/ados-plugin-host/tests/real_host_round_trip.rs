@@ -11,13 +11,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_plugin_host::mavlink_client::{MavlinkClient, MAVLINK_BROADCAST_DEPTH};
+use ados_plugin_host::frame_link::{FrameLink, LINK_DEPTH};
 use ados_plugin_host::realhost::RealHost;
 use ados_plugin_host::{EventBus, PluginIpcServer};
 use ados_protocol::frame::{
     decode_len, encode_frame, HEADER_SIZE, MAVLINK_MAX_FRAME, PLUGIN_MAX_FRAME,
 };
 use ados_protocol::ipc::IpcBroadcast;
+use ados_protocol::mavlink::{serialize_v1, serialize_v2, MavHeader, MavMessage, Message};
 use ados_protocol::plugin::{Envelope, TokenIssuer, PROTOCOL_VERSION};
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -30,19 +31,18 @@ fn caps(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
-/// A whole, well-formed v1 frame carrying `msgid` and an empty payload.
-///
-/// Eight bytes rather than a six-byte header stub: the pose-inject gate
-/// classifies the whole buffer and refuses one that is not a whole number of
-/// frames, so these fixtures have to be real frames.
+/// A whole v1 frame of the dialect message `msgid`, default fields, with a
+/// real checksum. The pose-inject gate refuses anything a flight controller
+/// would not consume whole, so these fixtures have to be genuine frames.
 fn v1_frame(msgid: u8) -> Vec<u8> {
-    vec![0xFE, 0, 0, 0, 0, msgid, 0, 0]
+    let msg = MavMessage::default_message_from_id(u32::from(msgid)).expect("dialect id");
+    serialize_v1(MavHeader::default(), &msg).expect("serialize")
 }
 
-/// A whole, well-formed v2 frame carrying `msgid` and an empty payload.
+/// A whole v2 frame of the dialect message `msgid`, default fields.
 fn v2_frame(msgid: u32) -> Vec<u8> {
-    let id = msgid.to_le_bytes();
-    vec![0xFD, 0, 0, 0, 0, 0, 0, id[0], id[1], id[2], 0, 0]
+    let msg = MavMessage::default_message_from_id(msgid).expect("dialect id");
+    serialize_v2(MavHeader::default(), &msg).expect("serialize")
 }
 
 fn map(entries: &[(&str, Value)]) -> Value {
@@ -331,28 +331,25 @@ async fn mavlink_send_validates_msg_bytes_before_the_capability_gate() {
     assert_eq!(resp.error.as_deref(), Some("msg_bytes must be bytes"));
 }
 
-#[tokio::test]
-async fn mavlink_subscribe_pushes_a_deliver_envelope() {
-    // Stand up a router-style socket (bidirectional, 256-deep, inbound channel),
-    // wire a MavlinkClient to it, and back the host with that client. A plugin
-    // that subscribes then receives a mavlink.deliver push when the router fans
-    // a frame out.
+/// A router-style socket plus a host whose MAVLink link is connected to it.
+async fn router_and_host(tag: &str) -> (IpcBroadcast, RealHost) {
     let mut router_path = std::env::temp_dir();
-    router_path.push(format!("ados-rh-mav-{}.sock", std::process::id()));
+    router_path.push(format!("ados-rh-mav-{}-{tag}.sock", std::process::id()));
     let _ = std::fs::remove_file(&router_path);
-    let (router, _inbound) =
-        IpcBroadcast::bind(&router_path, MAVLINK_BROADCAST_DEPTH, false, Some(256))
-            .await
-            .expect("bind router socket");
-    let client = Arc::new(
-        MavlinkClient::connect(&router_path)
-            .await
-            .expect("client connect"),
-    );
-    // Let the client register on the router before broadcasting.
+    let (router, _inbound) = IpcBroadcast::bind(&router_path, LINK_DEPTH, false, Some(256))
+        .await
+        .expect("bind router socket");
+    let link = Arc::new(FrameLink::spawn(&router_path, Box::new(Vec::new)));
+    assert!(link.connected_within(Duration::from_secs(2)).await);
+    // Let the router register the connection before broadcasting.
     tokio::time::sleep(Duration::from_millis(50)).await;
+    (router, RealHost::new().with_mavlink(link))
+}
 
-    let h = harness(RealHost::new().with_mavlink(client), &[PLUGIN_A]);
+#[tokio::test]
+async fn mavlink_subscribe_delivers_only_the_subscribed_message() {
+    let (router, host) = router_and_host("filter").await;
+    let h = harness(host, &[PLUGIN_A]);
     let (mut plugin, token) = hello(&h, PLUGIN_A, &["mavlink.read"]).await;
 
     // Subscribe to HEARTBEAT; the response carries {subscribed, msg_name}.
@@ -364,12 +361,16 @@ async fn mavlink_subscribe_pushes_a_deliver_envelope() {
     // Give the forwarder task a moment to arm.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Router fans a frame out; the plugin gets a mavlink.deliver push tagged
-    // with the subscribed name, carrying the raw frame bytes.
-    let frame = b"\xfd\x09\x00\x00\x00\x01\x01\x00\x00\x00body";
-    router
-        .broadcast(encode_frame(frame, MAVLINK_MAX_FRAME).unwrap().into())
-        .await;
+    // The router fans an ATTITUDE out first, then a HEARTBEAT. Only the
+    // HEARTBEAT may reach a HEARTBEAT subscription; delivering the ATTITUDE
+    // under that label would hand the plugin another message's bytes.
+    let attitude = v2_frame(30);
+    let heartbeat = v2_frame(0);
+    for frame in [&attitude, &heartbeat] {
+        router
+            .broadcast(encode_frame(frame, MAVLINK_MAX_FRAME).unwrap().into())
+            .await;
+    }
 
     let push = tokio::time::timeout(Duration::from_secs(2), recv(&mut plugin))
         .await
@@ -388,7 +389,38 @@ async fn mavlink_subscribe_pushes_a_deliver_envelope() {
             }),
         _ => None,
     };
-    assert_eq!(frame_field.as_deref(), Some(&frame[..]));
+    assert_eq!(frame_field.as_deref(), Some(&heartbeat[..]));
+}
+
+#[tokio::test]
+async fn mavlink_subscribe_refuses_a_name_the_dialect_does_not_define() {
+    let (_router, host) = router_and_host("unknown").await;
+    let h = harness(host, &[PLUGIN_A]);
+    let (mut plugin, token) = hello(&h, PLUGIN_A, &["mavlink.read"]).await;
+    let sub = map(&[("msg_name", Value::from("NOT_A_MESSAGE"))]);
+    send(&mut plugin, &request("mavlink.subscribe", &token, sub)).await;
+    let resp = recv(&mut plugin).await;
+    assert_eq!(
+        resp.error.as_deref(),
+        Some("unknown MAVLink message name: NOT_A_MESSAGE")
+    );
+}
+
+#[tokio::test]
+async fn mavlink_send_reports_a_router_that_is_down() {
+    // A link with no router behind it: the send must say it was not sent.
+    let mut path = std::env::temp_dir();
+    path.push(format!("ados-rh-mav-{}-down.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let host = RealHost::new().with_mavlink(Arc::new(FrameLink::spawn(&path, Box::new(Vec::new))));
+    let h = harness(host, &[PLUGIN_A]);
+    let (mut client, token) = hello(&h, PLUGIN_A, &["mavlink.write"]).await;
+    let args = map(&[("msg_bytes", Value::Binary(v1_frame(0)))]);
+    send(&mut client, &request("mavlink.send", &token, args)).await;
+    let resp = recv(&mut client).await;
+    assert_eq!(resp.error, None);
+    assert_eq!(args_bool(&resp, "sent"), Some(false));
+    assert_eq!(args_str(&resp, "reason"), Some("disconnected"));
 }
 
 #[tokio::test]

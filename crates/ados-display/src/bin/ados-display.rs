@@ -190,13 +190,16 @@ async fn run_page_ui(
     use ados_display::graphics::primitives::Canvas;
     use ados_display::navigator::{Dispatch, PageNavigator};
     use ados_display::pages::calibration::render_calibration;
-    use ados_display::pages::PageContext;
+    use ados_display::pages::plugin::PLUGIN_PAGE_ID;
+    use ados_display::pages::{PageContext, PanelAction};
+    use ados_display::panel_action::{AgentWriter, Outcome};
     use ados_display::render_loop::pack_frame_fitted;
     use ados_display::sidecar::{
         write_plugin_tap, write_snapshot_png, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
     };
     use ados_display::state_source::StateSource;
     use ados_display::touch_input::{TouchTransformHandle, TOUCH_CALIB_PATH};
+    use ados_display::widgets::draw_ack_line;
     use ados_hid::touch::GestureKind;
 
     // State poll cadence — matches the Python service's POLL_PERIOD_SECONDS.
@@ -215,19 +218,62 @@ async fn run_page_ui(
     // The calibration screen is static between taps (the tap path repaints it
     // immediately), so a modest base cadence keeps it lively without spinning.
     const CALIB_REFRESH_HZ: f32 = 5.0;
+    // How long a panel action's outcome line stays on screen.
+    const ACK_LINGER: Duration = Duration::from_secs(4);
 
     // Build the frame for the active surface: the calibration wizard when one is
     // running (it owns the whole panel, no navigator chrome), else the
-    // navigator's current page.
+    // navigator's current page with the latest action outcome over its foot.
     fn build_canvas(
         calibration: &Option<CalibrationController>,
         navigator: &PageNavigator,
         ctx: &PageContext,
         palette: &Palette,
+        ack: &Option<(Outcome, Instant)>,
     ) -> Canvas {
         match calibration {
             Some(ctrl) => render_calibration(ctrl, palette),
-            None => navigator.current_page().render(ctx, palette),
+            None => {
+                let mut canvas = navigator.current_page().render(ctx, palette);
+                if let Some((outcome, at)) = ack {
+                    if at.elapsed() < ACK_LINGER {
+                        draw_ack_line(&mut canvas, palette, &outcome.message, outcome.ok);
+                    }
+                }
+                canvas
+            }
+        }
+    }
+
+    // Act on a page-defined key. On the plugin page it is a zone tap for the
+    // plugin that owns the page. Elsewhere the page resolves it: an overlay
+    // toggle repaints (returns true), an agent write runs off the loop and posts
+    // its outcome to `acks`. Taps on system pages never reach plugins.
+    fn handle_custom(
+        key: &str,
+        navigator: &PageNavigator,
+        ctx: &PageContext,
+        writer: &std::sync::Arc<AgentWriter>,
+        acks: &tokio::sync::mpsc::Sender<Outcome>,
+        ts_ms: i64,
+    ) -> bool {
+        if navigator.current_page_id() == PLUGIN_PAGE_ID {
+            let _ = write_plugin_tap(key, ts_ms);
+            return false;
+        }
+        match navigator.custom_action(key, ctx) {
+            Some(PanelAction::Repaint) => true,
+            Some(PanelAction::Agent(req)) => {
+                tracing::info!(method = req.method, path = req.path, "panel action");
+                let writer = writer.clone();
+                let acks = acks.clone();
+                tokio::task::spawn_blocking(move || {
+                    let outcome = writer.send(&req);
+                    let _ = acks.blocking_send(outcome);
+                });
+                false
+            }
+            None => false,
         }
     }
 
@@ -260,6 +306,13 @@ async fn run_page_ui(
     let mut navigator = PageNavigator::new(all_pages());
     let mut source = StateSource::new();
     let mut ctx = source.build_context();
+
+    // Panel actions run off the loop; their outcomes come back here and are
+    // painted for ACK_LINGER, then the state is re-polled so the page shows
+    // what the agent now reports.
+    let agent_writer = std::sync::Arc::new(AgentWriter::local());
+    let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<Outcome>(8);
+    let mut ack: Option<(Outcome, Instant)> = None;
 
     // The touch reader runs as its own task and posts each classified gesture
     // here; the select! loop turns it into a navigator transition. A small
@@ -377,7 +430,7 @@ async fn run_page_ui(
                         .unwrap_or(true);
 
                 if render_due {
-                    let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
+                    let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
 
                     // Mirror the freshly rendered frame to the snapshot PNG so the
                     // REST snapshot endpoint serves the live panel without PIL.
@@ -448,7 +501,7 @@ async fn run_page_ui(
                         }
                         // Repaint immediately: the next target, or the resumed
                         // UI when the fit just landed.
-                        let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
+                        let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
                         present_frame(&writer, bpp, &canvas, xres, yres);
                         last_render = Some(now);
                     } else {
@@ -465,19 +518,19 @@ async fn run_page_ui(
                             // previous page's refresh period.
                             ctx = source.build_context();
                             last_state_poll = now;
-                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
+                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
                             present_frame(&writer, bpp, &canvas, xres, yres);
                             last_render = Some(now);
                         }
-                        // A page-defined custom key (slider drag, list row) or an
-                        // inert tap has no navigator-owned surface change; the
-                        // interaction boost already quickened the next render.
-                        //
-                        // A custom key on the reserved plugin page is a zone tap:
-                        // surface it to the plugin that owns that page so its
-                        // interactive zones are real, not decorative.
+                        // A page-defined custom key: a plugin zone tap, an overlay
+                        // toggle (repaint now), or an agent write whose outcome
+                        // arrives on the ack channel.
                         if let Dispatch::Custom(key) = dispatch {
-                            let _ = write_plugin_tap(&key, now_ms);
+                            if handle_custom(&key, &navigator, &ctx, &agent_writer, &ack_tx, now_ms) {
+                                let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
+                                present_frame(&writer, bpp, &canvas, xres, yres);
+                                last_render = Some(now);
+                            }
                         }
                     }
                 }
@@ -504,21 +557,42 @@ async fn run_page_ui(
                             // rather than waiting out the old page's period.
                             ctx = source.build_context();
                             last_state_poll = now;
-                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette);
+                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
                             present_frame(&writer, bpp, &canvas, xres, yres);
                             last_render = Some(now);
                         }
                         // A custom key (including an unmapped-button fallback to an
-                        // on-page action) surfaces as a plugin tap the same way a
-                        // touch-zone tap does.
+                        // on-page action) is handled exactly as a touch-zone key.
                         if let Dispatch::Custom(key) = dispatch {
                             let ts_ms = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|d| d.as_millis() as i64)
                                 .unwrap_or(0);
-                            let _ = write_plugin_tap(&key, ts_ms);
+                            if handle_custom(&key, &navigator, &ctx, &agent_writer, &ack_tx, ts_ms) {
+                                let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
+                                present_frame(&writer, bpp, &canvas, xres, yres);
+                                last_render = Some(now);
+                            }
                         }
                     }
+                }
+            }
+            maybe_ack = ack_rx.recv() => {
+                // A panel action finished: show its outcome now and re-poll so
+                // the page reflects what the agent reports after the write.
+                if let Some(outcome) = maybe_ack {
+                    if outcome.ok {
+                        tracing::info!(message = %outcome.message, "panel action done");
+                    } else {
+                        tracing::warn!(message = %outcome.message, "panel action failed");
+                    }
+                    let now = Instant::now();
+                    ack = Some((outcome, now));
+                    if calibration.is_none() {
+                        ctx = source.build_context();
+                        last_state_poll = now;
+                    }
+                    last_render = None;
                 }
             }
             _ = sighup.recv() => {
@@ -563,7 +637,7 @@ fn all_pages() -> Vec<Box<dyn ados_display::pages::Page>> {
         Box::new(SettingsPage),
         Box::new(LinkStatsPage),
         Box::new(ChannelHopsPage),
-        Box::new(MorePage),
+        Box::new(MorePage::default()),
         Box::new(RadioLinkDetailPage::new()),
         Box::new(UplinkDetailPage),
         Box::new(DroneDetailPage),

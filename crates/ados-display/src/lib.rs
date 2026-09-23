@@ -22,6 +22,7 @@
 //! * [`widgets`] — the shared page chrome (status bars, tiles, big numbers).
 //! * [`pages`] — the full-panel page composers.
 //! * [`navigator`] — the page-navigation state machine driven by buttons/touch.
+//! * [`panel_action`] — performs the agent writes the panel's controls ask for.
 //! * [`render_loop`] — the tick loop that paints the active page and feeds the
 //!   off-thread framebuffer writer.
 //! * [`touch_input`] — the touchscreen evdev reader: raw ADS7846 ABS samples ->
@@ -41,6 +42,7 @@ pub mod navigator;
 pub mod oled;
 pub mod pack;
 pub mod pages;
+pub mod panel_action;
 pub mod probe;
 pub mod render_loop;
 pub mod sidecar;

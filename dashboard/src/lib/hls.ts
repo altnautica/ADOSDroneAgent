@@ -1,4 +1,4 @@
-import { mediaAuthHeaders } from "./media-auth";
+import { mediaAuthHeaders, withMediaAuth } from "./media-auth";
 // Lazy HLS player. iOS / macOS Safari can play HLS natively via the
 // `<video>` element's `src` attribute. Chrome / Firefox / Edge need
 // hls.js as a Media Source Extensions adapter. We dynamic-import
@@ -19,9 +19,11 @@ export async function startHls(
   hlsUrl: string,
   videoEl: HTMLVideoElement,
 ): Promise<HlsResult> {
-  // Native HLS path (Safari, iOS, some Smart TVs)
+  // Native HLS path (Safari, iOS, some Smart TVs). The element fetches the
+  // playlist and segments itself and cannot send a header, so the session
+  // rides the query string the agent accepts on the media plane only.
   if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
-    videoEl.src = hlsUrl;
+    videoEl.src = withMediaAuth(hlsUrl);
     try {
       await videoEl.play();
     } catch {

@@ -40,6 +40,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::config_store::{section, section_path, update_config};
+
 /// The sidecar `ados-radio`'s hop supervisor writes on a newly-learned peer:
 /// `{"peer_device_id": "<id>"}`.
 const PEER_BACKFILL_SIDECAR: &str = "peer-backfill.json";
@@ -70,9 +72,10 @@ fn latched_peer_device_id(path: &Path) -> Option<String> {
 /// `ground_station.paired_drone_id` mirror) without disturbing any other key.
 ///
 /// Returns `Ok(true)` when the config was rewritten, `Ok(false)` when it already
-/// held this id (the idempotent no-op a re-heard beacon takes), `Err(message)` on
-/// a read/parse/write fault — e.g. the EPERM a non-root front gets on a 0600
-/// config, which must not be fatal to the reconciler loop.
+/// held this id (the idempotent no-op a re-heard beacon takes, which writes
+/// nothing), `Err(message)` on a read/parse/write fault — a document the shared
+/// config store refuses to write over, or the EPERM a non-root front gets on a
+/// 0600 config — which must not be fatal to the reconciler loop.
 ///
 /// The two keys and the GS-only mirror match `wfb_pair_write::persist_pair_state`
 /// exactly; this writes only the peer id, leaving `paired_at` and
@@ -83,87 +86,23 @@ pub(crate) fn persist_peer_device_id(
     is_ground_station: bool,
     peer_device_id: &str,
 ) -> Result<bool, String> {
-    use serde_norway::{Mapping, Value as Yaml};
+    use serde_norway::Value as Yaml;
 
-    let mut data: Yaml = match std::fs::read_to_string(config_path) {
-        Ok(text) => match serde_norway::from_str::<Yaml>(&text) {
-            Ok(v) if v.is_mapping() => v,
-            _ => Yaml::Mapping(Mapping::new()),
-        },
-        Err(_) => Yaml::Mapping(Mapping::new()),
-    };
-
-    let already = data
-        .get("video")
-        .and_then(|v| v.get("wfb"))
-        .and_then(|w| w.get("paired_with_device_id"))
-        .and_then(Yaml::as_str)
-        .map(|s| s == peer_device_id)
-        .unwrap_or(false);
-    let mirror_already = !is_ground_station
-        || data
-            .get("ground_station")
-            .and_then(|g| g.get("paired_drone_id"))
-            .and_then(Yaml::as_str)
-            .map(|s| s == peer_device_id)
-            .unwrap_or(false);
-    if already && mirror_already {
-        return Ok(false);
-    }
-
-    {
-        let root = data
-            .as_mapping_mut()
-            .ok_or_else(|| "config root is not a mapping".to_string())?;
-
-        let video = section_mut(root, "video")?;
-        let wfb = section_mut(video, "wfb")?;
-        wfb.insert(
+    update_config(config_path, |root| {
+        section_path(root, &["video", "wfb"]).insert(
             Yaml::String("paired_with_device_id".to_string()),
             Yaml::String(peer_device_id.to_string()),
         );
-
         if is_ground_station {
-            let gs = section_mut(root, "ground_station")?;
-            gs.insert(
+            section(root, "ground_station").insert(
                 Yaml::String("paired_drone_id".to_string()),
                 Yaml::String(peer_device_id.to_string()),
             );
         }
-    }
-
-    let body = serde_norway::to_string(&data).map_err(|e| e.to_string())?;
-    write_atomic(config_path, body.as_bytes())?;
-    Ok(true)
-}
-
-/// Navigate/create a nested mapping under `key`. A node that exists but is not a
-/// mapping is replaced with an empty mapping, matching every sibling config
-/// writer's `_get_section` behaviour.
-fn section_mut<'a>(
-    parent: &'a mut serde_norway::Mapping,
-    key: &str,
-) -> Result<&'a mut serde_norway::Mapping, String> {
-    use serde_norway::{Mapping, Value as Yaml};
-    let k = Yaml::String(key.to_string());
-    let entry = parent.entry(k).or_insert(Yaml::Mapping(Mapping::new()));
-    if !entry.is_mapping() {
-        *entry = Yaml::Mapping(Mapping::new());
-    }
-    entry
-        .as_mapping_mut()
-        .ok_or_else(|| format!("config section `{key}` is not a mapping"))
-}
-
-/// Write `body` to `path` through a temp file + rename so a reader never observes
-/// a half-written config.
-fn write_atomic(path: &Path, body: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = path.with_extension("tmp-peer-backfill");
-    std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+        Ok(())
+    })
+    .map(|w| w.wrote)
+    .map_err(|e| e.to_string())
 }
 
 /// Restate the back-fill on [`BACKFILL_INTERVAL`] for the life of the front.

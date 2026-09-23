@@ -101,34 +101,42 @@ impl SwarmIpcClient {
         )
     }
 
-    /// The latest published table, cloned. `None` until the first line decodes.
-    pub fn published(&self) -> Option<Value> {
+    /// The latest published table, cloned, with how long ago it arrived. `None`
+    /// until the first line decodes.
+    ///
+    /// The held table is never cleared when the bus goes quiet: a bus that died
+    /// leaves its last table here with every row's `age_ms` frozen at the moment
+    /// it stopped, which reads exactly like a fleet that is still being heard. So
+    /// there is no un-aged accessor; every reader decides against the age.
+    pub fn latest(&self) -> Option<(Value, Duration)> {
         self.published
             .lock()
             .as_ref()
-            .map(|(value, _)| value.clone())
+            .map(|(value, received)| (value.clone(), received.elapsed()))
     }
 
     /// The latest published table, but only if it arrived within `max_age`.
-    ///
-    /// The held table is never cleared when the bus goes quiet, so a consumer that
-    /// ACTS on what it says (rather than displaying it) has to ask how old it is: a
-    /// bus that died leaves its last table here with every row's `age_ms` frozen at
-    /// the moment it stopped, which reads exactly like a fleet that is still being
-    /// heard.
     pub fn published_within(&self, max_age: Duration) -> Option<Value> {
-        self.published
-            .lock()
-            .as_ref()
-            .filter(|(_, received)| received.elapsed() <= max_age)
-            .map(|(value, _)| value.clone())
+        self.latest()
+            .filter(|(_, age)| *age <= max_age)
+            .map(|(value, _)| value)
+    }
+
+    /// Overwrite the held payload directly, stamped as received `age` ago.
+    /// Test-only seam.
+    #[cfg(test)]
+    pub fn set_for_test_aged(&self, value: Value, age: Duration) {
+        let received = Instant::now()
+            .checked_sub(age)
+            .expect("test age fits the monotonic clock");
+        *self.published.lock() = Some((value, received));
     }
 
     /// Overwrite the held payload directly, stamped as just received. Test-only
     /// seam.
     #[cfg(test)]
     pub fn set_for_test(&self, value: Value) {
-        *self.published.lock() = Some((value, Instant::now()));
+        self.set_for_test_aged(value, Duration::ZERO);
     }
 }
 
@@ -260,11 +268,12 @@ mod tests {
     #[tokio::test]
     async fn nothing_published_leaves_the_cell_empty() {
         assert!(run_against(Vec::new()).await.is_none());
-        assert!(SwarmIpcClient::disconnected().published().is_none());
+        assert!(SwarmIpcClient::disconnected().latest().is_none());
     }
 
-    /// A table that stopped being republished is still served for display, but a
-    /// consumer acting on it gets nothing once it is older than it can trust.
+    /// A table that stopped being republished is still held, with an age that keeps
+    /// advancing, and a consumer that needs a current table gets nothing once it is
+    /// older than it can trust.
     #[test]
     fn a_table_that_stopped_arriving_is_not_offered_as_current() {
         let client = SwarmIpcClient::disconnected();
@@ -276,7 +285,9 @@ mod tests {
         );
         std::thread::sleep(Duration::from_millis(20));
         assert!(client.published_within(Duration::from_millis(5)).is_none());
-        assert_eq!(client.published(), Some(sample()));
+        let (held, age) = client.latest().expect("the table is still held");
+        assert_eq!(held, sample());
+        assert!(age >= Duration::from_millis(20), "the age keeps advancing");
     }
 
     /// A live round trip over a real Unix socket, including the replay-on-connect the
@@ -302,12 +313,12 @@ mod tests {
 
         let (client, handle) = SwarmIpcClient::spawn(path.clone());
         for _ in 0..100 {
-            if client.published().is_some() {
+            if client.latest().is_some() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(client.published(), Some(payload));
+        assert_eq!(client.latest().map(|(v, _)| v), Some(payload));
         handle.shutdown().await;
     }
 
@@ -318,7 +329,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (client, handle) = SwarmIpcClient::spawn(dir.path().join("absent-swarm.sock"));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(client.published().is_none());
+        assert!(client.latest().is_none());
         handle.shutdown().await;
     }
 
