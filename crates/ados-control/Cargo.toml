@@ -28,6 +28,9 @@ ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
 # report the same tier the drone runs on, not a second implementation.
 ados-offload = { path = "../ados-offload" }
 ados-config = { path = "../ados-config" }
+# The Wi-Fi-client manager and its command-socket server, served in-process on
+# nodes that run no uplink daemon.
+ados-net = { path = "../ados-net" }
 # Gamepad enumeration + the primary-device sidecar reader, reused by the
 # ground-station input read routes so the native surface lists controllers off
 # the exact evdev seam + the `ground-station-input.json` `{primary}` file the

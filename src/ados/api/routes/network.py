@@ -1,20 +1,12 @@
-"""Profile-agnostic Wi-Fi client REST surface.
+"""Profile-agnostic Wi-Fi client REST surface (the residual part).
 
 Lives outside the ground-station namespace because Wi-Fi client
-operations (scan / join / leave / status / saved-connection management)
-only depend on a wlan interface being present, not on the operator's
-chosen profile. Drones and ground stations both reach NetworkManager
-the same way; gating these routes to one profile artificially blocks
-drone agents from joining a bench network from the dashboard.
+operations only depend on a wlan interface being present, not on the
+operator's chosen profile.
 
-The handlers reuse the singleton ``WifiClientManager`` exported from
-``ados.services.ground_station.wifi_client_manager`` so the underlying
-nmcli logic and event bus stay in one place.
-
-On a ground station the native front serves the station status and the
-join/leave/forget writes itself, through the ``ados-net`` uplink daemon that
-owns the radio there. A drone runs no such daemon, so those requests fall
-through to the handlers below, which drive NetworkManager in-process.
+The station status and the join / leave / forget / autoconnect writes are
+served by the native front on every profile, through the Wi-Fi command
+socket. Only the scan and the stable-MAC routes remain here.
 """
 
 from __future__ import annotations
@@ -25,11 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ados.api.deps import get_agent_app
-from ados.api.routes.ground_station._common.models import WifiJoinRequest
 
 router = APIRouter(prefix="/v1/network", tags=["network"])
 
@@ -41,77 +31,6 @@ def _manager() -> Any:
     )
 
     return get_wifi_client_manager()
-
-
-def _wifi_error(status_code: int, code: str, message: str) -> HTTPException:
-    return HTTPException(
-        status_code=status_code,
-        detail={"error": {"code": code, "message": message}},
-    )
-
-
-@router.get("/client/status")
-async def get_client_status() -> dict[str, Any]:
-    """The live station connection state, read from NetworkManager."""
-    try:
-        return await _manager().status()
-    except Exception as exc:
-        # The state is unknown; a "not connected" body would claim otherwise.
-        raise _wifi_error(503, "E_WIFI_STATUS_UNAVAILABLE", str(exc)) from exc
-
-
-@router.put("/client/join")
-async def put_client_join(req: WifiJoinRequest) -> Any:
-    """Join a Wi-Fi network. An active AP without ``force`` is a 409."""
-    try:
-        result = await _manager().join(
-            ssid=req.ssid,
-            passphrase=req.passphrase,
-            force=bool(req.force),
-        )
-    except Exception as exc:
-        raise _wifi_error(500, "E_WIFI_JOIN_FAILED", str(exc)) from exc
-    if not result.get("joined") and result.get("error") == "station_busy_ap_active":
-        return JSONResponse(
-            status_code=409,
-            content={
-                "detail": {
-                    "error": {
-                        "code": "E_WLAN0_BUSY_AP_ACTIVE",
-                        "message": result.get("hint")
-                        or "AP is active; retry with force=true to steal wlan0",
-                    },
-                },
-                "needs_force": True,
-            },
-        )
-    return {
-        "joined": bool(result.get("joined")),
-        "ip": result.get("ip"),
-        "gateway": result.get("gateway"),
-        "error": result.get("error"),
-    }
-
-
-@router.delete("/client")
-async def delete_client() -> dict[str, Any]:
-    """Disconnect the current Wi-Fi client link."""
-    try:
-        return await _manager().leave()
-    except Exception as exc:
-        raise _wifi_error(500, "E_WIFI_LEAVE_FAILED", str(exc)) from exc
-
-
-@router.delete("/client/configured/{name}")
-async def delete_client_configured(name: str) -> dict[str, Any]:
-    """Forget a saved Wi-Fi profile. A forget the manager refused is a 400."""
-    try:
-        result = await _manager().forget(name)
-    except Exception as exc:
-        raise _wifi_error(500, "E_WIFI_FORGET_FAILED", str(exc)) from exc
-    if not result.get("forgot"):
-        raise _wifi_error(400, "E_WIFI_FORGET_FAILED", str(result.get("error") or "nmcli_failed"))
-    return result
 
 
 @router.get("/client/scan")
@@ -129,40 +48,6 @@ async def get_client_scan() -> dict[str, Any]:
         ) from exc
     return {"networks": networks or []}
 
-
-@router.put("/client/configured/{name}/autoconnect")
-async def put_client_autoconnect(name: str, body: dict[str, Any]) -> dict[str, Any]:
-    """Toggle the autoconnect flag on a saved Wi-Fi profile.
-
-    Profile-agnostic, served in-process: the native front only routes this to a
-    command socket where the ``ados-net`` daemon owns the uplink (a ground
-    station). A drone has no such daemon, so the front proxies here and the
-    packaged Wi-Fi manager drives nmcli directly.
-    """
-    enabled = bool(body.get("enabled"))
-    try:
-        result = await _manager().set_autoconnect(name, enabled)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": {
-                    "code": "E_WIFI_AUTOCONNECT_FAILED",
-                    "message": str(exc),
-                },
-            },
-        ) from exc
-    if isinstance(result, dict) and result.get("error"):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": {
-                    "code": "E_WIFI_AUTOCONNECT_FAILED",
-                    "message": str(result.get("error")),
-                },
-            },
-        )
-    return result
 
 
 # ── Stable-MAC pinning ──────────────────────────────────────────────────────

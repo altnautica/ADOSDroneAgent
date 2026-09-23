@@ -376,13 +376,11 @@ where
     .with_params_path(paths.params_path.clone())
     .with_swarm(swarm_client);
 
-    // Native-vs-residual gates for the profile-conditional route groups, resolved
-    // once at startup (the profile is fixed for the process). The Wi-Fi client
-    // WRITES and the PIC / gamepad / Bluetooth writes are served natively only on
-    // a ground station — the only profile that runs the daemons binding their
-    // command sockets (ados-net's wifi-cmd.sock; ados-pic's pic.sock + ados-input's
-    // hid-cmd.sock, both now native-only). On a drone they fall through to the
-    // residual; registering them natively there would 503 instead of proxying.
+    // Native-vs-residual gate for the PIC / gamepad / Bluetooth writes, resolved
+    // once at startup (the profile is fixed for the process). Those are served
+    // natively only on a ground station, the only profile that runs the daemons
+    // binding their command sockets (ados-pic's pic.sock, ados-input's
+    // hid-cmd.sock); on any other node they fall through to the residual.
     let is_ground_station = {
         let cfg = crate::config::PairingConfig::load_from(&paths.config_path);
         crate::profile::current_profile_and_role_at(
@@ -392,8 +390,24 @@ where
         )
         .0 == "ground-station"
     };
-    let net_native = is_ground_station;
     let hid_native = is_ground_station;
+
+    // The Wi-Fi client routes talk to the Wi-Fi command socket on every profile.
+    // A ground station's ados-net uplink daemon owns it; every other node has no
+    // uplink daemon, so this process serves the socket itself with the same
+    // Wi-Fi-client manager (the owner of the station's advisory radio lock).
+    if !is_ground_station {
+        let sock = crate::routes::network_write::wifi_cmd_sock();
+        let runner: Arc<dyn ados_net::cmd::CmdRunner> = Arc::new(ados_net::cmd::TokioCmdRunner);
+        let wifi = Arc::new(tokio::sync::Mutex::new(
+            ados_net::managers::WifiClientManager::new(runner),
+        ));
+        tokio::spawn(async move {
+            if let Err(e) = ados_net::cmdsock::serve_wifi_client(wifi, &sock).await {
+                tracing::error!(path = %sock.display(), error = %e, "wifi_client_socket_bind_failed");
+            }
+        });
+    }
 
     // Build the relay-proxy caller on ground-station-profile nodes only. The
     // proxy's AuxEgress talks to the radio's aux command socket; the response
@@ -494,9 +508,9 @@ where
     // The Unix edge: the bare Router, no auth. The LAN edge: the same Router
     // wrapped with the rate-limit + auth layer keyed on the shared pairing
     // reader (so a route and the gate read one short-TTL-cached posture).
-    let unix_router = unix_app(build_router(state.clone(), net_native, hid_native));
+    let unix_router = unix_app(build_router(state.clone(), hid_native));
     let tcp_router = tcp_app(
-        build_router(state, net_native, hid_native),
+        build_router(state, hid_native),
         Arc::clone(&pairing),
         Arc::clone(&proxied_auth),
         Arc::clone(&dashboard_pin),

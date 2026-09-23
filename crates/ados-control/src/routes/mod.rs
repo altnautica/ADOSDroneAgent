@@ -120,7 +120,7 @@ pub fn detail(status: StatusCode, message: impl Into<String>) -> Response {
 /// degrades cleanly to a FastAPI-shaped `{"detail"}` when that upstream is
 /// absent), so the front serves the migrated routes natively and proxies the
 /// rest while the migration is in flight.
-pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Router {
+pub fn build_router(state: AppState, hid_native: bool) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(system::healthz))
         .route("/api/version", get(system::get_version))
@@ -653,36 +653,31 @@ pub fn build_router(state: AppState, net_native: bool, hid_native: bool) -> Rout
                 .post(gs_relay_proxy::handle)
                 .put(gs_relay_proxy::handle)
                 .delete(gs_relay_proxy::handle),
+        )
+        // The Wi-Fi client station status and writes go through the Wi-Fi
+        // command socket on every profile. A ground station's ados-net uplink
+        // daemon serves it; on any other node this process serves it itself
+        // from startup, backed by the same Wi-Fi-client manager.
+        .route(
+            "/api/v1/network/client/status",
+            get(network_client_read::get_client_status),
+        )
+        .route(
+            "/api/v1/network/client/join",
+            put(network_write::put_client_join),
+        )
+        .route(
+            "/api/v1/network/client",
+            delete(network_write::delete_client),
+        )
+        .route(
+            "/api/v1/network/client/configured/:name",
+            delete(network_write::delete_client_configured),
+        )
+        .route(
+            "/api/v1/network/client/configured/:name/autoconnect",
+            put(network_write::put_client_autoconnect),
         );
-
-    // The Wi-Fi client station status and writes are served natively only where
-    // the ados-net uplink daemon runs (a ground station), because they go through
-    // its command socket. On a drone there is no such daemon: the routes are not
-    // registered and fall through to the residual, whose packaged Wi-Fi manager
-    // drives NetworkManager directly.
-    if net_native {
-        router = router
-            .route(
-                "/api/v1/network/client/status",
-                get(network_client_read::get_client_status),
-            )
-            .route(
-                "/api/v1/network/client/join",
-                put(network_write::put_client_join),
-            )
-            .route(
-                "/api/v1/network/client",
-                delete(network_write::delete_client),
-            )
-            .route(
-                "/api/v1/network/client/configured/:name",
-                delete(network_write::delete_client_configured),
-            )
-            .route(
-                "/api/v1/network/client/configured/:name/autoconnect",
-                put(network_write::put_client_autoconnect),
-            );
-    }
 
     // PIC arbiter + gamepad + Bluetooth writes reach the Rust ados-pic / ados-input
     // daemons over their sockets, which exist only when hid-rust is enabled;
@@ -940,7 +935,7 @@ mod recording_route_tests {
         // router miss answers an EMPTY 404 and a wrong-method match answers 405,
         // so the body is what tells "the request arrived" from "it did not".
         let (_dir, state) = state_for_profile("drone");
-        let router = build_router(state, false, false);
+        let router = build_router(state, false);
         let request = Request::builder()
             .method(method)
             .uri(uri)
@@ -1004,5 +999,29 @@ mod recording_route_tests {
         // And the start/stop writes keep their own methods.
         let (status, _) = send("DELETE", "/api/v1/ground-station/recording/start").await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn a_drone_serves_the_wifi_client_routes_natively() {
+        // These were registered only on a ground station, so a drone's request
+        // fell through to a residual with no handler (405). Every profile now
+        // routes them to the native handler, which answers from the Wi-Fi
+        // command socket (absent in this test, so an explicit 503).
+        for (method, uri) in [
+            ("GET", "/api/v1/network/client/status"),
+            ("DELETE", "/api/v1/network/client"),
+            ("DELETE", "/api/v1/network/client/configured/BenchNet"),
+        ] {
+            let (status, body) = send(method, uri).await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{method} {uri}: {body}"
+            );
+            assert!(
+                body.contains("E_WIFI_"),
+                "{method} {uri} missed its handler: {body}"
+            );
+        }
     }
 }

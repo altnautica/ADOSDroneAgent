@@ -67,7 +67,7 @@ fn run_dir() -> std::path::PathBuf {
 /// The native `ados-net` Wi-Fi command socket (`/run/ados/wifi-cmd.sock`), which
 /// applies the `wifi_join` / `wifi_leave` / `wifi_forget` ops through the daemon's
 /// single Wi-Fi-client manager (the owner of the `wlan0` AP/STA lock).
-fn wifi_cmd_sock() -> std::path::PathBuf {
+pub(crate) fn wifi_cmd_sock() -> std::path::PathBuf {
     run_dir().join("wifi-cmd.sock")
 }
 

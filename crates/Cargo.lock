@@ -192,6 +192,7 @@ dependencies = [
  "ados-hid",
  "ados-macpin",
  "ados-mavlink-router",
+ "ados-net",
  "ados-offload",
  "ados-protocol",
  "ados-swarmbus",

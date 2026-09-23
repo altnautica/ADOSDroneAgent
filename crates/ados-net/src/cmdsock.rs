@@ -250,51 +250,80 @@ async fn dispatch(line: &[u8], state: &CmdState) -> Value {
     apply(cmd, state).await
 }
 
+/// Serve ONLY the Wi-Fi-client ops on `sock_path`, for a node that runs no
+/// uplink daemon (a drone). The REST layer talks to the same socket with the
+/// same wire protocol on every profile; here the one Wi-Fi-client manager behind
+/// it is owned by the caller's process. The AP, Ethernet and modem ops have no
+/// manager on such a node and reply `ok:false` with `E_UNSUPPORTED_OP`.
+pub async fn serve_wifi_client(
+    wifi: Arc<Mutex<WifiClientManager>>,
+    sock_path: &Path,
+) -> std::io::Result<()> {
+    let listener = bind_command_socket(sock_path, 0o660)?;
+    tracing::info!(path = %sock_path.display(), "wifi client command socket listening");
+    serve_rpc(listener, MAX_REQUEST_BYTES, move |req: Vec<u8>| {
+        let wifi = Arc::clone(&wifi);
+        async move {
+            let resp = dispatch_wifi_client(&req, &wifi).await;
+            serde_json::to_vec(&resp)
+                .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec())
+        }
+    })
+    .await;
+    Ok(())
+}
+
+/// Parse + route one request against a lone Wi-Fi-client manager.
+async fn dispatch_wifi_client(line: &[u8], wifi: &Mutex<WifiClientManager>) -> Value {
+    match parse_command(line) {
+        Parsed::Reply(v) => v,
+        Parsed::Cmd(cmd) => match apply_wifi(cmd, wifi).await {
+            Ok(v) => v,
+            Err(_) => {
+                json!({"ok": false, "error": "E_UNSUPPORTED_OP: no uplink daemon on this node"})
+            }
+        },
+    }
+}
+
+/// Apply a Wi-Fi-client command, or hand a non-Wi-Fi command back unapplied.
+async fn apply_wifi(cmd: Command, wifi: &Mutex<WifiClientManager>) -> Result<Value, Command> {
+    Ok(match cmd {
+        Command::Join {
+            ssid,
+            passphrase,
+            force,
+        } => with_ok(
+            wifi.lock()
+                .await
+                .join(&ssid, passphrase.as_deref(), force)
+                .await,
+        ),
+        Command::Forget { name } => with_ok(wifi.lock().await.forget(&name).await),
+        Command::Leave => with_ok(wifi.lock().await.leave().await),
+        Command::Status => {
+            let mut st: Map<String, Value> = wifi.lock().await.status().await;
+            st.insert("ok".to_string(), json!(true));
+            Value::Object(st)
+        }
+        Command::Autoconnect { name, enabled } => {
+            with_ok(wifi.lock().await.set_autoconnect(&name, enabled).await)
+        }
+        other => return Err(other),
+    })
+}
+
 /// Apply a validated command to the live managers. The `ok` flag is derived from
 /// the manager's own result so the REST forward client can branch on it: a
 /// manager result object replies `ok:true` (its own success field carries the
 /// outcome the REST layer inspects); only a non-object manager result yields
 /// `ok:false`.
 async fn apply(cmd: Command, state: &CmdState) -> Value {
+    let cmd = match apply_wifi(cmd, &state.wifi).await {
+        Ok(v) => return v,
+        Err(other) => other,
+    };
     match cmd {
-        Command::Join {
-            ssid,
-            passphrase,
-            force,
-        } => {
-            let res = state
-                .wifi
-                .lock()
-                .await
-                .join(&ssid, passphrase.as_deref(), force)
-                .await;
-            with_ok(res)
-        }
-        Command::Forget { name } => {
-            let res = state.wifi.lock().await.forget(&name).await;
-            with_ok(res)
-        }
-        Command::Leave => {
-            let res = state.wifi.lock().await.leave().await;
-            with_ok(res)
-        }
-        Command::Status => {
-            let st: Map<String, Value> = state.wifi.lock().await.status().await;
-            let mut v = Value::Object(st);
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("ok".to_string(), json!(true));
-            }
-            v
-        }
-        Command::Autoconnect { name, enabled } => {
-            let res = state
-                .wifi
-                .lock()
-                .await
-                .set_autoconnect(&name, enabled)
-                .await;
-            with_ok(res)
-        }
         Command::ApConfig {
             ssid,
             passphrase,
@@ -317,6 +346,11 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
             let res = state.modem.configure(apn.as_deref(), cap_gb, enabled).await;
             with_ok(res)
         }
+        Command::Join { .. }
+        | Command::Forget { .. }
+        | Command::Leave
+        | Command::Status
+        | Command::Autoconnect { .. } => unreachable!("Wi-Fi-client ops are applied above"),
     }
 }
 
@@ -698,5 +732,47 @@ mod tests {
         let v = reply(b"");
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().starts_with("E_BAD_REQUEST"));
+    }
+
+    fn lone_wifi_manager(dir: &std::path::Path) -> Mutex<WifiClientManager> {
+        let runner: Arc<dyn crate::cmd::CmdRunner> =
+            Arc::new(crate::cmd::testing::ScriptedRunner::new());
+        Mutex::new(WifiClientManager::with_paths(
+            "wlan0",
+            runner,
+            dir.join("ados-wlan0.lock"),
+            dir.join("ap-was-up"),
+            dir.join("wifi-client.json"),
+        ))
+    }
+
+    #[tokio::test]
+    async fn a_lone_wifi_manager_serves_the_wifi_ops() {
+        let dir = tempfile::tempdir().unwrap();
+        let wifi = lone_wifi_manager(dir.path());
+        let st = dispatch_wifi_client(br#"{"op":"wifi_status"}"#, &wifi).await;
+        assert_eq!(st["ok"], true);
+        assert!(st.get("connected").is_some(), "{st}");
+        // A malformed request is still refused before any manager work.
+        let bad = dispatch_wifi_client(br#"{"op":"wifi_join"}"#, &wifi).await;
+        assert_eq!(bad["error"], "E_MISSING_SSID");
+    }
+
+    #[tokio::test]
+    async fn a_lone_wifi_manager_refuses_the_uplink_daemon_ops() {
+        let dir = tempfile::tempdir().unwrap();
+        let wifi = lone_wifi_manager(dir.path());
+        for line in [
+            &br#"{"op":"ap_config","enabled":true}"#[..],
+            &br#"{"op":"eth_config","mode":"dhcp"}"#[..],
+            &br#"{"op":"modem_config","enabled":false}"#[..],
+        ] {
+            let v = dispatch_wifi_client(line, &wifi).await;
+            assert_eq!(v["ok"], false);
+            assert!(
+                v["error"].as_str().unwrap().starts_with("E_UNSUPPORTED_OP"),
+                "{v}"
+            );
+        }
     }
 }

@@ -103,18 +103,22 @@ async fn get(socket: &Path, path: &str) -> (String, String) {
     )
 }
 
-/// Serve `line` on a Unix socket forever, the way `IpcBroadcast` replays its last
-/// buffer to every client that connects.
+/// Serve `line` on a Unix socket the way a live bus does: every client gets the
+/// last buffer on connect and again on every tick. A bus that goes quiet is a
+/// stale table by design, so a fake that wrote once would make any read slower
+/// than the stale bound (a loaded parallel test run) report "stale".
 fn serve_line(path: PathBuf, line: Vec<u8>) {
     let listener = UnixListener::bind(&path).unwrap();
     tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
             let line = line.clone();
             tokio::spawn(async move {
-                let _ = stream.write_all(&line).await;
-                let _ = stream.flush().await;
-                // Hold the connection so the reader stays in its read loop.
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                loop {
+                    if stream.write_all(&line).await.is_err() || stream.flush().await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
             });
         }
     });
