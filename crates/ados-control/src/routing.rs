@@ -104,8 +104,10 @@ fn native_routes() -> Vec<NativeRoute> {
         put("/api/vision/detector"),
         delete("/api/vision/detector"),
         post("/api/vision/models/upload"),
-        // Plugin per-drone config write (GCS skill toggle / settings → live host).
+        // Plugin per-drone config write (GCS skill toggle / settings → live host)
+        // and its read-back.
         put("/api/plugins/{plugin_id}/config"),
+        get("/api/plugins/{plugin_id}/config"),
         // Plugin MCP-tool invocation (an MCP client runs a plugin's tool → live
         // host; a two-param {plugin_id}/{tool} template).
         post("/api/plugins/{plugin_id}/tools/{tool}/invoke"),
@@ -676,7 +678,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            155,
+            154,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -852,6 +854,7 @@ mod tests {
         // The plugin per-drone config write is native (a control-plane write, so
         // it stays off the residual Python plugin surface).
         assert!(has(Method::PUT, "/api/plugins/{plugin_id}/config"));
+        assert!(has(Method::GET, "/api/plugins/{plugin_id}/config"));
         assert!(has(
             Method::POST,
             "/api/plugins/{plugin_id}/tools/{tool}/invoke"

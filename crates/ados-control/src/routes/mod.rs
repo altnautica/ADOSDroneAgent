@@ -192,10 +192,11 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // Plugin per-drone config write: a GCS skill toggle / per-drone settings
         // change flips a plugin's `active`/settings config in the live plugin
         // host (the daemon's control socket). Auth-gated when paired (a write),
-        // 503 when the plugin host is not up. The plugin READ routes stay proxied.
+        // 503 when the plugin host is not up. The GET reads the live store back
+        // so a reloaded GCS can hand the plugin's UI its current settings.
         .route(
             "/api/plugins/:plugin_id/config",
-            put(plugins_config::put_plugin_config),
+            get(plugins_config::get_plugin_config).put(plugins_config::put_plugin_config),
         )
         // Plugin MCP-tool invocation: an MCP client runs a plugin's declared tool
         // through the plugin host's control socket and gets the result. A native

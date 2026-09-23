@@ -49,6 +49,12 @@ const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(5);
 /// The control method that applies a per-plugin config write to the live store.
 pub const METHOD_CONFIG_SET: &str = "config.set";
 
+/// The control method that reads a plugin's live config as the plugin itself
+/// sees it on this drone (global keys with the drone's own keys over them), so
+/// a GCS can show a plugin's settings after a reload. Args: `{plugin_id}`;
+/// answers `{values: {key: value, ...}}`.
+pub const METHOD_CONFIG_GET: &str = "config.get";
+
 /// The control method that runs one of a plugin's declared MCP tools on its live
 /// connection and returns the result. The off-box authorization is the
 /// `ados-control` HTTP edge (the MCP-token scope gate); by the time it reaches
@@ -92,6 +98,9 @@ pub trait ConfigControl: Send + Sync {
         value: Value,
         scope: &str,
     ) -> Result<String, String>;
+
+    /// The plugin's effective per-drone config as a map, or a human error.
+    fn config_snapshot(&self, plugin_id: &str) -> Result<Value, String>;
 }
 
 /// The lifecycle half of the control surface: the two operations that keep a
@@ -151,9 +160,33 @@ fn err_response(request_id: &str, message: String) -> Envelope {
     }
 }
 
+/// Answer a `config.get` request with the plugin's effective config.
+fn handle_config_get<H: ConfigControl>(host: &H, req: &Envelope) -> Envelope {
+    let method = METHOD_CONFIG_GET;
+    let Some(plugin_id) = arg_str(&req.args, "plugin_id").filter(|s| !s.is_empty()) else {
+        return lifecycle_err(&req.request_id, method, "plugin_id must be a non-empty string".into());
+    };
+    match host.config_snapshot(plugin_id) {
+        Ok(values) => Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "response".to_string(),
+            method: method.to_string(),
+            capability: String::new(),
+            args: Value::Map(vec![(Value::from("values"), values)]),
+            request_id: req.request_id.clone(),
+            token: String::new(),
+            error: None,
+        },
+        Err(e) => lifecycle_err(&req.request_id, method, e),
+    }
+}
+
 /// Handle one decoded control request against the host. Pure of I/O so it unit
 /// tests directly.
 fn handle_request<H: ConfigControl>(host: &H, req: &Envelope) -> Envelope {
+    if req.method == METHOD_CONFIG_GET {
+        return handle_config_get(host, req);
+    }
     if req.method != METHOD_CONFIG_SET {
         return err_response(
             &req.request_id,
@@ -430,6 +463,17 @@ mod tests {
             // drone with an empty agent degrades to global in the real store;
             // the stub just echoes the requested scope.
             Ok(scope.to_string())
+        }
+
+        fn config_snapshot(&self, plugin_id: &str) -> Result<Value, String> {
+            if let Some(err) = &self.fail {
+                return Err(err.clone());
+            }
+            let last = self.last.lock().unwrap().clone();
+            Ok(Value::Map(match last {
+                Some((p, k, v, _)) if p == plugin_id => vec![(Value::from(k), v)],
+                _ => vec![],
+            }))
         }
     }
 

@@ -60,6 +60,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/params/{name}` |  |
 | POST | `/api/params/{name}` |  |
 | GET | `/api/ping` | unauthenticated by design |
+| GET | `/api/plugins/{plugin_id}/config` |  |
 | PUT | `/api/plugins/{plugin_id}/config` |  |
 | GET | `/api/plugins/{plugin_id}/state` |  |
 | POST | `/api/plugins/{plugin_id}/tools/{tool}/invoke` |  |
@@ -177,7 +178,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-153 native routes.
+154 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

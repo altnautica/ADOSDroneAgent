@@ -408,7 +408,7 @@ fn is_service_restart(path: &str) -> bool {
     }
 }
 
-/// `PUT /api/plugins/{plugin_id}/config`.
+/// `/api/plugins/{plugin_id}/config`: the `PUT` write and its `GET` read-back.
 fn is_plugin_config(path: &str) -> bool {
     match path
         .strip_prefix("/api/plugins/")
@@ -420,16 +420,18 @@ fn is_plugin_config(path: &str) -> bool {
 }
 
 /// Native `GET` routes whose response body carries a secret and therefore need the
-/// `secret_read` scope rather than plain `read`. Empty today: no native GET returns
-/// the pairing key, the WFB bind key, or a WS ticket (`/api/pairing/code` is public
+/// `secret_read` scope rather than plain `read`, by exact path. Empty today: no
+/// fixed-path native GET returns the pairing key, the WFB bind key, or a WS ticket (`/api/pairing/code` is public
 /// and 409s when paired, `wfb/pair` returns only a fingerprint, `signing/counters`
 /// reports unmeasured nulls). Add any future secret-bearing GET here, or a plain `read` token
 /// would reach it; this is a deliberate security surface, not a convenience list.
 const SECRET_GET_ROUTES: &[&str] = &[];
 
 /// Whether a native GET route returns a secret (needs `secret_read`, not `read`).
+/// A plugin's config is whatever that plugin stores, which can be a credential,
+/// so reading it back is treated as secret-bearing.
 fn is_secret_get(path: &str) -> bool {
-    SECRET_GET_ROUTES.contains(&path)
+    SECRET_GET_ROUTES.contains(&path) || is_plugin_config(path)
 }
 
 /// `POST /api/plugins/{plugin_id}/tools/{tool}/invoke` — a two-param template.
@@ -673,6 +675,11 @@ mod tests {
         assert_eq!(
             route_scope(&Method::GET, "/api/status"),
             Some(ScopeClass::Read)
+        );
+        // A plugin's stored config may hold a credential.
+        assert_eq!(
+            route_scope(&Method::GET, "/api/plugins/com.example.hello/config"),
+            Some(ScopeClass::SecretRead)
         );
     }
 

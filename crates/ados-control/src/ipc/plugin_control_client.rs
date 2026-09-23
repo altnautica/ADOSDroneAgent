@@ -31,6 +31,9 @@ use tokio::net::UnixStream;
 const METHOD_CONFIG_SET: &str = "config.set";
 /// The control method that runs one of a plugin's declared MCP tools.
 const METHOD_TOOL_INVOKE: &str = "tool.invoke";
+
+/// Read a plugin's effective config (mirrors `ados_plugin_host::control`).
+const METHOD_CONFIG_GET: &str = "config.get";
 /// The default plugin-host control directory (matches `DEFAULT_CONTROL_DIR` in
 /// the plugin host). Overridable via `ADOS_PLUGIN_HOST_DIR` so a test / SITL run
 /// points both the daemon and this client at a tempdir.
@@ -102,6 +105,21 @@ impl PluginControlClient {
             args.push((Value::from("scope"), Value::from(scope)));
         }
         self.request(METHOD_CONFIG_SET, Value::Map(args)).await
+    }
+
+    /// Read a plugin's effective per-drone config from the live daemon: the map
+    /// the plugin itself reads on this drone.
+    pub async fn config_get(&self, plugin_id: &str) -> Result<Value, PluginControlError> {
+        let args = Value::Map(vec![(Value::from("plugin_id"), Value::from(plugin_id))]);
+        let resp = self.request(METHOD_CONFIG_GET, args).await?;
+        Ok(match resp {
+            Value::Map(m) => m
+                .into_iter()
+                .find(|(k, _)| k.as_str() == Some("values"))
+                .map(|(_, v)| v)
+                .unwrap_or(Value::Map(vec![])),
+            _ => Value::Map(vec![]),
+        })
     }
 
     /// Run one of a plugin's declared MCP tools on its live connection through

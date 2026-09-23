@@ -481,6 +481,26 @@ impl ConfigStore {
         default
     }
 
+    /// Every value `plugin_id` reads on the drone `agent_id`: each global key,
+    /// with the drone's own keys over them, the precedence [`Self::get`] applies
+    /// to one key.
+    fn effective(&self, plugin_id: &str, agent_id: &str) -> Vec<(String, Value)> {
+        let mut out = std::collections::BTreeMap::new();
+        for ((p, k), v) in &self.global {
+            if p == plugin_id {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        if !agent_id.is_empty() {
+            for ((p, a, k), v) in &self.drone {
+                if p == plugin_id && a == agent_id {
+                    out.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
     /// Store `value`, refusing a value over [`CONFIG_VALUE_MAX_BYTES`] or a write
     /// that would take the plugin's whole store over [`CONFIG_PLUGIN_MAX_BYTES`].
     /// Sizes are the msgpack encoding, the form every read and persist handles.
@@ -3579,6 +3599,21 @@ impl crate::control::ConfigControl for RealHost {
     ) -> Result<String, String> {
         RealHost::apply_config_set(self, plugin_id, key, value, scope)
     }
+
+    fn config_snapshot(&self, plugin_id: &str) -> Result<Value, String> {
+        if plugin_id.is_empty() {
+            return Err("plugin_id must be a non-empty string".to_string());
+        }
+        let agent_id = self.agent_id_for(plugin_id);
+        let values = self
+            .config
+            .lock()
+            .expect("config mutex poisoned")
+            .effective(plugin_id, &agent_id);
+        Ok(Value::Map(
+            values.into_iter().map(|(k, v)| (Value::from(k), v)).collect(),
+        ))
+    }
 }
 
 /// Python `repr()` of a string: single-quoted. Used in the few error strings
@@ -4593,6 +4628,24 @@ mod tests {
         let get_args = map(&[("key", Value::from("k"))]);
         let g = ok_map(host.config_get("p", &get_args));
         assert_eq!(field(&g, "value").and_then(Value::as_str), Some("v"));
+    }
+
+    #[test]
+    fn config_snapshot_is_what_the_plugin_reads_on_this_drone() {
+        use crate::control::ConfigControl;
+        let host = RealHost::new().with_agent_id_lookup(Box::new(|_pid| "agent-1".to_string()));
+        host.apply_config_set("p", "mode", Value::from("global-mode"), "global").unwrap();
+        host.apply_config_set("p", "distance", Value::from(10), "global").unwrap();
+        host.apply_config_set("p", "distance", Value::from(25), "drone").unwrap();
+        host.apply_config_set("other", "distance", Value::from(99), "drone").unwrap();
+
+        let snap = host.config_snapshot("p").unwrap();
+        let snap = snap.as_map().expect("a map");
+        // The drone's own value wins over the global one, a global-only key is
+        // still there, and another plugin's config never appears.
+        assert_eq!(field(snap, "distance").and_then(Value::as_i64), Some(25));
+        assert_eq!(field(snap, "mode").and_then(Value::as_str), Some("global-mode"));
+        assert_eq!(snap.len(), 2);
     }
 
     #[test]

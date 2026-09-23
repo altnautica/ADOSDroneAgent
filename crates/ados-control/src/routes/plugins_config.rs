@@ -1,4 +1,4 @@
-//! The plugin per-drone config write route: `PUT /api/plugins/{plugin_id}/config`.
+//! The plugin per-drone config routes: `PUT` and `GET /api/plugins/{plugin_id}/config`.
 //!
 //! A GCS skill toggle (the Fly Mode Skill Bar flipping a behavior's `active`
 //! flag) and a per-drone settings change (a follow distance/height edit) both
@@ -13,6 +13,10 @@
 //! so they stay off the FastAPI surface. The plugin *read* routes (`GET
 //! /api/plugins/{id}`, `GET /api/plugins/{id}/gcs/...`) remain Python for now (a
 //! later route-ledger wave).
+//!
+//! The `GET` reads the same live store back (global keys with this drone's own
+//! keys over them, exactly what the plugin reads), so the GCS can hand a
+//! plugin's UI its current settings after a reload.
 //!
 //! Auth: this is a write, so it sits in the native route set and the LAN edge
 //! requires the pairing key when paired (the same posture as `/api/command` and
@@ -84,6 +88,30 @@ pub async fn put_plugin_config(
         // A bad request the daemon rejected (empty key, bad scope) is a 400; an
         // unreachable daemon (plugin host not up) is a 503 — a config write is
         // never silently dropped.
+        Err(PluginControlError::Rpc(msg)) => detail(StatusCode::BAD_REQUEST, msg),
+        Err(e) => detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("plugin host unavailable: {e}"),
+        ),
+    }
+}
+
+/// `GET /api/plugins/{plugin_id}/config` — the plugin's effective per-drone
+/// config from the live plugin host, `{plugin_id, values: {key: value}}`.
+pub async fn get_plugin_config(
+    State(_state): State<AppState>,
+    Path(plugin_id): Path<String>,
+) -> Response {
+    let client = PluginControlClient::default_socket();
+    match client.config_get(&plugin_id).await {
+        Ok(values) => {
+            let values = serde_json::to_value(&values).unwrap_or(json!({}));
+            (
+                StatusCode::OK,
+                Json(json!({ "plugin_id": plugin_id, "values": values })),
+            )
+                .into_response()
+        }
         Err(PluginControlError::Rpc(msg)) => detail(StatusCode::BAD_REQUEST, msg),
         Err(e) => detail(
             StatusCode::SERVICE_UNAVAILABLE,

@@ -1216,10 +1216,45 @@ impl<H: HostServices> Connection<H> {
                 )
                 .await
                 {
-                    Ok(result) => send_response(write_half, &env.request_id, result).await,
+                    Ok(result) => {
+                        if other == Method::TelemetryExtend {
+                            self.record_extended_channel(&env.args);
+                        }
+                        send_response(write_half, &env.request_id, result).await
+                    }
                     Err(e) => send_error(write_half, &env.request_id, &e.body()).await,
                 }
             }
+        }
+    }
+
+    /// Mirror a merged `telemetry.extend` channel into the plugin's state
+    /// sidecar as `telemetry.<channel>`: the file the native front serves at
+    /// `GET /api/plugins/{id}/state`, which is how the GCS gets a plugin's own
+    /// extended channel to that plugin's UI. The merge already succeeded, so a
+    /// write fault is logged, never returned.
+    fn record_extended_channel(&self, args: &Value) {
+        let field = |key: &str| match args {
+            Value::Map(m) => m.iter().find(|(k, _)| k.as_str() == Some(key)).map(|(_, v)| v),
+            _ => None,
+        };
+        let Some(channel) = field("channel").and_then(Value::as_str).filter(|c| !c.is_empty()) else {
+            return;
+        };
+        let payload = match field("payload") {
+            Some(v @ Value::Map(_)) => v.clone(),
+            _ => Value::Map(vec![]),
+        };
+        let topic = format!("telemetry.{channel}");
+        if let Err(e) =
+            crate::state_sidecar::record(&self.socket_dir, &self.plugin_id, &topic, &payload, now_ms())
+        {
+            tracing::warn!(
+                plugin_id = %self.plugin_id,
+                topic = %topic,
+                error = %e,
+                "failed to write plugin state sidecar"
+            );
         }
     }
 

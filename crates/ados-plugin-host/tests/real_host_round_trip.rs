@@ -178,9 +178,17 @@ async fn telemetry_extend_merges_and_lands_in_the_snapshot() {
     assert_eq!(args_bool(&resp, "merged"), Some(true));
     assert_eq!(args_str(&resp, "channel"), Some("metrics"));
 
-    // The heartbeat builder reads this snapshot; the channel is namespaced.
     let snap = h.host.telemetry_snapshot();
     assert!(snap.contains_key(&format!("{PLUGIN_A}/metrics")));
+
+    // The channel is also in the plugin's state sidecar as `telemetry.<channel>`,
+    // which the native front serves to the GCS for the plugin's own UI.
+    let sidecar = ados_plugin_host::state_sidecar::sidecar_path(h._dir.path(), PLUGIN_A);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).expect("sidecar written")).unwrap();
+    let text = doc.to_string();
+    assert!(text.contains("telemetry.metrics"), "sidecar: {text}");
+    assert!(text.contains("-42"), "sidecar: {text}");
 }
 
 #[tokio::test]
