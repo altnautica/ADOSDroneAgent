@@ -426,11 +426,14 @@ where
                 let listener = crate::state::AuxResponseListener::new(reader_cancel, reader_task);
                 // Fleet attention reconciler: auto-promotes a one-drone fleet to
                 // the full video profile (every drone boots to thumbnail, so the
-                // existing single-drone product would otherwise sit at 320x180)
-                // and re-issues any demotion a hero selection could not confirm.
-                // Idle — zero radio traffic — once the fleet agrees.
+                // existing single-drone product would otherwise sit at 320x180),
+                // re-issues any assignment a hero selection could not confirm,
+                // and re-asserts any drone whose beaconed hero bit disagrees
+                // with the selection (a hero that rebooted comes back as a
+                // thumbnail). Idle — zero radio traffic — once the fleet agrees.
                 tokio::spawn(crate::routes::gs_fleet_hero::run_hero_reconciler(
                     Arc::clone(&proxy),
+                    state.swarm.clone(),
                 ));
                 // Fleet slot delivery: the ground station allocates a slot at
                 // pair time and, until now, told only the caller. A drone
@@ -601,35 +604,6 @@ async fn shutdown_signal() {
         tracing::info!("received interrupt");
     }
 }
-
-/// Hand a freshly-bound socket to the `ados` group so a non-root operator in
-/// that group can reach the trusted local plane. The bind sets the mode to
-/// `0o660`, which only grants the group once the group actually owns the file.
-/// Best-effort: the installer creates the group, and when it is absent (a dev
-/// host) this is a quiet no-op so bring-up stays automatic. Linux-only; a stub
-/// elsewhere. Mirrors the logd helper.
-#[cfg(target_os = "linux")]
-pub(crate) fn set_ados_group(path: &Path) {
-    match nix::unistd::Group::from_name("ados") {
-        Ok(Some(g)) => {
-            if let Err(err) = nix::unistd::chown(path, None, Some(g.gid)) {
-                tracing::debug!(error = %err, path = %path.display(), "chgrp control socket failed");
-            }
-        }
-        Ok(None) => {
-            tracing::debug!("ados group not present; leaving socket group as-is");
-        }
-        Err(err) => {
-            tracing::debug!(error = %err, "resolving ados group failed");
-        }
-    }
-}
-
-/// Non-Linux stub: socket group ownership is a Linux-only concern. Unused on a
-/// dev host (the call site is itself Linux-gated), hence the allow.
-#[cfg(not(target_os = "linux"))]
-#[allow(dead_code)]
-pub(crate) fn set_ados_group(_path: &Path) {}
 
 #[cfg(test)]
 mod tests {

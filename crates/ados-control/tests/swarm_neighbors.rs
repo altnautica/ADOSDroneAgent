@@ -149,21 +149,24 @@ fn peers() -> (SwarmBeacon, SwarmBeacon) {
 }
 
 /// Build the neighbour table the way the bus does: real frames in, real
-/// classification, real table.
+/// classification, real table. The peers seal with their own cipher on the
+/// fleet key; the ground station opens with its own, as on the air.
 fn table_from_the_air(now: Instant) -> NeighborTable {
-    let cipher = SwarmCipher::new(&derive_fleet_key(Some(&[7u8; 64])));
+    let fleet_key = derive_fleet_key(Some(&[7u8; 64]));
+    let ground = SwarmCipher::new(&fleet_key);
     let mut table = NeighborTable::new(OWN_SLOT);
     let (hero, degraded) = peers();
 
     for (seq, beacon) in [hero, degraded].into_iter().enumerate() {
+        let sender = SwarmCipher::new(&fleet_key);
         let frame = build_frame(
             FLEET,
             seq as u16,
-            &cipher.seal(SwarmFrameKind::Beacon, &beacon.encode()),
+            &sender.seal(SwarmFrameKind::Beacon, &beacon.encode()),
         );
         // The frame is 87 bytes injected: 13 radiotap + 24 802.11 + 50 payload.
         assert_eq!(frame.len(), 87, "the on-air frame size changed");
-        let outcome = ingest_frame(&frame, FLEET, &cipher, &mut table, now);
+        let outcome = ingest_frame(&frame, FLEET, &ground, &mut table, now);
         assert_eq!(
             outcome,
             Ingest::Beacon(beacon),
@@ -176,10 +179,10 @@ fn table_from_the_air(now: Instant) -> NeighborTable {
     let intruder = build_frame(
         FLEET + 1,
         99,
-        &cipher.seal(SwarmFrameKind::Beacon, &peers().0.encode()),
+        &SwarmCipher::new(&fleet_key).seal(SwarmFrameKind::Beacon, &peers().0.encode()),
     );
     assert!(matches!(
-        ingest_frame(&intruder, FLEET, &cipher, &mut table, now),
+        ingest_frame(&intruder, FLEET, &ground, &mut table, now),
         Ingest::Rejected(_)
     ));
 
@@ -191,7 +194,7 @@ fn table_from_the_air(now: Instant) -> NeighborTable {
         &forger.seal(SwarmFrameKind::Beacon, &peers().0.encode()),
     );
     assert!(matches!(
-        ingest_frame(&forged, FLEET, &cipher, &mut table, now),
+        ingest_frame(&forged, FLEET, &ground, &mut table, now),
         Ingest::Rejected(_)
     ));
 
@@ -243,6 +246,7 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
         json!({
             "fleet_id": 7,
             "slot": 0,
+            "slot_conflict": false,
             "neighbors": [
                 {
                     "slot": 3,
@@ -290,6 +294,8 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
                 "beacons_rx": 2,
                 "beacons_bad_magic": 0,
                 "beacons_bad_tag": 1,
+                "beacons_replayed": 0,
+                "beacons_slot_conflict": 0,
                 "beacons_stale_dropped": 0,
                 "neighbors_now": 2,
             },

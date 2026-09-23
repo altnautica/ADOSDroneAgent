@@ -62,22 +62,13 @@ const HOP_FRAME_LEN: usize = 51;
 /// PresenceBeacon wire length (68 bytes).
 const PRESENCE_FRAME_LEN: usize = 68;
 
-/// Canonical shared-key file delivered byte-for-byte to both rigs by the bind
-/// protocol. AFTER a successful bind both sides have a `/etc/drone.key` with the
-/// SAME 64 bytes, so it is the only shared-content key on disk and the right
-/// source for a symmetric HMAC derivation.
-const DRONE_KEY_PRIMARY: &str = "/etc/drone.key";
-/// Forward-compatibility location if a future migration relocates the file into
-/// the agent's namespace.
-const DRONE_KEY_FALLBACK: &str = "/etc/ados/wfb/drone.key";
-
 /// Resolve the symmetric pair key used to authenticate the presence beacon
 /// HMAC, reusing the verified `ados_radio::hop::derive_pair_key`.
 ///
-/// Reads the 64-byte `/etc/drone.key` (then the `/etc/ados/wfb/drone.key`
-/// fallback). Cold-start (no key on disk yet) falls back to the deterministic
-/// `sha256(b"ados/wfb/hop/v2/cold-start")` constant so a stray beacon still
-/// parses before bind.
+/// Reads the 64-byte shared key through `ados_radio::paths::read_shared_key`
+/// (`/etc/drone.key`). Cold-start (no key on disk yet) falls back to the
+/// deterministic `sha256(b"ados/wfb/hop/v2/cold-start")` constant so a stray
+/// beacon still parses before bind.
 ///
 /// HARD CONSTRAINT, do not reintroduce the gs.key/tx.key divergence: an earlier
 /// version hashed `/etc/ados/wfb/tx.key` on the drone and `/etc/ados/wfb/rx.key`
@@ -87,15 +78,13 @@ const DRONE_KEY_FALLBACK: &str = "/etc/ados/wfb/drone.key";
 /// listener. The shared file is `/etc/drone.key`, present byte-identical on both
 /// rigs after bind. Only ever derive from that.
 pub fn resolve_pair_key() -> [u8; 32] {
-    for path in [DRONE_KEY_PRIMARY, DRONE_KEY_FALLBACK] {
-        if let Ok(key_bytes) = std::fs::read(path) {
-            if key_bytes.len() == 64 {
-                return derive_pair_key(Some(&key_bytes));
-            }
+    match ados_radio::paths::read_shared_key() {
+        Some(shared) => derive_pair_key(Some(&shared)),
+        None => {
+            tracing::warn!("hop_supervisor_pair_key_unavailable");
+            derive_pair_key(None)
         }
     }
-    tracing::warn!("hop_supervisor_pair_key_unavailable");
-    derive_pair_key(None)
 }
 
 /// Read the persistent device-id (`/etc/ados/device-id`), trimmed. Empty when
@@ -986,9 +975,7 @@ mod tests {
         let resolved = resolve_pair_key();
         let cold = derive_pair_key(None);
         // On a dev host /etc/drone.key is absent, so this is the cold path.
-        if !std::path::Path::new(DRONE_KEY_PRIMARY).exists()
-            && !std::path::Path::new(DRONE_KEY_FALLBACK).exists()
-        {
+        if ados_radio::paths::read_shared_key().is_none() {
             assert_eq!(resolved, cold);
         }
     }

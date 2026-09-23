@@ -994,7 +994,7 @@ mod tests {
             unit_dir: dir.join("units"),
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
-            socket_dir: dir.join("sockets"),
+            control_dir: dir.join("plugin-host"),
         };
         Arc::new(Mutex::new(PluginSupervisor::new(
             paths, false, None, "1.0.0",
@@ -1023,7 +1023,7 @@ mod tests {
             unit_dir: dir.join("units"),
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
-            socket_dir: dir.join("sockets"),
+            control_dir: dir.join("plugin-host"),
         };
         let sup = PluginSupervisor::production(paths, None, env!("CARGO_PKG_VERSION"))
             .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());

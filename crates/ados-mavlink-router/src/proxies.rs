@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use ados_protocol::pairing_posture::{
-    data_plane_access, is_on_box, load_pairing, Access, Pairing, FORWARDED_HEADERS,
+    classify_caller, data_plane_access, load_pairing, Access, CallerClass, Pairing,
 };
 use ados_protocol::ws_ticket::{now_unix, WsTicketIssuer, SCOPE_MAVLINK_WS};
 use futures_util::{SinkExt, StreamExt};
@@ -51,24 +51,38 @@ const WS_TICKET_SUBPROTOCOL: &str = "ados-ws-ticket";
 /// time. Mirrors the HTTP control surface's pairing TTL.
 const PAIRING_TTL: Duration = Duration::from_secs(2);
 
-/// The WebSocket proxy's view of the agent's pairing posture and whether it
+/// The direct-GCS proxies' view of the agent's pairing posture and whether it
 /// enforces the data-path auth gate.
 ///
-/// The proxy bridges raw MAVLink to/from the flight controller, so an
-/// unauthenticated LAN caller could otherwise inject commands. The gate mirrors
-/// the agent's HTTP auth posture: unpaired ⇒ open (LAN presence is the gate),
-/// paired + on-box ⇒ open (the local operator already holds shell privilege),
-/// paired + off-box ⇒ the stored pairing key is required in `X-ADOS-Key`.
+/// The proxies bridge raw MAVLink to/from the flight controller, so an
+/// unauthenticated caller could otherwise inject commands. Each connection's
+/// caller is classified once ([`classify_caller`]) and decided by
+/// [`direct_access`]:
+///
+/// - **Unpaired ⇒ the local operator and the first-boot lifelines only.** A
+///   fresh node has no key to check, and these edges carry flight-controller
+///   bytes, so the rest of the LAN and anything relayed through a proxy or
+///   tunnel is unauthorized. The HTTP surface's PIN-gated operator-LAN scope
+///   does not extend here: there is no PIN channel on a MAVLink stream.
+/// - **Paired + on-box ⇒ open.** The local operator already holds shell
+///   privilege.
+/// - **Paired + anyone else ⇒ the stored pairing key** (`X-ADOS-Key` or a
+///   `gs.mavlink_ws` ticket on the WebSocket; the raw edges have neither).
 ///
 /// **Two defaults, one mechanism.** `enforce` is supplied by the caller from
-/// the config, and the three edges do not share a value: the WebSocket
-/// enforces by default because a client can present either the `X-ADOS-Key`
-/// header or an `ados-ws-ticket` subprotocol, while the byte-stream edges
-/// (TCP, UDP) default off because they have no credential channel to present
-/// anything on. With `enforce` off the gate is observe-only: an unauthorized
-/// connection is logged and STILL admitted. With it on, an unauthorized
-/// off-box connection is refused at the handshake (WebSocket) or before any
-/// bytes are read (TCP, UDP).
+/// the config, and the edges do not share a value: the WebSocket enforces by
+/// default because a client can present either the `X-ADOS-Key` header or an
+/// `ados-ws-ticket` subprotocol, while the byte-stream edges (TCP, UDP) default
+/// off because they have no credential channel to present anything on. With
+/// `enforce` off the gate is observe-only: an unauthorized connection is logged
+/// and STILL admitted. With it on, an unauthorized connection is refused at the
+/// handshake (WebSocket) or before any bytes are read (TCP, UDP).
+///
+/// The byte-stream edges add one gate of their own on a PAIRED node: an
+/// off-box raw peer can never present the key, so it is served only when the
+/// operator opted the raw edges into LAN access
+/// ([`WsProxyAuth::with_raw_lan_access`]). Without that opt-in a paired node's
+/// raw proxies serve on-box callers only, whatever `enforce` says.
 ///
 /// The byte-stream proxies share this gate with the WebSocket, so the name is
 /// an alias rather than a second type: one posture, three edges.
@@ -77,6 +91,7 @@ pub type ProxyAuth = WsProxyAuth;
 #[derive(Clone)]
 pub struct WsProxyAuth {
     enforce: bool,
+    raw_lan_access: bool,
     pairing_path: PathBuf,
     cache: Arc<StdMutex<PairingCache>>,
 }
@@ -87,11 +102,23 @@ struct PairingCache {
     primed: bool,
 }
 
+/// The direct-proxy access rule for one classified caller, given the pairing
+/// posture. See [`WsProxyAuth`].
+fn direct_access(pairing: &Pairing, caller: CallerClass, presented_key: Option<&str>) -> Access {
+    if *pairing == Pairing::Unpaired && !caller.is_first_boot_reach() {
+        return Access::Unauthorized;
+    }
+    data_plane_access(pairing, caller, presented_key)
+}
+
 impl WsProxyAuth {
-    /// Build an auth context against an explicit pairing-state path.
+    /// Build an auth context against an explicit pairing-state path. The raw
+    /// edges start closed to off-box peers on a paired node; see
+    /// [`Self::with_raw_lan_access`].
     pub fn new(enforce: bool, pairing_path: PathBuf) -> Self {
         Self {
             enforce,
+            raw_lan_access: false,
             pairing_path,
             cache: Arc::new(StdMutex::new(PairingCache {
                 loaded: Pairing::Unpaired,
@@ -111,6 +138,18 @@ impl WsProxyAuth {
         Self::new(enforce, path)
     }
 
+    /// Open the raw byte-stream edges (TCP, UDP) to off-box peers on a PAIRED
+    /// node (`mavlink.raw_proxy_lan_access`). Those edges carry no credential
+    /// channel, so on a paired node an off-box peer is always unauthorized;
+    /// without this opt-in it is refused, which makes the raw proxies on-box
+    /// only once the node is paired. With it, the peer is served unless
+    /// `enforce` is also on. Consulted only by [`Self::classify`]; the
+    /// WebSocket authenticates its callers instead.
+    pub fn with_raw_lan_access(mut self, open: bool) -> Self {
+        self.raw_lan_access = open;
+        self
+    }
+
     /// The current pairing posture, reading `pairing.json` at most once per TTL.
     fn current(&self) -> Pairing {
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
@@ -124,26 +163,19 @@ impl WsProxyAuth {
         fresh
     }
 
-    /// Resolve the access decision for a connection, given whether the peer is
-    /// loopback, whether the handshake carried a proxy-forwarding header, and the
-    /// presented key. Pure given the cached posture; the enforce flag is applied
-    /// by the caller ([`should_admit`]).
-    fn decide(
-        &self,
-        peer_is_loopback: bool,
-        has_forwarding_header: bool,
-        presented_key: Option<&str>,
-    ) -> Access {
-        let on_box = is_on_box(peer_is_loopback, has_forwarding_header);
-        data_plane_access(&self.current(), on_box, presented_key)
+    /// Resolve the access decision for a classified caller and the presented
+    /// key, against the cached posture. The enforce flag is applied by the
+    /// callers ([`Self::should_admit`], [`Self::classify`]).
+    fn decide(&self, caller: CallerClass, presented_key: Option<&str>) -> Access {
+        direct_access(&self.current(), caller, presented_key)
     }
 
     /// Whether the offered WebSocket subprotocols carry a valid `gs.mavlink_ws`
     /// ticket for the current paired key. A browser cannot set `X-ADOS-Key`, so
     /// it presents a short-lived HMAC ticket (minted by the native control
     /// surface, keyed off the same `pairing.json`) through the subprotocol list.
-    /// Always false when unpaired (the unpaired posture already admits, so there
-    /// is nothing to verify against) or when no ticket is offered.
+    /// Always false when unpaired (there is no key to verify against) or when
+    /// no ticket is offered.
     fn ticket_valid(&self, offered: &[String]) -> bool {
         let Pairing::Paired(key) = self.current() else {
             return false;
@@ -156,55 +188,44 @@ impl WsProxyAuth {
             .is_ok()
     }
 
-    /// Whether to admit a connection, honouring the two-stage rollout. Returns
-    /// `(admit, access)`: when `enforce` is off an unauthorized posture still
-    /// admits (`admit = true`) so the caller can log-only; when `enforce` is on
-    /// an unauthorized posture rejects (`admit = false`).
+    /// Classify a raw-socket peer by address alone and decide it.
     ///
-    /// A valid ticket in the offered subprotocols promotes an otherwise
-    /// unauthorized (paired + off-box, no/bad key) connection to `Accept` — it is
-    /// an off-box credential equivalent to a valid `X-ADOS-Key`. So a browser GCS
-    /// (ticket) and a native client (header) both authenticate, and the
-    /// `enforce`-on gate is safe to flip for either.
-    /// Classify a raw-socket peer by address alone.
+    /// The byte-stream proxies have no header and no handshake, so the peer
+    /// address is the only signal available and there is no key or ticket to
+    /// present. Returns `(admit, access)`:
     ///
-    /// The byte-stream proxies have no header and no handshake, so this is the
-    /// only signal available: `is_on_box` reduces to "is the peer loopback",
-    /// and there is no key or ticket to present.
-    ///
-    /// It also applies [`unpaired_peer_allowed`], which `data_plane_access`
-    /// does not: an UNPAIRED node accepts everything by that rule, and an
-    /// unpaired node reachable from the whole LAN is exactly the state a fresh
-    /// unit ships in. The allowlist keeps the two lifelines a headless node
-    /// actually has — the first-boot AP and the USB gadget network — while
-    /// treating the rest of the LAN as unauthorized.
+    /// - an authorized caller (on-box; a lifeline while unpaired) is admitted;
+    /// - on a PAIRED node any other caller is admitted only when the raw edges
+    ///   were opened to the LAN AND enforcement is off;
+    /// - on an UNPAIRED node any other caller is admitted only when
+    ///   enforcement is off (observe-only).
     pub fn classify(&self, peer: std::net::IpAddr) -> (bool, Access) {
-        let is_loopback = peer.is_loopback();
-        let mut access = self.decide(is_loopback, false, None);
-        if access == Access::Accept
-            && !is_loopback
-            && !ados_protocol::pairing_posture::unpaired_peer_allowed(&peer)
-            && matches!(self.current(), Pairing::Unpaired)
-        {
-            // Unpaired-accepts-everything, from an address that is neither a
-            // lifeline nor on-box.
-            access = Access::Unauthorized;
-        }
-        let admit = match access {
-            Access::Accept => true,
-            Access::Unauthorized => !self.enforce,
+        let pairing = self.current();
+        let access = direct_access(&pairing, classify_caller(Some(peer), |_| false), None);
+        let admit = match (access, &pairing) {
+            (Access::Accept, _) => true,
+            (Access::Unauthorized, Pairing::Paired(_)) => self.raw_lan_access && !self.enforce,
+            (Access::Unauthorized, Pairing::Unpaired) => !self.enforce,
         };
         (admit, access)
     }
 
+    /// Whether to admit a WebSocket connection, honouring the enforce flag.
+    /// Returns `(admit, access)`: when `enforce` is off an unauthorized posture
+    /// still admits (`admit = true`) so the caller can log-only; when `enforce`
+    /// is on an unauthorized posture rejects (`admit = false`).
+    ///
+    /// A valid ticket in the offered subprotocols promotes an otherwise
+    /// unauthorized (paired, not on-box, no/bad key) connection to `Accept` — it
+    /// is an off-box credential equivalent to a valid `X-ADOS-Key`. So a browser
+    /// GCS (ticket) and a native client (header) both authenticate.
     fn should_admit(
         &self,
-        peer_is_loopback: bool,
-        has_forwarding_header: bool,
+        caller: CallerClass,
         presented_key: Option<&str>,
         offered_subprotocols: &[String],
     ) -> (bool, Access) {
-        let mut access = self.decide(peer_is_loopback, has_forwarding_header, presented_key);
+        let mut access = self.decide(caller, presented_key);
         if access == Access::Unauthorized && self.ticket_valid(offered_subprotocols) {
             access = Access::Accept;
         }
@@ -213,6 +234,19 @@ impl WsProxyAuth {
             Access::Unauthorized => !self.enforce,
         };
         (admit, access)
+    }
+
+    /// Decide a WebSocket handshake from its peer address and headers: classify
+    /// the caller (a forwarding header makes it remote), read the presented key
+    /// and the offered subprotocols, then [`Self::should_admit`].
+    fn handshake_decision(
+        &self,
+        peer: std::net::IpAddr,
+        headers: &tokio_tungstenite::tungstenite::http::HeaderMap,
+    ) -> (bool, Access) {
+        let caller = classify_caller(Some(peer), |h| headers.contains_key(h));
+        let presented = headers.get(WS_KEY_HEADER).and_then(|v| v.to_str().ok());
+        self.should_admit(caller, presented, &offered_subprotocols(headers))
     }
 }
 
@@ -225,11 +259,11 @@ fn extract_ticket(offered: &[String]) -> Option<&str> {
     offered.get(pos + 1).map(String::as_str)
 }
 
-/// Parse the offered WebSocket subprotocols from the handshake. Values may be
-/// split across multiple `Sec-WebSocket-Protocol` headers and/or comma-joined
-/// within one; flatten both forms.
-fn offered_subprotocols(req: &HandshakeRequest) -> Vec<String> {
-    req.headers()
+/// Parse the offered WebSocket subprotocols from the handshake headers. Values
+/// may be split across multiple `Sec-WebSocket-Protocol` headers and/or
+/// comma-joined within one; flatten both forms.
+fn offered_subprotocols(headers: &tokio_tungstenite::tungstenite::http::HeaderMap) -> Vec<String> {
+    headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
         .iter()
         .filter_map(|v| v.to_str().ok())
@@ -253,14 +287,6 @@ const UDP_PEER_TTL: Duration = Duration::from_secs(12);
 /// set cannot grow without bound.
 const UDP_MAX_PEERS: usize = 64;
 
-/// TCP MAVLink proxy. Binds `0.0.0.0:<port>` and serves each client a copy of
-/// the FC frame stream while forwarding its bytes to the FC.
-/// Bind address for the direct-GCS proxies when nothing overrides it.
-///
-/// `0.0.0.0` is what shipped, and the third-party ground-station path depends
-/// on it: the agent advertises `tcp://<lan-host>:5760` for QGroundControl and
-/// Mission Planner, so a loopback default would silently break a capability an
-/// operator was told they had.
 /// Map an access decision to the provenance the send path records.
 ///
 /// Deliberately not a permission: the byte path is unchanged either way. It
@@ -317,9 +343,28 @@ fn admit_raw_peer(
     admit.then(|| origin_of(access))
 }
 
+/// Bind address for the direct-GCS proxies when nothing overrides it.
+///
+/// Wide on purpose: a fresh unit is reached over its AP hotspot and USB gadget,
+/// neither of which is loopback, and an operator who opts the raw edges into
+/// LAN access (`mavlink.raw_proxy_lan_access`) needs them on the LAN. Who is
+/// actually served is decided per connection by [`WsProxyAuth`], which follows
+/// the pairing state with no restart; on a paired node without that opt-in the
+/// raw edges serve on-box callers only.
 pub const DEFAULT_PROXY_BIND_ADDR: &str = "0.0.0.0";
 
-/// The address the direct-GCS proxies bind, from `ADOS_MAVLINK_BIND_ADDR`.
+/// The operator's `ADOS_MAVLINK_BIND_ADDR` override, trimmed; `None` when it is
+/// unset or blank (a blank override is a mistake, not a request to bind
+/// nowhere).
+fn bind_override() -> Option<String> {
+    std::env::var("ADOS_MAVLINK_BIND_ADDR")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// The address the raw direct-GCS proxies (TCP, UDP) bind, from
+/// `ADOS_MAVLINK_BIND_ADDR`.
 ///
 /// Settable because the advertisement above is not right for every deployment.
 /// A unit that never needs a desktop ground station on its LAN can bind
@@ -327,13 +372,20 @@ pub const DEFAULT_PROXY_BIND_ADDR: &str = "0.0.0.0";
 /// at all — a stronger remedy than inspecting callers on a socket that stays
 /// open, because there is then nothing left to inspect.
 pub fn proxy_bind_addr() -> String {
-    std::env::var("ADOS_MAVLINK_BIND_ADDR")
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    bind_override().unwrap_or_else(|| DEFAULT_PROXY_BIND_ADDR.to_string())
+}
+
+/// The address the WebSocket proxy binds: the `ADOS_MAVLINK_BIND_ADDR`
+/// override when set (it narrows every direct-GCS proxy at once), else the
+/// configured WebSocket endpoint's `host`, else the default.
+pub fn ws_bind_addr(configured_host: &str) -> String {
+    bind_override()
+        .or_else(|| Some(configured_host.trim().to_string()).filter(|h| !h.is_empty()))
         .unwrap_or_else(|| DEFAULT_PROXY_BIND_ADDR.to_string())
 }
 
+/// TCP MAVLink proxy. Binds `<bind_addr>:<port>` and serves each admitted
+/// client a copy of the FC frame stream while forwarding its bytes to the FC.
 pub async fn run_tcp_proxy(
     fc: Arc<FcConnection>,
     bind_addr: &str,
@@ -356,16 +408,12 @@ pub async fn run_tcp_proxy(
                     // The peer address is the only thing this socket knows
                     // about its caller: MAVLink is a raw byte stream, so there
                     // is no header to carry a credential and no handshake to
-                    // hang one on.
-                    //
-                    // Enforcement is therefore opt-in. Off (the default) an
-                    // unauthorized peer is recorded and still served, because
-                    // this port is advertised to operators as the
-                    // QGroundControl / Mission Planner path and refusing would
-                    // break third-party GCS compatibility at the operator's
-                    // screen rather than at install time. On, the connection is
-                    // dropped before a single byte is read, so no client bytes
-                    // ever reach the flight controller.
+                    // hang one on. So on a paired node an off-box peer is
+                    // served only when the operator opened the raw edges to
+                    // the LAN (the QGroundControl / Mission Planner path) and
+                    // left enforcement off. A refused connection is dropped
+                    // before a single byte is read, so no client bytes ever
+                    // reach the flight controller.
                     let Some(origin) = admit_raw_peer(&auth, addr.ip(), port, RawEdge::Tcp) else {
                         // `stream` drops here, closing the connection.
                         continue;
@@ -422,7 +470,7 @@ async fn handle_tcp_client(
     writer.abort();
 }
 
-/// UDP MAVLink proxy. Binds `0.0.0.0:<port>`, learns each GCS peer from its
+/// UDP MAVLink proxy. Binds `<bind_addr>:<port>`, learns each admitted GCS peer from its
 /// inbound datagrams, forwards peer bytes to the FC, and sends FC frames to
 /// every learned peer.
 pub async fn run_udp_proxy(
@@ -492,11 +540,10 @@ pub async fn run_udp_proxy(
                     // flight controller AND enrols itself into the fan-out, so
                     // the FC's whole telemetry stream is mirrored back to it.
                     //
-                    // Enforcement is opt-in, as on TCP. Off (the default) this
-                    // is observe-only. On, BOTH halves are skipped: refusing the
-                    // injection while still enrolling the peer would leave the
-                    // telemetry mirror open, which is the half of this that
-                    // reaches furthest.
+                    // The same verdict as TCP. A refused sender skips BOTH
+                    // halves: refusing the injection while still enrolling the
+                    // peer would leave the telemetry mirror open, which is the
+                    // half of this that reaches furthest.
                     let Some(origin) = admit_raw_peer(&auth, addr.ip(), port, RawEdge::Udp) else {
                         continue;
                     };
@@ -541,26 +588,32 @@ fn cap_peers(peers: &mut HashMap<SocketAddr, Instant>, max: usize) {
     }
 }
 
-/// WebSocket MAVLink proxy. Binds `0.0.0.0:<port>` and bridges binary WebSocket
-/// frames to/from the FC, the way a browser GCS connects. Text/ping frames are
-/// ignored; only binary frames carry MAVLink.
+/// WebSocket MAVLink proxy. Binds `<bind_addr>:<port>` ([`ws_bind_addr`]) and
+/// bridges binary WebSocket frames to/from the FC, the way a browser GCS
+/// connects. Text/ping frames are ignored; only binary frames carry MAVLink.
 ///
 /// `auth` gates the handshake by the agent's pairing posture (see
-/// [`WsProxyAuth`]). With enforcement off (the default) the gate is observe-only.
+/// [`WsProxyAuth`]).
 pub async fn run_ws_proxy(
     fc: Arc<FcConnection>,
+    bind_addr: &str,
     port: u16,
     auth: WsProxyAuth,
     cancel: Arc<Notify>,
 ) {
-    let listener = match TcpListener::bind(("0.0.0.0", port)).await {
+    let listener = match TcpListener::bind((bind_addr, port)).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!(port, error = %e, "ws_proxy_bind_failed");
+            tracing::warn!(bind_addr, port, error = %e, "ws_proxy_bind_failed");
             return;
         }
     };
-    tracing::info!(port, enforce_auth = auth.enforce, "ws_proxy_listening");
+    tracing::info!(
+        bind_addr,
+        port,
+        enforce_auth = auth.enforce,
+        "ws_proxy_listening"
+    );
     loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -591,30 +644,18 @@ async fn handle_ws_client(
     peer: SocketAddr,
     auth: WsProxyAuth,
 ) {
-    // Inspect the handshake for the pairing key + any forwarding header, resolve
-    // the posture, and (with enforcement on) reject an unauthorized off-box
-    // connection at the handshake. With enforcement off the callback admits
-    // everything; the log happens after the handshake from the captured decision.
+    // Classify the caller from the peer and the handshake headers (a
+    // forwarding header makes it remote), resolve the posture, and (with
+    // enforcement on) reject an unauthorized connection at the handshake. With
+    // enforcement off the callback admits everything; the log happens after the
+    // handshake from the captured decision.
     let decision: Arc<StdMutex<Option<HandshakeDecision>>> = Arc::new(StdMutex::new(None));
     let callback_decision = decision.clone();
     let callback_auth = auth.clone();
     let ws = tokio_tungstenite::accept_hdr_async(
         stream,
         move |req: &HandshakeRequest, mut response: HandshakeResponse| {
-            let presented = req
-                .headers()
-                .get(WS_KEY_HEADER)
-                .and_then(|v| v.to_str().ok());
-            let has_forwarding_header = FORWARDED_HEADERS
-                .iter()
-                .any(|h| req.headers().contains_key(*h));
-            let offered = offered_subprotocols(req);
-            let (admit, access) = callback_auth.should_admit(
-                peer.ip().is_loopback(),
-                has_forwarding_header,
-                presented,
-                &offered,
-            );
+            let (admit, access) = callback_auth.handshake_decision(peer.ip(), req.headers());
             *callback_decision.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some(HandshakeDecision { admit, access });
             if admit {
@@ -622,13 +663,25 @@ async fn handle_ws_client(
                 // select one of the offered subprotocols (RFC 6455 §4.2.2) or a
                 // browser handshake fails — echo the marker back. We never echo
                 // the token itself, only the marker.
-                if offered.iter().any(|p| p == WS_TICKET_SUBPROTOCOL) {
+                if offered_subprotocols(req.headers())
+                    .iter()
+                    .any(|p| p == WS_TICKET_SUBPROTOCOL)
+                {
                     response.headers_mut().insert(
                         SEC_WEBSOCKET_PROTOCOL,
                         HeaderValue::from_static(WS_TICKET_SUBPROTOCOL),
                     );
                 }
                 Ok(response)
+            } else if callback_auth.current() == Pairing::Unpaired {
+                // The same refusal the HTTP edge gives an unpaired node's
+                // non-lifeline caller: there is no key it could have sent.
+                let mut err = ErrorResponse::new(Some(
+                    "This device is not paired yet. Pair it first, or reach it over its hotspot or USB connection."
+                        .to_string(),
+                ));
+                *err.status_mut() = StatusCode::FORBIDDEN;
+                Err(err)
             } else {
                 let mut err = ErrorResponse::new(Some(
                     "Missing X-ADOS-Key header. This agent is paired and requires authentication."
@@ -716,11 +769,9 @@ mod tests {
     // --- raw-socket posture (TCP / UDP), which have no handshake ------------
 
     #[test]
-    fn the_bind_default_keeps_the_advertised_third_party_path_working() {
-        // The agent advertises tcp://<lan-host>:5760 as the QGroundControl /
-        // Mission Planner path, so a loopback DEFAULT would silently break a
-        // capability an operator was told they had. Binding wide is the shipped
-        // behaviour; narrowing it is a deployment choice.
+    fn the_bind_default_stays_wide_for_the_lifelines() {
+        // A fresh unit's AP and USB lifelines are not loopback, so the listener
+        // binds wide and the per-connection gate decides who is served.
         assert_eq!(DEFAULT_PROXY_BIND_ADDR, "0.0.0.0");
     }
 
@@ -758,6 +809,13 @@ mod tests {
 
         std::env::remove_var("ADOS_MAVLINK_BIND_ADDR");
         assert_eq!(proxy_bind_addr(), DEFAULT_PROXY_BIND_ADDR);
+
+        // The WebSocket follows its configured endpoint host, and the operator
+        // override narrows it along with the raw edges.
+        assert_eq!(ws_bind_addr("127.0.0.1"), "127.0.0.1");
+        assert_eq!(ws_bind_addr("  "), DEFAULT_PROXY_BIND_ADDR);
+        std::env::set_var("ADOS_MAVLINK_BIND_ADDR", "127.0.0.1");
+        assert_eq!(ws_bind_addr("0.0.0.0"), "127.0.0.1");
 
         match restore {
             Some(v) => std::env::set_var("ADOS_MAVLINK_BIND_ADDR", v),
@@ -888,32 +946,57 @@ mod tests {
         }
     }
 
+    /// The raw edges have no credential channel, so on a PAIRED node an off-box
+    /// peer can never authenticate. Serving it anyway made the pairing gate
+    /// cosmetic for flight control. It is refused unless the operator opted
+    /// the raw edges into LAN access, and even then enforcement still wins.
+    /// Built over an explicit pairing file rather than `from_config` +
+    /// `ADOS_PAIRING_JSON` on purpose: that env var is read by the injector
+    /// gate in this same test binary, and setting a process global would make
+    /// two unrelated suites race.
     #[test]
-    fn a_paired_node_refuses_an_off_box_raw_peer_only_under_the_flag() {
-        // The shipped shape, and the one an operator lives with: paired, so an
-        // off-box peer is unauthorized, and the flag is the ONLY thing deciding
-        // whether it is served. Built over an explicit pairing file rather than
-        // `from_config` + `ADOS_PAIRING_JSON` on purpose: that env var is read by
-        // the injector gate in this same test binary, and setting a process
-        // global would make two unrelated suites race.
+    fn a_paired_node_serves_an_off_box_raw_peer_only_when_opted_into_lan_access() {
         let dir = tempfile::tempdir().unwrap();
         let pairing = write_pairing(dir.path(), r#"{"paired": true, "api_key": "k"}"#);
-        let lan: std::net::IpAddr = "10.0.0.9".parse().unwrap();
-
+        for ip in ["10.0.0.9", "192.168.4.20", "8.8.8.8"] {
+            let peer: std::net::IpAddr = ip.parse().unwrap();
+            for edge in [RawEdge::Tcp, RawEdge::Udp] {
+                assert_eq!(
+                    admit_raw_peer(&ProxyAuth::new(false, pairing.clone()), peer, 5760, edge),
+                    None,
+                    "{ip} on {edge:?}: a paired node's raw edges are on-box only by default"
+                );
+                assert_eq!(
+                    admit_raw_peer(
+                        &ProxyAuth::new(false, pairing.clone()).with_raw_lan_access(true),
+                        peer,
+                        5760,
+                        edge
+                    ),
+                    Some(ClientOrigin::Unauthenticated),
+                    "{ip} on {edge:?}: the opt-in serves it, recorded as anonymous"
+                );
+                assert_eq!(
+                    admit_raw_peer(
+                        &ProxyAuth::new(true, pairing.clone()).with_raw_lan_access(true),
+                        peer,
+                        5760,
+                        edge
+                    ),
+                    None,
+                    "{ip} on {edge:?}: enforcement still refuses an opted-in LAN peer"
+                );
+            }
+        }
+        // The local operator is served whatever the flags say.
         assert_eq!(
             admit_raw_peer(
-                &ProxyAuth::new(false, pairing.clone()),
-                lan,
+                &ProxyAuth::new(true, pairing),
+                "127.0.0.1".parse().unwrap(),
                 5760,
                 RawEdge::Tcp
             ),
-            Some(ClientOrigin::Unauthenticated),
-            "the shipped default must keep serving a desktop GCS"
-        );
-        assert_eq!(
-            admit_raw_peer(&ProxyAuth::new(true, pairing), lan, 5760, RawEdge::Tcp),
-            None,
-            "the flag must be the whole difference"
+            Some(ClientOrigin::Trusted)
         );
     }
 
@@ -949,57 +1032,88 @@ mod tests {
         (dir, auth)
     }
 
-    // Posture: unpaired admits any caller, regardless of key or peer.
+    /// A private-LAN caller, the ordinary off-box WebSocket client.
+    const LAN: CallerClass = CallerClass::OperatorLan;
+
+    /// An unpaired node's MAVLink WebSocket used to admit any caller, so a host
+    /// the HTTP edge would refuse could still arm the aircraft through it. It
+    /// now keeps the same lifeline-only posture as the raw edges.
     #[test]
-    fn unpaired_admits_off_box_without_a_key() {
+    fn unpaired_refuses_a_caller_that_is_not_on_box_or_a_lifeline() {
         let (_d, auth) = unpaired_auth(true);
-        // off-box (not loopback), no forwarding header, no key
-        assert_eq!(auth.decide(false, false, None), Access::Accept);
-        let (admit, access) = auth.should_admit(false, false, None, &[]);
-        assert!(admit);
-        assert_eq!(access, Access::Accept);
+        for caller in [CallerClass::Remote, CallerClass::OperatorLan] {
+            let (admit, access) = auth.should_admit(caller, None, &[]);
+            assert!(!admit, "{caller:?} must be refused while unpaired");
+            assert_eq!(access, Access::Unauthorized);
+        }
+        for caller in [CallerClass::OnBox, CallerClass::Lifeline] {
+            let (admit, access) = auth.should_admit(caller, None, &[]);
+            assert!(admit, "{caller:?} is how a fresh unit is reached");
+            assert_eq!(access, Access::Accept);
+        }
     }
 
-    // Posture: paired + loopback (on-box) admits without a key.
+    fn handshake_headers(
+        pairs: &[(&'static str, &str)],
+    ) -> tokio_tungstenite::tungstenite::http::HeaderMap {
+        let mut h = tokio_tungstenite::tungstenite::http::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    /// The handshake itself, headers and all: a tunnel terminating on loopback
+    /// is a remote caller, on either pairing state.
+    #[test]
+    fn a_loopback_handshake_with_a_forwarding_header_is_refused() {
+        let lo: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let tunnelled = handshake_headers(&[("cf-connecting-ip", "203.0.113.5")]);
+
+        let (_d, unpaired) = unpaired_auth(true);
+        assert_eq!(
+            unpaired.handshake_decision(lo, &tunnelled),
+            (false, Access::Unauthorized)
+        );
+        assert_eq!(
+            unpaired.handshake_decision(lo, &handshake_headers(&[])),
+            (true, Access::Accept),
+            "the local operator is still served"
+        );
+
+        let (_d2, paired) = paired_auth(true, "k");
+        assert_eq!(
+            paired.handshake_decision(lo, &tunnelled),
+            (false, Access::Unauthorized)
+        );
+        // The key still authenticates a tunnelled caller.
+        let keyed = handshake_headers(&[("x-forwarded-for", "203.0.113.5"), ("x-ados-key", "k")]);
+        assert_eq!(
+            paired.handshake_decision(lo, &keyed),
+            (true, Access::Accept)
+        );
+    }
+
+    // Posture: paired + on-box admits without a key.
     #[test]
     fn paired_on_box_admits_without_a_key() {
         let (_d, auth) = paired_auth(true, "k");
-        assert_eq!(auth.decide(true, false, None), Access::Accept);
-    }
-
-    // A loopback peer relayed by a proxy/tunnel is NOT on-box.
-    #[test]
-    fn paired_loopback_with_forwarding_header_is_not_on_box() {
-        let (_d, auth) = paired_auth(true, "k");
-        // loopback but a forwarding header present + no key => unauthorized
-        assert_eq!(auth.decide(true, true, None), Access::Unauthorized);
+        assert_eq!(auth.decide(CallerClass::OnBox, None), Access::Accept);
     }
 
     // Posture: paired + off-box + the valid key admits.
     #[test]
     fn paired_off_box_with_a_valid_key_admits() {
         let (_d, auth) = paired_auth(true, "ados_secret");
-        assert_eq!(
-            auth.decide(false, false, Some("ados_secret")),
-            Access::Accept
-        );
+        assert_eq!(auth.decide(LAN, Some("ados_secret")), Access::Accept);
     }
 
-    // Posture: paired + off-box + no key is unauthorized.
+    // Posture: paired + off-box + no key or a wrong key is unauthorized.
     #[test]
-    fn paired_off_box_with_no_key_is_unauthorized() {
+    fn paired_off_box_without_the_key_is_unauthorized() {
         let (_d, auth) = paired_auth(true, "ados_secret");
-        assert_eq!(auth.decide(false, false, None), Access::Unauthorized);
-    }
-
-    // Posture: paired + off-box + a wrong key is unauthorized.
-    #[test]
-    fn paired_off_box_with_a_wrong_key_is_unauthorized() {
-        let (_d, auth) = paired_auth(true, "ados_secret");
-        assert_eq!(
-            auth.decide(false, false, Some("wrong")),
-            Access::Unauthorized
-        );
+        assert_eq!(auth.decide(LAN, None), Access::Unauthorized);
+        assert_eq!(auth.decide(LAN, Some("wrong")), Access::Unauthorized);
     }
 
     // Two-stage rollout: with the enforce flag OFF an unauthorized posture is
@@ -1007,7 +1121,7 @@ mod tests {
     #[test]
     fn enforce_off_admits_an_unauthorized_connection_for_log_only() {
         let (_d, auth) = paired_auth(false, "ados_secret");
-        let (admit, access) = auth.should_admit(false, false, None, &[]);
+        let (admit, access) = auth.should_admit(LAN, None, &[]);
         assert!(
             admit,
             "with enforcement off the connection is still admitted"
@@ -1024,7 +1138,7 @@ mod tests {
     #[test]
     fn enforce_on_rejects_an_unauthorized_connection() {
         let (_d, auth) = paired_auth(true, "ados_secret");
-        let (admit, access) = auth.should_admit(false, false, None, &[]);
+        let (admit, access) = auth.should_admit(LAN, None, &[]);
         assert!(!admit, "with enforcement on the connection is rejected");
         assert_eq!(access, Access::Unauthorized);
     }
@@ -1034,7 +1148,7 @@ mod tests {
     fn an_authorized_connection_is_admitted_under_either_flag() {
         for enforce in [false, true] {
             let (_d, auth) = paired_auth(enforce, "k");
-            let (admit, access) = auth.should_admit(false, false, Some("k"), &[]);
+            let (admit, access) = auth.should_admit(LAN, Some("k"), &[]);
             assert!(admit);
             assert_eq!(access, Access::Accept);
         }
@@ -1052,7 +1166,7 @@ mod tests {
                 .token;
             let offered = vec!["ados-ws-ticket".to_string(), token];
             // off-box, no key, but a valid ticket => Accept under either flag.
-            let (admit, access) = auth.should_admit(false, false, None, &offered);
+            let (admit, access) = auth.should_admit(LAN, None, &offered);
             assert!(admit, "a valid ticket admits even with enforcement on");
             assert_eq!(access, Access::Accept);
         }
@@ -1067,7 +1181,7 @@ mod tests {
             .mint(SCOPE_MAVLINK_WS, 30)
             .token;
         let offered = vec!["ados-ws-ticket".to_string(), token];
-        let (admit, access) = auth.should_admit(false, false, None, &offered);
+        let (admit, access) = auth.should_admit(LAN, None, &offered);
         assert!(!admit);
         assert_eq!(access, Access::Unauthorized);
     }
@@ -1081,7 +1195,7 @@ mod tests {
             .mint("gs.pic_events", 30)
             .token;
         let offered = vec!["ados-ws-ticket".to_string(), token];
-        let (admit, _access) = auth.should_admit(false, false, None, &offered);
+        let (admit, _access) = auth.should_admit(LAN, None, &offered);
         assert!(!admit);
     }
 
@@ -1101,16 +1215,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_pairing(dir.path(), r#"{"paired": false}"#);
         let auth = WsProxyAuth::new(true, path.clone());
-        // First read: unpaired => off-box no-key admits.
-        assert_eq!(auth.decide(false, false, None), Access::Accept);
+        // First read: unpaired => an off-box non-lifeline caller is refused.
+        assert_eq!(auth.decide(LAN, None), Access::Unauthorized);
+        assert_eq!(auth.decide(CallerClass::Lifeline, None), Access::Accept);
         // Now pair and let the TTL lapse so the next read picks it up.
         write_pairing(dir.path(), r#"{"paired": true, "api_key": "k2"}"#);
         {
             let mut c = auth.cache.lock().unwrap();
             c.at = Instant::now() - (PAIRING_TTL + Duration::from_secs(1));
         }
-        assert_eq!(auth.decide(false, false, None), Access::Unauthorized);
-        assert_eq!(auth.decide(false, false, Some("k2")), Access::Accept);
+        // Paired: the lifeline is off-box like anyone else and needs the key.
+        assert_eq!(
+            auth.decide(CallerClass::Lifeline, None),
+            Access::Unauthorized
+        );
+        assert_eq!(auth.decide(LAN, Some("k2")), Access::Accept);
     }
 
     #[test]

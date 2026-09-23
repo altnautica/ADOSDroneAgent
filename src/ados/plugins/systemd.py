@@ -42,10 +42,29 @@ from ados.core.paths import (
     PLUGIN_UNIT_PREFIX,
 )
 from ados.plugins.manifest import PluginManifest
+from ados.plugins.ready_check import PROBE_TIMEOUT_S
 
 PLUGIN_RUNNER_BINARY = "/opt/ados/venv/bin/ados-plugin-runner"
 PLUGIN_SLICE_NAME = "ados-plugins.slice"
 PLUGIN_SLICE_PATH = PLUGIN_UNIT_DIR / PLUGIN_SLICE_NAME
+
+#: The fixed hardening every plugin process runs under: the main unit, each
+#: declared service, and each readiness probe. One list so the three cannot
+#: drift apart.
+HARDENING_DIRECTIVES = (
+    "NoNewPrivileges=yes",
+    "PrivateTmp=yes",
+    "ProtectSystem=strict",
+    "LockPersonality=yes",
+    "RestrictRealtime=yes",
+    "RestrictSUIDSGID=yes",
+    "ProtectKernelTunables=yes",
+    "ProtectKernelModules=yes",
+    "ProtectControlGroups=yes",
+    "ProtectProc=invisible",
+    "RestrictNamespaces=yes",
+    "SystemCallArchitectures=native",
+)
 
 # IOWeight=10 against the default 100 the flight units run at: systemd cannot
 # bound the bandwidth of an ``append:`` log destination, so the only lever on a
@@ -91,6 +110,33 @@ FILESYSTEM_HOST_CAP = "filesystem.host"
 #: another plugin's token from, and the trusted-key store it could enrol its
 #: own signer into. File modes already keep ``ados`` out of both.
 ALWAYS_INACCESSIBLE = ("/etc/ados/secrets", "/etc/ados/plugin-keys")
+
+#: Agent command sockets, and the plugin host's control dir, hidden from every
+#: plugin whatever it is granted. Each acts with the agent's authority rather
+#: than the plugin's grants; the real gate is the ``ados-operator`` socket group
+#: plus a peer-credential check on accept, and this is the second line.
+AGENT_SOCKET_PATHS = (
+    "/run/ados/plugin-host",
+    "/run/ados/control.sock",
+    "/run/ados/api-internal.sock",
+    "/run/ados/mavlink.sock",
+    "/run/ados/msp.sock",
+    "/run/ados/supervisor.sock",
+    "/run/ados/radio-cmd.sock",
+    "/run/ados/radio-aux.sock",
+    "/run/ados/wfb-cmd.sock",
+    "/run/ados/video-cmd.sock",
+    "/run/ados/gpio-cmd.sock",
+    "/run/ados/hid-cmd.sock",
+    "/run/ados/pic.sock",
+    "/run/ados/crsf-cmd.sock",
+    "/run/ados/wifi-cmd.sock",
+    "/run/ados/groundlink-cmd.sock",
+    "/run/ados/tunnel-config-cmd.sock",
+    "/run/ados/atlas-control.sock",
+    "/run/ados/pairing.sock",
+    "/run/ados/logd-query.sock",
+)
 
 #: Operator data roots reachable only with ``filesystem.host``.
 HOST_DATA_ROOTS = ("/srv", "/mnt", "/media", "/boot")
@@ -157,7 +203,7 @@ def sandbox_directives(granted: Iterable[str]) -> list[str]:
         rw.extend(HOST_DATA_ROOTS)
     lines.append("ReadWritePaths=" + " ".join(rw))
     lines.append("ProtectHome=read-only" if host_fs else "ProtectHome=yes")
-    inaccessible = [f"-{p}" for p in ALWAYS_INACCESSIBLE]
+    inaccessible = [f"-{p}" for p in (*ALWAYS_INACCESSIBLE, *AGENT_SOCKET_PATHS)]
     if not host_fs:
         inaccessible.extend(f"-{p}" for p in HOST_DATA_ROOTS)
     lines.append("InaccessiblePaths=" + " ".join(inaccessible))
@@ -266,6 +312,7 @@ def render_unit(
         max_cpu_percent=res.max_cpu_percent,
         max_pids=res.max_pids,
         log_path=log_path,
+        hardening="\n".join(HARDENING_DIRECTIVES),
         sandbox="\n".join(sandbox_directives(granted)),
     )
 
@@ -310,8 +357,53 @@ def render_service_unit(
         max_cpu_percent=res.max_cpu_percent,
         max_pids=res.max_pids,
         log_path=log_path,
+        hardening="\n".join(HARDENING_DIRECTIVES),
         sandbox="\n".join(sandbox_directives(granted)),
     )
+
+
+def probe_command(
+    manifest: PluginManifest,
+    argv: tuple[str, ...],
+    install_dir: Path,
+    granted: Iterable[str] = (),
+) -> list[str]:
+    """The ``systemd-run`` argv that runs one readiness probe sandboxed.
+
+    The probe is plugin-authored, so it gets exactly what the plugin's
+    declared services get: the ``ados`` user, the shared hardening, the
+    plugin's resource envelope and capability sandbox, the plugin slice, and
+    the plugin's install dir as its working directory. systemd starts it as a
+    transient unit, so it never runs inside the calling process, and
+    ``--wait --pipe`` return its exit status and output. ``RuntimeMaxSec``
+    bounds it in systemd as well as in the caller. ``argv`` is passed through
+    as separate arguments; no shell ever sees it.
+    """
+    if manifest.agent is None:
+        raise ValueError(f"plugin {manifest.id} has no agent half; nothing to probe")
+    res = manifest.agent.resources
+    properties = [
+        *HARDENING_DIRECTIVES,
+        f"MemoryMax={res.max_ram_mb}M",
+        f"CPUQuota={res.max_cpu_percent}%",
+        f"TasksMax={res.max_pids}",
+        f"RuntimeMaxSec={PROBE_TIMEOUT_S}",
+        *sandbox_directives(granted),
+    ]
+    return [
+        "systemd-run",
+        "--quiet",
+        "--wait",
+        "--pipe",
+        "--collect",
+        "--uid=ados",
+        "--gid=ados",
+        f"--slice={PLUGIN_SLICE_NAME}",
+        f"--working-directory={install_dir / manifest.id}",
+        *(f"--property={p}" for p in properties),
+        "--",
+        *argv,
+    ]
 
 
 UNIT_TEMPLATE = """\
@@ -338,18 +430,7 @@ StandardOutput=append:{log_path}
 StandardError=append:{log_path}
 User=ados
 Group=ados
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-LockPersonality=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectProc=invisible
-RestrictNamespaces=yes
-SystemCallArchitectures=native
+{hardening}
 # ---- capability sandbox (re-rendered on every grant/revoke) ----
 {sandbox}
 
@@ -379,18 +460,7 @@ StandardOutput=append:{log_path}
 StandardError=append:{log_path}
 User=ados
 Group=ados
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-LockPersonality=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectProc=invisible
-RestrictNamespaces=yes
-SystemCallArchitectures=native
+{hardening}
 # ---- capability sandbox (re-rendered on every grant/revoke) ----
 {sandbox}
 

@@ -47,9 +47,10 @@ pub async fn run(mut shutdown: watch::Receiver<bool>) {
             return;
         }
     };
-    // bind_command_socket already applied 0o660; group-own it to `ados` so the
-    // sandboxed plugin host (running as the `ados` group) can write it.
-    set_socket_perms(Path::new(VIDEO_CMD_SOCK));
+    // The shared helper applied 0o660, group-owned the socket to `ados-operator`
+    // and admits only root and operator-group peers. The plugin host runs as
+    // root and forwards `video.source.set` behind its capability gate; a plugin
+    // process itself cannot open this socket.
     tracing::info!(path = VIDEO_CMD_SOCK, "video command socket listening");
 
     let serve = serve_rpc(listener, MAX_REQUEST_BYTES, move |req: Vec<u8>| {
@@ -180,27 +181,6 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     let restarted = pm.restart(ADOS_VIDEO_UNIT).await;
     json!({"ok": restarted, "count": legs.len(), "persisted": true, "restarted": restarted})
 }
-
-/// 0o660 + group-own to `ados` so the sandboxed plugin host in that group can
-/// reach the trusted local plane. Best-effort; an absent group (a dev host) is a
-/// quiet no-op. Linux-only.
-#[cfg(target_os = "linux")]
-fn set_socket_perms(sock_path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o660));
-    match nix::unistd::Group::from_name("ados") {
-        Ok(Some(g)) => {
-            if let Err(err) = nix::unistd::chown(sock_path, None, Some(g.gid)) {
-                tracing::debug!(error = %err, "chgrp video command socket failed");
-            }
-        }
-        Ok(None) => tracing::debug!("ados group not present; leaving socket group as-is"),
-        Err(err) => tracing::debug!(error = %err, "resolving ados group failed"),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_socket_perms(_sock_path: &Path) {}
 
 #[cfg(test)]
 mod tests {

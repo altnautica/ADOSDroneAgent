@@ -41,7 +41,7 @@ use ados_radio::config::WfbConfig;
 use ados_radio::hop::derive_pair_key;
 use ados_radio::link_quality::LinkStats;
 use ados_radio::link_state::derive_link_state;
-use ados_radio::paths::{read_bind_sentinel_active, DRONE_KEY, WFB_TX_KEY};
+use ados_radio::paths::{read_bind_sentinel_active, read_shared_key, WFB_TX_KEY};
 use ados_radio::process::RadioProcesses;
 use ados_radio::watchdog::{
     aux_liveness_watchdog, new_counters, tx_health_watchdog, video_recvq_watchdog, CounterHandle,
@@ -712,8 +712,8 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         };
 
         // ── Load pair key for HMAC derivation ────────────────────────────
-        let drone_key = tokio::fs::read(DRONE_KEY).await.ok();
-        let pair_key = derive_pair_key(drone_key.as_deref());
+        let drone_key = read_shared_key();
+        let pair_key = derive_pair_key(drone_key.as_ref().map(|k| &k[..]));
 
         // ── Regulatory-enabled channel set, for the hop target filter ─────
         // Channels this adapter's reg domain forbids fail `iw set channel` with

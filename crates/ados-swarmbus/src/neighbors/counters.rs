@@ -1,20 +1,26 @@
 //! The counter set the bus publishes.
 //!
-//! Six numbers, and the discipline about which one moves when matters more than it
-//! looks — these are the whole field diagnosis of a swarm bus:
+//! Eight numbers, and the discipline about which one moves when matters more than
+//! it looks — these are the whole field diagnosis of a swarm bus:
 //!
 //! - `beacons_bad_magic` nonzero in steady state means the **kernel filter is not
 //!   attached**, so the adapter's entire video stream is being copied to userspace
 //!   and discarded.
 //! - `beacons_bad_tag` nonzero means a node **in range holds a different fleet key**
 //!   — a half-provisioned aircraft, or two fleets that were meant to be separate.
+//! - `beacons_replayed` nonzero means an **authentic frame arrived a second time**:
+//!   a counter its sender already used, or a sender run that has since been
+//!   replaced. Something on the channel is re-injecting captured beacons.
+//! - `beacons_slot_conflict` nonzero means **two live senders claim one slot** — a
+//!   peer on this node's own slot, or two peers sharing another. The fleet is
+//!   misprovisioned and separation cannot tell the pair apart.
 //! - `beacons_rx` climbing at roughly `2 × (N−1)` per second is the bus working;
 //!   flat while `neighbors_now` is nonzero means the table is coasting on entries
 //!   that are about to age out.
 //! - `beacons_tx` flat on a drone means it is not radiating at all, which is exactly
 //!   the state the identity gate forces on a misprovisioned slot.
 //!
-//! Conflating any two of them, or counting a malformed capture as either fault,
+//! Conflating any two of them, or counting a malformed capture as any fault,
 //! destroys the signal. That is why they are separate fields rather than one
 //! `errors` total.
 
@@ -36,6 +42,14 @@ pub struct SwarmCounters {
     /// Frames whose Poly1305 tag did not verify: a wrong fleet key, corruption, or a
     /// forgery. Indistinguishable by design, and all three want the same response.
     pub beacons_bad_tag: u64,
+    /// Authentic beacons refused as replays: a nonce counter at or below the last
+    /// one accepted from that sender, or a sender run already superseded on its
+    /// slot.
+    pub beacons_replayed: u64,
+    /// Authentic beacons from a second sender on an occupied slot. A peer on this
+    /// node's own slot is recorded (separation must see it) and counted; a second
+    /// sender on another peer's live slot is counted and not recorded.
+    pub beacons_slot_conflict: u64,
     /// Neighbours dropped after [`super::NEIGHBOR_STALE`].
     pub beacons_stale_dropped: u64,
 }
@@ -53,6 +67,8 @@ mod tests {
         assert_eq!(c.beacons_rx, 0);
         assert_eq!(c.beacons_bad_magic, 0);
         assert_eq!(c.beacons_bad_tag, 0);
+        assert_eq!(c.beacons_replayed, 0);
+        assert_eq!(c.beacons_slot_conflict, 0);
         assert_eq!(c.beacons_stale_dropped, 0);
         assert_eq!(c, SwarmCounters::default());
     }

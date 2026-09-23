@@ -93,6 +93,11 @@ const IPC_ONLY_KEYS: [&str; 12] = [
 /// republished at 10 Hz); `GET /api/params` serves them ungated from the router's
 /// on-disk cache.
 ///
+/// `mavlink_proxy_posture` is the router's own configuration — which address
+/// each direct-GCS proxy is bound to and whether a paired node's raw TCP/UDP
+/// edges serve the LAN — so it answers "can a desktop ground station reach this
+/// node" whether or not a flight controller is attached.
+///
 /// `swarm` is here for the same reason and is the strongest case of it: the swarm
 /// bus's counters (`beacons_tx` / `beacons_rx` / `beacons_bad_magic` /
 /// `beacons_bad_tag` / `beacons_stale_dropped` / `neighbors_now`) describe the
@@ -113,13 +118,14 @@ const IPC_ONLY_KEYS: [&str; 12] = [
 /// intervened" at exactly the moment something has.
 ///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 16] = [
+const AGENT_DIAGNOSTIC_KEYS: [&str; 17] = [
     "aux_mavlink_tee",
     "aux_rpc",
     "fc_reachable",
     "ipc_mavlink_drops",
     "ipc_state_drops",
     "mavlink_frame_ingest",
+    "mavlink_proxy_posture",
     "param_cached_count",
     "param_expected_count",
     "param_generation",

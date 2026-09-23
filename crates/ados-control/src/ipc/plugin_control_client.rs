@@ -4,8 +4,9 @@
 //! an in-memory store; a disk write alone is not seen until restart. So a GCS
 //! skill toggle (or a per-drone settings change) for a plugin the GCS is not has
 //! to reach the LIVE store in the running daemon. The daemon exposes one
-//! on-box, daemon-lifetime control socket (`/run/ados/plugins/_control.sock`)
-//! for exactly this; this client is its caller.
+//! on-box, daemon-lifetime control socket
+//! (`/run/ados/plugin-host/_control.sock`, in a root-only `0700` dir outside the
+//! per-plugin socket dir) for exactly this; this client is its caller.
 //!
 //! The wire is the same length-prefixed msgpack [`Envelope`] the vision socket
 //! speaks (4-byte big-endian length + a msgpack envelope), request/response,
@@ -14,8 +15,8 @@
 //! the route maps to a 503 so a config write is never silently dropped.
 //!
 //! Auth: the off-box auth is the LAN pairing-key edge on `PUT
-//! /api/plugins/{id}/config` (the same posture as `/api/vision/designate`); by
-//! the time a request reaches this socket it is an on-box, trusted caller.
+//! /api/plugins/{id}/config` (the same posture as `/api/vision/designate`); the
+//! socket itself admits root only, which this service runs as.
 
 use std::path::{Path, PathBuf};
 
@@ -30,17 +31,17 @@ use tokio::net::UnixStream;
 const METHOD_CONFIG_SET: &str = "config.set";
 /// The control method that runs one of a plugin's declared MCP tools.
 const METHOD_TOOL_INVOKE: &str = "tool.invoke";
-/// The default plugin socket directory (matches `DEFAULT_SOCKET_DIR` in the
-/// plugin host). Overridable via `ADOS_PLUGIN_SOCKET_DIR` so a test / SITL run
+/// The default plugin-host control directory (matches `DEFAULT_CONTROL_DIR` in
+/// the plugin host). Overridable via `ADOS_PLUGIN_HOST_DIR` so a test / SITL run
 /// points both the daemon and this client at a tempdir.
-const PLUGIN_SOCKET_DIR_DEFAULT: &str = "/run/ados/plugins";
-/// The control socket file name under the plugin socket dir.
+const PLUGIN_HOST_DIR_DEFAULT: &str = "/run/ados/plugin-host";
+/// The control socket file name under the control directory.
 const CONTROL_SOCKET_NAME: &str = "_control.sock";
 
-/// The default control socket path (`ADOS_PLUGIN_SOCKET_DIR`-aware).
+/// The default control socket path (`ADOS_PLUGIN_HOST_DIR`-aware).
 pub fn default_control_socket() -> PathBuf {
-    let dir = std::env::var("ADOS_PLUGIN_SOCKET_DIR")
-        .unwrap_or_else(|_| PLUGIN_SOCKET_DIR_DEFAULT.into());
+    let dir =
+        std::env::var("ADOS_PLUGIN_HOST_DIR").unwrap_or_else(|_| PLUGIN_HOST_DIR_DEFAULT.into());
     Path::new(&dir).join(CONTROL_SOCKET_NAME)
 }
 

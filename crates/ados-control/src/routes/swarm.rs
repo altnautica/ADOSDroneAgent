@@ -92,6 +92,7 @@ mod tests {
         json!({
             "fleet_id": 1,
             "slot": 0,
+            "slot_conflict": false,
             "neighbors": [{
                 "slot": 3,
                 "device_id": "ados-abc123",
@@ -117,6 +118,8 @@ mod tests {
                 "beacons_rx": 11,
                 "beacons_bad_magic": 0,
                 "beacons_bad_tag": 0,
+                "beacons_replayed": 0,
+                "beacons_slot_conflict": 0,
                 "beacons_stale_dropped": 0,
                 "neighbors_now": 1,
             },

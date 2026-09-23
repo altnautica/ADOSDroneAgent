@@ -8,9 +8,16 @@
 //! already holds shell-level privilege that exceeds API auth and is trusted past
 //! the gate.
 //!
+//! Who the caller is gets decided ONCE per request, at the transport edge, by
+//! [`classify_caller`]: the peer address plus the request's forwarding headers
+//! give one [`CallerClass`]. Every gate (the HTTP unpaired-node gate, the
+//! dashboard-PIN first set, the pairing claim, the direct MAVLink proxies) is a
+//! function of that value and the pairing state, so no two gates can read the
+//! same caller differently.
+//!
 //! These primitives are protocol-level on purpose: more than one native surface
 //! enforces the same posture (the HTTP control surface and the direct MAVLink
-//! WebSocket proxy), and a single implementation keeps the two from drifting.
+//! proxies), and a single implementation keeps them from drifting.
 //! Surface-specific concerns (request-rate limiting, the HTTP public-path
 //! exempt set, the short-TTL caching wrapper) live with each surface, not here.
 //!
@@ -19,6 +26,7 @@
 //! or not-`paired:true`-with-a-key file reads as [`Pairing::Unpaired`] (open),
 //! matching the agent's "no key on file means open" stance.
 
+use std::net::IpAddr;
 use std::path::Path;
 
 /// Proxy / tunnel relay headers. Their presence means the request was forwarded by a
@@ -51,22 +59,30 @@ pub enum Access {
 }
 
 /// Decide whether a data-plane connection may be admitted, independent of any
-/// transport. This is the single posture rule the native surfaces share:
+/// transport:
 ///
-/// - **Unpaired ⇒ Accept.** A fresh agent has no key; LAN presence is the gate.
-/// - **Paired + on-box ⇒ Accept.** The local operator already holds shell-level
-///   privilege that exceeds API auth.
-/// - **Paired + off-box + a valid key ⇒ Accept.** Compared in constant time.
-/// - **Paired + off-box + a missing or wrong key ⇒ Unauthorized.**
+/// - **Unpaired ⇒ Accept.** A fresh agent has no key to check against. Each
+///   surface narrows the unpaired posture by [`CallerClass`] itself before it
+///   gets here (the HTTP edge PIN-gates the operator LAN and refuses remote
+///   callers; the direct MAVLink proxies admit only
+///   [`CallerClass::is_first_boot_reach`]).
+/// - **Paired + [`CallerClass::OnBox`] ⇒ Accept.** The local operator already
+///   holds shell-level privilege that exceeds API auth.
+/// - **Paired + any other caller + a valid key ⇒ Accept.** Compared in
+///   constant time.
+/// - **Paired + any other caller + a missing or wrong key ⇒ Unauthorized.**
 ///
-/// `on_box` is the resolved [`is_on_box`] result for this peer (loopback and not
-/// relayed). `presented_key` is the key the caller supplied (e.g. an
-/// `X-ADOS-Key` header), if any.
-pub fn data_plane_access(pairing: &Pairing, on_box: bool, presented_key: Option<&str>) -> Access {
+/// `presented_key` is the key the caller supplied (e.g. an `X-ADOS-Key`
+/// header), if any.
+pub fn data_plane_access(
+    pairing: &Pairing,
+    caller: CallerClass,
+    presented_key: Option<&str>,
+) -> Access {
     match pairing {
         Pairing::Unpaired => Access::Accept,
         Pairing::Paired(expected) => {
-            if on_box {
+            if caller == CallerClass::OnBox {
                 return Access::Accept;
             }
             match presented_key {
@@ -97,111 +113,101 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(diff) == 0
 }
 
-/// True when the request originates on this host's loopback interface and was not
-/// relayed by a proxy or tunnel. An on-box caller (the local `ados` CLI, a root-owned
-/// job) already holds shell-level privilege that strictly exceeds API auth, so it is
-/// trusted past the pairing gate. A proxy or tunnel that terminates on loopback is
-/// excluded by the forwarding-header check.
+/// Who is on the other end of a request, derived once at the transport edge by
+/// [`classify_caller`].
 ///
-/// `peer_is_loopback` is whether the connection peer is `127.0.0.1`/`::1`;
-/// `has_forwarding_header` is whether any of [`FORWARDED_HEADERS`] is present on
-/// the request.
-pub fn is_on_box(peer_is_loopback: bool, has_forwarding_header: bool) -> bool {
-    peer_is_loopback && !has_forwarding_header
-}
-
-/// Whether an UNPAIRED node should answer a request from this peer.
-///
-/// An unpaired node accepts every route from anyone, including flight control,
-/// for as long as it stays unpaired. That is defensible on a bench, where
-/// physical presence on the LAN is the gate. It is not defensible on a unit a
-/// customer powers on in an office or a hotel and does not pair immediately.
-///
-/// The obvious remedy — bind only loopback and link-local until paired — cannot
-/// be used here, and the reason is worth stating so nobody reaches for it again.
-/// A headless node has exactly two operator lifelines and NEITHER is loopback or
-/// link-local: the AP hotspot on `192.168.4.1` (the primary first-boot route)
-/// and the USB gadget on `192.168.7.1`. Binding them away would leave a fresh
-/// unit reachable only from a shell the customer does not have, which is a
-/// worse failure than the exposure it closes. There is also no runtime re-bind:
+/// An unpaired node is a unit someone powered on and has not claimed yet, in a
+/// hangar, an office or a hotel. The obvious remedy for its exposure — bind only
+/// loopback and link-local until paired — cannot be used, and the reason is
+/// worth stating so nobody reaches for it again. A headless node has exactly two
+/// operator lifelines and NEITHER is loopback or link-local: the AP hotspot on
+/// `192.168.4.1` (the primary first-boot route) and the USB gadget on
+/// `192.168.7.1`. Binding them away would leave a fresh unit reachable only from
+/// a shell the customer does not have. There is also no runtime re-bind:
 /// listeners are bound once at startup, so a bind keyed on pairing would need a
 /// service restart at the exact moment the operator is mid-claim on that socket.
 ///
-/// So the gate is drawn here, at the peer address, where the decision is
-/// re-evaluated per request and follows pairing state in both directions with no
-/// restart. The honest limitation is that this is request-layer defence: the
-/// port stays open and an unauthorised peer receives a refusal rather than
-/// finding nothing listening.
+/// So the gate is drawn at the caller, per request, where it follows pairing
+/// state in both directions with no restart. The honest limitation is that this
+/// is request-layer defence: the port stays open and a refused caller receives a
+/// refusal rather than finding nothing listening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerClass {
+    /// A loopback peer whose request carries none of [`FORWARDED_HEADERS`]: the
+    /// local operator (the `ados` CLI, a root-owned job), who already holds
+    /// shell-level privilege that exceeds API auth.
+    OnBox,
+    /// A first-boot lifeline: IPv4/IPv6 link-local, the AP hotspot subnet
+    /// (`192.168.4.0/24`) or the USB gadget subnet (`192.168.7.0/24`). These are
+    /// the surfaces a fresh unit is reached from and its PIN is first set on.
+    Lifeline,
+    /// Any other RFC1918 private-LAN peer (`10/8`, `172.16/12`, `192.168/16`):
+    /// plausibly the operator's own browser on the local network rather than a
+    /// public-WAN host. Trusted less than a lifeline: while unpaired the HTTP
+    /// surface serves it data only behind a dashboard PIN session, and the
+    /// direct MAVLink proxies do not serve it at all.
+    OperatorLan,
+    /// Everything else: a public-WAN host, ANY request that carries a
+    /// proxy-forwarding header (a reverse proxy or tunnel, including one that
+    /// terminates on this host's loopback), or a caller whose address is unknown.
+    Remote,
+}
+
+impl CallerClass {
+    /// Whether this caller may reach an UNPAIRED node's data plane with no
+    /// credential at all: the local operator and the first-boot lifelines.
+    pub fn is_first_boot_reach(self) -> bool {
+        matches!(self, CallerClass::OnBox | CallerClass::Lifeline)
+    }
+}
+
+/// Classify a caller from its peer address and its request headers.
 ///
-/// Returns true for loopback, IPv4/IPv6 link-local, and the two agent-owned
-/// provisioning subnets. Everything else is refused while unpaired.
+/// `has_header` answers whether the request carries a header by (lowercase)
+/// name; a transport with no headers (a raw TCP or UDP socket) passes
+/// `|_| false`. A request carrying any of [`FORWARDED_HEADERS`] was relayed by a
+/// proxy or tunnel, so its socket address says nothing about where it came
+/// from: it is [`CallerClass::Remote`] whatever the peer is. That is what keeps
+/// a tunnel terminating on `127.0.0.1` from reading as the local operator, a
+/// first-boot lifeline, or a PIN claimant.
 ///
-/// This is the FIRST-BOOT LIFELINE set, deliberately left unchanged by the
-/// private-LAN operator scope: it is also consulted by the direct MAVLink WebSocket
-/// proxy (an off-`ados-control` surface that re-uses this crate), whose unpaired
-/// posture must stay restricted to the lifelines. A private-LAN browser is instead
-/// trusted for the HTTP operator-UI scope via [`trusted_operator_lan_peer`] and gated
-/// there behind the dashboard PIN — see that predicate for why the two sets are
-/// siblings rather than folded into one.
-pub fn unpaired_peer_allowed(peer: &std::net::IpAddr) -> bool {
-    match peer {
-        std::net::IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_link_local()
-                // The AP hotspot the operator joins on first boot.
-                || v4.octets()[..3] == [192, 168, 4]
-                // The USB gadget network, the headless fallback.
-                || v4.octets()[..3] == [192, 168, 7]
+/// `peer` is `None` when the address could not be determined, which is
+/// [`CallerClass::Remote`]: an unidentifiable caller is exactly the one these
+/// gates exist for. An IPv4 address mapped onto IPv6 is classified as the IPv4
+/// address it carries.
+pub fn classify_caller(peer: Option<IpAddr>, has_header: impl Fn(&str) -> bool) -> CallerClass {
+    let Some(peer) = peer else {
+        return CallerClass::Remote;
+    };
+    if FORWARDED_HEADERS.iter().any(|h| has_header(h)) {
+        return CallerClass::Remote;
+    }
+    match peer.to_canonical() {
+        ip if ip.is_loopback() => CallerClass::OnBox,
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            if v4.is_link_local() || o[..3] == [192, 168, 4] || o[..3] == [192, 168, 7] {
+                CallerClass::Lifeline
+            } else if is_rfc1918_v4(o) {
+                CallerClass::OperatorLan
+            } else {
+                CallerClass::Remote
+            }
         }
-        std::net::IpAddr::V6(v6) => {
-            v6.is_loopback()
-                // fe80::/10 — link-local unicast.
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-                // An IPv4 lifeline arriving mapped onto v6.
-                || v6
-                    .to_ipv4_mapped()
-                    .is_some_and(|m| unpaired_peer_allowed(&std::net::IpAddr::V4(m)))
-        }
+        // fe80::/10 — IPv6 link-local unicast.
+        IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => CallerClass::Lifeline,
+        IpAddr::V6(_) => CallerClass::Remote,
     }
 }
 
 /// True when an IPv4 octet array is in an RFC1918 private range: `10.0.0.0/8`,
-/// `172.16.0.0/12`, or `192.168.0.0/16`. Link-local (`169.254/16`) and loopback
-/// are NOT RFC1918 — the former is handled by the first-boot lifeline set, the
-/// latter is on-box.
+/// `172.16.0.0/12`, or `192.168.0.0/16`.
 fn is_rfc1918_v4(o: [u8; 4]) -> bool {
     match o {
         [10, _, _, _] => true,
         [172, b, _, _] => (16..=31).contains(&b),
         [192, 168, _, _] => true,
         _ => false,
-    }
-}
-
-/// Whether a peer is a trusted operator-LAN peer — it sits on an RFC1918 private
-/// LAN (`10/8`, `172.16/12`, `192.168/16`), i.e. plausibly the operator's own
-/// browser on the local network rather than a random public-WAN host.
-///
-/// These are the peers the PIN-gated cockpit design trusts for the
-/// operator-UI DATA scope while the node is unpaired: they may reach status/video/
-/// command through the HTTP control surface, but (unlike the first-boot lifelines)
-/// only when they present a dashboard PIN session, which the `ados-control` gate
-/// enforces. Public-WAN addresses never match this.
-///
-/// Deliberately a SIBLING of, not folded into, [`unpaired_peer_allowed`]: the
-/// first-boot lifelines keep their unrestricted unpaired access on EVERY surface,
-/// including the direct MAVLink WebSocket proxy that also consults this module. If
-/// the private-LAN set were folded into `unpaired_peer_allowed`, that proxy would
-/// blindly open flight-control bytes to the whole LAN while unpaired — exactly the
-/// blind trusted-network-open this design refuses — and the PIN gate would be
-/// bypassable off the HTTP surface. So the HTTP gate layers this predicate on top
-/// of the lifeline set and applies the PIN requirement itself.
-pub fn trusted_operator_lan_peer(peer: &std::net::IpAddr) -> bool {
-    match peer {
-        std::net::IpAddr::V4(v4) => is_rfc1918_v4(v4.octets()),
-        std::net::IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .is_some_and(|m| is_rfc1918_v4(m.octets())),
     }
 }
 
@@ -229,58 +235,82 @@ pub fn load_pairing(path: &Path) -> Pairing {
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
 
-    /// The two lifelines a headless unpaired unit is actually reached from.
-    /// These are the reason this is a peer filter and not a narrowed bind: a
-    /// literal loopback+link-local bind would remove both and leave a fresh
-    /// device unreachable to its own operator.
+    fn class(ip: &str) -> CallerClass {
+        classify_caller(Some(ip.parse().unwrap()), |_| false)
+    }
+
+    /// The local operator: a loopback peer with no relay header.
     #[test]
-    fn the_first_boot_lifelines_are_allowed_while_unpaired() {
-        for ip in [
-            "127.0.0.1",    // on-box
-            "::1",          // on-box, v6
-            "192.168.4.1",  // the AP hotspot itself
-            "192.168.4.37", // a phone joined to the hotspot
-            "192.168.7.1",  // the USB gadget
-            "192.168.7.42", // a laptop on the USB gadget net
-            "169.254.11.9", // IPv4 link-local
-            "fe80::1",      // IPv6 link-local
-        ] {
-            let addr: IpAddr = ip.parse().unwrap();
-            assert!(
-                unpaired_peer_allowed(&addr),
-                "{ip} is a first-boot reach path and must not be refused"
+    fn a_loopback_peer_with_no_forwarding_header_is_on_box() {
+        for ip in ["127.0.0.1", "127.0.0.53", "::1", "::ffff:127.0.0.1"] {
+            assert_eq!(class(ip), CallerClass::OnBox, "{ip}");
+        }
+    }
+
+    /// A tunnel terminating on this host (a tunnel's ingress to localhost)
+    /// delivers every internet request from 127.0.0.1 with one of these headers
+    /// set. Reading that caller as on-box, as a lifeline or as a PIN claimant is
+    /// the exposure this classification exists to close.
+    #[test]
+    fn a_loopback_peer_carrying_any_forwarding_header_is_remote() {
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        for header in FORWARDED_HEADERS {
+            assert_eq!(
+                classify_caller(Some(lo), |h| h == header),
+                CallerClass::Remote,
+                "loopback + {header} is a relayed caller"
             );
         }
     }
 
-    /// The exposure being closed: an ordinary LAN peer must not command an
-    /// unpaired aircraft.
+    /// A reverse proxy elsewhere on the LAN is no more trustworthy than one on
+    /// this host: once a request was forwarded, its socket address no longer
+    /// says where it came from.
     #[test]
-    fn an_ordinary_lan_peer_is_refused_while_unpaired() {
-        for ip in [
-            "192.168.1.50", // a typical private LAN address
-            "192.168.1.10",
-            "10.0.0.5",
-            "172.16.4.4",
-            "8.8.8.8",
-            "2001:db8::1",
-        ] {
-            let addr: IpAddr = ip.parse().unwrap();
-            assert!(
-                !unpaired_peer_allowed(&addr),
-                "{ip} must not reach a non-public route on an unpaired device"
+    fn a_forwarded_request_is_remote_from_any_peer() {
+        for ip in ["192.168.4.20", "192.168.1.50", "169.254.3.4", "fe80::1"] {
+            let peer: IpAddr = ip.parse().unwrap();
+            assert_eq!(
+                classify_caller(Some(peer), |h| h == "x-forwarded-for"),
+                CallerClass::Remote,
+                "{ip} + x-forwarded-for"
             );
         }
     }
 
-    /// A browser on a private trusted LAN is a trusted operator-LAN peer for the
-    /// PIN-gated operator-UI scope. The predicate is the RFC1918 signal, kept
-    /// distinct from the first-boot lifeline set so the MAVLink surface stays
-    /// lifeline-only while the HTTP gate layers the PIN on top of this.
     #[test]
-    fn a_private_lan_peer_is_a_trusted_operator_peer() {
+    fn an_unknown_peer_is_remote() {
+        assert_eq!(classify_caller(None, |_| false), CallerClass::Remote);
+    }
+
+    /// The lifelines a headless unpaired unit is actually reached from. These
+    /// are the reason this is a caller filter and not a narrowed bind: a literal
+    /// loopback+link-local bind would remove the AP and USB paths and leave a
+    /// fresh device unreachable to its own operator.
+    #[test]
+    fn the_first_boot_lifelines_classify_as_lifelines() {
+        for ip in [
+            "192.168.4.1",         // the AP hotspot itself
+            "192.168.4.37",        // a phone joined to the hotspot
+            "192.168.7.1",         // the USB gadget
+            "192.168.7.42",        // a laptop on the USB gadget net
+            "169.254.11.9",        // IPv4 link-local
+            "fe80::1",             // IPv6 link-local
+            "::ffff:192.168.4.20", // an IPv4 lifeline mapped onto v6
+        ] {
+            assert_eq!(class(ip), CallerClass::Lifeline, "{ip}");
+        }
+    }
+
+    /// A browser on a private LAN is an operator-LAN caller, distinct from the
+    /// lifelines, so the MAVLink proxies can stay lifeline-only while the HTTP
+    /// gate layers the PIN on top of it.
+    #[test]
+    fn a_private_lan_peer_is_an_operator_lan_caller() {
         for ip in [
             "192.168.1.10",
             "192.168.1.50",
@@ -288,66 +318,39 @@ mod tests {
             "10.255.255.1",
             "172.16.4.4",
             "172.31.255.1",
-            // The provisioning subnets are RFC1918 too, so they are trusted
-            // operator-LAN peers as well (the HTTP gate prioritises their
-            // lifeline status and serves them without a PIN).
-            "192.168.4.37",
-            "192.168.7.42",
+            "::ffff:192.168.1.50",
+            // Neighbouring subnets must not be taken for the lifelines by a
+            // sloppy prefix match.
+            "192.168.40.1",
+            "192.168.70.1",
+            "192.168.5.1",
+            "192.168.6.1",
         ] {
-            let addr: IpAddr = ip.parse().unwrap();
-            assert!(
-                trusted_operator_lan_peer(&addr),
-                "{ip} is on a private LAN and must be a trusted operator peer"
-            );
+            assert_eq!(class(ip), CallerClass::OperatorLan, "{ip}");
         }
-        // An IPv4 private address arriving mapped onto v6 is trusted too.
-        let mapped: IpAddr = "::ffff:192.168.1.50".parse().unwrap();
-        assert!(trusted_operator_lan_peer(&mapped));
     }
 
-    /// Public-WAN hosts and non-RFC1918 addresses must never be trusted as
-    /// operator-LAN peers — the PIN-gated scope must not open to the internet.
+    /// Public-WAN and non-RFC1918 addresses are never operator-LAN callers.
     #[test]
-    fn a_public_wan_peer_is_not_a_trusted_operator_peer() {
+    fn a_public_wan_peer_is_remote() {
         for ip in [
             "8.8.8.8",
             "203.0.113.5",  // documentation range
             "172.15.255.1", // just below 172.16/12
             "172.32.0.1",   // just above
-            "169.254.1.1",  // link-local, not RFC1918
-            "127.0.0.1",    // loopback, not RFC1918
             "2001:db8::1",
         ] {
-            let addr: IpAddr = ip.parse().unwrap();
-            assert!(
-                !trusted_operator_lan_peer(&addr),
-                "{ip} is not a private-LAN peer and must not be trusted"
-            );
+            assert_eq!(class(ip), CallerClass::Remote, "{ip}");
         }
     }
 
-    /// A neighbouring subnet must not be admitted by a sloppy prefix match.
     #[test]
-    fn adjacent_subnets_are_not_mistaken_for_the_lifelines() {
-        for ip in ["192.168.40.1", "192.168.70.1", "192.168.5.1", "192.168.6.1"] {
-            let addr: IpAddr = ip.parse().unwrap();
-            assert!(!unpaired_peer_allowed(&addr), "{ip} must not be allowed");
-        }
+    fn only_on_box_and_lifelines_reach_an_unpaired_node_without_a_credential() {
+        assert!(CallerClass::OnBox.is_first_boot_reach());
+        assert!(CallerClass::Lifeline.is_first_boot_reach());
+        assert!(!CallerClass::OperatorLan.is_first_boot_reach());
+        assert!(!CallerClass::Remote.is_first_boot_reach());
     }
-
-    /// A lifeline arriving mapped onto v6 is the same lifeline. The listener is
-    /// dual-stack, so this is a real shape, not a hypothetical.
-    #[test]
-    fn an_ipv4_lifeline_mapped_onto_v6_is_still_allowed() {
-        let mapped: IpAddr = "::ffff:192.168.4.20".parse().unwrap();
-        assert!(unpaired_peer_allowed(&mapped));
-        let mapped_lan: IpAddr = "::ffff:192.168.1.50".parse().unwrap();
-        assert!(!unpaired_peer_allowed(&mapped_lan));
-    }
-
-    use super::*;
-    use std::io::Write;
-    use std::path::PathBuf;
 
     fn write_pairing(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("pairing.json");
@@ -365,14 +368,6 @@ mod tests {
         assert!(!constant_time_eq(b"ados_secret", b"short"));
         assert!(constant_time_eq(b"", b""));
         assert!(!constant_time_eq(b"", b"x"));
-    }
-
-    #[test]
-    fn on_box_trust_is_loopback_and_no_forwarding_header() {
-        assert!(is_on_box(true, false));
-        assert!(!is_on_box(true, true));
-        assert!(!is_on_box(false, false));
-        assert!(!is_on_box(false, true));
     }
 
     #[test]
@@ -406,44 +401,53 @@ mod tests {
     }
 
     #[test]
-    fn unpaired_accepts_any_caller() {
-        assert_eq!(
-            data_plane_access(&Pairing::Unpaired, false, None),
-            Access::Accept
-        );
-        assert_eq!(
-            data_plane_access(&Pairing::Unpaired, false, Some("anything")),
-            Access::Accept
-        );
+    fn unpaired_accepts_any_caller_at_this_layer() {
+        for caller in [CallerClass::Remote, CallerClass::OperatorLan] {
+            assert_eq!(
+                data_plane_access(&Pairing::Unpaired, caller, None),
+                Access::Accept
+            );
+            assert_eq!(
+                data_plane_access(&Pairing::Unpaired, caller, Some("anything")),
+                Access::Accept
+            );
+        }
     }
 
     #[test]
     fn paired_on_box_accepts_without_a_key() {
         let p = Pairing::Paired("k".into());
-        assert_eq!(data_plane_access(&p, true, None), Access::Accept);
-    }
-
-    #[test]
-    fn paired_off_box_with_a_valid_key_accepts() {
-        let p = Pairing::Paired("ados_secret".into());
         assert_eq!(
-            data_plane_access(&p, false, Some("ados_secret")),
+            data_plane_access(&p, CallerClass::OnBox, None),
             Access::Accept
         );
     }
 
+    /// Only the local operator skips the key. A lifeline or LAN caller on a
+    /// paired node is off-box like any other.
     #[test]
-    fn paired_off_box_with_no_key_is_unauthorized() {
+    fn paired_non_on_box_callers_need_the_key() {
         let p = Pairing::Paired("ados_secret".into());
-        assert_eq!(data_plane_access(&p, false, None), Access::Unauthorized);
-    }
-
-    #[test]
-    fn paired_off_box_with_a_wrong_key_is_unauthorized() {
-        let p = Pairing::Paired("ados_secret".into());
-        assert_eq!(
-            data_plane_access(&p, false, Some("wrong")),
-            Access::Unauthorized
-        );
+        for caller in [
+            CallerClass::Lifeline,
+            CallerClass::OperatorLan,
+            CallerClass::Remote,
+        ] {
+            assert_eq!(
+                data_plane_access(&p, caller, Some("ados_secret")),
+                Access::Accept,
+                "{caller:?} with the key"
+            );
+            assert_eq!(
+                data_plane_access(&p, caller, None),
+                Access::Unauthorized,
+                "{caller:?} with no key"
+            );
+            assert_eq!(
+                data_plane_access(&p, caller, Some("wrong")),
+                Access::Unauthorized,
+                "{caller:?} with a wrong key"
+            );
+        }
     }
 }

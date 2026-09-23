@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use ados_groundlink::FleetSlot;
 use ados_video::profile::VideoProfile;
+use tokio::sync::mpsc;
 
 /// What one hero selection asks of one drone.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +131,9 @@ pub fn sole_slot_hero(slots: &[FleetSlot]) -> Option<&str> {
 /// slot immediately — and bounds what a fleet of dead drones can put on the air.
 const MAX_CONCURRENT_DEMOTIONS: usize = 4;
 
-/// Issue every assignment CONCURRENTLY, retrying each failure exactly once.
+/// Issue every assignment CONCURRENTLY, retrying each failure exactly once, and
+/// stream each drone's outcome back as it resolves, tagged with its index in
+/// `plan.targets`.
 ///
 /// Concurrency is the point: a 24-drone fleet demoted serially at the RPC
 /// timeout would take minutes, and the promotion of the new hero must not queue
@@ -145,20 +148,24 @@ const MAX_CONCURRENT_DEMOTIONS: usize = 4;
 /// hero, and holding it behind a queue of silent drones is precisely what this
 /// function exists to avoid.
 ///
-/// Outcomes come back in slot order regardless of completion order, so the
-/// response body is stable.
-pub async fn apply_plan<F, Fut>(plan: &HeroPlan, call: F) -> Vec<SlotOutcome>
+/// Every call runs on its own DETACHED task. Dropping the receiver stops the
+/// reporting, never the calls: a caller that gives up waiting (an HTTP client
+/// that timed out, a request future that was dropped) must not abort a
+/// demotion halfway across the fleet. The channel closes once every call has
+/// resolved.
+pub fn issue_plan<F, Fut>(plan: &HeroPlan, call: F) -> mpsc::UnboundedReceiver<(usize, SlotOutcome)>
 where
     F: Fn(String, VideoProfile) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Result<(), String>> + Send,
 {
-    let mut set = tokio::task::JoinSet::new();
+    let (tx, rx) = mpsc::unbounded_channel();
     let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DEMOTIONS));
     for (index, target) in plan.targets.iter().enumerate() {
         let call = call.clone();
         let target = target.clone();
         let limiter = (target.profile != VideoProfile::Hero).then(|| Arc::clone(&limiter));
-        set.spawn(async move {
+        let tx = tx.clone();
+        tokio::spawn(async move {
             // Held across the retry: a second attempt is part of the same
             // drone's exchange and belongs inside the same airtime budget.
             // `acquire` can only fail on a closed semaphore, which nothing
@@ -174,7 +181,9 @@ where
                 // failure and a second attempt clears it.
                 error = call(target.device_id.clone(), target.profile).await.err();
             }
-            (
+            // A closed receiver means nobody is listening any more; the call
+            // itself has already happened, which is what mattered.
+            let _ = tx.send((
                 index,
                 SlotOutcome {
                     slot: target.slot,
@@ -183,16 +192,23 @@ where
                     ok: error.is_none(),
                     error,
                 },
-            )
+            ));
         });
     }
+    rx
+}
 
+/// [`issue_plan`], awaited to completion: every outcome, in slot order
+/// regardless of completion order, so the result is stable.
+pub async fn apply_plan<F, Fut>(plan: &HeroPlan, call: F) -> Vec<SlotOutcome>
+where
+    F: Fn(String, VideoProfile) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Result<(), String>> + Send,
+{
+    let mut rx = issue_plan(plan, call);
     let mut done: Vec<Option<SlotOutcome>> = vec![None; plan.targets.len()];
-    while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok((index, outcome)) => done[index] = Some(outcome),
-            Err(e) => tracing::warn!(error = %e, "fleet_hero_task_panicked"),
-        }
+    while let Some((index, outcome)) = rx.recv().await {
+        done[index] = Some(outcome);
     }
     done.into_iter().flatten().collect()
 }

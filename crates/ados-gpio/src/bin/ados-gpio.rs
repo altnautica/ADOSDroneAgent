@@ -150,17 +150,14 @@ async fn persist_state(state: &State) {
 }
 
 /// Bind the command socket and serve requests until the listener errors. The
-/// shared helper removes a stale socket first and chmods it 0660; `set_socket_perms`
-/// then group-owns it to `ados` so a non-root operator (the API service) and the
-/// plugin host can write it. Each connection is one newline-terminated JSON
-/// request → one newline-terminated JSON response, then close. Returns only on a
-/// bind error.
+/// shared helper removes a stale socket, chmods it 0660, group-owns it to
+/// `ados-operator`, and admits only root and operator-group peers on accept, so
+/// a plugin (which runs as `ados`, outside that group) cannot drive a line past
+/// the plugin host's capability gate. Each connection is one newline-terminated
+/// JSON request → one newline-terminated JSON response, then close. Returns only
+/// on a bind error.
 async fn serve(state: State, sock_path: &Path) -> std::io::Result<()> {
     let listener = bind_command_socket(sock_path, 0o660)?;
-    // bind_command_socket already applied 0o660; set_socket_perms re-applies it
-    // (harmless) and additionally group-owns the socket to `ados`, which the
-    // shared helper does not do.
-    set_socket_perms(sock_path);
     tracing::info!(path = %sock_path.display(), "gpio command socket listening");
 
     serve_rpc(listener, MAX_REQUEST_BYTES, move |req: Vec<u8>| {
@@ -174,27 +171,6 @@ async fn serve(state: State, sock_path: &Path) -> std::io::Result<()> {
     .await;
     Ok(())
 }
-
-/// 0o660 + group-own to `ados` so a non-root operator in that group can reach the
-/// trusted local plane. Best-effort; an absent group (a dev host) is a quiet
-/// no-op. Linux-only.
-#[cfg(target_os = "linux")]
-fn set_socket_perms(sock_path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o660));
-    match nix::unistd::Group::from_name("ados") {
-        Ok(Some(g)) => {
-            if let Err(err) = nix::unistd::chown(sock_path, None, Some(g.gid)) {
-                tracing::debug!(error = %err, "chgrp gpio command socket failed");
-            }
-        }
-        Ok(None) => tracing::debug!("ados group not present; leaving socket group as-is"),
-        Err(err) => tracing::debug!(error = %err, "resolving ados group failed"),
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_socket_perms(_sock_path: &Path) {}
 
 /// Parse + route one request. The parse half is pure (covered by the lib tests);
 /// the apply half drives real lines, so it is exercised on-rig.

@@ -29,7 +29,9 @@ use axum::http::{Method, StatusCode};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use ados_protocol::pairing_posture::{constant_time_eq, data_plane_access, Access, Pairing};
+use ados_protocol::pairing_posture::{
+    constant_time_eq, data_plane_access, Access, CallerClass, Pairing,
+};
 
 use crate::config::SecuritySection;
 
@@ -468,9 +470,10 @@ impl ProxiedAuth {
         if !configured.is_empty() && constant_time_eq(key.as_bytes(), configured.as_bytes()) {
             return true;
         }
-        // The pairing key compare: reuse the shared posture (on_box=false here —
-        // this is only consulted off-box). Accept only when the key matches.
-        data_plane_access(pairing, false, Some(key)) == Access::Accept
+        // The pairing key compare: reuse the shared posture as a caller that
+        // is not on-box (this is only consulted off-box). Accept only when the
+        // key matches.
+        data_plane_access(pairing, CallerClass::Remote, Some(key)) == Access::Accept
     }
 
     /// True when the request carries the valid `X-ADOS-Setup-Token`. Mirrors

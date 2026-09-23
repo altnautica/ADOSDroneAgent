@@ -74,6 +74,7 @@ pub fn neighbors_payload(
     json!({
         "fleet_id": fleet_id,
         "slot": table.own_slot(),
+        "slot_conflict": table.slot_conflict(),
         "neighbors": neighbors,
         "counters": counters_value(table.counters(), table.len()),
         "slots": device_ids
@@ -91,6 +92,8 @@ pub fn counters_value(c: SwarmCounters, neighbors_now: usize) -> Value {
         "beacons_rx": c.beacons_rx,
         "beacons_bad_magic": c.beacons_bad_magic,
         "beacons_bad_tag": c.beacons_bad_tag,
+        "beacons_replayed": c.beacons_replayed,
+        "beacons_slot_conflict": c.beacons_slot_conflict,
         "beacons_stale_dropped": c.beacons_stale_dropped,
         "neighbors_now": neighbors_now,
     })
@@ -102,16 +105,18 @@ pub fn counters_value(c: SwarmCounters, neighbors_now: usize) -> Value {
 /// `fleet_id` and `slot` are **null**, not `1` and `0`. Those would be a guess: a
 /// reader cannot know the fleet identity of a service that is not running, and
 /// reporting the defaults would make an unprovisioned node indistinguishable from a
-/// correctly-provisioned fleet-1 node with no neighbours. The counters are all
-/// zero, which is honest — nothing has been transmitted or received. `slots` is
-/// an empty array rather than null: an empty registry is an honest description of
-/// a node with no registry of its own (every drone, and a ground station that has
+/// correctly-provisioned fleet-1 node with no neighbours. `slot_conflict` is null
+/// for the same reason: no running bus has looked. The counters are all zero,
+/// which is honest — nothing has been transmitted or received. `slots` is an
+/// empty array rather than null: an empty registry is an honest description of a
+/// node with no registry of its own (every drone, and a ground station that has
 /// paired nobody), whereas `fleet_id`/`slot` being empty would be a guess about a
 /// fleet identity this degraded body cannot know.
 pub fn empty_payload() -> Value {
     json!({
         "fleet_id": Value::Null,
         "slot": Value::Null,
+        "slot_conflict": Value::Null,
         "neighbors": [],
         "counters": counters_value(SwarmCounters::default(), 0),
         "slots": [],
@@ -132,7 +137,7 @@ pub fn normalise_payload(published: Option<&Value>) -> Value {
     let Value::Object(mut out) = empty_payload() else {
         unreachable!("empty_payload is an object")
     };
-    for key in ["fleet_id", "slot", "neighbors", "counters", "slots"] {
+    for key in PAYLOAD_KEYS {
         if let Some(v) = src.get(key) {
             out.insert(key.to_string(), v.clone());
         }
@@ -158,6 +163,18 @@ pub fn encode_line(payload: &Value) -> Vec<u8> {
     buf
 }
 
+/// The top-level keys of the published payload. `slot_conflict` is `true` while a
+/// peer is beaconing this node's own slot, `false` when none is, and `null` when
+/// no running bus has reported.
+pub const PAYLOAD_KEYS: [&str; 6] = [
+    "fleet_id",
+    "slot",
+    "slot_conflict",
+    "neighbors",
+    "counters",
+    "slots",
+];
+
 /// The keys the contract requires on a neighbour row. Exported so the shape is
 /// asserted from one list rather than a hand-copied one per test.
 pub const NEIGHBOR_KEYS: [&str; 18] = [
@@ -182,11 +199,13 @@ pub const NEIGHBOR_KEYS: [&str; 18] = [
 ];
 
 /// The keys the contract requires in the counter block.
-pub const COUNTER_KEYS: [&str; 6] = [
+pub const COUNTER_KEYS: [&str; 8] = [
     "beacons_tx",
     "beacons_rx",
     "beacons_bad_magic",
     "beacons_bad_tag",
+    "beacons_replayed",
+    "beacons_slot_conflict",
     "beacons_stale_dropped",
     "neighbors_now",
 ];
@@ -215,7 +234,7 @@ mod tests {
 
     fn table_with_one(now: Instant) -> NeighborTable {
         let mut t = NeighborTable::new(0);
-        t.record(
+        t.record_next(
             SwarmBeacon {
                 slot: 3,
                 seq_ms: 41234,
@@ -250,6 +269,7 @@ mod tests {
             json!({
                 "fleet_id": 1,
                 "slot": 0,
+                "slot_conflict": false,
                 "neighbors": [{
                     "slot": 3,
                     "device_id": "ados-abc123",
@@ -275,6 +295,8 @@ mod tests {
                     "beacons_rx": 1,
                     "beacons_bad_magic": 0,
                     "beacons_bad_tag": 0,
+                    "beacons_replayed": 0,
+                    "beacons_slot_conflict": 0,
                     "beacons_stale_dropped": 0,
                     "neighbors_now": 1,
                 },
@@ -290,11 +312,7 @@ mod tests {
     fn the_key_sets_are_exactly_the_contract_and_carry_nothing_extra() {
         let t0 = Instant::now();
         let payload = neighbors_payload(1, &table_with_one(t0), &ids(), t0);
-        assert_exact_keys(
-            &payload,
-            &["fleet_id", "slot", "neighbors", "counters", "slots"],
-            "payload",
-        );
+        assert_exact_keys(&payload, &PAYLOAD_KEYS, "payload");
         assert_exact_keys(&payload["neighbors"][0], &NEIGHBOR_KEYS, "neighbor row");
         assert_exact_keys(&payload["counters"], &COUNTER_KEYS, "counters");
         assert_exact_keys(&payload["slots"][0], &SLOT_KEYS, "slot row");
@@ -306,7 +324,7 @@ mod tests {
     fn an_unknown_signal_or_identity_is_null_not_a_plausible_value() {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
-        table.record(
+        table.record_next(
             SwarmBeacon {
                 slot: 4,
                 ..SwarmBeacon::default()
@@ -327,7 +345,7 @@ mod tests {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
         for slot in [9u8, 2, 24, 5] {
-            table.record(
+            table.record_next(
                 SwarmBeacon {
                     slot,
                     ..SwarmBeacon::default()
@@ -377,7 +395,7 @@ mod tests {
                 ..SwarmBeacon::default()
             };
             b.set_precedence(level);
-            table.record(b, None, t0);
+            table.record_next(b, None, t0);
             let p = neighbors_payload(1, &table, &BTreeMap::new(), t0);
             assert_eq!(
                 p["neighbors"][0]["mode_precedence"],
@@ -392,7 +410,7 @@ mod tests {
         let t0 = Instant::now();
         let row_for = |status: u8| {
             let mut table = NeighborTable::new(1);
-            table.record(
+            table.record_next(
                 SwarmBeacon {
                     slot: 2,
                     status,
@@ -421,13 +439,10 @@ mod tests {
         let p = empty_payload();
         assert_eq!(p["fleet_id"], Value::Null, "a guessed fleet id is a lie");
         assert_eq!(p["slot"], Value::Null);
+        assert_eq!(p["slot_conflict"], Value::Null, "no bus has looked");
         assert_eq!(p["neighbors"], json!([]));
         assert_eq!(p["slots"], json!([]));
-        assert_exact_keys(
-            &p,
-            &["fleet_id", "slot", "neighbors", "counters", "slots"],
-            "payload",
-        );
+        assert_exact_keys(&p, &PAYLOAD_KEYS, "payload");
         assert_exact_keys(&p["counters"], &COUNTER_KEYS, "counters");
         for k in COUNTER_KEYS {
             assert_eq!(p["counters"][k], json!(0), "{k} must be zero, not absent");
@@ -459,11 +474,7 @@ mod tests {
         assert_eq!(got["counters"]["beacons_rx"], json!(9));
         assert_eq!(got["counters"]["beacons_tx"], json!(0), "filled");
         assert_exact_keys(&got["counters"], &COUNTER_KEYS, "counters");
-        assert_exact_keys(
-            &got,
-            &["fleet_id", "slot", "neighbors", "counters", "slots"],
-            "payload",
-        );
+        assert_exact_keys(&got, &PAYLOAD_KEYS, "payload");
 
         // A complete payload passes through byte-identically.
         let t0 = Instant::now();
@@ -500,6 +511,31 @@ mod tests {
         let payload = neighbors_payload(1, &table, &device_ids, t0);
         assert_eq!(payload["slots"].as_array().unwrap().len(), 2);
         assert_eq!(payload["neighbors"].as_array().unwrap().len(), 1);
+    }
+
+    /// A drone whose slot another node is beaconing says so at the top of its
+    /// payload, so the operator sees the misprovisioning rather than one row
+    /// flipping between two aircraft.
+    #[test]
+    fn a_peer_on_our_slot_raises_the_slot_conflict_flag() {
+        let t0 = Instant::now();
+        let mut table = NeighborTable::new(4);
+        assert_eq!(
+            neighbors_payload(1, &table, &BTreeMap::new(), t0)["slot_conflict"],
+            json!(false)
+        );
+        table.record_next(
+            SwarmBeacon {
+                slot: 4,
+                ..SwarmBeacon::default()
+            },
+            None,
+            t0,
+        );
+        let p = neighbors_payload(1, &table, &BTreeMap::new(), t0);
+        assert_eq!(p["slot_conflict"], json!(true));
+        assert_eq!(p["counters"]["beacons_slot_conflict"], json!(1));
+        assert_eq!(p["neighbors"][0]["slot"], json!(4), "the peer is listed");
     }
 
     /// The degraded and normalised paths must default `slots` to an empty array,

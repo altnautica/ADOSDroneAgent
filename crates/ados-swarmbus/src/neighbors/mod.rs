@@ -14,6 +14,7 @@
 
 pub mod counters;
 pub mod geo;
+pub mod replay;
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -21,9 +22,11 @@ use std::time::{Duration, Instant};
 use ados_radio::config::{FLEET_MAX_SLOTS, SLOT_GROUND};
 
 use crate::beacon::SwarmBeacon;
+use crate::crypto::SenderNonce;
 
 pub use counters::SwarmCounters;
 pub use geo::{dead_reckon, distance_m, R_EARTH};
+use replay::{SenderMarks, SenderVerdict};
 
 /// How long a neighbour survives without a beacon: six missed transmissions at
 /// [`crate::BEACON_HZ`].
@@ -62,6 +65,26 @@ impl Neighbor {
     }
 }
 
+/// What [`NeighborTable::record`] did with one authenticated beacon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Recorded {
+    /// Recorded for its slot.
+    Accepted,
+    /// Recorded, but it carries this node's own slot: another node is provisioned
+    /// with our slot. Kept in the table so separation sees the aircraft, and
+    /// counted as a slot conflict.
+    OwnSlotConflict,
+    /// Not recorded, not a fault: a beacon claiming the ground slot, or a table
+    /// already at its cap.
+    Ignored,
+    /// Not recorded: a frame already seen, or from a sender run the slot has moved
+    /// on from.
+    Replayed,
+    /// Not recorded: a second live sender on a peer's slot. The first one heard
+    /// keeps the slot.
+    SecondSender,
+}
+
 /// Every peer this node currently hears, keyed by fleet slot.
 #[derive(Debug)]
 pub struct NeighborTable {
@@ -71,28 +94,34 @@ pub struct NeighborTable {
     by_slot: BTreeMap<u8, Neighbor>,
     own_slot: u8,
     counters: SwarmCounters,
+    senders: SenderMarks,
 }
 
 impl NeighborTable {
     /// A table for the node in `own_slot`.
     ///
-    /// The own slot is needed because a monitor interface loops locally injected
-    /// frames back to the capture path, so a node hears its own beacons. Recording
-    /// them would make every drone its own nearest neighbour at zero distance —
-    /// which the separation layer would treat as an imminent collision with itself.
-    /// This is the same self-pair guard `ados_groundlink::presence` applies by
-    /// device id.
+    /// This node's own looped-back transmissions never reach the table: the
+    /// receive path recognises them by the cipher's nonce prefix, which identifies
+    /// this process on the bus. The own slot is kept to tell a peer that CLAIMS our
+    /// slot apart from the rest (see [`Recorded::OwnSlotConflict`]).
     pub fn new(own_slot: u8) -> Self {
         Self {
             by_slot: BTreeMap::new(),
             own_slot,
             counters: SwarmCounters::default(),
+            senders: SenderMarks::default(),
         }
     }
 
     /// This node's own fleet slot.
     pub fn own_slot(&self) -> u8 {
         self.own_slot
+    }
+
+    /// Whether a peer is currently beaconing this node's own slot. Always false on
+    /// a ground station, whose slot no beacon may carry.
+    pub fn slot_conflict(&self) -> bool {
+        self.own_slot != SLOT_GROUND && self.by_slot.contains_key(&self.own_slot)
     }
 
     /// The published counters, with the live table size folded in.
@@ -137,27 +166,56 @@ impl NeighborTable {
         self.counters.beacons_bad_tag += 1;
     }
 
-    /// Record a beacon, replacing any previous entry for its slot.
+    /// Record an authenticated beacon sealed under `sender`'s nonce, replacing any
+    /// previous entry for its slot.
     ///
-    /// Returns whether it was accepted. Two rejections, neither counted as an
-    /// error:
+    /// Refused, without an entry change:
     ///
-    /// - **Our own slot, or slot 0.** A loopback of our own transmission, or a
-    ///   ground station emitting a beacon it has no business emitting.
-    /// - **A full table.** Only reachable with illegal slots present.
+    /// - **Slot 0**: a ground station emitting a beacon it has no business
+    ///   emitting. Not a fault.
+    /// - **A replay**: see [`replay`]. Counted as `beacons_replayed`.
+    /// - **A second live sender on a peer's slot**: counted as
+    ///   `beacons_slot_conflict`.
+    /// - **A full table**: only reachable with illegal slots present.
+    ///
+    /// A peer claiming **this node's own slot** is recorded and counted as a slot
+    /// conflict. Dropping it as loopback would leave two same-slot drones blind to
+    /// each other, which is the one pair separation most needs to see.
     ///
     /// A slot above [`FLEET_MAX_SLOTS`] is deliberately **accepted**. It is a
     /// misprovisioned fleet member, and the honest response is to make it visible
     /// on the operator's screen — a silent drop would hide the exact
     /// misconfiguration that causes the FEC thrash the slot registry exists to
     /// prevent.
-    pub fn record(&mut self, beacon: SwarmBeacon, rssi_dbm: Option<i8>, now: Instant) -> bool {
-        if beacon.slot == SLOT_GROUND || beacon.slot == self.own_slot {
-            return false;
+    pub fn record(
+        &mut self,
+        beacon: SwarmBeacon,
+        sender: SenderNonce,
+        rssi_dbm: Option<i8>,
+        now: Instant,
+    ) -> Recorded {
+        if beacon.slot == SLOT_GROUND {
+            return Recorded::Ignored;
+        }
+        let slot_live = self
+            .by_slot
+            .get(&beacon.slot)
+            .is_some_and(|n| !n.is_stale(now));
+        match self.senders.verdict(beacon.slot, sender, slot_live) {
+            SenderVerdict::Fresh => {}
+            SenderVerdict::Replayed => {
+                self.counters.beacons_replayed += 1;
+                return Recorded::Replayed;
+            }
+            SenderVerdict::SecondSender => {
+                self.counters.beacons_slot_conflict += 1;
+                return Recorded::SecondSender;
+            }
         }
         if self.by_slot.len() >= MAX_NEIGHBORS && !self.by_slot.contains_key(&beacon.slot) {
-            return false;
+            return Recorded::Ignored;
         }
+        self.senders.accept(beacon.slot, sender);
         self.by_slot.insert(
             beacon.slot,
             Neighbor {
@@ -167,7 +225,25 @@ impl NeighborTable {
             },
         );
         self.counters.beacons_rx += 1;
-        true
+        if beacon.slot == self.own_slot {
+            self.counters.beacons_slot_conflict += 1;
+            Recorded::OwnSlotConflict
+        } else {
+            Recorded::Accepted
+        }
+    }
+
+    /// [`Self::record`] with a fresh nonce from the slot's current run, for tests
+    /// that exercise the table rather than the replay window.
+    #[cfg(test)]
+    pub(crate) fn record_next(
+        &mut self,
+        beacon: SwarmBeacon,
+        rssi_dbm: Option<i8>,
+        now: Instant,
+    ) -> Recorded {
+        let sender = self.senders.next_for(beacon.slot);
+        self.record(beacon, sender, rssi_dbm, now)
     }
 
     /// Drop every neighbour whose last beacon is older than [`NEIGHBOR_STALE`],
@@ -252,13 +328,19 @@ mod tests {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
         assert!(table.is_empty());
-        assert!(table.record(at(3, LAT, LON, 10.0), Some(-48), t0));
+        assert_eq!(
+            table.record_next(at(3, LAT, LON, 10.0), Some(-48), t0),
+            Recorded::Accepted
+        );
         assert_eq!(table.len(), 1);
         assert_eq!(table.counters().beacons_rx, 1);
         assert_eq!(table.get(3).unwrap().rssi_dbm, Some(-48));
 
         // A second beacon for the same slot updates in place, not alongside.
-        assert!(table.record(at(3, LAT, LON, 20.0), None, t0));
+        assert_eq!(
+            table.record_next(at(3, LAT, LON, 20.0), None, t0),
+            Recorded::Accepted
+        );
         assert_eq!(table.len(), 1);
         assert_eq!(table.counters().beacons_rx, 2);
         assert_eq!(table.get(3).unwrap().beacon.alt_dm, 200);
@@ -269,26 +351,118 @@ mod tests {
         );
     }
 
-    /// A monitor interface loops our own injected frames back. Recording them
-    /// would make every drone its own nearest neighbour at zero distance — an
-    /// imminent collision with itself.
+    /// The ground slot is never recorded: a ground station is not an aircraft.
     #[test]
-    fn our_own_slot_and_the_ground_slot_are_never_recorded() {
+    fn the_ground_slot_is_never_recorded() {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(5);
-        assert!(
-            !table.record(at(5, LAT, LON, 10.0), None, t0),
-            "own loopback"
-        );
-        assert!(
-            !table.record(at(SLOT_GROUND, LAT, LON, 0.0), None, t0),
-            "GS"
+        assert_eq!(
+            table.record_next(at(SLOT_GROUND, LAT, LON, 0.0), None, t0),
+            Recorded::Ignored
         );
         assert!(table.is_empty());
-        assert_eq!(table.counters().beacons_rx, 0);
-        // A real peer still lands.
-        assert!(table.record(at(6, LAT, LON, 10.0), None, t0));
+        assert_eq!(table.counters(), SwarmCounters::default(), "not a fault");
+        assert_eq!(
+            table.record_next(at(6, LAT, LON, 10.0), None, t0),
+            Recorded::Accepted
+        );
         assert_eq!(table.len(), 1);
+    }
+
+    /// A peer provisioned with our slot reaches the table (own loopback is
+    /// filtered by nonce prefix before this point), so two same-slot drones see
+    /// each other and the conflict is counted and flagged.
+    #[test]
+    fn a_peer_on_our_own_slot_is_recorded_as_a_slot_conflict() {
+        let t0 = Instant::now();
+        let mut table = NeighborTable::new(5);
+        assert!(!table.slot_conflict());
+        assert_eq!(
+            table.record_next(at(5, LAT, LON, 10.0), None, t0),
+            Recorded::OwnSlotConflict
+        );
+        assert!(table.get(5).is_some(), "separation must see it");
+        assert!(table.slot_conflict());
+        assert_eq!(table.counters().beacons_slot_conflict, 1);
+        assert_eq!(table.counters().beacons_rx, 1);
+        // Once it ages out the flag clears on its own.
+        table.prune(t0 + NEIGHBOR_STALE);
+        assert!(!table.slot_conflict());
+        // A ground station never reports one.
+        assert!(!NeighborTable::new(SLOT_GROUND).slot_conflict());
+    }
+
+    /// A captured beacon re-injected later must not refresh the entry. Before the
+    /// replay window a replay overwrote the slot as just received, so a departed
+    /// aircraft stayed on the table on its old track.
+    #[test]
+    fn a_replayed_beacon_is_refused_and_counted() {
+        let t0 = Instant::now();
+        let mut table = NeighborTable::new(1);
+        let run = |counter| SenderNonce {
+            prefix: [0x11; 8],
+            counter,
+        };
+        assert_eq!(
+            table.record(at(3, LAT, LON, 10.0), run(7), None, t0),
+            Recorded::Accepted
+        );
+        let later = t0 + Duration::from_secs(1);
+        assert_eq!(
+            table.record(at(3, LAT, LON, 10.0), run(7), None, later),
+            Recorded::Replayed
+        );
+        assert_eq!(table.get(3).unwrap().received_at, t0, "not refreshed");
+        assert_eq!(table.counters().beacons_replayed, 1);
+        assert_eq!(table.counters().beacons_rx, 1);
+
+        // The replay keeps failing after the slot went stale and was pruned.
+        let gone = t0 + NEIGHBOR_STALE;
+        assert_eq!(table.prune(gone), 1);
+        assert_eq!(
+            table.record(at(3, LAT, LON, 10.0), run(7), None, gone),
+            Recorded::Replayed
+        );
+        assert!(table.is_empty());
+
+        // A restarted sender (new prefix) is accepted on the quiet slot, and its
+        // earlier run is refused from then on.
+        let restarted = SenderNonce {
+            prefix: [0x22; 8],
+            counter: 0,
+        };
+        assert_eq!(
+            table.record(at(3, LAT, LON, 10.0), restarted, None, gone),
+            Recorded::Accepted
+        );
+        assert_eq!(
+            table.record(at(3, LAT, LON, 10.0), run(8), None, gone),
+            Recorded::Replayed
+        );
+    }
+
+    /// Two peers provisioned with one slot: the first heard keeps it and the
+    /// second is counted, rather than the row flipping between two positions.
+    #[test]
+    fn a_second_live_sender_on_a_peers_slot_is_counted_not_recorded() {
+        let t0 = Instant::now();
+        let mut table = NeighborTable::new(1);
+        let a = SenderNonce {
+            prefix: [0xAA; 8],
+            counter: 0,
+        };
+        let b = SenderNonce {
+            prefix: [0xBB; 8],
+            counter: 0,
+        };
+        table.record(at(4, LAT, LON, 10.0), a, None, t0);
+        assert_eq!(
+            table.record(at(4, LAT, LON, 99.0), b, None, t0),
+            Recorded::SecondSender
+        );
+        assert_eq!(table.get(4).unwrap().beacon.alt_dm, 100);
+        assert_eq!(table.counters().beacons_slot_conflict, 1);
+        assert_eq!(table.counters().beacons_replayed, 0);
     }
 
     /// A misprovisioned slot is carried, not hidden: the operator must be able to
@@ -297,7 +471,10 @@ mod tests {
     fn an_out_of_range_slot_is_carried_and_flagged_rather_than_dropped() {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
-        assert!(table.record(at(200, LAT, LON, 10.0), None, t0));
+        assert_eq!(
+            table.record_next(at(200, LAT, LON, 10.0), None, t0),
+            Recorded::Accepted
+        );
         assert!(table.get(200).is_some());
         assert!(!is_legal_drone_slot(200));
         assert!(is_legal_drone_slot(FLEET_MAX_SLOTS));
@@ -310,15 +487,24 @@ mod tests {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(0);
         for slot in 1..=MAX_NEIGHBORS as u8 {
-            assert!(table.record(at(slot, LAT, LON, 1.0), None, t0));
+            assert_eq!(
+                table.record_next(at(slot, LAT, LON, 1.0), None, t0),
+                Recorded::Accepted
+            );
         }
         assert_eq!(table.len(), MAX_NEIGHBORS);
         // A new slot beyond the cap is refused...
-        assert!(!table.record(at(200, LAT, LON, 1.0), None, t0));
+        assert_eq!(
+            table.record_next(at(200, LAT, LON, 1.0), None, t0),
+            Recorded::Ignored
+        );
         assert_eq!(table.len(), MAX_NEIGHBORS);
         // ...but a slot already in the table still updates, so a full table can
         // never freeze the positions it already tracks.
-        assert!(table.record(at(1, LAT, LON, 99.0), None, t0));
+        assert_eq!(
+            table.record_next(at(1, LAT, LON, 99.0), None, t0),
+            Recorded::Accepted
+        );
         assert_eq!(table.get(1).unwrap().beacon.alt_dm, 990);
     }
 
@@ -329,8 +515,8 @@ mod tests {
     fn prune_drops_a_neighbour_at_the_stale_boundary_and_counts_it() {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
-        table.record(at(2, LAT, LON, 10.0), None, t0);
-        table.record(at(3, LAT, LON, 10.0), None, t0 + Duration::from_secs(2));
+        table.record_next(at(2, LAT, LON, 10.0), None, t0);
+        table.record_next(at(3, LAT, LON, 10.0), None, t0 + Duration::from_secs(2));
 
         // Just before the boundary nothing is dropped.
         assert_eq!(
@@ -377,8 +563,8 @@ mod tests {
             vx_cms: -1000,
             ..SwarmBeacon::default()
         };
-        table.record(north, None, t0);
-        table.record(south, None, t0);
+        table.record_next(north, None, t0);
+        table.record_next(south, None, t0);
 
         // Each slot predicts from ITS OWN beacon, not the first or the last recorded.
         let at_2s = t0 + Duration::from_secs(2);
@@ -396,7 +582,7 @@ mod tests {
         // The elapsed time is measured from receipt, so the same `now` against a
         // later-received beacon predicts a shorter displacement.
         let mut late = NeighborTable::new(1);
-        late.record(north, None, t0 + Duration::from_secs(1));
+        late.record_next(north, None, t0 + Duration::from_secs(1));
         assert_eq!(
             late.predicted(4, at_2s),
             Some(geo::dead_reckon(&north, 1.0))
@@ -409,7 +595,7 @@ mod tests {
     fn predicted_refuses_a_stale_or_unknown_neighbour() {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
-        table.record(
+        table.record_next(
             SwarmBeacon {
                 slot: 4,
                 vx_cms: 1000,
@@ -435,12 +621,12 @@ mod tests {
         let deg_east = |m: f64| (m / (R_EARTH * LAT.to_radians().cos())).to_degrees();
 
         // 30 m north, 10 m east, and directly overhead at 5 m.
-        table.record(at(2, LAT + deg_north(30.0), LON, 0.0), None, t0);
-        table.record(at(3, LAT, LON + deg_east(10.0), 0.0), None, t0);
-        table.record(at(4, LAT, LON, 5.0), None, t0);
+        table.record_next(at(2, LAT + deg_north(30.0), LON, 0.0), None, t0);
+        table.record_next(at(3, LAT, LON + deg_east(10.0), 0.0), None, t0);
+        table.record_next(at(4, LAT, LON, 5.0), None, t0);
         // 8 m east but 100 m up: nearest in 2-D, farthest in 3-D. This is the
         // entry that catches an altitude-blind distance.
-        table.record(at(5, LAT, LON + deg_east(8.0), 100.0), None, t0);
+        table.record_next(at(5, LAT, LON + deg_east(8.0), 100.0), None, t0);
 
         let from = (LAT, LON, 0.0);
         let order: Vec<u8> = table
@@ -479,7 +665,7 @@ mod tests {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
         for slot in [9u8, 2, 24, 5] {
-            table.record(at(slot, LAT, LON, 0.0), None, t0);
+            table.record_next(at(slot, LAT, LON, 0.0), None, t0);
         }
         let slots: Vec<u8> = table.iter().map(|(s, _)| *s).collect();
         assert_eq!(slots, vec![2, 5, 9, 24]);
@@ -489,7 +675,7 @@ mod tests {
     fn neighbour_age_is_monotonic_and_never_underflows() {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
-        table.record(at(2, LAT, LON, 0.0), None, t0 + Duration::from_secs(5));
+        table.record_next(at(2, LAT, LON, 0.0), None, t0 + Duration::from_secs(5));
         let n = table.get(2).unwrap();
         // A `now` earlier than the receipt saturates to zero rather than panicking
         // on the Duration subtraction.

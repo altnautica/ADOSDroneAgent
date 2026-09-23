@@ -44,16 +44,17 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 /// Ask the daemon to reconcile its served sockets against plugin state.
 ///
 /// Call this *before* `systemctl start` of a plugin unit: the socket and the
-/// token env file must exist before the runner looks for them.
-pub fn reconcile(socket_dir: &Path) -> Result<(), String> {
-    request(socket_dir, METHOD_PLUGIN_RECONCILE, Value::Map(vec![])).map(|_| ())
+/// token env file must exist before the runner looks for them. `control_dir` is
+/// the daemon's control dir ([`crate::control::DEFAULT_CONTROL_DIR`]).
+pub fn reconcile(control_dir: &Path) -> Result<(), String> {
+    request(control_dir, METHOD_PLUGIN_RECONCILE, Value::Map(vec![])).map(|_| ())
 }
 
 /// Ask the daemon to re-mint `plugin_id`'s capability token from the current
 /// grant set and push it into the plugin's live session.
-pub fn rotate_token(socket_dir: &Path, plugin_id: &str) -> Result<(), String> {
+pub fn rotate_token(control_dir: &Path, plugin_id: &str) -> Result<(), String> {
     request(
-        socket_dir,
+        control_dir,
         METHOD_TOKEN_ROTATE,
         Value::Map(vec![(Value::from("plugin_id"), Value::from(plugin_id))]),
     )
@@ -61,8 +62,8 @@ pub fn rotate_token(socket_dir: &Path, plugin_id: &str) -> Result<(), String> {
 }
 
 /// One request/response round trip. Returns the response args on success.
-fn request(socket_dir: &Path, method: &str, args: Value) -> Result<Value, String> {
-    let path = control_socket_path(socket_dir);
+fn request(control_dir: &Path, method: &str, args: Value) -> Result<Value, String> {
+    let path = control_socket_path(control_dir);
     let mut stream =
         UnixStream::connect(&path).map_err(|e| format!("connect {}: {e}", path.display()))?;
     stream

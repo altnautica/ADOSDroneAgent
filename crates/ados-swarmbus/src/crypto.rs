@@ -34,6 +34,7 @@
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::frame::SwarmFrameKind;
@@ -53,16 +54,8 @@ pub const PLAINTEXT_HEADER_LEN: usize = 2;
 /// Total payload overhead a body carries on the wire.
 pub const PAYLOAD_OVERHEAD: usize = NONCE_LEN + PLAINTEXT_HEADER_LEN + TAG_LEN;
 
-/// The canonical shared-key file the bind protocol delivers byte-for-byte to both
-/// rigs. Mirrors `ados_groundlink::presence`'s `DRONE_KEY_PRIMARY`.
-pub const DRONE_KEY_PRIMARY: &str = "/etc/drone.key";
-
-/// Forward-compatibility location if a future migration relocates the file into
-/// the agent's namespace.
-pub const DRONE_KEY_FALLBACK: &str = "/etc/ados/wfb/drone.key";
-
-/// The wfb-ng key file size. A file of any other length is not the shared key.
-const DRONE_KEY_BYTES: usize = 64;
+/// Length of the per-process random prefix at the head of every nonce.
+pub const NONCE_PREFIX_LEN: usize = 8;
 
 /// Domain separation for the swarm-bus key. Distinct from the hop supervisor's
 /// `ados/wfb/hop/v2\n` so the same `/etc/drone.key` yields two unrelated keys and
@@ -119,27 +112,95 @@ pub fn derive_fleet_key(drone_key: Option<&[u8]>) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Read the fleet key from the first shared-key file present on disk, falling
-/// back to the cold-start constant.
+/// The fleet key derived from the shared-key file at `path`, falling back to the
+/// cold-start constant when the file is absent or is not a whole key (the length
+/// gate lives in [`ados_radio::paths::read_shared_key_at`]).
 ///
-/// A file of the wrong length is treated as absent rather than hashed: a
-/// half-written key would derive a key only this node holds, and a fleet where one
-/// member's frames all fail their tag is far harder to diagnose than a fleet on the
-/// cold-start key.
-pub fn resolve_fleet_key() -> [u8; 32] {
-    for path in [DRONE_KEY_PRIMARY, DRONE_KEY_FALLBACK] {
-        match std::fs::read(path) {
-            Ok(bytes) if bytes.len() == DRONE_KEY_BYTES => return derive_fleet_key(Some(&bytes)),
-            Ok(bytes) => tracing::warn!(
-                path,
-                len = bytes.len(),
-                "swarm_key_file_wrong_length: ignoring"
-            ),
-            Err(_) => {}
-        }
+/// Returns whether a bound key was found beside the key itself, so a caller can
+/// report which of the two the bus is running under.
+pub fn fleet_key_at(path: &Path) -> ([u8; 32], bool) {
+    match ados_radio::paths::read_shared_key_at(path) {
+        Some(shared) => (derive_fleet_key(Some(&shared)), true),
+        None => (derive_fleet_key(None), false),
     }
-    tracing::warn!("swarm_fleet_key_unavailable: falling back to the cold-start key");
-    derive_fleet_key(None)
+}
+
+/// Follows the shared-key file so a running bus picks up a bind or a pair.
+///
+/// The key file is rewritten at runtime (by the bind sequence and by the ground
+/// station's pair route), long after this service started. A bus that resolved
+/// its key once at startup would keep sealing under the old one, and every peer
+/// on the new key would count its beacons as bad tags. The service polls this on
+/// a fixed cadence and rebuilds its cipher whenever [`FleetKeyWatch::poll`]
+/// reports a change.
+#[derive(Debug)]
+pub struct FleetKeyWatch {
+    path: PathBuf,
+    key: [u8; 32],
+}
+
+impl FleetKeyWatch {
+    /// Start watching the shared-key file at `path`, reading it now.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let (key, bound) = fleet_key_at(&path);
+        log_key_source(&path, bound);
+        Self { path, key }
+    }
+
+    /// The key the bus should be running under now.
+    pub fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+
+    /// Re-read the key file. Returns the new key when it differs from the one
+    /// last reported, `None` when nothing changed.
+    pub fn poll(&mut self) -> Option<[u8; 32]> {
+        let (key, bound) = fleet_key_at(&self.path);
+        if key == self.key {
+            return None;
+        }
+        log_key_source(&self.path, bound);
+        self.key = key;
+        Some(key)
+    }
+}
+
+fn log_key_source(path: &Path, bound: bool) {
+    if bound {
+        tracing::info!(path = %path.display(), "swarm_fleet_key_loaded");
+    } else {
+        tracing::warn!(
+            path = %path.display(),
+            "swarm_fleet_key_unavailable: running on the cold-start key"
+        );
+    }
+}
+
+/// The cleartext nonce at the head of a sealed payload, split into the sender's
+/// per-process prefix and its transmission counter.
+///
+/// Only meaningful once [`SwarmCipher::open`] has accepted the payload: the tag
+/// verifies under exactly this nonce, so an authenticated frame's nonce is the one
+/// its sender chose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SenderNonce {
+    /// Drawn at random once per sender process; identifies one run of one node.
+    pub prefix: [u8; NONCE_PREFIX_LEN],
+    /// Advances by one on every frame that sender seals.
+    pub counter: u32,
+}
+
+impl SenderNonce {
+    /// Read the nonce off the front of a sealed payload, or `None` when the
+    /// payload is too short to carry one.
+    pub fn from_wire(wire: &[u8]) -> Option<Self> {
+        let nonce = wire.get(..NONCE_LEN)?;
+        let mut prefix = [0u8; NONCE_PREFIX_LEN];
+        prefix.copy_from_slice(&nonce[..NONCE_PREFIX_LEN]);
+        let counter = u32::from_le_bytes([nonce[8], nonce[9], nonce[10], nonce[11]]);
+        Some(Self { prefix, counter })
+    }
 }
 
 /// Seals and opens swarm payloads under one fleet key.
@@ -150,7 +211,9 @@ pub fn resolve_fleet_key() -> [u8; 32] {
 pub struct SwarmCipher {
     cipher: ChaCha20Poly1305,
     /// Per-process random nonce prefix; see the module docs for the reuse budget.
-    prefix: [u8; 8],
+    /// It doubles as this node's identity on the bus: a frame opening with it is
+    /// our own transmission looped back by the monitor interface.
+    prefix: [u8; NONCE_PREFIX_LEN],
     counter: AtomicU32,
 }
 
@@ -182,6 +245,27 @@ impl SwarmCipher {
             prefix,
             counter: AtomicU32::new(0),
         }
+    }
+
+    /// The same sender under a new fleet key: this cipher's nonce prefix and
+    /// counter carry over, only the key changes.
+    ///
+    /// Keeping the prefix keeps this node's identity on the bus across a re-pair,
+    /// so peers that re-keyed alongside it read its next beacon as the next frame
+    /// of the same run instead of as a second sender on its slot. The counter
+    /// continues from where it stood, so no `(prefix, counter)` pair is ever
+    /// sealed twice under either key.
+    pub fn rekeyed(&self, key: &[u8; 32]) -> Self {
+        Self {
+            cipher: ChaCha20Poly1305::new(Key::from_slice(key)),
+            prefix: self.prefix,
+            counter: AtomicU32::new(self.counter.load(Ordering::Relaxed)),
+        }
+    }
+
+    /// Whether `nonce` is one this cipher sealed: our own frame, looped back.
+    pub fn is_own(&self, nonce: &SenderNonce) -> bool {
+        nonce.prefix == self.prefix
     }
 
     /// Seal one frame: `nonce || ChaCha20-Poly1305(version || kind || body)`.
@@ -435,15 +519,88 @@ mod tests {
 
     #[test]
     fn resolve_ignores_a_wrong_length_key_file_rather_than_hashing_it() {
-        // The production paths are absolute, so this exercises the length gate
-        // through the pure derivation the resolver delegates to: a truncated file
-        // must never derive a key only this node would hold.
-        assert_ne!(
-            derive_fleet_key(Some(&[7u8; 32])),
-            derive_fleet_key(Some(&[7u8; 64]))
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drone.key");
+        assert_eq!(fleet_key_at(&path), (derive_fleet_key(None), false));
+        std::fs::write(&path, [7u8; 32]).unwrap();
+        assert_eq!(
+            fleet_key_at(&path),
+            (derive_fleet_key(None), false),
+            "a truncated file must never derive a key only this node holds"
         );
-        // With no readable key file the resolver lands on cold start, which both
-        // rigs compute identically.
-        assert_eq!(derive_fleet_key(None).len(), 32);
+        std::fs::write(&path, [7u8; 64]).unwrap();
+        assert_eq!(fleet_key_at(&path), (key(), true));
+    }
+
+    /// A bind or pair rewrites the key file under a running bus. The watch must
+    /// report the new key so the bus rebuilds its cipher, and a cipher built from
+    /// it must read peers on the new key and stop reading the old one.
+    #[test]
+    fn the_key_watch_reports_a_rewritten_key_file_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drone.key");
+        let mut watch = FleetKeyWatch::new(&path);
+        assert_eq!(watch.key(), &derive_fleet_key(None), "unbound: cold start");
+        assert_eq!(watch.poll(), None, "nothing changed");
+
+        std::fs::write(&path, [7u8; 64]).unwrap();
+        assert_eq!(watch.poll(), Some(key()), "the bind landed");
+        assert_eq!(watch.poll(), None, "reported once");
+
+        std::fs::write(&path, [9u8; 64]).unwrap();
+        let rotated = watch.poll().expect("a re-pair is a change");
+        let rebuilt = SwarmCipher::new(&rotated);
+        let peer_new = SwarmCipher::new(&derive_fleet_key(Some(&[9u8; 64])));
+        let peer_old = SwarmCipher::new(&key());
+        let body = SwarmBeacon::default().encode();
+        assert!(rebuilt
+            .open(&peer_new.seal(SwarmFrameKind::Beacon, &body))
+            .is_ok());
+        assert_eq!(
+            rebuilt.open(&peer_old.seal(SwarmFrameKind::Beacon, &body)),
+            Err(SealError::BadTag)
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(watch.poll(), Some(derive_fleet_key(None)), "key removed");
+    }
+
+    /// The nonce read off the wire is exactly the one the sender sealed under, and
+    /// only the sealing cipher recognises it as its own.
+    #[test]
+    fn the_sender_nonce_identifies_its_cipher_and_counts_up() {
+        let a = SwarmCipher::new(&key());
+        let b = SwarmCipher::new(&key());
+        let body = SwarmBeacon::default().encode();
+        let first = SenderNonce::from_wire(&a.seal(SwarmFrameKind::Beacon, &body)).unwrap();
+        let second = SenderNonce::from_wire(&a.seal(SwarmFrameKind::Beacon, &body)).unwrap();
+        assert_eq!(first.prefix, second.prefix);
+        assert_eq!(second.counter, first.counter + 1);
+        assert!(a.is_own(&first));
+        assert!(!b.is_own(&first), "another node on the same key is not us");
+        assert_eq!(SenderNonce::from_wire(&[0u8; NONCE_LEN - 1]), None);
+    }
+
+    /// Re-keying keeps the sender's identity and continues its counter, so peers
+    /// that re-keyed alongside it see the next frame of the same run, and no
+    /// nonce is reused.
+    #[test]
+    fn a_rekeyed_cipher_keeps_its_prefix_and_continues_its_counter() {
+        let old = SwarmCipher::new(&key());
+        let body = SwarmBeacon::default().encode();
+        let last = SenderNonce::from_wire(&old.seal(SwarmFrameKind::Beacon, &body)).unwrap();
+
+        let new_key = derive_fleet_key(Some(&[9u8; 64]));
+        let rekeyed = old.rekeyed(&new_key);
+        let wire = rekeyed.seal(SwarmFrameKind::Beacon, &body);
+        let next = SenderNonce::from_wire(&wire).unwrap();
+        assert_eq!(next.prefix, last.prefix);
+        assert_eq!(next.counter, last.counter + 1);
+        assert!(rekeyed.is_own(&next));
+        assert!(
+            SwarmCipher::new(&new_key).open(&wire).is_ok(),
+            "sealed under the new key"
+        );
+        assert_eq!(old.open(&wire), Err(SealError::BadTag));
     }
 }

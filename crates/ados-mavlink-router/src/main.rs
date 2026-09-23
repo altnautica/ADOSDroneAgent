@@ -29,7 +29,8 @@ use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
 use ados_mavlink_router::param_cache::ParamCache;
 use ados_mavlink_router::proxies::{
-    proxy_bind_addr, run_tcp_proxy, run_udp_proxy, run_ws_proxy, ProxyAuth, WsProxyAuth,
+    proxy_bind_addr, run_tcp_proxy, run_udp_proxy, run_ws_proxy, ws_bind_addr, ProxyAuth,
+    WsProxyAuth,
 };
 use ados_mavlink_router::relayed::RelayedVehicle;
 use ados_mavlink_router::state::{firmware_family, VehicleState};
@@ -128,6 +129,26 @@ fn ws_proxy_port(cfg: &MavlinkConfig) -> Option<u16> {
         return v.trim().parse().ok();
     }
     cfg.websocket_port()
+}
+
+/// The WebSocket proxy's bind address: the configured endpoint host, narrowed
+/// by the operator's bind override.
+fn ws_proxy_bind(cfg: &MavlinkConfig) -> String {
+    ws_bind_addr(cfg.websocket_endpoint().map_or("", |e| e.host.as_str()))
+}
+
+/// What the direct-GCS proxies are bound to and who they serve, carried on the
+/// state snapshot as `mavlink_proxy_posture` so an operator surface can say
+/// whether a desktop ground station can reach this node's raw MAVLink ports.
+/// `ws_bind` is null when no WebSocket endpoint is enabled.
+fn proxy_posture(cfg: &MavlinkConfig) -> Value {
+    json!({
+        "ws_bind": ws_proxy_port(cfg).map(|_| ws_proxy_bind(cfg)),
+        "ws_enforce_auth": cfg.ws_proxy_enforce_auth,
+        "raw_bind": proxy_bind_addr(),
+        "raw_enforce_auth": cfg.raw_proxy_enforce_auth,
+        "raw_lan_access": cfg.raw_proxy_lan_access,
+    })
 }
 /// How often the attitude-cadence distribution is shipped to the store.
 ///
@@ -676,6 +697,7 @@ async fn main() {
         let frame_ingest_counters = frame_ingest_counters.clone();
         let relayed_vehicle = relayed_vehicle.clone();
         let attitude_status = attitude_status.clone();
+        let proxy_posture = proxy_posture(&cfg);
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -716,6 +738,7 @@ async fn main() {
                             aux_rpc_counters.as_ref(), swarm_status.as_ref(),
                             attitude_status.as_ref(),
                             relayed_vehicle.as_ref(),
+                            &proxy_posture,
                         )
                         .await;
                         let wire = { state.lock().await.to_wire_with(&extras) };
@@ -739,11 +762,12 @@ async fn main() {
         let cancel = cancel.clone();
         let port = tcp_proxy_port();
         let bind = proxy_bind_addr();
-        // Same posture object the WebSocket uses, on its own flag: these ports
-        // are advertised to operators as the QGroundControl / Mission Planner
-        // path and carry no credential channel, so enforcement is opt-in rather
-        // than the default. See `config::default_raw_proxy_enforce_auth`.
-        let auth = ProxyAuth::from_config(cfg.raw_proxy_enforce_auth);
+        // Same posture object the WebSocket uses, on its own flags: these
+        // ports carry no credential channel, so a paired node serves them
+        // off-box only when the operator opened them to the LAN. See
+        // `config::default_raw_proxy_lan_access`.
+        let auth = ProxyAuth::from_config(cfg.raw_proxy_enforce_auth)
+            .with_raw_lan_access(cfg.raw_proxy_lan_access);
         tasks.push(tokio::spawn(async move {
             run_tcp_proxy(fc, &bind, port, auth, cancel).await
         }));
@@ -751,7 +775,8 @@ async fn main() {
     for port in udp_proxy_ports() {
         let fc = fc.clone();
         let cancel = cancel.clone();
-        let auth = ProxyAuth::from_config(cfg.raw_proxy_enforce_auth);
+        let auth = ProxyAuth::from_config(cfg.raw_proxy_enforce_auth)
+            .with_raw_lan_access(cfg.raw_proxy_lan_access);
         let bind = proxy_bind_addr();
         tasks.push(tokio::spawn(async move {
             run_udp_proxy(fc, &bind, port, auth, cancel).await
@@ -762,12 +787,14 @@ async fn main() {
         let cancel = cancel.clone();
         // The direct WebSocket proxy carries raw MAVLink to/from the FC, so a
         // paired agent gates an off-box connection on the stored pairing key or
-        // a valid ticket. Enforcement is config-driven and defaults ON: the
-        // endpoint has two credential channels every first-party client already
-        // presents, so the gate is closable without stranding anyone.
+        // a valid ticket, and an unpaired one serves only the local operator
+        // and the first-boot lifelines. Enforcement is config-driven and
+        // defaults ON: the endpoint has two credential channels every
+        // first-party client already presents.
         let auth = WsProxyAuth::from_config(cfg.ws_proxy_enforce_auth);
+        let bind = ws_proxy_bind(&cfg);
         tasks.push(tokio::spawn(async move {
-            run_ws_proxy(fc, ws_port, auth, cancel).await
+            run_ws_proxy(fc, &bind, ws_port, auth, cancel).await
         }));
     }
 
@@ -817,6 +844,7 @@ async fn build_extras(
     swarm: Option<&Arc<SwarmSetpointStatus>>,
     attitude: Option<&Arc<AttitudeSetpointStatus>>,
     relayed_vehicle: Option<&Arc<StdMutex<RelayedVehicle>>>,
+    proxy_posture: &Value,
 ) -> Map<String, Value> {
     // The cached param count and the map's change counter, read under one lock.
     let (cached, param_generation) = {
@@ -981,6 +1009,9 @@ async fn build_extras(
             serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
         );
     }
+    // Who the direct-GCS proxies serve (see `proxy_posture`). Static for the
+    // life of the process, so a clone of the value built at startup.
+    extras.insert("mavlink_proxy_posture".into(), proxy_posture.clone());
     // The drone's video attention profile, so the swarm beacon's hero bit and the
     // fleet view read one source of truth. Owned by `ados-video`, which stamps
     // the sidecar on every encoder profile apply; this republishes it.
@@ -1137,7 +1168,7 @@ mod extras_key_set_tests {
     /// vehicle fields up in place of the withheld local ones. So it appears here
     /// but in neither classification list, which is correct rather than an
     /// omission.
-    const EXPECTED_EXTRAS_KEYS: [&str; 29] = [
+    const EXPECTED_EXTRAS_KEYS: [&str; 30] = [
         "attitude_verdict",
         "aux_mavlink_tee",
         "aux_rpc",
@@ -1155,6 +1186,7 @@ mod extras_key_set_tests {
         "ipc_state_drops",
         "mavlink_alive",
         "mavlink_frame_ingest",
+        "mavlink_proxy_posture",
         "param_cached_count",
         "param_expected_count",
         "param_generation",
@@ -1199,6 +1231,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(SwarmSetpointStatus::default())),
             None,
             Some(&relayed),
+            &proxy_posture(&MavlinkConfig::default()),
         )
         .await;
 
@@ -1276,6 +1309,7 @@ mod extras_key_set_tests {
             None,
             None,
             Some(&relayed),
+            &Value::Null,
         )
         .await;
 
@@ -1317,6 +1351,7 @@ mod extras_key_set_tests {
             None,
             None,
             Some(&never),
+            &Value::Null,
         )
         .await;
 
@@ -1366,6 +1401,7 @@ mod extras_key_set_tests {
             None,
             None,
             None,
+            &Value::Null,
         )
         .await;
         let empty_len = sized_without_clocks(empty);
@@ -1390,6 +1426,7 @@ mod extras_key_set_tests {
             None,
             None,
             None,
+            &Value::Null,
         )
         .await;
 

@@ -37,7 +37,7 @@
 //! | disarm        | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=0.0, rest 0                   |
 //! | takeoff       | MAV_CMD_NAV_TAKEOFF 22          | p7=alt (default 10.0), rest 0    |
 //! | land          | MAV_CMD_NAV_LAND 21             | all 0                            |
-//! | rtl           | MAV_CMD_DO_SET_MODE 176         | ArduPilot: p1=1, p2=6 · PX4: p1=1, p2=4, p3=5 |
+//! | rtl           | MAV_CMD_DO_SET_MODE 176         | ArduPilot: p1=1, p2=RTL of the vehicle's table (Copter 6, Plane/Rover 11) · PX4: p1=1, p2=4, p3=5 |
 //! | mode N        | MAV_CMD_DO_SET_MODE 176         | ArduPilot: p1=1, p2=custom_mode · PX4: p1=1, p2=main, p3=sub |
 //! | killSwitch    | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=0.0, p2=21196 (force), rest 0 |
 //! | pauseMission  | MAV_CMD_DO_PAUSE_CONTINUE 193   | p1=0.0 (pause), rest 0           |
@@ -65,9 +65,13 @@
 //!
 //! ## Flight-mode encoding: ArduPilot vs PX4
 //!
-//! ArduPilot carries a flat `custom_mode` integer (the copter mode table), so
-//! `DO_SET_MODE` sets `param1=1` (custom-mode enabled) and `param2=custom_mode`,
-//! `param3=0`.
+//! ArduPilot carries a flat `custom_mode` integer, so `DO_SET_MODE` sets
+//! `param1=1` (custom-mode enabled) and `param2=custom_mode`, `param3=0`. The
+//! number is firmware-specific (`6` is RTL on Copter, FBWB on Plane, FOLLOW on
+//! Rover), so the name resolves through the table for the vehicle type the FC
+//! reports in `HEARTBEAT.type` — the same shared table the router decodes the
+//! snapshot's mode name with. A vehicle type with no table (unknown, generic,
+//! submarine, ...) is refused with a 409 instead of guessing a number.
 //!
 //! PX4 uses a two-level `(main_mode, sub_mode)` scheme. For the `DO_SET_MODE`
 //! **command**, PX4 reads the two levels as SEPARATE small integers:
@@ -76,10 +80,10 @@
 //! the 32-bit `custom_mode` FIELD in `HEARTBEAT`/`SET_MODE`, which the state
 //! producer DECODES to name the current mode; the command layer takes the two
 //! levels de-packed.) So on PX4, RTL is the AUTO main mode with the RTL sub mode
-//! (`param2=4`, `param3=5`), not the copter value `6`.
+//! (`param2=4`, `param3=5`).
 //!
-//! The route reads the FC's advertised autopilot from the live state snapshot
-//! (`autopilot == 12` is PX4) and picks the encoding accordingly.
+//! The route reads the FC's advertised autopilot and vehicle type from the live
+//! state snapshot (`autopilot == 12` is PX4) and picks the encoding accordingly.
 //!
 //! ## COMMAND_ACK correlation
 //!
@@ -118,12 +122,13 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use ados_protocol::flight_modes::{ArduPilotFirmware, MAV_AUTOPILOT_PX4};
 use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, COMMAND_LONG_DATA};
 use ados_protocol::mavlink::{self, MavHeader};
 
 use crate::ipc::{FrameRead, MavlinkIpcClient};
 use crate::routes::detail;
-use crate::state::AppState;
+use crate::state::{AppState, FcIdentity};
 
 /// The command catalog: name → human description. The first six are the original
 /// text commands; the last three are agent-native additions the fleet board
@@ -160,11 +165,6 @@ const SOURCE_COMPONENT_ID: u8 = 191;
 const TARGET_SYSTEM: u8 = 1;
 const TARGET_COMPONENT: u8 = 1;
 
-/// The `HEARTBEAT.autopilot` value for PX4 (`MAV_AUTOPILOT_PX4`). When the FC
-/// advertises this, `rtl`/`mode` use the PX4 `(main, sub)` mode encoding; any
-/// other value uses the ArduPilot copter mode table.
-const AUTOPILOT_PX4: i64 = 12;
-
 /// Default takeoff altitude in metres when the request carries no `args[0]`,
 /// matching the FastAPI route's `float(req.args[0]) if req.args else 10.0`.
 const DEFAULT_TAKEOFF_ALT_M: f32 = 10.0;
@@ -192,11 +192,6 @@ const FORCE_DISARM_MAGIC: f32 = 21196.0;
 const PAUSE_CONTINUE_PAUSE: f32 = 0.0;
 const PAUSE_CONTINUE_CONTINUE: f32 = 1.0;
 
-/// RTL's `custom_mode` in the ArduCopter mode table (`RTL → 6`). The `rtl`
-/// shortcut on ArduPilot sends this so it commands Return-to-Launch, identical
-/// to the `mode RTL` path.
-const COPTER_RTL_CUSTOM_MODE: u32 = 6;
-
 // ── PX4 mode ids (px4_custom_mode.h) ────────────────────────────────────────
 // The DO_SET_MODE command takes these de-packed: param2 = main, param3 = sub.
 
@@ -219,37 +214,6 @@ const PX4_SUB_AUTO_RTL: u8 = 5;
 const PX4_SUB_AUTO_LAND: u8 = 6;
 const PX4_SUB_AUTO_FOLLOW_TARGET: u8 = 8;
 const PX4_SUB_AUTO_PRECLAND: u8 = 9;
-
-/// ArduCopter flight-mode name → `custom_mode`, the reverse of the router's
-/// COPTER mode table. The `mode` command resolves a mode name to its custom mode
-/// here on an ArduPilot FC. An unknown name is a 400.
-const COPTER_MODE_NUMBERS: &[(&str, u32)] = &[
-    ("STABILIZE", 0),
-    ("ACRO", 1),
-    ("ALT_HOLD", 2),
-    ("AUTO", 3),
-    ("GUIDED", 4),
-    ("LOITER", 5),
-    ("RTL", 6),
-    ("CIRCLE", 7),
-    ("LAND", 9),
-    ("DRIFT", 11),
-    ("SPORT", 13),
-    ("FLIP", 14),
-    ("AUTOTUNE", 15),
-    ("POSHOLD", 16),
-    ("BRAKE", 17),
-    ("THROW", 18),
-    ("AVOID_ADSB", 19),
-    ("GUIDED_NOGPS", 20),
-    ("SMART_RTL", 21),
-    ("FLOWHOLD", 22),
-    ("FOLLOW", 23),
-    ("ZIGZAG", 24),
-    ("SYSTEMID", 25),
-    ("AUTOROTATE", 26),
-    ("AUTO_RTL", 27),
-];
 
 /// PX4 flight-mode name → `(main_mode, sub_mode)` for the `DO_SET_MODE` command
 /// path. Matches the router's PX4 decode table, with both the short operator
@@ -346,7 +310,8 @@ pub struct CommandRequest {
 ///
 /// 503 `{"detail": ...}` when the FC is not connected OR the MAVLink socket
 /// cannot be reached (the command never silently drops). 400 `{"detail": ...}`
-/// on an unknown command, a `mode` with no name, or an unknown mode name.
+/// on an unknown command, a `mode` with no name, or an unknown mode name. 409
+/// on `rtl`/`mode` for an ArduPilot vehicle type with no mode table.
 /// Otherwise the frame is built, written to the socket, and the FC's
 /// `COMMAND_ACK` is correlated into the `ack` block of the response.
 pub async fn execute_command(
@@ -376,11 +341,11 @@ pub async fn execute_command(
     }
 
     let cmd = req.cmd.to_lowercase();
-    let autopilot = state.autopilot();
+    let fc = state.fc_identity();
 
     // Build the COMMAND_LONG + the success body for the named command. An unknown
     // command (or a bad mode arg) returns a 4xx here before any send.
-    let (base_long, mut body) = match build_command(&cmd, &req.args, autopilot) {
+    let (base_long, mut body) = match build_command(&cmd, &req.args, fc) {
         Ok(built) => built,
         Err(err) => return err.into_response(),
     };
@@ -401,7 +366,8 @@ pub async fn execute_command(
 }
 
 /// A 4xx the command builder raises before any send: an unknown command, a `mode`
-/// with no name, or an unknown mode name.
+/// with no name, an unknown mode name, or a mode change for a vehicle type with
+/// no mode table.
 #[derive(Debug)]
 struct CommandError {
     status: StatusCode,
@@ -415,12 +381,13 @@ impl IntoResponse for CommandError {
 }
 
 /// Build the `COMMAND_LONG` and the success body for a named command, resolving
-/// the flight-mode encoding for the FC's `autopilot` family. Returns a
-/// [`CommandError`] (a 400) for an unknown command or a bad `mode` argument.
+/// the flight-mode encoding for the FC's autopilot family and vehicle type.
+/// Returns a [`CommandError`] (a 4xx) for an unknown command, a bad `mode`
+/// argument, or a mode change the vehicle type cannot be encoded for.
 fn build_command(
     cmd: &str,
     args: &[Value],
-    autopilot: i64,
+    fc: FcIdentity,
 ) -> Result<(COMMAND_LONG_DATA, Value), CommandError> {
     match cmd {
         "arm" => Ok((
@@ -453,8 +420,8 @@ fn build_command(
         )),
         "rtl" => {
             // The `rtl` shortcut commands Return-to-Launch, the same frame the
-            // `mode RTL` path produces for this autopilot family.
-            let params = set_mode_params_for_rtl(autopilot);
+            // `mode RTL` path produces for this vehicle.
+            let params = set_mode_params_for_name("RTL", fc)?;
             Ok((
                 command_long(MavCmd::MAV_CMD_DO_SET_MODE, params),
                 json!({"status": "ok", "cmd": "rtl"}),
@@ -494,15 +461,7 @@ fn build_command(
                     })
                 }
             };
-            let params = match set_mode_params_for_name(&name, autopilot) {
-                Some(p) => p,
-                None => {
-                    return Err(CommandError {
-                        status: StatusCode::BAD_REQUEST,
-                        detail: format!("Unknown mode: {name}"),
-                    })
-                }
-            };
+            let params = set_mode_params_for_name(&name, fc)?;
             Ok((
                 command_long(MavCmd::MAV_CMD_DO_SET_MODE, params),
                 json!({"status": "ok", "cmd": "mode", "mode": name}),
@@ -515,26 +474,36 @@ fn build_command(
     }
 }
 
-/// The `DO_SET_MODE` params for Return-to-Launch on the given autopilot family.
-/// PX4 takes the de-packed `(main, sub)` in `param2`/`param3` (AUTO.RTL =
-/// `4`/`5`); ArduPilot takes the flat copter `custom_mode` in `param2` (`6`).
-fn set_mode_params_for_rtl(autopilot: i64) -> [f32; 7] {
-    if autopilot == AUTOPILOT_PX4 {
-        do_set_mode_px4(PX4_MAIN_AUTO, PX4_SUB_AUTO_RTL)
-    } else {
-        do_set_mode_ardupilot(COPTER_RTL_CUSTOM_MODE)
+/// The `DO_SET_MODE` params for a named flight mode on the connected FC.
+///
+/// PX4 takes the de-packed `(main, sub)` in `param2`/`param3`. ArduPilot takes
+/// the flat `custom_mode` from the table for the FC's vehicle type; a vehicle
+/// type with no table is a 409 (the number would be a guess, and the same number
+/// is a different mode on another firmware). A name missing from the resolved
+/// table is a 400.
+fn set_mode_params_for_name(name: &str, fc: FcIdentity) -> Result<[f32; 7], CommandError> {
+    let unknown_mode = || CommandError {
+        status: StatusCode::BAD_REQUEST,
+        detail: format!("Unknown mode: {name}"),
+    };
+    if fc.autopilot == MAV_AUTOPILOT_PX4 {
+        return px4_mode_number(name)
+            .map(|(main, sub)| do_set_mode_px4(main, sub))
+            .ok_or_else(unknown_mode);
     }
-}
-
-/// The `DO_SET_MODE` params for a named flight mode on the given autopilot
-/// family, or `None` when the name is not in that family's mode table (a 400 at
-/// the call site).
-fn set_mode_params_for_name(name: &str, autopilot: i64) -> Option<[f32; 7]> {
-    if autopilot == AUTOPILOT_PX4 {
-        px4_mode_number(name).map(|(main, sub)| do_set_mode_px4(main, sub))
-    } else {
-        copter_mode_number(name).map(do_set_mode_ardupilot)
-    }
+    let Some(firmware) = ArduPilotFirmware::from_mav_type(fc.mav_type) else {
+        return Err(CommandError {
+            status: StatusCode::CONFLICT,
+            detail: format!(
+                "No flight-mode table for vehicle type {}; refusing to set a mode",
+                fc.mav_type
+            ),
+        });
+    };
+    firmware
+        .custom_mode(name)
+        .map(do_set_mode_ardupilot)
+        .ok_or_else(unknown_mode)
 }
 
 /// `DO_SET_MODE` params for ArduPilot: `param1 = custom-mode-enabled`, `param2 =
@@ -633,15 +602,6 @@ fn arg_as_str(v: &Value) -> Option<String> {
         Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
-}
-
-/// Resolve an ArduCopter mode name to its `custom_mode`. `None` for an unknown
-/// name (a 400 at the call site).
-fn copter_mode_number(name: &str) -> Option<u32> {
-    COPTER_MODE_NUMBERS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, num)| *num)
 }
 
 /// Resolve a PX4 mode name to its `(main_mode, sub_mode)`. `None` for an unknown
@@ -872,15 +832,23 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
 
-    /// A non-PX4 autopilot value (ArduPilot); any value != 12 selects the copter
-    /// path. `MAV_AUTOPILOT_ARDUPILOTMEGA` is 3.
-    const ARDUPILOT: i64 = 3;
+    /// An ArduCopter quadrotor (`MAV_AUTOPILOT_ARDUPILOTMEGA` 3, `MAV_TYPE_QUADROTOR` 2).
+    const COPTER: FcIdentity = FcIdentity {
+        autopilot: 3,
+        mav_type: 2,
+    };
+
+    /// A PX4 quadrotor; the vehicle type does not select PX4's mode encoding.
+    const PX4: FcIdentity = FcIdentity {
+        autopilot: MAV_AUTOPILOT_PX4,
+        mav_type: 2,
+    };
 
     // ── G6: command building + PX4 mode encoding ────────────────────────────
 
     #[test]
     fn arm_is_component_arm_disarm_param1_one() {
-        let (d, body) = build_command("arm", &[], ARDUPILOT).unwrap();
+        let (d, body) = build_command("arm", &[], COPTER).unwrap();
         assert_eq!(d.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
         assert_eq!(d.param1, 1.0);
         assert_eq!(d.target_system, 1);
@@ -891,14 +859,14 @@ mod tests {
 
     #[test]
     fn disarm_is_component_arm_disarm_param1_zero() {
-        let (d, _b) = build_command("disarm", &[], ARDUPILOT).unwrap();
+        let (d, _b) = build_command("disarm", &[], COPTER).unwrap();
         assert_eq!(d.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
         assert_eq!(d.param1, 0.0);
     }
 
     #[test]
     fn takeoff_default_alt_is_ten_in_param7() {
-        let (d, body) = build_command("takeoff", &[], ARDUPILOT).unwrap();
+        let (d, body) = build_command("takeoff", &[], COPTER).unwrap();
         assert_eq!(d.command, MavCmd::MAV_CMD_NAV_TAKEOFF);
         assert_eq!(d.param7, 10.0);
         assert_eq!(body["altitude"], json!(10.0));
@@ -906,11 +874,11 @@ mod tests {
 
     #[test]
     fn takeoff_reads_the_altitude_arg_numeric_and_string() {
-        let (d, body) = build_command("takeoff", &[json!(25.0)], ARDUPILOT).unwrap();
+        let (d, body) = build_command("takeoff", &[json!(25.0)], COPTER).unwrap();
         assert_eq!(d.param7, 25.0);
         assert_eq!(body["altitude"], json!(25.0));
         // A stringly-typed numeric arg parses, matching Python float().
-        let (d2, _b) = build_command("takeoff", &[json!("30")], ARDUPILOT).unwrap();
+        let (d2, _b) = build_command("takeoff", &[json!("30")], COPTER).unwrap();
         assert_eq!(d2.param7, 30.0);
     }
 
@@ -941,7 +909,7 @@ mod tests {
             json!(Value::Null), // wrong type
             json!([25.0]),      // wrong type
         ] {
-            let err = build_command("takeoff", std::slice::from_ref(&arg), ARDUPILOT)
+            let err = build_command("takeoff", std::slice::from_ref(&arg), COPTER)
                 .expect_err(&format!("{arg} must be refused, not flown"));
             assert_eq!(err.status, StatusCode::BAD_REQUEST, "arg {arg}");
         }
@@ -952,18 +920,18 @@ mod tests {
     #[test]
     fn takeoff_accepts_the_bounded_positive_range() {
         for arg in [json!(0.5), json!(10), json!("120.5"), json!(1000.0)] {
-            let (d, _b) = build_command("takeoff", std::slice::from_ref(&arg), ARDUPILOT)
+            let (d, _b) = build_command("takeoff", std::slice::from_ref(&arg), COPTER)
                 .unwrap_or_else(|_| panic!("{arg} is a flyable altitude"));
             assert!(d.param7.is_finite() && d.param7 > 0.0);
         }
         // Absent args keep the documented default; only a PRESENT arg is judged.
-        let (d, _b) = build_command("takeoff", &[], ARDUPILOT).unwrap();
+        let (d, _b) = build_command("takeoff", &[], COPTER).unwrap();
         assert_eq!(d.param7, DEFAULT_TAKEOFF_ALT_M);
     }
 
     #[test]
     fn land_is_nav_land_all_zero() {
-        let (d, _b) = build_command("land", &[], ARDUPILOT).unwrap();
+        let (d, _b) = build_command("land", &[], COPTER).unwrap();
         assert_eq!(d.command, MavCmd::MAV_CMD_NAV_LAND);
         for p in [
             d.param1, d.param2, d.param3, d.param4, d.param5, d.param6, d.param7,
@@ -973,9 +941,9 @@ mod tests {
     }
 
     #[test]
-    fn ardupilot_rtl_is_do_set_mode_param2_six() {
-        // On ArduPilot the `rtl` shortcut sends DO_SET_MODE custom_mode=6.
-        let (d, _b) = build_command("rtl", &[], ARDUPILOT).unwrap();
+    fn copter_rtl_is_do_set_mode_param2_six() {
+        // On ArduCopter the `rtl` shortcut sends DO_SET_MODE custom_mode=6.
+        let (d, _b) = build_command("rtl", &[], COPTER).unwrap();
         assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE);
         assert_eq!(d.param1, 1.0);
         assert_eq!(d.param2, 6.0, "ArduCopter RTL custom_mode is 6");
@@ -983,8 +951,8 @@ mod tests {
     }
 
     #[test]
-    fn ardupilot_mode_rtl_matches_the_rtl_shortcut() {
-        let (d, body) = build_command("mode", &[json!("rtl")], ARDUPILOT).unwrap();
+    fn copter_mode_rtl_matches_the_rtl_shortcut() {
+        let (d, body) = build_command("mode", &[json!("rtl")], COPTER).unwrap();
         assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE);
         assert_eq!(d.param1, 1.0);
         assert_eq!(d.param2, 6.0);
@@ -993,8 +961,8 @@ mod tests {
     }
 
     #[test]
-    fn ardupilot_mode_guided_resolves_to_four() {
-        let (d, _b) = build_command("mode", &[json!("GUIDED")], ARDUPILOT).unwrap();
+    fn copter_mode_guided_resolves_to_four() {
+        let (d, _b) = build_command("mode", &[json!("GUIDED")], COPTER).unwrap();
         assert_eq!(d.param2, 4.0);
         assert_eq!(d.param3, 0.0);
     }
@@ -1003,7 +971,7 @@ mod tests {
     fn px4_rtl_is_do_set_mode_auto_main_rtl_sub() {
         // On PX4 the `rtl` shortcut sends DO_SET_MODE with de-packed main/sub:
         // AUTO (4) in param2, RTL (5) in param3 — NOT the copter value 6.
-        let (d, _b) = build_command("rtl", &[], AUTOPILOT_PX4).unwrap();
+        let (d, _b) = build_command("rtl", &[], PX4).unwrap();
         assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE);
         assert_eq!(d.param1, 1.0);
         assert_eq!(d.param2, 4.0, "PX4 RTL main_mode is AUTO=4");
@@ -1025,7 +993,7 @@ mod tests {
             ("LAND", 4.0, 6.0, 0x0604_0000),
         ];
         for (name, main, sub, packed) in cases {
-            let (d, body) = build_command("mode", &[json!(name)], AUTOPILOT_PX4).unwrap();
+            let (d, body) = build_command("mode", &[json!(name)], PX4).unwrap();
             assert_eq!(d.param1, 1.0, "{name}: custom-mode-enabled");
             assert_eq!(d.param2, main, "{name}: main_mode in param2");
             assert_eq!(d.param3, sub, "{name}: sub_mode in param3");
@@ -1048,7 +1016,7 @@ mod tests {
             ("ACRO", PX4_MAIN_ACRO),
             ("STABILIZED", PX4_MAIN_STABILIZED),
         ] {
-            let (d, _b) = build_command("mode", &[json!(name)], AUTOPILOT_PX4).unwrap();
+            let (d, _b) = build_command("mode", &[json!(name)], PX4).unwrap();
             assert_eq!(d.param2, main as f32, "{name}: main_mode");
             assert_eq!(d.param3, 0.0, "{name}: no sub-mode");
         }
@@ -1058,8 +1026,8 @@ mod tests {
     fn px4_dotted_mode_name_resolves_like_the_short_name() {
         // The dotted decode name the state producer reports resolves to the same
         // pair as the short operator name.
-        let (dotted, _b) = build_command("mode", &[json!("AUTO.MISSION")], AUTOPILOT_PX4).unwrap();
-        let (short, _b2) = build_command("mode", &[json!("MISSION")], AUTOPILOT_PX4).unwrap();
+        let (dotted, _b) = build_command("mode", &[json!("AUTO.MISSION")], PX4).unwrap();
+        let (short, _b2) = build_command("mode", &[json!("MISSION")], PX4).unwrap();
         assert_eq!(dotted.param2, short.param2);
         assert_eq!(dotted.param3, short.param3);
         assert_eq!(dotted.param2, 4.0);
@@ -1068,24 +1036,24 @@ mod tests {
 
     #[test]
     fn mode_with_no_name_is_a_400() {
-        let err = build_command("mode", &[], ARDUPILOT).unwrap_err();
+        let err = build_command("mode", &[], COPTER).unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.detail, "Mode name required");
     }
 
     #[test]
     fn unknown_mode_name_is_a_400_on_both_families() {
-        let err = build_command("mode", &[json!("NOPE")], ARDUPILOT).unwrap_err();
+        let err = build_command("mode", &[json!("NOPE")], COPTER).unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.detail, "Unknown mode: NOPE");
         // A copter-only mode name is unknown on PX4.
-        let err2 = build_command("mode", &[json!("POSHOLD")], AUTOPILOT_PX4).unwrap_err();
+        let err2 = build_command("mode", &[json!("POSHOLD")], PX4).unwrap_err();
         assert_eq!(err2.detail, "Unknown mode: POSHOLD");
     }
 
     #[test]
     fn unknown_command_is_a_400() {
-        let err = build_command("fly-to-the-moon", &[], ARDUPILOT).unwrap_err();
+        let err = build_command("fly-to-the-moon", &[], COPTER).unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.detail, "Unknown command: fly-to-the-moon");
     }
@@ -1094,7 +1062,7 @@ mod tests {
     fn command_serializes_to_a_valid_v2_frame() {
         // The built COMMAND_LONG serializes to a parseable v2 frame carrying the
         // same fields — proving the encode path the send uses is intact.
-        let (d, _b) = build_command("mode", &[json!("RTL")], AUTOPILOT_PX4).unwrap();
+        let (d, _b) = build_command("mode", &[json!("RTL")], PX4).unwrap();
         let header = MavHeader {
             system_id: SOURCE_SYSTEM_ID,
             component_id: SOURCE_COMPONENT_ID,
@@ -1138,7 +1106,7 @@ mod tests {
         // "killswitch" is what build_command matches. It force-disarms: disarm
         // (param1=0) with the 21196 force magic in param2 so the FC cuts motors
         // in flight instead of refusing.
-        let (d, body) = build_command("killswitch", &[], ARDUPILOT).unwrap();
+        let (d, body) = build_command("killswitch", &[], COPTER).unwrap();
         assert_eq!(d.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
         assert_eq!(d.param1, 0.0, "disarm");
         assert_eq!(
@@ -1148,7 +1116,7 @@ mod tests {
         assert_eq!(body["cmd"], json!("killSwitch"));
         // It is deliberately NOT a plain disarm: the force magic is the whole
         // point (a plain disarm carries param2=0 and the FC refuses it in flight).
-        let (plain, _b) = build_command("disarm", &[], ARDUPILOT).unwrap();
+        let (plain, _b) = build_command("disarm", &[], COPTER).unwrap();
         assert_eq!(plain.param2, 0.0);
         assert_ne!(d.param2, plain.param2);
     }
@@ -1157,12 +1125,12 @@ mod tests {
     fn pause_and_resume_are_do_pause_continue() {
         // Both use the one autopilot-agnostic pause/continue opcode; param1
         // distinguishes them (0 pause, 1 continue), the arm/disarm pattern.
-        let (pause, pbody) = build_command("pausemission", &[], ARDUPILOT).unwrap();
+        let (pause, pbody) = build_command("pausemission", &[], COPTER).unwrap();
         assert_eq!(pause.command, MavCmd::MAV_CMD_DO_PAUSE_CONTINUE);
         assert_eq!(pause.param1, 0.0, "pause");
         assert_eq!(pbody["cmd"], json!("pauseMission"));
 
-        let (resume, rbody) = build_command("resumemission", &[], ARDUPILOT).unwrap();
+        let (resume, rbody) = build_command("resumemission", &[], COPTER).unwrap();
         assert_eq!(resume.command, MavCmd::MAV_CMD_DO_PAUSE_CONTINUE);
         assert_eq!(resume.param1, 1.0, "continue");
         assert_eq!(rbody["cmd"], json!("resumeMission"));
@@ -1173,8 +1141,8 @@ mod tests {
         // kill / pause / resume build the same frame on PX4 as on ArduPilot (no
         // mode-table lookup), so the board drives them identically either family.
         for cmd in ["killswitch", "pausemission", "resumemission"] {
-            let (ap, _a) = build_command(cmd, &[], ARDUPILOT).unwrap();
-            let (px4, _p) = build_command(cmd, &[], AUTOPILOT_PX4).unwrap();
+            let (ap, _a) = build_command(cmd, &[], COPTER).unwrap();
+            let (px4, _p) = build_command(cmd, &[], PX4).unwrap();
             assert_eq!(ap.command, px4.command, "{cmd}: same opcode either family");
             assert_eq!(ap.param1, px4.param1, "{cmd}: same param1 either family");
             assert_eq!(ap.param2, px4.param2, "{cmd}: same param2 either family");
@@ -1381,7 +1349,7 @@ mod tests {
         let server = tokio::spawn(fake_fc(listener, vec![ack], Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("rtl", &[], AUTOPILOT_PX4).unwrap();
+        let (long, _b) = build_command("rtl", &[], PX4).unwrap();
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1412,7 +1380,7 @@ mod tests {
         let server = tokio::spawn(fake_fc(listener, responses, Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("arm", &[], ARDUPILOT).unwrap();
+        let (long, _b) = build_command("arm", &[], COPTER).unwrap();
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1446,7 +1414,7 @@ mod tests {
         let server = tokio::spawn(fake_fc(listener, responses, Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("takeoff", &[json!(15.0)], ARDUPILOT).unwrap();
+        let (long, _b) = build_command("takeoff", &[json!(15.0)], COPTER).unwrap();
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1469,7 +1437,7 @@ mod tests {
         let server = tokio::spawn(fake_fc(listener, vec![], Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("rtl", &[], ARDUPILOT).unwrap();
+        let (long, _b) = build_command("rtl", &[], COPTER).unwrap();
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1495,7 +1463,7 @@ mod tests {
         let server = tokio::spawn(fake_fc(listener, responses, Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("arm", &[], ARDUPILOT).unwrap();
+        let (long, _b) = build_command("arm", &[], COPTER).unwrap();
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1507,7 +1475,7 @@ mod tests {
     async fn send_awaiting_ack_absent_socket_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let client = MavlinkIpcClient::new(dir.path().join("absent.sock"));
-        let (long, _b) = build_command("arm", &[], ARDUPILOT).unwrap();
+        let (long, _b) = build_command("arm", &[], COPTER).unwrap();
         // No socket → Err (the route maps this to a 503), not a fake outcome.
         assert!(send_awaiting_ack(&client, &long, &test_cfg())
             .await

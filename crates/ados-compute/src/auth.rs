@@ -28,7 +28,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 
 use ados_protocol::pairing_posture::{
-    data_plane_access, is_on_box, load_pairing, Access, Pairing, FORWARDED_HEADERS,
+    classify_caller, data_plane_access, load_pairing, Access, CallerClass, Pairing,
 };
 
 /// Default pairing-state path: the agent's `pairing.json`.
@@ -168,7 +168,9 @@ impl ComputeAuth {
 /// The peer address is read from [`ConnectInfo`] (present when the router is
 /// served with `into_make_service_with_connect_info`); when absent (e.g. a
 /// `oneshot` test that injects no peer) the caller is treated as off-box, the
-/// conservative default. A proxy/tunnel that SETS one of [`FORWARDED_HEADERS`]
+/// conservative default. A proxy/tunnel that SETS a forwarding header
+/// ([`ados_protocol::pairing_posture::FORWARDED_HEADERS`], classified by
+/// [`classify_caller`])
 /// (any HTTP reverse proxy or Cloudflare-style tunnel) is denied loopback trust
 /// so it cannot impersonate an on-box caller. A raw L4 tunnel that sets no such
 /// header is, like a co-resident local process, on-box by the same trust model:
@@ -178,15 +180,12 @@ pub async fn require_pairing(
     req: Request,
     next: Next,
 ) -> Response {
-    let peer_is_loopback = req
+    let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip().is_loopback())
-        .unwrap_or(false);
-    let has_forwarding_header = FORWARDED_HEADERS
-        .iter()
-        .any(|h| req.headers().contains_key(*h));
-    let on_box = is_on_box(peer_is_loopback, has_forwarding_header);
+        .map(|ci| ci.0.ip());
+    let caller = classify_caller(peer, |h| req.headers().contains_key(h));
+    let on_box = caller == CallerClass::OnBox;
 
     // Rate-limit the off-box edge only; on-box callers are trusted + unlimited.
     if !on_box && !auth.limiter.check() {
@@ -198,7 +197,7 @@ pub async fn require_pairing(
     }
 
     let presented_key = req.headers().get(KEY_HEADER).and_then(|v| v.to_str().ok());
-    match data_plane_access(&auth.gate.current(), on_box, presented_key) {
+    match data_plane_access(&auth.gate.current(), caller, presented_key) {
         Access::Accept => next.run(req).await,
         // A terse, state-independent body: the 401 itself is the only signal.
         Access::Unauthorized => (

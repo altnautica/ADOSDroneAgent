@@ -120,6 +120,25 @@ def test_entrypoint_empty_rejected() -> None:
         PluginManifest.from_yaml_text(yaml.safe_dump(bad))
 
 
+@pytest.mark.parametrize(
+    "entrypoint",
+    [
+        "bin/x\nExecStartPre=+/bin/sh -c id",
+        "bin/x\rExecStartPre=+/bin/sh",
+        "bin/x\x1b[2J",
+        "pkg.mod:Class\nExecStartPre=+/bin/sh",
+    ],
+)
+def test_entrypoint_with_a_control_character_rejected(entrypoint: str) -> None:
+    """An entrypoint lands in a generated unit file, where a newline would
+    start a new directive; neither the path nor the module:Class form may
+    carry one."""
+    bad = _good()
+    bad["agent"]["entrypoint"] = entrypoint
+    with pytest.raises(ManifestError, match="control characters"):
+        PluginManifest.from_yaml_text(yaml.safe_dump(bad))
+
+
 # -----------------------------------------------------------------
 # First-party signer allowlist (security finding #6, MEDIUM)
 # -----------------------------------------------------------------

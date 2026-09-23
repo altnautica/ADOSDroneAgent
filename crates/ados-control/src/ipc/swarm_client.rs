@@ -18,6 +18,7 @@
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ados_protocol::ipc::read_newline_line;
 use ados_protocol::retry::RetryPace;
@@ -47,9 +48,9 @@ pub fn default_swarm_socket() -> PathBuf {
     Path::new(&run_dir).join(SWARM_SOCKET_NAME)
 }
 
-/// The shared, latest published table. `None` until the first line decodes, which is
-/// what the routes render as "the swarm bus is not running".
-type Published = Arc<Mutex<Option<Value>>>;
+/// The shared, latest published table and when it arrived. `None` until the first
+/// line decodes, which is what the routes render as "the swarm bus is not running".
+type Published = Arc<Mutex<Option<(Value, Instant)>>>;
 
 /// Reads the swarm socket and holds the latest published table.
 ///
@@ -102,13 +103,32 @@ impl SwarmIpcClient {
 
     /// The latest published table, cloned. `None` until the first line decodes.
     pub fn published(&self) -> Option<Value> {
-        self.published.lock().clone()
+        self.published
+            .lock()
+            .as_ref()
+            .map(|(value, _)| value.clone())
     }
 
-    /// Overwrite the held payload directly. Test-only seam.
+    /// The latest published table, but only if it arrived within `max_age`.
+    ///
+    /// The held table is never cleared when the bus goes quiet, so a consumer that
+    /// ACTS on what it says (rather than displaying it) has to ask how old it is: a
+    /// bus that died leaves its last table here with every row's `age_ms` frozen at
+    /// the moment it stopped, which reads exactly like a fleet that is still being
+    /// heard.
+    pub fn published_within(&self, max_age: Duration) -> Option<Value> {
+        self.published
+            .lock()
+            .as_ref()
+            .filter(|(_, received)| received.elapsed() <= max_age)
+            .map(|(value, _)| value.clone())
+    }
+
+    /// Overwrite the held payload directly, stamped as just received. Test-only
+    /// seam.
     #[cfg(test)]
     pub fn set_for_test(&self, value: Value) {
-        *self.published.lock() = Some(value);
+        *self.published.lock() = Some((value, Instant::now()));
     }
 }
 
@@ -171,7 +191,7 @@ async fn process_stream<R>(
         match line {
             Ok(Some(bytes)) => {
                 if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                    *published.lock() = Some(value);
+                    *published.lock() = Some((value, Instant::now()));
                 }
             }
             Ok(None) | Err(_) => return,
@@ -203,7 +223,7 @@ mod tests {
         let (_tx, rx) = oneshot::channel::<()>();
         tokio::pin!(rx);
         process_stream(Cursor::new(bytes), &published, &mut rx.as_mut()).await;
-        let held = published.lock().clone();
+        let held = published.lock().as_ref().map(|(value, _)| value.clone());
         held
     }
 
@@ -241,6 +261,22 @@ mod tests {
     async fn nothing_published_leaves_the_cell_empty() {
         assert!(run_against(Vec::new()).await.is_none());
         assert!(SwarmIpcClient::disconnected().published().is_none());
+    }
+
+    /// A table that stopped being republished is still served for display, but a
+    /// consumer acting on it gets nothing once it is older than it can trust.
+    #[test]
+    fn a_table_that_stopped_arriving_is_not_offered_as_current() {
+        let client = SwarmIpcClient::disconnected();
+        assert!(client.published_within(Duration::from_secs(60)).is_none());
+        client.set_for_test(sample());
+        assert_eq!(
+            client.published_within(Duration::from_secs(60)),
+            Some(sample())
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(client.published_within(Duration::from_millis(5)).is_none());
+        assert_eq!(client.published(), Some(sample()));
     }
 
     /// A live round trip over a real Unix socket, including the replay-on-connect the

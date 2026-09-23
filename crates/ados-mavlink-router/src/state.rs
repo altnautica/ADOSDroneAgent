@@ -10,79 +10,9 @@
 //! by the caller via [`VehicleState::to_wire_with`]; this type owns only the
 //! vehicle-derived fields so it stays I/O-free and unit-testable.
 
+use ados_protocol::flight_modes::{ArduPilotFirmware, MAV_AUTOPILOT_PX4};
 use ados_protocol::mavlink::ardupilotmega::MavMessage;
 use serde_json::{json, Map, Value};
-
-/// ArduCopter `custom_mode` -> mode name.
-const COPTER_MODES: &[(u32, &str)] = &[
-    (0, "STABILIZE"),
-    (1, "ACRO"),
-    (2, "ALT_HOLD"),
-    (3, "AUTO"),
-    (4, "GUIDED"),
-    (5, "LOITER"),
-    (6, "RTL"),
-    (7, "CIRCLE"),
-    (9, "LAND"),
-    (11, "DRIFT"),
-    (13, "SPORT"),
-    (14, "FLIP"),
-    (15, "AUTOTUNE"),
-    (16, "POSHOLD"),
-    (17, "BRAKE"),
-    (18, "THROW"),
-    (19, "AVOID_ADSB"),
-    (20, "GUIDED_NOGPS"),
-    (21, "SMART_RTL"),
-    (22, "FLOWHOLD"),
-    (23, "FOLLOW"),
-    (24, "ZIGZAG"),
-    (25, "SYSTEMID"),
-    (26, "AUTOROTATE"),
-    (27, "AUTO_RTL"),
-];
-
-/// ArduPlane `custom_mode` -> mode name.
-const PLANE_MODES: &[(u32, &str)] = &[
-    (0, "MANUAL"),
-    (1, "CIRCLE"),
-    (2, "STABILIZE"),
-    (3, "TRAINING"),
-    (4, "ACRO"),
-    (5, "FBWA"),
-    (6, "FBWB"),
-    (7, "CRUISE"),
-    (8, "AUTOTUNE"),
-    (10, "AUTO"),
-    (11, "RTL"),
-    (12, "LOITER"),
-    (14, "AVOID_ADSB"),
-    (15, "GUIDED"),
-    (17, "QSTABILIZE"),
-    (18, "QHOVER"),
-    (19, "QLOITER"),
-    (20, "QLAND"),
-    (21, "QRTL"),
-    (22, "QAUTOTUNE"),
-    (23, "QACRO"),
-    (24, "THERMAL"),
-    (25, "LOITER_ALT_QLAND"),
-];
-
-/// ArduRover `custom_mode` -> mode name.
-const ROVER_MODES: &[(u32, &str)] = &[
-    (0, "MANUAL"),
-    (1, "ACRO"),
-    (3, "STEERING"),
-    (4, "HOLD"),
-    (5, "LOITER"),
-    (6, "FOLLOW"),
-    (7, "SIMPLE"),
-    (10, "AUTO"),
-    (11, "RTL"),
-    (12, "SMART_RTL"),
-    (15, "GUIDED"),
-];
 
 /// PX4 `(main_mode, sub_mode)` -> mode name. PX4 packs the mode into
 /// `custom_mode` differently from ArduPilot (a `(main << 16) | (sub << 24)`
@@ -125,31 +55,16 @@ fn px4_mode_name(custom_mode: u32) -> String {
 
 /// Select the mode table for a vehicle, then resolve the custom mode. PX4 is
 /// decoded by its packed-union scheme (keyed on `autopilot`); ArduPilot is keyed
-/// on MAV_TYPE by its wire value (stable across dialect revisions). The plane
-/// table covers fixed-wing (1) and the VTOL types (20, 21). An unmapped
-/// type/mode falls back to `MODE_<n>`, matching the Python
-/// `mode_map.get(type, {}).get(custom_mode, f"MODE_{custom_mode}")`.
+/// on MAV_TYPE through the shared per-firmware tables, the same ones the
+/// control surface encodes `DO_SET_MODE` with. An unmapped type/mode falls back
+/// to `MODE_<n>`.
 fn mode_name(autopilot: i64, mav_type: i64, custom_mode: u32) -> String {
-    // MAV_AUTOPILOT_PX4 = 12.
-    if autopilot == 12 {
+    if autopilot == MAV_AUTOPILOT_PX4 {
         return px4_mode_name(custom_mode);
     }
-    let table: Option<&[(u32, &str)]> = match mav_type {
-        // QUADROTOR, HEXAROTOR, OCTOROTOR, HELICOPTER, TRICOPTER, COAXIAL
-        2 | 13 | 14 | 4 | 15 | 3 => Some(COPTER_MODES),
-        // FIXED_WING, VTOL_QUADROTOR, VTOL_TILTROTOR
-        1 | 20 | 21 => Some(PLANE_MODES),
-        // GROUND_ROVER, SURFACE_BOAT
-        10 | 11 => Some(ROVER_MODES),
-        _ => None,
-    };
-    table
-        .and_then(|t| {
-            t.iter()
-                .find(|(k, _)| *k == custom_mode)
-                .map(|(_, v)| v.to_string())
-        })
-        .unwrap_or_else(|| format!("MODE_{custom_mode}"))
+    ArduPilotFirmware::from_mav_type(mav_type)
+        .and_then(|fw| fw.mode_name(custom_mode))
+        .map_or_else(|| format!("MODE_{custom_mode}"), str::to_string)
 }
 
 /// The canonical FC firmware family, derived only from the verified signals the

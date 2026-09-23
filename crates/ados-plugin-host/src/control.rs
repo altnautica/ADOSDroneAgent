@@ -7,16 +7,21 @@
 //! the operator, lands at the native control surface (`ados-control`), and must
 //! reach the LIVE in-memory [`crate::realhost::ConfigStore`] in this running
 //! daemon (a disk write alone is not seen until restart). This module is that
-//! reach: a single daemon-lifetime Unix socket at `<socket_dir>/_control.sock`
-//! that applies an on-box config write to the live store and persists it.
+//! reach: a single daemon-lifetime Unix socket at
+//! `/run/ados/plugin-host/_control.sock` that applies an on-box config write to
+//! the live store and persists it.
 //!
-//! Trust boundary: the socket is on-box and bound with the same owner+group mode
-//! as the per-plugin sockets (the `ados` group). The off-box auth lives at the
-//! `ados-control` HTTP edge (the LAN pairing key when paired), exactly like
-//! `POST /api/vision/designate`; by the time a request reaches this socket it is
-//! an on-box, trusted caller. The wire is the same length-prefixed msgpack
-//! [`Envelope`] every other agent IPC socket speaks, so no new framing.
+//! Trust boundary: the socket is NOT in the per-plugin socket dir. Every plugin
+//! unit can write `/run/ados/plugins`, and a plugin that reached this socket
+//! could rewrite another plugin's config or run another plugin's tools with that
+//! plugin's grants. It lives in its own directory, created `0700` by the daemon
+//! (root), and the listener re-checks each peer's kernel credentials (root or the
+//! operator group only). The off-box auth lives at the `ados-control` HTTP edge
+//! (the LAN pairing key when paired), exactly like `POST /api/vision/designate`.
+//! The wire is the same length-prefixed msgpack [`Envelope`] every other agent
+//! IPC socket speaks, so no new framing.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,10 +35,16 @@ use tokio::task::JoinHandle;
 
 use crate::invoke::{InvokeRegistry, DEFAULT_INVOKE_TIMEOUT};
 
-/// The control socket file name under the per-plugin socket dir. The leading
-/// underscore keeps it out of the `<plugin_id>.sock` namespace (no plugin id is
-/// `_control`).
+/// The directory the control socket lives in. Root-only (`0700`) and outside the
+/// per-plugin socket dir, so no plugin process can reach it.
+pub const DEFAULT_CONTROL_DIR: &str = "/run/ados/plugin-host";
+
+/// The control socket file name under the control dir.
 pub const CONTROL_SOCKET_NAME: &str = "_control.sock";
+
+/// How long a caller has to deliver its request frame. A peer that connects and
+/// then stalls is dropped instead of pinning a task for the daemon's lifetime.
+const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(5);
 
 /// The control method that applies a per-plugin config write to the live store.
 pub const METHOD_CONFIG_SET: &str = "config.set";
@@ -61,9 +72,9 @@ pub const METHOD_TOKEN_ROTATE: &str = "token.rotate";
 /// the runner finds both already in place. Args: none.
 pub const METHOD_PLUGIN_RECONCILE: &str = "plugin.reconcile";
 
-/// The control socket path under a socket dir.
-pub fn control_socket_path(socket_dir: &Path) -> PathBuf {
-    socket_dir.join(CONTROL_SOCKET_NAME)
+/// The control socket path under a control dir.
+pub fn control_socket_path(control_dir: &Path) -> PathBuf {
+    control_dir.join(CONTROL_SOCKET_NAME)
 }
 
 /// The host capability the control socket drives: a config write into the live
@@ -308,20 +319,12 @@ async fn serve_connection<H: ConfigControl>(
     mut stream: UnixStream,
 ) {
     // One request/response per connection (the client opens fresh per call,
-    // matching the vision IPC client). A read/decode failure just drops the
-    // connection.
-    let mut header = [0u8; HEADER_SIZE];
-    if stream.read_exact(&mut header).await.is_err() {
-        return;
-    }
-    let len = match decode_len(header, PLUGIN_MAX_FRAME, true) {
-        Ok(l) => l,
-        Err(_) => return,
+    // matching the vision IPC client). A read/decode failure, or a request that
+    // does not arrive within the deadline, just drops the connection.
+    let body = match tokio::time::timeout(REQUEST_READ_DEADLINE, read_request(&mut stream)).await {
+        Ok(Ok(Some(body))) => body,
+        _ => return,
     };
-    let mut body = vec![0u8; len];
-    if stream.read_exact(&mut body).await.is_err() {
-        return;
-    }
     let resp = match Envelope::from_msgpack(&body) {
         Ok(req) if req.method == METHOD_TOOL_INVOKE => {
             handle_tool_invoke(invoke.as_ref(), &req).await
@@ -338,10 +341,32 @@ async fn serve_connection<H: ConfigControl>(
     }
 }
 
-/// Bind the control socket and spawn its accept loop. Mirrors
-/// [`crate::server::PluginIpcServer::serve_plugin`]'s bind dance: ensure the
-/// dir, unlink a stale socket, bind, set owner+group mode. Returns the bound
-/// path and the accept-task handle so the daemon can unlink + abort on shutdown.
+/// Read one length-prefixed request frame. `None` on a bad length or a short
+/// read.
+async fn read_request(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>>> {
+    let mut header = [0u8; HEADER_SIZE];
+    stream.read_exact(&mut header).await?;
+    let Ok(len) = decode_len(header, PLUGIN_MAX_FRAME, true) else {
+        return Ok(None);
+    };
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).await?;
+    Ok(Some(body))
+}
+
+/// Create the control dir and lock it to its owner (`0700`). The daemon runs as
+/// root, so nothing but root can traverse to the socket inside it. A dir this
+/// process cannot lock down is an error, never a silently wider socket.
+fn prepare_control_dir(control_dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(control_dir)?;
+    std::fs::set_permissions(control_dir, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Bind the control socket and spawn its accept loop. The control dir is
+/// created `0700`, then the shared command-plane helper unlinks a stale socket,
+/// binds it `0600`, and admits only root and operator-group peers on accept.
+/// Returns the bound path and the accept-task handle so the daemon can unlink +
+/// abort on shutdown.
 ///
 /// `lifecycle` is the reconciler the `token.rotate` / `plugin.reconcile`
 /// methods act through. `None` is a daemon with no reconciler, where those two
@@ -350,14 +375,11 @@ pub fn serve_control<H: ConfigControl + 'static>(
     host: Arc<H>,
     invoke: Arc<InvokeRegistry>,
     lifecycle: Option<Arc<dyn LifecycleControl>>,
-    socket_dir: PathBuf,
+    control_dir: PathBuf,
 ) -> std::io::Result<(PathBuf, JoinHandle<()>)> {
-    let path = control_socket_path(&socket_dir);
-    // The shared helper owns the create-dir / remove-stale / bind / chmod
-    // hygiene: the control socket's parent is the per-plugin socket dir, so
-    // binding it ensures the dir. 0o660 is the same owner+group mode the
-    // per-plugin sockets use, so an `ados`-group on-box service can connect.
-    let listener = ados_protocol::ipc::bind_command_socket(&path, 0o660)?;
+    prepare_control_dir(&control_dir)?;
+    let path = control_socket_path(&control_dir);
+    let listener = ados_protocol::ipc::bind_command_socket(&path, 0o600)?;
 
     let task = tokio::spawn(async move {
         loop {
@@ -536,6 +558,53 @@ mod tests {
         let resp = Envelope::from_msgpack(&body).unwrap();
         assert_eq!(resp.error, None);
         assert_eq!(host.last.lock().unwrap().clone().unwrap().1, "active");
+
+        task.abort();
+    }
+
+    /// The control socket is reachable by root only: it lives in its own `0700`
+    /// dir outside the per-plugin socket dir the plugin units can write, the
+    /// socket itself is `0600`, and the accept policy refuses a plugin process.
+    #[tokio::test]
+    async fn the_control_socket_is_root_only_and_refuses_a_plugin_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let control_dir = dir.path().join("plugin-host");
+        let host = Arc::new(StubHost::default());
+        let invoke = Arc::new(InvokeRegistry::new());
+        let (path, task) = serve_control(host, invoke, None, control_dir.clone()).unwrap();
+
+        assert_eq!(path.parent(), Some(control_dir.as_path()));
+        let dir_mode = std::fs::metadata(&control_dir)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(dir_mode & 0o777, 0o700, "control dir must be owner-only");
+        let sock_mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            sock_mode & 0o777,
+            0o600,
+            "control socket must be owner-only"
+        );
+        assert!(
+            !Path::new(DEFAULT_CONTROL_DIR).starts_with(crate::server::DEFAULT_SOCKET_DIR),
+            "the control dir must not sit under the per-plugin socket dir"
+        );
+
+        // A plugin process: uid 1000 with only its own group, against a root
+        // daemon on a host that has the operator group.
+        assert!(!ados_protocol::ipc::operator_peer_allowed(
+            1000,
+            &[1000],
+            0,
+            Some(990)
+        ));
+        // An operator-group member is admitted by the same policy.
+        assert!(ados_protocol::ipc::operator_peer_allowed(
+            1000,
+            &[1000, 990],
+            0,
+            Some(990)
+        ));
 
         task.abort();
     }

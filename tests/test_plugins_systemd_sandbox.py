@@ -166,6 +166,34 @@ def test_device_rules_match_the_rust_renderer() -> None:
     assert dict(DEVICE_CAP_RULES) == expected
 
 
+def test_agent_command_sockets_are_hidden_like_the_rust_renderer() -> None:
+    """Byte parity with the no-grant line ``ados-plugin-host/src/sandbox.rs``
+    pins, and the sockets stay hidden whatever the plugin is granted.
+
+    A plugin that could open one of these would act with the agent's
+    authority rather than its own grants.
+    """
+    expected = (
+        "InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys "
+        "-/run/ados/plugin-host -/run/ados/control.sock -/run/ados/api-internal.sock "
+        "-/run/ados/mavlink.sock -/run/ados/msp.sock -/run/ados/supervisor.sock "
+        "-/run/ados/radio-cmd.sock -/run/ados/radio-aux.sock -/run/ados/wfb-cmd.sock "
+        "-/run/ados/video-cmd.sock -/run/ados/gpio-cmd.sock -/run/ados/hid-cmd.sock "
+        "-/run/ados/pic.sock -/run/ados/crsf-cmd.sock -/run/ados/wifi-cmd.sock "
+        "-/run/ados/groundlink-cmd.sock -/run/ados/tunnel-config-cmd.sock "
+        "-/run/ados/atlas-control.sock -/run/ados/pairing.sock "
+        "-/run/ados/logd-query.sock -/srv -/mnt -/media -/boot"
+    )
+    lines = sandbox_directives([])
+    assert next(line for line in lines if line.startswith("InaccessiblePaths=")) == expected
+
+    everything = sandbox_directives(sandbox_enforced_caps())
+    hidden = next(line for line in everything if line.startswith("InaccessiblePaths="))
+    for path in ("/run/ados/plugin-host", "/run/ados/control.sock", "/run/ados/gpio-cmd.sock"):
+        assert f" -{path}" in hidden
+    assert "/run/ados/plugins" not in hidden
+
+
 def test_the_unit_carries_no_start_rate_limit() -> None:
     """A plugin whose host socket is not up yet must keep retrying.
 

@@ -63,6 +63,7 @@ from ados.plugins.errors import (
 )
 from ados.plugins.loader import load_builtin_manifests
 from ados.plugins.manifest import PluginManifest
+from ados.plugins.ready_check import PROBE_TIMEOUT_S, HttpProbe, parse_ready_check
 from ados.plugins.signing import (
     is_first_party_signer,
     load_trusted_keys,
@@ -87,6 +88,7 @@ from ados.plugins.state import (
     upsert_install,
 )
 from ados.plugins.systemd import (
+    probe_command,
     render_service_unit,
     render_unit,
     service_unit_name_for,
@@ -142,7 +144,7 @@ class PluginSupervisor:
 
         Also filters in-memory permission grants down to what the
         manifest currently declares, defending against a tampered
-        state file (security audit finding #5).
+        state file.
         """
         self._installs = load_state()
         for manifest in load_builtin_manifests():
@@ -791,9 +793,10 @@ class PluginSupervisor:
         Readiness rules per service:
 
         * ``ready_check`` absent ⇒ ready iff the unit is active.
-        * ``ready_check`` an ``http(s)://`` URL ⇒ ready on a 2xx GET.
-        * ``ready_check`` anything else ⇒ ready on a shell command
-          exiting 0.
+        * ``ready_check`` an ``http(s)://127.0.0.1:<port>`` URL ⇒ ready on
+          a 2xx GET.
+        * ``ready_check`` anything else ⇒ ready on an argv exiting 0, run
+          sandboxed as the plugin user (:meth:`_probe_command_ready`).
 
         All probes are short-timeout and never raise into the caller;
         a probe error becomes ``ready=False`` with the error as the
@@ -804,12 +807,12 @@ class PluginSupervisor:
             return None
         out: list[dict] = []
         for service in services:
-            ready, reason = self._probe_service_ready(plugin_id, service)
+            ready, reason = self._probe_service_ready(plugin_id, manifest, service)
             out.append({"name": service.name, "ready": ready, "reason": reason})
         return out
 
     def _probe_service_ready(
-        self, plugin_id: str, service
+        self, plugin_id: str, manifest: PluginManifest, service
     ) -> tuple[bool, str | None]:
         """Probe one service's readiness. ``service`` is a ServiceSpec."""
         check = service.ready_check
@@ -818,10 +821,13 @@ class PluginSupervisor:
                 service_unit_name_for(plugin_id, service.name)
             )
             return (active, None if active else "unit not active")
-        check = check.strip()
-        if check.startswith("http://") or check.startswith("https://"):
-            return self._probe_http_ready(check)
-        return self._probe_command_ready(check)
+        try:
+            probe = parse_ready_check(check)
+        except ValueError as exc:
+            return (False, f"invalid ready_check: {exc}")
+        if isinstance(probe, HttpProbe):
+            return self._probe_http_ready(probe.url)
+        return self._probe_command_ready(manifest, probe.argv)
 
     def _unit_is_active(self, unit: str) -> bool:
         """``systemctl is-active --quiet <unit>`` ⇒ exit 0 means active."""
@@ -849,15 +855,24 @@ class PluginSupervisor:
         except (urllib.error.URLError, ValueError, OSError) as exc:
             return (False, f"http probe failed: {exc}")
 
-    def _probe_command_ready(self, command: str) -> tuple[bool, str | None]:
-        """Run the readiness command via the shell; ready on exit 0."""
+    def _probe_command_ready(
+        self, manifest: PluginManifest, argv: tuple[str, ...]
+    ) -> tuple[bool, str | None]:
+        """Run a declared readiness argv; ready on exit 0.
+
+        The argv is plugin-authored, so it never runs in this process and
+        never through a shell: ``systemd-run`` starts it as a transient unit
+        with the ``ados`` user and the same sandbox and resource envelope the
+        plugin's declared services get (:func:`probe_command`).
+        """
+        command = probe_command(manifest, argv, self._install_dir)
         try:
             proc = subprocess.run(
                 command,
-                shell=True,  # noqa: S602 — operator-approved manifest command
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=PROBE_TIMEOUT_S + 5,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
             return (False, f"command probe failed: {exc}")

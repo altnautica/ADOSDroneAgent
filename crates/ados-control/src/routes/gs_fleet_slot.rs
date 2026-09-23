@@ -123,9 +123,13 @@ pub fn decide_tick(slots: &[FleetSlot], confirmed: &BTreeMap<String, u8>) -> Vec
 
 /// Send one drone its slot. Returns `Ok` only on a 2xx, so a drone that
 /// answered with an error is retried rather than recorded as agreeing.
-pub async fn deliver(proxy: &Arc<AuxRpcProxy>, assignment: &SlotAssignment) -> Result<(), String> {
+pub async fn deliver(
+    proxy: &Arc<AuxRpcProxy>,
+    slots: &[FleetSlot],
+    assignment: &SlotAssignment,
+) -> Result<(), String> {
     let body = json!({ "key": FLEET_SLOT_KEY, "value": assignment.slot }).to_string();
-    let ticket = mint_ticket(&assignment.device_id);
+    let ticket = mint_ticket(slots, &assignment.device_id);
     match proxy
         .call_with_ticket(
             assignment.device_id.as_bytes(),
@@ -142,17 +146,23 @@ pub async fn deliver(proxy: &Arc<AuxRpcProxy>, assignment: &SlotAssignment) -> R
     }
 }
 
-/// Mint a relay ticket for `device_id` from the secret the registry holds.
+/// Mint a relay ticket for `device_id` from the secret `slots` holds for it.
 ///
-/// Empty when this ground station has no secret for that drone, which encodes
+/// Every ground-station-to-drone call except the secret delivery itself goes
+/// out with one: the drone refuses any relayed request that does not carry a
+/// ticket it can verify, so a caller that skips this is refused outright.
+/// `slots` is the registry snapshot the caller is already working from, so a
+/// fan-out across the fleet reads the registry once rather than per call.
+///
+/// Empty when the snapshot holds no secret for that drone, which encodes
 /// byte-identically to the request it always sent. That is the compatibility
 /// hinge: a drone running a build that predates the ticket field would refuse a
 /// frame carrying one, and this is what guarantees it never receives one.
-pub fn mint_ticket(device_id: &str) -> String {
-    let Some(secret) = registered_slots()
-        .into_iter()
+pub fn mint_ticket(slots: &[FleetSlot], device_id: &str) -> String {
+    let Some(secret) = slots
+        .iter()
         .find(|s| s.device_id == device_id)
-        .and_then(|s| s.relay_secret)
+        .and_then(|s| s.relay_secret.as_deref())
     else {
         return String::new();
     };
@@ -261,7 +271,7 @@ pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
         confirmed.retain(|device_id, _| present.contains(device_id.as_str()));
 
         for assignment in decide_tick(&slots, &confirmed) {
-            match deliver(&proxy, &assignment).await {
+            match deliver(&proxy, &slots, &assignment).await {
                 Ok(()) => {
                     tracing::info!(
                         device_id = %assignment.device_id,
@@ -285,12 +295,119 @@ pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
     }
 }
 
-/// The fleet registry's current slots.
-fn registered_slots() -> Vec<FleetSlot> {
+/// The fleet registry's current slots, read fresh. Never cached:
+/// `ados-groundlink` owns the writes and a drone can pair at any moment, so a
+/// cached copy is stale the instant it matters.
+pub(crate) fn registered_slots() -> Vec<FleetSlot> {
     ados_groundlink::FleetRegistry::load(std::path::Path::new(ados_groundlink::FLEET_REGISTRY_PATH))
         .slots()
         .cloned()
         .collect()
+}
+
+/// A ground station's relay lane with one drone on the far end that runs the
+/// drone's REAL relay authorization (`ados_mavlink_router::aux_rpc_handler::
+/// authorize`) before answering. Shared by every test of a relayed caller, so
+/// a caller that forgets its ticket fails the way it would against an
+/// aircraft instead of passing against a stub that answers anything.
+#[cfg(test)]
+pub(crate) mod test_drone {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use ados_protocol::aux_egress::AuxEgress;
+    use ados_protocol::aux_mux::{self, AuxChannel};
+    use ados_protocol::aux_rpc::{self, RpcMethod};
+    use ados_protocol::aux_rpc_proxy::AuxRpcProxy;
+    use tokio::net::UdpSocket;
+
+    /// A 32-byte relay secret, hex, as the ground station issues one.
+    pub const SECRET: &str = "5f1c0e2a9b7d4c3e8a6f0b1d2c3e4f5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4";
+
+    /// One request the drone received and how it answered it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Seen {
+        pub method: RpcMethod,
+        pub path: Vec<u8>,
+        pub body: Vec<u8>,
+        pub status: u16,
+    }
+
+    /// The ground station's end of the lane, and what the drone saw.
+    pub struct TestDrone {
+        pub proxy: Arc<AuxRpcProxy>,
+        pub seen: Arc<parking_lot::Mutex<Vec<Seen>>>,
+    }
+
+    /// Start a drone called `device_id` holding `held` as its relay secret.
+    /// It answers 200 to every request `authorize` admits and 401 to the rest.
+    pub async fn spawn(device_id: &'static str, held: Option<&'static str>) -> TestDrone {
+        let radio = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = radio.local_addr().unwrap().port();
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        sock.connect(("127.0.0.1", port)).await.unwrap();
+        let proxy = Arc::new(AuxRpcProxy::with_timeout(
+            AuxEgress::connected_for_test(sock),
+            Duration::from_secs(2),
+        ));
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        let ground = Arc::clone(&proxy);
+        let log = Arc::clone(&seen);
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, _)) = radio.recv_from(&mut buf).await {
+                let Ok((AuxChannel::Request, payload)) = aux_mux::decode(&buf[..n]) else {
+                    continue;
+                };
+                let Ok(request) = aux_rpc::decode_request(payload) else {
+                    continue;
+                };
+                if request.target != device_id.as_bytes() {
+                    continue;
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                let status = match ados_mavlink_router::aux_rpc_handler::authorize(
+                    held,
+                    request.ticket,
+                    request.method,
+                    request.path,
+                    device_id,
+                    now,
+                ) {
+                    Ok(()) => 200,
+                    Err(_) => 401,
+                };
+                log.lock().push(Seen {
+                    method: request.method,
+                    path: request.path.to_vec(),
+                    body: request.body.to_vec(),
+                    status,
+                });
+                let symbols = aux_rpc::split_response(&[]).unwrap();
+                let total = symbols.symbols.len() as u16;
+                for (index, symbol) in symbols.symbols.iter().enumerate() {
+                    let fragment = aux_rpc::encode_response_fragment(
+                        device_id.as_bytes(),
+                        request.id,
+                        status,
+                        index as u16,
+                        total,
+                        symbols.oti,
+                        symbol,
+                    )
+                    .unwrap();
+                    ground
+                        .dispatch_response(&aux_rpc::decode_response(&fragment).unwrap())
+                        .await;
+                }
+            }
+        });
+        TestDrone { proxy, seen }
+    }
 }
 
 #[cfg(test)]

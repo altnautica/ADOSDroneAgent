@@ -2,11 +2,13 @@
 //!
 //! Mirrors the semantics of `ADOSDroneAgent/src/ados/core/ipc.py`:
 //!
-//! - The owning service binds a Unix socket (perms `0o660`, group `ados`,
-//!   stale socket removed first) and broadcasts byte buffers to every connected
-//!   client. The trusted local plane is root plus that group and nothing wider:
-//!   two of these sockets forward inbound bytes straight to the flight
-//!   controller.
+//! - The owning service binds a Unix socket (perms `0o660`, group
+//!   `ados-operator`, stale socket removed first) and broadcasts byte buffers to
+//!   every connected client. The trusted local plane is root plus that group and
+//!   nothing wider: two of these sockets forward inbound bytes straight to the
+//!   flight controller. Plugins run as the `ados` user, which is never in the
+//!   operator group, and every accept re-checks the peer's kernel credentials
+//!   (see [`OperatorListener`]).
 //! - Each client has a bounded outbound queue. A client whose queue fills is
 //!   dropped rather than allowed to grow unbounded (slow-client policy).
 //! - The state socket additionally replays the last buffer to a client the
@@ -190,11 +192,11 @@ trait ClientSource: Send + 'static {
     fn next_client(&mut self) -> impl Future<Output = io::Result<UnixStream>> + Send;
 }
 
-impl ClientSource for UnixListener {
+impl ClientSource for OperatorListener {
     #[allow(clippy::manual_async_fn)]
     fn next_client(&mut self) -> impl Future<Output = io::Result<UnixStream>> + Send {
         async move {
-            UnixListener::accept(self)
+            OperatorListener::accept(self)
                 .await
                 .map(|(stream, _addr)| stream)
         }
@@ -251,17 +253,17 @@ impl IpcBroadcast {
         inbound: Option<usize>,
     ) -> io::Result<(Self, Option<mpsc::Receiver<InboundCommand>>)> {
         let path = path.as_ref().to_path_buf();
-        // Owner+group rw (0o660, group `ados`), matching every other command
-        // socket in the tree; the shared helper owns the create-dir /
-        // remove-stale / bind / chmod / chgrp hygiene.
+        // Owner+group rw (0o660, group `ados-operator`), matching every other
+        // command socket in the tree; the shared helper owns the create-dir /
+        // remove-stale / bind / chmod / chgrp hygiene and the per-accept peer
+        // check.
         //
-        // This was 0o666 to match the Python server. That is world-writable, and
-        // two of these sockets — the MAVLink and MSP lanes — accept inbound bytes
-        // that are written straight through to the flight controller, so any
-        // local process could arm an aircraft. The trusted-local plane is
-        // root plus the `ados` group; nothing legitimate needs more, because
-        // every service runs as root and plugins reach the flight controller
-        // through the plugin host rather than by opening these sockets.
+        // Two of these sockets — the MAVLink and MSP lanes — accept inbound
+        // bytes that are written straight through to the flight controller, so
+        // a peer that can open one can arm an aircraft. The trusted-local plane
+        // is root plus the operator group; plugins run as `ados`, outside it,
+        // and reach the flight controller through the plugin host, which gates
+        // every write on the plugin's granted capabilities.
         let listener = bind_command_socket(&path, 0o660)?;
 
         Ok(Self::from_source(
@@ -531,19 +533,196 @@ impl Drop for IpcBroadcast {
     }
 }
 
-/// Bind a Unix command socket with the standard hygiene every accept loop
-/// needs: create the parent directory, remove a stale socket left by a prior
-/// run (so `bind` cannot fail with `EADDRINUSE`), bind, and set the file mode.
-/// Returns the bound listener.
+/// The group that owns every agent command-plane socket: the control socket,
+/// the `*-cmd.sock` command sockets, the MAVLink/MSP/state lanes, and the rest
+/// of the sockets bound through [`bind_command_socket`]. The installer creates
+/// it and adds the human operator; the plugin user is never a member.
+pub const OPERATOR_GROUP: &str = "ados-operator";
+
+/// The group the plugin units run in. It owns only the per-plugin sockets
+/// ([`bind_plugin_socket`]), which gate every request on the plugin's own
+/// capability token.
+pub const PLUGIN_GROUP: &str = "ados";
+
+/// Whether a connecting peer may use a command-plane socket.
 ///
-/// This is the create-dir / remove-stale / bind / chmod sequence that every
-/// owning service duplicates. [`IpcBroadcast::bind`] and the one-shot command
-/// sockets share it so the hygiene lives in one place.
+/// Root always may. So may a peer running as the same uid as the serving
+/// process: every agent service runs as root, so on a node this adds nothing,
+/// and on a dev host it lets the owning user's own tools in. Anyone else must
+/// carry the operator group, primary or supplementary. With the group absent
+/// from the host (`operator_gid` is `None`) nobody else is admitted.
+///
+/// Pure over the kernel-reported credentials so the decision is testable
+/// without a second uid.
+pub fn operator_peer_allowed(
+    peer_uid: u32,
+    peer_gids: &[u32],
+    server_uid: u32,
+    operator_gid: Option<u32>,
+) -> bool {
+    peer_uid == 0
+        || peer_uid == server_uid
+        || operator_gid.is_some_and(|gid| peer_gids.contains(&gid))
+}
+
+/// A bound command-plane socket. [`accept`](Self::accept) yields only peers
+/// [`operator_peer_allowed`] admits; any other peer is closed before a byte of
+/// it is read.
+///
+/// The socket file is already `0o660 root:ados-operator`, so the kernel refuses
+/// `connect()` to anyone outside the group. The per-accept check is the second
+/// line: it holds when the chgrp could not be applied, when the mode is widened
+/// by hand, or when a descriptor to the socket is passed to a process that could
+/// not have opened it.
+pub struct OperatorListener {
+    inner: UnixListener,
+    path: PathBuf,
+    server_uid: u32,
+    operator_gid: Option<u32>,
+}
+
+impl OperatorListener {
+    /// Accept the next admitted peer. Refused peers are logged and dropped; the
+    /// call keeps waiting for one that is admitted. An `accept()` error is
+    /// returned to the caller's own retry policy unchanged.
+    pub async fn accept(&self) -> io::Result<(UnixStream, tokio::net::unix::SocketAddr)> {
+        loop {
+            let (stream, addr) = self.inner.accept().await?;
+            if self.admits(&stream) {
+                return Ok((stream, addr));
+            }
+        }
+    }
+
+    fn admits(&self, stream: &UnixStream) -> bool {
+        match peer_credentials(stream) {
+            Ok((uid, gids)) => {
+                let allowed = operator_peer_allowed(uid, &gids, self.server_uid, self.operator_gid);
+                if !allowed {
+                    tracing::warn!(
+                        path = %self.path.display(),
+                        peer_uid = uid,
+                        "command socket refused a peer outside the operator group"
+                    );
+                }
+                allowed
+            }
+            Err(err) if peer_hung_up_before_accept(&err) => true,
+            Err(err) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %err,
+                    "command socket refused a peer with unreadable credentials"
+                );
+                false
+            }
+        }
+    }
+}
+
+/// The connecting peer's uid and group set, as the kernel reports them. An
+/// error means the platform would not answer, which the caller treats as a
+/// refusal (see [`peer_hung_up_before_accept`] for the one exception).
+fn peer_credentials(stream: &UnixStream) -> io::Result<(u32, Vec<u32>)> {
+    let cred = stream.peer_cred()?;
+    #[allow(unused_mut)]
+    let mut gids = vec![cred.gid()];
+    #[cfg(target_os = "linux")]
+    gids.extend(peer_supplementary_groups(stream));
+    Ok((cred.uid(), gids))
+}
+
+/// Linux records `SO_PEERCRED` at `connect()` and answers it even after the
+/// peer has closed. macOS answers `LOCAL_PEERCRED` with `ENOTCONN` once the peer
+/// has hung up, even while its bytes are still queued, so a client that sends
+/// and closes before the accept would lose everything it sent. macOS is a
+/// development host only, and the socket file mode still gates `connect()`
+/// there, so a peer that already hung up is admitted on non-Linux hosts.
+#[cfg(not(target_os = "linux"))]
+fn peer_hung_up_before_accept(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::NotConnected
+}
+
+#[cfg(target_os = "linux")]
+fn peer_hung_up_before_accept(_err: &io::Error) -> bool {
+    false
+}
+
+/// The peer's supplementary groups at `connect()` time (`SO_PEERGROUPS`). An
+/// error reads as no supplementary groups, which can only narrow admission.
+#[cfg(target_os = "linux")]
+fn peer_supplementary_groups(stream: &UnixStream) -> Vec<u32> {
+    use nix::libc;
+    use std::os::fd::AsRawFd;
+
+    const GID_SIZE: usize = std::mem::size_of::<libc::gid_t>();
+    let fd = stream.as_raw_fd();
+    let mut groups: Vec<libc::gid_t> = vec![0; 32];
+    // One retry: on ERANGE the kernel writes the size it needs into `len`.
+    for _ in 0..2 {
+        let mut len = (groups.len() * GID_SIZE) as libc::socklen_t;
+        // SAFETY: `groups` is a live, writable buffer of exactly `len` bytes,
+        // and the kernel writes at most `len` bytes into it and updates `len`.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERGROUPS,
+                groups.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        if rc == 0 {
+            groups.truncate(len as usize / GID_SIZE);
+            return groups;
+        }
+        let needed = len as usize / GID_SIZE;
+        if io::Error::last_os_error().raw_os_error() != Some(libc::ERANGE) || needed <= groups.len()
+        {
+            break;
+        }
+        groups.resize(needed, 0);
+    }
+    Vec::new()
+}
+
+/// Bind a command-plane socket: create the parent directory, remove a stale
+/// socket left by a prior run (so `bind` cannot fail with `EADDRINUSE`), bind,
+/// set the file mode, and hand the file to [`OPERATOR_GROUP`]. Every accept on
+/// the returned listener re-checks the peer (see [`OperatorListener`]).
+///
+/// [`IpcBroadcast::bind`] and the one-shot command sockets share it so the
+/// hygiene and the peer policy live in one place.
 ///
 /// Like [`UnixListener::bind`], this must be called from within a Tokio runtime
 /// context.
-pub fn bind_command_socket(path: impl AsRef<Path>, mode: u32) -> io::Result<UnixListener> {
+pub fn bind_command_socket(path: impl AsRef<Path>, mode: u32) -> io::Result<OperatorListener> {
     let path = path.as_ref();
+    let inner = bind_socket_file(path, mode)?;
+    let operator_gid = group_gid(OPERATOR_GROUP);
+    set_socket_group(path, OPERATOR_GROUP, operator_gid);
+    Ok(OperatorListener {
+        inner,
+        path: path.to_path_buf(),
+        server_uid: nix::unistd::geteuid().as_raw(),
+        operator_gid,
+    })
+}
+
+/// Bind a socket on the plugin-reachable plane: the same hygiene as
+/// [`bind_command_socket`], owned by [`PLUGIN_GROUP`] so a plugin's unit can
+/// connect. There is no peer check here, so it is only for surfaces a plugin
+/// may legitimately reach: the per-plugin sockets, where the server gates every
+/// request on the plugin's own capability token, and the log ingest sink, which
+/// only accepts log frames. Never use it for an agent command socket.
+pub fn bind_plugin_socket(path: impl AsRef<Path>, mode: u32) -> io::Result<UnixListener> {
+    let path = path.as_ref();
+    let listener = bind_socket_file(path, mode)?;
+    set_socket_group(path, PLUGIN_GROUP, group_gid(PLUGIN_GROUP));
+    Ok(listener)
+}
+
+fn bind_socket_file(path: &Path, mode: u32) -> io::Result<UnixListener> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
@@ -551,43 +730,44 @@ pub fn bind_command_socket(path: impl AsRef<Path>, mode: u32) -> io::Result<Unix
     let _ = std::fs::remove_file(path);
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    set_ados_group(path);
     Ok(listener)
 }
 
-/// Give a freshly-bound socket to the `ados` group.
+fn group_gid(name: &str) -> Option<u32> {
+    match nix::unistd::Group::from_name(name) {
+        Ok(group) => group.map(|g| g.gid.as_raw()),
+        Err(err) => {
+            tracing::debug!(error = %err, group = name, "resolving socket group failed");
+            None
+        }
+    }
+}
+
+/// Give a freshly-bound socket to `group`.
 ///
 /// This belongs next to the mode, not in each caller, because the two are one
 /// decision: every service here runs as root, so a `0o660` socket grants
-/// *nobody but root* until the group owns the file. A caller that sets the mode
-/// and forgets the chgrp has not written a group-readable socket, it has
-/// written a root-only one — and the failure is silent, because root can still
-/// reach it, so it only shows up as a non-root client that mysteriously cannot
-/// connect.
+/// *nobody but root* until the group owns the file.
 ///
-/// Best-effort by design: the installer creates the group, and on a dev host
-/// where it is absent this is a quiet no-op so bring-up stays automatic
-/// (Rule 26). Linux-only; a stub elsewhere. Mirrors the `ados-control` and
-/// `ados-gpio` helpers this generalizes.
+/// Best-effort by design: the installer creates the groups, and on a dev host
+/// where one is absent this is a quiet no-op, which leaves the socket reachable
+/// by its owner only. Linux-only; a stub elsewhere.
 #[cfg(target_os = "linux")]
-fn set_ados_group(path: &Path) {
-    match nix::unistd::Group::from_name("ados") {
-        Ok(Some(g)) => {
-            if let Err(err) = nix::unistd::chown(path, None, Some(g.gid)) {
-                tracing::debug!(
-                    error = %err,
-                    path = %path.display(),
-                    "chgrp command socket to ados failed"
-                );
-            }
-        }
-        Ok(None) => tracing::debug!("ados group not present; leaving socket group as-is"),
-        Err(err) => tracing::debug!(error = %err, "resolving ados group failed"),
+fn set_socket_group(path: &Path, group: &str, gid: Option<u32>) {
+    let Some(gid) = gid else {
+        tracing::debug!(
+            group,
+            "socket group not present; leaving socket group as-is"
+        );
+        return;
+    };
+    if let Err(err) = nix::unistd::chown(path, None, Some(nix::unistd::Gid::from_raw(gid))) {
+        tracing::debug!(error = %err, path = %path.display(), group, "chgrp socket failed");
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn set_ados_group(_path: &Path) {}
+fn set_socket_group(_path: &Path, _group: &str, _gid: Option<u32>) {}
 
 /// Serve a one-shot request/response command socket.
 ///
@@ -610,7 +790,7 @@ fn set_ados_group(_path: &Path) {}
 /// Use this only for sockets that are unambiguously one-shot newline
 /// request/response. A length-prefixed, streaming, stateful (handshake), or
 /// multi-request socket keeps its own accept loop.
-pub async fn serve_rpc<H, Fut>(listener: UnixListener, max_request: usize, handler: H)
+pub async fn serve_rpc<H, Fut>(listener: OperatorListener, max_request: usize, handler: H)
 where
     H: Fn(Vec<u8>) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Vec<u8>> + Send + 'static,
@@ -750,7 +930,7 @@ mod tests {
     /// daemon. It cannot be induced in-process without lowering the whole
     /// process's fd limit, which is why this seam exists.
     struct FlakyAcceptor {
-        listener: UnixListener,
+        listener: OperatorListener,
         failures_left: usize,
     }
 
@@ -1228,7 +1408,7 @@ mod tests {
         // Python server, and two of them — the MAVLink and MSP lanes — forward
         // inbound bytes straight to the flight controller, so world-write meant
         // any local process could arm an aircraft. The trusted local plane is
-        // root plus the `ados` group and nothing wider.
+        // root plus the operator group and nothing wider.
         let path = temp_sock("bcast-perm");
         let (server, _inbound) = IpcBroadcast::bind(&path, 8, false, None).await.unwrap();
 
@@ -1281,6 +1461,68 @@ mod tests {
         assert!(
             matches!(outcome, Ok(None) | Err(_)),
             "over-cap request must get no reply, got {outcome:?}"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn operator_peer_policy_admits_root_the_server_uid_and_operator_members_only() {
+        let operator_gid = Some(990);
+        // A plugin process: uid 1000, primary group 1000, no operator group.
+        assert!(!operator_peer_allowed(1000, &[1000], 0, operator_gid));
+        // The same uid with the operator group as a supplementary group.
+        assert!(operator_peer_allowed(1000, &[1000, 990], 0, operator_gid));
+        // The operator group as the primary group counts too.
+        assert!(operator_peer_allowed(1000, &[990], 0, operator_gid));
+        // Root and the serving process's own uid are always admitted.
+        assert!(operator_peer_allowed(0, &[0], 0, operator_gid));
+        assert!(operator_peer_allowed(501, &[20], 501, operator_gid));
+        // With the operator group absent from the host nobody else gets in,
+        // whatever groups it carries.
+        assert!(!operator_peer_allowed(1000, &[1000, 990], 0, None));
+    }
+
+    #[tokio::test]
+    async fn a_refused_peer_is_closed_before_its_request_is_read() {
+        // Root is admitted by rule, so this can only be observed as non-root.
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        let path = temp_sock("refused");
+        let mut listener = bind_command_socket(&path, 0o660).unwrap();
+        // Serve as a different uid with no operator group on the host: the
+        // test's own uid is then an outsider, exactly like a plugin process.
+        listener.server_uid = u32::MAX - 1;
+        listener.operator_gid = None;
+        let reached = Arc::new(AtomicU64::new(0));
+        let counter = reached.clone();
+        let server = tokio::spawn(serve_rpc(listener, 64, move |_req: Vec<u8>| {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::Relaxed);
+                b"served".to_vec()
+            }
+        }));
+
+        let mut client = connect_with_retry(&path, 10, Duration::from_millis(20))
+            .await
+            .unwrap();
+        let _ = client.write_all(b"ping\n").await;
+        let _ = client.flush().await;
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(2), read_newline_line(&mut client, 256))
+                .await
+                .expect("a refused peer must be closed, not left hanging");
+        assert!(
+            matches!(outcome, Ok(None) | Err(_)),
+            "a refused peer must get no reply, got {outcome:?}"
+        );
+        assert_eq!(
+            reached.load(Ordering::Relaxed),
+            0,
+            "the handler must never run"
         );
 
         server.abort();

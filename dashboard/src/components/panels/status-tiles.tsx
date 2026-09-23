@@ -8,12 +8,12 @@ import {
   Wifi,
 } from "lucide-react";
 
-import { summarizeHardware } from "@/components/panels/hardware-item-list";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useStatus } from "@/hooks/use-status";
 import { mspVariant } from "@/lib/fc-firmware";
 import { fmtBitrate, severityClasses, severityFromState } from "@/lib/format";
+import { summarizeHardware } from "@/lib/hardware-summary";
 import type { Severity } from "@/lib/types";
 import { cn } from "@/lib/utils";
 

@@ -14,13 +14,15 @@
 //! - **Public paths** ([`is_public`]) are open on both edges even when paired,
 //!   so a fresh GCS can read `/api/version` and walk the pairing handshake
 //!   before it holds a key, and a watchdog can hit `/healthz`.
-//! - **On-box loopback trust** ([`is_on_box`]): a request whose peer address is
-//!   loopback and that carries no proxy-forwarding header is the local operator,
-//!   who already holds shell-level privilege that exceeds API auth. This is free
-//!   on the Unix socket (which never installs the gate); for the loopback-TCP
-//!   case the caller threads the peer address in. A proxy or tunnel that
-//!   terminates on 127.0.0.1 is excluded by the forwarding-header check, so it
-//!   can never impersonate an on-box caller to bypass authentication.
+//! - **On-box loopback trust** ([`CallerClass::OnBox`]): a request whose peer
+//!   address is loopback and that carries no proxy-forwarding header is the
+//!   local operator, who already holds shell-level privilege that exceeds API
+//!   auth. This is free on the Unix socket (which never installs the gate); for
+//!   the loopback-TCP case the edge classifies the caller once
+//!   ([`ados_protocol::pairing_posture::classify_caller`]). A proxy or tunnel
+//!   that terminates on 127.0.0.1 carries a forwarding header and is classified
+//!   remote, so it can never impersonate an on-box caller to bypass
+//!   authentication.
 //!
 //! The pairing state is the agent's `pairing.json` (`{ "paired": bool,
 //! "api_key": "..." }`). It is read fresh on each request through a short-TTL
@@ -34,13 +36,11 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-// The pairing-posture primitives are shared with the direct MAVLink WebSocket
-// proxy, so they live once in the protocol crate. Re-exported here under the
-// names this surface (and its callers) already use, so the HTTP edge keeps a
-// single import point for the auth posture.
-pub use ados_protocol::pairing_posture::{
-    constant_time_eq, is_on_box, load_pairing, Pairing, FORWARDED_HEADERS,
-};
+// The pairing-posture primitives are shared with the direct MAVLink proxies, so
+// they live once in the protocol crate. Re-exported here under the names this
+// surface (and its callers) already use, so the HTTP edge keeps a single import
+// point for the auth posture.
+pub use ados_protocol::pairing_posture::{constant_time_eq, load_pairing, CallerClass, Pairing};
 
 /// Why a request path cannot be used to make an authorization decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,18 +199,16 @@ impl PairingState {
     }
 
     /// Decide a request: `true` to pass, `false` to reject with 401. A public
-    /// path is always allowed; an unpaired agent allows everything; a paired
-    /// agent requires the exact key. The on-box loopback shortcut is applied by
-    /// the caller before this is consulted (it needs the peer address, which
-    /// this reader does not carry), so this only models the unpaired-vs-keyed
-    /// posture (`on_box = false`).
+    /// path is always allowed; an unpaired agent allows everything (the
+    /// unpaired caller gate, [`unpaired_decision`], has already run); a paired
+    /// agent requires the exact key. The on-box shortcut is applied by the edge
+    /// before this is consulted, so this only models a caller that is not
+    /// on-box.
     pub fn authorize(&self, path: &str, presented_key: Option<&str>) -> bool {
         if is_public(path) {
             return true;
         }
-        // The on-box shortcut is handled at the HTTP edge before this is reached;
-        // here only the unpaired-or-keyed posture remains, so pass `on_box=false`.
-        data_plane_access(&self.current(), false, presented_key) == Access::Accept
+        data_plane_access(&self.current(), CallerClass::Remote, presented_key) == Access::Accept
     }
 }
 
@@ -340,11 +338,14 @@ pub fn is_public(path: &str) -> bool {
             | "/api/ping"
             | "/api/pairing/info"
             | "/api/pairing/code"
+            // Public, but an unpaired node refuses it to a remote caller (see
+            // `unpaired_decision`); a paired node answers it with a 409.
             | "/api/pairing/claim"
             | "/api/version"
             // Dashboard-access PIN gate: an off-box paired browser must reach the
-            // status read + the verify (login) + the set (trust-on-first-use)
-            // before it holds any credential. `set` authorizes IN THE HANDLER;
+            // status read + the verify (login) + the set (the handler decides
+            // who may set a first PIN) before it holds any credential. `set`
+            // authorizes IN THE HANDLER;
             // `verify` is rate-limited + lockout-throttled in the store. `clear`
             // is deliberately NOT here — it stays behind the normal gate so only
             // an on-box or key-bearing caller resets the PIN.
@@ -390,63 +391,62 @@ pub fn is_operator_ui(path: &str) -> bool {
 }
 
 /// The unpaired-node gate's outcome for a request, granular enough to express the
-/// new private-LAN PIN scope: a private-LAN browser is no longer flatly refused on
-/// a DATA route — it is trusted for the operator-UI scope and PIN-gated instead.
+/// private-LAN PIN scope: a private-LAN browser is not flatly refused on a DATA
+/// route — it is trusted for the operator-UI scope and PIN-gated instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnpairedDecision {
-    /// Serve the request: the node is paired, the route is public or operator UI,
-    /// or the peer is a first-boot lifeline (loopback, link-local, AP/USB subnets).
+    /// Serve the request: the node is paired, the route is operator UI or a
+    /// public route the caller may reach, or the caller is on-box or a
+    /// first-boot lifeline.
     Allow,
-    /// A trusted operator-LAN peer requesting a DATA route on an UNPAIRED node:
+    /// An operator-LAN caller requesting a DATA route on an UNPAIRED node:
     /// served only when the caller presents a valid dashboard PIN session
     /// (minted via `/api/dashboard/pin/{set,verify}`), else refused.
     RequirePin,
-    /// The peer is neither a lifeline nor a trusted operator-LAN peer (a public-WAN
-    /// host, or an unidentifiable peer): refuse with 403, exactly as before.
+    /// A remote caller (a public-WAN host, anything relayed through a proxy or
+    /// tunnel, or an unidentifiable peer): refuse with 403.
     Refuse,
 }
 
+/// The pairing claim path: public (a fresh operator holds no key yet), but it
+/// hands out the node's master key, so an unpaired node answers it only for a
+/// caller on the device's own networks.
+const CLAIM_PATH: &str = "/api/pairing/claim";
+
 /// The unpaired-node gate: whether a request is served outright, requires a PIN
-/// session, or is refused. Pure, so the decision is testable — it had no
-/// behavioural coverage at all while it lived inline in the serve loop, which is a
-/// poor place for a security gate to have none.
+/// session, or is refused. A pure function of the path, the pairing state and
+/// the [`CallerClass`] the edge computed, so the decision is testable.
 ///
-/// `peer` is `None` when the peer address could not be determined, which is
-/// treated as not-allowed — an unidentifiable caller is exactly the one this gate
-/// exists for.
+/// While unpaired:
 ///
-/// The private-LAN operator scope rests on [`ados_protocol::pairing_posture::
-/// trusted_operator_lan_peer`], layered on top of the (unchanged) first-boot
-/// lifeline set so the direct MAVLink proxy keeps its lifeline-only unpaired
-/// posture and the PIN cannot be bypassed off the HTTP surface. An ordinary private
-/// LAN peer hits `RequirePin` on a DATA route; the caller (serve.rs) checks the
-/// dashboard session and 403s without one.
-pub fn unpaired_decision(
-    path: &str,
-    unpaired: bool,
-    peer: Option<std::net::IpAddr>,
-) -> UnpairedDecision {
-    if !unpaired {
+/// - the operator UI shell is served to anyone (it carries no data);
+/// - the pairing claim is served to every caller except a remote one: it mints
+///   the key that makes the caller the node's owner, and a remote caller (an
+///   internet request arriving through a tunnel, a public-WAN host) must not be
+///   able to claim a unit its operator has not reached yet;
+/// - the other public routes are served to anyone;
+/// - a DATA route is served to the local operator and the first-boot
+///   lifelines, PIN-gated for an operator-LAN caller, and refused otherwise.
+pub fn unpaired_decision(path: &str, unpaired: bool, caller: CallerClass) -> UnpairedDecision {
+    if !unpaired || is_operator_ui(path) {
         return UnpairedDecision::Allow;
     }
-    if is_public(path) || is_operator_ui(path) {
+    if path == CLAIM_PATH {
+        return match caller {
+            CallerClass::Remote => UnpairedDecision::Refuse,
+            CallerClass::OnBox | CallerClass::Lifeline | CallerClass::OperatorLan => {
+                UnpairedDecision::Allow
+            }
+        };
+    }
+    if is_public(path) {
         return UnpairedDecision::Allow;
     }
-    // A DATA route (status / telemetry / command / video): gate by peer.
-    let Some(peer) = peer else {
-        return UnpairedDecision::Refuse;
-    };
-    use ados_protocol::pairing_posture::{trusted_operator_lan_peer, unpaired_peer_allowed};
-    if unpaired_peer_allowed(&peer) {
-        // First-boot lifeline (loopback, link-local, AP/USB): served without a PIN,
-        // unchanged — these are the surfaces the PIN is first created on.
-        return UnpairedDecision::Allow;
+    match caller {
+        CallerClass::OnBox | CallerClass::Lifeline => UnpairedDecision::Allow,
+        CallerClass::OperatorLan => UnpairedDecision::RequirePin,
+        CallerClass::Remote => UnpairedDecision::Refuse,
     }
-    if trusted_operator_lan_peer(&peer) {
-        // A private-LAN browser: the new PIN-gated operator scope.
-        return UnpairedDecision::RequirePin;
-    }
-    UnpairedDecision::Refuse
 }
 
 /// A fixed-window token-bucket rate limiter for the TCP edge. Each refill
@@ -821,11 +821,9 @@ mod tests {
     #[test]
     fn the_unpaired_gate_pins_private_lan_data_and_admits_the_shell() {
         use crate::auth::UnpairedDecision;
-        use std::net::IpAddr;
-        // An ordinary LAN peer — the case the founder hit. A private-LAN address:
-        // trusted for the operator-UI scope, so it is no longer flatly refused;
-        // instead its DATA calls now require a PIN session.
-        let lan: Option<IpAddr> = Some("192.168.1.50".parse().unwrap());
+        // An ordinary private-LAN browser: trusted for the operator-UI scope,
+        // so it is not flatly refused; its DATA calls require a PIN session.
+        let lan = CallerClass::OperatorLan;
 
         // The shell loads, so the operator can see the node and its pairing code.
         for p in [
@@ -840,8 +838,6 @@ mod tests {
                 "{p} must load so the operator has a surface at all"
             );
         }
-        // Data routes from a private-LAN browser are PIN-gated, not flatly refused:
-        // the operator's browser can reach the cockpit DATA with a PIN session.
         for p in ["/api/status", "/api/config", "/api/command", "/whep"] {
             assert_eq!(
                 unpaired_decision(p, true, lan),
@@ -849,7 +845,8 @@ mod tests {
                 "{p} must be PIN-gated for a private-LAN peer while unpaired"
             );
         }
-        // Claiming the device is how it stops being unpaired, so it stays open.
+        // Claiming the device over its own LAN is the documented local-first
+        // flow, so it stays open to this caller.
         assert_eq!(
             unpaired_decision("/api/pairing/claim", true, lan),
             UnpairedDecision::Allow
@@ -860,18 +857,26 @@ mod tests {
         );
     }
 
+    /// A remote caller — a public-WAN host, a tunnelled internet request that
+    /// arrives on loopback, or an unidentifiable peer — reaches neither the
+    /// data plane nor the claim that would hand it the node's key.
     #[test]
-    fn a_public_wan_peer_is_still_refused_data_while_unpaired() {
+    fn a_remote_caller_is_refused_data_and_the_claim_while_unpaired() {
         use crate::auth::UnpairedDecision;
-        use std::net::IpAddr;
-        // Public-WAN must stay closed: nothing about the PIN-gated scope loosens
-        // for a non-private-LAN host.
-        for ip in ["8.8.8.8", "203.0.113.5", "2001:db8::1"] {
-            let peer: Option<IpAddr> = Some(ip.parse().unwrap());
+        for p in ["/api/status", "/api/command", "/whep", "/api/pairing/claim"] {
             assert_eq!(
-                unpaired_decision("/api/status", true, peer),
+                unpaired_decision(p, true, CallerClass::Remote),
                 UnpairedDecision::Refuse,
-                "{ip} is public WAN and must stay refused"
+                "{p} must be refused to a remote caller while unpaired"
+            );
+        }
+        // The shell and the non-issuing public routes are still served, so a
+        // browser is never left with nothing to read.
+        for p in ["/cockpit/", "/api/pairing/info", "/healthz"] {
+            assert_eq!(
+                unpaired_decision(p, true, CallerClass::Remote),
+                UnpairedDecision::Allow,
+                "{p}"
             );
         }
     }
@@ -879,60 +884,32 @@ mod tests {
     #[test]
     fn pairing_the_device_opens_everything_the_gate_was_holding() {
         use crate::auth::UnpairedDecision;
-        use std::net::IpAddr;
-        let lan: Option<IpAddr> = Some("192.168.1.50".parse().unwrap());
-        for p in ["/api/status", "/api/command", "/whep", "/cockpit/"] {
-            assert_eq!(
-                unpaired_decision(p, false, lan),
-                UnpairedDecision::Allow,
-                "{p} is not this gate's business once paired"
-            );
+        for caller in [CallerClass::OperatorLan, CallerClass::Remote] {
+            for p in ["/api/status", "/api/command", "/whep", "/cockpit/"] {
+                assert_eq!(
+                    unpaired_decision(p, false, caller),
+                    UnpairedDecision::Allow,
+                    "{p} is not this gate's business once paired"
+                );
+            }
         }
     }
 
     #[test]
-    fn an_unidentifiable_peer_is_refused_while_unpaired() {
+    fn the_reachable_callers_are_the_ones_a_fresh_device_is_reached_from() {
         use crate::auth::UnpairedDecision;
-        // No peer address means the caller cannot be placed on a trusted link,
-        // which is precisely who this gate exists to stop.
-        assert_eq!(
-            unpaired_decision("/api/status", true, None),
-            UnpairedDecision::Refuse
-        );
-        // ...but the shell is still served, so a browser is never left with
-        // nothing to read.
-        assert_eq!(
-            unpaired_decision("/cockpit/", true, None),
-            UnpairedDecision::Allow
-        );
-    }
-
-    #[test]
-    fn the_reachable_peers_are_the_ones_a_fresh_device_is_reached_from() {
-        use crate::auth::UnpairedDecision;
-        use std::net::IpAddr;
-        // The first-boot lifelines keep unrestricted unpaired data access (no PIN):
-        // these are the surfaces the PIN is first created on.
-        for ip in ["127.0.0.1", "192.168.4.10", "192.168.7.2"] {
-            let peer: Option<IpAddr> = Some(ip.parse().unwrap());
-            assert_eq!(
-                unpaired_decision("/api/status", true, peer),
-                UnpairedDecision::Allow,
-                "{ip} is a direct link to the device"
-            );
+        // The local operator and the first-boot lifelines keep unrestricted
+        // unpaired data access (no PIN): these are the surfaces the PIN is first
+        // created on, and they may claim the device.
+        for caller in [CallerClass::OnBox, CallerClass::Lifeline] {
+            for p in ["/api/status", "/api/pairing/claim"] {
+                assert_eq!(
+                    unpaired_decision(p, true, caller),
+                    UnpairedDecision::Allow,
+                    "{caller:?} {p}"
+                );
+            }
         }
-    }
-
-    #[test]
-    fn on_box_trust_is_loopback_and_no_forwarding_header() {
-        // Loopback peer, no proxy header → trusted.
-        assert!(is_on_box(true, false));
-        // Loopback peer but a forwarding header present → a tunnel terminating
-        // on loopback, NOT trusted.
-        assert!(!is_on_box(true, true));
-        // Off-box peer → never trusted regardless of headers.
-        assert!(!is_on_box(false, false));
-        assert!(!is_on_box(false, true));
     }
 
     #[test]

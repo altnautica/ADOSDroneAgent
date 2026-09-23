@@ -48,6 +48,10 @@ jobs:
         working-directory: cockpit
         run: npm run typecheck
 
+      - name: Lint
+        working-directory: cockpit
+        run: npm run lint
+
       - name: Test
         working-directory: cockpit
         run: npm run test

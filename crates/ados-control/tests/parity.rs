@@ -1509,17 +1509,68 @@ async fn post_command(socket: &Path, json_body: &str) -> (String, String) {
     unix_post(socket, "/api/command", None, json_body).await
 }
 
+/// The command snapshot for an ArduPilot FC (`autopilot` 3) of the given MAV_TYPE.
+fn ardupilot_snapshot(mav_type: i64) -> Value {
+    let mut snapshot = fc_up_snapshot();
+    snapshot["autopilot"] = serde_json::json!(3);
+    snapshot["mav_type"] = serde_json::json!(mav_type);
+    snapshot
+}
+
 /// Bring up the surface with an FC-connected state snapshot AND a live mock
 /// MAVLink socket. Returns the harness + the mock so a command test can assert
 /// the exact frame the route wrote.
 async fn start_with_fc_and_mavlink(dir: &Path) -> (Harness, MockStateServer, MockMavlinkServer) {
-    let state_mock = MockStateServer::start(dir, fc_up_snapshot(), Wire::V1Json).await;
+    start_with_snapshot(dir, fc_up_snapshot()).await
+}
+
+/// [`start_with_fc_and_mavlink`] over a caller-chosen (FC-connected) snapshot.
+async fn start_with_snapshot(
+    dir: &Path,
+    snapshot: Value,
+) -> (Harness, MockStateServer, MockMavlinkServer) {
+    let state_mock = MockStateServer::start(dir, snapshot, Wire::V1Json).await;
     let mav_mock = MockMavlinkServer::start(dir).await;
     let h = start_full(dir, None, state_mock.path.clone(), mav_mock.path.clone()).await;
     // Wait for the state client to read fc_connected=true so the command gate
     // passes deterministically.
     poll_info_until_fc_connected(&h.socket).await;
     (h, state_mock, mav_mock)
+}
+
+/// POST one command to a surface whose FC reports `snapshot`, require a 200, and
+/// return the `COMMAND_LONG` the MAVLink socket received with the response body.
+async fn sent_command(snapshot: Value, json_body: &str) -> (COMMAND_LONG_DATA, Value) {
+    let dir = tempfile::tempdir().unwrap();
+    let (h, state_mock, mav_mock) = start_with_snapshot(dir.path(), snapshot).await;
+    let (status, body) = post_command(&h.socket, json_body).await;
+    assert!(status.contains("200"), "{json_body}: {status} {body}");
+    let d = mav_mock.await_command().await;
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
+    (d, serde_json::from_str(&body).unwrap())
+}
+
+/// Assert `rtl` and `mode <name>` on an ArduPilot vehicle of `mav_type` send
+/// DO_SET_MODE with `rtl_mode` and `named_mode` as the custom mode.
+async fn assert_ardupilot_modes(mav_type: i64, rtl_mode: f32, name: &str, named_mode: f32) {
+    let (d, body) = sent_command(ardupilot_snapshot(mav_type), r#"{"cmd":"rtl"}"#).await;
+    assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE);
+    assert_eq!(d.param1, 1.0);
+    assert_eq!(d.param2, rtl_mode, "mav_type {mav_type}: RTL custom_mode");
+    assert_eq!(d.param3, 0.0);
+    assert_eq!(body["cmd"], serde_json::json!("rtl"));
+
+    let req = format!(r#"{{"cmd":"mode","args":["{name}"]}}"#);
+    let (d, body) = sent_command(ardupilot_snapshot(mav_type), &req).await;
+    assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE);
+    assert_eq!(d.param1, 1.0);
+    assert_eq!(
+        d.param2, named_mode,
+        "mav_type {mav_type}: {name} custom_mode"
+    );
+    assert_eq!(body["mode"], serde_json::json!(name));
 }
 
 #[tokio::test]
@@ -1615,40 +1666,64 @@ async fn command_land_writes_nav_land_all_zero() {
 }
 
 #[tokio::test]
-async fn command_rtl_writes_do_set_mode_param2_six() {
-    let dir = tempfile::tempdir().unwrap();
-    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
-
-    let (status, _b) = post_command(&h.socket, r#"{"cmd":"rtl"}"#).await;
-    assert!(status.contains("200"), "{status}");
-    let d = mav_mock.await_command().await;
-    // The `rtl` shortcut commands Return-to-Launch: DO_SET_MODE p1=1, p2=6 (RTL).
-    assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE);
-    assert_eq!(d.param1, 1.0);
-    assert_eq!(d.param2, 6.0);
-
-    h.stop().await;
-    state_mock.stop().await;
-    mav_mock.stop().await;
+async fn command_modes_use_the_copter_table_on_a_quadrotor() {
+    // MAV_TYPE_QUADROTOR: RTL is 6, LOITER is 5.
+    assert_ardupilot_modes(2, 6.0, "LOITER", 5.0).await;
 }
 
 #[tokio::test]
-async fn command_mode_rtl_writes_do_set_mode_param2_six() {
-    let dir = tempfile::tempdir().unwrap();
-    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+async fn command_modes_use_the_plane_table_on_a_fixed_wing() {
+    // MAV_TYPE_FIXED_WING: RTL is 11 (6 would be FBWB), LOITER is 12 (5 would be FBWA).
+    assert_ardupilot_modes(1, 11.0, "LOITER", 12.0).await;
+}
 
-    let (status, body) = post_command(&h.socket, r#"{"cmd":"mode","args":["RTL"]}"#).await;
-    assert!(status.contains("200"), "{status}");
-    let got: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(got["mode"], serde_json::json!("RTL"));
-    let d = mav_mock.await_command().await;
-    assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE);
-    assert_eq!(d.param1, 1.0);
-    assert_eq!(d.param2, 6.0);
+#[tokio::test]
+async fn command_modes_use_the_rover_table_on_a_ground_rover() {
+    // MAV_TYPE_GROUND_ROVER: RTL is 11 (6 would be FOLLOW), HOLD is 4.
+    assert_ardupilot_modes(10, 11.0, "HOLD", 4.0).await;
+}
 
-    h.stop().await;
-    state_mock.stop().await;
-    mav_mock.stop().await;
+#[tokio::test]
+async fn command_modes_use_the_plane_table_on_a_quadplane() {
+    // MAV_TYPE_VTOL_TAILSITTER_QUADROTOR (a QuadPlane): ArduPlane's table.
+    assert_ardupilot_modes(20, 11.0, "QLOITER", 19.0).await;
+}
+
+#[tokio::test]
+async fn command_mode_change_is_refused_without_a_mode_table() {
+    // An ArduPilot FC whose vehicle type is absent from the snapshot, or has no
+    // mode table (MAV_TYPE_SUBMARINE), gets no guessed custom_mode: 409, and
+    // nothing reaches the MAVLink socket.
+    let untyped = {
+        let mut s = fc_up_snapshot();
+        s["autopilot"] = serde_json::json!(3);
+        s
+    };
+    for (snapshot, req) in [
+        (untyped.clone(), r#"{"cmd":"rtl"}"#),
+        (untyped, r#"{"cmd":"mode","args":["RTL"]}"#),
+        (ardupilot_snapshot(12), r#"{"cmd":"rtl"}"#),
+        (
+            ardupilot_snapshot(12),
+            r#"{"cmd":"mode","args":["LOITER"]}"#,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (h, state_mock, mav_mock) = start_with_snapshot(dir.path(), snapshot).await;
+        let (status, body) = post_command(&h.socket, req).await;
+        assert!(status.contains("409"), "{req}: {status} {body}");
+        let j: Value = serde_json::from_str(&body).unwrap();
+        assert!(
+            j["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("vehicle type")),
+            "{req}: {body}"
+        );
+        mav_mock.assert_no_frame_forwarded(req).await;
+        h.stop().await;
+        state_mock.stop().await;
+        mav_mock.stop().await;
+    }
 }
 
 #[tokio::test]
@@ -1738,13 +1813,22 @@ async fn command_400_on_unknown_command() {
 #[tokio::test]
 async fn command_400_on_unknown_mode_and_missing_mode_name() {
     let dir = tempfile::tempdir().unwrap();
-    let (h, state_mock, mav_mock) = start_with_fc_and_mavlink(dir.path()).await;
+    let (h, state_mock, mav_mock) = start_with_snapshot(dir.path(), ardupilot_snapshot(2)).await;
 
     // Unknown mode name.
     let (status, body) = post_command(&h.socket, r#"{"cmd":"mode","args":["NOPE"]}"#).await;
     assert!(status.contains("400"), "unknown mode must be 400: {status}");
     let j: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(j["detail"], serde_json::json!("Unknown mode: NOPE"));
+
+    // A mode that exists only on another firmware is unknown on this vehicle.
+    let (status, body) = post_command(&h.socket, r#"{"cmd":"mode","args":["QLOITER"]}"#).await;
+    assert!(
+        status.contains("400"),
+        "plane-only mode on a copter: {status}"
+    );
+    let j: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(j["detail"], serde_json::json!("Unknown mode: QLOITER"));
 
     // Missing mode name.
     let (status2, body2) = post_command(&h.socket, r#"{"cmd":"mode"}"#).await;

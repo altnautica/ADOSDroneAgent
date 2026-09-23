@@ -30,18 +30,35 @@ pub const BEACON_MCS_INDEX: u8 = 0;
 /// driver on one interpretation of the MCS field for both senders.
 const RADIOTAP_MCS_KNOWN: u8 = 0x37;
 
+/// Radiotap `it_present` bit for `IEEE80211_RADIOTAP_FLAGS`.
+const RT_BIT_FLAGS: u32 = 1;
 /// Radiotap `it_present` bit for `IEEE80211_RADIOTAP_DBM_ANTSIGNAL`.
 const RT_BIT_DBM_ANTSIGNAL: u32 = 5;
 /// Radiotap `it_present` bit for the extension-word chain.
 const RT_BIT_EXT: u32 = 31;
 
+/// FLAGS bit: the captured frame still carries its 4-byte FCS at the end.
+///
+/// Monitor-mode drivers commonly hand the frame up with the CRC attached and say
+/// so here. Left in place, those four bytes land after the Poly1305 tag and every
+/// peer beacon fails authentication.
+pub const RT_F_FCS: u8 = 0x10;
+
+/// FLAGS bit: the frame failed its FCS check in the receiver. Its bytes are
+/// corrupt, so it is dropped before anything reads them.
+pub const RT_F_BADFCS: u8 = 0x40;
+
+/// The length of the 802.11 frame check sequence a driver may leave on a capture.
+pub const FCS_LEN: usize = 4;
+
 /// `(align, size)` of every radiotap field that can precede DBM_ANTSIGNAL:
 /// TSFT, FLAGS, RATE, CHANNEL, FHSS.
 ///
 /// Walking exactly these five is *sufficient*, not a partial implementation: the
-/// signal field is present bit 5, so no field defined at a higher bit can shift
-/// its offset, and no unknown-field bailout is reachable before we arrive at it.
-const RT_FIELDS_BEFORE_SIGNAL: [(usize, usize); 5] = [(8, 8), (1, 1), (1, 1), (2, 4), (1, 2)];
+/// fields read here are present bits 1 and 5, so no field defined at a higher bit
+/// can shift their offsets, and no unknown-field bailout is reachable before we
+/// arrive at them.
+const RT_LEADING_FIELDS: [(usize, usize); 5] = [(8, 8), (1, 1), (1, 1), (2, 4), (1, 2)];
 
 /// Build the radiotap injection header.
 ///
@@ -89,6 +106,18 @@ pub fn declared_len(rt: &[u8]) -> Option<usize> {
 /// entirely, and a fabricated `0` or `-100` would render as a real measurement in
 /// the operator's signal column.
 pub fn radiotap_rssi(rt: &[u8]) -> Option<i8> {
+    one_byte_field(rt, RT_BIT_DBM_ANTSIGNAL).map(|b| b as i8)
+}
+
+/// Read the FLAGS field out of a captured radiotap header, or `None` when the
+/// capture did not include one (which means no FCS is attached).
+pub fn radiotap_flags(rt: &[u8]) -> Option<u8> {
+    one_byte_field(rt, RT_BIT_FLAGS)
+}
+
+/// Read a one-byte, byte-aligned standard field at present bit `bit` (at most 5)
+/// out of a captured radiotap header.
+fn one_byte_field(rt: &[u8], bit: u32) -> Option<u8> {
     let declared = declared_len(rt)?;
     if declared > rt.len() || declared < 8 {
         return None;
@@ -115,17 +144,16 @@ pub fn radiotap_rssi(rt: &[u8]) -> Option<i8> {
     // below; a present bit in a later word belongs to a vendor or extended
     // namespace and cannot precede bit 5 of the first.
     let present = first_word?;
-    if present & (1 << RT_BIT_DBM_ANTSIGNAL) == 0 {
+    if present & (1 << bit) == 0 {
         return None;
     }
-    for (bit, (align, size)) in RT_FIELDS_BEFORE_SIGNAL.iter().enumerate() {
-        if present & (1 << bit) == 0 {
+    for (b, (align, size)) in RT_LEADING_FIELDS.iter().enumerate().take(bit as usize) {
+        if present & (1 << b) == 0 {
             continue;
         }
         off = align_up(off, *align).checked_add(*size)?;
     }
-    // DBM_ANTSIGNAL is a 1-byte field with 1-byte alignment.
-    (off < rt.len()).then(|| rt[off] as i8)
+    (off < rt.len()).then(|| rt[off])
 }
 
 /// Round `off` up to the next multiple of `align`. Radiotap fields are aligned to
@@ -243,5 +271,27 @@ mod tests {
         rt.extend_from_slice(&(1u32 << RT_BIT_DBM_ANTSIGNAL).to_le_bytes());
         rt.push((-48i8) as u8);
         assert_eq!(radiotap_rssi(&rt), Some(-48));
+    }
+
+    /// FLAGS sits after an 8-aligned TSFT when both are present, and is absent
+    /// (not zero) when the driver did not include it. The injected header carries
+    /// no FLAGS field, so our own frames never claim an attached FCS.
+    #[test]
+    fn the_flags_field_is_walked_after_tsft_and_absent_when_not_declared() {
+        let present: u32 = (1 << 0) | (1 << RT_BIT_FLAGS) | (1 << RT_BIT_DBM_ANTSIGNAL);
+        let mut rt = vec![0x00, 0x00, 18, 0x00];
+        rt.extend_from_slice(&present.to_le_bytes());
+        rt.extend_from_slice(&0u64.to_le_bytes()); // TSFT @8..16
+        rt.push(RT_F_FCS); // FLAGS @16
+        rt.push((-48i8) as u8); // DBM_ANTSIGNAL @17
+        assert_eq!(radiotap_flags(&rt), Some(RT_F_FCS));
+        assert_eq!(
+            radiotap_rssi(&rt),
+            Some(-48),
+            "FLAGS shifts the signal by one"
+        );
+
+        assert_eq!(radiotap_flags(&radiotap_header(BEACON_MCS_INDEX)), None);
+        assert_eq!(radiotap_flags(&[]), None);
     }
 }

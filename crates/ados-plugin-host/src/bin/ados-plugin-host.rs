@@ -94,6 +94,17 @@ fn plugin_socket_dir() -> PathBuf {
     )
 }
 
+/// The root-only directory the control socket binds in. Honours
+/// `ADOS_PLUGIN_HOST_DIR` (the same env `ados-control` reads to reach it),
+/// defaulting to [`ados_plugin_host::DEFAULT_CONTROL_DIR`]. Kept apart from the
+/// per-plugin socket dir, which every plugin unit can write.
+fn plugin_host_control_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var("ADOS_PLUGIN_HOST_DIR")
+            .unwrap_or_else(|_| ados_plugin_host::DEFAULT_CONTROL_DIR.to_string()),
+    )
+}
+
 /// The running agent semver, used by the supervisor's compatibility gate. The
 /// `ADOS_AGENT_VERSION` env mirrors the Python `ados.__version__` source; the
 /// crate version is the inert fallback when the env is unset.
@@ -414,14 +425,15 @@ fn config_store_path() -> PathBuf {
 /// full wiring without `main()`.
 ///
 /// `state_path` is the plugin state file the reconciler watches; the socket dir
-/// is where the per-plugin sockets bind; the install dir / run dir feed the
-/// host lookups. `secret_path` is the persisted HMAC secret the issuer is built
-/// from; the same file feeds the unit-generation path, so a runner's token
-/// verifies here.
+/// is where the per-plugin sockets bind; the control dir holds the root-only
+/// control socket; the install dir / run dir feed the host lookups.
+/// `secret_path` is the persisted HMAC secret the issuer is built from; the
+/// same file feeds the unit-generation path, so a runner's token verifies here.
 async fn wire(
     state_path: PathBuf,
     install_dir: PathBuf,
     socket_dir: PathBuf,
+    control_dir: PathBuf,
     run_dir: PathBuf,
     secret_path: &Path,
 ) -> WiredDaemon<RealHost> {
@@ -484,7 +496,7 @@ async fn wire(
         host.clone(),
         server.invoke_registry(),
         Some(lifecycle),
-        socket_dir.clone(),
+        control_dir,
     ) {
         Ok((path, handle)) => {
             tracing::info!(socket = %path.display(), "serving plugin-host control socket");
@@ -526,11 +538,12 @@ async fn main() -> Result<()> {
     let paths = ados_plugin_host::supervisor::Paths::default();
     let install_dir = paths.install_dir.clone();
     let state_path = paths.state_path.clone();
-    // The per-plugin + control + state-sidecar socket dir. Honours
+    // The per-plugin + state-sidecar socket dir. Honours
     // `ADOS_PLUGIN_SOCKET_DIR` (the same env `ados-control` reads) so a test /
     // SITL run points both daemons at a writable tempdir instead of
-    // `/run/ados/plugins`.
+    // `/run/ados/plugins`. The control socket binds in its own root-only dir.
     let socket_dir = plugin_socket_dir();
+    let control_dir = plugin_host_control_dir();
     let run = run_dir();
     let version = agent_version();
     let (board_id, board_tier) = read_board_identity(&run);
@@ -563,7 +576,15 @@ async fn main() -> Result<()> {
     drop(supervisor);
 
     let secret = secret_path();
-    let daemon = wire(state_path, install_dir, socket_dir, run, &secret).await;
+    let daemon = wire(
+        state_path,
+        install_dir,
+        socket_dir,
+        control_dir,
+        run,
+        &secret,
+    )
+    .await;
     // The shared-secret issuer is owned by the daemon for the session lifetime;
     // it both verifies the runner's `hello` token and backs the mint that
     // writes each served plugin's token env file.
@@ -610,7 +631,7 @@ mod tests {
             unit_dir: dir.join("units"),
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
-            socket_dir: dir.join("sockets"),
+            control_dir: dir.join("plugin-host"),
         }
     }
 
@@ -698,7 +719,15 @@ mod tests {
         // Wire the daemon (no mavlink router up -> slot stays None, fine).
         // A tempdir secret path makes the issuer persist a shared secret.
         let secret = dir.path().join("secrets/plugin-token-secret");
-        let daemon = wire(state_path, install_dir, socket_dir.clone(), run, &secret).await;
+        let daemon = wire(
+            state_path,
+            install_dir,
+            socket_dir.clone(),
+            dir.path().join("plugin-host"),
+            run,
+            &secret,
+        )
+        .await;
         assert_eq!(
             daemon.reconciler.serving().len(),
             1,
@@ -811,7 +840,9 @@ mod tests {
             );
             let manifest =
                 ados_plugin_host::PluginManifest::from_yaml_text(&manifest_yaml).expect("manifest");
-            let unit = render_unit(&manifest, dir.path(), &BTreeSet::new()).expect("unit");
+            let unit = render_unit(&manifest, dir.path(), &BTreeSet::new())
+                .expect("render")
+                .expect("unit");
             // Both runtimes deliver the token via the same env file + static
             // socket Environment line.
             assert!(

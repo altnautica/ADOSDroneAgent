@@ -86,10 +86,12 @@ pub use beacon::{
 };
 pub use bus::SwarmBus;
 pub use config::{SwarmBusConfig, CONFIG_YAML};
-pub use crypto::{derive_fleet_key, resolve_fleet_key, SwarmCipher};
+pub use crypto::{derive_fleet_key, FleetKeyWatch, SwarmCipher};
 pub use frame::{SwarmFrame, SwarmFrameKind};
 pub use ingest::{ingest_frame, Ingest, IngestReject};
-pub use neighbors::{Neighbor, NeighborTable, SwarmCounters, MAX_NEIGHBORS, NEIGHBOR_STALE};
+pub use neighbors::{
+    Neighbor, NeighborTable, Recorded, SwarmCounters, MAX_NEIGHBORS, NEIGHBOR_STALE,
+};
 pub use precedence::ModePrecedence;
 pub use schedule::{BEACON_HZ, BEACON_JITTER_MS, BEACON_PERIOD};
 pub use service::run;

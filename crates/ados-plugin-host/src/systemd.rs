@@ -28,6 +28,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use crate::errors::SupervisorError;
 use crate::manifest::{AgentIsolation, AgentRuntime, PluginManifest};
 use crate::sandbox::sandbox_directives;
 use crate::server::DEFAULT_SOCKET_DIR;
@@ -126,8 +127,8 @@ fn log_path_for(plugin_id: &str) -> String {
     )
 }
 
-/// Render the per-plugin systemd unit. Returns `None` for plugins that need no
-/// unit (no agent half, or `inprocess` isolation) — the caller treats that as
+/// Render the per-plugin systemd unit. Returns `Ok(None)` for plugins that need
+/// no unit (no agent half, or `inprocess` isolation) — the caller treats that as
 /// "do not write a unit", mirroring the Python `render_unit` raising for those
 /// cases.
 ///
@@ -138,15 +139,23 @@ fn log_path_for(plugin_id: &str) -> String {
 /// `install_dir` is the unpacked-plugin install root (e.g. `/var/ados/plugins`);
 /// the rust `ExecStart` resolves to `{install_dir}/{id}/{entrypoint}`. The slice,
 /// hardening, limits, and log lines are identical for both runtimes.
+///
+/// Every value spliced into the unit text must be a single token: whitespace
+/// would split an `ExecStart` argument and a newline or other control character
+/// would start a new directive (an `ExecStartPre=+...` runs as root). A value
+/// that is not is refused, never escaped into a unit systemd would still run.
 pub fn render_unit(
     manifest: &PluginManifest,
     install_dir: &Path,
     granted: &BTreeSet<String>,
-) -> Option<String> {
-    let agent = manifest.agent.as_ref()?;
+) -> Result<Option<String>, SupervisorError> {
+    let Some(agent) = manifest.agent.as_ref() else {
+        return Ok(None);
+    };
     if agent.isolation != AgentIsolation::Subprocess {
-        return None;
+        return Ok(None);
     }
+    unit_token("plugin id", &manifest.id)?;
     let res = &agent.resources;
     let log_path = log_path_for(&manifest.id);
     let socket_path = format!("{DEFAULT_SOCKET_DIR}/{}.sock", manifest.id);
@@ -161,9 +170,9 @@ pub fn render_unit(
         // on the command line (a /proc/<pid>/cmdline is world-readable).
         AgentRuntime::Rust => format!(
             "{install_dir}/{plugin_id}/{entrypoint} {plugin_id} --socket {socket_path}",
-            install_dir = install_dir.display(),
+            install_dir = unit_token("install dir", &install_dir.display().to_string())?,
             plugin_id = manifest.id,
-            entrypoint = agent.entrypoint,
+            entrypoint = unit_token("entrypoint", &agent.entrypoint)?,
             socket_path = socket_path,
         ),
     };
@@ -179,7 +188,7 @@ pub fn render_unit(
     // fixed hardening; these lines change with the operator's grants, which is
     // why a grant or revoke re-renders the unit.
     let sandbox = sandbox_directives(granted).join("\n");
-    Some(format!(
+    Ok(Some(format!(
         "\
 [Unit]
 Description=ADOS plugin {plugin_id}
@@ -232,7 +241,18 @@ WantedBy=ados-supervisor.service
         max_pids = res.max_pids,
         log_path = log_path,
         sandbox = sandbox,
-    ))
+    )))
+}
+
+/// Refuse a value that is not a single unit-file token (see [`render_unit`]).
+fn unit_token<'a>(what: &str, value: &'a str) -> Result<&'a str, SupervisorError> {
+    if value.is_empty() || value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(SupervisorError(format!(
+            "refusing to render a systemd unit: {what} {value:?} is empty or contains \
+             whitespace or a control character"
+        )));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -286,6 +306,7 @@ mod tests {
             Path::new("/var/ados/plugins"),
             &BTreeSet::new(),
         )
+        .unwrap()
         .unwrap();
         assert!(unit.contains("Slice=ados-plugins.slice"));
         // Python runtime (default): the shared runner takes the plugin id.
@@ -319,7 +340,9 @@ mod tests {
             "id: com.example.rustplug\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: agent/bin/com.example.rustplug\n  runtime: rust\n  resources:\n    max_ram_mb: 64\n    max_cpu_percent: 30\n    max_pids: 8\n",
         )
         .unwrap();
-        let unit = render_unit(&m, Path::new("/var/ados/plugins"), &BTreeSet::new()).unwrap();
+        let unit = render_unit(&m, Path::new("/var/ados/plugins"), &BTreeSet::new())
+            .unwrap()
+            .unwrap();
         // ExecStart points at the unpacked plugin binary, the plugin id as the
         // leading positional (the SDK runner requires it), then the socket path.
         assert!(
@@ -357,13 +380,61 @@ mod tests {
             "id: com.altnautica.builtin\nversion: 0.1.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: pkg:Class\n  isolation: inprocess\n",
         )
         .unwrap();
-        assert!(render_unit(&inproc, Path::new("/var/ados/plugins"), &BTreeSet::new()).is_none());
+        assert!(
+            render_unit(&inproc, Path::new("/var/ados/plugins"), &BTreeSet::new())
+                .unwrap()
+                .is_none()
+        );
 
         let gcs_only = PluginManifest::from_yaml_text(
             "id: com.example.panel\nversion: 0.1.0\ncompatibility:\n  ados_version: \">=0.1.0\"\ngcs:\n  entrypoint: gcs/dist/index.js\n",
         )
         .unwrap();
-        assert!(render_unit(&gcs_only, Path::new("/var/ados/plugins"), &BTreeSet::new()).is_none());
+        assert!(
+            render_unit(&gcs_only, Path::new("/var/ados/plugins"), &BTreeSet::new())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// A manifest deserialized without the parser's validation, as one would be
+    /// by any path that skips `from_yaml_text`. Values are JSON-quoted YAML
+    /// scalars so a newline survives into the struct.
+    fn unvalidated_rust_manifest(id: &str, entrypoint: &str) -> PluginManifest {
+        let q = |s: &str| serde_json::to_string(s).unwrap();
+        serde_norway::from_str(&format!(
+            "id: {}\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: {}\n  runtime: rust\n",
+            q(id),
+            q(entrypoint)
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_value_that_would_split_or_add_a_unit_line_is_refused() {
+        let install_dir = Path::new("/var/ados/plugins");
+        for (id, entrypoint) in [
+            (
+                "com.example.x",
+                "bin/x\nExecStartPre=+/bin/sh -c 'id>/root/p'",
+            ),
+            ("com.example.x", "bin/x --extra"),
+            ("com.example.x", "bin/x\u{1b}[2J"),
+            ("com.example.x\nExecStartPre=+/bin/sh", "bin/x"),
+            ("com.example.x y", "bin/x"),
+        ] {
+            let m = unvalidated_rust_manifest(id, entrypoint);
+            let err = render_unit(&m, install_dir, &BTreeSet::new())
+                .expect_err(&format!("{id:?} / {entrypoint:?} must be refused"));
+            assert!(err.0.contains("refusing to render"), "{}", err.0);
+        }
+        // An install dir with whitespace is refused on the rust ExecStart too.
+        let m = unvalidated_rust_manifest("com.example.x", "bin/x");
+        assert!(render_unit(&m, Path::new("/var/ados/my plugins"), &BTreeSet::new()).is_err());
+        // The same manifest renders under a clean install dir.
+        assert!(render_unit(&m, install_dir, &BTreeSet::new())
+            .unwrap()
+            .is_some());
     }
 
     #[test]

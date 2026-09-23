@@ -4,6 +4,52 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.376] - 2026-09-23
+
+### Security
+
+- The native edge classifies each request once: on-box, lifeline, operator
+  LAN or remote. A request carrying any forwarding header is remote, so a
+  tunnelled caller is never treated as local. An unpaired node refuses remote
+  callers, including a pairing claim.
+- On a paired node the first dashboard PIN needs the node key (or an on-box
+  caller). Setting a PIN by LAN presence alone works only while unpaired.
+- WebSocket tickets honour MCP token scopes: a flight-class stream needs the
+  flight scope.
+- The MAVLink WebSocket proxy on an unpaired node admits on-box and lifeline
+  callers only, and binds the configured endpoint host. On a paired node the
+  raw 5760/14550 proxies serve on-box callers only unless
+  `mavlink.raw_proxy_lan_access` is set. A ground-control app attached over
+  the LAN to a paired node needs that key. The posture is reported as
+  `mavlink_proxy_posture` in telemetry.
+- Command sockets (control, radio, video, GPIO and the other command sockets,
+  the log query socket and the plugin-host control socket) belong to a new
+  `ados-operator` group and check peer credentials on every accept. The
+  installer creates the group and adds the installing operator. Plugins are
+  never in it, and plugin units hide those sockets.
+- Plugin manifests are validated on every install path (id, semver version,
+  entrypoints). Unit rendering refuses values with whitespace or control
+  characters, and an install always lands in a direct child of the install
+  directory.
+- A plugin `ready_check` command runs as an argv through `systemd-run` as the
+  plugin user with the plugin's sandbox, never inside the API process. HTTP
+  checks must target 127.0.0.1.
+
+### Fixed
+
+- ArduPilot mode changes, RTL included, use the connected vehicle's mode
+  table (Copter, Plane and QuadPlane, Rover). RTL on a plane used to select
+  FBWB. A vehicle type with no table is refused with 409.
+- Ground-station hero promotion and relay-proxy calls carry the per-drone relay
+  ticket, so drones accept them. A hero selection completes even when the
+  client times out, and a hero drone that reboots is promoted again.
+- The swarm bus strips the radiotap FCS and drops bad-FCS frames, rebuilds its
+  cipher when the fleet key changes, restarts after a bind, rejects replayed
+  beacons, and reports a slot shared by two nodes (`beacons_replayed`,
+  `beacons_slot_conflict`, `slot_conflict`). A stale GPS fix no longer hides
+  the armed and mode state.
+- The dashboard and cockpit are linted in CI.
+
 ## [0.99.374] - 2026-09-15
 
 ### Fixed

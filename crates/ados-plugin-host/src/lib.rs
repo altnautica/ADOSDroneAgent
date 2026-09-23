@@ -66,7 +66,7 @@ pub mod vision_client;
 
 pub use control::{
     control_socket_path, serve_control, ConfigControl, LifecycleControl, CONTROL_SOCKET_NAME,
-    METHOD_PLUGIN_RECONCILE, METHOD_TOKEN_ROTATE,
+    DEFAULT_CONTROL_DIR, METHOD_PLUGIN_RECONCILE, METHOD_TOKEN_ROTATE,
 };
 pub use control_client::{
     reconcile as reconcile_via_control, rotate_token as rotate_token_via_control,

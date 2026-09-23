@@ -618,6 +618,13 @@ async fn apply_keypair_inner(
     if role == BindRole::Drone && !pm.restart("ados-video.service").await {
         tracing::info!("ados_video_restart_skipped (not active / no video pipeline)");
     }
+    // The swarm bus derives its beacon key from the shared key file this bind
+    // just delivered, on both roles. It also re-reads that file on its own
+    // cadence; the restart makes the new key take effect now rather than within
+    // the next poll, and re-attaches it to the freshly re-brought-up adapter.
+    if !pm.restart(super::ADOS_SWARMBUS_UNIT).await {
+        tracing::info!("ados_swarmbus_restart_skipped (unit not installed)");
+    }
 
     Ok(PairResult {
         paired: true,

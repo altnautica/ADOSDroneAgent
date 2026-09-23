@@ -388,32 +388,91 @@ def test_readiness_for_unknown_plugin_raises(isolated_paths):
         sup.readiness_for("com.example.absent")
 
 
-def test_command_ready_check_exit_zero_is_ready(isolated_paths, tmp_path: Path):
-    """A `cmd:`-style (non-URL) ready_check runs as a shell command."""
+def _probe(sup: PluginSupervisor, ready_check: str, returncode: int = 0):
+    """Run one command probe with subprocess stubbed; return the verdict and
+    the (args, kwargs) the probe handed to ``subprocess.run``."""
+    spec = ServiceSpec.model_validate(
+        {"name": "worker", "command": "noop", "ready_check": ready_check}
+    )
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(
+            returncode=returncode, stderr="not yet", stdout=""
+        )
+        verdict = sup._probe_service_ready(
+            "com.example.daemonplug", _service_manifest(), spec
+        )
+    assert run_mock.call_count == 1
+    return verdict, run_mock.call_args
+
+
+def test_command_ready_check_runs_as_a_sandboxed_argv(isolated_paths):
+    """A non-URL ready_check is an argv run by systemd-run as the plugin user
+    inside the plugin's sandbox, never a shell string in the API process."""
     sup = PluginSupervisor(
         install_dir=isolated_paths["install_dir"], require_signed=False
     )
-    spec = ServiceSpec.model_validate(
-        # `exit 0` is a shell builtin, portable across the test hosts.
-        {"name": "worker", "command": "noop", "ready_check": "exit 0"}
+    (ready, reason), call = _probe(sup, "/usr/bin/test -S 'run/worker sock'")
+    assert (ready, reason) == (True, None)
+
+    argv = call.args[0]
+    assert isinstance(argv, list)
+    assert call.kwargs.get("shell") is not True
+    assert argv[0] == "systemd-run"
+    assert "--uid=ados" in argv and "--gid=ados" in argv
+    assert "--slice=ados-plugins.slice" in argv
+    # The plugin's own sandbox: hardening, its resource envelope, and the
+    # capability sandbox that hides the agent's command sockets.
+    assert "--property=NoNewPrivileges=yes" in argv
+    assert "--property=MemoryMax=48M" in argv
+    assert any(
+        a.startswith("--property=InaccessiblePaths=") and "-/run/ados/control.sock" in a
+        for a in argv
     )
-    ready, reason = sup._probe_service_ready("com.example.x", spec)
-    assert ready is True
-    assert reason is None
+    # The probe's own words come after `--`, one argv element each.
+    sep = argv.index("--")
+    assert argv[sep + 1 :] == ["/usr/bin/test", "-S", "run/worker sock"]
 
 
-def test_command_ready_check_nonzero_is_not_ready(
-    isolated_paths, tmp_path: Path
-):
+def test_shell_syntax_in_a_ready_check_is_never_interpreted(isolated_paths):
     sup = PluginSupervisor(
         install_dir=isolated_paths["install_dir"], require_signed=False
     )
-    spec = ServiceSpec.model_validate(
-        {"name": "worker", "command": "noop", "ready_check": "exit 7"}
+    _, call = _probe(sup, "cp /bin/sh /tmp/s; chmod 4755 /tmp/s")
+    argv = call.args[0]
+    sep = argv.index("--")
+    # `;` stays a literal argument to `cp`; no second command exists.
+    assert argv[sep + 1 :] == ["cp", "/bin/sh", "/tmp/s;", "chmod", "4755", "/tmp/s"]
+    assert call.kwargs.get("shell") is not True
+
+
+def test_command_ready_check_nonzero_is_not_ready(isolated_paths):
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"], require_signed=False
     )
-    ready, reason = sup._probe_service_ready("com.example.x", spec)
+    (ready, reason), _ = _probe(sup, "/usr/bin/false", returncode=7)
     assert ready is False
-    assert reason is not None and "exit" in reason
+    assert reason == "exit 7: not yet"
+
+
+@pytest.mark.parametrize(
+    "ready_check",
+    [
+        "/bin/true\nExecStartPre=+/bin/sh",
+        "/bin/true\x00",
+        "http://192.168.1.50:9100/healthz",
+        "http://127.0.0.1/healthz",
+        "https://user:pw@127.0.0.1:9100/",
+        "   ",
+        "'unterminated",
+    ],
+)
+def test_manifest_rejects_an_unsafe_ready_check(ready_check: str) -> None:
+    from ados.plugins.errors import ManifestError
+
+    with pytest.raises(ManifestError):
+        ServiceSpec.model_validate(
+            {"name": "worker", "command": "noop", "ready_check": ready_check}
+        )
 
 
 # ---------------------------------------------------------------------

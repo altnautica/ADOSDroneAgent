@@ -4395,12 +4395,12 @@ mod tests {
     #[test]
     fn config_value_validated_against_the_manifest_schema() {
         let dir = tempfile::tempdir().unwrap();
-        let plugin_dir = dir.path().join("myplugin");
+        let plugin_dir = dir.path().join("com.example.myplugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(
             plugin_dir.join("manifest.yaml"),
             r#"
-id: myplugin
+id: com.example.myplugin
 version: 0.1.0
 compatibility:
   ados_version: ">=0.9.0"
@@ -4418,7 +4418,7 @@ gcs:
         .unwrap();
         let pd = plugin_dir.clone();
         let host = RealHost::new().with_runtime_lookup(Box::new(move |id| {
-            if id == "myplugin" {
+            if id == "com.example.myplugin" {
                 Some((pd.clone(), std::collections::BTreeSet::new()))
             } else {
                 None
@@ -4427,16 +4427,31 @@ gcs:
 
         // In-bounds value passes the schema.
         assert!(host
-            .apply_config_set("myplugin", "follow_distance_m", Value::from(8.0), "drone")
+            .apply_config_set(
+                "com.example.myplugin",
+                "follow_distance_m",
+                Value::from(8.0),
+                "drone"
+            )
             .is_ok());
         // Out-of-bounds value (> maximum) is rejected before it is persisted.
         let err = host
-            .apply_config_set("myplugin", "follow_distance_m", Value::from(999.0), "drone")
+            .apply_config_set(
+                "com.example.myplugin",
+                "follow_distance_m",
+                Value::from(999.0),
+                "drone",
+            )
             .unwrap_err();
         assert!(err.contains("follow_distance_m"), "{err}");
         // A key with no declared schema is allowed (legacy / schemaless keys).
         assert!(host
-            .apply_config_set("myplugin", "no_schema_key", Value::from("x"), "drone")
+            .apply_config_set(
+                "com.example.myplugin",
+                "no_schema_key",
+                Value::from("x"),
+                "drone"
+            )
             .is_ok());
         // No runtime lookup at all -> allowed (no schema source).
         assert!(RealHost::new()

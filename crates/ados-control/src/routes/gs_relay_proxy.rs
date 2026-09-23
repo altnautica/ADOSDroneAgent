@@ -103,14 +103,16 @@ pub async fn handle(
             .into_response();
     }
 
-    match proxy
-        .call(
-            peer_device_id.as_bytes(),
-            rpc_method,
-            full_path.as_bytes(),
-            &body,
-        )
-        .await
+    let slots = crate::routes::gs_fleet_slot::registered_slots();
+    match forward(
+        proxy,
+        &slots,
+        &peer_device_id,
+        rpc_method,
+        full_path.as_bytes(),
+        &body,
+    )
+    .await
     {
         Ok(resp) => relayed_response(resp),
         Err(e) => {
@@ -151,6 +153,27 @@ pub async fn handle(
             (status, Json(serde_json::json!({ "detail": msg }))).into_response()
         }
     }
+}
+
+/// Send one relayed request to `peer`, carrying the relay ticket minted from
+/// the registry snapshot `slots`.
+///
+/// The drone authorizes every relayed request before it reaches its own API,
+/// and one without a ticket it can verify is answered 401 — so the ticket is
+/// what makes this route reach a drone at all.
+async fn forward(
+    proxy: &ados_protocol::aux_rpc_proxy::AuxRpcProxy,
+    slots: &[ados_groundlink::FleetSlot],
+    peer: &str,
+    method: ados_protocol::aux_rpc::RpcMethod,
+    path: &[u8],
+    body: &[u8],
+) -> Result<ados_protocol::aux_rpc_proxy::RpcResponseOwned, ados_protocol::aux_rpc_proxy::RpcError>
+{
+    let ticket = crate::routes::gs_fleet_slot::mint_ticket(slots, peer);
+    proxy
+        .call_with_ticket(peer.as_bytes(), method, path, body, ticket.as_bytes())
+        .await
 }
 
 /// Project a completed relay call onto the HTTP response this route returns:
@@ -320,5 +343,50 @@ mod tests {
         assert!(!path_is_safe("/api/\0version"));
         assert!(!path_is_safe("/api/\tversion"));
         assert!(!path_is_safe("/api/version\x7f"));
+    }
+
+    fn registered(device_id: &str, secret: Option<&str>) -> Vec<ados_groundlink::FleetSlot> {
+        vec![ados_groundlink::FleetSlot {
+            slot: 1,
+            device_id: device_id.to_string(),
+            paired_at_ms: 0,
+            relay_secret: secret.map(str::to_string),
+        }]
+    }
+
+    #[tokio::test]
+    async fn a_relayed_call_carries_a_ticket_the_drone_admits() {
+        use crate::routes::gs_fleet_slot::test_drone::{self, SECRET};
+        use ados_protocol::aux_rpc::RpcMethod;
+
+        const DRONE: &str = "ados-relay-01";
+        let drone = test_drone::spawn(DRONE, Some(SECRET)).await;
+
+        let resp = super::forward(
+            &drone.proxy,
+            &registered(DRONE, Some(SECRET)),
+            DRONE,
+            RpcMethod::Get,
+            b"/api/version",
+            b"",
+        )
+        .await
+        .expect("the drone answers");
+        assert_eq!(resp.status, 200, "the drone must admit the relayed call");
+        assert_eq!(drone.seen.lock().last().unwrap().path, b"/api/version");
+
+        // With no secret on file for the drone there is nothing to mint, and
+        // the drone refuses exactly as it refuses any unticketed call.
+        let resp = super::forward(
+            &drone.proxy,
+            &registered(DRONE, None),
+            DRONE,
+            RpcMethod::Get,
+            b"/api/version",
+            b"",
+        )
+        .await
+        .expect("the drone answers");
+        assert_eq!(resp.status, 401);
     }
 }

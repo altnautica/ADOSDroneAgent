@@ -178,10 +178,12 @@ pub struct ClaimRequest {
 /// strings); 409 `{"detail":"Already paired. Unpair first."}` when already
 /// paired.
 ///
-/// Writes `pairing.json` mirroring `PairingManager.claim` exactly (atomic, 0600,
-/// the four Python keys, code + pending key dropped) and returns the key. No
-/// auth required, only works while unpaired — being on the LAN is the gate
-/// (`is_public` lists this path), the same posture the FastAPI claim takes.
+/// Writes `pairing.json` (mirroring `PairingManager.claim` exactly: atomic,
+/// 0600, the four Python keys, code + pending key dropped) and returns the key.
+/// No credential required and only works while unpaired. Being on the device's
+/// own networks is the gate: the edge refuses a remote caller (a public-WAN
+/// host, or anything relayed through a proxy or tunnel) before this handler
+/// runs — see `auth::unpaired_decision`.
 pub async fn claim_pairing(
     State(state): State<AppState>,
     Json(req): Json<ClaimRequest>,

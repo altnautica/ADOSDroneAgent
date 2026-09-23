@@ -1607,6 +1607,14 @@ fn provision_ados_identity() {
     if !exec::run_ok("getent", &["group", "ados"]) {
         let _ = exec::run("groupadd", &["--system", "ados"]);
     }
+    // The group that owns the agent's command sockets. The `ados` plugin user
+    // is never added to it, so a plugin cannot open them.
+    if !exec::run_ok("getent", &["group", ados_protocol::ipc::OPERATOR_GROUP]) {
+        let _ = exec::run(
+            "groupadd",
+            &["--system", ados_protocol::ipc::OPERATOR_GROUP],
+        );
+    }
     if !exec::run_ok("id", &["ados"]) {
         let _ = exec::run(
             "useradd",
@@ -1658,11 +1666,15 @@ fn add_operator_to_ados_group() {
         Ok(user) if !user.is_empty() && user != "root" => user,
         _ => return,
     };
-    if !exec::run_ok("getent", &["group", "ados"]) {
+    if !exec::run_ok("id", &[operator.as_str()]) {
         return;
     }
-    if exec::run_ok("id", &[operator.as_str()]) {
-        let _ = exec::run("usermod", &["-aG", "ados", operator.as_str()]);
+    // `ados` for the plugin/log file plane, the operator group for the
+    // command sockets (control, logd query, CLI) that plugins must not reach.
+    for group in ["ados", ados_protocol::ipc::OPERATOR_GROUP] {
+        if exec::run_ok("getent", &["group", group]) {
+            let _ = exec::run("usermod", &["-aG", group, operator.as_str()]);
+        }
     }
 }
 

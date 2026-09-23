@@ -52,6 +52,9 @@ pub const GS_BIND_UNIT: &str = "wifibroadcast@gs_bind.service";
 pub const ADOS_WFB_DRONE_UNIT: &str = "ados-wfb.service";
 /// Agent-managed normal-operation wfb RX unit (gs profile).
 pub const ADOS_WFB_GS_UNIT: &str = "ados-wfb-rx.service";
+/// The swarm state bus. Its beacon key derives from `/etc/drone.key`, which a
+/// bind rewrites, so it is restarted with the radio after every bind attempt.
+pub const ADOS_SWARMBUS_UNIT: &str = "ados-swarmbus.service";
 
 // ── Bind tunnel (10.5.99.x L3 over WFB). ────────────────────────────────────
 /// L3 bind tunnel interface created by the drone bind profile.

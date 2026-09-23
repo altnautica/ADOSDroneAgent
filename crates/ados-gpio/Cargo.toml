@@ -27,7 +27,6 @@ anyhow = { workspace = true }
 tokio = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { workspace = true }
 tracing-journald = { workspace = true }
 sd-notify = { workspace = true }
 # Pure-Rust character-device GPIO (no libgpiod C dependency), the same backend

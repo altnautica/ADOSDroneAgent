@@ -141,17 +141,13 @@ pub struct IngestSocket {
 impl IngestSocket {
     /// Bind the ingest socket at `path`. Removes a stale socket from a prior run
     /// (otherwise `bind` fails with `EADDRINUSE`), creates the parent directory
-    /// if absent, and tightens the mode to `0o660` on Linux so only the agent
-    /// group can write frames.
+    /// if absent, and sets the mode to `0o660` on the plugin-reachable plane:
+    /// the plugin runtime ships its logs here, so the plugin user must be able
+    /// to connect. The socket only accepts log frames; the query socket, which
+    /// reads the store back, stays on the operator plane.
     pub fn bind(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        // The shared helper owns the create-dir / remove-stale / bind / chmod
-        // (0o660) hygiene; group-owning to `ados` afterward keeps the mode's
-        // group-rw grant reaching a non-root member (a chown does not clear the
-        // rw bits, so the final owner+group+mode state is unchanged).
-        let listener = ados_protocol::ipc::bind_command_socket(&path, 0o660)?;
-        #[cfg(target_os = "linux")]
-        crate::set_ados_group(&path);
+        let listener = ados_protocol::ipc::bind_plugin_socket(&path, 0o660)?;
         Ok(Self { listener, path })
     }
 

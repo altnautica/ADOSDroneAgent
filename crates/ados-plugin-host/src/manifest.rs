@@ -13,11 +13,14 @@
 //! isolation levels, the resource limits, the declared permissions, and the
 //! compatibility block) and tolerates every other field through
 //! `#[serde(default)]` + an open `extra` map, mirroring the Pydantic model's
-//! forward-compatible posture. Validation that the Pydantic model performs at
-//! parse time (reverse-DNS id, semver shape) is not re-run here: the archive
-//! that reaches the controller has already been produced by the SDK packer,
-//! and the controller's own gates (semver range, board, isolation) operate on
-//! the parsed values regardless.
+//! forward-compatible posture.
+//!
+//! Identity and path fields are validated at parse time
+//! ([`PluginManifest::validate`]), on every install path: the id is joined onto
+//! the install dir that a root process removes and unpacks into, and both the
+//! id and the entrypoint are interpolated into the generated systemd unit. A
+//! signature proves who packed an archive, not that its manifest is well
+//! formed, so none of this is left to the SDK packer.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -254,7 +257,41 @@ impl PluginManifest {
                 "manifest top-level must be a mapping".to_string(),
             ));
         }
-        serde_norway::from_value(value).map_err(|e| ManifestError(e.to_string()))
+        let manifest: PluginManifest =
+            serde_norway::from_value(value).map_err(|e| ManifestError(e.to_string()))?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Enforce the identity and path rules the lifecycle relies on, matching the
+    /// Pydantic model's validators:
+    ///
+    /// * `id` is reverse-DNS: `^[a-z0-9]+(\.[a-z0-9-]+)+$`. It becomes a
+    ///   directory name under the install dir and a token in unit text, so it
+    ///   can never be absolute, contain `/` or `..`, or carry whitespace.
+    /// * `version` is semver 2.0.
+    /// * each entrypoint is a relative POSIX path over `[A-Za-z0-9._/-]` with no
+    ///   empty or `..` segment, or a `module:Class` reference.
+    pub fn validate(&self) -> Result<(), ManifestError> {
+        if !is_plugin_id(&self.id) {
+            return Err(ManifestError(format!(
+                "plugin id {:?} must be reverse-DNS lowercase, e.g. com.example.thermal",
+                self.id
+            )));
+        }
+        if !is_semver(&self.version) {
+            return Err(ManifestError(format!(
+                "plugin version {:?} is not valid semver",
+                self.version
+            )));
+        }
+        if let Some(agent) = &self.agent {
+            validate_entrypoint("agent.entrypoint", &agent.entrypoint)?;
+        }
+        if let Some(gcs) = &self.gcs {
+            validate_entrypoint("gcs.entrypoint", &gcs.entrypoint)?;
+        }
+        Ok(())
     }
 
     /// Flat set of declared permission ids across both halves. Used by the
@@ -285,6 +322,94 @@ impl PluginManifest {
     pub fn agent_runtime(&self) -> Option<AgentRuntime> {
         self.agent.as_ref().map(|a| a.runtime)
     }
+}
+
+/// `^[a-z0-9]+(\.[a-z0-9-]+)+$`: at least two dot-separated segments, the first
+/// lowercase alnum, the rest lowercase alnum or hyphen.
+fn is_plugin_id(id: &str) -> bool {
+    let mut segments = id.split('.');
+    let first_ok = segments.next().is_some_and(|s| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    });
+    let mut rest = 0usize;
+    let rest_ok = segments.all(|s| {
+        rest += 1;
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    });
+    first_ok && rest_ok && rest > 0
+}
+
+/// Semver 2.0: `MAJOR.MINOR.PATCH`, no leading zeros, with an optional
+/// dot-separated pre-release (`-...`) and build (`+...`) suffix.
+fn is_semver(v: &str) -> bool {
+    let (rest, build) = match v.split_once('+') {
+        Some((r, b)) => (r, Some(b)),
+        None => (v, None),
+    };
+    let (core, pre) = match rest.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (rest, None),
+    };
+    let numeric = |s: &str| {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && (s == "0" || !s.starts_with('0'))
+    };
+    let alnum =
+        |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3 || !parts.iter().all(|p| numeric(p)) {
+        return false;
+    }
+    // A pre-release identifier is numeric without leading zeros, or
+    // alphanumeric with at least one non-digit.
+    let pre_ok = pre.is_none_or(|p| {
+        p.split('.')
+            .all(|id| alnum(id) && (numeric(id) || id.bytes().any(|b| !b.is_ascii_digit())))
+    });
+    let build_ok = build.is_none_or(|b| b.split('.').all(alnum));
+    pre_ok && build_ok
+}
+
+/// Refuse an entrypoint that could escape the plugin's install dir or break
+/// out of the unit line it is interpolated into.
+fn validate_entrypoint(field: &str, value: &str) -> Result<(), ManifestError> {
+    let ok = match value.split_once(':') {
+        Some((module, class)) => is_module_path(module) && is_identifier(class),
+        None => is_relative_posix_path(value),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(ManifestError(format!(
+            "{field} {value:?} must be a relative posix path over [A-Za-z0-9._/-] \
+             with no empty or '..' segment, or a module:Class reference"
+        )))
+    }
+}
+
+fn is_relative_posix_path(path: &str) -> bool {
+    !path.is_empty()
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'/' | b'-'))
+        && path
+            .split('/')
+            .all(|segment| !segment.is_empty() && !segment.starts_with(".."))
+}
+
+fn is_identifier(s: &str) -> bool {
+    let mut bytes = s.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn is_module_path(s: &str) -> bool {
+    s.split('.').all(is_identifier)
 }
 
 #[cfg(test)]
@@ -438,5 +563,122 @@ gcs:
     fn non_mapping_top_level_is_rejected() {
         let err = PluginManifest::from_yaml_text("- a\n- b").unwrap_err();
         assert!(err.0.contains("top-level must be a mapping"), "{}", err.0);
+    }
+
+    /// A manifest built from YAML with the given id, version and agent
+    /// entrypoint. Values are emitted as JSON-quoted scalars (valid YAML) so a
+    /// test can carry a newline or quote through the parser intact.
+    fn manifest_with(id: &str, version: &str, entrypoint: &str) -> String {
+        let q = |s: &str| serde_json::to_string(s).unwrap();
+        format!(
+            "id: {}\nversion: {}\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: {}\n  runtime: rust\n",
+            q(id),
+            q(version),
+            q(entrypoint)
+        )
+    }
+
+    #[test]
+    fn ids_that_escape_the_install_dir_or_the_unit_line_are_rejected() {
+        for id in [
+            "../../etc",
+            "/etc",
+            "../../../etc/cron.d",
+            "com.example.x\nExecStartPre=+/bin/sh -c id",
+            "com.example.x y",
+            "com.example/x",
+            "Com.Example.x",
+            "single",
+            "com..example",
+            "com.example.",
+            ".com.example",
+            "",
+        ] {
+            let err = PluginManifest::from_yaml_text(&manifest_with(id, "1.0.0", "bin/x"))
+                .expect_err(&format!("id {id:?} must be rejected"));
+            assert!(err.0.contains("plugin id"), "{id:?}: {}", err.0);
+        }
+        for id in [
+            "com.example.thermal-lepton",
+            "com.example.x",
+            "io.ados.a1.b-2",
+        ] {
+            PluginManifest::from_yaml_text(&manifest_with(id, "1.0.0", "bin/x"))
+                .unwrap_or_else(|e| panic!("id {id:?} must be accepted: {}", e.0));
+        }
+    }
+
+    #[test]
+    fn entrypoints_that_escape_or_inject_are_rejected() {
+        for entrypoint in [
+            "bin/x\nExecStartPre=+/bin/sh -c 'id>/root/p'",
+            "bin/x\rExecStartPre=+/bin/sh",
+            "bin/x\tflag",
+            "bin/x --flag",
+            "../bin/x",
+            "bin/../../x",
+            "/usr/bin/x",
+            "bin//x",
+            "bin/x/",
+            "",
+            "pkg.mod:Class\nExecStartPre=+/bin/sh",
+            "pkg.mod:Class:Extra",
+            "../pkg:Class",
+            ":Class",
+            "pkg:",
+        ] {
+            let err = PluginManifest::from_yaml_text(&manifest_with(
+                "com.example.x",
+                "1.0.0",
+                entrypoint,
+            ))
+            .expect_err(&format!("entrypoint {entrypoint:?} must be rejected"));
+            assert!(
+                err.0.contains("agent.entrypoint"),
+                "{entrypoint:?}: {}",
+                err.0
+            );
+        }
+        for entrypoint in [
+            "agent/py/thermal.py",
+            "agent/bin/com.example.rustplug",
+            "bin/vision-nav",
+            "gcs/plugin.bundle.js",
+            "pkg.mod:Class",
+            "altnautica_thermal_camera.plugin:ThermalUsbPlugin",
+        ] {
+            PluginManifest::from_yaml_text(&manifest_with("com.example.x", "1.0.0", entrypoint))
+                .unwrap_or_else(|e| panic!("entrypoint {entrypoint:?} must be accepted: {}", e.0));
+        }
+    }
+
+    #[test]
+    fn the_gcs_entrypoint_is_held_to_the_same_rules() {
+        let yaml = "id: com.example.panel\nversion: 0.1.0\ncompatibility:\n  ados_version: \">=0.1.0\"\ngcs:\n  entrypoint: \"../../dist/index.js\"\n";
+        let err = PluginManifest::from_yaml_text(yaml).unwrap_err();
+        assert!(err.0.contains("gcs.entrypoint"), "{}", err.0);
+    }
+
+    #[test]
+    fn version_must_be_semver() {
+        for version in [
+            "1.0", "01.0.0", "1.0.0-", "1.0.0-01", "1.0.0+", "1.0.0 ", "v1.0.0", "1.0.0\n",
+        ] {
+            let err =
+                PluginManifest::from_yaml_text(&manifest_with("com.example.x", version, "bin/x"))
+                    .expect_err(&format!("version {version:?} must be rejected"));
+            assert!(err.0.contains("semver"), "{version:?}: {}", err.0);
+        }
+        for version in [
+            "0.0.0",
+            "1.2.3",
+            "1.0.0-rc.1",
+            "1.0.0-alpha-2.0a",
+            "1.0.0+build.5",
+            "10.20.30-0.x+b",
+        ] {
+            PluginManifest::from_yaml_text(&manifest_with("com.example.x", version, "bin/x"))
+                .unwrap_or_else(|e| panic!("version {version:?} must be accepted: {}", e.0));
+        }
     }
 }

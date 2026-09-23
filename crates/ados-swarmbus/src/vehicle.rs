@@ -74,6 +74,14 @@ fn saturating_i16(v: f64) -> i16 {
 /// position and every condition bit clear — which reads, correctly, as "this node
 /// is on the bus but has no fix and is not armed".
 ///
+/// `position_trusted` says whether the snapshot's position fix is fresh enough to
+/// radiate. When it is not, the position, altitude and velocity go out as zero
+/// and [`STATUS_GPS_OK`] stays clear, because every receiver dead-reckons those
+/// fields forward and a frozen fix would read as a node still flying on a track
+/// it has left. Every other bit still comes from the snapshot: a drone that loses
+/// GPS mid-flight is still armed, still in its mode, still the hero, and still
+/// under whatever precedence governs it, and the fleet must keep reading that.
+///
 /// `hero` is read from the snapshot's `video_profile` extra, which the video
 /// service publishes as `"hero"` or `"thumbnail"`. An absent key reads as
 /// thumbnail, matching the boot default: a fleet powering up together must not
@@ -86,7 +94,12 @@ fn saturating_i16(v: f64) -> i16 {
 /// owns the FC link its control loop commands through. Each has a safe absent
 /// reading — thumbnail, `hold`, not-in-override — so a node running none of those
 /// layers radiates an honest beacon rather than a defaulted-to-plausible one.
-pub fn beacon_from_state(state: Option<&Value>, slot: u8, seq_ms: u16) -> SwarmBeacon {
+pub fn beacon_from_state(
+    state: Option<&Value>,
+    position_trusted: bool,
+    slot: u8,
+    seq_ms: u16,
+) -> SwarmBeacon {
     let mut b = SwarmBeacon {
         slot,
         seq_ms,
@@ -96,29 +109,41 @@ pub fn beacon_from_state(state: Option<&Value>, slot: u8, seq_ms: u16) -> SwarmB
         return b;
     };
 
-    b.lat = nested_f64(state, "position", "lat")
-        .map(|v| saturating_i32(v * 1e7))
-        .unwrap_or(0);
-    b.lon = nested_f64(state, "position", "lon")
-        .map(|v| saturating_i32(v * 1e7))
-        .unwrap_or(0);
-    // Home-relative altitude, in decimetres. `alt_msl` is deliberately not used:
-    // every separation threshold is relative, and mixing the two references across
-    // a fleet would put two drones at "the same altitude" tens of metres apart.
-    b.alt_dm = nested_f64(state, "position", "alt_rel")
-        .map(|v| saturating_i16(v * 10.0))
-        .unwrap_or(0);
-    b.vx_cms = nested_f64(state, "velocity", "vx")
-        .map(|v| saturating_i16(v * 100.0))
-        .unwrap_or(0);
-    b.vy_cms = nested_f64(state, "velocity", "vy")
-        .map(|v| saturating_i16(v * 100.0))
-        .unwrap_or(0);
-    b.vz_cms = nested_f64(state, "velocity", "vz")
-        .map(|v| saturating_i16(v * 100.0))
-        .unwrap_or(0);
-
     let mut status = 0u8;
+    if position_trusted {
+        b.lat = nested_f64(state, "position", "lat")
+            .map(|v| saturating_i32(v * 1e7))
+            .unwrap_or(0);
+        b.lon = nested_f64(state, "position", "lon")
+            .map(|v| saturating_i32(v * 1e7))
+            .unwrap_or(0);
+        // Home-relative altitude, in decimetres. `alt_msl` is deliberately not
+        // used: every separation threshold is relative, and mixing the two
+        // references across a fleet would put two drones at "the same altitude"
+        // tens of metres apart.
+        b.alt_dm = nested_f64(state, "position", "alt_rel")
+            .map(|v| saturating_i16(v * 10.0))
+            .unwrap_or(0);
+        b.vx_cms = nested_f64(state, "velocity", "vx")
+            .map(|v| saturating_i16(v * 100.0))
+            .unwrap_or(0);
+        b.vy_cms = nested_f64(state, "velocity", "vy")
+            .map(|v| saturating_i16(v * 100.0))
+            .unwrap_or(0);
+        b.vz_cms = nested_f64(state, "velocity", "vz")
+            .map(|v| saturating_i16(v * 100.0))
+            .unwrap_or(0);
+        if state
+            .get("gps")
+            .and_then(|g| g.get("fix_type"))
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            >= MIN_USABLE_FIX_TYPE
+        {
+            status |= STATUS_GPS_OK;
+        }
+    }
+
     if state.get("armed").and_then(Value::as_bool).unwrap_or(false) {
         status |= STATUS_ARMED;
     }
@@ -136,15 +161,6 @@ pub fn beacon_from_state(state: Option<&Value>, slot: u8, seq_ms: u16) -> SwarmB
         .is_some_and(|m| ados_protocol::accepts_offboard_setpoints(&m.to_ascii_uppercase()))
     {
         status |= STATUS_GUIDED;
-    }
-    if state
-        .get("gps")
-        .and_then(|g| g.get("fix_type"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0)
-        >= MIN_USABLE_FIX_TYPE
-    {
-        status |= STATUS_GPS_OK;
     }
     if state
         .get("video_profile")
@@ -188,6 +204,11 @@ mod tests {
     use crate::ModePrecedence;
     use serde_json::json;
 
+    /// A beacon from a snapshot whose position fix is fresh.
+    fn fixed(state: Option<&Value>, slot: u8, seq_ms: u16) -> SwarmBeacon {
+        beacon_from_state(state, true, slot, seq_ms)
+    }
+
     fn flying() -> Value {
         json!({
             "armed": true,
@@ -200,7 +221,7 @@ mod tests {
 
     #[test]
     fn a_flying_snapshot_maps_every_field_into_the_beacon() {
-        let b = beacon_from_state(Some(&flying()), 3, 41234);
+        let b = fixed(Some(&flying()), 3, 41234);
         assert_eq!(b.slot, 3);
         assert_eq!(b.seq_ms, 41234);
         assert_eq!(b.lat, 129_716_000);
@@ -227,7 +248,7 @@ mod tests {
         for level in ModePrecedence::ARBITRATION_ORDER {
             let mut s = flying();
             s["swarm_precedence"] = json!(level.as_wire());
-            let b = beacon_from_state(Some(&s), 3, 0);
+            let b = fixed(Some(&s), 3, 0);
             assert_eq!(b.precedence(), level, "{level:?} did not reach the beacon");
             // It survives the wire, so a peer decodes the same level.
             assert_eq!(
@@ -253,7 +274,7 @@ mod tests {
         ] {
             let mut s = flying();
             s["swarm_precedence"] = bad.clone();
-            let b = beacon_from_state(Some(&s), 3, 0);
+            let b = fixed(Some(&s), 3, 0);
             assert_eq!(b.precedence(), ModePrecedence::Hold, "{bad}");
             assert_eq!(b.status & STATUS_PRECEDENCE_MASK, 0, "{bad} left bits set");
         }
@@ -272,7 +293,7 @@ mod tests {
         let mut engaged = flying();
         engaged["swarm_emergency"] = json!(true);
         engaged["swarm_precedence"] = json!("hard-separation");
-        let b = beacon_from_state(Some(&engaged), 3, 0);
+        let b = fixed(Some(&engaged), 3, 0);
         assert!(b.emergency());
         assert_eq!(b.precedence(), ModePrecedence::HardSeparation);
         // Still armed/guided/fixed: the override is an addition, not a replacement.
@@ -289,7 +310,7 @@ mod tests {
             if let Some(v) = quiet.clone() {
                 s["swarm_emergency"] = v;
             }
-            let quiet_beacon = beacon_from_state(Some(&s), 3, 0);
+            let quiet_beacon = fixed(Some(&s), 3, 0);
             assert!(
                 quiet_beacon.status & STATUS_EMERGENCY == 0,
                 "{quiet:?} must not raise the emergency bit"
@@ -302,7 +323,7 @@ mod tests {
     /// has an `alt_msl` of 920 m specifically to catch that.
     #[test]
     fn altitude_is_home_relative_never_mean_sea_level() {
-        let b = beacon_from_state(Some(&flying()), 1, 0);
+        let b = fixed(Some(&flying()), 1, 0);
         assert_eq!(b.alt_dm, 325);
         assert!((b.alt_m() - 32.5).abs() < 1e-9);
     }
@@ -313,7 +334,7 @@ mod tests {
     #[test]
     fn an_absent_or_empty_snapshot_yields_a_flagless_beacon() {
         for state in [None, Some(&json!({})), Some(&json!("not an object"))] {
-            let b = beacon_from_state(state, 9, 7);
+            let b = fixed(state, 9, 7);
             assert_eq!(b.slot, 9);
             assert_eq!(b.seq_ms, 7);
             assert_eq!(b.status, 0, "no condition bit may be set without a source");
@@ -327,7 +348,7 @@ mod tests {
     /// steady state on a drone whose GPS has not locked yet.
     #[test]
     fn a_partial_snapshot_carries_what_it_has_and_zeroes_the_rest() {
-        let b = beacon_from_state(
+        let b = fixed(
             Some(&json!({"armed": true, "position": {"lat": 1.0}})),
             2,
             0,
@@ -343,8 +364,7 @@ mod tests {
     /// better fixes and must not read as unusable.
     #[test]
     fn the_gps_bit_is_a_threshold_at_a_three_dimensional_fix() {
-        let with_fix =
-            |t: i64| beacon_from_state(Some(&json!({"gps": {"fix_type": t}})), 1, 0).gps_ok();
+        let with_fix = |t: i64| fixed(Some(&json!({"gps": {"fix_type": t}})), 1, 0).gps_ok();
         assert!(!with_fix(0), "no fix");
         assert!(!with_fix(1), "no fix");
         assert!(!with_fix(2), "2D has no altitude");
@@ -359,7 +379,7 @@ mod tests {
     /// the mode match must not be fooled by case or by a different mode.
     #[test]
     fn the_guided_bit_matches_the_mode_string_case_insensitively() {
-        let in_mode = |m: &str| beacon_from_state(Some(&json!({"mode": m})), 1, 0).guided();
+        let in_mode = |m: &str| fixed(Some(&json!({"mode": m})), 1, 0).guided();
         assert!(in_mode("GUIDED"));
         assert!(in_mode("guided"));
         assert!(in_mode("Guided"));
@@ -379,7 +399,7 @@ mod tests {
         assert!(!in_mode("LOITER"));
         assert!(!in_mode(""));
         // A non-string mode does not panic and does not claim guided.
-        assert!(!beacon_from_state(Some(&json!({"mode": 4})), 1, 0).guided());
+        assert!(!fixed(Some(&json!({"mode": 4})), 1, 0).guided());
     }
 
     /// The hero bit is the video service's flag, and an absent key must read as
@@ -390,17 +410,14 @@ mod tests {
         let profile = |p: Value| {
             let mut s = flying();
             s["video_profile"] = p;
-            beacon_from_state(Some(&s), 1, 0).hero()
+            fixed(Some(&s), 1, 0).hero()
         };
         assert!(profile(json!("hero")));
         assert!(!profile(json!("thumbnail")));
         assert!(!profile(json!("HERO")), "the wire value is exactly `hero`");
         assert!(!profile(json!(null)));
         assert!(!profile(json!(true)));
-        assert!(
-            !beacon_from_state(Some(&flying()), 1, 0).hero(),
-            "absent key"
-        );
+        assert!(!fixed(Some(&flying()), 1, 0).hero(), "absent key");
     }
 
     /// An out-of-range reading must clamp, never wrap: a wrapped velocity turns a
@@ -408,7 +425,7 @@ mod tests {
     /// would make the separation layer steer into it.
     #[test]
     fn out_of_range_readings_saturate_rather_than_wrapping() {
-        let b = beacon_from_state(
+        let b = fixed(
             Some(&json!({
                 "position": {"lat": 1e9, "lon": -1e9, "alt_rel": 1e9},
                 "velocity": {"vx": 1e9, "vy": -1e9, "vz": -1e9},
@@ -443,7 +460,7 @@ mod tests {
         assert_eq!(wire["velocity"]["vx"], json!(null));
         assert_eq!(wire["position"]["lat"], json!(null));
 
-        let b = beacon_from_state(Some(&wire), 1, 0);
+        let b = fixed(Some(&wire), 1, 0);
         assert_eq!((b.vx_cms, b.vy_cms, b.vz_cms), (0, 0, 0));
         assert_eq!((b.lat, b.lon), (0, 0));
         assert!(!b.gps_ok(), "a zeroed position must not read as a fix");
@@ -453,7 +470,26 @@ mod tests {
     /// unchanged, so what a neighbour decodes is what the flight controller said.
     #[test]
     fn a_filled_beacon_round_trips_through_the_wire() {
-        let b = beacon_from_state(Some(&flying()), 3, 41234);
+        let b = fixed(Some(&flying()), 3, 41234);
         assert_eq!(SwarmBeacon::decode(&b.encode()), Some(b));
+    }
+
+    /// A dead fix under a live producer zeroes what receivers dead-reckon and
+    /// clears GPS_OK, but keeps every bit that says what the aircraft is doing.
+    /// Zeroing those too broadcast an armed, guided hero in hard separation as a
+    /// disarmed `hold` drone, and let a second hero be promoted.
+    #[test]
+    fn an_untrusted_fix_keeps_the_condition_bits_and_precedence() {
+        let mut s = flying();
+        s["video_profile"] = json!("hero");
+        s["swarm_emergency"] = json!(true);
+        s["swarm_precedence"] = json!("hard-separation");
+        let b = beacon_from_state(Some(&s), false, 3, 77);
+        assert_eq!((b.lat, b.lon, b.alt_dm), (0, 0, 0));
+        assert_eq!((b.vx_cms, b.vy_cms, b.vz_cms), (0, 0, 0));
+        assert!(!b.gps_ok(), "a dead fix must not claim GPS_OK");
+        assert!(b.armed() && b.guided() && b.hero() && b.emergency());
+        assert_eq!(b.precedence(), ModePrecedence::HardSeparation);
+        assert_eq!((b.slot, b.seq_ms), (3, 77));
     }
 }

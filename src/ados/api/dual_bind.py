@@ -56,13 +56,20 @@ def make_listen_sockets(
     return make_dual_stack_sockets(ipv4_host, port, backlog)
 
 
+#: The group that owns the agent's command-plane sockets. The plugin user is
+#: never a member; the native front runs as root and reaches the socket anyway.
+OPERATOR_GROUP = "ados-operator"
+
+
 def _make_unix_socket(path: str, backlog: int = 2048) -> socket.socket:
-    """Bind a stream ``AF_UNIX`` listener at ``path``, 0o660 + the ``ados`` group.
+    """Bind a stream ``AF_UNIX`` listener at ``path``, 0o660 + the operator group.
 
     Removes a stale socket first so a restart does not fail with ``EADDRINUSE``,
-    and group-owns to ``ados`` so the front (running as the ``ados`` user) can
-    reach it while a stray local user cannot. The chmod/chown are best-effort: a
-    dev host without the group still binds, just without the group grant.
+    and group-owns to ``ados-operator`` so the front (root) and on-box operators
+    reach it while a plugin (the ``ados`` user) or a stray local user cannot:
+    this socket is the residual API behind the front's auth, so a caller that
+    could open it directly would skip that auth. The chmod/chown are
+    best-effort: a dev host without the group still binds, root-only.
     """
     parent = os.path.dirname(path)
     if parent:
@@ -77,11 +84,11 @@ def _make_unix_socket(path: str, backlog: int = 2048) -> socket.socket:
     sock.bind(path)
     sock.listen(backlog)
 
-    # Group-own to ados first, then tighten the mode: the 0o660 grant only
-    # reaches the front once the group owns the socket. Mirrors the native
-    # control socket's bind in crates/ados-control/src/serve.rs::bind_unix.
+    # Group-own first, then tighten the mode: the 0o660 grant only reaches the
+    # group once it owns the socket. Mirrors the native command-socket bind in
+    # crates/ados-protocol/src/ipc.rs::bind_command_socket.
     try:
-        gid = grp.getgrnam("ados").gr_gid
+        gid = grp.getgrnam(OPERATOR_GROUP).gr_gid
         os.chown(path, -1, gid)
     except (KeyError, OSError):
         pass

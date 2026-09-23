@@ -43,7 +43,10 @@ mod bpf;
 mod radiotap;
 
 pub use bpf::{bpf_program, SockFilter, BPF_PROGRAM_LEN};
-pub use radiotap::{radiotap_header, radiotap_rssi, BEACON_MCS_INDEX, RADIOTAP_TX_LEN};
+pub use radiotap::{
+    radiotap_flags, radiotap_header, radiotap_rssi, BEACON_MCS_INDEX, FCS_LEN, RADIOTAP_TX_LEN,
+    RT_F_BADFCS, RT_F_FCS,
+};
 
 /// Our magic, in the two bytes of the transmitter address that wfb-ng fills with
 /// `0x5742`. The two differ in the first byte, so the two kernel filters diverge
@@ -124,6 +127,9 @@ pub enum FrameReject {
     /// Our magic, another fleet's id. Two fleets may legitimately share one
     /// channel, and this is how they stay separate.
     ForeignFleet,
+    /// The receiver's radiotap FLAGS marked the frame as failing its FCS check:
+    /// corrupted on the air, so none of its bytes are read.
+    BadFcs,
 }
 
 /// One captured frame, split into what the cipher needs and what the neighbour
@@ -179,12 +185,18 @@ pub fn ieee80211_header(fleet_id: u16, seq: u16) -> [u8; IEEE80211_HDR_LEN] {
 /// Split a captured radiotap frame into its payload and its signal reading,
 /// verifying the magic and the fleet.
 ///
-/// The in-kernel BPF ([`bpf_program`]) already rejects everything this rejects, so
-/// on a live socket this only ever returns `Ok`. It is checked again anyway, for
-/// two reasons that are not paranoia: the filter is attached best-effort (a kernel
-/// that refuses it leaves the socket unfiltered rather than dead), and this is the
-/// seam the codec is tested through off-target, where no kernel filter exists at
-/// all.
+/// The in-kernel BPF ([`bpf_program`]) already rejects foreign magic and foreign
+/// fleets, so on a live socket those two only ever pass. They are checked again
+/// anyway, for two reasons that are not paranoia: the filter is attached
+/// best-effort (a kernel that refuses it leaves the socket unfiltered rather than
+/// dead), and this is the seam the codec is tested through off-target, where no
+/// kernel filter exists at all.
+///
+/// The radiotap FLAGS field decides where the payload ends. A monitor-mode driver
+/// that leaves the 802.11 FCS on the capture sets [`RT_F_FCS`], and those four
+/// trailing CRC bytes are cut off here; the sealed payload is whatever lies
+/// between the MAC header and the FCS. A frame flagged [`RT_F_BADFCS`] is
+/// corrupt and is rejected before its header is read.
 pub fn parse_frame(buf: &[u8], fleet_id: u16) -> Result<CapturedFrame<'_>, FrameReject> {
     let rt_len = match radiotap::declared_len(buf) {
         Some(n) => n,
@@ -193,7 +205,16 @@ pub fn parse_frame(buf: &[u8], fleet_id: u16) -> Result<CapturedFrame<'_>, Frame
     if buf.len() < rt_len + IEEE80211_HDR_LEN {
         return Err(FrameReject::Malformed);
     }
-    let mac = &buf[rt_len..];
+    let rt = &buf[..rt_len];
+    let flags = radiotap_flags(rt).unwrap_or(0);
+    if flags & RT_F_BADFCS != 0 {
+        return Err(FrameReject::BadFcs);
+    }
+    let fcs_len = if flags & RT_F_FCS != 0 { FCS_LEN } else { 0 };
+    if buf.len() < rt_len + IEEE80211_HDR_LEN + fcs_len {
+        return Err(FrameReject::Malformed);
+    }
+    let mac = &buf[rt_len..buf.len() - fcs_len];
     let magic = u16::from_be_bytes([mac[MAGIC_OFFSET], mac[MAGIC_OFFSET + 1]]);
     if magic != SWARM_MAGIC {
         return Err(FrameReject::ForeignMagic);
@@ -209,7 +230,7 @@ pub fn parse_frame(buf: &[u8], fleet_id: u16) -> Result<CapturedFrame<'_>, Frame
     }
     Ok(CapturedFrame {
         payload: &mac[IEEE80211_HDR_LEN..],
-        rssi_dbm: radiotap_rssi(&buf[..rt_len]),
+        rssi_dbm: radiotap_rssi(rt),
     })
 }
 
@@ -302,7 +323,9 @@ mod tests {
     /// The parse must tolerate a longer radiotap header than we inject — the
     /// receiving driver decides the capture's field set, not us. Hardcoding 13
     /// bytes here would read every real capture at the wrong offset, and every
-    /// beacon in the fleet would look like a foreign magic.
+    /// beacon in the fleet would look like a foreign magic. This header declares
+    /// FLAGS=F_FCS, so the capture carries the 4-byte CRC it promises and the
+    /// payload must end before it.
     #[test]
     fn a_longer_receive_side_radiotap_header_is_walked_by_its_declared_length() {
         let mut frame = Vec::new();
@@ -312,15 +335,56 @@ mod tests {
         frame.extend_from_slice(&18u16.to_le_bytes());
         frame.extend_from_slice(&present.to_le_bytes());
         frame.extend_from_slice(&0u64.to_le_bytes()); // TSFT, 8-aligned at 8
-        frame.push(0x10); // FLAGS @16
+        frame.push(RT_F_FCS); // FLAGS @16
         frame.push((-48i8) as u8); // DBM_ANTSIGNAL @17
         assert_eq!(frame.len(), 18);
         frame.extend_from_slice(&ieee80211_header(9, 0));
         frame.extend_from_slice(b"payload");
+        frame.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // FCS
 
         let got = parse_frame(&frame, 9).expect("declared length is honoured");
-        assert_eq!(got.payload, b"payload");
+        assert_eq!(
+            got.payload, b"payload",
+            "the FCS is not part of the payload"
+        );
         assert_eq!(got.rssi_dbm, Some(-48), "the signal reading is carried out");
+
+        // A capture too short to hold the FCS its flags declare is malformed.
+        let cut = 18 + IEEE80211_HDR_LEN + FCS_LEN - 1;
+        assert_eq!(parse_frame(&frame[..cut], 9), Err(FrameReject::Malformed));
+    }
+
+    /// Without F_FCS nothing is trimmed: the injected (and looped-back) frame has
+    /// no FLAGS field at all and its payload runs to the end of the capture.
+    #[test]
+    fn a_capture_without_the_fcs_flag_keeps_its_whole_payload() {
+        let mut frame = vec![0x00, 0x00, 9, 0x00];
+        frame.extend_from_slice(&(1u32 << 1).to_le_bytes());
+        frame.push(0x00); // FLAGS, nothing set
+        frame.extend_from_slice(&ieee80211_header(9, 0));
+        frame.extend_from_slice(b"payload!");
+        assert_eq!(parse_frame(&frame, 9).unwrap().payload, b"payload!");
+        assert_eq!(
+            parse_frame(&build_frame(9, 0, b"payload!"), 9)
+                .unwrap()
+                .payload,
+            b"payload!"
+        );
+    }
+
+    /// A frame the receiver flagged as failing its FCS is corrupt. It is dropped
+    /// as such before its header is trusted, so a bit-flipped wfb-ng frame is not
+    /// counted as a foreign magic and a bit-flipped beacon is not a bad tag.
+    #[test]
+    fn a_bad_fcs_frame_is_rejected_before_its_header_is_read() {
+        let mut frame = vec![0x00, 0x00, 9, 0x00];
+        frame.extend_from_slice(&(1u32 << 1).to_le_bytes());
+        frame.push(RT_F_FCS | RT_F_BADFCS);
+        let mut mac = ieee80211_header(9, 0);
+        mac[MAGIC_OFFSET] ^= 0x40; // the corruption hit the magic
+        frame.extend_from_slice(&mac);
+        frame.extend_from_slice(&[0u8; 54]);
+        assert_eq!(parse_frame(&frame, 9), Err(FrameReject::BadFcs));
     }
 
     #[test]

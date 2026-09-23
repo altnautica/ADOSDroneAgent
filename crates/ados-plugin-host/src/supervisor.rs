@@ -43,7 +43,7 @@
 //! recorder in tests without touching systemd.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
@@ -123,11 +123,11 @@ pub struct Paths {
     pub unit_dir: PathBuf,
     pub state_path: PathBuf,
     pub log_dir: PathBuf,
-    /// The per-plugin socket dir, which is also where the plugin host's control
-    /// socket lives. The controller reaches the live daemon through it after a
-    /// grant or revoke, so a permission change is effective immediately rather
-    /// than at the next daemon restart.
-    pub socket_dir: PathBuf,
+    /// The plugin host's control dir, where its root-only control socket lives.
+    /// The controller reaches the live daemon through it after a grant or
+    /// revoke, so a permission change is effective immediately rather than at
+    /// the next daemon restart.
+    pub control_dir: PathBuf,
 }
 
 impl Default for Paths {
@@ -137,7 +137,7 @@ impl Default for Paths {
             unit_dir: PathBuf::from(PLUGIN_UNIT_DIR),
             state_path: PathBuf::from(state::PLUGIN_STATE_PATH),
             log_dir: PathBuf::from(PLUGIN_LOG_DIR),
-            socket_dir: PathBuf::from(crate::server::DEFAULT_SOCKET_DIR),
+            control_dir: PathBuf::from(crate::control::DEFAULT_CONTROL_DIR),
         }
     }
 }
@@ -378,7 +378,7 @@ impl PluginSupervisor {
 
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
 
-        let target = self.paths.install_dir.join(&manifest.id);
+        let target = plugin_install_target(&self.paths.install_dir, &manifest.id)?;
         if target.exists() {
             std::fs::remove_dir_all(&target)?;
         }
@@ -403,7 +403,7 @@ impl PluginSupervisor {
         if manifest.is_subprocess_agent() {
             self.ensure_slice_exists()?;
             let unit_path = unit_path_for(&manifest.id, Some(&self.paths.unit_dir));
-            if let Some(unit) = render_unit(&manifest, &self.paths.install_dir, &BTreeSet::new()) {
+            if let Some(unit) = render_unit(&manifest, &self.paths.install_dir, &BTreeSet::new())? {
                 std::fs::write(&unit_path, unit.as_bytes())?;
             }
             self.systemctl.run(&["daemon-reload"])?;
@@ -552,7 +552,7 @@ impl PluginSupervisor {
 
         if manifest.is_subprocess_agent() {
             let unit_path = unit_path_for(plugin_id, Some(&self.paths.unit_dir));
-            if let Some(unit) = render_unit(manifest, &self.paths.install_dir, &granted) {
+            if let Some(unit) = render_unit(manifest, &self.paths.install_dir, &granted)? {
                 let previous = std::fs::read_to_string(&unit_path).unwrap_or_default();
                 if previous != unit {
                     std::fs::write(&unit_path, unit.as_bytes())?;
@@ -571,7 +571,7 @@ impl PluginSupervisor {
         // Re-mint the live token. A plugin host that is not up has nothing to
         // re-mint against and will read the new grant set off state when it
         // starts, so an unreachable control socket is logged, not an error.
-        match crate::rotate_token_via_control(&self.paths.socket_dir, plugin_id) {
+        match crate::rotate_token_via_control(&self.paths.control_dir, plugin_id) {
             Ok(()) => tracing::info!(plugin_id, "plugin_token_rotated_after_permission_change"),
             Err(e) => tracing::info!(
                 plugin_id,
@@ -659,7 +659,7 @@ impl PluginSupervisor {
             }
             self.systemctl.run(&["daemon-reload"])?;
         }
-        let target = self.paths.install_dir.join(plugin_id);
+        let target = plugin_install_target(&self.paths.install_dir, plugin_id)?;
         if target.exists() {
             std::fs::remove_dir_all(&target)?;
         }
@@ -878,6 +878,24 @@ pub fn require_signed_default() -> bool {
     }
 }
 
+/// The plugin's unpacked dir: a direct child of `install_dir` named by the id.
+///
+/// The install path runs `remove_dir_all` on this and then unpacks into it, as
+/// root, so an id that is absolute, carries a separator, or walks up with `..`
+/// would aim both at an arbitrary host directory. The manifest parser already
+/// refuses such an id; this is the check at the point of use, so no id that
+/// reaches here some other way can widen the blast radius past one plugin dir.
+fn plugin_install_target(install_dir: &Path, plugin_id: &str) -> Result<PathBuf, SupervisorError> {
+    let mut components = Path::new(plugin_id).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) => Ok(install_dir.join(name)),
+        _ => Err(SupervisorError(format!(
+            "plugin id {plugin_id:?} does not name a directory under {}",
+            install_dir.display()
+        ))),
+    }
+}
+
 /// Bounded semver-range parser for the constraint vocabulary.
 ///
 /// Supports comma-separated atoms each of the form `<op><semver>` where op is
@@ -964,7 +982,7 @@ mod tests {
             unit_dir: dir.join("units"),
             state_path: dir.join("state/plugin-state.json"),
             log_dir: dir.join("logs"),
-            socket_dir: dir.join("sockets"),
+            control_dir: dir.join("plugin-host"),
         }
     }
 
@@ -1045,6 +1063,28 @@ mod tests {
             Some(v) => std::env::set_var("ADOS_PLUGIN_REQUIRE_SIGNED", v),
             None => std::env::remove_var("ADOS_PLUGIN_REQUIRE_SIGNED"),
         }
+    }
+
+    #[test]
+    fn the_install_target_is_always_a_direct_child_of_the_install_dir() {
+        let install_dir = Path::new("/var/ados/plugins");
+        for id in [
+            "../../etc",
+            "/etc",
+            "com.example/../../etc",
+            "a/b",
+            "..",
+            ".",
+            "",
+        ] {
+            assert!(
+                plugin_install_target(install_dir, id).is_err(),
+                "id {id:?} must not resolve to an install target"
+            );
+        }
+        let target = plugin_install_target(install_dir, "com.example.thermal").unwrap();
+        assert_eq!(target, install_dir.join("com.example.thermal"));
+        assert_eq!(target.parent(), Some(install_dir));
     }
 
     #[test]

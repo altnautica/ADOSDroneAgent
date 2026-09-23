@@ -16,19 +16,18 @@
 //! `mcp.token_accept_enabled` config flag (default off), which `status` reports so
 //! an operator sees whether a minted token would actually be honored yet.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use ados_protocol::pairing_posture::{constant_time_eq, Pairing};
+use ados_protocol::pairing_posture::{constant_time_eq, CallerClass, Pairing};
 
 use crate::config::{ControlSecurityConfig, PairingConfig};
 use crate::mcp::{MintError, MintRequest};
 use crate::routes::detail;
-use crate::serve::ONBOX_HEADER;
 use crate::state::AppState;
 
 /// Default token lifetime (ms) when the mint body omits `ttl_ms`: 30 days.
@@ -85,12 +84,13 @@ pub struct MintBody {
 /// `X-ADOS-Key`. Returns `{token, expires_at}`; the token is shown ONCE.
 pub async fn mint_mcp_token(
     State(state): State<AppState>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Json(body): Json<MintBody>,
 ) -> Response {
     let pairing = state.pairing.current();
-    // The edge stamps a trustworthy on-box header (stripped-then-set).
-    let on_box = header(&headers, ONBOX_HEADER).as_deref() == Some("1");
+    // The caller class the edge computed (the Unix edge stamps on-box).
+    let on_box = matches!(caller, Some(Extension(CallerClass::OnBox)));
     let key_valid = match (&pairing, header(&headers, "x-ados-key")) {
         (Pairing::Paired(k), Some(key)) => constant_time_eq(key.as_bytes(), k.as_bytes()),
         _ => false,

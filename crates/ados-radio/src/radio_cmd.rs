@@ -144,14 +144,14 @@ fn parse_command(line: &[u8]) -> Parsed {
 
 /// Bind the command socket and serve one-shot requests until the listener
 /// errors. Run as its own task from the service main loop. The shared helper
-/// owns the create-dir / remove-stale / bind / chmod hygiene; [`set_socket_perms`]
-/// then hands group ownership to the `ados` group so a non-root operator (the API
-/// service) can write it. Each connection is one newline-terminated request ->
-/// one newline-terminated response (the trailing newline is added by the shared
-/// serve loop; the handler returns the response body).
+/// owns the create-dir / remove-stale / bind / chmod hygiene, group-owns the
+/// socket to `ados-operator`, and admits only root and operator-group peers, so
+/// a plugin cannot hop the radio channel. Each connection is one
+/// newline-terminated request -> one newline-terminated response (the trailing
+/// newline is added by the shared serve loop; the handler returns the response
+/// body).
 pub async fn serve(state: CmdState, sock_path: &Path) -> std::io::Result<()> {
     let listener = bind_command_socket(sock_path, 0o660)?;
-    set_socket_perms(sock_path);
     tracing::info!(path = %sock_path.display(), "radio command socket listening");
 
     serve_rpc(listener, MAX_REQUEST_BYTES, move |req: Vec<u8>| {
@@ -165,30 +165,6 @@ pub async fn serve(state: CmdState, sock_path: &Path) -> std::io::Result<()> {
     .await;
     Ok(())
 }
-
-/// 0o660 + group-own to `ados` so a non-root operator in that group can reach
-/// the trusted local plane. The mode only grants the group once the group
-/// actually owns the file, so both steps are required. Best-effort: an absent
-/// group (a dev host) is a quiet no-op. Linux-only.
-#[cfg(target_os = "linux")]
-fn set_socket_perms(sock_path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o660));
-    match nix::unistd::Group::from_name("ados") {
-        Ok(Some(g)) => {
-            if let Err(err) = nix::unistd::chown(sock_path, None, Some(g.gid)) {
-                tracing::debug!(error = %err, path = %sock_path.display(), "chgrp radio command socket failed");
-            }
-        }
-        Ok(None) => tracing::debug!("ados group not present; leaving socket group as-is"),
-        Err(err) => tracing::debug!(error = %err, "resolving ados group failed"),
-    }
-}
-
-/// Non-Linux: socket group ownership is a Linux-only concern (the service runs
-/// on the target SBC). A no-op so the dev-host build links.
-#[cfg(not(target_os = "linux"))]
-fn set_socket_perms(_sock_path: &Path) {}
 
 /// Parse + route one request. The parse half is pure (covered by tests); a
 /// `hop` is forwarded to the supervisor and the verdict awaited, a `status`

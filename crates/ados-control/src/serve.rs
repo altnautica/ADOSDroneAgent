@@ -3,20 +3,24 @@
 //! The same Router is bound on two edges, mirroring the logging store's read
 //! surface:
 //!
-//! 1. **The trusted local Unix socket** (`0o660`, tmpfs). No auth, no rate
-//!    limit: anything on-box that can open the socket is inside the trust
-//!    boundary, and this path keeps working even if the LAN edge is gated. The
-//!    GCS does not use it; the on-box CLI does.
+//! 1. **The trusted local Unix socket** (`0o660 root:ados-operator`, tmpfs). No
+//!    auth, no rate limit: only root and members of the operator group can open
+//!    it, every accept re-checks the peer's kernel credentials, and this path
+//!    keeps working even if the LAN edge is gated. Plugins run outside the
+//!    operator group. The GCS does not use it; the on-box CLI does.
 //! 2. **A LAN TCP port.** The auth layer mirrors the agent's HTTP posture:
-//!    unpaired ⇒ open, paired ⇒ `X-ADOS-Key` required, with on-box loopback
-//!    trust and a token-bucket rate limit guarding the edge.
+//!    unpaired ⇒ served by caller class (lifelines open, the operator LAN
+//!    behind a dashboard PIN, remote callers refused), paired ⇒ `X-ADOS-Key`
+//!    required, with on-box loopback trust and a token-bucket rate limit
+//!    guarding the edge.
 //!
-//! The one difference from the logd listener is the peer address: the LAN edge
-//! threads the accepted connection's [`SocketAddr`] into the request as an
-//! extension so the auth middleware can grant on-box loopback trust to a request
-//! arriving over loopback TCP (the local CLI hitting `127.0.0.1:<port>` rather
-//! than the Unix socket). The Unix edge carries no peer address — it is trusted
-//! outright and never installs the auth layer.
+//! The one difference from the logd listener is the caller: the LAN edge
+//! threads the accepted connection's [`SocketAddr`] into the request, and the
+//! edge middleware classifies it once per request into a
+//! [`CallerClass`] (peer address plus forwarding headers) that every gate and
+//! handler then reads as a request extension. The Unix edge stamps
+//! [`CallerClass::OnBox`] — its trust is the socket's group and the per-accept
+//! peer check, and it never installs the auth layer.
 
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -34,7 +38,7 @@ use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tower::{Service, ServiceBuilder};
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
@@ -44,32 +48,40 @@ use crate::config::{ControlSecurityConfig, PairingConfig};
 use crate::mcp::{route_scope, McpTokenStore, MCP_SCOPES_HEADER, MCP_TOKEN_HEADER};
 use crate::proxy_auth::{BodyField, Decision, ProxiedAuth, RequestHeaders};
 use crate::routes::detail;
+use ados_protocol::ipc::OperatorListener;
 use ados_protocol::mcp_token::scope_allows_class;
+use ados_protocol::pairing_posture::{classify_caller, CallerClass};
 use ados_protocol::ws_ticket::{now_unix, WsTicketIssuer};
 
 /// The header the front stamps on a request that passes its on-box loopback
 /// check, so the residual Python (which does not see the TCP peer) can honour the
 /// same on-box trust the native edge applies. It is STRIPPED from every inbound
-/// request first, then set only when the front's own check passes, so a value
-/// arriving from off-box can never be spoofed in. See [`tcp_edge`]. Public so a
-/// native handler (e.g. the dashboard-PIN set route) can read the trustworthy
-/// on-box signal the edge stamped.
+/// request first, then set only when the edge classified the caller
+/// [`CallerClass::OnBox`], so a value arriving from off-box can never be spoofed
+/// in. See [`tcp_edge`]. Native handlers read the [`CallerClass`] request
+/// extension instead.
 pub const ONBOX_HEADER: &str = "x-ados-onbox";
 
-/// The peer address of the accepted connection, attached to each LAN-edge
-/// request as an extension so the auth middleware can apply on-box loopback
-/// trust. Absent on the Unix edge (which is trusted outright).
-///
-/// `pub`, not `pub(crate)`, because route handlers extract it as an axum
-/// `Extension` and a handler's signature is part of its public type — the
-/// dashboard-PIN route needs the peer to decide who may claim an unset PIN,
-/// and a private type in a `pub fn` signature is a `private_interfaces`
-/// warning that fails a `-D warnings` gate.
+/// The peer address of the accepted TCP connection, attached to each LAN-edge
+/// request as an extension so [`tcp_edge`] can classify the caller. Absent on
+/// the Unix edge.
 ///
 /// It cannot be forged: the accept loop inserts it from the real socket, and
 /// nothing reads it from a header.
 #[derive(Clone, Copy, Debug)]
-pub struct PeerAddr(pub SocketAddr);
+pub(crate) struct PeerAddr(pub SocketAddr);
+
+/// Which listener a connection arrived on, so [`serve_conn`] stamps the right
+/// caller evidence on every request it carries.
+#[derive(Clone, Copy, Debug)]
+enum ConnEdge {
+    /// The operator Unix socket: only root and operator-group peers reach it,
+    /// so every request on it is [`CallerClass::OnBox`].
+    Unix,
+    /// The LAN TCP front: the peer address is stamped and [`tcp_edge`]
+    /// classifies the caller per request (it needs the request's headers).
+    Tcp(SocketAddr),
+}
 
 /// Per-edge auth state attached to the TCP layer. The Unix listener does not
 /// install the layer at all, so on-box callers are never gated.
@@ -187,20 +199,17 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         }
     };
 
-    // On-box loopback trust: a request whose peer is loopback and that carries no
-    // proxy-forwarding header is the local operator (the `ados` CLI over
-    // `127.0.0.1:<port>`), who already holds shell-level privilege that exceeds
-    // API auth. A tunnel terminating on loopback is excluded by the
-    // forwarding-header check. This mirrors the FastAPI `_is_on_box` contract.
-    let peer_is_loopback = request
-        .extensions()
-        .get::<PeerAddr>()
-        .map(|p| p.0.ip().is_loopback())
-        .unwrap_or(false);
-    let has_forwarding_header = auth::FORWARDED_HEADERS
-        .iter()
-        .any(|h| request.headers().contains_key(*h));
-    let on_box = auth::is_on_box(peer_is_loopback, has_forwarding_header);
+    // Classify the caller ONCE, from the peer address and the forwarding
+    // headers, and hand the one value to every gate below and to every handler
+    // (as a request extension, overwriting anything already there). A loopback
+    // peer with no forwarding header is the local operator (the `ados` CLI over
+    // `127.0.0.1:<port>`); any request that carries a forwarding header was
+    // relayed by a proxy or tunnel and is remote, wherever its socket says it
+    // came from.
+    let peer_ip = request.extensions().get::<PeerAddr>().map(|p| p.0.ip());
+    let caller = classify_caller(peer_ip, |h| request.headers().contains_key(h));
+    request.extensions_mut().insert(caller);
+    let on_box = caller == CallerClass::OnBox;
 
     // A request that crossed the radio relay arrives on loopback, so it is
     // on-box by the check above. That is deliberate and load-bearing — a fleet
@@ -228,36 +237,37 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         );
     }
 
-    // While UNPAIRED the node answers every route to anyone, flight control
-    // included, for as long as it stays unpaired. Narrow that to the peers a
-    // fresh device is actually reached from.
+    // While UNPAIRED the node would answer every route to anyone, flight
+    // control included, for as long as it stays unpaired. Narrow that by caller:
+    // the local operator and the first-boot lifelines are served, an
+    // operator-LAN browser needs a dashboard PIN session for data, and a remote
+    // caller gets neither the data nor the claim that would hand it the key.
     //
-    // Public paths stay open to everyone deliberately: `/api/pairing/{info,code,
-    // claim}` is how a device is claimed over the LAN, which is the documented
-    // local-first flow. Refusing those would trade an exposure for an
-    // unpairable device. So the LAN can still discover and claim; what it can no
-    // longer do while unpaired is fly the aircraft or rewrite its config.
+    // The other public paths stay open to everyone deliberately:
+    // `/api/pairing/{info,code}` is how a device is discovered over the LAN, and
+    // the claim stays open to every caller on the device's own networks, which
+    // is the documented local-first flow.
     //
     // Checked before the native/proxied split so it covers both surfaces, and
     // read per request through the TTL-cached pairing state, so the posture
     // widens the moment the device is paired and narrows again on unpair with no
     // restart — which a bind-time decision cannot do. See
-    // `pairing_posture::unpaired_peer_allowed` for why this is not a bind.
+    // `pairing_posture::CallerClass` for why this is not a bind.
     // The operator's own UI is allowed through alongside the public routes. It
     // serves no data — every `/api/*` call it then makes is refused exactly as
     // before — but withholding the shell left an unpaired node unable to show
     // the operator its own pairing code, and left a browser that already had an
     // old copy with no way to fetch a newer one.
-    let peer_ip = request.extensions().get::<PeerAddr>().map(|p| p.0.ip());
     let unpaired = matches!(
         edge.pairing.current(),
         ados_protocol::pairing_posture::Pairing::Unpaired
     );
-    match auth::unpaired_decision(&path, unpaired, peer_ip) {
+    match auth::unpaired_decision(&path, unpaired, caller) {
         auth::UnpairedDecision::Refuse => {
             tracing::warn!(
                 path = %path,
                 peer = ?peer_ip,
+                ?caller,
                 "unpaired_peer_refused"
             );
             return detail(
@@ -689,17 +699,11 @@ pub fn tcp_app(
     )
 }
 
-/// Bind the Unix listener, removing a stale socket and tightening the mode to
-/// `0o660` on Linux so only the agent group can reach the trusted plane.
-pub fn bind_unix(path: &Path) -> std::io::Result<UnixListener> {
-    // The shared helper owns the create-dir / remove-stale / bind / chmod
-    // (0o660) hygiene; group-owning to `ados` afterward keeps the mode's
-    // group-rw grant reaching a non-root operator (a chown does not clear the rw
-    // bits, so the final owner+group+mode state is unchanged).
-    let listener = ados_protocol::ipc::bind_command_socket(path, 0o660)?;
-    #[cfg(target_os = "linux")]
-    crate::set_ados_group(path);
-    Ok(listener)
+/// Bind the Unix listener through the shared command-plane helper: stale socket
+/// removed, mode `0o660`, group `ados-operator`, and a peer-credential check on
+/// every accept, so only root and the operator group reach the trusted plane.
+pub fn bind_unix(path: &Path) -> std::io::Result<OperatorListener> {
+    ados_protocol::ipc::bind_command_socket(path, 0o660)
 }
 
 /// Bind the LAN TCP front on the given port across BOTH address families: one
@@ -760,8 +764,9 @@ fn bind_one(domain: Domain, port: u16, v6only: bool) -> std::io::Result<TcpListe
 /// Serve the Router on the Unix listener: accept connections and hand each to
 /// hyper with the axum service, until the stop signal fires. Each connection is
 /// driven on its own task so one slow client cannot stall the accept loop. The
-/// Unix edge carries no peer address (it is trusted outright).
-pub async fn serve_unix(listener: UnixListener, app: Router, stop: oneshot::Receiver<()>) {
+/// listener admits only root and operator-group peers; the Unix edge carries no
+/// peer address.
+pub async fn serve_unix(listener: OperatorListener, app: Router, stop: oneshot::Receiver<()>) {
     tokio::pin!(stop);
     loop {
         tokio::select! {
@@ -770,7 +775,7 @@ pub async fn serve_unix(listener: UnixListener, app: Router, stop: oneshot::Rece
                 match accepted {
                     Ok((stream, _addr)) => {
                         let app = app.clone();
-                        tokio::spawn(serve_conn(TokioIo::new(stream), app, None));
+                        tokio::spawn(serve_conn(TokioIo::new(stream), app, ConnEdge::Unix));
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "control unix accept failed");
@@ -784,8 +789,7 @@ pub async fn serve_unix(listener: UnixListener, app: Router, stop: oneshot::Rece
 
 /// Serve the Router on the TCP listener, mirroring the unix accept loop. Unlike
 /// the logd listener, the accepted peer address is threaded into each connection
-/// so the auth middleware can grant on-box loopback trust to a request arriving
-/// over loopback TCP.
+/// so the edge middleware can classify the caller.
 pub async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiver<()>) {
     tokio::pin!(stop);
     loop {
@@ -795,7 +799,7 @@ pub async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiv
                 match accepted {
                     Ok((stream, peer)) => {
                         let app = app.clone();
-                        tokio::spawn(serve_conn(TokioIo::new(stream), app, Some(peer)));
+                        tokio::spawn(serve_conn(TokioIo::new(stream), app, ConnEdge::Tcp(peer)));
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "control tcp accept failed");
@@ -808,22 +812,28 @@ pub async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiv
 }
 
 /// Drive one accepted connection through hyper with the axum service. Generic
-/// over the IO so the same code serves a Unix stream and a TCP stream. When a
-/// `peer` is given (the TCP edge), it is inserted as a request extension so the
-/// auth middleware can read it; the Unix edge passes `None`.
-async fn serve_conn<I>(io: TokioIo<I>, app: Router, peer: Option<SocketAddr>)
+/// over the IO so the same code serves a Unix stream and a TCP stream. The TCP
+/// edge stamps the peer address for [`tcp_edge`] to classify; the Unix edge
+/// stamps [`CallerClass::OnBox`] directly, since its listener already admitted
+/// only root and operator-group peers.
+async fn serve_conn<I>(io: TokioIo<I>, app: Router, edge: ConnEdge)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     // Bridge the axum Router (a tower Service over axum's Request) to hyper's
-    // service over `Incoming` request bodies, stamping the peer address on the
-    // request so the LAN-edge middleware can apply loopback trust.
+    // service over `Incoming` request bodies, stamping the caller evidence on
+    // every request.
     let svc = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
         let mut app = app.clone();
         async move {
             let mut req = req.map(Body::new);
-            if let Some(addr) = peer {
-                req.extensions_mut().insert(PeerAddr(addr));
+            match edge {
+                ConnEdge::Unix => {
+                    req.extensions_mut().insert(CallerClass::OnBox);
+                }
+                ConnEdge::Tcp(addr) => {
+                    req.extensions_mut().insert(PeerAddr(addr));
+                }
             }
             // Router implements Service<Request<Body>>; readiness is immediate.
             let response = app.call(req).await?;
@@ -837,6 +847,9 @@ where
         tracing::debug!(error = %e, "control connection ended");
     }
 }
+
+#[cfg(test)]
+mod caller_tests;
 
 #[cfg(test)]
 mod tests {

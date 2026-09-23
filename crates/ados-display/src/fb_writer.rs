@@ -449,32 +449,51 @@ mod tests {
         VirtualSink::open(&path).write_frame(&small).unwrap();
 
         let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let small_seen = std::sync::Arc::new(AtomicBool::new(false));
+        let large_seen = std::sync::Arc::new(AtomicBool::new(false));
         let reader = {
             let (path, stop) = (path.clone(), stop.clone());
+            let (small_seen, large_seen) = (small_seen.clone(), large_seen.clone());
             std::thread::spawn(move || {
-                let (mut small_seen, mut large_seen) = (false, false);
                 while !stop.load(Ordering::Relaxed) {
                     if let Ok(bytes) = std::fs::read(&path) {
                         match bytes.len() {
-                            64 => small_seen = true,
-                            4096 => large_seen = true,
+                            64 => small_seen.store(true, Ordering::Relaxed),
+                            4096 => large_seen.store(true, Ordering::Relaxed),
                             other => panic!("torn read: length {other} is neither full frame"),
                         }
                     }
                 }
-                (small_seen, large_seen)
             })
         };
 
+        // Keep writing until the reader has observed both frame sizes (or a
+        // generous deadline passes), so a loaded test runner that schedules the
+        // reader late still exercises the race instead of failing on timing.
         let mut sink = VirtualSink::open(&path);
-        for i in 0..400 {
-            sink.write_frame(if i % 2 == 0 { &large } else { &small })
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut i = 0u64;
+        while !(small_seen.load(Ordering::Relaxed) && large_seen.load(Ordering::Relaxed))
+            && std::time::Instant::now() < deadline
+        {
+            sink.write_frame(if i.is_multiple_of(2) { &large } else { &small })
                 .unwrap();
+            i += 1;
+        }
+        // A few hundred more writes with the reader live, so the torn-read
+        // check runs against a sustained writer, not just the first switch.
+        for j in 0..400u64 {
+            sink.write_frame(if (i + j).is_multiple_of(2) {
+                &large
+            } else {
+                &small
+            })
+            .unwrap();
         }
         stop.store(true, Ordering::Relaxed);
-        let (small_seen, large_seen) = reader.join().unwrap();
+        reader.join().expect("reader saw only complete frames");
         assert!(
-            small_seen && large_seen,
+            small_seen.load(Ordering::Relaxed) && large_seen.load(Ordering::Relaxed),
             "the reader observed both complete frames"
         );
     }

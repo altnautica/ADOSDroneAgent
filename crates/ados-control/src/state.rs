@@ -363,26 +363,32 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    /// The autopilot family the FC advertises, read from the live state
-    /// snapshot's `autopilot` field (the `HEARTBEAT.autopilot` wire value the
-    /// MAVLink service records). The command route uses it to pick the mode
-    /// encoding: `12` is PX4 (its own packed `(main, sub)` scheme), anything else
-    /// is treated as ArduPilot (the copter mode table). An absent snapshot or a
-    /// missing field reads `0` (unknown → the ArduPilot default path).
-    pub fn autopilot(&self) -> i64 {
-        self.state
-            .snapshot()
-            .as_ref()
-            .and_then(serde_json::Value::as_object)
-            .and_then(|m| m.get("autopilot"))
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0)
+    /// The FC's identity from its `HEARTBEAT`, read from the live state
+    /// snapshot's `autopilot` and `mav_type` fields in one read so the two always
+    /// come from the same heartbeat. The command route uses it to pick the mode
+    /// encoding: `autopilot == 12` is PX4 (its own packed `(main, sub)` scheme);
+    /// anything else is ArduPilot, whose mode numbers depend on the vehicle type.
+    /// An absent snapshot or a missing field reads `0` (unknown).
+    pub fn fc_identity(&self) -> FcIdentity {
+        let snapshot = self.state.snapshot();
+        let field = |key: &str| {
+            snapshot
+                .as_ref()
+                .and_then(serde_json::Value::as_object)
+                .and_then(|m| m.get(key))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0)
+        };
+        FcIdentity {
+            autopilot: field("autopilot"),
+            mav_type: field("mav_type"),
+        }
     }
 
     /// Whether the connected FC speaks MSP (Betaflight / iNav) rather than
     /// MAVLink, read from the same snapshot the status route already surfaces.
     ///
-    /// This matters because [`Self::autopilot`] cannot tell the difference. An
+    /// This matters because [`Self::fc_identity`] cannot tell the difference. An
     /// MSP flight controller never sends a HEARTBEAT, so `autopilot` reads its
     /// absent-field default of `0` — indistinguishable from an ArduPilot board
     /// that simply has not been identified yet. Without this check the command
@@ -396,6 +402,14 @@ impl AppState {
     pub fn fc_speaks_msp(&self) -> bool {
         snapshot_says_msp(self.state.snapshot().as_ref())
     }
+}
+
+/// The `HEARTBEAT.autopilot` and `HEARTBEAT.type` (MAV_TYPE) wire values of the
+/// connected FC, `0` when unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FcIdentity {
+    pub autopilot: i64,
+    pub mav_type: i64,
 }
 
 /// The pure half of [`AppState::fc_speaks_msp`], over a state snapshot.

@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ados_protocol::state::encode_v2;
-use ados_swarmbus::publish::{COUNTER_KEYS, NEIGHBOR_KEYS};
+use ados_swarmbus::publish::{COUNTER_KEYS, NEIGHBOR_KEYS, PAYLOAD_KEYS};
 use ados_swarmbus::SwarmBusConfig;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -113,15 +113,17 @@ async fn the_service_publishes_the_contract_without_a_working_radio() {
         assert_eq!(first["counters"][k], json!(0), "{k} must be zero");
     }
     // The contract's key sets are present and complete even with an empty table.
-    let keys: Vec<&str> = first
+    let keys: std::collections::BTreeSet<&str> = first
         .as_object()
         .unwrap()
         .keys()
         .map(String::as_str)
         .collect();
+    assert_eq!(keys, PAYLOAD_KEYS.into_iter().collect());
     assert_eq!(
-        keys,
-        vec!["counters", "fleet_id", "neighbors", "slot", "slots"]
+        first["slot_conflict"],
+        json!(false),
+        "a ground station never has one"
     );
     for k in COUNTER_KEYS {
         assert!(first["counters"].get(k).is_some(), "counters missing {k}");

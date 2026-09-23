@@ -82,13 +82,23 @@ fn default_ws_proxy_enforce_auth() -> bool {
 /// the `X-ADOS-Key` header for a native client and the `ados-ws-ticket`
 /// subprotocol for a browser. The raw edges have NEITHER -- there is no
 /// handshake and no header on a MAVLink byte stream, so
-/// [`crate::proxies::WsProxyAuth::classify`] presents no key at all. On a
-/// PAIRED node, enforcing there makes every off-box peer unauthorized with no
-/// remedy available on the client side, and the published documentation tells
-/// operators these ports are credential-free precisely so a desktop GCS can
-/// attach. Turning it on is therefore a deliberate lockdown of the third-party
-/// GCS path, not a hardening default.
+/// [`crate::proxies::WsProxyAuth::classify`] presents no key at all. Where
+/// this flag decides anything is the unpaired node's non-lifeline peers and a
+/// paired node whose raw edges were opened with
+/// [`default_raw_proxy_lan_access`]; turning it on refuses both.
 fn default_raw_proxy_enforce_auth() -> bool {
+    false
+}
+/// Whether the raw byte-stream proxies (TCP 5760, UDP 14550) serve off-box
+/// peers on a PAIRED node.
+///
+/// Off. Those edges carry no credential channel, so a paired node that serves
+/// them to the LAN hands flight control to any host on it and makes the
+/// pairing key protect nothing. Closed, a paired node's raw proxies serve
+/// on-box callers only. An operator who attaches a desktop ground station
+/// (QGroundControl, Mission Planner) over the LAN opts in here, deliberately
+/// and on record in their config.
+fn default_raw_proxy_lan_access() -> bool {
     false
 }
 /// Whether a client whose origin could not be authenticated is REFUSED the
@@ -169,11 +179,14 @@ pub struct MavlinkConfig {
     /// When true, the raw byte-stream proxies (TCP 5760, UDP 14550) refuse an
     /// unauthorized peer instead of logging it and serving it anyway. False by
     /// default: unlike the WebSocket, these edges carry no credential channel
-    /// at all, so enforcement on a paired node refuses every off-box GCS with
-    /// nothing the client can do about it. See
-    /// [`default_raw_proxy_enforce_auth`].
+    /// at all. See [`default_raw_proxy_enforce_auth`].
     #[serde(default = "default_raw_proxy_enforce_auth")]
     pub raw_proxy_enforce_auth: bool,
+    /// When true, a PAIRED node's raw byte-stream proxies serve off-box peers
+    /// (subject to [`Self::raw_proxy_enforce_auth`]); when false (the default)
+    /// they serve on-box callers only. See [`default_raw_proxy_lan_access`].
+    #[serde(default = "default_raw_proxy_lan_access")]
+    pub raw_proxy_lan_access: bool,
     /// When true, a client this router could not authenticate is refused the
     /// aux-radio uplink instead of being logged and relayed anyway. False by
     /// default. The `Relayed` origin is exempt under both settings -- it names
@@ -278,6 +291,7 @@ impl Default for MavlinkConfig {
             endpoints: default_endpoints(),
             ws_proxy_enforce_auth: default_ws_proxy_enforce_auth(),
             raw_proxy_enforce_auth: default_raw_proxy_enforce_auth(),
+            raw_proxy_lan_access: default_raw_proxy_lan_access(),
             aux_uplink_enforce_origin: default_aux_uplink_enforce_origin(),
             legacy_stream_request: default_legacy_stream_request(),
             crsf_device: String::new(),
@@ -460,12 +474,17 @@ impl MavlinkConfig {
         }
     }
 
-    /// The first enabled WebSocket endpoint port, if any (the proxy bind port).
-    pub fn websocket_port(&self) -> Option<u16> {
+    /// The first enabled WebSocket endpoint, if any (the proxy's bind host and
+    /// port).
+    pub fn websocket_endpoint(&self) -> Option<&EndpointConfig> {
         self.endpoints
             .iter()
             .find(|e| e.enabled && e.kind == "websocket")
-            .map(|e| e.port)
+    }
+
+    /// The first enabled WebSocket endpoint port, if any (the proxy bind port).
+    pub fn websocket_port(&self) -> Option<u16> {
+        self.websocket_endpoint().map(|e| e.port)
     }
 }
 
@@ -629,9 +648,8 @@ mod tests {
     #[test]
     fn raw_proxy_enforce_auth_defaults_off() {
         // The opposite default from the WebSocket, and deliberately so: the raw
-        // edges carry no credential channel, so enforcement there refuses every
-        // off-box GCS on a paired node with no client-side remedy. A missing
-        // file and a config that omits the flag must both leave it off.
+        // edges carry no credential channel. A missing file and a config that
+        // omits the flag must both leave it off.
         let dir = tempfile::tempdir().unwrap();
         assert!(!MavlinkConfig::load_from(&dir.path().join("nope.yaml")).raw_proxy_enforce_auth);
         let cfg = dir.path().join("config.yaml");
@@ -640,6 +658,19 @@ mod tests {
         // The two edges are separately controlled: turning the raw one on must
         // not be reachable by accident from the WebSocket's own default.
         assert!(MavlinkConfig::load_from(&cfg).ws_proxy_enforce_auth);
+    }
+
+    #[test]
+    fn a_paired_nodes_raw_edges_stay_closed_to_the_lan_unless_opted_in() {
+        // A node whose config never mentions the key keeps its raw proxies
+        // on-box once paired; serving them to the LAN is a recorded choice.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!MavlinkConfig::load_from(&dir.path().join("nope.yaml")).raw_proxy_lan_access);
+        let cfg = dir.path().join("config.yaml");
+        write(&cfg, "mavlink:\n  raw_proxy_enforce_auth: false\n");
+        assert!(!MavlinkConfig::load_from(&cfg).raw_proxy_lan_access);
+        write(&cfg, "mavlink:\n  raw_proxy_lan_access: true\n");
+        assert!(MavlinkConfig::load_from(&cfg).raw_proxy_lan_access);
     }
 
     #[test]

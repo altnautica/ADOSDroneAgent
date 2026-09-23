@@ -786,6 +786,11 @@ impl BindOrchestrator {
         if role == BindRole::Drone {
             self.pm.restart("ados-video.service").await;
         }
+        // A bind attempt cycles the adapter's monitor mode and, on a ground
+        // station, regenerates the shared key file the swarm bus derives its key
+        // from. Restart it with the radio so it is back on the live adapter and
+        // the key on disk.
+        self.pm.restart(super::ADOS_SWARMBUS_UNIT).await;
         // Heal the global reg domain on the way out: a failed/cancelled/watchdog
         // retry cycled the bind unit's monitor mode and may have left the baked
         // country as the global domain. Without this, a retrying bind re-poisons

@@ -27,6 +27,12 @@
 //!   data roots are `InaccessiblePaths`; granted, they become writable and
 //!   `ProtectHome` relaxes to read-only.
 //!
+//! Independent of any grant, the agent's own command sockets are
+//! `InaccessiblePaths` too ([`AGENT_SOCKET_PATHS`]). Their real gate is the
+//! socket group (`ados-operator`, which the plugin user is never in) plus a
+//! peer-credential check on accept; hiding them from the plugin's mount
+//! namespace is the second line.
+//!
 //! Two invariants this file exists to hold:
 //!
 //! 1. The map is **byte-identical** to `ados.plugins.systemd` on the Python
@@ -86,6 +92,36 @@ pub const FILESYSTEM_HOST_CAP: &str = "filesystem.host";
 /// enrol its own signer into. File modes already keep `ados` out of both; this
 /// is the second line, and it costs one line of unit text.
 pub const ALWAYS_INACCESSIBLE: &[&str] = &["/etc/ados/secrets", "/etc/ados/plugin-keys"];
+
+/// Agent command sockets, and the plugin host's control dir, hidden from every
+/// plugin. Each is a command surface that acts with the agent's authority
+/// rather than the plugin's grants (the control plane, the flight-controller
+/// byte lanes, the radio / video / GPIO / input command sockets). A plugin
+/// reaches the ones it is granted through its own host socket, which gates
+/// every call on its token. Prefixed `-` like the other entries, so a socket a
+/// host does not run is not a unit-start failure.
+pub const AGENT_SOCKET_PATHS: &[&str] = &[
+    "/run/ados/plugin-host",
+    "/run/ados/control.sock",
+    "/run/ados/api-internal.sock",
+    "/run/ados/mavlink.sock",
+    "/run/ados/msp.sock",
+    "/run/ados/supervisor.sock",
+    "/run/ados/radio-cmd.sock",
+    "/run/ados/radio-aux.sock",
+    "/run/ados/wfb-cmd.sock",
+    "/run/ados/video-cmd.sock",
+    "/run/ados/gpio-cmd.sock",
+    "/run/ados/hid-cmd.sock",
+    "/run/ados/pic.sock",
+    "/run/ados/crsf-cmd.sock",
+    "/run/ados/wifi-cmd.sock",
+    "/run/ados/groundlink-cmd.sock",
+    "/run/ados/tunnel-config-cmd.sock",
+    "/run/ados/atlas-control.sock",
+    "/run/ados/pairing.sock",
+    "/run/ados/logd-query.sock",
+];
 
 /// Operator data roots reachable only with `filesystem.host`. Every entry is
 /// prefixed `-` in the rendered directive so a host that does not have the path
@@ -177,6 +213,7 @@ pub fn sandbox_directives(granted: &BTreeSet<String>) -> Vec<String> {
     );
     let mut inaccessible: Vec<String> = ALWAYS_INACCESSIBLE
         .iter()
+        .chain(AGENT_SOCKET_PATHS)
         .map(|p| format!("-{p}"))
         .collect();
     if !host_fs {
@@ -251,6 +288,42 @@ mod tests {
         // The issuer secret is off limits in both postures.
         assert!(inacc_without.contains("-/etc/ados/secrets"));
         assert!(inacc_with.contains("-/etc/ados/secrets"));
+    }
+
+    /// The no-grant `InaccessiblePaths=` line, restated as the literal the
+    /// Python renderer's test also pins, so the two renderers cannot drift.
+    const NO_GRANT_INACCESSIBLE: &str = "InaccessiblePaths=-/etc/ados/secrets \
+        -/etc/ados/plugin-keys -/run/ados/plugin-host -/run/ados/control.sock \
+        -/run/ados/api-internal.sock -/run/ados/mavlink.sock -/run/ados/msp.sock \
+        -/run/ados/supervisor.sock -/run/ados/radio-cmd.sock -/run/ados/radio-aux.sock \
+        -/run/ados/wfb-cmd.sock -/run/ados/video-cmd.sock -/run/ados/gpio-cmd.sock \
+        -/run/ados/hid-cmd.sock -/run/ados/pic.sock -/run/ados/crsf-cmd.sock \
+        -/run/ados/wifi-cmd.sock -/run/ados/groundlink-cmd.sock \
+        -/run/ados/tunnel-config-cmd.sock -/run/ados/atlas-control.sock \
+        -/run/ados/pairing.sock -/run/ados/logd-query.sock -/srv -/mnt -/media -/boot";
+
+    #[test]
+    fn agent_command_sockets_are_hidden_whatever_is_granted() {
+        let inaccessible = |granted: &BTreeSet<String>| {
+            sandbox_directives(granted)
+                .into_iter()
+                .find(|l| l.starts_with("InaccessiblePaths="))
+                .unwrap()
+        };
+        assert_eq!(inaccessible(&caps(&[])), NO_GRANT_INACCESSIBLE);
+
+        // Granting every sandbox capability reopens only the data roots.
+        let everything: Vec<&str> = sandbox_enforced_caps().into_iter().collect();
+        let all = inaccessible(&caps(&everything));
+        for path in AGENT_SOCKET_PATHS {
+            assert!(
+                all.contains(&format!(" -{path}")),
+                "{path} missing from {all}"
+            );
+        }
+        // The per-plugin socket dir stays reachable: the plugin's own host
+        // socket lives there.
+        assert!(!all.contains("/run/ados/plugins"), "{all}");
     }
 
     #[test]

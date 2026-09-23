@@ -9,6 +9,7 @@
 
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::broadcast;
@@ -31,7 +32,7 @@ const FANOUT_DEPTH: usize = 64;
 /// One fleet's swarm bus on one monitor interface.
 pub struct SwarmBus {
     radio: Radio,
-    cipher: SwarmCipher,
+    cipher: Arc<SwarmCipher>,
     fleet_id: u16,
     slot: u8,
     /// 802.11 sequence control, advanced per transmission so a driver cannot treat
@@ -42,17 +43,26 @@ pub struct SwarmBus {
 }
 
 impl SwarmBus {
-    /// Open the bus on `iface` for `fleet_id`, as the node in `slot`, keyed by
-    /// `key`.
+    /// Open the bus on `iface` for `fleet_id`, as the node in `slot`, sealing and
+    /// opening with `cipher`.
+    ///
+    /// The cipher is supplied rather than built here so it outlives the socket: an
+    /// adapter flap reopens the bus with the same cipher, and this node keeps its
+    /// nonce prefix (its identity on the bus) and counter across the reopen.
     ///
     /// Fails when the interface is absent, is not in monitor mode, or the process
     /// lacks `CAP_NET_RAW` — all operational conditions the caller retries, since
     /// the radio manager may simply not have selected an adapter yet.
-    pub fn open(iface: &str, fleet_id: u16, slot: u8, key: &[u8; 32]) -> anyhow::Result<Self> {
+    pub fn open(
+        iface: &str,
+        fleet_id: u16,
+        slot: u8,
+        cipher: Arc<SwarmCipher>,
+    ) -> anyhow::Result<Self> {
         let radio = Radio::open(iface, fleet_id)?;
         Ok(Self {
             radio,
-            cipher: SwarmCipher::new(key),
+            cipher,
             fleet_id,
             slot,
             seq: AtomicU16::new(0),
@@ -149,8 +159,8 @@ mod tests {
     /// exhaustively in [`crate::ingest`], which needs no socket.
     #[test]
     fn opening_without_a_usable_radio_is_a_clean_error() {
-        let key = [0u8; 32];
-        let err = match SwarmBus::open("nonexistent-swarm-iface0", 1, 1, &key) {
+        let cipher = Arc::new(SwarmCipher::new(&[0u8; 32]));
+        let err = match SwarmBus::open("nonexistent-swarm-iface0", 1, 1, cipher) {
             Ok(_) => return,
             Err(e) => e,
         };

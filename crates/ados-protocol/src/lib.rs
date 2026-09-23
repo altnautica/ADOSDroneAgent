@@ -41,6 +41,8 @@
 //!   which frames received off-board (a ground station's radio lane) enter that
 //!   node's own frame fan-out. The mirror of the MAVLink socket's inbound path,
 //!   which travels toward a flight controller rather than away from one.
+//! - [`flight_modes`] — the ArduPilot flight-mode tables keyed by vehicle type,
+//!   shared by the router's mode decode and the control surface's mode encode.
 
 pub mod ap_country;
 pub mod atlas;
@@ -58,6 +60,7 @@ pub mod crypto;
 pub mod dashboard_session;
 pub mod dispatch;
 pub mod fleet_identity;
+pub mod flight_modes;
 pub mod frame;
 pub mod framebus;
 pub mod hwcaps;

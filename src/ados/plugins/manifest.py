@@ -36,6 +36,7 @@ from ados.plugins.capabilities import (
     is_known_gcs_capability,
 )
 from ados.plugins.errors import ManifestError
+from ados.plugins.ready_check import has_control_char, parse_ready_check
 
 log = get_logger("plugins.manifest")
 
@@ -170,9 +171,10 @@ class ServiceSpec(_StrictModel):
       ``ExecStart``; the plugin author is responsible for an absolute
       path or a binary on ``PATH``.
     * ``ready_check`` — how readiness is probed. ``None`` ⇒ the service
-      is ready iff its unit is active. A value that starts with
-      ``http://`` or ``https://`` ⇒ an HTTP GET, ready on a 2xx status.
-      Any other value ⇒ a shell command, ready on exit code 0.
+      is ready iff its unit is active. An ``http(s)://127.0.0.1:<port>``
+      URL ⇒ an HTTP GET, ready on a 2xx status. Any other value ⇒ an
+      argv (POSIX quoting, never a shell) run as the plugin user inside
+      the plugin's sandbox, ready on exit code 0.
     * ``restart`` — systemd restart policy for the unit.
     * ``slice`` — cgroup slice the unit runs in; defaults to the shared
       plugin slice so resource accounting stays grouped.
@@ -196,6 +198,17 @@ class ServiceSpec(_StrictModel):
                 f"service name {v!r} must be lowercase alnum plus ._- , "
                 "starting with an alnum"
             )
+        return v
+
+    @field_validator("ready_check")
+    @classmethod
+    def _validate_ready_check(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            parse_ready_check(v)
+        except ValueError as exc:
+            raise ManifestError(f"service ready_check {v!r} is invalid: {exc}") from exc
         return v
 
 
@@ -235,11 +248,18 @@ class AgentContributes(_StrictModel):
 
 
 def _validate_entrypoint(value: str) -> str:
-    """Reject path-traversal or absolute paths in entrypoint fields.
+    """Reject path-traversal, absolute paths, or control characters in
+    entrypoint fields.
 
     Module-id form (``module:Class``) passes through. Path form must
-    be relative and contain no ``..`` segments.
+    be relative and contain no ``..`` segments. Neither form may carry a
+    control character: an entrypoint is interpolated into a generated
+    unit file, where a newline starts a new directive.
     """
+    if has_control_char(value):
+        raise ManifestError(
+            f"entrypoint must not contain control characters, got {value!r}"
+        )
     if ":" in value:
         return value
     if value.startswith("/") or value.startswith("\\") or "\\" in value:

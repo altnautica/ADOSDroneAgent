@@ -1,12 +1,13 @@
 //! Dashboard-access PIN routes: `/api/dashboard/pin/{status,verify,set,clear}`.
 //!
-//! A paired agent's own web dashboard, reached from off-box (a phone/laptop on
-//! the LAN pasting `http://<node-ip>:8080`), has no `X-ADOS-Key`. Instead of the
-//! old raw-key prompt, the dashboard shows a branded PIN splash: the first LAN
-//! visitor SETS a PIN (trust-on-first-use, the same posture the pairing-claim
-//! flow takes), a returning visitor ENTERS it, and a correct PIN mints a scoped
+//! An agent's own web dashboard, reached from off-box (a phone/laptop on the
+//! LAN pasting `http://<node-ip>:8080`), has no `X-ADOS-Key`. Instead of a
+//! raw-key prompt, the dashboard shows a branded PIN splash: a returning
+//! visitor ENTERS the PIN, and a correct PIN mints a scoped
 //! [`ados_protocol::dashboard_session`] token the browser then sends on every
-//! `/api/*` call (the front accepts it alongside `X-ADOS-Key`).
+//! `/api/*` call (the front accepts it alongside `X-ADOS-Key`). The first PIN is
+//! set by the key holder or on the device once the node is paired, and by the
+//! first visitor on the device's own networks while it is not.
 //!
 //! Auth posture per route (the edge public-exempts status/verify/set so an
 //! off-box paired browser can reach them; clear stays behind the normal gate):
@@ -16,9 +17,11 @@
 //! - **verify** — public login: rate-limited by the shared limiter + the in-store
 //!   lockout ladder. A correct PIN returns a session.
 //! - **set** — public at the edge, AUTHORIZED IN THE HANDLER: on-box OR a valid
-//!   `X-ADOS-Key` OR a valid current session OR trust-on-first-use (no PIN
-//!   set yet AND the peer is on-box or on the operator's own LAN)
-//!   OR a matching `current_pin`. A change with none of those is `403`.
+//!   `X-ADOS-Key` OR a valid current session OR a matching `current_pin`, OR —
+//!   only while the node is UNPAIRED and no PIN is set yet — trust-on-first-use
+//!   from a first-boot lifeline or the operator's own LAN. A paired node's first
+//!   PIN is set by whoever holds its key (Mission Control) or on the device.
+//!   Anything else is `403`.
 //! - **clear** — NOT public: the normal gate already admits only on-box or a
 //!   valid credential (the GCS holds the key), which is exactly reset's audience.
 
@@ -30,11 +33,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use ados_protocol::dashboard_session::DashboardSession;
-use ados_protocol::pairing_posture::{constant_time_eq, Pairing};
+use ados_protocol::pairing_posture::{constant_time_eq, CallerClass, Pairing};
 
 use crate::dashboard_pin::{PinStatus, VerifyOutcome, DASHBOARD_SESSION_HEADER};
 use crate::routes::detail;
-use crate::serve::ONBOX_HEADER;
 use crate::state::AppState;
 
 /// `GET /api/dashboard/pin/status` → `{pin_set, locked, locked_until|null}`.
@@ -94,16 +96,16 @@ pub struct SetRequest {
 /// setter is immediately unlocked).
 pub async fn set_pin(
     State(state): State<AppState>,
-    peer: Option<Extension<crate::serve::PeerAddr>>,
+    caller: Option<Extension<CallerClass>>,
     headers: HeaderMap,
     Json(req): Json<SetRequest>,
 ) -> Response {
     let now = now_unix_seconds();
     let pairing = state.pairing.current();
+    // The caller class the edge computed (the Unix edge stamps on-box). A
+    // request that somehow carries none is treated as remote.
+    let caller = caller.map_or(CallerClass::Remote, |Extension(c)| c);
 
-    // The edge stamps a trustworthy on-box header (stripped-then-set) — the local
-    // operator at the device.
-    let on_box = header(&headers, ONBOX_HEADER).as_deref() == Some("1");
     // A valid pairing key (the GCS holds it).
     let key_valid = match (&pairing, header(&headers, "x-ados-key")) {
         (Pairing::Paired(k), Some(key)) => constant_time_eq(key.as_bytes(), k.as_bytes()),
@@ -115,35 +117,27 @@ pub async fn set_pin(
         .unwrap_or(false);
     let pin_set = state.dashboard_pin.is_set();
 
-    // Who may claim an UNSET PIN — trust-on-first-use.
+    // Who may claim an UNSET PIN without a credential — trust-on-first-use.
     //
-    // This used to be a bare `!pin_set`, and `/api/dashboard/pin/set` is a
-    // public path, so on a node with no PIN yet the first caller to reach
-    // this route won the dashboard — from anywhere that could route to the
-    // agent, not just from the operator's own network. The window is the
-    // whole period between a node coming up and its operator getting to it,
-    // which on a fresh install is exactly when nobody is watching.
-    //
-    // Narrowed to the peers a first-boot device is legitimately reached
-    // from: the box itself, and the operator's own LAN. `None` means the
-    // request arrived on the Unix socket, which is the local plane and is
-    // trusted outright; an unidentifiable TCP peer is not.
-    let peer_ip = peer.map(|Extension(p)| p.0.ip());
-    let local_claimant = match peer_ip {
-        None => true,
-        Some(ip) => {
-            ados_protocol::pairing_posture::unpaired_peer_allowed(&ip)
-                || ados_protocol::pairing_posture::trusted_operator_lan_peer(&ip)
-        }
-    };
+    // `/api/dashboard/pin/set` is a public path, and a dashboard session is
+    // accepted everywhere the pairing key is, so whoever sets the first PIN
+    // holds the node's data plane. On a PAIRED node that credential already
+    // exists — the pairing key — so the first PIN is set by its holder or on
+    // the device, never by presence on a network. On an UNPAIRED node there is
+    // no key yet, and the first PIN may be claimed from the device's own
+    // networks: a first-boot lifeline or the operator LAN. A remote caller —
+    // including an internet request tunnelled in on loopback — never qualifies.
+    let tofu_claimant = !pin_set
+        && pairing == Pairing::Unpaired
+        && matches!(caller, CallerClass::Lifeline | CallerClass::OperatorLan);
 
     // Then the current-PIN change path, short-circuited so a wrong
     // `current_pin` is only consulted when nothing else authorized — it
     // counts as a failed attempt against the lockout ladder.
-    let authorized = on_box
+    let authorized = caller == CallerClass::OnBox
         || key_valid
         || session_valid
-        || (!pin_set && local_claimant)
+        || tofu_claimant
         || req
             .current_pin
             .as_deref()
@@ -151,16 +145,19 @@ pub async fn set_pin(
             .unwrap_or(false);
 
     if !authorized {
-        // Two different refusals, because they need different operator
-        // actions: a remote peer on a PIN-less node has to come to the
-        // device or onto its network, not go hunting for a PIN that does
-        // not exist.
+        // Different refusals, because they need different operator actions.
         if !pin_set {
-            tracing::warn!(peer = ?peer_ip, "dashboard_pin_tofu_refused_remote_peer");
-            return detail(
-                StatusCode::FORBIDDEN,
-                "Set the dashboard PIN from the device itself or from its own network.",
-            );
+            tracing::warn!(?caller, "dashboard_pin_first_set_refused");
+            return match pairing {
+                Pairing::Paired(_) => detail(
+                    StatusCode::FORBIDDEN,
+                    "This device is paired. Set the dashboard PIN from Mission Control or on the device itself.",
+                ),
+                Pairing::Unpaired => detail(
+                    StatusCode::FORBIDDEN,
+                    "Set the dashboard PIN from the device itself or from its own network.",
+                ),
+            };
         }
         return detail(
             StatusCode::FORBIDDEN,

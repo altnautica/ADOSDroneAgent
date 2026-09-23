@@ -1122,6 +1122,11 @@
           "title": "Raw Proxy Enforce Auth",
           "type": "boolean"
         },
+        "raw_proxy_lan_access": {
+          "default": false,
+          "title": "Raw Proxy Lan Access",
+          "type": "boolean"
+        },
         "serial_port": {
           "default": "",
           "title": "Serial Port",
@@ -2488,6 +2493,7 @@
         ],
         "legacy_stream_request": false,
         "raw_proxy_enforce_auth": false,
+        "raw_proxy_lan_access": false,
         "serial_port": "",
         "source": "auto",
         "system_id": 1,

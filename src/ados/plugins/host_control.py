@@ -40,6 +40,10 @@ the miss and carry on. The one thing a caller must NOT do is tell the operator
 a change is applied when the socket was unreachable AND the poll has not run —
 the supervisor surfaces the difference.
 
+The socket lives in ``/run/ados/plugin-host/`` (mode 0700, root), outside the
+per-plugin socket directory the plugin units can reach, so only a root caller
+can open it; the daemon also re-checks the peer's credentials on accept.
+
 The wire is the same length-prefixed msgpack envelope every other agent IPC
 socket speaks, so this needs no new framing and no event loop: a blocking
 ``socket`` with a short timeout is the whole client.
@@ -54,13 +58,16 @@ from typing import Any
 import msgpack
 
 from ados.core.logging import get_logger
-from ados.core.paths import PLUGIN_RUN_DIR
+from ados.core.paths import ADOS_RUN_DIR
 from ados.plugins.rpc import MAX_FRAME_BYTES, Envelope, encode_frame
 
 log = get_logger("plugins.host_control")
 
-#: The control socket file name under the per-plugin socket dir. The leading
-#: underscore keeps it out of the ``<plugin_id>.sock`` namespace.
+#: The root-only directory the control socket lives in. Kept apart from the
+#: per-plugin socket dir because every plugin unit can write that one.
+CONTROL_DIR = ADOS_RUN_DIR / "plugin-host"
+
+#: The control socket file name under :data:`CONTROL_DIR`.
 CONTROL_SOCKET_NAME = "_control.sock"
 
 #: Re-mint one plugin's capability token from the current grant set and push it
@@ -75,13 +82,13 @@ METHOD_PLUGIN_RECONCILE = "plugin.reconcile"
 TIMEOUT_S = 3.0
 
 
-def control_socket_path(socket_dir: Path | None = None) -> Path:
-    """The control socket path under ``socket_dir`` (default the run dir)."""
-    base = socket_dir if socket_dir is not None else PLUGIN_RUN_DIR
+def control_socket_path(control_dir: Path | None = None) -> Path:
+    """The control socket path under ``control_dir`` (default :data:`CONTROL_DIR`)."""
+    base = control_dir if control_dir is not None else CONTROL_DIR
     return Path(base) / CONTROL_SOCKET_NAME
 
 
-def reconcile(socket_dir: Path | None = None) -> bool:
+def reconcile(control_dir: Path | None = None) -> bool:
     """Ask the daemon to reconcile its served sockets against plugin state.
 
     Call this BEFORE ``systemctl start`` of a plugin unit: the socket and the
@@ -89,7 +96,7 @@ def reconcile(socket_dir: Path | None = None) -> bool:
 
     Returns True when the daemon acknowledged.
     """
-    result = _request(METHOD_PLUGIN_RECONCILE, {}, socket_dir)
+    result = _request(METHOD_PLUGIN_RECONCILE, {}, control_dir)
     if result is None:
         return False
     log.info(
@@ -101,7 +108,7 @@ def reconcile(socket_dir: Path | None = None) -> bool:
     return True
 
 
-def rotate_token(plugin_id: str, socket_dir: Path | None = None) -> bool:
+def rotate_token(plugin_id: str, control_dir: Path | None = None) -> bool:
     """Re-mint ``plugin_id``'s capability token from the current grant set.
 
     Returns True when the daemon acknowledged. The daemon also reports whether
@@ -109,7 +116,7 @@ def rotate_token(plugin_id: str, socket_dir: Path | None = None) -> bool:
     correct outcome for an enabled plugin that has not connected yet, so it is
     logged rather than treated as a failure.
     """
-    result = _request(METHOD_TOKEN_ROTATE, {"plugin_id": plugin_id}, socket_dir)
+    result = _request(METHOD_TOKEN_ROTATE, {"plugin_id": plugin_id}, control_dir)
     if result is None:
         return False
     log.info(
@@ -121,7 +128,7 @@ def rotate_token(plugin_id: str, socket_dir: Path | None = None) -> bool:
 
 
 def _request(
-    method: str, args: dict[str, Any], socket_dir: Path | None
+    method: str, args: dict[str, Any], control_dir: Path | None
 ) -> dict[str, Any] | None:
     """One request/response round trip. ``None`` on any failure.
 
@@ -129,7 +136,7 @@ def _request(
     succeeded, and an unreachable plugin host is a latency problem the
     daemon's state poll resolves, not a reason to fail an install.
     """
-    path = control_socket_path(socket_dir)
+    path = control_socket_path(control_dir)
     env = Envelope(
         type="request",
         method=method,

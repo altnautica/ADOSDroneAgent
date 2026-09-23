@@ -32,6 +32,27 @@ pub const WFB_RX_KEY: &str = "/etc/ados/wfb/rx.key";
 /// The canonical drone key shared with the ground station after bind.
 pub const DRONE_KEY: &str = "/etc/drone.key";
 
+/// The wfb-ng key file size. A shared-key file of any other length is not a key.
+pub const DRONE_KEY_BYTES: usize = 64;
+
+/// Read the shared key the bind protocol delivers byte-for-byte to both rigs.
+///
+/// `None` when the file is absent, unreadable, or not exactly
+/// [`DRONE_KEY_BYTES`] long. A wrong-length file is treated as absent rather than
+/// hashed: a half-written key would derive a key only this node holds, and a
+/// link where one side's frames all fail authentication is far harder to
+/// diagnose than one where both sides sit on the cold-start key. Every plane that
+/// derives a symmetric key from the shared file (the presence beacon, the hop
+/// announce, the swarm bus) reads it through here so they agree on that rule.
+pub fn read_shared_key_at(path: &std::path::Path) -> Option<[u8; DRONE_KEY_BYTES]> {
+    std::fs::read(path).ok()?.try_into().ok()
+}
+
+/// [`read_shared_key_at`] on the canonical [`DRONE_KEY`] path.
+pub fn read_shared_key() -> Option<[u8; DRONE_KEY_BYTES]> {
+    read_shared_key_at(std::path::Path::new(DRONE_KEY))
+}
+
 /// Cross-process bind-liveness sentinel written by the supervisor while a bind
 /// session owns the radio adapter. `{"active": <bool>}`.
 pub const BIND_STATE_SENTINEL: &str = "/run/ados/bind-state.json";

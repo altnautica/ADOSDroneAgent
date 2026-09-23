@@ -4,10 +4,11 @@
 //! is bound on two edges:
 //!
 //! 1. **`/run/ados/logd-query.sock`** — the trusted local Unix socket
-//!    (`0o660`, tmpfs). No auth, no rate limit: anything on-box that can open
-//!    the socket is inside the trust boundary, and this path keeps working even
-//!    if the Python API is down (the diagnostics tool must not share a failure
-//!    domain with the thing it diagnoses).
+//!    (`0o660 root:ados-operator`, tmpfs). No auth, no rate limit: only root
+//!    and the operator group can open it, and every accept re-checks the
+//!    peer's credentials. This path keeps working even if the Python API is
+//!    down (the diagnostics tool must not share a failure domain with the thing
+//!    it diagnoses).
 //! 2. **TCP `:8090`** — the LAN edge. The auth layer mirrors the agent's HTTP
 //!    posture exactly: unpaired ⇒ open, paired ⇒ `X-ADOS-Key` required and an
 //!    exact match. A token-bucket rate limit guards the edge.
@@ -48,10 +49,11 @@ use axum::{Json, Router};
 use hyper::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tower::Service;
 
+use ados_protocol::ipc::OperatorListener;
 use ados_protocol::logd::IngestFrame;
 
 use crate::writer::ControlMsg;
@@ -252,23 +254,17 @@ where
     Ok(())
 }
 
-/// Bind the Unix listener, removing a stale socket and tightening the mode to
-/// `0o660` on Linux so only the agent group can reach the trusted plane.
-fn bind_unix(path: &Path) -> std::io::Result<UnixListener> {
-    // The shared helper owns the create-dir / remove-stale / bind / chmod
-    // (0o660) hygiene; group-owning to `ados` afterward keeps the mode's
-    // group-rw grant reaching a non-root operator (a chown does not clear the rw
-    // bits, so the final owner+group+mode state is unchanged).
-    let listener = ados_protocol::ipc::bind_command_socket(path, 0o660)?;
-    #[cfg(target_os = "linux")]
-    crate::set_ados_group(path);
-    Ok(listener)
+/// Bind the Unix listener through the shared command-plane helper: stale socket
+/// removed, mode `0o660`, group `ados-operator`, and a peer-credential check on
+/// every accept.
+fn bind_unix(path: &Path) -> std::io::Result<OperatorListener> {
+    ados_protocol::ipc::bind_command_socket(path, 0o660)
 }
 
 /// Serve the Router on the Unix listener: accept connections and hand each to
 /// hyper with the axum service, until the stop signal fires. Each connection is
 /// driven on its own task so one slow client cannot stall the accept loop.
-async fn serve_unix(listener: UnixListener, app: Router, stop: oneshot::Receiver<()>) {
+async fn serve_unix(listener: OperatorListener, app: Router, stop: oneshot::Receiver<()>) {
     tokio::pin!(stop);
     loop {
         tokio::select! {

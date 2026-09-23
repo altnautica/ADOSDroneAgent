@@ -143,6 +143,11 @@ tempfile = "3"
 # The integration tests drive the LAN-edge middleware with `tower::util::ServiceExt::oneshot`;
 # `util` is not a default tower feature, so enable it here for the test build only.
 tower = { workspace = true, features = ["util"] }
+# The drone's relay authorization, so the ground station's relayed callers are
+# tested against the real check a drone runs rather than a stub closure.
+ados-mavlink-router = { path = "../ados-mavlink-router" }
+# Paused-clock tests for the hero selection's report window.
+tokio = { workspace = true, features = ["test-util"] }
 
 # Linux-only edge: systemd readiness/watchdog notify + journald log layer for
 # the daemon, and the nix group-ownership helper for the trusted socket. Confined

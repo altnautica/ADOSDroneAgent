@@ -195,9 +195,9 @@ impl<H: HostServices> PluginIpcServer<H> {
         let path = self.socket_path(plugin_id);
         // The shared helper owns the create-dir / remove-stale / bind / chmod
         // hygiene: the socket's parent is the per-plugin socket dir, so binding it
-        // ensures the dir. 0o660 keeps the socket owner+group rw, matching
-        // `os.chmod(sock_path, 0o660)` in the Python server.
-        let listener = ados_protocol::ipc::bind_command_socket(&path, 0o660)?;
+        // ensures the dir. 0o660 and the `ados` group let the plugin's unit (which
+        // runs as `ados`) connect; every request is then gated on its token.
+        let listener = ados_protocol::ipc::bind_plugin_socket(&path, 0o660)?;
 
         let plugin_id = plugin_id.to_string();
         let token_issuer = self.token_issuer.clone();

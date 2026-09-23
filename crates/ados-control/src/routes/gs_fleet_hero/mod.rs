@@ -26,20 +26,30 @@
 //! response's per-slot outcomes and the route answers **207**, while the new
 //! hero's promotion goes through regardless: a drone stuck on `hero` costs
 //! airtime, it does not endanger anything, so it must never gate the operator's
-//! selection. The reconcile tick re-issues just that drone's demotion until it
-//! takes, and re-asserts nothing else — a healthy fleet costs zero radio
-//! traffic.
+//! selection. The selection runs on its own task and takes effect the moment
+//! the hero's own call resolves; a demotion still in flight a few seconds later
+//! is reported `pending` and finishes in the background (see [`select`]).
+//!
+//! ## The beacon is the truth
+//!
+//! Every call carries the per-drone relay ticket, because a drone refuses any
+//! relayed request without one. What a drone is actually running comes back on
+//! its swarm beacon's hero bit, and the reconcile tick compares that against the
+//! selection: a hero that rebooted (it comes back as a thumbnail) is promoted
+//! again, a drone that failed to demote is demoted again, and a fleet that
+//! agrees costs zero radio traffic.
 
 pub mod fanout;
 pub mod reconcile;
+pub mod select;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -50,23 +60,38 @@ use tokio::sync::Mutex;
 
 use ados_groundlink::FleetSlot;
 use ados_protocol::aux_rpc::RpcMethod;
-use ados_protocol::aux_rpc_proxy::AuxRpcProxy;
+use ados_protocol::aux_rpc_proxy::{AuxRpcProxy, RPC_DEFAULT_TIMEOUT};
 use ados_video::profile::VideoProfile;
 
 use crate::routes::detail;
+use crate::routes::gs_fleet_slot::{mint_ticket, registered_slots};
 use crate::state::AppState;
 
-use fanout::{apply_plan, plan_hero, SlotOutcome};
-use reconcile::registered_slots;
+use fanout::{plan_hero, HeroPlan, SlotOutcome};
+use select::{select_hero, SelectionReport};
 
 pub use reconcile::run_hero_reconciler;
 
 /// How often the ground station reconciles the fleet's attention state.
 ///
-/// Two jobs, both cheap: auto-promote a one-drone fleet (the existing
+/// Three jobs, all cheap: auto-promote a one-drone fleet (the existing
 /// single-drone product, which must not sit at 320x180 waiting for an operator
-/// click), and re-issue any demotion that has not yet been confirmed.
+/// click), re-issue any assignment that has not yet been confirmed, and
+/// re-assert any drone whose beacon disagrees with the selection.
 pub const HERO_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long after a drone was sent an assignment before its beacon is held to
+/// it, and so the fastest a drone that keeps disagreeing is re-sent one.
+///
+/// The settle time: the hero bit reaches the ground through the drone's video
+/// sidecar, its state snapshot and its next beacon, so a drone that has just
+/// taken an assignment still beacons the old one for a moment. The rate bound: a
+/// drone whose bit never flips (an answer that never lands, a video service that
+/// is still starting) is chased once per holdoff, not once per tick. Longer than
+/// a whole call plus its retry, so the tick never races a selection whose calls
+/// are still in flight.
+pub const REISSUE_HOLDOFF: Duration = Duration::from_secs(30);
+const _: () = assert!(REISSUE_HOLDOFF.as_secs() > 2 * RPC_DEFAULT_TIMEOUT.as_secs());
 
 /// The drone's attention-profile route, reached over the aux RPC lane.
 const DRONE_PROFILE_PATH: &[u8] = b"/api/video/profile";
@@ -88,10 +113,45 @@ pub struct FleetHeroState {
 
 #[derive(Debug, Default)]
 struct Inner {
-    /// The current hero's device id, or `None` before the first selection.
+    /// The current hero's device id, or `None` before the first selection has
+    /// had its promotion answered.
     hero: Option<String>,
     /// Assignments asked for but not confirmed, retried by the reconcile tick.
     unconfirmed: BTreeMap<String, VideoProfile>,
+    /// Bumped by every selection and carried back by every outcome, so a slow
+    /// answer to an older selection is dropped instead of overwriting a newer
+    /// one. Selections are no longer serialized behind the request that made
+    /// them, so two can overlap.
+    generation: u64,
+    /// When each drone was last sent an assignment, for [`REISSUE_HOLDOFF`].
+    issued: BTreeMap<String, Instant>,
+}
+
+impl Inner {
+    fn note(&mut self, outcome: &SlotOutcome) {
+        if outcome.ok {
+            self.unconfirmed.remove(&outcome.device_id);
+        } else {
+            self.unconfirmed
+                .insert(outcome.device_id.clone(), outcome.profile);
+        }
+    }
+
+    fn stamp(&mut self, plan: &HeroPlan, now: Instant) {
+        for t in &plan.targets {
+            self.issued.insert(t.device_id.clone(), now);
+        }
+    }
+}
+
+/// What one reconcile tick decides from.
+#[derive(Debug, Clone, Default)]
+pub(super) struct TickInputs {
+    pub hero: Option<String>,
+    pub unconfirmed: BTreeMap<String, VideoProfile>,
+    /// Drones sent an assignment within [`REISSUE_HOLDOFF`]: their beacon may
+    /// not have caught up yet.
+    pub settling: BTreeSet<String>,
 }
 
 impl FleetHeroState {
@@ -100,43 +160,86 @@ impl FleetHeroState {
         self.inner.lock().await.hero.clone()
     }
 
-    /// Record the result of a hero selection: the selection itself is sticky,
-    /// and every drone that did not confirm is queued for the reconcile tick.
-    pub async fn record_selection(&self, hero: &str, outcomes: &[SlotOutcome]) {
+    /// Open a hero selection and return its generation.
+    ///
+    /// The plan names every registered drone, so it supersedes whatever an
+    /// earlier selection left queued. Every target is stamped as issued now,
+    /// which keeps the reconcile tick off them while their calls are in flight.
+    pub async fn begin_selection(&self, plan: &HeroPlan, now: Instant) -> u64 {
         let mut inner = self.inner.lock().await;
+        inner.generation += 1;
+        inner.unconfirmed.clear();
+        inner.stamp(plan, now);
+        inner.generation
+    }
+
+    /// Record the hero's own outcome: this is where a selection takes effect,
+    /// and it is sticky whether or not the promotion took (a failed one is
+    /// queued like any other). Returns `false`, recording nothing, when a newer
+    /// selection has begun since.
+    pub async fn record_hero(&self, generation: u64, hero: &str, outcome: &SlotOutcome) -> bool {
+        let mut inner = self.inner.lock().await;
+        if inner.generation != generation {
+            return false;
+        }
         inner.hero = Some(hero.to_string());
-        for o in outcomes {
-            if o.ok {
-                inner.unconfirmed.remove(&o.device_id);
-            } else {
-                inner.unconfirmed.insert(o.device_id.clone(), o.profile);
-            }
-        }
+        inner.note(outcome);
+        true
     }
 
-    /// Record the result of a retry pass: confirmations clear, failures stay.
-    pub async fn record_retry(&self, outcomes: &[SlotOutcome]) {
+    /// Record one demotion's outcome: a confirmation clears, a failure is
+    /// queued for the reconcile tick. Dropped when a newer selection has begun.
+    pub async fn record_outcome(&self, generation: u64, outcome: &SlotOutcome) {
         let mut inner = self.inner.lock().await;
-        for o in outcomes {
-            if o.ok {
-                inner.unconfirmed.remove(&o.device_id);
-            }
+        if inner.generation == generation {
+            inner.note(outcome);
         }
     }
 
-    /// Drop queued assignments for drones that have left the fleet — chasing an
+    /// Stamp a reconcile pass's targets as issued now and return the generation
+    /// its outcomes belong to.
+    pub async fn begin_reissue(&self, plan: &HeroPlan, now: Instant) -> u64 {
+        let mut inner = self.inner.lock().await;
+        inner.stamp(plan, now);
+        inner.generation
+    }
+
+    /// Record a reconcile pass: confirmations clear. A failure changes nothing:
+    /// a queued one is chased again next tick, and a disagreement the beacon
+    /// showed is re-checked once the holdoff has passed.
+    pub async fn record_reissue(&self, generation: u64, outcomes: &[SlotOutcome]) {
+        let mut inner = self.inner.lock().await;
+        if inner.generation != generation {
+            return;
+        }
+        for o in outcomes.iter().filter(|o| o.ok) {
+            inner.unconfirmed.remove(&o.device_id);
+        }
+    }
+
+    /// Drop everything held for drones that have left the fleet — chasing an
     /// unpaired drone forever would be a permanent radio cost for nothing.
     pub async fn prune(&self, slots: &[FleetSlot]) {
         let mut inner = self.inner.lock().await;
-        inner
-            .unconfirmed
-            .retain(|id, _| slots.iter().any(|s| &s.device_id == id));
+        let present = |id: &String| slots.iter().any(|s| &s.device_id == id);
+        inner.unconfirmed.retain(|id, _| present(id));
+        inner.issued.retain(|id, _| present(id));
     }
 
-    /// The current selection plus everything still awaiting confirmation.
-    pub(super) async fn outstanding(&self) -> (Option<String>, BTreeMap<String, VideoProfile>) {
+    /// The current selection, everything still awaiting confirmation, and the
+    /// drones still settling at `now`.
+    pub(super) async fn tick_inputs(&self, now: Instant) -> TickInputs {
         let inner = self.inner.lock().await;
-        (inner.hero.clone(), inner.unconfirmed.clone())
+        TickInputs {
+            hero: inner.hero.clone(),
+            unconfirmed: inner.unconfirmed.clone(),
+            settling: inner
+                .issued
+                .iter()
+                .filter(|(_, at)| now.saturating_duration_since(**at) < REISSUE_HOLDOFF)
+                .map(|(id, _)| id.clone())
+                .collect(),
+        }
     }
 }
 
@@ -195,18 +298,20 @@ pub(super) fn publish_hero_to(path: &Path, slots: &[FleetSlot], hero: &str) -> b
     }
 }
 
-/// [`publish_hero_to`] at the real sidecar path.
-pub(super) fn publish_hero(slots: &[FleetSlot], hero: &str) -> bool {
-    publish_hero_to(Path::new(&ados_groundlink::hero_path()), slots, hero)
+/// Where the fan-out reads the published hero.
+pub(super) fn hero_sidecar() -> PathBuf {
+    PathBuf::from(ados_groundlink::hero_path())
 }
 
 /// The process-wide fleet attention state.
-static FLEET_HERO_STATE: LazyLock<FleetHeroState> = LazyLock::new(FleetHeroState::default);
+static FLEET_HERO_STATE: LazyLock<Arc<FleetHeroState>> = LazyLock::new(Arc::default);
 
 /// The process-wide fleet attention state, shared by the route and the
 /// reconcile ticker so they can never disagree about the current selection.
-pub fn fleet_hero_state() -> &'static FleetHeroState {
-    &FLEET_HERO_STATE
+/// An `Arc` so a selection running on its own task can outlive the request
+/// that started it.
+pub fn fleet_hero_state() -> Arc<FleetHeroState> {
+    Arc::clone(&FLEET_HERO_STATE)
 }
 
 // ---------------------------------------------------------------------------
@@ -255,64 +360,110 @@ pub async fn post_fleet_hero(State(state): State<AppState>, body: Option<Json<Va
             .into_response();
     };
 
-    let outcomes = apply_plan(&plan, profile_caller(proxy)).await;
-    fleet_hero_state()
-        .record_selection(device_id, &outcomes)
-        .await;
-    // Point the fan-out at the new hero only once the profile calls have been
-    // issued: re-pointing first would put the operator on a drone that is still
-    // a 1 fps thumbnail, when what they had a moment ago was a full-rate stream.
-    publish_hero(&slots, device_id);
+    // The selection runs on its own task and this handler only awaits its
+    // handle: a client that times out, or a connection that drops mid-request,
+    // no longer aborts the calls in flight or skips recording and publishing
+    // the hero.
+    let caller = profile_caller(proxy, Arc::from(slots.as_slice()));
+    let selected = select_hero(
+        fleet_hero_state(),
+        slots,
+        plan,
+        device_id.to_string(),
+        caller,
+        hero_sidecar(),
+    )
+    .await;
+    let report = match selected {
+        Ok(report) => report,
+        Err(e) => {
+            tracing::error!(error = %e, device_id = %device_id, "fleet_hero_selection_task_failed");
+            return detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "hero selection task failed",
+            );
+        }
+    };
 
     (
-        outcome_status(&outcomes),
-        Json(outcome_body(device_id, &outcomes)),
+        outcome_status(&report),
+        Json(outcome_body(device_id, &report)),
     )
         .into_response()
 }
 
 /// `200` when every registered drone confirmed, `207 Multi-Status` when at
-/// least one did not — never a blanket `500`, because the operator's hero WAS
-/// promoted and the body says exactly which slots lagged.
-fn outcome_status(outcomes: &[SlotOutcome]) -> StatusCode {
-    if outcomes.iter().all(|o| o.ok) {
+/// least one did not or has not answered yet — never a blanket `500`, because
+/// the operator's selection WAS made and the body says exactly which slots
+/// lagged.
+fn outcome_status(report: &SelectionReport) -> StatusCode {
+    if report.complete() {
         StatusCode::OK
     } else {
         StatusCode::MULTI_STATUS
     }
 }
 
-/// The response body: the selected hero plus one row per registered slot.
-fn outcome_body(hero: &str, outcomes: &[SlotOutcome]) -> Value {
-    json!({
-        "hero": hero,
-        "slots": outcomes
-            .iter()
-            .map(|o| json!({
+/// The response body: the selected hero plus one row per registered slot, in
+/// slot order. A `pending` row is a drone still being called when the report
+/// was cut; it is neither a success nor a failure yet.
+fn outcome_body(hero: &str, report: &SelectionReport) -> Value {
+    let resolved = report.resolved.iter().map(|o| {
+        (
+            o.slot,
+            json!({
                 "slot": o.slot,
                 "device_id": o.device_id,
                 "profile": o.profile.as_str(),
                 "ok": o.ok,
+                "pending": false,
                 "error": o.error,
-            }))
-            .collect::<Vec<_>>(),
+            }),
+        )
+    });
+    let pending = report.pending.iter().map(|t| {
+        (
+            t.slot,
+            json!({
+                "slot": t.slot,
+                "device_id": t.device_id,
+                "profile": t.profile.as_str(),
+                "ok": false,
+                "pending": true,
+                "error": Value::Null,
+            }),
+        )
+    });
+    let mut rows: Vec<(u8, Value)> = resolved.chain(pending).collect();
+    rows.sort_by_key(|(slot, _)| *slot);
+    json!({
+        "hero": hero,
+        "slots": rows.into_iter().map(|(_, row)| row).collect::<Vec<_>>(),
     })
 }
 
-/// The per-drone call: a targeted `POST /api/video/profile` over the aux lane.
+/// The per-drone call: a targeted `POST /api/video/profile` over the aux lane,
+/// carrying the relay ticket minted from `slots` for that drone.
+///
+/// The drone refuses a relayed request without a ticket it can verify, so the
+/// ticket is not optional here. It is minted per attempt, so a retry never
+/// presents one that expired while the first attempt timed out.
 pub(super) fn profile_caller(
     proxy: Arc<AuxRpcProxy>,
+    slots: Arc<[FleetSlot]>,
 ) -> impl Fn(String, VideoProfile) -> ProfileCall + Clone + Send + 'static {
     move |device_id: String, profile: VideoProfile| {
         let proxy = Arc::clone(&proxy);
+        let ticket = mint_ticket(&slots, &device_id);
         ProfileCall(Box::pin(async move {
             let body = json!({"profile": profile.as_str()}).to_string();
             match proxy
-                .call(
+                .call_with_ticket(
                     device_id.as_bytes(),
                     RpcMethod::Post,
                     DRONE_PROFILE_PATH,
                     body.as_bytes(),
+                    ticket.as_bytes(),
                 )
                 .await
             {
@@ -343,7 +494,7 @@ fn is_ground_station(state: &AppState) -> bool {
     profile == "ground-station"
 }
 
-/// Fixtures shared by this module's tests and [`reconcile`]'s.
+/// Fixtures shared by this module's tests and its submodules'.
 #[cfg(test)]
 pub(super) mod tests_support {
     use super::*;
@@ -373,120 +524,167 @@ pub(super) mod tests_support {
 
 #[cfg(test)]
 mod tests {
-    use super::reconcile::{decide_tick, TickAction};
+    use super::fanout::HeroTarget;
     use super::tests_support::{outcome, slots};
     use super::*;
+    use crate::routes::gs_fleet_slot::test_drone::{self, SECRET};
 
     #[tokio::test]
-    async fn selecting_a_new_hero_demotes_the_previous_one_and_nobody_else() {
-        let s = slots(&["a", "b", "c"]);
-        let st = FleetHeroState::default();
-        // `a` is hero.
-        let first = apply_plan(&plan_hero(&s, "a").unwrap(), |_id, _p| async { Ok(()) }).await;
-        st.record_selection("a", &first).await;
+    async fn a_promotion_carries_a_ticket_the_drone_admits() {
+        // Driven through the drone's own relay authorization, not a stub. A
+        // drone refuses a relayed request with no ticket, so a caller that
+        // omits it leaves every drone at 320x180 forever.
+        const DRONE: &str = "ados-hero-01";
+        let drone = test_drone::spawn(DRONE, Some(SECRET)).await;
+        let mut registry = slots(&[DRONE]);
+        registry[0].relay_secret = Some(SECRET.to_string());
 
-        // Now select `c`.
-        let plan = plan_hero(&s, "c").unwrap();
-        let assignments: BTreeMap<&str, VideoProfile> = plan
-            .targets
-            .iter()
-            .map(|t| (t.device_id.as_str(), t.profile))
-            .collect();
-        assert_eq!(assignments["c"], VideoProfile::Hero);
-        // The previous hero is demoted...
-        assert_eq!(assignments["a"], VideoProfile::Thumbnail);
-        // ...and the drone that was already a thumbnail is simply reasserted,
-        // never promoted by accident.
-        assert_eq!(assignments["b"], VideoProfile::Thumbnail);
+        let promote = profile_caller(Arc::clone(&drone.proxy), Arc::from(registry.as_slice()));
+        assert_eq!(
+            promote(DRONE.to_string(), VideoProfile::Hero).await,
+            Ok(()),
+            "the drone must admit the promotion"
+        );
+        let seen = drone
+            .seen
+            .lock()
+            .last()
+            .cloned()
+            .expect("the drone was called");
+        assert_eq!(seen.method, RpcMethod::Post);
+        assert_eq!(seen.path, DRONE_PROFILE_PATH);
+        assert_eq!(seen.body, br#"{"profile":"hero"}"#);
+        assert_eq!(seen.status, 200);
 
-        let second = apply_plan(&plan, |_id, _p| async { Ok(()) }).await;
-        st.record_selection("c", &second).await;
-        assert_eq!(st.hero().await.as_deref(), Some("c"));
+        // The same request without a ticket is what the drone refuses.
+        let bare = drone
+            .proxy
+            .call(
+                DRONE.as_bytes(),
+                RpcMethod::Post,
+                DRONE_PROFILE_PATH,
+                &seen.body,
+            )
+            .await
+            .expect("the drone answers");
+        assert_eq!(bare.status, 401);
     }
 
     #[tokio::test]
-    async fn the_response_body_carries_a_row_per_slot_with_the_failure_reason() {
-        let outcomes = vec![
-            outcome(1, "a", VideoProfile::Hero, true),
-            outcome(2, "b", VideoProfile::Thumbnail, false),
-        ];
-        let body = outcome_body("a", &outcomes);
+    async fn a_promotion_for_a_drone_with_no_secret_on_file_is_refused_and_says_so() {
+        // Nothing to mint from, so the call goes out bare and the drone's
+        // refusal is surfaced rather than read as a success.
+        const DRONE: &str = "ados-hero-02";
+        let drone = test_drone::spawn(DRONE, Some(SECRET)).await;
+        let promote = profile_caller(Arc::clone(&drone.proxy), Arc::from(slots(&[DRONE])));
+        let err = promote(DRONE.to_string(), VideoProfile::Hero)
+            .await
+            .expect_err("the drone refuses an unticketed call");
+        assert!(err.contains("401"), "{err}");
+    }
+
+    #[test]
+    fn the_response_body_carries_a_row_per_slot_with_the_failure_reason() {
+        let report = SelectionReport {
+            resolved: vec![
+                outcome(1, "a", VideoProfile::Hero, true),
+                outcome(2, "b", VideoProfile::Thumbnail, false),
+            ],
+            pending: vec![HeroTarget {
+                slot: 3,
+                device_id: "c".into(),
+                profile: VideoProfile::Thumbnail,
+            }],
+        };
+        let body = outcome_body("a", &report);
         assert_eq!(body["hero"], "a");
         assert_eq!(body["slots"][0]["profile"], "hero");
         assert_eq!(body["slots"][0]["ok"], true);
+        assert_eq!(body["slots"][0]["pending"], false);
         assert!(body["slots"][0]["error"].is_null());
         assert_eq!(body["slots"][1]["slot"], 2);
         assert_eq!(body["slots"][1]["ok"], false);
         assert_eq!(body["slots"][1]["error"], "no response");
+        // A drone still being called is neither a success nor a failure yet.
+        assert_eq!(body["slots"][2]["device_id"], "c");
+        assert_eq!(body["slots"][2]["pending"], true);
+        assert_eq!(body["slots"][2]["ok"], false);
+        assert!(body["slots"][2]["error"].is_null());
+        assert_eq!(outcome_status(&report), StatusCode::MULTI_STATUS);
     }
 
-    #[tokio::test]
-    async fn a_non_responding_drone_yields_207_while_the_new_hero_is_still_promoted() {
-        let s = slots(&["deaf", "newhero"]);
-        let plan = plan_hero(&s, "newhero").unwrap();
-        let outcomes = apply_plan(&plan, |id, _p| async move {
-            if id == "deaf" {
-                Err("no response from the linked drone within the bound".to_string())
-            } else {
-                Ok(())
-            }
-        })
-        .await;
-
-        assert_eq!(outcome_status(&outcomes), StatusCode::MULTI_STATUS);
-        let body = outcome_body("newhero", &outcomes);
-        assert_eq!(body["hero"], "newhero");
-        // Per-slot outcomes, not a blanket failure.
-        assert_eq!(body["slots"][0]["device_id"], "deaf");
-        assert_eq!(body["slots"][0]["ok"], false);
-        // The promotion went through anyway — a drone stuck on hero is an
-        // airtime problem, never a reason to refuse the operator's selection.
-        assert_eq!(body["slots"][1]["device_id"], "newhero");
-        assert_eq!(body["slots"][1]["profile"], "hero");
-        assert_eq!(body["slots"][1]["ok"], true);
-
-        // And the failure is queued for the reconcile tick rather than lost.
-        let st = FleetHeroState::default();
-        st.record_selection("newhero", &outcomes).await;
-        let (hero, unconfirmed) = st.outstanding().await;
-        assert_eq!(hero.as_deref(), Some("newhero"));
-        let TickAction::Retry { plan } = decide_tick(&s, hero.as_deref(), &unconfirmed) else {
-            panic!("the deaf drone's demotion must be re-issued");
+    #[test]
+    fn only_a_fully_answered_fleet_is_a_200() {
+        let all_ok = SelectionReport {
+            resolved: vec![
+                outcome(1, "a", VideoProfile::Thumbnail, true),
+                outcome(2, "b", VideoProfile::Hero, true),
+            ],
+            pending: vec![],
         };
-        assert_eq!(plan.targets.len(), 1);
-        assert_eq!(plan.targets[0].device_id, "deaf");
+        assert_eq!(outcome_status(&all_ok), StatusCode::OK);
+        let lagging = SelectionReport {
+            resolved: vec![outcome(2, "b", VideoProfile::Hero, true)],
+            pending: vec![HeroTarget {
+                slot: 1,
+                device_id: "a".into(),
+                profile: VideoProfile::Thumbnail,
+            }],
+        };
+        assert_eq!(outcome_status(&lagging), StatusCode::MULTI_STATUS);
+        // Rows stay in slot order whichever list they came from.
+        assert_eq!(outcome_body("b", &lagging)["slots"][0]["device_id"], "a");
     }
 
     #[tokio::test]
-    async fn a_fully_confirmed_selection_is_200_and_leaves_nothing_queued() {
+    async fn a_slow_answer_to_an_older_selection_cannot_overwrite_a_newer_one() {
+        // Selections run on their own tasks, so two can overlap: the operator
+        // picks `a`, then `b` before `a`'s calls have come back.
         let s = slots(&["a", "b"]);
-        let plan = plan_hero(&s, "b").unwrap();
-        let outcomes = apply_plan(&plan, |_id, _p| async { Ok(()) }).await;
-        assert_eq!(outcome_status(&outcomes), StatusCode::OK);
         let st = FleetHeroState::default();
-        st.record_selection("b", &outcomes).await;
-        assert!(st.outstanding().await.1.is_empty());
+        let now = Instant::now();
+        let first = st.begin_selection(&plan_hero(&s, "a").unwrap(), now).await;
+        let second = st.begin_selection(&plan_hero(&s, "b").unwrap(), now).await;
+
+        assert!(
+            st.record_hero(second, "b", &outcome(2, "b", VideoProfile::Hero, true))
+                .await
+        );
+        // The first selection's answers arrive late.
+        assert!(
+            !st.record_hero(first, "a", &outcome(1, "a", VideoProfile::Hero, true))
+                .await,
+            "a superseded selection must not take effect"
+        );
+        st.record_outcome(first, &outcome(2, "b", VideoProfile::Thumbnail, false))
+            .await;
+
+        let inputs = st.tick_inputs(now).await;
+        assert_eq!(inputs.hero.as_deref(), Some("b"));
+        assert!(
+            inputs.unconfirmed.is_empty(),
+            "the stale demotion of the new hero must not be queued: {:?}",
+            inputs.unconfirmed
+        );
     }
 
     #[tokio::test]
-    async fn a_selection_publishes_the_hero_slot_so_the_fan_out_can_follow_it() {
-        // The operator-facing bug this closes: promoting a hero that is not on
-        // the lowest slot left the ground station forwarding a different drone,
-        // because the fan-out had no way to learn the selection.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fleet-hero.json");
-        let s = slots(&["a", "b", "c"]);
-
-        // The route's sequence: plan, issue, record, publish.
-        let plan = plan_hero(&s, "c").unwrap();
-        let outcomes = apply_plan(&plan, |_id, _p| async { Ok(()) }).await;
+    async fn a_drone_just_sent_an_assignment_settles_for_the_holdoff_and_then_does_not() {
+        let s = slots(&["a", "b"]);
         let st = FleetHeroState::default();
-        st.record_selection("c", &outcomes).await;
-        assert!(publish_hero_to(&path, &s, "c"));
-
-        let published = ados_groundlink::read_hero_from(&path).expect("a selection must publish");
-        assert_eq!(published.slot, 3, "the fan-out must be sent to slot 3");
-        assert_eq!(published.device_id, "c");
+        let t0 = Instant::now();
+        st.begin_selection(&plan_hero(&s, "a").unwrap(), t0).await;
+        let settling = st.tick_inputs(t0 + Duration::from_secs(1)).await.settling;
+        assert!(settling.contains("a") && settling.contains("b"));
+        assert!(st
+            .tick_inputs(t0 + REISSUE_HOLDOFF)
+            .await
+            .settling
+            .is_empty());
+        // A drone that leaves the fleet takes its stamp with it.
+        st.prune(&slots(&["a"])).await;
+        let settling = st.tick_inputs(t0).await.settling;
+        assert!(settling.contains("a") && !settling.contains("b"));
     }
 
     #[test]

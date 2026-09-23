@@ -57,14 +57,17 @@ class MavlinkConfig(BaseModel):
     # Off, and the disagreement with the WebSocket flag above is the point.
     # The WebSocket enforces because a client can present either the
     # `X-ADOS-Key` header or an `ados-ws-ticket` subprotocol. The raw edges
-    # have no credential channel at all -- no handshake, no headers -- so on a
-    # paired node enforcement there refuses every off-box ground station with
-    # nothing the client can do about it, and the published documentation tells
-    # operators those ports are credential-free precisely so a desktop GCS can
-    # attach. Declared here for the same reason as the flag above: the router
-    # reads it, and a key this model does not declare is stripped from the file
-    # on the next config write.
+    # have no credential channel at all -- no handshake, no headers. Declared
+    # here for the same reason as the flag above: the router reads it, and a
+    # key this model does not declare is stripped from the file on the next
+    # config write.
     raw_proxy_enforce_auth: bool = False
+    # When true, a PAIRED node's raw byte-stream proxies serve off-box peers
+    # (a desktop ground station on the LAN), subject to the flag above. Off:
+    # those edges carry no credential, so serving them to the LAN once paired
+    # hands flight control to any host on it; closed, they serve on-box
+    # callers only. Declared for the same reason as the flags above.
+    raw_proxy_lan_access: bool = False
     # When true, a client the router could not authenticate is refused the
     # aux-radio uplink instead of being recorded and relayed anyway.
     #

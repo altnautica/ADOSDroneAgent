@@ -65,11 +65,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ados_protocol::aux_mux::AuxChannel;
-use ados_protocol::ipc::{bind_command_socket, read_newline_line};
+use ados_protocol::ipc::{bind_command_socket, read_newline_line, OperatorListener};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixStream;
 use tokio::sync::{broadcast, Mutex};
 
 use crate::config::WfbConfig;
@@ -111,8 +111,8 @@ struct Request {
 
 /// Bind the aux command socket and serve connections until the listener errors.
 /// Run as its own task from the service main loop. The shared helper owns the
-/// create-dir / remove-stale / bind / chmod (0660; root-owned, the api/plugin
-/// host runs as root on target) hygiene. Each connection serves one request:
+/// create-dir / remove-stale / bind / chmod (0660, group `ados-operator`) hygiene
+/// and admits only root and operator-group peers. Each connection serves one request:
 /// `open`/`close`/`status`/`send` reply once and close; `subscribe` replies then
 /// streams application datagrams until the client disconnects or asks to close.
 ///
@@ -131,7 +131,7 @@ pub async fn serve(state: AuxCmdState, sock_path: &Path) -> std::io::Result<()> 
 /// up would need a manual restart), mirroring the shared one-shot helper. Each
 /// connection runs on its own task; a streaming subscriber does not block the
 /// other connections.
-async fn accept_loop(listener: UnixListener, state: AuxCmdState) {
+async fn accept_loop(listener: OperatorListener, state: AuxCmdState) {
     loop {
         let mut stream = match listener.accept().await {
             Ok((s, _addr)) => s,
