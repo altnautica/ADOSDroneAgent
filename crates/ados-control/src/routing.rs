@@ -146,7 +146,6 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/fleet/peers"),
         // MAVLink v2 signing reads.
         get("/api/mavlink/signing/capability"),
-        get("/api/mavlink/signing/require"),
         get("/api/mavlink/signing/counters"),
         // WFB radio reads.
         get("/api/wfb"),
@@ -242,13 +241,12 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/ws/mesh"),
         get("/api/v1/ground-station/ws/buttons"),
         // Writes. The path-param routes use the {name} template the matcher
-        // recognises; the require PUT shares its path with the require GET read.
+        // recognises.
         post("/api/params/{name}"),
         post("/api/services/{name}/restart"),
         post("/api/v1/system/restart-supervisor"),
         post("/api/mavlink/signing/enroll-fc"),
         post("/api/mavlink/signing/disable-on-fc"),
-        put("/api/mavlink/signing/require"),
         // Wi-Fi client reads (profile-agnostic): live station status + saved NM
         // profiles. The scan stays proxied (its rescan is a side effect).
         get("/api/v1/network/client/status"),
@@ -691,7 +689,6 @@ mod tests {
             "/api/fleet/enrollment",
             "/api/fleet/peers",
             "/api/mavlink/signing/capability",
-            "/api/mavlink/signing/require",
             "/api/mavlink/signing/counters",
             "/api/wfb",
             "/api/wfb/history",
@@ -749,7 +746,6 @@ mod tests {
         assert!(has(Method::POST, "/api/v1/system/restart-supervisor"));
         assert!(has(Method::POST, "/api/mavlink/signing/enroll-fc"));
         assert!(has(Method::POST, "/api/mavlink/signing/disable-on-fc"));
-        assert!(has(Method::PUT, "/api/mavlink/signing/require"));
         // The Wi-Fi client writes: a PUT join + two DELETEs (leave + the {name}
         // forget template).
         assert!(has(Method::PUT, "/api/v1/network/client/join"));

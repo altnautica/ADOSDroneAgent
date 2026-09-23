@@ -49,8 +49,6 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/mavlink/signing/counters` |  |
 | POST | `/api/mavlink/signing/disable-on-fc` |  |
 | POST | `/api/mavlink/signing/enroll-fc` |  |
-| GET | `/api/mavlink/signing/require` |  |
-| PUT | `/api/mavlink/signing/require` |  |
 | POST | `/api/mcp/revoke` | relay-forbidden |
 | GET | `/api/mcp/status` |  |
 | POST | `/api/mcp/tokens` | relay-forbidden |
@@ -179,7 +177,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-155 native routes.
+153 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 
@@ -276,7 +274,7 @@ absent (a known feature, not on this profile) rather than `404`.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-86 residual routes.
+85 residual routes.
 
 ## Logging store — `ados-logd` on :8090
 

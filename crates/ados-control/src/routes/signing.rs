@@ -1,10 +1,10 @@
 //! MAVLink v2 signing capability + state read routes.
 //!
 //! The agent never holds a signing key. These read routes let the GCS detect
-//! whether the connected FC supports MAVLink v2 signing, read the current
-//! `SIGNING_REQUIRE` param, and read the observational signed-frame counters.
-//! All three read from the same vehicle-state snapshot the MAVLink service
-//! publishes on `/run/ados/state.sock` (held by the [`StateIpcClient`](crate::ipc)):
+//! whether the connected FC supports MAVLink v2 signing and read the
+//! observational signed-frame counters. Capability reads the vehicle-state
+//! snapshot the MAVLink service publishes on `/run/ados/state.sock` (held by the
+//! [`StateIpcClient`](crate::ipc)):
 //!
 //! - **`/api/mavlink/signing/capability`** runs the capability check over the FC
 //!   connection flag and the autopilot id from the snapshot. ArduPilot keeps the
@@ -12,9 +12,6 @@
 //!   exposes no `SIGNING_*` parameter, so support is decided by the autopilot
 //!   family, not by the param tree. Any other firmware reports unsupported with a
 //!   specific reason enum.
-//! - **`/api/mavlink/signing/require`** reads `SIGNING_REQUIRE` from the cached
-//!   param blob. `{require: bool}` when the param has been seen, `{require: null}`
-//!   when it has not.
 //! - **`/api/mavlink/signing/counters`** reports signed-frame counters. The agent
 //!   validates nothing (it holds no key); the counters would only confirm signed
 //!   frames are transiting. No process on the node observes frames for signing
@@ -22,9 +19,13 @@
 //!   every count `null`. A zero would read as "measured, and no signed frame was
 //!   seen", which is a different and usually false claim.
 //!
+//! There is no signing-enforcement flag to read or set: ArduPilot has no
+//! `SIGNING_*` parameter. Once its store holds a key it rejects unsigned traffic
+//! on every link but channel 0 (normally USB), and it reports nothing about it.
+//!
 //! With no agent running (an empty snapshot), capability reports
-//! `fc_not_connected`, require reports `{require: null}`, and counters report
-//! unmeasured — each a valid, GCS-parseable body rather than a failure.
+//! `fc_not_connected` and counters report unmeasured, each a valid,
+//! GCS-parseable body rather than a failure.
 
 use axum::extract::State;
 use axum::Json;
@@ -61,18 +62,6 @@ pub async fn capability(State(state): State<AppState>) -> Json<Value> {
         autopilot,
         signing_params_present(&params),
     ))
-}
-
-/// `GET /api/mavlink/signing/require` → the current `SIGNING_REQUIRE` param value
-/// from the cached param map.
-///
-/// Returns `{require: bool}` when the param has been seen, or `{require: null}`
-/// when it has not. The boolean is `value != 0` (the Python `bool(int(value))`).
-/// An absent cache or an absent param both read as `{require: null}`.
-/// Guaranteed-200, never 500.
-pub async fn require(State(state): State<AppState>) -> Json<Value> {
-    let params = crate::param_store::read_param_blob(&state.params_path);
-    Json(get_require(params.get("SIGNING_REQUIRE")))
 }
 
 /// `GET /api/mavlink/signing/counters` → the observational signed-frame counters.
@@ -117,22 +106,6 @@ fn autopilot_from_snapshot(snapshot: Option<&Value>) -> i64 {
 /// ArduPilot FC normally reports `false` here and is still supported.
 fn signing_params_present(params: &serde_json::Map<String, Value>) -> bool {
     params.keys().any(|name| name.starts_with("SIGNING_"))
-}
-
-/// Build the require-read body from the raw param value, mirroring the Python
-/// `get_require`. `None` → `{require: null}` (the param has not been seen yet);
-/// a present value → `{require: bool}` where the boolean is `int(value) != 0`
-/// (the Python `bool(int(value))`). A non-numeric value reads as `null` (the
-/// Python `int(value)` would raise; the snapshot only ever carries numeric
-/// params, so this is the same defensive shape the route degrades to).
-fn get_require(value: Option<&Value>) -> Value {
-    match value {
-        None => json!({ "require": Value::Null }),
-        Some(v) => match v.as_f64() {
-            Some(n) => json!({ "require": (n as i64) != 0 }),
-            None => json!({ "require": Value::Null }),
-        },
-    }
 }
 
 /// The capability check. The FC must be connected and the autopilot must be
@@ -284,36 +257,6 @@ mod tests {
                 "firmware_version": Value::Null,
                 "signing_params_present": false,
             })
-        );
-    }
-
-    // ── require: the golden parity fixtures ──────────────────────────────────
-
-    #[test]
-    fn require_absent_param_is_null() {
-        // The golden body when SIGNING_REQUIRE has not been seen.
-        assert_eq!(get_require(None), json!({ "require": Value::Null }));
-    }
-
-    #[test]
-    fn require_zero_is_false() {
-        assert_eq!(get_require(Some(&json!(0.0))), json!({ "require": false }));
-        assert_eq!(get_require(Some(&json!(0))), json!({ "require": false }));
-    }
-
-    #[test]
-    fn require_nonzero_is_true() {
-        assert_eq!(get_require(Some(&json!(1.0))), json!({ "require": true }));
-        assert_eq!(get_require(Some(&json!(1))), json!({ "require": true }));
-    }
-
-    #[test]
-    fn require_non_numeric_value_degrades_to_null() {
-        // A non-numeric param value can never occur in a real snapshot; the route
-        // degrades it to null rather than failing.
-        assert_eq!(
-            get_require(Some(&json!("not a number"))),
-            json!({ "require": Value::Null })
         );
     }
 

@@ -372,7 +372,7 @@ pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
         },
         Method::PUT => match path {
             "/api/wfb/tx-power" | "/api/wfb/pair/auto-pair" => Some(Admin),
-            "/api/vision/detector" | "/api/mavlink/signing/require" => Some(Admin),
+            "/api/vision/detector" => Some(Admin),
             "/api/atlas/config" => Some(SafeWrite),
             p if is_plugin_config(p) => Some(Admin),
             p if p.starts_with("/api/v1/network/") => Some(Admin),

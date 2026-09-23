@@ -1,9 +1,8 @@
-//! MAVLink v2 signing write routes: FC enrollment, store clear, and the
-//! `SIGNING_REQUIRE` toggle.
+//! MAVLink v2 signing write routes: FC enrollment and store clear.
 //!
 //! The agent never holds a signing key. These write routes let the GCS push a
-//! one-shot key to the FC, clear the FC's signing store, and flip the
-//! `SIGNING_REQUIRE` param — each by building a MAVLink frame and writing it to
+//! one-shot key to the FC and clear the FC's signing store, each by building a
+//! MAVLink frame and writing it to
 //! `/run/ados/mavlink.sock`, the same socket the router forwards to the FC. They
 //! are the write companions to the [`crate::routes::signing`] reads.
 //!
@@ -12,8 +11,8 @@
 //! The Python routes pack their frames with a standalone v2 encoder whose source
 //! identity is `srcSystem=255, srcComponent=190` (mission-planner component), and
 //! the router forwards the frame verbatim, so the header identity is on the wire.
-//! This surface stamps the same `255/190` source so an enroll/disable/require from
-//! here is wire-identical to one the Python routes sent.
+//! This surface stamps the same `255/190` source so an enroll/disable from here
+//! is wire-identical to one the Python routes sent.
 //!
 //! - **`POST /api/mavlink/signing/enroll-fc`** parses the 64-hex-char body into a
 //!   32-byte key and sends `SETUP_SIGNING` (the key + an initial timestamp in
@@ -26,18 +25,15 @@
 //! - **`POST /api/mavlink/signing/disable-on-fc`** sends `SETUP_SIGNING` with an
 //!   all-zero key and a zero timestamp, which ArduPilot recognises as
 //!   "disable signing", and returns `{success: true}`.
-//! - **`PUT /api/mavlink/signing/require`** sends `PARAM_SET` for `SIGNING_REQUIRE`
-//!   (`1.0`/`0.0`, MAV_PARAM_TYPE_UINT8) and returns `{success, require}`.
 //!
 //! ## Error shapes (matched verbatim to the Python routes)
 //!
-//! All three gate on the FC being connected first (`503 {"detail":"FC not
+//! Both gate on the FC being connected first (`503 {"detail":"FC not
 //! connected"}` when not). A failure to reach the MAVLink socket is `503
 //! {"detail":"MAVLink command link unavailable"}` (the Python connect-failure
 //! branch). A bad body on enroll is `400 {"detail": <parse error>}` (the exact
 //! `parse_key_hex` message). Any other send failure degrades to the route's
-//! `500 {"detail": ...}` ("enrollment failed" / "disable failed" / "set require
-//! failed"), never a panic.
+//! `500 {"detail": ...}` ("enrollment failed" / "disable failed"), never a panic.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -49,7 +45,7 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use ados_protocol::mavlink::ardupilotmega::{
-    MavMessage, MavParamType, PARAM_SET_DATA, SETUP_SIGNING_DATA,
+    MavMessage, SETUP_SIGNING_DATA,
 };
 use ados_protocol::mavlink::{self, MavHeader};
 
@@ -58,7 +54,7 @@ use crate::state::AppState;
 
 /// The source identity stamped on every signing frame, matching the Python
 /// signing encoder (`srcSystem=255, srcComponent=MAV_COMP_ID_MISSIONPLANNER`), so
-/// an enroll/disable/require from this surface is wire-identical to one the Python
+/// an enroll/disable from this surface is wire-identical to one the Python
 /// routes emitted. The router forwards the frame verbatim, so this header is on
 /// the wire and is the parity target.
 const SOURCE_SYSTEM_ID: u8 = 255;
@@ -69,17 +65,8 @@ const SOURCE_COMPONENT_ID: u8 = 190;
 const DEFAULT_TARGET_SYSTEM: u8 = 1;
 const DEFAULT_TARGET_COMPONENT: u8 = 1;
 
-/// `MAV_PARAM_TYPE_UINT8` (= 1). `SIGNING_REQUIRE` is a uint8 on ArduPilot, the
-/// type the Python `set_require` writes.
-const PARAM_TYPE_UINT8: MavParamType = MavParamType::MAV_PARAM_TYPE_UINT8;
-
 /// The 32-byte signing-key length the FC's signing store expects.
 const SIGNING_KEY_LEN: usize = 32;
-
-/// `1.0` / `0.0` as the `SIGNING_REQUIRE` param value, matching `1.0 if require
-/// else 0.0` in the Python `set_require`.
-const REQUIRE_ON: f32 = 1.0;
-const REQUIRE_OFF: f32 = 0.0;
 
 /// Seconds from the POSIX epoch (1970-01-01 UTC) to 2015-01-01 UTC, the MAVLink
 /// signing epoch the initial timestamp is measured from.
@@ -115,12 +102,6 @@ fn default_target_system() -> i64 {
 
 fn default_target_component() -> i64 {
     DEFAULT_TARGET_COMPONENT as i64
-}
-
-/// Body for `PUT /api/mavlink/signing/require`. A single required `require` boolean.
-#[derive(Debug, Deserialize)]
-pub struct RequireRequest {
-    pub require: bool,
 }
 
 /// `POST /api/mavlink/signing/enroll-fc` → push a 32-byte signing key to the FC.
@@ -262,45 +243,6 @@ pub async fn disable_on_fc(State(state): State<AppState>) -> Response {
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
 }
 
-/// `PUT /api/mavlink/signing/require` → set `SIGNING_REQUIRE` on the FC.
-///
-/// Gates on the FC being connected (`503` when not), then sends `PARAM_SET` for
-/// `SIGNING_REQUIRE` (`1.0`/`0.0`, uint8) and returns `{success: true, require:
-/// <bool>}`. A socket failure is the Python `503 "MAVLink command link
-/// unavailable"`; any other failure is the Python `500 "set require failed"`.
-pub async fn require(State(state): State<AppState>, Json(req): Json<RequireRequest>) -> Response {
-    if !state.fc_connected() {
-        return detail(StatusCode::SERVICE_UNAVAILABLE, "FC not connected");
-    }
-
-    let frame = match build_param_set_require_frame(
-        DEFAULT_TARGET_SYSTEM,
-        DEFAULT_TARGET_COMPONENT,
-        req.require,
-    ) {
-        Ok(bytes) => bytes,
-        Err(()) => {
-            tracing::error!("signing require frame serialize failed");
-            return detail(StatusCode::INTERNAL_SERVER_ERROR, "set require failed");
-        }
-    };
-
-    if let Err(e) = state.mavlink.send(&frame).await {
-        tracing::warn!(error = %e, "signing set-require send failed");
-        return detail(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "MAVLink command link unavailable",
-        );
-    }
-
-    tracing::info!(require = req.require, "signing require set");
-    (
-        StatusCode::OK,
-        Json(json!({ "success": true, "require": req.require })),
-    )
-        .into_response()
-}
-
 /// Parse a 64-char lowercase-hex string into a 32-byte key, mirroring the Python
 /// `parse_key_hex` error messages verbatim so the 400 body is byte-identical:
 /// a non-64-length input is `key_hex must be 64 hex chars, got <n>`; a non-hex
@@ -396,34 +338,14 @@ fn build_setup_signing_frame(
     serialize_signing(&msg)
 }
 
-/// Build a `PARAM_SET` v2 frame writing `SIGNING_REQUIRE` (`1.0`/`0.0`, uint8)
-/// with the signing source identity. Returns `Err` only on a serialize failure.
-fn build_param_set_require_frame(
-    target_system: u8,
-    target_component: u8,
-    require: bool,
-) -> Result<Vec<u8>, ()> {
-    let mut param_id = [0u8; 16];
-    let name = b"SIGNING_REQUIRE";
-    param_id[..name.len()].copy_from_slice(name);
-    let msg = MavMessage::PARAM_SET(PARAM_SET_DATA {
-        target_system,
-        target_component,
-        param_id: param_id.into(),
-        param_value: if require { REQUIRE_ON } else { REQUIRE_OFF },
-        param_type: PARAM_TYPE_UINT8,
-    });
-    serialize_signing(&msg)
-}
-
 /// Serialize a message into a complete v2 frame with the signing source identity.
 fn serialize_signing(msg: &MavMessage) -> Result<Vec<u8>, ()> {
     let header = MavHeader {
         system_id: SOURCE_SYSTEM_ID,
         component_id: SOURCE_COMPONENT_ID,
         // The router stamps its own sequence on its frames; a client-written
-        // signing frame carries 0 (ArduPilot routes SETUP_SIGNING / PARAM_SET by
-        // target regardless of the sequence).
+        // signing frame carries 0 (ArduPilot routes SETUP_SIGNING by target
+        // regardless of the sequence).
         sequence: 0,
     };
     mavlink::serialize_v2(header, msg).map_err(|e| {
@@ -580,41 +502,6 @@ mod tests {
                 assert!(d.secret_key.iter().all(|b| *b == 0));
             }
             other => panic!("expected SETUP_SIGNING, got {other:?}"),
-        }
-    }
-
-    // ── PARAM_SET frame: SIGNING_REQUIRE 1.0 / 0.0 uint8 ──────────────────────
-
-    #[test]
-    fn param_set_require_on_writes_signing_require_one() {
-        let frame = build_param_set_require_frame(1, 1, true).unwrap();
-        let (header, msg) = mavlink::parse_v2(&frame).unwrap();
-        assert_eq!(header.system_id, 255);
-        assert_eq!(header.component_id, 190);
-        match msg {
-            MavMessage::PARAM_SET(d) => {
-                assert_eq!(d.param_value, 1.0);
-                assert_eq!(d.param_type, MavParamType::MAV_PARAM_TYPE_UINT8);
-                // param_id is "SIGNING_REQUIRE" left-justified, NUL-padded to 16.
-                let id: Vec<u8> = d
-                    .param_id
-                    .iter()
-                    .take_while(|b| **b != 0)
-                    .copied()
-                    .collect();
-                assert_eq!(&id, b"SIGNING_REQUIRE");
-            }
-            other => panic!("expected PARAM_SET, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn param_set_require_off_writes_signing_require_zero() {
-        let frame = build_param_set_require_frame(1, 1, false).unwrap();
-        let (_h, msg) = mavlink::parse_v2(&frame).unwrap();
-        match msg {
-            MavMessage::PARAM_SET(d) => assert_eq!(d.param_value, 0.0),
-            other => panic!("expected PARAM_SET, got {other:?}"),
         }
     }
 
@@ -864,56 +751,6 @@ mod tests {
         let sock = dir.path().join("absent.sock");
         let state = state_with_mavlink(sock, true);
         let resp = disable_on_fc(State(state)).await;
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            body_json(resp).await,
-            json!({ "detail": "MAVLink command link unavailable" })
-        );
-    }
-
-    #[tokio::test]
-    async fn require_writes_param_set_and_returns_the_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("mavlink.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        let server = accept_one_frame(listener);
-
-        let state = state_with_mavlink(sock, true);
-        let resp = require(State(state), Json(RequireRequest { require: true })).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let value = body_json(resp).await;
-        assert_eq!(value, json!({ "success": true, "require": true }));
-
-        let frame = server.await.unwrap();
-        let (_h, msg) = mavlink::parse_v2(&frame).unwrap();
-        match msg {
-            MavMessage::PARAM_SET(d) => {
-                assert_eq!(d.param_value, 1.0);
-                assert_eq!(d.param_type, MavParamType::MAV_PARAM_TYPE_UINT8);
-            }
-            other => panic!("expected PARAM_SET, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn require_with_fc_disconnected_is_a_503() {
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("mavlink.sock");
-        let state = state_with_mavlink(sock, false);
-        let resp = require(State(state), Json(RequireRequest { require: false })).await;
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            body_json(resp).await,
-            json!({ "detail": "FC not connected" })
-        );
-    }
-
-    #[tokio::test]
-    async fn require_with_an_absent_socket_is_the_link_unavailable_503() {
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("absent.sock");
-        let state = state_with_mavlink(sock, true);
-        let resp = require(State(state), Json(RequireRequest { require: true })).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             body_json(resp).await,

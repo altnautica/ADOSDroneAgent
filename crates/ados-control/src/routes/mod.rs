@@ -287,15 +287,10 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         )
         .route("/api/fleet/enrollment", get(fleet::get_enrollment))
         .route("/api/fleet/peers", get(fleet::list_peers))
-        // MAVLink v2 signing: FC capability, the require-flag value (GET) + toggle
-        // (PUT, on the same path the read uses), the observational counters, and
-        // the enroll/disable writes that push a key to the FC and clear its store.
+        // MAVLink v2 signing: FC capability, the observational counters, and the
+        // enroll/disable writes that push a key to the FC and clear its store.
         .route("/api/mavlink/signing/capability", get(signing::capability))
-        .route(
-            "/api/mavlink/signing/require",
-            get(signing::require).put(signing_write::require),
-        )
-        .route("/api/mavlink/signing/counters", get(signing::counters))
+                .route("/api/mavlink/signing/counters", get(signing::counters))
         .route(
             "/api/mavlink/signing/enroll-fc",
             post(signing_write::enroll_fc),
