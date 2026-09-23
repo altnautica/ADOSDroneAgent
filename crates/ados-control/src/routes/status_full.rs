@@ -14,10 +14,9 @@
 //!   the logging store's hardware snapshots with a direct host read behind them.
 //!   A field neither source supplies is `null`, never `0`.
 //! - **`services`** — the systemd-fallback inventory (`systemctl list-units
-//!   ados-*.service`), one object per unit shaped `{name, state, status,
-//!   task_done, uptimeSeconds, memory_mb}`, the exact shape the FastAPI route's
-//!   `_systemd_services_fallback` emits when its in-process tracker is empty (which
-//!   it always is on this separate daemon).
+//!   ados-*.service`), one object per unit shaped `{name, state, sub_state,
+//!   task_done, memory_mb}`. There is no per-unit transition log, so no uptime
+//!   is reported (a consumer shows it as unknown rather than a fabricated 0).
 //! - **`resources`** — CPU / memory / swap / disk / temperature derived from the
 //!   store's most-recent hardware snapshots, the same 13-field subset the FastAPI
 //!   `/api/status/full` selects from `derive_resources`. An unreachable store (or
@@ -218,10 +217,8 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     payload.insert(
         "relaySecretPresent".to_string(),
         json!(
-            ados_protocol::relay_ticket::load_secret_at(std::path::Path::new(
-                ados_protocol::relay_ticket::RELAY_SECRET_PATH
-            ))
-            .is_some()
+            ados_protocol::relay_ticket::load_secret_at(&state.pairing_paths.relay_secret)
+                .is_some()
         ),
     );
     // Whether the rule keeping a network-capable plugin off this node's own
@@ -260,10 +257,10 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     // Linked WFB peers + the freshest-peer scalars, folded in only when this node
     // currently decodes a fresh PresenceBeacon from at least one WFB peer. This is
     // the LOCAL-FIRST transitive-enrollment signal (a ground node's relayed drones)
-    // the cloud heartbeat carries, now on the PRIMARY LAN path (Rule 39), so a GCS
+    // the cloud heartbeat carries, now on the PRIMARY LAN path, so a GCS
     // paired only to a ground node enrols each relayed drone without the cloud
     // relay. PROFILE-AGNOSTIC; the keys are absent on a drone / a peerless node / a
-    // node whose relay lane went quiet, never a fabricated block (operating rule 44).
+    // node whose relay lane went quiet, never a fabricated block.
     for (k, v) in read_linked_peers() {
         payload.insert(k, v);
     }
@@ -281,7 +278,7 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     // LAN path, which is the whole point of a decentralized bus. The key is OMITTED
     // rather than emitted as `[]` when the bus is silent, because an empty array
     // would claim "this node hears no neighbours" — a different fact from "this node
-    // runs no swarm bus" (operating rule 44). A client that wants the counters, or
+    // runs no swarm bus". A client that wants the counters, or
     // the degraded shape explicitly, reads `/api/swarm/neighbors`.
     if let Some(neighbors) = super::swarm::neighbors_for_full_status(&state) {
         payload.insert("neighbors".to_string(), neighbors);
@@ -420,14 +417,14 @@ fn round_int(v: f64) -> i64 {
 
 /// Build the consolidated-status `services` list from the systemd unit inventory.
 ///
-/// This daemon has no in-process service tracker, so the FastAPI route's tracker
-/// branch is always empty here and it serves the `_systemd_services_fallback`
-/// shape: one object per `ados-*.service` unit, shaped `{name, state, status,
-/// task_done, uptimeSeconds, memory_mb}`. `state` is `"running"` when the unit's
-/// sub-state is `running`, else the sub-state (or `"unknown"`); `status` mirrors
-/// `state`; `task_done` is `state != "running"`; `uptimeSeconds` is always `0`
-/// (the fallback path carries no transition log); `memory_mb` is the unit's
-/// grouped PSS. An absent / failing `systemctl` degrades to an empty list.
+/// This daemon has no in-process service tracker, so it serves the systemd
+/// inventory: one object per `ados-*.service` unit, shaped `{name, state,
+/// sub_state, task_done, memory_mb}`. `state` is the systemd ActiveState and
+/// `sub_state` the unit's sub-state (each `"unknown"` when absent); `task_done`
+/// is `sub_state != "running"`; no uptime is emitted (this daemon carries no
+/// transition log, and a 0 would read as a just-restarted unit); `memory_mb` is
+/// the unit's grouped PSS. An absent / failing `systemctl` degrades to an empty
+/// list.
 async fn build_services_list() -> Value {
     let mut services = systemd_services_fallback().await;
     attach_service_memory(&mut services);
@@ -477,21 +474,26 @@ async fn systemd_services_fallback() -> Vec<Value> {
 /// ([`crate::routes::services::parse_unit_line`]), which strips a leading status
 /// glyph. A failed unit is exactly the row the dashboard most needs, and older
 /// systemd builds prefix it with `●`/`*` even under `--plain`. This projects the
-/// parsed row onto the status/full shape: `state` is `"running"` when the
-/// sub-state is `running`, else the sub-state (or `"unknown"`); `status` mirrors
-/// `state`; `task_done` is `state != "running"`.
+/// parsed row onto the status/full shape: `state` is the systemd ActiveState
+/// (`active`, `inactive`, `failed`, `activating`, …, or `unknown`), `sub_state`
+/// is the unit's sub-state (`running`, `dead`, `exited`, `auto-restart`, …), and
+/// `task_done` is `sub_state != "running"`. No uptime is carried: the list does
+/// not report one, so the consumer shows it as unknown.
 fn parse_fallback_line(line: &str) -> Option<Value> {
     let unit = crate::routes::services::parse_unit_line(line)?;
     let name = unit["name"].as_str()?.to_string();
-    let sub = unit["sub_state"].as_str().unwrap_or("").trim();
-    let state = if sub.is_empty() { "unknown" } else { sub };
+    let or_unknown = |key: &str| {
+        let v = unit[key].as_str().unwrap_or("").trim();
+        if v.is_empty() { "unknown" } else { v }.to_string()
+    };
+    let state = or_unknown("state");
+    let sub = or_unknown("sub_state");
 
     Some(json!({
         "name": name,
         "state": state,
-        "status": state,
-        "task_done": state != "running",
-        "uptimeSeconds": 0,
+        "task_done": sub != "running",
+        "sub_state": sub,
     }))
 }
 
@@ -1430,7 +1432,7 @@ const USB_REHOME_FRESH_S: f64 = 600.0;
 ///
 /// Every block is omitted (not defaulted) when its sidecar is absent, stale, or
 /// malformed: a stopped supervisor must read as "no reading", never as a healthy
-/// verdict frozen at the moment it died (operating rule 44).
+/// verdict frozen at the moment it died.
 pub(crate) fn read_reconciler_status() -> Vec<(String, Value)> {
     read_reconciler_status_in(&run_dir(), now_unix_secs())
 }
@@ -1617,8 +1619,8 @@ fn sidecar_fresh(obj: &Map<String, Value>, now: f64, max_age_s: f64) -> bool {
 const CRSF_STATS_SIDECAR: &str = "crsf-stats.json";
 
 /// A CRSF sidecar not re-written within this window reads as absent, so a dead
-/// lane's lingering tmpfs file never keeps the status carrying a frozen state
-/// (operating rule 44). The lane rewrites it ~1 Hz while transmitting and every
+/// lane's lingering tmpfs file never keeps the status carrying a frozen state.
+/// The lane rewrites it ~1 Hz while transmitting and every
 /// 5 s while idling; 10 s is the canonical consumer window that idle refresh
 /// cadence was sized to be half of, so a live idle lane never flaps to absent.
 /// The sidecar body carries no write time, so the gate keys on the file mtime
@@ -1686,7 +1688,7 @@ const LINKED_PEERS_SIDECAR: &str = "linked-peers.json";
 /// (`LINKED_PEER_STALE_AFTER_S`) and the cloud heartbeat's fold of the same
 /// sidecar. Per-entry gating also covers the dead-writer case: a stale file's
 /// entries are all old, so the whole fold reads absent rather than republishing
-/// ghost peers (operating rule 44).
+/// ghost peers.
 const LINKED_PEER_STALE_S: f64 = 60.0;
 
 /// One raw peer row as the linked-peers sidecar writes it (snake_case, the
@@ -1717,7 +1719,7 @@ struct LinkedPeersDoc {
 /// top-level `linked_peers` array plus the freshest peer's `peerDeviceId` /
 /// `peerRssiDbm` scalars, so a GCS paired LOCAL-FIRST to a ground node can
 /// transitively enrol each drone that node relays over WFB — the exact signal the
-/// cloud heartbeat carries, now on the PRIMARY LAN path (Rule 39).
+/// cloud heartbeat carries, now on the PRIMARY LAN path.
 ///
 /// Each array entry is served in the SNAKE_CASE shape the GCS
 /// `FullStatusResponse.linked_peers` reader consumes: `device_id` / `role` /
@@ -1729,7 +1731,7 @@ struct LinkedPeersDoc {
 /// PROFILE-AGNOSTIC by construction — it reads the sidecar, not the profile — and
 /// staleness-gated per entry, so the fold is absent (no keys) on a drone / a
 /// peerless ground node / a node whose relay lane went quiet, never a fabricated
-/// block (operating rule 44).
+/// block.
 pub(crate) fn read_linked_peers() -> Vec<(String, Value)> {
     read_linked_peers_in(&run_dir().join(LINKED_PEERS_SIDECAR), now_unix_secs())
 }
@@ -2089,21 +2091,27 @@ mod tests {
         let row = "ados-mavlink.service loaded active running ADOS MAVLink router";
         let svc = parse_fallback_line(row).unwrap();
         assert_eq!(svc["name"], json!("ados-mavlink"));
-        assert_eq!(svc["state"], json!("running"));
-        assert_eq!(svc["status"], json!("running"));
+        assert_eq!(svc["state"], json!("active"));
+        assert_eq!(svc["sub_state"], json!("running"));
         assert_eq!(svc["task_done"], json!(false));
-        assert_eq!(svc["uptimeSeconds"], json!(0));
+        assert!(svc.get("uptimeSeconds").is_none());
     }
 
     #[test]
-    fn fallback_line_maps_a_dead_unit_state_to_its_substate() {
-        // A non-running sub-state surfaces verbatim (e.g. "dead"); task_done true.
+    fn fallback_line_keeps_active_state_and_substate_apart() {
+        // The ActiveState and the sub-state travel separately, so a consumer
+        // can tell a stopped unit from a crash-looping one.
         let row = "ados-discovery.service loaded inactive dead ADOS discovery";
         let svc = parse_fallback_line(row).unwrap();
         assert_eq!(svc["name"], json!("ados-discovery"));
-        assert_eq!(svc["state"], json!("dead"));
-        assert_eq!(svc["status"], json!("dead"));
+        assert_eq!(svc["state"], json!("inactive"));
+        assert_eq!(svc["sub_state"], json!("dead"));
         assert_eq!(svc["task_done"], json!(true));
+
+        let looping =
+            parse_fallback_line("ados-video.service loaded activating auto-restart V").unwrap();
+        assert_eq!(looping["state"], json!("activating"));
+        assert_eq!(looping["sub_state"], json!("auto-restart"));
     }
 
     #[test]
@@ -2117,6 +2125,7 @@ mod tests {
             let svc = parse_fallback_line(row).unwrap_or_else(|| panic!("dropped: {row}"));
             assert_eq!(svc["name"], json!("ados-x"));
             assert_eq!(svc["state"], json!("failed"));
+            assert_eq!(svc["sub_state"], json!("failed"));
             assert_eq!(svc["task_done"], json!(true));
         }
     }
@@ -2131,7 +2140,7 @@ mod tests {
     #[test]
     fn consolidated_service_entry_carries_memory_mb() {
         // Build a representative entry through the same code the route runs and
-        // assert the full six-key consolidated shape.
+        // assert the full five-key consolidated shape.
         let mut entry =
             vec![
                 parse_fallback_line("ados-video.service loaded active running ADOS Video").unwrap(),
@@ -2142,14 +2151,7 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            [
-                "memory_mb",
-                "name",
-                "state",
-                "status",
-                "task_done",
-                "uptimeSeconds"
-            ]
+            ["memory_mb", "name", "state", "sub_state", "task_done"]
         );
         assert!(obj["memory_mb"].is_number());
     }
@@ -3102,7 +3104,7 @@ mod tests {
 
     /// A stale sidecar (a dead lane's orphaned file, past the staleness window)
     /// folds NO `crsf` key, so a dropped lane clears the tab rather than pinning a
-    /// frozen reading (operating rule 44).
+    /// frozen reading.
     #[test]
     fn crsf_absent_when_the_sidecar_is_stale() {
         let dir = tempfile::tempdir().unwrap();
@@ -3187,7 +3189,7 @@ mod tests {
     }
 
     /// Every entry past the prune window → nothing folded, so a quiet / dead lane
-    /// clears the surface rather than pinning ghost peers (operating rule 44).
+    /// clears the surface rather than pinning ghost peers.
     #[test]
     fn linked_peers_absent_when_every_entry_is_stale() {
         let dir = tempfile::tempdir().unwrap();

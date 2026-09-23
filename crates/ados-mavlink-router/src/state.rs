@@ -54,15 +54,24 @@ fn px4_mode_name(custom_mode: u32) -> String {
 }
 
 /// Select the mode table for a vehicle, then resolve the custom mode. PX4 is
-/// decoded by its packed-union scheme (keyed on `autopilot`); ArduPilot is keyed
-/// on MAV_TYPE through the shared per-firmware tables, the same ones the
-/// control surface encodes `DO_SET_MODE` with. An unmapped type/mode falls back
-/// to `MODE_<n>`.
-fn mode_name(autopilot: i64, mav_type: i64, custom_mode: u32) -> String {
+/// decoded by its packed-union scheme (keyed on `autopilot`); ArduPilot through
+/// the shared per-firmware tables, the same ones the control surface encodes
+/// `DO_SET_MODE` with: the firmware the banner named, or until the banner
+/// arrives the one the MAV_TYPE suggests. The suggestion is display-only: the
+/// command route never encodes from it (a copter-typed heartbeat may be a
+/// QuadPlane), and the router requests the banner until it has one. An
+/// unmapped type/mode reads `MODE_<n>`.
+fn mode_name(
+    autopilot: i64,
+    firmware: Option<ArduPilotFirmware>,
+    mav_type: i64,
+    custom_mode: u32,
+) -> String {
     if autopilot == MAV_AUTOPILOT_PX4 {
         return px4_mode_name(custom_mode);
     }
-    ArduPilotFirmware::from_mav_type(mav_type)
+    firmware
+        .or_else(|| ArduPilotFirmware::from_mav_type(mav_type))
         .and_then(|fw| fw.mode_name(custom_mode))
         .map_or_else(|| format!("MODE_{custom_mode}"), str::to_string)
 }
@@ -110,6 +119,10 @@ pub struct VehicleState {
     pub system_status: i64,
     pub armed: bool,
     pub mode: String,
+    /// The ArduPilot firmware the FC's banner STATUSTEXT named, `None` until
+    /// one arrives. Cleared when the heartbeat's autopilot or type changes,
+    /// so a swapped FC is never decoded with the previous one's table.
+    pub firmware: Option<ArduPilotFirmware>,
     // GLOBAL_POSITION_INT
     pub lat: f64,
     pub lon: f64,
@@ -185,6 +198,7 @@ impl Default for VehicleState {
             system_status: 0,
             armed: false,
             mode: String::new(),
+            firmware: None,
             lat: 0.0,
             lon: 0.0,
             alt_msl: 0.0,
@@ -244,14 +258,42 @@ impl VehicleState {
         self.last_update = now_iso.to_string();
         match msg {
             MavMessage::HEARTBEAT(m) => {
-                self.mav_type = m.mavtype as i64;
-                self.autopilot = m.autopilot as i64;
+                let (autopilot, mav_type) = (m.autopilot as i64, m.mavtype as i64);
+                // A different autopilot, or a type only another firmware
+                // reports, is a different FC: forget the identification. A
+                // multirotor type contradicts nothing (a QuadPlane reports one).
+                let contradicted = match ArduPilotFirmware::from_mav_type(mav_type) {
+                    Some(ArduPilotFirmware::Copter) | None => false,
+                    Some(fw) => self.firmware.is_some_and(|known| known != fw),
+                };
+                if !self.last_heartbeat.is_empty() && (autopilot != self.autopilot || contradicted)
+                {
+                    self.firmware = None;
+                }
+                self.mav_type = mav_type;
+                self.autopilot = autopilot;
                 self.base_mode = m.base_mode.bits() as i64;
                 self.custom_mode = m.custom_mode as i64;
                 self.system_status = m.system_status as i64;
                 self.armed = (m.base_mode.bits() & 128) != 0;
                 self.last_heartbeat = now_iso.to_string();
-                self.mode = mode_name(m.autopilot as i64, m.mavtype as i64, m.custom_mode);
+                self.mode = mode_name(autopilot, self.firmware, mav_type, m.custom_mode);
+                None
+            }
+            MavMessage::STATUSTEXT(m) => {
+                let end = m.text.iter().position(|&b| b == 0).unwrap_or(m.text.len());
+                let text = String::from_utf8_lossy(&m.text[..end]);
+                if let Some(fw) = ArduPilotFirmware::from_banner(&text) {
+                    self.firmware = Some(fw);
+                    if !self.last_heartbeat.is_empty() {
+                        self.mode = mode_name(
+                            self.autopilot,
+                            self.firmware,
+                            self.mav_type,
+                            self.custom_mode as u32,
+                        );
+                    }
+                }
                 None
             }
             MavMessage::GLOBAL_POSITION_INT(m) => {
@@ -364,6 +406,10 @@ impl VehicleState {
         json!({
             "mav_type": self.mav_type,
             "autopilot": self.autopilot,
+            // The firmware the banner named ("copter" / "plane" / "rover"), or
+            // null until one has been seen. The command route encodes flight
+            // modes from this, never from `mav_type` alone.
+            "vehicle_firmware": self.firmware.map(ArduPilotFirmware::as_str),
             "armed": self.armed,
             "mode": self.mode,
             "position": {
@@ -441,10 +487,10 @@ fn param_id_to_string(raw: &[u8]) -> String {
 mod tests {
     use super::*;
     use ados_protocol::mavlink::ardupilotmega::{
-        GpsFixType, MavAutopilot, MavBatteryFunction, MavBatteryType, MavModeFlag, MavState,
-        MavSysStatusSensor, MavType, BATTERY_STATUS_DATA, GLOBAL_POSITION_INT_DATA,
-        GPS_RAW_INT_DATA, HEARTBEAT_DATA, PARAM_VALUE_DATA, RC_CHANNELS_DATA, SYS_STATUS_DATA,
-        VFR_HUD_DATA,
+        GpsFixType, MavAutopilot, MavBatteryFunction, MavBatteryType, MavModeFlag, MavSeverity,
+        MavState, MavSysStatusSensor, MavType, BATTERY_STATUS_DATA, GLOBAL_POSITION_INT_DATA,
+        GPS_RAW_INT_DATA, HEARTBEAT_DATA, PARAM_VALUE_DATA, RC_CHANNELS_DATA, STATUSTEXT_DATA,
+        SYS_STATUS_DATA, VFR_HUD_DATA,
     };
     use ados_protocol::mavlink::MavMessage;
 
@@ -463,6 +509,16 @@ mod tests {
             base_mode,
             system_status: MavState::MAV_STATE_STANDBY,
             mavlink_version: 3,
+        })
+    }
+
+    /// The banner STATUSTEXT ArduPilot sends at boot and on a param request.
+    fn banner(text: &str) -> MavMessage {
+        let mut buf = [0u8; 50];
+        buf[..text.len()].copy_from_slice(text.as_bytes());
+        MavMessage::STATUSTEXT(STATUSTEXT_DATA {
+            severity: MavSeverity::MAV_SEVERITY_INFO,
+            text: buf.into(),
         })
     }
 
@@ -488,6 +544,30 @@ mod tests {
         s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 99, false), TS);
         assert_eq!(s.mode, "MODE_99");
         assert!(!s.armed);
+    }
+
+    #[test]
+    fn a_quadplane_is_decoded_with_the_plane_table_once_its_banner_arrives() {
+        // Q_MAV_TYPE=QUADROTOR makes a plane heartbeat as a quad. Mode 6 is
+        // FBWB on Plane and RTL on Copter: before the banner only the type's
+        // suggestion is displayed and no firmware is published, so the command
+        // route refuses to encode a mode; after it the plane name is reported
+        // and the snapshot carries the firmware.
+        let mut s = VehicleState::default();
+        s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 6, false), TS);
+        assert_eq!(s.to_wire()["vehicle_firmware"], Value::Null);
+        s.update_from_message(&banner("ArduPlane V4.5.7 (4a6ff3b2)"), TS);
+        assert_eq!(s.mode, "FBWB");
+        s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 11, false), TS);
+        assert_eq!(s.mode, "RTL");
+        assert_eq!(s.to_wire()["vehicle_firmware"], json!("plane"));
+        // Another multirotor type contradicts nothing; a type only another
+        // firmware reports is a different FC and drops the identification.
+        s.update_from_message(&heartbeat(MavType::MAV_TYPE_HEXAROTOR, 6, false), TS);
+        assert_eq!(s.mode, "FBWB");
+        s.update_from_message(&heartbeat(MavType::MAV_TYPE_GROUND_ROVER, 6, false), TS);
+        assert_eq!(s.firmware, None);
+        assert_eq!(s.mode, "FOLLOW");
     }
 
     fn heartbeat_px4(mavtype: MavType, custom_mode: u32) -> MavMessage {

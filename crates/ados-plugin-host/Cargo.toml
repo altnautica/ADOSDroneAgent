@@ -27,6 +27,11 @@ ados-protocol = { path = "../ados-protocol", features = ["tracing-layer", "mavli
 # forwards a plugin's gated `compute.*` calls to its paired compute node through
 # this client; it never re-implements the job API.
 ados-compute = { path = "../ados-compute" }
+# The PIC arbiter's sidecar read and injector-refusal decision, shared with the
+# router's FC-write gate. With injector arbitration armed the host checks it
+# before queueing a command, so a plugin reads `pic_refused` for the command the
+# router would drop rather than a `sent` it never got.
+ados-hid = { path = "../ados-hid" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

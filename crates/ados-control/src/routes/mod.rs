@@ -216,7 +216,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
             get(plugins_state::get_plugin_state),
         )
         // The compute node's cluster status, read from its heartbeat sidecar, so
-        // a LAN-paired GCS renders the compute-cluster card local-first (Rule 39).
+        // a LAN-paired GCS renders the compute-cluster card local-first.
         .route(
             "/api/compute/status",
             get(compute_status::get_compute_status),
@@ -899,6 +899,7 @@ mod recording_route_tests {
             bind_state: dir.path().join("bind-state.json"),
             profile_conf: dir.path().join("profile.conf"),
             mesh_role: dir.path().join("mesh-role"),
+            relay_secret: dir.path().join("relay-peer-secret"),
         };
         let state = AppState::new(
             std::sync::Arc::new(crate::auth::PairingState::with_path(pairing_json)),

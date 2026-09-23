@@ -11,12 +11,12 @@
 //! - It publishes at the beacon rate, repeatedly, not once at startup.
 //! - It replays the last table to a late subscriber, so a consumer that connects
 //!   between publishes is not blind for half a second.
-//! - It reports the real fleet identity, and zeroed counters rather than fabricated
-//!   activity.
+//! - It reports the real fleet identity, zeroed counters rather than fabricated
+//!   activity, and a radio block that says the bus is not listening — so a deaf
+//!   bus is not mistaken for empty sky.
 //! - It removes its socket on shutdown, so a restart does not inherit a stale one.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use ados_protocol::state::encode_v2;
@@ -25,14 +25,13 @@ use ados_swarmbus::SwarmBusConfig;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 /// A ground-station config rooted in `dir`: slot 0, so the transmit loop is correctly
 /// never started and the identity gate passes.
 fn ground_station_config(dir: &Path) -> SwarmBusConfig {
     SwarmBusConfig {
-        profile: Some("ground_station".to_string()),
-        device_id: "ados-gs-test".to_string(),
+        ground_station: true,
         // A name no host has, so the radio open fails the way it does on a node whose
         // adapter is not up yet — which is the condition under test.
         interface: "nonexistent-swarm-iface0".to_string(),
@@ -94,10 +93,9 @@ async fn the_service_publishes_the_contract_without_a_working_radio() {
         }),
     );
 
-    let cancel = Arc::new(Notify::new());
+    let (cancel, cancel_rx) = watch::channel(false);
     let cfg = ground_station_config(dir.path());
-    let run_cancel = cancel.clone();
-    let service = tokio::spawn(async move { ados_swarmbus::run(cfg, run_cancel).await });
+    let service = tokio::spawn(ados_swarmbus::run(cfg, cancel_rx));
 
     let swarm_sock = dir.path().join("swarm.sock");
     let first = read_one_line(&swarm_sock).await;
@@ -125,6 +123,9 @@ async fn the_service_publishes_the_contract_without_a_working_radio() {
         json!(false),
         "a ground station never has one"
     );
+    // A bus whose radio never opened says so. Zeroed counters and an empty table
+    // alone read exactly like a healthy listener with nobody in range.
+    assert_eq!(first["radio"], json!({"open": false, "iface": null}));
     for k in COUNTER_KEYS {
         assert!(first["counters"].get(k).is_some(), "counters missing {k}");
     }
@@ -162,7 +163,7 @@ async fn the_service_publishes_the_contract_without_a_working_radio() {
     );
 
     // Shutdown removes the socket, so a restart cannot inherit a stale one.
-    cancel.notify_waiters();
+    cancel.send(true).unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(5), service).await;
     assert!(
         !swarm_sock.exists(),
@@ -176,7 +177,8 @@ async fn the_service_publishes_the_contract_without_a_working_radio() {
 /// a configuration error.
 #[test]
 fn a_drone_left_on_the_ground_slot_is_rejected_before_it_can_radiate() {
-    let cfg = SwarmBusConfig::from_yaml("agent:\n  profile: drone\n");
+    let no_sentinel = Path::new("/nonexistent/ados/profile.conf");
+    let cfg = SwarmBusConfig::from_yaml("agent:\n  profile: drone\n", no_sentinel);
     assert_eq!(cfg.fleet_slot, 0);
     assert!(
         cfg.identity_error().is_some(),
@@ -185,6 +187,7 @@ fn a_drone_left_on_the_ground_slot_is_rejected_before_it_can_radiate() {
     // And the correctly-provisioned equivalent passes.
     let ok = SwarmBusConfig::from_yaml(
         "agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_id: 7\n    fleet_slot: 3\n",
+        no_sentinel,
     );
     assert_eq!(ok.identity_error(), None);
     assert!(!ok.is_ground_station());

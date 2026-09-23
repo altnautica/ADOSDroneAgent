@@ -5,7 +5,7 @@ Why this module exists
 
 The Python supervisor is the lifecycle controller: it installs, enables,
 disables and grants. The ``ados-plugin-host`` daemon is what actually
-*serves* a plugin — it binds ``/run/ados/plugins/<id>.sock`` and writes the
+*serves* a plugin — it binds ``/run/ados/plugins/<id>/host.sock`` and writes the
 0600 token env file the plugin's systemd unit reads through
 ``EnvironmentFile=``.
 
@@ -40,9 +40,10 @@ the miss and carry on. The one thing a caller must NOT do is tell the operator
 a change is applied when the socket was unreachable AND the poll has not run —
 the supervisor surfaces the difference.
 
-The socket lives in ``/run/ados/plugin-host/`` (mode 0700, root), outside the
-per-plugin socket directory the plugin units can reach, so only a root caller
-can open it; the daemon also re-checks the peer's credentials on accept.
+The socket lives in ``/run/ados/plugin-host/`` (mode 0700, root), outside
+every plugin's mount namespace (each unit sees only its own socket
+directory), so only a root caller can open it; the daemon also re-checks the
+peer's credentials on accept.
 
 The wire is the same length-prefixed msgpack envelope every other agent IPC
 socket speaks, so this needs no new framing and no event loop: a blocking
@@ -63,8 +64,8 @@ from ados.plugins.rpc import MAX_FRAME_BYTES, Envelope, encode_frame
 
 log = get_logger("plugins.host_control")
 
-#: The root-only directory the control socket lives in. Kept apart from the
-#: per-plugin socket dir because every plugin unit can write that one.
+#: The root-only directory the control socket lives in, apart from the
+#: per-plugin socket directories.
 CONTROL_DIR = ADOS_RUN_DIR / "plugin-host"
 
 #: The control socket file name under :data:`CONTROL_DIR`.

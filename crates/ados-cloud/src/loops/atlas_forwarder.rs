@@ -6,7 +6,7 @@
 //! leave the drone for a compute node to reconstruct a world model from. This
 //! loop is that egress: it SUBSCRIBES to the atlas bus and forwards every event
 //! over the bearer ladder — direct LAN first, then the WFB relay for the field,
-//! then the opt-in cloud lane — local-first (Rule 39).
+//! then the opt-in cloud lane — local-first.
 //!
 //! The compute node is discovered over mDNS (a service advertising
 //! `profile=workstation`); its job-API base URL backs the direct-LAN bearer.

@@ -167,7 +167,9 @@ pub fn mint_scoped_ticket(
     ttl_seconds: i64,
 ) -> Option<String> {
     match crate::pairing_posture::load_pairing(pairing_path) {
-        crate::pairing_posture::Pairing::Unpaired => None,
+        crate::pairing_posture::Pairing::Unpaired | crate::pairing_posture::Pairing::Unreadable => {
+            None
+        }
         crate::pairing_posture::Pairing::Paired(api_key) => Some(
             WsTicketIssuer::from_api_key(&api_key)
                 .mint(scope, ttl_seconds)

@@ -31,12 +31,15 @@
 //! ground station is paired to by radio alone. It is the one route whose value
 //! depends on being callable before any credential exists.
 
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use ados_protocol::relay_ticket::{self, AcceptDecision, RELAY_SECRET_PATH};
+use ados_protocol::relay_ticket::{self, AcceptDecision};
+
+use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
 pub struct OfferedSecret {
@@ -53,8 +56,11 @@ pub struct OfferedSecret {
 /// pairing is now credentialled, already-held means the restatement was a
 /// no-op and the reconciler can go quiet, and refused means this drone is
 /// paired to a DIFFERENT ground station and somebody should know.
-pub async fn post_peer_secret(Json(req): Json<OfferedSecret>) -> (StatusCode, Json<Value>) {
-    let path = std::path::Path::new(RELAY_SECRET_PATH);
+pub async fn post_peer_secret(
+    State(state): State<AppState>,
+    Json(req): Json<OfferedSecret>,
+) -> (StatusCode, Json<Value>) {
+    let path = state.pairing_paths.relay_secret.as_path();
     match relay_ticket::apply_offered_secret(path, &req.secret) {
         Ok(AcceptDecision::Accept) => (
             StatusCode::OK,
@@ -96,12 +102,44 @@ pub async fn post_peer_secret(Json(req): Json<OfferedSecret>) -> (StatusCode, Js
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use crate::auth::PairingState;
+    use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};
+    use crate::state::PairingPaths;
 
     const HEX32: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    /// The handler writes to the real path, so the decision logic is exercised
-    /// through `apply_offered_secret` directly (which owns the rule and has its
-    /// own tests against a tempdir). What is asserted here is the MAPPING from
+    /// An `AppState` whose paths, the relay secret included, all live in `dir`.
+    fn test_state(dir: &Path) -> AppState {
+        let pairing_paths = PairingPaths {
+            config: dir.join("config.yaml"),
+            pairing_json: dir.join("pairing.json"),
+            wfb_key_dir: dir.join("wfb"),
+            bind_state: dir.join("bind-state.json"),
+            profile_conf: dir.join("profile.conf"),
+            mesh_role: dir.join("mesh-role"),
+            relay_secret: dir.join("secrets").join("relay-peer-secret"),
+        };
+        AppState::new(
+            Arc::new(PairingState::with_path(dir.join("pairing.json"))),
+            StateIpcClient::disconnected(),
+            MavlinkIpcClient::new(dir.join("absent-mavlink.sock")),
+            LogdQueryClient::new(dir.join("absent-logd.sock")),
+            dir.join("board.json"),
+            pairing_paths,
+            Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.join("dashboard-pin.json"),
+            )),
+            Arc::new(crate::mcp::McpTokenStore::with_path(
+                dir.join("mcp-token.json"),
+            )),
+        )
+    }
+
+    /// The decision logic has its own tests against a tempdir
+    /// (`apply_offered_secret`). What is asserted here is the MAPPING from
     /// decision to HTTP status, which is this module's whole job and is what a
     /// ground station's reconciler branches on.
     #[test]
@@ -129,9 +167,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_malformed_offer_is_refused_with_a_reason_a_human_can_act_on() {
-        let (status, Json(body)) = post_peer_secret(Json(OfferedSecret {
-            secret: "nonsense".to_string(),
-        }))
+        let dir = tempfile::tempdir().unwrap();
+        let (status, Json(body)) = post_peer_secret(
+            State(test_state(dir.path())),
+            Json(OfferedSecret {
+                secret: "nonsense".to_string(),
+            }),
+        )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["accepted"], json!(false));
@@ -140,6 +182,25 @@ mod tests {
             body["detail"].as_str().unwrap().contains("64 hex"),
             "the reason names the actual requirement"
         );
+    }
+
+    #[tokio::test]
+    async fn an_accepted_offer_lands_at_the_configured_path_and_is_not_re_keyed() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let offer = |secret: &str| {
+            Json(OfferedSecret {
+                secret: secret.to_string(),
+            })
+        };
+        let (status, _) = post_peer_secret(State(state.clone()), offer(HEX32)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(relay_ticket::load_secret_at(&state.pairing_paths.relay_secret).is_some());
+
+        let other = HEX32.replace('0', "f");
+        let (status, Json(body)) = post_peer_secret(State(state), offer(&other)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["decision"], json!("refused_would_overwrite"));
     }
 
     #[test]

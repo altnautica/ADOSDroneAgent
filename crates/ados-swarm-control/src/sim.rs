@@ -336,7 +336,7 @@ impl SimWorld {
                 let lon = crate::geo::e7_to_deg(b.lon_e7);
                 let alt = b.alt_dm as f64 / 10.0;
                 // Dead reckon in the local frame, then hand back geodetic, which
-                // is the same order `NeighborTable::predicted` uses.
+                // is the same order `swarmbus::fixes_from_payload` uses.
                 let o = GeoOrigin::new(lat, lon, alt);
                 let (plat, plon, palt) = o.to_geo(Ned::new(vn * dt, ve * dt, vd * dt));
                 Some(NeighborFix {

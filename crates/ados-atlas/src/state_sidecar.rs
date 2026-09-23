@@ -14,7 +14,7 @@
 //! egress forwarder (`ados-cloud`), which writes them to the
 //! [`ATLAS_FORWARD_SIDECAR`] handoff file; this writer folds a *fresh* handoff in
 //! (a stale one, from a dead forwarder, is dropped so the Stream card never shows
-//! a compute node that is no longer there — operating rule 44).
+//! a compute node that is no longer there).
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -35,8 +35,8 @@ pub const ATLAS_STATE_SIDECAR: &str = "/run/ados/plugins/atlas-state.json";
 pub const ATLAS_STATE_SIDECAR_VERSION: u16 = 1;
 
 /// A forwarder handoff not re-written within this window is treated as absent, so
-/// a dead forwarder never keeps a stale compute node / bearer on the Stream card
-/// (operating rule 44). Comfortably larger than the forwarder's refresh cadence.
+/// a dead forwarder never keeps a stale compute node / bearer on the Stream card.
+/// Comfortably larger than the forwarder's refresh cadence.
 const FORWARD_STALE: Duration = Duration::from_secs(15);
 
 /// The Atlas telemetry slice — the camelCase shape the GCS Atlas plugin reads.

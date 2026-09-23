@@ -40,6 +40,10 @@ export interface MacPinResult {
   removedOverride?: boolean;
   removedLinkFile?: boolean;
   note?: string;
+  // Unpin only: the config write was refused, or an existing .link could not
+  // be deleted. Either leaves the pin in force at the next boot.
+  persist_error?: string;
+  link_error?: string;
 }
 
 export function getMacAdapters() {

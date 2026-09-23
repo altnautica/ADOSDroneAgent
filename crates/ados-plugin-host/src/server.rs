@@ -1,10 +1,15 @@
 //! Per-plugin Unix-socket RPC server.
 //!
-//! One server instance binds one
-//! socket per plugin at `<socket_dir>/<plugin_id>.sock`, accepts the plugin
-//! runner's connection, runs the `hello` handshake, then loops on request
-//! envelopes: re-check token expiry, gate the method on its required
-//! capability, route, and reply.
+//! One server instance binds one socket per plugin at
+//! `<socket_dir>/<plugin_id>/host.sock`, accepts the plugin runner's
+//! connection, runs the `hello` handshake, then loops on request envelopes:
+//! re-check token expiry, gate the method on its required capability, route,
+//! and reply.
+//!
+//! Each socket sits alone in its plugin's own directory because that directory
+//! is what the plugin's unit bind-mounts (see [`crate::sandbox`]): a plugin
+//! sees its own host socket and no other plugin's, and the bind follows a
+//! socket the host re-creates, which a bind of the socket file itself would not.
 //!
 //! The wire is `ados-protocol` unchanged. Frames are length-prefixed msgpack
 //! [`Envelope`]s; the token is the pipe-delimited [`CapabilityToken`] the
@@ -30,9 +35,56 @@ use crate::host::HostServices;
 use crate::invoke::{InvokeRegistry, InvokeRequest};
 use crate::token_secret::TokenMint;
 
-/// Default per-plugin socket directory. Part of the plugin wire contract: the
-/// runtime resolves the same path, so changing it breaks every installed plugin.
+/// Default plugin socket directory. Part of the plugin wire contract: the
+/// generated unit hands each plugin its socket path under it, so changing it
+/// breaks every installed plugin.
 pub const DEFAULT_SOCKET_DIR: &str = "/run/ados/plugins";
+
+/// File name of the host socket inside a plugin's own socket directory.
+pub const PLUGIN_SOCKET_NAME: &str = "host.sock";
+
+/// A plugin's own socket directory, `<socket_dir>/<plugin_id>`: the one
+/// directory its unit bind-mounts. It holds the host socket and nothing else.
+pub fn plugin_socket_dir(socket_dir: &Path, plugin_id: &str) -> PathBuf {
+    socket_dir.join(plugin_id)
+}
+
+/// The host socket a plugin connects to, `<socket_dir>/<plugin_id>/host.sock`.
+pub fn plugin_socket_path(socket_dir: &Path, plugin_id: &str) -> PathBuf {
+    plugin_socket_dir(socket_dir, plugin_id).join(PLUGIN_SOCKET_NAME)
+}
+
+/// Make `dir` a directory this process owns, mode 0755, reusing it when it
+/// already is one. A plugin's unit bind-mounts this directory, so a sound one
+/// is never replaced: a fresh directory would leave a running plugin bound to
+/// the old one. Anything else at the path (a file, a symlink, a directory
+/// another user owns) is removed first, so nothing but the host can write where
+/// the socket is bound.
+fn prepare_plugin_socket_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.is_dir() && owned_by_this_process(&meta) => {}
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(dir)?,
+        Ok(_) => std::fs::remove_file(dir)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+}
+
+#[cfg(target_os = "linux")]
+fn owned_by_this_process(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.uid() == nix::unistd::geteuid().as_raw()
+}
+
+/// Development hosts run no plugin units, so there is no other owner to guard
+/// against.
+#[cfg(not(target_os = "linux"))]
+fn owned_by_this_process(_meta: &std::fs::Metadata) -> bool {
+    true
+}
 
 /// The event method the host pushes a rotated capability token on.
 ///
@@ -43,6 +95,11 @@ pub const DEFAULT_SOCKET_DIR: &str = "/run/ados/plugins";
 /// plugin can log (or degrade on) a capability it just lost instead of
 /// discovering it through a `capability_denied`.
 pub const TOKEN_REFRESH_METHOD: &str = "token.refresh";
+
+/// How long an accept loop waits after a failed `accept()` before trying again.
+/// Fixed, with no cap on attempts, so a socket recovers on its own once the
+/// transient condition (fd pressure) clears.
+pub(crate) const ACCEPT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Errors raised while running one plugin's socket server.
 #[derive(Debug, thiserror::Error)]
@@ -186,17 +243,18 @@ impl<H: HostServices> PluginIpcServer<H> {
 
     /// The socket path for a plugin id.
     pub fn socket_path(&self, plugin_id: &str) -> PathBuf {
-        self.socket_dir.join(format!("{plugin_id}.sock"))
+        plugin_socket_path(&self.socket_dir, plugin_id)
     }
 
     /// Bind the per-plugin socket and spawn the accept loop. Returns the bound path and
     /// a handle to the accept task.
     pub fn serve_plugin(&self, plugin_id: &str) -> Result<(PathBuf, JoinHandle<()>), ServerError> {
+        // The plugin's own directory first (the one its unit bind-mounts), then
+        // the shared helper's remove-stale / bind / chmod hygiene inside it.
+        // 0o660 and the `ados` group let the plugin's unit (which runs as
+        // `ados`) connect; every request is then gated on its token.
+        prepare_plugin_socket_dir(&plugin_socket_dir(&self.socket_dir, plugin_id))?;
         let path = self.socket_path(plugin_id);
-        // The shared helper owns the create-dir / remove-stale / bind / chmod
-        // hygiene: the socket's parent is the per-plugin socket dir, so binding it
-        // ensures the dir. 0o660 and the `ados` group let the plugin's unit (which
-        // runs as `ados`) connect; every request is then gated on its token.
         let listener = ados_protocol::ipc::bind_plugin_socket(&path, 0o660)?;
 
         let plugin_id = plugin_id.to_string();
@@ -211,7 +269,13 @@ impl<H: HostServices> PluginIpcServer<H> {
             loop {
                 let stream = match listener.accept().await {
                     Ok((s, _addr)) => s,
-                    Err(_) => break,
+                    Err(e) => {
+                        // A transient accept error (fd pressure) must not leave
+                        // the plugin refused until the daemon restarts.
+                        tracing::warn!(plugin_id = %plugin_id, error = %e, "plugin socket accept failed");
+                        tokio::time::sleep(ACCEPT_RETRY_INTERVAL).await;
+                        continue;
+                    }
                 };
                 let conn = Connection {
                     plugin_id: plugin_id.clone(),
@@ -223,6 +287,9 @@ impl<H: HostServices> PluginIpcServer<H> {
                     refresh: refresh.clone(),
                     mint: mint.clone(),
                 };
+                // Every accepted connection is a new session; its teardown
+                // releases only what it acquired.
+                let session = host.begin_session(&plugin_id);
                 tokio::spawn(async move {
                     if let Err(err) = conn.run(stream).await {
                         tracing::warn!(
@@ -231,7 +298,7 @@ impl<H: HostServices> PluginIpcServer<H> {
                             "plugin connection ended with an error"
                         );
                     }
-                    conn.host.release_plugin(&conn.plugin_id);
+                    conn.host.release_session(&conn.plugin_id, session).await;
                 });
             }
         });
@@ -241,7 +308,7 @@ impl<H: HostServices> PluginIpcServer<H> {
     /// Stop serving a plugin: remove its bound socket file. The caller owns the
     /// accept [`JoinHandle`] returned by [`serve_plugin`] and aborts it; this
     /// only unlinks the socket so a later re-serve binds cleanly and no stale
-    /// socket lingers. A live connection's `release_plugin` already runs on
+    /// socket lingers. A live connection's `release_session` already runs on
     /// disconnect (see [`serve_plugin`]); aborting the accept task stops new
     /// connections.
     pub fn stop_plugin(&self, plugin_id: &str) {
@@ -519,7 +586,9 @@ impl<H: HostServices> Connection<H> {
                 evt = bus_rx.recv() => {
                     match evt {
                         Ok(event) => {
-                            if subscriptions.iter().any(|p| handlers::topic_matches(p, &event.topic)) {
+                            if handlers::may_deliver(&self.plugin_id, &event)
+                                && subscriptions.iter().any(|p| handlers::topic_matches(p, &event.topic))
+                            {
                                 if let Err(e) = self.deliver_event(&mut write_half, &token, &event).await {
                                     break Err(e);
                                 }
@@ -879,6 +948,17 @@ impl<H: HostServices> Connection<H> {
                                 Value::Boolean(true),
                             )]);
                             return send_response(write_half, &env.request_id, result).await;
+                        }
+                        if subscriptions.len() >= handlers::EVENT_MAX_SUBSCRIPTIONS {
+                            return send_error(
+                                write_half,
+                                &env.request_id,
+                                &format!(
+                                    "subscription limit reached ({} per connection)",
+                                    handlers::EVENT_MAX_SUBSCRIPTIONS
+                                ),
+                            )
+                            .await;
                         }
                         subscriptions.push(pattern);
                         let result =
@@ -1680,6 +1760,59 @@ mod tests {
             !path.exists(),
             "socket file should be gone after stop_plugin"
         );
+    }
+
+    #[tokio::test]
+    async fn serving_again_keeps_the_directory_a_running_unit_has_bound() {
+        // The unit bind-mounts the plugin's socket directory at start. A daemon
+        // restart re-serves the plugin; it must bind the new socket inside the
+        // SAME directory, or the running plugin stays bound to a dead one.
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let issuer = Arc::new(TokenIssuer::new(b"reserve-secret".to_vec()));
+        let server = PluginIpcServer::new(
+            dir.path(),
+            issuer,
+            Arc::new(EventBus::new()),
+            Arc::new(NoopHost),
+        );
+        let (path, accept) = server.serve_plugin("com.example.demo").expect("serve");
+        assert_eq!(path, dir.path().join("com.example.demo").join("host.sock"));
+        let inode = std::fs::metadata(path.parent().unwrap()).unwrap().ino();
+        accept.abort();
+        server.stop_plugin("com.example.demo");
+        let (again, accept) = server.serve_plugin("com.example.demo").expect("re-serve");
+        assert_eq!(
+            std::fs::metadata(again.parent().unwrap()).unwrap().ino(),
+            inode
+        );
+        assert!(UnixStream::connect(&again).await.is_ok());
+        accept.abort();
+    }
+
+    #[tokio::test]
+    async fn a_symlink_in_place_of_the_socket_dir_is_replaced_not_followed() {
+        // Whatever sits at the plugin's socket-dir path that is not the host's
+        // own directory is removed, so the socket (and its chmod/chgrp) never
+        // lands where a link points.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join("com.example.demo")).unwrap();
+        let server = PluginIpcServer::new(
+            dir.path(),
+            Arc::new(TokenIssuer::new(b"symlink-secret".to_vec())),
+            Arc::new(EventBus::new()),
+            Arc::new(NoopHost),
+        );
+        let (path, accept) = server.serve_plugin("com.example.demo").expect("serve");
+        let socket_dir = path.parent().unwrap();
+        assert!(!std::fs::symlink_metadata(socket_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        accept.abort();
     }
 
     #[tokio::test]

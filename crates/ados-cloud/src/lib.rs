@@ -7,8 +7,8 @@
 //! move to Rust is invisible to the receiver.
 //!
 //! This layer carries the frozen heartbeat wire model, the config + pairing
-//! readers, the shared TLS config, the MQTT layer (transport seam,
-//! telemetry/status gateway, bounded MAVLink relay, WebRTC signaling relay), the
+//! readers, the shared TLS config, the MQTT layer (transport seam, bounded
+//! MAVLink relay, WebRTC signaling relay), the
 //! periodic loops (heartbeat / command-poll / pairing-beacon), the command
 //! dispatcher (idempotent, plugin lifecycle over the frozen supervisor), the
 //! ground-station relay bridge (uplink-aware MQTT supervision + data-cap
@@ -17,9 +17,9 @@
 //! Modules:
 //! - [`heartbeat`] — the frozen `agent/status` wire model (camelCase root,
 //!   snake_case `radio` sub-block, `None`-stripping).
-//! - [`tls`] — the shared RustCrypto-backed rustls client config.
-//! - [`mqtt`] — the broker transport seam, the telemetry/status gateway, the
-//!   bounded MAVLink relay, and the WebRTC signaling relay.
+//! - [`tls`] — the shared ring-backed rustls client config.
+//! - [`mqtt`] — the broker transport seam, the bounded MAVLink relay, and the
+//!   WebRTC signaling relay.
 //! - [`loops`] — the heartbeat / command-poll / pairing-beacon loops.
 //! - [`dispatch`] — the cloud command dispatcher (idempotency, download
 //!   allowlist, plugin lifecycle over the frozen `PluginSupervisor`).
@@ -51,7 +51,7 @@ pub use ground_station::{CloudRelayBridge, GsHeartbeat, ThrottleState, UplinkSna
 pub use heartbeat::{HeartbeatPayload, RadioBlock, RemoteAccess, ServiceEntry};
 pub use log_push::{spawn_log_push_watcher, PushRequest, PushResult};
 pub use mqtt::{
-    BoundedPublishQueue, MavlinkMqttRelay, MqttGateway, MqttQos, MqttTransport, RumqttcTransport,
+    BoundedPublishQueue, MavlinkMqttRelay, MqttQos, MqttTransport, RumqttcTransport,
     WebrtcSignalingRelay,
 };
 pub use pairing::PairingState;

@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from ados.core.paths import DISPLAY_CONF_PATH
-from ados.hal.detect import _load_board_profiles, detect_board
+from ados.hal.detect import detect_board, detect_board_profile
 from ados.setup import display_install
 from ados.setup.models import (
     DisplayInstallRequest,
@@ -53,21 +53,18 @@ def _read_display_conf() -> dict[str, str] | None:
 async def get_display_options() -> DisplayOptionsResponse:
     """Return the supported displays for the active board plus the current state.
 
-    Reads ``displays.supported`` from the active board's YAML profile via
-    the HAL. Always includes a synthetic ``{ id: "none" }`` option so the
-    wizard can offer an explicit skip.
+    Reads ``displays.supported`` from the matched board profile (variant
+    applied, matched by device tree/stem like every other HAL consumer). A
+    variant renames the board (an 8-core ROCK 5C is served by the Lite YAML), so
+    matching loaded profiles by display name would miss it. Always includes a
+    synthetic ``{ id: "none" }`` option so the wizard can offer an explicit skip.
     """
     board = detect_board()
     board_id = board.name or ""
     options: list[DisplayOption] = []
 
-    # Walk the loaded board profiles and find the one whose ``name``
-    # matches the running board. The HAL's BoardProfile carries the
-    # rich ``displays`` block; we project it onto the wizard's option
-    # shape and let the SPA render the picker.
-    for profile in _load_board_profiles():
-        if profile.name != board.name:
-            continue
+    profile = detect_board_profile()
+    if profile is not None:
         for binding in profile.displays.supported:
             options.append(
                 DisplayOption(
@@ -78,7 +75,6 @@ async def get_display_options() -> DisplayOptionsResponse:
                     resolution=binding.resolution,
                 )
             )
-        break
 
     options.append(
         DisplayOption(id="none", label="Skip / no display attached")

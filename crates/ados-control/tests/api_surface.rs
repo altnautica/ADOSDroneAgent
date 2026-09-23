@@ -67,13 +67,32 @@ fn native_rows() -> BTreeSet<(String, String)> {
 }
 
 #[test]
-fn every_native_route_appears_in_the_committed_table() {
-    let committed = committed_rows();
-    let missing: Vec<_> = native_rows().difference(&committed).cloned().collect();
+fn every_native_route_appears_in_the_native_section() {
+    // Against the Native section only: a native route still listed under
+    // Residual (a migration whose table was never regenerated) describes the
+    // wrong half and the wrong auth lane, and the union of sections hid that.
+    let native_section = rows_in_section("Native");
+    let missing: Vec<_> = native_rows().difference(&native_section).cloned().collect();
     assert!(
         missing.is_empty(),
-        "these routes are served but absent from docs/api-surface.md, so the \
-         client check would reject a caller that is actually correct: {missing:?}\n{REGENERATE}"
+        "these routes are served natively but absent from the Native section of \
+         docs/api-surface.md: {missing:?}\n{REGENERATE}"
+    );
+}
+
+#[test]
+fn no_native_route_is_listed_under_another_section() {
+    let native = native_rows();
+    let misfiled: Vec<_> = rows_in_section("Residual")
+        .into_iter()
+        .chain(rows_in_section("Logging store"))
+        .filter(|row| native.contains(row))
+        .collect();
+    assert!(
+        misfiled.is_empty(),
+        "docs/api-surface.md lists these native routes outside the Native \
+         section, so it misstates which half serves and authenticates them: \
+         {misfiled:?}\n{REGENERATE}"
     );
 }
 

@@ -14,7 +14,8 @@ client calls a path this table does not carry, which is what turns a
 one-sided route rename from a silent 404 into a build failure.
 
 A `{name}` segment matches one path segment; `{*name}` swallows the
-tail.
+tail. Method `WS` marks a route that answers only a WebSocket upgrade;
+a plain HTTP request to it is not served.
 
 ## Native — `ados-control` on :8080
 
@@ -47,7 +48,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/mavlink/ports` |  |
 | GET | `/api/mavlink/signing/capability` |  |
 | GET | `/api/mavlink/signing/counters` |  |
-| POST | `/api/mavlink/signing/disable-on-fc` |  |
+| POST | `/api/mavlink/signing/disable-on-fc` | relay-forbidden |
 | POST | `/api/mavlink/signing/enroll-fc` |  |
 | POST | `/api/mcp/revoke` | relay-forbidden |
 | GET | `/api/mcp/status` |  |
@@ -66,7 +67,7 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/plugins/{plugin_id}/tools/{tool}/invoke` |  |
 | POST | `/api/relay/peer-secret` |  |
 | GET | `/api/services` |  |
-| POST | `/api/services/{name}/restart` |  |
+| POST | `/api/services/{name}/restart` | relay-forbidden |
 | GET | `/api/status` |  |
 | GET | `/api/status/full` |  |
 | GET | `/api/swarm/neighbors` |  |
@@ -112,7 +113,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/v1/ground-station/pic` |  |
 | POST | `/api/v1/ground-station/pic/claim` |  |
 | POST | `/api/v1/ground-station/pic/confirm-token` |  |
-| GET | `/api/v1/ground-station/pic/events` | unauthenticated by design |
+| WS | `/api/v1/ground-station/pic/events` | unauthenticated by design |
 | POST | `/api/v1/ground-station/pic/heartbeat` |  |
 | POST | `/api/v1/ground-station/pic/release` |  |
 | GET | `/api/v1/ground-station/recording/clip` |  |
@@ -144,9 +145,9 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/v1/ground-station/wfb/receiver/combined` |  |
 | GET | `/api/v1/ground-station/wfb/receiver/relays` |  |
 | GET | `/api/v1/ground-station/wfb/relay/status` |  |
-| GET | `/api/v1/ground-station/ws/buttons` | unauthenticated by design |
-| GET | `/api/v1/ground-station/ws/mesh` | unauthenticated by design |
-| GET | `/api/v1/ground-station/ws/uplink` | unauthenticated by design |
+| WS | `/api/v1/ground-station/ws/buttons` | unauthenticated by design |
+| WS | `/api/v1/ground-station/ws/mesh` | unauthenticated by design |
+| WS | `/api/v1/ground-station/ws/uplink` | unauthenticated by design |
 | DELETE | `/api/v1/network/client` |  |
 | GET | `/api/v1/network/client/configured` |  |
 | DELETE | `/api/v1/network/client/configured/{name}` |  |
@@ -200,15 +201,15 @@ absent (a known feature, not on this profile) rather than `404`.
 | POST | `/api/plugins/capability-token` | relay-forbidden |
 | POST | `/api/plugins/install` | relay-forbidden |
 | POST | `/api/plugins/install_from_url` | relay-forbidden |
-| GET | `/api/plugins/jobs/{job_id}` |  |
+| WS | `/api/plugins/jobs/{job_id}` |  |
 | POST | `/api/plugins/parse` |  |
 | POST | `/api/plugins/parse_from_url` |  |
 | DELETE | `/api/plugins/{plugin_id}` |  |
 | GET | `/api/plugins/{plugin_id}` |  |
 | POST | `/api/plugins/{plugin_id}/disable` |  |
-| POST | `/api/plugins/{plugin_id}/enable` |  |
+| POST | `/api/plugins/{plugin_id}/enable` | relay-forbidden |
 | GET | `/api/plugins/{plugin_id}/gcs/{*asset_path}` |  |
-| POST | `/api/plugins/{plugin_id}/grant` |  |
+| POST | `/api/plugins/{plugin_id}/grant` | relay-forbidden |
 | DELETE | `/api/plugins/{plugin_id}/perms/{permission_id}` |  |
 | GET | `/api/plugins/{plugin_id}/readiness` |  |
 | GET | `/api/v1/dashboard/snapshot` |  |
@@ -235,7 +236,7 @@ absent (a known feature, not on this profile) rather than `404`.
 | GET | `/api/v1/plugins/catalog` |  |
 | POST | `/api/v1/setup/apply` |  |
 | POST | `/api/v1/setup/cloud-choice` | relay-forbidden |
-| GET | `/api/v1/setup/cloudflare/logs` |  |
+| WS | `/api/v1/setup/cloudflare/logs` |  |
 | GET | `/api/v1/setup/cloudflare/verify` |  |
 | POST | `/api/v1/setup/display/calibrate/start` |  |
 | POST | `/api/v1/setup/display/install` |  |
@@ -263,7 +264,7 @@ absent (a known feature, not on this profile) rather than `404`.
 | POST | `/api/video/snapshot` |  |
 | GET | `/api/video/snapshot.jpg` |  |
 | GET | `/api/vision/detections/latest` |  |
-| GET | `/api/vision/detections/ws` |  |
+| WS | `/api/vision/detections/ws` |  |
 | GET | `/api/vision/models` |  |
 | POST | `/api/vision/models/{model_id}/download` |  |
 | GET | `/api/vision/models/{model_id}/status` |  |

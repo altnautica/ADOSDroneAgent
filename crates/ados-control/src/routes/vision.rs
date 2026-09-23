@@ -120,7 +120,7 @@ pub async fn engine_status(State(state): State<AppState>) -> Response {
     let client = VisionIpcClient::default_socket();
     // The node NPU utilization from the logging store's hardware signals. `None`
     // when no sampler feeds it (a board with no NPU, or debugfs not readable) —
-    // surfaced as `null`, never a fabricated 0 (Rule 44).
+    // surfaced as `null`, never a fabricated 0.
     let npu_util = state
         .logd
         .latest_hw_signals()
@@ -276,7 +276,7 @@ pub struct CapabilitiesQuery {
 /// With no query, returns the registered models grouped by task (`kind`) with
 /// the union of their classes and whether any is inference-capable, so the GCS
 /// or a plugin sees the node's real capabilities (a mock-backed model is not
-/// inference-capable, Rule 44). With `?kind=detection[&class=person]` it
+/// inference-capable). With `?kind=detection[&class=person]` it
 /// resolves a single capability and returns the matched model or
 /// `{available:false}`. An unreachable engine is a 503, never a silent empty.
 pub async fn engine_capabilities(
@@ -338,7 +338,7 @@ mod tests {
         assert!(resolve_capability(&models, ModelKind::Detection, None).is_some());
         // An unlisted class does not resolve.
         assert!(resolve_capability(&models, ModelKind::Detection, Some("boat")).is_none());
-        // A non-inference-capable depth model does not resolve (Rule 44).
+        // A non-inference-capable depth model does not resolve.
         assert!(resolve_capability(&models, ModelKind::Depth, None).is_none());
     }
 

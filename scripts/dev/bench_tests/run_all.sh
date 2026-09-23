@@ -4,7 +4,7 @@
 # This driver script aggregates results.
 #
 # Usage: ./run_all.sh <drone-ssh> <drone-pass> <gs-ssh> <gs-pass>
-#   e.g. ./run_all.sh radxa@groundnode.local radxa skynode@skynode.local root
+#   e.g. ./run_all.sh radxa@gs-example.local radxa skynode@skynode.local root
 #
 # All tests are read-only (or self-recovering) — none leave the rigs
 # in a broken state if a test fails midway.

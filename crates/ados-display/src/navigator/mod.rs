@@ -48,13 +48,14 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
 use crate::pages::{HitAction, Page, PageContext, PanelAction, BOTTOM_BAR_H, PANEL_H, PANEL_W};
 use crate::sidecar::{self, LcdState, LCD_PAGE_REQUEST_PATH, LCD_STATE_PATH};
+use crate::widgets::draw_tab_pulse;
 
 /// The route the navigator falls back to when no page is persisted (and the
 /// first tab in the tab bar).
 pub const DEFAULT_PAGE_ID: &str = "dashboard";
 
-/// How long a tab tap-flash lingers, in milliseconds. Surfaced to the chrome so
-/// the bottom bar paints an inverse-fill pulse for one or two render ticks.
+/// How long the inverse-fill pulse on a tapped tab lingers, in milliseconds.
+/// Long enough for one or two frames at the post-tap boosted render rate.
 pub const TAP_FEEDBACK_LINGER_MS: i64 = 200;
 
 /// Width of one bottom-bar tab in landscape (`480 / 5`). The tab-tap router maps
@@ -114,7 +115,8 @@ pub struct PageNavigator {
     /// Detail pages stacked above the active page, top of stack last. Stored as
     /// route ids resolved against the registry at render time.
     modal_stack: Vec<String>,
-    tap_feedback: HashMap<String, i64>,
+    /// The last tapped tab and when, on the caller's monotonic-ms clock.
+    tab_tap: Option<(&'static str, i64)>,
     state_path: PathBuf,
 }
 
@@ -153,16 +155,15 @@ impl PageNavigator {
             order,
             active_page_id,
             modal_stack: Vec::new(),
-            tap_feedback: HashMap::new(),
+            tab_tap: None,
             state_path,
         };
-        // Persist the resolved initial state on first boot so the cloud
-        // heartbeat consumer sees a populated lcd-state.json before the
-        // operator ever touches the panel. Only write when absent so a valid
-        // persisted id is never clobbered by the default.
-        if !nav.state_path.exists() {
-            nav.persist_active_id();
-        }
+        // Persist the resolved state at every start: the heartbeat consumer and
+        // `GET /api/v1/display/page` see the page actually shown (a stale
+        // modal stack or an unresolvable id is not carried over), and the
+        // route ids this build registers reach `POST /api/v1/display/page`,
+        // which accepts exactly those.
+        nav.persist_active_id();
         nav
     }
 
@@ -275,9 +276,17 @@ impl PageNavigator {
     // ── render ──────────────────────────────────────────────────────
 
     /// Paint the currently-resolved page (topmost modal or active tab) into a
-    /// full-panel canvas.
-    pub fn render_active(&self, ctx: &PageContext, palette: &Palette) -> Canvas {
-        self.current_page().render(ctx, palette)
+    /// full-panel canvas. On a page that paints the tab bar, a tab tapped less
+    /// than [`TAP_FEEDBACK_LINGER_MS`] before `now_ms` is painted pressed.
+    pub fn render_active(&self, ctx: &PageContext, palette: &Palette, now_ms: i64) -> Canvas {
+        let page = self.current_page();
+        let mut canvas = page.render(ctx, palette);
+        if page.chrome().has_tab_bar() {
+            if let Some(tab) = self.tab_pulse(now_ms) {
+                draw_tab_pulse(&mut canvas, palette, tab);
+            }
+        }
+        canvas
     }
 
     /// The active page's preferred redraw cadence, so the render loop can pace
@@ -332,14 +341,12 @@ impl PageNavigator {
     }
 
     /// Map an x position in the tab bar to a tab and switch to it, popping any
-    /// open modal first so the operator lands at the tab root. Records the
-    /// tap-flash for the chrome regardless of whether the route changed.
+    /// open modal first so the operator lands at the tab root. Records the tap
+    /// for the pulse regardless of whether the route changed.
     fn route_tab_tap(&mut self, start_x: i32, now_ms: i64) -> Dispatch {
         let index = (start_x / TAB_WIDTH).clamp(0, TAB_COUNT as i32 - 1) as usize;
         let page_id = TAB_PAGE_IDS[index];
-        // Record the flash by the same zone-id convention the chrome paints
-        // with (`tab.<page_id>`) so the bottom bar pulses the tapped tab.
-        self.record_tap(&format!("tab.{page_id}"), now_ms);
+        self.tab_tap = Some((page_id, now_ms));
         if !self.registry.contains_key(page_id) {
             return Dispatch::None;
         }
@@ -355,7 +362,7 @@ impl PageNavigator {
     fn dispatch_action(&mut self, action: HitAction, now_ms: i64) -> Dispatch {
         match action {
             HitAction::GoTab(id) => {
-                self.record_tap(&format!("tab.{id}"), now_ms);
+                self.tab_tap = Some((id, now_ms));
                 if self.go(id) {
                     Dispatch::RouteChanged(id.to_string())
                 } else {
@@ -500,36 +507,36 @@ impl PageNavigator {
         Some(page_id)
     }
 
-    // ── tap-feedback bookkeeping ────────────────────────────────────
+    // ── tap feedback ────────────────────────────────────────────────
 
-    /// Record a tap-flash for `zone_id` so the next render of the chrome paints
-    /// the inverse-fill pulse. Stamped with the monotonic-ms clock the chrome
-    /// compares against its linger window.
-    pub fn record_tap(&mut self, zone_id: &str, now_ms: i64) {
-        self.tap_feedback.insert(zone_id.to_string(), now_ms);
-    }
-
-    /// The tap-flash stamps the chrome reads to paint the bottom-bar pulse. The
-    /// chrome drops any stamp older than its linger window.
-    pub fn tap_feedback(&self) -> &HashMap<String, i64> {
-        &self.tap_feedback
+    /// The tab to paint pressed at `now_ms`: the last tapped one, while its tap
+    /// is younger than [`TAP_FEEDBACK_LINGER_MS`].
+    pub fn tab_pulse(&self, now_ms: i64) -> Option<&'static str> {
+        self.tab_tap
+            .filter(|(_, at)| (0..TAP_FEEDBACK_LINGER_MS).contains(&(now_ms - at)))
+            .map(|(tab, _)| tab)
     }
 
     // ── persistence ─────────────────────────────────────────────────
 
-    /// Atomically write `{active_page_id, modal_stack}` (tmp sibling + fsync +
-    /// rename) so a power cut mid-write cannot leave a half-flushed file. A
-    /// write error is swallowed: persistence is best-effort and never blocks the
-    /// render loop.
+    /// Atomically write `{active_page_id, modal_stack, route_ids}` (tmp
+    /// sibling, fsync, rename) so a power cut mid-write cannot leave a
+    /// half-flushed file. `route_ids` is every registered route in
+    /// registration order: the remote page-request route validates against
+    /// it, so the ids it accepts are the ones this navigator can land on. A
+    /// write error is swallowed: persistence is best-effort and never blocks
+    /// the render loop.
     fn persist_active_id(&self) {
         #[derive(serde::Serialize)]
         struct Blob<'a> {
             active_page_id: &'a str,
             modal_stack: &'a [String],
+            route_ids: &'a [&'static str],
         }
         let blob = Blob {
             active_page_id: &self.active_page_id,
             modal_stack: &self.modal_stack,
+            route_ids: &self.order,
         };
         let Ok(body) = serde_json::to_vec(&blob) else {
             return;
@@ -680,6 +687,35 @@ mod tests {
     }
 
     #[test]
+    fn persisted_state_lists_every_registered_route() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-state.json");
+        // A stale file from an earlier build, with a modal the fresh navigator
+        // does not show and no route list.
+        std::fs::write(
+            &path,
+            r#"{"active_page_id":"video","modal_stack":["details.about"]}"#,
+        )
+        .unwrap();
+        let n = nav(dir.path());
+        let blob: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let routes: Vec<&str> = blob["route_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let registered: Vec<&str> = all_pages().iter().map(|p| p.id()).collect();
+        assert_eq!(routes, registered);
+        assert!(routes.contains(&"plugin") && routes.contains(&"channel_hops"));
+        // The restored page is kept; the modal it no longer shows is not.
+        assert_eq!(n.active_page_id(), "video");
+        assert_eq!(blob["active_page_id"], "video");
+        assert_eq!(blob["modal_stack"], serde_json::json!([]));
+    }
+
+    #[test]
     fn go_switches_tab_and_drops_modal() {
         let dir = tempfile::tempdir().unwrap();
         let mut n = nav(dir.path());
@@ -730,8 +766,13 @@ mod tests {
         // far-right band clamps to channel_hops (index 4) even past 480.
         let d = n.on_touch(&ctx, &tap(470, 300), 1200);
         assert_eq!(d, Dispatch::RouteChanged("channel_hops".to_string()));
-        // a tab tap records a flash for the chrome.
-        assert!(n.tap_feedback().contains_key("tab.channel_hops"));
+        // The tapped tab pulses for the linger window, then stops.
+        assert_eq!(n.tab_pulse(1200), Some("channel_hops"));
+        assert_eq!(
+            n.tab_pulse(1200 + TAP_FEEDBACK_LINGER_MS - 1),
+            Some("channel_hops")
+        );
+        assert_eq!(n.tab_pulse(1200 + TAP_FEEDBACK_LINGER_MS), None);
     }
 
     #[test]
@@ -994,7 +1035,7 @@ mod tests {
         assert_eq!(n.current_page().id(), "plugin");
 
         // It paints a full panel like every other page.
-        let c = n.render_active(&PageContext::default(), &crate::graphics::palette::DARK);
+        let c = n.render_active(&PageContext::default(), &crate::graphics::palette::DARK, 0);
         assert_eq!(c.width(), PANEL_W);
         assert_eq!(c.height(), PANEL_H);
 
@@ -1020,13 +1061,35 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut n = nav(dir.path());
         let ctx = PageContext::default();
-        let c = n.render_active(&ctx, &crate::graphics::palette::DARK);
+        let c = n.render_active(&ctx, &crate::graphics::palette::DARK, 0);
         assert_eq!(c.width(), PANEL_W);
         assert_eq!(c.height(), PANEL_H);
         // After a drill-in the modal paints instead.
         n.push_modal("details.about");
-        let c2 = n.render_active(&ctx, &crate::graphics::palette::DARK);
+        let c2 = n.render_active(&ctx, &crate::graphics::palette::DARK, 0);
         assert_eq!(c2.width(), PANEL_W);
+    }
+
+    /// A tab tap paints that tab pressed in the next frame, and only until the
+    /// linger window closes.
+    #[test]
+    fn a_tapped_tab_is_painted_pressed_then_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut n = nav(dir.path());
+        let ctx = PageContext::default();
+        let palette = &crate::graphics::palette::DARK;
+        n.on_touch(&ctx, &tap(120, 300), 1000);
+        let pressed = n.render_active(&ctx, palette, 1000);
+        let released = n.render_active(&ctx, palette, 1000 + TAP_FEEDBACK_LINGER_MS);
+        // The video tab's cell (band 1) differs between the two frames; the
+        // content above the bar does not.
+        let cell_differs = (TAB_BAR_TOP_Y + 2..PANEL_H as i32).any(|y| {
+            (TAB_WIDTH + 2..2 * TAB_WIDTH - 2).any(|x| pressed.pixel(x, y) != released.pixel(x, y))
+        });
+        assert!(cell_differs, "the tapped tab must be painted pressed");
+        let content_same = (40..TAB_BAR_TOP_Y - 1)
+            .all(|y| (0..PANEL_W as i32).all(|x| pressed.pixel(x, y) == released.pixel(x, y)));
+        assert!(content_same, "only the tab cell changes");
     }
 
     #[test]

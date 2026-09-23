@@ -184,6 +184,42 @@ def apply_ws_proxy_enforce_default(raw: dict[str, Any]) -> bool:
     return True
 
 
+# The `security` sub-blocks older builds wrote for TLS and WireGuard. No server
+# or tunnel ever read them, so they only suggested a protection the node did
+# not have.
+_RETIRED_SECURITY_KEYS = ("tls", "wireguard")
+
+
+def apply_drop_retired_security_blocks(raw: dict[str, Any]) -> bool:
+    """Remove the retired ``security.tls`` and ``security.wireguard`` blocks.
+
+    Idempotent: a node without them is left untouched, and the keys no
+    longer exist in the schema, so there is no operator value to preserve.
+    """
+    sec = raw.get("security")
+    if not isinstance(sec, dict):
+        return False
+    removed = [key for key in _RETIRED_SECURITY_KEYS if sec.pop(key, None) is not None]
+    return bool(removed)
+
+
+def apply_mqtt_username_device_id(raw: dict[str, Any]) -> bool:
+    """Drop the ``server.mqtt_username: "ados"`` older installers recorded.
+
+    The gateway authenticates as the bare device id unless a username is
+    configured, because the broker ACL ``ados/%u/#`` keys on it. Every node
+    installed while ``"ados"`` was the written default carries it in its own
+    config, so it would keep publishing under a username the ACL rejects.
+    One-shot for the same reason as :func:`apply_ws_proxy_enforce_default`:
+    an operator who sets ``"ados"`` afterwards means it.
+    """
+    server = raw.get("server")
+    if not isinstance(server, dict) or server.get("mqtt_username") != "ados":
+        return False
+    server.pop("mqtt_username", None)
+    return True
+
+
 Migration = Callable[[dict[str, Any]], bool]
 
 # Idempotent shape translations. Each backfills a destination from a legacy
@@ -195,6 +231,7 @@ NORMALISERS: tuple[tuple[str, Migration], ...] = (
     ("share_uplink_from_legacy_json", apply_share_uplink_from_legacy_json),
     ("gs_ui_from_legacy_json", apply_gs_ui_from_legacy_json),
     ("api_from_scripting", apply_api_from_scripting),
+    ("drop_retired_security_blocks", apply_drop_retired_security_blocks),
 )
 
 # One-shot cleanups. These *remove* a recorded value, which is only correct
@@ -203,6 +240,7 @@ NORMALISERS: tuple[tuple[str, Migration], ...] = (
 # once per node, recorded in a persistent ledger. Never on the read path.
 ONE_SHOTS: tuple[tuple[str, Migration], ...] = (
     ("ws_proxy_enforce_default", apply_ws_proxy_enforce_default),
+    ("mqtt_username_device_id", apply_mqtt_username_device_id),
 )
 
 ALL_MIGRATION_IDS: tuple[str, ...] = tuple(

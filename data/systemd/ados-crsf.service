@@ -30,12 +30,17 @@ Environment=ADOS_CONFIG=/etc/ados/config.yaml
 Environment=RUST_LOG=info
 EnvironmentFile=-/etc/ados/env
 
-# The RC transmitter module is a USB-serial device: the lane needs the tty
-# character devices and the run dir. No network capabilities — this is a
-# serial lane, not a network radio (no CAP_NET_RAW / CAP_NET_ADMIN).
+# The RC transmitter module is a serial device: a USB-serial adapter
+# (ttyUSB/ttyACM) or a header UART (ttyS/ttyAMA), since radio.crsf.device is a
+# free-form path. DeviceAllow closes the device policy, so every serial major
+# the lane can be pointed at is listed. The lane needs those character devices
+# and the run dir. No network capabilities — this is a serial lane, not a
+# network radio (no CAP_NET_RAW / CAP_NET_ADMIN).
 SupplementaryGroups=dialout
 DeviceAllow=char-ttyUSB rw
 DeviceAllow=char-ttyACM rw
+DeviceAllow=char-ttyS rw
+DeviceAllow=char-ttyAMA rw
 NoNewPrivileges=yes
 ProtectSystem=strict
 PrivateTmp=yes

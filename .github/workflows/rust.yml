@@ -34,6 +34,13 @@ on:
 permissions:
   contents: read
 
+# One run per ref at a time, queued rather than cancelled. Every push to main
+# republishes the same rolling prebuilt-* tags; two overlapping runs would race
+# each other's uploads and leave the tags holding a mix of two commits' binaries.
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: false
+
 defaults:
   run:
     working-directory: crates
@@ -260,6 +267,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-tui-aarch64 -x rel/ados-tui-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -317,6 +335,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-supervisor-aarch64 -x rel/ados-supervisor-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -373,6 +402,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-mavlink-router-aarch64 -x rel/ados-mavlink-router-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -425,6 +465,17 @@ jobs:
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-radio-aarch64 -x rel/ados-radio-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -485,6 +536,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-swarmbus-aarch64 -x rel/ados-swarmbus-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -537,6 +599,17 @@ jobs:
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-gpio-aarch64 -x rel/ados-gpio-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -591,6 +664,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-crsf-aarch64 -x rel/ados-crsf-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -643,6 +727,17 @@ jobs:
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-tunnel-config-aarch64 -x rel/ados-tunnel-config-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -703,6 +798,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-video-aarch64 -x rel/ados-video-aarch64.minisig
           minisign -S -s /tmp/sign.key -m rel/ados-camera-probe-aarch64 -x rel/ados-camera-probe-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -765,6 +871,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-plugin-host-aarch64 -x rel/ados-plugin-host-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -778,8 +895,8 @@ jobs:
   # Build the native HTTP control surface as a static arm64 binary and publish it
   # to a rolling prerelease the installer fetches. Static (musl) so one binary
   # runs on every supported board regardless of its glibc. Runs only on pushes to
-  # main, not pull requests. The unit ships disabled, so the binary is staged for
-  # an on-demand `ados rust enable control` rather than started by the installer.
+  # main, not pull requests. It is the LAN front on :8080: every install writes
+  # the front marker and enables the unit.
   publish-control:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -796,14 +913,19 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # ados-control links ados-compute (bundled SQLite, zstd, and ring through
+      # rerun's re_redap_client) via ados-groundlink -> ados-plugin-host, so it
+      # cross-compiles through the zig C toolchain like publish-plugin-host.
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
 
-      # ados-control has no bundled C, so plain musl-tools cross-compiles it. If a
-      # bundled-C dependency is ever added (rusqlite/SQLite, zstd), switch this to
-      # cargo-zigbuild and install zig above (see the publish-cloud job).
-      - name: Build static ados-control
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-control
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build static ados-control (bundled C via zig)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-control
 
       - name: Stage artifact + checksum
         run: |
@@ -825,6 +947,17 @@ jobs:
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-control-aarch64 -x rel/ados-control-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -883,6 +1016,17 @@ jobs:
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-cloud-aarch64 -x rel/ados-cloud-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -945,6 +1089,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-compute-aarch64 -x rel/ados-compute-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1003,6 +1158,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-atlas-aarch64 -x rel/ados-atlas-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1033,11 +1199,19 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # ados-groundlink links ados-compute (bundled SQLite, zstd, and ring through
+      # rerun's re_redap_client) via ados-plugin-host, so it
+      # cross-compiles through the zig C toolchain like publish-plugin-host.
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
 
-      - name: Build static ados-groundlink
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-groundlink
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build static ados-groundlink (bundled C via zig)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-groundlink
 
       - name: Stage artifact + checksum
         run: |
@@ -1059,6 +1233,17 @@ jobs:
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-groundlink-aarch64 -x rel/ados-groundlink-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -1115,6 +1300,17 @@ jobs:
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-net-aarch64 -x rel/ados-net-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -1175,6 +1371,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-pic-aarch64 -x rel/ados-pic-aarch64.minisig
           minisign -S -s /tmp/sign.key -m rel/ados-input-aarch64 -x rel/ados-input-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -1239,6 +1446,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-oled-i2c-aarch64 -x rel/ados-oled-i2c-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1296,6 +1514,17 @@ jobs:
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
           minisign -S -s /tmp/sign.key -m rel/ados-vision-aarch64 -x rel/ados-vision-aarch64.minisig
           rm -f /tmp/sign.key
+
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Publish rolling prerelease
         env:
@@ -1436,6 +1665,17 @@ jobs:
       #
       # `--clobber` replaces one named asset at a time, so a failure can no
       # longer leave the tag holding an artifact whose checksum is absent.
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1554,6 +1794,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/ados-logd-aarch64 -x rel/ados-logd-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1605,6 +1856,17 @@ jobs:
           minisign -S -s /tmp/sign.key -m rel/mediamtx-aarch64 -x rel/mediamtx-aarch64.minisig
           rm -f /tmp/sign.key
 
+      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
+      # this run rather than from the rolling tag, which a slower run for an
+      # older commit can overwrite in between.
+      - name: Hand the artifacts to the per-revision mirror
+        uses: actions/upload-artifact@v4
+        with:
+          name: rel-${{ env.RELEASE_TAG }}
+          path: crates/rel/
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publish rolling prerelease
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1615,7 +1877,7 @@ jobs:
             --prerelease --title "Prebuilt mediamtx (mirrored)" --notes ""
           gh release upload "$RELEASE_TAG" rel/* --clobber
 
-  # Assemble ONE per-revision release out of the rolling tags this same run just
+  # Assemble ONE per-revision release out of the artifacts this same run just
   # published, so `install.sh --ref <sha>` resolves every service binary from a
   # single commit instead of ~22 tags that each roll independently.
   #
@@ -1626,10 +1888,12 @@ jobs:
   # running the `curl | sudo bash` one-liner. Releases are anonymous, so the pin
   # costs the rig nothing.
   #
-  # Why a mirror and not 22 more builds: the assets are re-uploaded BYTE-IDENTICAL
-  # from the tags above, so the pinned install and the rolling install place the
-  # same bytes, and the job costs one download+upload rather than another full
-  # arm64 build matrix.
+  # Why a mirror and not 22 more builds: each publish job hands its staged rel/
+  # directory to this job as a run artifact, and the assets are re-uploaded
+  # BYTE-IDENTICAL from there. Reading the run's own artifacts, not the rolling
+  # tags, is what keeps the pin honest: a rolling tag can already hold a newer or
+  # older run's binary by the time this job runs. The release tag is cut at this
+  # run's commit (`--target`), not at whatever main points to when it runs.
   #
   # Cost, stated plainly: this creates one prerelease per commit that touches the
   # paths this workflow filters on. Nothing prunes them yet.
@@ -1637,7 +1901,7 @@ jobs:
   # The installer's own catalog guard (crates/ados-installer/src/binaries.rs)
   # asserts that SOURCE_TAGS is exactly the set of tags an install fetches, in
   # both directions, and that this job waits for every publish job in the file —
-  # a new service otherwise reaches the rolling tags and 404s under a pin.
+  # a new service otherwise never reaches the mirror and 404s under a pin.
   publish-rev:
     needs:
       - publish-tui
@@ -1701,6 +1965,12 @@ jobs:
       # `working-directory: crates`, which must exist.
       - uses: actions/checkout@v4
 
+      - name: Collect this run's published artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rel-*
+          path: crates/rev
+
       - name: Mirror this run's assets into the per-revision release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1713,14 +1983,20 @@ jobs:
           # resolve at test time would drop out of the catalog symmetry check.
           # This tag is per-commit by construction, so it can only be templated.
           tag="rev-${GITHUB_SHA}"
-          rm -rf rev && mkdir -p rev
+          # Every mirrored tag must have handed over its artifact. Each lands in
+          # its own rev/rel-<tag>/ subdir, so an asset name colliding across two
+          # tags cannot silently overwrite the other before the upload.
           for src in ${SOURCE_TAGS}; do
-            # Per-tag subdir: an asset name colliding across two tags would
-            # otherwise silently overwrite one of them before the upload.
-            gh release download "$src" --dir "rev/${src}"
+            if [ -z "$(ls -A "rev/rel-${src}" 2>/dev/null)" ]; then
+              echo "::error::no artifact from ${src} in this run; refusing a partial rev-${GITHUB_SHA}"
+              exit 1
+            fi
           done
           gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
             --prerelease \
+            --target "${GITHUB_SHA}" \
             --title "ADOS binaries for ${GITHUB_SHA}" \
-            --notes "Per-revision mirror of the rolling prebuilt tags, published so \`install.sh --ref ${GITHUB_SHA}\` resolves every service binary from one commit. Byte-identical to the rolling assets from this run."
-          gh release upload "$tag" rev/*/* --clobber
+            --notes "Per-revision release of this run's prebuilt binaries, published so \`install.sh --ref ${GITHUB_SHA}\` resolves every service binary from one commit. Byte-identical to the rolling assets this run published."
+          for src in ${SOURCE_TAGS}; do
+            gh release upload "$tag" "rev/rel-${src}"/* --clobber
+          done

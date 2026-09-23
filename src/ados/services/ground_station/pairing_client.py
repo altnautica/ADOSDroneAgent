@@ -9,9 +9,12 @@ gesture:
    UDP broadcast on `bat0`.
 3. Send a join request datagram to `receiver:5801` (see `pairing_manager`
    for the wire format).
-4. Wait for the encrypted invite blob reply on the same socket.
-5. Decrypt with our private key and persist mesh identity to disk so
-   mesh_manager can bring up batman-adv on its next start.
+4. Wait for the encrypted invite blob reply on the same socket, taking
+   replies only from the resolved receiver's address.
+5. Decrypt with our private key and the six-digit code the receiver's
+   operator read out, and persist mesh identity to disk so mesh_manager
+   can bring up batman-adv on its next start. A node that merely heard
+   the join request cannot build an invite that opens under the code.
 6. Return success so the caller can publish an OLED "joined" screen and
    trigger a role transition to `relay`.
 
@@ -47,14 +50,15 @@ from ados.core.paths import (
 )
 
 from .events import PairingEvent, get_pairing_event_bus
-from .mdns_announce import iface_ip, resolve_receiver
-from .pair_journal import publish_pair_event
-from .pairing_manager import (
-    PAIR_UDP_PORT,
+from .invite_crypto import (
     InviteBundle,
     decrypt_invite,
     generate_keypair,
+    is_invite_code,
 )
+from .mdns_announce import iface_ip, resolve_receiver
+from .pair_journal import publish_pair_event
+from .pairing_manager import PAIR_UDP_PORT
 
 log = get_logger("ground_station.pairing_client")
 
@@ -69,6 +73,12 @@ _WFB_RX_KEY_PATH = WFB_RX_KEY_PATH
 _DEFAULT_SERVICE = "_ados-receiver._tcp"
 _BROADCAST_FALLBACK_ADDR = "255.255.255.255"
 
+# Replies that do not open under the code before the join gives up. Each
+# one is an online guess at the code, so this bounds a hostile node's odds
+# to a handful in a million; the legitimate receiver sends each invite
+# twice, and both copies open.
+MAX_UNREADABLE_INVITES = 5
+
 
 @dataclass
 class JoinResult:
@@ -77,6 +87,19 @@ class JoinResult:
     receiver_host: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+
+
+def _join_timeout(unreadable: int) -> JoinResult:
+    """The timeout result. When invites arrived but none opened, the code
+    is the likely fault, so the message says so."""
+    if unreadable:
+        message = (
+            f"no invite opened with this code ({unreadable} did not); "
+            "check the code the receiver shows and join again"
+        )
+    else:
+        message = "no invite reply received"
+    return JoinResult(ok=False, error_code="E_JOIN_TIMEOUT", error_message=message)
 
 
 async def _send_join_request(
@@ -142,6 +165,7 @@ def _persist_bundle(bundle: InviteBundle) -> None:
 
 
 async def request_join(
+    code: str,
     receiver_host: str | None = None,
     receiver_port: int | None = None,
     timeout_s: float = 45.0,
@@ -149,15 +173,24 @@ async def request_join(
     """Send a join request and wait for an invite reply.
 
     Args:
+        code: The six-digit code the receiver shows while its Accept
+            window is open. The invite is sealed under it.
         receiver_host: Optional explicit hostname or IP. When omitted,
             mDNS discovery on the mesh interface decides.
         receiver_port: Optional port override. Defaults to the pairing
             UDP port.
         timeout_s: How long to wait for the reply after sending.
 
-    Returns a JoinResult with ok=False on any failure, including mDNS
-    resolve timeout, decrypt error, or invite expiry.
+    Returns a JoinResult with ok=False on any failure, including a
+    malformed code, mDNS resolve timeout, too many invites that do not
+    open under the code, or invite expiry.
     """
+    if not is_invite_code(code):
+        return JoinResult(
+            ok=False,
+            error_code="E_BAD_CODE",
+            error_message="the join code is six digits",
+        )
     config = load_config()
     device_id = config.agent.device_id or "relay"
     mesh_iface = config.ground_station.mesh.bat_iface
@@ -216,32 +249,50 @@ async def request_join(
     try:
         await _send_join_request(sock, device_id, pub, receiver_addr)
         loop = asyncio.get_running_loop()
-        # Wait for the invite reply. Drop anything that fails to
-        # decrypt (noise, wrong deployment, stale retry).
+        # A unicast join takes replies only from the receiver it asked.
+        # The broadcast fallback has no receiver address to hold replies
+        # to, so there the code alone authenticates the invite.
+        expected_ip = (
+            None if receiver_addr[0] == _BROADCAST_FALLBACK_ADDR else receiver_addr[0]
+        )
+        unreadable = 0
         deadline = time.monotonic() + timeout_s
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return JoinResult(
-                    ok=False,
-                    error_code="E_JOIN_TIMEOUT",
-                    error_message="no invite reply received",
-                )
+                return _join_timeout(unreadable)
             try:
-                data, _src = await asyncio.wait_for(
+                data, src = await asyncio.wait_for(
                     loop.sock_recvfrom(sock, 4096),
                     timeout=remaining,
                 )
             except TimeoutError:
-                return JoinResult(
-                    ok=False,
-                    error_code="E_JOIN_TIMEOUT",
-                    error_message="no invite reply received",
+                return _join_timeout(unreadable)
+            if expected_ip is not None and src[0] != expected_ip:
+                log.warning(
+                    "pairing_reply_from_other_host",
+                    expected=expected_ip,
+                    got=src[0],
                 )
+                continue
             try:
-                bundle = decrypt_invite(data, priv)
+                bundle = decrypt_invite(data, priv, code)
             except ValueError as exc:
-                log.debug("pairing_decrypt_skipped", error=str(exc))
+                unreadable += 1
+                log.warning(
+                    "pairing_invite_unreadable",
+                    error=str(exc),
+                    count=unreadable,
+                )
+                if unreadable >= MAX_UNREADABLE_INVITES:
+                    return JoinResult(
+                        ok=False,
+                        error_code="E_INVITE_REJECTED",
+                        error_message=(
+                            f"{unreadable} invites did not open with this code; "
+                            "check the code the receiver shows and join again"
+                        ),
+                    )
                 continue
             _persist_bundle(bundle)
             await publish_pair_event(

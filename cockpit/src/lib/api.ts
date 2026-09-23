@@ -111,7 +111,7 @@ function strOr(v: unknown, fallback: string | null): string | null {
  *  `/api/status` is the anchor (a failure throws so the caller flips `stale`
  *  and keeps the last snapshot); the radio, telemetry, and pairing reads are
  *  best-effort — a missing one degrades a field to a dash, never the whole
- *  snapshot (Rule 44 — a status surface never fabricates). */
+ *  snapshot (a status surface never fabricates). */
 export async function getDroneStatus(signal?: AbortSignal): Promise<GsStatus> {
   const status = asRecord(
     await apiFetch<Record<string, unknown>>("/api/status", { signal }),

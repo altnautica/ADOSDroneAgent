@@ -18,7 +18,7 @@
 //! payload. So even if the enrichment producer returns nothing, the loop emits a
 //! valid heartbeat with the required fields (`deviceId`/`version`/
 //! `uptimeSeconds`) and absence reads as honest "unknown" rather than a
-//! fabricated `0` / `false` / `"stopped"` (operating rule 37). The wire
+//! fabricated `0` / `false` / `"stopped"`. The wire
 //! `HeartbeatPayload` (frozen + golden-tested) stays byte-identical.
 
 use std::time::Duration;
@@ -35,7 +35,7 @@ const COMPUTE_HEARTBEAT_SIDECAR: &str = "/run/ados/compute-heartbeat.json";
 
 /// A compute sidecar not re-written within this window is treated as absent, so
 /// a dead/hung `ados-compute` (whose tmpfs file persists) never makes the relay
-/// fold a frozen-but-live compute state forever (operating rule 44). 4x the
+/// fold a frozen-but-live compute state forever. 4x the
 /// producer's 5 s write cadence.
 const COMPUTE_SIDECAR_STALE_MS: i64 = 20_000;
 
@@ -88,7 +88,7 @@ const VIDEO_STREAMS_SIDECAR: &str = "/run/ados/video-streams.json";
 
 /// A video-streams sidecar not re-stamped within this window is treated as
 /// absent, so a stopped pipeline's lingering tmpfs file stops advertising dead
-/// legs (Rule 44). 4x the ~5 s healthy-tick re-stamp cadence.
+/// legs. 4x the ~5 s healthy-tick re-stamp cadence.
 const VIDEO_STREAMS_STALE_MS: i64 = 20_000;
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -143,7 +143,7 @@ const LINKED_PEERS_SIDECAR: &str = "/run/ados/linked-peers.json";
 /// A linked-peer whose last beacon is older than this is dropped, matching the
 /// listener's 60 s prune window (`LINKED_PEER_STALE_AFTER_S`). Per-entry gating
 /// also covers the dead-writer case: a stale file's entries are all old, so the
-/// whole list reads absent rather than republishing ghost peers (Rule 44).
+/// whole list reads absent rather than republishing ghost peers.
 const LINKED_PEER_STALE_MS: i64 = 60_000;
 
 /// One raw peer row as the `linked-peers.json` sidecar writes it (snake_case,
@@ -214,7 +214,7 @@ const CRSF_STATS_SIDECAR: &str = "/run/ados/crsf-stats.json";
 
 /// A CRSF sidecar not re-written within this window is treated as absent, so a
 /// dead lane service's lingering tmpfs file never keeps the heartbeat carrying
-/// a frozen lane state (operating rule 44). The sidecar body carries no write
+/// a frozen lane state. The sidecar body carries no write
 /// time, so the gate keys on the file mtime (the plugin-state precedent);
 /// double the lane's slowest (idle keep-alive) rewrite cadence.
 const CRSF_STATS_STALE: Duration = Duration::from_secs(10);
@@ -260,7 +260,7 @@ const WFB_STATS_SIDECAR: &str = "/run/ados/wfb-stats.json";
 
 /// A stats sidecar not re-written within this window is treated as absent, the
 /// same ceiling the LAN route applies (`WFB_STALE_AGE_S`). A frozen snapshot
-/// renders a dead link as if it were live (operating rule 44), and the body
+/// renders a dead link as if it were live, and the body
 /// carries no write time, so the gate keys on the file mtime.
 const WFB_STATS_STALE: Duration = Duration::from_secs(10);
 
@@ -342,7 +342,7 @@ const PLUGIN_STATE_DIR: &str = "/run/ados/plugins";
 
 /// A plugin sidecar not re-written within this window is treated as absent, so a
 /// dead/hung producer (whose tmpfs file persists) never makes the relay fold a
-/// frozen-but-live slice forever (operating rule 44). Mirrors the on-box
+/// frozen-but-live slice forever. Mirrors the on-box
 /// `/api/plugins/{id}/state` 10 s gate, with a little slack.
 const PLUGIN_STATE_STALE: Duration = Duration::from_secs(15);
 
@@ -634,7 +634,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
     // paired, reachable workstation flips compute_node_paired + bearer_acceptable
     // true and names the target). Absent / stale ⇒ no link ⇒ a board with a local
     // path reads `local` and one without any path reads `none`; the offload target
-    // stays absent until a workstation is actually paired (rule 44). Fed
+    // stays absent until a workstation is actually paired. Fed
     // identically to /api/status via `TierInputs::for_drone`.
     let has_accelerator = base.board_npu_tops > 0.0;
     let offload_link = ados_protocol::offload_link::read_offload_link(now_epoch_ms());
@@ -654,7 +654,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         None => "none",
     }
     .to_string();
-    // Surface the target only on an actual offload path (rule 44).
+    // Surface the target only on an actual offload path.
     let perception_offload_target = offload_link
         .filter(|l| l.is_offload_path())
         .and_then(|l| l.target);
@@ -675,7 +675,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         perception_offload_target,
         // Unmeasured by the native loop: omitted (None) so the wire says
         // "unknown" rather than asserting a 0 / false / "stopped" reading the
-        // loop never took (operating rule 37). The enrichment loop
+        // loop never took. The enrichment loop
         // folds the real values over these absences each tick.
         cpu_percent: None,
         memory_percent: None,
@@ -1018,7 +1018,7 @@ mod tests {
         let missing = std::path::Path::new("/run/ados/does-not-exist-linked-peers.json");
         assert!(read_linked_peers_sidecar_from(missing, 1_000_000).is_none());
         // A file whose only peer is stale reads None — the dead-writer case
-        // never republishes a ghost peer as a confident list (Rule 44).
+        // never republishes a ghost peer as a confident list.
         let dir =
             std::env::temp_dir().join(format!("ados-cloud-linked-stale-{}", std::process::id()));
         write_named(
@@ -1055,7 +1055,7 @@ mod tests {
         assert_eq!(fresh.packet_rate_hz, Some(150));
         // The measured TX power carries under the sidecar's real key. A
         // `tx_power_dbm` field here silently dropped it to null (serde ignored
-        // the unmatched key), so a cloud-reached node showed no power (rule 44).
+        // the unmatched key), so a cloud-reached node showed no power.
         assert_eq!(fresh.tx_power_mw, Some(100));
         assert_eq!(fresh.rf_unverified, Some(false));
         // A crsf_rc lane has no MAVLink-over-ELRS command path to gate.
@@ -1173,7 +1173,7 @@ mod tests {
         assert!(!obj.contains_key("temperature"));
         assert!(!obj.contains_key("peripherals"));
         // The unmeasured-by-native fields are OMITTED, not asserted as 0/false/
-        // "stopped"/[] (operating rule 37). They reappear only via the producer.
+        // "stopped"/[]. They reappear only via the producer.
         assert!(!obj.contains_key("cpuPercent"));
         assert!(!obj.contains_key("memoryPercent"));
         assert!(!obj.contains_key("diskPercent"));

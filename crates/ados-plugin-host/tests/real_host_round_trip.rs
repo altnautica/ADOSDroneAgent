@@ -25,7 +25,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 const PLUGIN_A: &str = "com.example.alpha";
-const PLUGIN_B: &str = "com.example.beta";
 
 fn caps(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| s.to_string()).collect()
@@ -103,11 +102,9 @@ fn args_bool(env: &Envelope, key: &str) -> Option<bool> {
 }
 
 /// A server backed by a shared `Arc<RealHost>`, with one or more plugin sockets
-/// bound. The `Arc<RealHost>` is returned so a test can read host state
-/// (telemetry snapshot) and stash camera frames directly.
+/// bound.
 struct Harness {
     issuer: Arc<TokenIssuer>,
-    host: Arc<RealHost>,
     paths: Vec<(String, PathBuf)>,
     _accepts: Vec<tokio::task::JoinHandle<()>>,
     _dir: tempfile::TempDir,
@@ -117,8 +114,7 @@ fn harness(host: RealHost, plugins: &[&str]) -> Harness {
     let dir = tempfile::tempdir().expect("tempdir");
     let issuer = Arc::new(TokenIssuer::new(b"real-host-secret".to_vec()));
     let bus = Arc::new(EventBus::new());
-    let host = Arc::new(host);
-    let server = PluginIpcServer::new(dir.path(), issuer.clone(), bus, host.clone());
+    let server = PluginIpcServer::new(dir.path(), issuer.clone(), bus, Arc::new(host));
     let mut paths = Vec::new();
     let mut accepts = Vec::new();
     for p in plugins {
@@ -128,7 +124,6 @@ fn harness(host: RealHost, plugins: &[&str]) -> Harness {
     }
     Harness {
         issuer,
-        host,
         paths,
         _accepts: accepts,
         _dir: dir,
@@ -178,9 +173,6 @@ async fn telemetry_extend_merges_and_lands_in_the_snapshot() {
     assert_eq!(args_bool(&resp, "merged"), Some(true));
     assert_eq!(args_str(&resp, "channel"), Some("metrics"));
 
-    let snap = h.host.telemetry_snapshot();
-    assert!(snap.contains_key(&format!("{PLUGIN_A}/metrics")));
-
     // The channel is also in the plugin's state sidecar as `telemetry.<channel>`,
     // which the native front serves to the GCS for the plugin's own UI.
     let sidecar = ados_plugin_host::state_sidecar::sidecar_path(h._dir.path(), PLUGIN_A);
@@ -224,23 +216,15 @@ async fn config_set_then_get_round_trips() {
 }
 
 #[tokio::test]
-async fn second_plugin_exclusive_claim_gets_the_exact_error() {
-    let h = harness(RealHost::new(), &[PLUGIN_A, PLUGIN_B]);
+async fn camera_claim_answers_not_implemented_without_a_capture_pipeline() {
+    // Nothing feeds this host camera buffers, so a claim is never acknowledged.
+    let h = harness(RealHost::new(), &[PLUGIN_A]);
     let (mut a, token_a) = hello(&h, PLUGIN_A, &["sensor.camera.register"]).await;
-    let (mut b, token_b) = hello(&h, PLUGIN_B, &["sensor.camera.register"]).await;
-
     let claim = map(&[("device_path", Value::from("/dev/video0"))]);
-    send(&mut a, &request("camera.claim", &token_a, claim.clone())).await;
+    send(&mut a, &request("camera.claim", &token_a, claim)).await;
     let resp = recv(&mut a).await;
-    assert_eq!(args_bool(&resp, "claimed"), Some(true));
-
-    // Plugin B's exclusive claim on the same path is refused with the exact body.
-    send(&mut b, &request("camera.claim", &token_b, claim)).await;
-    let resp = recv(&mut b).await;
-    assert_eq!(
-        resp.error.as_deref(),
-        Some("camera /dev/video0 is exclusively held by com.example.alpha")
-    );
+    assert_eq!(args_bool(&resp, "claimed"), None);
+    assert_eq!(args_str(&resp, "error"), Some("not_implemented"));
 }
 
 #[tokio::test]

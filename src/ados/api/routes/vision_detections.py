@@ -211,7 +211,7 @@ async def get_latest_detection() -> dict:
         )
     except (FileNotFoundError, ConnectionRefusedError, OSError, TimeoutError):
         # Vision isn't running (or isn't up yet) on this board. Honest empty
-        # reading, not a fabricated batch (Rule 44) — mirrors the WS route's
+        # reading, not a fabricated batch — mirrors the WS route's
         # "no live detections" close rather than erroring the poll loop.
         return {"detections": []}
     try:

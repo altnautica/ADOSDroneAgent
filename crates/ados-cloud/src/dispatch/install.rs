@@ -206,16 +206,31 @@ impl InstallCommand {
 }
 
 /// The live download source: a blocking HTTPS GET with the allowlist + size cap.
-/// The signed URL is already allowlist-validated by the caller; this re-checks
-/// the size cap while streaming. TLS is the shared RustCrypto rustls config.
+/// Every redirect hop re-runs the allowlist, and the body is read through a
+/// counted reader that stops one byte past the cap, so a hostile row can steer
+/// neither the destination nor the agent's memory. TLS is the shared ring-backed
+/// rustls config.
 pub struct HttpDownloadSource {
     client: reqwest::blocking::Client,
 }
 
+/// Most redirect hops a download may follow. Each hop is allowlist-checked.
+const DOWNLOAD_MAX_REDIRECTS: usize = 5;
+
 impl HttpDownloadSource {
     pub fn new() -> Self {
+        let policy = reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= DOWNLOAD_MAX_REDIRECTS {
+                return attempt.error("too many redirects");
+            }
+            match super::download::validate_parsed_url(attempt.url()) {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            }
+        });
         let client = reqwest::blocking::Client::builder()
             .use_preconfigured_tls(crate::tls::client_config())
+            .redirect(policy)
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("reqwest blocking client builds");
@@ -229,6 +244,20 @@ impl Default for HttpDownloadSource {
     }
 }
 
+/// Read `body` to the end, refusing it once it passes `cap` bytes. Reads at most
+/// `cap + 1` bytes, so an oversize body is never held whole.
+fn read_capped(body: impl std::io::Read, cap: usize) -> Result<Vec<u8>, DownloadError> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    body.take(cap as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|_| DownloadError::Transport)?;
+    if out.len() > cap {
+        return Err(DownloadError::TooLarge);
+    }
+    Ok(out)
+}
+
 impl DownloadSource for HttpDownloadSource {
     fn fetch(&self, signed_url: &str) -> Result<Vec<u8>, DownloadError> {
         // Allowlist re-check at the transport boundary (defense-in-depth; the
@@ -238,17 +267,17 @@ impl DownloadSource for HttpDownloadSource {
             .client
             .get(signed_url)
             .send()
-            .map_err(|_| DownloadError::Unparseable)?;
+            .map_err(|_| DownloadError::Transport)?;
         if !resp.status().is_success() {
-            return Err(DownloadError::Unparseable);
+            return Err(DownloadError::Transport);
         }
-        let bytes = resp.bytes().map_err(|_| DownloadError::Unparseable)?;
-        if bytes.len() > DOWNLOAD_MAX_BYTES {
-            return Err(DownloadError::HostNotAllowed(
-                "size cap exceeded".to_string(),
-            ));
+        if resp
+            .content_length()
+            .is_some_and(|n| n > DOWNLOAD_MAX_BYTES as u64)
+        {
+            return Err(DownloadError::TooLarge);
         }
-        Ok(bytes.to_vec())
+        read_capped(resp, DOWNLOAD_MAX_BYTES)
     }
 }
 
@@ -271,6 +300,16 @@ mod tests {
             control_dir: dir.join("plugin-host"),
             loopback_guard_state: dir.join("plugin-loopback-guard.json"),
         }
+    }
+
+    #[test]
+    fn capped_read_stops_one_byte_past_the_cap_on_an_endless_body() {
+        // An endless body must be refused after cap + 1 bytes, not buffered.
+        assert_eq!(
+            read_capped(std::io::repeat(7), 16),
+            Err(DownloadError::TooLarge)
+        );
+        assert_eq!(read_capped(&[1u8; 16][..], 16), Ok(vec![1u8; 16]));
     }
 
     fn build_archive() -> Vec<u8> {

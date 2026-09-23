@@ -7,7 +7,6 @@ import math
 import pytest
 
 from ados.services.mavlink.encoders import (
-    ENCODER_CAPABILITY_GATES,
     MESSAGE_ID_TO_ENCODER,
     encode_set_gps_global_origin,
     encode_set_home_position,
@@ -101,5 +100,3 @@ def test_set_home_position_rejects_bad_q():
 def test_setup_registry_entries():
     assert 48 in MESSAGE_ID_TO_ENCODER
     assert 243 in MESSAGE_ID_TO_ENCODER
-    assert ENCODER_CAPABILITY_GATES[48] == "mavlink.write"
-    assert ENCODER_CAPABILITY_GATES[243] == "mavlink.write"

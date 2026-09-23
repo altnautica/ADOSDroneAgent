@@ -6,7 +6,7 @@
 //! identity is static (resolved once, cached); the utilisation is sampled with a
 //! short cache so a rapid poll never re-spawns `powermetrics`.
 //!
-//! Best-effort + honest (Rule 44): every field is `Option`, and any failure (a
+//! Best-effort + honest: every field is `Option`, and any failure (a
 //! missing tool, no passwordless sudo for `powermetrics`, a parse miss) leaves
 //! that field `null` rather than fabricating a value. On a non-macOS host the
 //! whole block is all-`null`.

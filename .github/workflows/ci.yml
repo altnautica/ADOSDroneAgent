@@ -206,6 +206,31 @@ jobs:
           fi
           exit "$fail"
 
+  # Published advisories against what this repo ships. The Rust workspace is
+  # checked against the RustSec database (crates/deny.toml); the Python agent
+  # against PyPI advisories in the environment a device install resolves, since
+  # the dependencies are floor-only and every install takes the latest release.
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust advisories (cargo deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: crates/Cargo.toml
+          command: check advisories
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python advisories (pip-audit)
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[ground-station,vision]" pip-audit
+          pip-audit --skip-editable
+
   # The prebuilt catalog's signing coverage is a checked fact, not an
   # assumption. It has silently regressed three separate ways: a job whose
   # runner had no signing tool published unsigned for months, kernel modules
@@ -234,5 +259,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The pull request's base commit, or on a push to main the commit main
+      # held before the push. `origin/main` is useless on a push: the checkout
+      # already has it equal to HEAD, so the diff is empty and the gate passes
+      # whatever landed.
       - name: Shipped behaviour carries a version bump
-        run: bash scripts/check-version-bumped.sh origin/${{ github.event.pull_request.base.ref || 'main' }}
+        run: bash scripts/check-version-bumped.sh "${{ github.event.pull_request.base.sha || github.event.before }}"

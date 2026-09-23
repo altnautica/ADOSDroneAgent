@@ -4,7 +4,7 @@
 //! surface (what to tear down / bring up / forward on each uplink, health, and
 //! data-cap transition) is factored into pure methods so it is unit-testable
 //! with no MQTT and no network; the live supervision (`start`/`run`) drives the
-//! MQTT gateway + MAVLink relay tasks and the 30 s GS status heartbeat.
+//! MAVLink relay task and the 30 s GS status heartbeat.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

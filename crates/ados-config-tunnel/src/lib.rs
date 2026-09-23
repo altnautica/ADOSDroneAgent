@@ -8,7 +8,8 @@
 //!   `/api/config` surface on `:8080`, and chunks the reply back onto the
 //!   downlink. It restricts every call to `/api/config` exactly, so the
 //!   channel can only read/write agent config — never a general command proxy
-//!   or an armed-flight authority.
+//!   or an armed-flight authority. Every request must carry the per-pair relay
+//!   ticket for this drone, and a write may touch only `radio.*` / `video.*`.
 //! - **ground station → injector** ([`injector`] + [`cmdsock`]): accepts a
 //!   config request over its command socket (which `ados-control`'s
 //!   relayed-config route forwards to), chunks it onto the bearer, and awaits

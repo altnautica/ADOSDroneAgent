@@ -3,7 +3,7 @@
 //! The compute daemon writes its cluster + queue status to a heartbeat sidecar
 //! (the same file `ados-cloud` folds onto the cloud heartbeat, in the exact
 //! `cmd_droneStatus` `compute*` camelCase shape). This route serves it to a
-//! LAN-paired GCS so the compute-cluster card renders local-first (Rule 39),
+//! LAN-paired GCS so the compute-cluster card renders local-first,
 //! fresher than the cloud heartbeat. An absent / stale / unreadable sidecar is a
 //! `404` (the node is not a compute profile, or its daemon is not running) —
 //! never a `500`.

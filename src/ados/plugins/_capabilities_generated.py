@@ -489,12 +489,10 @@ GCS_CAPABILITIES: frozenset[str] = frozenset(
         "mission.read",
         "mission.write",
         "cloud.read",
-        "cloud.write",
         "perception.read",
         "perception.subscribe",
         "mcp.expose",
         "event.publish",
         "event.subscribe",
-        "agent.request",
     }
 )

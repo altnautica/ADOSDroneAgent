@@ -91,13 +91,29 @@ pub async fn put_detector(
     }
 
     let restart = restart_unit(VISION_UNIT).await;
-    Json(json!({
-        "status": "ok",
-        "model_id": model_id,
-        "enabled": true,
-        "restart": restart,
-    }))
-    .into_response()
+    restart_reply(
+        json!({
+            "model_id": model_id,
+            "enabled": true,
+        }),
+        restart,
+    )
+}
+
+/// The reply for a detector write: `200 {status:"ok", ..}` when the engine
+/// restarted onto the new config, `502 {status:"error", ..}` when it did not.
+/// The config is written either way, but the running engine keeps its old
+/// model until a restart succeeds, so a failed restart is not a success.
+fn restart_reply(mut body: Value, restart: Value) -> Response {
+    let restarted = restart.get("status").and_then(|s| s.as_str()) == Some("ok");
+    body["status"] = json!(if restarted { "ok" } else { "error" });
+    body["restart"] = restart;
+    let status = if restarted {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    (status, Json(body)).into_response()
 }
 
 /// `DELETE /api/vision/detector` → remove the active detector + restart the engine.
@@ -107,13 +123,13 @@ pub async fn delete_detector(State(_state): State<AppState>) -> Response {
     }
 
     let restart = restart_unit(VISION_UNIT).await;
-    Json(json!({
-        "status": "ok",
-        "model_id": Value::Null,
-        "enabled": false,
-        "restart": restart,
-    }))
-    .into_response()
+    restart_reply(
+        json!({
+            "model_id": Value::Null,
+            "enabled": false,
+        }),
+        restart,
+    )
 }
 
 /// Surgically write `vision.detector.{model_id, enabled}` (plus `model_path` when
@@ -170,6 +186,19 @@ fn remove_detector_block(config_path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The engine keeps its old model until a restart succeeds, so a detector
+    /// write whose restart failed is not a success.
+    #[test]
+    fn a_failed_engine_restart_is_not_reported_as_success() {
+        let failed = restart_reply(
+            json!({"model_id": "yolov8n", "enabled": true}),
+            json!({"status": "error", "message": "restart not confirmed"}),
+        );
+        assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+        let ok = restart_reply(json!({"model_id": "yolov8n"}), json!({"status": "ok"}));
+        assert_eq!(ok.status(), StatusCode::OK);
+    }
 
     fn read_yaml(path: &Path) -> serde_norway::Value {
         serde_norway::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()

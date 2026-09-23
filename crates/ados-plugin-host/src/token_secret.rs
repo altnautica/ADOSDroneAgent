@@ -190,7 +190,7 @@ impl TokenMint {
 
     /// The plugin's socket path under this mint's socket dir.
     pub fn socket_path(&self, plugin_id: &str) -> PathBuf {
-        self.socket_dir.join(format!("{plugin_id}.sock"))
+        crate::server::plugin_socket_path(&self.socket_dir, plugin_id)
     }
 
     /// Mint a fresh token for `plugin_id` from the current grant set and

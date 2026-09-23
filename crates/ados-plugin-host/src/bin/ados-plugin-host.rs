@@ -36,6 +36,7 @@ use tokio::task::JoinHandle;
 use ados_plugin_host::frame_link::{Declarations, FrameLink};
 use ados_plugin_host::loopback_guard;
 use ados_plugin_host::manifest::PluginManifest;
+use ados_plugin_host::pic_gate::PicGate;
 use ados_plugin_host::realhost::RealHost;
 use ados_plugin_host::reconcile::PluginReconciler;
 use ados_plugin_host::server::DEFAULT_SOCKET_DIR;
@@ -311,21 +312,30 @@ async fn build_host(install_dir: PathBuf, run_dir: PathBuf, bus: &Arc<EventBus>)
         })
     };
 
+    // A link that declares an injector also asks the router's PIC gate before
+    // queueing, so a refused command answers `pic_refused` instead of `sent`.
+    let link = |sock: &str| {
+        let link = FrameLink::spawn(run_dir.join(sock), declarations());
+        if armed {
+            link.with_pic_gate(PicGate::new(INJECTOR_CLIENT_ID))
+        } else {
+            link
+        }
+    };
+
     // (a) MAVLink and MSP router links. MSP carries raw bytes for a Betaflight /
     //     iNav FC; on a node with no MSP FC its link simply stays disconnected.
-    let mavlink = Arc::new(FrameLink::spawn(
-        run_dir.join("mavlink.sock"),
-        declarations(),
-    ));
+    let mavlink = Arc::new(link("mavlink.sock"));
     // The host is the only publisher of the public vehicle topics; it derives
     // them from the flight controller's own frames on the router link.
-    ados_plugin_host::vehicle_events::spawn_vehicle_events(Arc::clone(bus), mavlink.subscribe());
+    ados_plugin_host::vehicle_events::spawn_vehicle_events(
+        Arc::clone(bus),
+        mavlink.subscribe(),
+        host.fc_identity(),
+    );
     host = host
         .with_mavlink(mavlink)
-        .with_msp(Arc::new(FrameLink::spawn(
-            run_dir.join("msp.sock"),
-            declarations(),
-        )));
+        .with_msp(Arc::new(link("msp.sock")));
 
     // (b) Vision client: best-effort connect to the engine's socket so the
     //     three vision request methods proxy to it and the frame-descriptor
@@ -566,9 +576,18 @@ async fn main() -> Result<()> {
     // live install path. The board id and tier come from the HAL sidecar so the
     // cloud-relay install path applies the same `supported_boards` and
     // `min_tier` gates the LAN path does.
+    let ungrantable = RealHost::ungrantable_caps();
+    // Publish the same set for the LAN grant path, which runs in another
+    // process and cannot derive it; it refuses these grants too.
+    let ungrantable_sidecar = run.join(ados_plugin_host::realhost::UNGRANTABLE_CAPS_SIDECAR);
+    if let Err(e) =
+        ados_plugin_host::realhost::write_ungrantable_caps(&ungrantable_sidecar, &ungrantable)
+    {
+        tracing::warn!(path = %ungrantable_sidecar.display(), error = %e, "could not publish the ungrantable capability list");
+    }
     let mut supervisor = PluginSupervisor::production(paths, board_id, version)
         .with_board_tier(board_tier)
-        .with_ungrantable_caps(RealHost::ungrantable_caps());
+        .with_ungrantable_caps(ungrantable);
     if let Err(e) = supervisor.discover() {
         tracing::error!(error = %e, "plugin discovery failed");
     }
@@ -765,7 +784,7 @@ mod tests {
         // Use that very token (as a runner would, read from its env) for the
         // hello + ping, proving the daemon accepts it.
         let token = token_line.to_string();
-        let sock_path = socket_dir.join(format!("{PLUGIN_ID}.sock"));
+        let sock_path = ados_plugin_host::plugin_socket_path(&socket_dir, PLUGIN_ID);
         let mut client = {
             let mut s = None;
             for _ in 0..50 {
@@ -866,7 +885,7 @@ mod tests {
             );
             assert!(
                 unit.contains(
-                    "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.consistency.sock"
+                    "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.consistency/host.sock"
                 ),
                 "{runtime} unit missing socket Environment: {unit}"
             );
@@ -881,7 +900,7 @@ mod tests {
             // runner token and writes the env file. A separately-built issuer
             // (a stand-in for the serving daemon process) verifies it.
             let minting = ados_plugin_host::shared_issuer(&secret).expect("issuer");
-            let sock = socket_dir.join(format!("{plugin_id}.sock"));
+            let sock = ados_plugin_host::plugin_socket_path(&socket_dir, plugin_id);
             ados_plugin_host::write_token_env(
                 &minting,
                 plugin_id,

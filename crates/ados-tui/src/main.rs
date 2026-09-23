@@ -6,6 +6,7 @@
 
 mod action;
 mod model;
+mod poll;
 mod theme;
 mod ui;
 mod update;
@@ -26,7 +27,7 @@ use ratatui::Terminal;
 use serde_json::Value;
 
 use crate::action::{update_request, Action, ACTIONS};
-use crate::model::{Dashboard, History};
+use crate::poll::{AgentView, Poller};
 
 /// Where the agent stores the pairing key (matches `ados.core.paths.PAIRING_JSON`).
 const PAIRING_JSON: &str = "/etc/ados/pairing.json";
@@ -118,7 +119,7 @@ fn request_update(
     armed: Option<bool>,
 ) -> Result<()> {
     match update_request(armed) {
-        Ok(action) => run_action(terminal, action),
+        Ok(action) => run_action(terminal, action, None),
         Err(why) => show_refusal(terminal, why),
     }
 }
@@ -129,12 +130,20 @@ fn splash_requests_update(code: KeyCode) -> bool {
     matches!(code, KeyCode::Char('u') | KeyCode::Char('U'))
 }
 
-/// Run a quick action by shelling out to the real terminal (Pattern A). The
+/// Run a quick action by shelling out to the real terminal. The
 /// cockpit leaves the alt screen so the command's own output — and any sudo
 /// prompt or the command's own confirmation — is visible, optionally confirms
 /// first, then restores the cockpit. The command shells an existing `ados` (or
 /// `systemctl`) verb, so no write path to the agent is opened here.
-fn run_action(terminal: &mut Terminal<CrosstermBackend<Stdout>>, action: &Action) -> Result<()> {
+fn run_action(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    action: &Action,
+    profile: Option<&str>,
+) -> Result<()> {
+    let (program, args) = match action.argv(profile) {
+        Ok(argv) => argv,
+        Err(why) => return show_refusal(terminal, why),
+    };
     restore_terminal();
     // The terminal is now in cooked mode (Ctrl-C raises SIGINT). Ignore SIGINT +
     // SIGQUIT in this process for the duration of the action so a Ctrl-C used to
@@ -152,12 +161,12 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<Stdout>>, action: &Action
         }
     }
 
-    println!("\n$ {} {}\n", action.program, action.args.join(" "));
-    match spawn_action(action.program, action.args) {
+    println!("\n$ {program} {}\n", args.join(" "));
+    match spawn_action(program, &args) {
         Ok(status) if !status.success() => {
             println!("\n[exited with status {}]", status.code().unwrap_or(-1));
         }
-        Err(e) => println!("\n[could not run {}: {e}]", action.program),
+        Err(e) => println!("\n[could not run {program}: {e}]"),
         _ => {}
     }
     pause_then_restore(terminal)
@@ -228,7 +237,7 @@ fn main() -> Result<()> {
     stdout.execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
-    let result = run(&mut terminal, &client);
+    let result = run(&mut terminal, client);
 
     // Always restore the terminal on a clean exit too.
     restore_terminal();
@@ -236,21 +245,13 @@ fn main() -> Result<()> {
     result
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -> Result<()> {
-    let mut data: Option<Value> = None;
-    let mut error: Option<String> = None;
-    let mut refreshed = now_hms();
-    let mut last_fetch: Option<Instant> = None;
-    // When the last successful poll landed (distinct from the per-attempt
-    // `refreshed` clock, which advances even on a failed fetch).
-    let mut last_success: Option<Instant> = None;
-    // Best-effort snapshot from the native `/api/status` route, merged for the
-    // richer FC-link truth (port-open-but-silent). Absent → the gated boolean.
-    let mut fc_status: Option<Value> = None;
+fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: RestClient) -> Result<()> {
+    // The REST reads run on their own thread; this loop only renders and
+    // handles keys, so a hung agent never freezes the screen or `q`.
+    let poller = Poller::spawn(client, POLL_INTERVAL);
+    let mut view = AgentView::default();
     // `Some(i)` while the quick-actions overlay is open, with row `i` selected.
     let mut actions_selected: Option<usize> = None;
-    // Trend buffers of verified telemetry, one sample per successful poll.
-    let mut history = History::default();
 
     // One-shot background "newer version available?" check (pings GitHub via
     // curl off-thread; never blocks the loop). The launch splash is shown once,
@@ -260,43 +261,21 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
     let mut update_splash_done = false;
 
     loop {
-        // Fetch immediately on first iteration, then every POLL_INTERVAL.
-        let due = match last_fetch {
-            None => true,
-            Some(t) => t.elapsed() >= POLL_INTERVAL,
-        };
-        if due {
-            match client.setup_status() {
-                Ok(v) => {
-                    history.record(&Dashboard::from_status(&v));
-                    data = Some(v);
-                    error = None;
-                    last_success = Some(Instant::now());
-                }
-                Err(e) => error = Some(format!("Agent unreachable: {e}")),
-            }
-            // Best-effort: the native status route carries the FC transport /
-            // heartbeat split. A failure here leaves the gated boolean standing.
-            fc_status = client.status().ok();
-            refreshed = now_hms();
-            last_fetch = Some(Instant::now());
+        for result in poller.drain() {
+            view.apply(result, Instant::now(), now_hms());
         }
 
         // The snapshot is stale when the last success is older than STALE_AFTER
-        // (the fetch is erroring while an old snapshot is still on screen).
-        let stale = last_success.is_some_and(|t| t.elapsed() > STALE_AFTER);
-        let dash = data.as_ref().map(|v| {
-            let mut d = Dashboard::from_status(v);
-            if let Some(fc) = &fc_status {
-                d.merge_fc_status(fc);
-            }
-            d
-        });
+        // (polls are failing or hanging while an old snapshot is still held).
+        let stale = view.is_stale(Instant::now(), STALE_AFTER);
+        let dash = view.dash.as_ref();
+        let armed = dash.and_then(|d| d.armed);
+        let profile = dash.map(|d| d.profile.as_str());
 
         // The latest version from the background check (None until it lands).
         let latest = latest_slot.lock().ok().and_then(|g| g.clone());
         let update_available = matches!(
-            (latest.as_deref(), dash.as_ref()),
+            (latest.as_deref(), dash),
             (Some(l), Some(d)) if update::is_newer(l, &d.version)
         );
         // Raise the launch splash once, the first time an update is seen (never
@@ -308,11 +287,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
         terminal.draw(|f| {
             ui::render(
                 f,
-                dash.as_ref(),
-                &history,
-                &refreshed,
+                dash,
+                &view.history,
+                view.refreshed.as_deref(),
                 stale,
-                error.as_deref(),
+                view.error.as_deref(),
                 actions_selected,
                 latest.as_deref(),
                 update_splash,
@@ -336,8 +315,8 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                     update_splash = false;
                     update_splash_done = true;
                     if splash_requests_update(key.code) {
-                        request_update(terminal, dash.as_ref().and_then(|d| d.armed))?;
-                        last_fetch = None;
+                        request_update(terminal, armed)?;
+                        poller.refresh();
                     }
                     continue;
                 }
@@ -354,12 +333,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                         KeyCode::Enter => {
                             actions_selected = None;
                             let action = &ACTIONS[sel];
-                            if action.args.first().copied() == Some("update") {
-                                request_update(terminal, dash.as_ref().and_then(|d| d.armed))?;
+                            if action.is_update() {
+                                request_update(terminal, armed)?;
                             } else {
-                                run_action(terminal, action)?;
+                                run_action(terminal, action, profile)?;
                             }
-                            last_fetch = None; // refresh right after returning
+                            poller.refresh(); // refresh right after returning
                         }
                         _ => {}
                     },
@@ -367,18 +346,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: &RestClient) -
                     None => match key.code {
                         KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(()),
                         KeyCode::Char('a') | KeyCode::Char('A') => actions_selected = Some(0),
-                        KeyCode::Char('r') | KeyCode::Char('R') => last_fetch = None,
+                        KeyCode::Char('r') | KeyCode::Char('R') => poller.refresh(),
                         // `[u] update` (shown in the footer only when a newer
                         // version is available) runs the agent update, y/N-gated.
                         KeyCode::Char('u') | KeyCode::Char('U') if update_available => {
-                            request_update(terminal, dash.as_ref().and_then(|d| d.armed))?;
-                            last_fetch = None;
+                            request_update(terminal, armed)?;
+                            poller.refresh();
                         }
                         KeyCode::Char(c) => {
                             let c = c.to_ascii_lowercase();
                             if let Some(action) = ACTIONS.iter().find(|a| a.key == Some(c)) {
-                                run_action(terminal, action)?;
-                                last_fetch = None;
+                                run_action(terminal, action, profile)?;
+                                poller.refresh();
                             }
                         }
                         _ => {}

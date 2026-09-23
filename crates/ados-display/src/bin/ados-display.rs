@@ -223,18 +223,22 @@ async fn run_page_ui(
 
     // Build the frame for the active surface: the calibration wizard when one is
     // running (it owns the whole panel, no navigator chrome), else the
-    // navigator's current page with the latest action outcome over its foot.
+    // navigator's current page (with a just-tapped tab painted pressed) and the
+    // latest action outcome over its foot. `touch_clock` is the clock the touch
+    // path stamps taps with.
     fn build_canvas(
         calibration: &Option<CalibrationController>,
         navigator: &PageNavigator,
         ctx: &PageContext,
         palette: &Palette,
         ack: &Option<(Outcome, Instant)>,
+        touch_clock: Instant,
     ) -> Canvas {
         match calibration {
             Some(ctrl) => render_calibration(ctrl, palette),
             None => {
-                let mut canvas = navigator.current_page().render(ctx, palette);
+                let now_ms = touch_clock.elapsed().as_millis() as i64;
+                let mut canvas = navigator.render_active(ctx, palette, now_ms);
                 if let Some((outcome, at)) = ack {
                     if at.elapsed() < ACK_LINGER {
                         draw_ack_line(&mut canvas, palette, &outcome.message, outcome.ok);
@@ -430,7 +434,7 @@ async fn run_page_ui(
                         .unwrap_or(true);
 
                 if render_due {
-                    let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
+                    let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
 
                     // Mirror the freshly rendered frame to the snapshot PNG so the
                     // REST snapshot endpoint serves the live panel without PIL.
@@ -501,7 +505,7 @@ async fn run_page_ui(
                         }
                         // Repaint immediately: the next target, or the resumed
                         // UI when the fit just landed.
-                        let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
+                        let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
                         present_frame(&writer, bpp, &canvas, xres, yres);
                         last_render = Some(now);
                     } else {
@@ -518,7 +522,7 @@ async fn run_page_ui(
                             // previous page's refresh period.
                             ctx = source.build_context();
                             last_state_poll = now;
-                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
+                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
                             present_frame(&writer, bpp, &canvas, xres, yres);
                             last_render = Some(now);
                         }
@@ -527,7 +531,7 @@ async fn run_page_ui(
                         // arrives on the ack channel.
                         if let Dispatch::Custom(key) = dispatch {
                             if handle_custom(&key, &navigator, &ctx, &agent_writer, &ack_tx, now_ms) {
-                                let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
+                                let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
                                 present_frame(&writer, bpp, &canvas, xres, yres);
                                 last_render = Some(now);
                             }
@@ -557,7 +561,7 @@ async fn run_page_ui(
                             // rather than waiting out the old page's period.
                             ctx = source.build_context();
                             last_state_poll = now;
-                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
+                            let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
                             present_frame(&writer, bpp, &canvas, xres, yres);
                             last_render = Some(now);
                         }
@@ -569,7 +573,7 @@ async fn run_page_ui(
                                 .map(|d| d.as_millis() as i64)
                                 .unwrap_or(0);
                             if handle_custom(&key, &navigator, &ctx, &agent_writer, &ack_tx, ts_ms) {
-                                let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack);
+                                let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
                                 present_frame(&writer, bpp, &canvas, xres, yres);
                                 last_render = Some(now);
                             }

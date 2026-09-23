@@ -54,6 +54,7 @@
 //!    whether it was present. A persist fault after a successful pop is swallowed
 //!    (matching the FastAPI `except: pass`).
 //! 2. The `.link` is removed; `removedLinkFile` reflects whether a file existed.
+//!    A `.link` that exists but cannot be removed adds `link_error`.
 //! 3. The static `note` reminds the operator a known no-efuse chipset is re-pinned
 //!    automatically unless `network.mac_pin.enabled` is false.
 
@@ -295,24 +296,29 @@ async fn apply_live(_iface: &str, _mac: &str) -> Result<(), String> {
     Err("live re-tag unavailable on this platform".to_string())
 }
 
-/// Remove the pin `.link` for `iface` from `dir`, returning whether a file was
-/// removed. Reuses the shared `ados-macpin` engine on Linux (which also reloads
-/// udev, bounded and off the reactor); on a non-Linux dev host it removes the
-/// file directly so the `removedLinkFile` flag is still exercised by tests.
+/// Remove the pin `.link` for `iface` from `dir`: `Ok(true)` when a file was
+/// removed, `Ok(false)` when none existed, `Err(message)` when one exists and
+/// could not be removed (a read-only or unwritable networkd dir), so the reply
+/// never passes a surviving `.link` off as "there was no file". Reuses the
+/// shared `ados-macpin` engine on Linux (which also reloads udev, bounded and
+/// off the reactor); on a non-Linux dev host it removes the file directly so
+/// the flag and the error are still exercised by tests.
 #[cfg(target_os = "linux")]
-async fn remove_link_file(dir: &Path, iface: &str) -> bool {
+async fn remove_link_file(dir: &Path, iface: &str) -> Result<bool, String> {
     ados_macpin::engine::remove_pin_link(dir, iface)
         .await
-        .unwrap_or(false)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn remove_link_file(dir: &Path, iface: &str) -> bool {
+async fn remove_link_file(dir: &Path, iface: &str) -> Result<bool, String> {
     let path = dir.join(ados_macpin::engine::link_file_name(iface));
     if path.exists() {
-        std::fs::remove_file(&path).is_ok()
+        std::fs::remove_file(&path)
+            .map(|()| true)
+            .map_err(|e| e.to_string())
     } else {
-        false
+        Ok(false)
     }
 }
 
@@ -494,8 +500,9 @@ const NOTE_UNPIN: &str =
 
 /// `DELETE /api/v1/network/mac/{iface}` → unpin: clear the override + remove the
 /// `.link`. Always a `200` with `{status, iface, removedOverride, removedLinkFile,
-/// note}` — an absent override / absent `.link` are reported as `false`, never an
-/// error. Mirrors the Python `delete_mac_pin`.
+/// note}` — an absent override / absent `.link` are reported as `false`. A
+/// config the store refuses adds `persist_error`; a `.link` that exists but could
+/// not be removed adds `link_error`. Mirrors the Python `delete_mac_pin`.
 pub async fn delete_mac_pin(
     State(state): State<AppState>,
     AxumPath(iface): AxumPath<String>,
@@ -516,8 +523,16 @@ async fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str)
             (false, Some(e))
         }
     };
-    // Remove the `.link` (a file existed → true).
-    let removed_link = remove_link_file(networkd_dir, iface).await;
+    // Remove the `.link` (a file existed → true). A `.link` that exists but
+    // could not be removed is reported with its error: networkd would re-apply
+    // the old MAC at the next boot, so a bare `false` would read as "no file".
+    let (removed_link, link_error) = match remove_link_file(networkd_dir, iface).await {
+        Ok(removed) => (removed, None),
+        Err(e) => {
+            tracing::error!(error = %e, iface, "mac pin .link not removed");
+            (false, Some(e))
+        }
+    };
 
     let mut body = json!({
         "status": "ok",
@@ -528,6 +543,9 @@ async fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str)
     });
     if let Some(e) = persist_error {
         body["persist_error"] = json!(e);
+    }
+    if let Some(e) = link_error {
+        body["link_error"] = json!(e);
     }
     Json(body).into_response()
 }
@@ -949,6 +967,29 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["removedOverride"], json!(false));
         assert_eq!(body["removedLinkFile"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn delete_reports_a_link_that_exists_but_cannot_be_removed() {
+        // A `.link` path that cannot be unlinked (here a directory standing at the
+        // canonical name, which refuses remove_file even for root, like the
+        // read-only networkd dir a sandbox imposes) must surface its error, not
+        // collapse into `removedLinkFile: false` as if no file existed.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let netd = dir.path().join("networkd");
+        let link = netd.join(ados_macpin::engine::link_file_name("wlan0"));
+        std::fs::create_dir_all(&link).unwrap();
+        std::fs::write(&cfg, "agent:\n  name: my-drone\n").unwrap();
+
+        let resp = delete_mac_pin_at(&cfg, &netd, "wlan0").await;
+        let body = body_json(resp).await;
+        assert_eq!(body["removedLinkFile"], json!(false));
+        assert!(
+            body["link_error"].as_str().is_some_and(|e| !e.is_empty()),
+            "a surviving .link must be reported: {body}"
+        );
+        assert!(link.exists());
     }
 
     // ── shared body helpers ───────────────────────────────────────────────────

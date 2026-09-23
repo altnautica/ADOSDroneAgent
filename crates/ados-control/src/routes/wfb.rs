@@ -262,26 +262,11 @@ pub async fn get_wfb_pair_status(State(state): State<AppState>) -> Json<Value> {
     let cfg = crate::config::PairingConfig::load_from(&paths.config);
     let (_profile, role) = current_role(&cfg.agent.profile);
 
-    // The role-appropriate key file: tx.key for a drone, rx.key for a GS.
-    let key_path = if role == "drone" {
-        paths.wfb_key_dir.join("tx.key")
-    } else {
-        paths.wfb_key_dir.join("rx.key")
-    };
-
-    // paired := the file exists AND is exactly 64 bytes. A readable fingerprint is
-    // then required; a 64-byte file whose fingerprint cannot be read reverts paired
-    // to false, matching the Python `except (OSError, ValueError): paired = False`.
-    let mut paired = std::fs::metadata(&key_path)
-        .map(|m| m.is_file() && m.len() == WFB_KEY_FILE_BYTES as u64)
-        .unwrap_or(false);
-    let mut fingerprint: Value = Value::Null;
-    if paired {
-        match read_public_fingerprint(&key_path) {
-            Some(fp) => fingerprint = json!(fp),
-            None => paired = false,
-        }
-    }
+    // The shared radio-pair predicate: the role's key, exactly 64 bytes, with a
+    // readable fingerprint.
+    let fingerprint: Option<String> = paired_key_fingerprint(&paths.wfb_key_dir, &role);
+    let paired = fingerprint.is_some();
+    let fingerprint: Value = fingerprint.map_or(Value::Null, |fp| json!(fp));
 
     // Peer / paired-at / auto-pair off the raw config dict, mirroring the Python
     // `_load_config_dict()` read (a present-but-non-string peer/paired-at reads as
@@ -389,7 +374,7 @@ const WFB_PUBLIC_HALF_OFFSET: usize = 32;
 /// file is absent or not exactly 64 bytes. The peer-public half is the second 32
 /// bytes; the fingerprint is `blake2b(pub, digest_size=8)` rendered as 16
 /// lowercase hex chars. Byte-identical to `key_mgr.read_public_fingerprint`.
-fn read_public_fingerprint(path: &Path) -> Option<String> {
+pub(crate) fn read_public_fingerprint(path: &Path) -> Option<String> {
     use blake2::digest::{Update, VariableOutput};
     use blake2::Blake2bVar;
     let data = std::fs::read(path).ok()?;
@@ -403,13 +388,37 @@ fn read_public_fingerprint(path: &Path) -> Option<String> {
     Some(hex::encode(out))
 }
 
+/// The one radio-pair predicate every surface answers from (`GET /api/wfb/pair`,
+/// the auto-pair toggle, `/api/pairing/info`): the role's own key file —
+/// `tx.key` on a drone, `rx.key` on a ground station — is exactly 64 bytes and
+/// yields a fingerprint. Returns that fingerprint when paired. A truncated key,
+/// or a key left over from the other role, is not a pairing.
+pub(crate) fn paired_key_fingerprint(key_dir: &Path, bind_role: &str) -> Option<String> {
+    let name = if bind_role == "drone" {
+        "tx.key"
+    } else {
+        "rx.key"
+    };
+    read_public_fingerprint(&key_dir.join(name))
+}
+
+/// The bind-protocol role for a resolved (hyphen-wire) profile: `"drone"` only
+/// for the drone profile, `"gs"` otherwise.
+pub(crate) fn bind_role_for(profile: &str) -> &'static str {
+    if profile == "drone" {
+        "drone"
+    } else {
+        "gs"
+    }
+}
+
 /// Resolve the bind-protocol role from the agent's profile, mirroring the Python
 /// `_current_role(app)` → `_agent_role_from_profile`. The profile is the
 /// hyphen-wire form (`"drone"` / `"ground-station"`); the role is `"drone"` only
 /// when the profile is exactly `"drone"`, else `"gs"`.
 fn current_role(config_profile: &str) -> (String, String) {
     let (profile, _role) = crate::profile::current_profile_and_role(config_profile);
-    let bind_role = if profile == "drone" { "drone" } else { "gs" };
+    let bind_role = bind_role_for(&profile);
     (profile, bind_role.to_string())
 }
 

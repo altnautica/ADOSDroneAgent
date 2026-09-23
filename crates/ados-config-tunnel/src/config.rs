@@ -19,9 +19,11 @@
 //! auxiliary application lane (the drone's `-p2` downlink and the ground
 //! station's `-p3` uplink) on its own multiplex channel; the aux transmit and
 //! receive pair is brought up ON DEMAND by the radio service, so an opted-out
-//! node radiates nothing and spawns nothing. The "gate" the channel inherits by
-//! riding that lane is the WFB pairing key (only a paired peer can inject or
-//! decode), which is a pairing-scope gate, not a flight-authorization gate.
+//! node radiates nothing and spawns nothing. The WFB radio key is shared by a
+//! whole fleet, so it is not the gate: every request must carry a relay ticket
+//! minted from the per-pair secret for the addressed drone, and a write may
+//! touch only `radio.*` and `video.*` keys (never `radio.tunnel.*`), so
+//! credentials, cloud and MAVLink routing stay out of the channel's reach.
 
 use std::path::Path;
 

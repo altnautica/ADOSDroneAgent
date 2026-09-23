@@ -62,7 +62,7 @@ fn a_stale_link_makes_the_board_report_none() {
     assert_eq!(
         tier_from_link(read.as_ref()),
         None,
-        "no fresh link ⇒ an NPU-less board reports none (rule 44)"
+        "no fresh link ⇒ an NPU-less board reports none"
     );
 
     std::fs::remove_dir_all(&dir).ok();

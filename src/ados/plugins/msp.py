@@ -121,7 +121,7 @@ def decode_frame(buf: bytes) -> tuple[MspFrame, int]:
     """Decode exactly one MSP frame from the START of ``buf`` (v1 or v2,
     auto-detected). Returns ``(frame, consumed)`` so a streaming caller can
     advance. Raises :class:`MspTooShort` / :class:`MspBadPreamble` /
-    :class:`MspBadCrc`; fails closed on a CRC mismatch (Rule 44)."""
+    :class:`MspBadCrc`; fails closed on a CRC mismatch."""
     if len(buf) < 3:
         raise MspTooShort
     if buf[0] != ord("$"):

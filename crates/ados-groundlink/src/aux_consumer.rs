@@ -1760,7 +1760,7 @@ mod tests {
         let proxy = AuxRpcResponseIngest::new("/nonexistent/proxy.sock");
 
         let fragment =
-            encode_response_fragment(b"77735cd38937", 9, 200, 0, 1, 11, br#"{"ok":true}"#).unwrap();
+            encode_response_fragment(b"0a1b2c3d4e5f", 9, 200, 0, 1, 11, br#"{"ok":true}"#).unwrap();
         let framed = aux_mux::encode(AuxChannel::Response, &fragment).unwrap();
         dispatch(
             TEST_SLOT,

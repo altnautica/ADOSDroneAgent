@@ -155,8 +155,7 @@ class WfbConfig(BaseModel):
     # not a measurement of the vendored rtl8812eu driver, and OpenIPC's
     # adaptive-link (the working production reference for this loop)
     # ships a profile table that tops out at MCS 2 in the field.
-    # Anything above 3 is bench-only until the characterisation sweep in
-    # product/specs/ados-agent-rust-hybrid/wfb-video-pipeline-runbook.md
+    # Anything above 3 is bench-only until an MCS characterisation sweep
     # measures which rungs this driver actually applies and holds.
     adaptive_mcs_max: int = 3
     # Periodic + reactive coordinated frequency hopping. Operator

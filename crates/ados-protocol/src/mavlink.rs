@@ -141,6 +141,39 @@ pub fn decode_exact_frame(frame: &[u8]) -> Result<MavMessage, MavlinkError> {
         .map_err(|e| MavlinkError::Read(e.to_string()))
 }
 
+/// Whether a complete MAVLink v1/v2 frame carries a valid checksum: the X.25
+/// over every byte after the start-of-frame through the payload, folded with
+/// the message's CRC_EXTRA. `false` for a truncated frame and for a message id
+/// outside the dialect, whose CRC_EXTRA is unknown: its checksum cannot be
+/// checked, and a byte-stream framer resyncing after line noise must not take
+/// an unverifiable candidate as a frame.
+pub fn frame_checksum_ok(frame: &[u8]) -> bool {
+    let (header_len, msg_id) = match frame.first() {
+        Some(&0xFD) if frame.len() >= 10 => (
+            10usize,
+            u32::from_le_bytes([frame[7], frame[8], frame[9], 0]),
+        ),
+        Some(&0xFE) if frame.len() >= 6 => (6usize, u32::from(frame[5])),
+        _ => return false,
+    };
+    let crc_at = header_len + frame[1] as usize;
+    if frame.len() < crc_at + 2 {
+        return false;
+    }
+    if <MavMessage as rust_mavlink::Message>::default_message_from_id(msg_id).is_none() {
+        return false;
+    }
+    let mut crc = X25_INIT;
+    for &b in &frame[1..crc_at] {
+        crc = x25_accumulate(b, crc);
+    }
+    crc = x25_accumulate(
+        <MavMessage as rust_mavlink::Message>::extra_crc(msg_id),
+        crc,
+    );
+    frame[crc_at..crc_at + 2] == crc.to_le_bytes()
+}
+
 /// Serialize a message into a complete MAVLink v2 frame.
 pub fn serialize_v2(header: MavHeader, msg: &MavMessage) -> Result<Vec<u8>, MavlinkError> {
     let mut buf = Vec::new();

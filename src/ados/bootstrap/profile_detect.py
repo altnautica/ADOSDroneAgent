@@ -584,7 +584,7 @@ def _hostname_suggested_profile() -> str | None:
         return None
     if not name:
         return None
-    if name.startswith(("groundnode", "groundstation", "gcs", "gs-")):
+    if name.startswith(("groundstation", "gcs", "gs-")):
         return "ground_station"
     if name.startswith(("skynode", "drone", "rig-", "uav")):
         return "drone"
@@ -645,10 +645,10 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
     air_score = sum(a for _g, a, _d in probes.values())
 
     # Hostname is operator-controlled but easy to leave stale: a box
-    # named `groundnode` six months ago might be wired up as a drone
+    # named `gs-field` six months ago might be wired up as a drone
     # today. Treat it as a soft tiebreaker rather than a hardware
     # override, so a real FC with a matched USB vendor (6 air points)
-    # still wins over an inherited "groundnode" hostname. Operators
+    # still wins over an inherited "gs-" hostname. Operators
     # who want hard pinning use `agent.profile` in /etc/ados/config.yaml
     # or `ados profile set`.
     hostname_pick = _hostname_suggested_profile()

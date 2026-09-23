@@ -7,9 +7,8 @@ and the socket did not exist yet), stranding the FC-status snapshot empty so
 that the reconnecting reader recovers the snapshot after a server restart and
 after a cold start where the socket appears late.
 
-Teardown note: ``StateIPCServer.stop()`` blocks while a client is still actively
-connected, so every test stops the reader (shutdown + cancel + disconnect)
-BEFORE stopping a server.
+Teardown note: every test stops the reader (shutdown + cancel + disconnect)
+BEFORE stopping a server, so no live handler holds the server open.
 """
 
 from __future__ import annotations
@@ -20,8 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from ados.core.ipc import StateIPCClient, StateIPCServer
+from ados.core.ipc import StateIPCClient
 from ados.services.api.__main__ import _state_ipc_reader
+from tests.state_ipc_utils import StateSocketServer
 
 
 class _Log:
@@ -71,7 +71,7 @@ async def test_reader_recovers_after_connection_drops(tmp_sock_dir):
 
     shutdown = asyncio.Event()
 
-    server = StateIPCServer(sock_path=sock)
+    server = StateSocketServer(sock)
     await server.start()
     server.publish({"fc_connected": True, "mav_type": 2})
 
@@ -112,7 +112,7 @@ async def test_reader_connects_when_socket_appears_late(tmp_sock_dir):
 
     shutdown = asyncio.Event()
     reader_task = asyncio.create_task(_state_ipc_reader(client, shutdown, _Log()))
-    server = StateIPCServer(sock_path=sock)
+    server = StateSocketServer(sock)
     try:
         # No server yet — the first connect attempt fails; the loop retries.
         await asyncio.sleep(0.1)
@@ -135,7 +135,7 @@ async def test_reader_exits_promptly_on_shutdown(tmp_sock_dir):
     client = StateIPCClient(sock_path=sock)
     shutdown = asyncio.Event()
 
-    server = StateIPCServer(sock_path=sock)
+    server = StateSocketServer(sock)
     await server.start()
     server.publish({"fc_connected": True})
     reader_task = asyncio.create_task(_state_ipc_reader(client, shutdown, _Log()))

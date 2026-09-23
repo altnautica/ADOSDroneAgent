@@ -19,6 +19,10 @@ Slice=ados.slice
 Type=notify
 ExecStart=/opt/ados/bin/ados-logd
 Restart=always
+# Exit 0 means the store is switched off (logging.store.enabled: false); it must
+# not respawn every RestartSec. Any other exit, signal or watchdog timeout
+# restarts forever (no start limit).
+RestartPreventExitStatus=0
 RestartSec=3
 # Headroom for the boot-path store check on a large store (the retention cap is
 # gigabytes). The daemon gates READY on a fast quick_check, but give ample slack

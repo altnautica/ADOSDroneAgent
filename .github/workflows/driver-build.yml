@@ -175,15 +175,37 @@ jobs:
         if: ${{ matrix.headers_source == 'apt' }}
         run: |
           set -euxo pipefail
-          # trusted=yes skips upstream repo-signature verification. Repo-signature
-          # verification of the public headers feed is not our trust boundary: the
-          # .ko we publish carries its own SHA256 (and minisign signature when a
-          # key is set), so the artifact's integrity does not depend on the
-          # upstream apt signature. (An optional apt_key_url can still be pinned.)
-          echo "${{ matrix.apt_list }}" | tee /etc/apt/sources.list.d/vendor-kernel.list
-          if [ -n "${{ matrix.apt_key_url }}" ]; then
-            curl -fsSL "${{ matrix.apt_key_url }}" -o /etc/apt/trusted.gpg.d/vendor-kernel.asc || true
-          fi
+          # The headers and their postinst shape the module this workflow then
+          # signs with the project key, so the feed they come from is part of the
+          # trust chain: every row must name an HTTPS repo, be pinned to its
+          # vendor keyring with signed-by, and never use trusted=yes. apt then
+          # refuses a Release file that the vendor key did not sign.
+          apt_list='${{ matrix.apt_list }}'
+          key_urls='${{ matrix.apt_key_url }}'
+          case "$apt_list" in
+            *trusted=yes*) echo "::error::apt_list for ${{ matrix.flavor }} uses trusted=yes"; exit 1 ;;
+          esac
+          case "$apt_list" in
+            *"signed-by=/etc/apt/keyrings/vendor-kernel.gpg"*" https://"*) ;;
+            *) echo "::error::apt_list for ${{ matrix.flavor }} must be an https feed with signed-by=/etc/apt/keyrings/vendor-kernel.gpg"; exit 1 ;;
+          esac
+          [ -n "$key_urls" ] || { echo "::error::apt row ${{ matrix.flavor }} has no apt_key_url"; exit 1; }
+          # apt_key_url is one or more space-separated HTTPS URLs (a vendor that
+          # rotates keys yearly lists each year's key). Armored keys are
+          # dearmored; the binary keyrings are concatenated into one file.
+          install -d -m 0755 /etc/apt/keyrings
+          : > /tmp/vendor-kernel.gpg
+          for url in $key_urls; do
+            case "$url" in https://*) ;; *) echo "::error::key URL is not https: $url"; exit 1 ;; esac
+            curl -fsSL "$url" -o /tmp/vendor-key
+            if grep -q -- '-----BEGIN PGP PUBLIC KEY BLOCK-----' /tmp/vendor-key; then
+              gpg --dearmor < /tmp/vendor-key >> /tmp/vendor-kernel.gpg
+            else
+              cat /tmp/vendor-key >> /tmp/vendor-kernel.gpg
+            fi
+          done
+          install -m 0644 /tmp/vendor-kernel.gpg /etc/apt/keyrings/vendor-kernel.gpg
+          echo "$apt_list" | tee /etc/apt/sources.list.d/vendor-kernel.list
           apt-get update
 
       - name: Install kernel headers from apt (group A)
@@ -360,17 +382,35 @@ jobs:
           done
           rm -f /tmp/driver.key
 
-      - name: Publish rolling prerelease (non-tag runs)
-        if: ${{ github.ref_type != 'tag' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: prebuilt-drivers
-          prerelease: true
-          name: "Prebuilt RTL8812EU modules (rolling)"
-          files: rel/*
-
-      - name: Publish stable release (drivers-v* tags)
-        if: ${{ github.ref_type == 'tag' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          files: rel/*
+      # gh CLI, not a release action: `gh release upload --clobber` replaces each
+      # asset in place, where a release action that fails mid-replacement has
+      # left a tag holding a module with no .sha256 (and a board that finds no
+      # checksum falls back to the slow on-device build). The modules and their
+      # sidecars go up first and the manifest last, so an aborted run never
+      # advertises a row whose files are not already on the release.
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}"
+            gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+              --verify-tag --title "$tag" --notes ""
+          else
+            tag="prebuilt-drivers"
+            gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
+              --prerelease --title "Prebuilt RTL8812EU modules (rolling)" --notes ""
+          fi
+          modules=()
+          for f in rel/*; do
+            case "$(basename "$f")" in
+              drivers-manifest.json*) ;;
+              *) modules+=("$f") ;;
+            esac
+          done
+          if [ ${#modules[@]} -gt 0 ]; then
+            gh release upload "$tag" "${modules[@]}" --clobber
+          fi
+          gh release upload "$tag" rel/drivers-manifest.json* --clobber

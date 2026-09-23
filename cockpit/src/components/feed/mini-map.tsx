@@ -6,7 +6,7 @@
 // animation — the marker's position/rotation are data-driven, not decorative
 // motion).
 //
-// Honest surfaces (Rule 44): there is no home datum on the wire, so the map never
+// Honest surfaces: there is no home datum on the wire, so the map never
 // draws one — the "start" marker is the first fix we observed this session (our
 // launch proxy), labelled as such, not the flight controller's home. With no
 // valid fix it shows a plain "No GPS fix" state; when the fix goes stale it dims

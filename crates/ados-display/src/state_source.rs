@@ -2,34 +2,38 @@
 //!
 //! The native-resolution page UI in [`crate::pages`] reads from a single
 //! [`PageContext`]; this module is the seam that fills it from the running
-//! agent, mirroring the same sources the Python LCD service polled:
+//! agent:
 //!
 //! * The agent's local REST API on `127.0.0.1:8080` — the ground-station
 //!   status snapshot (`/api/v1/ground-station/status`, the union of link /
 //!   network / system / role / mesh / video the dashboard reads) and the setup
-//!   wizard state (`/api/v1/setup/status`, completion + next step + device
-//!   identity). Authentication is the `X-ADOS-Key` header read from
+//!   wizard state (`/api/v1/setup/status`: completion, next step, device
+//!   identity, LAN host, the advertised Mission Control URL and the hardware
+//!   checklist), plus the WFB radio-pair read (`/api/wfb/pair`) for the
+//!   auto-pair flag the pair-drone page shows. Authentication is the `X-ADOS-Key` header read from
 //!   `/etc/ados/pairing.json`; the pairing routes stay reachable while
 //!   unpaired, and an empty key is correct for an unpaired box.
-//! * The `/run/ados` JSON sidecars the channel-hops and link-stats surfaces
-//!   read directly because the data lives cross-process (the radio service
-//!   owns it): `hop-supervisor.json` (band + hop history) and `health.json`
-//!   (cpu / memory / disk / temperature).
+//! * The `/run/ados/hop-supervisor.json` sidecar the channel-hops surface reads
+//!   directly because the data lives cross-process (the radio service owns
+//!   it), used only while fresh.
+//! * The logging store's query socket, for the diagnostics log tail
+//!   ([`crate::log_tail`]), and the HAL board sidecar plus sysfs for the
+//!   identity rows ([`crate::host_identity`]).
 //!
 //! The history buffers the sparkline surfaces read (RSSI, CPU, temperature,
 //! battery) are not carried in any one snapshot; the source keeps a rolling
-//! 60-sample ring per series and pushes the freshest reading each refresh, the
-//! same way the Python screen objects accumulated trend points across ticks.
+//! 60-sample ring per series and pushes the freshest reading each refresh.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::host_identity::{HostIdentity, HostPaths};
 use crate::pages::{
-    CloudCtx, DeviceCtx, DroneCtx, FcCtx, HardwareItem, HealthCtx, HopEntry, HoppingCtx, LinkCtx,
-    MeshCtx, MeshPeer, NetworkCtx, PageContext, PairedDroneCtx, PairingCtx, RadioCtx, RoleCtx,
-    SystemCtx, UplinkCtx, VideoCtx, WifiClientCtx, LINK_STATE_STALE,
+    CloudCtx, DeviceCtx, DroneCtx, FcCtx, HardwareItem, HopEntry, HoppingCtx, LinkCtx, MeshCtx,
+    MeshPeer, NetworkCtx, PageContext, PairedDroneCtx, PairingCtx, RoleCtx, SystemCtx, UplinkCtx,
+    VideoCtx, WifiClientCtx, LINK_STATE_STALE,
 };
 
 /// The agent's local HTTP API base. Matches the Python LCD service's
@@ -51,9 +55,6 @@ pub const PAIRING_JSON_PATH: &str = "/etc/ados/pairing.json";
 /// and diagnostics surfaces show when the setup snapshot doesn't carry one.
 pub const DEVICE_ID_PATH: &str = "/etc/ados/device-id";
 
-/// Build-stamp breadcrumb (`/etc/ados/build.txt`) for the about surface.
-pub const BUILD_STAMP_PATH: &str = "/etc/ados/build.txt";
-
 /// Per-request timeout for the local status polls. Matches the Python LCD
 /// service's `httpx` 0.9 s ceiling so a wedged agent never stalls the panel.
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -63,12 +64,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_millis(900);
 /// that many, oldest first.
 const HISTORY_LEN: usize = 60;
 
+/// How old `hop-supervisor.json` may be and still describe a running
+/// supervisor. Its writer refreshes it every 5 s, so three missed writes mean
+/// the supervisor is not running and its last history is not current.
+const HOP_SIDECAR_FRESH: Duration = Duration::from_secs(15);
+
 /// `/run/ados` sidecar paths the surfaces read directly.
 fn hop_supervisor_path() -> PathBuf {
     PathBuf::from("/run/ados/hop-supervisor.json")
-}
-fn health_path() -> PathBuf {
-    PathBuf::from("/run/ados/health.json")
 }
 
 /// A fixed-length rolling history of optional samples, oldest first. A `None`
@@ -104,7 +107,8 @@ pub struct StateSource {
     agent: ureq::Agent,
     hostname: String,
     hop_path: PathBuf,
-    health_path: PathBuf,
+    logd_socket: PathBuf,
+    host_paths: HostPaths,
     rssi_history: History,
     cpu_history: History,
     temp_history: History,
@@ -119,18 +123,12 @@ impl StateSource {
             DEFAULT_API_BASE,
             Path::new(PAIRING_JSON_PATH),
             hop_supervisor_path(),
-            health_path(),
         )
     }
 
     /// Build a source with explicit base URL and sidecar paths (used by tests
     /// so the polls and reads round-trip without touching `/run` or `/etc`).
-    pub fn with_paths(
-        base: impl Into<String>,
-        pairing_json: &Path,
-        hop_path: PathBuf,
-        health_path: PathBuf,
-    ) -> Self {
+    pub fn with_paths(base: impl Into<String>, pairing_json: &Path, hop_path: PathBuf) -> Self {
         let agent = ureq::AgentBuilder::new().timeout(REQUEST_TIMEOUT).build();
         Self {
             base: base.into().trim_end_matches('/').to_string(),
@@ -138,7 +136,8 @@ impl StateSource {
             agent,
             hostname: read_hostname(),
             hop_path,
-            health_path,
+            logd_socket: PathBuf::from(crate::log_tail::LOGD_QUERY_SOCKET),
+            host_paths: HostPaths::default(),
             rssi_history: History::default(),
             cpu_history: History::default(),
             temp_history: History::default(),
@@ -164,13 +163,14 @@ impl StateSource {
     /// Refresh every source and build the full [`PageContext`] for this tick.
     ///
     /// The status snapshot and the setup snapshot come from the agent's local
-    /// API; the hop-supervisor + health sidecars are read from disk. Each
-    /// source is independent — a missing one degrades only the surfaces that
-    /// read it, never the whole frame.
+    /// API; the hop-supervisor sidecar, the log tail and the host identity are
+    /// read on-box. Each source is independent — a missing one degrades only the
+    /// surfaces that read it, never the whole frame.
     pub fn build_context(&mut self) -> PageContext {
         let status = self.get_json("/api/v1/ground-station/status");
         let setup = self.get_json("/api/v1/setup/status");
-        let hop = read_run_json(&self.hop_path);
+        let hop = read_run_json(&self.hop_path)
+            .filter(|_| file_age(&self.hop_path).is_some_and(|age| age <= HOP_SIDECAR_FRESH));
         // Best-effort schema-drift signal (never reject): warn when the
         // hop-supervisor sidecar was written by an agent with a different schema
         // version, then render anyway. The writer const lives in the radio crate,
@@ -181,16 +181,15 @@ impl StateSource {
                 ados_protocol::sidecar::check_sidecar_version("hop-supervisor", got, ours);
             }
         }
-        let health = read_run_json(&self.health_path);
-        self.compose(
-            status.as_ref(),
-            setup.as_ref(),
-            hop.as_ref(),
-            health.as_ref(),
-        )
+        let mut ctx = self.compose(status.as_ref(), setup.as_ref(), hop.as_ref());
+        ctx.paired_drone.auto_pair_enabled =
+            auto_pair_enabled(self.get_json("/api/wfb/pair").as_ref());
+        apply_host_identity(&mut ctx.device, HostIdentity::read(&self.host_paths));
+        ctx.diagnostics.agent_logs = crate::log_tail::fetch(&self.logd_socket).unwrap_or_default();
+        ctx
     }
 
-    /// Map the four already-fetched JSON sources into a [`PageContext`],
+    /// Map the three already-fetched JSON sources into a [`PageContext`],
     /// advancing the rolling history buffers. Split out from
     /// [`StateSource::build_context`] so the mapping is unit-testable without a
     /// live agent.
@@ -199,7 +198,6 @@ impl StateSource {
         status: Option<&Value>,
         setup: Option<&Value>,
         hop: Option<&Value>,
-        health: Option<&Value>,
     ) -> PageContext {
         let mut ctx = PageContext {
             hostname: self.hostname.clone(),
@@ -209,7 +207,6 @@ impl StateSource {
 
         if let Some(s) = status {
             ctx.link = link_ctx(get(s, "link"));
-            ctx.radio = radio_ctx(get(s, "radio"));
             ctx.drone = drone_ctx(get(s, "drone").or_else(|| get(s, "paired_drone")));
             ctx.paired_drone = paired_drone_ctx(get(s, "paired_drone"));
             ctx.fc = fc_ctx(get(s, "fc"));
@@ -221,7 +218,6 @@ impl StateSource {
             ctx.uplink = uplink_ctx(get(s, "uplink").or_else(|| get(s, "modem")));
             ctx.system = system_ctx(get(s, "system"));
             ctx.video = video_ctx(get(s, "video"));
-            ctx.hardware_check = hardware_items(get(s, "hardware_check"));
         }
 
         if let Some(su) = setup {
@@ -229,7 +225,6 @@ impl StateSource {
         }
 
         ctx.hopping = hopping_ctx(hop, ctx.link.channel);
-        ctx.health = health_ctx(health);
         ctx.device = self.device_ctx(setup, &ctx.system);
 
         // Advance the rolling trend buffers from this tick's fresh readings.
@@ -247,21 +242,14 @@ impl StateSource {
         ctx
     }
 
-    /// Compose device identity from the setup snapshot, the system block, and
-    /// the on-disk device-id / build-stamp breadcrumbs.
+    /// Compose the setup-status identity fields (id, name, version) with the
+    /// on-disk device-id breadcrumb and the system block's version.
     fn device_ctx(&self, setup: Option<&Value>, system: &SystemCtx) -> DeviceCtx {
         let mut device = DeviceCtx::default();
         if let Some(su) = setup {
             device.device_id = string_field(su, "device_id");
-            device.device_name =
-                string_field(su, "device_name").or_else(|| string_field(su, "name"));
+            device.device_name = string_field(su, "device_name");
             device.version = string_field(su, "version");
-            device.board_name =
-                string_field(su, "board_name").or_else(|| string_field(su, "board"));
-            device.primary_ip = string_field(su, "primary_ip");
-            device.primary_mac = string_field(su, "primary_mac");
-            device.mac_eth0 = string_field(su, "mac_eth0");
-            device.mac_wlan0 = string_field(su, "mac_wlan0");
         }
         if device.device_id.is_none() {
             let id = read_trimmed(Path::new(DEVICE_ID_PATH));
@@ -272,12 +260,17 @@ impl StateSource {
         if device.version.is_none() {
             device.version = system.agent_version.clone();
         }
-        let stamp = read_trimmed(Path::new(BUILD_STAMP_PATH));
-        if !stamp.is_empty() {
-            device.build_stamp = Some(stamp);
-        }
         device
     }
+}
+
+/// Fill the identity rows read off the box.
+fn apply_host_identity(device: &mut DeviceCtx, host: HostIdentity) {
+    device.board_name = host.board_name;
+    device.mac_wired = host.mac_wired;
+    device.mac_wireless = host.mac_wireless;
+    device.primary_ip = host.primary_ip;
+    device.primary_mac = host.primary_mac;
 }
 
 impl Default for StateSource {
@@ -331,9 +324,13 @@ fn link_ctx(v: Option<&Value>) -> LinkCtx {
         return LinkCtx::default();
     };
     let state = string_field(v, "state");
+    // The declared power path is configuration, not a reading, so it survives a
+    // stale snapshot.
+    let topology = string_field(v, "topology");
     if state.as_deref() == Some(LINK_STATE_STALE) {
         return LinkCtx {
             state,
+            topology,
             ..LinkCtx::default()
         };
     }
@@ -353,6 +350,7 @@ fn link_ctx(v: Option<&Value>) -> LinkCtx {
         frequency_mhz: i64_field(v, "frequency_mhz"),
         bandwidth_mhz: i64_field(v, "bandwidth_mhz"),
         tx_power_dbm: i64_field(v, "tx_power_dbm"),
+        topology,
         mcs_index: i64_field(v, "mcs_index"),
         fec_k: i64_field(v, "fec_k"),
         fec_n: i64_field(v, "fec_n"),
@@ -364,16 +362,6 @@ fn link_ctx(v: Option<&Value>) -> LinkCtx {
         packets_lost: i64_field(v, "packets_lost"),
         rssi_history: Vec::new(),
     }
-}
-
-fn radio_ctx(v: Option<&Value>) -> RadioCtx {
-    // Mirror `_normalize_radio_fields`: default the topology to `host_vbus`
-    // when the block (or the field) is absent, so the brownout badge has a
-    // stable source on agents that predate the WFB-status REST exposure.
-    let topology = v
-        .and_then(|v| string_field(v, "topology"))
-        .or_else(|| Some("host_vbus".to_string()));
-    RadioCtx { topology }
 }
 
 fn drone_ctx(v: Option<&Value>) -> DroneCtx {
@@ -399,7 +387,14 @@ fn paired_drone_ctx(v: Option<&Value>) -> PairedDroneCtx {
         key_fingerprint: string_field(v, "key_fingerprint"),
         paired_at_seconds: f64_field(v, "paired_at_seconds"),
         paired_at: f64_field(v, "paired_at"),
+        auto_pair_enabled: None,
     }
+}
+
+/// The WFB auto-pair arm flag off a `GET /api/wfb/pair` body. `None` when the
+/// read failed or the body carries no boolean flag.
+fn auto_pair_enabled(wfb_pair: Option<&Value>) -> Option<bool> {
+    wfb_pair?.get("auto_pair_enabled").and_then(Value::as_bool)
 }
 
 fn fc_ctx(v: Option<&Value>) -> FcCtx {
@@ -424,12 +419,11 @@ fn cloud_ctx(v: Option<&Value>) -> CloudCtx {
     };
     CloudCtx {
         paired: bool_field(v, "paired"),
-        pair_code: string_field(v, "pair_code"),
-        pairing_code: string_field(v, "pairing_code"),
+        // One pair-code field whichever spelling the producer used.
+        pair_code: string_field(v, "pair_code").or_else(|| string_field(v, "pairing_code")),
         latency_ms: f64_field(v, "latency_ms"),
         rtt_ms: f64_field(v, "rtt_ms"),
         broadcasting: bool_field(v, "broadcasting"),
-        pair_url: string_field(v, "pair_url"),
         mqtt_state: string_field(v, "mqtt_state"),
         http_state: string_field(v, "http_state"),
         drone_id: string_field(v, "drone_id"),
@@ -442,7 +436,6 @@ fn pairing_ctx(v: Option<&Value>) -> PairingCtx {
     };
     PairingCtx {
         code: string_field(v, "code"),
-        pair_url: string_field(v, "pair_url"),
         window_active: bool_field(v, "window_active"),
         window_remaining_seconds: f64_field(v, "window_remaining_seconds"),
     }
@@ -459,6 +452,10 @@ fn role_ctx(v: Option<&Value>) -> RoleCtx {
     }
 }
 
+/// The mesh block. The agent reports `up` / `peer_count` as null (and
+/// `stale: true`) when it has no current snapshot; those stay unknown here
+/// rather than becoming "down" and "0 peers". The roster is `None` when the
+/// block carries no `peers` array, which is different from an empty one.
 fn mesh_ctx(v: Option<&Value>) -> MeshCtx {
     let Some(v) = v else {
         return MeshCtx::default();
@@ -466,12 +463,12 @@ fn mesh_ctx(v: Option<&Value>) -> MeshCtx {
     let peers = v
         .get("peers")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().map(mesh_peer).collect())
-        .unwrap_or_default();
+        .map(|arr| arr.iter().map(mesh_peer).collect());
     MeshCtx {
-        up: bool_field(v, "up"),
+        up: v.get("up").and_then(Value::as_bool),
+        stale: bool_field(v, "stale"),
         partition: bool_field(v, "partition"),
-        peer_count: i64_field(v, "peer_count").unwrap_or(0),
+        peer_count: i64_field(v, "peer_count"),
         selected_gateway: string_field(v, "selected_gateway"),
         mesh_id: string_field(v, "mesh_id"),
         peers,
@@ -503,10 +500,8 @@ fn network_ctx(v: Option<&Value>) -> NetworkCtx {
         ap_ip: string_field(v, "ap_ip"),
         usb_ip: string_field(v, "usb_ip"),
         uplink_type: string_field(v, "uplink_type"),
-        uplink_reachable: bool_field(v, "uplink_reachable"),
-        mdns_host: string_field(v, "mdns_host"),
+        uplink_reachable: v.get("uplink_reachable").and_then(Value::as_bool),
         hotspot_ssid: string_field(v, "hotspot_ssid"),
-        hotspot_enabled: bool_field(v, "hotspot_enabled"),
         // Read from disk, never from the polled response: those routes answer
         // the LAN as well as loopback, so a passphrase in a payload is a
         // passphrase published to anyone who can reach the box.
@@ -562,6 +557,7 @@ fn system_ctx(v: Option<&Value>) -> SystemCtx {
         ram_used_mb: f64_field(v, "ram_used_mb"),
         ram_total_mb: f64_field(v, "ram_total_mb"),
         temp_c: f64_field(v, "temp_c"),
+        disk_pct: f64_field(v, "disk_pct"),
         uptime_seconds: f64_field(v, "uptime_seconds"),
         agent_version: string_field(v, "agent_version"),
         cpu_history: Vec::new(),
@@ -575,42 +571,50 @@ fn video_ctx(v: Option<&Value>) -> VideoCtx {
     };
     VideoCtx {
         decoder: string_field(v, "decoder"),
-        active: bool_field(v, "active"),
+        active: v.get("active").and_then(Value::as_bool),
         recording: bool_field(v, "recording"),
         fps: f64_field(v, "fps"),
         latency_ms: f64_field(v, "latency_ms"),
         bitrate_kbps: f64_field(v, "bitrate_kbps"),
-        mediamtx_ready: bool_field(v, "mediamtx_ready"),
+        mediamtx_ready: v.get("mediamtx_ready").and_then(Value::as_bool),
         mediamtx_inbound_kbps: f64_field(v, "mediamtx_inbound_kbps"),
         camera_label: string_field(v, "camera_label"),
         camera_count: i64_field(v, "camera_count").unwrap_or(0),
     }
 }
 
+/// The setup status `hardware_check` block (`{profile, items: [...]}`), each
+/// item carrying the producer's `id`, `label`, `required`, `state` and
+/// `fix_hint`.
 fn hardware_items(v: Option<&Value>) -> Vec<HardwareItem> {
-    let Some(v) = v else {
-        return Vec::new();
-    };
-    // The block may be a bare array or an object carrying an `items` array.
-    let arr = v
-        .as_array()
-        .or_else(|| v.get("items").and_then(Value::as_array));
-    let Some(arr) = arr else {
+    let Some(arr) = v.and_then(|v| v.get("items")).and_then(Value::as_array) else {
         return Vec::new();
     };
     arr.iter()
         .map(|item| HardwareItem {
             id: string_field(item, "id"),
             label: string_field(item, "label"),
+            required: bool_field(item, "required"),
             state: string_field(item, "state"),
             fix_hint: string_field(item, "fix_hint"),
         })
         .collect()
 }
 
+/// The Mission Control URL the setup service advertises: the `access_urls`
+/// entry of kind `mission_control`.
+fn mission_control_url(su: &Value) -> Option<String> {
+    su.get("access_urls")?
+        .as_array()?
+        .iter()
+        .find(|u| u.get("kind").and_then(Value::as_str) == Some("mission_control"))
+        .and_then(|u| string_field(u, "url"))
+}
+
 /// Apply the setup-status snapshot onto the context: completion percent, the
-/// next-step copy, the wizard-finalized flag, and the local pair code the
-/// dashboard shows before a cloud relay binds one.
+/// next-step copy, the wizard-finalized flag, the LAN host and Mission Control
+/// URL the setup and pairing links use, the hardware checklist, and the local
+/// pair code the dashboard shows before a cloud relay binds one.
 fn apply_setup(ctx: &mut PageContext, su: &Value) {
     ctx.setup_finalized = bool_field(su, "finalized")
         || bool_field(su, "setup_complete")
@@ -618,6 +622,9 @@ fn apply_setup(ctx: &mut PageContext, su: &Value) {
     ctx.completion_percent =
         f64_field(su, "completion_percent").or_else(|| f64_field(su, "percent"));
     ctx.next_action = string_field(su, "next_action").or_else(|| string_field(su, "next_step"));
+    ctx.lan_host = string_field(su, "lan_host");
+    ctx.mission_control_url = mission_control_url(su);
+    ctx.hardware_check = hardware_items(get(su, "hardware_check"));
 
     // A local pair code carried on the setup snapshot seeds the pairing +
     // cloud code surfaces when the status block didn't already populate them.
@@ -634,22 +641,9 @@ fn apply_setup(ctx: &mut PageContext, su: &Value) {
     }
 }
 
-fn health_ctx(v: Option<&Value>) -> HealthCtx {
-    let Some(v) = v else {
-        return HealthCtx::default();
-    };
-    HealthCtx {
-        cpu_percent: f64_field(v, "cpu_percent"),
-        memory_percent: f64_field(v, "memory_percent"),
-        disk_percent: f64_field(v, "disk_percent"),
-        temperature: f64_field(v, "temperature"),
-    }
-}
-
-/// Build the channel-hopping context from `hop-supervisor.json`. The reference
-/// channel is the live radio channel taken from the link block (matching the
-/// Python channel-hops page, which reads the link channel for the chart's
-/// reference line).
+/// Build the channel-hopping context from a fresh `hop-supervisor.json` (the
+/// caller drops a stale one). The reference channel is the live radio channel
+/// taken from the link block.
 fn hopping_ctx(hop: Option<&Value>, link_channel: Option<i64>) -> HoppingCtx {
     let Some(v) = hop else {
         return HoppingCtx {
@@ -663,6 +657,7 @@ fn hopping_ctx(hop: Option<&Value>, link_channel: Option<i64>) -> HoppingCtx {
         .map(|arr| arr.iter().filter_map(hop_entry).collect())
         .unwrap_or_default();
     HoppingCtx {
+        present: true,
         band: string_field(v, "band"),
         history,
         radio_channel: link_channel,
@@ -706,6 +701,17 @@ pub(crate) fn load_api_key(path: &Path) -> Option<String> {
 fn read_run_json(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// How long ago `path` was last modified. `None` when it cannot be read or its
+/// time is in the future.
+fn file_age(path: &Path) -> Option<Duration> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()
 }
 
 /// Read a small one-line breadcrumb file (device-id, build stamp), trimmed.
@@ -756,7 +762,6 @@ mod tests {
             "http://127.0.0.1:1",
             Path::new("/nonexistent/pairing.json"),
             PathBuf::from("/nonexistent/hop.json"),
-            PathBuf::from("/nonexistent/health.json"),
         )
     }
 
@@ -778,33 +783,33 @@ mod tests {
     #[test]
     fn missing_sources_yield_a_safe_default_context() {
         let mut src = source();
-        let ctx = src.compose(None, None, None, None);
+        let ctx = src.compose(None, None, None);
         // The chrome fields still resolve from the OS / clock.
         assert!(!ctx.hostname.is_empty());
         assert_eq!(ctx.clock.len(), 8);
         // Every sub-context is its default (no panic, no blank-field crash).
         assert!(ctx.link.rssi_dbm.is_none());
-        assert_eq!(ctx.mesh.peer_count, 0);
+        assert_eq!(ctx.mesh.peer_count, None);
         assert!(ctx.video.camera_label.is_none());
-        // With NO status payload at all, the radio topology stays unset — the
-        // `host_vbus` backfill only runs when a status snapshot exists (it
-        // mirrors `_normalize_radio_fields`, which the Python poller runs on a
-        // received payload, not on a missing one).
-        assert!(ctx.radio.topology.is_none());
+        // No snapshot, no supply path: the brownout warning has nothing to key on.
+        assert!(ctx.link.topology.is_none());
+        assert!(!ctx.hopping.present);
         // History buffers got their first (None) sample.
         assert_eq!(ctx.link.rssi_history.len(), 1);
         assert_eq!(ctx.system.cpu_history.len(), 1);
     }
 
+    /// The power path comes from the link block the radio writes. A status with
+    /// no topology leaves it unknown; it is never assumed to be host VBUS.
     #[test]
-    fn status_with_no_radio_block_backfills_host_vbus() {
-        // When a status payload exists but carries no `radio` block, the
-        // topology defaults to host_vbus (the brownout badge always has a
-        // source on the polled path), matching `_normalize_radio_fields`.
+    fn topology_is_read_from_the_link_block_and_never_assumed() {
         let mut src = source();
         let status = json!({"link": {"rssi_dbm": -60.0}});
-        let ctx = src.compose(Some(&status), None, None, None);
-        assert_eq!(ctx.radio.topology.as_deref(), Some("host_vbus"));
+        let ctx = src.compose(Some(&status), None, None);
+        assert_eq!(ctx.link.topology, None);
+        let status = json!({"link": {"state": "stale", "topology": "powered_hub"}});
+        let ctx = src.compose(Some(&status), None, None);
+        assert_eq!(ctx.link.topology.as_deref(), Some("powered_hub"));
     }
 
     #[test]
@@ -834,7 +839,7 @@ mod tests {
             },
             "video": {"recording": true, "camera_count": 1, "mediamtx_ready": true}
         });
-        let ctx = src.compose(Some(&status), None, None, None);
+        let ctx = src.compose(Some(&status), None, None);
 
         assert_eq!(ctx.link.state.as_deref(), Some("connected"));
         assert_eq!(ctx.link.rssi_dbm, Some(-67.0));
@@ -846,19 +851,48 @@ mod tests {
         assert_eq!(ctx.role.current.as_deref(), Some("receiver"));
         assert!(ctx.role.mesh_capable);
 
-        assert!(ctx.mesh.up);
-        assert_eq!(ctx.mesh.peer_count, 2);
+        assert_eq!(ctx.mesh.up, Some(true));
+        assert_eq!(ctx.mesh.peer_count, Some(2));
         assert_eq!(ctx.mesh.selected_gateway.as_deref(), Some("gw-2"));
+        // No roster in the block: unknown, not an empty list.
+        assert!(ctx.mesh.peers.is_none());
 
         assert_eq!(ctx.network.uplink_type.as_deref(), Some("eth"));
-        assert!(ctx.network.uplink_reachable);
+        assert_eq!(ctx.network.uplink_reachable, Some(true));
 
         assert_eq!(ctx.system.cpu_pct, Some(22.0));
         assert_eq!(ctx.system.agent_version.as_deref(), Some("0.49.41"));
 
         assert!(ctx.video.recording);
         assert_eq!(ctx.video.camera_count, 1);
-        assert!(ctx.video.mediamtx_ready);
+        assert_eq!(ctx.video.mediamtx_ready, Some(true));
+        // Not reported, so not "inactive".
+        assert_eq!(ctx.video.active, None);
+    }
+
+    /// A relay whose mesh poll has no current snapshot gets the agent's nulled,
+    /// stale-marked block. That is "unknown", never "down" with zero peers.
+    #[test]
+    fn a_stale_mesh_block_is_unknown_not_down() {
+        let mut src = source();
+        let status = json!({
+            "mesh": {"up": null, "peer_count": null, "selected_gateway": null,
+                     "partition": null, "mesh_id": null, "stale": true}
+        });
+        let ctx = src.compose(Some(&status), None, None);
+        assert_eq!(ctx.mesh.up, None);
+        assert_eq!(ctx.mesh.peer_count, None);
+        assert!(ctx.mesh.stale);
+        assert_eq!(ctx.mesh.state(), crate::pages::MeshState::Unknown);
+
+        // A stale block that still says up is unknown too.
+        let status = json!({"mesh": {"up": true, "peer_count": 3, "stale": true}});
+        let ctx = src.compose(Some(&status), None, None);
+        assert_eq!(ctx.mesh.state(), crate::pages::MeshState::Unknown);
+
+        let status = json!({"mesh": {"up": false, "peer_count": 0, "stale": false}});
+        let ctx = src.compose(Some(&status), None, None);
+        assert_eq!(ctx.mesh.state(), crate::pages::MeshState::Down);
     }
 
     /// A stale radio snapshot is no data: the dead producer's last RSSI,
@@ -879,7 +913,7 @@ mod tests {
                 "tx_power_dbm": 10
             }
         });
-        let ctx = src.compose(Some(&status), None, None, None);
+        let ctx = src.compose(Some(&status), None, None);
         assert!(ctx.link.is_stale());
         assert_eq!(ctx.link.rssi_dbm, None);
         assert_eq!(ctx.link.bitrate_mbps, None);
@@ -895,21 +929,21 @@ mod tests {
     #[test]
     fn an_absent_arm_report_stays_unknown() {
         let mut src = source();
-        let ctx = src.compose(Some(&json!({"fc": {"mode": "LOITER"}})), None, None, None);
+        let ctx = src.compose(Some(&json!({"fc": {"mode": "LOITER"}})), None, None);
         assert_eq!(ctx.fc.armed, None);
         assert_eq!(ctx.drone.armed, None);
-        let ctx = src.compose(Some(&json!({"fc": {"armed": false}})), None, None, None);
+        let ctx = src.compose(Some(&json!({"fc": {"armed": false}})), None, None);
         assert_eq!(ctx.fc.armed, Some(false));
     }
 
     #[test]
-    fn paired_drone_and_radio_topology_map() {
+    fn paired_drone_and_link_topology_map() {
         let mut src = source();
         let status = json!({
             "paired_drone": {"device_id": "drone-aabbcc", "key_fingerprint": "deadbeef"},
-            "radio": {"topology": "external_5v"}
+            "link": {"topology": "external_5v"}
         });
-        let ctx = src.compose(Some(&status), None, None, None);
+        let ctx = src.compose(Some(&status), None, None);
         assert_eq!(ctx.paired_drone.device_id.as_deref(), Some("drone-aabbcc"));
         assert_eq!(
             ctx.paired_drone.key_fingerprint.as_deref(),
@@ -918,7 +952,7 @@ mod tests {
         // The drone tile falls back to the paired_drone block when no live
         // `drone` block is present.
         assert_eq!(ctx.drone.device_id.as_deref(), Some("drone-aabbcc"));
-        assert_eq!(ctx.radio.topology.as_deref(), Some("external_5v"));
+        assert_eq!(ctx.link.topology.as_deref(), Some("external_5v"));
     }
 
     #[test]
@@ -935,8 +969,9 @@ mod tests {
         });
         let link = json!({"channel": 161});
         let status = json!({"link": link});
-        let ctx = src.compose(Some(&status), None, Some(&hop), None);
+        let ctx = src.compose(Some(&status), None, Some(&hop));
 
+        assert!(ctx.hopping.present);
         assert_eq!(ctx.hopping.band.as_deref(), Some("u-nii-3"));
         // The third row (missing `at`) and the bare string are dropped.
         assert_eq!(ctx.hopping.history.len(), 2);
@@ -948,16 +983,46 @@ mod tests {
         assert_eq!(ctx.hopping.radio_channel, Some(161));
     }
 
+    /// A hop-supervisor sidecar older than its refresh window describes no
+    /// running supervisor, so the page is told there is no data rather than
+    /// being handed the last history as current.
     #[test]
-    fn health_sidecar_maps() {
+    fn a_stale_hop_sidecar_is_not_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let hop_path = dir.path().join("hop-supervisor.json");
+        std::fs::write(&hop_path, r#"{"band":"u-nii-3","history":[]}"#).unwrap();
+        let mut src = StateSource::with_paths(
+            "http://127.0.0.1:1",
+            Path::new("/nonexistent/pairing.json"),
+            hop_path.clone(),
+        );
+        assert!(src.build_context().hopping.present);
+
+        let old = std::time::SystemTime::now() - HOP_SIDECAR_FRESH - Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&hop_path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let ctx = src.build_context();
+        assert!(!ctx.hopping.present);
+        assert!(ctx.hopping.band.is_none());
+    }
+
+    /// The one system-metrics source: the status `system` block, disk included.
+    #[test]
+    fn the_system_block_carries_every_host_metric() {
         let mut src = source();
-        let health = json!({
-            "cpu_percent": 31.5, "memory_percent": 48.0,
-            "disk_percent": 12.0, "temperature": 52.3
-        });
-        let ctx = src.compose(None, None, None, Some(&health));
-        assert_eq!(ctx.health.cpu_percent, Some(31.5));
-        assert_eq!(ctx.health.temperature, Some(52.3));
+        let status = json!({"system": {
+            "cpu_pct": 31.5, "ram_used_mb": 1024.0, "ram_total_mb": 4096.0,
+            "temp_c": 52.3, "disk_pct": 12.0
+        }});
+        let ctx = src.compose(Some(&status), None, None);
+        assert_eq!(ctx.system.cpu_pct, Some(31.5));
+        assert_eq!(ctx.system.ram_pct(), Some(25.0));
+        assert_eq!(ctx.system.disk_pct, Some(12.0));
+        assert_eq!(ctx.system.temp_c, Some(52.3));
     }
 
     #[test]
@@ -968,10 +1033,10 @@ mod tests {
             "completion_percent": 70.0,
             "next_action": "pair with Mission Control",
             "pairing_code": "7YTFC7",
-            "board_name": "rpi4b",
+            "device_name": "gs-example",
             "version": "0.49.41"
         });
-        let ctx = src.compose(None, Some(&setup), None, None);
+        let ctx = src.compose(None, Some(&setup), None);
         assert!(!ctx.setup_finalized);
         assert_eq!(ctx.completion_percent, Some(70.0));
         assert_eq!(
@@ -980,8 +1045,54 @@ mod tests {
         );
         assert_eq!(ctx.pairing.code.as_deref(), Some("7YTFC7"));
         assert_eq!(ctx.cloud.pair_code.as_deref(), Some("7YTFC7"));
-        assert_eq!(ctx.device.board_name.as_deref(), Some("rpi4b"));
+        assert_eq!(ctx.device.device_name.as_deref(), Some("gs-example"));
         assert_eq!(ctx.device.version.as_deref(), Some("0.49.41"));
+    }
+
+    /// The setup status carries the LAN host, the advertised Mission Control
+    /// URL and the hardware checklist (`hardware_check.items`, with the
+    /// producer's ids and `required` flag). All three feed the early-life tiles.
+    #[test]
+    fn setup_snapshot_maps_reach_names_and_the_hardware_checklist() {
+        let mut src = source();
+        let setup = json!({
+            "lan_host": "ados-9f2c1a.local",
+            "access_urls": [
+                {"kind": "setup", "url": "http://192.168.1.50:8080/setup"},
+                {"kind": "mission_control", "url": "https://mc.example.com"}
+            ],
+            "hardware_check": {
+                "profile": "ground_station",
+                "items": [
+                    {"id": "board", "label": "Companion compute", "required": true, "state": "ok"},
+                    {"id": "radio_wfb", "label": "WFB radio adapter", "required": true,
+                     "state": "missing", "fix_hint": "Plug in an RTL8812EU/AU USB adapter."}
+                ]
+            }
+        });
+        let ctx = src.compose(None, Some(&setup), None);
+        assert_eq!(ctx.lan_host.as_deref(), Some("ados-9f2c1a.local"));
+        assert_eq!(
+            ctx.mission_control_url.as_deref(),
+            Some("https://mc.example.com")
+        );
+        let radio = ctx
+            .hardware_check
+            .iter()
+            .find(|it| it.id.as_deref() == Some("radio_wfb"))
+            .expect("the radio row maps");
+        assert!(radio.required);
+        assert_eq!(radio.state.as_deref(), Some("missing"));
+        assert_eq!(ctx.hardware_check.len(), 2);
+
+        // The ground-station status has no hardware_check block; a stray one
+        // there is not read.
+        let status =
+            json!({"hardware_check": {"items": [{"id": "radio_wfb", "state": "missing"}]}});
+        assert!(src
+            .compose(Some(&status), None, None)
+            .hardware_check
+            .is_empty());
     }
 
     #[test]
@@ -993,9 +1104,9 @@ mod tests {
             "fc": {"battery_remaining": 88.0}
         });
         // Drive 65 ticks; the buffers should cap at HISTORY_LEN.
-        let mut ctx = src.compose(Some(&status), None, None, None);
+        let mut ctx = src.compose(Some(&status), None, None);
         for _ in 0..64 {
-            ctx = src.compose(Some(&status), None, None, None);
+            ctx = src.compose(Some(&status), None, None);
         }
         assert_eq!(ctx.link.rssi_history.len(), HISTORY_LEN);
         assert_eq!(ctx.system.cpu_history.len(), HISTORY_LEN);
@@ -1004,6 +1115,21 @@ mod tests {
         // Newest sample is at the tail.
         assert_eq!(ctx.link.rssi_history.last().copied().flatten(), Some(-55.0));
         assert_eq!(ctx.fc.battery_history.last().copied().flatten(), Some(88.0));
+    }
+
+    #[test]
+    fn auto_pair_flag_reads_the_wfb_pair_body() {
+        assert_eq!(
+            auto_pair_enabled(Some(&json!({"auto_pair_enabled": false}))),
+            Some(false)
+        );
+        assert_eq!(
+            auto_pair_enabled(Some(&json!({"auto_pair_enabled": true}))),
+            Some(true)
+        );
+        // No answer, or no flag, is unknown rather than a guessed state.
+        assert_eq!(auto_pair_enabled(None), None);
+        assert_eq!(auto_pair_enabled(Some(&json!({"paired": false}))), None);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! whether to serve at all (the toggle) and which detector model to serve. The
 //! `ADOS_COMPUTE_DETECTOR_MODEL` env still wins over the config (the bench
 //! override). A resolution to a path that does not exist simply falls back to the
-//! mock at load time (Rule 26 — the node still comes up).
+//! mock at load time (the node still comes up).
 
 use std::path::Path;
 

@@ -21,7 +21,7 @@
 //! That distinction matters. A drone whose radio went quiet and a drone sitting
 //! at 12% CPU look identical if the last snapshot keeps being served, and the
 //! operator would be reading a number from a link that is gone. Losing the
-//! reading is correct; keeping it is a lie (operating rule 44).
+//! reading is correct; keeping it is a lie.
 //!
 //! ## Bounded
 //!

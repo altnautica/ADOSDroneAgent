@@ -54,7 +54,7 @@ pub const DEFAULT_VISION_SOCK: &str = "/run/ados/vision.sock";
 /// it (`ados-cloud`) so a hosted / off-LAN GCS renders the same live detections a
 /// LAN GCS gets over the vision-detection WebSocket. `publish` is synchronous and
 /// non-blocking (it drops on a busy / down publisher), so it never stalls the
-/// offload return path; a LAN-only agent wires no tee and stays local (Rule 39).
+/// offload return path; a LAN-only agent wires no tee and stays local.
 pub trait DetectionTee: Send + Sync {
     /// Tee one converted batch. Best-effort: never blocks, never errors back to
     /// the caller — a full outgoing queue or a down link silently drops it.
@@ -104,7 +104,7 @@ pub struct OrchestratorConfig {
     pub vision_sock: String,
     /// An optional fire-and-forget sink for each returned batch, teed alongside
     /// the local vision bus (the cloud-relay detection publisher). `None` on a
-    /// LAN-only agent (Rule 39: local stays local, no cloud round-trip).
+    /// LAN-only agent (local stays local, no cloud round-trip).
     pub detection_tee: Option<Arc<dyn DetectionTee>>,
 }
 
@@ -138,7 +138,7 @@ impl OrchestratorConfig {
 
     /// Attach a fire-and-forget cloud detection tee: each returned batch is teed
     /// to it in addition to the local vision bus. `None` leaves the session
-    /// LAN-only (Rule 39).
+    /// LAN-only.
     pub fn with_detection_tee(mut self, tee: Option<Arc<dyn DetectionTee>>) -> Self {
         self.detection_tee = tee;
         self

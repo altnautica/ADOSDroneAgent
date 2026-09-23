@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use crate::errors::SupervisorError;
 use crate::manifest::{AgentIsolation, AgentRuntime, PluginManifest};
 use crate::sandbox::sandbox_directives;
-use crate::server::DEFAULT_SOCKET_DIR;
+use crate::server::{plugin_socket_dir, plugin_socket_path, DEFAULT_SOCKET_DIR};
 
 /// Path to the per-plugin runner binary that systemd starts.
 pub const PLUGIN_RUNNER_BINARY: &str = "/opt/ados/venv/bin/ados-plugin-runner";
@@ -162,7 +162,10 @@ pub fn render_unit(
     unit_token("plugin id", &manifest.id)?;
     let res = &agent.resources;
     let log_path = log_path_for(&manifest.id);
-    let socket_path = format!("{DEFAULT_SOCKET_DIR}/{}.sock", manifest.id);
+    let socket_dir = plugin_socket_dir(Path::new(DEFAULT_SOCKET_DIR), &manifest.id);
+    let socket_path = plugin_socket_path(Path::new(DEFAULT_SOCKET_DIR), &manifest.id);
+    let socket_dir = socket_dir.display();
+    let socket_path = socket_path.display();
     let exec_start = match agent.runtime {
         // Python (default): the shared runner takes the plugin id and resolves
         // the manifest + entrypoint itself. Unchanged.
@@ -188,6 +191,10 @@ pub fn render_unit(
     // waits for it rather than degrading, so the optional prefix cannot
     // produce a silently token-less plugin.
     let token_env_file = format!("{DEFAULT_SOCKET_DIR}/{}.token.env", manifest.id);
+    // The plugin's own socket directory is the one path under the hidden run
+    // dir bound into this unit (read-only; see `crate::sandbox`), so the plugin
+    // reaches its own host socket and no other plugin's.
+    //
     // The capability-backed half of the sandbox. Everything above the marker is
     // fixed hardening; these lines change with the operator's grants, which is
     // why a grant or revoke re-renders the unit.
@@ -207,6 +214,7 @@ Slice={slice_name}
 Type=simple
 Environment=ADOS_PLUGIN_SOCKET={socket_path}
 EnvironmentFile=-{token_env_file}
+BindReadOnlyPaths={socket_dir}
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2s
@@ -239,6 +247,7 @@ WantedBy=ados-supervisor.service
         slice_name = PLUGIN_SLICE_NAME,
         socket_path = socket_path,
         token_env_file = token_env_file,
+        socket_dir = socket_dir,
         exec_start = exec_start,
         max_ram_mb = res.max_ram_mb,
         max_cpu_percent = res.max_cpu_percent,
@@ -352,7 +361,7 @@ mod tests {
         // leading positional (the SDK runner requires it), then the socket path.
         assert!(
             unit.contains(
-                "ExecStart=/var/ados/plugins/com.example.rustplug/agent/bin/com.example.rustplug com.example.rustplug --socket /run/ados/plugins/com.example.rustplug.sock"
+                "ExecStart=/var/ados/plugins/com.example.rustplug/agent/bin/com.example.rustplug com.example.rustplug --socket /run/ados/plugins/com.example.rustplug/host.sock"
             ),
             "{unit}"
         );
@@ -367,7 +376,7 @@ mod tests {
         // rides in an owner-only EnvironmentFile (the `-` prefix tolerates its
         // absence before the first mint).
         assert!(unit.contains(
-            "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.rustplug.sock"
+            "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.rustplug/host.sock"
         ));
         assert!(unit.contains("EnvironmentFile=-/run/ados/plugins/com.example.rustplug.token.env"));
         // The shared/hardening/limit lines are identical to the python branch.
@@ -377,6 +386,42 @@ mod tests {
         assert!(
             unit.contains("StandardOutput=append:/var/log/ados/plugins/com-example-rustplug.log")
         );
+    }
+
+    #[test]
+    fn a_unit_reaches_its_own_socket_dir_and_no_other_plugins() {
+        // Two plugins on one box. Each unit hides the whole run dir and binds
+        // back exactly one plugin directory, its own, which holds the socket
+        // its runner is pointed at.
+        let render = |id: &str| {
+            let m = PluginManifest::from_yaml_text(&format!(
+                "id: {id}\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: agent/py/p.py\n"
+            ))
+            .unwrap();
+            render_unit(&m, Path::new("/var/ados/plugins"), &BTreeSet::new(), false)
+                .unwrap()
+                .unwrap()
+        };
+        for (id, other) in [
+            ("com.example.a", "com.example.b"),
+            ("com.example.b", "com.example.a"),
+        ] {
+            let unit = render(id);
+            assert!(unit.contains("TemporaryFileSystem=/run/ados:ro"), "{unit}");
+            let binds: Vec<&str> = unit
+                .lines()
+                .filter_map(|l| l.strip_prefix("BindReadOnlyPaths="))
+                .filter(|p| p.contains("/run/ados/plugins"))
+                .collect();
+            assert_eq!(binds, vec![format!("/run/ados/plugins/{id}")], "{unit}");
+            assert!(unit.contains(&format!(
+                "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/{id}/host.sock"
+            )));
+            assert!(
+                !unit.contains(&format!("/run/ados/plugins/{other}")),
+                "{unit}"
+            );
+        }
     }
 
     #[test]

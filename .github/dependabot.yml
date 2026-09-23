@@ -1,0 +1,42 @@
+version: 2
+# Advisory-driven and routine dependency updates for every ecosystem this repo
+# ships: the Rust workspace, the Python agent, the two on-device SPAs and the
+# workflows themselves. Security updates open regardless of the schedule.
+updates:
+  - package-ecosystem: cargo
+    directory: /crates
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: npm
+    directory: /dashboard
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dashboard-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /cockpit
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cockpit-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

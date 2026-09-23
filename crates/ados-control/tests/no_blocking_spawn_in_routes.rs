@@ -36,10 +36,45 @@
 
 use std::path::{Path, PathBuf};
 
-/// `std::process::Command`, however it is spelled. A file that imports
-/// `std::process::Command` and then writes bare `Command::new` is the common
-/// case, so the import itself counts.
-const BLOCKING_SPAWN_MARKERS: &[&str] = &["std::process::Command", "use std::process::Command"];
+/// Lines that name `std::process::Command`, however it is spelled: the full
+/// path (`std::process::Command::new`, `use std::process::Command;`, `… as
+/// Cmd`), a grouped import (`use std::process::{Command, Stdio};`, including a
+/// group that spans lines), and the module-qualified form after
+/// `use std::process;` (`process::Command::new`). A file that imports the type
+/// and then writes bare `Command::new` is the common case, so the import itself
+/// counts. `tokio::process::Command` is the replacement and never matches.
+fn blocking_spawn_hits(lines: &[(usize, &str)]) -> Vec<(usize, String)> {
+    let mut hits = Vec::new();
+    for (i, (lineno, line)) in lines.iter().enumerate() {
+        let mut hit = line.contains("std::process::Command");
+        if !hit {
+            if let Some(at) = line.find("std::process::{") {
+                // Gather the group up to its closing brace, across lines.
+                let mut group = line[at + "std::process::{".len()..].to_string();
+                let mut j = i + 1;
+                while !group.contains('}') && j < lines.len() {
+                    group.push_str(lines[j].1);
+                    j += 1;
+                }
+                let body = group.split('}').next().unwrap_or("");
+                hit = body.split(',').any(|item| {
+                    let item = item.trim();
+                    item == "Command" || item.starts_with("Command ")
+                });
+            }
+        }
+        if !hit {
+            hit = line.match_indices("process::Command").any(|(at, _)| {
+                let before = &line[..at];
+                !before.ends_with("tokio::") && !before.ends_with("std::")
+            });
+        }
+        if hit {
+            hits.push((*lineno, line.trim().to_string()));
+        }
+    }
+    hits
+}
 
 /// The route layer, plus the library surface a route handler's stack reaches.
 ///
@@ -235,10 +270,8 @@ fn the_reactor_side_layer_never_spawns_a_process_synchronously() {
             Ok(t) => t,
             Err(_) => continue,
         };
-        for (lineno, line) in code_lines(&text) {
-            if BLOCKING_SPAWN_MARKERS.iter().any(|m| line.contains(m)) {
-                violations.push(format!("{rel}:{lineno}: {}", line.trim()));
-            }
+        for (lineno, line) in blocking_spawn_hits(&code_lines(&text)) {
+            violations.push(format!("{rel}:{lineno}: {line}"));
         }
     }
 
@@ -320,7 +353,38 @@ fn the_test_module_stripper_does_not_swallow_the_rest_of_a_file() {
     // And the marker is detected on a line the stripper keeps — the property
     // every assertion above depends on.
     let live = code_lines("use std::process::Command;\n");
-    assert!(live
-        .iter()
-        .any(|(_, l)| BLOCKING_SPAWN_MARKERS.iter().any(|m| l.contains(m))));
+    assert_eq!(blocking_spawn_hits(&live).len(), 1);
+}
+
+/// Every spelling of the blocking type is caught, and the async replacement is not.
+#[test]
+fn every_spelling_of_the_blocking_spawn_is_detected() {
+    let caught = [
+        "use std::process::Command;\n",
+        "let o = std::process::Command::new(\"iw\");\n",
+        "use std::process::{Command, Stdio};\n",
+        "use std::process::{Stdio, Command as Cmd};\n",
+        "use std::process::{\n    Stdio,\n    Command,\n};\n",
+        "let o = process::Command::new(\"iw\").output();\n",
+    ];
+    for src in caught {
+        let lines = code_lines(src);
+        assert!(
+            !blocking_spawn_hits(&lines).is_empty(),
+            "not detected: {src:?}"
+        );
+    }
+    let clean = [
+        "use tokio::process::Command;\n",
+        "use std::process::{ExitStatus, Stdio};\n",
+        "let c = tokio::process::Command::new(\"iw\");\n",
+        "std::process::exit(1);\n",
+    ];
+    for src in clean {
+        let lines = code_lines(src);
+        assert!(
+            blocking_spawn_hits(&lines).is_empty(),
+            "false positive: {src:?}"
+        );
+    }
 }

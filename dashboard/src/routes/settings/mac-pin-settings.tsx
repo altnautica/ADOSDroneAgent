@@ -181,7 +181,15 @@ export function MacPinSettings() {
     setBusyIface(iface);
     try {
       const res = await unpinMac(iface);
-      toast.ok(res.note || "Unpinned.");
+      // The unpin answers 200 even when half of it failed: a config the agent
+      // could not write, or a next-boot .link it could not delete (networkd
+      // would re-apply the old MAC at the next boot).
+      const failure = res.link_error ?? res.persist_error;
+      if (failure) {
+        toast.err("The adapter is still pinned for the next boot.", failure);
+      } else {
+        toast.ok(res.note || "Unpinned.");
+      }
       await adapters.refetch();
     } catch (err) {
       toastFromError(err, "Could not unpin the adapter.");

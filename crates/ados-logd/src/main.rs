@@ -56,8 +56,8 @@ async fn main() -> Result<()> {
     //
     // The installer also declines to enable the unit when the key is off; this
     // second read covers the unit being started by hand or left enabled by an
-    // older install. Exit 0, because declining to run is not a failure and
-    // `Restart=on-failure` must not turn it into a loop.
+    // older install. Exit 0, because declining to run is not a failure, and the
+    // unit's `RestartPreventExitStatus=0` keeps `Restart=always` from looping it.
     if !ados_logd::gate::store_enabled() {
         tracing::info!(
             key = "logging.store.enabled",
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
         //
         // READY then exit is the correct handshake for "started successfully,
         // and there is nothing to do" — systemd records a clean start and a
-        // clean stop, and `Restart=on-failure` has no failure to act on.
+        // clean stop, and exit 0 is the one status the unit does not restart.
         ados_logd::daemon::sd_ready();
         return Ok(());
     }

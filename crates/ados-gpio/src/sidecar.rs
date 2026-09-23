@@ -183,11 +183,6 @@ mod tests {
     }
 
     #[test]
-    fn path_constant_is_under_the_run_dir() {
-        assert_eq!(GPIO_OUTPUT_PATH, "/run/ados/gpio-output.json");
-    }
-
-    #[test]
     fn written_state_stamps_the_schema_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gpio-output.json");

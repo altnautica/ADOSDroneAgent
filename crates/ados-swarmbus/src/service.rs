@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use ados_protocol::ipc::{connect_with_retry, IpcBroadcast};
 use ados_protocol::state::{read_state_value, STATE_V2_MAX_FRAME};
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use crate::bus::SwarmBus;
 use crate::config::SwarmBusConfig;
@@ -40,6 +40,13 @@ const SWARM_QUEUE_DEPTH: usize = 8;
 
 /// How long to wait before retrying a radio open.
 const RADIO_RETRY: Duration = Duration::from_secs(5);
+
+/// Consecutive beacon injection failures after which the transmit loop gives up
+/// and the supervisor reopens the radio. At the 500 ms beacon period this is
+/// about five seconds: long enough to ride out a momentarily full driver queue,
+/// short enough that a wedged TX path is noticed before neighbours drop this node
+/// for long.
+const TX_FAILURE_LIMIT: u32 = 10;
 
 /// How often the slot-to-device-id join and the fleet key file are re-read.
 /// Pairing and binding are human-scale events, so this is deliberately far slower
@@ -121,8 +128,19 @@ fn own_beacon(
     }
 }
 
-/// Run the service until `cancel` fires.
-pub async fn run(cfg: SwarmBusConfig, cancel: Arc<Notify>) {
+/// Resolves once shutdown has been requested, immediately if it already was.
+///
+/// Shutdown is a latched `watch` flag rather than a `Notify`: a notification sent
+/// before a loop reaches its await point would be lost, and a stop that lands
+/// during startup would then hang the service until systemd kills it. A dropped
+/// sender also counts as shutdown, since nothing could ever request it again.
+async fn cancelled(cancel: &watch::Receiver<bool>) {
+    let mut rx = cancel.clone();
+    let _ = rx.wait_for(|stop| *stop).await;
+}
+
+/// Run the service until `cancel` is set to `true`.
+pub async fn run(cfg: SwarmBusConfig, cancel: watch::Receiver<bool>) {
     let table = Arc::new(Mutex::new(NeighborTable::new(cfg.fleet_slot)));
 
     // The publish socket comes up first and unconditionally. A bus with no radio
@@ -140,7 +158,7 @@ pub async fn run(cfg: SwarmBusConfig, cancel: Arc<Notify>) {
 
     // The own-beacon source. Started on a ground station too, harmlessly: it simply
     // never connects, and the transmit loop that would read it does not run.
-    let state = spawn_state_reader(cfg.state_socket_path(), cancel.clone());
+    let (state, state_reader) = spawn_state_reader(cfg.state_socket_path(), cancel.clone());
 
     let publish = tokio::spawn(publish_loop(
         cfg.clone(),
@@ -160,9 +178,10 @@ pub async fn run(cfg: SwarmBusConfig, cancel: Arc<Notify>) {
         cancel.clone(),
     ));
 
-    cancel.notified().await;
+    cancelled(&cancel).await;
     publish.abort();
     radio.abort();
+    state_reader.abort();
     let _ = std::fs::remove_file(&swarm_sock);
     tracing::info!("ados-swarmbus stopped");
 }
@@ -171,6 +190,7 @@ pub async fn run(cfg: SwarmBusConfig, cancel: Arc<Notify>) {
 enum Reopen {
     Stop,
     RadioLost,
+    TxFailed,
     Rekeyed,
 }
 
@@ -186,7 +206,7 @@ async fn radio_supervisor(
     cfg: SwarmBusConfig,
     table: Arc<Mutex<NeighborTable>>,
     state: SharedState,
-    cancel: Arc<Notify>,
+    cancel: watch::Receiver<bool>,
 ) {
     let mut keys = FleetKeyWatch::new(ados_radio::paths::DRONE_KEY);
     let mut cipher = Arc::new(SwarmCipher::new(keys.key()));
@@ -207,11 +227,12 @@ async fn radio_supervisor(
             slot = bus.slot(),
             "swarm bus open"
         );
+        table.lock().set_radio_iface(Some(bus.iface().to_string()));
 
         let mut rx = tokio::spawn(recv_loop(bus.clone(), table.clone()));
         // A ground station receives only. Slot 0 is not an aircraft, so it has no
         // position to broadcast and must never appear in a neighbour table.
-        let tx = (!cfg.is_ground_station()).then(|| {
+        let mut tx = (!cfg.is_ground_station()).then(|| {
             tokio::spawn(transmit_loop(
                 bus.clone(),
                 cfg.fleet_slot,
@@ -222,10 +243,17 @@ async fn radio_supervisor(
 
         let outcome = loop {
             tokio::select! {
-                _ = cancel.notified() => break Reopen::Stop,
+                _ = cancelled(&cancel) => break Reopen::Stop,
                 // The receive loop only returns on a socket error, which means the
                 // adapter went away. Drop both loops and reopen.
                 _ = &mut rx => break Reopen::RadioLost,
+                // The transmit loop returns only after a run of injection
+                // failures: the receive socket may still be bound, but this node
+                // has stopped radiating, so reopen the whole bus.
+                _ = transmit_ended(&mut tx) => {
+                    tx = None;
+                    break Reopen::TxFailed;
+                }
                 _ = tokio::time::sleep(REGISTRY_REFRESH) => {
                     if let Some(key) = keys.poll() {
                         cipher = Arc::new(cipher.rekeyed(&key));
@@ -234,6 +262,7 @@ async fn radio_supervisor(
                 }
             }
         };
+        table.lock().set_radio_iface(None);
         rx.abort();
         if let Some(tx) = tx {
             // Wait the transmitter out, so the old cipher seals nothing after the
@@ -244,14 +273,47 @@ async fn radio_supervisor(
         match outcome {
             Reopen::Stop => return,
             Reopen::Rekeyed => tracing::info!("swarm fleet key changed; reopening the bus"),
-            Reopen::RadioLost => {
-                tracing::warn!("swarm radio receive ended; reopening");
+            Reopen::RadioLost | Reopen::TxFailed => {
+                if matches!(outcome, Reopen::RadioLost) {
+                    tracing::warn!("swarm radio receive ended; reopening");
+                } else {
+                    tracing::warn!("swarm beacon injection keeps failing; reopening");
+                }
                 tokio::select! {
-                    _ = cancel.notified() => return,
+                    _ = cancelled(&cancel) => return,
                     _ = tokio::time::sleep(RADIO_RETRY) => {}
                 }
             }
         }
+    }
+}
+
+/// Resolves when the transmit task ends; never, on a node that runs none.
+async fn transmit_ended(tx: &mut Option<tokio::task::JoinHandle<()>>) {
+    match tx {
+        Some(handle) => {
+            let _ = handle.await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Counts consecutive beacon injection failures. One success clears the run.
+#[derive(Debug, Default)]
+struct TxFailures {
+    consecutive: u32,
+}
+
+impl TxFailures {
+    /// Record one send outcome; `true` once the run of failures reaches
+    /// [`TX_FAILURE_LIMIT`] and the transmitter should give the radio up.
+    fn record(&mut self, sent: bool) -> bool {
+        if sent {
+            self.consecutive = 0;
+            return false;
+        }
+        self.consecutive += 1;
+        self.consecutive >= TX_FAILURE_LIMIT
     }
 }
 
@@ -260,7 +322,7 @@ async fn radio_supervisor(
 async fn open_bus(
     cfg: &SwarmBusConfig,
     cipher: &Arc<SwarmCipher>,
-    cancel: &Notify,
+    cancel: &watch::Receiver<bool>,
 ) -> Option<SwarmBus> {
     loop {
         match resolve_interface(cfg) {
@@ -276,7 +338,7 @@ async fn open_bus(
             None => tracing::debug!("swarm_radio_interface_unknown: waiting for the radio manager"),
         }
         tokio::select! {
-            _ = cancel.notified() => return None,
+            _ = cancelled(cancel) => return None,
             _ = tokio::time::sleep(RADIO_RETRY) => {}
         }
     }
@@ -320,7 +382,9 @@ async fn recv_loop(bus: Arc<SwarmBus>, table: Arc<Mutex<NeighborTable>>) {
     }
 }
 
-/// Broadcast this node's beacon at the jittered beacon rate.
+/// Broadcast this node's beacon at the jittered beacon rate. Returns after
+/// [`TX_FAILURE_LIMIT`] consecutive injection failures so the supervisor reopens
+/// the radio; an isolated failure (a full driver queue) is only a dropped beacon.
 async fn transmit_loop(
     bus: Arc<SwarmBus>,
     slot: u8,
@@ -328,6 +392,7 @@ async fn transmit_loop(
     state: SharedState,
 ) {
     let started = Instant::now();
+    let mut failures = TxFailures::default();
     loop {
         // Fresh jitter every transmission, not once at startup: a fleet powered up
         // together must not stay in lockstep.
@@ -358,10 +423,21 @@ async fn transmit_loop(
         let seq_ms = started.elapsed().as_millis() as u16;
         let beacon = own_beacon(held.as_ref(), now, slot, seq_ms);
         match bus.broadcast(&beacon).await {
-            Ok(()) => table.lock().record_tx(),
-            // A full driver queue is a dropped beacon, not a fault: the next one is
-            // 500 ms away and the receiver's dead reckoning covers the gap.
-            Err(e) => tracing::debug!(error = %e, "swarm_beacon_tx_failed"),
+            Ok(()) => {
+                table.lock().record_tx();
+                failures.record(true);
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "swarm_beacon_tx_failed");
+                if failures.record(false) {
+                    tracing::warn!(
+                        error = %e,
+                        failures = TX_FAILURE_LIMIT,
+                        "swarm_beacon_tx_failing"
+                    );
+                    return;
+                }
+            }
         }
     }
 }
@@ -371,13 +447,13 @@ async fn publish_loop(
     cfg: SwarmBusConfig,
     table: Arc<Mutex<NeighborTable>>,
     publisher: Arc<IpcBroadcast>,
-    cancel: Arc<Notify>,
+    cancel: watch::Receiver<bool>,
 ) {
     let mut device_ids = load_device_ids(Path::new(FLEET_REGISTRY_PATH));
     let mut last_registry_read = Instant::now();
     loop {
         tokio::select! {
-            _ = cancel.notified() => return,
+            _ = cancelled(&cancel) => return,
             _ = tokio::time::sleep(BEACON_PERIOD) => {}
         }
         if last_registry_read.elapsed() >= REGISTRY_REFRESH {
@@ -403,19 +479,22 @@ async fn publish_loop(
 /// telemetry surfaces do. An absent socket leaves the cell empty and the beacon goes
 /// out with no position and no condition bits, which reads correctly as "on the bus,
 /// no fix".
-fn spawn_state_reader(socket_path: String, cancel: Arc<Notify>) -> SharedState {
+fn spawn_state_reader(
+    socket_path: String,
+    cancel: watch::Receiver<bool>,
+) -> (SharedState, tokio::task::JoinHandle<()>) {
     let shared: SharedState = Arc::new(Mutex::new(None));
     let writer = shared.clone();
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             let connect = connect_with_retry(&socket_path, 5, Duration::from_millis(300));
             let mut stream = tokio::select! {
-                _ = cancel.notified() => return,
+                _ = cancelled(&cancel) => return,
                 s = connect => match s {
                     Ok(s) => s,
                     Err(_) => {
                         tokio::select! {
-                            _ = cancel.notified() => return,
+                            _ = cancelled(&cancel) => return,
                             _ = tokio::time::sleep(Duration::from_millis(500)) => {}
                         }
                         continue;
@@ -426,7 +505,7 @@ fn spawn_state_reader(socket_path: String, cancel: Arc<Notify>) -> SharedState {
                 tokio::io::BufReader::with_capacity(STATE_V2_MAX_FRAME.min(64 * 1024), &mut stream);
             loop {
                 let frame = tokio::select! {
-                    _ = cancel.notified() => return,
+                    _ = cancelled(&cancel) => return,
                     f = read_state_value(&mut reader) => f,
                 };
                 match frame {
@@ -449,17 +528,32 @@ fn spawn_state_reader(socket_path: String, cancel: Arc<Notify>) -> SharedState {
                 }
             }
             tokio::select! {
-                _ = cancel.notified() => return,
+                _ = cancelled(&cancel) => return,
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {}
             }
         }
     });
-    shared
+    (shared, task)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run of injection failures ends the transmitter; a single success in the
+    /// run clears it, so an occasional full queue never tears the radio down.
+    #[test]
+    fn only_a_consecutive_run_of_tx_failures_gives_the_radio_up() {
+        let mut f = TxFailures::default();
+        for _ in 0..TX_FAILURE_LIMIT - 1 {
+            assert!(!f.record(false));
+        }
+        assert!(!f.record(true), "a success clears the run");
+        for _ in 0..TX_FAILURE_LIMIT - 1 {
+            assert!(!f.record(false));
+        }
+        assert!(f.record(false), "the limit-th consecutive failure gives up");
+    }
 
     /// The config pin wins when set, because an operator who names an interface
     /// means it.
@@ -700,8 +794,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("state.sock");
         let (server, _in) = IpcBroadcast::bind(&sock, 32, true, None).await.unwrap();
-        let cancel = Arc::new(Notify::new());
-        let shared = spawn_state_reader(sock.to_string_lossy().into_owned(), cancel.clone());
+        let (cancel, cancel_rx) = watch::channel(false);
+        let (shared, _reader) = spawn_state_reader(sock.to_string_lossy().into_owned(), cancel_rx);
 
         server
             .broadcast(
@@ -730,6 +824,32 @@ mod tests {
             shared.lock().is_none(),
             "a snapshot with no producer behind it must not stay held"
         );
-        cancel.notify_waiters();
+        let _ = cancel.send(true);
+    }
+
+    /// A stop requested before the service reached its own await point must still
+    /// stop it. With a non-latched notification, a stop that lands during startup
+    /// was lost and the service ran on until systemd killed it, leaving
+    /// `swarm.sock` behind.
+    #[tokio::test]
+    async fn a_stop_requested_during_startup_still_stops_the_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SwarmBusConfig {
+            ground_station: true,
+            interface: "nonexistent-swarm-iface0".to_string(),
+            fleet_slot: ados_radio::config::SLOT_GROUND,
+            socket_dir: dir.path().to_string_lossy().into_owned(),
+            ..SwarmBusConfig::default()
+        };
+        let (cancel, cancel_rx) = watch::channel(false);
+        // The stop lands before `run` has registered anything.
+        cancel.send(true).unwrap();
+        let finished =
+            tokio::time::timeout(Duration::from_secs(5), run(cfg.clone(), cancel_rx)).await;
+        assert!(finished.is_ok(), "the service must honour an early stop");
+        assert!(
+            !Path::new(&cfg.swarm_socket_path()).exists(),
+            "shutdown removes the socket"
+        );
     }
 }

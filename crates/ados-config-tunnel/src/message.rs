@@ -6,9 +6,14 @@
 //! become a general command proxy over the radio:
 //!
 //! ```text
-//!   {"op":"get"}                                   → GET  /api/config
-//!   {"op":"put","key":"<dot.path>","value":"<s>"}  → PUT  /api/config {key,value}
+//!   {"op":"get","ticket":"<relay ticket>"}                → GET  /api/config
+//!   {"op":"put","key":"<dot.path>","value":"<s>","ticket":"…"}
+//!                                                         → PUT  /api/config {key,value}
 //! ```
+//!
+//! `ticket` is the per-pair relay ticket the ground station mints for the
+//! drone it addresses (see `ados_protocol::relay_ticket`); the terminator
+//! refuses a request without one it can verify.
 //!
 //! The response body is the config surface's own JSON (verbatim on success),
 //! or a `{"error":"E_…","detail":"…"}` envelope on a rejection. The chunk
@@ -35,6 +40,13 @@ pub enum ConfigOp {
     Put { key: String, value: String },
 }
 
+/// A parsed request: the op and the relay ticket presented with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelRequest {
+    pub op: ConfigOp,
+    pub ticket: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct RawRequest {
     op: String,
@@ -42,16 +54,18 @@ struct RawRequest {
     key: Option<String>,
     #[serde(default)]
     value: Option<Value>,
+    #[serde(default)]
+    ticket: Option<String>,
 }
 
-/// Parse a request body into a [`ConfigOp`]. `Err` carries a ready-to-send
-/// error envelope (JSON bytes) so the caller relays it verbatim with the
-/// `is_error` flag set.
-pub fn parse_request(body: &[u8]) -> Result<ConfigOp, Vec<u8>> {
+/// Parse a request body into a [`TunnelRequest`]. `Err` carries a
+/// ready-to-send error envelope (JSON bytes) so the caller relays it verbatim
+/// with the `is_error` flag set.
+pub fn parse_request(body: &[u8]) -> Result<TunnelRequest, Vec<u8>> {
     let req: RawRequest =
         serde_json::from_slice(body).map_err(|e| error_body("E_BAD_REQUEST", &e.to_string()))?;
-    match req.op.as_str() {
-        "get" => Ok(ConfigOp::Get),
+    let op = match req.op.as_str() {
+        "get" => ConfigOp::Get,
         "put" => {
             let Some(key) = req.key.filter(|k| !k.trim().is_empty()) else {
                 return Err(error_body("E_BAD_REQUEST", "put requires a non-empty key"));
@@ -74,10 +88,14 @@ pub fn parse_request(body: &[u8]) -> Result<ConfigOp, Vec<u8>> {
                     ))
                 }
             };
-            Ok(ConfigOp::Put { key, value })
+            ConfigOp::Put { key, value }
         }
-        other => Err(error_body("E_UNKNOWN_OP", other)),
-    }
+        other => return Err(error_body("E_UNKNOWN_OP", other)),
+    };
+    Ok(TunnelRequest {
+        op,
+        ticket: req.ticket.filter(|t| !t.is_empty()),
+    })
 }
 
 /// Build an error envelope body (JSON bytes) for a response frame.
@@ -100,9 +118,11 @@ mod tests {
 
     #[test]
     fn parses_get_and_put() {
-        assert_eq!(parse_request(br#"{"op":"get"}"#).unwrap(), ConfigOp::Get);
+        assert_eq!(parse_request(br#"{"op":"get"}"#).unwrap().op, ConfigOp::Get);
         assert_eq!(
-            parse_request(br#"{"op":"put","key":"radio.tunnel.enabled","value":"true"}"#).unwrap(),
+            parse_request(br#"{"op":"put","key":"radio.tunnel.enabled","value":"true"}"#)
+                .unwrap()
+                .op,
             ConfigOp::Put {
                 key: "radio.tunnel.enabled".to_string(),
                 value: "true".to_string()
@@ -110,19 +130,26 @@ mod tests {
         );
         // A bool/number value coerces to its string form (config casts to leaf).
         assert_eq!(
-            parse_request(br#"{"op":"put","key":"k","value":true}"#).unwrap(),
+            parse_request(br#"{"op":"put","key":"k","value":true}"#)
+                .unwrap()
+                .op,
             ConfigOp::Put {
                 key: "k".to_string(),
                 value: "true".to_string()
             }
         );
         assert_eq!(
-            parse_request(br#"{"op":"put","key":"k","value":150}"#).unwrap(),
+            parse_request(br#"{"op":"put","key":"k","value":150}"#)
+                .unwrap()
+                .op,
             ConfigOp::Put {
                 key: "k".to_string(),
                 value: "150".to_string()
             }
         );
+        // The ticket rides beside the op.
+        let with_ticket = parse_request(br#"{"op":"get","ticket":"v1|t"}"#).unwrap();
+        assert_eq!(with_ticket.ticket.as_deref(), Some("v1|t"));
     }
 
     #[test]

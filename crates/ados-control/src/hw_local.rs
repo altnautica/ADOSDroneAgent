@@ -9,7 +9,7 @@
 //! `derive_system` / `derive_health` mappers consume it unchanged. The board
 //! block is derived the same way when no HAL board sidecar is present.
 //!
-//! Honest by construction (Rule 44): a signal the host cannot supply is omitted
+//! Honest by construction: a signal the host cannot supply is omitted
 //! (so the mapper degrades it to its documented default) and a board field that
 //! is unknown is `null` — never faked. There is no portable thermal source here,
 //! so no `thermal.*` signal is emitted and the temperature reads `null`.
@@ -99,7 +99,7 @@ pub fn cpu_count_fallback() -> Value {
 /// dict keys the GCS reads: `name`, `model`, `arch`, `soc`, `vendor`, `ram_mb`,
 /// `cpu_cores`. No `tier` — that classifies an SBC capability tier, not a
 /// workstation host. The identity is static for the process, so it is resolved
-/// once and cached. Unknown fields are `null` (Rule 44).
+/// once and cached. Unknown fields are `null`.
 pub fn host_board() -> Value {
     static BOARD: OnceLock<Value> = OnceLock::new();
     BOARD.get_or_init(probe_host_board).clone()

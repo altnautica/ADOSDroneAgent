@@ -126,4 +126,4 @@ profiles:
   video_capable: true
   recommended_resolution: "1920x1080"
   memory_budget_mb: 287
-  notes: "Pro tier. 6 TOPS NPU for AI/object detection. H.265 8K encode. USB 3.0 + PCIe 3.0. Same Hirose connector as CM3 for single baseboard design. $72 module cost."
+  notes: "6 TOPS NPU for AI/object detection. H.265 8K encode. USB 3.0 + PCIe 3.0. Same Hirose connector as CM3 for single baseboard design."

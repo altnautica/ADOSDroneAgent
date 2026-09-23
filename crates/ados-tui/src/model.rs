@@ -97,6 +97,9 @@ pub struct Dashboard {
     pub paired: bool,
     pub pairing_code: Option<String>,
     pub access_urls: Vec<AccessUrl>,
+    /// The Links panel groups, derived once from the advertised URLs when the
+    /// model is built rather than on every rendered frame.
+    pub links: Vec<LinkGroup>,
 
     pub steps: Vec<Step>,
     pub has_steps: bool,
@@ -501,6 +504,7 @@ impl Dashboard {
         }
 
         dash.next_action = s(data, "next_action", "");
+        dash.links = dash.reach_links();
         dash
     }
 
@@ -770,15 +774,17 @@ impl Dashboard {
         let services_failed =
             self.services_total > 0 && self.services_running < self.services_total;
         let is_ground_station = self.profile == "ground_station";
-        let mavlink_ok = self.mavlink_connected || is_ground_station;
+        // An identified MSP FC is a live link even though it never sends the
+        // MAVLink heartbeat `mavlink_connected` gates on.
+        let fc_ok = matches!(self.fc_link(), FcLink::Connected | FcLink::Msp) || is_ground_station;
         let configured = self.paired || (self.has_steps && self.steps_all_complete);
 
         if services_failed {
             Health::Degraded
-        } else if configured && !mavlink_ok {
+        } else if configured && !fc_ok {
             // A set-up drone that has lost its flight controller.
             Health::Degraded
-        } else if services_all_running && configured && mavlink_ok {
+        } else if services_all_running && configured && fc_ok {
             Health::Healthy
         } else {
             Health::Setup
@@ -1159,6 +1165,20 @@ mod tests {
             "services": [{"state": "running"}]
         });
         assert_eq!(Dashboard::from_status(&data).health(), Health::Healthy);
+    }
+
+    #[test]
+    fn health_healthy_for_a_paired_msp_drone() {
+        let data = json!({
+            "profile": "drone",
+            "paired": true,
+            "mavlink": {"connected": false},
+            "services": [{"state": "running"}]
+        });
+        let mut dash = Dashboard::from_status(&data);
+        dash.merge_fc_status(&json!({"fcVariant": "betaflight", "transportOpen": true}));
+        assert_eq!(dash.fc_link(), FcLink::Msp);
+        assert_eq!(dash.health(), Health::Healthy);
     }
 
     #[test]

@@ -466,7 +466,7 @@ pub fn is_apple_silicon() -> bool {
 /// manifest / too few poses) it falls back to the portable random-init trainer
 /// (Brush), which trains from the poses alone; with neither trainer installed it
 /// falls back to the mock (CI / no-GPU). Whichever tool actually ran is stamped on
-/// the output (`msplat` / `brush` / `mock`), so the honesty badge (Rule 44) is
+/// the output (`msplat` / `brush` / `mock`), so the honesty badge is
 /// always accurate — this wrapper's own name is never the backend.
 pub struct SeededSplatReconstructor {
     work_root: PathBuf,

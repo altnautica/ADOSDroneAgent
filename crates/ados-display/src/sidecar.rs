@@ -144,6 +144,18 @@ pub struct LcdPluginZone {
     pub label: String,
 }
 
+/// Most rows the reserved page loads. The plugin host refuses a page past it;
+/// the loader truncates as well, so a sidecar written by anything else still
+/// costs a bounded render.
+pub const PLUGIN_PAGE_MAX_ROWS: usize = 32;
+/// Most touch zones the reserved page loads.
+pub const PLUGIN_PAGE_MAX_ZONES: usize = 16;
+/// Longest title, row label or value, zone key or caption, in characters.
+pub const PLUGIN_PAGE_MAX_TEXT: usize = 64;
+/// Largest plugin page sidecar the loader reads. A page at every cap above
+/// serializes to well under this.
+pub const PLUGIN_PAGE_MAX_BYTES: u64 = 64 * 1024;
+
 /// `lcd-plugin-page.json` payload — the data-driven content for the reserved
 /// `plugin` page. Every field is optional/defaulted so a partial or evolving
 /// payload still loads (lenient by design); unknown fields are ignored. The
@@ -159,12 +171,41 @@ pub struct LcdPluginPage {
     pub zones: Vec<LcdPluginZone>,
 }
 
+/// `text` cut to at most [`PLUGIN_PAGE_MAX_TEXT`] characters.
+fn cap_text(text: &mut String) {
+    if let Some((cut, _)) = text.char_indices().nth(PLUGIN_PAGE_MAX_TEXT) {
+        text.truncate(cut);
+    }
+}
+
 impl LcdPluginPage {
-    /// Read the plugin page content. `None` on a missing or malformed file, so
-    /// the reserved page falls back to its placeholder rather than failing.
+    /// Read the plugin page content. `None` on a missing, oversized or
+    /// malformed file, so the reserved page falls back to its placeholder
+    /// rather than failing. Rows, zones and text past their caps are dropped.
     pub fn load(path: &Path) -> Option<LcdPluginPage> {
-        let text = std::fs::read_to_string(path).ok()?;
-        serde_json::from_str(&text).ok()
+        use std::io::Read;
+        let mut text = String::new();
+        std::fs::File::open(path)
+            .ok()?
+            .take(PLUGIN_PAGE_MAX_BYTES + 1)
+            .read_to_string(&mut text)
+            .ok()?;
+        if text.len() as u64 > PLUGIN_PAGE_MAX_BYTES {
+            return None;
+        }
+        let mut page: LcdPluginPage = serde_json::from_str(&text).ok()?;
+        page.rows.truncate(PLUGIN_PAGE_MAX_ROWS);
+        page.zones.truncate(PLUGIN_PAGE_MAX_ZONES);
+        cap_text(&mut page.title);
+        for row in &mut page.rows {
+            cap_text(&mut row.label);
+            cap_text(&mut row.value);
+        }
+        for zone in &mut page.zones {
+            cap_text(&mut zone.key);
+            cap_text(&mut zone.label);
+        }
+        Some(page)
     }
 
     /// Atomically write this page content to `path` (tmp sibling + fsync +

@@ -12,7 +12,7 @@ echo "  - Dashboard PIN             ($CONFIG_DIR/dashboard-pin.json)"
 echo "  - MCP token                 ($CONFIG_DIR/mcp-token.json)"
 echo "  - Setup / tunnel secrets    ($CONFIG_DIR/secrets/)"
 echo "  - Access point passphrase   ($CONFIG_DIR/ap-passphrase)"
-echo "  - Radio keypair             ($CONFIG_DIR/wfb/)"
+echo "  - Radio keypair             ($CONFIG_DIR/wfb/, /etc/drone.key, /etc/gs.key)"
 echo "  - TLS certificates          ($CONFIG_DIR/certs/)"
 echo "  - Configuration             ($CONFIG_DIR/config.yaml)"
 echo "  - Device identity           ($CONFIG_DIR/device-id)"
@@ -48,6 +48,10 @@ rm -f "$CONFIG_DIR/mcp-token.json"
 rm -f "$CONFIG_DIR/ap-passphrase"
 rm -rf "$CONFIG_DIR/secrets/"
 rm -rf "$CONFIG_DIR/wfb/"
+# The bind's shared radio keys, which also seed the swarm-bus fleet key and the
+# presence-beacon key.
+rm -f /etc/drone.key
+rm -f /etc/gs.key
 rm -rf "$CONFIG_DIR/certs/"
 rm -f /var/lib/ados/setup-complete
 

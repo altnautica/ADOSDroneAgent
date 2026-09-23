@@ -38,7 +38,7 @@ use super::{
 /// carries the precise failure cause the emitter should report instead of
 /// re-deriving it from the free-text `message` — the peer-evidence gate uses
 /// this so `no_peer_proof` / `stale_key` never fall through the string-matching
-/// classifier (Rule 44: name the true cause, don't guess it).
+/// classifier (name the true cause, don't guess it).
 #[derive(Debug, Clone)]
 pub struct BindError {
     pub message: String,
@@ -576,7 +576,7 @@ impl BindOrchestrator {
 
             // ── Peer-evidence gate ──────────────────────────────────────────
             // The wire protocol exiting 0 is NOT proof a peer participated
-            // (Rule 37: setting a state is not proof of the state). Two
+            // (setting a state is not proof of the state). Two
             // observed phantoms: a stale roaming client EOFs the drone's
             // listener conversation (socat exits 0, the stale upstream key
             // passes a bare existence check), and a stale local listener lets
@@ -782,7 +782,7 @@ impl BindOrchestrator {
         self.pm.start(role.normal_unit()).await;
         // Same recovery as the success path: the drone's video pipeline does not
         // re-attach to the restarted wfb_tx on its own, so restart it too — video
-        // resumes without a drone reboot after a failed/aborted bind (Rule 26).
+        // resumes without a drone reboot after a failed/aborted bind.
         if role == BindRole::Drone {
             self.pm.restart("ados-video.service").await;
         }

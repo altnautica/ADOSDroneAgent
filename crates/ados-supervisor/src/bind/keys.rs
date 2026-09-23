@@ -614,7 +614,7 @@ async fn apply_keypair_inner(
     // (camera → mediamtx → tee → UDP 5600 → wfb_tx) does not re-attach to the
     // freshly restarted wfb_tx on its own — it recovers only via its slow
     // backoff FSM, so video can be silent for many seconds after a bind. Restart
-    // it too so the feed re-establishes promptly without a drone reboot (Rule 26).
+    // it too so the feed re-establishes promptly without a drone reboot.
     if role == BindRole::Drone && !pm.restart("ados-video.service").await {
         tracing::info!("ados_video_restart_skipped (not active / no video pipeline)");
     }

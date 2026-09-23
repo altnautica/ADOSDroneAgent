@@ -129,7 +129,7 @@ pub enum MspDecodeError {
 /// from the `$M` / `$X` preamble). Returns the frame and the number of bytes it
 /// consumed, so a caller streaming from the socket can advance past it. Verifies
 /// the CRC and fails closed on a mismatch — a corrupt FC reply must never be
-/// handed on as if it were valid (Rule 44: a status surface reports verified
+/// handed on as if it were valid (a status surface reports verified
 /// data).
 pub fn decode_frame(buf: &[u8]) -> Result<(MspFrame, usize), MspDecodeError> {
     if buf.len() < 3 {

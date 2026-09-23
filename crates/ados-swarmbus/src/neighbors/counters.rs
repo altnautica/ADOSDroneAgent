@@ -20,9 +20,9 @@
 //! - `beacons_tx` flat on a drone means it is not radiating at all, which is exactly
 //!   the state the identity gate forces on a misprovisioned slot.
 //!
-//! Conflating any two of them, or counting a malformed capture as any fault,
-//! destroys the signal. That is why they are separate fields rather than one
-//! `errors` total.
+//! Conflating any two of them, or counting a malformed or version-skewed capture
+//! as any fault, destroys the signal. That is why they are separate fields rather
+//! than one `errors` total.
 
 /// The counters the swarm bus reports beside its neighbour table.
 ///
@@ -41,6 +41,8 @@ pub struct SwarmCounters {
     pub beacons_bad_magic: u64,
     /// Frames whose Poly1305 tag did not verify: a wrong fleet key, corruption, or a
     /// forgery. Indistinguishable by design, and all three want the same response.
+    /// A payload too short to carry a seal, or an authentic one with a wire version
+    /// or frame kind this build does not implement, is not counted here.
     pub beacons_bad_tag: u64,
     /// Authentic beacons refused as replays: a nonce counter at or below the last
     /// one accepted from that sender, or a sender run already superseded on its

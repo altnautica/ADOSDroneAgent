@@ -1,12 +1,19 @@
-//! ArduPilot flight-mode tables, keyed by the vehicle type the FC reports.
+//! ArduPilot flight-mode tables, keyed by the firmware the FC runs.
 //!
 //! An ArduPilot `custom_mode` number means a different mode on each firmware:
 //! `6` is RTL on Copter, FBWB on Plane and FOLLOW on Rover. The mode name the
 //! state snapshot reports (decode) and the `custom_mode` a `DO_SET_MODE` command
-//! carries (encode) must therefore both come from the table for the vehicle that
-//! is actually connected, selected by `HEARTBEAT.type` (MAV_TYPE). This module is
-//! the one copy of those tables: the MAVLink router decodes with it and the
-//! control surface encodes with it, so the two can never disagree.
+//! carries (encode) must therefore both come from the table for the firmware
+//! that is actually connected. This module is the one copy of those tables: the
+//! MAVLink router decodes with it and the control surface encodes with it, so
+//! the two can never disagree.
+//!
+//! `HEARTBEAT.type` (MAV_TYPE) alone cannot name the firmware: ArduPlane
+//! reports `Q_MAV_TYPE` for a QuadPlane, so a plane can arrive as a
+//! QUADROTOR. The firmware is identified from the banner STATUSTEXT ArduPilot
+//! sends at boot and on every `PARAM_REQUEST_LIST` ([`ArduPilotFirmware::from_banner`]);
+//! until then only a MAV_TYPE that just one firmware reports is trusted
+//! ([`ArduPilotFirmware::resolve`]).
 //!
 //! PX4 packs its mode into `custom_mode` differently and is keyed on
 //! `HEARTBEAT.autopilot` ([`MAV_AUTOPILOT_PX4`]), not on MAV_TYPE.
@@ -95,20 +102,62 @@ pub enum ArduPilotFirmware {
 }
 
 impl ArduPilotFirmware {
-    /// The firmware behind a `HEARTBEAT.type` (MAV_TYPE wire value), or `None`
-    /// for a type with no mode table here (generic, submarine, airship, antenna
-    /// tracker, ...). A caller encoding a mode must refuse on `None` rather than
-    /// guess: a number from the wrong table commands a different mode.
+    /// The firmware a `HEARTBEAT.type` (MAV_TYPE wire value) suggests, or
+    /// `None` for a type with no mode table here (generic, submarine, airship,
+    /// antenna tracker, ...). A multirotor type is only a suggestion: a
+    /// QuadPlane reports one too. Encoders use [`Self::resolve`].
     pub fn from_mav_type(mav_type: i64) -> Option<Self> {
         match mav_type {
             // COAXIAL, HELICOPTER, QUADROTOR, HEXAROTOR, OCTOROTOR, TRICOPTER,
-            // DODECAROTOR, DECAROTOR: the frames ArduCopter reports.
+            // DODECAROTOR, DECAROTOR: the frames ArduCopter reports, and the
+            // Q_MAV_TYPE values a QuadPlane may report.
             2 | 3 | 4 | 13 | 14 | 15 | 29 | 35 => Some(Self::Copter),
             // FIXED_WING and the VTOL types (tailsitter duo/quad, tiltrotor,
             // fixed-rotor, tailsitter, tiltwing): ArduPlane and QuadPlane.
             1 | 19..=24 => Some(Self::Plane),
             // GROUND_ROVER, SURFACE_BOAT.
             10 | 11 => Some(Self::Rover),
+            _ => None,
+        }
+    }
+
+    /// The firmware a banner STATUSTEXT names (`"ArduPlane V4.5.7 (…)"`), or
+    /// `None` for any other text.
+    pub fn from_banner(text: &str) -> Option<Self> {
+        match text.split_whitespace().next()? {
+            "ArduCopter" | "APM:Copter" => Some(Self::Copter),
+            "ArduPlane" | "APM:Plane" => Some(Self::Plane),
+            "ArduRover" | "APM:Rover" => Some(Self::Rover),
+            _ => None,
+        }
+    }
+
+    /// The mode table to use for a vehicle: the identified firmware when the
+    /// banner has been seen; otherwise the firmware a MAV_TYPE only it reports
+    /// names. A multirotor MAV_TYPE with no banner is `None`, because it may be
+    /// a QuadPlane, where the copter RTL number commands FBWB.
+    pub fn resolve(identified: Option<Self>, mav_type: i64) -> Option<Self> {
+        identified.or(match Self::from_mav_type(mav_type) {
+            Some(Self::Copter) => None,
+            other => other,
+        })
+    }
+
+    /// The snapshot's name for this firmware.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Copter => "copter",
+            Self::Plane => "plane",
+            Self::Rover => "rover",
+        }
+    }
+
+    /// The firmware a snapshot name ([`Self::as_str`]) denotes.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "copter" => Some(Self::Copter),
+            "plane" => Some(Self::Plane),
+            "rover" => Some(Self::Rover),
             _ => None,
         }
     }
@@ -196,6 +245,38 @@ mod tests {
                 assert_eq!(fw.custom_mode(name), Some(*num), "{fw:?} {name}");
                 assert_eq!(fw.mode_name(*num), Some(*name), "{fw:?} {num}");
             }
+        }
+    }
+
+    #[test]
+    fn a_quadplane_reporting_a_multirotor_type_is_never_given_the_copter_table() {
+        // Q_MAV_TYPE=QUADROTOR: the heartbeat says 2. Without the banner the
+        // firmware is unknown, so no mode number is guessed.
+        assert_eq!(ArduPilotFirmware::resolve(None, 2), None);
+        let plane = ArduPilotFirmware::from_banner("ArduPlane V4.5.7 (4a6ff3b2)");
+        assert_eq!(plane, Some(ArduPilotFirmware::Plane));
+        let fw = ArduPilotFirmware::resolve(plane, 2).unwrap();
+        assert_eq!(fw.custom_mode("RTL"), Some(11), "never the copter 6 (FBWB)");
+        // A copter is a copter once its banner says so.
+        let copter = ArduPilotFirmware::from_banner("ArduCopter V4.6.0 (1234abcd)");
+        assert_eq!(
+            ArduPilotFirmware::resolve(copter, 2),
+            Some(ArduPilotFirmware::Copter)
+        );
+        // A type only one firmware reports needs no banner.
+        assert_eq!(
+            ArduPilotFirmware::resolve(None, 1),
+            Some(ArduPilotFirmware::Plane)
+        );
+        assert_eq!(
+            ArduPilotFirmware::resolve(None, 10),
+            Some(ArduPilotFirmware::Rover)
+        );
+        // Other text names nothing.
+        assert_eq!(ArduPilotFirmware::from_banner("ChibiOS: 1a2b3c"), None);
+        assert_eq!(ArduPilotFirmware::from_banner(""), None);
+        for fw in ALL {
+            assert_eq!(ArduPilotFirmware::from_name(fw.as_str()), Some(fw));
         }
     }
 }

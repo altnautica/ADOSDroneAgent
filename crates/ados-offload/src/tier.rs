@@ -32,7 +32,7 @@ pub struct TierInputs {
     /// full local compute path, so it resolves to `Local` the same way an
     /// accelerator does — an NPU-less-but-CPU-strong board runs detection
     /// on-board rather than offloading. Only true when the board genuinely
-    /// declares it (rule 44), so it never fabricates a local path.
+    /// declares it, so it never fabricates a local path.
     pub local_inference_capable: bool,
     /// The required models fit + run on the local accelerator.
     pub models_fit_locally: bool,

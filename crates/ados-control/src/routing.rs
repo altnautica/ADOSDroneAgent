@@ -19,6 +19,8 @@
 //! distinguish "this feature is absent on this profile" (a permanent-Python
 //! feature, served `501` when the upstream is gone) from "no such route" (`404`).
 
+use std::sync::LazyLock;
+
 use http::Method;
 
 /// How the front handles a given route.
@@ -37,10 +39,12 @@ pub enum RouteMode {
 /// template segment written `{name}` matches any single segment and `{*name}`
 /// swallows the tail; see [`segments_match`]. Axum's `:name` form is NOT
 /// understood here — a colon segment is compared literally and the route silently
-/// falls off the native lane.
+/// falls off the native lane. `websocket` marks a GET that only answers an
+/// upgrade, so the route table can tell it apart from a plain HTTP read.
 struct NativeRoute {
     method: Method,
     path: &'static str,
+    websocket: bool,
 }
 
 /// The exact `(method, path)` set the front serves natively — the same routes
@@ -49,21 +53,20 @@ struct NativeRoute {
 /// rather than proxying it.
 fn native_routes() -> Vec<NativeRoute> {
     // Small constructors keep the list scannable as it grows route by route.
-    let get = |path| NativeRoute {
+    let route = |method, path| NativeRoute {
+        method,
+        path,
+        websocket: false,
+    };
+    let get = |path| route(Method::GET, path);
+    let post = |path| route(Method::POST, path);
+    let put = |path| route(Method::PUT, path);
+    let delete = |path| route(Method::DELETE, path);
+    // The upgrade request is a GET, which is what the auth edge matches on.
+    let ws = |path| NativeRoute {
         method: Method::GET,
         path,
-    };
-    let post = |path| NativeRoute {
-        method: Method::POST,
-        path,
-    };
-    let put = |path| NativeRoute {
-        method: Method::PUT,
-        path,
-    };
-    let delete = |path| NativeRoute {
-        method: Method::DELETE,
-        path,
+        websocket: true,
     };
     vec![
         // Status + identity.
@@ -238,10 +241,10 @@ fn native_routes() -> Vec<NativeRoute> {
         // edge routes the upgrade to the front (not the proxy); the handlers do
         // their own WebSocket auth, and the paths are public-exempt so the edge
         // does not gate the keyless browser handshake.
-        get("/api/v1/ground-station/ws/uplink"),
-        get("/api/v1/ground-station/pic/events"),
-        get("/api/v1/ground-station/ws/mesh"),
-        get("/api/v1/ground-station/ws/buttons"),
+        ws("/api/v1/ground-station/ws/uplink"),
+        ws("/api/v1/ground-station/pic/events"),
+        ws("/api/v1/ground-station/ws/mesh"),
+        ws("/api/v1/ground-station/ws/buttons"),
         // Writes. The path-param routes use the {name} template the matcher
         // recognises.
         post("/api/params/{name}"),
@@ -327,17 +330,26 @@ fn native_routes() -> Vec<NativeRoute> {
     ]
 }
 
-/// The native `(method, path)` set as plain data, for the tools that have to
-/// enumerate it rather than query it: the `docs/api-surface.md` generator and
-/// the CI check that every client path literal resolves against a real route.
+/// The native route set as plain data, for the tools that have to enumerate it
+/// rather than query it: the `docs/api-surface.md` generator and the CI check
+/// that every client path literal resolves against a real route. The first
+/// field is the HTTP method, or `WS` for a route that only answers a WebSocket
+/// upgrade, so the client check cannot clear a plain GET against one.
 ///
 /// There is no second list — this projects [`native_routes`], so a route added
 /// to the router and the auth edge appears in the table and the check without
 /// anyone remembering to update a third place.
-pub fn native_route_table() -> Vec<(Method, &'static str)> {
+pub fn native_route_table() -> Vec<(String, &'static str)> {
     native_routes()
         .into_iter()
-        .map(|r| (r.method, r.path))
+        .map(|r| {
+            let label = if r.websocket {
+                "WS".to_owned()
+            } else {
+                r.method.to_string()
+            };
+            (label, r.path)
+        })
         .collect()
 }
 
@@ -379,6 +391,53 @@ pub fn classify(method: &Method, path: &str) -> RouteMode {
     }
 }
 
+/// One pre-split template segment.
+enum Segment {
+    Literal(&'static str),
+    /// `{name}`: any single non-empty segment.
+    Param,
+    /// A final `{*name}`: one or more remaining segments, not all empty.
+    Tail,
+}
+
+/// A native route with its template split once, so a request is matched by
+/// walking its own segments with no allocation.
+struct CompiledRoute {
+    method: Method,
+    segments: Vec<Segment>,
+}
+
+/// The native table, built and split once. `is_native` runs on every inbound
+/// request, so rebuilding the table there cost a full allocation of it per
+/// poll.
+static NATIVE_TABLE: LazyLock<Vec<CompiledRoute>> = LazyLock::new(|| {
+    native_routes()
+        .into_iter()
+        .map(|r| CompiledRoute {
+            method: r.method,
+            segments: compile_template(r.path),
+        })
+        .collect()
+});
+
+fn compile_template(template: &'static str) -> Vec<Segment> {
+    let parts: Vec<&'static str> = template.split('/').collect();
+    let last = parts.len() - 1;
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| {
+            if i == last && s.starts_with("{*") && s.ends_with('}') {
+                Segment::Tail
+            } else if s.starts_with('{') && s.ends_with('}') && s.len() >= 2 {
+                Segment::Param
+            } else {
+                Segment::Literal(s)
+            }
+        })
+        .collect()
+}
+
 /// True iff the front serves this exact `(method, path)` itself. The auth edge
 /// keeps its native posture for these and proxies everything else; the proxy
 /// fallback never fires for a native route (axum routes it first). The method
@@ -386,57 +445,44 @@ pub fn classify(method: &Method, path: &str) -> RouteMode {
 /// falls through to the proxy, which lets the residual surface answer with its
 /// own `405`/`404`. The path matches against the native template: a `{param}`
 /// segment matches any single non-empty segment, every other segment literally
-/// (see [`path_matches_template`]), so a path-param route like
+/// (see [`segments_match`]), so a path-param route like
 /// `/api/services/{name}/restart` is recognized as native and keeps its auth.
 pub fn is_native(method: &Method, path: &str) -> bool {
-    native_routes()
+    NATIVE_TABLE
         .iter()
-        .any(|r| r.method == method && path_matches_template(r.path, path))
+        .any(|r| r.method == method && segments_match(&r.segments, path))
 }
 
-/// Match a request path against a native-route template. A segment wrapped in
-/// `{...}` matches any single non-empty segment; a final `{*name}` segment
-/// matches one or more remaining segments; every other segment must match
-/// literally. A param-free template reduces to literal equality, so the
-/// existing exact routes are unaffected. Mirrors how axum's router matches
-/// `{param}` and `{*wildcard}` placeholders, so the auth gate and the router
-/// agree on what is native.
-fn path_matches_template(template: &str, actual: &str) -> bool {
-    let tc: Vec<&str> = template.split('/').collect();
-    let ac: Vec<&str> = actual.split('/').collect();
-
-    let wildcard_tail = tc
-        .last()
-        .is_some_and(|s| s.starts_with("{*") && s.ends_with('}'));
-    if wildcard_tail {
-        // The wildcard must have at least one segment to swallow; everything
-        // before it matches segment-for-segment.
-        if ac.len() < tc.len() {
-            return false;
+/// Match a request path against a pre-split native-route template. A `{param}`
+/// segment matches any single non-empty segment; a final `{*name}` segment
+/// matches one or more remaining segments, not all empty; every other segment
+/// must match literally. A param-free template reduces to literal equality.
+/// Mirrors how axum's router matches `{param}` and `{*wildcard}` placeholders,
+/// so the auth gate and the router agree on what is native.
+fn segments_match(template: &[Segment], actual: &str) -> bool {
+    let mut rest = actual.split('/');
+    for segment in template {
+        match segment {
+            Segment::Tail => {
+                let mut any_non_empty = false;
+                let mut any = false;
+                for s in rest.by_ref() {
+                    any = true;
+                    any_non_empty |= !s.is_empty();
+                }
+                return any && any_non_empty;
+            }
+            Segment::Param => match rest.next() {
+                Some(s) if !s.is_empty() => {}
+                _ => return false,
+            },
+            Segment::Literal(lit) => match rest.next() {
+                Some(s) if s == *lit => {}
+                _ => return false,
+            },
         }
-        let head = tc.len() - 1;
-        if ac[head..].iter().all(|s| s.is_empty()) {
-            return false;
-        }
-        return segments_match(&tc[..head], &ac[..head]);
     }
-
-    if tc.len() != ac.len() {
-        return false;
-    }
-    segments_match(&tc, &ac)
-}
-
-/// Segment-for-segment comparison, where `{param}` matches any non-empty
-/// segment. Both slices must already be the same length.
-fn segments_match(template: &[&str], actual: &[&str]) -> bool {
-    template.iter().zip(actual.iter()).all(|(ts, seg)| {
-        if ts.starts_with('{') && ts.ends_with('}') && ts.len() >= 2 {
-            !seg.is_empty()
-        } else {
-            ts == seg
-        }
-    })
+    rest.next().is_none()
 }
 
 /// True when a path sits under a known permanent-Python prefix. Used only to pick
@@ -450,6 +496,10 @@ pub fn is_permanent_python_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn path_matches_template(template: &'static str, actual: &str) -> bool {
+        segments_match(&compile_template(template), actual)
+    }
 
     #[test]
     fn every_native_route_is_native() {
@@ -576,27 +626,27 @@ mod tests {
         // One tail segment and many both match; the peer id is a single segment.
         assert!(path_matches_template(
             t,
-            "/api/v1/ground-station/relay-proxy/77735cd38937/healthz"
+            "/api/v1/ground-station/relay-proxy/0a1b2c3d4e5f/healthz"
         ));
         assert!(path_matches_template(
             t,
-            "/api/v1/ground-station/relay-proxy/77735cd38937/api/status/full"
+            "/api/v1/ground-station/relay-proxy/0a1b2c3d4e5f/api/status/full"
         ));
         // The tail must exist: without it the route is not this one, and a
         // wildcard that matched nothing would hand the auth edge a path axum
         // never routes here.
         assert!(!path_matches_template(
             t,
-            "/api/v1/ground-station/relay-proxy/77735cd38937"
+            "/api/v1/ground-station/relay-proxy/0a1b2c3d4e5f"
         ));
         assert!(!path_matches_template(
             t,
-            "/api/v1/ground-station/relay-proxy/77735cd38937/"
+            "/api/v1/ground-station/relay-proxy/0a1b2c3d4e5f/"
         ));
         // A different prefix is not this route.
         assert!(!path_matches_template(
             t,
-            "/api/v1/ground-station/status/77735cd38937/healthz"
+            "/api/v1/ground-station/status/0a1b2c3d4e5f/healthz"
         ));
     }
 
@@ -604,7 +654,7 @@ mod tests {
     fn the_relay_proxy_lane_is_native_under_every_method_it_serves() {
         // Missing from the native set, this lane would be served with the
         // front's auth SKIPPED and outside the rate limiter its siblings share.
-        let p = "/api/v1/ground-station/relay-proxy/77735cd38937/api/services";
+        let p = "/api/v1/ground-station/relay-proxy/0a1b2c3d4e5f/api/services";
         for m in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
             assert!(is_native(&m, p), "{m} {p} must be native");
         }

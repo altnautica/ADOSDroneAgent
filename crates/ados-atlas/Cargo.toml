@@ -17,7 +17,7 @@ path = "src/bin/ados-atlas.rs"
 
 [dependencies]
 # `tracing-layer` pulls in the LogdLayer so the daemon's logs reach the durable
-# ados-logd Black Box store, not just journald (Rule 41).
+# ados-logd Black Box store, not just journald.
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

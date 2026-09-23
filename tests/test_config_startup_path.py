@@ -28,13 +28,20 @@ from ados.core.config import load_config
 from ados.core.config.maintenance import migrate_config_file
 
 # A config that trips every migrator at once: a legacy `scripting` block to
-# relocate, and a recorded ws_proxy_enforce_auth=false to drop.
+# relocate, a recorded ws_proxy_enforce_auth=false and the old installer's
+# mqtt_username to drop, and the retired security.tls / wireguard blocks.
 _LEGACY_CONFIG = {
     "agent": {"name": "test-node", "profile": "drone"},
     "mavlink": {"system_id": 42, "ws_proxy_enforce_auth": False},
     "scripting": {
         "rest_api": {"enabled": True, "host": "127.0.0.1", "port": 8099},
         "mission_control_url": "https://gcs.example.com",
+    },
+    "server": {"mode": "cloud", "mqtt_username": "ados"},
+    "security": {
+        "tls": {"enabled": False},
+        "wireguard": {"enabled": False, "config_path": "/etc/wireguard/ados.conf"},
+        "api": {"cors_enabled": True},
     },
     "video": {"wfb": {"paired_at": "2026-01-01T00:00:00Z"}},
 }
@@ -228,13 +235,17 @@ def test_migrate_config_file_persists_every_migration(monkeypatch, tmp_path):
         "share_uplink_from_legacy_json",
         "gs_ui_from_legacy_json",
         "api_from_scripting",
+        "drop_retired_security_blocks",
         "ws_proxy_enforce_default",
+        "mqtt_username_device_id",
     }
 
     on_disk = yaml.safe_load(cfg.read_text())
     assert on_disk["api"]["rest"]["port"] == 8099
     assert on_disk["ground_station"]["share_uplink"] is True
     assert "ws_proxy_enforce_auth" not in on_disk["mavlink"]
+    assert on_disk["server"] == {"mode": "cloud"}
+    assert on_disk["security"] == {"api": {"cors_enabled": True}}
     # Everything an operator tuned beside the migrated keys comes back.
     assert on_disk["mavlink"]["system_id"] == 42
     # And a timestamp comes back byte-identical. A read-modify-write that

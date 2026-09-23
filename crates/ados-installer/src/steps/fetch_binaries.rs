@@ -739,7 +739,7 @@ fn install_one_with_retry(
 /// CPU-ONNX local inference (a strong CPU, no NPU) fetches the onnx-enabled build
 /// so it runs the detector on the CPU; if that variant cannot be fetched the
 /// install falls back to the default build so it never aborts on a missing
-/// variant (Rule 26 — the default build still installs and honestly reports no
+/// variant (the default build still installs and honestly reports no
 /// real inference until the onnx variant is available). Every other service
 /// installs its single catalog binary unchanged.
 ///

@@ -139,7 +139,7 @@ def test_board_family_siblings_and_display_names() -> None:
 
 # ── A733 / cubie-a7s: no accelerator backend in-tree, resolves to the CPU family ──
 def test_board_family_a733_resolves_to_cpu_not_generic() -> None:
-    # The A733's VIP9000 NPU has no in-tree ados-vision backend (Rule 44), so it must
+    # The A733's VIP9000 NPU has no in-tree ados-vision backend, so it must
     # NOT land in an accelerator family; it resolves to "cpu" — the board_match token
     # plugin manifests (e.g. follow-me's coco-person) actually declare for the
     # non-accelerator variant. "generic" would match no declared variant at all.

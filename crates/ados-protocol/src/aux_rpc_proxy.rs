@@ -998,7 +998,7 @@ mod tests {
     }
 
     /// The device id the tests address, and the one their drone answers with.
-    const DRONE: &[u8] = b"77735cd38937";
+    const DRONE: &[u8] = b"0a1b2c3d4e5f";
 
     /// The encoded aux payloads for one response, exactly as a drone emits
     /// them: RaptorQ symbols, each stamped with the sender's device id.

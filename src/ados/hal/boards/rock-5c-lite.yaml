@@ -12,8 +12,8 @@
 # provisioned. GPU presence is determined per-unit at runtime (/dev/mali0), not
 # assumed from this profile — see the installer's GPU provisioning step.
 #
-# Audit note (2026-04-07): an earlier procurement research pass falsely
-# claimed "RK3582 has the NPU fused off". That claim is wrong. Sources:
+# Note: the RK3582 does NOT have the NPU fused off, despite a common claim
+# that it does. References:
 #   - https://dl.radxa.com/rock5/5c/docs/hw/v1100/radxa_rock5c_product_brief.pdf
 #   - https://www.cnx-software.com/2024/05/18/radxa-rock-5c-lite-sbc-rockchip-rk3588s2-rk3582-soc-wifi-6-raspberry-pi-pcie-ffc-connector/
 #   - https://www.hackster.io/news/radxa-launches-the-rock-5c-5c-lite-single-board-computers-and-adopts-raspberry-pi-s-pcie-pinout-d327c57ed04c
@@ -96,7 +96,7 @@ compute:
   npu_tops: 6.0          # 6 TOPS @ INT4, ~5 TOPS @ INT8 (intact, NOT fused off)
   hw_encoder: ["h264", "h265"]
   hw_decoder: ["h264", "h265", "vp9", "av1"]
-  ram_mb: 16384          # 16 GB LPDDR4x as procured
+  ram_mb: 16384          # 16 GB LPDDR4x reference unit
   ram_type: LPDDR4X
 
 storage:

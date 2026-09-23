@@ -725,9 +725,10 @@ REGISTRY: list[RouteCase] = [
     # Change the WFB-ng channel. A side effect (it forwards a coordinated hop to
     # the radio command socket), so sandboxed and skipped by default; the bench
     # opts in against a live radio. The body is the {"channel": N} the route
-    # validates and forwards. The success body is the static
-    # {status, channel, frequency_mhz} shape (the echoed channel is the radio's,
-    # so it is masked); the deterministic diff is the invalid-channel rejection.
+    # validates and forwards. The success body is the 202
+    # {status: "initiated", target_channel, frequency_mhz} shape (the echoed
+    # target is the radio's, so it is masked); the deterministic diff is the
+    # invalid-channel rejection.
     RouteCase(
         name="wfb-channel-write",
         method="POST",
@@ -736,7 +737,7 @@ REGISTRY: list[RouteCase] = [
         content_type="application/json",
         paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
         require_sandbox=True,
-        extra_volatile=("channel",),
+        extra_volatile=("target_channel",),
     ),
     # Set the WFB-ng TX power at runtime. A side effect (it forwards to the radio
     # command socket + persists to config), so sandboxed by default. The body is

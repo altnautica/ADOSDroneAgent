@@ -159,6 +159,19 @@ pub fn resolve_authority(
     }
 }
 
+/// Whether the PIC arbiter refuses a declared autonomous injector's command
+/// right now: [`resolve_authority`] in hybrid mode landing on the human/neutral
+/// hold. That covers a human (or any other client) holding the claim and an
+/// arbiter that is not reporting; a fresh "no one holds" report or the
+/// injector's own claim lets it through.
+///
+/// The one decision behind the router's FC-write gate and the plugin host's
+/// pre-send check, so a plugin is told `pic_refused` exactly when the router
+/// would drop its command.
+pub fn injector_refused(pic: Option<&PicView>, verified_injector: Option<&str>) -> bool {
+    resolve_authority(ChannelSourceMode::Hybrid, pic, verified_injector) == Authority::Hid
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +314,49 @@ mod tests {
             read_pic_view(&path, stepped_back).is_none(),
             "future mtime (backward clock step) fails closed"
         );
+    }
+
+    // ── the injector refusal decision ────────────────────────────────────────
+
+    #[test]
+    fn no_arbiter_report_refuses_the_injector_fail_closed() {
+        // pic = None (absent/stale/malformed): a dead arbiter is not consent.
+        assert!(injector_refused(None, Some("ai-mission")));
+        assert!(injector_refused(None, None));
+    }
+
+    #[test]
+    fn a_human_holder_refuses_the_injector() {
+        let human = PicView {
+            claimed: true,
+            holder: Some("hdmi-kiosk".into()),
+        };
+        assert!(injector_refused(Some(&human), Some("ai-mission")));
+    }
+
+    #[test]
+    fn the_injector_holding_the_claim_is_allowed() {
+        let robot = PicView {
+            claimed: true,
+            holder: Some("ai-mission".into()),
+        };
+        assert!(!injector_refused(Some(&robot), Some("ai-mission")));
+    }
+
+    #[test]
+    fn a_fresh_unclaimed_report_allows_the_injector() {
+        let unclaimed = PicView::default();
+        assert!(!injector_refused(Some(&unclaimed), None));
+    }
+
+    #[test]
+    fn an_unverified_injector_never_wins_even_holding_the_claim() {
+        // holder matches the asserted id, but verified_injector is None (bad
+        // ticket): the claim cannot be credited, so a human-path hold stands.
+        let claimed_by_asserted = PicView {
+            claimed: true,
+            holder: Some("ai-mission".into()),
+        };
+        assert!(injector_refused(Some(&claimed_by_asserted), None));
     }
 }

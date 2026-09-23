@@ -142,7 +142,7 @@ async fn main() {
     // Exit on a signal OR if the capture loop ends unexpectedly. The loop only
     // returns on `cancel`, so an early finish (a panic the runtime caught in a
     // debug build, or a future bug) means the service is alive-but-dead; surface
-    // it with a non-zero exit so systemd's Restart=on-failure recovers it instead
+    // it with a non-zero exit so systemd's Restart=always recovers it instead
     // of leaving a running unit that captures nothing.
     tokio::select! {
         _ = wait_for_shutdown() => {

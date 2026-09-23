@@ -235,20 +235,28 @@ async fn reconcile_once(
                     "fleet_hero_reasserting_assignment"
                 );
             }
-            let generation = hero_state.begin_reissue(&plan, now).await;
+            let Some(generation) = hero_state
+                .begin_reissue(&plan, now, inputs.generation)
+                .await
+            else {
+                // A selection began while this pass was deciding; what it
+                // decided may contradict it. The next tick decides afresh.
+                return;
+            };
             let outcomes = apply_plan(&plan, caller).await;
             hero_state.record_reissue(generation, &outcomes).await;
         }
     }
 
-    // Publish whoever the hero is now — including one this tick just
-    // auto-promoted, which is the whole of a single-drone fleet's selection and
-    // would otherwise never reach the fan-out. Idempotent, so a settled fleet
-    // costs one tmpfs read every few seconds and no write; that also means a
-    // publish that failed earlier (an unwritable run dir, a full tmpfs) is
-    // retried here instead of leaving the operator on the wrong drone until the
-    // next selection.
-    if let Some(current) = hero_state.hero().await {
+    // Publish whoever the hero is now, once its promotion has confirmed —
+    // including one this tick just auto-promoted, which is the whole of a
+    // single-drone fleet's selection and would otherwise never reach the
+    // fan-out, and one whose failed promotion a retry has since confirmed.
+    // Idempotent, so a settled fleet costs one tmpfs read every few seconds
+    // and no write; that also means a publish that failed earlier (an
+    // unwritable run dir, a full tmpfs) is retried here instead of leaving the
+    // operator on the wrong drone until the next selection.
+    if let Some(current) = hero_state.confirmed_hero().await {
         publish_hero_to(&hero_sidecar(), &slots, &current);
     }
 }
@@ -457,7 +465,10 @@ mod tests {
                 profile: Thumbnail,
             }],
         };
-        let generation = st.begin_reissue(&retry, now).await;
+        let generation = st
+            .begin_reissue(&retry, now, inputs.generation)
+            .await
+            .expect("no selection has begun since the inputs were read");
         st.record_reissue(generation, &[outcome(2, "b", Thumbnail, true)])
             .await;
         let inputs = st.tick_inputs(now).await;
@@ -493,7 +504,7 @@ mod tests {
         // Nothing published: the write failed at selection time.
         assert!(ados_groundlink::read_hero_from(&path).is_none());
 
-        let hero = st.hero().await.expect("the selection is sticky");
+        let hero = st.confirmed_hero().await.expect("the selection is sticky");
         assert!(publish_hero_to(&path, &s, &hero));
         assert_eq!(ados_groundlink::read_hero_from(&path).unwrap().slot, 3);
 

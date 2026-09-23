@@ -100,7 +100,7 @@ impl WorkProof {
     /// Fold one counter reading for `unit` into its history and judge it.
     pub fn observe(&mut self, unit: &str, reading: Option<u64>, now: Instant) -> WorkVerdict {
         let Some(counter) = reading else {
-            // Rule 2: a gap in the samples is not elapsed flatness.
+            // A gap in the samples is not elapsed flatness.
             self.last.remove(unit);
             return WorkVerdict::Unknown;
         };

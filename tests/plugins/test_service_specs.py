@@ -472,13 +472,12 @@ def test_command_ready_check_runs_as_a_sandboxed_argv(isolated_paths):
     assert "--uid=ados" in argv and "--gid=ados" in argv
     assert "--slice=ados-plugins.slice" in argv
     # The plugin's own sandbox: hardening, its resource envelope, and the
-    # capability sandbox that hides the agent's command sockets.
+    # capability sandbox that hides the agent's run dir (command sockets and
+    # every plugin's socket dir) behind an empty tmpfs.
     assert "--property=NoNewPrivileges=yes" in argv
     assert "--property=MemoryMax=48M" in argv
-    assert any(
-        a.startswith("--property=InaccessiblePaths=") and "-/run/ados/control.sock" in a
-        for a in argv
-    )
+    assert "--property=TemporaryFileSystem=/run/ados:ro" in argv
+    assert not any("/run/ados/plugins" in a for a in argv)
     # The probe's own words come after `--`, one argv element each.
     sep = argv.index("--")
     assert argv[sep + 1 :] == ["/usr/bin/test", "-S", "run/worker sock"]

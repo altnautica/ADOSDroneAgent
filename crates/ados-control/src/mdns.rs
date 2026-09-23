@@ -175,17 +175,19 @@ fn read_identity(paths: &PairingPaths, board_path: &std::path::Path) -> AdvertId
 }
 
 /// Read the mutable half: whether the node is claimed, and the code it is
-/// waiting on while it is not.
+/// waiting on while it is not. An unreadable pairing file is advertised as
+/// claimed with no code: the node refuses a claim in that state, so inviting
+/// one would be false.
 fn read_pairing(pairing_json: &std::path::Path) -> AdvertPairing {
-    let doc = PairingDoc::load(pairing_json);
-    let paired = doc.is_paired();
-    AdvertPairing {
-        code: if paired {
-            None
-        } else {
-            doc.pairing_code.clone().filter(|c| !c.is_empty())
+    match PairingDoc::read(pairing_json) {
+        Ok(doc) if !doc.is_paired() => AdvertPairing {
+            code: doc.pairing_code.clone().filter(|c| !c.is_empty()),
+            paired: false,
         },
-        paired,
+        _ => AdvertPairing {
+            code: None,
+            paired: true,
+        },
     }
 }
 

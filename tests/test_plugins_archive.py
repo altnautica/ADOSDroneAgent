@@ -200,9 +200,10 @@ def test_unpack_restores_exec_bit_for_executable_entries(tmp_path: Path) -> None
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(MANIFEST_FILENAME, _good_manifest_yaml().encode())
-        # An executable binary entry: external_attr upper 16 bits carry 0o755.
+        # An executable binary entry carrying group/world write in its zip
+        # mode, which is outside the signed payload hash.
         info = zipfile.ZipInfo("agent/bin/geofence")
-        info.external_attr = 0o755 << 16
+        info.external_attr = 0o777 << 16
         zf.writestr(info, b"#!/bin/sh\n")
     raw = buf.getvalue()
 
@@ -210,9 +211,24 @@ def test_unpack_restores_exec_bit_for_executable_entries(tmp_path: Path) -> None
     unpack_to(raw, dest)
 
     bin_mode = (dest / "agent" / "bin" / "geofence").stat().st_mode
-    assert bin_mode & 0o111, f"agent/bin entry must be executable (mode {oct(bin_mode)})"
+    assert bin_mode & 0o777 == 0o755, f"agent/bin entry must unpack 0755 (mode {oct(bin_mode)})"
     mani_mode = (dest / MANIFEST_FILENAME).stat().st_mode
     assert not (mani_mode & 0o111), "plain entry must not gain exec bits"
+
+
+@pytest.mark.parametrize("alias", ["./manifest.yaml", "agent//x.py", "agent/./x.py"])
+def test_dot_and_empty_segments_cannot_alias_an_entry(alias: str, tmp_path: Path) -> None:
+    """``./manifest.yaml`` unpacks over ``manifest.yaml``; the validated
+    manifest and the one written to disk must never be able to differ."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(MANIFEST_FILENAME, _good_manifest_yaml().encode())
+        zf.writestr(alias, b"id: com.example.other\n")
+    raw = buf.getvalue()
+    with pytest.raises(ArchiveError, match="unsafe archive entry path"):
+        parse_archive_bytes(raw)
+    with pytest.raises(ArchiveError):
+        unpack_to(raw, tmp_path / "out")
 
 
 def _manifest_with_gcs_yaml(gcs_entrypoint: str = "gcs/plugin.bundle.js") -> str:

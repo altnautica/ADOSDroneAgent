@@ -7,17 +7,26 @@
 //! - **Transmit** is `AF_PACKET`/`SOCK_RAW` bound to the interface with
 //!   `PACKET_QDISC_BYPASS`, exactly as `vendor/wfb-ng/src/tx.cpp:213-249` does. The
 //!   frame is written whole (radiotap, 802.11, payload) with one `send`.
-//! - **Receive** is `AF_PACKET`/`SOCK_RAW` with `ETH_P_ALL`, carrying the classic
-//!   BPF from [`crate::frame::bpf_program`]. The filter is attached **before** the
-//!   bind, so the socket is never unfiltered for even one frame — attaching after
-//!   binding leaves a window in which the adapter's entire video stream queues into
-//!   the receive buffer.
+//! - **Receive** is `AF_PACKET`/`SOCK_RAW`, carrying the classic BPF from
+//!   [`crate::frame::bpf_program`]. The socket is created with protocol 0, which
+//!   registers no packet hook, so it receives nothing until it is bound. The filter
+//!   is attached, and only then is the socket bound with `ETH_P_ALL` — the bind is
+//!   what registers the hook. The socket is therefore never unfiltered for even
+//!   one frame; creating it with `ETH_P_ALL` would register an all-device hook at
+//!   `socket()` time and queue eth0 and video frames before the filter lands.
+//!
+//! Both sockets are opened only on a radiotap monitor interface
+//! (`/sys/class/net/<iface>/type` = 803). `AF_PACKET` binds to any interface, so
+//! without that check an adapter still in managed mode would open cleanly, the
+//! filter would reject everything, and every injection would fail quietly.
 //!
 //! No libpcap, so this cross-compiles to the musl SBC target as a self-contained
-//! binary; the whole Linux surface is these four syscalls plus `if_nametoindex`.
+//! binary; the whole Linux surface is these few syscalls, `if_nametoindex` and one
+//! sysfs read.
 
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::Path;
 
 use tokio::io::unix::AsyncFd;
 
@@ -27,6 +36,13 @@ use crate::frame::{bpf_program, SockFilter, MAX_FRAME_LEN};
 /// qdisc layer on transmit, as wfb-ng does: a beacon has no business queueing
 /// behind the video stream, and a queued beacon is a stale beacon.
 const PACKET_QDISC_BYPASS: libc::c_int = 20;
+
+/// `ARPHRD_IEEE80211_RADIOTAP`: the link type of a monitor-mode interface that
+/// delivers and accepts radiotap-prefixed 802.11 frames.
+const ARPHRD_IEEE80211_RADIOTAP: u32 = 803;
+
+/// Where the kernel exposes each interface's link type.
+const SYS_CLASS_NET: &str = "/sys/class/net";
 
 /// The kernel's `struct sock_fprog`: a length and a pointer to the program.
 #[repr(C)]
@@ -48,7 +64,9 @@ impl Radio {
     /// Every failure is reported with the interface name and the errno, because the
     /// realistic causes are all operational and all distinguishable that way: the
     /// adapter is not in monitor mode, the radio manager has not selected it yet, or
-    /// the process lacks `CAP_NET_RAW`.
+    /// the process lacks `CAP_NET_RAW`. An interface that exists but is not a
+    /// radiotap monitor interface is refused before any socket is opened, so the
+    /// caller keeps retrying until the radio manager has switched it over.
     ///
     /// # Panics
     ///
@@ -60,6 +78,7 @@ impl Radio {
     /// an unprivileged host never sees it.
     pub fn open(iface: &str, fleet_id: u16) -> io::Result<Self> {
         let ifindex = if_nametoindex(iface)?;
+        require_radiotap(Path::new(SYS_CLASS_NET), iface)?;
         let tx = open_tx(ifindex)?;
         let rx = open_rx(ifindex, fleet_id)?;
         Ok(Self {
@@ -143,6 +162,31 @@ fn if_nametoindex(iface: &str) -> io::Result<libc::c_uint> {
     Ok(idx)
 }
 
+/// Refuse an interface whose link type is not radiotap monitor mode.
+///
+/// `sys_class_net` is the sysfs directory holding one entry per interface, split
+/// out so the check is testable against a fixture tree.
+fn require_radiotap(sys_class_net: &Path, iface: &str) -> io::Result<()> {
+    let path = sys_class_net.join(iface).join("type");
+    let text = std::fs::read_to_string(&path)?;
+    let link_type: u32 = text.trim().parse().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not a link type: {:?}", path.display(), text.trim()),
+        )
+    })?;
+    if link_type != ARPHRD_IEEE80211_RADIOTAP {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{iface} is not a radiotap monitor interface (link type {link_type}, \
+                 want {ARPHRD_IEEE80211_RADIOTAP})"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Bind an `AF_PACKET` socket to an interface index.
 fn bind_to_iface(fd: RawFd, ifindex: libc::c_uint, protocol: u16) -> io::Result<()> {
     let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
@@ -201,14 +245,15 @@ fn open_tx(ifindex: libc::c_uint) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
-/// The receive socket: filtered, non-blocking, then bound.
+/// The receive socket: created with no hook, filtered, non-blocking, then bound.
 fn open_rx(ifindex: libc::c_uint, fleet_id: u16) -> io::Result<OwnedFd> {
-    let fd = raw_socket(libc::ETH_P_ALL as u16)?;
+    // Protocol 0: no packet hook exists yet, so nothing can queue before the
+    // filter is attached.
+    let fd = raw_socket(0)?;
     attach_filter(fd.as_raw_fd(), fleet_id)?;
     set_nonblocking(fd.as_raw_fd())?;
-    // Bind LAST: an unbound packet socket receives nothing, so the filter is in
-    // place before the first frame can arrive and the adapter's video stream never
-    // gets a window to queue into the receive buffer.
+    // Binding with ETH_P_ALL registers the hook, on this interface only, with the
+    // filter already in place.
     bind_to_iface(fd.as_raw_fd(), ifindex, libc::ETH_P_ALL as u16)?;
     Ok(fd)
 }
@@ -310,36 +355,42 @@ mod tests {
         assert_eq!(nul.raw_os_error(), None);
     }
 
-    /// `Radio::open` must fail cleanly at the syscall rather than panicking or
-    /// hanging when the process lacks `CAP_NET_RAW`, and must succeed when it has
-    /// it. Both outcomes are legitimate here, so the assertion is on the shape of
-    /// the failure, not on which branch is taken.
-    ///
-    /// `#[tokio::test]`, not `#[test]`: a PRIVILEGED runner (root in a container,
-    /// and the agent's own service account on a board) gets past the permission
-    /// check and reaches the `AsyncFd` registration, which panics without a
-    /// reactor. An unprivileged runner fails earlier and never reaches it, so a
-    /// plain `#[test]` passes on CI and panics for anyone running as root.
-    ///
-    /// Same `raw_os_error()` discipline as above: a sandbox that refuses
-    /// `AF_PACKET` outright answers `EAFNOSUPPORT`, another errno with no stable
-    /// `ErrorKind`.
-    #[tokio::test]
-    async fn opening_the_radio_either_succeeds_or_fails_with_a_real_errno() {
-        let Err(e) = Radio::open("lo", 1) else {
-            // Privileged: the sockets opened. `lo` is not a monitor interface, but
-            // AF_PACKET binds to any interface, so this is the expected root path.
-            return;
+    /// Only a radiotap monitor interface passes; a managed-mode adapter, an
+    /// unreadable entry and a garbage link type are all refused.
+    #[test]
+    fn only_a_radiotap_link_type_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |iface: &str, body: &str| {
+            std::fs::create_dir_all(dir.path().join(iface)).unwrap();
+            std::fs::write(dir.path().join(iface).join("type"), body).unwrap();
         };
-        let errno = e
-            .raw_os_error()
-            .expect("a refused raw socket must surface a real OS error");
-        assert!(
-            errno == libc::EPERM
-                || errno == libc::EACCES
-                || errno == libc::EAFNOSUPPORT
-                || errno == libc::ENODEV,
-            "unexpected errno {errno} opening a raw packet socket: {e}"
+        write("mon0", "803\n");
+        write("wlan0", "1\n");
+        write("junk0", "radiotap\n");
+
+        assert!(require_radiotap(dir.path(), "mon0").is_ok());
+        let managed = require_radiotap(dir.path(), "wlan0").unwrap_err();
+        assert_eq!(managed.kind(), io::ErrorKind::InvalidInput);
+        assert!(managed.to_string().contains("link type 1"), "{managed}");
+        assert_eq!(
+            require_radiotap(dir.path(), "junk0").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
         );
+        assert_eq!(
+            require_radiotap(dir.path(), "absent0")
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::ENOENT)
+        );
+    }
+
+    /// `lo` exists but is not a monitor interface, so opening the bus on it is
+    /// refused before any socket is created, privileged or not.
+    #[tokio::test]
+    async fn a_non_monitor_interface_is_refused() {
+        let Err(e) = Radio::open("lo", 1) else {
+            panic!("loopback must not open as a swarm radio");
+        };
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
     }
 }

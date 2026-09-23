@@ -1,13 +1,13 @@
 //! Uplink detail page.
 //!
 //! The drilldown from the dashboard's uplink/cloud tile. It shows the
-//! cloud-relay state (a status badge plus MQTT/HTTP/RTT and the drone id or
-//! pair code) across the top band, and a cellular band (signal bars,
-//! RSRP/RSRQ/SINR, band, IP, tech) below — or a WiFi-client fallback when no
-//! modem is present, or a "No WAN uplink" notice when neither is up.
+//! Mission Control pairing state (a status badge plus MQTT/HTTP/RTT and the
+//! drone id or pair code) across the top band, and a cellular band (signal
+//! bars, RSRP/RSRQ/SINR, band, IP, tech) below — or, with no modem, the uplink
+//! the agent reports (Ethernet, WiFi client, none, or unknown).
 //!
 //! Cloud state comes from [`PageContext::cloud`], the modem from
-//! [`PageContext::uplink`], and the WiFi fallback from [`PageContext::network`].
+//! [`PageContext::uplink`], and the uplink kind from [`PageContext::network`].
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
@@ -45,25 +45,21 @@ fn bars_for_rsrp(rsrp_dbm: Option<f64>) -> i32 {
 }
 
 /// Return the cloud badge label + severity from the cloud state.
+///
+/// Pairing is keyed on `paired` (Mission Control has claimed this node), the
+/// same fact the dashboard tile shows. With transport states reported, a
+/// paired node reads CONNECTED / RECONNECTING / OFFLINE; with none reported it
+/// reads PAIRED, since nothing measured says more.
 fn cloud_state_label(cloud: &CloudCtx) -> (&'static str, Severity) {
-    let mqtt = cloud
-        .mqtt_state
-        .clone()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let http = cloud
-        .http_state
-        .clone()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let has_drone = cloud
-        .drone_id
-        .as_deref()
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
-    if !has_drone {
+    if !cloud.paired {
         return ("UNPAIRED", Severity::Muted);
     }
+    let (Some(mqtt), Some(http)) = (cloud.mqtt_state.as_deref(), cloud.http_state.as_deref())
+    else {
+        return ("PAIRED", Severity::Ok);
+    };
+    let mqtt = mqtt.to_ascii_lowercase();
+    let http = http.to_ascii_lowercase();
     if mqtt == "connected" && (http == "ok" || http == "connected") {
         return ("CONNECTED", Severity::Ok);
     }
@@ -164,7 +160,7 @@ fn render_cloud_band(canvas: &mut Canvas, palette: &Palette, cloud: &CloudCtx) {
     );
 
     let drone_id = cloud.drone_id.clone().unwrap_or_default();
-    let pairing_code = cloud.pairing_code.clone().unwrap_or_default();
+    let pair_code = cloud.pair_code.clone().unwrap_or_default();
     let right_x = 240;
     if !drone_id.is_empty() {
         text(
@@ -176,12 +172,12 @@ fn render_cloud_band(canvas: &mut Canvas, palette: &Palette, cloud: &CloudCtx) {
             palette.text_secondary,
         );
     }
-    if !pairing_code.is_empty() && drone_id.is_empty() {
+    if !cloud.paired && !pair_code.is_empty() {
         let pair_font = LoadedFont::new(FontFace::MonoBold, 12);
         text(
             canvas,
             &pair_font,
-            &format!("pair {pairing_code}"),
+            &format!("pair {pair_code}"),
             right_x,
             CLOUD_BAND_Y + 44,
             palette.text_primary,
@@ -269,59 +265,73 @@ fn render_cellular_band(canvas: &mut Canvas, palette: &Palette, modem: &UplinkCt
     );
 }
 
-/// Paint the WiFi-client fallback (or a no-WAN notice) when no modem is up.
+/// What the band below the cloud shows when no modem is present: the uplink
+/// the agent reports. `(headline, detail)`; an unreported uplink is unknown,
+/// never "No WAN uplink".
+fn wan_summary(network: &NetworkCtx) -> (String, Option<String>) {
+    let reach = match network.uplink_reachable {
+        Some(true) => "internet reachable",
+        Some(false) => "internet unreachable",
+        None => "reachability unknown",
+    };
+    let wifi = &network.wifi_client;
+    match network.uplink_type.as_deref() {
+        Some("eth") => ("Ethernet uplink".to_string(), Some(reach.to_string())),
+        Some("wifi") => {
+            let ssid = wifi.ssid.clone().unwrap_or_else(|| "--".to_string());
+            let detail = match wifi.signal_dbm {
+                Some(s) => format!("signal {} dBm · {reach}", s as i64),
+                None => reach.to_string(),
+            };
+            (format!("WiFi uplink: {ssid}"), Some(detail))
+        }
+        Some("none") => ("No WAN uplink".to_string(), None),
+        Some(other) => (format!("{other} uplink"), Some(reach.to_string())),
+        None => ("Uplink state unknown".to_string(), None),
+    }
+}
+
+/// Paint the uplink the agent reports when no modem is up.
 fn render_wifi_fallback(
     canvas: &mut Canvas,
     palette: &Palette,
     network: &NetworkCtx,
     modem: &UplinkCtx,
 ) {
-    let wifi = &network.wifi_client;
     let body_font = LoadedFont::new(FontFace::MonoRegular, 12);
     let head_font = LoadedFont::new(FontFace::SansBold, 12);
-    if wifi.connected {
-        let ssid = wifi.ssid.clone().unwrap_or_else(|| "--".to_string());
-        let sig_text = match wifi.signal_dbm {
-            Some(s) => format!("signal {} dBm", s as i64),
-            None => "signal --".to_string(),
-        };
-        text(
-            canvas,
-            &head_font,
-            &format!("WiFi uplink: {ssid}"),
-            12,
-            CELL_BAND_Y + 12,
-            palette.text_primary,
-        );
+    let (headline, detail) = wan_summary(network);
+    let known = network.uplink_type.as_deref().is_some_and(|t| t != "none");
+    text(
+        canvas,
+        &head_font,
+        &headline,
+        12,
+        CELL_BAND_Y + 12,
+        if known {
+            palette.text_primary
+        } else {
+            palette.text_tertiary
+        },
+    );
+    if let Some(detail) = detail {
         text(
             canvas,
             &body_font,
-            &sig_text,
+            &detail,
             12,
             CELL_BAND_Y + 30,
             palette.text_secondary,
         );
-    } else {
+    } else if let Some(reason) = modem.reason.as_deref().filter(|r| !r.is_empty()) {
         text(
             canvas,
-            &head_font,
-            "No WAN uplink",
+            &body_font,
+            &format!("modem: {reason}"),
             12,
-            CELL_BAND_Y + 14,
+            CELL_BAND_Y + 30,
             palette.text_tertiary,
         );
-        if let Some(reason) = modem.reason.as_deref() {
-            if !reason.is_empty() {
-                text(
-                    canvas,
-                    &body_font,
-                    &format!("modem: {reason}"),
-                    12,
-                    CELL_BAND_Y + 32,
-                    palette.text_tertiary,
-                );
-            }
-        }
     }
 }
 
@@ -345,9 +355,8 @@ mod tests {
     #[test]
     fn cloud_label_buckets() {
         let mut cloud = CloudCtx::default();
-        // No drone id -> unpaired.
         assert_eq!(cloud_state_label(&cloud), ("UNPAIRED", Severity::Muted));
-        cloud.drone_id = Some("ados-58c27faf".to_string());
+        cloud.paired = true;
         cloud.mqtt_state = Some("connected".to_string());
         cloud.http_state = Some("ok".to_string());
         assert_eq!(cloud_state_label(&cloud), ("CONNECTED", Severity::Ok));
@@ -356,6 +365,36 @@ mod tests {
         cloud.mqtt_state = Some("error".to_string());
         cloud.http_state = Some("down".to_string());
         assert_eq!(cloud_state_label(&cloud), ("OFFLINE", Severity::Err));
+    }
+
+    /// A node Mission Control has claimed is paired whether or not anything
+    /// reports its transports; the badge follows `paired`, as the dashboard does.
+    #[test]
+    fn a_claimed_node_with_no_transport_report_reads_paired() {
+        let cloud = CloudCtx {
+            paired: true,
+            ..CloudCtx::default()
+        };
+        assert_eq!(cloud_state_label(&cloud), ("PAIRED", Severity::Ok));
+    }
+
+    /// An uplink the agent reports as Ethernet is shown as Ethernet, and an
+    /// unreported one as unknown; only a reported `none` is "No WAN uplink".
+    #[test]
+    fn the_wan_band_follows_the_reported_uplink() {
+        let mut network = NetworkCtx::default();
+        assert_eq!(wan_summary(&network).0, "Uplink state unknown");
+        network.uplink_type = Some("eth".to_string());
+        network.uplink_reachable = Some(true);
+        assert_eq!(
+            wan_summary(&network),
+            (
+                "Ethernet uplink".to_string(),
+                Some("internet reachable".to_string())
+            )
+        );
+        network.uplink_type = Some("none".to_string());
+        assert_eq!(wan_summary(&network).0, "No WAN uplink");
     }
 
     #[test]
@@ -386,6 +425,7 @@ mod tests {
     fn wifi_fallback_renders_when_no_modem() {
         let page = UplinkDetailPage;
         let mut ctx = PageContext::default();
+        ctx.network.uplink_type = Some("wifi".to_string());
         ctx.network.wifi_client.connected = true;
         ctx.network.wifi_client.ssid = Some("HomeNetwork".to_string());
         ctx.network.wifi_client.signal_dbm = Some(-47.0);

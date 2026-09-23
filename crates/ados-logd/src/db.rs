@@ -252,7 +252,7 @@ pub fn auto_vacuum_mode(conn: &Connection) -> Result<i64, DbError> {
 ///
 /// This was learned the hard way. Doing the conversion inside [`open`] put a
 /// ~950 MB rewrite in front of readiness on a real node: the unit is
-/// `Type=notify` with `TimeoutStartSec=5min` and `Restart=on-failure`, so it sat
+/// `Type=notify` with `TimeoutStartSec=5min` and `Restart=always`, so it sat
 /// in `activating` accumulating a 955 MB WAL and was minutes from being killed
 /// mid-rewrite and restarted into the same rewrite — a crash loop that tears the
 /// store, which is precisely the failure the incremental work exists to stop.

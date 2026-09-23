@@ -14,7 +14,6 @@ import pytest
 
 from ados.services.mavlink.encoders import (
     CRC_EXTRA_TABLE,
-    ENCODER_CAPABILITY_GATES,
     MESSAGE_ID_TO_ENCODER,
     MESSAGE_NAMES,
     encode_global_vision_position_estimate,
@@ -270,16 +269,6 @@ def test_registry_covers_all_vision_ids():
         assert mid in MESSAGE_ID_TO_ENCODER
         assert mid in MESSAGE_NAMES
         assert mid in CRC_EXTRA_TABLE
-        assert mid in ENCODER_CAPABILITY_GATES
-
-
-def test_capability_routing_vision():
-    # Pure sensor publishers ride on mavlink.write.
-    assert ENCODER_CAPABILITY_GATES[100] == "mavlink.write"
-    assert ENCODER_CAPABILITY_GATES[106] == "mavlink.write"
-    # Estimator-pose injections need their own capability.
-    for mid in (101, 102, 331, 11011):
-        assert ENCODER_CAPABILITY_GATES[mid] == "estimator.pose.inject"
 
 
 def test_crc_extra_table_matches_dialect():

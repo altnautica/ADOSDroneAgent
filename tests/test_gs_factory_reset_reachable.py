@@ -70,26 +70,9 @@ async def test_loopback_still_reaches_the_confirm_gate() -> None:
     assert _code(exc) == "E_CONFIRM_MISMATCH"
 
 
-async def test_a_lan_caller_without_a_captive_token_is_still_refused() -> None:
-    # Unchanged, and the point of the gate: a curl from the operator's laptop
-    # gets nowhere near the wipe, even with a correct-looking confirm.
+async def test_a_lan_caller_is_refused_before_the_confirm_gate() -> None:
+    # The point of the gate: a curl from the operator's laptop gets nowhere
+    # near the wipe, even with a correct-looking confirm.
     exc = await _reset(_FakeRequest(host="192.168.1.40"), confirm=_FINGERPRINT)
     assert exc.status_code == 401
-    assert _code(exc) == "E_CAPTIVE_TOKEN_INVALID"
-
-
-async def test_a_lan_caller_with_a_live_captive_token_reaches_the_confirm_gate() -> None:
-    from ados.services.setup_webapp.captive_token import get_captive_token_store
-
-    token = get_captive_token_store().generate()
-    request = _FakeRequest(host="192.168.4.23", headers={"x-ados-captive-key": token})
-
-    exc = await _reset(request, confirm="wrong")
-    assert exc.status_code == 400
-    assert _code(exc) == "E_CONFIRM_MISMATCH"
-
-    # Single-use: the same token must not open the route twice.
-    replay = _FakeRequest(host="192.168.4.23", headers={"x-ados-captive-key": token})
-    exc = await _reset(replay, confirm="wrong")
-    assert exc.status_code == 401
-    assert _code(exc) == "E_CAPTIVE_TOKEN_INVALID"
+    assert _code(exc) == "E_NOT_ON_BOX"

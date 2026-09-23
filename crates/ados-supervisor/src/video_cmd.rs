@@ -8,7 +8,7 @@
 //!
 //! A driver plugin (e.g. a smart-camera / optical-pod driver) calls the plugin
 //! `ctx.video.set_source([...])` facade after it negotiates its feeds, so the
-//! operator never hand-types an RTSP URL (Rule 26). The host never writes the
+//! operator never hand-types an RTSP URL. The host never writes the
 //! config itself (it runs sandboxed); the privileged write lives here.
 
 use std::path::Path;
@@ -112,7 +112,7 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     // becomes a mediamtx path + a WHEP URL segment, so it must be path-safe
     // (alphanumeric / dash / underscore) and unique — a bad char or a duplicate
     // would corrupt the mediamtx config and wedge the whole pipeline. Reject the
-    // whole list rather than write a half-usable config (Rule 44 — never
+    // whole list rather than write a half-usable config (never
     // advertise a stream the pipeline cannot actually serve).
     let mut seen = std::collections::HashSet::new();
     for leg in legs {

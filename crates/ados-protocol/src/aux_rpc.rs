@@ -354,11 +354,11 @@ mod tests {
     #[test]
     fn round_trips_a_typical_get_request() {
         let path = b"/api/pairing/info";
-        let enc = encode_request(RpcMethod::Get, 0xCAFEBABE, b"77735cd38937", path, &[]).unwrap();
+        let enc = encode_request(RpcMethod::Get, 0xCAFEBABE, b"0a1b2c3d4e5f", path, &[]).unwrap();
         let dec = decode_request(&enc).unwrap();
         assert_eq!(dec.id, 0xCAFEBABE);
         assert_eq!(dec.method, RpcMethod::Get);
-        assert_eq!(dec.target, b"77735cd38937");
+        assert_eq!(dec.target, b"0a1b2c3d4e5f");
         assert_eq!(dec.path, path);
         assert!(dec.body.is_empty());
     }
@@ -384,7 +384,7 @@ mod tests {
     fn round_trips_a_post_with_a_body() {
         let path = b"/api/config";
         let body = br#"{"key":"agent.name","value":"example-drone"}"#;
-        let enc = encode_request(RpcMethod::Post, 1, b"77735cd38937", path, body).unwrap();
+        let enc = encode_request(RpcMethod::Post, 1, b"0a1b2c3d4e5f", path, body).unwrap();
         let dec = decode_request(&enc).unwrap();
         assert_eq!(dec.method, RpcMethod::Post);
         assert_eq!(dec.path, path);
@@ -492,11 +492,11 @@ mod tests {
         // changed a single byte, every drone running an older build would stop
         // decoding relayed calls the moment this shipped.
         let with_helper =
-            encode_request(RpcMethod::Post, 7, b"77735cd38937", b"/api/status", b"{}").unwrap();
+            encode_request(RpcMethod::Post, 7, b"0a1b2c3d4e5f", b"/api/status", b"{}").unwrap();
         let explicit_empty = encode_request_with_ticket(
             RpcMethod::Post,
             7,
-            b"77735cd38937",
+            b"0a1b2c3d4e5f",
             b"/api/status",
             b"{}",
             &[],
@@ -512,11 +512,11 @@ mod tests {
 
     #[test]
     fn a_ticket_survives_the_round_trip() {
-        let ticket = b"v1|relay.http|77735cd38937|100|130|abcdef";
+        let ticket = b"v1|relay.http|0a1b2c3d4e5f|100|130|abcdef";
         let enc = encode_request_with_ticket(
             RpcMethod::Get,
             3,
-            b"77735cd38937",
+            b"0a1b2c3d4e5f",
             b"/api/status",
             &[],
             ticket,
@@ -525,7 +525,7 @@ mod tests {
         let dec = decode_request(&enc).unwrap();
         assert_eq!(dec.ticket, ticket);
         assert_eq!(dec.path, b"/api/status");
-        assert_eq!(dec.target, b"77735cd38937");
+        assert_eq!(dec.target, b"0a1b2c3d4e5f");
     }
 
     #[test]

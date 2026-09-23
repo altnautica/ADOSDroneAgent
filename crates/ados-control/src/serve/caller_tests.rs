@@ -78,6 +78,7 @@ fn harness(paired: bool) -> Harness {
             bind_state: d.join("bind-state.json"),
             profile_conf: d.join("profile.conf"),
             mesh_role: d.join("mesh-role"),
+            relay_secret: d.join("relay-peer-secret"),
         },
         pin.clone(),
         mcp.clone(),

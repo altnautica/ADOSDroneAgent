@@ -141,6 +141,10 @@ pub async fn mint_ws_ticket(
     let issuer = match state.pairing.current() {
         Pairing::Paired(key) => WsTicketIssuer::from_api_key(&key),
         Pairing::Unpaired => WsTicketIssuer::from_api_key(""),
+        // No key anyone holds: nothing minted here could be verified.
+        Pairing::Unreadable => {
+            return detail(StatusCode::SERVICE_UNAVAILABLE, "The pairing state on this device is unreadable. Unpair it on the device itself to recover.")
+        }
     };
     let ticket = issuer.mint(&req.scope, ttl);
 

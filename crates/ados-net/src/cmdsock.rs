@@ -32,14 +32,17 @@
 //!     -> {"ok":true,"mode":"dhcp",...}     (a no_ethernet_connection apply -> ok:false)
 //! {"op":"modem_config","apn":"internet","cap_gb":5.0,"enabled":true}
 //!     -> {"ok":true,"apn":"internet","cap_gb":5.0,"enabled":true}
+//! {"op":"share_uplink","enabled":true}
+//!     -> {"ok":true,"applied":true,"backend":"nftables","apply_error":null}
 //! ```
 //!
 //! A failed apply replies with `ok:false` and the manager's `error`, so the REST
 //! layer can surface it. The socket mutates the live managers it shares with the
 //! daemon; the AP / WiFi-client ops drive the radio, the Ethernet / modem ops the
-//! profiles, and the modem op only PERSISTS the sidecar (the daemon's poll loop
-//! reconciles the live session) — the REST layer owns the config-file persistence
-//! the AP channel/ssid + the share-uplink flag need.
+//! profiles, the share-uplink op the NAT firewall on the active uplink, and the
+//! modem op only PERSISTS the sidecar (the daemon's poll loop reconciles the live
+//! session) — the REST layer owns the config-file persistence the AP
+//! channel/ssid + the share-uplink flag need.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -49,7 +52,9 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
+use crate::firewall::ShareUplinkFirewall;
 use crate::managers::{EthernetManager, HostapdManager, ModemManager, WifiClientManager};
+use crate::router::UplinkRouter;
 
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -72,6 +77,11 @@ pub struct CmdState {
     /// The live cellular modem manager the daemon owns; drives `modem_config`
     /// (persist only — the daemon's poll loop reconciles the live session).
     pub modem: Arc<ModemManager>,
+    /// The share-uplink firewall the daemon's uplink-switch consumer also
+    /// drives; drives `share_uplink`. Its applies are serialized internally.
+    pub firewall: Arc<ShareUplinkFirewall>,
+    /// The live uplink router, for the active iface `share_uplink` applies on.
+    pub router: Arc<UplinkRouter>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,6 +181,10 @@ enum Command {
         cap_gb: Option<f64>,
         enabled: Option<bool>,
     },
+    /// Apply (or remove) the share-uplink NAT on the active uplink now.
+    ShareUplink {
+        enabled: bool,
+    },
 }
 
 /// The outcome of parsing a request line: an apply-ready [`Command`], or a
@@ -234,6 +248,10 @@ fn parse_command(line: &[u8]) -> Parsed {
             cap_gb: req.cap_gb,
             enabled: req.enabled,
         }),
+        "share_uplink" => match req.enabled {
+            Some(enabled) => Parsed::Cmd(Command::ShareUplink { enabled }),
+            None => Parsed::Reply(json!({"ok": false, "error": "E_MISSING_ENABLED"})),
+        },
         other => Parsed::Reply(json!({"ok": false, "error": format!("E_UNKNOWN_OP: {other}")})),
     }
 }
@@ -345,6 +363,15 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
         } => {
             let res = state.modem.configure(apn.as_deref(), cap_gb, enabled).await;
             with_ok(res)
+        }
+        Command::ShareUplink { enabled } => {
+            let iface = state.router.active_iface().await;
+            with_ok(
+                state
+                    .firewall
+                    .apply_share_uplink(enabled, iface.as_deref())
+                    .await,
+            )
         }
         Command::Join { .. }
         | Command::Forget { .. }
@@ -668,6 +695,18 @@ mod tests {
                 cap_gb: None,
                 enabled: None,
             }
+        );
+    }
+
+    #[test]
+    fn share_uplink_requires_the_enabled_flag() {
+        assert_eq!(
+            cmd(br#"{"op":"share_uplink","enabled":true}"#),
+            Command::ShareUplink { enabled: true }
+        );
+        assert_eq!(
+            reply(br#"{"op":"share_uplink"}"#)["error"],
+            "E_MISSING_ENABLED"
         );
     }
 

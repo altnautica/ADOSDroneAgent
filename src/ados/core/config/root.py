@@ -37,9 +37,7 @@ from .video import VideoConfig
 # every read surface covers it automatically — there is no second list to
 # keep in step.
 SECRET_PATHS: tuple[str, ...] = (
-    "security.tls.key_path",
     "security.api.api_key",
-    "security.wireguard.config_path",
     "server.self_hosted.api_key",
     "security.hmac_secret",
     "server.mqtt_password",

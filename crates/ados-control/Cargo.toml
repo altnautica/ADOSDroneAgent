@@ -9,9 +9,10 @@ description = "Native HTTP control surface: the same status/pairing/command API 
 
 # lib + a daemon binary. The lib carries the dual-listener serve loop, the
 # LAN-edge auth, the shared app state, and the route Router; the binary inits
-# logging + systemd notify and runs the lifecycle. The binary ships dark — no
-# supervisor registration and no systemd unit enable it yet, so it has no effect
-# at the install layer until the wiring chunk lands. The crate is inert.
+# logging + systemd notify and runs the lifecycle. The binary is the LAN front
+# on :8080 (the installer writes the front marker and enables its unit on every
+# install). Through ados-groundlink it links ados-compute's bundled C (SQLite,
+# zstd, ring), so its release build cross-compiles with cargo-zigbuild.
 [[bin]]
 name = "ados-control"
 path = "src/main.rs"

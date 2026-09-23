@@ -11,16 +11,17 @@
 //! `/run/ados/plugin-host/_control.sock` that applies an on-box config write to
 //! the live store and persists it.
 //!
-//! Trust boundary: the socket is NOT in the per-plugin socket dir. Every plugin
-//! unit can write `/run/ados/plugins`, and a plugin that reached this socket
-//! could rewrite another plugin's config or run another plugin's tools with that
-//! plugin's grants. It lives in its own directory, created `0700` by the daemon
+//! Trust boundary: the socket is NOT in the per-plugin socket dir. A plugin that
+//! reached this socket could rewrite another plugin's config or run another
+//! plugin's tools with that plugin's grants, so it sits outside every plugin's
+//! mount namespace. It lives in its own directory, created `0700` by the daemon
 //! (root), and the listener re-checks each peer's kernel credentials (root or the
 //! operator group only). The off-box auth lives at the `ados-control` HTTP edge
 //! (the LAN pairing key when paired), exactly like `POST /api/vision/designate`.
 //! The wire is the same length-prefixed msgpack [`Envelope`] every other agent
 //! IPC socket speaks, so no new framing.
 
+use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -45,6 +46,11 @@ pub const CONTROL_SOCKET_NAME: &str = "_control.sock";
 /// How long a caller has to deliver its request frame. A peer that connects and
 /// then stalls is dropped instead of pinning a task for the daemon's lifetime.
 const REQUEST_READ_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Most control connections served at once. The callers are the agent's own
+/// routes and the reconciler, one short request each; the cap bounds the tasks
+/// and fds a stuck caller can hold.
+const CONTROL_MAX_CONNECTIONS: usize = 32;
 
 /// The control method that applies a per-plugin config write to the live store.
 pub const METHOD_CONFIG_SET: &str = "config.set";
@@ -90,14 +96,15 @@ pub fn control_socket_path(control_dir: &Path) -> PathBuf {
 pub trait ConfigControl: Send + Sync {
     /// Apply a config write. Returns the effective scope (`drone`/`global`) on
     /// success, or a human error string. Persistence is the implementation's
-    /// concern (the real store flushes its 0600 JSON file on every set).
+    /// concern (the real store flushes its 0600 JSON file on every set), which
+    /// is why the write is async.
     fn apply_config_set(
         &self,
         plugin_id: &str,
         key: &str,
         value: Value,
         scope: &str,
-    ) -> Result<String, String>;
+    ) -> impl Future<Output = Result<String, String>> + Send;
 
     /// The plugin's effective per-drone config as a map, or a human error.
     fn config_snapshot(&self, plugin_id: &str) -> Result<Value, String>;
@@ -185,9 +192,9 @@ fn handle_config_get<H: ConfigControl>(host: &H, req: &Envelope) -> Envelope {
     }
 }
 
-/// Handle one decoded control request against the host. Pure of I/O so it unit
-/// tests directly.
-fn handle_request<H: ConfigControl>(host: &H, req: &Envelope) -> Envelope {
+/// Handle one decoded control request against the host. Free of socket I/O so
+/// it unit tests directly.
+async fn handle_request<H: ConfigControl>(host: &H, req: &Envelope) -> Envelope {
     if req.method == METHOD_CONFIG_GET {
         return handle_config_get(host, req);
     }
@@ -214,7 +221,7 @@ fn handle_request<H: ConfigControl>(host: &H, req: &Envelope) -> Envelope {
     let scope = arg_str(&req.args, "scope")
         .filter(|s| !s.is_empty())
         .unwrap_or("drone");
-    match host.apply_config_set(plugin_id, key, value, scope) {
+    match host.apply_config_set(plugin_id, key, value, scope).await {
         Ok(effective) => ok_response(&req.request_id, &effective),
         Err(e) => err_response(&req.request_id, e),
     }
@@ -369,7 +376,7 @@ async fn serve_connection<H: ConfigControl>(
         Ok(req) if req.method == METHOD_TOKEN_ROTATE || req.method == METHOD_PLUGIN_RECONCILE => {
             handle_lifecycle(lifecycle.as_ref(), &req)
         }
-        Ok(req) => handle_request(host.as_ref(), &req),
+        Ok(req) => handle_request(host.as_ref(), &req).await,
         Err(e) => err_response("", format!("decode control request: {e}")),
     };
     if let Ok(frame) = resp.encode_frame() {
@@ -418,17 +425,31 @@ pub fn serve_control<H: ConfigControl + 'static>(
     let path = control_socket_path(&control_dir);
     let listener = ados_protocol::ipc::bind_command_socket(&path, 0o600)?;
 
+    let permits = Arc::new(tokio::sync::Semaphore::new(CONTROL_MAX_CONNECTIONS));
     let task = tokio::spawn(async move {
         loop {
             let stream = match listener.accept().await {
                 Ok((s, _addr)) => s,
-                Err(_) => break,
+                Err(e) => {
+                    // A transient accept error (fd pressure) must not end the
+                    // control surface for the daemon's lifetime.
+                    tracing::warn!(error = %e, "control socket accept failed");
+                    tokio::time::sleep(crate::server::ACCEPT_RETRY_INTERVAL).await;
+                    continue;
+                }
+            };
+            // Past the cap the connection is dropped unanswered; the callers
+            // treat an unanswered control call as unreachable and retry.
+            let Ok(permit) = permits.clone().try_acquire_owned() else {
+                tracing::warn!("control socket at its connection cap; dropping a connection");
+                continue;
             };
             let host = host.clone();
             let invoke = invoke.clone();
             let lifecycle = lifecycle.clone();
             tokio::spawn(async move {
                 serve_connection(host, invoke, lifecycle, stream).await;
+                drop(permit);
             });
         }
     });
@@ -448,7 +469,7 @@ mod tests {
     }
 
     impl ConfigControl for StubHost {
-        fn apply_config_set(
+        async fn apply_config_set(
             &self,
             plugin_id: &str,
             key: &str,
@@ -494,8 +515,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn applies_a_config_write_and_echoes_scope() {
+    #[tokio::test]
+    async fn applies_a_config_write_and_echoes_scope() {
         let host = StubHost::default();
         let req = request(vec![
             (
@@ -506,7 +527,7 @@ mod tests {
             (Value::from("value"), Value::Boolean(true)),
             (Value::from("scope"), Value::from("drone")),
         ]);
-        let resp = handle_request(&host, &req);
+        let resp = handle_request(&host, &req).await;
         assert_eq!(resp.error, None);
         let last = host.last.lock().unwrap().clone().expect("a write");
         assert_eq!(last.0, "com.altnautica.follow-me");
@@ -515,44 +536,44 @@ mod tests {
         assert_eq!(last.3, "drone");
     }
 
-    #[test]
-    fn defaults_scope_to_drone_when_absent() {
+    #[tokio::test]
+    async fn defaults_scope_to_drone_when_absent() {
         let host = StubHost::default();
         let req = request(vec![
             (Value::from("plugin_id"), Value::from("p")),
             (Value::from("key"), Value::from("k")),
             (Value::from("value"), Value::from(3)),
         ]);
-        let resp = handle_request(&host, &req);
+        let resp = handle_request(&host, &req).await;
         assert_eq!(resp.error, None);
         assert_eq!(host.last.lock().unwrap().clone().unwrap().3, "drone");
     }
 
-    #[test]
-    fn rejects_a_missing_plugin_id() {
+    #[tokio::test]
+    async fn rejects_a_missing_plugin_id() {
         let host = StubHost::default();
         let req = request(vec![
             (Value::from("key"), Value::from("k")),
             (Value::from("value"), Value::from(1)),
         ]);
-        let resp = handle_request(&host, &req);
+        let resp = handle_request(&host, &req).await;
         assert!(resp.error.unwrap().contains("plugin_id"));
         assert!(host.last.lock().unwrap().is_none());
     }
 
-    #[test]
-    fn rejects_a_missing_value() {
+    #[tokio::test]
+    async fn rejects_a_missing_value() {
         let host = StubHost::default();
         let req = request(vec![
             (Value::from("plugin_id"), Value::from("p")),
             (Value::from("key"), Value::from("k")),
         ]);
-        let resp = handle_request(&host, &req);
+        let resp = handle_request(&host, &req).await;
         assert!(resp.error.unwrap().contains("value"));
     }
 
-    #[test]
-    fn surfaces_a_host_error() {
+    #[tokio::test]
+    async fn surfaces_a_host_error() {
         let host = StubHost {
             fail: Some("scope must be drone or global, got nonsense".to_string()),
             ..StubHost::default()
@@ -563,16 +584,16 @@ mod tests {
             (Value::from("value"), Value::from(1)),
             (Value::from("scope"), Value::from("nonsense")),
         ]);
-        let resp = handle_request(&host, &req);
+        let resp = handle_request(&host, &req).await;
         assert!(resp.error.unwrap().contains("scope must be"));
     }
 
-    #[test]
-    fn rejects_an_unknown_method() {
+    #[tokio::test]
+    async fn rejects_an_unknown_method() {
         let host = StubHost::default();
         let mut req = request(vec![]);
         req.method = "config.delete".to_string();
-        let resp = handle_request(&host, &req);
+        let resp = handle_request(&host, &req).await;
         assert!(resp.error.unwrap().contains("unknown control method"));
     }
 

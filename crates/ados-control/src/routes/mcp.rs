@@ -111,6 +111,9 @@ pub async fn mint_mcp_token(
                 "Agent is unpaired; pair first, then mint a scoped MCP token.",
             )
         }
+        Pairing::Unreadable => {
+            return detail(StatusCode::SERVICE_UNAVAILABLE, "The pairing state on this device is unreadable. Unpair it on the device itself to recover.")
+        }
     };
     if body.scopes.is_empty() {
         return detail(StatusCode::BAD_REQUEST, "At least one scope is required.");

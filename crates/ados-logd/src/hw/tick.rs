@@ -205,7 +205,7 @@ impl Collector {
     /// NPU utilization (Rockchip RKNPU debugfs), emitted as `npu.load_pct`.
     /// Returns `1` when there is no readable NPU load (no NPU, debugfs not
     /// mounted, or no permission) so the absence is observed rather than reported
-    /// as a fabricated 0 (Rule 44); the signal is simply absent then.
+    /// as a fabricated 0; the signal is simply absent then.
     fn fold_npu(&self, ts: i64, snap: &mut HwSnapshot, metrics: &mut Vec<TelemetryFrame>) -> u32 {
         match read_npu_load_pct(&self.root) {
             Some(pct) => {

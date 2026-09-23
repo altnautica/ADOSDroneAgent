@@ -26,8 +26,8 @@
 //!
 //! Every optional field is `skip_serializing_if`, so a fact the drone could not
 //! read is ABSENT from the frame rather than sent as a plausible-looking `0` or
-//! `false`. A ground reader shows "unknown", never a fabricated reading
-//! (operating rule 44). This is also what keeps the frame small in practice: a
+//! `false`. A ground reader shows "unknown", never a fabricated reading.
+//! This is also what keeps the frame small in practice: a
 //! node with no flight controller spends no bytes saying so.
 //!
 //! ## Trimming, not fragmentation

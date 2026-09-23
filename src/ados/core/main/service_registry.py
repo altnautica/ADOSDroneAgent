@@ -86,35 +86,12 @@ async def register_services(app: AgentApp) -> None:  # noqa: C901
     if app.config.agent.tier == "auto":
         app.config.agent.tier = f"tier{board.tier}"
 
-    # Initialize model manager (vision model registry + cache)
+    # Model manager (vision model registry + cache). It picks variants sized for
+    # the NPU of the profile detection resolved (board_override, compatible token,
+    # variant), so the rating comes from that result, not a second board match.
     from ados.services.vision.model_manager import ModelManager
 
-    # Load raw board profile YAML so the model manager can pick variants
-    # sized for the detected NPU.
-    board_profile_dict: dict = {}
-    try:
-        import yaml as _yaml
-
-        from ados.hal.detect import BOARDS_DIR
-
-        if BOARDS_DIR.is_dir():
-            model_lower = board.model.lower()
-            for yaml_file in sorted(BOARDS_DIR.glob("*.yaml")):
-                with open(yaml_file) as _f:
-                    raw = _yaml.safe_load(_f)
-                    if not raw:
-                        continue
-                    for pattern in raw.get("model_patterns", []):
-                        if pattern.lower() in model_lower:
-                            board_profile_dict = raw
-                            break
-                if board_profile_dict:
-                    break
-    except Exception:
-        pass
-
-    npu_tops = board_profile_dict.get("compute", {}).get("npu_tops", 0)
-    app.model_manager = ModelManager(app.config.vision, npu_tops=npu_tops)
+    app.model_manager = ModelManager(app.config.vision, npu_tops=board.npu_tops)
 
     # The native MAVLink router owns the FC link, the direct-GCS proxies
     # (WebSocket / TCP / UDP), and the parameter sweep. It runs as its own

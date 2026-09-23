@@ -20,7 +20,8 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_circle, fill_rect, fill_rect_outline, line, text, Canvas};
 use crate::pages::{
-    blank_panel, AgentRequest, Chrome, HitAction, HitZone, MeshCtx, Page, PageContext, PanelAction,
+    blank_panel, AgentRequest, Chrome, HitAction, HitZone, MeshCtx, MeshState, Page, PageContext,
+    PanelAction,
 };
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
@@ -121,12 +122,14 @@ impl Page for MeshDetailPage {
         let mut canvas = blank_panel(palette);
         draw_detail_header(&mut canvas, palette, "Mesh");
 
+        // A missing role is unknown, not direct: a failed status poll must not
+        // present this node as "not a mesh node".
         let role = ctx
             .role
             .current
-            .clone()
-            .unwrap_or_else(|| "direct".to_string())
-            .to_ascii_lowercase();
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
 
         // Role badge row.
         let dot_color = role_color(palette, &role);
@@ -141,10 +144,15 @@ impl Page for MeshDetailPage {
             None,
         );
         let role_font = LoadedFont::new(FontFace::SansBold, 14);
+        let role_label = if role.is_empty() {
+            "ROLE UNKNOWN".to_string()
+        } else {
+            role.to_ascii_uppercase()
+        };
         text(
             &mut canvas,
             &role_font,
-            &role.to_ascii_uppercase(),
+            &role_label,
             28,
             ROLE_ROW_Y + 4,
             palette.text_primary,
@@ -172,15 +180,31 @@ impl Page for MeshDetailPage {
             palette.text_primary,
         );
 
-        // Body selection: a direct role shows the not-a-mesh-node notice, a
-        // mesh-capable role with the carrier down shows the checking notice,
-        // otherwise the peer list.
+        // Body selection: a direct role shows the not-a-mesh-node notice; an
+        // unknown role or mesh state says so; a mesh that reports down shows the
+        // checking notice; otherwise the peer list.
         if role == "direct" {
             render_direct_body(&mut canvas, palette);
-        } else if !ctx.mesh.up {
-            render_mesh_down_body(&mut canvas, palette, self.tick.get());
+        } else if role.is_empty() {
+            render_notice_body(
+                &mut canvas,
+                palette,
+                "Role unknown",
+                "no status from the agent",
+            );
         } else {
-            render_peer_list(&mut canvas, palette, &ctx.mesh, self.scroll_offset.get());
+            match ctx.mesh.state() {
+                MeshState::Unknown => render_notice_body(
+                    &mut canvas,
+                    palette,
+                    "Mesh state unknown",
+                    "no current mesh snapshot",
+                ),
+                MeshState::Down => render_mesh_down_body(&mut canvas, palette, self.tick.get()),
+                MeshState::Up => {
+                    render_peer_list(&mut canvas, palette, &ctx.mesh, self.scroll_offset.get())
+                }
+            }
         }
 
         // Footer: gateway + partition status.
@@ -271,6 +295,30 @@ impl Page for MeshDetailPage {
     }
 }
 
+/// Paint a two-line tertiary notice centered in the list region.
+fn render_notice_body(canvas: &mut Canvas, palette: &Palette, msg: &str, sub: &str) {
+    let font = LoadedFont::new(FontFace::SansBold, 14);
+    let (mw, mh) = font.text_size(msg);
+    text(
+        canvas,
+        &font,
+        msg,
+        (PAGE_W - mw as i32) / 2,
+        PEER_LIST_Y + (PEER_LIST_H - mh as i32) / 2 - 6,
+        palette.text_secondary,
+    );
+    let sub_font = LoadedFont::new(FontFace::SansRegular, 11);
+    let sw = sub_font.text_size(sub).0 as i32;
+    text(
+        canvas,
+        &sub_font,
+        sub,
+        (PAGE_W - sw) / 2,
+        PEER_LIST_Y + (PEER_LIST_H - mh as i32) / 2 + 14,
+        palette.text_tertiary,
+    );
+}
+
 /// Paint the direct-role body: a "not a mesh node" notice centered in the list
 /// region.
 fn render_direct_body(canvas: &mut Canvas, palette: &Palette) {
@@ -321,9 +369,18 @@ fn render_mesh_down_body(canvas: &mut Canvas, palette: &Palette, tick: u64) {
     fill_circle(canvas, cx + dx, cy + dy, 3, palette.accent_primary, None);
 }
 
-/// Paint up to six visible peer rows starting at the scroll offset.
+/// Paint up to six visible peer rows starting at the scroll offset. With no
+/// roster in the snapshot, the peer count is all that is known and is shown as
+/// such, rather than an empty list that reads as "nobody visible".
 fn render_peer_list(canvas: &mut Canvas, palette: &Palette, mesh: &MeshCtx, scroll_offset: i32) {
-    let peers = &mesh.peers;
+    let Some(peers) = mesh.peers.as_deref() else {
+        let count = match mesh.peer_count {
+            Some(n) => format!("{n} peers"),
+            None => "— peers".to_string(),
+        };
+        render_notice_body(canvas, palette, &count, "peer roster not reported");
+        return;
+    };
     let max_offset = (peers.len() as i32 - PEER_ROWS_VISIBLE).max(0);
     let offset = scroll_offset.clamp(0, max_offset);
     let start = offset as usize;
@@ -454,14 +511,16 @@ mod tests {
         let page = MeshDetailPage::new();
         let mut ctx = PageContext::default();
         ctx.role.current = Some("receiver".to_string());
-        ctx.mesh.up = true;
-        ctx.mesh.peers = (0..3)
-            .map(|i| MeshPeer {
-                device_id: Some(format!("ados-peer-{i:08x}")),
-                role: Some("relay".to_string()),
-                last_seen_seconds_ago: Some(i as f64 * 2.0),
-            })
-            .collect();
+        ctx.mesh.up = Some(true);
+        ctx.mesh.peers = Some(
+            (0..3)
+                .map(|i| MeshPeer {
+                    device_id: Some(format!("ados-peer-{i:08x}")),
+                    role: Some("relay".to_string()),
+                    last_seen_seconds_ago: Some(i as f64 * 2.0),
+                })
+                .collect(),
+        );
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
         let zones = page.hit_zones(&ctx);

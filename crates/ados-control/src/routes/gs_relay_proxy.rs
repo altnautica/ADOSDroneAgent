@@ -42,8 +42,9 @@ use crate::state::AppState;
 /// request.
 pub async fn handle(
     State(state): State<AppState>,
-    Path((peer_device_id, path)): Path<(String, String)>,
+    Path((peer_device_id, _decoded_path)): Path<(String, String)>,
     method: axum::http::Method,
+    uri: axum::http::Uri,
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
@@ -83,21 +84,29 @@ pub async fn handle(
         }
     };
 
-    // Build the full path the drone's HTTP API will see. The wildcard capture
-    // strips the leading slash, so re-add it: `/api/pairing/info`. The query
-    // string travels too — `/api/logs?limit=5` reaching the drone as
+    // Build the full path the drone's HTTP API will see, from the RAW request
+    // path: the wildcard capture is percent-decoded, and a decoded space, `?`,
+    // `#` or `/` would change or break the request line the drone builds. The
+    // query string travels too — `/api/logs?limit=5` reaching the drone as
     // `/api/logs` would silently serve endpoint defaults instead of what the
     // caller asked for.
+    let Some(path) = raw_forward_path(uri.path()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"detail": "relay path is missing"})),
+        )
+            .into_response();
+    };
     let full_path = match raw_query.as_deref().filter(|q| !q.is_empty()) {
-        Some(q) => format!("/{path}?{q}"),
-        None => format!("/{path}"),
+        Some(q) => format!("{path}?{q}"),
+        None => path.to_string(),
     };
 
     if !path_is_safe(&full_path) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "detail": "relay path contains control characters"
+                "detail": "relay path contains control characters or spaces"
             })),
         )
             .into_response();
@@ -220,22 +229,32 @@ fn is_ground_station(state: &AppState) -> bool {
     profile == "ground-station"
 }
 
+/// The still-encoded path to forward: everything after the peer segment of the
+/// raw request path, starting with its `/`. `None` when there is nothing after
+/// the peer.
+fn raw_forward_path(uri_path: &str) -> Option<&str> {
+    let rest = uri_path.strip_prefix("/api/v1/ground-station/relay-proxy/")?;
+    let slash = rest.find('/')?;
+    Some(&rest[slash..]).filter(|p| p.len() > 1)
+}
+
 /// Whether a relay path may be forwarded.
 ///
-/// axum percent-decodes the wildcard capture, so `%0D%0A` in the URL arrives as
-/// literal CRLF. The drone interpolates this path straight into the request
-/// line of the HTTP/1.1 request it makes against its OWN API — a call that
-/// arrives over genuine loopback and is therefore fully on-box trusted — so an
-/// unfiltered control character is header injection into a trusted context.
-/// The drone rejects it independently; neither end may trust the other's
-/// validation.
+/// The path is forwarded still percent-encoded, so a raw control character or
+/// space here came from a client that sent one unencoded. The drone
+/// interpolates this path straight into the request line of the HTTP/1.1
+/// request it makes against its OWN API — a call that arrives over genuine
+/// loopback and is therefore fully on-box trusted — so an unfiltered control
+/// character is header injection into a trusted context, and a space splits
+/// the request line. The drone rejects both independently; neither end may
+/// trust the other's validation.
 fn path_is_safe(path: &str) -> bool {
-    !path.bytes().any(|b| b < 0x20 || b == 0x7F)
+    !path.bytes().any(|b| b <= 0x20 || b == 0x7F)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{path_is_safe, relayed_response};
+    use super::{path_is_safe, raw_forward_path, relayed_response};
     use ados_protocol::aux_rpc_proxy::RpcResponseOwned;
 
     fn relayed(status: u16, headers: &[(&str, &str)], body: &[u8]) -> axum::response::Response {
@@ -343,6 +362,31 @@ mod tests {
         assert!(!path_is_safe("/api/\0version"));
         assert!(!path_is_safe("/api/\tversion"));
         assert!(!path_is_safe("/api/version\x7f"));
+        // A bare space would split the drone's request line.
+        assert!(!path_is_safe("/api/v1/network/configured/Home Net"));
+    }
+
+    #[test]
+    fn the_forwarded_path_stays_percent_encoded() {
+        // A saved network named "Home Net" (or with a `?` in it) must reach the
+        // drone as the same encoded path the operator's client sent.
+        let raw = "/api/v1/ground-station/relay-proxy/0a1b2c3d4e5f/api/v1/network/configured/Home%20Net%3F";
+        let path = raw_forward_path(raw).unwrap();
+        assert_eq!(path, "/api/v1/network/configured/Home%20Net%3F");
+        assert!(path_is_safe(path));
+        // An encoded slash stays one path segment.
+        assert_eq!(
+            raw_forward_path("/api/v1/ground-station/relay-proxy/d1/api/x/a%2Fb"),
+            Some("/api/x/a%2Fb")
+        );
+        assert_eq!(
+            raw_forward_path("/api/v1/ground-station/relay-proxy/d1/"),
+            None
+        );
+        assert_eq!(
+            raw_forward_path("/api/v1/ground-station/relay-proxy/d1"),
+            None
+        );
     }
 
     fn registered(device_id: &str, secret: Option<&str>) -> Vec<ados_groundlink::FleetSlot> {

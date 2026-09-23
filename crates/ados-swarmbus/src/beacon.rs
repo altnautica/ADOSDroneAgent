@@ -355,7 +355,7 @@ mod tests {
     }
 
     /// A node with no autonomy layer running leaves bits 5-7 at zero and every
-    /// reader decodes `hold` — the pre-Phase-5 steady state.
+    /// reader decodes `hold`.
     #[test]
     fn a_beacon_with_no_precedence_source_reads_hold_with_the_field_zeroed() {
         let b = SwarmBeacon {

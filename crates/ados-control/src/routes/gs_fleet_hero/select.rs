@@ -51,6 +51,14 @@ impl SelectionReport {
     pub fn complete(&self) -> bool {
         self.pending.is_empty() && self.resolved.iter().all(|o| o.ok)
     }
+
+    /// The hero's own promotion resolved and failed: the selection is recorded
+    /// and chased, but the drone the operator picked is still a thumbnail.
+    pub fn hero_failed(&self) -> bool {
+        self.resolved
+            .iter()
+            .any(|o| o.profile == VideoProfile::Hero && !o.ok)
+    }
 }
 
 /// [`run_selection`] on its own task, awaited through its handle.
@@ -120,11 +128,12 @@ where
         };
         if outcome.profile == VideoProfile::Hero {
             // The selection takes effect here, not after the slowest demotion.
-            // The fan-out is re-pointed only once the promotion call has
-            // resolved: re-pointing first would put the operator on a drone
+            // The fan-out is re-pointed only once the promotion has CONFIRMED:
+            // re-pointing on a failed one would put the operator on a drone
             // that is still a 1 fps thumbnail, when what they had a moment ago
-            // was a full-rate stream.
-            if hero_state.record_hero(generation, &hero, &outcome).await {
+            // was a full-rate stream. The reconcile tick publishes it once the
+            // queued promotion confirms.
+            if hero_state.record_hero(generation, &hero, &outcome).await && outcome.ok {
                 publish_hero_to(&publish_path, &slots, &hero);
             }
             report_until = Some(tokio::time::Instant::now() + DEMOTION_REPORT_WINDOW);

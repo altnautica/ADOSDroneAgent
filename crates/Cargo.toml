@@ -65,7 +65,7 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "
 ureq = { version = "2", default-features = false, features = ["json"] }
 # TUI. ratatui re-exports a matching crossterm, so the binary uses
 # `ratatui::crossterm` rather than a separately versioned crossterm dependency.
-ratatui = "0.29"
+ratatui = "0.30"
 anyhow = "1"
 # YAML config reader (/etc/ados/config.yaml + profile.conf). serde_yaml is
 # archived and serde_yml has an outstanding advisory; serde_norway is the

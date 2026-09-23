@@ -522,7 +522,7 @@ where
 
     if writer_died {
         // Not a clean stop: the store stopped recording under a daemon that
-        // was still serving. Exit non-zero so `Restart=on-failure` cycles the
+        // was still serving. Exit non-zero so `Restart=always` cycles the
         // unit, rather than leaving a healthy-looking front over a dead store.
         tracing::error!("logging store stopped because its writer ended");
         return Err(anyhow::anyhow!(
@@ -897,7 +897,7 @@ mod tests {
         // The store's write path starts failing underneath a running writer —
         // an SQLITE_FULL, an I/O error or a damaged schema all look like this
         // from the loop's side. The writer's run loop returns Err, and the
-        // daemon must come down non-zero so `Restart=on-failure` cycles it,
+        // daemon must come down non-zero so `Restart=always` cycles it,
         // instead of serving a read surface in front of a Black Box that
         // stopped recording. (A single bad ROW is deliberately skipped, not
         // fatal, so this fails the session write, which is not skippable.)

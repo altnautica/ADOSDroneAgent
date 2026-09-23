@@ -23,13 +23,20 @@ use crate::pages::{
 };
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
-/// A WiFi join string, the format every phone camera understands.
+/// A WiFi join string, the format every phone camera understands, for this
+/// ground station's WPA access point. `None` when the passphrase is unknown.
+///
+/// The AP is always WPA (the network daemon generates a passphrase on first
+/// boot), so there is no open-network form: with no passphrase to encode the
+/// page shows no QR at all. A `nopass` string would send a phone looking for an
+/// open network that does not exist, or onto someone else's open network
+/// carrying the same name.
 ///
 /// Escaping is not cosmetic: `;` and `:` are the format's own separators, so an
 /// unescaped one in a passphrase silently truncates it and the operator gets a
 /// QR that scans cleanly and joins nothing. The generated alphabet avoids these
 /// characters, but a configured passphrase does not have to.
-pub fn wifi_join_string(ssid: &str, passphrase: Option<&str>) -> String {
+pub fn wifi_join_string(ssid: &str, passphrase: Option<&str>) -> Option<String> {
     fn esc(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         for c in s.chars() {
@@ -40,15 +47,18 @@ pub fn wifi_join_string(ssid: &str, passphrase: Option<&str>) -> String {
         }
         out
     }
-    match passphrase {
-        Some(p) if !p.is_empty() => {
-            format!("WIFI:T:WPA;S:{};P:{};;", esc(ssid), esc(p))
-        }
-        // An open network is a different join string, not a WPA one with an
-        // empty password — a phone handed the latter prompts for a passphrase
-        // that does not exist.
-        _ => format!("WIFI:T:nopass;S:{};;", esc(ssid)),
-    }
+    let passphrase = passphrase.filter(|p| !p.is_empty())?;
+    Some(format!(
+        "WIFI:T:WPA;S:{};P:{};;",
+        esc(ssid),
+        esc(passphrase)
+    ))
+}
+
+/// Whether the access point is up. The agent reports the AP gateway address
+/// only while hostapd is active, so its presence is the broadcasting signal.
+pub fn ap_broadcasting(network: &NetworkCtx) -> bool {
+    network.ap_ip.as_deref().is_some_and(|ip| !ip.is_empty())
 }
 
 /// What the page shows for the passphrase, given what it could read.
@@ -134,7 +144,7 @@ impl Page for AccessPointDetailPage {
         // State the truth about whether the AP is actually up. A passphrase for
         // a network that is not broadcasting is a five-minute detour.
         y += 26;
-        let (state, colour) = if ctx.network.hotspot_enabled {
+        let (state, colour) = if ap_broadcasting(&ctx.network) {
             ("broadcasting", palette.text_primary)
         } else {
             ("not broadcasting", palette.text_secondary)
@@ -144,27 +154,45 @@ impl Page for AccessPointDetailPage {
         // The QR carries the same pair, so a phone joins without transcribing a
         // passphrase that was deliberately built to be unambiguous but is still
         // twelve characters read off a small panel.
-        let payload = wifi_join_string(&ssid, ctx.network.ap_passphrase.as_deref());
-        if let Some(qr) = render_qr(&payload, 100, 2) {
-            let qr_x = PANEL_W as i32 - qr.size as i32 - 24;
-            let qr_y = DETAIL_HEADER_H + 8;
-            for py in 0..qr.size {
-                for px in 0..qr.size {
-                    if qr.is_dark(px, py) {
-                        canvas.put_pixel(qr_x + px as i32, qr_y + py as i32, palette.text_primary);
+        let qr_x = PANEL_W as i32 - 100 - 24;
+        let qr_y = DETAIL_HEADER_H + 8;
+        match wifi_join_string(&ssid, ctx.network.ap_passphrase.as_deref())
+            .and_then(|payload| render_qr(&payload, 100, 2))
+        {
+            Some(qr) => {
+                let qr_x = PANEL_W as i32 - qr.size as i32 - 24;
+                for py in 0..qr.size {
+                    for px in 0..qr.size {
+                        if qr.is_dark(px, py) {
+                            canvas.put_pixel(
+                                qr_x + px as i32,
+                                qr_y + py as i32,
+                                palette.text_primary,
+                            );
+                        }
                     }
                 }
+                let hint = "scan to join";
+                let hw = label_font.text_advance(hint);
+                text(
+                    &mut canvas,
+                    &label_font,
+                    hint,
+                    qr_x + (qr.size as i32 - hw as i32) / 2,
+                    qr_y + qr.size as i32 + 6,
+                    palette.text_secondary,
+                );
             }
-            let hint = "scan to join";
-            let hw = label_font.text_advance(hint);
-            text(
-                &mut canvas,
-                &label_font,
-                hint,
-                qr_x + (qr.size as i32 - hw as i32) / 2,
-                qr_y + qr.size as i32 + 6,
-                palette.text_secondary,
-            );
+            None => {
+                text(
+                    &mut canvas,
+                    &label_font,
+                    "QR unavailable",
+                    qr_x,
+                    qr_y + 44,
+                    palette.text_secondary,
+                );
+            }
         }
 
         canvas
@@ -183,14 +211,14 @@ mod tests {
         NetworkCtx {
             ap_ssid: ssid.map(str::to_string),
             ap_passphrase: pw.map(str::to_string),
-            hotspot_enabled: true,
+            ap_ip: Some("192.168.4.1".to_string()),
             ..Default::default()
         }
     }
 
     #[test]
     fn a_wpa_join_string_carries_both_halves() {
-        let s = wifi_join_string("ADOS-GS-40bb", Some("EXAMPLEPASS99"));
+        let s = wifi_join_string("ADOS-GS-40bb", Some("EXAMPLEPASS99")).unwrap();
         assert!(s.starts_with("WIFI:T:WPA;"));
         assert!(s.contains("S:ADOS-GS-40bb;"));
         assert!(s.contains("P:EXAMPLEPASS99;"));
@@ -202,20 +230,29 @@ mod tests {
         // `;` and `:` are the format's own separators. An unescaped one gives a
         // QR that scans perfectly and joins nothing, which is worse than one
         // that fails to scan — the operator blames the network, not the code.
-        let s = wifi_join_string("my;net", Some("pa:ss;word"));
+        let s = wifi_join_string("my;net", Some("pa:ss;word")).unwrap();
         assert!(s.contains("S:my\\;net;"));
         assert!(s.contains("P:pa\\:ss\\;word;"));
     }
 
+    /// The AP is always WPA. An unreadable passphrase yields no join string at
+    /// all; an open-network (`nopass`) QR would send a phone to a network that
+    /// does not exist, or onto another open network with the same name.
     #[test]
-    fn no_passphrase_is_an_open_network_not_wpa_with_an_empty_password() {
-        // A phone handed WPA-with-empty-password prompts for a passphrase that
-        // does not exist.
+    fn no_passphrase_gives_no_join_string_rather_than_an_open_network() {
         for pw in [None, Some("")] {
-            let s = wifi_join_string("open-net", pw);
-            assert!(s.starts_with("WIFI:T:nopass;"), "{s}");
-            assert!(!s.contains("P:;"), "{s}");
+            assert_eq!(wifi_join_string("ADOS-GS-40bb", pw), None, "{pw:?}");
         }
+    }
+
+    /// Broadcasting follows the AP gateway the agent reports only while hostapd
+    /// is up.
+    #[test]
+    fn broadcasting_follows_the_reported_ap_address() {
+        let mut n = net(Some("ADOS-GS"), Some("pw"));
+        assert!(ap_broadcasting(&n));
+        n.ap_ip = None;
+        assert!(!ap_broadcasting(&n));
     }
 
     #[test]

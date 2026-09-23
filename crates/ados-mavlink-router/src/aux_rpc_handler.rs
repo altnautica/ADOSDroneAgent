@@ -511,14 +511,14 @@ fn build_request_head(method: &str, path: &str, body_len: usize) -> String {
 
 /// Whether a relayed path may be interpolated into an HTTP request line.
 ///
-/// axum percent-decodes the ground route's wildcard capture, so `%0D%0A` in the
-/// caller's URL arrives here as a literal CRLF that would end the request line
-/// and let the caller inject arbitrary headers into the request the drone makes
-/// to its own API. The ground rejects this too; the drone re-checks because the
+/// The ground forwards the caller's path still percent-encoded, so a raw
+/// control character or space here would end or split the request line and
+/// let the caller inject arbitrary headers into the request the drone makes to
+/// its own API. The ground rejects this too; the drone re-checks because the
 /// radio is the trust boundary, and this side must not depend on the other
 /// side's validation.
 fn path_is_safe(path: &str) -> bool {
-    !path.bytes().any(|b| b < 0x20 || b == 0x7F)
+    !path.bytes().any(|b| b <= 0x20 || b == 0x7F)
 }
 
 /// The response headers that cross the relay.
@@ -668,7 +668,7 @@ mod tests {
     const MEASURED_SERVICES_BYTES: usize = 2631;
 
     /// This drone's device id, stamped on every fragment it emits.
-    const OWN_ID: &[u8] = b"77735cd38937";
+    const OWN_ID: &[u8] = b"0a1b2c3d4e5f";
 
     /// Rebuild a response from the fragments the handler produced, the way the
     /// ground station does — including splitting the encoded object back into
@@ -1002,6 +1002,8 @@ Content-Length: 3\r\n\r\nabc";
         );
         assert!(!path_is_safe("/api/version\nX-Injected: 1"));
         assert!(!path_is_safe("/api/version\u{7f}"));
+        assert!(!path_is_safe("/api/v1/network/configured/Home Net"));
+        assert!(path_is_safe("/api/v1/network/configured/Home%20Net"));
     }
 
     #[test]
@@ -1076,7 +1078,7 @@ Content-Length: 3\r\n\r\nabc";
         };
 
         const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        const ME: &str = "77735cd38937";
+        const ME: &str = "0a1b2c3d4e5f";
         const NOW: i64 = 1_800_000_000;
         /// A path with no special standing, used wherever the decision must not
         /// depend on which route was called.

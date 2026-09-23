@@ -45,7 +45,7 @@ def _hostname_suggested_profile() -> str | None:
         return None
     if not name:
         return None
-    if name.startswith(("groundnode", "groundstation", "gcs", "gs-")):
+    if name.startswith(("groundstation", "gcs", "gs-")):
         return "ground_station"
     if name.startswith(("skynode", "drone", "rig-", "uav")):
         return "drone"
@@ -226,7 +226,7 @@ def apply_profile(
         data["restart_required"] = True
 
     # Advisory: hostname carries a strong signal about expected
-    # profile (e.g., `groundnode` should be a ground station). When
+    # profile (e.g., `gs-example` should be a ground station). When
     # the chosen profile contradicts the hostname-derived expectation
     # the wizard still applies the choice — operators do reconfigure
     # — but surfaces an inline nudge so the swap is intentional. No

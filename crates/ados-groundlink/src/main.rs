@@ -869,7 +869,7 @@ async fn receive_loop(
                 // Injection setup did not establish. A slow USB link is the usual
                 // cause, so keep the USB facts and publish a `no_injection`
                 // sidecar carrying them: a stuck receive plane must self-report
-                // WHY it is deaf (Rule 44) rather than going silent while the run
+                // WHY it is deaf rather than going silent while the run
                 // loop retries. Without this write a slow-USB adapter — exactly
                 // what lands a rig in this arm — reports nothing at all.
                 let adapter = wfb_rx::GsAdapterInfo::from(&sel);

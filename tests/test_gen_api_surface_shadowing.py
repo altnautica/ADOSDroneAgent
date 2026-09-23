@@ -51,6 +51,28 @@ def test_an_unrelated_residual_route_survives() -> None:
     assert gen.shadow_native(native, residual) == residual
 
 
+def test_a_websocket_route_is_recorded_as_ws_not_get() -> None:
+    """A GET against an upgrade-only route 404s, so the table must not say GET."""
+    from fastapi import APIRouter, WebSocket
+
+    router = APIRouter()
+
+    @router.websocket("/plugins/jobs/{job_id}")
+    async def _stream(websocket: WebSocket, job_id: str) -> None:  # pragma: no cover
+        await websocket.close()
+
+    @router.get("/plugins")
+    async def _list() -> list[str]:  # pragma: no cover
+        return []
+
+    out: list[tuple[str, str]] = []
+    gen._walk(router, "/api", out)
+
+    assert ("WS", "/api/plugins/jobs/{job_id}") in out
+    assert ("GET", "/api/plugins/jobs/{job_id}") not in out
+    assert ("GET", "/api/plugins") in out
+
+
 def test_the_live_table_carries_the_split_video_config_route() -> None:
     """End-to-end on the committed artefact, not on the generator's internals.
 

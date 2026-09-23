@@ -8,14 +8,13 @@
 //!    their trend from [`PageContext::system`]; uptime has no trend).
 //! 2. **Identity** — board name + agent version on one line, device id on the
 //!    next, primary IP + MAC on the third.
-//! 3. **Recent agent logs** — the tail of the agent journal, oldest first,
-//!    tinted by severity (error red, warning amber, info muted), clipped to the
-//!    log band and offset by the page's scroll position.
+//! 3. **Recent agent logs** — the newest agent log lines from the logging
+//!    store that fit the band, oldest first, tinted by severity (error red,
+//!    warning amber, info muted).
 //!
 //! The fields the composer reads are gathered in [`PageContext::system`],
 //! [`PageContext::device`], and [`PageContext::diagnostics`]. The page is a
-//! pure composer over that context; the scroll position is supplied by the
-//! navigator via `diagnostics.log_scroll_offset`.
+//! pure composer over that context.
 
 use embedded_graphics::pixelcolor::Rgb888;
 
@@ -52,10 +51,9 @@ enum LogLevel {
 
 /// Classify a log line into a severity tier by keyword sniffing.
 ///
-/// The journal tail strips the level prefix, so the tier is derived from the
-/// text: anything mentioning an error / traceback / exception / critical /
-/// failure is red, anything mentioning a warning is amber, everything else is
-/// the muted secondary tone.
+/// The state source prefixes each line with its stored level (`ERROR`, `WARN`,
+/// `INFO`, ...), so the tier follows it; the message text is sniffed too, so a
+/// traceback or failure logged at info still reads red.
 fn classify_log_level(line: &str) -> LogLevel {
     let low = line.to_ascii_lowercase();
     if low.contains("error")
@@ -248,8 +246,8 @@ fn render_identity_section(canvas: &mut Canvas, palette: &Palette, ctx: &PageCon
     let mac = dev
         .primary_mac
         .as_deref()
-        .or(dev.mac_eth0.as_deref())
-        .or(dev.mac_wlan0.as_deref())
+        .or(dev.mac_wired.as_deref())
+        .or(dev.mac_wireless.as_deref())
         .unwrap_or("--");
 
     let bold = LoadedFont::new(FontFace::SansBold, 12);
@@ -284,8 +282,8 @@ fn render_identity_section(canvas: &mut Canvas, palette: &Palette, ctx: &PageCon
     );
 }
 
-/// Paint the scrollable agent-log pane below a divider + section label,
-/// clipping rows to the log band and tinting each by severity.
+/// Paint the agent-log pane below a divider + section label: the newest lines
+/// that fit the band, clipped to it and tinted by severity.
 fn render_log_section(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     let section_y = HEADER_H + METRICS_H + IDENTITY_H;
     line(
@@ -311,22 +309,11 @@ fn render_log_section(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext)
     let line_font = LoadedFont::new(FontFace::MonoRegular, 9);
     let log_band_top = section_y + 16;
     let log_band_bottom = PAGE_H - 1;
-    let max_visible = ((log_band_bottom - log_band_top) / LOG_ROW_H).max(0);
+    let max_visible = ((log_band_bottom - log_band_top) / LOG_ROW_H).max(0) as usize;
+    let first_line = lines.len().saturating_sub(max_visible);
 
-    let offset = ctx.diagnostics.log_scroll_offset.max(0) as i32;
-    let first_line = (offset / LOG_ROW_H).max(0) as usize;
-    let sub_pixel = offset % LOG_ROW_H;
-
-    for i in 0..=max_visible {
-        let idx = first_line + i as usize;
-        if idx >= lines.len() {
-            break;
-        }
-        let row_y = log_band_top + i * LOG_ROW_H - sub_pixel;
-        if row_y >= log_band_bottom {
-            break;
-        }
-        let raw = &lines[idx];
+    for (i, raw) in lines[first_line..].iter().enumerate() {
+        let row_y = log_band_top + i as i32 * LOG_ROW_H;
         let color = match classify_log_level(raw) {
             LogLevel::Error => palette.status_error,
             LogLevel::Warning => palette.status_warning,

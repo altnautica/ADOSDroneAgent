@@ -84,7 +84,7 @@ pub struct ComputeJobStatus {
 /// The host GPU block carried on a compute node's status: identity (name, core
 /// count, Metal support, unified-memory size) plus a live utilisation sample.
 ///
-/// Every field is optional and honest (Rule 44): an unknown field is `null`,
+/// Every field is optional and honest: an unknown field is `null`,
 /// never fabricated. On a non-macOS host (or when a probe tool is missing / a
 /// `powermetrics` sample needs sudo it does not have) the relevant field is
 /// `null`, so the whole block degrades to all-`null` rather than reporting a

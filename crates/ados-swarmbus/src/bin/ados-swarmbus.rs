@@ -11,10 +11,9 @@
 //! own fleet is not.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use ados_swarmbus::config::{SwarmBusConfig, CONFIG_YAML};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 fn init_tracing() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -48,9 +47,11 @@ fn init_tracing() {
 async fn main() {
     init_tracing();
 
-    let config = SwarmBusConfig::load_from(Path::new(CONFIG_YAML));
+    let config = SwarmBusConfig::load_from(
+        Path::new(CONFIG_YAML),
+        Path::new(ados_radio::config::PROFILE_CONF),
+    );
     tracing::info!(
-        profile = ?config.profile,
         fleet_id = config.fleet_id,
         fleet_slot = config.fleet_slot,
         ground_station = config.is_ground_station(),
@@ -66,21 +67,22 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let cancel = Arc::new(Notify::new());
+    let (cancel, cancel_rx) = watch::channel(false);
     notify_ready();
     tracing::info!("ados-swarmbus ready");
 
-    let run_cancel = cancel.clone();
-    let mut handle = tokio::spawn(async move { ados_swarmbus::run(config, run_cancel).await });
+    let mut handle = tokio::spawn(ados_swarmbus::run(config, cancel_rx));
 
     // Exit on a signal, or if the service loop ends unexpectedly. It only returns on
     // `cancel`, so an early finish means the daemon is alive-but-dead; surface it
-    // with a non-zero exit so systemd's Restart=on-failure recovers it rather than
+    // with a non-zero exit so systemd's Restart=always recovers it rather than
     // leaving a running unit that carries no beacons.
     tokio::select! {
         _ = wait_for_shutdown() => {
             tracing::info!("ados-swarmbus stopping");
-            cancel.notify_waiters();
+            // Latched: the service stops even if it has not reached its own
+            // await point yet.
+            let _ = cancel.send(true);
             let _ = handle.await;
         }
         res = &mut handle => {

@@ -6,8 +6,11 @@
 //!   the transmit plane runs in a sibling `ados-radio` process, so there is no
 //!   in-process manager to call; the channel change is forwarded as a coordinated
 //!   hop to the radio's operator command socket (`/run/ados/radio-cmd.sock`). The
-//!   radio announces the hop, waits for the ground station's ack, then commits, so
-//!   the link does not go one-sided. A reachable socket's reply is authoritative.
+//!   radio validates the hop and replies at once, BEFORE it announces the hop,
+//!   waits for the ground station's ack and commits. So an accepted reply means
+//!   the hop was initiated, not that the link is on the new channel: the route
+//!   answers `202` with the target channel, and the operating channel is read
+//!   from the status surfaces.
 //! - **`PUT /api/wfb/tx-power`** — set the runtime TX power (dBm). Forwarded to the
 //!   radio's other command socket (`/run/ados/wfb-cmd.sock`), the same `set_tx_power`
 //!   op the data-plane knobs use. The accepted value is persisted to
@@ -33,11 +36,12 @@
 //! 1. The channel must be a standard WFB channel → `400 {"detail": "Invalid
 //!    channel <n>. Valid channels: [..]"}`, byte-identical to the FastAPI text.
 //! 2. The hop is forwarded to the radio command socket. A reply with `ok: true`
-//!    is `200 {"status": "ok", "channel": <echoed>, "frequency_mhz": <derived>}`;
-//!    a reply with `ok: false` is `409 {"detail": {"error": "hop_refused",
-//!    "message": <reason>}}`.
+//!    is `202 {"status": "initiated", "target_channel": <echoed>, "frequency_mhz":
+//!    <derived>}`; a reply with `ok: false` is `409 {"detail": {"error":
+//!    "hop_refused", "message": <reason>}}`.
 //! 3. An unreachable socket is the no-manager `503 {"detail": "WFB-ng service not
-//!    running"}`.
+//!    running"}`; a socket that does not reply within [`RADIO_CMD_TIMEOUT`] is
+//!    `504`, and an unparseable reply `502`.
 //!
 //! TX-power:
 //! 1. Below 1 dBm → `400 {"detail": {"error": "below_floor", "min": 1}}`.
@@ -46,9 +50,9 @@
 //! 3. The value is forwarded to the radio command socket. A reply with `ok: true`
 //!    yields the effective dBm; a reply with `ok: false` is `500 {"detail":
 //!    {"error": "apply_failed", "message": <reason>}}`. An unreachable socket is
-//!    the no-manager `503 {"detail": "WFB-ng service not running"}` (no persist on
-//!    that path, matching the FastAPI route, which only persists after a
-//!    non-raising apply).
+//!    the no-manager `503 {"detail": "WFB-ng service not running"}`, a silent one
+//!    `504` and an unparseable reply `502`; none of those persist, matching the
+//!    FastAPI route, which only persists after a non-raising apply.
 //! 4. On accept the value is persisted to `video.wfb.tx_power_dbm` through the
 //!    shared config store (every other key preserved; a document that cannot be
 //!    read or parsed is never written over) and the route returns `200
@@ -109,41 +113,92 @@ fn wfb_cmd_sock() -> PathBuf {
     run_dir().join("wfb-cmd.sock")
 }
 
+/// How long a radio command-socket round trip may take. Both sockets reply
+/// once validation or the apply completes (a hop replies before its announce),
+/// so a healthy radio answers well inside this.
+const RADIO_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Why a radio command-socket round trip produced no reply.
+#[derive(Debug, PartialEq, Eq)]
+enum RadioCmdFailure {
+    /// The socket could not be connected: the radio is not running.
+    Unreachable,
+    /// Connected, but no complete reply within [`RADIO_CMD_TIMEOUT`].
+    Timeout,
+    /// A reply arrived but was not one JSON line (or the connection broke).
+    BadReply,
+}
+
+impl RadioCmdFailure {
+    /// The route response for this failure.
+    fn response(&self) -> Response {
+        match self {
+            Self::Unreachable => detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "WFB-ng service not running",
+            ),
+            Self::Timeout => detail(
+                StatusCode::GATEWAY_TIMEOUT,
+                "the radio command socket did not reply in time",
+            ),
+            Self::BadReply => detail(
+                StatusCode::BAD_GATEWAY,
+                "the radio command socket returned an unreadable reply",
+            ),
+        }
+    }
+}
+
 /// Send one newline-terminated JSON request to a radio command socket and read one
-/// newline-terminated JSON reply. `None` on an unreachable socket, a read error, a
-/// closed connection before a reply, or an unparseable reply, so the caller
-/// degrades to the no-manager posture. Mirrors the framing both radio command
-/// sockets use (one newline-terminated JSON each way, then the server closes).
-async fn radio_cmd_roundtrip(socket: &Path, request: &Value) -> Option<Value> {
+/// newline-terminated JSON reply, bounded by [`RADIO_CMD_TIMEOUT`]. Mirrors the
+/// framing both radio command sockets use (one newline-terminated JSON each way,
+/// then the server closes).
+async fn radio_cmd_roundtrip(socket: &Path, request: &Value) -> Result<Value, RadioCmdFailure> {
+    radio_cmd_roundtrip_within(socket, request, RADIO_CMD_TIMEOUT).await
+}
+
+async fn radio_cmd_roundtrip_within(
+    socket: &Path,
+    request: &Value,
+    bound: std::time::Duration,
+) -> Result<Value, RadioCmdFailure> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A command reply is a few hundred bytes; bound the read to guard a runaway.
     const MAX_REPLY_BYTES: usize = 64 * 1024;
 
-    let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
-    let line = format!("{}\n", serde_json::to_string(request).ok()?);
-    stream.write_all(line.as_bytes()).await.ok()?;
-    stream.flush().await.ok()?;
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .map_err(|_| RadioCmdFailure::Unreachable)?;
+    let exchange = async {
+        let line = format!("{request}\n");
+        stream.write_all(line.as_bytes()).await.ok()?;
+        stream.flush().await.ok()?;
 
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 8 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await.ok()?;
-        if n == 0 {
-            break; // EOF: the server replies once then closes.
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 8 * 1024];
+        loop {
+            let n = stream.read(&mut buf).await.ok()?;
+            if n == 0 {
+                break; // EOF: the server replies once then closes.
+            }
+            if raw.len() + n > MAX_REPLY_BYTES {
+                return None;
+            }
+            raw.extend_from_slice(&buf[..n]);
+            // The reply is one newline-terminated line; stop at the first newline.
+            if raw.contains(&b'\n') {
+                break;
+            }
         }
-        if raw.len() + n > MAX_REPLY_BYTES {
-            return None;
-        }
-        raw.extend_from_slice(&buf[..n]);
-        // The reply is one newline-terminated line; stop at the first newline.
-        if raw.contains(&b'\n') {
-            break;
-        }
+        let text = String::from_utf8(raw).ok()?;
+        serde_json::from_str::<Value>(text.lines().next()?).ok()
+    };
+    match tokio::time::timeout(bound, exchange).await {
+        Err(_) => Err(RadioCmdFailure::Timeout),
+        Ok(None) => Err(RadioCmdFailure::BadReply),
+        Ok(Some(v)) => Ok(v),
     }
-    let text = String::from_utf8(raw).ok()?;
-    let reply_line = text.lines().next()?;
-    serde_json::from_str(reply_line).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -157,13 +212,13 @@ pub struct ChannelRequest {
     pub channel: i64,
 }
 
-/// `POST /api/wfb/channel` → set the WFB-ng channel.
+/// `POST /api/wfb/channel` → request a coordinated WFB-ng channel hop.
 ///
 /// Validates the channel against the standard set (`400` on an unknown channel),
 /// then forwards a coordinated hop to the radio command socket. A reply with
-/// `ok: true` is `200 {"status":"ok","channel":<echoed>,"frequency_mhz":<derived>}`;
-/// a reply with `ok: false` is the FastAPI `409 hop_refused` body; an unreachable
-/// socket is the FastAPI no-manager `503`. Never panics on an absent socket.
+/// `ok: true` is `202 {"status":"initiated","target_channel":<echoed>,
+/// "frequency_mhz":<derived>}`; a reply with `ok: false` is the FastAPI `409
+/// hop_refused` body; an unreachable socket is the FastAPI no-manager `503`.
 pub async fn set_wfb_channel(Json(req): Json<ChannelRequest>) -> Response {
     set_wfb_channel_at(&radio_cmd_sock(), req.channel).await
 }
@@ -192,40 +247,34 @@ async fn set_wfb_channel_at(socket: &Path, channel: i64) -> Response {
     //    in-process manager, so a reachable reply is authoritative and an
     //    unreachable socket is the no-manager 503.
     let request = json!({"op": "hop", "channel": channel});
-    let reply = match radio_cmd_roundtrip(socket, &request).await {
-        Some(reply) => reply,
-        None => {
-            // Unreachable socket: the FastAPI route would fall through to the
-            // in-process manager, which on this front is absent → the no-manager
-            // 503, the same terminal posture as the FastAPI `wfb is None` branch.
-            return detail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "WFB-ng service not running",
-            );
-        }
-    };
-
-    channel_reply_response(&reply, channel, ch.frequency_mhz)
+    match radio_cmd_roundtrip(socket, &request).await {
+        Ok(reply) => channel_reply_response(&reply, channel, ch.frequency_mhz),
+        Err(failure) => failure.response(),
+    }
 }
 
 /// Map a radio command-socket reply to the channel route's response. `ok: true` is
-/// the success body (the echoed channel preferred, the frequency derived from the
-/// validated channel); anything else is the FastAPI `409 hop_refused` body with
-/// the reply's `error` text (or the default `"hop refused"`). Factored out so the
+/// the initiated body (the echoed target channel preferred, the frequency derived
+/// from it); anything else is the FastAPI `409 hop_refused` body with the reply's
+/// `error` text (or the default `"hop refused"`). Factored out so the
 /// reply→response mapping is testable without the socket.
 fn channel_reply_response(reply: &Value, requested_channel: i64, frequency_mhz: i64) -> Response {
     if reply.get("ok") == Some(&Value::Bool(true)) {
-        // Prefer the channel the radio echoed back; fall back to the request.
-        let echoed = reply
+        // The radio validated the hop and has started it; it commits only after
+        // the ground station acks the announce, so nothing here is the operating
+        // channel yet.
+        let target = reply
             .get("channel")
             .and_then(Value::as_i64)
             .unwrap_or(requested_channel);
+        let frequency = ados_protocol::wfb_status::get_channel(target)
+            .map_or(frequency_mhz, |c| c.frequency_mhz);
         return (
-            StatusCode::OK,
+            StatusCode::ACCEPTED,
             Json(json!({
-                "status": "ok",
-                "channel": echoed,
-                "frequency_mhz": frequency_mhz,
+                "status": "initiated",
+                "target_channel": target,
+                "frequency_mhz": frequency,
             })),
         )
             .into_response();
@@ -298,11 +347,12 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
     }
 
     // 3. Forward to the radio command socket. The front has no in-process manager,
-    //    so an unreachable socket is the no-manager 503 (no persist on that path,
-    //    matching the FastAPI route, which only persists after a non-raising apply).
+    //    so an unreachable socket is the no-manager 503; neither it nor a silent or
+    //    garbled socket persists, matching the FastAPI route, which only persists
+    //    after a non-raising apply.
     let request = json!({"op": "set_tx_power", "tx_power_dbm": requested});
     let effective: Value = match radio_cmd_roundtrip(socket, &request).await {
-        Some(reply) => match tx_power_effective_from_reply(&reply) {
+        Ok(reply) => match tx_power_effective_from_reply(&reply) {
             Ok(eff) => eff,
             Err(message) => {
                 // ok: false → the FastAPI `RadioCmdError` 500 apply_failed body.
@@ -313,14 +363,7 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
                     .into_response();
             }
         },
-        None => {
-            // Unreachable socket: the FastAPI route falls back to the in-process
-            // manager, which on this front is absent → the no-manager 503.
-            return detail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "WFB-ng service not running",
-            );
-        }
+        Err(failure) => return failure.response(),
     };
 
     // 4. Persist the accepted value so it survives a restart, regardless of the
@@ -486,28 +529,76 @@ mod tests {
     // ── channel reply mapping: ok / refused ───────────────────────────────────
 
     #[tokio::test]
-    async fn an_ok_reply_is_the_success_body_with_the_echoed_channel() {
-        // The radio echoes back the channel it committed; the success body prefers
-        // it, and the frequency is derived from the validated channel.
+    async fn an_ok_reply_is_an_initiated_hop_not_a_committed_channel() {
+        // The radio answers `ok` once it has validated the hop and BEFORE the
+        // announce: the ground station may never ack and the link stay put, so
+        // the route must not report the channel as changed.
         let reply = json!({"ok": true, "channel": 153});
-        let resp = channel_reply_response(&reply, 149, 5745);
-        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = channel_reply_response(&reply, 153, 5765);
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = body_json(resp).await;
         assert_eq!(
             body,
-            json!({"status": "ok", "channel": 153, "frequency_mhz": 5745})
+            json!({"status": "initiated", "target_channel": 153, "frequency_mhz": 5765})
         );
     }
 
     #[tokio::test]
-    async fn an_ok_reply_without_an_echoed_channel_falls_back_to_the_request() {
+    async fn an_ok_reply_without_an_echoed_channel_targets_the_request() {
         let reply = json!({"ok": true});
         let resp = channel_reply_response(&reply, 149, 5745);
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let body = body_json(resp).await;
         assert_eq!(
             body,
-            json!({"status": "ok", "channel": 149, "frequency_mhz": 5745})
+            json!({"status": "initiated", "target_channel": 149, "frequency_mhz": 5745})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_silent_radio_socket_is_a_504_and_a_garbled_one_a_502() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+
+        // Accepts, reads the request, never answers.
+        let silent = dir.path().join("silent.sock");
+        let listener = tokio::net::UnixListener::bind(&silent).unwrap();
+        let _hold = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let failure = radio_cmd_roundtrip_within(
+            &silent,
+            &json!({"op": "hop", "channel": 149}),
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, RadioCmdFailure::Timeout);
+        assert_eq!(failure.response().status(), StatusCode::GATEWAY_TIMEOUT);
+
+        // Answers with something that is not JSON.
+        let garbled = dir.path().join("garbled.sock");
+        let listener = tokio::net::UnixListener::bind(&garbled).unwrap();
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).await;
+            let _ = conn.write_all(b"txpower 10 ok\n").await;
+        });
+        let failure = radio_cmd_roundtrip(&garbled, &json!({"op": "set_tx_power"}))
+            .await
+            .unwrap_err();
+        assert_eq!(failure, RadioCmdFailure::BadReply);
+        assert_eq!(failure.response().status(), StatusCode::BAD_GATEWAY);
+
+        // Nothing listening is the radio not running.
+        let absent = dir.path().join("absent.sock");
+        assert_eq!(
+            radio_cmd_roundtrip(&absent, &json!({})).await.unwrap_err(),
+            RadioCmdFailure::Unreachable
         );
     }
 
@@ -562,14 +653,14 @@ mod tests {
         });
 
         let resp = set_wfb_channel_at(&sock, 149).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
         let req = server.await.unwrap();
         assert_eq!(req, json!({"op": "hop", "channel": 149}));
         let body = body_json(resp).await;
         assert_eq!(
             body,
-            json!({"status": "ok", "channel": 149, "frequency_mhz": 5745})
+            json!({"status": "initiated", "target_channel": 149, "frequency_mhz": 5745})
         );
     }
 

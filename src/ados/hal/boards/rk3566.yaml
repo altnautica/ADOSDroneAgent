@@ -130,4 +130,4 @@ profiles:
   video_capable: true
   recommended_resolution: "1920x1080"
   memory_budget_mb: 287
-  notes: "Recommended primary target. 2GB RAM provides massive headroom (~1.7GB free). Quad A55 @ 1.8GHz runs Python comfortably. H.264 1080p@60 HW encode. Same Hirose connector as CM4 for single baseboard design. $36 module cost enables $50-80 retail."
+  notes: "Recommended primary target. 2GB RAM provides massive headroom (~1.7GB free). Quad A55 @ 1.8GHz runs Python comfortably. H.264 1080p@60 HW encode. Same Hirose connector as CM4 for single baseboard design."

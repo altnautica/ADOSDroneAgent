@@ -1,9 +1,10 @@
 //! The slice of `/etc/ados/config.yaml` the uplink daemon reads.
 //!
-//! The daemon owns the share-uplink firewall (the REST write path only persists
-//! the flag), so it reads the configured `ground_station.share_uplink` flag off
-//! the same on-disk YAML the Python agent writes, typing only that field and
-//! tolerating every other section. Mirrors the sibling crates' config readers.
+//! The daemon owns the share-uplink firewall (the REST write path persists the
+//! flag and asks the daemon to apply it), so it reads the configured
+//! `ground_station.share_uplink` flag off the same on-disk YAML the Python agent
+//! writes, typing only that field and tolerating every other section. Mirrors
+//! the sibling crates' config readers.
 //!
 //! The reader is total: a missing or unparseable file yields the all-defaults
 //! snapshot (`share_uplink: false`, matching the Python `GroundStationConfig`

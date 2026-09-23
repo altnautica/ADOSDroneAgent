@@ -69,7 +69,7 @@ mod tests {
         }
         let schema: serde_json::Value =
             serde_json::from_str(AGENT_CONFIG_SCHEMA).expect("committed schema parses");
-        assert_eq!(count(&schema), 8, "secret-marker set drifted");
+        assert_eq!(count(&schema), 6, "secret-marker set drifted");
         assert_eq!(
             schema["$defs"]["ApiSecurityConfig"]["properties"]["api_key"]["x-secret"],
             serde_json::json!(true)

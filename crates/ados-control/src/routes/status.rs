@@ -100,7 +100,8 @@ const IPC_ONLY_KEYS: [&str; 12] = [
 ///
 /// `swarm` is here for the same reason and is the strongest case of it: the swarm
 /// bus's counters (`beacons_tx` / `beacons_rx` / `beacons_bad_magic` /
-/// `beacons_bad_tag` / `beacons_stale_dropped` / `neighbors_now`) describe the
+/// `beacons_bad_tag` / `beacons_stale_dropped` / `beacons_replayed` /
+/// `beacons_slot_conflict` / `neighbors_now`) describe the
 /// agent's own radio plane, and the node most likely to be diagnosed with them is a
 /// ground station — which never decodes a HEARTBEAT, so the gate would blank them
 /// permanently on exactly the node that needs them. The live table itself is served
@@ -333,7 +334,7 @@ pub(crate) fn derive_health(signals: Option<&Map<String, Value>>) -> Value {
 /// fabricated `true`. An NPU-less, non-ONNX board with no offload path reads
 /// `none`; the offload-link the reconciler writes (a paired reachable
 /// workstation) folds in when present. The offload target stays null until a
-/// workstation is paired — never a fabricated reach (Rule 44). Returns
+/// workstation is paired — never a fabricated reach. Returns
 /// `(npu_tops, has_accelerator, tier, offload_target)`. `has_accelerator`
 /// itself stays the raw hardware declaration (unaffected by
 /// `backend_inference_capable`) — it answers "does this board have NPU
@@ -352,7 +353,7 @@ pub(crate) fn perception_fields(
     let has_accelerator = npu_tops > 0.0;
     // The board's declared CPU-ONNX local-inference capability (an NPU-less but
     // CPU-strong board runs the detector on-board). Absent on an older board
-    // sidecar ⇒ false, so the tier is unchanged there (rule 44 — a local path is
+    // sidecar ⇒ false, so the tier is unchanged there (a local path is
     // reported only when the board really declares one).
     let local_inference_capable = board
         .get("has_local_inference")
@@ -360,7 +361,7 @@ pub(crate) fn perception_fields(
         .unwrap_or(false);
     // The live offload-link the reconciler writes: a paired, reachable workstation
     // flips compute_node_paired + bearer_acceptable true and names the target.
-    // Absent / stale ⇒ no link ⇒ an NPU-less board reports `none` (rule 44 —
+    // Absent / stale ⇒ no link ⇒ an NPU-less board reports `none` (
     // never a fabricated paired node). Fed identically here and on the cloud
     // heartbeat via `TierInputs::for_drone`.
     let link = ados_protocol::offload_link::read_offload_link(now_epoch_ms());
@@ -380,7 +381,7 @@ pub(crate) fn perception_fields(
         Some(ados_offload::PerceptionTier::Hybrid) => "hybrid",
         None => "none",
     };
-    // Surface the target only on an actual offload path (rule 44 — never a
+    // Surface the target only on an actual offload path (never a
     // reach we are not really using).
     let offload_target = link.filter(|l| l.is_offload_path()).and_then(|l| l.target);
     (npu_tops, has_accelerator, tier_str, offload_target)
@@ -393,7 +394,7 @@ pub(crate) fn perception_fields(
 /// no model is registered. An unreachable engine (vision disabled, the
 /// service not up yet, or mid-restart) degrades to `false`: with nothing
 /// loaded there is certainly no live inference to report, and a stale `true`
-/// would be exactly the fabricated capability Rule 44 forbids.
+/// would be exactly the fabricated capability an honest surface forbids.
 ///
 /// Shared by `/api/status` and `/api/status/full` so both feed
 /// [`perception_fields`] the same live signal.

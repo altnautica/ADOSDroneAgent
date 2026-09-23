@@ -23,6 +23,19 @@ use crate::host::{HostError, HostResult, HostServices};
 /// Per-subscriber event-bus depth. Matches the Python `events.QUEUE_DEPTH`.
 pub const EVENT_QUEUE_DEPTH: usize = 256;
 
+/// Longest topic or subscription pattern, in bytes. Topics are short dotted
+/// names; the cap bounds the glob match cost per event per subscription.
+pub const EVENT_TOPIC_MAX_BYTES: usize = 256;
+
+/// Largest event payload, in msgpack-encoded bytes. Together with
+/// [`EVENT_QUEUE_DEPTH`] this bounds what one non-draining subscriber can pin
+/// in the host (depth x payload, 16 MiB), where a full plugin frame per slot
+/// would be a gigabyte.
+pub const EVENT_PAYLOAD_MAX_BYTES: usize = 64 * 1024;
+
+/// Most event subscriptions one plugin connection may hold.
+pub const EVENT_MAX_SUBSCRIPTIONS: usize = 32;
+
 /// One event on the in-process bus. Mirrors `events.Event`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Event {
@@ -81,23 +94,23 @@ pub fn topic_matches(pattern: &str, topic: &str) -> bool {
     if pattern == topic {
         return true;
     }
-    fnmatch(pattern, topic)
+    fnmatch(pattern.as_bytes(), topic.as_bytes())
 }
 
 /// Minimal fnmatch supporting `*` (any run, including across `.`) and `?` (one
-/// char), which is all the topic taxonomy uses. Implemented locally so the
-/// crate carries no extra dependency for one glob.
-fn fnmatch(pattern: &str, text: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    // Iterative backtracking matcher.
+/// byte), which is all the topic taxonomy uses. Topics and patterns are
+/// printable ASCII (enforced at publish and subscribe), so matching bytes is
+/// matching characters, and no per-event allocation is needed. Iterative
+/// single-star backtracking: O(pattern x topic) worst case, which the
+/// [`EVENT_TOPIC_MAX_BYTES`] cap keeps small.
+fn fnmatch(p: &[u8], t: &[u8]) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);
     let (mut star_p, mut star_t): (Option<usize>, usize) = (None, 0);
     while ti < t.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+        if pi < p.len() && (p[pi] == b'?' || p[pi] == t[ti]) {
             pi += 1;
             ti += 1;
-        } else if pi < p.len() && p[pi] == '*' {
+        } else if pi < p.len() && p[pi] == b'*' {
             star_p = Some(pi);
             star_t = ti;
             pi += 1;
@@ -109,10 +122,43 @@ fn fnmatch(pattern: &str, text: &str) -> bool {
             return false;
         }
     }
-    while pi < p.len() && p[pi] == '*' {
+    while pi < p.len() && p[pi] == b'*' {
         pi += 1;
     }
     pi == p.len()
+}
+
+/// Whether `topic` (or a pattern) is a well-formed bus name: non-empty,
+/// printable ASCII, within [`EVENT_TOPIC_MAX_BYTES`].
+fn topic_well_formed(topic: &str) -> bool {
+    !topic.is_empty()
+        && topic.len() <= EVENT_TOPIC_MAX_BYTES
+        && topic.bytes().all(|b| b.is_ascii_graphic())
+}
+
+/// The namespace every plugin's own topics live under.
+const PLUGIN_NAMESPACE: &str = "plugin.";
+
+/// The host-owned world-model namespace. Its topics are read-gated by a
+/// capability, so only a host bridge may publish there; no plugin, whatever its
+/// id, may put a world model on the bus.
+const HOST_ATLAS_NAMESPACE: &str = "plugin.atlas.";
+
+/// Whether an event may be delivered to `subscriber_id`.
+///
+/// Plugin ids are dotted reverse-DNS names, so `plugin.com.acme.` is a prefix
+/// of `plugin.com.acme.tools.`: a topic-prefix check alone cannot tell the two
+/// plugins' namespaces apart. Delivery closes that gap using the host-stamped
+/// publisher: an event under `plugin.` reaches a subscriber only when that
+/// subscriber published it or the host did. So a plugin cannot read another
+/// plugin's private events by subscribing to a longer prefix, and cannot spoof
+/// them by publishing under one.
+pub fn may_deliver(subscriber_id: &str, event: &Event) -> bool {
+    if !event.topic.starts_with(PLUGIN_NAMESPACE) {
+        return true;
+    }
+    event.publisher_plugin_id == subscriber_id
+        || event.publisher_plugin_id == crate::vehicle_events::HOST_PUBLISHER
 }
 
 /// Topics any plugin may subscribe to without an explicit allowlist entry.
@@ -133,8 +179,10 @@ pub const PUBLIC_TOPICS_FOR_SUBSCRIBE: &[&str] = &[
 /// publishes frame descriptors and detections there, and a plugin reaches the surface
 /// through the gated `vision.*` methods, not by publishing the topic itself. A plugin
 /// may still subscribe to `vision.*` with `event.subscribe` plus the matching read cap.
+/// `plugin.` is reserved too: every plugin publishes only under its own
+/// `plugin.<id>.` prefix, never into another plugin's.
 const RESERVED_PUBLISH_PREFIXES: &[&str] = &[
-    "vehicle.", "mavlink.", "mission.", "safety.", "agent.", "swarm.", "gps.", "vision.",
+    "vehicle.", "mavlink.", "mission.", "safety.", "agent.", "swarm.", "gps.", "vision.", "plugin.",
 ];
 
 /// Whether the plugin may subscribe to `topic_pattern`. Mirrors
@@ -160,13 +208,13 @@ pub fn is_subscribe_allowed(
     topic_pattern: &str,
     granted_caps: &BTreeSet<String>,
 ) -> bool {
-    if !granted_caps.contains("event.subscribe") {
+    if !granted_caps.contains("event.subscribe") || !topic_well_formed(topic_pattern) {
         return false;
     }
     if let Some(cap) = ados_protocol::atlas::atlas_topic_subscribe_capability(topic_pattern) {
         return granted_caps.contains(cap);
     }
-    if topic_pattern.starts_with(&format!("plugin.{plugin_id}.")) {
+    if topic_pattern.starts_with(&format!("{PLUGIN_NAMESPACE}{plugin_id}.")) {
         return true;
     }
     PUBLIC_TOPICS_FOR_SUBSCRIBE.contains(&topic_pattern)
@@ -175,9 +223,13 @@ pub fn is_subscribe_allowed(
 /// Whether the plugin may publish to `topic`. Mirrors
 /// `events.is_publish_allowed`: the plugin's own namespace is always
 /// publishable; otherwise `event.publish` is required and the reserved
-/// namespaces are refused.
+/// namespaces (including every other plugin's) are refused. The host world
+/// model namespace is refused even to a plugin whose id would make it "own".
 pub fn is_publish_allowed(plugin_id: &str, topic: &str, granted_caps: &BTreeSet<String>) -> bool {
-    if topic.starts_with(&format!("plugin.{plugin_id}.")) {
+    if !topic_well_formed(topic) || topic.starts_with(HOST_ATLAS_NAMESPACE) {
+        return false;
+    }
+    if topic.starts_with(&format!("{PLUGIN_NAMESPACE}{plugin_id}.")) {
         return true;
     }
     if !granted_caps.contains("event.publish") {
@@ -255,14 +307,26 @@ pub fn prepare_publish(
     let Some(topic) = arg_str(args, "topic") else {
         return PublishOutcome::Denied(RpcError("topic must be a string".to_string()));
     };
+    if !topic_well_formed(topic) {
+        return PublishOutcome::Denied(RpcError(format!(
+            "topic must be 1-{EVENT_TOPIC_MAX_BYTES} printable ASCII bytes"
+        )));
+    }
     if !is_publish_allowed(plugin_id, topic, granted_caps) {
         return PublishOutcome::Denied(RpcError(format!("publish not permitted on topic {topic}")));
+    }
+    let payload = arg_map(args, "payload");
+    let size = rmp_serde::to_vec(&payload).map_or(usize::MAX, |b| b.len());
+    if size > EVENT_PAYLOAD_MAX_BYTES {
+        return PublishOutcome::Denied(RpcError(format!(
+            "event payload exceeds {EVENT_PAYLOAD_MAX_BYTES} bytes"
+        )));
     }
     PublishOutcome::Publish(Event {
         topic: topic.to_string(),
         timestamp_ms: now_ms,
         publisher_plugin_id: plugin_id.to_string(),
-        payload: arg_map(args, "payload"),
+        payload,
     })
 }
 
@@ -276,6 +340,11 @@ pub fn prepare_subscribe(
     let Some(pattern) = arg_str(args, "topic") else {
         return Err(RpcError("topic must be a string".to_string()));
     };
+    if !topic_well_formed(pattern) {
+        return Err(RpcError(format!(
+            "topic must be 1-{EVENT_TOPIC_MAX_BYTES} printable ASCII bytes"
+        )));
+    }
     if !is_subscribe_allowed(plugin_id, pattern, granted_caps) {
         return Err(RpcError(format!("subscribe not permitted on {pattern}")));
     }
@@ -307,9 +376,9 @@ pub fn event_deliver_args(event: &Event) -> Value {
 /// bodies; a real host returns [`Err(HostError)`](HostError) for a soft failure,
 /// which the server renders into the response envelope `error` field.
 ///
-/// Async because the three vision request methods proxy to the vision engine
-/// socket and await its reply; the other methods complete synchronously and are
-/// awaited as already-ready futures.
+/// Async because the vision, compute, command-socket (GPIO, video, radio aux)
+/// and config-write methods await a socket, an HTTP reply or file work; the
+/// in-process methods complete synchronously.
 ///
 /// `granted_caps` is the caller's verified capability set. Only the three
 /// payload-gated methods (`mavlink.send`, `mavlink.register_component`,
@@ -347,18 +416,18 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::CameraClaim => host.camera_claim(plugin_id, args),
         Method::CameraRelease => host.camera_release(plugin_id, args),
         Method::CameraGetFrame => host.camera_get_frame(plugin_id, args),
-        Method::VideoSourceSet => host.video_source_set(plugin_id, args),
+        Method::VideoSourceSet => host.video_source_set(plugin_id, args).await,
         Method::ConfigGet => host.config_get(plugin_id, args),
-        Method::ConfigSet => host.config_set(plugin_id, args),
+        Method::ConfigSet => host.config_set(plugin_id, args).await,
         Method::ProcessSpawn => host.process_spawn(plugin_id, args),
         Method::DisplayPageSet => host.display_page_set(plugin_id, args),
-        Method::GpioOutputSet => host.gpio_output_set(plugin_id, args),
-        Method::GpioBuzzerBeep => host.gpio_buzzer_beep(plugin_id, args),
+        Method::GpioOutputSet => host.gpio_output_set(plugin_id, args).await,
+        Method::GpioBuzzerBeep => host.gpio_buzzer_beep(plugin_id, args).await,
         Method::GuidedSetpointSend => host.guided_setpoint_send(plugin_id, args),
         Method::RateSetpointSend => host.rate_setpoint_send(plugin_id, args),
-        Method::RadioAuxStreamOpen => host.radio_aux_stream_open(plugin_id, args),
-        Method::RadioAuxStreamClose => host.radio_aux_stream_close(plugin_id, args),
-        Method::RadioAuxStreamSend => host.radio_aux_stream_send(plugin_id, args),
+        Method::RadioAuxStreamOpen => host.radio_aux_stream_open(plugin_id, args).await,
+        Method::RadioAuxStreamClose => host.radio_aux_stream_close(plugin_id, args).await,
+        Method::RadioAuxStreamSend => host.radio_aux_stream_send(plugin_id, args).await,
         // Subscribe is handled in the server (it arms the per-connection aux
         // push stream) and never reaches here, exactly like button.subscribe.
         Method::RadioAuxStreamSubscribe => {
@@ -563,5 +632,76 @@ mod tests {
             }
             PublishOutcome::Publish(_) => panic!("reserved topic must be denied"),
         }
+    }
+
+    #[test]
+    fn publish_refuses_other_plugins_and_the_world_model_namespace() {
+        let publish = caps(&["event.publish"]);
+        assert!(!is_publish_allowed(
+            "com.example.a",
+            "plugin.com.example.b.status",
+            &publish
+        ));
+        assert!(!is_publish_allowed(
+            "com.example.a",
+            ados_protocol::atlas::PLUGIN_ATLAS_OCCUPANCY_TOPIC,
+            &publish
+        ));
+        assert!(is_publish_allowed(
+            "com.example.a",
+            "plugin.com.example.a.status",
+            &caps(&[])
+        ));
+    }
+
+    fn event(topic: &str, publisher: &str) -> Event {
+        Event {
+            topic: topic.to_string(),
+            timestamp_ms: 0,
+            publisher_plugin_id: publisher.to_string(),
+            payload: Value::Map(vec![]),
+        }
+    }
+
+    #[test]
+    fn dotted_ids_do_not_share_a_namespace_at_delivery() {
+        // com.acme's own-namespace prefix also covers com.acme.tools' topics;
+        // delivery keys on the host-stamped publisher, so neither plugin reads
+        // or spoofs the other's events.
+        let spoof = event("plugin.com.acme.tools.status", "com.acme");
+        assert!(!may_deliver("com.acme.tools", &spoof));
+        let private = event("plugin.com.acme.tools.status", "com.acme.tools");
+        assert!(!may_deliver("com.acme", &private));
+        assert!(may_deliver("com.acme.tools", &private));
+        let host = event(
+            "plugin.atlas.occupancy",
+            crate::vehicle_events::HOST_PUBLISHER,
+        );
+        assert!(may_deliver("com.acme", &host));
+        assert!(may_deliver("com.acme", &event("vehicle.armed", "host")));
+    }
+
+    #[test]
+    fn oversize_topics_patterns_and_payloads_are_refused() {
+        let long = format!("plugin.demo.{}", "a".repeat(EVENT_TOPIC_MAX_BYTES));
+        let args = Value::Map(vec![(Value::from("topic"), Value::from(long.as_str()))]);
+        assert!(matches!(
+            prepare_publish("demo", &args, &caps(&[]), 0),
+            PublishOutcome::Denied(_)
+        ));
+        assert!(prepare_subscribe("demo", &args, &caps(&["event.subscribe"])).is_err());
+
+        let big = Value::Map(vec![(
+            Value::from("blob"),
+            Value::Binary(vec![0u8; EVENT_PAYLOAD_MAX_BYTES]),
+        )]);
+        let args = Value::Map(vec![
+            (Value::from("topic"), Value::from("plugin.demo.x")),
+            (Value::from("payload"), big),
+        ]);
+        assert!(matches!(
+            prepare_publish("demo", &args, &caps(&[]), 0),
+            PublishOutcome::Denied(_)
+        ));
     }
 }

@@ -7,7 +7,7 @@
 //! Rust advert (the `mdns-sd` daemon, held by the compute daemon for its
 //! lifetime) fills that gap: the node advertises `_ados._tcp` with
 //! `profile=workstation` in the TXT from boot, so it auto-appears for LAN pairing
-//! (Rule 39) like a drone/ground-station, no pairing code required first.
+//! like a drone/ground-station, no pairing code required first.
 //!
 //! The advert points at the control front's pairing port (`:8080`, where the
 //! node serves `/api/pairing/*`); the job-API port (`:8092`) rides the `jobApi`

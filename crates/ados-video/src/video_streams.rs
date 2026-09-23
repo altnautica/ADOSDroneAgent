@@ -35,7 +35,7 @@ pub struct VideoStreamEntry {
     /// Per-leg liveness: `Some(true)` = this leg's mediamtx path is receiving
     /// bytes, `Some(false)` = it has been flat (stalled source), `None` = not
     /// yet sampled. A stalled secondary leg is surfaced honestly here so the GCS
-    /// switcher/PiP + the operator can see which leg is dead (Rule 44) rather
+    /// switcher/PiP + the operator can see which leg is dead rather
     /// than a silently-black stream. Additive/optional — absent on older readers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live: Option<bool>,

@@ -36,7 +36,9 @@ jobs:
           # run is {2,} rather than {3}: two-digit and four-digit tags are both
           # real, and a fixed {3} makes both invisible. No \b anywhere — git
           # grep's ERE does not support it and matches nothing when present.
-          TAG_PATTERN='(^|[^A-Za-z])(DEC|MSN|LRN)-[0-9]{2,}|(^|[^A-Za-z])Wave [0-9]'
+          # An internal rule number ("rule" plus a digit run) is the same leak:
+          # it points a public reader at a private rulebook; name the principle.
+          TAG_PATTERN='(^|[^A-Za-z])(DEC|MSN|LRN)-[0-9]{2,}|(^|[^A-Za-z])Wave [0-9]|(^|[^A-Za-z])[Rr]ule #?[0-9]+'
 
           # An absolute home path is a developer machine baked into shipped
           # source. Placeholder and service-account names are allowed: tests
@@ -49,20 +51,26 @@ jobs:
           # literals into this file would make the file its own first hit, and
           # "the guard found itself" is indistinguishable from a real leak.
           SAMPLE_TAG="$(printf 'DEC%s284' '-')"
+          SAMPLE_RULE="$(printf 'per Rule %s' '44')"
           SAMPLE_HOME="$(printf '/Users/%s/src/x' 'realname')"
           printf 'ref %s and path %s\n' "$SAMPLE_TAG" "$SAMPLE_HOME" > .guard-selftest
-          git add -f .guard-selftest
-          if ! git grep -qIE "$TAG_PATTERN" -- .guard-selftest; then
-            echo "SELF-TEST FAILED: the planning-tag pattern does not match a known tag."
-            echo "  The pattern is broken; this job would have reported a clean tree."
-            fail=1
-          fi
+          # The rule sample gets its own file so each alternative of the tag
+          # pattern is proven on its own, not carried by the other one.
+          printf 'see %s\n' "$SAMPLE_RULE" > .guard-selftest-rule
+          git add -f .guard-selftest .guard-selftest-rule
+          for sample in .guard-selftest .guard-selftest-rule; do
+            if ! git grep -qIE "$TAG_PATTERN" -- "$sample"; then
+              echo "SELF-TEST FAILED: the planning-tag pattern does not match the known sample in $sample."
+              echo "  The pattern is broken; this job would have reported a clean tree."
+              fail=1
+            fi
+          done
           if ! git grep -IE "$HOME_PATTERN" -- .guard-selftest | grep -qvE "$HOME_ALLOW"; then
             echo "SELF-TEST FAILED: the home-path pattern does not match a known absolute home path."
             fail=1
           fi
-          git rm -q --cached .guard-selftest
-          rm -f .guard-selftest
+          git rm -q --cached .guard-selftest .guard-selftest-rule
+          rm -f .guard-selftest .guard-selftest-rule
           [ "$fail" -eq 0 ] || exit 1
 
           # ---- check 1: the generated private context bridge is gitignored
@@ -221,6 +229,51 @@ jobs:
             exit 1
           fi
           echo "PASS: every mirrored generated file matches"
+
+  api-surface:
+    name: Route table is current and every client call resolves
+    runs-on: ubuntu-latest
+    steps:
+      # docs/api-surface.md is what every client call is checked against, so a
+      # stale table checks the clients against routes that no longer exist. It
+      # is regenerated from the two producers (the native route table via cargo,
+      # the residual FastAPI app via its OpenAPI schema) and must come out
+      # byte-identical. The client check then scans Mission Control beside this
+      # repo, the layout the two checkouts below reproduce.
+      - uses: actions/checkout@v4
+        with:
+          path: ADOSDroneAgent
+
+      - uses: actions/checkout@v4
+        with:
+          repository: altnautica/ADOSMissionControl
+          path: ADOSMissionControl
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the agent
+        working-directory: ADOSDroneAgent
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,ground-station,vision]"
+
+      - name: Regenerated table matches the committed one
+        working-directory: ADOSDroneAgent
+        run: |
+          set -euo pipefail
+          python scripts/gen-api-surface.py
+          if ! git diff --exit-code docs/api-surface.md; then
+            echo "FAIL: docs/api-surface.md is stale. Run scripts/gen-api-surface.py and commit it."
+            exit 1
+          fi
+
+      - name: Every client call resolves against the table
+        working-directory: ADOSDroneAgent
+        run: python scripts/check-api-surface.py
 
   ignored-test-inventory:
     name: The ignored-test set is a decision, not a drift

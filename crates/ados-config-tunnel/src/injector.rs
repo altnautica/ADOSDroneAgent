@@ -187,7 +187,7 @@ impl Injector {
 mod tests {
     use super::*;
     use crate::config_client::{ConfigClient, ConfigResponse, Unreachable};
-    use crate::terminator::run_terminator;
+    use crate::terminator::{run_terminator, TunnelAuth};
     use crate::transport::mock::duplex;
     use async_trait::async_trait;
     use tokio::sync::Notify;
@@ -210,6 +210,28 @@ mod tests {
         }
     }
 
+    /// A drone holding a per-pair secret, and a `get` request carrying a ticket
+    /// its ground station minted for it now.
+    fn paired_drone() -> (tempfile::TempDir, TunnelAuth, Vec<u8>) {
+        const SECRET: &str = "0123456789abcdef0123456789abcdef";
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("relay-peer-secret");
+        std::fs::write(&secret_path, SECRET).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let ticket = ados_protocol::relay_ticket::RelayTicketIssuer::from_secret(SECRET.as_bytes())
+            .mint_at("drone-1", 60, now);
+        let request =
+            serde_json::to_vec(&serde_json::json!({"op": "get", "ticket": ticket})).unwrap();
+        let auth = TunnelAuth {
+            secret_path,
+            own_device_id: "drone-1".to_string(),
+        };
+        (dir, auth, request)
+    }
+
     /// The whole substrate, in-process: a GS injector and a drone terminator
     /// wired over the crossed mock bearer, a multi-chunk config body relayed
     /// end-to-end.
@@ -223,9 +245,11 @@ mod tests {
         let big_body = format!(r#"{{"blob":"{}"}}"#, "z".repeat(300)).into_bytes();
         let client: Arc<dyn ConfigClient> = Arc::new(FixedClient(big_body.clone()));
         let drone_counters = Arc::new(Counters::default());
+        let (_secret_dir, auth, request) = paired_drone();
         let drone = tokio::spawn(run_terminator(
             Arc::new(drone_side),
             false,
+            auth,
             client,
             drone_counters.clone(),
             sd_rx.clone(),
@@ -236,7 +260,7 @@ mod tests {
         let injector = Injector::spawn(Arc::new(gs_side), gs_counters.clone(), sd_rx);
 
         let resp = injector
-            .submit(br#"{"op":"get"}"#, Duration::from_secs(5))
+            .submit(&request, Duration::from_secs(5))
             .await
             .expect("a reply arrives");
         assert!(!resp.is_error);
@@ -264,9 +288,11 @@ mod tests {
         let big_body = format!(r#"{{"blob":"{}"}}"#, "z".repeat(300)).into_bytes();
         let client: Arc<dyn ConfigClient> = Arc::new(FixedClient(big_body.clone()));
         let drone_counters = Arc::new(Counters::default());
+        let (_secret_dir, auth, request) = paired_drone();
         let drone = tokio::spawn(run_terminator(
             Arc::new(pair.drone),
             false,
+            auth,
             client,
             drone_counters.clone(),
             sd_rx.clone(),
@@ -277,7 +303,7 @@ mod tests {
         let injector = Injector::spawn(Arc::new(pair.ground), gs_counters.clone(), sd_rx);
 
         let resp = injector
-            .submit(br#"{"op":"get"}"#, Duration::from_secs(10))
+            .submit(&request, Duration::from_secs(10))
             .await
             .expect("a reply arrives over the aux lane");
         assert!(!resp.is_error);

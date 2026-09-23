@@ -199,13 +199,28 @@ impl WsProxyAuth {
     ///   were opened to the LAN AND enforcement is off;
     /// - on an UNPAIRED node any other caller is admitted only when
     ///   enforcement is off (observe-only).
-    pub fn classify(&self, peer: std::net::IpAddr) -> (bool, Access) {
+    ///
+    /// `local` is the address the peer reached (see
+    /// [`ados_protocol::pairing_posture::classify_caller`]); a private-LAN peer
+    /// is a lifeline only when that is the agent's own AP or USB address.
+    /// An unreadable pairing file is treated like a paired node with no key:
+    /// only the on-box operator is admitted, whatever the flags say.
+    pub fn classify(
+        &self,
+        peer: std::net::IpAddr,
+        local: Option<std::net::IpAddr>,
+    ) -> (bool, Access) {
         let pairing = self.current();
-        let access = direct_access(&pairing, classify_caller(Some(peer), |_| false), None);
+        let access = direct_access(
+            &pairing,
+            classify_caller(Some(peer), local, |_| false),
+            None,
+        );
         let admit = match (access, &pairing) {
             (Access::Accept, _) => true,
             (Access::Unauthorized, Pairing::Paired(_)) => self.raw_lan_access && !self.enforce,
             (Access::Unauthorized, Pairing::Unpaired) => !self.enforce,
+            (Access::Unauthorized, Pairing::Unreadable) => false,
         };
         (admit, access)
     }
@@ -242,9 +257,10 @@ impl WsProxyAuth {
     fn handshake_decision(
         &self,
         peer: std::net::IpAddr,
+        local: Option<std::net::IpAddr>,
         headers: &tokio_tungstenite::tungstenite::http::HeaderMap,
     ) -> (bool, Access) {
-        let caller = classify_caller(Some(peer), |h| headers.contains_key(h));
+        let caller = classify_caller(Some(peer), local, |h| headers.contains_key(h));
         let presented = headers.get(WS_KEY_HEADER).and_then(|v| v.to_str().ok());
         self.should_admit(caller, presented, &offered_subprotocols(headers))
     }
@@ -320,10 +336,11 @@ enum RawEdge {
 fn admit_raw_peer(
     auth: &ProxyAuth,
     peer: std::net::IpAddr,
+    local: Option<std::net::IpAddr>,
     port: u16,
     edge: RawEdge,
 ) -> Option<ClientOrigin> {
-    let (admit, access) = auth.classify(peer);
+    let (admit, access) = auth.classify(peer, local);
     if access != Access::Accept {
         match edge {
             RawEdge::Tcp => tracing::warn!(
@@ -414,7 +431,7 @@ pub async fn run_tcp_proxy(
                     // left enforcement off. A refused connection is dropped
                     // before a single byte is read, so no client bytes ever
                     // reach the flight controller.
-                    let Some(origin) = admit_raw_peer(&auth, addr.ip(), port, RawEdge::Tcp) else {
+                    let Some(origin) = admit_raw_peer(&auth, addr.ip(), stream.local_addr().ok().map(|a| a.ip()), port, RawEdge::Tcp) else {
                         // `stream` drops here, closing the connection.
                         continue;
                     };
@@ -544,7 +561,11 @@ pub async fn run_udp_proxy(
                     // halves: refusing the injection while still enrolling the
                     // peer would leave the telemetry mirror open, which is the
                     // half of this that reaches furthest.
-                    let Some(origin) = admit_raw_peer(&auth, addr.ip(), port, RawEdge::Udp) else {
+                    // A wildcard-bound UDP socket has no per-datagram local
+                    // address; the route toward the sender names the interface
+                    // it sits on.
+                    let local = ados_protocol::pairing_posture::local_addr_toward(addr.ip());
+                    let Some(origin) = admit_raw_peer(&auth, addr.ip(), local, port, RawEdge::Udp) else {
                         continue;
                     };
                     {
@@ -649,13 +670,14 @@ async fn handle_ws_client(
     // enforcement on) reject an unauthorized connection at the handshake. With
     // enforcement off the callback admits everything; the log happens after the
     // handshake from the captured decision.
+    let local = stream.local_addr().ok().map(|a| a.ip());
     let decision: Arc<StdMutex<Option<HandshakeDecision>>> = Arc::new(StdMutex::new(None));
     let callback_decision = decision.clone();
     let callback_auth = auth.clone();
     let ws = tokio_tungstenite::accept_hdr_async(
         stream,
         move |req: &HandshakeRequest, mut response: HandshakeResponse| {
-            let (admit, access) = callback_auth.handshake_decision(peer.ip(), req.headers());
+            let (admit, access) = callback_auth.handshake_decision(peer.ip(), local, req.headers());
             *callback_decision.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some(HandshakeDecision { admit, access });
             if admit {
@@ -830,10 +852,54 @@ mod tests {
         // them would leave a fresh unit with no way in at all.
         let (_dir, auth) = unpaired_auth(false);
         for ip in ["127.0.0.1", "192.168.4.20", "192.168.7.2", "169.254.3.4"] {
-            let (admit, access) = auth.classify(ip.parse().unwrap());
+            let (admit, access) = auth.classify(ip.parse().unwrap(), lifeline_local(ip));
             assert_eq!(access, Access::Accept, "{ip} is a lifeline");
             assert!(admit);
         }
+    }
+
+    /// The local address a peer on the AP or USB subnet reaches: the agent's
+    /// own gateway address there. `None` for every other peer.
+    fn lifeline_local(ip: &str) -> Option<std::net::IpAddr> {
+        if ip.starts_with("192.168.4.") {
+            Some("192.168.4.1".parse().unwrap())
+        } else if ip.starts_with("192.168.7.") {
+            Some("192.168.7.1".parse().unwrap())
+        } else {
+            None
+        }
+    }
+
+    /// A LAN numbered like the AP subnet, reached on the node's own DHCP lease
+    /// rather than the AP gateway, is not a lifeline.
+    #[test]
+    fn an_ap_numbered_lan_is_not_a_lifeline_off_the_ap_address() {
+        let (_dir, auth) = unpaired_auth(true);
+        let (admit, access) = auth.classify(
+            "192.168.4.20".parse().unwrap(),
+            Some("192.168.4.57".parse().unwrap()),
+        );
+        assert_eq!(access, Access::Unauthorized);
+        assert!(!admit);
+    }
+
+    /// An unreadable pairing file admits only the local operator, even with the
+    /// raw edges opened to the LAN and enforcement off.
+    #[test]
+    fn an_unreadable_pairing_file_admits_only_the_local_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        let pairing = write_pairing(dir.path(), "not json");
+        let auth = ProxyAuth::new(false, pairing).with_raw_lan_access(true);
+        assert!(!auth.classify("192.168.1.50".parse().unwrap(), None).0);
+        assert!(
+            !auth
+                .classify(
+                    "192.168.4.20".parse().unwrap(),
+                    lifeline_local("192.168.4.20")
+                )
+                .0
+        );
+        assert!(auth.classify("127.0.0.1".parse().unwrap(), None).0);
     }
 
     #[test]
@@ -844,7 +910,7 @@ mod tests {
         // has.
         let (_dir, auth) = unpaired_auth(false);
         for ip in ["10.0.0.9", "172.16.4.4", "192.168.1.50", "8.8.8.8"] {
-            let (_admit, access) = auth.classify(ip.parse().unwrap());
+            let (_admit, access) = auth.classify(ip.parse().unwrap(), None);
             assert_eq!(access, Access::Unauthorized, "{ip} is not a lifeline");
         }
     }
@@ -855,7 +921,7 @@ mod tests {
         // third-party GCS path, so refusing a caller would break it at the
         // operator's screen. Flagging must not change the data path.
         let (_dir, auth) = unpaired_auth(false);
-        let (admit, access) = auth.classify("10.0.0.9".parse().unwrap());
+        let (admit, access) = auth.classify("10.0.0.9".parse().unwrap(), None);
         assert_eq!(access, Access::Unauthorized);
         assert!(admit, "observe-only must still admit");
     }
@@ -865,11 +931,17 @@ mod tests {
         // Proves the second stage is a flag flip rather than new logic, so the
         // observation gathered now describes exactly what enforcement will do.
         let (_dir, auth) = unpaired_auth(true);
-        let (admit, access) = auth.classify("10.0.0.9".parse().unwrap());
+        let (admit, access) = auth.classify("10.0.0.9".parse().unwrap(), None);
         assert_eq!(access, Access::Unauthorized);
         assert!(!admit);
         // A lifeline is still admitted under enforcement.
-        assert!(auth.classify("192.168.4.20".parse().unwrap()).0);
+        assert!(
+            auth.classify(
+                "192.168.4.20".parse().unwrap(),
+                lifeline_local("192.168.4.20")
+            )
+            .0
+        );
     }
 
     #[test]
@@ -881,14 +953,14 @@ mod tests {
         let pairing = dir.path().join("pairing.json");
         std::fs::write(&pairing, r#"{"paired":true,"api_key":"secret-key"}"#).unwrap();
         let auth = ProxyAuth::new(false, pairing);
-        let (_admit, access) = auth.classify("10.0.0.9".parse().unwrap());
+        let (_admit, access) = auth.classify("10.0.0.9".parse().unwrap(), None);
         assert_eq!(
             access,
             Access::Unauthorized,
             "a paired node must not admit an off-box peer that presented nothing"
         );
         assert_eq!(
-            auth.classify("127.0.0.1".parse().unwrap()).1,
+            auth.classify("127.0.0.1".parse().unwrap(), None).1,
             Access::Accept
         );
     }
@@ -903,7 +975,7 @@ mod tests {
         let lan: std::net::IpAddr = "10.0.0.9".parse().unwrap();
         for edge in [RawEdge::Tcp, RawEdge::Udp] {
             assert_eq!(
-                admit_raw_peer(&auth, lan, 5760, edge),
+                admit_raw_peer(&auth, lan, None, 5760, edge),
                 Some(ClientOrigin::Unauthenticated),
                 "{edge:?}: observe-only must serve, and record the anonymity"
             );
@@ -923,7 +995,7 @@ mod tests {
         let lan: std::net::IpAddr = "10.0.0.9".parse().unwrap();
         for edge in [RawEdge::Tcp, RawEdge::Udp] {
             assert_eq!(
-                admit_raw_peer(&auth, lan, 5760, edge),
+                admit_raw_peer(&auth, lan, None, 5760, edge),
                 None,
                 "{edge:?}: enforcement must refuse, not log and continue"
             );
@@ -938,7 +1010,7 @@ mod tests {
         for ip in ["127.0.0.1", "192.168.4.20", "192.168.7.2", "169.254.3.4"] {
             for edge in [RawEdge::Tcp, RawEdge::Udp] {
                 assert_eq!(
-                    admit_raw_peer(&auth, ip.parse().unwrap(), 14550, edge),
+                    admit_raw_peer(&auth, ip.parse().unwrap(), lifeline_local(ip), 14550, edge),
                     Some(ClientOrigin::Trusted),
                     "{ip} on {edge:?} must survive enforcement"
                 );
@@ -962,7 +1034,13 @@ mod tests {
             let peer: std::net::IpAddr = ip.parse().unwrap();
             for edge in [RawEdge::Tcp, RawEdge::Udp] {
                 assert_eq!(
-                    admit_raw_peer(&ProxyAuth::new(false, pairing.clone()), peer, 5760, edge),
+                    admit_raw_peer(
+                        &ProxyAuth::new(false, pairing.clone()),
+                        peer,
+                        lifeline_local(ip),
+                        5760,
+                        edge
+                    ),
                     None,
                     "{ip} on {edge:?}: a paired node's raw edges are on-box only by default"
                 );
@@ -970,6 +1048,7 @@ mod tests {
                     admit_raw_peer(
                         &ProxyAuth::new(false, pairing.clone()).with_raw_lan_access(true),
                         peer,
+                        lifeline_local(ip),
                         5760,
                         edge
                     ),
@@ -980,6 +1059,7 @@ mod tests {
                     admit_raw_peer(
                         &ProxyAuth::new(true, pairing.clone()).with_raw_lan_access(true),
                         peer,
+                        lifeline_local(ip),
                         5760,
                         edge
                     ),
@@ -993,6 +1073,7 @@ mod tests {
             admit_raw_peer(
                 &ProxyAuth::new(true, pairing),
                 "127.0.0.1".parse().unwrap(),
+                None,
                 5760,
                 RawEdge::Tcp
             ),
@@ -1072,24 +1153,24 @@ mod tests {
 
         let (_d, unpaired) = unpaired_auth(true);
         assert_eq!(
-            unpaired.handshake_decision(lo, &tunnelled),
+            unpaired.handshake_decision(lo, Some(lo), &tunnelled),
             (false, Access::Unauthorized)
         );
         assert_eq!(
-            unpaired.handshake_decision(lo, &handshake_headers(&[])),
+            unpaired.handshake_decision(lo, Some(lo), &handshake_headers(&[])),
             (true, Access::Accept),
             "the local operator is still served"
         );
 
         let (_d2, paired) = paired_auth(true, "k");
         assert_eq!(
-            paired.handshake_decision(lo, &tunnelled),
+            paired.handshake_decision(lo, Some(lo), &tunnelled),
             (false, Access::Unauthorized)
         );
         // The key still authenticates a tunnelled caller.
         let keyed = handshake_headers(&[("x-forwarded-for", "203.0.113.5"), ("x-ados-key", "k")]);
         assert_eq!(
-            paired.handshake_decision(lo, &keyed),
+            paired.handshake_decision(lo, Some(lo), &keyed),
             (true, Access::Accept)
         );
     }

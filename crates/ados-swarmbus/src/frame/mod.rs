@@ -74,9 +74,8 @@ pub const FRAME_HEADER_LEN: usize = RADIOTAP_TX_LEN + IEEE80211_HDR_LEN;
 
 /// The largest frame the receive path accepts off the socket.
 ///
-/// A beacon frame is 87 bytes injected. The ceiling exists for the CBBA bid lane
-/// ([`SwarmFrameKind::CbbaBid`]), whose bid vectors run to a few hundred bytes,
-/// and to bound a single read against a corrupt or hostile length.
+/// A beacon frame is 87 bytes injected. The ceiling bounds a single read against
+/// a corrupt or hostile length.
 pub const MAX_FRAME_LEN: usize = 2048;
 
 /// Frame kinds carried in the sealed payload's second byte.
@@ -85,10 +84,6 @@ pub const MAX_FRAME_LEN: usize = 2048;
 pub enum SwarmFrameKind {
     /// A [`crate::SwarmBeacon`]: the periodic 2 Hz cooperative-awareness message.
     Beacon = 1,
-    /// A CBBA bid vector, emitted event-driven only (on a task-set change or a
-    /// reallocation, never periodically). This crate is pure transport for it and
-    /// never parses the body; the onboard autonomy layer owns that codec.
-    CbbaBid = 2,
 }
 
 impl SwarmFrameKind {
@@ -97,22 +92,9 @@ impl SwarmFrameKind {
     pub const fn from_wire(v: u8) -> Option<Self> {
         match v {
             1 => Some(Self::Beacon),
-            2 => Some(Self::CbbaBid),
             _ => None,
         }
     }
-}
-
-/// A received, authenticated, non-beacon frame, handed to whichever layer owns
-/// that kind.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SwarmFrame {
-    pub kind: SwarmFrameKind,
-    pub body: Vec<u8>,
-    /// Radiotap antenna signal in dBm, or `None` when the capture carried no
-    /// signal field. Never fabricated: a missing reading is not `0` and not
-    /// `-100`, because either would render as a real measurement.
-    pub rssi_dbm: Option<i8>,
 }
 
 /// Why a captured frame was not ours.
@@ -159,10 +141,12 @@ pub fn build_frame(fleet_id: u16, seq: u16, payload: &[u8]) -> Vec<u8> {
 /// both the transmitter and BSSID fields exactly as wfb-ng repeats its
 /// `channel_id`, and the sequence-control field carrying `seq`.
 ///
-/// `seq` is advanced by the caller per transmission. No receiver reassembles
-/// fragments, but a changing sequence stops a driver or an intermediate from
-/// treating consecutive beacons as retransmissions of one frame and discarding
-/// them as duplicates.
+/// `seq` is the 12-bit sequence number, advanced by the caller per transmission.
+/// It is written above the 4-bit fragment number, which stays 0: every beacon is
+/// a whole, unfragmented MSDU. A changing sequence number stops a driver or an
+/// intermediate from treating consecutive beacons as retransmissions of one frame
+/// and discarding them as duplicates. Bits above the 12th are dropped, so the
+/// caller's counter may wrap freely.
 pub fn ieee80211_header(fleet_id: u16, seq: u16) -> [u8; IEEE80211_HDR_LEN] {
     let mut h = [0u8; IEEE80211_HDR_LEN];
     // Frame control: data frame, from STA to DS; duration not set.
@@ -177,8 +161,8 @@ pub fn ieee80211_header(fleet_id: u16, seq: u16) -> [u8; IEEE80211_HDR_LEN] {
     h[FLEET_OFFSET..FLEET_OFFSET + 4].copy_from_slice(&fleet);
     h[16..18].copy_from_slice(&magic);
     h[18..22].copy_from_slice(&fleet);
-    // Sequence control.
-    h[22..24].copy_from_slice(&seq.to_le_bytes());
+    // Sequence control: sequence number in bits 4-15, fragment number 0.
+    h[22..24].copy_from_slice(&(seq << 4).to_le_bytes());
     h
 }
 
@@ -271,7 +255,15 @@ mod tests {
         );
         // The BSSID repeats the discriminator, as wfb-ng repeats its channel_id.
         assert_eq!(&h[16..22], &h[MAGIC_OFFSET..MAGIC_OFFSET + 6]);
-        assert_eq!(&h[22..24], &0xABCDu16.to_le_bytes(), "sequence control");
+        let control = u16::from_le_bytes([h[22], h[23]]);
+        assert_eq!(control & 0x000F, 0, "fragment number 0");
+        assert_eq!(control >> 4, 0xBCD, "12-bit sequence number");
+        // Consecutive transmissions differ in the sequence number, not the
+        // fragment number.
+        let next = ieee80211_header(0x1234, 0xABCE);
+        let next_control = u16::from_le_bytes([next[22], next[23]]);
+        assert_eq!(next_control & 0x000F, 0, "fragment number stays 0");
+        assert_eq!(next_control >> 4, (control >> 4) + 1);
     }
 
     /// Two fleets on one channel must not read each other's frames. This is the
@@ -406,10 +398,8 @@ mod tests {
     #[test]
     fn frame_kinds_decode_and_unknown_kinds_are_dropped() {
         assert_eq!(SwarmFrameKind::from_wire(1), Some(SwarmFrameKind::Beacon));
-        assert_eq!(SwarmFrameKind::from_wire(2), Some(SwarmFrameKind::CbbaBid));
         assert_eq!(SwarmFrameKind::Beacon as u8, 1);
-        assert_eq!(SwarmFrameKind::CbbaBid as u8, 2);
-        for unknown in [0u8, 3, 255] {
+        for unknown in [0u8, 2, 3, 255] {
             assert_eq!(SwarmFrameKind::from_wire(unknown), None);
         }
     }

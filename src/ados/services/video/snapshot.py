@@ -43,14 +43,16 @@ def _build_capture_command(camera: CameraInfo, output_path: str) -> list[str]:
 
 
 def _write_exif(path: str, gps_lat: float, gps_lon: float) -> bool:
-    """Write GPS EXIF data to a JPEG file if piexif is available.
+    """Write GPS EXIF data to a JPEG file.
 
     Returns True if EXIF was written successfully, False otherwise.
     """
     try:
         import piexif
     except ImportError:
-        log.debug("piexif_not_available", msg="EXIF metadata skipped")
+        # piexif is a declared dependency; its absence is a broken install, and
+        # the photo is saved without its position.
+        log.warning("piexif_not_available", msg="snapshot saved without GPS EXIF")
         return False
 
     def _to_dms(coord: float) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:

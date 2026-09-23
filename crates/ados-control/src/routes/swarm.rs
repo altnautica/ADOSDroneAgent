@@ -109,6 +109,7 @@ mod tests {
             bind_state: dir.join("bind-state.json"),
             profile_conf: dir.join("profile.conf"),
             mesh_role: dir.join("mesh-role"),
+            relay_secret: dir.join("relay-peer-secret"),
         };
         AppState::new(
             Arc::new(PairingState::with_path(dir.join("pairing.json"))),
@@ -165,6 +166,7 @@ mod tests {
                 "neighbors_now": 1,
             },
             "slots": [],
+            "radio": {"open": true, "iface": "wlan1"},
         })
     }
 

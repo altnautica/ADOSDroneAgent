@@ -11,14 +11,22 @@
 //!   profile off `/etc/ados/config.yaml`, the cloud-pair state off
 //!   `pairing.json`, the radio-pair signal off the `/etc/ados/wfb` key files, the
 //!   bind session off the `/run/ados/bind-state.json` sentinel, and the FC triple
-//!   off the live state snapshot. Every read is fault-tolerant; the route is
-//!   guaranteed 200, never 500.
+//!   off the live state snapshot. Every optional read is fault-tolerant. The one
+//!   exception is `pairing.json` itself: an unreadable or malformed file is a
+//!   `503`, never the unpaired default, because "unpaired" is the state in which
+//!   anyone on the LAN may claim a fresh key.
 //! - **`GET /api/pairing/code`** — the bare code while unpaired; 409 when paired.
 //! - **`POST /api/pairing/claim`** — claim the agent for a user. Writes
 //!   `pairing.json` (mirroring `PairingManager.claim` exactly) and returns the
-//!   key; 409 when already paired.
+//!   key; 409 when already paired; 503 when the pairing file cannot be read.
 //! - **`POST /api/pairing/unpair`** — clear pairing + mint a fresh code; 409 when
-//!   not paired. Gated by the auth middleware (it is not in the public set).
+//!   not paired. Gated by the auth middleware (it is not in the public set). An
+//!   unreadable pairing file is cleared too: the gate already restricts it to the
+//!   on-box operator, and this is how that operator recovers the node.
+//!
+//! The pairing code is withheld from a remote caller (anything relayed through a
+//! proxy or tunnel, or a public-WAN host): `info` reports it as null and `code`
+//! refuses. It is a claim credential for the device's own networks only.
 //!
 //! `mdns_host` is the RESOLVABLE reach name — the system hostname avahi
 //! publishes (`<hostname>.local`, or the name verbatim when it already carries
@@ -32,17 +40,40 @@
 //! (`crate::mdns`) uses the identical name as its SRV target, so the browse
 //! record and the probe response name one host.
 
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
+
+use ados_protocol::pairing_posture::CallerClass;
 
 use crate::config::PairingConfig;
 use crate::pairing_store::{self, PairingDoc};
 use crate::profile::current_profile_and_role_at;
 use crate::routes::detail;
 use crate::state::{AppState, PairingPaths};
+
+/// The `503` for a pairing file that exists but cannot be read or parsed. The
+/// node refuses to act as unpaired (which would open the claim) and names the
+/// recovery.
+fn pairing_unreadable(reason: &str) -> Response {
+    tracing::error!(reason, "pairing_state_unreadable");
+    detail(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "The pairing state on this device is unreadable. Unpair it on the device itself to recover.",
+    )
+}
+
+/// Whether the caller may see the pairing code: anyone on the device's own
+/// networks, never a remote caller. A request with no caller class (never
+/// produced by the edges) is treated as remote.
+fn may_see_code(caller: Option<Extension<CallerClass>>) -> bool {
+    !matches!(
+        caller.map_or(CallerClass::Remote, |Extension(c)| c),
+        CallerClass::Remote
+    )
+}
 
 /// `GET /api/pairing/info` → the 19-field node-identity probe.
 ///
@@ -51,7 +82,10 @@ use crate::state::{AppState, PairingPaths};
 /// off exact field presence), so `bind_state` and `radio` serialize as JSON
 /// `null`, never omitted. Each underlying read is guarded so a partially
 /// configured agent answers 200 with a usable shape rather than 500.
-pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
+pub async fn get_pairing_info(
+    State(state): State<AppState>,
+    caller: Option<Extension<CallerClass>>,
+) -> Response {
     let paths = &state.pairing_paths;
 
     // Device identity + profile, read live off the config (mirroring the FastAPI
@@ -75,13 +109,19 @@ pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
     // which is a proven reach, where a constructed name is not.
     let mdns_host = ados_protocol::reach::mdns_hostname().unwrap_or_default();
 
-    // Cloud-pair state off pairing.json.
-    let doc = PairingDoc::load(&paths.pairing_json);
+    // Cloud-pair state off pairing.json. Absent is unpaired; unreadable is not.
+    let doc = match PairingDoc::read(&paths.pairing_json) {
+        Ok(doc) => doc,
+        Err(reason) => return pairing_unreadable(&reason),
+    };
 
-    // Radio-pair signal: the presence of a wfb key file. Owned by the wfb service
-    // (a separate process), so read directly off disk, the same as the FastAPI
-    // route's `key_exists()` call.
-    let radio_paired = wfb_key_exists(paths);
+    // Radio-pair signal: the same predicate `GET /api/wfb/pair` answers from —
+    // this role's own key file, exactly 64 bytes, with a readable fingerprint.
+    let radio_paired = crate::routes::wfb::paired_key_fingerprint(
+        &paths.wfb_key_dir,
+        crate::routes::wfb::bind_role_for(&profile),
+    )
+    .is_some();
 
     // The folded bind-session snapshot from the cross-process sentinel.
     let bind_state = read_bind_state(paths);
@@ -103,7 +143,7 @@ pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
         "paired": doc.is_paired(),
         "radio_paired": radio_paired,
         "radio_peer_device_id": radio_peer_device_id,
-        "pairing_code": doc.info_pairing_code(),
+        "pairing_code": if may_see_code(caller) { doc.info_pairing_code() } else { None },
         "owner_id": doc.info_owner_id(),
         "paired_at": doc.info_paired_at(),
         "mdns_host": mdns_host,
@@ -124,6 +164,7 @@ pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
         "fc_port": fc_port,
         "fc_baud": fc_baud,
     }))
+    .into_response()
 }
 
 /// `GET /api/pairing/code` → `{"code": <code>}` while unpaired; 409
@@ -133,9 +174,21 @@ pub async fn get_pairing_info(State(state): State<AppState>) -> Json<Value> {
 /// native read surface returns the persisted code when one is present, and mints
 /// then persists one when absent so a fresh agent still answers a usable code
 /// (the same effect `get_or_create_code` has). Paired agents 409.
-pub async fn get_pairing_code(State(state): State<AppState>) -> Response {
+pub async fn get_pairing_code(
+    State(state): State<AppState>,
+    caller: Option<Extension<CallerClass>>,
+) -> Response {
+    if !may_see_code(caller) {
+        return detail(
+            StatusCode::FORBIDDEN,
+            "The pairing code is only served on the device's own networks.",
+        );
+    }
     let paths = &state.pairing_paths;
-    let doc = PairingDoc::load(&paths.pairing_json);
+    let doc = match PairingDoc::read(&paths.pairing_json) {
+        Ok(doc) => doc,
+        Err(reason) => return pairing_unreadable(&reason),
+    };
     if doc.is_paired() {
         return detail(StatusCode::CONFLICT, "Already paired");
     }
@@ -189,7 +242,10 @@ pub async fn claim_pairing(
     Json(req): Json<ClaimRequest>,
 ) -> Response {
     let paths = &state.pairing_paths;
-    let doc = PairingDoc::load(&paths.pairing_json);
+    let doc = match PairingDoc::read(&paths.pairing_json) {
+        Ok(doc) => doc,
+        Err(reason) => return pairing_unreadable(&reason),
+    };
     if doc.is_paired() {
         return detail(StatusCode::CONFLICT, "Already paired. Unpair first.");
     }
@@ -206,6 +262,9 @@ pub async fn claim_pairing(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to mint pairing key",
             );
+        }
+        Err(pairing_store::ClaimError::Unreadable(reason)) => {
+            return pairing_unreadable(&reason);
         }
         Err(pairing_store::ClaimError::Persist(e)) => {
             tracing::error!(error = %e, "pairing claim persist failed");
@@ -253,12 +312,15 @@ pub async fn claim_pairing(
 /// middleware (this path is NOT in the public set), matching the FastAPI route.
 pub async fn unpair(State(state): State<AppState>) -> Response {
     let paths = &state.pairing_paths;
-    let doc = PairingDoc::load(&paths.pairing_json);
-    if !doc.is_paired() {
-        return detail(StatusCode::CONFLICT, "Not paired");
+    // An unreadable file is cleared as well: only the on-box operator reaches
+    // this while it is unreadable (no key can match), and it is their recovery.
+    if let Ok(doc) = PairingDoc::read(&paths.pairing_json) {
+        if !doc.is_paired() {
+            return detail(StatusCode::CONFLICT, "Not paired");
+        }
     }
 
-    if let Err(e) = pairing_store::unpair(&paths.pairing_json) {
+    if let Err(e) = pairing_store::unpair(&paths.pairing_json, &paths.relay_secret) {
         tracing::error!(error = %e, "pairing unpair persist failed");
         return detail(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -299,13 +361,6 @@ pub async fn unpair(State(state): State<AppState>) -> Response {
 }
 
 // --- helpers ---
-
-/// Whether a role-appropriate WFB key file is present, the `radio_paired` signal.
-/// Mirrors `key_mgr.key_exists()` with no explicit role: either `tx.key` or
-/// `rx.key` counts as paired (the bind protocol writes one side per rig).
-fn wfb_key_exists(paths: &PairingPaths) -> bool {
-    paths.wfb_key_dir.join("tx.key").is_file() || paths.wfb_key_dir.join("rx.key").is_file()
-}
 
 /// Fold the WFB bind-session snapshot from the cross-process sentinel. Absent
 /// file (no bind has run) or a sentinel with no `state` → `null`. Each field is
@@ -478,18 +533,32 @@ mod tests {
         assert_eq!(bs["phase"], Value::Null);
     }
 
+    /// `radio_paired` answers from the shared predicate: this role's own key,
+    /// exactly 64 bytes. A truncated key, or a stale key of the other role, is
+    /// not a radio pairing.
     #[test]
-    fn wfb_key_presence_is_the_radio_paired_signal() {
+    fn radio_paired_is_the_roles_own_complete_key() {
+        use crate::routes::wfb::paired_key_fingerprint;
         let dir = tempfile::tempdir().unwrap();
-        let paths = test_paths(dir.path());
-        let key_dir = &paths.wfb_key_dir;
-        std::fs::create_dir_all(key_dir).unwrap();
-        assert!(!wfb_key_exists(&paths), "no key → not radio-paired");
+        let key_dir = dir.path().join("wfb");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        assert!(
+            paired_key_fingerprint(&key_dir, "drone").is_none(),
+            "no key"
+        );
         std::fs::write(key_dir.join("tx.key"), b"x").unwrap();
-        assert!(wfb_key_exists(&paths), "tx.key → radio-paired");
-        std::fs::remove_file(key_dir.join("tx.key")).unwrap();
-        std::fs::write(key_dir.join("rx.key"), b"x").unwrap();
-        assert!(wfb_key_exists(&paths), "rx.key → radio-paired");
+        assert!(
+            paired_key_fingerprint(&key_dir, "drone").is_none(),
+            "a truncated tx.key is not a pairing"
+        );
+        std::fs::write(key_dir.join("rx.key"), [7u8; 64]).unwrap();
+        assert!(
+            paired_key_fingerprint(&key_dir, "drone").is_none(),
+            "a drone holding only a ground-station rx.key is not paired"
+        );
+        assert!(paired_key_fingerprint(&key_dir, "gs").is_some());
+        std::fs::write(key_dir.join("tx.key"), [7u8; 64]).unwrap();
+        assert!(paired_key_fingerprint(&key_dir, "drone").is_some());
     }
 
     fn test_paths(dir: &std::path::Path) -> PairingPaths {
@@ -500,6 +569,7 @@ mod tests {
             bind_state: dir.join("bind-state.json"),
             profile_conf: dir.join("profile.conf"),
             mesh_role: dir.join("mesh-role"),
+            relay_secret: dir.join("relay-peer-secret"),
         }
     }
 }

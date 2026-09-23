@@ -66,8 +66,8 @@ pub fn build_sidecar(inputs: &SidecarInputs) -> Value {
         "command_enabled": inputs.command_enabled,
         // Honest scope: this channel carries config request/response ONLY —
         // never armed-flight command authority — and rides the radio's auxiliary
-        // application lane on its own multiplex channel (the WFB pairing key is
-        // its only gate).
+        // application lane on its own multiplex channel. Each request carries a
+        // per-pair relay ticket, and writes are limited to radio.* / video.*.
         "carries": "config",
         "bearer": "aux",
         "rx_port": inputs.rx_port,

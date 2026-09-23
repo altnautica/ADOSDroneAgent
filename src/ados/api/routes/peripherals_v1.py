@@ -13,6 +13,9 @@ the ground-station profile, so every agent exposes this router.
 
 from __future__ import annotations
 
+import asyncio
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -99,13 +102,12 @@ async def put_peripheral_config(
 
     if manifest.config_schema:
         try:
-            # Lazy import so jsonschema stays optional. If the library
-            # is not present, log the gap and let the write through.
-            # Strict validation is plugin responsibility in Track B.
+            # jsonschema is a declared dependency. A broken install without it
+            # writes the config unvalidated, loudly, rather than refusing it.
             import jsonschema  # type: ignore[import-not-found]
             jsonschema.validate(instance=body, schema=manifest.config_schema)
         except ImportError:
-            log.debug(
+            log.warning(
                 "peripheral_config_validate_skipped",
                 peripheral_id=peripheral_id,
                 reason="jsonschema_not_installed",
@@ -151,19 +153,43 @@ async def put_peripheral_config(
     }
 
 
-def _dispatch_restart_radio() -> dict:
+async def _systemctl(*args: str, timeout: float) -> tuple[int, str, str]:
+    """Run ``systemctl`` off the event loop, bounded, killing it on timeout."""
+    proc = await asyncio.create_subprocess_exec(
+        "systemctl",
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise
+    rc = proc.returncode if proc.returncode is not None else -1
+    return rc, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+def _wfb_unit() -> str:
+    """The radio unit this node actually runs: ``ados-wfb-rx`` on a ground
+    station (where ``ados-wfb`` is a no-op), ``ados-wfb`` everywhere else."""
+    from ados.api.deps import get_agent_app
+    from ados.api.routes.ground_station._common.profile import is_ground_station
+
+    return "ados-wfb-rx" if is_ground_station(get_agent_app()) else "ados-wfb"
+
+
+async def _dispatch_restart_radio() -> dict:
     """Restart the WFB radio service via systemctl.
 
-    Pre-flight ``systemctl is-active ados-wfb`` so a profile that
-    doesn't run the unit (drone-only without an RTL8812EU adapter)
-    surfaces a clean 409 instead of pretending to succeed. The
-    ``ados-wfb`` unit is on the same allowlist used by the dedicated
-    service-restart route in ``services.py``.
+    Pre-flight ``systemctl is-active <unit>`` so a profile that doesn't run
+    the unit (drone-only without an RTL8812EU adapter) surfaces a clean 409
+    instead of pretending to succeed. The unit follows the node's profile:
+    a ground station restarts ``ados-wfb-rx``. Both systemctl calls run as
+    subprocesses awaited off the event loop, so the rest of the API keeps
+    serving while the radio restarts.
     """
-    import shutil
-    import subprocess
-    from datetime import datetime, timezone
-
     if shutil.which("systemctl") is None:
         raise HTTPException(
             status_code=409,
@@ -172,19 +198,15 @@ def _dispatch_restart_radio() -> dict:
                 "message": "systemctl unavailable on this host",
             },
         )
+    unit = _wfb_unit()
     try:
-        active = subprocess.run(
-            ["systemctl", "is-active", "ados-wfb"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        _rc, stdout, _err = await _systemctl("is-active", unit, timeout=5)
+    except (TimeoutError, OSError) as exc:
         raise HTTPException(
             status_code=500,
-            detail={"code": "E_PROBE_FAILED", "message": str(exc)},
+            detail={"code": "E_PROBE_FAILED", "message": str(exc) or "probe timed out"},
         ) from exc
-    state = (active.stdout or "").strip()
+    state = stdout.strip()
     # Whitelist only the stable "active" state. activating /
     # deactivating / reloading all indicate the supervisor is mid-
     # transition; restarting on top of a deactivate path races the
@@ -194,7 +216,7 @@ def _dispatch_restart_radio() -> dict:
             status_code=409,
             detail={
                 "code": "E_UNIT_NOT_RUNNING",
-                "unit": "ados-wfb",
+                "unit": unit,
                 "state": state or "unknown",
                 "message": (
                     "The wfb radio service is not in the stable active "
@@ -203,33 +225,32 @@ def _dispatch_restart_radio() -> dict:
             },
         )
     try:
-        result = subprocess.run(
-            ["systemctl", "restart", "ados-wfb"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except subprocess.TimeoutExpired as exc:
+        rc, _out, stderr = await _systemctl("restart", unit, timeout=15)
+    except TimeoutError as exc:
         raise HTTPException(
             status_code=504,
             detail={
                 "code": "E_RESTART_TIMEOUT",
-                "message": "systemctl restart ados-wfb timed out",
+                "message": f"systemctl restart {unit} timed out",
             },
         ) from exc
-    if result.returncode != 0:
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "E_RESTART_FAILED", "message": str(exc)},
+        ) from exc
+    if rc != 0:
         raise HTTPException(
             status_code=500,
             detail={
                 "code": "E_RESTART_FAILED",
-                "message": (result.stderr or "").strip()
-                or f"systemctl exited {result.returncode}",
+                "message": stderr.strip() or f"systemctl exited {rc}",
             },
         )
     return {
         "ok": True,
         "dispatched_at": datetime.now(timezone.utc).isoformat(),
-        "message": "ados-wfb restarted",
+        "message": f"{unit} restarted",
     }
 
 
@@ -299,7 +320,7 @@ async def invoke_peripheral_action(
             ),
         }
 
-    result = dispatcher()
+    result = await dispatcher()
     log.info(
         "peripheral_action_dispatched",
         peripheral_id=peripheral_id,

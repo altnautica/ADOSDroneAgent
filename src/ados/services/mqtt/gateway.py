@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import ssl
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ados.core.logging import get_logger
@@ -15,6 +14,10 @@ if TYPE_CHECKING:
     from ados.services.mavlink.ipc_state import IpcVehicleState as VehicleState
 
 log = get_logger("mqtt")
+
+# Fixed pause between broker connect attempts. The gateway never gives up: a
+# broker that is down at boot is reached as soon as it comes back.
+CONNECT_RETRY_S = 3.0
 
 
 class MqttGateway:
@@ -26,6 +29,35 @@ class MqttGateway:
         self._client = None
         self._device_id = config.agent.device_id
         self._api_key = api_key  # From pairing, used as MQTT password in cloud mode
+
+    def _credentials(self) -> tuple[str, str | None]:
+        """The broker username and password.
+
+        The username is the bare device id unless explicitly overridden, so the
+        broker ACL pattern ``ados/%u/#`` resolves to this agent's own topic
+        subtree ``ados/<device_id>/...``. In cloud mode the pairing key is the
+        password when none is configured.
+        """
+        server = self.config.server
+        user = server.mqtt_username or self._device_id
+        password = server.mqtt_password
+        if server.mode == "cloud" and self._api_key:
+            password = password or self._api_key
+        return user, password or None
+
+    async def _connect(self, client, broker: str, port: int, shutdown: asyncio.Event) -> bool:
+        """Connect, retrying on a fixed interval until connected or shut down."""
+        while not shutdown.is_set():
+            try:
+                await asyncio.to_thread(client.connect, broker, port, 60)
+                return True
+            except Exception as e:  # noqa: BLE001 — DNS, refused, TLS, auth: all retried
+                log.warning("mqtt_connect_failed", broker=broker, error=str(e), retry_s=CONNECT_RETRY_S)
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=CONNECT_RETRY_S)
+            except TimeoutError:
+                pass
+        return False
 
     def _get_broker_config(self) -> tuple[str, int]:
         """Get broker host and port based on server mode."""
@@ -78,26 +110,21 @@ class MqttGateway:
         if transport == "websockets":
             client.ws_set_options(path="/mqtt")
 
-        # Username/password auth — in cloud mode, auto-use deviceId + apiKey.
-        # Username is the bare device_id (no prefix) so the broker ACL pattern
-        # `pattern readwrite ados/%u/#` substitutes to the agent's actual topic
-        # subtree `ados/<device_id>/...`.
-        mqtt_user = self.config.server.mqtt_username
-        mqtt_pass = self.config.server.mqtt_password
-        if self.config.server.mode == "cloud" and self._api_key:
-            mqtt_user = mqtt_user or self._device_id
-            mqtt_pass = mqtt_pass or self._api_key
-        if mqtt_user:
-            client.username_pw_set(mqtt_user, mqtt_pass)
+        user, password = self._credentials()
+        client.username_pw_set(user, password)
 
-        # TLS for secure connections
-        if self.config.security.tls.enabled or transport == "websockets":
+        # TLS on every transport, verified against the system trust store: the
+        # password is the pairing key. Only the explicit dev flag turns it off,
+        # and a TLS setup failure stops the gateway rather than falling back
+        # to plaintext.
+        if self.config.server.mqtt_plaintext_dev:
+            log.warning("mqtt_plaintext_dev", reason="server.mqtt_plaintext_dev is set")
+        else:
             try:
-                ca_path = self.config.security.tls.ca_path
-                ca_certs = ca_path if ca_path and Path(ca_path).exists() else None
-                client.tls_set(ca_certs=ca_certs, cert_reqs=ssl.CERT_REQUIRED)
-            except Exception as e:
-                log.warning("mqtt_tls_failed", error=str(e))
+                client.tls_set(cert_reqs=ssl.CERT_REQUIRED)
+            except Exception as e:  # noqa: BLE001 — any TLS setup failure is fatal here
+                log.error("mqtt_tls_setup_failed", error=str(e))
+                return
 
         # Use port 443 for WebSocket (through Cloudflare Tunnel)
         if transport == "websockets" and port == 8883:
@@ -111,17 +138,18 @@ class MqttGateway:
             except Exception as e:
                 log.warning("mqtt_parse_error", error=str(e))
 
-        client.on_message = on_message
-
-        # Connect
-        try:
-            client.connect(broker, port, keepalive=60)
+        # Subscribing on every CONNACK keeps the command subscription across the
+        # client's own automatic reconnects.
+        def on_connect(client, userdata, flags, reason_code, properties):
             client.subscribe(f"ados/{self._device_id}/command")
-            client.loop_start()
-            log.info("mqtt_connected", broker=broker, port=port)
-        except Exception as e:
-            log.error("mqtt_connect_failed", broker=broker, error=str(e))
+
+        client.on_message = on_message
+        client.on_connect = on_connect
+
+        if not await self._connect(client, broker, port, shutdown):
             return
+        client.loop_start()
+        log.info("mqtt_connected", broker=broker, port=port)
 
         self._client = client
         rate = self.config.server.telemetry_rate

@@ -132,8 +132,11 @@ pub fn render(
     frame: &mut Frame,
     dash: Option<&Dashboard>,
     history: &History,
-    refreshed: &str,
+    // Wall-clock time of the last successful poll; `None` before the first one.
+    refreshed: Option<&str>,
+    // The last success is old enough that its readings no longer count as live.
     stale: bool,
+    // Why the latest poll failed, if it did.
     error: Option<&str>,
     actions_selected: Option<usize>,
     // The latest agent version fetched from GitHub, once known (drives the footer
@@ -158,11 +161,11 @@ pub fn render(
     .split(frame.area());
 
     header(frame, rows[0], dash, refreshed, stale);
-    verdict(frame, rows[1], dash);
+    verdict(frame, rows[1], dash, error, stale);
     footer(frame, rows[3], dash, update_latest);
 
     match dash {
-        Some(d) => body(frame, rows[2], d, history),
+        Some(d) => body(frame, rows[2], d, history, stale),
         None => {
             let block = panel("Status");
             let inner = block.inner(rows[2]);
@@ -187,7 +190,13 @@ pub fn render(
     }
 }
 
-fn header(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>, refreshed: &str, stale: bool) {
+fn header(
+    frame: &mut Frame,
+    area: Rect,
+    dash: Option<&Dashboard>,
+    refreshed: Option<&str>,
+    stale: bool,
+) {
     let ident = match dash {
         Some(d) => Span::styled(d.ident(), bright()),
         None => Span::styled("connecting", dim()),
@@ -208,7 +217,13 @@ fn header(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>, refreshed: &s
     if let Some(d) = dash {
         right.push(Span::styled(format!("v{}  ·  ", d.version), dim()));
     }
-    right.push(Span::styled(format!("refreshed {refreshed} UTC"), dim()));
+    right.push(Span::styled(
+        match refreshed {
+            Some(at) => format!("refreshed {at} UTC"),
+            None => "not refreshed yet".to_string(),
+        },
+        dim(),
+    ));
     if stale {
         right.push(Span::styled(
             "  stale",
@@ -226,7 +241,13 @@ fn header(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>, refreshed: &s
     );
 }
 
-fn verdict(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>) {
+fn verdict(
+    frame: &mut Frame,
+    area: Rect,
+    dash: Option<&Dashboard>,
+    error: Option<&str>,
+    stale: bool,
+) {
     let Some(d) = dash else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled("· · ·", dim()))),
@@ -234,6 +255,32 @@ fn verdict(frame: &mut Frame, area: Rect, dash: Option<&Dashboard>) {
         );
         return;
     };
+    // A snapshot the agent is no longer confirming is never shown as a health
+    // verdict: the failure takes the verdict line, so the last good snapshot
+    // cannot read as a live HEALTHY.
+    if error.is_some() || stale {
+        let word = if error.is_some() {
+            "UNREACHABLE"
+        } else {
+            "STALE"
+        };
+        let why = error.unwrap_or("No answer from the agent.");
+        let line1 = Line::from(vec![
+            Span::styled("▲ ", Style::default().fg(theme::danger())),
+            Span::styled(
+                word,
+                Style::default()
+                    .fg(theme::danger())
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]);
+        let line2 = Line::from(Span::styled(
+            format!("{why} · showing the last snapshot"),
+            Style::default().fg(theme::warning()),
+        ));
+        frame.render_widget(Paragraph::new(vec![line1, line2]), area);
+        return;
+    }
     let health = d.health();
     let color = match health {
         Health::Healthy => theme::success(),
@@ -387,7 +434,7 @@ fn update_splash_overlay(frame: &mut Frame, installed: &str, latest: &str) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
-fn body(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History) {
+fn body(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History, stale: bool) {
     // Left: every reachable link (wide enough for a full URL). Right: live state.
     let cols =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area);
@@ -400,7 +447,7 @@ fn body(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History) {
         Constraint::Min(4),
     ])
     .split(cols[1]);
-    autopilot_panel(frame, cockpit[0], dash, history);
+    autopilot_panel(frame, cockpit[0], dash, history, stale);
     video_panel(frame, cockpit[1], dash);
     link_panel(frame, cockpit[2], dash);
     services_panel(frame, cockpit[3], dash);
@@ -411,7 +458,7 @@ fn links_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let groups = dash.reach_links();
+    let groups = &dash.links;
     if groups.is_empty() {
         frame.render_widget(
             Paragraph::new(Span::styled("no links advertised yet", dim())),
@@ -463,10 +510,30 @@ fn links_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn autopilot_panel(frame: &mut Frame, area: Rect, dash: &Dashboard, history: &History) {
+fn autopilot_panel(
+    frame: &mut Frame,
+    area: Rect,
+    dash: &Dashboard,
+    history: &History,
+    stale: bool,
+) {
     let block = panel("Autopilot");
     let inner = block.inner(area);
     frame.render_widget(block, area);
+
+    // Flight readings from a snapshot the agent stopped confirming are not
+    // live: hide them rather than show a frozen mode, arm state or battery.
+    if stale {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "no fresh data from the agent · flight readings hidden",
+                Style::default().fg(theme::warning()),
+            )))
+            .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
 
     // A ground station with no flight controller has no autopilot to show.
     if dash.profile == "ground_station" && !dash.mavlink_connected {
@@ -759,6 +826,16 @@ mod tests {
     /// Render one frame to an off-screen backend and return every cell's symbol,
     /// row by row, so a test can assert a rendered string is present.
     fn buffer_text(dash: Option<&Dashboard>, update_latest: Option<&str>, splash: bool) -> String {
+        draw_text(dash, update_latest, splash, None, false)
+    }
+
+    fn draw_text(
+        dash: Option<&Dashboard>,
+        update_latest: Option<&str>,
+        splash: bool,
+        error: Option<&str>,
+        stale: bool,
+    ) -> String {
         let backend = TestBackend::new(120, 50);
         let mut terminal = Terminal::new(backend).unwrap();
         let history = History::default();
@@ -768,9 +845,9 @@ mod tests {
                     f,
                     dash,
                     &history,
-                    "12:00:00",
-                    false,
-                    None,
+                    Some("12:00:00"),
+                    stale,
+                    error,
                     None,
                     update_latest,
                     splash,
@@ -846,5 +923,71 @@ mod tests {
         let text = buffer_text(Some(&sample()), Some("0.99.108"), false);
         assert!(!text.contains("update available"), "{text}");
         assert!(text.contains("up to date"), "{text}");
+    }
+
+    /// A healthy, armed-state-reporting drone as the last good snapshot.
+    fn live_drone() -> Dashboard {
+        Dashboard::from_status(&json!({
+            "version": "0.99.108",
+            "device_name": "ados-x",
+            "profile": "drone",
+            "paired": true,
+            "mavlink": {"connected": true},
+            "telemetry": {
+                "mode": "LOITER",
+                "armed": false,
+                "battery": {"remaining": 82.0}
+            },
+            "services": [{"state": "running"}]
+        }))
+    }
+
+    #[test]
+    fn a_failed_poll_takes_the_verdict_line_over_the_last_snapshot() {
+        let dash = live_drone();
+        assert!(draw_text(Some(&dash), None, false, None, false).contains("HEALTHY"));
+
+        let text = draw_text(
+            Some(&dash),
+            None,
+            false,
+            Some("Agent unreachable: connection refused"),
+            false,
+        );
+        assert!(text.contains("UNREACHABLE"), "{text}");
+        assert!(
+            text.contains("Agent unreachable: connection refused"),
+            "{text}"
+        );
+        assert!(!text.contains("HEALTHY"), "{text}");
+    }
+
+    #[test]
+    fn a_stale_snapshot_hides_its_flight_readings() {
+        let dash = live_drone();
+        let live = draw_text(Some(&dash), None, false, None, false);
+        assert!(
+            live.contains("DISARMED") && live.contains("battery 82%"),
+            "{live}"
+        );
+
+        let text = draw_text(
+            Some(&dash),
+            None,
+            false,
+            Some("Agent unreachable: timed out"),
+            true,
+        );
+        assert!(text.contains("UNREACHABLE"), "{text}");
+        assert!(!text.contains("HEALTHY"), "{text}");
+        assert!(!text.contains("DISARMED"), "{text}");
+        assert!(!text.contains("LOITER"), "{text}");
+        assert!(!text.contains("battery 82%"), "{text}");
+        assert!(text.contains("flight readings hidden"), "{text}");
+
+        // A hung poll with no error yet still loses the verdict once stale.
+        let hung = draw_text(Some(&dash), None, false, None, true);
+        assert!(hung.contains("STALE"), "{hung}");
+        assert!(!hung.contains("HEALTHY"), "{hung}");
     }
 }

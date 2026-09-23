@@ -18,6 +18,7 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, fill_rect_outline, text, Canvas};
 use crate::graphics::qr::render_qr;
 use crate::graphics::sparkline::draw_sparkline;
+use crate::graphics::thresholds;
 use crate::pages::{blank_panel, ArmState, Chrome, HitAction, HitZone, Page, PageContext};
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
@@ -231,13 +232,7 @@ fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     if let Some(p) = bat_pct {
         let pct = (p as i64).clamp(0, 100);
         let fill_w = ((bat_w - 4) * pct as i32) / 100;
-        let color = if pct >= 50 {
-            palette.status_success
-        } else if pct >= 20 {
-            palette.status_warning
-        } else {
-            palette.status_error
-        };
+        let color = palette.grade(Some(pct as f64), thresholds::BATTERY_PCT);
         if fill_w > 0 {
             fill_rect(
                 canvas,
@@ -274,9 +269,8 @@ fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
 fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     let code = ctx
         .cloud
-        .pairing_code
+        .pair_code
         .clone()
-        .or_else(|| ctx.cloud.pair_code.clone())
         .or_else(|| ctx.pairing.code.clone())
         .unwrap_or_default();
 
@@ -303,11 +297,7 @@ fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
             HEADER_H + 32,
             palette.text_primary,
         );
-        let qr_payload = ctx
-            .cloud
-            .pair_url
-            .clone()
-            .unwrap_or_else(|| format!("altnautica.com/command?pair={code}"));
+        let qr_payload = ctx.pair_deep_link(&code);
         if let Some(qr) = render_qr(&qr_payload, 100, 2) {
             let qr_x = (PAGE_W - qr.size as i32) / 2;
             let qr_y = HEADER_H + 60;
@@ -347,7 +337,7 @@ mod tests {
     fn unpaired_offers_no_control_without_an_endpoint() {
         let page = DroneDetailPage;
         let mut ctx = PageContext::default();
-        ctx.cloud.pairing_code = Some("ABC123".to_string());
+        ctx.cloud.pair_code = Some("ABC123".to_string());
         let zones = page.hit_zones(&ctx);
         assert_eq!(zones.len(), 1);
         assert_eq!(zones[0].action, HitAction::Back);

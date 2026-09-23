@@ -10,12 +10,14 @@ be written under the returned dir (not merely that a path string was computed).
 
 from __future__ import annotations
 
+import tempfile
+
 import ados.plugins.runner as runner
 
 
 def test_prepare_plugin_dirs_creates_a_writable_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "PLUGIN_DATA_DIR", tmp_path / "plugin-data")
-    monkeypatch.setattr(runner, "PLUGIN_RUN_DIR", tmp_path / "run")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     monkeypatch.delenv("ADOS_PLUGIN_DATA_DIR", raising=False)
 
     data_dir, config_dir, temp_dir = runner._prepare_plugin_dirs(
@@ -26,14 +28,17 @@ def test_prepare_plugin_dirs_creates_a_writable_data_dir(tmp_path, monkeypatch):
     assert data_dir.is_dir()
     (data_dir / "state.json").write_text("{}")
     assert config_dir.is_dir()
-    assert temp_dir.is_dir()
+    # Scratch lives under the (unit-private) temp dir, never the agent run dir
+    # the plugin's sandbox cannot write.
+    assert temp_dir == tmp_path / "tmp" / "com.example.plugin"
+    (temp_dir / "scratch").write_text("x")
     # Fallback derivation, since no env was set.
     assert data_dir == tmp_path / "plugin-data" / "com.example.plugin" / "drones" / "drone-xyz"
 
 
 def test_env_data_dir_wins_over_the_local_derivation(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "PLUGIN_DATA_DIR", tmp_path / "plugin-data")
-    monkeypatch.setattr(runner, "PLUGIN_RUN_DIR", tmp_path / "run")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     host_dir = tmp_path / "host-supplied" / "drones" / "drone-xyz"
     monkeypatch.setenv("ADOS_PLUGIN_DATA_DIR", str(host_dir))
 
@@ -48,7 +53,7 @@ def test_env_data_dir_wins_over_the_local_derivation(tmp_path, monkeypatch):
 
 def test_idempotent_across_repeated_calls(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "PLUGIN_DATA_DIR", tmp_path / "plugin-data")
-    monkeypatch.setattr(runner, "PLUGIN_RUN_DIR", tmp_path / "run")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     monkeypatch.delenv("ADOS_PLUGIN_DATA_DIR", raising=False)
 
     first = runner._prepare_plugin_dirs("com.example.plugin", "drone-xyz")

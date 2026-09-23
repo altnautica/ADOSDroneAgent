@@ -1,7 +1,7 @@
 //! `ados-cloud` daemon.
 //!
 //! The runnable cloud relay. Wires the relay tasks into one tokio runtime:
-//! the MQTT telemetry/status gateway, the MAVLink-over-MQTT relay, the WebRTC
+//! the MAVLink-over-MQTT relay, the WebRTC
 //! signaling relay, the heartbeat / command-poll loops, and the WFB auto-pair
 //! supervisor. The pairing beacon is hosted in the API process (it owns the
 //! pairing code + api key + claim). Modeled on `ados-supervisor/src/main.rs`:

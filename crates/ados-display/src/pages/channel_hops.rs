@@ -93,7 +93,7 @@ impl Page for ChannelHopsPage {
 
         draw_header(&mut canvas, palette, &ctx.hopping.band, history.len());
         if history.is_empty() {
-            draw_empty(&mut canvas, palette, radio_channel);
+            draw_empty(&mut canvas, palette, ctx.hopping.present, radio_channel);
         } else {
             draw_chart(&mut canvas, palette, history, radio_channel);
             draw_legend(&mut canvas, palette, history);
@@ -169,15 +169,19 @@ fn draw_header(canvas: &mut Canvas, palette: &Palette, band: &Option<String>, ho
     );
 }
 
-/// Paint the empty-state body: a "no hops yet" headline and a sub-line that
-/// reports the current channel (or that the supervisor is armed).
-fn draw_empty(canvas: &mut Canvas, palette: &Palette, radio_channel: Option<i64>) {
+/// Paint the empty-state body. Without a fresh hop-supervisor sidecar the page
+/// says there is no supervisor data rather than asserting anything about it.
+fn draw_empty(canvas: &mut Canvas, palette: &Palette, present: bool, radio_channel: Option<i64>) {
     let big_f = LoadedFont::new(FontFace::SansBold, 14);
     let small_f = LoadedFont::new(FontFace::SansRegular, 11);
-    let msg = "No hops yet";
+    let msg = if present {
+        "No hops yet"
+    } else {
+        "No hop supervisor data"
+    };
     let sub = match radio_channel {
         Some(ch) => format!("current channel {ch}"),
-        None => "supervisor is armed".to_string(),
+        None => "channel —".to_string(),
     };
     text(
         canvas,
@@ -336,22 +340,23 @@ fn draw_chart(
 
     // Scatter markers per hop, colored by trigger + outcome.
     for entry in history {
-        let trigger = entry.trigger.as_deref().unwrap_or("periodic");
-        let color = marker_color(palette, trigger, entry.ok);
+        let color = marker_color(palette, entry.trigger.as_deref(), entry.ok);
         let (cx, cy) = to_px(entry.at, entry.to_channel as f64);
         fill_circle(canvas, cx, cy, 3, color, Some(palette.bg_primary));
     }
 }
 
 /// The scatter-marker color: red for a failed hop, amber for a reactive hop,
-/// green for a successful periodic hop.
-fn marker_color(palette: &Palette, trigger: &str, ok: bool) -> Rgb888 {
+/// green for a successful periodic hop, neutral when the trigger is unreported.
+fn marker_color(palette: &Palette, trigger: Option<&str>, ok: bool) -> Rgb888 {
     if !ok {
         palette.status_error
-    } else if trigger == "reactive" {
+    } else if trigger == Some("reactive") {
         palette.status_warning
-    } else {
+    } else if trigger == Some("periodic") {
         palette.status_success
+    } else {
+        palette.text_secondary
     }
 }
 
@@ -494,8 +499,18 @@ mod tests {
 
     #[test]
     fn marker_color_follows_trigger_and_outcome() {
-        assert_eq!(marker_color(&DARK, "periodic", false), DARK.status_error);
-        assert_eq!(marker_color(&DARK, "reactive", true), DARK.status_warning);
-        assert_eq!(marker_color(&DARK, "periodic", true), DARK.status_success);
+        assert_eq!(
+            marker_color(&DARK, Some("periodic"), false),
+            DARK.status_error
+        );
+        assert_eq!(
+            marker_color(&DARK, Some("reactive"), true),
+            DARK.status_warning
+        );
+        assert_eq!(
+            marker_color(&DARK, Some("periodic"), true),
+            DARK.status_success
+        );
+        assert_eq!(marker_color(&DARK, None, true), DARK.text_secondary);
     }
 }

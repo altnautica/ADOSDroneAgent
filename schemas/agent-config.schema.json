@@ -1565,22 +1565,6 @@
           "default": false,
           "title": "Setup Token Required",
           "type": "boolean"
-        },
-        "tls": {
-          "$ref": "#/$defs/TlsConfig",
-          "default": {
-            "ca_path": "/etc/ados/certs/ca.crt",
-            "cert_path": "/etc/ados/certs/device.crt",
-            "enabled": true,
-            "key_path": "/etc/ados/certs/device.key"
-          }
-        },
-        "wireguard": {
-          "$ref": "#/$defs/WireguardConfig",
-          "default": {
-            "config_path": "/etc/wireguard/ados.conf",
-            "enabled": false
-          }
         }
       },
       "title": "SecurityConfig",
@@ -1644,13 +1628,18 @@
           "type": "string",
           "x-secret": true
         },
+        "mqtt_plaintext_dev": {
+          "default": false,
+          "title": "Mqtt Plaintext Dev",
+          "type": "boolean"
+        },
         "mqtt_transport": {
           "default": "websockets",
           "title": "Mqtt Transport",
           "type": "string"
         },
         "mqtt_username": {
-          "default": "ados",
+          "default": "",
           "title": "Mqtt Username",
           "type": "string"
         },
@@ -1830,33 +1819,6 @@
         }
       },
       "title": "SwarmTasksConfig",
-      "type": "object"
-    },
-    "TlsConfig": {
-      "properties": {
-        "ca_path": {
-          "default": "/etc/ados/certs/ca.crt",
-          "title": "Ca Path",
-          "type": "string"
-        },
-        "cert_path": {
-          "default": "/etc/ados/certs/device.crt",
-          "title": "Cert Path",
-          "type": "string"
-        },
-        "enabled": {
-          "default": true,
-          "title": "Enabled",
-          "type": "boolean"
-        },
-        "key_path": {
-          "default": "/etc/ados/certs/device.key",
-          "title": "Key Path",
-          "type": "string",
-          "x-secret": true
-        }
-      },
-      "title": "TlsConfig",
       "type": "object"
     },
     "TunnelConfig": {
@@ -2359,23 +2321,6 @@
       },
       "title": "WifiSelfHealConfig",
       "type": "object"
-    },
-    "WireguardConfig": {
-      "properties": {
-        "config_path": {
-          "default": "/etc/wireguard/ados.conf",
-          "title": "Config Path",
-          "type": "string",
-          "x-secret": true
-        },
-        "enabled": {
-          "default": false,
-          "title": "Enabled",
-          "type": "boolean"
-        }
-      },
-      "title": "WireguardConfig",
-      "type": "object"
     }
   },
   "properties": {
@@ -2614,17 +2559,7 @@
         },
         "hmac_enabled": false,
         "hmac_secret": "",
-        "setup_token_required": false,
-        "tls": {
-          "ca_path": "/etc/ados/certs/ca.crt",
-          "cert_path": "/etc/ados/certs/device.crt",
-          "enabled": true,
-          "key_path": "/etc/ados/certs/device.key"
-        },
-        "wireguard": {
-          "config_path": "/etc/wireguard/ados.conf",
-          "enabled": false
-        }
+        "setup_token_required": false
       }
     },
     "server": {
@@ -2638,8 +2573,9 @@
         "heartbeat_interval": 5,
         "mode": "local",
         "mqtt_password": "",
+        "mqtt_plaintext_dev": false,
         "mqtt_transport": "websockets",
-        "mqtt_username": "ados",
+        "mqtt_username": "",
         "self_hosted": {
           "api_key": "",
           "mqtt_broker": "",

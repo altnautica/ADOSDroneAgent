@@ -115,6 +115,15 @@ fn mesh_state_path() -> PathBuf {
     run_dir().join("mesh-state.json")
 }
 
+/// The uplink router's active-uplink sentinel (`/run/ados/uplink-active`): present
+/// with the selected uplink while one is up, unlinked when there is none.
+fn uplink_active_flag_path() -> PathBuf {
+    run_dir().join("uplink-active")
+}
+
+/// The unit that runs the uplink router and so owns the sentinel above.
+const UPLINK_ROUTER_UNIT: &str = "ados-uplink-router.service";
+
 /// The relay-state sidecar (`/run/ados/wfb-relay.json`) the relay loop writes; the
 /// sidecar fallback for `/wfb/relay/status`.
 fn wfb_relay_path() -> PathBuf {
@@ -268,7 +277,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     // `gs_recording`'s own module docs contradict: the start and stop are separate
     // requests, so the front holds the one recorder behind a `OnceLock` for the
     // life of the process. The surface therefore reported a known-false value
-    // while a capture was running (rule 6).
+    // while a capture was running.
     let (recording_active, recording_filename) =
         crate::routes::gs_recording::recording_view(&crate::routes::gs_recording::recorder()).await;
 
@@ -439,6 +448,10 @@ fn link_view_from(path: &Path) -> Value {
     base.insert("packets_lost".to_string(), json!(0));
     base.insert("loss_percent".to_string(), Value::Null);
     base.insert("tx_power_dbm".to_string(), Value::Null);
+    // The radio's declared power path (`host_vbus` / `powered_hub` /
+    // `external_5v`), which the panel's brownout warning keys on. Null until the
+    // radio writes a snapshot, so no reader guesses a supply topology.
+    base.insert("topology".to_string(), Value::Null);
     base.insert("state".to_string(), json!("connecting"));
     // The one-glance link diagnosis (deaf / mis_keyed / jammed / healthy /
     // searching) + the RX counters that separate the failure modes a bare "0
@@ -595,6 +608,14 @@ fn link_view_from(path: &Path) -> Value {
             _ => Value::Null,
         },
     );
+    merged.insert(
+        "topology".to_string(),
+        payload
+            .get("topology")
+            .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
     // state: the payload value when truthy, else "connecting".
     let payload_state = payload.get("state").cloned().unwrap_or(Value::Null);
     let state = if json_truthy(&payload_state) {
@@ -634,10 +655,11 @@ const AP_GATEWAY_IP: &str = "192.168.4.1";
 /// regardless of the unit state) and `ap_ip` from `status()["gateway"]`. The front
 /// has no in-process manager but reads the same live seams: the resolved SSID off
 /// config (the way `_hostapd_manager` + `_build_ssid` resolve it) and the
-/// `192.168.4.1` gateway while the AP unit is active. `usb_ip` / `uplink_type` /
-/// `uplink_reachable` are the same static legs the Python view carries. When the
-/// AP unit is down, `ap_ip` is null (the manager's status reports the gateway only
-/// while up), while `ap_ssid` still resolves off config.
+/// `192.168.4.1` gateway while the AP unit is active. `usb_ip` stays the static
+/// null leg. `uplink_type` / `uplink_reachable` come from the uplink router's
+/// active-uplink sentinel (see [`uplink_view`]). When the AP unit is down, `ap_ip`
+/// is null (the manager's status reports the gateway only while up), while
+/// `ap_ssid` still resolves off config.
 ///
 /// This is the I/O shell, so it is the frame that goes `async`: the composition
 /// stays pure in [`network_view_compose`], which already takes the running flag
@@ -651,20 +673,63 @@ async fn network_view(state: &AppState) -> Value {
     // exactly how two surfaces come to give an operator two different answers
     // about the same unit; keep it centralised so it cannot drift again.
     let running = crate::probe::unit_is_active(HOSTAPD_UNIT).await;
-    network_view_compose(&ap_ssid_from_config(&cfg), running)
+    let router_running = crate::probe::unit_is_active(UPLINK_ROUTER_UNIT).await;
+    let uplink = uplink_view(&uplink_active_flag_path(), router_running);
+    network_view_compose(&ap_ssid_from_config(&cfg), running, uplink)
 }
 
-/// Compose the `_network_view` body from the resolved SSID + the live running
-/// flag. Split out so the shape + the running-vs-not-running gating are unit
-/// tested without the `systemctl` IO. `ap_ip` is the gateway while running, else
-/// null; `ap_ssid` is the resolved SSID either way; the rest are the static legs.
-fn network_view_compose(ap_ssid: &str, running: bool) -> Value {
+/// `(uplink_type, uplink_reachable)` from the uplink router's sentinel.
+///
+/// A present sentinel names the selected uplink, mapped to its kind (`eth`,
+/// `wifi`, `cellular`, `usb`, else the interface name), with the router's last
+/// reachability verdict. An absent sentinel while the router runs is the
+/// router's own "no uplink" (`"none"`, unreachable). Anything else (the router
+/// not running, an unreadable or malformed file) is unknown: both null, which a
+/// reader renders as "—" rather than as offline.
+fn uplink_view(flag: &Path, router_running: bool) -> (Value, Value) {
+    #[derive(Deserialize)]
+    struct Flag {
+        active_uplink: String,
+        internet_reachable: bool,
+    }
+    match std::fs::read_to_string(flag) {
+        Ok(text) => match serde_json::from_str::<Flag>(&text) {
+            Ok(f) => {
+                let name = f.active_uplink.trim();
+                let kind = if name.starts_with("eth") {
+                    "eth"
+                } else if name.starts_with("wlan") {
+                    "wifi"
+                } else if name.starts_with("wwan") {
+                    "cellular"
+                } else if name.starts_with("usb") {
+                    "usb"
+                } else {
+                    name
+                };
+                (json!(kind), json!(f.internet_reachable))
+            }
+            Err(_) => (Value::Null, Value::Null),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && router_running => {
+            (json!("none"), json!(false))
+        }
+        Err(_) => (Value::Null, Value::Null),
+    }
+}
+
+/// Compose the `_network_view` body from the resolved SSID, the live running
+/// flag and the uplink verdict. Split out so the shape + the running-vs-not-running
+/// gating are unit tested without the `systemctl` IO. `ap_ip` is the gateway while
+/// running, else null; `ap_ssid` is the resolved SSID either way.
+fn network_view_compose(ap_ssid: &str, running: bool, uplink: (Value, Value)) -> Value {
+    let (uplink_type, uplink_reachable) = uplink;
     json!({
         "ap_ssid": ap_ssid,
         "ap_ip": if running { Value::String(AP_GATEWAY_IP.to_string()) } else { Value::Null },
         "usb_ip": Value::Null,
-        "uplink_type": Value::Null,
-        "uplink_reachable": false,
+        "uplink_type": uplink_type,
+        "uplink_reachable": uplink_reachable,
     })
 }
 
@@ -766,15 +831,28 @@ fn system_block(signals: Option<&Map<String, Value>>, uptime_s: i64, version: &s
         .and_then(|s| signal_num(s, "thermal.primary_c"))
         .map(Value::from)
         .unwrap_or(Value::Null);
+    let disk_pct = signals
+        .and_then(root_disk_pct)
+        .map(Value::from)
+        .unwrap_or(Value::Null);
 
     json!({
         "cpu_pct": cpu_pct,
         "ram_used_mb": ram_used_mb,
         "ram_total_mb": ram_total_mb,
         "temp_c": temp_c,
+        "disk_pct": disk_pct,
         "uptime_seconds": uptime_s,
         "agent_version": version,
     })
+}
+
+/// Root-filesystem usage in percent (one decimal) from the used + total byte
+/// signals. `None` when either signal is absent or the total is not positive.
+fn root_disk_pct(signals: &Map<String, Value>) -> Option<f64> {
+    let total = signal_num(signals, "disk.fs_total_bytes")?;
+    let used = signal_num(signals, "disk.fs_used_bytes")?;
+    (total > 0.0).then(|| (used.max(0.0) / total * 1000.0).round() / 10.0)
 }
 
 /// Used + total RAM in MiB from the total + available byte signals, mirroring the
@@ -1413,6 +1491,7 @@ mod tests {
             "packets_lost": 0,
             "loss_percent": null,
             "tx_power_dbm": null,
+            "topology": null,
             "state": "connecting",
             "link_diag": null,
             "packets_all": 0,
@@ -1450,6 +1529,7 @@ mod tests {
             "decrypt_errors": 0,
             "mcs_index": 3,
             "mcs_ladder_cap": 3,
+            "topology": "powered_hub",
         });
         std::fs::write(&stats, serde_json::to_string(&payload).unwrap()).unwrap();
         let view = link_view_from(&stats);
@@ -1472,32 +1552,78 @@ mod tests {
         assert_eq!(view["mcs_index"], json!(3));
         assert_eq!(view["mcs_ladder_cap"], json!(3));
         assert_eq!(view["snr_db"], json!(28.0));
+        // The declared power path rides through, so the panel's brownout warning
+        // reads the radio's own topology instead of assuming host VBUS.
+        assert_eq!(view["topology"], json!("powered_hub"));
     }
 
     #[test]
     fn network_view_compose_running_carries_ssid_and_gateway() {
-        // The live shape the bench observed: a running AP reports the resolved
-        // SSID + the 192.168.4.1 gateway; the static legs are null/false.
+        // A running AP reports the resolved SSID + the 192.168.4.1 gateway,
+        // beside the uplink verdict it was handed.
         let want = json!({
             "ap_ssid": "ADOS-GS-D9DB",
             "ap_ip": "192.168.4.1",
             "usb_ip": null,
-            "uplink_type": null,
-            "uplink_reachable": false,
+            "uplink_type": "eth",
+            "uplink_reachable": true,
         });
-        assert_eq!(network_view_compose("ADOS-GS-D9DB", true), want);
+        assert_eq!(
+            network_view_compose("ADOS-GS-D9DB", true, (json!("eth"), json!(true))),
+            want
+        );
     }
 
     #[test]
     fn network_view_compose_not_running_gates_the_gateway() {
         // A down AP keeps the resolved SSID but reports ap_ip null (the manager's
         // status reports the gateway only while up).
-        let v = network_view_compose("ADOS-GS-0000", false);
+        let v = network_view_compose("ADOS-GS-0000", false, (Value::Null, Value::Null));
         assert_eq!(v["ap_ssid"], json!("ADOS-GS-0000"));
         assert_eq!(v["ap_ip"], Value::Null);
         assert_eq!(v["usb_ip"], Value::Null);
         assert_eq!(v["uplink_type"], Value::Null);
-        assert_eq!(v["uplink_reachable"], json!(false));
+        assert_eq!(v["uplink_reachable"], Value::Null);
+    }
+
+    /// The uplink comes from the router's sentinel. Its absence is "no uplink"
+    /// only while the router runs; otherwise nothing is known, and unknown must
+    /// not read as offline.
+    #[test]
+    fn uplink_view_reads_the_router_sentinel_and_keeps_unknown_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("uplink-active");
+        let write = |name: &str, reachable: bool| {
+            let body = json!({
+                "active_uplink": name,
+                "internet_reachable": reachable,
+                "timestamp_ms": 1,
+                "data_cap_state": "ok",
+            });
+            std::fs::write(&flag, body.to_string()).unwrap();
+        };
+        for (name, kind) in [
+            ("eth0", "eth"),
+            ("wlan0_client", "wifi"),
+            ("wwan0", "cellular"),
+            ("usb0", "usb"),
+        ] {
+            write(name, true);
+            assert_eq!(
+                uplink_view(&flag, true),
+                (json!(kind), json!(true)),
+                "{name}"
+            );
+        }
+        write("eth0", false);
+        assert_eq!(uplink_view(&flag, false), (json!("eth"), json!(false)));
+
+        std::fs::remove_file(&flag).unwrap();
+        assert_eq!(uplink_view(&flag, true), (json!("none"), json!(false)));
+        assert_eq!(uplink_view(&flag, false), (Value::Null, Value::Null));
+
+        std::fs::write(&flag, "not json").unwrap();
+        assert_eq!(uplink_view(&flag, true), (Value::Null, Value::Null));
     }
 
     #[test]
@@ -1551,7 +1677,13 @@ mod tests {
     #[test]
     fn system_block_with_no_signals_nulls_every_measured_leg() {
         let block = system_block(None, 1234, "9.9.9");
-        for leg in ["cpu_pct", "ram_used_mb", "ram_total_mb", "temp_c"] {
+        for leg in [
+            "cpu_pct",
+            "ram_used_mb",
+            "ram_total_mb",
+            "temp_c",
+            "disk_pct",
+        ] {
             assert_eq!(block[leg], Value::Null, "{leg} must be null, not a number");
             assert!(
                 block.as_object().unwrap().contains_key(leg),
@@ -1570,6 +1702,8 @@ mod tests {
             ("mem.total_bytes", json!(4_000_000_000_i64)),
             ("mem.avail_bytes", json!(1_000_000_000_i64)),
             ("thermal.primary_c", json!(47.5)),
+            ("disk.fs_total_bytes", json!(32_000_000_000_i64)),
+            ("disk.fs_used_bytes", json!(8_000_000_000_i64)),
         ]);
         let block = system_block(Some(&s), 7, "1.2.3");
         assert_eq!(block["cpu_pct"], json!(12.5));
@@ -1583,6 +1717,24 @@ mod tests {
             json!(((4_000_000_000_f64) / (1024.0 * 1024.0)) as i64)
         );
         assert_eq!(block["temp_c"], json!(47.5));
+        assert_eq!(block["disk_pct"], json!(25.0));
+    }
+
+    #[test]
+    fn system_block_nulls_disk_without_both_byte_signals() {
+        let used_only = signals(&[("disk.fs_used_bytes", json!(8_000_000_000_i64))]);
+        assert_eq!(
+            system_block(Some(&used_only), 0, "")["disk_pct"],
+            Value::Null
+        );
+        let zero_total = signals(&[
+            ("disk.fs_total_bytes", json!(0)),
+            ("disk.fs_used_bytes", json!(0)),
+        ]);
+        assert_eq!(
+            system_block(Some(&zero_total), 0, "")["disk_pct"],
+            Value::Null
+        );
     }
 
     #[test]
@@ -2027,7 +2179,7 @@ mod tests {
             // The idle-GS network view: the resolved SSID with the AP unit down
             // (ap_ip gated to null), composed from the pure seam so the fixture
             // does not depend on the host's `systemctl` answer.
-            "network": network_view_compose("ADOS-GS-0000", false),
+            "network": network_view_compose("ADOS-GS-0000", false, (Value::Null, Value::Null)),
             "recording": false,
             "video": {"recording": false, "recording_filename": Value::Null},
             "role": role_block,

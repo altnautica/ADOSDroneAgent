@@ -33,7 +33,9 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::errors::{ArchiveError, ManifestError, SignatureError, SignatureErrorKind};
+use crate::errors::{
+    ArchiveError, LifecycleError, ManifestError, SignatureError, SignatureErrorKind,
+};
 use crate::manifest::PluginManifest;
 
 pub const ARCHIVE_MAX_BYTES: u64 = 50 * 1024 * 1024;
@@ -63,15 +65,20 @@ pub struct ArchiveContents {
     pub raw_archive_bytes: Vec<u8>,
 }
 
-/// Reject path-traversal and absolute-path entries. Mirrors the Python
-/// `_safe_member_path`: a leading `/`, any backslash, or any `..` path segment
-/// (or a segment that starts with `..`) is unsafe.
+/// Reject path-traversal, absolute-path and non-canonical entries. A leading
+/// `/`, any backslash, any `..` path segment (or a segment that starts with
+/// `..`), a `.` segment, or an empty segment (`a//b`) is refused. The last two
+/// matter because `./manifest.yaml` and `manifest.yaml` are different zip names
+/// that unpack to the same file: accepting both lets the manifest the install
+/// gates validated differ from the one written to disk. A directory entry's
+/// single trailing `/` is not a segment.
 fn safe_member_path(name: &str) -> Result<&str, ArchiveError> {
-    if name.starts_with('/') || name.contains('\\') {
+    if name.is_empty() || name.starts_with('/') || name.contains('\\') {
         return Err(ArchiveError(format!("unsafe archive entry path: {name:?}")));
     }
-    for part in name.split('/') {
-        if part == ".." || part.starts_with("..") {
+    let body = name.strip_suffix('/').unwrap_or(name);
+    for part in body.split('/') {
+        if part.is_empty() || part == "." || part.starts_with("..") {
             return Err(ArchiveError(format!("unsafe archive entry path: {name:?}")));
         }
     }
@@ -135,38 +142,38 @@ pub fn canonical_payload_hash(entries: &BTreeMap<String, Vec<u8>>) -> [u8; 32] {
 
 /// Open and parse a `.adosplug` archive from a file without verifying the
 /// signature. Validates structural sanity; signature verification is a
-/// separate step (see [`crate::signing`]).
-pub fn open_archive(path: &Path) -> Result<ArchiveContents, ArchiveError> {
-    if !path.exists() {
-        return Err(ArchiveError(format!(
-            "archive not found: {}",
-            path.display()
-        )));
-    }
-    let raw = std::fs::read(path)
+/// separate step (see [`crate::signing`]). The size cap is checked on the file
+/// metadata before any byte is read, and the read itself stops one byte past
+/// the cap, so an oversized file is never held in memory.
+pub fn open_archive(path: &Path) -> Result<ArchiveContents, LifecycleError> {
+    let meta = std::fs::metadata(path)
         .map_err(|e| ArchiveError(format!("cannot read archive {}: {e}", path.display())))?;
-    if raw.len() as u64 > ARCHIVE_MAX_BYTES {
+    if meta.len() > ARCHIVE_MAX_BYTES {
         return Err(ArchiveError(format!(
             "archive {} is {} bytes; cap is {ARCHIVE_MAX_BYTES}",
             path.display(),
-            raw.len()
-        )));
+            meta.len()
+        ))
+        .into());
     }
+    let mut raw = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(ARCHIVE_MAX_BYTES + 1).read_to_end(&mut raw))
+        .map_err(|e| ArchiveError(format!("cannot read archive {}: {e}", path.display())))?;
     parse_archive_bytes(raw)
 }
 
-/// Parse archive bytes already in memory. The error type is [`ArchiveError`]
-/// for structural problems; a malformed manifest surfaces as a
-/// [`ManifestError`] wrapped into the archive error string, and a malformed
-/// `SIGNATURE` blob surfaces as a [`SignatureError`] (so the caller can map it
-/// to the `invalid` exit code) — both are converted on the way out via the
-/// returned `ArchiveError` only when structural, otherwise propagate.
-pub fn parse_archive_bytes(raw: Vec<u8>) -> Result<ArchiveContents, ArchiveError> {
+/// Parse archive bytes already in memory. A structural problem (or a malformed
+/// manifest) is a [`LifecycleError::Archive`]; a malformed `SIGNATURE` blob is
+/// a [`LifecycleError::Signature`] of kind `invalid`, so the caller can map it
+/// to the signature-invalid outcome without matching strings.
+pub fn parse_archive_bytes(raw: Vec<u8>) -> Result<ArchiveContents, LifecycleError> {
     if raw.len() as u64 > ARCHIVE_MAX_BYTES {
         return Err(ArchiveError(format!(
             "archive is {} bytes; cap is {ARCHIVE_MAX_BYTES}",
             raw.len()
-        )));
+        ))
+        .into());
     }
 
     let entries = read_entries(&raw)?;
@@ -246,7 +253,9 @@ fn read_entries(raw: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
                 "archive decompresses past the total cap {TOTAL_DECOMPRESSED_MAX}"
             )));
         }
-        entries.insert(safe, buf);
+        if entries.insert(safe.clone(), buf).is_some() {
+            return Err(ArchiveError(format!("archive entry {safe} appears twice")));
+        }
     }
     Ok(entries)
 }
@@ -257,17 +266,14 @@ fn read_entries(raw: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
 /// [`SignatureError`] of kind `invalid`.
 fn read_signature(
     blob: Option<&Vec<u8>>,
-) -> Result<(Option<String>, Option<String>), ArchiveError> {
+) -> Result<(Option<String>, Option<String>), SignatureError> {
     let Some(blob) = blob else {
         return Ok((None, None));
     };
     let text = std::str::from_utf8(blob).map_err(|e| {
-        ArchiveError(
-            SignatureError::new(
-                SignatureErrorKind::Invalid,
-                format!("SIGNATURE is not valid UTF-8: {e}"),
-            )
-            .message,
+        SignatureError::new(
+            SignatureErrorKind::Invalid,
+            format!("SIGNATURE is not valid UTF-8: {e}"),
         )
     })?;
     let lines: Vec<&str> = text
@@ -276,15 +282,12 @@ fn read_signature(
         .filter(|l| !l.is_empty())
         .collect();
     if lines.len() != 2 {
-        return Err(ArchiveError(
-            SignatureError::new(
-                SignatureErrorKind::Invalid,
-                format!(
-                    "SIGNATURE must be 2 non-blank lines (signer-id + sig), got {}",
-                    lines.len()
-                ),
-            )
-            .message,
+        return Err(SignatureError::new(
+            SignatureErrorKind::Invalid,
+            format!(
+                "SIGNATURE must be 2 non-blank lines (signer-id + sig), got {}",
+                lines.len()
+            ),
         ));
     }
     Ok((Some(lines[0].to_string()), Some(lines[1].to_string())))
@@ -376,6 +379,7 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
     let mut zf = zip::ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|e| ArchiveError(format!("not a valid zip archive: {e}")))?;
     let mut total_decompressed: u64 = 0;
+    let mut written: BTreeSet<String> = BTreeSet::new();
     for i in 0..zf.len() {
         let (name, unix_mode, is_dir) = {
             let file = zf
@@ -392,6 +396,9 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
             return Err(ArchiveError(format!(
                 "archive entry {safe} is a symlink; symlinks not allowed"
             )));
+        }
+        if !written.insert(safe.clone()) {
+            return Err(ArchiveError(format!("archive entry {safe} appears twice")));
         }
         let target = dest.join(&safe);
         if let Some(parent) = target.parent() {
@@ -415,36 +422,29 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
         }
         std::fs::write(&target, &buf)
             .map_err(|e| ArchiveError(format!("write of {} failed: {e}", target.display())))?;
-        restore_exec_mode(&target, unix_mode)?;
+        set_entry_mode(&target, unix_mode)?;
     }
     Ok(())
 }
 
-/// Restore the executable Unix mode when the zip entry carried one, so an
-/// unpacked `agent/bin/<id>` Rust-plugin binary is runnable by the generated
-/// systemd `ExecStart`. Without this, `std::fs::write` leaves the file at the
-/// process umask default (typically `0644`) and the unit dies with `EACCES`.
-///
-/// Only acts when the entry's mode has an exec bit set, and preserves the
-/// entry's own permission bits (masked to `0o777`). The canonical payload hash
-/// is computed over file *content*, so restoring the mode never affects the
-/// signature. Unix-only; a no-op elsewhere so the crate builds on a non-Unix
-/// dev host.
+/// Set an unpacked file's mode: `0755` when the zip entry carried an exec bit
+/// (so an `agent/bin/<id>` Rust-plugin binary is runnable by the generated
+/// systemd `ExecStart`), `0644` otherwise. Never the entry's own bits: zip
+/// metadata is outside the signed payload hash (which covers content only), so
+/// a re-zipped signed archive could otherwise install a group- or
+/// world-writable binary that any local process could rewrite. Unix-only; a
+/// no-op elsewhere so the crate builds on a non-Unix dev host.
 #[cfg(unix)]
-fn restore_exec_mode(target: &Path, unix_mode: Option<u32>) -> Result<(), ArchiveError> {
+fn set_entry_mode(target: &Path, unix_mode: Option<u32>) -> Result<(), ArchiveError> {
     use std::os::unix::fs::PermissionsExt;
-    if let Some(mode) = unix_mode {
-        if mode & 0o111 != 0 {
-            let perms = std::fs::Permissions::from_mode(mode & 0o777);
-            std::fs::set_permissions(target, perms)
-                .map_err(|e| ArchiveError(format!("chmod of {} failed: {e}", target.display())))?;
-        }
-    }
-    Ok(())
+    let exec = unix_mode.is_some_and(|m| m & 0o111 != 0);
+    let perms = std::fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 });
+    std::fs::set_permissions(target, perms)
+        .map_err(|e| ArchiveError(format!("chmod of {} failed: {e}", target.display())))
 }
 
 #[cfg(not(unix))]
-fn restore_exec_mode(_target: &Path, _unix_mode: Option<u32>) -> Result<(), ArchiveError> {
+fn set_entry_mode(_target: &Path, _unix_mode: Option<u32>) -> Result<(), ArchiveError> {
     Ok(())
 }
 
@@ -500,8 +500,8 @@ mod tests {
     #[test]
     fn missing_manifest_is_rejected() {
         let zip = build_zip(&[("agent/py/x.py", b"x")], None);
-        let err = parse_archive_bytes(zip).unwrap_err();
-        assert!(err.0.contains("missing manifest.yaml"), "{}", err.0);
+        let err = parse_archive_bytes(zip).unwrap_err().to_string();
+        assert!(err.contains("missing manifest.yaml"), "{}", err);
     }
 
     #[test]
@@ -513,8 +513,8 @@ mod tests {
             ],
             None,
         );
-        let err = parse_archive_bytes(zip).unwrap_err();
-        assert!(err.0.contains("unsafe archive entry path"), "{}", err.0);
+        let err = parse_archive_bytes(zip).unwrap_err().to_string();
+        assert!(err.contains("unsafe archive entry path"), "{}", err);
     }
 
     #[test]
@@ -526,8 +526,8 @@ mod tests {
             ],
             None,
         );
-        let err = parse_archive_bytes(zip).unwrap_err();
-        assert!(err.0.contains("unsafe archive entry path"), "{}", err.0);
+        let err = parse_archive_bytes(zip).unwrap_err().to_string();
+        assert!(err.contains("unsafe archive entry path"), "{}", err);
     }
 
     #[test]
@@ -539,8 +539,8 @@ mod tests {
             ],
             Some("link"),
         );
-        let err = parse_archive_bytes(zip).unwrap_err();
-        assert!(err.0.contains("symlink"), "{}", err.0);
+        let err = parse_archive_bytes(zip).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{}", err);
     }
 
     #[test]
@@ -566,8 +566,8 @@ mod tests {
             ],
             None,
         );
-        let err = parse_archive_bytes(zip).unwrap_err();
-        assert!(err.0.contains("2 non-blank lines"), "{}", err.0);
+        let err = parse_archive_bytes(zip).unwrap_err().to_string();
+        assert!(err.contains("2 non-blank lines"), "{}", err);
     }
 
     #[test]
@@ -634,11 +634,11 @@ mod tests {
             "compressed archive should be small ({})",
             buf.len()
         );
-        let err = parse_archive_bytes(buf.clone()).unwrap_err();
+        let err = parse_archive_bytes(buf.clone()).unwrap_err().to_string();
         assert!(
-            err.0.contains("per-entry cap"),
+            err.contains("per-entry cap"),
             "expected a per-entry decompression cap error, got: {}",
-            err.0
+            err
         );
         // unpack_to must enforce the same bound (it had no cap at all before).
         let dir = tempfile::tempdir().unwrap();
@@ -663,7 +663,7 @@ mod tests {
                 SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
             w.start_file("manifest.yaml", stored).unwrap();
             w.write_all(manifest_yaml().as_bytes()).unwrap();
-            w.start_file("agent/bin/geofence", stored.unix_permissions(0o755))
+            w.start_file("agent/bin/geofence", stored.unix_permissions(0o777))
                 .unwrap();
             w.write_all(b"#!/bin/sh\n").unwrap();
             w.finish().unwrap();
@@ -675,10 +675,12 @@ mod tests {
             .unwrap()
             .permissions()
             .mode();
-        assert_ne!(
-            bin_mode & 0o111,
-            0,
-            "agent/bin entry must be executable after unpack (mode {bin_mode:o})"
+        // A 0777 zip mode (outside the signed hash) still installs 0755: an
+        // executable, but never group- or world-writable.
+        assert_eq!(
+            bin_mode & 0o777,
+            0o755,
+            "agent/bin entry must unpack 0755 (mode {bin_mode:o})"
         );
         // ...and the plain manifest entry stays non-executable.
         let mani_mode = std::fs::metadata(dir.path().join("manifest.yaml"))
@@ -686,5 +688,54 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mani_mode & 0o111, 0, "plain entry must not gain exec bits");
+    }
+
+    #[test]
+    fn dot_and_empty_segments_cannot_alias_the_manifest() {
+        // `./manifest.yaml` unpacks over `manifest.yaml`, so the validated
+        // manifest and the one on disk could differ.
+        for alias in ["./manifest.yaml", "agent//x.py", "agent/./x.py"] {
+            let zip = build_zip(
+                &[
+                    ("manifest.yaml", manifest_yaml().as_bytes()),
+                    (alias, b"id: com.example.other\n"),
+                ],
+                None,
+            );
+            let err = parse_archive_bytes(zip.clone()).unwrap_err().to_string();
+            assert!(err.contains("unsafe archive entry path"), "{alias}: {err}");
+            let dir = tempfile::tempdir().unwrap();
+            assert!(unpack_to(&zip, dir.path()).is_err(), "{alias}");
+        }
+    }
+
+    #[test]
+    fn malformed_signature_keeps_the_invalid_kind() {
+        let zip = build_zip(
+            &[
+                ("manifest.yaml", manifest_yaml().as_bytes()),
+                ("SIGNATURE", b"only-one-line\n"),
+            ],
+            None,
+        );
+        match parse_archive_bytes(zip) {
+            Err(LifecycleError::Signature(e)) => {
+                assert_eq!(e.kind, SignatureErrorKind::Invalid)
+            }
+            other => panic!("expected a signature error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oversized_archive_file_is_refused_before_it_is_read() {
+        // A sparse file past the cap: refused on its metadata, never buffered.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.adosplug");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(ARCHIVE_MAX_BYTES + 1)
+            .unwrap();
+        let err = open_archive(&path).unwrap_err().to_string();
+        assert!(err.contains("cap is"), "{err}");
     }
 }

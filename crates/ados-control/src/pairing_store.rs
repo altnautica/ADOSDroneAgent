@@ -47,8 +47,10 @@ const API_KEY_RANDOM_BYTES: usize = 32;
 
 /// The read view of the pairing document the pairing-info route projects. Only
 /// the cloud-pair fields the route surfaces are typed; every other key is
-/// tolerated. Missing / unparseable file reads as the all-`None` unpaired
-/// default, matching the Python `get_info()` fallback shape.
+/// tolerated. An absent file reads as the all-`None` unpaired default; an
+/// unreadable or malformed one is an error ([`PairingDoc::read`]), never the
+/// unpaired default, because "unpaired" is what lets anyone on the LAN claim a
+/// fresh key.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct PairingDoc {
     #[serde(default)]
@@ -66,14 +68,26 @@ pub struct PairingDoc {
 }
 
 impl PairingDoc {
-    /// Read the current document from `path`. A missing or unparseable file reads
-    /// as the unpaired default (never an error), so the guaranteed-200 contract
-    /// holds.
-    pub fn load(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-            Err(_) => PairingDoc::default(),
+    /// Read the current document from `path`. An absent file is the unpaired
+    /// default; any other read failure, a parse failure, or `paired:true` with
+    /// no key is an error carrying the reason.
+    pub fn read(path: &Path) -> Result<Self, String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !value.is_object() {
+            return Err(format!("{}: not a JSON object", path.display()));
         }
+        let doc: Self =
+            serde_json::from_value(value).map_err(|e| format!("{}: {e}", path.display()))?;
+        if doc.paired && doc.api_key.as_deref().unwrap_or("").is_empty() {
+            return Err(format!("{}: paired with no key", path.display()));
+        }
+        Ok(doc)
     }
 
     /// Whether the agent is cloud-paired.
@@ -179,6 +193,9 @@ pub enum ClaimError {
     KeyGen(getrandom::Error),
     /// Serializing or atomically writing `pairing.json` failed.
     Persist(std::io::Error),
+    /// The existing document could not be read or parsed. A claim never
+    /// overwrites a file it could not read: that file may hold a live pairing.
+    Unreadable(String),
 }
 
 impl std::fmt::Display for ClaimError {
@@ -186,6 +203,7 @@ impl std::fmt::Display for ClaimError {
         match self {
             ClaimError::KeyGen(e) => write!(f, "key generation failed: {e}"),
             ClaimError::Persist(e) => write!(f, "{e}"),
+            ClaimError::Unreadable(e) => write!(f, "pairing state unreadable: {e}"),
         }
     }
 }
@@ -198,12 +216,13 @@ impl std::error::Error for ClaimError {}
 /// the same way the Python writer does). Returns the persisted API key.
 ///
 /// Fails closed on a `getrandom` error when no pending key is cached: a fresh
-/// claim never emits a predictable/all-zero key.
+/// claim never emits a predictable/all-zero key. Fails closed as well when the
+/// existing document cannot be read or parsed.
 ///
 /// `now` is the `paired_at` timestamp (unix seconds, fractional), passed in so a
 /// test can pin it; production passes the wall clock.
 pub fn claim(path: &Path, user_id: &str, now: f64) -> Result<ClaimOutcome, ClaimError> {
-    let current = PairingDoc::load(path);
+    let current = PairingDoc::read(path).map_err(ClaimError::Unreadable)?;
     // Idempotent re-claim: an already-paired agent returns its EXISTING key
     // rather than rotating to the pending one. Rotating on re-claim silently
     // invalidates every client already holding the key (the GCS, other
@@ -235,8 +254,22 @@ pub fn claim(path: &Path, user_id: &str, now: f64) -> Result<ClaimOutcome, Claim
 /// `{}`. The Python writer resets the in-memory state to `{}` then saves, so the
 /// on-disk result is the two-byte `{}` (pretty-printed by `json.dumps(..,
 /// indent=2)`, which still emits `{}` for an empty dict).
-pub fn unpair(path: &Path) -> std::io::Result<()> {
-    atomic_write_0600(path, b"{}")
+///
+/// The relay peer secret belongs to the pairing it was offered under, so it is
+/// removed too: the next ground station's offer must be accepted, and the
+/// previous holder's relay tickets must stop verifying.
+pub fn unpair(path: &Path, relay_secret: &Path) -> std::io::Result<()> {
+    atomic_write_0600(path, b"{}")?;
+    remove_relay_secret(relay_secret)
+}
+
+/// Remove the relay peer secret. Absent is success.
+pub fn remove_relay_secret(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// Persist a fresh pairing code, mirroring the `code`-writing branch of
@@ -492,7 +525,7 @@ mod tests {
             r#"{"paired":true,"api_key":"k","owner_id":"o","paired_at":1.0}"#,
         )
         .unwrap();
-        unpair(&path).unwrap();
+        unpair(&path, &dir.path().join("relay-peer-secret")).unwrap();
         let on_disk = read_json(&path);
         assert_eq!(on_disk, serde_json::json!({}), "unpair must write {{}}");
     }
@@ -503,7 +536,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pairing.json");
-        unpair(&path).unwrap();
+        unpair(&path, &dir.path().join("relay-peer-secret")).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
@@ -528,7 +561,7 @@ mod tests {
             r#"{"paired":true,"api_key":"k","owner_id":"user-42","paired_at":1700000000.0,"pairing_code":"ZZ"}"#,
         )
         .unwrap();
-        let doc = PairingDoc::load(&path);
+        let doc = PairingDoc::read(&path).unwrap();
         assert!(doc.is_paired());
         assert_eq!(doc.info_owner_id(), Some("user-42".to_string()));
         assert_eq!(doc.info_paired_at(), Some(1700000000.0));
@@ -541,7 +574,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pairing.json");
         std::fs::write(&path, r#"{"pairing_code":"ABC234","code_created_at":1.0}"#).unwrap();
-        let doc = PairingDoc::load(&path);
+        let doc = PairingDoc::read(&path).unwrap();
         assert!(!doc.is_paired());
         assert_eq!(doc.info_pairing_code(), Some("ABC234".to_string()));
         // Unpaired → owner/paired_at omitted.
@@ -552,9 +585,56 @@ mod tests {
     #[test]
     fn load_of_an_absent_file_is_the_unpaired_default() {
         let dir = tempfile::tempdir().unwrap();
-        let doc = PairingDoc::load(&dir.path().join("absent.json"));
+        let doc = PairingDoc::read(&dir.path().join("absent.json")).unwrap();
         assert!(!doc.is_paired());
         assert_eq!(doc.info_owner_id(), None);
         assert_eq!(doc.info_pairing_code(), None);
+    }
+
+    /// A present file that cannot be parsed is not "unpaired": reading it is an
+    /// error, and a claim neither hands out a key nor overwrites it.
+    #[test]
+    fn a_malformed_file_fails_closed_and_the_claim_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pairing.json");
+        for body in [
+            r#"{"paired": true, "api_key": "k""#,
+            r#"{"paired": true}"#,
+            "[]",
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert!(PairingDoc::read(&path).is_err(), "{body} must not read");
+            assert!(matches!(
+                claim(&path, "intruder", 1.0),
+                Err(ClaimError::Unreadable(_))
+            ));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        }
+    }
+
+    /// Unpair drops the relay secret, so the next ground station's offer is
+    /// accepted instead of refused as "already held".
+    #[test]
+    fn unpair_then_a_new_relay_offer_is_accepted() {
+        use ados_protocol::relay_ticket::{apply_offered_secret, AcceptDecision};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pairing.json");
+        let secret = dir.path().join("secrets/relay-peer-secret");
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        assert_eq!(
+            apply_offered_secret(&secret, &first).unwrap(),
+            AcceptDecision::Accept
+        );
+        assert_ne!(
+            apply_offered_secret(&secret, &second).unwrap(),
+            AcceptDecision::Accept,
+            "held: a second offer is refused"
+        );
+        unpair(&path, &secret).unwrap();
+        assert_eq!(
+            apply_offered_secret(&secret, &second).unwrap(),
+            AcceptDecision::Accept
+        );
     }
 }

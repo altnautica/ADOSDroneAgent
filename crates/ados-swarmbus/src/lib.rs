@@ -26,7 +26,7 @@
 //!   stub elsewhere.
 //! - [`bus`] — transmit and receive over one interface.
 //! - [`ingest`] — captured bytes to table effect, as one pure function.
-//! - [`neighbors`] — the table, the counters, the dead reckoning.
+//! - [`neighbors`] — the table, its counters and the replay window.
 //! - [`schedule`] — 2 Hz with per-transmission jitter.
 //! - [`vehicle`] — filling this node's own beacon from the flight controller.
 //! - [`publish`] — the JSON contract on `swarm.sock`.
@@ -87,7 +87,7 @@ pub use beacon::{
 pub use bus::SwarmBus;
 pub use config::{SwarmBusConfig, CONFIG_YAML};
 pub use crypto::{derive_fleet_key, FleetKeyWatch, SwarmCipher};
-pub use frame::{SwarmFrame, SwarmFrameKind};
+pub use frame::SwarmFrameKind;
 pub use ingest::{ingest_frame, Ingest, IngestReject};
 pub use neighbors::{
     Neighbor, NeighborTable, Recorded, SwarmCounters, MAX_NEIGHBORS, NEIGHBOR_STALE,
@@ -173,8 +173,7 @@ mod tests {
         assert!((occupancy - 0.00835).abs() < 1e-5, "{occupancy}");
     }
 
-    /// Even at twice the committed fleet size the bus is negligible, which is the
-    /// headroom claim in the plan.
+    /// Even at twice the committed fleet size the bus stays negligible.
     #[test]
     fn the_bus_is_still_negligible_at_fifty_nodes() {
         let fifty = AirtimeBudget {

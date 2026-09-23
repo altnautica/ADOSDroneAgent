@@ -15,7 +15,7 @@
 # The 5 TOPS "Bernoulli" BPU is a Horizon proprietary accelerator (hbdk /
 # OpenExplorer .bin toolchain) — NOT an ONNX/RKNN NPU. ADOS's in-process
 # ONNX / RKNN vision backends cannot target it, so it is declared
-# npu_tops: 0.0 / local_inference: none (Rule 44 — never advertise a
+# npu_tops: 0.0 / local_inference: none (never advertise a
 # capability the runtime cannot deliver). Perception OFFLOADS from this board.
 # The real BPU spec is kept in ignored compute keys (bpu / bpu_tops) for docs.
 #
@@ -83,7 +83,7 @@ compute:
   # "Bernoulli" BPU, but it is a proprietary accelerator (hbdk / OpenExplorer,
   # compiles models to .bin) that ADOS's ONNX/RKNN vision engine cannot drive.
   # Declaring it here would flip has_accelerator=True and make the perception
-  # tier attempt local detection on hardware ADOS cannot use (Rule 44). Keep 0.0
+  # tier attempt local detection on hardware ADOS cannot use. Keep 0.0
   # so the tier correctly OFFLOADS. The A53 quad is also too weak for the CPU
   # ONNX path, so local_inference stays none.
   npu_tops: 0.0

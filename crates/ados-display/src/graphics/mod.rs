@@ -19,6 +19,7 @@
 //! * [`bar_meter`] — a chipped horizontal fill meter.
 //! * [`status_dot`] — a filled status circle.
 //! * [`qr`] — a QR matrix rasterizer for pair URLs / short codes.
+//! * [`thresholds`] — the one grading table every page colors a metric by.
 
 pub mod bar_meter;
 pub mod fonts;
@@ -27,3 +28,4 @@ pub mod primitives;
 pub mod qr;
 pub mod sparkline;
 pub mod status_dot;
+pub mod thresholds;

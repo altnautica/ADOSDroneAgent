@@ -59,7 +59,12 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: deleted as dead. A comment asserting "mirrors X" outlives X and then reads
 #: as a live contract with a file that no longer exists, so the citation goes
 #: with the predecessor and the Rust says what it does instead.
-MIN_CITATIONS = 161
+#:
+#: 161 -> 154: the Python plugin remote-install download module and the
+#: `ados.security` package were deleted, so the Rust download validator and
+#: the WFB pair write no longer mirror anything; their citations went with
+#: the Python they named.
+MIN_CITATIONS = 154
 
 
 def _rust_sources() -> list[Path]:

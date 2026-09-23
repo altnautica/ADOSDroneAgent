@@ -36,10 +36,18 @@ pub trait ConfigClient: Send + Sync {
     async fn put(&self, key: &str, value: &str) -> Result<ConfigResponse, Unreachable>;
 }
 
+/// How long a config-surface call may take to connect, and to deliver its
+/// response. The surface is on-box and answers in milliseconds; a hung `:8080`
+/// must fail the call rather than park a blocking thread forever.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// The real client: blocking `ureq` to `http://127.0.0.1:8080/api/config`,
-/// run on a blocking pool so it never stalls the async loop.
+/// run on a blocking pool so it never stalls the async loop, with bounded
+/// connect and read.
 pub struct HttpConfigClient {
     base_url: String,
+    agent: ureq::Agent,
 }
 
 impl HttpConfigClient {
@@ -47,6 +55,11 @@ impl HttpConfigClient {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
+            agent: ureq::AgentBuilder::new()
+                .timeout_connect(CONNECT_TIMEOUT)
+                .timeout_read(READ_TIMEOUT)
+                .timeout_write(READ_TIMEOUT)
+                .build(),
         }
     }
 }
@@ -77,7 +90,8 @@ fn read_response(resp: ureq::Response) -> ConfigResponse {
 impl ConfigClient for HttpConfigClient {
     async fn get(&self) -> Result<ConfigResponse, Unreachable> {
         let url = format!("{}/api/config", self.base_url);
-        tokio::task::spawn_blocking(move || map_ureq(ureq::get(&url).call()))
+        let agent = self.agent.clone();
+        tokio::task::spawn_blocking(move || map_ureq(agent.get(&url).call()))
             .await
             .map_err(|e| Unreachable(format!("join error: {e}")))?
     }
@@ -85,8 +99,34 @@ impl ConfigClient for HttpConfigClient {
     async fn put(&self, key: &str, value: &str) -> Result<ConfigResponse, Unreachable> {
         let url = format!("{}/api/config", self.base_url);
         let payload = serde_json::json!({ "key": key, "value": value });
-        tokio::task::spawn_blocking(move || map_ureq(ureq::put(&url).send_json(payload)))
+        let agent = self.agent.clone();
+        tokio::task::spawn_blocking(move || map_ureq(agent.put(&url).send_json(payload)))
             .await
             .map_err(|e| Unreachable(format!("join error: {e}")))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_hung_config_surface_is_unreachable_not_a_parked_thread() {
+        // Accepts the connection and never answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _hold = std::thread::spawn(move || {
+            let conn = listener.accept();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            drop(conn);
+        });
+        let mut client = HttpConfigClient::new(format!("http://{addr}"));
+        client.agent = ureq::AgentBuilder::new()
+            .timeout_read(std::time::Duration::from_millis(200))
+            .build();
+        let started = std::time::Instant::now();
+        let result = client.get().await;
+        assert!(result.is_err(), "{result:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 }

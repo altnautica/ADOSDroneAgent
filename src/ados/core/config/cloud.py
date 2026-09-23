@@ -35,8 +35,12 @@ class ServerConfig(BaseModel):
     telemetry_rate: int = 2
     heartbeat_interval: int = 5
     mqtt_transport: str = "websockets"  # "tcp" or "websockets"
-    mqtt_username: str = "ados"
+    # Empty uses the bare device id, which the broker ACL `ados/%u/#` keys on.
+    mqtt_username: str = ""
     mqtt_password: str = ""  # Auto-filled from API key in cloud mode
+    # Development brokers only: connect without TLS. The password (the pairing
+    # key in cloud mode) then crosses the network in clear text.
+    mqtt_plaintext_dev: bool = False
 
 
 class CloudflareTunnelConfig(BaseModel):

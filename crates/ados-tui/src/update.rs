@@ -92,20 +92,21 @@ fn parse_version(src: &str) -> Option<String> {
 
 /// True when `latest` is strictly newer than `installed`, compared as dotted
 /// numeric tuples so a local dev / ahead build never shows a false "update
-/// available". Falls back to a plain inequality when either side is not a clean
-/// numeric version, and never fires when the installed version is unknown (`?`).
+/// available". A pre-release or build suffix (`-dev`, `-rc1`, `+abc`) is dropped
+/// before comparing, and either side that still does not parse (including an
+/// unknown `?` installed version) never reports an update.
 pub fn is_newer(latest: &str, installed: &str) -> bool {
     match (parse_tuple(latest), parse_tuple(installed)) {
         (Some(l), Some(i)) => l > i,
-        _ => !latest.is_empty() && installed != "?" && latest != installed,
+        _ => false,
     }
 }
 
-/// Parse a dotted numeric version into a comparable tuple, e.g. `0.99.108` →
-/// `[0, 99, 108]`. `None` if any component is non-numeric (a pre-release tag).
+/// Parse the dotted numeric core of a version into a comparable tuple, e.g.
+/// `0.99.108-dev` → `[0, 99, 108]`. `None` if any core component is not a number.
 fn parse_tuple(v: &str) -> Option<Vec<u64>> {
-    let parts: Option<Vec<u64>> = v.split('.').map(|p| p.parse().ok()).collect();
-    parts.filter(|p| !p.is_empty())
+    let core = v.split(['-', '+']).next().unwrap_or_default();
+    core.split('.').map(|p| p.parse().ok()).collect()
 }
 
 #[cfg(test)]
@@ -136,9 +137,17 @@ mod tests {
     }
 
     #[test]
-    fn newer_falls_back_for_non_numeric() {
-        assert!(is_newer("2.0.0-rc1", "1.9.9")); // unparseable → inequality
-        assert!(!is_newer("", "1.0.0")); // empty latest → never
+    fn newer_compares_the_numeric_core_of_suffixed_versions() {
+        assert!(is_newer("2.0.0-rc1", "1.9.9"));
+        // A dev build ahead of main is never offered a downgrade.
+        assert!(!is_newer("0.99.108", "0.99.109-dev"));
+        assert!(!is_newer("0.99.108-rc1", "0.99.109"));
+        assert!(!is_newer("0.99.108", "0.99.108+local"));
+        assert!(is_newer("0.99.110", "0.99.109-dev"));
+        // Anything that does not parse never reports an update.
+        assert!(!is_newer("", "1.0.0"));
+        assert!(!is_newer("next", "1.0.0"));
+        assert!(!is_newer("1.0.1", "unknown"));
     }
 
     #[test]

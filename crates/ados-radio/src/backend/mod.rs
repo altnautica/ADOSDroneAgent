@@ -19,12 +19,11 @@
 //! Three facts decide "wire it or delete it", and they are recorded here because
 //! that question has been re-opened three times:
 //!
-//! 1. **The second backend is specified and deliberately deferred by the project
-//!    owner.** The cross-platform userspace-USB backend has a written design (the
-//!    radio-backend abstraction spec under `product/specs/ados-direct-link/`),
-//!    and the owner's build plan explicitly defers it — ship the kernel path,
-//!    leave this trait inert. Deleting it would throw away specced substrate that
-//!    a named, scheduled piece of work resumes from.
+//! 1. **The second backend is designed and deliberately deferred.** The
+//!    cross-platform userspace-USB backend has a written design, and it is
+//!    deferred on purpose — ship the kernel path, leave this trait inert.
+//!    Deleting it would throw away substrate that later backend work resumes
+//!    from.
 //! 2. **The trait cannot host that backend as it stands.** [`BroughtUp`] carries
 //!    an `Arc<Mutex<RadioProcesses>>` — a forked `wfb_tx`/`wfb_rx` process group.
 //!    A userspace backend has no forked process at all (it drives the dongle

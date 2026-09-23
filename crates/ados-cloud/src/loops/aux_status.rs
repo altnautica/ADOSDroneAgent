@@ -155,7 +155,7 @@ fn summarize_services(services: &[Value]) -> ServiceSummary {
 ///
 /// A lingering sidecar from a stopped pipeline must not keep advertising a
 /// camera as ready, so an un-refreshed file reads as unknown rather than as its
-/// last value (operating rule 44).
+/// last value.
 ///
 /// A camera that was DISCOVERED but whose pipeline failed is not `ready`
 /// either: the cockpit raises its no-camera overlay only for `missing`, so a

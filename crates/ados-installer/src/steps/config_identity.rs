@@ -100,7 +100,7 @@ mode: \"{server_mode}\"\n  \
 telemetry_rate: 2\n  \
 heartbeat_interval: 5\n  \
 mqtt_transport: \"websockets\"\n  \
-mqtt_username: \"ados\"\n  \
+mqtt_username: \"\"\n  \
 mqtt_password: \"\"\n\
 \n\
 security:\n  \
@@ -904,8 +904,8 @@ mod tests {
     #[test]
     fn hosts_rewrite_appends_when_absent() {
         let hosts = "127.0.0.1\tlocalhost\n";
-        let out = rewrite_hosts_body(hosts, "groundnode");
-        assert!(out.contains("127.0.1.1\tgroundnode"));
+        let out = rewrite_hosts_body(hosts, "gs-example");
+        assert!(out.contains("127.0.1.1\tgs-example"));
         assert!(out.ends_with('\n'));
     }
 

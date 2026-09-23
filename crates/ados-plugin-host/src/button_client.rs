@@ -11,9 +11,10 @@
 //!
 //! An absent bus is a normal resting state, not an error: a drone has no front
 //! panel, and a ground station whose `ados-pic` is down should not make every
-//! subscribing plugin handle a failure. The reader retries quietly on a bounded
-//! backoff, and a subscriber simply receives nothing until presses exist.
+//! subscribing plugin handle a failure. The reader retries quietly on a fixed
+//! interval, and a subscriber simply receives nothing until presses exist.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -29,8 +30,28 @@ pub const BUTTONS_SOCK: &str = "/run/ados/buttons.sock";
 /// wedged, and dropping the oldest beats growing without bound.
 const BROADCAST_DEPTH: usize = 64;
 
-const RECONNECT_MIN: Duration = Duration::from_millis(500);
-const RECONNECT_MAX: Duration = Duration::from_secs(10);
+/// How long a host reader waits before reconnecting to a bus that closed or
+/// refused it. Fixed, with no cap on attempts: a restarted service is picked up
+/// within one interval, and a service that refuses (a disabled aux stream) is
+/// retried at a steady, cheap rate instead of twice a second.
+pub(crate) const RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Run `connect_once` forever, waiting [`RECONNECT_INTERVAL`] after each
+/// connection ends (cleanly or with an error). Shared by every host-side bus
+/// reader so they keep one recovery cadence.
+pub(crate) async fn reconnect_forever<F, Fut>(label: &'static str, mut connect_once: F)
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    loop {
+        match connect_once().await {
+            Ok(()) => tracing::debug!(bus = label, "bus closed; reconnecting"),
+            Err(e) => tracing::debug!(bus = label, error = %e, "bus unavailable"),
+        }
+        tokio::time::sleep(RECONNECT_INTERVAL).await;
+    }
+}
 
 /// A shared subscription to the host's button bus.
 pub struct ButtonClient {
@@ -41,24 +62,13 @@ impl ButtonClient {
     /// Connect to `sock_path` and start re-broadcasting presses.
     ///
     /// Returns immediately; the reader runs as a task for the process lifetime
-    /// and reconnects on a bounded backoff, so a `ados-pic` restart heals
+    /// and reconnects on a fixed interval, so a `ados-pic` restart heals
     /// without the host noticing.
     pub fn spawn(sock_path: PathBuf) -> Self {
         let (tx, _rx) = broadcast::channel(BROADCAST_DEPTH);
         let tx_task = tx.clone();
         tokio::spawn(async move {
-            let mut backoff = RECONNECT_MIN;
-            loop {
-                match pump(&sock_path, &tx_task).await {
-                    Ok(()) => {
-                        backoff = RECONNECT_MIN;
-                        tracing::debug!("button bus closed; reconnecting");
-                    }
-                    Err(e) => tracing::debug!(error = %e, "button bus unavailable"),
-                }
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(RECONNECT_MAX);
-            }
+            reconnect_forever("buttons", || pump(&sock_path, &tx_task)).await;
         });
         Self { tx }
     }
@@ -187,17 +197,5 @@ mod tests {
         let got: ButtonPress = serde_json::from_slice(&rx.recv().await.unwrap()).unwrap();
         assert_eq!(got.pin, 6);
         assert_eq!(got.action.as_deref(), Some("back"));
-    }
-
-    #[tokio::test]
-    async fn publishing_with_no_subscribers_is_not_an_error() {
-        // The common case on a node with no button-using plugin. If this were
-        // treated as a failure the reader would log on every single press.
-        let (tx, _keep) = broadcast::channel::<Vec<u8>>(8);
-        drop(_keep);
-        let client = ButtonClient { tx };
-        drop(client.subscribe());
-        // No panic, no unwrap: send returning Err here is expected and ignored
-        // by `pump`.
     }
 }

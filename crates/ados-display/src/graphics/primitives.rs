@@ -130,6 +130,31 @@ impl DrawTarget for Canvas {
         }
         Ok(())
     }
+
+    /// Fill `area`, clipped to the canvas first. The trait default walks every
+    /// point of `area` through `draw_iter`, so an oversized or off-panel
+    /// rectangle costs its full area in iterations while painting nothing past
+    /// the edge. The bounds are computed in i64 so no extent near the i32/u32
+    /// range can wrap.
+    fn fill_solid(&mut self, area: &Rectangle, color: Self::Color) -> Result<(), Self::Error> {
+        let left = i64::from(area.top_left.x);
+        let top = i64::from(area.top_left.y);
+        let x0 = left.max(0);
+        let y0 = top.max(0);
+        let x1 = (left + i64::from(area.size.width)).min(i64::from(self.width));
+        let y1 = (top + i64::from(area.size.height)).min(i64::from(self.height));
+        if x0 >= x1 || y0 >= y1 {
+            return Ok(());
+        }
+        let px = [color.r(), color.g(), color.b()];
+        let stride = self.width as usize * 3;
+        for y in y0 as usize..y1 as usize {
+            let row = &mut self.buf[y * stride + x0 as usize * 3..y * stride + x1 as usize * 3];
+            let (pixels, _) = row.as_chunks_mut::<3>();
+            pixels.fill(px);
+        }
+        Ok(())
+    }
 }
 
 /// Fill the inclusive rectangle `(x0, y0)..=(x1, y1)` with `color`.
@@ -257,6 +282,45 @@ mod tests {
         assert_eq!(c.pixel(3, 3), Rgb888::WHITE);
         assert_eq!(c.pixel(0, 0), Rgb888::BLACK);
         assert_eq!(c.pixel(4, 4), Rgb888::BLACK);
+    }
+
+    #[test]
+    fn fill_solid_paints_only_the_on_canvas_part() {
+        let mut c = Canvas::new(4, 3, Rgb888::BLACK);
+        // Straddles the left and bottom edges: only x 0..=1, y 1..=2 land.
+        c.fill_solid(
+            &Rectangle::new(Point::new(-3, 1), Size::new(5, 10)),
+            Rgb888::WHITE,
+        )
+        .unwrap();
+        for y in 0..3 {
+            for x in 0..4 {
+                let want = if x <= 1 && y >= 1 {
+                    Rgb888::WHITE
+                } else {
+                    Rgb888::BLACK
+                };
+                assert_eq!(c.pixel(x, y), want, "pixel ({x}, {y})");
+            }
+        }
+        // An extent at the top of the u32 range from a far-negative origin
+        // covers the canvas in one clipped pass.
+        c.fill_solid(
+            &Rectangle::new(
+                Point::new(i32::MIN, i32::MIN),
+                Size::new(u32::MAX, u32::MAX),
+            ),
+            Rgb888::RED,
+        )
+        .unwrap();
+        assert!(c.as_rgb888().chunks(3).all(|p| p == [0xFF, 0, 0]));
+        // Entirely off the canvas paints nothing.
+        c.fill_solid(
+            &Rectangle::new(Point::new(4, 0), Size::new(10, 10)),
+            Rgb888::WHITE,
+        )
+        .unwrap();
+        assert!(c.as_rgb888().chunks(3).all(|p| p == [0xFF, 0, 0]));
     }
 
     #[test]

@@ -41,9 +41,9 @@
 //! - **`GET .../network/modem`** — the modem view (same leg as `modem_4g`).
 //! - **`GET .../network/priority`** — the uplink priority list.
 //! - **`GET .../modem-status`** — the cellular detail snapshot; the front has no
-//!   `mmcli` polling seam, so it serves a `present:false` shape, reproducing the
-//!   Python `which mmcli` gate: `modemmanager_not_installed` when ModemManager is
-//!   absent, else `no_modem`.
+//!   `mmcli` polling seam, so it serves `modemmanager_not_installed` when
+//!   ModemManager is absent and otherwise `{"present": null, "reason":
+//!   "not_probed"}`: it never looked, so it claims neither a modem nor none.
 
 use std::path::{Path, PathBuf};
 
@@ -255,8 +255,7 @@ async fn ap_view(cfg: &Value) -> Value {
 }
 
 /// Merge the setup-AP guard's live decision (`standing_down` + reason + phy count +
-/// client-uplink flag) into the AP view so an operator can see WHY the AP is up or down
-/// (Rule 44).
+/// client-uplink flag) into the AP view so an operator can see WHY the AP is up or down.
 fn merge_ap_guard_diagnostics(view: &mut Value) {
     let Some(obj) = view.as_object_mut() else {
         return;
@@ -798,10 +797,9 @@ fn priority_list() -> Value {
 /// `{"present": false, "reason": "modemmanager_not_installed"}` when `mmcli` is
 /// not on PATH. The front reproduces exactly that gate (a `which mmcli` probe)
 /// and serves that shape when ModemManager is absent. When `mmcli` IS present
-/// the front has no `mmcli` polling seam, so it falls back to the
-/// no-modem-detected shape (`{"present": false, "reason": "no_modem"}`), the
-/// degrade the Python returns when `mmcli -L` finds no modems — never claiming a
-/// modem is present.
+/// the front has no `mmcli` polling seam and never looks for a modem, so it
+/// answers `present: null` with `reason: "not_probed"` rather than claiming
+/// either a modem or none.
 pub async fn get_modem_status() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
@@ -809,12 +807,16 @@ pub async fn get_modem_status() -> Response {
     // The Python `_which_mmcli` gate: `which mmcli` exiting zero. An absent
     // `which` / any spawn error / a timeout all read as ModemManager absent,
     // matching the Python `except` returning `False`.
-    let reason = if crate::probe::on_path("mmcli").await {
-        "no_modem"
+    Json(modem_status_body(crate::probe::on_path("mmcli").await)).into_response()
+}
+
+/// The modem-status body for a box where `mmcli` is (or is not) on PATH.
+fn modem_status_body(mmcli_present: bool) -> Value {
+    if mmcli_present {
+        json!({"present": null, "reason": "not_probed"})
     } else {
-        "modemmanager_not_installed"
-    };
-    Json(json!({"present": false, "reason": reason})).into_response()
+        json!({"present": false, "reason": "modemmanager_not_installed"})
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1619,34 +1621,17 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn modem_status_reason_tracks_the_mmcli_gate() {
-        // The reason is the Python `which mmcli` gate: `modemmanager_not_installed`
-        // when mmcli is absent, else `no_modem`. The CI host has no ModemManager,
-        // so the reason here is `modemmanager_not_installed`; assert the reason
-        // selection is consistent with the gate rather than pinning the host's
-        // mmcli presence.
-        //
-        // The gate is probed once and the answer reused: two probes could
-        // disagree on a box where ModemManager is installed mid-test, leaving the
-        // final assertion reading a reason the first branch never chose.
-        let mmcli_present = crate::probe::on_path("mmcli").await;
-        let reason = if mmcli_present {
-            "no_modem"
-        } else {
-            "modemmanager_not_installed"
-        };
-        let body = json!({"present": false, "reason": reason});
-        assert_eq!(body["present"], json!(false));
-        // Both reasons are non-empty and are exactly the two Python `_build_snapshot`
-        // `present:false` strings the front can serve.
-        assert!(["no_modem", "modemmanager_not_installed"].contains(&reason));
-        // On the CI host (no ModemManager) the gate resolves to the
-        // not-installed reason — the shape the bench observed against the live
-        // Python, NOT the prior hard-coded `no_modem`.
-        if !mmcli_present {
-            assert_eq!(body["reason"], json!("modemmanager_not_installed"));
-        }
+    #[test]
+    fn modem_status_never_claims_no_modem_without_looking() {
+        // With ModemManager installed the front has not probed for a modem, so
+        // a working modem must not read as "No modem detected".
+        let probed_nothing = modem_status_body(true);
+        assert_eq!(probed_nothing["present"], Value::Null);
+        assert_eq!(probed_nothing["reason"], json!("not_probed"));
+        // Without ModemManager there is nothing to probe with, and that is a fact.
+        let no_manager = modem_status_body(false);
+        assert_eq!(no_manager["present"], json!(false));
+        assert_eq!(no_manager["reason"], json!("modemmanager_not_installed"));
     }
 
     #[test]

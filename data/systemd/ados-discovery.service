@@ -1,6 +1,9 @@
 [Unit]
 Description=ADOS mDNS Discovery
-After=network-online.target
+# Not ordered after network-online.target: this unit serves on-box sockets and
+# wildcard binds that need no configured network, and waiting on it held the
+# FC link (and every unit ordered after this one) until wait-online timed out
+# whenever a remembered Wi-Fi was out of range at boot.
 PartOf=ados-supervisor.service
 StartLimitIntervalSec=0
 

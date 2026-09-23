@@ -3,7 +3,7 @@
 //! periodically reclaims terminal jobs, and serves the REST job API on a single
 //! TCP listener. The supervisor starts it for the `compute` profile.
 //!
-//! Local-first reach (Rule 39): the job API is gated by the pairing posture
+//! Local-first reach: the job API is gated by the pairing posture
 //! (unpaired ⇒ open, paired + on-box ⇒ open, paired + off-box ⇒ `X-ADOS-Key`),
 //! so binding a non-loopback address is safe. It still defaults to `127.0.0.1`;
 //! the installer opts a node into serving the LAN with `ADOS_COMPUTE_BIND`. mDNS
@@ -86,7 +86,7 @@ fn init_logging() {
     let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
 
     // The logd layer ships records to the logging daemon alongside the primary
-    // sink; it is best-effort and never blocks the service (Rule 41).
+    // sink; it is best-effort and never blocks the service.
     #[cfg(target_os = "linux")]
     {
         if let Ok(journald) = tracing_journald::layer() {
@@ -115,7 +115,7 @@ fn env_or(key: &str, default: &str) -> String {
 /// detector (CoreML-accelerated on macOS via the `coreml` feature); otherwise
 /// fall back to the mock so the offload path stays exercised with no model. A
 /// load failure logs and falls back to the mock rather than refusing to start
-/// (Rule 26: the node still comes up).
+/// (the node still comes up).
 fn select_detector(config_model_path: Option<&str>) -> Arc<dyn Detector> {
     // Used only in the onnx build (the mock path ignores it).
     #[cfg(not(feature = "onnx"))]
@@ -458,7 +458,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the compute pairing gate wraps only the /api/compute/* routes.
     .merge(offload_ws_router(offload_broadcaster.clone()));
 
-    // Atlas world-model receiver. INERT unless atlas is enabled (Rule 46 single
+    // Atlas world-model receiver. INERT unless atlas is enabled (single
     // canonical gate): when on, mount POST /api/atlas/event alongside the compute
     // job API on the same listener, and drain decoded events into the job queue
     // (a bagged capture-state submits the reconstruct job the workers pick up).
@@ -495,7 +495,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(&bind).await?;
     tracing::info!(bind = %bind, workers, "compute job API listening (pairing-gated)");
     // Advertise on mDNS so the GCS Add-a-Node card auto-discovers this node for
-    // LAN pairing (Rule 39). Best-effort: a None means no auto-discovery, manual
+    // LAN pairing. Best-effort: a None means no auto-discovery, manual
     // add-by-IP still works. Held for the process lifetime (unregisters on exit).
     let job_port = bind
         .rsplit(':')

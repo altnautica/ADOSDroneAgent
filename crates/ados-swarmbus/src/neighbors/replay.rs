@@ -27,7 +27,7 @@ use crate::crypto::{SenderNonce, NONCE_PREFIX_LEN};
 /// often inside one bus lifetime is already a fault in its own right.
 pub const RETIRED_PREFIXES: usize = 8;
 
-/// What the replay window says about one authenticated beacon.
+/// What the replay window says about one authenticated frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SenderVerdict {
     /// The next frame from the slot's current run, or the first frame of a new run
@@ -139,7 +139,7 @@ mod tests {
         marks.accept(3, run(1, 10));
         assert_eq!(marks.verdict(3, run(1, 10), true), SenderVerdict::Replayed);
         assert_eq!(marks.verdict(3, run(1, 9), true), SenderVerdict::Replayed);
-        // Counters need not be contiguous: the bid lane shares the sequence.
+        // Counters need not be contiguous.
         assert_eq!(marks.verdict(3, run(1, 14), true), SenderVerdict::Fresh);
         // Other slots are judged on their own history.
         assert_eq!(marks.verdict(4, run(1, 0), true), SenderVerdict::Fresh);

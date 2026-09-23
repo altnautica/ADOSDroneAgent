@@ -147,6 +147,10 @@ pub struct DaemonPaths {
     /// The ground-station role sentinel (`/etc/ados/mesh/role`) the pairing-info
     /// profile resolver reads for a ground station. Injectable for tests.
     pub mesh_role_path: PathBuf,
+    /// The per-pair relay peer secret (`/etc/ados/secrets/relay-peer-secret`)
+    /// unpair removes, the ground station delivers, and full status reports
+    /// the presence of. Injectable for tests.
+    pub relay_secret_path: PathBuf,
 }
 
 impl Default for DaemonPaths {
@@ -230,6 +234,7 @@ impl Default for DaemonPaths {
             bind_state_path,
             profile_conf_path,
             mesh_role_path,
+            relay_secret_path: PathBuf::from(ados_protocol::relay_ticket::RELAY_SECRET_PATH),
         }
     }
 }
@@ -293,6 +298,7 @@ pub async fn run_daemon() -> Result<()> {
             bind_state: paths.bind_state_path.clone(),
             profile_conf: paths.profile_conf_path.clone(),
             mesh_role: paths.mesh_role_path.clone(),
+            relay_secret: paths.relay_secret_path.clone(),
         },
         paths.board_path.clone(),
         paths.control_tcp_port,
@@ -349,6 +355,7 @@ where
         bind_state: paths.bind_state_path.clone(),
         profile_conf: paths.profile_conf_path.clone(),
         mesh_role: paths.mesh_role_path.clone(),
+        relay_secret: paths.relay_secret_path.clone(),
     };
     // The dashboard-access PIN store, shared (one `Arc`) between the routes
     // (set/verify/clear/status) and the LAN-edge auth (which accepts a valid

@@ -1,11 +1,11 @@
 """mesh_manager.main() must exit cleanly on a direct-role node.
 
 A ground station in `direct` role has no mesh to bring up. The systemd
-unit's ConditionPathExists gate only checks that the role sentinel file
+unit's AssertPathExists gate only checks that the role sentinel file
 exists, not its contents, so the process can still be launched on a
-direct node. Treating that no-op as a crash (exit 2) makes systemd
-Restart=on-failure flap the unit until it hits the start limit and lands
-FAILED. main() must exit 0 instead.
+direct node. The unit is Restart=always with RestartPreventExitStatus=0, so
+treating that no-op as a crash (exit 2) restarts it every RestartSec forever.
+main() must exit 0 instead.
 """
 
 from __future__ import annotations

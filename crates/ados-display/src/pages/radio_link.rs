@@ -62,18 +62,31 @@ impl RadioLinkDetailPage {
     }
 }
 
-/// The TX power to paint and step from: the snapshot value clamped into the
-/// envelope, or `None` when the snapshot carries none.
+/// The TX power the radio reports, unclamped. The steppers write inside the
+/// `1..=15` dBm envelope, but a value set elsewhere above it is shown as it is.
 fn current_tx(ctx: &PageContext) -> Option<i64> {
-    ctx.link
-        .tx_power_dbm
-        .map(|v| v.clamp(TX_MIN_DBM, TX_MAX_DBM))
+    ctx.link.tx_power_dbm
+}
+
+/// The RSSI trend's `(peak, floor)` in dBm, `None` with no samples. RSSI is
+/// negative dBm, so the peak is the least negative sample, never clamped to 0.
+fn rssi_peak_floor(history: &[Option<f64>]) -> (Option<i64>, Option<i64>) {
+    let real = history.iter().flatten().copied();
+    let peak = real.clone().reduce(f64::max).map(|v| v as i64);
+    let floor = real.reduce(f64::min).map(|v| v as i64);
+    (peak, floor)
 }
 
 /// The TX-power write for one stepper tap: `delta` dBm from the current value,
 /// clamped into the envelope. `None` when there is no current value.
 fn tx_step(ctx: &PageContext, delta: i64) -> Option<PanelAction> {
-    let next = (current_tx(ctx)? + delta).clamp(TX_MIN_DBM, TX_MAX_DBM);
+    let current = current_tx(ctx)?;
+    let next = (current + delta).clamp(TX_MIN_DBM, TX_MAX_DBM);
+    // A step never moves the wrong way: from above the envelope, `+` would
+    // otherwise clamp down to the ceiling.
+    if (delta > 0 && next < current) || (delta < 0 && next > current) {
+        return None;
+    }
     Some(PanelAction::Agent(AgentRequest {
         method: "PUT",
         path: "/api/wfb/tx-power",
@@ -114,7 +127,8 @@ impl Page for RadioLinkDetailPage {
         // Sparkline band y=44..120 (76 px tall, 16 px reserved for the footer).
         let spark_y = HEADER_H + 4;
         let spark_h = 76;
-        let (peak, floor) = if !link.rssi_history.is_empty() {
+        let (peak, floor) = rssi_peak_floor(&link.rssi_history);
+        if !link.rssi_history.is_empty() {
             draw_sparkline(
                 &mut canvas,
                 8,
@@ -126,15 +140,6 @@ impl Page for RadioLinkDetailPage {
                 None,
                 None,
             );
-            let real: Vec<f64> = link.rssi_history.iter().filter_map(|v| *v).collect();
-            let peak = real
-                .iter()
-                .cloned()
-                .fold(f64::NEG_INFINITY, f64::max)
-                .max(0.0) as i64;
-            let floor = real.iter().cloned().fold(f64::INFINITY, f64::min);
-            let floor = if floor.is_finite() { floor as i64 } else { 0 };
-            (if real.is_empty() { 0 } else { peak }, floor)
         } else {
             let empty_font = LoadedFont::new(FontFace::SansRegular, 11);
             let msg = "no history yet";
@@ -147,8 +152,9 @@ impl Page for RadioLinkDetailPage {
                 spark_y + (spark_h - 16) / 2,
                 palette.text_tertiary,
             );
-            (0, 0)
-        };
+        }
+        let dbm = |v: Option<i64>| v.map_or_else(|| "--".to_string(), |v| v.to_string());
+        let (peak, floor) = (dbm(peak), dbm(floor));
 
         // Sparkline footer line: rssi value + peak/floor summary.
         let summary_font = LoadedFont::new(FontFace::MonoRegular, 11);
@@ -442,7 +448,7 @@ fn draw_slider(canvas: &mut Canvas, palette: &Palette, value_dbm: Option<i64>) {
     );
 
     // Value chip just above the thumb.
-    let chip_text = format!("{clamped} dBm");
+    let chip_text = format!("{value_dbm} dBm");
     let chip_font = LoadedFont::new(FontFace::MonoBold, 11);
     let (cw, ch) = chip_font.text_size(&chip_text);
     let chip_y = SLIDER_Y - ch as i32 - 4;
@@ -529,6 +535,32 @@ mod tests {
         let ctx = PageContext::default();
         assert_eq!(page.hit_zones(&ctx).len(), 1);
         assert!(page.on_custom("radio.tx_plus", &ctx).is_none());
+    }
+
+    /// RSSI is negative dBm: the peak of `[-70, -55]` is -55, not 0.
+    #[test]
+    fn rssi_peak_is_the_strongest_negative_sample() {
+        let history = [Some(-70.0), None, Some(-55.0)];
+        assert_eq!(rssi_peak_floor(&history), (Some(-55), Some(-70)));
+        assert_eq!(rssi_peak_floor(&[None, None]), (None, None));
+    }
+
+    /// A reported TX above the stepper envelope is shown and stepped from as
+    /// it is; `+` from there writes nothing rather than lowering it.
+    #[test]
+    fn tx_above_the_envelope_is_reported_unclamped() {
+        let page = RadioLinkDetailPage::new();
+        let mut ctx = ctx_with_link();
+        ctx.link.tx_power_dbm = Some(20);
+        assert_eq!(current_tx(&ctx), Some(20));
+        assert!(page.on_custom("radio.tx_plus", &ctx).is_none());
+        let Some(PanelAction::Agent(req)) = page.on_custom("radio.tx_minus", &ctx) else {
+            panic!("minus steps down");
+        };
+        assert_eq!(
+            req.body.unwrap()["tx_power_dbm"],
+            serde_json::json!(TX_MAX_DBM)
+        );
     }
 
     #[test]

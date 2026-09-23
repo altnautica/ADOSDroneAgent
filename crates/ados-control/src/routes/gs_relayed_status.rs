@@ -23,7 +23,7 @@
 //! reads `404` rather than serving its last contents. A peer whose own status
 //! has aged out keeps its identity but loses its status block: the node is still
 //! known, its readings are not current. Neither case ever serves a stale reading
-//! as a live one (operating rule 44).
+//! as a live one.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -1,11 +1,10 @@
 """``ados plugin`` CLI subcommand tree.
 
-Wires the plugin supervisor to the operator's terminal. Mirrors the
-spec at ``product/specs/ados-plugin-system/12-cli.md``. Output is
+Wires the plugin supervisor to the operator's terminal. Output is
 human-readable by default; ``--json`` switches to a machine envelope
-``{"ok": bool, "code": int, "kind": str, "data": ...}`` per the spec.
+``{"ok": bool, "code": int, "kind": str, "data": ...}``.
 
-Exit code map (matches spec §5):
+Exit code map:
 
 * 0 success
 * 1 generic failure

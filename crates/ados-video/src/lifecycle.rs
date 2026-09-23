@@ -648,7 +648,7 @@ impl VideoOrchestrator {
         // Bind the serving socket and start the reframer: read ffmpeg's raw
         // frames off stdout, ADVT-header them (Contract F), and serve the
         // connecting vision engine. A bind/stdout failure leaves the tap process
-        // up but with no consumer — surfaced loudly, never silent (Rule 44).
+        // up but with no consumer — surfaced loudly, never silent.
         match (t.take_stdout(), tap::bind_vision_tap(&v.sink)) {
             (Some(stdout), Ok(listener)) => {
                 let format = tap::frame_format_from_str(v.pixel_format());

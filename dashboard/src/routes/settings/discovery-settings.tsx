@@ -73,7 +73,7 @@ export function DiscoverySettings() {
         </Card>
       )}
 
-      {/* Reach names — only what the agent advertises (Rule 47). */}
+      {/* Reach names — only what the agent advertises. */}
       <Card>
         <CardContent className="pt-5 pb-5 space-y-3">
           <div className="text-sm font-semibold">How to reach this node</div>

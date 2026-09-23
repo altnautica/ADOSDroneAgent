@@ -340,6 +340,36 @@ def test_network_grant_needs_the_loopback_guard(
         assert install.permissions["network.outbound"].granted is True
 
 
+def test_grant_refuses_a_capability_the_plugin_host_cannot_back(
+    isolated_paths, tmp_path: Path, monkeypatch
+):
+    archive = _build_archive(tmp_path, permissions='["mission.write"]')
+    sup = PluginSupervisor(
+        install_dir=isolated_paths["install_dir"],
+        require_signed=False,
+    )
+    sup.discover()
+    sidecar = tmp_path / "plugin-ungrantable-caps.json"
+    sidecar.write_text('{"caps": ["mission.write"]}')
+    monkeypatch.setattr(
+        "ados.plugins.systemd.PLUGIN_UNGRANTABLE_CAPS_JSON", sidecar
+    )
+    with patch("ados.plugins.supervisor.subprocess.run") as run_mock:
+        run_mock.return_value = MagicMock(returncode=0, stderr="")
+        sup.install_archive(archive)
+        with pytest.raises(SupervisorError, match="does not implement"):
+            sup.grant_permission("com.example.basic", "mission.write")
+        install = sup.find_install("com.example.basic")
+        assert install is not None
+        refused = install.permissions.get("mission.write")
+        assert refused is None or refused.granted is False
+
+        # Without the host's list nothing is refused on its behalf.
+        sidecar.unlink()
+        sup.grant_permission("com.example.basic", "mission.write")
+        assert install.permissions["mission.write"].granted is True
+
+
 def test_remove_unknown_plugin_raises(isolated_paths):
     sup = PluginSupervisor(
         install_dir=isolated_paths["install_dir"], require_signed=False

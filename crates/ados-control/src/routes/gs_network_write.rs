@@ -13,18 +13,18 @@
 //! writes use:
 //!
 //! - **Config-file persists the daemon reconciles**: `PUT .../network/priority`
-//!   atomically writes `{"priority": [...]}` to the uplink file; `PUT
-//!   .../network/share_uplink` merges `ground_station.share_uplink` into the agent
-//!   config. The daemon reads those on its own cadence, so the front persisting is
-//!   wire-equivalent to the FastAPI route persisting, with no second writer.
+//!   atomically writes `{"priority": [...]}` to the uplink file. The daemon reads
+//!   it on its own cadence, so the front persisting is wire-equivalent to the
+//!   FastAPI route persisting, with no second writer.
 //! - **Command-socket forwards**: `PUT .../network/ap`, `PUT .../network/ethernet`,
-//!   and `PUT .../network/modem` each forward one `{"op":...}` request to the
-//!   `ados-net` command socket at `/run/ados/wifi-cmd.sock`; the daemon applies it
-//!   through the SAME live manager it owns and replies with the manager-truth view,
-//!   which the front returns. The AP route additionally persists the channel/ssid
-//!   to the agent config (the daemon owns the radio; the REST layer owns the
-//!   config-file persist that survives a reboot), mirroring the FastAPI route's
-//!   own post-apply `_save_config`.
+//!   `PUT .../network/modem` and `PUT .../network/share_uplink` each forward one
+//!   `{"op":...}` request to the `ados-net` command socket at
+//!   `/run/ados/wifi-cmd.sock`; the daemon applies it through the SAME live
+//!   manager it owns and replies with the manager-truth view, which the front
+//!   returns. The AP route additionally persists the channel/ssid, and the
+//!   share-uplink route the flag, to the agent config (the daemon owns the radio
+//!   and firewall; the REST layer owns the config-file persist that survives a
+//!   reboot), mirroring the FastAPI route's own post-apply `_save_config`.
 //!
 //! ## Degrade posture
 //!
@@ -620,13 +620,14 @@ pub struct ShareUplinkUpdate {
 /// `PUT .../network/share_uplink` → `{enabled, applied, apply_error, backend}`.
 ///
 /// Gates on the ground-station profile (404 on a drone). Persists
-/// `ground_station.share_uplink` into the agent config, then returns the
-/// native-backend body (`applied:true`, `apply_error:null`, `backend:"native"`).
-/// This matches the FastAPI route's `is_service_native(net)` branch exactly: the
-/// native `ados-net` daemon owns the sysctl + firewall reconciliation, so the
-/// REST layer only persists the flag and lets the daemon apply it — a front-side
-/// apply would be a second writer racing the daemon for the same iptables rule. A
-/// persist failure maps to the FastAPI 500 `E_UI_SAVE_FAILED`.
+/// `ground_station.share_uplink` into the agent config, then asks the `ados-net`
+/// daemon, which owns the sysctl + firewall, to apply it now on the active
+/// uplink (the `share_uplink` command-socket op) and returns the daemon's own
+/// verdict. The daemon serializes that apply against its uplink-switch
+/// re-apply, so there is still one writer. A daemon that is unreachable or
+/// refuses leaves the flag persisted and reported `applied:false`: it applies
+/// at the daemon's next start. A persist failure maps to the FastAPI 500
+/// `E_UI_SAVE_FAILED`.
 pub async fn put_network_share_uplink(
     State(_state): State<AppState>,
     Json(update): Json<ShareUplinkUpdate>,
@@ -639,13 +640,33 @@ pub async fn put_network_share_uplink(
         return error_body(StatusCode::INTERNAL_SERVER_ERROR, "E_UI_SAVE_FAILED", &msg);
     }
 
-    Json(json!({
-        "enabled": update.enabled,
-        "applied": true,
-        "apply_error": Value::Null,
-        "backend": "native",
-    }))
-    .into_response()
+    let reply = net_cmd(&json!({"op": "share_uplink", "enabled": update.enabled})).await;
+    Json(share_uplink_body(update.enabled, reply)).into_response()
+}
+
+/// The share-uplink reply: the daemon's apply verdict, or `applied:false` with
+/// the reason it could not be asked.
+fn share_uplink_body(enabled: bool, reply: NetCmd) -> Value {
+    match reply {
+        NetCmd::Reply(r) => json!({
+            "enabled": enabled,
+            "applied": r.get("applied").and_then(Value::as_bool).unwrap_or(false),
+            "apply_error": r.get("apply_error").cloned().unwrap_or(Value::Null),
+            "backend": r.get("backend").cloned().unwrap_or(Value::Null),
+        }),
+        NetCmd::Error(msg) => json!({
+            "enabled": enabled,
+            "applied": false,
+            "apply_error": msg,
+            "backend": Value::Null,
+        }),
+        NetCmd::Unavailable => json!({
+            "enabled": enabled,
+            "applied": false,
+            "apply_error": "network daemon unreachable; the saved setting applies when it starts",
+            "backend": Value::Null,
+        }),
+    }
 }
 
 /// Merge `ground_station.share_uplink` into the agent config through the shared
@@ -1057,21 +1078,45 @@ mod tests {
         );
     }
 
-    // ── share_uplink route: the native-backend body shape ────────────────────
+    // ── share_uplink route: the daemon's apply verdict ──────────────────────
 
-    #[test]
-    fn share_uplink_native_backend_body_shape() {
-        // The success body is fixed (native backend); the profile + persist gate
-        // it on a live ground station, so this pins the json! the handler builds.
-        let body = json!({
-            "enabled": true,
-            "applied": true,
-            "apply_error": Value::Null,
-            "backend": "native",
-        });
-        assert_eq!(body["backend"], json!("native"));
+    #[tokio::test]
+    async fn share_uplink_reports_the_daemons_apply_verdict() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = canned_socket(
+            dir.path(),
+            r#"{"ok":true,"applied":false,"backend":"nftables","apply_error":"nft_add_failed"}"#,
+        )
+        .await;
+        let reply = net_cmd_at(&sock, &json!({"op": "share_uplink", "enabled": true})).await;
+        let body = share_uplink_body(true, reply);
+        assert_eq!(body["applied"], json!(false));
+        assert_eq!(body["apply_error"], json!("nft_add_failed"));
+        assert_eq!(body["backend"], json!("nftables"));
+
+        let ok_dir = tempfile::tempdir().unwrap();
+        let ok_sock = canned_socket(
+            ok_dir.path(),
+            r#"{"ok":true,"applied":true,"backend":"iptables-persistent","apply_error":null}"#,
+        )
+        .await;
+        let body = share_uplink_body(
+            true,
+            net_cmd_at(&ok_sock, &json!({"op": "share_uplink", "enabled": true})).await,
+        );
         assert_eq!(body["applied"], json!(true));
         assert_eq!(body["apply_error"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn share_uplink_with_no_daemon_is_not_reported_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.sock");
+        let reply = net_cmd_at(&missing, &json!({"op": "share_uplink", "enabled": true})).await;
+        let body = share_uplink_body(true, reply);
+        assert_eq!(body["enabled"], json!(true));
+        assert_eq!(body["applied"], json!(false));
+        assert!(body["apply_error"].as_str().is_some());
     }
 
     // ── profile gate ─────────────────────────────────────────────────────────

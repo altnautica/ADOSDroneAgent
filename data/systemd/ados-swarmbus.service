@@ -38,8 +38,11 @@ ProtectSystem=strict
 # /run/ados: binds swarm.sock, reads state.sock + the radio's wfb-stats.json.
 # /var/lib/ados: reads the ground station's fleet.json for the slot -> device-id
 # join. /etc: reads the fleet key (/etc/drone.key) and the agent config.
+# /etc/drone.key exists only after the first bind, so it carries the '-' prefix:
+# an absent listed path otherwise fails the start with 226/NAMESPACE, and the bus
+# is built to run on the cold-start key until a bind writes the fleet key.
 ReadWritePaths=/run/ados
-ReadOnlyPaths=/var/lib/ados /etc/ados /etc/drone.key
+ReadOnlyPaths=/var/lib/ados /etc/ados -/etc/drone.key
 
 # One 20-byte beacon at 2 Hz and a table capped at 64 entries: the working set is
 # kilobytes, so the ceiling exists to catch a leak, not to bound real use.

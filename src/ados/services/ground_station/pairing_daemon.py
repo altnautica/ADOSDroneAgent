@@ -29,7 +29,7 @@ negotiation. Clients close the socket after each request; reconnects
 are free because pairing is low-frequency.
 
 Supported ops:
-  - `open_window(duration_s: int)` -> `{opened_at_ms, closes_at_ms}`
+  - `open_window(duration_s: int)` -> `{opened_at_ms, closes_at_ms, code}`
   - `close_window()` -> `{closed: bool}`
   - `is_window_open()` -> `{open: bool}`
   - `snapshot()` -> `{...}` (same shape as REST /pair/pending)
@@ -58,10 +58,8 @@ import structlog
 from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import MESH_ID_PATH, PAIRING_SOCK
 
-from .pairing_manager import (
-    InviteBundle,
-    get_pairing_manager,
-)
+from .invite_crypto import InviteBundle
+from .pairing_manager import get_pairing_manager
 from .pairing_manager import (
     revoke as revoke_device,
 )
@@ -125,6 +123,7 @@ async def _handle_op(op: str, args: dict[str, Any]) -> dict[str, Any]:
                 "result": {
                     "opened_at_ms": window.opened_at_ms,
                     "closes_at_ms": window.closes_at_ms,
+                    "code": window.code,
                 },
             }
         if op == "close_window":

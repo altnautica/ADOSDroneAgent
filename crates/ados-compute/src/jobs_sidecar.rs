@@ -6,7 +6,7 @@
 //! same Contract-E sidecar pattern as the heartbeat sidecar: the producer owns
 //! its domain state (the jobs, in the wire shape the cloud route accepts), the
 //! relay owns the transport (auth + POST). The GCS World Model tab reads the
-//! reconstruction LOCAL-FIRST off the compute node over the LAN (Rule 39); this
+//! reconstruction LOCAL-FIRST off the compute node over the LAN; this
 //! cloud sync is the secondary/remote path.
 //!
 //! One representative entry per capture session: the newest COMPLETED reconstruct
@@ -67,7 +67,7 @@ pub struct AtlasJobEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_url: Option<String>,
     /// Opaque metadata the GCS reads: `{ backend?, viewerHint?, gaussianCount? }`.
-    /// `backend` drives the reconstruction-honesty badge (Rule 44).
+    /// `backend` drives the reconstruction-honesty badge.
     pub metadata: serde_json::Value,
     /// Job creation time (epoch ms).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,7 +176,7 @@ pub fn build_atlas_jobs_sidecar(
         let output_url = first.map(|o| o.uri.clone());
 
         let mut metadata = serde_json::Map::new();
-        // The honest reconstruction backend (Rule 44): the output's stamped
+        // The honest reconstruction backend: the output's stamped
         // backend, else the requested hint before an output exists.
         let backend = first
             .and_then(|o| o.meta.get("backend").and_then(|v| v.as_str()))
@@ -305,7 +305,7 @@ mod tests {
             e.output_url.as_deref(),
             Some("http://node:8092/artifacts/s1/world.spz")
         );
-        // The honest backend badge (Rule 44) + viewer hint + gaussian count.
+        // The honest backend badge + viewer hint + gaussian count.
         assert_eq!(e.metadata["backend"], "brush");
         assert_eq!(e.metadata["viewerHint"], "splat");
         assert_eq!(e.metadata["gaussianCount"], 250000);

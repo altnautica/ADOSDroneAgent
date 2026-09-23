@@ -9,9 +9,9 @@
 //! `vision.detection` bus (transparent to every consumer). It writes the
 //! `/run/ados/offload-link.json` sidecar so the status surfaces report (and
 //! surface the target of) the live offload; absent/idle ⇒ the drone reports
-//! `none` (Rule 44 — never a fabricated paired node).
+//! `none` (never a fabricated paired node).
 //!
-//! Local-first (Rule 39): the node is discovered over mDNS (or pinned by config),
+//! Local-first: the node is discovered over mDNS (or pinned by config),
 //! reached by its LAN job-API address; no cloud round-trip. The RTSP URL handed
 //! to the node is the drone's LAN-reachable egress IP (never `localhost` — the
 //! node pulls the feed).
@@ -132,7 +132,7 @@ fn split_host_port(s: &str, default_port: u16) -> Option<(String, u16)> {
 /// the node would use, i.e. the address the node can reach the drone's RTSP feed
 /// back on. A UDP "connect" sets the default route + picks the source IP without
 /// sending a packet. `None` when the node address doesn't resolve or no route
-/// exists (Rule 47: no verified reach ⇒ don't advertise one).
+/// exists (no verified reach ⇒ don't advertise one).
 fn local_ip_towards(host: &str, port: u16) -> Option<IpAddr> {
     let addr = format!("{host}:{port}").to_socket_addrs().ok()?.next()?;
     let sock = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
@@ -244,7 +244,7 @@ fn session_id(config: &CloudConfig) -> String {
 /// Lazily build the dedicated cloud detection publisher (once) and hand back a
 /// tee for the orchestrator, or `None` in local-first mode / while unpaired.
 ///
-/// Rule 39: the tee exists only when the agent is in an explicit cloud-relay
+/// The tee exists only when the agent is in an explicit cloud-relay
 /// posture AND paired — a LAN-only drone keeps its detections local. The MQTT
 /// session uses a DISTINCT client id (`ados-{device}-vision`) so it never
 /// collides with the MAVLink relay's `ados-{device}` session (a same-id second
@@ -296,7 +296,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     let mut last_search: Option<Instant> = None;
     // The dedicated cloud detection publisher, built at most once (on the first
     // offloaded session in cloud mode) and reused across sessions. `None` in
-    // local-first mode (Rule 39).
+    // local-first mode.
     let mut cloud_pub: Option<Arc<CloudDetectionPublisher>> = None;
 
     loop {
@@ -345,7 +345,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                             let cancel = Arc::new(Notify::new());
                             // Tee returned detections to the cloud relay too, so a
                             // hosted / off-LAN GCS renders the same live boxes. None
-                            // (LAN-only) leaves the session local (Rule 39).
+                            // (LAN-only) leaves the session local.
                             let tee = cloud_detection_tee(&config, &mut cloud_pub);
                             let cfg = OrchestratorConfig::vision_only(
                                 session_id(&config), CAMERA_ID, rtsp_url, width, height, TARGET_BUDGET_MS,

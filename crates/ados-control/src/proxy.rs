@@ -95,12 +95,32 @@ pub async fn proxy_with_socket(socket: &Path, request: Request) -> Response {
     proxy_plain(socket, request).await
 }
 
+/// How long the residual API has to send a response HEAD. The head of an SSE
+/// stream arrives at once and its body then flows unbounded, so this bounds a
+/// wedged handler without cutting a live stream.
+const UPSTREAM_HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The largest request body the head deadline applies to. A handler answers
+/// only after reading the body, so a large streamed upload over a slow link
+/// could not meet a fixed deadline; those run unbounded.
+const HEAD_DEADLINE_MAX_BODY: u64 = 1024 * 1024;
+
 /// Forward a plain (non-upgrade) request: open a fresh HTTP/1.1 connection on the
 /// upstream Unix socket, send the request with its body STREAMED, and relay the
 /// upstream response (status + non-hop-by-hop headers + streamed body) back. SSE
 /// works for free: the streamed body carries no `Content-Length` we set, so it
-/// just flows.
+/// just flows. A request with at most a small body must get its response head
+/// within [`UPSTREAM_HEAD_TIMEOUT`], else `504`: a wedged residual handler must
+/// not hold the front's connection and file descriptor forever.
 async fn proxy_plain(socket: &Path, request: Request) -> Response {
+    proxy_plain_within(socket, request, UPSTREAM_HEAD_TIMEOUT).await
+}
+
+async fn proxy_plain_within(
+    socket: &Path,
+    request: Request,
+    head_timeout: std::time::Duration,
+) -> Response {
     let stream = match UnixStream::connect(socket).await {
         Ok(s) => s,
         Err(_) => return upstream_absent(request.uri().path()),
@@ -113,20 +133,53 @@ async fn proxy_plain(socket: &Path, request: Request) -> Response {
         Ok(pair) => pair,
         Err(_) => return upstream_absent(request.uri().path()),
     };
-    tokio::spawn(async move {
+    let conn_task = tokio::spawn(async move {
         // The connection ends when the response body is fully read or the peer
         // closes; an error here is just the connection ending, not a route fault.
         let _ = conn.await;
     });
 
+    let bounded = has_small_body(request.headers());
     // The axum request body implements `http_body::Body`, so it forwards as the
     // upstream request body directly — no buffering, a large upload streams.
-    match sender.send_request(request).await {
+    let exchange = sender.send_request(request);
+    let result = if bounded {
+        match tokio::time::timeout(head_timeout, exchange).await {
+            Ok(r) => r,
+            Err(_) => {
+                // Drop the upstream connection with the abandoned exchange.
+                conn_task.abort();
+                return detail(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "the residual API did not answer in time",
+                );
+            }
+        }
+    } else {
+        exchange.await
+    };
+    match result {
         Ok(upstream) => relay_response(upstream),
         // The upstream accepted the connection but the exchange failed (it closed
         // mid-request, or sent a malformed reply). Degrade rather than 500 — to
         // the downstream client the route simply is not there right now.
         Err(_) => upstream_absent_path_only(socket),
+    }
+}
+
+/// Whether a request's body is known to be no larger than
+/// [`HEAD_DEADLINE_MAX_BODY`]: no body at all, or a `Content-Length` within it.
+fn has_small_body(headers: &http::HeaderMap) -> bool {
+    if headers.contains_key(http::header::TRANSFER_ENCODING) {
+        return false;
+    }
+    match headers.get(http::header::CONTENT_LENGTH) {
+        None => true,
+        Some(v) => v
+            .to_str()
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .is_some_and(|n| n <= HEAD_DEADLINE_MAX_BODY),
     }
 }
 
@@ -388,6 +441,56 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
         let body = body_bytes(resp).await;
         assert_eq!(body, br#"{"detail":"Not Found"}"#);
+    }
+
+    #[tokio::test]
+    async fn a_wedged_upstream_is_a_504_not_a_hang() {
+        // The residual API accepts and reads the request, then never answers.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-internal.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let _wedged = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = conn.read(&mut buf).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let request = http::Request::builder()
+            .uri("/api/flights")
+            .body(Body::empty())
+            .unwrap();
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            proxy_plain_within(&path, request, std::time::Duration::from_millis(200)),
+        )
+        .await
+        .expect("the proxy must not wait on a wedged upstream");
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn only_small_or_absent_bodies_get_the_head_deadline() {
+        let mut h = http::HeaderMap::new();
+        assert!(has_small_body(&h));
+        h.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_static("512"),
+        );
+        assert!(has_small_body(&h));
+        h.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_static("52428800"),
+        );
+        assert!(
+            !has_small_body(&h),
+            "a large upload may take longer than the deadline"
+        );
+        let mut chunked = http::HeaderMap::new();
+        chunked.insert(
+            http::header::TRANSFER_ENCODING,
+            HeaderValue::from_static("chunked"),
+        );
+        assert!(!has_small_body(&chunked));
     }
 
     #[test]

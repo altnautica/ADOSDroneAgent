@@ -237,7 +237,7 @@ def test_get_latest_returns_most_recent_batch(unpaired_client):
 
 
 def test_get_latest_returns_empty_detections_when_socket_absent():
-    """No engine socket present → an honest empty reading (Rule 44), never
+    """No engine socket present → an honest empty reading, never
     a hang or a fabricated batch — the poll loop's steady state until
     vision comes up or is enabled."""
     from ados.api.server import create_app

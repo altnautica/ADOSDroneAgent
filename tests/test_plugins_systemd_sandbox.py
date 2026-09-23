@@ -202,32 +202,49 @@ def test_device_rules_match_the_rust_renderer() -> None:
     assert dict(DEVICE_CAP_RULES) == expected
 
 
-def test_agent_command_sockets_are_hidden_like_the_rust_renderer() -> None:
-    """Byte parity with the no-grant line ``ados-plugin-host/src/sandbox.rs``
-    pins, and the sockets stay hidden whatever the plugin is granted.
+def test_the_agent_run_dir_is_hidden_like_the_rust_renderer() -> None:
+    """Byte parity with the no-grant filesystem lines ``ados-plugin-host/src/
+    sandbox.rs`` pins, and the run dir stays hidden whatever is granted.
 
-    A plugin that could open one of these would act with the agent's
-    authority rather than its own grants.
+    The run dir holds every agent command socket and every plugin's socket
+    directory. A plugin that could open one would act with the agent's
+    authority, or another plugin's grants, rather than its own. It is hidden
+    as a whole so a socket re-created after the plugin started stays hidden.
     """
-    expected = (
+    expected = [
+        "TemporaryFileSystem=/run/ados:ro",
+        "BindReadOnlyPaths=-/run/ados/logd.sock",
+        "ReadWritePaths=/var/ados/plugin-data /var/log/ados/plugins",
+        "ProtectHome=yes",
         "InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys "
-        "-/run/ados/plugin-host -/run/ados/control.sock -/run/ados/api-internal.sock "
-        "-/run/ados/mavlink.sock -/run/ados/msp.sock -/run/ados/supervisor.sock "
-        "-/run/ados/radio-cmd.sock -/run/ados/radio-aux.sock -/run/ados/wfb-cmd.sock "
-        "-/run/ados/video-cmd.sock -/run/ados/gpio-cmd.sock -/run/ados/hid-cmd.sock "
-        "-/run/ados/pic.sock -/run/ados/crsf-cmd.sock -/run/ados/wifi-cmd.sock "
-        "-/run/ados/groundlink-cmd.sock -/run/ados/tunnel-config-cmd.sock "
-        "-/run/ados/atlas-control.sock -/run/ados/pairing.sock "
-        "-/run/ados/logd-query.sock -/srv -/mnt -/media -/boot"
-    )
+        "-/srv -/mnt -/media -/boot",
+    ]
     lines = sandbox_directives([], True)
-    assert next(line for line in lines if line.startswith("InaccessiblePaths=")) == expected
+    assert lines[-len(expected) :] == expected
 
     everything = sandbox_directives(sandbox_enforced_caps(), True)
-    hidden = next(line for line in everything if line.startswith("InaccessiblePaths="))
-    for path in ("/run/ados/plugin-host", "/run/ados/control.sock", "/run/ados/gpio-cmd.sock"):
-        assert f" -{path}" in hidden
-    assert "/run/ados/plugins" not in hidden
+    assert "TemporaryFileSystem=/run/ados:ro" in everything
+    for line in everything:
+        if line.startswith("ReadWritePaths="):
+            assert "/run/ados" not in line
+        if line.startswith(("BindReadOnlyPaths=", "BindPaths=")):
+            assert line == "BindReadOnlyPaths=-/run/ados/logd.sock"
+
+
+def test_a_unit_binds_only_its_own_socket_dir() -> None:
+    """Each plugin unit binds back exactly one plugin directory: its own."""
+    run_dir = systemd_mod.PLUGIN_RUN_DIR
+    unit = render_unit(_manifest(), _INSTALL_DIR, ())
+    binds = [
+        line.removeprefix("BindReadOnlyPaths=")
+        for line in unit.splitlines()
+        if line.startswith("BindReadOnlyPaths=") and "logd.sock" not in line
+    ]
+    assert binds == [str(run_dir / "com.example.sandbox")]
+    assert (
+        f"Environment=ADOS_PLUGIN_SOCKET={run_dir / 'com.example.sandbox' / 'host.sock'}"
+        in unit
+    )
 
 
 def test_the_unit_carries_no_start_rate_limit() -> None:

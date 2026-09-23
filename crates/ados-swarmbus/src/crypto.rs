@@ -19,9 +19,6 @@
 //! end. The bind protocol delivers `/etc/drone.key` byte-for-byte to both sides,
 //! which makes it the only shared-content key on disk and the only correct source.
 //!
-//! The plan text for this phase said "key = fleet rx.key"; that is the trap above,
-//! so this follows the codebase's existing hard constraint instead.
-//!
 //! ## Nonces
 //!
 //! 8 random bytes drawn once per process, then a 4-byte little-endian counter.
@@ -506,24 +503,11 @@ mod tests {
         );
     }
 
-    /// The CBBA lane shares the transport, so an arbitrary body must round-trip
-    /// unchanged and be dispatched under its own kind.
+    /// The resolver itself, against a real file: absent and wrong-length files
+    /// fall back to the cold-start key, and only a whole key file derives a bound
+    /// key.
     #[test]
-    fn the_bid_lane_round_trips_an_arbitrary_body_under_its_own_kind() {
-        let c = SwarmCipher::new(&key());
-        let bid: Vec<u8> = (0..=255u8).collect();
-        let wire = c.seal(SwarmFrameKind::CbbaBid, &bid);
-        let (kind, body) = c.open(&wire).unwrap();
-        assert_eq!(kind, SwarmFrameKind::CbbaBid);
-        assert_eq!(body, bid);
-        // An empty body is legal too (the degenerate zero-task bid vector).
-        let (kind, body) = c.open(&c.seal(SwarmFrameKind::CbbaBid, &[])).unwrap();
-        assert_eq!(kind, SwarmFrameKind::CbbaBid);
-        assert!(body.is_empty());
-    }
-
-    #[test]
-    fn resolve_ignores_a_wrong_length_key_file_rather_than_hashing_it() {
+    fn fleet_key_at_derives_only_from_a_whole_key_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("drone.key");
         assert_eq!(fleet_key_at(&path), (derive_fleet_key(None), false));

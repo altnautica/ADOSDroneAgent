@@ -175,7 +175,7 @@ pub fn beacon_from_state(
     // and `swarm_emergency`, so the two processes meet in exactly one place — the
     // same seam `video_profile` uses for the hero bit.
     //
-    // An absent key reads as `hold` / not-in-override, which is the pre-Phase-5
+    // An absent key reads as `hold` / not-in-override, which is the
     // steady state: a node with no autonomy layer running radiates zeroes in the
     // precedence field and no emergency bit, and every reader honestly decodes it as
     // "this drone is not being flown by the swarm layer".

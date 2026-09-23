@@ -248,7 +248,6 @@ def test_ws_proxy_enforce_auth_defaults_on_and_round_trips():
 def test_security_defaults():
     """Security defaults should be reasonable."""
     cfg = ADOSConfig()
-    assert cfg.security.tls.enabled is True
     assert cfg.security.api.cors_enabled is True
     assert len(cfg.security.api.cors_origins) >= 1
     assert "*" not in cfg.security.api.cors_origins

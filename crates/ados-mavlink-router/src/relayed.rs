@@ -77,6 +77,7 @@ const STATE_MESSAGE_IDS: &[u32] = &[
     65,  // RC_CHANNELS
     74,  // VFR_HUD
     147, // BATTERY_STATUS
+    253, // STATUSTEXT: the firmware banner names the mode table
 ];
 
 /// Whether a frame carries a message this projection reads.

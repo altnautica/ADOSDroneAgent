@@ -11,7 +11,7 @@
 //! the SAME shape the local WebSocket emits (the `DetectionBatch` named-map), so
 //! the GCS parses one shape for both LAN and cloud.
 //!
-//! Local-first (Rule 39): a LAN-only agent never builds this publisher (the
+//! Local-first: a LAN-only agent never builds this publisher (the
 //! reconciler wires no tee when cloud relay is off), and even when built, a batch
 //! is dropped while the broker session is not confirmed up — no cloud round-trip
 //! for a local drone. The publish is fire-and-forget at q0 (a lossy live stream,
@@ -69,7 +69,7 @@ impl CloudDetectionPublisher {
 
 impl DetectionTee for CloudDetectionPublisher {
     fn publish(&self, batch: &DetectionBatch) {
-        // Rule 39: never a cloud round-trip against a down / unconfirmed session.
+        // Never a cloud round-trip against a down / unconfirmed session.
         // A LAN-only or disconnected agent drops the batch (not an error).
         if !self.connected.load(Ordering::Relaxed) {
             return;
@@ -186,7 +186,7 @@ mod tests {
             connected,
         );
 
-        // Local-first (Rule 39): a down session takes no cloud round-trip.
+        // Local-first: a down session takes no cloud round-trip.
         publisher.publish(&sample_batch());
         assert!(fake.publishes.lock().is_empty());
     }

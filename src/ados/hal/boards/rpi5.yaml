@@ -12,7 +12,7 @@ gpio_pins:
   - 14  # UART TX
   - 15  # UART RX
   - 18  # PWM0
-# Declared GPIO output lines (D5 active-buzzer procurement is open).
+# Declared GPIO output lines (the active-buzzer pin is not yet fixed).
 # pin UNVERIFIED: -1 is a sentinel meaning "confirm the physical BCM pin
 # before flashing" — do not drive this line until the active-buzzer pin is
 # decided. The plugin reads this via config and records `unconfigured` rather

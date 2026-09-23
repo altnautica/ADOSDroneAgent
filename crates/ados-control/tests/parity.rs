@@ -233,6 +233,7 @@ async fn start_full_once(
         // profile; a test seeds `mesh-role` to exercise a ground-station role.
         profile_conf_path: dir.join("profile.conf"),
         mesh_role_path: dir.join("mesh-role"),
+        relay_secret_path: dir.join("relay-peer-secret"),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(run_with_paths(paths, async move {
@@ -443,8 +444,8 @@ async fn tcp_requires_the_key_when_paired() {
     // Wrong key → 401.
     let (wrong, _b) = tcp_get(h.port, "/api/time", &[fwd, ("X-ADOS-Key", "nope")]).await;
     assert!(wrong.contains("401"), "status {wrong}");
-    // Right key → not a 401 (the route itself is unregistered this chunk, so a
-    // 404 is the expected pass-through; the point is the gate let it through).
+    // Right key → not a 401. The assertion is about the gate letting the request
+    // through, not about what the route itself answers.
     let (ok, _b) = tcp_get(h.port, "/api/time", &[fwd, ("X-ADOS-Key", "ados_secret")]).await;
     assert!(
         !ok.contains("401") && !ok.contains("429"),
@@ -957,7 +958,7 @@ async fn time_is_gated_when_paired_but_answers_with_a_key() {
     h.stop().await;
 }
 
-// --- pairing parity (R1: the highest-risk surface) ---
+// --- pairing parity (the pairing handshake and its response shape) ---
 
 /// Minimal HTTP/1.1 POST over the unix socket with a JSON body: write the
 /// request, read the whole response, return (status_line, body).
@@ -1036,7 +1037,7 @@ async fn pairing_info_unpaired_matches_the_golden_shape() {
     let got: Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("body: {body}"));
     let want = fixture("pairing_info_unpaired.json");
 
-    // R1: the exact 19-field key set, no field omitted.
+    // The exact 19-field key set, no field omitted.
     assert_same_keys(&got, &want, "/api/pairing/info (unpaired)");
     assert_eq!(
         got.as_object().unwrap().len(),
@@ -1048,7 +1049,7 @@ async fn pairing_info_unpaired_matches_the_golden_shape() {
     assert_same_shape(&got, &want, "/api/pairing/info (unpaired)");
 
     // The seven nullable fields are provably JSON null on a degraded/unpaired
-    // agent (not omitted) — the Rule-39 invariant the GCS depends on.
+    // agent (not omitted); the GCS distinguishes "absent" from "unknown" on that.
     for k in [
         "bind_state",
         "radio",
@@ -1122,9 +1123,9 @@ async fn pairing_info_reads_the_fc_triple_radio_peer_and_bind_state() {
         "agent:\n  device_id: abcdef1234567890\n  name: test-drone\n  profile: drone\nvideo:\n  wfb:\n    paired_with_device_id: peer-9876543210\n",
     )
     .unwrap();
-    // Seed a wfb key (radio_paired) + a bind-state sentinel.
+    // Seed a complete 64-byte wfb key (radio_paired) + a bind-state sentinel.
     std::fs::create_dir_all(dir.path().join("wfb")).unwrap();
-    std::fs::write(dir.path().join("wfb").join("tx.key"), b"k").unwrap();
+    std::fs::write(dir.path().join("wfb").join("tx.key"), [7u8; 64]).unwrap();
     std::fs::write(
         dir.path().join("bind-state.json"),
         r#"{"state":"binding","phase":"key_transfer","active":true,"error":null,"finished_at":12.0,"fingerprint":"ab"}"#,
@@ -1155,9 +1156,48 @@ async fn pairing_info_reads_the_fc_triple_radio_peer_and_bind_state() {
         &fixture("pairing_info_unpaired.json"),
         "/api/pairing/info (rich)",
     );
+    // A truncated key is not a radio pairing: the same predicate the WFB pair
+    // routes use answers here.
+    std::fs::write(dir.path().join("wfb").join("tx.key"), b"k").unwrap();
+    let (_status, body) = unix_get(&h.socket, "/api/pairing/info", None).await;
+    let truncated: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(truncated["radio_paired"], Value::Bool(false));
 
     h.stop().await;
     mock.stop().await;
+}
+
+/// A pairing file that exists but cannot be parsed never reads as unpaired:
+/// the probe says so and the claim refuses instead of minting a fresh key.
+#[tokio::test]
+async fn a_corrupt_pairing_file_refuses_the_claim_and_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_config(dir.path(), "abcdef1234567890", "test-drone", "drone");
+    let corrupt = r#"{"paired": true, "api_key": "ados_K""#;
+    let h = start_with_state(
+        dir.path(),
+        Some(corrupt),
+        dir.path().join("absent-state.sock"),
+    )
+    .await;
+
+    let (status, _body) = unix_get(&h.socket, "/api/pairing/info", None).await;
+    assert!(status.contains("503"), "info on a corrupt file: {status}");
+    let (status, body) = unix_post(
+        &h.socket,
+        "/api/pairing/claim",
+        None,
+        r#"{"user_id":"intruder"}"#,
+    )
+    .await;
+    assert!(
+        status.contains("503"),
+        "claim on a corrupt file: {status} {body}"
+    );
+    assert!(!body.contains("api_key"), "no key is handed out: {body}");
+    let on_disk = std::fs::read_to_string(dir.path().join("pairing.json")).unwrap();
+    assert_eq!(on_disk, corrupt, "the file is not overwritten");
+    h.stop().await;
 }
 
 #[tokio::test]
@@ -1294,6 +1334,10 @@ async fn pairing_unpair_clears_pairing_json_and_mints_a_code() {
         Some(r#"{"paired": true, "api_key": "ados_K", "owner_id": "u", "paired_at": 1.0}"#),
     )
     .await;
+    // The per-pair relay secret this node holds, at the path the harness
+    // injects: unpair must clear it there, never at a host path.
+    let relay_secret = dir.path().join("relay-peer-secret");
+    std::fs::write(&relay_secret, "0".repeat(64)).unwrap();
 
     let (status, body) = unix_post(
         &h.socket,
@@ -1325,6 +1369,10 @@ async fn pairing_unpair_clears_pairing_json_and_mints_a_code() {
         "unpaired must drop the api_key"
     );
     assert_eq!(on_disk["pairing_code"], serde_json::json!(new_code));
+    assert!(
+        !relay_secret.exists(),
+        "unpair must remove the relay secret at the configured path"
+    );
 
     h.stop().await;
 }
@@ -1369,7 +1417,7 @@ async fn pairing_unpair_is_gated_by_the_key_when_paired_over_tcp() {
     h.stop().await;
 }
 
-// --- command parity (R2: the MAVLink bytes / R3: target_system) ---
+// --- command parity (the MAVLink bytes and the target_system) ---
 
 use ados_protocol::frame::{decode_len, HEADER_SIZE, MAVLINK_MAX_FRAME};
 use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, COMMAND_LONG_DATA};
@@ -1509,11 +1557,16 @@ async fn post_command(socket: &Path, json_body: &str) -> (String, String) {
     unix_post(socket, "/api/command", None, json_body).await
 }
 
-/// The command snapshot for an ArduPilot FC (`autopilot` 3) of the given MAV_TYPE.
+/// The command snapshot for an ArduPilot FC (`autopilot` 3) of the given
+/// MAV_TYPE whose banner has named its firmware (a copter for a multirotor
+/// type, which the type alone cannot establish).
 fn ardupilot_snapshot(mav_type: i64) -> Value {
     let mut snapshot = fc_up_snapshot();
     snapshot["autopilot"] = serde_json::json!(3);
     snapshot["mav_type"] = serde_json::json!(mav_type);
+    if let Some(fw) = ados_protocol::flight_modes::ArduPilotFirmware::from_mav_type(mav_type) {
+        snapshot["vehicle_firmware"] = serde_json::json!(fw.as_str());
+    }
     snapshot
 }
 
@@ -1587,7 +1640,7 @@ async fn command_arm_writes_a_component_arm_disarm_frame() {
     let d = mav_mock.await_command().await;
     assert_eq!(d.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
     assert_eq!(d.param1, 1.0);
-    // R3: single-vehicle target.
+    // Single-vehicle target.
     assert_eq!(d.target_system, 1);
     assert_eq!(d.target_component, 1);
 
@@ -1669,6 +1722,24 @@ async fn command_land_writes_nav_land_all_zero() {
 async fn command_modes_use_the_copter_table_on_a_quadrotor() {
     // MAV_TYPE_QUADROTOR: RTL is 6, LOITER is 5.
     assert_ardupilot_modes(2, 6.0, "LOITER", 5.0).await;
+}
+
+#[tokio::test]
+async fn command_modes_are_refused_on_a_quadrotor_whose_firmware_is_unidentified() {
+    // No banner yet: a quadrotor-typed heartbeat may be a QuadPlane, where the
+    // copter RTL number commands FBWB.
+    let dir = tempfile::tempdir().unwrap();
+    let mut snapshot = ardupilot_snapshot(2);
+    snapshot.as_object_mut().unwrap().remove("vehicle_firmware");
+    let (h, state_mock, mav_mock) = start_with_snapshot(dir.path(), snapshot).await;
+    let (status, _body) = post_command(&h.socket, r#"{"cmd":"rtl"}"#).await;
+    assert!(
+        status.contains("409"),
+        "unidentified firmware must be 409: {status}"
+    );
+    h.stop().await;
+    state_mock.stop().await;
+    mav_mock.stop().await;
 }
 
 #[tokio::test]

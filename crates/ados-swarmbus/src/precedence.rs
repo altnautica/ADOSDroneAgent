@@ -30,8 +30,8 @@
 #[repr(u8)]
 pub enum ModePrecedence {
     /// No swarm layer is commanding the vehicle: the flight controller holds.
-    /// Also what an unknown encoding decodes to, and the pre-Phase-5 steady
-    /// state of every drone in the fleet.
+    /// Also what an unknown encoding decodes to, and the state of every drone
+    /// with no autonomy layer running.
     #[default]
     Hold = 0,
     /// The separation layer has overridden everything else (a neighbour inside

@@ -8,7 +8,7 @@ by the agent's own front, not a Next.js build on the box).
 Lifecycle:
 1. Probe `/dev/dri/card0`. If absent, the box has no HDMI sink connected
    (or the DRM driver did not bind). Log clearly and exit 0 so systemd
-   does not churn restarting. Rule 26: the rest of the ground station
+   does not churn restarting. Plug-and-play: the rest of the ground station
    keeps working even without HDMI.
 2. Resolve target URL via config -> env var -> default chain.
 3. Launch Chromium full-screen, adaptively:

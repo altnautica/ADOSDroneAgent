@@ -8,24 +8,22 @@
 //! off does not change what any drone knows.
 //!
 //! The table is deliberately small and total: one entry per fleet slot, no history,
-//! no filtering. Position smoothing belongs to whoever consumes it;
-//! [`NeighborTable::predicted`] offers the one extrapolation the 10 Hz control loop
-//! needs from a 2 Hz beacon.
+//! no filtering, no extrapolation. Position smoothing and dead reckoning belong to
+//! whoever consumes the published table (the onboard control loop reads it off
+//! `swarm.sock` and projects it into its own frame).
 
 pub mod counters;
-pub mod geo;
 pub mod replay;
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use ados_radio::config::{FLEET_MAX_SLOTS, SLOT_GROUND};
+use ados_radio::config::SLOT_GROUND;
 
 use crate::beacon::SwarmBeacon;
 use crate::crypto::{SenderNonce, NONCE_PREFIX_LEN};
 
 pub use counters::SwarmCounters;
-pub use geo::{dead_reckon, distance_m, R_EARTH};
 use replay::{SenderMarks, SenderVerdict};
 
 /// How long a neighbour survives without a beacon: six missed transmissions at
@@ -38,7 +36,7 @@ use replay::{SenderMarks, SenderVerdict};
 pub const NEIGHBOR_STALE: Duration = Duration::from_secs(3);
 
 /// Hard cap on table size. A legal fleet cannot reach it
-/// ([`FLEET_MAX_SLOTS`] is 24); it bounds the table against a garbage or hostile
+/// ([`ados_radio::config::FLEET_MAX_SLOTS`] is 24); it bounds the table against a garbage or hostile
 /// slot flood, since `slot` is a `u8` and 255 distinct values are expressible.
 pub const MAX_NEIGHBORS: usize = 64;
 
@@ -99,6 +97,9 @@ pub struct NeighborTable {
     own_slot: u8,
     /// This node's own nonce prefix, once the radio half has built its cipher.
     own_sender: Option<[u8; NONCE_PREFIX_LEN]>,
+    /// The monitor interface the bus is listening on, `None` while the radio is
+    /// not open. Published so a bus that cannot hear is not read as empty sky.
+    radio_iface: Option<String>,
     counters: SwarmCounters,
     senders: SenderMarks,
 }
@@ -115,6 +116,7 @@ impl NeighborTable {
             by_slot: BTreeMap::new(),
             own_slot,
             own_sender: None,
+            radio_iface: None,
             counters: SwarmCounters::default(),
             senders: SenderMarks::default(),
         }
@@ -134,6 +136,17 @@ impl NeighborTable {
     /// re-key, so this is set once per process in practice.
     pub fn set_own_sender(&mut self, prefix: [u8; NONCE_PREFIX_LEN]) {
         self.own_sender = Some(prefix);
+    }
+
+    /// The interface the radio is open on, or `None` while it is not open.
+    pub fn radio_iface(&self) -> Option<&str> {
+        self.radio_iface.as_deref()
+    }
+
+    /// Record the radio as open on `iface`, or closed with `None`. The radio
+    /// supervisor calls this on every open and every teardown.
+    pub fn set_radio_iface(&mut self, iface: Option<String>) {
+        self.radio_iface = iface;
     }
 
     /// Whether a peer is currently beaconing this node's own slot. Always false on
@@ -200,7 +213,7 @@ impl NeighborTable {
     /// conflict. Dropping it as loopback would leave two same-slot drones blind to
     /// each other, which is the one pair separation most needs to see.
     ///
-    /// A slot above [`FLEET_MAX_SLOTS`] is deliberately **accepted**. It is a
+    /// A slot above [`ados_radio::config::FLEET_MAX_SLOTS`] is deliberately **accepted**. It is a
     /// misprovisioned fleet member, and the honest response is to make it visible
     /// on the operator's screen — a silent drop would hide the exact
     /// misconfiguration that causes the FEC thrash the slot registry exists to
@@ -274,50 +287,6 @@ impl NeighborTable {
         self.counters.beacons_stale_dropped += dropped as u64;
         dropped
     }
-
-    /// A neighbour's position dead-reckoned forward from its last beacon at
-    /// constant velocity, as `(lat_deg, lon_deg, alt_m)`.
-    ///
-    /// This predict step is what lets a 10 Hz control loop run against a 2 Hz
-    /// beacon: between beacons the neighbour's position is extrapolated rather than
-    /// held, so the separation layer sees a closing aircraft move continuously
-    /// instead of jumping 500 ms at a time.
-    ///
-    /// Returns `None` for an unknown slot **and for a stale one**. Extrapolating
-    /// past [`NEIGHBOR_STALE`] would hand the control layer a confident position
-    /// for an aircraft that has been silent for three seconds; refusing is what
-    /// makes "never fly on stale data" structural rather than a convention.
-    pub fn predicted(&self, slot: u8, now: Instant) -> Option<(f64, f64, f64)> {
-        let n = self.by_slot.get(&slot)?;
-        if n.is_stale(now) {
-            return None;
-        }
-        Some(geo::dead_reckon(&n.beacon, n.age(now).as_secs_f64()))
-    }
-
-    /// The `n` nearest neighbours to `from` (`lat_deg`, `lon_deg`, `alt_m`),
-    /// nearest first, by true 3-D distance in metres.
-    ///
-    /// Ordering is on the last-reported position, not the dead-reckoned one: the
-    /// caller that wants prediction folded in already has [`Self::predicted`], and
-    /// mixing the two would make the ordering depend on when it was asked.
-    pub fn nearest(&self, n: usize, from: (f64, f64, f64)) -> Vec<&Neighbor> {
-        let mut scored: Vec<(f64, &Neighbor)> = self
-            .by_slot
-            .values()
-            .map(|nb| (geo::distance_m(from, geo::position_of(&nb.beacon)), nb))
-            .collect();
-        // Ties broken by slot, which `by_slot` iteration already supplies in order,
-        // so a stable sort makes the result deterministic for co-located drones.
-        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
-        scored.into_iter().take(n).map(|(_, nb)| nb).collect()
-    }
-}
-
-/// Whether a slot is a legal drone slot in this fleet. Exposed so a consumer can
-/// flag a misprovisioned member the table deliberately still carries.
-pub fn is_legal_drone_slot(slot: u8) -> bool {
-    slot != SLOT_GROUND && slot <= FLEET_MAX_SLOTS
 }
 
 #[cfg(test)]
@@ -495,10 +464,6 @@ mod tests {
             Recorded::Accepted
         );
         assert!(table.get(200).is_some());
-        assert!(!is_legal_drone_slot(200));
-        assert!(is_legal_drone_slot(FLEET_MAX_SLOTS));
-        assert!(!is_legal_drone_slot(FLEET_MAX_SLOTS + 1));
-        assert!(!is_legal_drone_slot(SLOT_GROUND));
     }
 
     #[test]
@@ -559,108 +524,6 @@ mod tests {
         // Pruning an empty table is a no-op, not a phantom drop.
         assert_eq!(table.prune(t0 + Duration::from_secs(20)), 0);
         assert_eq!(table.counters().beacons_stale_dropped, 2);
-    }
-
-    /// `predicted` delegates the arithmetic to [`geo::dead_reckon`] (tested there
-    /// against a known answer); what belongs to the table is that it feeds in the
-    /// right elapsed time and the right beacon.
-    #[test]
-    fn predicted_feeds_the_elapsed_time_of_the_right_neighbour() {
-        let t0 = Instant::now();
-        let mut table = NeighborTable::new(1);
-        let north = SwarmBeacon {
-            slot: 4,
-            lat: (LAT * 1e7) as i32,
-            lon: (LON * 1e7) as i32,
-            vx_cms: 1000, // 10 m/s north
-            ..SwarmBeacon::default()
-        };
-        let south = SwarmBeacon {
-            slot: 5,
-            lat: (LAT * 1e7) as i32,
-            lon: (LON * 1e7) as i32,
-            vx_cms: -1000,
-            ..SwarmBeacon::default()
-        };
-        table.record_next(north, None, t0);
-        table.record_next(south, None, t0);
-
-        // Each slot predicts from ITS OWN beacon, not the first or the last recorded.
-        let at_2s = t0 + Duration::from_secs(2);
-        assert_eq!(
-            table.predicted(4, at_2s),
-            Some(geo::dead_reckon(&north, 2.0))
-        );
-        assert_eq!(
-            table.predicted(5, at_2s),
-            Some(geo::dead_reckon(&south, 2.0))
-        );
-        assert!(table.predicted(4, at_2s).unwrap().0 > LAT, "4 moved north");
-        assert!(table.predicted(5, at_2s).unwrap().0 < LAT, "5 moved south");
-
-        // The elapsed time is measured from receipt, so the same `now` against a
-        // later-received beacon predicts a shorter displacement.
-        let mut late = NeighborTable::new(1);
-        late.record_next(north, None, t0 + Duration::from_secs(1));
-        assert_eq!(
-            late.predicted(4, at_2s),
-            Some(geo::dead_reckon(&north, 1.0))
-        );
-    }
-
-    /// The refusal is the safety property: past the stale window the control layer
-    /// gets `None`, never a confident extrapolation of a silent aircraft.
-    #[test]
-    fn predicted_refuses_a_stale_or_unknown_neighbour() {
-        let t0 = Instant::now();
-        let mut table = NeighborTable::new(1);
-        table.record_next(
-            SwarmBeacon {
-                slot: 4,
-                vx_cms: 1000,
-                ..SwarmBeacon::default()
-            },
-            None,
-            t0,
-        );
-        assert!(table
-            .predicted(4, t0 + NEIGHBOR_STALE - Duration::from_millis(1))
-            .is_some());
-        assert!(table.predicted(4, t0 + NEIGHBOR_STALE).is_none(), "stale");
-        assert!(table.predicted(9, t0).is_none(), "unknown slot");
-    }
-
-    /// Ordering must be by TRUE 3-D distance. A 2-D-only implementation, or one
-    /// that forgets the `cos(lat)` longitude scale, orders these differently.
-    #[test]
-    fn nearest_orders_by_true_three_dimensional_distance() {
-        let t0 = Instant::now();
-        let mut table = NeighborTable::new(1);
-        let deg_north = |m: f64| (m / R_EARTH).to_degrees();
-        let deg_east = |m: f64| (m / (R_EARTH * LAT.to_radians().cos())).to_degrees();
-
-        // 30 m north, 10 m east, and directly overhead at 5 m.
-        table.record_next(at(2, LAT + deg_north(30.0), LON, 0.0), None, t0);
-        table.record_next(at(3, LAT, LON + deg_east(10.0), 0.0), None, t0);
-        table.record_next(at(4, LAT, LON, 5.0), None, t0);
-        // 8 m east but 100 m up: nearest in 2-D, farthest in 3-D. This is the
-        // entry that catches an altitude-blind distance.
-        table.record_next(at(5, LAT, LON + deg_east(8.0), 100.0), None, t0);
-
-        let from = (LAT, LON, 0.0);
-        let order: Vec<u8> = table
-            .nearest(4, from)
-            .iter()
-            .map(|n| n.beacon.slot)
-            .collect();
-        assert_eq!(order, vec![4, 3, 2, 5], "5 m, 10 m, 30 m, ~100 m");
-
-        // `n` truncates from the near end.
-        assert_eq!(table.nearest(1, from)[0].beacon.slot, 4);
-        assert_eq!(table.nearest(2, from).len(), 2);
-        // Asking for more than exist returns everything, not a panic.
-        assert_eq!(table.nearest(99, from).len(), 4);
-        assert!(NeighborTable::new(1).nearest(3, from).is_empty());
     }
 
     #[test]

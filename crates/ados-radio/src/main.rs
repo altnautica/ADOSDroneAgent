@@ -58,7 +58,6 @@ use sidecar::{
 use txrate::{read_tx_bytes, TxLiveness, TxRates};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
-const PROFILE_CONF: &str = "/etc/ados/profile.conf";
 /// Poll interval while waiting for the WFB TX key (unpaired state).
 const KEY_WAIT_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -110,7 +109,7 @@ async fn main() {
     // wfb-stats.json. Defensive — the supervisor already profile-gates the unit.
     if ados_radio::config::profile_is_ground_station(
         Path::new(CONFIG_YAML),
-        Path::new(PROFILE_CONF),
+        Path::new(ados_radio::config::PROFILE_CONF),
     ) {
         tracing::warn!("wfb_tx_idle_on_ground_station_profile");
         wait_for_shutdown().await;
@@ -874,7 +873,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                         // not-permitted floor injects frames but radiates nothing
                         // (the RTL8812EU `set type monitor` mute). Surfaced on the
                         // sidecar so Mission Control shows a "PHY muted" badge
-                        // instead of a silent dead link (Rule 28).
+                        // instead of a silent dead link.
                         let phy_muted = ados_radio::adapter::read_tx_power(&hb_iface)
                             .await
                             .map(|dbm| dbm <= ados_radio::adapter::MUTED_TX_POWER_DBM)

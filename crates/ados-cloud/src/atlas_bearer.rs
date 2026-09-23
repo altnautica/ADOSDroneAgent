@@ -11,7 +11,7 @@
 //!
 //! **The cloud lane carries DESCRIPTORS, not multi-MB artifacts.** A full-res
 //! keyframe at q1 over a thin uplink head-of-line blocks the SHARED broker
-//! connection — the gateway's telemetry/status ride the same client — so a
+//! connection — every other publish on this session waits behind it — so a
 //! framed event over [`CLOUD_MAX_PAYLOAD`] is declined with a (retriable)
 //! `PayloadTooLarge`; the ladder offers it to a bearer that fits (the direct-LAN
 //! or post-flight-bulk lane), ending in `NoBearer` if none does. Small events

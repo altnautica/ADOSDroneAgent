@@ -89,6 +89,7 @@ from ados.plugins.state import (
 )
 from ados.plugins.systemd import (
     NETWORK_OUTBOUND_CAP,
+    host_ungrantable_caps,
     plugin_loopback_guard_active,
     probe_command,
     render_service_unit,
@@ -350,6 +351,13 @@ class PluginSupervisor:
             if permission_id not in manifest.declared_permissions():
                 raise SupervisorError(
                     f"plugin {plugin_id} did not declare permission {permission_id}"
+                )
+            # A capability whose every method answers not_implemented on this
+            # host would be granted only to fail at call time.
+            if permission_id in host_ungrantable_caps():
+                raise SupervisorError(
+                    f"plugin {plugin_id}: {permission_id} refused: this plugin "
+                    "host does not implement the methods it gates"
                 )
             # Network access is only safe to hold while the plugin host's
             # loopback guard keeps the plugin off the agent's own listeners.

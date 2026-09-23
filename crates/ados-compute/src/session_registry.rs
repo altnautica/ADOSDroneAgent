@@ -16,7 +16,7 @@
 //! closed session is removed from the registry (the close reason is logged), so
 //! the endpoint only ever lists live sessions. Every transition is driven by a
 //! real signal — a batch emitted, a reader reconnect, the stall clock, a close —
-//! never assumed (Rule 44).
+//! never assumed.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -28,7 +28,7 @@ use tokio::sync::Notify;
 /// A streaming session with no detection batch for this long is considered
 /// `Stalled`: still supervised (the frame reader is reconnecting), but not
 /// currently producing, so a status surface reports the honest quiet state rather
-/// than a stale `Live` (Rule 44).
+/// than a stale `Live`.
 pub const STALL_WINDOW_MS: i64 = 3_000;
 
 /// Local epoch-ms clock for session timestamps.
@@ -131,7 +131,7 @@ pub struct SessionRegistry {
     /// Lock-free projection = count of `Opening|Live` records, shared into the
     /// engine so its sync heartbeat reports `active_sessions` with no lock.
     /// Recomputed from the map on every mutation, so it can never drift from the
-    /// records it summarizes (Rule 44).
+    /// records it summarizes.
     active: Arc<AtomicU32>,
 }
 

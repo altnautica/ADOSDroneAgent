@@ -624,14 +624,20 @@ impl PluginSupervisor {
 
         // Re-mint the live token. A plugin host that is not up has nothing to
         // re-mint against and will read the new grant set off state when it
-        // starts, so an unreachable control socket is logged, not an error.
+        // starts, so an unreachable control socket is logged, not an error. The
+        // host's state poll also compares each live session's grant set with
+        // state, so a missed poke still lands within one poll period.
         match crate::rotate_token_via_control(&self.paths.control_dir, plugin_id) {
-            Ok(()) => tracing::info!(plugin_id, "plugin_token_rotated_after_permission_change"),
-            Err(e) => tracing::info!(
+            Ok(true) => tracing::info!(plugin_id, "plugin_token_rotated_after_permission_change"),
+            Ok(false) => tracing::info!(
+                plugin_id,
+                "plugin token re-minted; no live session took it, the plugin reads it on connect"
+            ),
+            Err(e) => tracing::warn!(
                 plugin_id,
                 detail = %e,
-                "plugin host control socket unreachable; the new grant set applies \
-                 when it next reads state"
+                "plugin host control socket unreachable; the host's state poll applies \
+                 the new grant set to the live session"
             ),
         }
         Ok(())
@@ -1388,19 +1394,23 @@ mod tests {
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
             .with_systemctl(Arc::new(RecordingSystemctl::default()))
             .with_ungrantable_caps(RealHost::ungrantable_caps());
-        // recording.write is dead on RealHost; sensor.camera.register is backed.
-        let manifest = "id: com.example.rec\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0,<2.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n  permissions:\n    - recording.write\n    - sensor.camera.register\n";
+        // recording.write and sensor.camera.register are dead on RealHost;
+        // mavlink.read is backed.
+        let manifest = "id: com.example.rec\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0,<2.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n  permissions:\n    - recording.write\n    - sensor.camera.register\n    - mavlink.read\n";
         let contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
         sup.install_contents(contents, Path::new("/tmp/rec.adosplug"))
             .unwrap();
         assert!(sup
             .grant_permission("com.example.rec", "recording.write")
             .is_err());
-        sup.grant_permission("com.example.rec", "sensor.camera.register")
+        assert!(sup
+            .grant_permission("com.example.rec", "sensor.camera.register")
+            .is_err());
+        sup.grant_permission("com.example.rec", "mavlink.read")
             .unwrap();
         assert!(state::is_permission_granted(
             sup.find_install("com.example.rec").unwrap(),
-            "sensor.camera.register"
+            "mavlink.read"
         ));
     }
 

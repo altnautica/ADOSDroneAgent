@@ -12,7 +12,7 @@ name = "ados_atlas_transport"
 path = "src/lib.rs"
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { path = "../ados-protocol", features = ["tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = { workspace = true }

@@ -72,17 +72,6 @@ log = get_logger("api.display")
 router = APIRouter(prefix="/v1/display", tags=["display"])
 
 
-# Page ids the navigator owns. POST /page validates against this set
-# so a typo never hangs the OLED service waiting on an unknown route.
-# `more` is kept in the set for backward compat — the More tab was
-# replaced by `link_stats` in the bottom bar but the MorePage class is
-# still importable and a stale GCS request that targets `more` should
-# still resolve rather than 400.
-_VALID_PAGE_IDS: frozenset[str] = frozenset(
-    {"dashboard", "video", "settings", "more", "link_stats"}
-)
-
-
 # ── snapshot caching ────────────────────────────────────────────────
 
 # Cache the rendered PNG for this many milliseconds. The Display
@@ -162,18 +151,19 @@ def _lcd_is_bound() -> bool:
     return _resolve_fb_path(_read_display_conf()) is not None
 
 
-def _read_lcd_state() -> dict[str, Any]:
+def _load_lcd_state_blob() -> dict[str, Any] | None:
     """Read ``/run/ados/lcd-state.json`` with one retry on partial writes.
 
     The OLED service writes atomically, but a reader that catches the
     inode mid-rename can still see an empty file. A single retry after
-    a 5 ms sleep covers the rare race.
+    a 5 ms sleep covers the rare race. ``None`` when the file is absent,
+    unreadable, or not a JSON object.
     """
     for attempt in range(2):
         try:
             text = LCD_STATE_PATH.read_text()
         except OSError:
-            return {"active_page": "dashboard", "modal_stack": []}
+            return None
         if not text.strip():
             time.sleep(0.005)
             continue
@@ -183,16 +173,38 @@ def _read_lcd_state() -> dict[str, Any]:
             if attempt == 0:
                 time.sleep(0.005)
                 continue
-            return {"active_page": "dashboard", "modal_stack": []}
-        if not isinstance(blob, dict):
-            return {"active_page": "dashboard", "modal_stack": []}
-        return {
-            "active_page": str(blob.get("active_page_id") or "dashboard"),
-            "modal_stack": [
-                str(x) for x in (blob.get("modal_stack") or [])
-            ],
-        }
-    return {"active_page": "dashboard", "modal_stack": []}
+            return None
+        return blob if isinstance(blob, dict) else None
+    return None
+
+
+def _read_lcd_state() -> dict[str, Any]:
+    """The active page id and modal stack the navigator persisted,
+    defaulting to the dashboard when the file is absent or malformed."""
+    blob = _load_lcd_state_blob()
+    if blob is None:
+        return {"active_page": "dashboard", "modal_stack": []}
+    return {
+        "active_page": str(blob.get("active_page_id") or "dashboard"),
+        "modal_stack": [
+            str(x) for x in (blob.get("modal_stack") or [])
+        ],
+    }
+
+
+def _registered_page_ids() -> frozenset[str]:
+    """The route ids the display navigator registered.
+
+    The navigator rewrites ``route_ids`` in ``lcd-state.json`` at every
+    start, so the set is exactly the pages the running build can land on
+    (the reserved plugin page and the channel-hops tab included). Empty
+    when no display service has published it.
+    """
+    blob = _load_lcd_state_blob()
+    ids = blob.get("route_ids") if blob else None
+    if not isinstance(ids, list):
+        return frozenset()
+    return frozenset(x for x in ids if isinstance(x, str) and x)
 
 
 # The Rust writer refreshes the snapshot PNG at ~1 Hz. Accept a file up
@@ -433,18 +445,30 @@ async def post_page(body: PageSetBody) -> dict[str, Any]:
 
     The OLED service polls ``/run/ados/lcd-page-request.json`` on
     each render tick. When the file appears, the navigator routes to
-    the requested page and unlinks the file. Validation is strict:
-    unknown ids return 400 so a typo never hangs the watcher.
+    the requested page and unlinks the file. Validation is strict: the
+    id must be one the running navigator registered (it publishes the
+    list in ``lcd-state.json``), so a typo never hangs the watcher, and
+    no request is queued while no display service has published one.
     """
     page_id = body.page.strip()
-    if page_id not in _VALID_PAGE_IDS:
+    valid = _registered_page_ids()
+    if not valid:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "error": "display_not_running",
+                "page": page_id,
+            },
+        )
+    if page_id not in valid:
         raise HTTPException(
             status_code=400,
             detail={
                 "ok": False,
                 "error": "unknown_page",
                 "page": page_id,
-                "valid": sorted(_VALID_PAGE_IDS),
+                "valid": sorted(valid),
             },
         )
     blob = {"page": page_id, "requested_at_ms": int(time.time() * 1000)}

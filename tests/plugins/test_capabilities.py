@@ -30,7 +30,7 @@ EXPECTED_AGENT_CAPABILITY_COUNT = 51
 
 # The compute + vision capability family: gated at the dispatch level today, so
 # the catalog must mark them enforced (the metadata that drives the install
-# dialog's "has a runtime gate" signal must be honest — Rule 44).
+# dialog's "has a runtime gate" signal must be honest).
 COMPUTE_VISION_FAMILY = (
     "compute.job.submit",
     "compute.job.read",
@@ -88,7 +88,7 @@ def test_compute_stream_open_capability_exists() -> None:
 def test_compute_and_vision_family_is_enforced() -> None:
     """The compute + vision family carries a runtime dispatch gate today, so the
     catalog must mark each enforced — a lie here would train an operator to
-    distrust the install dialog's risk signal (Rule 44)."""
+    distrust the install dialog's risk signal."""
     for cap in COMPUTE_VISION_FAMILY:
         assert cap in AGENT_CAPABILITIES, f"{cap!r} missing from the catalog"
         assert cap in ENFORCED_AGENT_CAPABILITIES, (
@@ -174,6 +174,5 @@ def test_gcs_capability_count_matches_ts_catalog() -> None:
         "mission.read",
         "mission.write",
         "cloud.read",
-        "cloud.write",
     ):
         assert required in entries, f"GCS catalog missing {required!r}"

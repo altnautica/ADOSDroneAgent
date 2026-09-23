@@ -1,7 +1,9 @@
 [Unit]
 Description=ADOS Power Hardening Re-assert
-After=network-online.target
-Wants=network-online.target
+# Not ordered after network-online.target: pulling that target in stalled the
+# MAVLink unit's start on every boot where a remembered Wi-Fi was out of range.
+# The reassert script waits (bounded) for a default route itself before the
+# Ethernet EEE step, the one step that needs to know the management NIC.
 
 [Service]
 Type=oneshot

@@ -103,6 +103,10 @@ pub struct ShareUplinkFirewall {
     sysctl_dropin: PathBuf,
     iptables_rules_v4: PathBuf,
     nftables_conf: PathBuf,
+    /// Held across a whole share-uplink apply: the uplink-switch consumer and
+    /// the operator's command-socket toggle both apply, and two interleaved
+    /// add/remove sequences could leave the rule set half of each.
+    apply_lock: tokio::sync::Mutex<()>,
 }
 
 impl ShareUplinkFirewall {
@@ -131,6 +135,7 @@ impl ShareUplinkFirewall {
             sysctl_dropin,
             iptables_rules_v4,
             nftables_conf,
+            apply_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -357,8 +362,9 @@ impl ShareUplinkFirewall {
     // ---------------- public apply ----------------
 
     /// Apply or remove sysctl + NAT MASQUERADE and persist. Best-effort: never panics.
-    /// Returns `{applied, backend, apply_error}`.
+    /// Returns `{applied, backend, apply_error}`. Applies are serialized.
     pub async fn apply_share_uplink(&self, enabled: bool, active_iface: Option<&str>) -> Value {
+        let _one_writer = self.apply_lock.lock().await;
         let backend = self.backend();
         if backend == FirewallBackend::None {
             let msg = "no_firewall_backend (neither iptables nor nftables found)";

@@ -184,7 +184,10 @@ pub async fn require_pairing(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip());
-    let caller = classify_caller(peer, |h| req.headers().contains_key(h));
+    // axum's connect info carries the peer only; the route toward the peer
+    // names the local address it reached.
+    let local = peer.and_then(ados_protocol::pairing_posture::local_addr_toward);
+    let caller = classify_caller(peer, local, |h| req.headers().contains_key(h));
     let on_box = caller == CallerClass::OnBox;
 
     // Rate-limit the off-box edge only; on-box callers are trusted + unlimited.

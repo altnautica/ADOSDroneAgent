@@ -344,7 +344,7 @@ pub const WFB_STALE_AGE_US: i64 = 10_000_000;
 
 /// The staleness ceiling in seconds, the same number [`WFB_STALE_AGE_US`] carries.
 /// A snapshot older than this renders a dead link as if it were live, so every
-/// transport gates on it (operating rule 44).
+/// transport gates on it.
 pub const WFB_STALE_AGE_S: f64 = 10.0;
 
 /// The config-seeded zero-default WFB status block both read paths merge over.

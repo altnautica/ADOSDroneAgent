@@ -8,7 +8,7 @@ Description=ADOS Drone Agent Supervisor
 # child needs internet, and it retries indefinitely on its own.
 # Gating the supervisor on network-online previously left the LCD
 # blank for hours when the home Wi-Fi failed to associate at boot.
-# Per Rule 26: "the install must be 100% AUTOMATIC" — an operator
+# The install must be fully automatic — an operator
 # on a deserted island with both rigs powered must see video.
 After=local-fs.target
 StartLimitIntervalSec=0

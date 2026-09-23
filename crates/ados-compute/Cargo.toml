@@ -17,8 +17,8 @@ path = "src/bin/ados-compute.rs"
 
 [dependencies]
 # `tracing-layer` pulls in the LogdLayer so the daemon's logs reach the durable
-# ados-logd Black Box store, not just journald (Rule 41).
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+# ados-logd Black Box store, not just journald.
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer", "tls"] }
 # The Atlas stream lane: the daemon mounts `atlas_event_router` to receive
 # keyframe + capture-state events a drone forwards, and drains them into the job
 # queue (the world-model receive side). The bearer half is the air/GS sender.
@@ -65,7 +65,7 @@ rmp-serde = { workspace = true }
 # ("No provider set").
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # mDNS advertisement so a compute node auto-appears in the GCS Add-a-Node card
-# for LAN pairing (Rule 39) from boot, like a drone/ground-station. The Python
+# for LAN pairing from boot, like a drone/ground-station. The Python
 # `ados-discovery` advert is OnDemand (only runs while a pairing code is live),
 # so this always-on Rust advert is what makes the node discoverable at boot.
 mdns-sd = "0.13"

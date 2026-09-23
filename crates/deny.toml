@@ -1,0 +1,19 @@
+# cargo-deny configuration. CI runs `cargo deny check advisories` against the
+# RustSec database, so a published vulnerability in any crate the workspace
+# locks fails the build instead of shipping in the flight binaries.
+[advisories]
+# An unmaintained notice on a crate a workspace member depends on directly is
+# actionable here; one deep in a transitive tree is for its parent to replace.
+unmaintained = "workspace"
+yanked = "warn"
+# Every exception is a decision: name the advisory and why it does not apply.
+ignore = [
+    # quick-xml is a build dependency of mavlink-bindgen only: the mavlink
+    # crate's build script parses the MAVLink dialect XML definitions bundled
+    # inside that crate, once, at compile time. No shipped binary links
+    # quick-xml and no runtime input ever reaches it, so a slow duplicate-
+    # attribute check or a namespace-declaration allocation on hostile XML has
+    # no attacker. mavlink-bindgen pins quick-xml ^0.39 in its latest release.
+    { id = "RUSTSEC-2026-0194", reason = "build-time parse of the mavlink crate's bundled dialect XML only; never in a shipped binary" },
+    { id = "RUSTSEC-2026-0195", reason = "build-time parse of the mavlink crate's bundled dialect XML only; never in a shipped binary" },
+]

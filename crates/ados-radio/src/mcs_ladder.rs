@@ -70,8 +70,7 @@ pub const LADDER_MAX_MCS: u8 = 5;
 /// standard 802.11n required-SNR figures, not a measurement of the vendored
 /// `rtl8812eu` driver: nothing here has verified that the driver actually applies
 /// MCS 4 or 5, or that it holds them under load. Anything above 3 is bench-only
-/// until the sweep in `product/specs/ados-agent-rust-hybrid/wfb-video-pipeline-runbook.md`
-/// ("MCS ladder characterisation sweep") measures this driver at three ranges and
+/// until an MCS ladder characterisation sweep measures this driver at three ranges and
 /// says otherwise.
 pub const DEFAULT_LADDER_MAX_MCS: u8 = 3;
 

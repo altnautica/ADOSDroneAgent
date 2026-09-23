@@ -1,6 +1,6 @@
 //! The broker transport seam.
 //!
-//! [`MqttTransport`] is the small async surface the gateway and the signaling
+//! [`MqttTransport`] is the small async surface the Atlas bearer and the signaling
 //! relay route through (`publish`, `subscribe`, and a stream of incoming
 //! messages). A test fake implements it without a broker; [`RumqttcTransport`]
 //! is the real rumqttc-next client over WSS+TLS.
@@ -220,7 +220,7 @@ pub trait MqttTransport: Send + Sync {
 }
 
 /// How a [`RumqttcTransport`] dials the broker. Carries the resolved
-/// host/port/path/credentials; TLS is the shared RustCrypto rustls config.
+/// host/port/path/credentials; TLS is the shared ring-backed rustls config.
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
     pub client_id: String,
@@ -229,9 +229,9 @@ pub struct TransportConfig {
     pub ws_path: String,
     pub username: String,
     pub password: String,
-    /// MQTT in-flight ceiling. The MAVLink relay sets this high (the Rule-37
-    /// fix); the gateway uses the same high ceiling to avoid telemetry-burst
-    /// drops, matching the Python `max_inflight_messages_set(1000)`.
+    /// MQTT in-flight ceiling. The relays set this high so a telemetry burst is
+    /// not dropped at the client, matching the Python gateway's
+    /// `max_inflight_messages_set(1000)`.
     pub inflight: u16,
     pub keep_alive: Duration,
 }
@@ -391,7 +391,7 @@ pub(crate) mod test_support {
     pub type RecordedPublish = (String, MqttQos, Vec<u8>);
 
     /// A fake transport that records publishes and subscriptions, and can feed
-    /// incoming messages to a consumer. Lets the gateway + signaling relay run
+    /// incoming messages to a consumer. Lets the signaling relay and the bearers run
     /// in a unit test without a broker.
     #[derive(Default)]
     pub struct FakeTransport {

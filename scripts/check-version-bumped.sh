@@ -9,10 +9,19 @@
 # told apart from one that never updated.
 #
 # Usage:
-#   scripts/check-version-bumped.sh <base-ref>    # default: origin/main
+#   scripts/check-version-bumped.sh <base>    # default: origin/main
+#
+# <base> is a ref or commit SHA. CI passes the pull request's base SHA, or on a
+# push the SHA main pointed at before the push (`github.event.before`): on a
+# push, origin/main already equals HEAD, so diffing against it checks nothing.
+# An all-zero SHA (the before-SHA of a newly created ref) means "no previous
+# commit on this ref" and is checked against HEAD~1.
 set -uo pipefail
 
 BASE="${1:-origin/main}"
+if [ -z "${BASE//0/}" ]; then
+    BASE="HEAD~1"
+fi
 VERSION_FILE="src/ados/__init__.py"
 
 # Paths whose change means shipped behaviour changed. Deliberately broad: it is

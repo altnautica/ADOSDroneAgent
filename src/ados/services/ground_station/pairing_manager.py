@@ -14,6 +14,10 @@ shared PSK, receiver mDNS name, drone WFB key, expiry), and sends it
 back. The relay writes the bundle into `/etc/ados/mesh/` and restarts
 its mesh services.
 
+Each window carries a six-digit code the receiver shows its operator.
+The relay's operator enters it on join, and the invite key binds it (see
+`invite_crypto`), so neither side accepts a peer that has not seen it.
+
 No laptop. No cloud. No QR codes. Default window is 60 seconds; the
 receiver operator explicitly closes it by pressing B4.
 
@@ -38,27 +42,23 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import secrets
 import socket
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from cryptography.hazmat.primitives import hashes, hmac
-from cryptography.hazmat.primitives.asymmetric.x25519 import (
-    X25519PrivateKey,
-    X25519PublicKey,
-)
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from cryptography.hazmat.primitives.serialization import (
-    Encoding,
-    PublicFormat,
-)
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from ados.core.logging import get_logger
 from ados.core.paths import MESH_REVOCATIONS_JSON
 
 from .events import PairingEvent, get_pairing_event_bus
+from .invite_crypto import (
+    InviteBundle,
+    encrypt_invite,
+    generate_keypair,
+    new_invite_code,
+)
 from .pair_journal import publish_pair_event as _publish_pair_event
 
 log = get_logger("ground_station.pairing_manager")
@@ -106,50 +106,6 @@ class PendingRequest:
 
 
 @dataclass
-class InviteBundle:
-    """What a relay receives on approval.
-
-    Fields map 1:1 into /etc/ados/mesh/ paths on the relay side.
-    """
-
-    mesh_id: str
-    mesh_psk: bytes  # 32 bytes
-    drone_channel: int
-    wfb_rx_key: bytes  # drone-paired wfb rx key material
-    receiver_mdns_host: str
-    receiver_mdns_port: int
-    issued_at_ms: int
-    expires_at_ms: int
-
-    def pack(self) -> bytes:
-        payload = {
-            "mesh_id": self.mesh_id,
-            "mesh_psk": self.mesh_psk.hex(),
-            "drone_channel": self.drone_channel,
-            "wfb_rx_key": self.wfb_rx_key.hex(),
-            "receiver_mdns_host": self.receiver_mdns_host,
-            "receiver_mdns_port": self.receiver_mdns_port,
-            "issued_at_ms": self.issued_at_ms,
-            "expires_at_ms": self.expires_at_ms,
-        }
-        return json.dumps(payload, sort_keys=True).encode("utf-8")
-
-    @classmethod
-    def unpack(cls, blob: bytes) -> InviteBundle:
-        data = json.loads(blob.decode("utf-8"))
-        return cls(
-            mesh_id=data["mesh_id"],
-            mesh_psk=bytes.fromhex(data["mesh_psk"]),
-            drone_channel=int(data["drone_channel"]),
-            wfb_rx_key=bytes.fromhex(data["wfb_rx_key"]),
-            receiver_mdns_host=data["receiver_mdns_host"],
-            receiver_mdns_port=int(data["receiver_mdns_port"]),
-            issued_at_ms=int(data["issued_at_ms"]),
-            expires_at_ms=int(data["expires_at_ms"]),
-        )
-
-
-@dataclass
 class AcceptWindow:
     # Wall-clock timestamps kept for UI display and REST snapshots.
     # Do NOT use them for freshness checks; wall-clock can go backwards
@@ -157,21 +113,14 @@ class AcceptWindow:
     # a stale one. `closes_at_monotonic_ns` is the authoritative deadline.
     opened_at_ms: int
     closes_at_ms: int
+    # The code the receiver shows and the relay's operator types in. It
+    # is bound into every invite's key for this window.
+    code: str
     # Authoritative deadline for `is_window_open` and `_expire_at`.
     # Populated when the window is created.
     closes_at_monotonic_ns: int = 0
     pending: list[PendingRequest] = field(default_factory=list)
     approvals: dict[str, int] = field(default_factory=dict)  # device_id -> ts
-
-
-def _hkdf_session_key(shared: bytes, context: bytes) -> bytes:
-    """Derive a 32-byte ChaCha20Poly1305 key from the ECDH shared secret."""
-    h = hmac.HMAC(b"\x00" * 32, hashes.SHA256())
-    h.update(shared)
-    prk = h.finalize()
-    h2 = hmac.HMAC(prk, hashes.SHA256())
-    h2.update(context + b"\x01")
-    return h2.finalize()
 
 
 # In-memory revocation cache. Every join request lands here first, so a
@@ -240,59 +189,6 @@ def unrevoke(device_id: str) -> None:
 
 def is_revoked(device_id: str) -> bool:
     return device_id in load_revocations()
-
-
-def generate_keypair() -> tuple[X25519PrivateKey, bytes]:
-    """Return (private, public_bytes) for ECDH."""
-    priv = X25519PrivateKey.generate()
-    pub = priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    return priv, pub
-
-
-def encrypt_invite(
-    bundle: InviteBundle,
-    receiver_priv: X25519PrivateKey,
-    relay_pubkey_bytes: bytes,
-) -> bytes:
-    """ECDH + ChaCha20Poly1305 encrypted invite bundle.
-
-    Wire format:
-        32 bytes  receiver_pubkey
-        12 bytes  nonce
-        N bytes   ciphertext || tag
-    """
-    peer_pub = X25519PublicKey.from_public_bytes(relay_pubkey_bytes)
-    shared = receiver_priv.exchange(peer_pub)
-    key = _hkdf_session_key(shared, b"ados-mesh-invite")
-    nonce = secrets.token_bytes(12)
-    cipher = ChaCha20Poly1305(key)
-    ct = cipher.encrypt(nonce, bundle.pack(), associated_data=None)
-    receiver_pub = receiver_priv.public_key().public_bytes(
-        Encoding.Raw, PublicFormat.Raw,
-    )
-    return receiver_pub + nonce + ct
-
-
-def decrypt_invite(
-    blob: bytes,
-    relay_priv: X25519PrivateKey,
-) -> InviteBundle:
-    """Decrypt an invite received from the receiver."""
-    if len(blob) < 32 + 12 + 16:
-        raise ValueError("invite blob too short")
-    receiver_pub_bytes = blob[:32]
-    nonce = blob[32:44]
-    ct = blob[44:]
-    peer_pub = X25519PublicKey.from_public_bytes(receiver_pub_bytes)
-    shared = relay_priv.exchange(peer_pub)
-    key = _hkdf_session_key(shared, b"ados-mesh-invite")
-    cipher = ChaCha20Poly1305(key)
-    plaintext = cipher.decrypt(nonce, ct, associated_data=None)
-    bundle = InviteBundle.unpack(plaintext)
-    now_ms = int(time.time() * 1000)
-    if now_ms > bundle.expires_at_ms:
-        raise ValueError("invite expired")
-    return bundle
 
 
 class _PairingProtocol(asyncio.DatagramProtocol):
@@ -529,6 +425,7 @@ class PairingManager:
             self._window = AcceptWindow(
                 opened_at_ms=now_ms,
                 closes_at_ms=now_ms + duration_s * 1000,
+                code=new_invite_code(),
                 closes_at_monotonic_ns=(
                     time.monotonic_ns() + duration_s * 1_000_000_000
                 ),
@@ -670,7 +567,9 @@ class PairingManager:
             )
             if match is None:
                 return None
-            blob = encrypt_invite(bundle, self._priv, match.relay_pubkey)
+            blob = encrypt_invite(
+                bundle, self._priv, match.relay_pubkey, self._window.code,
+            )
             self._window.approvals[device_id] = int(time.time() * 1000)
             remote_addr = match.remote_addr
             await _publish_pair_event(
@@ -732,6 +631,7 @@ class PairingManager:
                     for r in self._window.pending
                 ],
                 "approvals": dict(self._window.approvals),
+                "code": self._window.code,
             }
 
 

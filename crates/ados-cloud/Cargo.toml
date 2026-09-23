@@ -16,7 +16,7 @@ path = "src/bin/ados-cloud.rs"
 # Wire primitives + the frozen plugin-supervisor contract the command
 # dispatcher will drive (path deps; the supervisor consumer wiring lands with
 # the command-dispatcher task).
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer", "tls"] }
 # The canonical perception-tier decision (pick_tier) so the cloud beacon reports
 # the same tier the drone runs on, not a second implementation.
 ados-offload = { path = "../ados-offload" }
@@ -59,34 +59,29 @@ async-trait = { workspace = true }
 # poisoned std lock there would silently disarm the reconnect replay.
 parking_lot = { workspace = true }
 
-# TLS stack: pure-Rust rustls with the RustCrypto crypto provider. This keeps
-# the cross-compile to aarch64-unknown-linux-musl free of any C toolchain
-# (no ring, no aws-lc, no OpenSSL) and produces a clean static binary. The
-# CryptoProvider seam keeps the backend swappable. These deps are specific to
-# this crate (no other crate links a TLS client), so they are declared here
+# TLS stack: rustls with the ring crypto provider and the bundled webpki trust
+# anchors. ring is already linked into this crate's graph (the compute client's
+# dependencies pull it), so the TLS path uses that one mature provider rather
+# than a second, pre-release one. These deps are specific to this crate (no
+# other crate builds its own TLS client config), so they are declared here
 # rather than in the workspace table.
 rustls = { version = "0.23", default-features = false, features = [
-    "custom-provider",
+    "ring",
     "std",
     "tls12",
     "logging",
 ] }
-# Pinned to the exact alpha: it is the canonical RustCrypto provider for rustls
-# and its dependencies are all mature RustCrypto crates already in the tree
-# (ed25519-dalek, x25519-dalek, sha2, aes-gcm, ...). Pin so a provider bump is a
-# deliberate change, not a silent float.
-rustls-rustcrypto = "=0.0.2-alpha"
 webpki-roots = "0.26"
 # Sync HTTP client for the oneshot update poll over HTTPS, on the no-provider
-# rustls path (no ring); the preconfigured rustls ClientConfig carries the
-# RustCrypto provider.
+# rustls path; the preconfigured rustls ClientConfig carries the ring provider.
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-manual-roots-no-provider",
     "blocking",
     "json",
 ] }
 # Async MQTT v5 client (the v5 line — the Python relay speaks MQTTv5). The
-# no-provider rustls path avoids ring; `websocket` carries the WSS transport.
+# no-provider rustls path takes the preconfigured config; `websocket` carries
+# the WSS transport.
 rumqttc = { package = "rumqttc-next", version = "0.33", default-features = false, features = [
     "use-rustls-no-provider",
     "websocket",

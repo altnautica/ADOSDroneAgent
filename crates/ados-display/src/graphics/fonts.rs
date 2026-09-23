@@ -188,8 +188,8 @@ mod tests {
     fn larger_size_is_wider() {
         let small = LoadedFont::new(FontFace::SansBold, 12);
         let large = LoadedFont::new(FontFace::SansBold, 32);
-        let sw = small.text_advance("groundnode");
-        let lw = large.text_advance("groundnode");
+        let sw = small.text_advance("gs-example");
+        let lw = large.text_advance("gs-example");
         assert!(lw > sw, "32px advance {lw} should exceed 12px advance {sw}");
     }
 

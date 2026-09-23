@@ -266,7 +266,7 @@ pub struct CrsfBlock {
     /// Conducted TX power in MILLIWATTS, mapped from the module's power-table
     /// index by the lane. Matches the sidecar + LAN route key `tx_power_mw`; a
     /// `tx_power_dbm` here silently dropped the value (serde ignored the real
-    /// key), so a cloud-reached node showed no TX power (rule 44).
+    /// key), so a cloud-reached node showed no TX power.
     pub tx_power_mw: Option<i64>,
     pub tx_frames_per_s: Option<f64>,
     pub rx_frames_per_s: Option<f64>,
@@ -343,7 +343,7 @@ pub struct HeartbeatPayload {
     // The NPU capability + the perception tier this node runs on. `npu_tops`
     // comes from the board sidecar; `perception_tier` is the canonical
     // ados_offload::pick_tier decision (not a second impl). The offload target is
-    // absent until a workstation is paired (never a fabricated reach, rule 44).
+    // absent until a workstation is paired (never a fabricated reach).
     pub npu_tops: f64,
     pub has_accelerator: bool,
     pub perception_tier: String,
@@ -353,8 +353,8 @@ pub struct HeartbeatPayload {
     // --- health ---
     // CPU/memory/disk are measured by the enrichment loop, not the
     // native loop. Optional + skip so a heartbeat with no fresh enrichment OMITS
-    // them (honest "unknown") instead of asserting 0.0 as a live reading
-    // (operating rule 37). The producer folds the real values over the base.
+    // them (honest "unknown") instead of asserting 0.0 as a live reading.
+    // The producer folds the real values over the base.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_percent: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -377,7 +377,7 @@ pub struct HeartbeatPayload {
     // The FC connection is observed by the enrichment producer (it reads the
     // state-socket snapshot). Optional + skip so absence reads as "unknown" on
     // the GCS rather than the native loop asserting a hard `false` for a drone
-    // whose FC is actually up (operating rule 37).
+    // whose FC is actually up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fc_connected: Option<bool>,
     pub fc_port: String,
@@ -386,7 +386,7 @@ pub struct HeartbeatPayload {
     // enrichment producer lifts them from the state snapshot so a cloud-relay drone
     // can render "port open · no MAVLink" + the diagnostic hint, not just a
     // connected boolean. All optional + skip so an older agent (absent fields)
-    // reads as honest "unknown" rather than asserting a value (operating rule 37).
+    // reads as honest "unknown" rather than asserting a value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport_open: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,7 +401,7 @@ pub struct HeartbeatPayload {
     // absent for a MAVLink/unknown FC. Lifted by the enrichment producer from the
     // state snapshot so a cloud-relay GCS can badge "Betaflight (MSP)" instead of a
     // misleading "not connected" (an MSP FC never emits the HEARTBEAT the alive gate
-    // needs). Optional + skip so absence reads as honest "unknown" (operating rule 37).
+    // needs). Optional + skip so absence reads as honest "unknown".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fc_variant: Option<String>,
 
@@ -830,7 +830,7 @@ mod tests {
         assert!(!obj.contains_key("apiUrl"));
         // No top-level key serializes as explicit null EXCEPT the declared
         // null-tolerant set, for which null is the "reported, not measured"
-        // reading that clears the receiver's column (wire rule 2).
+        // reading that clears the receiver's column.
         for (k, val) in obj.iter() {
             assert!(
                 !val.is_null()

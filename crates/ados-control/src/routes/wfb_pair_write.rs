@@ -26,11 +26,13 @@
 //!   pair-proof record (`ados_protocol::pair_proof`), persists the arm flag, and
 //!   leaves the key exactly where it is; the supervisor's re-arm latch consumes
 //!   the one-shot on its next tick and opens a single bind window.
-//! - **Otherwise** it persists the new arm flag, re-writing the canonical pair
-//!   state (`video.wfb.{paired_with_device_id, paired_at, auto_pair_enabled}`,
-//!   with the legacy `ground_station.*` mirror on the GS profile) from the values
-//!   the status read just computed, and returns the status snapshot with
-//!   `auto_pair_enabled` set to the requested value. Arming an unpaired rig also
+//! - **Otherwise** it persists the new arm flag — `video.wfb.auto_pair_enabled`
+//!   and nothing else — and returns the status snapshot with
+//!   `auto_pair_enabled` set to the requested value. The peer and `paired_at`
+//!   belong to the bind that wrote them; the toggle never rewrites them from its
+//!   own read, which is lossy (a timestamp-shaped `paired_at` reads as null) and
+//!   may predate a bind that completes while the request is in flight. Arming an
+//!   unpaired rig also
 //!   drops the local-retry request (`ados_protocol::pair_proof`) the supervisor's
 //!   auto-pair loop consumes: a loop that spent its local attempts and parked on
 //!   the cloud relay holds that verdict in memory, and a config flag that was
@@ -68,7 +70,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::config_store::{section, section_path, update_config, ConfigWriteError};
+use crate::config_store::{section_path, update_config, ConfigWriteError};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -87,14 +89,6 @@ fn config_yaml_path() -> PathBuf {
 // Pair-status snapshot: the same `status(role)` the GET /api/wfb/pair read
 // computes, the input both branches of set_auto_pair start from.
 // ---------------------------------------------------------------------------
-
-/// The exact 64-byte size a complete WFB-ng key file is. Mirrors
-/// `WFB_KEY_FILE_BYTES`.
-const WFB_KEY_FILE_BYTES: usize = 64;
-
-/// The byte offset of the peer-public half (the second 32 bytes) inside a 64-byte
-/// WFB key file. Mirrors `WFB_PUBLIC_HALF_OFFSET`.
-const WFB_PUBLIC_HALF_OFFSET: usize = 32;
 
 /// The live pair-status snapshot for a role: the field set `set_auto_pair` reads
 /// before it branches, and that the persist path writes back from. Mirrors the
@@ -151,26 +145,11 @@ fn current_role_at(config_profile: &str, profile_conf: &Path, role_path: &Path) 
 /// fingerprint), and the peer / paired-at / auto-pair come off the config with the
 /// legacy `ground_station.*` fallback on the GS profile.
 fn read_pair_status(config_path: &Path, key_dir: &Path, role: &str) -> PairStatus {
-    // The role-appropriate key file: tx.key for a drone, rx.key for a GS.
-    let key_path = if role == "drone" {
-        key_dir.join("tx.key")
-    } else {
-        key_dir.join("rx.key")
-    };
-
-    // paired := the file exists AND is exactly 64 bytes. A readable fingerprint is
-    // then required; a 64-byte file whose fingerprint cannot be read reverts paired
-    // to false, matching the residual `except (OSError, ValueError): paired = False`.
-    let mut paired = std::fs::metadata(&key_path)
-        .map(|m| m.is_file() && m.len() == WFB_KEY_FILE_BYTES as u64)
-        .unwrap_or(false);
-    let mut fingerprint: Value = Value::Null;
-    if paired {
-        match read_public_fingerprint(&key_path) {
-            Some(fp) => fingerprint = json!(fp),
-            None => paired = false,
-        }
-    }
+    // The shared radio-pair predicate: the role's key, exactly 64 bytes, with a
+    // readable fingerprint.
+    let fingerprint = crate::routes::wfb::paired_key_fingerprint(key_dir, role);
+    let paired = fingerprint.is_some();
+    let fingerprint: Value = fingerprint.map_or(Value::Null, |fp| json!(fp));
 
     // Peer / paired-at / auto-pair off the raw config dict, mirroring the residual
     // `_load_config_dict()` read (a present-but-non-string peer/paired-at reads as
@@ -221,24 +200,6 @@ fn read_pair_status(config_path: &Path, key_dir: &Path, role: &str) -> PairStatu
         auto_pair_enabled,
         role: role.to_string(),
     }
-}
-
-/// The 16-hex-char public-key fingerprint of a WFB key file, or `None` when the
-/// file is absent or not exactly 64 bytes. The peer-public half is the second 32
-/// bytes; the fingerprint is `blake2b(pub, digest_size=8)` rendered as 16
-/// lowercase hex chars. Byte-identical to `key_mgr.read_public_fingerprint`.
-fn read_public_fingerprint(path: &Path) -> Option<String> {
-    use blake2::digest::{Update, VariableOutput};
-    use blake2::Blake2bVar;
-    let data = std::fs::read(path).ok()?;
-    if data.len() != WFB_KEY_FILE_BYTES {
-        return None;
-    }
-    let mut hasher = Blake2bVar::new(8).ok()?;
-    hasher.update(&data[WFB_PUBLIC_HALF_OFFSET..]);
-    let mut out = [0u8; 8];
-    hasher.finalize_variable(&mut out).ok()?;
-    Some(hex::encode(out))
 }
 
 /// The `paired_at` field value the status read reports, mirroring the residual
@@ -376,81 +337,35 @@ fn is_yaml_timestamp(s: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Persist: re-write the canonical pair state with the new arm flag, mirroring
-// the residual `_persist_pair_state`.
+// Persist: the arm flag, and only the arm flag.
 // ---------------------------------------------------------------------------
 
-/// Re-write the persisted pair fields under `video.wfb` (canonical) and mirror
-/// onto `ground_station.{paired_drone_id, paired_at}` for the GS profile, from the
-/// values the status read computed plus the new arm flag. Mirrors the residual
-/// `_persist_pair_state(role, peer_device_id, paired_at, auto_pair_enabled)`:
-///
-/// - a null `peer` pops `video.wfb.paired_with_device_id` (and the GS mirror keys);
-/// - a null `paired_at` pops `video.wfb.paired_at`;
-/// - `auto_pair_enabled` is always set;
-/// - a string `peer` sets it (and, on the GS profile, the legacy mirror keys).
-///
-/// Goes through the shared config store: a document that cannot be read or
-/// parsed is never written over, and the error says why.
-fn persist_pair_state(
-    config_path: &Path,
-    role: &str,
-    peer: &Value,
-    paired_at: &Value,
-    auto_pair_enabled: bool,
-) -> Result<(), ConfigWriteError> {
+/// Set `video.wfb.auto_pair_enabled`, inside the config store's lock, touching
+/// no other key. The pair record (peer, `paired_at`, the GS mirror) is the
+/// bind's; re-writing it from the status snapshot erased a `paired_at` the read
+/// projection demotes to null, and wrote back a pre-bind peer over a bind that
+/// landed mid-request.
+fn persist_auto_pair_flag(config_path: &Path, enabled: bool) -> Result<(), ConfigWriteError> {
     use serde_norway::Value as Yaml;
-
-    // Convert the JSON status fields to their YAML scalar (a string or, when null,
-    // nothing — the absence is what pops the key).
-    let peer_yaml: Option<Yaml> = peer.as_str().map(|s| Yaml::String(s.to_string()));
-    let paired_at_yaml: Option<Yaml> = paired_at.as_str().map(|s| Yaml::String(s.to_string()));
-
     update_config(config_path, |root| {
-        // video.wfb — the canonical pair state.
-        let wfb = section_path(root, &["video", "wfb"]);
-        match &peer_yaml {
-            Some(p) => {
-                wfb.insert(Yaml::String("paired_with_device_id".to_string()), p.clone());
-            }
-            None => {
-                wfb.remove("paired_with_device_id");
-            }
-        }
-        match &paired_at_yaml {
-            Some(pa) => {
-                wfb.insert(Yaml::String("paired_at".to_string()), pa.clone());
-            }
-            None => {
-                wfb.remove("paired_at");
-            }
-        }
-        wfb.insert(
+        section_path(root, &["video", "wfb"]).insert(
             Yaml::String("auto_pair_enabled".to_string()),
-            Yaml::Bool(auto_pair_enabled),
+            Yaml::Bool(enabled),
         );
-
-        // GS-profile legacy mirror under ground_station.*.
-        if role == "gs" {
-            let gs = section(root, "ground_station");
-            match &peer_yaml {
-                None => {
-                    gs.remove("paired_drone_id");
-                    gs.remove("paired_at");
-                }
-                Some(p) => {
-                    gs.insert(Yaml::String("paired_drone_id".to_string()), p.clone());
-                    // The residual writes `gs["paired_at"] = paired_at` whenever the
-                    // peer is present — a string when present, else a YAML null (not a
-                    // key removal). Mirror both.
-                    let pa_value = paired_at_yaml.clone().unwrap_or(Yaml::Null);
-                    gs.insert(Yaml::String("paired_at".to_string()), pa_value);
-                }
-            }
-        }
         Ok(())
     })
     .map(|_| ())
+}
+
+/// Whether the supervisor's re-arm latch is switched on
+/// (`video.wfb.pair_rearm.enabled`, default on). With it off the latch never
+/// reads a forced one-shot, so a force recorded now would sit in the proof
+/// record and fire whenever the latch is next enabled.
+fn rearm_latch_enabled(config_path: &Path) -> bool {
+    crate::config::load_config_object(config_path)
+        .pointer("/video/wfb/pair_rearm/enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -562,19 +477,40 @@ fn put_auto_pair_at(
         return Json(body).into_response();
     }
 
-    if let Err(e) = persist_pair_state(config_path, role, &status.peer, &status.paired_at, enabled)
-    {
+    let forced = enabled && status.paired;
+    // A forced re-arm the supervisor's latch will not act on is refused before
+    // anything is written: recording it would leave a one-shot that fires at an
+    // unplanned moment when the latch is next switched on.
+    if forced && !rearm_latch_enabled(config_path) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"detail": {
+                "error": "rearm_latch_disabled",
+                "message": "The re-arm latch is switched off (video.wfb.pair_rearm.enabled), so a forced re-arm cannot open a bind window.",
+            }})),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = persist_auto_pair_flag(config_path, enabled) {
+        tracing::warn!(error = %e, "auto_pair_flag_persist_failed");
         return not_applied("config_write_failed", e.to_string());
     }
 
-    if enabled && status.paired {
+    if forced {
         // The forced re-arm: record the one-shot and never touch the key. Only
         // meaningful on a paired rig; a forced request on an unpaired one is just
-        // an ordinary arm, which the retry request below already covers.
-        if let Some(fp) = status.fingerprint.as_str() {
-            if let Err(e) = record_force_rearm(proof_path, role, fp) {
-                return not_applied("rearm_record_failed", e.to_string());
-            }
+        // an ordinary arm, which the retry request below already covers. A paired
+        // status always carries the fingerprint it was proven with.
+        let Some(fp) = status.fingerprint.as_str() else {
+            return not_applied(
+                "rearm_record_failed",
+                "the paired key has no readable fingerprint".to_string(),
+            );
+        };
+        if let Err(e) = record_force_rearm(proof_path, role, fp) {
+            tracing::warn!(error = %e, "force_rearm_record_failed");
+            return not_applied("rearm_record_failed", e.to_string());
         }
         body["rearm_blocked"] = json!(false);
         body["forced"] = json!(true);
@@ -591,6 +527,7 @@ fn put_auto_pair_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::wfb::read_public_fingerprint;
 
     /// Read a response body as JSON.
     async fn body_json(resp: Response) -> Value {
@@ -964,10 +901,78 @@ mod tests {
         );
     }
 
-    // ── GS profile: the legacy ground_station.* mirror on persist ─────────────
+    // ── the toggle writes the arm flag and nothing else ───────────────────────
+
+    /// The bind stores `paired_at` as an unquoted ISO timestamp, which the
+    /// status projection reads as null. The toggle must leave the record the
+    /// bind wrote exactly as it was, on both profiles, rather than write that
+    /// lossy projection back over it.
+    #[tokio::test]
+    async fn the_toggle_leaves_the_bind_record_untouched() {
+        for (profile, role) in [("drone", "drone"), ("ground_station", "gs")] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = dir.path().join("config.yaml");
+            let keys = dir.path().join("wfb");
+            let proof = dir.path().join("pair-proof.json");
+            let retry = dir.path().join("auto-pair-retry.request");
+            std::fs::create_dir_all(&keys).unwrap();
+            std::fs::write(
+                &cfg,
+                format!(
+                    "agent:\n  profile: {profile}\nvideo:\n  wfb:\n    paired_with_device_id: peer-1\n    paired_at: 2026-05-29T12:34:56+00:00\n    auto_pair_enabled: true\n"
+                ),
+            )
+            .unwrap();
+            let resp = put_auto_pair_at(&cfg, &keys, &proof, &retry, role, false, false);
+            assert_eq!(resp.status(), StatusCode::OK);
+            let parsed: serde_norway::Value =
+                serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+            let wfb = parsed.get("video").and_then(|v| v.get("wfb")).unwrap();
+            assert_eq!(
+                wfb.get("paired_at").and_then(|v| v.as_str()),
+                Some("2026-05-29T12:34:56+00:00"),
+                "{role}: paired_at survives the toggle"
+            );
+            assert_eq!(
+                wfb.get("paired_with_device_id").and_then(|v| v.as_str()),
+                Some("peer-1")
+            );
+            assert_eq!(
+                wfb.get("auto_pair_enabled").and_then(|v| v.as_bool()),
+                Some(false)
+            );
+            assert!(
+                parsed.get("ground_station").is_none(),
+                "{role}: no legacy mirror is written by the toggle"
+            );
+        }
+    }
+
+    /// A forced re-arm with the latch switched off is refused and records
+    /// nothing, so no one-shot is left to fire when the latch is re-enabled.
+    #[tokio::test]
+    async fn a_forced_rearm_with_the_latch_off_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let keys = dir.path().join("wfb");
+        let proof = dir.path().join("pair-proof.json");
+        let retry = dir.path().join("auto-pair-retry.request");
+        std::fs::create_dir_all(&keys).unwrap();
+        write_key(&keys, "tx.key");
+        let original = "agent:\n  profile: drone\nvideo:\n  wfb:\n    auto_pair_enabled: false\n    pair_rearm:\n      enabled: false\n";
+        std::fs::write(&cfg, original).unwrap();
+        let resp = put_auto_pair_at(&cfg, &keys, &proof, &retry, "drone", true, true);
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(resp).await["detail"]["error"],
+            json!("rearm_latch_disabled")
+        );
+        assert!(!proof.exists(), "no one-shot recorded");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original);
+    }
 
     #[tokio::test]
-    async fn gs_persist_mirrors_the_peer_onto_ground_station() {
+    async fn gs_toggle_persists_the_flag() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let keys = dir.path().join("wfb");
@@ -988,16 +993,9 @@ mod tests {
         assert_eq!(body["role"], json!("gs"));
         assert_eq!(body["paired_with_device_id"], json!("drone-1"));
 
-        // The peer mirrors onto ground_station.paired_drone_id.
         let parsed: serde_norway::Value =
             serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
-        assert_eq!(
-            parsed
-                .get("ground_station")
-                .and_then(|g| g.get("paired_drone_id"))
-                .and_then(|v| v.as_str()),
-            Some("drone-1")
-        );
+        assert!(parsed.get("ground_station").is_none());
         assert_eq!(
             parsed
                 .get("video")
@@ -1042,17 +1040,14 @@ mod tests {
         assert_eq!(st.peer, json!("drone-legacy"));
     }
 
-    // ── persist: a null peer pops the keys ────────────────────────────────────
-
     #[tokio::test]
-    async fn disable_with_no_peer_leaves_no_peer_keys() {
+    async fn disable_with_no_peer_writes_only_the_flag() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let keys = dir.path().join("wfb");
         let proof = dir.path().join("pair-proof.json");
         let retry = dir.path().join("auto-pair-retry.request");
         std::fs::create_dir_all(&keys).unwrap();
-        // Unpaired, no peer → the persist pops paired_with_device_id / paired_at.
         std::fs::write(&cfg, "agent:\n  profile: drone\n").unwrap();
         let resp = put_auto_pair_at(&cfg, &keys, &proof, &retry, "drone", false, false);
         let body = body_json(resp).await;

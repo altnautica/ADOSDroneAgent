@@ -150,10 +150,9 @@ async fn main() -> Result<()> {
 
     // Share-uplink NAT reconcile: apply the persisted share_uplink flag on the
     // active iface at start, then re-apply on every uplink switch so the NAT
-    // MASQUERADE rule follows the active uplink. The daemon owns this (the REST
-    // share-uplink write path only persists the flag), and the flag is re-read
-    // from the agent config on each event so an operator toggle lands without a
-    // restart.
+    // MASQUERADE rule follows the active uplink. The flag is re-read from the
+    // agent config on each event. An operator toggle is applied at once through
+    // the command socket's `share_uplink` op.
     let share_uplink_rx = router.bus().subscribe();
     let share_uplink_task = tokio::spawn(run_share_uplink_consumer(
         share_uplink_rx,
@@ -299,9 +298,9 @@ async fn main() -> Result<()> {
     // manager so the two never both transition the radio. The AP / ethernet /
     // modem managers shared here are the same live instances the daemon already
     // owns (the modem) or a stateless-apply peer (ethernet), so the socket drives
-    // the live system, not a parallel copy. The share-uplink toggle takes no op
-    // here: the REST layer only persists the flag and the daemon's reconciler
-    // applies the firewall, so a socket apply would be a second writer racing it.
+    // the live system, not a parallel copy. The share-uplink op drives the same
+    // firewall the uplink-switch consumer does, which serializes its applies, so
+    // an operator toggle takes effect now instead of at the next uplink switch.
     let wifi_cmd = Arc::new(Mutex::new(WifiClientManager::new(runner.clone())));
     let eth_iface = detect_ethernet_iface();
     let eth_cmd = Arc::new(EthernetManager::new(eth_iface, runner.clone()));
@@ -311,6 +310,8 @@ async fn main() -> Result<()> {
             hostapd: Arc::clone(&hostapd),
             ethernet: Arc::clone(&eth_cmd),
             modem: Arc::clone(&modem),
+            firewall: Arc::clone(&firewall),
+            router: Arc::clone(&router),
         };
         tokio::spawn(async move {
             if let Err(e) = ados_net::cmdsock::serve(state, ados_net::paths::wifi_cmd_sock()).await

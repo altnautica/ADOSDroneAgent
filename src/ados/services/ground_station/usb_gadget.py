@@ -1,4 +1,4 @@
-"""USB composite gadget lifecycle (spec 07-usb-tether-gadget.md).
+"""USB composite gadget lifecycle.
 
 Builds a libcomposite CDC-NCM + RNDIS gadget on the Pi 4B USB-C OTG
 port. The host (Mac, Windows, Linux, Android 11+) picks whichever
@@ -57,7 +57,7 @@ DHCP_RANGE_END = "192.168.7.2"
 DNSMASQ_CONF_PATH = DNSMASQ_USB0_CONF
 DNSMASQ_PID_PATH = DNSMASQ_USB0_PID
 
-# USB descriptor values, straight from 07-usb-tether-gadget.md
+# USB descriptor values for the composite tether gadget.
 ID_VENDOR = "0x1d6b"      # Linux Foundation
 ID_PRODUCT = "0x0104"     # Multifunction composite gadget
 BCD_DEVICE = "0x0100"

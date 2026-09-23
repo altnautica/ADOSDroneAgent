@@ -9,7 +9,7 @@
 # stopped process and the supervisor's restart loop respawned it.
 #
 # Usage: ./test_wfb_tx_zombie_recovery.sh <ssh-target> <ssh-pass>
-#   e.g. ./test_wfb_tx_zombie_recovery.sh radxa@groundnode.local radxa
+#   e.g. ./test_wfb_tx_zombie_recovery.sh radxa@gs-example.local radxa
 #
 # Exits 0 on success, non-zero on failure. No operator interaction.
 

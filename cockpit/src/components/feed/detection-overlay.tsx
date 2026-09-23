@@ -10,7 +10,7 @@
 // rectangle, and places each box inside THAT rect — never a naive percentage of
 // the panel, which would slide boxes into the letterbox bars.
 //
-// Honest surfaces (Rule 44): a track's colour + label reflect its real
+// Honest surfaces: a track's colour + label reflect its real
 // `lock_state` (green locked / amber uncertain / red lost) and `track_id`; an
 // untracked detection falls back to a confidence ramp. Stale batches age out so a
 // stopped feed does not pin the last frame's boxes on screen, and an empty batch

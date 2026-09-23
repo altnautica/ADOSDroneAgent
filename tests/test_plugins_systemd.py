@@ -120,7 +120,7 @@ def test_render_unit_emits_resource_limits() -> None:
 def test_render_unit_rust_runtime_execs_the_plugin_binary() -> None:
     unit = render_unit(_rust_manifest(), _INSTALL_DIR)
     # ExecStart points at the unpacked plugin binary with its socket path.
-    sock = PLUGIN_RUN_DIR / "com.example.rustplug.sock"
+    sock = PLUGIN_RUN_DIR / "com.example.rustplug" / "host.sock"
     assert (
         f"ExecStart={_INSTALL_DIR}/com.example.rustplug/"
         "agent/bin/com.example.rustplug "
@@ -145,10 +145,12 @@ def test_render_unit_delivers_token_via_environment_file() -> None:
     # reads ADOS_PLUGIN_TOKEN / ADOS_PLUGIN_SOCKET from its environment.
     for manifest in (_subprocess_manifest(), _rust_manifest()):
         unit = render_unit(manifest, _INSTALL_DIR)
-        sock = PLUGIN_RUN_DIR / f"{manifest.id}.sock"
+        sock = PLUGIN_RUN_DIR / manifest.id / "host.sock"
         env_file = PLUGIN_RUN_DIR / f"{manifest.id}.token.env"
         assert f"Environment=ADOS_PLUGIN_SOCKET={sock}" in unit
         assert f"EnvironmentFile=-{env_file}" in unit
+        # The socket's directory is the one plugin path bound into the unit.
+        assert f"BindReadOnlyPaths={PLUGIN_RUN_DIR / manifest.id}" in unit
 
 
 def test_render_unit_rejects_inprocess() -> None:

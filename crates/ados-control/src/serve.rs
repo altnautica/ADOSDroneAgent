@@ -11,8 +11,9 @@
 //! 2. **A LAN TCP port.** The auth layer mirrors the agent's HTTP posture:
 //!    unpaired ⇒ served by caller class (lifelines open, the operator LAN
 //!    behind a dashboard PIN, remote callers refused), paired ⇒ `X-ADOS-Key`
-//!    required, with on-box loopback trust and a token-bucket rate limit
-//!    guarding the edge.
+//!    required, with on-box loopback trust and a per-caller rate limit
+//!    guarding the edge. Connections are capped in total and per caller, and a
+//!    connection that does not deliver a request head in time is closed.
 //!
 //! The one difference from the logd listener is the caller: the LAN edge
 //! threads the accepted connection's [`SocketAddr`] into the request, and the
@@ -22,10 +23,12 @@
 //! [`CallerClass::OnBox`] — its trust is the socket's group and the per-accept
 //! peer check, and it never installs the auth layer.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
@@ -35,15 +38,15 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::Router;
 use hyper::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tower::{Service, ServiceBuilder};
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
-use crate::auth::{self, Pairing, PairingState, RateLimiter};
+use crate::auth::{self, Pairing, PairingState, PeerKey, RateLimiter};
 use crate::config::{ControlSecurityConfig, PairingConfig};
 use crate::mcp::{route_scope, McpTokenStore, MCP_SCOPES_HEADER, MCP_TOKEN_HEADER};
 use crate::proxy_auth::{BodyField, Decision, ProxiedAuth, RequestHeaders};
@@ -69,7 +72,14 @@ pub const ONBOX_HEADER: &str = "x-ados-onbox";
 /// It cannot be forged: the accept loop inserts it from the real socket, and
 /// nothing reads it from a header.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PeerAddr(pub SocketAddr);
+pub struct PeerAddr(pub SocketAddr);
+
+/// The local address the accepted TCP connection arrived on, attached next to
+/// [`PeerAddr`]. A private-LAN peer is a first-boot lifeline only when this is
+/// the agent's own AP or USB-gadget address; a LAN that merely shares that
+/// numbering is not.
+#[derive(Clone, Copy, Debug)]
+pub struct LocalAddr(pub SocketAddr);
 
 /// Which listener a connection arrived on, so [`serve_conn`] stamps the right
 /// caller evidence on every request it carries.
@@ -78,9 +88,83 @@ enum ConnEdge {
     /// The operator Unix socket: only root and operator-group peers reach it,
     /// so every request on it is [`CallerClass::OnBox`].
     Unix,
-    /// The LAN TCP front: the peer address is stamped and [`tcp_edge`]
-    /// classifies the caller per request (it needs the request's headers).
-    Tcp(SocketAddr),
+    /// The LAN TCP front: the peer and local addresses are stamped and
+    /// [`tcp_edge`] classifies the caller per request (it needs the request's
+    /// headers).
+    Tcp {
+        peer: SocketAddr,
+        local: Option<SocketAddr>,
+    },
+}
+
+/// Concurrent connections the TCP front holds in total. The unit runs under a
+/// small memory ceiling and the default descriptor limit; past this a new
+/// connection is closed on accept.
+const MAX_TCP_CONNECTIONS: usize = 512;
+
+/// Concurrent connections one caller may hold. A GCS, a dashboard and a
+/// cockpit on one host, each with a few streams open, fit well under it.
+const MAX_TCP_CONNECTIONS_PER_PEER: usize = 32;
+
+/// How long a connection may take to deliver a request head, including the
+/// idle wait for the next request on a kept-alive connection.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The largest request body the HMAC gate buffers to verify. The signed
+/// mutations are JSON commands and config writes, far below this.
+const HMAC_BODY_LIMIT: usize = 1024 * 1024;
+
+/// The largest relayed `PUT /api/config` body the edge reads to check its key.
+const RELAY_CONFIG_BODY_LIMIT: usize = 64 * 1024;
+
+/// Per-caller connection accounting for the TCP front.
+#[derive(Clone, Default)]
+struct ConnCounts(Arc<Mutex<HashMap<PeerKey, usize>>>);
+
+/// Holds one connection's slot: a share of the total, plus (for an off-box
+/// caller) one of that caller's slots. Released on drop.
+struct ConnSlot {
+    counted: Option<(ConnCounts, PeerKey)>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl ConnCounts {
+    /// Take a slot for `key` if both the total and the per-caller caps allow.
+    /// `None` for `key` takes a share of the total only.
+    fn acquire(&self, key: Option<PeerKey>, total: &Arc<Semaphore>) -> Option<ConnSlot> {
+        let permit = total.clone().try_acquire_owned().ok()?;
+        let Some(key) = key else {
+            return Some(ConnSlot {
+                counted: None,
+                _permit: permit,
+            });
+        };
+        let mut counts = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let held = counts.entry(key).or_insert(0);
+        if *held >= MAX_TCP_CONNECTIONS_PER_PEER {
+            return None;
+        }
+        *held += 1;
+        Some(ConnSlot {
+            counted: Some((self.clone(), key)),
+            _permit: permit,
+        })
+    }
+}
+
+impl Drop for ConnSlot {
+    fn drop(&mut self) {
+        let Some((counts, key)) = &self.counted else {
+            return;
+        };
+        let mut counts = counts.0.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(held) = counts.get_mut(key) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                counts.remove(key);
+            }
+        }
+    }
 }
 
 /// Per-edge auth state attached to the TCP layer. The Unix listener does not
@@ -207,9 +291,11 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     // relayed by a proxy or tunnel and is remote, wherever its socket says it
     // came from.
     let peer_ip = request.extensions().get::<PeerAddr>().map(|p| p.0.ip());
-    let caller = classify_caller(peer_ip, |h| request.headers().contains_key(h));
+    let local_ip = request.extensions().get::<LocalAddr>().map(|l| l.0.ip());
+    let caller = classify_caller(peer_ip, local_ip, |h| request.headers().contains_key(h));
     request.extensions_mut().insert(caller);
     let on_box = caller == CallerClass::OnBox;
+    let peer_key = PeerKey::of(peer_ip);
 
     // A request that crossed the radio relay arrives on loopback, so it is
     // on-box by the check above. That is deliberate and load-bearing — a fleet
@@ -235,6 +321,37 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
             StatusCode::FORBIDDEN,
             "This path cannot be reached over the radio relay.",
         );
+    }
+
+    // The config write stays relay-reachable (the slot reconciler and the
+    // relayed settings surface use it), but not for the keys that mint a
+    // standing credential or re-route the flight link. The body is small JSON;
+    // it is read here, checked, and handed on unchanged.
+    if is_relayed
+        && request.method() == axum::http::Method::PUT
+        && path == auth::RELAY_CONFIG_WRITE_PATH
+    {
+        let (parts, body) = request.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, RELAY_CONFIG_BODY_LIMIT).await else {
+            return detail(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Config write body too large.",
+            );
+        };
+        let key = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("key").and_then(|k| k.as_str()).map(str::to_string));
+        match key {
+            Some(key) if !auth::relay_config_key_forbidden(&key) => {}
+            other => {
+                tracing::warn!(key = ?other, "relay_config_key_refused");
+                return detail(
+                    StatusCode::FORBIDDEN,
+                    "This config key cannot be written over the radio relay.",
+                );
+            }
+        }
+        request = Request::from_parts(parts, Body::from(bytes));
     }
 
     // While UNPAIRED the node would answer every route to anyone, flight
@@ -317,6 +434,20 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     // the on-box header's strip-then-set discipline.
     request.headers_mut().remove(MCP_SCOPES_HEADER);
 
+    // Every off-box request is charged to its own caller's budget, on both
+    // lanes. A single shared bucket let any host on the network 429 every
+    // operator; per caller, a flood exhausts only the flooder. The liveness,
+    // version and pairing-handshake paths stay exempt so a watchdog or a fresh
+    // GCS is never starved; the PIN login is charged, since it is the one
+    // public path a guesser would loop on.
+    let exempt_from_budget = on_box || (auth::is_public(&path) && !auth::is_pin_login(&path));
+    if !exempt_from_budget && !edge.rate.check(peer_key) {
+        return detail(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Request budget exceeded; slow down.",
+        );
+    }
+
     // A route the front does not serve natively falls through to the reverse
     // proxy. The front runs the ported auth decision itself before forwarding,
     // so the residual surface no longer carries its own auth layers — the front
@@ -338,23 +469,13 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     }
 
     // Liveness, version, and the pairing handshake are public and must always
-    // answer before any gate: a fresh GCS has no key yet, and a watchdog hitting
-    // `/healthz` must never be starved by a request flood, so the public paths
-    // skip the rate limiter and the auth check.
+    // answer before any gate: a fresh GCS has no key yet.
     if auth::is_public(&path) {
         return next.run(request).await;
     }
 
     if on_box {
-        return next.run(request).await;
-    }
-
-    // Rate limit before the pairing read so a flood does not even reach it.
-    if !edge.rate.check() {
-        return detail(
-            StatusCode::TOO_MANY_REQUESTS,
-            "Request budget exceeded; slow down.",
-        );
+        return hmac_then_run(&edge.proxied, &path, request, next).await;
     }
 
     let presented = request
@@ -414,15 +535,56 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
             }
         }
     }
-    next.run(request).await
+    hmac_then_run(&edge.proxied, &path, request, next).await
+}
+
+/// The HMAC/replay gate, then the handler (or the proxy). Applied to native and
+/// proxied mutations alike, so `security.hmac_enabled` means every mutation is
+/// signed rather than only the ones the residual API happens to serve.
+///
+/// The body is buffered only when the gate is active for this method and path,
+/// and only up to [`HMAC_BODY_LIMIT`]: a larger body is a `413` rather than an
+/// unbounded read into a memory-capped process. Otherwise the request streams
+/// through untouched, so an upload or an SSE request is not buffered.
+async fn hmac_then_run(
+    proxied: &ProxiedAuth,
+    path: &str,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().clone();
+    if !proxied.hmac_needs_body(&method, path) {
+        return next.run(request).await;
+    }
+    let headers = collect_headers(request.headers());
+    let query = request.uri().query().map(str::to_string);
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, HMAC_BODY_LIMIT).await {
+        Ok(b) => b,
+        Err(_) => {
+            return detail(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Request body too large to verify its signature.",
+            );
+        }
+    };
+    if let Decision::Reject {
+        status,
+        field,
+        message,
+    } = proxied.decide_hmac(&method, path, query.as_deref(), &headers, &bytes)
+    {
+        return reject_response(status, field, message);
+    }
+    // Rebuild the request with the buffered body so it continues unchanged.
+    next.run(Request::from_parts(parts, Body::from(bytes)))
+        .await
 }
 
 /// Run the ported proxied-route auth decision, then forward to the proxy on an
 /// accept. The on-box header has already been stamped on `request` by the
-/// caller, so the residual still sees the trustworthy on-box signal. The body
-/// is buffered ONLY when the HMAC gate needs it (a mutating, non-exempt method
-/// while HMAC is active); otherwise it streams through untouched, so a large
-/// upload or an SSE request is not buffered.
+/// caller, so the residual still sees the trustworthy on-box signal. The HMAC
+/// gate then runs through [`hmac_then_run`], the same one the native lane uses.
 async fn proxied_auth_then_forward(
     proxied: Arc<ProxiedAuth>,
     pairing_state: Arc<PairingState>,
@@ -469,39 +631,7 @@ async fn proxied_auth_then_forward(
         }
     }
 
-    // The HMAC gate. Only here do we touch the body, and only when the gate is
-    // active for this method+path; otherwise forward the original request with
-    // its body still streaming.
-    if proxied.hmac_needs_body(&method, &path) {
-        let (parts, body) = request.into_parts();
-        let bytes = match axum::body::to_bytes(body, usize::MAX).await {
-            Ok(b) => b,
-            Err(_) => {
-                // A body we cannot read cannot be HMAC-verified; reject with the
-                // same shape an invalid signature would (the request never
-                // reaches the upstream).
-                return reject_response(
-                    StatusCode::UNAUTHORIZED,
-                    BodyField::Error,
-                    "Invalid HMAC signature",
-                );
-            }
-        };
-        if let Decision::Reject {
-            status,
-            field,
-            message,
-        } = proxied.decide_hmac(&method, &path, &headers, &bytes)
-        {
-            return reject_response(status, field, message);
-        }
-        // Rebuild the request with the buffered body so the proxy still streams
-        // it downstream unchanged.
-        let rebuilt = Request::from_parts(parts, Body::from(bytes));
-        return next.run(rebuilt).await;
-    }
-
-    next.run(request).await
+    hmac_then_run(&proxied, &path, request, next).await
 }
 
 /// True when a WebSocket-upgrade request to a proxied route carries an authentic,
@@ -814,18 +944,37 @@ pub async fn serve_unix(listener: OperatorListener, app: Router, stop: oneshot::
 }
 
 /// Serve the Router on the TCP listener, mirroring the unix accept loop. Unlike
-/// the logd listener, the accepted peer address is threaded into each connection
-/// so the edge middleware can classify the caller.
+/// the logd listener, the accepted peer and local addresses are threaded into
+/// each connection so the edge middleware can classify the caller.
+///
+/// Connections are capped: [`MAX_TCP_CONNECTIONS`] in total and
+/// [`MAX_TCP_CONNECTIONS_PER_PEER`] per off-box caller. One host opening
+/// connections and trickling header bytes used to exhaust the process's
+/// descriptors and cut every client off; past a cap the new connection is
+/// closed on accept. Loopback callers (the relay, a tunnel's ingress, the CLI)
+/// share one address, so they count against the total only.
 pub async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiver<()>) {
     tokio::pin!(stop);
+    let total = Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS));
+    let counts = ConnCounts::default();
     loop {
         tokio::select! {
             _ = &mut stop => break,
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, peer)) => {
+                        let key = (!peer.ip().to_canonical().is_loopback())
+                            .then(|| PeerKey::of(Some(peer.ip())));
+                        let Some(slot) = counts.acquire(key, &total) else {
+                            tracing::debug!(peer = %peer, "control tcp connection cap reached");
+                            continue;
+                        };
+                        let local = stream.local_addr().ok();
                         let app = app.clone();
-                        tokio::spawn(serve_conn(TokioIo::new(stream), app, ConnEdge::Tcp(peer)));
+                        tokio::spawn(async move {
+                            serve_conn(TokioIo::new(stream), app, ConnEdge::Tcp { peer, local }).await;
+                            drop(slot);
+                        });
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "control tcp accept failed");
@@ -839,9 +988,13 @@ pub async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiv
 
 /// Drive one accepted connection through hyper with the axum service. Generic
 /// over the IO so the same code serves a Unix stream and a TCP stream. The TCP
-/// edge stamps the peer address for [`tcp_edge`] to classify; the Unix edge
-/// stamps [`CallerClass::OnBox`] directly, since its listener already admitted
-/// only root and operator-group peers.
+/// edge stamps the peer and local addresses for [`tcp_edge`] to classify; the
+/// Unix edge stamps [`CallerClass::OnBox`] directly, since its listener already
+/// admitted only root and operator-group peers.
+///
+/// HTTP/1 only (nothing on this edge speaks cleartext HTTP/2), with a request
+/// head deadline of [`HEADER_READ_TIMEOUT`] that also bounds the idle wait
+/// between requests on a kept-alive connection.
 async fn serve_conn<I>(io: TokioIo<I>, app: Router, edge: ConnEdge)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -857,8 +1010,11 @@ where
                 ConnEdge::Unix => {
                     req.extensions_mut().insert(CallerClass::OnBox);
                 }
-                ConnEdge::Tcp(addr) => {
-                    req.extensions_mut().insert(PeerAddr(addr));
+                ConnEdge::Tcp { peer, local } => {
+                    req.extensions_mut().insert(PeerAddr(peer));
+                    if let Some(local) = local {
+                        req.extensions_mut().insert(LocalAddr(local));
+                    }
                 }
             }
             // Router implements Service<Request<Body>>; readiness is immediate.
@@ -866,10 +1022,12 @@ where
             Ok::<_, Infallible>(response)
         }
     });
-    if let Err(e) = ConnBuilder::new(TokioExecutor::new())
-        .serve_connection_with_upgrades(io, svc)
-        .await
-    {
+    let mut builder = ConnBuilder::new(TokioExecutor::new()).http1_only();
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT);
+    if let Err(e) = builder.serve_connection_with_upgrades(io, svc).await {
         tracing::debug!(error = %e, "control connection ended");
     }
 }
@@ -1134,16 +1292,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (edge, _set_pin_unused) = unpaired_edge(dir.path());
         let app = lan_app(edge);
-        for ip in ["192.168.4.37", "192.168.7.2", "127.0.0.1"] {
+        // Each peer reached the agent's own address on its subnet.
+        for (ip, local) in [
+            ("192.168.4.37", "192.168.4.1"),
+            ("192.168.7.2", "192.168.7.1"),
+            ("127.0.0.1", "127.0.0.1"),
+        ] {
             let ip: std::net::IpAddr = ip.parse().unwrap();
+            let local: std::net::IpAddr = local.parse().unwrap();
             let req = Request::builder()
                 .uri("/api/status")
                 .extension(PeerAddr(SocketAddr::from((ip, 45678))))
+                .extension(LocalAddr(SocketAddr::from((local, 8080))))
                 .body(Body::empty())
                 .unwrap();
             let resp = app.clone().oneshot(req).await.unwrap();
             assert_eq!(resp.status(), StatusCode::OK, "{ip} is a lifeline");
         }
+        // A peer on a LAN merely numbered like the AP subnet, reaching the
+        // node's own lease rather than the AP address, is not a lifeline.
+        let req = Request::builder()
+            .uri("/api/status")
+            .extension(PeerAddr(SocketAddr::from(([192, 168, 4, 37], 45678))))
+            .extension(LocalAddr(SocketAddr::from(([192, 168, 4, 12], 8080))))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "not a lifeline");
         // A public-WAN peer stays refused on a data route.
         let req = Request::builder()
             .uri("/api/status")

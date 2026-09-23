@@ -52,6 +52,7 @@ pub mod inventory;
 pub mod invoke;
 pub mod loopback_guard;
 pub mod manifest;
+pub mod pic_gate;
 pub mod realhost;
 pub mod reconcile;
 pub mod sandbox;
@@ -83,7 +84,9 @@ pub use invoke::{InvokeRegistry, InvokeRequest, DEFAULT_INVOKE_TIMEOUT};
 pub use manifest::{AgentRuntime, PluginManifest};
 pub use reconcile::{PluginReconciler, ReconcileReport};
 pub use sandbox::{sandbox_directives, sandbox_enforced_caps};
-pub use server::{PluginIpcServer, RefreshRegistry, ServerError, DEFAULT_SOCKET_DIR};
+pub use server::{
+    plugin_socket_path, PluginIpcServer, RefreshRegistry, ServerError, DEFAULT_SOCKET_DIR,
+};
 pub use signing::{is_first_party_signer, FIRST_PARTY_SIGNERS};
 pub use state::{PluginInstall, PluginSource, PluginStatus};
 pub use supervisor::{semver_in_range, InstallResult, Paths, PluginSupervisor, SystemctlRunner};

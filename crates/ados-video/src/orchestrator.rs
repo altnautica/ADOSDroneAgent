@@ -74,7 +74,7 @@ pub struct VideoOrchestrator {
 
     /// Per-leg inbound-byte watchdog state (last counter value + when it last
     /// advanced), keyed by leg id. Feeds the per-leg `live` flag in the sidecar
-    /// so a stalled secondary leg is surfaced honestly (Rule 44).
+    /// so a stalled secondary leg is surfaced honestly.
     pub(crate) leg_inbound: std::collections::HashMap<String, (u64, Instant)>,
     /// The derived per-leg liveness the sidecar stamps (`id -> is_live`).
     pub(crate) leg_live: std::collections::HashMap<String, bool>,
@@ -116,7 +116,7 @@ pub struct VideoOrchestrator {
     /// Bound to the same lifetime as `vision_tap`; aborted on stop/restart.
     pub(crate) vision_tap_reframer: Option<tokio::task::JoinHandle<()>>,
     pub(crate) wfb_tee_progress: ProgressTracker,
-    /// Output-progress clock for the decoupled vision tap (Rule 37: liveness
+    /// Output-progress clock for the decoupled vision tap (liveness
     /// alone is never proof of work; the tap can hold the sink open while
     /// pushing nothing).
     pub(crate) vision_tap_progress: ProgressTracker,
@@ -494,7 +494,7 @@ impl VideoOrchestrator {
     /// Sample each leg's mediamtx inbound-byte counter and derive per-leg
     /// liveness (`leg_live`): a leg whose counter advanced is live; a leg flat
     /// for `LEG_FLAT_SECS` is stalled. Surfaces a dead secondary leg in the
-    /// sidecar (Rule 44). mediamtx owns per-path re-establishment for a
+    /// sidecar. mediamtx owns per-path re-establishment for a
     /// `sourceOnDemand` pull when a reader re-attaches; this is the detection.
     pub(crate) async fn sample_leg_liveness(&mut self) {
         const LEG_FLAT_SECS: u64 = 30;
@@ -1071,7 +1071,7 @@ impl VideoOrchestrator {
         }
 
         // Encoder + cloud fine — check the wfb tee ladder (no circuit breaker;
-        // Rule 26: video retries forever).
+        // Video retries forever).
         if !self.check_wfb_tee_health().await {
             if !self.mediamtx.path_ready(MAIN_PATH).await {
                 tracing::warn!("wfb_tee_source_down: RTSP source not ready; deferring tee respawn");
@@ -1290,7 +1290,7 @@ impl VideoOrchestrator {
 /// window. A `sourceOnDemand` leg (a network-pull secondary) is only pulled while
 /// a viewer reads it, so "flat" means "no reader", NOT "dead" — report `None`
 /// (unknown; the GCS keeps the leg selectable) rather than a false-degraded
-/// `Some(false)` (Rule 44); a genuinely dead on-demand source surfaces as a
+/// `Some(false)`; a genuinely dead on-demand source surfaces as a
 /// failed pull the moment a viewer connects. Primary + local (publisher) legs
 /// always push, so a flat counter there IS a real degradation → `Some(false)`.
 fn liveness_on_flat(is_network_pull: bool) -> Option<bool> {

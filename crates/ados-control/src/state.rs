@@ -171,6 +171,10 @@ pub struct PairingPaths {
     /// The ground-station role sentinel (`/etc/ados/mesh/role`) the profile resolver
     /// reads for a ground station. Threaded so the resolve is path-injectable.
     pub mesh_role: PathBuf,
+    /// The per-pair relay peer secret (`/etc/ados/secrets/relay-peer-secret`)
+    /// unpair removes, the relay-secret route accepts, and full status reports
+    /// the presence of. Threaded so a test points it at a tempdir.
+    pub relay_secret: PathBuf,
 }
 
 /// State shared across all routes. Cloned per connection by the axum router, so
@@ -363,25 +367,28 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    /// The FC's identity from its `HEARTBEAT`, read from the live state
-    /// snapshot's `autopilot` and `mav_type` fields in one read so the two always
-    /// come from the same heartbeat. The command route uses it to pick the mode
+    /// The FC's identity, read from the live state snapshot's `autopilot`,
+    /// `mav_type` and `vehicle_firmware` fields in one read so they always come
+    /// from the same snapshot. The command route uses it to pick the mode
     /// encoding: `autopilot == 12` is PX4 (its own packed `(main, sub)` scheme);
-    /// anything else is ArduPilot, whose mode numbers depend on the vehicle type.
-    /// An absent snapshot or a missing field reads `0` (unknown).
+    /// anything else is ArduPilot, whose mode numbers depend on the firmware
+    /// its banner named. An absent snapshot or a missing field reads `0` /
+    /// `None` (unknown).
     pub fn fc_identity(&self) -> FcIdentity {
         let snapshot = self.state.snapshot();
+        let map = snapshot.as_ref().and_then(serde_json::Value::as_object);
         let field = |key: &str| {
-            snapshot
-                .as_ref()
-                .and_then(serde_json::Value::as_object)
-                .and_then(|m| m.get(key))
+            map.and_then(|m| m.get(key))
                 .and_then(serde_json::Value::as_i64)
                 .unwrap_or(0)
         };
         FcIdentity {
             autopilot: field("autopilot"),
             mav_type: field("mav_type"),
+            firmware: map
+                .and_then(|m| m.get("vehicle_firmware"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(ados_protocol::flight_modes::ArduPilotFirmware::from_name),
         }
     }
 
@@ -405,11 +412,12 @@ impl AppState {
 }
 
 /// The `HEARTBEAT.autopilot` and `HEARTBEAT.type` (MAV_TYPE) wire values of the
-/// connected FC, `0` when unknown.
+/// connected FC, `0` when unknown, and the ArduPilot firmware its banner named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FcIdentity {
     pub autopilot: i64,
     pub mav_type: i64,
+    pub firmware: Option<ados_protocol::flight_modes::ArduPilotFirmware>,
 }
 
 /// The pure half of [`AppState::fc_speaks_msp`], over a state snapshot.

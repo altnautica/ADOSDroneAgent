@@ -92,7 +92,7 @@ def test_a_model_write_preserves_keys_the_model_does_not_declare(tmp_path):
 
 
 def test_a_model_write_lands_only_the_leaves_the_caller_changed(tmp_path):
-    """Repo rule 17: a node must keep tracking a shipped default it never set.
+    """A node must keep tracking a shipped default it never set.
 
     `model_dump()` materialises every defaulted field, so the old write froze
     the whole model into the document and no future default change could reach

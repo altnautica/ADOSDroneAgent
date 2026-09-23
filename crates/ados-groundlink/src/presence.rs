@@ -173,7 +173,7 @@ pub const LINKED_PEERS_SIDECAR_VERSION: u16 = 1;
 /// older than this. Matches the Python heartbeat's `_PEER_STALE_AFTER_S` so a
 /// peer that stops beaconing disappears from `linkedPeers[]` on both the
 /// listener-prune side and the reader-freshness side, never lingering as a
-/// stale confident entry (Rule 44 — a dead relay shows dead, not a green ghost).
+/// stale confident entry (a dead relay shows dead, not a green ghost).
 pub const LINKED_PEER_STALE_AFTER_S: f64 = 60.0;
 
 /// Persist cadence for `linked-peers.json` (5 s, matching the hop-supervisor

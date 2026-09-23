@@ -45,6 +45,7 @@ from ados.core.paths import (
     CONFIG_YAML,
     FACTORY_RESET_DIRS,
     FACTORY_RESET_FILES,
+    SECRETS_DIR,
     SETUP_COMPLETE_PATH,
 )
 from ados.services.wfb.key_mgr import (
@@ -65,6 +66,11 @@ _SETUP_COMPLETE_PATH = SETUP_COMPLETE_PATH
 _FACTORY_RESET_FILES = FACTORY_RESET_FILES
 _FACTORY_RESET_DIRS = FACTORY_RESET_DIRS
 _CONFIG_PATH = CONFIG_YAML
+
+# The relay peer secret a ground station offered over the radio. It belongs to
+# the radio pairing it was offered under, so an unpair drops it: the next
+# ground station's offer is then accepted rather than refused as already held.
+_RELAY_SECRET_PATH = SECRETS_DIR / "relay-peer-secret"
 
 _WFB_DRONE_UNIT = "ados-wfb.service"
 _WFB_GS_UNIT = "ados-wfb-rx.service"
@@ -379,7 +385,7 @@ class PairManager:
         # rx.key on a drone (or stale tx.key on a GS) would never be
         # used in normal operation, but it leaks crypto material on
         # disk and confuses the heartbeat surface.
-        for path in (self._tx_key_path, self._rx_key_path):
+        for path in (self._tx_key_path, self._rx_key_path, _RELAY_SECRET_PATH):
             try:
                 if path.is_file():
                     path.unlink()

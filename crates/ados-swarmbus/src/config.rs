@@ -1,19 +1,25 @@
 //! The swarm bus service's runtime configuration.
 //!
-//! Three fields matter and all three already exist: `agent.profile` decides whether
-//! this node transmits or only listens, and `video.wfb.{fleet_id, fleet_slot}` are
-//! the fleet addressing the radio plane already uses. Nothing new is invented here
-//! — the swarm bus rides the fleet identity that `link_id` is already built from,
-//! so a node cannot be addressed differently on the two planes.
+//! Three facts matter and all three already exist: whether this node is a ground
+//! station decides whether it transmits or only listens, and
+//! `video.wfb.{fleet_id, fleet_slot}` are the fleet addressing the radio plane
+//! already uses. Nothing new is invented here — the swarm bus rides the fleet
+//! identity that `link_id` is already built from, so a node cannot be addressed
+//! differently on the two planes.
 //!
-//! The defaults come from [`ados_radio::config::WfbConfig::default`] rather than
-//! being restated, so the two planes cannot drift apart. `WfbConfig::load_from` is
-//! deliberately NOT called: it publishes the *radio* service's config-status
-//! sidecar, and a second writer would clobber it.
+//! The ground-station decision is the radio plane's own resolver
+//! ([`ground_station_from_config_text`]), `profile.conf` fallback included, so a
+//! ground station whose `agent.profile` is `auto` is a ground station on both
+//! planes. The defaults come from [`ados_radio::config::WfbConfig::default`]
+//! rather than being restated. `WfbConfig::load_from` is deliberately NOT called:
+//! it publishes the *radio* service's config-status sidecar, and a second writer
+//! would clobber it.
 
 use std::path::Path;
 
-use ados_radio::config::{fleet_identity_error, FleetIdentityError, WfbConfig};
+use ados_radio::config::{
+    fleet_identity_error, ground_station_from_config_text, FleetIdentityError, WfbConfig,
+};
 use serde::Deserialize;
 
 /// Canonical agent config file.
@@ -27,11 +33,9 @@ fn default_socket_dir() -> String {
 /// The resolved configuration the daemon runs with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwarmBusConfig {
-    /// Raw `agent.profile` (`"drone"` / `"ground_station"` / `"auto"` / absent).
-    pub profile: Option<String>,
-    /// `agent.device_id`, joined against the slot so the operator surface can name
-    /// a neighbour rather than showing a bare number. Empty when absent.
-    pub device_id: String,
+    /// Whether the agent profile resolves to a ground station (config value,
+    /// then `profile.conf`).
+    pub ground_station: bool,
     /// The operator's monitor-interface pin (`video.wfb.interface`). Usually empty,
     /// in which case the live selection is read from the radio sidecar; see
     /// [`crate::service`].
@@ -48,8 +52,7 @@ impl Default for SwarmBusConfig {
     fn default() -> Self {
         let wfb = WfbConfig::default();
         Self {
-            profile: None,
-            device_id: String::new(),
+            ground_station: false,
             interface: wfb.interface,
             fleet_id: wfb.fleet_id,
             fleet_slot: wfb.fleet_slot,
@@ -78,35 +81,25 @@ struct RawVideo {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct RawAgent {
-    #[serde(default)]
-    profile: Option<String>,
-    #[serde(default)]
-    device_id: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
 struct RawConfig {
-    #[serde(default)]
-    agent: RawAgent,
     #[serde(default)]
     video: RawVideo,
 }
 
 impl SwarmBusConfig {
-    /// Load from the agent config file. A missing file yields defaults; a parse
+    /// Load from the agent config file and the profile sentinel. A missing config
+    /// yields defaults (the profile still resolves from `profile_conf`); a parse
     /// error is logged loudly and then yields defaults, so the reason a fleet id
     /// looks wrong is in the journal rather than invisible.
-    pub fn load_from(path: &Path) -> Self {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Self::default();
-        };
-        Self::from_yaml(&text)
+    pub fn load_from(path: &Path, profile_conf: &Path) -> Self {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        Self::from_yaml(&text, profile_conf)
     }
 
-    /// Parse from YAML text. Split out from [`Self::load_from`] so the resolution
-    /// rules are testable without touching the filesystem.
-    pub fn from_yaml(text: &str) -> Self {
+    /// Parse from YAML text, resolving the profile against `profile_conf`. Split
+    /// out from [`Self::load_from`] so the resolution rules are testable without
+    /// the canonical paths.
+    pub fn from_yaml(text: &str, profile_conf: &Path) -> Self {
         let raw: RawConfig = match serde_norway::from_str(text) {
             Ok(c) => c,
             Err(e) => {
@@ -119,8 +112,7 @@ impl SwarmBusConfig {
         };
         let d = Self::default();
         Self {
-            profile: raw.agent.profile,
-            device_id: raw.agent.device_id,
+            ground_station: ground_station_from_config_text(Some(text), profile_conf),
             interface: raw.video.wfb.interface.unwrap_or(d.interface),
             fleet_id: raw.video.wfb.fleet_id.unwrap_or(d.fleet_id),
             fleet_slot: raw.video.wfb.fleet_slot.unwrap_or(d.fleet_slot),
@@ -130,12 +122,8 @@ impl SwarmBusConfig {
 
     /// Whether this node is a ground station: a listener that never emits a beacon
     /// because it is not an aircraft.
-    ///
-    /// `"auto"` and an absent profile both read as NOT a ground station, matching
-    /// how the rest of the agent treats the raw value — the ground-station profile
-    /// is always written explicitly.
     pub fn is_ground_station(&self) -> bool {
-        self.profile.as_deref() == Some("ground_station")
+        self.ground_station
     }
 
     /// Validate the fleet identity, reusing the radio plane's validator so both
@@ -164,6 +152,11 @@ mod tests {
     use super::*;
     use ados_radio::config::{FLEET_MAX_SLOTS, SLOT_GROUND};
 
+    /// Parse with no profile sentinel on disk, so only the config text decides.
+    fn parse(text: &str) -> SwarmBusConfig {
+        SwarmBusConfig::from_yaml(text, Path::new("/nonexistent/ados/profile.conf"))
+    }
+
     #[test]
     fn the_defaults_are_the_radio_planes_defaults_not_a_second_copy() {
         let wfb = WfbConfig::default();
@@ -178,11 +171,10 @@ mod tests {
 
     #[test]
     fn the_fleet_block_is_read_from_the_video_wfb_keys() {
-        let c = SwarmBusConfig::from_yaml(
+        let c = parse(
             "agent:\n  profile: drone\n  device_id: ados-abc123\nvideo:\n  wfb:\n    interface: wlan1\n    fleet_id: 7\n    fleet_slot: 3\n",
         );
-        assert_eq!(c.profile.as_deref(), Some("drone"));
-        assert_eq!(c.device_id, "ados-abc123");
+        assert!(!c.ground_station);
         assert_eq!(c.interface, "wlan1");
         assert_eq!(c.fleet_id, 7);
         assert_eq!(c.fleet_slot, 3);
@@ -195,25 +187,52 @@ mod tests {
     /// and would fail validation on a config that never mentioned it.
     #[test]
     fn an_absent_key_falls_back_to_the_default_rather_than_zero() {
-        let c = SwarmBusConfig::from_yaml("video:\n  wfb:\n    fleet_slot: 5\n");
+        let c = parse("video:\n  wfb:\n    fleet_slot: 5\n");
         assert_eq!(c.fleet_id, 1, "an unmentioned fleet id is not 0");
         assert_eq!(c.fleet_slot, 5);
         // Entirely empty and entirely absent both give the defaults.
-        assert_eq!(SwarmBusConfig::from_yaml(""), SwarmBusConfig::default());
-        assert_eq!(SwarmBusConfig::from_yaml("agent: {}\n").fleet_id, 1);
+        assert_eq!(parse(""), SwarmBusConfig::default());
+        assert_eq!(parse("agent: {}\n").fleet_id, 1);
     }
 
     #[test]
     fn a_ground_station_profile_is_recognised_and_other_values_are_not() {
-        let gs = SwarmBusConfig::from_yaml("agent:\n  profile: ground_station\n");
-        assert!(gs.is_ground_station());
-        assert_eq!(gs.fleet_slot, SLOT_GROUND);
-        assert_eq!(gs.identity_error(), None);
+        for gs_value in ["ground_station", "ground-station"] {
+            let gs = parse(&format!("agent:\n  profile: {gs_value}\n"));
+            assert!(gs.is_ground_station(), "{gs_value} is a ground station");
+            assert_eq!(gs.fleet_slot, SLOT_GROUND);
+            assert_eq!(gs.identity_error(), None);
+        }
         for other in ["drone", "auto", "workstation", "compute"] {
-            let c = SwarmBusConfig::from_yaml(&format!("agent:\n  profile: {other}\n"));
+            let c = parse(&format!("agent:\n  profile: {other}\n"));
             assert!(!c.is_ground_station(), "{other} is not a ground station");
         }
-        assert!(!SwarmBusConfig::from_yaml("").is_ground_station());
+        assert!(!parse("").is_ground_station());
+    }
+
+    /// `auto`, an empty value or an absent key defers to `profile.conf`, the same
+    /// way the radio plane decides. A ground station left on `auto` must come up
+    /// as a listener on slot 0, not as a drone refused for having no slot.
+    #[test]
+    fn an_auto_profile_resolves_through_the_profile_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("profile.conf");
+        std::fs::write(&conf, "profile: ground_station\n").unwrap();
+        for text in ["agent:\n  profile: auto\n", "agent:\n  profile: ''\n", ""] {
+            let c = SwarmBusConfig::from_yaml(text, &conf);
+            assert!(c.is_ground_station(), "{text:?} defers to profile.conf");
+            assert_eq!(c.identity_error(), None, "{text:?}");
+        }
+        // An explicit drone value is not overridden by the sentinel.
+        let c = SwarmBusConfig::from_yaml("agent:\n  profile: drone\n", &conf);
+        assert!(!c.is_ground_station());
+
+        // And load_from reads both files.
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "agent:\n  profile: auto\n").unwrap();
+        assert!(SwarmBusConfig::load_from(&cfg, &conf).is_ground_station());
+        std::fs::write(&conf, "profile=drone\n").unwrap();
+        assert!(!SwarmBusConfig::load_from(&cfg, &conf).is_ground_station());
     }
 
     /// The identity gate is what stops a misprovisioned drone radiating. Each case
@@ -222,23 +241,22 @@ mod tests {
     fn a_misprovisioned_identity_is_rejected_with_the_radio_planes_reasons() {
         // A drone left on the ground station's slot 0 — the default a fresh box
         // boots with, and the case that must fail loudest.
-        let c = SwarmBusConfig::from_yaml("agent:\n  profile: drone\n");
+        let c = parse("agent:\n  profile: drone\n");
         assert_eq!(
             c.identity_error(),
             Some(FleetIdentityError::DroneWithoutSlot)
         );
 
         // The reserved unprovisioned fleet.
-        let c = SwarmBusConfig::from_yaml(
-            "agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_id: 0\n    fleet_slot: 2\n",
-        );
+        let c =
+            parse("agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_id: 0\n    fleet_slot: 2\n");
         assert_eq!(
             c.identity_error(),
             Some(FleetIdentityError::UnprovisionedFleet)
         );
 
         // A slot past the fleet maximum.
-        let c = SwarmBusConfig::from_yaml(&format!(
+        let c = parse(&format!(
             "agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_slot: {}\n",
             FLEET_MAX_SLOTS + 1
         ));
@@ -248,16 +266,14 @@ mod tests {
         );
 
         // A ground station carrying a drone slot.
-        let c = SwarmBusConfig::from_yaml(
-            "agent:\n  profile: ground_station\nvideo:\n  wfb:\n    fleet_slot: 4\n",
-        );
+        let c = parse("agent:\n  profile: ground_station\nvideo:\n  wfb:\n    fleet_slot: 4\n");
         assert_eq!(
             c.identity_error(),
             Some(FleetIdentityError::GroundWithDroneSlot(4))
         );
 
         // And the boundary is inclusive on the legal side.
-        let c = SwarmBusConfig::from_yaml(&format!(
+        let c = parse(&format!(
             "agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_slot: {FLEET_MAX_SLOTS}\n"
         ));
         assert_eq!(c.identity_error(), None);
@@ -267,7 +283,7 @@ mod tests {
     /// logged and the defaults stand, so the bus still runs on fleet 1.
     #[test]
     fn a_malformed_config_degrades_to_defaults_rather_than_to_zero() {
-        let c = SwarmBusConfig::from_yaml("video:\n  wfb:\n    fleet_id: not-a-number\n");
+        let c = parse("video:\n  wfb:\n    fleet_id: not-a-number\n");
         assert_eq!(c, SwarmBusConfig::default());
         assert_eq!(c.fleet_id, 1);
     }

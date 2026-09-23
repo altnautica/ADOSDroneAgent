@@ -18,16 +18,31 @@ import { fmtNum } from "@/lib/format";
 import { rebootAgent } from "@/lib/setup-actions";
 import { toast, toastFromError } from "@/lib/toast";
 
+// Every numeric field is null in the degraded body the agent serves when its
+// metrics store is unreachable (`available: false`).
 interface SystemSnapshot {
-  cpu_percent: number;
-  cpu_count: number;
-  memory_total_mb: number;
-  memory_used_mb: number;
-  memory_percent: number;
-  disk_total_gb: number;
-  disk_used_gb: number;
-  disk_percent: number;
+  cpu_percent: number | null;
+  cpu_count: number | null;
+  memory_total_mb: number | null;
+  memory_used_mb: number | null;
+  memory_percent: number | null;
+  disk_total_gb: number | null;
+  disk_used_gb: number | null;
+  disk_percent: number | null;
   temperatures: Record<string, number>;
+  available?: boolean;
+}
+
+// The restart route answers HTTP 200 for every outcome; the body's `status`
+// carries the verdict (an unknown unit, a systemctl failure, a timeout and an
+// unconfirmed restart are all `status: "error"`).
+interface RestartResult {
+  status: string;
+  message?: string;
+}
+
+function pct(v: number | null | undefined): string {
+  return v == null ? "—" : `${fmtNum(v, 0)}%`;
 }
 
 interface ServiceEntry {
@@ -68,10 +83,15 @@ export function DiagnosticsRoute() {
   async function restartService(name: string) {
     setBusy(`restart:${name}`);
     try {
-      await apiFetch(`/api/services/${encodeURIComponent(name)}/restart`, {
-        method: "POST",
-      });
-      toast.ok(`${name} restart queued.`);
+      const res = await apiFetch<RestartResult>(
+        `/api/services/${encodeURIComponent(name)}/restart`,
+        { method: "POST" },
+      );
+      if (res.status === "ok") {
+        toast.ok(res.message || `Restarted ${name}.`);
+      } else {
+        toast.err(`${name} was not restarted.`, res.message);
+      }
       services.refetch();
     } catch (err) {
       toastFromError(err, "Service restart failed.");
@@ -95,18 +115,26 @@ export function DiagnosticsRoute() {
     }
   }
 
+  const cpuPct = sys.data?.cpu_percent ?? null;
+  const memPct = sys.data?.memory_percent ?? null;
+  const diskPct = sys.data?.disk_percent ?? null;
   const cpuTone =
-    sys.data && sys.data.cpu_percent > 80
+    cpuPct != null && cpuPct > 80
       ? "err"
-      : sys.data && sys.data.cpu_percent > 60
+      : cpuPct != null && cpuPct > 60
         ? "warn"
         : "ok";
   const memTone =
-    sys.data && sys.data.memory_percent > 80
+    memPct != null && memPct > 80
       ? "err"
-      : sys.data && sys.data.memory_percent > 60
+      : memPct != null && memPct > 60
         ? "warn"
         : "ok";
+  const cpuCount = sys.data?.cpu_count ?? null;
+  const memUsed = sys.data?.memory_used_mb ?? null;
+  const memTotal = sys.data?.memory_total_mb ?? null;
+  const diskUsed = sys.data?.disk_used_gb ?? null;
+  const diskTotal = sys.data?.disk_total_gb ?? null;
 
   const firstTemp = sys.data
     ? Object.entries(sys.data.temperatures)[0]
@@ -132,25 +160,17 @@ export function DiagnosticsRoute() {
         <MetricTile
           icon={Cpu}
           label="CPU"
-          value={
-            sys.data
-              ? `${fmtNum(sys.data.cpu_percent, 0)}%`
-              : "—"
-          }
-          sub={sys.data ? `${sys.data.cpu_count} cores` : ""}
+          value={pct(cpuPct)}
+          sub={cpuCount != null ? `${cpuCount} cores` : ""}
           tone={cpuTone}
         />
         <MetricTile
           icon={MemoryStick}
           label="Memory"
-          value={
-            sys.data
-              ? `${fmtNum(sys.data.memory_percent, 0)}%`
-              : "—"
-          }
+          value={pct(memPct)}
           sub={
-            sys.data
-              ? `${sys.data.memory_used_mb} / ${sys.data.memory_total_mb} MB`
+            memUsed != null && memTotal != null
+              ? `${fmtNum(memUsed, 0)} / ${fmtNum(memTotal, 0)} MB`
               : ""
           }
           tone={memTone}
@@ -158,21 +178,13 @@ export function DiagnosticsRoute() {
         <MetricTile
           icon={HardDrive}
           label="Disk"
-          value={
-            sys.data
-              ? `${fmtNum(sys.data.disk_percent, 0)}%`
-              : "—"
-          }
+          value={pct(diskPct)}
           sub={
-            sys.data
-              ? `${fmtNum(sys.data.disk_used_gb, 1)} / ${fmtNum(sys.data.disk_total_gb, 1)} GB`
+            diskUsed != null && diskTotal != null
+              ? `${fmtNum(diskUsed, 1)} / ${fmtNum(diskTotal, 1)} GB`
               : ""
           }
-          tone={
-            sys.data && sys.data.disk_percent > 80
-              ? "warn"
-              : "ok"
-          }
+          tone={diskPct != null && diskPct > 80 ? "warn" : "ok"}
         />
         <MetricTile
           icon={Thermometer}

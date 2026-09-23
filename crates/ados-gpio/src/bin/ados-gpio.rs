@@ -191,8 +191,10 @@ async fn apply(cmd: Command, state: &State) -> Value {
             // final low. Report the count of real phases so the caller sees the
             // bounded schedule was accepted.
             let real = phases.iter().filter(|p| p.hold_ms > 0).count();
-            spawn_beep(chip, pin, phases, state.clone());
-            json!({"ok": true, "phases": real})
+            match start_beep(chip, pin, phases, state.clone()).await {
+                Ok(()) => json!({"ok": true, "phases": real}),
+                Err(code) => json!({"ok": false, "error": code}),
+            }
         }
         Command::Status => {
             #[cfg(target_os = "linux")]
@@ -230,17 +232,35 @@ async fn set_line(_chip: u32, _pin: u32, _level: ados_gpio::Level, _state: &Stat
     json!({"ok": false, "error": "E_NO_GPIO"})
 }
 
-/// Play a beep schedule on a background task so the request returns immediately.
-/// On Linux it drives the real line through each phase; off Linux it is a no-op
-/// (there is no line to toggle), matching `set_line`.
+/// Start a beep schedule. The first phase is driven before this returns, so a
+/// missing chip or a line another consumer holds is reported to the caller as
+/// `E_DRIVE_FAILED` rather than acknowledged; the remaining phases play on a
+/// background task so the request does not wait out the whole pattern.
 #[cfg(target_os = "linux")]
-fn spawn_beep(chip: u32, pin: u32, phases: Vec<ados_gpio::BeepPhase>, state: State) {
+async fn start_beep(
+    chip: u32,
+    pin: u32,
+    phases: Vec<ados_gpio::BeepPhase>,
+    state: State,
+) -> Result<(), String> {
+    let mut phases = phases.into_iter();
+    let Some(first) = phases.next() else {
+        return Ok(());
+    };
+    state
+        .output
+        .lock()
+        .await
+        .set(chip, pin, first.level)
+        .map_err(|e| format!("E_DRIVE_FAILED: {e}"))?;
+    persist_state(&state).await;
     tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(first.hold_ms as u64)).await;
         for phase in phases {
             {
                 let mut out = state.output.lock().await;
                 if let Err(e) = out.set(chip, pin, phase.level) {
-                    tracing::debug!(chip, pin, error = %e, "beep phase drive failed");
+                    tracing::warn!(chip, pin, error = %e, "beep phase drive failed");
                     break;
                 }
             }
@@ -257,10 +277,20 @@ fn spawn_beep(chip: u32, pin: u32, phases: Vec<ados_gpio::BeepPhase>, state: Sta
         }
         persist_state(&state).await;
     });
+    Ok(())
 }
 
+/// Off Linux there is no GPIO subsystem: report the beep as unavailable, the
+/// same as `set_line`.
 #[cfg(not(target_os = "linux"))]
-fn spawn_beep(_chip: u32, _pin: u32, _phases: Vec<ados_gpio::BeepPhase>, _state: State) {}
+async fn start_beep(
+    _chip: u32,
+    _pin: u32,
+    _phases: Vec<ados_gpio::BeepPhase>,
+    _state: State,
+) -> Result<(), String> {
+    Err("E_NO_GPIO".to_string())
+}
 
 #[cfg(test)]
 mod tests {
@@ -298,19 +328,30 @@ mod tests {
         assert!(v["lines"].as_array().unwrap().is_empty());
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
-    async fn beep_returns_the_bounded_phase_count_without_blocking() {
-        // A beep is accepted and reports its bounded schedule; the reply returns
-        // before the (background) playback finishes. Off Linux there is no line
-        // to toggle, but the schedule math + the immediate reply are exercised.
+    async fn beep_without_a_gpio_subsystem_is_refused() {
+        // No line can be driven, so the beep must not be acknowledged.
         let v = dispatch(
             br#"{"op":"beep","pin":18,"on_ms":50,"off_ms":50,"cycles":2}"#,
             &state(),
         )
         .await;
-        assert_eq!(v["ok"], true);
-        // 2 cycles → 4 real phases (High,Low,High,Low); the terminal zero-ms low
-        // is excluded from the reported count.
-        assert_eq!(v["phases"], 4);
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "E_NO_GPIO");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn beep_on_a_missing_chip_reports_the_drive_failure() {
+        // Chip 250 does not exist, so the first phase cannot be driven and the
+        // caller hears about it instead of a false ok.
+        let v = dispatch(
+            br#"{"op":"beep","chip":250,"pin":18,"on_ms":50,"off_ms":50,"cycles":2}"#,
+            &state(),
+        )
+        .await;
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().starts_with("E_DRIVE_FAILED"));
     }
 }

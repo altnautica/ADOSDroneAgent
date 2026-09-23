@@ -12,9 +12,10 @@
 use embedded_graphics::pixelcolor::Rgb888;
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
-use crate::graphics::palette::{Palette, ThresholdDirection};
+use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, fill_rect_outline, line, text, Canvas};
 use crate::graphics::status_dot::draw_dot;
+use crate::graphics::thresholds;
 use crate::pages::{HitAction, HitZone, BOTTOM_BAR_H, PANEL_W, TOP_BAR_H};
 
 /// Height reserved for a tile's caps title row.
@@ -74,13 +75,9 @@ pub fn draw_top_bar(
     let h = TOP_BAR_H as i32;
     fill_rect(canvas, 0, 0, w - 1, h - 1, palette.bg_primary);
 
-    // Hostname.
+    // Hostname. An unresolved one is shown as unknown, never as a stand-in name.
     let name_font = LoadedFont::new(FontFace::SansBold, 14);
-    let name = if hostname.is_empty() {
-        "groundnode"
-    } else {
-        hostname
-    };
+    let name = if hostname.is_empty() { "—" } else { hostname };
     text(canvas, &name_font, name, 8, 8, palette.text_primary);
     let name_w = name_font.text_size(name).0 as i32;
 
@@ -111,13 +108,13 @@ pub fn draw_top_bar(
     let text_y = 10;
     let mut cursor_x = label_x + role_w + 18;
 
-    let cpu_color = palette.threshold_color(cpu_pct, 70.0, 85.0, ThresholdDirection::LowerIsBetter);
+    let cpu_color = palette.grade(cpu_pct, thresholds::CPU_PCT);
     let ram_pct = match (ram_used_mb, ram_total_mb) {
         (Some(u), Some(t)) if t > 0.0 => Some(u / t * 100.0),
         _ => None,
     };
-    let ram_color = palette.threshold_color(ram_pct, 70.0, 85.0, ThresholdDirection::LowerIsBetter);
-    let temp_color = palette.threshold_color(temp_c, 65.0, 75.0, ThresholdDirection::LowerIsBetter);
+    let ram_color = palette.grade(ram_pct, thresholds::RAM_PCT);
+    let temp_color = palette.grade(temp_c, thresholds::TEMP_C);
 
     let mut emit = |cursor: &mut i32, label: &str, value: &str, color: Rgb888| {
         text(
@@ -336,6 +333,27 @@ pub fn bottom_bar_zones() -> Vec<HitZone> {
             )
         })
         .collect()
+}
+
+/// Paint the tab for `page_id` pressed: an inverse fill of its cell with the
+/// icon knocked out in the background tone. Drawn over a frame that already
+/// carries the bottom bar; an unknown id paints nothing.
+pub fn draw_tab_pulse(canvas: &mut Canvas, palette: &Palette, page_id: &str) {
+    let Some(index) = TABS.iter().position(|(id, _)| *id == page_id) else {
+        return;
+    };
+    let y = (canvas.height() as i32) - BOTTOM_BAR_H as i32;
+    let x0 = index as i32 * TAB_WIDTH;
+    fill_rect(
+        canvas,
+        x0,
+        y + 1,
+        x0 + TAB_WIDTH - 1,
+        y + BOTTOM_BAR_H as i32 - 1,
+        palette.accent_primary,
+    );
+    let (cx, cy) = (x0 + TAB_WIDTH / 2, y + BOTTOM_BAR_H as i32 / 2);
+    draw_tab_icon(canvas, TABS[index].1, cx, cy, palette.bg_primary);
 }
 
 /// Page-local height of the content region (panel minus both chrome bars).
@@ -565,7 +583,7 @@ mod tests {
         draw_top_bar(
             &mut c,
             &DARK,
-            "groundnode",
+            "gs-example",
             "receiver",
             Some(22.0),
             Some(1234.0),

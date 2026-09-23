@@ -22,18 +22,26 @@ import pytest
 
 from ados.services.ground_station import pair_journal
 from ados.services.ground_station import pairing_manager as pm
-from ados.services.ground_station.pairing_manager import (
+from ados.services.ground_station.invite_crypto import (
+    INVITE_CONTEXT,
     InviteBundle,
-    PairingManager,
     decrypt_invite,
     encrypt_invite,
     generate_keypair,
+    invite_context,
+    is_invite_code,
+    session_key,
+)
+from ados.services.ground_station.pairing_manager import (
+    PairingManager,
     is_revoked,
     load_revocations,
     revoke,
     save_revocations,
     unrevoke,
 )
+
+CODE = "482910"
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -110,12 +118,12 @@ def test_invite_encrypt_decrypt_round_trip() -> None:
     relay_priv, relay_pub = generate_keypair()
 
     bundle = _bundle()
-    blob = encrypt_invite(bundle, receiver_priv, relay_pub)
+    blob = encrypt_invite(bundle, receiver_priv, relay_pub, CODE)
 
     # Wire format: 32 (receiver pub) + 12 (nonce) + N (ct||tag).
     assert len(blob) >= 32 + 12 + 16
 
-    decoded = decrypt_invite(blob, relay_priv)
+    decoded = decrypt_invite(blob, relay_priv, CODE)
     assert decoded.mesh_id == bundle.mesh_id
     assert decoded.mesh_psk == bundle.mesh_psk
     assert decoded.drone_channel == bundle.drone_channel
@@ -126,7 +134,7 @@ def test_invite_encrypt_decrypt_round_trip() -> None:
 def test_invite_decrypt_too_short_raises() -> None:
     relay_priv, _ = generate_keypair()
     with pytest.raises(ValueError, match="too short"):
-        decrypt_invite(b"\x00" * 10, relay_priv)
+        decrypt_invite(b"\x00" * 10, relay_priv, CODE)
 
 
 def test_invite_decrypt_expired_raises() -> None:
@@ -144,9 +152,9 @@ def test_invite_decrypt_expired_raises() -> None:
         issued_at_ms=now_ms - 200_000,
         expires_at_ms=now_ms - 100_000,
     )
-    blob = encrypt_invite(expired, receiver_priv, relay_pub)
+    blob = encrypt_invite(expired, receiver_priv, relay_pub, CODE)
     with pytest.raises(ValueError, match="expired"):
-        decrypt_invite(blob, relay_priv)
+        decrypt_invite(blob, relay_priv, CODE)
 
 
 def test_invite_decrypt_with_wrong_key_fails() -> None:
@@ -155,9 +163,34 @@ def test_invite_decrypt_with_wrong_key_fails() -> None:
     # The attacker has a different relay_priv that does not match relay_pub.
     attacker_priv, _ = generate_keypair()
 
-    blob = encrypt_invite(_bundle(), receiver_priv, relay_pub)
-    with pytest.raises(Exception):
-        decrypt_invite(blob, attacker_priv)
+    blob = encrypt_invite(_bundle(), receiver_priv, relay_pub, CODE)
+    with pytest.raises(ValueError, match="did not open"):
+        decrypt_invite(blob, attacker_priv, CODE)
+
+
+def test_an_invite_sealed_under_another_code_does_not_open() -> None:
+    """Anyone who heard the join request holds the relay's public key and can
+    seal an invite to it. Without the window code that invite must not open."""
+    hostile_priv, _ = generate_keypair()
+    relay_priv, relay_pub = generate_keypair()
+
+    blob = encrypt_invite(_bundle(), hostile_priv, relay_pub, "000000")
+    with pytest.raises(ValueError, match="did not open"):
+        decrypt_invite(blob, relay_priv, CODE)
+
+
+def test_the_code_is_bound_into_the_session_key_context() -> None:
+    """The Rust pairing crypto carries the same vector; both must derive this
+    key for this shared secret and code."""
+    assert invite_context(CODE) == INVITE_CONTEXT + b"\x00" + b"482910"
+    assert (
+        session_key(b"\x11" * 32, invite_context("123456")).hex()
+        == "b286a016663b9570232bda114a1f86cced6679ca9e7357ca17b118ea9a71c200"
+    )
+    for bad in ("12345", "1234567", "12345a", "\uff11" * 6):
+        assert not is_invite_code(bad)
+        with pytest.raises(ValueError):
+            invite_context(bad)
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +425,7 @@ async def test_approve_happy_path_returns_blob(
     blob = await manager.approve("dev-good", _bundle())
     assert blob is not None
     # The blob must round-trip through decrypt_invite using the relay's priv.
-    decoded = decrypt_invite(blob, relay_priv)
+    decoded = decrypt_invite(blob, relay_priv, manager.window.code)
     assert decoded.mesh_id == "mesh-test"
 
     # And the transport must have recorded at least one send.
@@ -440,6 +473,9 @@ async def test_snapshot_with_open_window_and_pending(
     assert snap["pending"][0]["device_id"] == "dev-snap"
     assert snap["pending"][0]["remote_ip"] == "192.168.1.5"
     assert "approvals" in snap
+    # The window code the operator reads out is what the invite is sealed under.
+    assert is_invite_code(snap["code"])
+    assert snap["code"] == manager.window.code
 
 
 # ---------------------------------------------------------------------------

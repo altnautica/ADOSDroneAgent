@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use ados_hid::pic_view::{read_pic_view, resolve_authority, Authority, ChannelSourceMode, PicView};
+use ados_hid::pic_view::{injector_refused, read_pic_view, PicView};
 use ados_protocol::ipc::InjectorClaim;
 use ados_protocol::pairing_posture::{load_pairing, Pairing};
 use ados_protocol::ws_ticket::{crsf_inject_scope, now_unix, WsTicketIssuer};
@@ -38,6 +38,8 @@ use ados_protocol::ws_ticket::{crsf_inject_scope, now_unix, WsTicketIssuer};
 pub fn verify_injector(pairing_path: &Path, claim: &InjectorClaim) -> Option<String> {
     match load_pairing(pairing_path) {
         Pairing::Unpaired => Some(claim.client_id.clone()),
+        // An unreadable pairing file admits no remote injector.
+        Pairing::Unreadable => None,
         Pairing::Paired(api_key) => {
             let ticket = claim.ticket.as_deref()?;
             WsTicketIssuer::from_api_key(&api_key)
@@ -46,20 +48,6 @@ pub fn verify_injector(pairing_path: &Path, claim: &InjectorClaim) -> Option<Str
                 .map(|()| claim.client_id.clone())
         }
     }
-}
-
-/// The pure gate decision: does a declared injector's command get REFUSED, given
-/// the PIC arbiter's view and the injector's verified identity? Pure over its
-/// inputs so the full matrix is unit-testable with no filesystem.
-///
-/// This is exactly [`resolve_authority`] in `Hybrid` mode reading `Authority::Hid`
-/// (the human/neutral hold) — reused rather than re-spelled so the FC-write plane
-/// and the CRSF channel plane arbitrate identically. `Hid` (refuse) covers: a
-/// human holds the claim, a claim with no/other holder, and a non-reporting
-/// arbiter (fail-closed). `Inject` (allow) covers: the injector itself holds the
-/// claim, or a fresh affirmative "no one holds".
-pub fn injector_refused_decision(pic: Option<&PicView>, verified_injector: Option<&str>) -> bool {
-    resolve_authority(ChannelSourceMode::Hybrid, pic, verified_injector) == Authority::Hid
 }
 
 /// The pairing file, respecting the same `ADOS_PAIRING_JSON` override every
@@ -73,13 +61,14 @@ fn default_pairing_path() -> PathBuf {
 /// How long a PIC read is reused before the sidecar is re-read on the hot path.
 const PIC_CACHE_TTL: Duration = Duration::from_millis(50);
 
-/// The hot-path injector gate: the same decision as [`injector_refused`], but
-/// with the two blocking costs cached off the async router loop.
+/// The hot-path injector gate: the PIC arbiter's decision
+/// ([`injector_refused`]) with its two blocking costs cached off the async
+/// router loop.
 ///
-/// [`injector_refused`] read `pairing.json` (+ an HMAC verify) AND the PIC
-/// sidecar on EVERY command. At an armed 50–100 Hz `set_raw_rc` cadence that is
-/// two blocking `std::fs` reads plus a crypto verify per frame, on the executor
-/// thread that also drives every other socket. This caches both:
+/// Reading `pairing.json` (+ an HMAC verify) AND the PIC sidecar on EVERY
+/// command would be, at an armed 50–100 Hz `set_raw_rc` cadence, two blocking
+/// `std::fs` reads plus a crypto verify per frame, on the executor thread that
+/// also drives every other socket. This caches both:
 ///
 /// * the **verify** is reused while the claim is byte-identical — the injector
 ///   ticket is minted once per connection, so a claim that verified once stays
@@ -131,7 +120,7 @@ impl InjectorGateCache {
 
     /// Is this declared injector's command REFUSED right now? Caches the verify
     /// per sticky claim and the PIC read on a short TTL; the verdict itself is the
-    /// same pure [`injector_refused_decision`] the matrix tests cover.
+    /// shared pure [`injector_refused`].
     pub fn refused(&mut self, claim: &InjectorClaim) -> bool {
         self.refused_at(claim, Instant::now(), SystemTime::now())
     }
@@ -155,7 +144,7 @@ impl InjectorGateCache {
                 p
             }
         };
-        injector_refused_decision(pic.as_ref(), verified.as_deref())
+        injector_refused(pic.as_ref(), verified.as_deref())
     }
 }
 
@@ -168,50 +157,6 @@ mod tests {
             client_id: id.to_string(),
             ticket: ticket.map(str::to_string),
         }
-    }
-
-    // ── the pure decision matrix ─────────────────────────────────────────────
-
-    #[test]
-    fn no_arbiter_report_refuses_the_injector_fail_closed() {
-        // pic = None (absent/stale/malformed): a dead arbiter is not consent.
-        assert!(injector_refused_decision(None, Some("ai-mission")));
-        assert!(injector_refused_decision(None, None));
-    }
-
-    #[test]
-    fn a_human_holder_refuses_the_injector() {
-        let human = PicView {
-            claimed: true,
-            holder: Some("hdmi-kiosk".into()),
-        };
-        assert!(injector_refused_decision(Some(&human), Some("ai-mission")));
-    }
-
-    #[test]
-    fn the_injector_holding_the_claim_is_allowed() {
-        let robot = PicView {
-            claimed: true,
-            holder: Some("ai-mission".into()),
-        };
-        assert!(!injector_refused_decision(Some(&robot), Some("ai-mission")));
-    }
-
-    #[test]
-    fn a_fresh_unclaimed_report_allows_the_injector() {
-        let unclaimed = PicView::default();
-        assert!(!injector_refused_decision(Some(&unclaimed), None));
-    }
-
-    #[test]
-    fn an_unverified_injector_never_wins_even_holding_the_claim() {
-        // holder matches the asserted id, but verified_injector is None (bad
-        // ticket): the claim cannot be credited, so a human-path hold stands.
-        let claimed_by_asserted = PicView {
-            claimed: true,
-            holder: Some("ai-mission".into()),
-        };
-        assert!(injector_refused_decision(Some(&claimed_by_asserted), None));
     }
 
     // ── verification against the pairing key ─────────────────────────────────

@@ -367,7 +367,7 @@ class SetupStatus(BaseModel):
     pairing_code: str | None = None
     paired: bool = False
     # LAN-routable host the CLI and external clients should use to
-    # reach this agent. Prefers the system hostname (``groundnode.local``)
+    # reach this agent. Prefers the system hostname (``gs-example.local``)
     # over the device-id mDNS form (``ados-<id>.local``) when set, with
     # the first non-loopback IP as fallback. Empty when no LAN identity
     # could be derived. The agent's own webapp still self-references via

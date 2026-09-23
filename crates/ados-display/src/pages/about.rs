@@ -1,17 +1,16 @@
 //! About page — read-only system identity drilldown.
 //!
 //! Shown from the settings list as the bottom-most row. The body lists the
-//! agent version, board name, device id, device name, the eth0 / wlan0 MAC
-//! addresses, a release-time build stamp, the license, and the repo URL. Every
-//! value is read-only; the operator backs out via the header chevron.
+//! agent version, board name, device id, device name, the wired and wireless
+//! MAC addresses, the license, and the repo URL. Every value is read-only; the
+//! operator backs out via the header chevron.
 //!
 //! The label/value rows are a fixed table: an uppercase caps label in the left
 //! column (Sans Bold 11) and a mono value in the right column (Mono Regular 12),
 //! 22 px per row. Missing identity fields render as `--`.
 //!
-//! All values come from [`PageContext::device`], which the render loop fills
-//! from the setup-status snapshot and the HAL board detect plus the sysfs MAC
-//! and build-stamp reads.
+//! All values come from [`PageContext::device`], which the state source fills
+//! from the setup-status snapshot, the HAL board sidecar and sysfs.
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
@@ -60,14 +59,13 @@ impl Page for AboutDetailPage {
         draw_detail_header(&mut canvas, palette, "About");
 
         let device = &ctx.device;
-        let rows: [(&str, String); 9] = [
+        let rows: [(&str, String); 8] = [
             ("Agent", field(&device.version)),
             ("Board", field(&device.board_name)),
             ("Device ID", field(&device.device_id)),
             ("Device", field(&device.device_name)),
-            ("eth0", field(&device.mac_eth0)),
-            ("wlan0", field(&device.mac_wlan0)),
-            ("Build", field(&device.build_stamp)),
+            ("Ethernet", field(&device.mac_wired)),
+            ("Wi-Fi", field(&device.mac_wireless)),
             ("License", "GPLv3".to_string()),
             ("Repo", REPO_URL.to_string()),
         ];
@@ -126,10 +124,9 @@ mod tests {
         ctx.device.version = Some("0.49.39".to_string());
         ctx.device.board_name = Some("Raspberry Pi 4B".to_string());
         ctx.device.device_id = Some("ados-58c27faf".to_string());
-        ctx.device.device_name = Some("groundnode".to_string());
-        ctx.device.mac_eth0 = Some("dc:a6:32:00:11:22".to_string());
-        ctx.device.mac_wlan0 = Some("dc:a6:32:00:11:23".to_string());
-        ctx.device.build_stamp = Some("2026-06-01".to_string());
+        ctx.device.device_name = Some("gs-example".to_string());
+        ctx.device.mac_wired = Some("dc:a6:32:00:11:22".to_string());
+        ctx.device.mac_wireless = Some("dc:a6:32:00:11:23".to_string());
         // A populated context paints body content, so the body region is no
         // longer entirely the background color.
         let c = page.render(&ctx, &DARK);

@@ -1008,6 +1008,7 @@ mod tests {
             bind_state: dir.path().join("bind-state.json"),
             profile_conf: dir.path().join("profile.conf"),
             mesh_role: dir.path().join("mesh-role"),
+            relay_secret: dir.path().join("relay-peer-secret"),
         };
         let state = AppState::new(
             pairing,

@@ -7,7 +7,6 @@ import math
 import pytest
 
 from ados.services.mavlink.encoders import (
-    ENCODER_CAPABILITY_GATES,
     MESSAGE_ID_TO_ENCODER,
     encode_distance_sensor,
 )
@@ -73,4 +72,3 @@ def test_distance_sensor_rejects_bad_quaternion():
 
 def test_distance_sensor_registry_entries():
     assert 132 in MESSAGE_ID_TO_ENCODER
-    assert ENCODER_CAPABILITY_GATES[132] == "mavlink.write"

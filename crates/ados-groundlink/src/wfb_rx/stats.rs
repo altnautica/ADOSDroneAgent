@@ -164,7 +164,7 @@ pub fn write_reg_blocked_sidecar(
 /// operator-visible CAUSE this sidecar must carry. No receive chain runs, so the
 /// link-quality block defaults and injection is denied; the adapter's chipset +
 /// USB speed/degraded facts ride verbatim so the panel shows WHY the link is
-/// stuck rather than a blank (Rule 44). Atomic via the Contract E writer.
+/// stuck rather than a blank. Atomic via the Contract E writer.
 ///
 /// The regulatory gate has not run in this arm (it precedes `prepare_interface`),
 /// so the reg picture is the honest unknown default — never a stale claim from a
@@ -398,7 +398,7 @@ pub fn build_gs_stats(
         // Which radio backend is driving the receive path: the Linux monitor-mode
         // + wfb_rx backend. Wire value mirrors the drone-side KernelMonitor backend
         // ("kernel") so Mission Control badges the live radio path from either rig
-        // (additive; Rule 28).
+        // (additive).
         "backend": "kernel",
         // Link-quality block (parity with the air side). Signal-strength fields are
         // null until a packet is actually decoded (see `measured` above) so the
@@ -1225,7 +1225,7 @@ mod tests {
         // The whole point of the write: a slow-USB adapter — exactly what lands a
         // rig in the no-injection arm — must carry its USB speed + degraded flag
         // so the operator sees WHY the receive plane is stuck, instead of the arm
-        // going silent (Rule 44).
+        // going silent.
         let channels = GsChannelTruth {
             actual: 149,
             rendezvous: 149,

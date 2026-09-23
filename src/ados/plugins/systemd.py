@@ -43,6 +43,8 @@ from ados.core.paths import (
     PLUGIN_LOG_DIR,
     PLUGIN_LOOPBACK_GUARD_JSON,
     PLUGIN_RUN_DIR,
+    PLUGIN_SOCKET_NAME,
+    PLUGIN_UNGRANTABLE_CAPS_JSON,
     PLUGIN_UNIT_DIR,
     PLUGIN_UNIT_PREFIX,
 )
@@ -116,32 +118,18 @@ FILESYSTEM_HOST_CAP = "filesystem.host"
 #: own signer into. File modes already keep ``ados`` out of both.
 ALWAYS_INACCESSIBLE = ("/etc/ados/secrets", "/etc/ados/plugin-keys")
 
-#: Agent command sockets, and the plugin host's control dir, hidden from every
-#: plugin whatever it is granted. Each acts with the agent's authority rather
-#: than the plugin's grants; the real gate is the ``ados-operator`` socket group
-#: plus a peer-credential check on accept, and this is the second line.
-AGENT_SOCKET_PATHS = (
-    "/run/ados/plugin-host",
-    "/run/ados/control.sock",
-    "/run/ados/api-internal.sock",
-    "/run/ados/mavlink.sock",
-    "/run/ados/msp.sock",
-    "/run/ados/supervisor.sock",
-    "/run/ados/radio-cmd.sock",
-    "/run/ados/radio-aux.sock",
-    "/run/ados/wfb-cmd.sock",
-    "/run/ados/video-cmd.sock",
-    "/run/ados/gpio-cmd.sock",
-    "/run/ados/hid-cmd.sock",
-    "/run/ados/pic.sock",
-    "/run/ados/crsf-cmd.sock",
-    "/run/ados/wifi-cmd.sock",
-    "/run/ados/groundlink-cmd.sock",
-    "/run/ados/tunnel-config-cmd.sock",
-    "/run/ados/atlas-control.sock",
-    "/run/ados/pairing.sock",
-    "/run/ados/logd-query.sock",
-)
+#: The agent run directory, replaced by an empty read-only tmpfs in every
+#: plugin's mount namespace. It holds every agent command socket, the plugin
+#: host's control dir and every plugin's socket directory; each acts with the
+#: agent's authority or another plugin's grants. The real gate is the
+#: ``ados-operator`` socket group plus a peer-credential check on accept, and
+#: this is the second line. Hiding the directory, not each socket, keeps a
+#: socket a service re-creates after the plugin started hidden too.
+HIDDEN_RUN_DIR = "/run/ados"
+
+#: Sockets under :data:`HIDDEN_RUN_DIR` bound back into every plugin,
+#: read-only: the log ingest sink, which only accepts log frames.
+PLUGIN_REACHABLE_SOCKETS = ("/run/ados/logd.sock",)
 
 #: Operator data roots reachable only with ``filesystem.host``.
 HOST_DATA_ROOTS = ("/srv", "/mnt", "/media", "/boot")
@@ -150,7 +138,6 @@ HOST_DATA_ROOTS = ("/srv", "/mnt", "/media", "/boot")
 BASE_READ_WRITE_PATHS = (
     "/var/ados/plugin-data",
     "/var/log/ados/plugins",
-    "/run/ados/plugins",
 )
 
 
@@ -173,6 +160,23 @@ def plugin_loopback_guard_active() -> bool:
     except (OSError, ValueError):
         return False
     return isinstance(data, dict) and data.get("active") is True
+
+
+def host_ungrantable_caps() -> frozenset[str]:
+    """Capabilities the running plugin host cannot back.
+
+    Reads the list the plugin-host daemon writes at startup. Absent or
+    unreadable reads as empty: the host then enforces its own refusal on the
+    cloud path, and nothing here invents a list.
+    """
+    try:
+        data = json.loads(PLUGIN_UNGRANTABLE_CAPS_JSON.read_text())
+    except (OSError, ValueError):
+        return frozenset()
+    caps = data.get("caps") if isinstance(data, dict) else None
+    if not isinstance(caps, list):
+        return frozenset()
+    return frozenset(c for c in caps if isinstance(c, str))
 
 
 def sandbox_directives(
@@ -221,13 +225,17 @@ def sandbox_directives(
         lines.append("IPAddressDeny=any")
 
     # ---- filesystem -------------------------------------------------
+    # The agent run dir goes first: an empty read-only tmpfs, with only the
+    # plugin-reachable sockets bound back in.
+    lines.append(f"TemporaryFileSystem={HIDDEN_RUN_DIR}:ro")
+    lines.extend(f"BindReadOnlyPaths=-{p}" for p in PLUGIN_REACHABLE_SOCKETS)
     host_fs = FILESYSTEM_HOST_CAP in granted_set
     rw = list(BASE_READ_WRITE_PATHS)
     if host_fs:
         rw.extend(HOST_DATA_ROOTS)
     lines.append("ReadWritePaths=" + " ".join(rw))
     lines.append("ProtectHome=read-only" if host_fs else "ProtectHome=yes")
-    inaccessible = [f"-{p}" for p in (*ALWAYS_INACCESSIBLE, *AGENT_SOCKET_PATHS)]
+    inaccessible = [f"-{p}" for p in ALWAYS_INACCESSIBLE]
     if not host_fs:
         inaccessible.extend(f"-{p}" for p in HOST_DATA_ROOTS)
     lines.append("InaccessiblePaths=" + " ".join(inaccessible))
@@ -350,7 +358,11 @@ def render_unit(
     # Reference the module global by name so tests can rebind it via
     # monkeypatch.setattr and the runtime resolves the current value.
     log_path = PLUGIN_LOG_DIR / f"{_sanitize_unit_name(manifest.id)}.log"
-    socket_path = PLUGIN_RUN_DIR / f"{manifest.id}.sock"
+    # The plugin's own socket directory is the one path under the hidden run
+    # dir bound into the unit (read-only), so the plugin reaches its own host
+    # socket and no other plugin's.
+    socket_dir = PLUGIN_RUN_DIR / manifest.id
+    socket_path = socket_dir / PLUGIN_SOCKET_NAME
     # The ExecStart line is the only part that differs by agent.runtime.
     if manifest.agent.runtime == "rust":
         # Rust: exec the plugin's own binary directly with the plugin id as the
@@ -379,6 +391,7 @@ def render_unit(
         slice_name=PLUGIN_SLICE_NAME,
         socket_path=socket_path,
         token_env_file=token_env_file,
+        socket_dir=socket_dir,
         exec_start=exec_start,
         max_ram_mb=res.max_ram_mb,
         max_cpu_percent=res.max_cpu_percent,
@@ -493,6 +506,7 @@ Slice={slice_name}
 Type=simple
 Environment=ADOS_PLUGIN_SOCKET={socket_path}
 EnvironmentFile=-{token_env_file}
+BindReadOnlyPaths={socket_dir}
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=2s

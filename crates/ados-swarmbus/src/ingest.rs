@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use crate::beacon::SwarmBeacon;
 use crate::crypto::{SealError, SenderNonce, SwarmCipher};
-use crate::frame::{parse_frame, FrameReject, SwarmFrame, SwarmFrameKind};
+use crate::frame::{parse_frame, FrameReject, SwarmFrameKind};
 use crate::neighbors::{NeighborTable, Recorded};
 
 /// What one captured frame did.
@@ -22,8 +22,6 @@ pub enum Ingest {
     /// beacon claiming the ground slot, a second sender on a peer's live slot, or
     /// a table already at its cap.
     BeaconIgnored(SwarmBeacon),
-    /// An authenticated frame belonging to another layer (the CBBA bid lane).
-    Frame(SwarmFrame),
     /// Not ours, not authentic, or not fresh.
     Rejected(IngestReject),
 }
@@ -40,11 +38,12 @@ pub enum IngestReject {
     ForeignMagic,
     /// Our magic, another fleet's id.
     ForeignFleet,
-    /// The seal did not verify or carried a version/kind we do not implement.
+    /// The seal did not verify, was too short to carry one, or authenticated a
+    /// version/kind we do not implement. Only [`SealError::BadTag`] is counted.
     Seal(SealError),
     /// Authenticated as a beacon, but the body was not a beacon.
     BadBeaconBody,
-    /// An authentic beacon its sender already delivered, or one from a sender run
+    /// An authentic frame its sender already delivered, or one from a sender run
     /// its slot has moved on from.
     Replayed,
 }
@@ -56,8 +55,8 @@ pub enum IngestReject {
 /// `beacons_bad_tag` are the two numbers a field diagnosis turns on. A nonzero
 /// bad-magic count means the kernel filter is not doing its job and the whole video
 /// stream is being copied to userspace; a nonzero bad-tag count means a node in
-/// range holds a different fleet key. Conflating them, or counting a malformed or
-/// corrupted frame as either, destroys both signals.
+/// range holds a different fleet key. Conflating them, or counting a malformed,
+/// corrupted or version-skewed frame as either, destroys both signals.
 ///
 /// Our own transmissions come back on a monitor interface. They are recognised by
 /// the cipher's per-process nonce prefix, not by slot, so a peer provisioned with
@@ -87,7 +86,13 @@ pub fn ingest_frame(
     let (kind, body) = match cipher.open(captured.payload) {
         Ok(v) => v,
         Err(e) => {
-            table.record_bad_tag();
+            // Only a failed tag says "a different fleet key". A payload too short
+            // to carry a seal is malformed; an authenticated frame with a version
+            // or kind this build does not implement is a version skew inside the
+            // fleet, like a wrong-length beacon body. Neither is counted.
+            if e == SealError::BadTag {
+                table.record_bad_tag();
+            }
             return Ingest::Rejected(IngestReject::Seal(e));
         }
     };
@@ -108,11 +113,6 @@ pub fn ingest_frame(
             // inside one fleet, not an attack, so it is not a bad tag.
             None => Ingest::Rejected(IngestReject::BadBeaconBody),
         },
-        SwarmFrameKind::CbbaBid => Ingest::Frame(SwarmFrame {
-            kind,
-            body,
-            rssi_dbm: captured.rssi_dbm,
-        }),
     }
 }
 
@@ -402,23 +402,47 @@ mod tests {
         assert_eq!(table.counters().beacons_bad_tag, 0, "it is authentic");
     }
 
+    /// A fleet member on a newer agent may seal with a newer wire version or a
+    /// frame kind this build does not implement. The frame authenticates, so it
+    /// is a version skew, and it must not read as a fleet-key mismatch.
     #[test]
-    fn a_bid_frame_is_handed_out_without_touching_the_table() {
+    fn an_authenticated_frame_of_an_unknown_version_or_kind_is_not_a_bad_tag() {
+        use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+        use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
-        let bid: Vec<u8> = (0..40u8).collect();
-        let frame = air(&peer(), SwarmFrameKind::CbbaBid, &bid);
+        let raw = ChaCha20Poly1305::new(Key::from_slice(&key()));
+        let seal_with_header = |header: [u8; 2], counter: u8| {
+            let nonce = [9, 9, 9, 9, 9, 9, 9, 9, counter, 0, 0, 0];
+            let mut plaintext = header.to_vec();
+            plaintext.extend_from_slice(&beacon(3).encode());
+            let sealed = raw
+                .encrypt(
+                    Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: &plaintext,
+                        aad: &[],
+                    },
+                )
+                .unwrap();
+            let mut wire = nonce.to_vec();
+            wire.extend_from_slice(&sealed);
+            build_frame(FLEET, 0, &wire)
+        };
 
+        let newer_version = seal_with_header([2, SwarmFrameKind::Beacon as u8], 0);
         assert_eq!(
-            ingest_frame(&frame, FLEET, &me(), &mut table, t0),
-            Ingest::Frame(SwarmFrame {
-                kind: SwarmFrameKind::CbbaBid,
-                body: bid,
-                rssi_dbm: None,
-            })
+            ingest_frame(&newer_version, FLEET, &me(), &mut table, t0),
+            Ingest::Rejected(IngestReject::Seal(SealError::BadVersion(2)))
         );
+        let unknown_kind = seal_with_header([crate::crypto::SWARM_WIRE_VERSION, 2], 1);
+        assert_eq!(
+            ingest_frame(&unknown_kind, FLEET, &me(), &mut table, t0),
+            Ingest::Rejected(IngestReject::Seal(SealError::UnknownKind(2)))
+        );
+        assert_eq!(table.counters(), Default::default(), "no counter moved");
         assert!(table.is_empty());
-        assert_eq!(table.counters().beacons_rx, 0, "a bid is not a beacon");
     }
 
     /// A fleet member on a newer agent could seal a beacon body of a different
@@ -452,14 +476,15 @@ mod tests {
             );
         }
         assert_eq!(table.counters(), Default::default());
-        // A frame with our header but no payload at all fails the seal length gate.
+        // A frame with our header but no payload at all fails the seal length
+        // gate. It is malformed, not evidence of a different fleet key.
         let headers = build_frame(FLEET, 0, &[]);
         assert_eq!(headers.len(), 37);
         assert!(matches!(
             ingest_frame(&headers, FLEET, &c, &mut table, t0),
             Ingest::Rejected(IngestReject::Seal(SealError::TooShort))
         ));
-        assert_eq!(table.counters().beacons_bad_tag, 1);
+        assert_eq!(table.counters(), Default::default());
     }
 
     /// The signal reading has to survive from the radiotap header all the way into
@@ -486,9 +511,10 @@ mod tests {
     }
 
     /// The end-to-end property the bus exists for: a peer's beacon becomes a
-    /// dead-reckonable neighbour, and goes away on its own after the stale window.
+    /// neighbour carrying its reported velocity, and goes away on its own after the
+    /// stale window.
     #[test]
-    fn a_received_beacon_becomes_a_predictable_neighbour_then_expires() {
+    fn a_received_beacon_becomes_a_neighbour_then_expires() {
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
         let mut b = beacon(6);
@@ -499,13 +525,10 @@ mod tests {
             ingest_frame(&frame, FLEET, &me(), &mut table, t0),
             Ingest::Beacon(_)
         ));
-        let (lat, _, _) = table
-            .predicted(6, t0 + std::time::Duration::from_secs(1))
-            .unwrap();
-        assert!(lat > b.lat_deg(), "it moved north");
+        assert_eq!(table.get(6).unwrap().beacon, b);
 
         assert_eq!(table.prune(t0 + crate::NEIGHBOR_STALE), 1);
-        assert!(table.predicted(6, t0 + crate::NEIGHBOR_STALE).is_none());
+        assert!(table.get(6).is_none());
         assert_eq!(table.counters().beacons_stale_dropped, 1);
     }
 }

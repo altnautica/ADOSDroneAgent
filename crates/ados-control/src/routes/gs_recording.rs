@@ -92,7 +92,7 @@ fn profile_mismatch() -> Response {
 /// live state and must read THIS instance: it previously hardcoded `false` on the
 /// stated grounds that the front had no in-process recorder, which this module
 /// contradicts, and an operator recording through the cockpit saw the status
-/// surface deny it (rule 6).
+/// surface deny it.
 pub(crate) fn recorder() -> Arc<GroundStationRecorder> {
     static RECORDER: OnceLock<Arc<GroundStationRecorder>> = OnceLock::new();
     RECORDER
@@ -107,8 +107,8 @@ pub(crate) fn recorder() -> Arc<GroundStationRecorder> {
 /// ONE derivation, deliberately. The listing route hardcoded `recording: false`
 /// on the stated grounds that the front has no in-process recorder — the same
 /// false justification the status route once carried — so the two surfaces
-/// answered differently about the same capture and one of them was known-false
-/// (rule 6). A second copy of this logic would be the same defect, so both
+/// answered differently about the same capture and one of them was known-false.
+/// A second copy of this logic would be the same defect, so both
 /// routes call THIS.
 ///
 /// Takes the recorder rather than reading the `OnceLock` itself, so the
@@ -119,7 +119,7 @@ pub(crate) fn recorder() -> Arc<GroundStationRecorder> {
 /// The filename is reported ONLY while a capture is in flight. The recorder keeps
 /// `current_path` after a stop (the stop reply needs it), so forwarding it
 /// unconditionally would render the last completed capture as if it were still
-/// running — the same class of frozen reading rule 44 exists to prevent.
+/// running — the same class of frozen reading an honest surface must never show.
 pub(crate) async fn recording_view(recorder: &GroundStationRecorder) -> (bool, Value) {
     if !recorder.is_active().await {
         return (false, Value::Null);

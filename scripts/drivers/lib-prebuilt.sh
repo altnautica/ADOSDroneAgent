@@ -101,6 +101,10 @@ try_prebuilt_install() {
     # installed; the caller falls back to building from source, which is slower
     # but is the same path a board with no prebuilt coverage already takes.
     local allow_unsigned="${ADOS_PREBUILT_ALLOW_UNSIGNED:-0}"
+    # One channel for the manifest and the module: it governs how an
+    # UNVERIFIABLE artifact is treated, and only the development channel
+    # ("edge") tolerates one. Every other value, the default included, is strict.
+    local channel="${ADOS_PREBUILT_CHANNEL:-stable}"
     local pubkey; pubkey="$(_pb_pubkey)"
     local tmp; tmp="$(mktemp -d)" || return 1
 
@@ -113,7 +117,7 @@ try_prebuilt_install() {
         ados_fetch "${base}/drivers-manifest.json.sha256" "${tmp}/drivers-manifest.json.sha256" 15 2>/dev/null || true
         ados_fetch "${base}/drivers-manifest.json.minisig" "${tmp}/drivers-manifest.json.minisig" 15 2>/dev/null || true
         if [ -f "${tmp}/drivers-manifest.json.sha256" ] \
-            && ! ados_verify_artifact "${tmp}/drivers-manifest.json" "${pubkey}" "prebuilt" "${allow_unsigned}"; then
+            && ! ados_verify_artifact "${tmp}/drivers-manifest.json" "${pubkey}" "${channel}" "${allow_unsigned}"; then
             warn "prebuilt manifest failed verification; ignoring it."
         else
             manifest_ok=1
@@ -162,12 +166,9 @@ try_prebuilt_install() {
     fi
     ados_fetch "${base}/${file}.minisig" "${tmp}/${file}.minisig" 15 2>/dev/null || true
 
-    # 4. verify: SHA256 mandatory, signature per the dev/prod posture.
-    # The channel governs how an UNVERIFIABLE artifact is treated. "prebuilt"
-    # matched neither known channel and so used to take the lenient branch by
-    # accident; it is now strict unless the operator asks for the development
-    # channel explicitly.
-    if ! ados_verify_artifact "${tmp}/${file}" "${pubkey}" "${ADOS_PREBUILT_CHANNEL:-stable}" "${allow_unsigned}"; then
+    # 4. verify: SHA256 mandatory, signature per the dev/prod posture, on the
+    # same channel the manifest was verified on.
+    if ! ados_verify_artifact "${tmp}/${file}" "${pubkey}" "${channel}" "${allow_unsigned}"; then
         warn "prebuilt ${file} failed verification; building from source."
         rm -rf "${tmp}"; return 1
     fi

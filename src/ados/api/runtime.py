@@ -306,10 +306,6 @@ class StandaloneApiRuntime:
 
     def _initialize_model_manager(self, log: Any) -> None:
         try:
-            from pathlib import Path
-
-            import yaml
-
             from ados.hal.detect import detect_board
             from ados.services.vision.model_manager import ModelManager
 
@@ -318,20 +314,10 @@ class StandaloneApiRuntime:
             # The board fingerprint sidecar (/run/ados/board.json) is written by
             # the supervisor at startup, in Rust, and has exactly one writer.
             # This process is not it: a second writer of the same document is how
-            # a zero-Python node ended up with no writer at all.
-            board_profile_dict: dict = {}
-            boards_dir = Path(__file__).resolve().parent.parent / "hal" / "boards"
-            if not boards_dir.exists():
-                import ados.hal
-
-                boards_dir = Path(ados.hal.__file__).parent / "boards"
-            for yf in boards_dir.glob("*.yaml"):
-                with open(yf) as f:
-                    data = yaml.safe_load(f) or {}
-                if data.get("name") == board_info.name:
-                    board_profile_dict = data
-                    break
-            npu_tops = board_profile_dict.get("compute", {}).get("npu_tops", 0)
+            # a zero-Python node ended up with no writer at all. The NPU rating
+            # comes from the profile detection resolved (override, compatible
+            # token, variant), never from a second match over the board YAMLs.
+            npu_tops = board_info.npu_tops
             self.model_manager = ModelManager(self.config.vision, npu_tops=npu_tops)
             log.info("model_manager_initialized", board=board_info.name, npu_tops=npu_tops)
         except Exception as e:

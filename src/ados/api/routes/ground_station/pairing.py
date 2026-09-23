@@ -31,6 +31,9 @@ router = APIRouter(prefix="/v1/ground-station", tags=["ground-station"])
 async def post_pair_accept(req: PairAcceptRequest) -> dict[str, Any]:
     """Open the Accept window on a receiver. Idempotent during open window.
 
+    The response carries the window's six-digit `code`. The operator reads
+    it to whoever joins the relay; the relay's join must present it.
+
     Routes through `pairing_facade()` so when `ADOS_PAIRING_VIA_DAEMON=1`
     the call lands in `ados-mesh-pairing.service` and the UDP bind
     survives a REST restart.
@@ -56,12 +59,14 @@ async def post_pair_accept(req: PairAcceptRequest) -> dict[str, Any]:
                 "opened_at_ms": int(result.get("opened_at_ms", 0)),
                 "closes_at_ms": int(result.get("closes_at_ms", 0)),
                 "duration_s": req.duration_s,
+                "code": str(result["code"]),
             }
         window = await mgr.open_window(duration_s=req.duration_s)
         return {
             "opened_at_ms": window.opened_at_ms,
             "closes_at_ms": window.closes_at_ms,
             "duration_s": req.duration_s,
+            "code": window.code,
         }
     except PairingRpcError as exc:
         raise HTTPException(
@@ -173,10 +178,8 @@ async def post_pair_approve(device_id: str) -> dict[str, Any]:
     # In-process path. Build the invite bundle here because the
     # in-process `PairingManager.approve(device_id, bundle)` takes it
     # from the caller rather than reading disk itself.
-    from ados.services.ground_station.pairing_manager import (
-        InviteBundle,
-        get_pairing_manager,
-    )
+    from ados.services.ground_station.invite_crypto import InviteBundle
+    from ados.services.ground_station.pairing_manager import get_pairing_manager
     mgr = get_pairing_manager()
     if not await mgr.is_window_open():
         raise HTTPException(
@@ -244,9 +247,10 @@ async def post_pair_revoke(device_id: str) -> dict[str, Any]:
 async def post_pair_join(req: PairJoinRequest) -> dict[str, Any]:
     """Relay-side: send a join request and wait for the encrypted invite.
 
-    Synchronously runs the ECDH exchange, decrypts the invite, and
-    persists mesh identity to disk. Returns success so the caller can
-    promote the node to `relay` and start mesh services.
+    Synchronously runs the ECDH exchange, decrypts the invite under the
+    receiver's window `code`, and persists mesh identity to disk. Returns
+    success so the caller can promote the node to `relay` and start mesh
+    services.
     """
     _gs._require_ground_profile()
     from ados.services.ground_station.role_manager import get_current_role
@@ -264,6 +268,7 @@ async def post_pair_join(req: PairJoinRequest) -> dict[str, Any]:
         )
     from ados.services.ground_station.pairing_client import request_join
     result = await request_join(
+        code=req.code,
         receiver_host=req.receiver_host,
         receiver_port=req.receiver_port,
     )

@@ -1,5 +1,4 @@
-// Two-stage plugin install dialog. Spec:
-// product/specs/ados-plugin-system/17-ux-install-and-permissions.md
+// Two-stage plugin install dialog.
 //
 //   Stage 1: pre-install summary (orientation, no grants).
 //   Stage 2: permission approval (grants happen here).

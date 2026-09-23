@@ -7,7 +7,7 @@
 //! 192.168.7.1/24 and a single-host `dnsmasq` serves the tethered host. Ports
 //! `usb_gadget.py`.
 //!
-//! The dnsmasq fork goes through [`ManagedProcess`] (setsid + killpg, Rule 37)
+//! The dnsmasq fork goes through [`ManagedProcess`] (setsid + killpg)
 //! so a teardown can never orphan a dnsmasq holding a bound socket on usb0.
 //! Posture: requires root + configfs; off-Linux or unprivileged, the configfs
 //! writes fail cleanly and `setup` returns false without panicking.

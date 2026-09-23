@@ -46,35 +46,23 @@ async def post_factory_reset(
     `factory-reset-unpaired`. This stops a casual curl from bricking a
     live device.
 
-    Authorization is "the request reached this residual app from on-box, or it
-    carries a live captive-portal token", and the fingerprint above is the
-    destructive-action confirmation on top of it.
+    Authorization is "the request reached this residual app from on-box", and
+    the fingerprint above is the destructive-action confirmation on top of it.
 
-    The peer check has to treat "no peer address" as on-box. The native front
-    owns the LAN port and proxies `/api/*` to this app over
+    The peer check treats "no peer address" as on-box. The native front owns
+    the LAN port and proxies `/api/*` to this app over
     `/run/ados/api-internal.sock` after applying its own key/HMAC auth, and a
-    Unix-socket request has `request.client is None`. The gate used to demand a
-    captive token for exactly that case and for every LAN caller, which closed
-    the route permanently: `CaptiveTokenStore.generate()` has no caller
-    anywhere in the tree, so the store is always empty and `consume()` can only
-    ever return False. A ground station therefore had no reachable factory
-    reset at all — and there is no native route serving this path, so nothing
-    else provided one. The captive branch is kept because the hotspot
-    setup-webapp flow is designed around it; it is inert until something mints.
+    Unix-socket request has `request.client is None`. Any other peer is
+    refused.
     """
     _gs._require_ground_profile()
 
     client_host = request.client.host if request.client else None
-    on_box = client_host in (None, "127.0.0.1", "::1")
-    if not on_box:
-        from ados.services.setup_webapp.captive_token import get_captive_token_store
-
-        captive_header = request.headers.get("x-ados-captive-key")
-        if not captive_header or not get_captive_token_store().consume(captive_header):
-            raise HTTPException(
-                status_code=401,
-                detail={"error": {"code": "E_CAPTIVE_TOKEN_INVALID"}},
-            )
+    if client_host not in (None, "127.0.0.1", "::1"):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": {"code": "E_NOT_ON_BOX"}},
+        )
 
     pm = _gs._pair_manager()
 

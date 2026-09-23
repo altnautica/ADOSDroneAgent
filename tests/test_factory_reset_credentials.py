@@ -31,6 +31,10 @@ class TestCanonicalSet:
         assert "dashboard-pin.json" in names, "mints dashboard sessions"
         assert "mcp-token.json" in names, "a scoped bearer the auth edge accepts"
         assert "ap-passphrase" in names, "the access point's WPA2 key"
+        # The bind's shared radio keys sit outside /etc/ados, and the swarm
+        # bus and presence beacon derive the fleet keys from the drone key.
+        assert "drone.key" in names, "the fleet's radio and swarm-bus key"
+        assert "gs.key" in names, "the ground side of the radio keypair"
 
         dirs = {p.name for p in paths.FACTORY_RESET_DIRS}
         assert "secrets" in dirs, "tunnel token, setup token, server API key"

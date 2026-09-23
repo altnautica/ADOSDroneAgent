@@ -75,8 +75,6 @@ from .security import (
     DEFAULT_CORS_ORIGINS,
     ApiSecurityConfig,
     SecurityConfig,
-    TlsConfig,
-    WireguardConfig,
 )
 from .system import (
     DiscoveryConfig,
@@ -131,8 +129,6 @@ __all__ = [
     "ApiSecurityConfig",
     "DEFAULT_CORS_ORIGINS",
     "SecurityConfig",
-    "TlsConfig",
-    "WireguardConfig",
     # system
     "DiscoveryConfig",
     "LoggingConfig",

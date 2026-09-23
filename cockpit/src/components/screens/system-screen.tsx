@@ -104,6 +104,10 @@ export function SystemScreen() {
   );
 
   const [restarting, setRestarting] = useState<string | null>(null);
+  // The restart route answers HTTP 200 for every outcome and carries the
+  // verdict in `status`; a refused or unconfirmed restart is shown here until
+  // the next restart attempt.
+  const [restartError, setRestartError] = useState<string | null>(null);
   const [recordBusy, setRecordBusy] = useState(false);
 
   const r = sys.data;
@@ -116,10 +120,17 @@ export function SystemScreen() {
   const restartService = async (name: string) => {
     if (restarting) return;
     setRestarting(name);
+    setRestartError(null);
     try {
-      await apiFetch(`/api/services/${encodeURIComponent(name)}/restart`, { method: "POST", body: {} });
-    } catch {
-      // the next services poll reflects the real unit state.
+      const res = await apiFetch<{ status?: string; message?: string }>(
+        `/api/services/${encodeURIComponent(name)}/restart`,
+        { method: "POST", body: {} },
+      );
+      if (res.status !== "ok") {
+        setRestartError(`${shortName(name)} not restarted: ${res.message ?? "the agent refused"}`);
+      }
+    } catch (err) {
+      setRestartError(`${shortName(name)} not restarted: ${err instanceof Error ? err.message : "request failed"}`);
     } finally {
       setRestarting(null);
       services.refresh();
@@ -207,6 +218,7 @@ export function SystemScreen() {
         <SectionHeader>
           Services{services.data?.systemd_available === false ? " (systemd unavailable)" : ""}
         </SectionHeader>
+        {restartError ? <div className="truncate text-[0.7rem] text-err">{restartError}</div> : null}
         {svcList.length ? (
           svcList.map((s) => (
             <div key={s.name} className="flex items-center gap-[0.5rem] rounded-md bg-input/30 px-[0.6rem] py-[0.3rem]">

@@ -6,7 +6,7 @@
 //! `bearer_acceptable` into [`crate`]'s tier decision, so an NPU-less drone with
 //! a reachable workstation reports (and runs) tier `offload` instead of the
 //! hardcoded "no node" default. Absent / stale ⇒ no offload link ⇒ the drone
-//! reports `none` (honest, operating rule 44 — never a fabricated paired node).
+//! reports `none` (honest: never a fabricated paired node).
 //!
 //! Producer: the `ados-cloud` offload reconciler. Consumers: `ados-control`
 //! (`/api/status`) and `ados-cloud` (the cloud heartbeat). Single writer, many
@@ -24,7 +24,7 @@ pub const OFFLOAD_LINK_SIDECAR_VERSION: u16 = 1;
 
 /// A link file not re-written within this window is treated as absent, so a dead
 /// / hung reconciler (whose tmpfs file persists) never keeps a drone reporting a
-/// frozen `offload` tier after the workstation is gone (operating rule 44). 4x
+/// frozen `offload` tier after the workstation is gone. 4x
 /// the reconciler's ~5 s tick.
 pub const OFFLOAD_LINK_STALE_MS: i64 = 20_000;
 

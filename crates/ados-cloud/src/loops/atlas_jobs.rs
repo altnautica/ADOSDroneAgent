@@ -4,7 +4,7 @@
 //! sidecar (`/run/ados/compute-jobs.json`); this loop reads it and POSTs each job
 //! to `{convex}/agent/atlas-jobs` so Mission Control's `cmd_atlasJobs` mirrors the
 //! node's world models. The GCS World Model tab reads the reconstruction
-//! LOCAL-FIRST off the compute node over the LAN (Rule 39); this cloud sync is the
+//! LOCAL-FIRST off the compute node over the LAN; this cloud sync is the
 //! secondary/remote path.
 //!
 //! INERT by default: the loop no-ops unless the node is paired AND a cloud posture
@@ -29,7 +29,7 @@ const COMPUTE_JOBS_FILE: &str = "compute-jobs.json";
 
 /// A sidecar not re-written within this window is treated as absent, so a
 /// dead/hung `ados-compute` (whose tmpfs file persists) never makes the relay
-/// forward frozen job state forever (operating rule 44). 4x the producer's 5 s
+/// forward frozen job state forever. 4x the producer's 5 s
 /// write cadence.
 const COMPUTE_JOBS_STALE_MS: i64 = 20_000;
 

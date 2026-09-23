@@ -1676,27 +1676,29 @@ mod liveness_tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_fc_reconnect_retries_on_a_flat_interval_with_no_attempt_cap() {
-        // ROUTER-FC-RECONNECT-BACKOFF regression. This is the sole C2 path with
+        // This is the sole C2 path with
         // no packaged fallback, so the retry must be flat: the old ladder walked
         // 1→2→4→8→16→30 s (and never reset for a port that opens but never
         // accepts a write), leaving a drone up to half a minute with no FC link
         // after a replug or a brownout.
         //
         // A real listener that accepts and immediately drops each connection
-        // turns every reconnect attempt into one countable accept, so the shape
-        // of the retry is measured rather than asserted about a constant.
+        // turns every reconnect attempt into one accept, stamped with the paused
+        // clock. The test awaits each accept in turn instead of counting after a
+        // fixed number of yields, so the result does not depend on how the
+        // scheduler interleaves the loopback I/O with the clock.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener bind");
         let addr = listener.local_addr().expect("listener addr");
-        let accepts = std::sync::Arc::new(AtomicUsize::new(0));
-        let accept_counter = accepts.clone();
+        let (accepted_tx, mut accepted) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
             // Drop each peer immediately: the router sees EOF, tears the
-            // session down and re-opens after the fixed interval. The loop ends
-            // when `accept` errors, which is how the test closes the listener.
+            // session down and re-opens after the fixed interval.
             while let Ok((peer, _)) = listener.accept().await {
-                accept_counter.fetch_add(1, Ordering::Relaxed);
+                if accepted_tx.send(tokio::time::Instant::now()).is_err() {
+                    return;
+                }
                 drop(peer);
             }
         });
@@ -1709,26 +1711,33 @@ mod liveness_tests {
         let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
         let run_conn = c.clone();
         let run_cancel = cancel.clone();
-        tokio::spawn(async move { run_conn.run(run_cancel).await });
+        let mut run_task = tokio::spawn(async move { run_conn.run(run_cancel).await });
 
-        // Drive 40 retry intervals of simulated time. A flat 3 s interval gives
-        // ~40 attempts; the old doubling ladder would have spent the same 120 s
-        // on about six.
-        const CYCLES: usize = 40;
-        for _ in 0..CYCLES {
-            tokio::time::advance(RECONNECT_INTERVAL).await;
-            for _ in 0..8 {
-                tokio::task::yield_now().await;
+        // The only timer in play is the reconnect sleep, so the paused clock
+        // auto-advances by exactly one interval between consecutive accepts. A
+        // doubling ladder would stretch the later gaps, and an attempt cap would
+        // end the run task before the attempts below were all seen.
+        const ATTEMPTS: usize = 12;
+        let mut stamps = Vec::with_capacity(ATTEMPTS);
+        while stamps.len() < ATTEMPTS {
+            tokio::select! {
+                at = accepted.recv() => stamps.push(at.expect("the listener stays up")),
+                _ = &mut run_task => panic!(
+                    "the reconnect loop stopped after {} attempts",
+                    stamps.len()
+                ),
             }
         }
         cancel.notify_waiters();
 
-        let seen = accepts.load(Ordering::Relaxed);
-        assert!(
-            seen >= CYCLES / 2,
-            "the reconnect must retry on a flat interval with no cap: \
-             {seen} attempts across {CYCLES} intervals"
-        );
+        for (i, pair) in stamps.windows(2).enumerate() {
+            let gap = pair[1] - pair[0];
+            assert!(
+                gap >= RECONNECT_INTERVAL && gap < RECONNECT_INTERVAL * 2,
+                "retry {} came {gap:?} after the previous one; the interval must stay flat",
+                i + 1
+            );
+        }
         // And the interval itself stays inside the fixed recovery band.
         assert!(RECONNECT_INTERVAL >= Duration::from_secs(2));
         assert!(RECONNECT_INTERVAL <= Duration::from_secs(5));

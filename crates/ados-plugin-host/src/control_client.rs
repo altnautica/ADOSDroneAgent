@@ -51,14 +51,25 @@ pub fn reconcile(control_dir: &Path) -> Result<(), String> {
 }
 
 /// Ask the daemon to re-mint `plugin_id`'s capability token from the current
-/// grant set and push it into the plugin's live session.
-pub fn rotate_token(control_dir: &Path, plugin_id: &str) -> Result<(), String> {
-    request(
+/// grant set and push it into the plugin's live session. `Ok(true)` when a live
+/// session received the new token; `Ok(false)` when it was re-minted to the env
+/// file only (no session open, or the session's refresh queue was full, in which
+/// case the reconciler's grant-set comparison re-pushes it on its next pass).
+pub fn rotate_token(control_dir: &Path, plugin_id: &str) -> Result<bool, String> {
+    let args = request(
         control_dir,
         METHOD_TOKEN_ROTATE,
         Value::Map(vec![(Value::from("plugin_id"), Value::from(plugin_id))]),
-    )
-    .map(|_| ())
+    )?;
+    let delivered = match &args {
+        Value::Map(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("delivered"))
+            .and_then(|(_, v)| v.as_bool())
+            .unwrap_or(false),
+        _ => false,
+    };
+    Ok(delivered)
 }
 
 /// One request/response round trip. Returns the response args on success.

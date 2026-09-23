@@ -1279,7 +1279,7 @@ mod tests {
     fn opening_a_legacy_store_never_rewrites_it_but_the_periodic_vacuum_converts_it() {
         // The regression, found on a real node: converting inside `db::open`
         // put a ~950 MB whole-file rewrite in front of daemon readiness. The
-        // unit is Type=notify with TimeoutStartSec=5min and Restart=on-failure,
+        // unit is Type=notify with TimeoutStartSec=5min and Restart=always,
         // so it sat in `activating` growing a 955 MB WAL and was minutes from
         // being killed mid-rewrite and restarted into the same rewrite — a
         // crash loop that tears the store, which is the exact failure this whole

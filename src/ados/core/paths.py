@@ -198,6 +198,12 @@ WFB_FAILOVER_STATE_JSON = ADOS_RUN_DIR / "wfb_failover.json"
 # as unavailable.
 PLUGIN_LOOPBACK_GUARD_JSON = ADOS_RUN_DIR / "plugin-loopback-guard.json"
 
+# Capabilities the running plugin host cannot back (``{"caps": [str, ...]}``).
+# Written by the plugin-host daemon at startup; every method such a capability
+# gates answers ``not_implemented`` on this host, so a grant is refused rather
+# than handed out to fail at call time. Absent reads as an empty set.
+PLUGIN_UNGRANTABLE_CAPS_JSON = ADOS_RUN_DIR / "plugin-ungrantable-caps.json"
+
 # Sentinel files
 UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
 
@@ -264,7 +270,6 @@ TUNNEL_ENABLED_PATH = ADOS_ETC_DIR / "tunnel-enabled"
 # itself gate the DHCP/DNS unit. Reconciled by the config persist path and by
 # the installer, never hand-managed.
 HOTSPOT_ENABLED_PATH = ADOS_ETC_DIR / "hotspot-enabled"
-FIREWALL_RULES_PATH = ADOS_ETC_DIR / "firewall.rules"
 AP_PASSPHRASE_PATH = ADOS_ETC_DIR / "ap-passphrase"
 
 # Touchscreen calibration matrix saved by the LCD calibration wizard.
@@ -304,14 +309,12 @@ PERIPHERALS_GLOB = "/etc/ados/peripherals/*.yaml"
 PLUGIN_KEYS_DIR = ADOS_ETC_DIR / "plugin-keys"
 PLUGIN_REVOCATIONS_PATH = ADOS_ETC_DIR / "plugin-revocations.json"
 PLUGIN_RUN_DIR = ADOS_RUN_DIR / "plugins"
+# A plugin's host socket lives alone in its own directory under PLUGIN_RUN_DIR
+# (``<PLUGIN_RUN_DIR>/<id>/host.sock``): that directory is the one path under
+# the agent run dir the plugin's unit binds back into its mount namespace.
+PLUGIN_SOCKET_NAME = "host.sock"
 PLUGIN_UNIT_DIR = Path("/etc/systemd/system")
 PLUGIN_UNIT_PREFIX = "ados-plugin-"
-
-# TLS certificates
-CERTS_DIR = ADOS_ETC_DIR / "certs"
-DEVICE_CERT_PATH = CERTS_DIR / "device.crt"
-DEVICE_KEY_PATH = CERTS_DIR / "device.key"
-CA_CERT_PATH = CERTS_DIR / "ca.crt"
 
 # Mesh
 MESH_DIR = ADOS_ETC_DIR / "mesh"
@@ -325,6 +328,11 @@ MESH_REVOCATIONS_JSON = MESH_DIR / "revocations.json"
 # WFB-ng key material
 WFB_KEY_DIR = ADOS_ETC_DIR / "wfb"
 WFB_RX_KEY_PATH = WFB_KEY_DIR / "rx.key"
+# The shared radio keys the bind writes where wfb-ng itself reads them. The
+# swarm bus and the presence beacon derive the fleet and beacon keys from the
+# drone key, so a factory reset must remove both.
+WFB_BIND_DRONE_KEY_PATH = Path("/etc/drone.key")
+WFB_BIND_GS_KEY_PATH = Path("/etc/gs.key")
 
 # ---------------------------------------------------------------------------
 # Data directory: /var/ados/
@@ -453,6 +461,8 @@ FACTORY_RESET_FILES: tuple[Path, ...] = (
     DASHBOARD_PIN_PATH,
     MCP_TOKEN_PATH,
     AP_PASSPHRASE_PATH,
+    WFB_BIND_DRONE_KEY_PATH,
+    WFB_BIND_GS_KEY_PATH,
     SETUP_COMPLETE_PATH,
     # Identity and configuration, after the credentials.
     DEVICE_ID_PATH,

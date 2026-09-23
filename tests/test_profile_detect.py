@@ -432,7 +432,7 @@ def test_rtl8812_matches_canonical_pid(monkeypatch) -> None:
 
 
 def test_rtl8812_matches_pid_a81a(monkeypatch) -> None:
-    """Bench dev rig: groundnode's Realtek '802.11ac NIC' exposes
+    """Bench dev rig: a Realtek '802.11ac NIC' that exposes
     ``0bda:a81a``. Same monitor-mode driver works; probe should score
     the adapter so the install-time profile decision isn't reduced to
     a hostname tiebreak."""
@@ -465,8 +465,8 @@ def test_rtl8812_ignores_unrelated_realtek_pid(monkeypatch) -> None:
 # ---- Hostname is a soft tiebreaker, not a hardware override ---------------
 
 
-def test_fc_with_matched_vid_outweighs_groundnode_hostname(monkeypatch) -> None:
-    """The motivating fix: a Rock 5C named ``groundnode`` with an FC
+def test_fc_with_matched_vid_outweighs_ground_station_hostname(monkeypatch) -> None:
+    """The motivating fix: a Rock 5C named ``gs-example`` with an FC
     plugged in (pid.codes VID) and a WFB-ng dongle should auto-detect
     as ``drone`` because hardware reality (FC + matched VID) carries
     more weight than the stale hostname."""
@@ -489,7 +489,7 @@ def test_fc_with_matched_vid_outweighs_groundnode_hostname(monkeypatch) -> None:
 
 def test_hostname_still_resolves_genuine_ground_station(monkeypatch) -> None:
     """Regression: a ground-station rig with no FC, OLED + buttons +
-    WFB dongle + hostname ``groundnode`` still resolves to
+    WFB dongle + hostname ``gs-example`` still resolves to
     ``ground_station`` — hostname weight stays meaningful when the
     hardware signal is itself low."""
     _stub_probes(
@@ -511,7 +511,7 @@ def test_hostname_still_resolves_genuine_ground_station(monkeypatch) -> None:
 
 
 def test_hostname_tiebreak_when_hardware_is_silent(monkeypatch) -> None:
-    """No hardware probes fire; hostname ``groundnode`` still pushes
+    """No hardware probes fire; hostname ``gs-example`` still pushes
     the result toward ground_station via the +2 weight."""
     _stub_probes(monkeypatch)  # everything zero
     monkeypatch.setattr(

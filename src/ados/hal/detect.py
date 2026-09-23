@@ -256,7 +256,7 @@ class ComputeSection(BaseModel):
     # Whether this board can run the detector locally WITHOUT an NPU, on the CPU
     # via the in-process ONNX backend. "none" (default) = no CPU-inference path;
     # "onnx" = a CPU strong enough for the ONNX detector (declared only on boards
-    # where it is genuinely usable, per Rule 44). Drives the perception tier
+    # where it is genuinely usable). Drives the perception tier
     # (a capable board reads `local`) and the installer's vision-binary variant
     # selection (a capable board fetches the onnx-enabled ados-vision build).
     local_inference: Literal["none", "onnx"] = "none"

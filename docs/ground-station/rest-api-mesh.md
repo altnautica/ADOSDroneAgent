@@ -172,7 +172,7 @@ Receiver only. Post-FEC-combine output stream stats: kbit/s, fraction of packets
 
 ### POST /pair/accept
 
-Receiver only. Open a pairing accept window. Body: `{"duration_s": 60}`.
+Receiver only. Open a pairing accept window. Body: `{"duration_s": 60}`. The response carries the window's six-digit join `code`; a relay's join must present it.
 
 ```
 POST /api/v1/ground-station/pair/accept
@@ -182,7 +182,8 @@ POST /api/v1/ground-station/pair/accept
 {
   "opened_at_ms": 1713339123000,
   "closes_at_ms": 1713339183000,
-  "duration_s": 60
+  "duration_s": 60,
+  "code": "482910"
 }
 ```
 
@@ -192,26 +193,26 @@ Receiver only. Close the accept window immediately.
 
 ### GET /pair/pending
 
-Receiver only. Pending invite requests that have not yet been approved.
+Receiver only. The open window, its join code, and the relay requests that have not yet been approved. With no window open the body is `{"open": false}`.
 
 ```
 GET /api/v1/ground-station/pair/pending
 200 OK
 {
-  "window": {
-    "open": true,
-    "opened_at_ms": 1713339123000,
-    "closes_at_ms": 1713339183000
-  },
+  "open": true,
+  "opened_at_ms": 1713339123000,
+  "closes_at_ms": 1713339183000,
   "pending": [
     {"device_id": "ados-1a2b3c", "remote_ip": "10.20.0.14", "received_at_ms": 1713339130000}
-  ]
+  ],
+  "approvals": {},
+  "code": "482910"
 }
 ```
 
 ### POST /pair/approve/{device_id}
 
-Receiver only. Admit the specified pending relay. The receiver derives a session key via X25519 ECDH against the relay's pubkey, builds the invite bundle (mesh id, PSK, drone WFB-ng rx key, receiver mDNS host and port, TTL), ChaCha20-Poly1305-seals it, and sends it to the relay on UDP 5801. The transmission is sent twice with a 100 ms gap to survive a single dropped packet.
+Receiver only. Admit the specified pending relay. The receiver derives a session key via X25519 ECDH against the relay's pubkey, bound to the window's join code, builds the invite bundle (mesh id, PSK, drone WFB-ng rx key, receiver mDNS host and port, TTL), ChaCha20-Poly1305-seals it, and sends it to the relay on UDP 5801. The transmission is sent twice with a 100 ms gap to survive a single dropped packet.
 
 ```
 POST /api/v1/ground-station/pair/approve/ados-1a2b3c
@@ -225,15 +226,19 @@ Receiver only. Add the device to `/etc/ados/mesh/revocations.json`. Future invit
 
 ### POST /pair/join
 
-Relay only. Send an invite request to a receiver. Body: `{"receiver_host": "<ip>", "receiver_port": 5801}`. With an empty body, the relay resolves `_ados-receiver._tcp` over mDNS on `bat0` and picks the first result.
+Relay only. Send an invite request to a receiver and wait for the invite. Body: `{"code": "<six digits>", "receiver_host": "<ip>", "receiver_port": 5801}`; `code` is required, the other two are optional. Without `receiver_host`, the relay resolves `_ados-receiver._tcp` over mDNS on `bat0` and picks the first result, falling back to broadcast.
+
+The invite only opens under the code the receiver shows, so a node that heard the join request cannot answer it. A unicast join takes replies only from the resolved receiver address. After five replies that do not open, the join fails with `E_INVITE_REJECTED`.
 
 ```
 POST /api/v1/ground-station/pair/join
-{"receiver_host": "10.20.0.1", "receiver_port": 5801}
+{"code": "482910", "receiver_host": "10.20.0.1", "receiver_port": 5801}
 
 200 OK
-{"sent_at_ms": 1713339131000}
+{"mesh_id": "ados-abc123def4", "receiver_host": "gs-recv.local", "ok": true}
 ```
+
+Failures answer `503` with `detail.error.code` one of `E_BAD_CODE`, `E_MESH_IFACE_DOWN`, `E_BIND_FAILED`, `E_JOIN_TIMEOUT` or `E_INVITE_REJECTED`. A body without a six-digit `code` answers `422`.
 
 ## Error codes
 

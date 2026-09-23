@@ -12,9 +12,9 @@
 //! 1. The API-key gate: the exempt set, the OPTIONS bypass, on-box trust, the
 //!    cloud-posture setup routes, the setup-mutation routes, the unpaired-open
 //!    pass, and the paired `X-ADOS-Key` requirement.
-//! 2. The HMAC/replay gate: a request signature over the timestamp + body, plus
-//!    a nonce/timestamp replay window, applied to mutating methods when HMAC is
-//!    enabled.
+//! 2. The HMAC/replay gate: a request signature over the method, the request
+//!    target, the nonce, the timestamp and the body, plus a nonce/timestamp
+//!    replay window, applied to mutating methods when HMAC is enabled.
 //!
 //! Status codes, body shapes, and message strings are preserved byte-for-byte
 //! from the predecessor middlewares so a GCS that surfaces the rejection body
@@ -393,14 +393,17 @@ impl ProxiedAuth {
         }
     }
 
-    /// The HMAC/replay gate (`SecurityMiddleware.dispatch`), run after the
-    /// API-key gate accepts. `body` is the buffered request body the caller read
-    /// (only read when [`hmac_needs_body`] is true). Returns `Accept` to forward
-    /// or a `Reject` with the exact Python status + `{"error"}` body.
+    /// The HMAC/replay gate, run after the API-key gate accepts. `path` is the
+    /// normalized decision path and `query` the raw query string, together the
+    /// request target the signature covers. `body` is the buffered request body
+    /// the caller read (only read when [`Self::hmac_needs_body`] is true).
+    /// Returns `Accept` to forward or a `Reject` with the status + `{"error"}`
+    /// body.
     pub fn decide_hmac(
         &self,
         method: &Method,
         path: &str,
+        query: Option<&str>,
         headers: &RequestHeaders,
         body: &[u8],
     ) -> Decision {
@@ -447,8 +450,16 @@ impl ProxiedAuth {
         if !self.replay.check(timestamp, nonce) {
             return reject(StatusCode::FORBIDDEN, BodyField::Error, messages::REPLAY);
         }
-        // Verify the signature over (be_f64(ts) || body) → 401 on mismatch.
-        if !verify_hmac(self.config.hmac_secret.as_bytes(), timestamp, body, sig) {
+        // Verify the signature over the whole request identity → 401 on mismatch.
+        let signed = SignedRequest {
+            method: method.as_str(),
+            path,
+            query,
+            nonce,
+            timestamp,
+            body,
+        };
+        if !verify_hmac(self.config.hmac_secret.as_bytes(), &signed, sig) {
             return reject(
                 StatusCode::UNAUTHORIZED,
                 BodyField::Error,
@@ -644,19 +655,50 @@ fn parse_hostname(url: &str) -> Option<String> {
     }
 }
 
-/// Verify a hex HMAC signature over `be_f64(timestamp) || body`. Mirrors
-/// `HmacSigner.sign`/`verify`: the message is the big-endian IEEE-754 double of
-/// the timestamp followed by the raw body, the signature is the lowercase hex of
-/// HMAC-SHA256, compared constant-time.
-fn verify_hmac(secret: &[u8], timestamp: f64, body: &[u8], presented_hex: &str) -> bool {
+/// The parts of a request the HMAC signature covers.
+#[derive(Clone, Copy)]
+pub(crate) struct SignedRequest<'a> {
+    pub method: &'a str,
+    /// The normalized decision path.
+    pub path: &'a str,
+    /// The raw query string, without the `?`.
+    pub query: Option<&'a str>,
+    pub nonce: &'a str,
+    pub timestamp: f64,
+    pub body: &'a [u8],
+}
+
+impl SignedRequest<'_> {
+    /// The signed message: `METHOD \n path[?query] \n nonce \n be_f64(ts) ||
+    /// body`. The method, target and nonce are bound as well as the body: a
+    /// signature over the timestamp and body alone could be replayed with a
+    /// fresh nonce against any other route taking the same body.
+    fn feed(&self, mac: &mut HmacSha256) {
+        mac.update(self.method.as_bytes());
+        mac.update(b"\n");
+        mac.update(self.path.as_bytes());
+        if let Some(q) = self.query {
+            mac.update(b"?");
+            mac.update(q.as_bytes());
+        }
+        mac.update(b"\n");
+        mac.update(self.nonce.as_bytes());
+        mac.update(b"\n");
+        mac.update(&self.timestamp.to_be_bytes());
+        mac.update(self.body);
+    }
+}
+
+/// Verify a hex HMAC-SHA256 signature over [`SignedRequest::feed`]'s message,
+/// compared constant-time on the lowercase hex.
+fn verify_hmac(secret: &[u8], signed: &SignedRequest<'_>, presented_hex: &str) -> bool {
     let mut mac = match HmacSha256::new_from_slice(secret) {
         Ok(m) => m,
         // The caller only reaches here when the secret is >= 16 bytes, so a key
         // error cannot happen; reject defensively if it ever did.
         Err(_) => return false,
     };
-    mac.update(&timestamp.to_be_bytes());
-    mac.update(body);
+    signed.feed(&mut mac);
     let expected = mac.finalize().into_bytes();
     let expected_hex = hex::encode(expected);
     // Compare the hex strings constant-time, mirroring Python's
@@ -1240,8 +1282,22 @@ mod tests {
         )
     }
 
-    fn sign(secret: &str, timestamp: f64, body: &[u8]) -> String {
+    /// Sign a `POST /api/command` the way a client must: method, target,
+    /// nonce, timestamp and body.
+    fn sign(secret: &str, nonce: &str, timestamp: f64, body: &[u8]) -> String {
+        sign_for(secret, "POST", "/api/command", nonce, timestamp, body)
+    }
+
+    fn sign_for(
+        secret: &str,
+        method: &str,
+        path: &str,
+        nonce: &str,
+        timestamp: f64,
+        body: &[u8],
+    ) -> String {
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(format!("{method}\n{path}\n{nonce}\n").as_bytes());
         mac.update(&timestamp.to_be_bytes());
         mac.update(body);
         hex::encode(mac.finalize().into_bytes())
@@ -1267,6 +1323,7 @@ mod tests {
             a.decide_hmac(
                 &Method::POST,
                 "/api/command",
+                None,
                 &RequestHeaders::default(),
                 b"{}"
             ),
@@ -1280,7 +1337,13 @@ mod tests {
         assert!(auth.hmac_active());
         // GET is not verified.
         assert_eq!(
-            auth.decide_hmac(&Method::GET, "/api/status", &RequestHeaders::default(), b""),
+            auth.decide_hmac(
+                &Method::GET,
+                "/api/status",
+                None,
+                &RequestHeaders::default(),
+                b""
+            ),
             Decision::Accept
         );
         // An HMAC-exempt route.
@@ -1288,6 +1351,7 @@ mod tests {
             auth.decide_hmac(
                 &Method::POST,
                 "/api/pairing/claim",
+                None,
                 &RequestHeaders::default(),
                 b"{}"
             ),
@@ -1298,6 +1362,7 @@ mod tests {
             auth.decide_hmac(
                 &Method::POST,
                 "/api/pairing/whatever",
+                None,
                 &RequestHeaders::default(),
                 b"{}"
             ),
@@ -1316,6 +1381,7 @@ mod tests {
             auth.decide_hmac(
                 &Method::POST,
                 "/api/command",
+                None,
                 &RequestHeaders::default(),
                 b"{}"
             ),
@@ -1337,7 +1403,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            auth.decide_hmac(&Method::POST, "/api/command", &headers, b"{}"),
+            auth.decide_hmac(&Method::POST, "/api/command", None, &headers, b"{}"),
             reject(
                 StatusCode::UNAUTHORIZED,
                 BodyField::Error,
@@ -1353,7 +1419,7 @@ mod tests {
         // A timestamp far outside the 300s window.
         let ts = unix_now() - 10_000.0;
         let body = b"{\"cmd\":\"arm\"}";
-        let sig = sign(secret, ts, body);
+        let sig = sign(secret, "n-expired", ts, body);
         let headers = RequestHeaders {
             x_timestamp: Some(format!("{ts}")),
             x_nonce: Some("n-expired".to_string()),
@@ -1361,7 +1427,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            auth.decide_hmac(&Method::POST, "/api/command", &headers, body),
+            auth.decide_hmac(&Method::POST, "/api/command", None, &headers, body),
             reject(StatusCode::FORBIDDEN, BodyField::Error, messages::REPLAY),
         );
     }
@@ -1372,7 +1438,7 @@ mod tests {
         let auth = hmac_auth(secret);
         let ts = unix_now();
         let body = b"{\"cmd\":\"land\"}";
-        let sig = sign(secret, ts, body);
+        let sig = sign(secret, "dup-nonce", ts, body);
         let headers = RequestHeaders {
             x_timestamp: Some(format!("{ts}")),
             x_nonce: Some("dup-nonce".to_string()),
@@ -1381,12 +1447,12 @@ mod tests {
         };
         // First passes.
         assert_eq!(
-            auth.decide_hmac(&Method::POST, "/api/command", &headers, body),
+            auth.decide_hmac(&Method::POST, "/api/command", None, &headers, body),
             Decision::Accept
         );
         // The replay of the same nonce is rejected.
         assert_eq!(
-            auth.decide_hmac(&Method::POST, "/api/command", &headers, body),
+            auth.decide_hmac(&Method::POST, "/api/command", None, &headers, body),
             reject(StatusCode::FORBIDDEN, BodyField::Error, messages::REPLAY),
         );
     }
@@ -1403,7 +1469,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            auth.decide_hmac(&Method::POST, "/api/command", &headers, b"{}"),
+            auth.decide_hmac(&Method::POST, "/api/command", None, &headers, b"{}"),
             reject(
                 StatusCode::UNAUTHORIZED,
                 BodyField::Error,
@@ -1418,7 +1484,7 @@ mod tests {
         let auth = hmac_auth(secret);
         let ts = unix_now();
         let body = b"{\"cmd\":\"takeoff\",\"alt\":10}";
-        let sig = sign(secret, ts, body);
+        let sig = sign(secret, "n-valid", ts, body);
         let headers = RequestHeaders {
             x_timestamp: Some(format!("{ts}")),
             x_nonce: Some("n-valid".to_string()),
@@ -1426,40 +1492,63 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            auth.decide_hmac(&Method::POST, "/api/command", &headers, body),
+            auth.decide_hmac(&Method::POST, "/api/command", None, &headers, body),
             Decision::Accept
         );
     }
 
     #[test]
-    fn hmac_wire_format_is_be_f64_then_body() {
-        // Lock the exact wire format against a hand-checked vector: the message
-        // is the 8-byte big-endian IEEE-754 double of the timestamp followed by
-        // the raw body. A signature computed exactly that way verifies; one over
-        // little-endian or body-first does not.
+    fn hmac_wire_format_binds_method_target_nonce_timestamp_and_body() {
+        // Lock the exact wire format against a hand-built vector:
+        // `METHOD \n path?query \n nonce \n be_f64(ts) || body`.
         let secret = b"a-long-enough-secret-key";
         let ts: f64 = 1_700_000_000.5;
         let body = b"payload-bytes";
+        let signed = SignedRequest {
+            method: "POST",
+            path: "/api/command",
+            query: Some("force=1"),
+            nonce: "n-1",
+            timestamp: ts,
+            body,
+        };
 
-        let mut be = HmacSha256::new_from_slice(secret).unwrap();
-        be.update(&ts.to_be_bytes());
-        be.update(body);
-        let be_hex = hex::encode(be.finalize().into_bytes());
-        assert!(verify_hmac(secret, ts, body, &be_hex));
+        let mut mac = HmacSha256::new_from_slice(secret).unwrap();
+        mac.update(b"POST\n/api/command?force=1\nn-1\n");
+        mac.update(&ts.to_be_bytes());
+        mac.update(body);
+        let good = hex::encode(mac.finalize().into_bytes());
+        assert!(verify_hmac(secret, &signed, &good));
 
-        // Little-endian timestamp bytes must NOT verify.
-        let mut le = HmacSha256::new_from_slice(secret).unwrap();
-        le.update(&ts.to_le_bytes());
-        le.update(body);
-        let le_hex = hex::encode(le.finalize().into_bytes());
-        assert!(!verify_hmac(secret, ts, body, &le_hex));
+        // The same signature does not carry to another route, method, query or
+        // nonce: a captured request cannot be re-aimed with a fresh nonce.
+        for other in [
+            SignedRequest {
+                path: "/api/config",
+                ..signed
+            },
+            SignedRequest {
+                method: "PUT",
+                ..signed
+            },
+            SignedRequest {
+                query: None,
+                ..signed
+            },
+            SignedRequest {
+                nonce: "n-2",
+                ..signed
+            },
+        ] {
+            assert!(!verify_hmac(secret, &other, &good));
+        }
 
-        // Body-before-timestamp must NOT verify.
-        let mut swapped = HmacSha256::new_from_slice(secret).unwrap();
-        swapped.update(body);
-        swapped.update(&ts.to_be_bytes());
-        let swapped_hex = hex::encode(swapped.finalize().into_bytes());
-        assert!(!verify_hmac(secret, ts, body, &swapped_hex));
+        // The old timestamp-and-body-only signature no longer verifies.
+        let mut old = HmacSha256::new_from_slice(secret).unwrap();
+        old.update(&ts.to_be_bytes());
+        old.update(body);
+        let old_hex = hex::encode(old.finalize().into_bytes());
+        assert!(!verify_hmac(secret, &signed, &old_hex));
     }
 
     #[test]

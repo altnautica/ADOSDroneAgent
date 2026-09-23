@@ -717,7 +717,7 @@ fn install_plugin_tmpfiles(source: Option<&Path>) {
     const DEST: &str = "/etc/tmpfiles.d/ados-plugins.conf";
     let inline = "# ADOS plugin runtime sockets and runtime state\n\
 d /run/ados/plugins 0750 ados ados -\n\
-r! /run/ados/plugins/*.sock\n";
+r! /run/ados/plugins/*/host.sock\n";
 
     let wrote = source
         .map(|s| s.join("etc/tmpfiles.d/ados-plugins.conf"))
@@ -1209,14 +1209,15 @@ fn reconcile_logd_unit() {
     }
 }
 
-/// Reconcile the native control surface unit against its opt-in marker. The
-/// surface is OFF by default (the GCS uses the FastAPI surface on :8080), so a
-/// fresh box writes no marker and the unit stays disabled — the binary is still
-/// fetched + placed so `ados rust enable control` works on demand. The marker
-/// (`control-rust-enabled`) is written by `ados rust enable control` and removed
-/// by `ados rust disable control`; the next install pins the unit to match.
-/// Idempotent; runs on every install so a partial state self-heals. The START
-/// half is the start step's job (the unit is PartOf the supervisor).
+/// Reconcile the native control surface unit against its markers. The surface
+/// is the LAN front by default: `ensure_front_default_on` writes
+/// `front-rust-enabled` on every install, so the unit is enabled and owns :8080.
+/// `control-rust-enabled` (written by `ados rust enable control`) runs it on the
+/// alternate LAN port beside the Python API. With neither marker (the front
+/// marker removed for a debug session) the unit is disabled until the next
+/// install restores the default. Idempotent; runs on every install so a partial
+/// state self-heals. The START half is the start step's job (the unit is PartOf
+/// the supervisor).
 fn reconcile_control_unit() {
     const UNIT: &str = "ados-control.service";
     // Either marker selects the native control surface: `control-rust-enabled`

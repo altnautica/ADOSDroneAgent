@@ -7,7 +7,7 @@
 //! status OLED coexists with the HDMI cockpit, so it runs whenever an OLED
 //! answers on the I2C bus, regardless of what the main display surface is.
 //!
-//! Auto-skip (Rule 26): if I2C is not enabled (`/dev/i2c-<bus>` absent) or no
+//! Auto-skip: if I2C is not enabled (`/dev/i2c-<bus>` absent) or no
 //! device acknowledges at the configured address, the service logs the reason
 //! and exits cleanly (rc 0) — a board with no OLED never churns.
 //!
@@ -63,7 +63,7 @@ fn controller_from_env() -> Controller {
 /// we honour exactly that; otherwise we auto-probe the two addresses these OLED
 /// modules ship at — 0x3C (default) then 0x3D (the jumpered variant) — so the
 /// panel is found with zero manual config regardless of its address strap
-/// (Rule 26 plug-and-play).
+/// (plug-and-play).
 fn addresses_to_probe() -> Vec<u16> {
     resolve_probe_addresses(std::env::var("ADOS_OLED_ADDR").ok().as_deref())
 }
@@ -109,7 +109,7 @@ fn status_line(ctx: &PageContext) -> String {
         format!("PAIRING {secs}s")
     } else if let Some(role) = ctx.role.current.as_deref() {
         format!("role: {role}")
-    } else if ctx.network.uplink_reachable {
+    } else if ctx.network.uplink_reachable == Some(true) {
         "uplink up".to_string()
     } else {
         "ready".to_string()

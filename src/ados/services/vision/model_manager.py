@@ -139,7 +139,7 @@ def board_family(board_id: str | None) -> str:
     in this family — it falls through to generic).
 
     The A733 (Radxa Cubie A7S, and its A7Z sibling on the same SoC) carries a Vivante
-    VIP9000 NPU with no in-tree ados-vision backend (Rule 44 — see cubie-a7s.yaml's
+    VIP9000 NPU with no in-tree ados-vision backend (see cubie-a7s.yaml's
     ``compute.npu_tops`` comment), so it is deliberately NOT routed into an accelerator
     family; it resolves to ``cpu``, the CPU-ONNX ``board_match`` token every plugin's
     ``board_variants`` catalog actually declares for its non-accelerator model (see

@@ -5,7 +5,7 @@
 //! on a tri-core RK3588, or `NPU load:  43%,` on a single-core part. The node
 //! utilization is the average across the cores. An absent file (no NPU, debugfs
 //! not mounted, or no read permission) yields `None` — the honest "not
-//! sampleable" reading, never a fabricated 0 (Rule 44). The Jetson `tegrastats`
+//! sampleable" reading, never a fabricated 0. The Jetson `tegrastats`
 //! path is a subprocess (this file-based collector's boundary), left as a
 //! follow-up alongside the Pi-throttle subprocess exception.
 

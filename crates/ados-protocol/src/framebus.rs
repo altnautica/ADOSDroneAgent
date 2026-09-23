@@ -508,7 +508,7 @@ pub struct ModelInfo {
     /// Whether this model actually runs a real backend (an engine-run model whose
     /// file loaded on an inference-capable backend). A mock-backend engine reports
     /// `false` so a status surface never presents a placeholder as a working
-    /// detector (Rule 44). Additive; defaults `false`.
+    /// detector. Additive; defaults `false`.
     #[serde(default, rename = "isInferenceCapable")]
     pub is_inference_capable: bool,
 }

@@ -616,6 +616,33 @@ impl FcConnection {
                 self.send_msg(&req).await;
             }
         }
+        // Until ArduPilot's banner has named its firmware, ask for it on the
+        // same cadence: a warm parameter cache sends no PARAM_REQUEST_LIST (the
+        // other thing that provokes the banner), and until it arrives a
+        // copter-typed heartbeat cannot be told from a QuadPlane, so no flight
+        // mode can be named or commanded.
+        let unidentified = {
+            let s = self.state.lock().await;
+            s.firmware.is_none()
+                && s.autopilot == MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA as i64
+                && !s.last_heartbeat.is_empty()
+        };
+        if unidentified {
+            let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+                target_system: target,
+                target_component: 1,
+                command: MavCmd::MAV_CMD_DO_SEND_BANNER,
+                confirmation: 0,
+                param1: 0.0,
+                param2: 0.0,
+                param3: 0.0,
+                param4: 0.0,
+                param5: 0.0,
+                param6: 0.0,
+                param7: 0.0,
+            });
+            self.send_msg(&cmd).await;
+        }
         *self.last_stream_req.lock().await = Some(Instant::now());
     }
 

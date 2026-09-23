@@ -29,7 +29,7 @@
 //! [`crate::routes::gs_recording`] holds the one `GroundStationRecorder` behind a
 //! `OnceLock` because start and stop arrive as separate requests. So this
 //! surface and `/status` answered differently about the same capture, one of them
-//! known-false (rule 6). Both now read
+//! known-false. Both now read
 //! [`crate::routes::gs_recording::recording_view`] — one derivation, not a copy
 //! per route.
 //!

@@ -191,8 +191,6 @@ const REBOOT_PREFIXES: readonly string[] = [
   "ground_station.wfb_receiver.",
   "ground_station.kiosk.",
   "ground_station.ui.",
-  "security.tls.",
-  "security.wireguard.",
   "remote_access.",
   "vision.",
   "atlas.",
@@ -237,9 +235,7 @@ export function isReadOnly(dotpath: string): boolean {
 export const REDACTION_SENTINEL = "***";
 
 export const REDACTED_PATHS: ReadonlySet<string> = new Set([
-  "security.tls.key_path",
   "security.api.api_key",
-  "security.wireguard.config_path",
   "server.self_hosted.api_key",
 ]);
 
@@ -409,7 +405,6 @@ export const CURATED_GROUPS: CuratedGroup[] = [
       "mavlink.system_id",
       "mavlink.ws_proxy_enforce_auth",
       "discovery.mdns_enabled",
-      "security.tls.enabled",
       "pairing.beacon_interval",
     ],
   },

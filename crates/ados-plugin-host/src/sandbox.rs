@@ -33,11 +33,17 @@
 //!   data roots are `InaccessiblePaths`; granted, they become writable and
 //!   `ProtectHome` relaxes to read-only.
 //!
-//! Independent of any grant, the agent's own command sockets are
-//! `InaccessiblePaths` too ([`AGENT_SOCKET_PATHS`]). Their real gate is the
-//! socket group (`ados-operator`, which the plugin user is never in) plus a
-//! peer-credential check on accept; hiding them from the plugin's mount
-//! namespace is the second line.
+//! Independent of any grant, the agent's run directory ([`HIDDEN_RUN_DIR`]) is
+//! replaced by an empty read-only tmpfs in the plugin's mount namespace, so the
+//! agent's command sockets and the plugin host's control dir are simply not
+//! there. Their real gate is the socket group (`ados-operator`, which the
+//! plugin user is never in) plus a peer-credential check on accept; this is the
+//! second line. Hiding the directory rather than listing each socket keeps it
+//! closed when a service re-creates its socket after the plugin started: a
+//! mount over a socket file stays on the old inode and the new socket would be
+//! in plain view. Only [`PLUGIN_REACHABLE_SOCKETS`] are bound back in, and the
+//! main unit binds the plugin's own socket directory (see
+//! [`crate::systemd::render_unit`]), never another plugin's.
 //!
 //! Two invariants this file exists to hold:
 //!
@@ -99,48 +105,30 @@ pub const FILESYSTEM_HOST_CAP: &str = "filesystem.host";
 /// is the second line, and it costs one line of unit text.
 pub const ALWAYS_INACCESSIBLE: &[&str] = &["/etc/ados/secrets", "/etc/ados/plugin-keys"];
 
-/// Agent command sockets, and the plugin host's control dir, hidden from every
-/// plugin. Each is a command surface that acts with the agent's authority
-/// rather than the plugin's grants (the control plane, the flight-controller
-/// byte lanes, the radio / video / GPIO / input command sockets). A plugin
-/// reaches the ones it is granted through its own host socket, which gates
-/// every call on its token. Prefixed `-` like the other entries, so a socket a
-/// host does not run is not a unit-start failure.
-pub const AGENT_SOCKET_PATHS: &[&str] = &[
-    "/run/ados/plugin-host",
-    "/run/ados/control.sock",
-    "/run/ados/api-internal.sock",
-    "/run/ados/mavlink.sock",
-    "/run/ados/msp.sock",
-    "/run/ados/supervisor.sock",
-    "/run/ados/radio-cmd.sock",
-    "/run/ados/radio-aux.sock",
-    "/run/ados/wfb-cmd.sock",
-    "/run/ados/video-cmd.sock",
-    "/run/ados/gpio-cmd.sock",
-    "/run/ados/hid-cmd.sock",
-    "/run/ados/pic.sock",
-    "/run/ados/crsf-cmd.sock",
-    "/run/ados/wifi-cmd.sock",
-    "/run/ados/groundlink-cmd.sock",
-    "/run/ados/tunnel-config-cmd.sock",
-    "/run/ados/atlas-control.sock",
-    "/run/ados/pairing.sock",
-    "/run/ados/logd-query.sock",
-];
+/// The agent's run directory, hidden from every plugin behind an empty
+/// read-only tmpfs. It holds every agent command socket (the control plane,
+/// the flight-controller byte lanes, the radio / video / GPIO / input command
+/// sockets), the plugin host's control dir and every plugin's socket directory.
+/// A plugin reaches what it is granted through its own host socket, which gates
+/// every call on its token.
+pub const HIDDEN_RUN_DIR: &str = "/run/ados";
+
+/// Sockets under [`HIDDEN_RUN_DIR`] bound back into every plugin, read-only:
+/// the log ingest sink, which only accepts log frames. Prefixed `-` in the unit
+/// so a host without it is not a unit-start failure. A socket file bind stays
+/// on the inode present at unit start, so after the log store re-creates its
+/// socket the plugin's log shipping resumes at its next start; its own log
+/// file is unaffected.
+pub const PLUGIN_REACHABLE_SOCKETS: &[&str] = &["/run/ados/logd.sock"];
 
 /// Operator data roots reachable only with `filesystem.host`. Every entry is
 /// prefixed `-` in the rendered directive so a host that does not have the path
 /// is not a unit-start failure.
 pub const HOST_DATA_ROOTS: &[&str] = &["/srv", "/mnt", "/media", "/boot"];
 
-/// The writable surface every plugin gets: its own data dir, its log, and its
-/// socket dir. Ordered, so the rendered `ReadWritePaths=` line is stable.
-pub const BASE_READ_WRITE_PATHS: &[&str] = &[
-    "/var/ados/plugin-data",
-    "/var/log/ados/plugins",
-    "/run/ados/plugins",
-];
+/// The writable surface every plugin gets: its own data dir and its log.
+/// Ordered, so the rendered `ReadWritePaths=` line is stable.
+pub const BASE_READ_WRITE_PATHS: &[&str] = &["/var/ados/plugin-data", "/var/log/ados/plugins"];
 
 /// Every capability whose enforcement mechanism is the generated unit.
 ///
@@ -203,6 +191,12 @@ pub fn sandbox_directives(granted: &BTreeSet<String>, loopback_guard_active: boo
     }
 
     // ---- filesystem -------------------------------------------------
+    // The agent run dir goes first: an empty read-only tmpfs, with only the
+    // plugin-reachable sockets bound back in.
+    lines.push(format!("TemporaryFileSystem={HIDDEN_RUN_DIR}:ro"));
+    for socket in PLUGIN_REACHABLE_SOCKETS {
+        lines.push(format!("BindReadOnlyPaths=-{socket}"));
+    }
     let host_fs = granted.contains(FILESYSTEM_HOST_CAP);
     let mut rw: Vec<String> = BASE_READ_WRITE_PATHS
         .iter()
@@ -222,7 +216,6 @@ pub fn sandbox_directives(granted: &BTreeSet<String>, loopback_guard_active: boo
     );
     let mut inaccessible: Vec<String> = ALWAYS_INACCESSIBLE
         .iter()
-        .chain(AGENT_SOCKET_PATHS)
         .map(|p| format!("-{p}"))
         .collect();
     if !host_fs {
@@ -310,40 +303,38 @@ mod tests {
         assert!(inacc_with.contains("-/etc/ados/secrets"));
     }
 
-    /// The no-grant `InaccessiblePaths=` line, restated as the literal the
-    /// Python renderer's test also pins, so the two renderers cannot drift.
-    const NO_GRANT_INACCESSIBLE: &str = "InaccessiblePaths=-/etc/ados/secrets \
-        -/etc/ados/plugin-keys -/run/ados/plugin-host -/run/ados/control.sock \
-        -/run/ados/api-internal.sock -/run/ados/mavlink.sock -/run/ados/msp.sock \
-        -/run/ados/supervisor.sock -/run/ados/radio-cmd.sock -/run/ados/radio-aux.sock \
-        -/run/ados/wfb-cmd.sock -/run/ados/video-cmd.sock -/run/ados/gpio-cmd.sock \
-        -/run/ados/hid-cmd.sock -/run/ados/pic.sock -/run/ados/crsf-cmd.sock \
-        -/run/ados/wifi-cmd.sock -/run/ados/groundlink-cmd.sock \
-        -/run/ados/tunnel-config-cmd.sock -/run/ados/atlas-control.sock \
-        -/run/ados/pairing.sock -/run/ados/logd-query.sock -/srv -/mnt -/media -/boot";
+    /// The no-grant filesystem lines, restated as the literals the Python
+    /// renderer's test also pins, so the two renderers cannot drift.
+    const NO_GRANT_FILESYSTEM: &[&str] = &[
+        "TemporaryFileSystem=/run/ados:ro",
+        "BindReadOnlyPaths=-/run/ados/logd.sock",
+        "ReadWritePaths=/var/ados/plugin-data /var/log/ados/plugins",
+        "ProtectHome=yes",
+        "InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys -/srv -/mnt -/media -/boot",
+    ];
 
     #[test]
-    fn agent_command_sockets_are_hidden_whatever_is_granted() {
-        let inaccessible = |granted: &BTreeSet<String>| {
-            sandbox_directives(granted, true)
-                .into_iter()
-                .find(|l| l.starts_with("InaccessiblePaths="))
-                .unwrap()
-        };
-        assert_eq!(inaccessible(&caps(&[])), NO_GRANT_INACCESSIBLE);
+    fn the_agent_run_dir_is_hidden_whatever_is_granted() {
+        let none = sandbox_directives(&caps(&[]), true);
+        let tail = &none[none.len() - NO_GRANT_FILESYSTEM.len()..];
+        assert_eq!(tail, NO_GRANT_FILESYSTEM);
 
-        // Granting every sandbox capability reopens only the data roots.
+        // Granting every sandbox capability reopens only the data roots: the
+        // run dir stays an empty tmpfs, nothing under it becomes writable, and
+        // nothing but the log sink is bound back, least of all another
+        // plugin's socket dir.
         let everything: Vec<&str> = sandbox_enforced_caps().into_iter().collect();
-        let all = inaccessible(&caps(&everything));
-        for path in AGENT_SOCKET_PATHS {
-            assert!(
-                all.contains(&format!(" -{path}")),
-                "{path} missing from {all}"
-            );
+        for lines in [none.clone(), sandbox_directives(&caps(&everything), true)] {
+            assert!(lines.contains(&"TemporaryFileSystem=/run/ados:ro".to_string()));
+            for line in &lines {
+                if let Some(paths) = line.strip_prefix("ReadWritePaths=") {
+                    assert!(!paths.contains("/run/ados"), "{line}");
+                }
+                if line.starts_with("BindReadOnlyPaths=") || line.starts_with("BindPaths=") {
+                    assert_eq!(line, "BindReadOnlyPaths=-/run/ados/logd.sock");
+                }
+            }
         }
-        // The per-plugin socket dir stays reachable: the plugin's own host
-        // socket lives there.
-        assert!(!all.contains("/run/ados/plugins"), "{all}");
     }
 
     #[test]

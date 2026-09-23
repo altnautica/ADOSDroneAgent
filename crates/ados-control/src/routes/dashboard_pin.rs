@@ -13,9 +13,9 @@
 //! off-box paired browser can reach them; clear stays behind the normal gate):
 //!
 //! - **status** — public read of `{pin_set, locked, locked_until}` (booleans, no
-//!   secret) so the splash picks set-vs-enter.
-//! - **verify** — public login: rate-limited by the shared limiter + the in-store
-//!   lockout ladder. A correct PIN returns a session.
+//!   secret) so the splash picks set-vs-enter. `locked` is the caller's own.
+//! - **verify** — public login: rate-limited per caller at the edge, plus a
+//!   per-caller lockout ladder in the store. A correct PIN returns a session.
 //! - **set** — public at the edge, AUTHORIZED IN THE HANDLER: on-box OR a valid
 //!   `X-ADOS-Key` OR a valid current session OR a matching `current_pin`, OR —
 //!   only while the node is UNPAIRED and no PIN is set yet — trust-on-first-use
@@ -35,18 +35,30 @@ use serde_json::{json, Value};
 use ados_protocol::dashboard_session::DashboardSession;
 use ados_protocol::pairing_posture::{constant_time_eq, CallerClass, Pairing};
 
-use crate::dashboard_pin::{PinStatus, VerifyOutcome, DASHBOARD_SESSION_HEADER};
+use crate::dashboard_pin::{PeerKey, PinStatus, VerifyOutcome, DASHBOARD_SESSION_HEADER};
 use crate::routes::detail;
+use crate::serve::PeerAddr;
 use crate::state::AppState;
+
+/// The lockout key for this request's caller: its address on the TCP edge, or
+/// the local operator on the Unix socket.
+fn peer_key(peer: Option<Extension<PeerAddr>>) -> PeerKey {
+    PeerKey::of(peer.map(|Extension(PeerAddr(addr))| addr.ip()))
+}
 
 /// `GET /api/dashboard/pin/status` → `{pin_set, locked, locked_until|null}`.
 /// Public — reveals only booleans so the splash can pick set-vs-enter.
-pub async fn get_pin_status(State(state): State<AppState>) -> Json<Value> {
+pub async fn get_pin_status(
+    State(state): State<AppState>,
+    peer: Option<Extension<PeerAddr>>,
+) -> Json<Value> {
     let PinStatus {
         pin_set,
         locked,
         locked_until,
-    } = state.dashboard_pin.status(now_unix_seconds());
+    } = state
+        .dashboard_pin
+        .status(peer_key(peer), now_unix_seconds());
     Json(json!({
         "pin_set": pin_set,
         "locked": locked,
@@ -65,8 +77,15 @@ pub struct VerifyRequest {
 /// `POST /api/dashboard/pin/verify` — enter the PIN. On success returns a session
 /// token; on a wrong PIN a `401` with the remaining-attempt countdown; while
 /// locked a `429` with the lockout expiry.
-pub async fn verify_pin(State(state): State<AppState>, Json(req): Json<VerifyRequest>) -> Response {
-    match state.dashboard_pin.verify_pin(&req.pin, now_unix_seconds()) {
+pub async fn verify_pin(
+    State(state): State<AppState>,
+    peer: Option<Extension<PeerAddr>>,
+    Json(req): Json<VerifyRequest>,
+) -> Response {
+    match state
+        .dashboard_pin
+        .verify_pin(peer_key(peer), &req.pin, now_unix_seconds())
+    {
         VerifyOutcome::Ok => session_response(&state),
         VerifyOutcome::Wrong { remaining_attempts } => (
             StatusCode::UNAUTHORIZED,
@@ -97,9 +116,11 @@ pub struct SetRequest {
 pub async fn set_pin(
     State(state): State<AppState>,
     caller: Option<Extension<CallerClass>>,
+    peer: Option<Extension<PeerAddr>>,
     headers: HeaderMap,
     Json(req): Json<SetRequest>,
 ) -> Response {
+    let peer = peer_key(peer);
     let now = now_unix_seconds();
     let pairing = state.pairing.current();
     // The caller class the edge computed (the Unix edge stamps on-box). A
@@ -141,7 +162,12 @@ pub async fn set_pin(
         || req
             .current_pin
             .as_deref()
-            .map(|cp| matches!(state.dashboard_pin.verify_pin(cp, now), VerifyOutcome::Ok))
+            .map(|cp| {
+                matches!(
+                    state.dashboard_pin.verify_pin(peer, cp, now),
+                    VerifyOutcome::Ok
+                )
+            })
             .unwrap_or(false);
 
     if !authorized {
@@ -157,6 +183,7 @@ pub async fn set_pin(
                     StatusCode::FORBIDDEN,
                     "Set the dashboard PIN from the device itself or from its own network.",
                 ),
+                Pairing::Unreadable => detail(StatusCode::SERVICE_UNAVAILABLE, "The pairing state on this device is unreadable. Unpair it on the device itself to recover."),
             };
         }
         return detail(
@@ -205,6 +232,10 @@ fn session_response(state: &AppState) -> Response {
     let api_key = match state.pairing.current() {
         Pairing::Paired(k) => k,
         Pairing::Unpaired => String::new(),
+        // A session minted now would verify against no issuer.
+        Pairing::Unreadable => {
+            return detail(StatusCode::SERVICE_UNAVAILABLE, "The pairing state on this device is unreadable. Unpair it on the device itself to recover.")
+        }
     };
     match state.dashboard_pin.mint_session(&api_key) {
         Some(DashboardSession { token, expires_at }) => Json(json!({

@@ -386,7 +386,9 @@ def radio_hop(channel: int) -> None:
         click.echo(click.style(f"Hop failed: HTTP {status}: {body}", fg="red"))
         raise click.exceptions.Exit(code=1)
 
-    ch = body.get("channel")
+    # 202: the radio validated and started the hop; it commits only once the
+    # ground station acks the announce, so this is the target, not the result.
+    ch = body.get("target_channel")
     freq = body.get("frequency_mhz")
     click.echo(
         click.style(f"Hop initiated → channel {ch} ({freq} MHz).", fg="green")

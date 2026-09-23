@@ -1,5 +1,5 @@
 # Rockchip RK3576 reference board.
-# Applicable to companion computer (air unit) and Android RC controller builds.
+# Companion computer (air unit) profile.
 # Reference design: TaiShan Pi 3M (立创·泰山派3M RK3576 开发板V1.4)
 name: "Rockchip RK3576 (Reference)"
 vendor: "Rockchip"
@@ -182,4 +182,4 @@ profiles:
   recommended_resolution: "1920x1080"
   recommended_codec: "h265"
   memory_budget_mb: 500
-  notes: "Unified platform for companion computer and Android RC controller. 6T NPU enables real-time object detection. H.265 4K@60 encode saves 50% bandwidth on 4G. Triple CSI for multi-camera. Mini-PCIe for native 4G modem. One chip, two products."
+  notes: "6T NPU enables real-time object detection. H.265 4K@60 encode saves 50% bandwidth on 4G. Triple CSI for multi-camera. Mini-PCIe for native 4G modem."

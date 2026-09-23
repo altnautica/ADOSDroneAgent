@@ -110,7 +110,7 @@ export interface SkillState {
  * drone); only a node with neither is undrivable. With a link, arm is
  * inapplicable while armed and disarm while disarmed; every other action is
  * available. The reason strings are what the bar shows on a disabled control
- * (Rule 44 — never a control the node cannot drive without a plain reason).
+ * (never a control the node cannot drive without a plain reason).
  */
 export function resolveSkillState(skill: Skill, ctx: SkillContext): SkillState {
   if (!ctx.fcConnected && !ctx.relayed) {

@@ -71,7 +71,7 @@ export function FeedTelemetryStrip() {
   const drone = status?.paired_drone;
   // Name the aircraft the readings belong to when they came over the radio, so
   // the operator can tell a relayed vehicle from one attached to this node
-  // (Rule 44 — a reading whose origin is ambiguous is a reading that gets
+  // (a reading whose origin is ambiguous is a reading that gets
   // mistrusted). Falls back to the system id, then to the bare label.
   const relayedPeer = relayed
     ? (drone?.device_id ?? (telemetry?.relayed_link?.system_id != null

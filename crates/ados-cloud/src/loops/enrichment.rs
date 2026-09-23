@@ -4,7 +4,7 @@
 //! board) carries no live status: no CPU/memory/disk, no FC-link state, no
 //! service fleet. The frozen [`crate::heartbeat::HeartbeatPayload`] leaves those
 //! fields `Option` + skip-if-none so a base-only heartbeat is honestly silent
-//! about them (operating rule 37) — but the GCS then shows nothing.
+//! about them — but the GCS then shows nothing.
 //!
 //! This module builds that live status **in Rust, on every heartbeat tick**, from
 //! the real sources the agent already exposes, and the loop folds it over the

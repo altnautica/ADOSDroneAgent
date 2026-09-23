@@ -5,8 +5,9 @@
 //! OS shell work the installer ORCHESTRATES, not reimplements. This step OWNS the
 //! order (after `venv_agent`, which clones the source tree; before the radio
 //! units `systemd` enables) + the VERIFY: it confirms the real outcome (the
-//! wfb-ng binaries on PATH + the bind artifacts on disk), not the script's exit
-//! code — the script is deliberately lenient on a librga-less BSP.
+//! wfb-ng binaries on PATH, the bind artifacts on disk, and the installed commit
+//! equal to the vendored one), not the script's exit code — the script is
+//! deliberately lenient on a librga-less BSP.
 //!
 //! Required: the supervisor's local-radio bind FSM
 //! (`crates/ados-supervisor/src/bind/`) cannot start without `/etc/bind.key` +
@@ -27,6 +28,31 @@ use crate::ui::activity;
 const REQUIRED_BINS: &[&str] = &["wfb_tx", "wfb_rx", "wfb_keygen", "wfb-server"];
 /// The bind artifacts the supervisor's bind FSM requires before it can run.
 const BIND_ARTIFACTS: &[&str] = &["/etc/bind.key", "/etc/bind.yaml"];
+/// Where the script records the vendored wfb-ng commit it last built and
+/// installed. It is written only after a successful build + install.
+const INSTALLED_VERSION_PATH: &str = "/etc/ados/wfb-ng.version";
+
+/// The installed wfb-ng must be the vendored commit. Both rigs of a pair build
+/// from the same source tree, so a rebuild that failed on one of them leaves the
+/// two on different wfb-ng commits, which breaks the bind tunnel. The binaries
+/// from the previous build still satisfy the presence checks, so the recorded
+/// commit is the only evidence the rebuild did not land. `None` when they agree
+/// or the vendored commit is unknown (a source tree without git metadata, which
+/// the script also cannot compare); otherwise the failure message.
+fn version_drift(vendored: Option<&str>, installed: Option<&str>) -> Option<String> {
+    let vendored = vendored.map(str::trim).filter(|c| !c.is_empty())?;
+    match installed.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(i) if i == vendored => None,
+        Some(i) => Some(format!(
+            "wfb-ng rebuild did not land: installed commit {i} but the vendored source is \
+             {vendored} (see /tmp/wfb-ng-build.log + /tmp/wfb-ng-install.log)"
+        )),
+        None => Some(format!(
+            "wfb-ng build or install failed: no installed commit recorded for vendored {vendored} \
+             (see /tmp/wfb-ng-build.log + /tmp/wfb-ng-install.log)"
+        )),
+    }
+}
 
 /// True when `bin` resolves on PATH or in the two dirs `setup.py install` writes
 /// console scripts to. Replaces a `command -v` shell-out (a builtin, not a
@@ -124,22 +150,60 @@ impl Step for WfbNg {
             .filter(|p| !Path::new(p).exists())
             .collect();
 
-        if missing_bins.is_empty() && missing_artifacts.is_empty() {
-            tracing::info!("wfb-ng userspace + bind artifacts present");
-            StepOutcome::Ok
-        } else {
-            StepOutcome::Failed(format!(
+        if !(missing_bins.is_empty() && missing_artifacts.is_empty()) {
+            return StepOutcome::Failed(format!(
                 "wfb-ng provisioning incomplete: missing binaries {:?}, missing artifacts {:?} \
                  (see /tmp/wfb-ng-build.log + /tmp/wfb-ng-install.log)",
                 missing_bins, missing_artifacts
-            ))
+            ));
         }
+
+        let vendor_dir = source.join("vendor/wfb-ng");
+        let vendor_dir_s = vendor_dir.to_string_lossy();
+        let vendored = vendor_dir
+            .join(".git")
+            .exists()
+            .then(|| exec::run("git", &["-C", vendor_dir_s.as_ref(), "rev-parse", "HEAD"]))
+            .filter(|r| r.success())
+            .map(|r| r.stdout);
+        let installed = std::fs::read_to_string(INSTALLED_VERSION_PATH).ok();
+        if let Some(msg) = version_drift(vendored.as_deref(), installed.as_deref()) {
+            return StepOutcome::Failed(msg);
+        }
+
+        tracing::info!("wfb-ng userspace + bind artifacts present at the vendored commit");
+        StepOutcome::Ok
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rebuild_that_did_not_land_fails_the_step() {
+        let vendored = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678\n";
+        // The previous build's commit is still recorded: the rebuild failed and
+        // the old binaries satisfy every presence check.
+        let stale = "0f1e2d3c4b5a69788796a5b4c3d2e1f009182736\n";
+        assert!(version_drift(Some(vendored), Some(stale)).is_some());
+        // No commit recorded at all: the first build or install failed.
+        assert!(version_drift(Some(vendored), None).is_some());
+        assert!(version_drift(Some(vendored), Some("  \n")).is_some());
+    }
+
+    #[test]
+    fn the_vendored_commit_installed_or_unknown_passes() {
+        let c = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+        assert_eq!(
+            version_drift(Some(&format!("{c}\n")), Some(&format!("{c}\n"))),
+            None
+        );
+        // A source tree without git metadata: nothing to compare against, the
+        // same case the script skips.
+        assert_eq!(version_drift(None, Some(c)), None);
+        assert_eq!(version_drift(None, None), None);
+    }
 
     #[test]
     fn on_path_finds_a_ubiquitous_binary() {

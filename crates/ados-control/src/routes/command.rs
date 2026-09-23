@@ -477,10 +477,11 @@ fn build_command(
 /// The `DO_SET_MODE` params for a named flight mode on the connected FC.
 ///
 /// PX4 takes the de-packed `(main, sub)` in `param2`/`param3`. ArduPilot takes
-/// the flat `custom_mode` from the table for the FC's vehicle type; a vehicle
-/// type with no table is a 409 (the number would be a guess, and the same number
-/// is a different mode on another firmware). A name missing from the resolved
-/// table is a 400.
+/// the flat `custom_mode` from the table for the FC's firmware, as its banner
+/// named it (a MAV_TYPE only one firmware reports also serves). An unresolved
+/// firmware is a 409: a copter-typed heartbeat may be a QuadPlane, where the
+/// copter RTL number commands FBWB. A name missing from the resolved table is a
+/// 400.
 fn set_mode_params_for_name(name: &str, fc: FcIdentity) -> Result<[f32; 7], CommandError> {
     let unknown_mode = || CommandError {
         status: StatusCode::BAD_REQUEST,
@@ -491,13 +492,22 @@ fn set_mode_params_for_name(name: &str, fc: FcIdentity) -> Result<[f32; 7], Comm
             .map(|(main, sub)| do_set_mode_px4(main, sub))
             .ok_or_else(unknown_mode);
     }
-    let Some(firmware) = ArduPilotFirmware::from_mav_type(fc.mav_type) else {
-        return Err(CommandError {
-            status: StatusCode::CONFLICT,
-            detail: format!(
+    let Some(firmware) = ArduPilotFirmware::resolve(fc.firmware, fc.mav_type) else {
+        let detail = if ArduPilotFirmware::from_mav_type(fc.mav_type).is_some() {
+            format!(
+                "The flight controller's firmware is not identified yet (vehicle type {} \
+                 is reported by more than one firmware); refusing to set a mode",
+                fc.mav_type
+            )
+        } else {
+            format!(
                 "No flight-mode table for vehicle type {}; refusing to set a mode",
                 fc.mav_type
-            ),
+            )
+        };
+        return Err(CommandError {
+            status: StatusCode::CONFLICT,
+            detail,
         });
     };
     firmware
@@ -832,16 +842,19 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
 
-    /// An ArduCopter quadrotor (`MAV_AUTOPILOT_ARDUPILOTMEGA` 3, `MAV_TYPE_QUADROTOR` 2).
+    /// An ArduCopter quadrotor (`MAV_AUTOPILOT_ARDUPILOTMEGA` 3, `MAV_TYPE_QUADROTOR` 2)
+    /// whose banner has been seen.
     const COPTER: FcIdentity = FcIdentity {
         autopilot: 3,
         mav_type: 2,
+        firmware: Some(ArduPilotFirmware::Copter),
     };
 
     /// A PX4 quadrotor; the vehicle type does not select PX4's mode encoding.
     const PX4: FcIdentity = FcIdentity {
         autopilot: MAV_AUTOPILOT_PX4,
         mav_type: 2,
+        firmware: None,
     };
 
     // ── G6: command building + PX4 mode encoding ────────────────────────────
@@ -965,6 +978,27 @@ mod tests {
         let (d, _b) = build_command("mode", &[json!("GUIDED")], COPTER).unwrap();
         assert_eq!(d.param2, 4.0);
         assert_eq!(d.param3, 0.0);
+    }
+
+    #[test]
+    fn a_quadplane_reporting_a_quadrotor_type_gets_the_plane_rtl() {
+        // Q_MAV_TYPE=QUADROTOR: the heartbeat says 2, the banner says Plane.
+        let quadplane = FcIdentity {
+            autopilot: 3,
+            mav_type: 2,
+            firmware: Some(ArduPilotFirmware::Plane),
+        };
+        let (d, _b) = build_command("rtl", &[], quadplane).unwrap();
+        assert_eq!(d.param2, 11.0, "Plane RTL, never the copter 6 (FBWB)");
+        // With no banner yet, a quadrotor-typed FC is not guessed at.
+        let unidentified = FcIdentity {
+            firmware: None,
+            ..quadplane
+        };
+        let err = build_command("rtl", &[], unidentified).unwrap_err();
+        assert_eq!(err.status, StatusCode::CONFLICT);
+        let err = build_command("mode", &[json!("LOITER")], unidentified).unwrap_err();
+        assert_eq!(err.status, StatusCode::CONFLICT);
     }
 
     #[test]

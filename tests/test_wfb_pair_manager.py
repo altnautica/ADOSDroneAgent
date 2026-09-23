@@ -48,6 +48,9 @@ def isolated_pm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PairManager:
     monkeypatch.setattr(
         pm_mod, "_FACTORY_RESET_DIRS", (tmp_path / "secrets",)
     )
+    monkeypatch.setattr(
+        pm_mod, "_RELAY_SECRET_PATH", tmp_path / "secrets" / "relay-peer-secret"
+    )
 
     pm_mod._reset_for_tests()
     return PairManager(key_dir=str(tmp_path))
@@ -150,6 +153,16 @@ def test_unpair_wipes_both_files(
     asyncio.run(isolated_pm.unpair("drone"))
     assert not (tmp_path / "tx.key").is_file()
     assert not (tmp_path / "rx.key").is_file()
+
+
+def test_unpair_drops_the_relay_peer_secret(isolated_pm, tmp_path):
+    """The relay secret belongs to the pairing: after an unpair the next
+    ground station's offer must not be refused as already held."""
+    secret = tmp_path / "secrets" / "relay-peer-secret"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("a" * 64)
+    asyncio.run(isolated_pm.unpair("drone"))
+    assert not secret.exists()
 
 
 def test_apply_flips_auto_pair_off(

@@ -67,8 +67,8 @@ const VALID_CAPTURE_PROFILES: [&str; 4] = ["orbit", "lawnmower", "freeform", "in
 const VALID_CAMERA_ROLES: [&str; 7] = ["primary", "aux", "down", "left", "right", "back", "up"];
 
 /// A forwarder handoff not re-written within this window is treated as absent, so a
-/// dead forwarder never keeps a stale compute node on the readiness surface
-/// (operating rule 44). Comfortably larger than the forwarder's refresh cadence.
+/// dead forwarder never keeps a stale compute node on the readiness surface.
+/// Comfortably larger than the forwarder's refresh cadence.
 const FORWARD_STALE: Duration = Duration::from_secs(15);
 
 /// The agent config path (`ADOS_CONFIG`, default `/etc/ados/config.yaml`), the
@@ -179,7 +179,7 @@ fn capture_state_str(state: CaptureState) -> &'static str {
 /// Read the forwarder handoff at `path` if it exists AND was written within
 /// [`FORWARD_STALE`] of `now`. A stale file (a dead forwarder whose tmpfs file
 /// persists) is treated as absent so the readiness surface never reports a compute
-/// node that is gone (operating rule 44). A future/unreadable mtime counts as
+/// node that is gone. A future/unreadable mtime counts as
 /// fresh. Best-effort: any I/O or parse error yields `None`.
 fn read_fresh_forward_status(path: &Path, now: SystemTime) -> Option<AtlasForwardStatus> {
     let meta = std::fs::metadata(path).ok()?;
@@ -336,12 +336,30 @@ pub async fn put_atlas_config(Json(body): Json<AtlasConfigBody>) -> Response {
         Err(msg) => return detail(StatusCode::INTERNAL_SERVER_ERROR, msg),
     };
     let restart = restart_unit(ATLAS_UNIT).await;
-    Json(json!({
-        "status": "ok",
-        "enabled": effective_enabled,
-        "restart": restart,
-    }))
-    .into_response()
+    config_reply(effective_enabled, restart)
+}
+
+/// The reply for an atlas config write. The config landed either way; the
+/// restart outcome decides whether the change is live. A restart that failed or
+/// could not be confirmed is a `502` with a top-level error, so no client reads
+/// the write as having taken effect.
+fn config_reply(enabled: bool, restart: Value) -> Response {
+    let restarted = restart.get("status").and_then(|s| s.as_str()) == Some("ok");
+    let status = if restarted {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    (
+        status,
+        Json(json!({
+            "status": if restarted { "ok" } else { "error" },
+            "enabled": enabled,
+            "persisted": true,
+            "restart": restart,
+        })),
+    )
+        .into_response()
 }
 
 /// Surgically write the provided `atlas.*` fields through the shared config
@@ -416,6 +434,15 @@ pub async fn post_capture_resume() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write whose service restart failed is not reported as a success.
+    #[test]
+    fn a_failed_restart_is_a_top_level_error() {
+        let failed = config_reply(true, json!({"status": "error", "message": "timed out"}));
+        assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
+        let ok = config_reply(true, json!({"status": "ok"}));
+        assert_eq!(ok.status(), StatusCode::OK);
+    }
 
     fn read_yaml(path: &Path) -> serde_norway::Value {
         serde_norway::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -711,7 +738,7 @@ mod tests {
 
     #[test]
     fn a_stale_forward_handoff_is_dropped_so_no_dead_node_lingers() {
-        // A handoff older than the freshness window is treated as absent (rule 44):
+        // A handoff older than the freshness window is treated as absent:
         // a dead forwarder must not keep reporting a compute node that is gone.
         let dir = tempfile::tempdir().unwrap();
         let fwd_path = dir.path().join("atlas-forward.json");

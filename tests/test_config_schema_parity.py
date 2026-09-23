@@ -81,8 +81,8 @@ def test_committed_schema_shape_and_secret_markers() -> None:
 
     # Machine-independent defaults: the emitter pins the Linux FHS bases.
     assert (
-        schema["$defs"]["TlsConfig"]["properties"]["key_path"]["default"]
-        == "/etc/ados/certs/device.key"
+        schema["$defs"]["CloudflareTunnelConfig"]["properties"]["token_path"]["default"]
+        == "/etc/ados/secrets/cloudflare-tunnel-token"
     )
 
     # The full secret set is marked, and nothing else is.
@@ -94,12 +94,10 @@ def test_committed_schema_shape_and_secret_markers() -> None:
             return sum(_count_markers(v) for v in node)
         return 0
 
-    assert _count_markers(schema) == 8
+    assert _count_markers(schema) == 6
     defs = schema["$defs"]
     for def_name, prop in (
-        ("TlsConfig", "key_path"),
         ("ApiSecurityConfig", "api_key"),
-        ("WireguardConfig", "config_path"),
         ("SelfHostedServerConfig", "api_key"),
         ("SecurityConfig", "hmac_secret"),
         ("ServerConfig", "mqtt_password"),

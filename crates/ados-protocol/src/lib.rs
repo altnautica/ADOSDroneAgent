@@ -56,6 +56,7 @@ pub mod capabilities;
 pub mod compute;
 pub mod config_tunnel_ingest;
 pub mod contracts;
+#[cfg(feature = "tls")]
 pub mod crypto;
 pub mod dashboard_session;
 pub mod dispatch;

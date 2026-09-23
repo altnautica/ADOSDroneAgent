@@ -116,7 +116,6 @@ Python, under `src/ados/`:
 - Cockpit SPA: `src/ados/cockpit/`
 - Bootstrap and profile detection: `src/ados/bootstrap/`
 - Compute service: `src/ados/compute/`
-- Security (HMAC, certs, firewall): `src/ados/security/`
 - Data files (plugin catalog, param metadata): `src/ados/data/`
 - Setup facade and terminal status data: `src/ados/setup/`
 - Tests: `tests/`

@@ -17,6 +17,7 @@
 //! starts mid-flight still tells its plugins about a breach or a failsafe that
 //! is already under way. Arm and mode fire only on an observed change.
 
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use ados_protocol::flight_modes::{ArduPilotFirmware, MAV_AUTOPILOT_PX4};
@@ -136,6 +137,36 @@ impl VehicleEventDeriver {
     }
 }
 
+/// The flight controller's MAVLink identity, as observed on the router link.
+///
+/// A command a plugin sends without naming its target goes to this system and
+/// component, never to an assumed `1/1`: the autopilot ignores a message
+/// addressed to another system id, so a fleet drone with a non-default system
+/// id would silently drop every command sent to the assumed one.
+#[derive(Debug, Default)]
+pub struct FcIdentity(AtomicU16);
+
+impl FcIdentity {
+    /// `(system_id, component_id)` of the last autopilot heartbeat, or `None`
+    /// before one has been seen. System id 0 is the broadcast address, never a
+    /// vehicle, so the packed value 0 means "unknown".
+    pub fn get(&self) -> Option<(u8, u8)> {
+        let packed = self.0.load(Ordering::Acquire);
+        let [sys, comp] = packed.to_be_bytes();
+        (sys != 0).then_some((sys, comp))
+    }
+
+    /// Record an autopilot identity. A zero system id is ignored.
+    pub fn set(&self, system_id: u8, component_id: u8) {
+        if system_id != 0 {
+            self.0.store(
+                u16::from_be_bytes([system_id, component_id]),
+                Ordering::Release,
+            );
+        }
+    }
+}
+
 /// Publish one host event on `bus`.
 pub fn publish_host_event(bus: &EventBus, topic: &str, payload: Value) -> usize {
     bus.publish(Event {
@@ -146,10 +177,12 @@ pub fn publish_host_event(bus: &EventBus, topic: &str, payload: Value) -> usize 
     })
 }
 
-/// Drain the FC frame fanout forever, publishing the vehicle events it implies.
+/// Drain the FC frame fanout forever, publishing the vehicle events it implies
+/// and recording the autopilot's identity in `identity`.
 pub fn spawn_vehicle_events(
     bus: Arc<EventBus>,
     mut frames: broadcast::Receiver<Vec<u8>>,
+    identity: Arc<FcIdentity>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut deriver = VehicleEventDeriver::default();
@@ -160,9 +193,14 @@ pub fn spawn_vehicle_events(
                 Err(broadcast::error::RecvError::Closed) => return,
             };
             for frame in ados_protocol::aux_mux::split_frames(&chunk) {
-                let Ok((_, msg)) = parse_any(frame) else {
+                let Ok((header, msg)) = parse_any(frame) else {
                     continue;
                 };
+                if let MavMessage::HEARTBEAT(hb) = &msg {
+                    if hb.autopilot != MavAutopilot::MAV_AUTOPILOT_INVALID {
+                        identity.set(header.system_id, header.component_id);
+                    }
+                }
                 for (topic, payload) in deriver.observe(&msg) {
                     publish_host_event(&bus, topic, payload);
                 }
@@ -301,8 +339,15 @@ mod tests {
         let bus = Arc::new(EventBus::new());
         let mut sub = bus.subscribe();
         let (tx, rx) = broadcast::channel(8);
-        let _task = spawn_vehicle_events(bus.clone(), rx);
-        let header = ados_protocol::mavlink::MavHeader::default();
+        let identity = Arc::new(FcIdentity::default());
+        let _task = spawn_vehicle_events(bus.clone(), rx, identity.clone());
+        assert_eq!(identity.get(), None);
+        // A fleet drone with a non-default system id: commands must target it.
+        let header = ados_protocol::mavlink::MavHeader {
+            system_id: 3,
+            component_id: 1,
+            sequence: 0,
+        };
         for armed in [false, true] {
             let frame = ados_protocol::mavlink::serialize_v2(header, &heartbeat(armed, 0)).unwrap();
             tx.send(frame).unwrap();
@@ -313,6 +358,7 @@ mod tests {
             .unwrap();
         assert_eq!(event.topic, "vehicle.armed");
         assert_eq!(event.publisher_plugin_id, HOST_PUBLISHER);
+        assert_eq!(identity.get(), Some((3, 1)));
         let _: HEARTBEAT_DATA = match heartbeat(false, 0) {
             MavMessage::HEARTBEAT(hb) => hb,
             _ => unreachable!(),

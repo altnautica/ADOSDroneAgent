@@ -1,6 +1,6 @@
 //! Honest received-side counters for the config-tunnel channel.
 //!
-//! Per Rule 37/44, a config lane that reports "healthy" without proof trains
+//! A config lane that reports "healthy" without proof trains
 //! the operator to distrust telemetry. These counters are the delivery proof:
 //! a received frame count that never advances means nothing is arriving over
 //! the bearer — a truthful "not active", never a fabricated green.

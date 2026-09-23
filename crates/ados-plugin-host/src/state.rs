@@ -132,24 +132,30 @@ fn state_path(path: Option<&Path>) -> PathBuf {
 /// Individual entries that fail to deserialize are skipped rather than
 /// aborting the whole load.
 pub fn load_state(path: Option<&Path>) -> Vec<PluginInstall> {
+    load_state_checked(path).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "plugin_state_read_failed");
+        Vec::new()
+    })
+}
+
+/// Load the install list, telling "no state yet" apart from "state could not be
+/// read". A missing file is `Ok(empty)`; a read error, a JSON parse error or a
+/// document without an `installs` array is `Err`. A caller that acts on the
+/// ABSENCE of an install (the reconciler tears a plugin down when it is not
+/// listed) must use this, so one failed read is not taken as "nothing enabled".
+/// Individual entries that fail to deserialize are still skipped.
+pub fn load_state_checked(path: Option<&Path>) -> Result<Vec<PluginInstall>, String> {
     let target = state_path(path);
     let raw = match std::fs::read_to_string(&target) {
         Ok(s) => s,
-        Err(_) => return Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("read {}: {e}", target.display())),
     };
     // Parse the wrapper loosely so one bad entry does not lose the rest.
-    let value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "plugin_state_read_failed");
-            return Vec::new();
-        }
-    };
-    let serde_json::Value::Object(map) = &value else {
-        return Vec::new();
-    };
-    let Some(serde_json::Value::Array(installs)) = map.get("installs") else {
-        return Vec::new();
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", target.display()))?;
+    let Some(serde_json::Value::Array(installs)) = value.get("installs") else {
+        return Err(format!("{} has no installs list", target.display()));
     };
     let mut out = Vec::with_capacity(installs.len());
     for entry in installs {
@@ -160,7 +166,7 @@ pub fn load_state(path: Option<&Path>) -> Vec<PluginInstall> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Atomically persist the install list. Writes a sibling `.tmp` and renames it

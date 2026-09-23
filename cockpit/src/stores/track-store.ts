@@ -42,7 +42,7 @@ interface TrackState {
   /** Reconcile the track against the currently-paired vehicle identity. A change
    *  to a DIFFERENT vehicle drops the breadcrumb + start, so the minimap never
    *  draws a cross-vehicle trail or mislabels one vehicle's first fix as
-   *  another's session start (Rule 44) — the failure a mid-session re-pair on a
+   *  another's session start — the failure a mid-session re-pair on a
    *  ground-station cockpit would otherwise cause. A null id (a transient link
    *  drop / unpaired) is ignored so a brief dropout does not wipe a real track,
    *  and the first identity seen adopts the in-progress track rather than

@@ -45,7 +45,10 @@ impl Page for VideoPage {
     }
 
     fn refresh_hz(&self) -> f32 {
-        20.0
+        // No decoded frame is painted yet, and the metrics under it change only
+        // at the state-poll cadence, so a fast repaint would re-rasterize a
+        // static card for nothing on the SBC that also runs the video link.
+        2.0
     }
 
     fn render(&self, ctx: &PageContext, palette: &Palette) -> Canvas {
@@ -122,7 +125,7 @@ fn render_content(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     // The video plane reads as a dedicated band with a centered status-message
     // card when no decoded frame is present, so the operator never sees a black
     // hole; the metrics row dims its colors while the plane has no live frame.
-    let dim = !video.active;
+    let dim = video.active != Some(true);
     draw_video_plane(canvas, palette, oy, video);
     draw_metrics(canvas, palette, oy, video, &ctx.link, dim);
     draw_rec_button(canvas, palette, 8, oy + 8, video.recording);
@@ -147,13 +150,13 @@ fn draw_video_plane(canvas: &mut Canvas, palette: &Palette, oy: i32, video: &Vid
         oy + VIDEO_H - 1,
         palette.bg_secondary,
     );
-    // The message tracks whether the pipeline ever came up: a ready mediamtx
-    // path that has not yet handed a frame reads as "waiting for stream"; a
-    // pipeline that never bound reads as "unavailable".
-    let message = if video.mediamtx_ready || video.active {
-        "Video link not available — waiting for stream"
-    } else {
-        "Video pipeline unavailable"
+    // The message tracks what the agent reports: a ready path or a live tap
+    // with no frame yet is "waiting for stream"; both reported down is
+    // "unavailable"; nothing reported is unknown, not a failure.
+    let message = match (video.mediamtx_ready, video.active) {
+        (Some(true), _) | (_, Some(true)) => "Video link not available — waiting for stream",
+        (Some(false), Some(false)) => "Video pipeline unavailable",
+        _ => "Video pipeline state unknown",
     };
     let font = LoadedFont::new(FontFace::SansRegular, 14);
     let (tw, th) = font.text_size(message);
@@ -446,7 +449,7 @@ mod tests {
         let ctx = ctx_with_video(
             VideoCtx {
                 recording: true,
-                active: true,
+                active: Some(true),
                 ..Default::default()
             },
             LinkCtx::default(),

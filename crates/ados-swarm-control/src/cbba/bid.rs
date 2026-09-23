@@ -1,4 +1,7 @@
-//! The CBBA bid vector and its wire form (swarm-bus frame `kind = 2`).
+//! The CBBA bid vector and its byte encoding.
+//!
+//! No transport carries it yet: the swarm bus has no bid frame kind, so this is
+//! the library half of the auction only.
 //!
 //! Exactly `5 * n_tasks + 2 * n_agents` bytes:
 //!
@@ -16,8 +19,7 @@
 //!
 //! Bids are EVENT-DRIVEN ONLY: emitted on a task-set change or a reallocation,
 //! never periodically. At 20 tasks and 24 agents that is 148 bytes per
-//! reallocation, which is why this can share the beacon's medium without a
-//! bandwidth argument.
+//! reallocation.
 
 /// Bytes per task in the wire encoding.
 pub const BID_BYTES_PER_TASK: usize = 5;
@@ -49,7 +51,7 @@ impl BidVector {
         n_tasks * BID_BYTES_PER_TASK + n_agents * BID_BYTES_PER_AGENT
     }
 
-    /// Encode for `SwarmFrameKind::CbbaBid`.
+    /// Encode to the wire form above.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::wire_len(self.y.len(), self.s.len()));
         for (bid, winner) in self.y.iter().zip(&self.z) {

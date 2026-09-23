@@ -47,7 +47,10 @@ command -v gh >/dev/null || { echo "gh CLI not found; cannot check the catalog" 
 # 0 — the exact silent-success this check exists to prevent.
 tags=("$@")
 if [ ${#tags[@]} -eq 0 ]; then
-  tag_list=$(gh release list --limit 100 --json tagName -q '.[].tagName' | grep '^prebuilt-') || {
+  # Every page, not the newest N: releases list newest-created first, and a
+  # rev-<sha> prerelease is cut on every crate-touching push, so a fixed limit
+  # silently drops the long-lived prebuilt-* tags out of the audit over time.
+  tag_list=$(gh api --paginate 'repos/{owner}/{repo}/releases?per_page=100' --jq '.[].tag_name' | grep '^prebuilt-') || {
     echo "could not list releases" >&2
     exit 2
   }

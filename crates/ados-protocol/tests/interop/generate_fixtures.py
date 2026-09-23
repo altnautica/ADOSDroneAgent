@@ -93,14 +93,14 @@ def _sample_state() -> dict:
 
 
 def state_v1_fixture() -> dict:
-    # Mirrors core/ipc.py StateIPCServer.publish (v1): json.dumps(state) + "\n".
+    # The legacy v1 state wire: json.dumps(state) + "\n".
     state = _sample_state()
     wire = json.dumps(state).encode() + b"\n"
     return {"state": state, "wire_hex": wire.hex()}
 
 
 def state_v2_fixture() -> dict:
-    # Mirrors core/ipc.py _encode_state_frame (v2) body: the msgpack map
+    # The v2 state body: the msgpack map
     # {"v": <version>, "s": state} (use_bin_type). The Rust decoder unwraps it
     # back to the inner state. Version sourced from the shared contract registry.
     state = _sample_state()

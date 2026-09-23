@@ -6,19 +6,20 @@
 //! * **Paired** — when the paired-drone record carries a device id. Show the
 //!   device id, the key-fingerprint short form, the paired-at relative time plus
 //!   a short absolute clock, and a destructive "Unpair" button bottom-right.
-//! * **Unpaired** — show a NOT PAIRED banner, the local pairing code, a QR of
-//!   the pair URL on the right half, and, while a pairing window is open, a
-//!   countdown pill. The window is opened from Mission Control; the panel has
-//!   no agent route to open one, so it offers no button for it.
+//! * **Unpaired** — show a NOT PAIRED banner and the WFB auto-pair state: armed
+//!   (a powered, unpaired drone in radio range pairs on its own), disarmed, or
+//!   unknown when the pair read did not answer.
 //!
-//! The paired identity comes from [`PageContext::paired_drone`]; the unpaired
-//! code/URL come from [`PageContext::pairing`] and [`PageContext::cloud`]; the
-//! pairing-window countdown comes from [`PageContext::pairing`].
+//! Radio pairing uses no code. The six-character code the operator types into
+//! Mission Control claims the node in the cloud, a different flow, so it lives
+//! on the dashboard and drone surfaces, never here.
+//!
+//! The paired identity and the auto-pair flag both come from
+//! [`PageContext::paired_drone`].
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
-use crate::graphics::primitives::{fill_rect, fill_rect_outline, text, Canvas};
-use crate::graphics::qr::render_qr;
+use crate::graphics::primitives::{fill_rect, text, Canvas};
 use crate::pages::{
     blank_panel, AgentRequest, Chrome, HitAction, HitZone, Page, PageContext, PanelAction,
 };
@@ -208,16 +209,18 @@ fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     );
 }
 
-/// Paint the unpaired body: NOT PAIRED banner + code + QR + window countdown.
-fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
-    let code = ctx
-        .pairing
-        .code
-        .clone()
-        .or_else(|| ctx.cloud.pairing_code.clone())
-        .or_else(|| ctx.cloud.pair_code.clone())
-        .unwrap_or_default();
+/// The auto-pair row value and the operator hint under it for an unpaired
+/// station, from the WFB auto-pair flag alone.
+fn auto_pair_lines(auto_pair_enabled: Option<bool>) -> (&'static str, &'static str) {
+    match auto_pair_enabled {
+        Some(true) => ("ON", "Power on an unpaired drone within radio range."),
+        Some(false) => ("OFF", "Turn auto-pair on or pair from Mission Control."),
+        None => ("--", "Radio pairing state unavailable."),
+    }
+}
 
+/// Paint the unpaired body: NOT PAIRED banner + the WFB auto-pair state.
+fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
     let msg_font = LoadedFont::new(FontFace::SansBold, 13);
     text(
         canvas,
@@ -228,77 +231,28 @@ fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
         palette.text_secondary,
     );
 
-    let code_font = LoadedFont::new(FontFace::MonoBold, 22);
-    let code_text = if code.is_empty() {
-        "------".to_string()
-    } else {
-        code.clone()
-    };
+    let (state, hint) = auto_pair_lines(ctx.paired_drone.auto_pair_enabled);
+    let label = LoadedFont::new(FontFace::SansBold, 11);
+    let value_font = LoadedFont::new(FontFace::MonoBold, 22);
+    let hint_font = LoadedFont::new(FontFace::SansRegular, 12);
+    let cy = HEADER_H + 36;
+    text(canvas, &label, "AUTO-PAIR", 16, cy, palette.text_tertiary);
     text(
         canvas,
-        &code_font,
-        &code_text,
+        &value_font,
+        state,
         16,
-        HEADER_H + 28,
+        cy + 14,
         palette.text_primary,
     );
-
-    // 100 px QR pinned to the right half, mirroring the paste anchor.
-    if !code.is_empty() {
-        let qr_payload = ctx
-            .pairing
-            .pair_url
-            .clone()
-            .or_else(|| ctx.cloud.pair_url.clone())
-            .unwrap_or_else(|| format!("altnautica.com/command?pair={code}"));
-        if let Some(qr) = render_qr(&qr_payload, 100, 2) {
-            let qr_x = PAGE_W - qr.size as i32 - 24;
-            let qr_y = HEADER_H + 8;
-            for py in 0..qr.size {
-                for px in 0..qr.size {
-                    if qr.is_dark(px, py) {
-                        canvas.put_pixel(qr_x + px as i32, qr_y + py as i32, palette.text_primary);
-                    }
-                }
-            }
-        }
-    }
-
-    let btn_x = PAGE_W - BTN_W - BTN_RIGHT_PAD;
-    let btn_y = PAGE_H - BTN_H - BTN_BOTTOM_PAD;
-
-    if ctx.pairing.window_active {
-        // Countdown pill, bottom-right.
-        let secs = ctx
-            .pairing
-            .window_remaining_seconds
-            .map(|v| v.max(0.0) as i64)
-            .unwrap_or(0);
-        let mins = secs / 60;
-        let rem = secs % 60;
-        let countdown = format!("Open \u{b7} {mins}:{rem:02} left");
-        for ring in 0..2 {
-            fill_rect_outline(
-                canvas,
-                btn_x + ring,
-                btn_y + ring,
-                btn_x + BTN_W - 1 - ring,
-                btn_y + BTN_H - 1 - ring,
-                palette.bg_secondary,
-                palette.accent_primary,
-            );
-        }
-        let cf = LoadedFont::new(FontFace::SansBold, 13);
-        let (cw, ch) = cf.text_size(&countdown);
-        text(
-            canvas,
-            &cf,
-            &countdown,
-            btn_x + (BTN_W - cw as i32) / 2,
-            btn_y + (BTN_H - ch as i32) / 2 - 1,
-            palette.accent_primary,
-        );
-    }
+    text(
+        canvas,
+        &hint_font,
+        hint,
+        16,
+        cy + 48,
+        palette.text_secondary,
+    );
 }
 
 #[cfg(test)]
@@ -319,17 +273,36 @@ mod tests {
     }
 
     #[test]
-    fn open_window_active_drops_the_button_zone() {
+    fn unpaired_page_never_shows_the_cloud_claim_code() {
+        // The claim code belongs to the Mission Control claim flow; radio
+        // pairing uses none, so its presence must not change a single pixel.
         let page = PairDroneDetailPage;
-        let mut ctx = PageContext::default();
-        ctx.pairing.code = Some("ABC123".to_string());
-        ctx.pairing.window_active = true;
-        ctx.pairing.window_remaining_seconds = Some(95.0);
-        let c = page.render(&ctx, &DARK);
-        assert_eq!(c.width(), PANEL_W);
-        let zones = page.hit_zones(&ctx);
-        assert_eq!(zones.len(), 1);
-        assert_eq!(zones[0].action, HitAction::Back);
+        let mut without = PageContext::default();
+        without.paired_drone.auto_pair_enabled = Some(true);
+        let mut with = without.clone();
+        with.pairing.code = Some("ABC123".to_string());
+        with.cloud.pair_code = Some("ABC123".to_string());
+        assert_eq!(
+            page.render(&with, &DARK).as_rgb888(),
+            page.render(&without, &DARK).as_rgb888()
+        );
+        assert_eq!(page.hit_zones(&with).len(), 1);
+    }
+
+    #[test]
+    fn auto_pair_state_reads_only_the_radio_flag() {
+        assert_eq!(auto_pair_lines(Some(true)).0, "ON");
+        assert_eq!(auto_pair_lines(Some(false)).0, "OFF");
+        assert_eq!(auto_pair_lines(None).0, "--");
+        let page = PairDroneDetailPage;
+        let mut on = PageContext::default();
+        on.paired_drone.auto_pair_enabled = Some(true);
+        let mut off = on.clone();
+        off.paired_drone.auto_pair_enabled = Some(false);
+        assert_ne!(
+            page.render(&on, &DARK).as_rgb888(),
+            page.render(&off, &DARK).as_rgb888()
+        );
     }
 
     #[test]

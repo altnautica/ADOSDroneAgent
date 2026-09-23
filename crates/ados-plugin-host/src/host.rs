@@ -19,6 +19,8 @@
 //! matches how the Python supervisor wires the `EventBus` directly rather than
 //! behind a host-service hook.
 
+use std::future::Future;
+
 use rmpv::Value;
 
 use crate::dispatch::errors;
@@ -194,14 +196,29 @@ pub trait HostServices: Send + Sync + 'static {
     fn camera_get_frame(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("camera.get_frame"))
     }
-    fn video_source_set(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
-        Ok(not_implemented("video.source.set"))
+    /// Replace this plugin's video sources. A real host forwards the request to
+    /// the supervisor's video command socket, which persists the list and
+    /// restarts the video pipeline before it replies, so the forward is async
+    /// and waits out that restart.
+    fn video_source_set(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("video.source.set")))
     }
     fn config_get(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("config.get"))
     }
-    fn config_set(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
-        Ok(not_implemented("config.set"))
+    /// Store one config value. Async because a real host validates against the
+    /// plugin's declared parameter schema and persists the store, both file
+    /// work that must not run on a runtime worker.
+    fn config_set(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("config.set")))
     }
     fn process_spawn(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("process.spawn"))
@@ -221,15 +238,23 @@ pub trait HostServices: Send + Sync + 'static {
     /// Fully gated at the dispatch level on the GPIO-output capability, so it does
     /// not see the caller's caps. The default returns `not_implemented` so
     /// [`NoopHost`] stays inert.
-    fn gpio_output_set(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
-        Ok(not_implemented("gpio.output.set"))
+    fn gpio_output_set(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("gpio.output.set")))
     }
 
     /// Play a bounded buzzer/LED beep pattern on a host GPIO output line. A real
     /// host forwards the request to the GPIO-output service's command socket,
     /// which clamps the pattern into the safe bounds before driving the line.
-    fn gpio_buzzer_beep(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
-        Ok(not_implemented("gpio.buzzer.beep"))
+    fn gpio_buzzer_beep(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("gpio.buzzer.beep")))
     }
 
     /// Send one guided-mode position/velocity setpoint to the flight controller.
@@ -269,40 +294,43 @@ pub trait HostServices: Send + Sync + 'static {
     /// which brings up a transmit/receive pair on a separate radio-port from the
     /// data and control planes. SAFE: the pair never starts on its own — only this
     /// explicit open brings it up, and the matching close (or the plugin
-    /// disconnecting) tears it down. Fully gated at the dispatch level on the
-    /// auxiliary-stream capability, so it does not see the caller's caps. The
-    /// default returns `not_implemented` so [`NoopHost`] stays inert.
+    /// disconnecting) tears it down. One plugin owns the stream at a time; an
+    /// open while another plugin owns it is refused. Fully gated at the dispatch
+    /// level on the auxiliary-stream capability, so it does not see the caller's
+    /// caps. The default returns `not_implemented` so [`NoopHost`] stays inert.
     fn radio_aux_stream_open(
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> Result<HostResult, HostError> {
-        Ok(not_implemented("radio.aux_stream.open"))
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("radio.aux_stream.open")))
     }
 
-    /// Close the auxiliary application stream a plugin opened. A real host forwards
-    /// the request to the radio service's auxiliary command socket, which tears
-    /// down the transmit/receive pair (additive — it never touches the data or
-    /// control planes). Idempotent: closing an already-closed stream is a quiet
-    /// success. The default returns `not_implemented` so [`NoopHost`] stays inert.
+    /// Close the auxiliary application stream the calling plugin opened. A real
+    /// host forwards the request to the radio service's auxiliary command
+    /// socket, which tears down the transmit/receive pair (additive — it never
+    /// touches the data or control planes). A close from a plugin that does not
+    /// own the stream is refused without reaching the radio service. The default
+    /// returns `not_implemented` so [`NoopHost`] stays inert.
     fn radio_aux_stream_close(
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> Result<HostResult, HostError> {
-        Ok(not_implemented("radio.aux_stream.close"))
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("radio.aux_stream.close")))
     }
 
-    /// Send one application datagram on the open auxiliary stream. A real host
-    /// validates the channel, encodes the aux frame, and forwards it to the radio
-    /// service's auxiliary command socket. Gated at the dispatch level on
-    /// `radio.aux_stream`.
+    /// Send one application datagram on the auxiliary stream the calling plugin
+    /// opened. A real host validates the channel, encodes the aux frame, and
+    /// forwards it to the radio service's auxiliary command socket; a send from
+    /// a plugin that does not own the stream is refused. Gated at the dispatch
+    /// level on `radio.aux_stream`.
     fn radio_aux_stream_send(
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> Result<HostResult, HostError> {
-        Ok(not_implemented("radio.aux_stream.send"))
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("radio.aux_stream.send")))
     }
 
     /// Subscribe to application datagrams received on an open auxiliary stream. A
@@ -334,10 +362,23 @@ pub trait HostServices: Send + Sync + 'static {
         None
     }
 
-    /// Release every per-session host resource a plugin held when its connection drops
-    /// (component reservations, driver registrations, camera claims, telemetry
-    /// channels). The default is a no-op; a real host releases its state.
-    fn release_plugin(&self, _plugin_id: &str) {}
+    /// Open a connection session for `plugin_id` and return its id. Resources
+    /// the plugin acquires from now on are tagged with it, so a reconnect's
+    /// new session and the old session's teardown can overlap without the
+    /// teardown releasing what the new session holds. The default (no
+    /// per-session state) returns 0.
+    fn begin_session(&self, _plugin_id: &str) -> u64 {
+        0
+    }
+
+    /// Release the per-session host resources `session` acquired when its
+    /// connection drops (component reservations, telemetry channels, the aux
+    /// stream, offload sessions). Anything a newer session of the same plugin
+    /// re-acquired is left alone. Async because closing the aux stream is a
+    /// command-socket round trip. The default is a no-op.
+    fn release_session(&self, _plugin_id: &str, _session: u64) -> impl Future<Output = ()> + Send {
+        std::future::ready(())
+    }
 
     /// A receiver for the MAVLink frame fanout, when this host has a wired
     /// MAVLink client. The server obtains one per `mavlink.subscribe` and pushes
@@ -448,7 +489,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("vision.register_model")))
     }
 
@@ -462,7 +503,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("vision.read_model")))
     }
 
@@ -472,7 +513,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("vision.infer")))
     }
 
@@ -482,7 +523,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("vision.publish_detection")))
     }
 
@@ -492,7 +533,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("vision.designate_track")))
     }
 
@@ -504,7 +545,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("compute.dataset.write")))
     }
 
@@ -514,7 +555,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("compute.job.submit")))
     }
 
@@ -523,7 +564,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("compute.job.read")))
     }
 
@@ -532,7 +573,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("compute.job.outputs")))
     }
 
@@ -541,7 +582,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("compute.job.cancel")))
     }
 
@@ -560,7 +601,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("compute.stream.open")))
     }
 
@@ -573,7 +614,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("compute.stream.close")))
     }
 
@@ -585,7 +626,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _args: &Value,
-    ) -> impl std::future::Future<Output = Result<HostResult, HostError>> + Send {
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("compute.stream.health")))
     }
 }

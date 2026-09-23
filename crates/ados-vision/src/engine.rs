@@ -411,7 +411,7 @@ impl VisionEngine {
     /// hand-picking a global detector.
     ///
     /// Only inference-capable models resolve: a mock-backed or failed-to-load
-    /// model is never returned as a working capability (Rule 44). The result is
+    /// model is never returned as a working capability. The result is
     /// deterministic because [`Self::list_models`] is sorted by id.
     pub async fn resolve_capability(
         &self,
@@ -896,7 +896,7 @@ mod tests {
     async fn resolve_capability_skips_a_non_inference_capable_model() {
         // The default mock engine loads the model (backend_loaded) but is not
         // inference-capable, so the detection capability does not resolve — a
-        // placeholder is never offered as a working capability (Rule 44).
+        // placeholder is never offered as a working capability.
         let e = engine();
         e.register_model(meta("m1", ModelExecution::EngineRun))
             .await
@@ -1050,7 +1050,7 @@ mod tests {
     async fn list_models_flags_a_mock_backend_as_not_inference_capable() {
         // A model loads on the mock backend (backend_loaded true) but the mock
         // runs no real inference, so is_inference_capable is false — a status
-        // surface must not present it as a working detector (Rule 44).
+        // surface must not present it as a working detector.
         let e = engine();
         e.register_model(meta("m1", ModelExecution::EngineRun))
             .await

@@ -39,7 +39,7 @@ pub const MAX_BYTES: usize = 64 * 1024;
 
 /// The sidecar file path for a plugin id under a socket dir:
 /// `<socket_dir>/<plugin_id>-state.json`. The `-state.json` suffix keeps it
-/// distinct from the plugin's `<plugin_id>.sock` and `<plugin_id>.token.env`.
+/// distinct from the plugin's `<plugin_id>/` socket dir and `<plugin_id>.token.env`.
 pub fn sidecar_path(socket_dir: &Path, plugin_id: &str) -> PathBuf {
     socket_dir.join(format!("{plugin_id}-state.json"))
 }

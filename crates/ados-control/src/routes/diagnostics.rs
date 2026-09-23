@@ -439,7 +439,7 @@ const VIDEO_SAMPLE_WINDOW_MS: u64 = 2000;
 /// mediamtx `main` path, the wfb-stats sidecar, the WHEP endpoint) — never
 /// tcpdump, `/proc/net/udp` queue depth, or a single snapshot — and samples each
 /// twice over [`VIDEO_SAMPLE_WINDOW_MS`] so a hop is judged by data actually
-/// moving, not by a process being alive (Rule 37 / the pipeline runbook).
+/// moving, not by a process being alive (the pipeline runbook).
 ///
 /// Drone (video SOURCE) hops: camera→mediamtx (mediamtx `main` bytesReceived
 /// delta) and mediamtx→radio-TX (the wfb TX bitrate; a drone injects only what
@@ -452,7 +452,7 @@ pub async fn get_video_diagnostics(State(state): State<AppState>) -> Json<Value>
     let (profile, role) = crate::profile::current_profile_and_role(&cfg.agent.profile);
 
     // Two reads a window apart: each hop is judged by data actually moving between
-    // them, not by a process being alive (Rule 37 / the pipeline runbook).
+    // them, not by a process being alive (the pipeline runbook).
     let s0 = VideoSample::take().await;
     tokio::time::sleep(std::time::Duration::from_millis(VIDEO_SAMPLE_WINDOW_MS)).await;
     let s1 = VideoSample::take().await;

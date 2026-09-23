@@ -145,11 +145,19 @@ SYMLINK_MODE = 0o120000
 
 
 def _safe_member_path(name: str) -> str:
-    if name.startswith("/") or "\\" in name:
+    """Refuse traversal, absolute and non-canonical member names.
+
+    A ``.`` or empty segment is refused along with ``..``: ``./manifest.yaml``
+    and ``manifest.yaml`` are distinct zip names that unpack to one file, so
+    accepting both lets the validated manifest differ from the one on disk. A
+    directory entry's single trailing ``/`` is not a segment.
+    """
+    if not name or name.startswith("/") or "\\" in name:
         raise ArchiveError(f"unsafe archive entry path: {name!r}")
-    parts = Path(name).parts
-    if ".." in parts or any(p.startswith("..") for p in parts):
-        raise ArchiveError(f"unsafe archive entry path: {name!r}")
+    body = name[:-1] if name.endswith("/") else name
+    for part in body.split("/"):
+        if not part or part == "." or part.startswith(".."):
+            raise ArchiveError(f"unsafe archive entry path: {name!r}")
     return name
 
 
@@ -181,6 +189,7 @@ def _read_members_bounded(
     never leave a half-extracted tree behind.
     """
     members: list[tuple[zipfile.ZipInfo, str, bytes]] = []
+    seen: set[str] = set()
     total = 0
     for info in zf.infolist():
         name = _safe_member_path(info.filename)
@@ -222,6 +231,9 @@ def _read_members_bounded(
             raise ArchiveError(
                 f"archive decompresses past the total cap {TOTAL_DECOMPRESSED_MAX}"
             )
+        if name in seen:
+            raise ArchiveError(f"archive entry {name} appears twice")
+        seen.add(name)
         members.append((info, name, data))
     return members
 
@@ -252,11 +264,13 @@ def open_archive(path: str | Path) -> ArchiveContents:
     p = Path(path)
     if not p.exists():
         raise ArchiveError(f"archive not found: {path}")
-    raw = p.read_bytes()
-    if len(raw) > ARCHIVE_MAX_BYTES:
+    size = p.stat().st_size
+    if size > ARCHIVE_MAX_BYTES:
         raise ArchiveError(
-            f"archive {path} is {len(raw)} bytes; cap is {ARCHIVE_MAX_BYTES}"
+            f"archive {path} is {size} bytes; cap is {ARCHIVE_MAX_BYTES}"
         )
+    with p.open("rb") as fh:
+        raw = fh.read(ARCHIVE_MAX_BYTES + 1)
 
     return parse_archive_bytes(raw)
 
@@ -329,18 +343,17 @@ def _read_signature(blob: bytes | None) -> tuple[str | None, str | None]:
 
 
 def _restore_exec_mode(target: Path, info: zipfile.ZipInfo) -> None:
-    """Restore the executable Unix mode when the zip entry carried one.
+    """Set an unpacked file's mode from the zip entry's exec bit.
 
     An unpacked ``agent/bin/<id>`` Rust-plugin binary must be runnable by the
-    generated systemd ``ExecStart``; ``write_bytes`` otherwise leaves the file
-    at the umask default (typically ``0644``) and the unit dies with
-    ``EACCES``. Only acts when an exec bit is set, and preserves the entry's
-    own permission bits (masked to ``0o777``). The canonical payload hash is
-    over file content, so restoring the mode never affects the signature.
+    generated systemd ``ExecStart``, so an entry carrying an exec bit becomes
+    ``0755``; every other file is ``0644``. The entry's own bits are never
+    applied: zip metadata is outside the signed payload hash (content only),
+    so a re-zipped signed archive could otherwise install a group- or
+    world-writable binary.
     """
     mode = (info.external_attr >> 16) & 0o777
-    if mode & 0o111:
-        os.chmod(target, mode)
+    os.chmod(target, 0o755 if mode & 0o111 else 0o644)
 
 
 def unpack_to(archive_bytes: bytes, dest: Path) -> None:

@@ -64,6 +64,7 @@ async fn start(dir: &Path, swarm_socket: PathBuf) -> (PathBuf, oneshot::Sender<(
         params_path: dir.join("params.json"),
         profile_conf_path: dir.join("profile.conf"),
         mesh_role_path: dir.join("mesh-role"),
+        relay_secret_path: dir.join("relay-peer-secret"),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     tokio::spawn(run_with_paths(paths, async move {
@@ -297,13 +298,14 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
                     "slot": 9,
                     "device_id": "ados-def456",
                     "seq_ms": 9001,
-                    "lat": 12.972,
-                    "lon": 77.595,
-                    "alt_m": -15.0,
-                    "vx_ms": 0.0,
-                    "vy_ms": 0.0,
-                    "vz_ms": -1.0,
-                    "heading_deg": 0.0,
+                    // No GPS fix: the placeholder position is published as null.
+                    "lat": Value::Null,
+                    "lon": Value::Null,
+                    "alt_m": Value::Null,
+                    "vx_ms": Value::Null,
+                    "vy_ms": Value::Null,
+                    "vz_ms": Value::Null,
+                    "heading_deg": Value::Null,
                     "armed": false,
                     "guided": false,
                     "emergency": false,
@@ -329,6 +331,8 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
                 {"slot": 3, "device_id": "ados-abc123"},
                 {"slot": 9, "device_id": "ados-def456"},
             ],
+            // The table was built without a radio, so the bus reports it cannot hear.
+            "radio": {"open": false, "iface": null},
         }),
         "the published contract drifted"
     );

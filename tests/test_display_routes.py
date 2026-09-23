@@ -289,12 +289,25 @@ def test_page_get_returns_active_page_default(client: TestClient) -> None:
     assert body == {"active_page": "dashboard", "modal_stack": []}
 
 
+def _state_with_routes(tmp_path: Path, routes: list[str]) -> Path:
+    """An lcd-state.json as the navigator writes it at start."""
+    state = tmp_path / "lcd-state.json"
+    state.write_text(json.dumps({
+        "active_page_id": "dashboard",
+        "modal_stack": [],
+        "route_ids": routes,
+    }))
+    return state
+
+
 def test_page_post_writes_request_file(
     client: TestClient, tmp_path: Path,
 ) -> None:
     """POST /page writes a request blob the OLED service can pick up."""
     target = tmp_path / "lcd-page-request.json"
-    with patch.object(display_routes, "LCD_PAGE_REQUEST_PATH", target):
+    state = _state_with_routes(tmp_path, ["dashboard", "video"])
+    with patch.object(display_routes, "LCD_PAGE_REQUEST_PATH", target), \
+         patch.object(display_routes, "LCD_STATE_PATH", state):
         resp = client.post(
             "/api/v1/display/page",
             json={"page": "video"},
@@ -307,17 +320,50 @@ def test_page_post_writes_request_file(
     assert "requested_at_ms" in blob
 
 
-def test_page_post_rejects_unknown_id(client: TestClient) -> None:
-    resp = client.post(
-        "/api/v1/display/page",
-        json={"page": "deepspace"},
+def test_page_post_accepts_every_route_the_navigator_registered(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """The reserved plugin page and the channel-hops tab are requestable
+    because the navigator lists them, not because a copy here does."""
+    target = tmp_path / "lcd-page-request.json"
+    state = _state_with_routes(
+        tmp_path, ["dashboard", "channel_hops", "plugin"],
     )
+    with patch.object(display_routes, "LCD_PAGE_REQUEST_PATH", target), \
+         patch.object(display_routes, "LCD_STATE_PATH", state):
+        for page in ("plugin", "channel_hops"):
+            resp = client.post("/api/v1/display/page", json={"page": page})
+            assert resp.status_code == 200, page
+            assert json.loads(target.read_text())["page"] == page
+
+
+def test_page_post_rejects_unknown_id(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    state = _state_with_routes(tmp_path, ["dashboard", "video"])
+    with patch.object(display_routes, "LCD_STATE_PATH", state):
+        resp = client.post(
+            "/api/v1/display/page",
+            json={"page": "deepspace"},
+        )
     assert resp.status_code == 400
     body = resp.json()
     detail = body["detail"]
     assert detail["error"] == "unknown_page"
     assert detail["page"] == "deepspace"
-    assert "valid" in detail
+    assert detail["valid"] == ["dashboard", "video"]
+
+
+def test_page_post_refuses_when_no_navigator_published_routes(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    target = tmp_path / "lcd-page-request.json"
+    with patch.object(display_routes, "LCD_PAGE_REQUEST_PATH", target), \
+         patch.object(display_routes, "LCD_STATE_PATH", tmp_path / "absent.json"):
+        resp = client.post("/api/v1/display/page", json={"page": "video"})
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error"] == "display_not_running"
+    assert not target.exists()
 
 
 # ── touches ---------------------------------------------------------

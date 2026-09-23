@@ -7,7 +7,7 @@
 //!     `/sys/class/net/<iface>/statistics/rx_packets`. A monotonic increment
 //!     proves the peer transmitted a frame that passed FEC + decryption inside
 //!     `wfb_rx` and was handed to the TUN device — a kernel integer immune to
-//!     wfb-ng log-format churn (Rule 37: trust `/sys/class/net` counters).
+//!     wfb-ng log-format churn (trust `/sys/class/net` counters).
 
 use std::path::Path;
 use std::time::Duration;

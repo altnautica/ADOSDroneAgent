@@ -4,6 +4,59 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.378] - 2026-09-24
+
+### Security
+
+- Relayed requests are now signed over method, path and query, nonce,
+  timestamp and body. A relayed config write to `security.*`,
+  `server.cloud.*` or `mavlink.*` keys is refused at the edge.
+- The edge rate limit is per caller and charges both native and proxied
+  routes. The TCP front caps connections (512 in total, 32 per off-box caller)
+  and times out a slow header read after 15 s. The PIN lockout is per caller.
+- An unreadable or malformed pairing file now fails closed: claim, code and
+  info answer 503. Remote callers never see the pairing code.
+- Unpairing removes the relay peer secret. A tunnel request must carry a
+  per-pair relay ticket naming this drone.
+- Plugin sockets live in per-plugin root-owned directories. Each plugin unit
+  sees only its own directory; the rest of `/run/ados` is hidden behind an
+  empty read-only tmpfs.
+- The plugin host checks the component id in every MAVLink frame header a
+  plugin sends. Aux streams and offload sessions are owned by the plugin that
+  opened them. The `plugin.` topic namespace is reserved.
+- The MQTT gateway uses TLS on every transport unless
+  `server.mqtt_plaintext_dev` is set, and logs in with the device id.
+- The mesh relay invite is bound to the receiver, and swarm bid frames are
+  checked for replay.
+- Plugin archives with `.` or empty path segments, duplicate entries or an
+  oversized declared size are refused before any read.
+- Removed pricing and planning notes from the board definitions.
+
+### Changed
+
+- The router validates CRC and CRC_EXTRA on every MAVLink frame and resyncs
+  on a bad one. It identifies ArduPilot firmware from the banner before
+  encoding flight modes, and answers 409 when the firmware is unknown.
+- A radio channel hop answers 202 with the target channel, and the radio
+  command socket round trip is bounded at 5 s.
+- Setting the Atlas config or a vision detector answers 502 when the service
+  restart fails.
+- Plugin host forwards (GPIO, video source, radio aux) are async with
+  deadlines. `video.source.set` waits out a pipeline restart.
+- The ground-station display shows only reported values: topology, uplink,
+  video and mesh state read "unknown" until they are reported. Page ids are
+  validated against the pages the running navigator publishes.
+- The Rust dependency tree is updated; statically linked services no longer
+  link a TLS stack.
+- `ados-logd.service` no longer restarts after a clean store-disabled exit.
+
+### Removed
+
+- The unused `ados.security` package (certs, firewall, WireGuard, HMAC
+  signing, replay), the `security.tls` and `security.wireguard` config
+  blocks, and the residual Python rate-limit middleware.
+- The unused swarm bid lane, and the unused MQTT gateway in `ados-cloud`.
+
 ## [0.99.377] - 2026-09-23
 
 ### Security

@@ -75,10 +75,10 @@ def create_app(agent: Any) -> FastAPI:
     # middleware below makes the claim true instead of stated.
     app.add_middleware(OnboxOriginMiddleware)
 
-    # Rate limiting middleware — added after CORS.
-    # Execution order: CORS → Rate Limit → Route handler.
-    from ados.security.rate_limit import RateLimitMiddleware
-    app.add_middleware(RateLimitMiddleware, rate=10.0, burst=20)
+    # No rate limiter here: this app is reached only over the front's Unix
+    # socket, where every caller has the same (absent) address, so a limiter
+    # here is one bucket shared by every client. The front charges each caller's
+    # own budget before it forwards a request.
 
     # Close the logging-store proxy clients on shutdown so the shared
     # connections do not leak across an app teardown. The /api/logs surface and

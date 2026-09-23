@@ -14,8 +14,9 @@
 //! injector traffic can never pass as operator traffic after a reconnect.
 //!
 //! [`FrameLink::send`] reports what happened instead of swallowing it: a frame
-//! over the wire cap, a full queue and a missing connection are each an error,
-//! so a caller never tells a plugin a command was sent when it was not.
+//! over the wire cap, a full queue, a missing connection and, on a link that
+//! declared itself an injector, the router's PIC gate refusing it are each an
+//! error, so a caller never tells a plugin a command was sent when it was not.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,6 +29,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+
+use crate::pic_gate::PicGate;
 
 /// Depth of the inbound fanout and the outbound command queue. Matches the
 /// router's queue depth so a subscriber that briefly stalls lags rather than
@@ -53,6 +56,10 @@ pub enum SendError {
     QueueFull,
     /// No live connection to the router.
     Disconnected,
+    /// The link declared itself an autonomous injector and the router's PIC
+    /// gate refuses injector traffic right now: an operator holds manual
+    /// control, or the PIC arbiter is not reporting.
+    PicRefused,
 }
 
 impl SendError {
@@ -62,6 +69,7 @@ impl SendError {
             Self::TooLarge => "too_large",
             Self::QueueFull => "queue_full",
             Self::Disconnected => "disconnected",
+            Self::PicRefused => "pic_refused",
         }
     }
 }
@@ -78,6 +86,9 @@ pub struct FrameLink {
     inbound: broadcast::Sender<Vec<u8>>,
     connected: Arc<AtomicBool>,
     task: JoinHandle<()>,
+    /// Set on a link that declares an injector: the router's PIC gate, asked
+    /// before a command is queued.
+    pic_gate: Option<PicGate>,
 }
 
 impl FrameLink {
@@ -109,15 +120,27 @@ impl FrameLink {
             inbound,
             connected,
             task,
+            pic_gate: None,
         }
     }
 
+    /// Check every command against the router's PIC gate before queueing it.
+    /// For a link whose declarations subject it to that gate.
+    pub fn with_pic_gate(mut self, gate: PicGate) -> Self {
+        self.pic_gate = Some(gate);
+        self
+    }
+
     /// Frame `data` and queue it toward the flight controller. `Ok` means the
-    /// frame is queued on a live connection, behind the declarations.
+    /// frame is queued on a live connection, behind the declarations, and the
+    /// router's PIC gate (when this link is subject to it) lets it through.
     pub fn send(&self, data: &[u8]) -> Result<(), SendError> {
         let frame = encode_frame(data, MAVLINK_MAX_FRAME).map_err(|_| SendError::TooLarge)?;
         if !self.connected.load(Ordering::Acquire) {
             return Err(SendError::Disconnected);
+        }
+        if self.pic_gate.as_ref().is_some_and(PicGate::refuses) {
+            return Err(SendError::PicRefused);
         }
         self.outbound.try_send(frame).map_err(|e| match e {
             mpsc::error::TrySendError::Full(_) => SendError::QueueFull,

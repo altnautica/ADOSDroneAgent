@@ -58,7 +58,7 @@ server:
   telemetry_rate: 2
   heartbeat_interval: 5
   mqtt_transport: "websockets"
-  mqtt_username: "ados"
+  mqtt_username: ""
   mqtt_password: ""
 
 remote_access:
@@ -74,8 +74,6 @@ remote_access:
     mavlink_ws_url: ""
 
 security:
-  tls:
-    enabled: false
   api:
     cors_enabled: true
   setup_token_required: false

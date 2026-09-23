@@ -1,4 +1,4 @@
-//! Forked-helper process manager with process-group isolation (Rule 37).
+//! Forked-helper process manager with process-group isolation.
 //!
 //! The USB-gadget manager forks a long-lived `dnsmasq` to serve the single
 //! tethered host its DHCP lease. The Python predecessor used a bare

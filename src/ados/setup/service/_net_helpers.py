@@ -226,7 +226,7 @@ def _best_lan_host(hostname: str, local_ips: list[str]) -> str:
 
     Preference order:
     1. ``<hostname>.local`` when the system hostname looks routable.
-       ``groundnode`` becomes ``groundnode.local`` — the form a bench
+       ``gs-example`` becomes ``gs-example.local`` — the form a bench
        operator already typed at the SSH prompt.
     2. ``<hostname>`` itself when it already carries a dot (admin set a
        full DNS name).

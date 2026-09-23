@@ -119,6 +119,9 @@ class PairRevokeRequest(BaseModel):
 
 
 class PairJoinRequest(BaseModel):
+    # The six-digit code the receiver shows while its Accept window is
+    # open. The invite only opens with it.
+    code: str = Field(pattern=r"^[0-9]{6}$")
     receiver_host: str | None = None
     receiver_port: int | None = Field(default=None, ge=1, le=65535)
 

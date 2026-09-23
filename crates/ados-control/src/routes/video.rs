@@ -86,7 +86,7 @@ fn build_adaptive_block(available: bool, stats: Option<&Map<String, Value>>) -> 
 /// Absent and stale both return `None`. A stale snapshot's controller state
 /// describes a radio that may be dead: a frozen `adaptive_bitrate_enabled: true`
 /// beside a frozen recommended rung reads as a live adapting link, which is the
-/// healthy-looking dead link Rule 44 forbids — the same reasoning the `link`
+/// healthy-looking dead link an honest surface forbids — the same reasoning the `link`
 /// block already documents for its own counters.
 fn read_stats_if_fresh(path: &Path) -> Option<Map<String, Value>> {
     if sidecar_age_seconds(path).is_some_and(|age| age <= LINK_STALE_AFTER_S) {
@@ -323,7 +323,7 @@ pub async fn get_video_config() -> Json<Value> {
     // same file. A stale snapshot's controller state describes a radio that may
     // be dead now: a frozen `adaptive_bitrate_enabled: true` beside a frozen
     // recommended rung reads as a live adapting link, which is the
-    // healthy-looking dead link Rule 44 forbids. Absent and stale both degrade to
+    // healthy-looking dead link an honest surface forbids. Absent and stale both degrade to
     // the config stub rather than to a last-known value.
     let adaptive = build_adaptive_block(
         wfb.adaptive_bitrate_enabled,
@@ -481,7 +481,7 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
         // snapshot describes a link that may be dead now, so every counter stays at
         // its `null` placeholder (unknown) rather than a frozen last-known value —
         // holding a stale advancing `tx_bytes_per_s` or a stale `channel_locked`
-        // renders a dead link as if live (operating rule 44). `channel` stays null
+        // renders a dead link as if live. `channel` stays null
         // when stale too and falls back to the configured value below.
         let fresh = sidecar_age_seconds(stats_path).is_some_and(|age| age <= LINK_STALE_AFTER_S);
         if fresh {
@@ -1473,7 +1473,7 @@ mod tests {
     fn link_snapshot_stale_counters_read_null_not_frozen() {
         // A dead radio leaves its last-written sidecar on disk. Every liveness
         // counter must read null on a stale snapshot — a frozen last-known value
-        // read as live is the healthy-looking dead link operating rule 44 forbids.
+        // read as live is the healthy-looking dead link an honest surface forbids.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wfb-stats.json");
         let body = r#"{"tx_bytes_per_s": 750000, "valid_rx_packets_per_s": 42.5,

@@ -11,8 +11,11 @@
 //!
 //! - **A missing reading is `null`, never a plausible number.** `rssi_dbm` is null
 //!   when the capture carried no signal field and `device_id` is null when the
-//!   slot cannot be joined to an identity. A fabricated `-100 dBm` or an empty
-//!   string would render as a real value.
+//!   slot cannot be joined to an identity. A beacon with its `gps_ok` bit clear
+//!   carries a placeholder fix (0°, 0°, zero velocity), so its position,
+//!   altitude, velocity and heading are null: a map would otherwise plot the
+//!   drone at 0°N 0°E. A fabricated `-100 dBm` or an empty string would render as
+//!   a real value.
 //! - **Derived fields are computed here, not on the client.** `heading_deg` and
 //!   `age_ms` are emitted so every consumer agrees on them; two clients deriving
 //!   heading with different argument orders would mirror the map.
@@ -28,6 +31,10 @@
 //!   operator-facing fact `slots` exists to carry — a slot present in `slots` but
 //!   absent from `neighbors` is a drone the fleet issued a slot to and has since
 //!   stopped hearing.
+//! - **`radio` says whether the bus can hear at all.** `{open, iface}` is set by
+//!   the radio supervisor. A bus whose radio never opened publishes the same
+//!   empty table and zeroed counters as a healthy listener with nobody in range;
+//!   `open: false` is what tells the two apart.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -58,17 +65,19 @@ pub fn neighbors_payload(
         .iter()
         .map(|(slot, n)| {
             let b = &n.beacon;
+            // A no-fix beacon's position block is a placeholder, not a reading.
+            let fix = |v: f64| if b.gps_ok() { json!(v) } else { Value::Null };
             json!({
                 "slot": slot,
                 "device_id": device_ids.get(slot).map(String::as_str),
                 "seq_ms": b.seq_ms,
-                "lat": b.lat_deg(),
-                "lon": b.lon_deg(),
-                "alt_m": b.alt_m(),
-                "vx_ms": b.vx_ms(),
-                "vy_ms": b.vy_ms(),
-                "vz_ms": b.vz_ms(),
-                "heading_deg": b.heading_deg(),
+                "lat": fix(b.lat_deg()),
+                "lon": fix(b.lon_deg()),
+                "alt_m": fix(b.alt_m()),
+                "vx_ms": fix(b.vx_ms()),
+                "vy_ms": fix(b.vy_ms()),
+                "vz_ms": fix(b.vz_ms()),
+                "heading_deg": fix(b.heading_deg()),
                 "armed": b.armed(),
                 "guided": b.guided(),
                 "emergency": b.emergency(),
@@ -93,6 +102,10 @@ pub fn neighbors_payload(
             .iter()
             .map(|(slot, device_id)| json!({"slot": slot, "device_id": device_id}))
             .collect::<Vec<Value>>(),
+        "radio": {
+            "open": table.radio_iface().is_some(),
+            "iface": table.radio_iface(),
+        },
     })
 }
 
@@ -123,7 +136,8 @@ pub fn counters_value(c: SwarmCounters, neighbors_now: usize) -> Value {
 /// empty array rather than null: an empty registry is an honest description of a
 /// node with no registry of its own (every drone, and a ground station that has
 /// paired nobody), whereas `fleet_id`/`slot` being empty would be a guess about a
-/// fleet identity this degraded body cannot know.
+/// fleet identity this degraded body cannot know. `radio` is null: no running bus
+/// has said whether it can hear.
 pub fn empty_payload() -> Value {
     json!({
         "fleet_id": Value::Null,
@@ -133,6 +147,7 @@ pub fn empty_payload() -> Value {
         "neighbors": [],
         "counters": counters_value(SwarmCounters::default(), 0),
         "slots": [],
+        "radio": Value::Null,
     })
 }
 
@@ -179,7 +194,7 @@ pub fn encode_line(payload: &Value) -> Vec<u8> {
 /// The top-level keys of the published payload. `slot_conflict` is `true` while a
 /// peer is beaconing this node's own slot, `false` when none is, and `null` when
 /// no running bus has reported.
-pub const PAYLOAD_KEYS: [&str; 7] = [
+pub const PAYLOAD_KEYS: [&str; 8] = [
     "fleet_id",
     "slot",
     "sender_id",
@@ -187,6 +202,7 @@ pub const PAYLOAD_KEYS: [&str; 7] = [
     "neighbors",
     "counters",
     "slots",
+    "radio",
 ];
 
 /// The keys the contract requires on a neighbour row. Exported so the shape is
@@ -271,7 +287,7 @@ mod tests {
         BTreeMap::from([(3u8, "ados-abc123".to_string())])
     }
 
-    /// The exact body the batch contract specifies, value for value. Mission
+    /// The exact published body, value for value. Mission
     /// Control's store is typed against this, so a drift here breaks the operator's
     /// fleet view with no compile error anywhere.
     #[test]
@@ -318,8 +334,61 @@ mod tests {
                     "neighbors_now": 1,
                 },
                 "slots": [{"slot": 3, "device_id": "ados-abc123"}],
+                "radio": {"open": false, "iface": null},
             })
         );
+    }
+
+    /// A beacon without a GPS fix carries the placeholder 0°/0° position. It must
+    /// be published as null, or a map plots the drone at Null Island and zooms out
+    /// to fit it; the condition bits beside it are still live readings.
+    #[test]
+    fn a_no_fix_beacon_publishes_a_null_position_not_null_island() {
+        let t0 = Instant::now();
+        let mut table = NeighborTable::new(0);
+        table.record_next(
+            SwarmBeacon {
+                slot: 5,
+                status: STATUS_ARMED,
+                ..SwarmBeacon::default()
+            },
+            Some(-60),
+            t0,
+        );
+        let row = &neighbors_payload(1, &table, &BTreeMap::new(), t0)["neighbors"][0];
+        for k in [
+            "lat",
+            "lon",
+            "alt_m",
+            "vx_ms",
+            "vy_ms",
+            "vz_ms",
+            "heading_deg",
+        ] {
+            assert_eq!(row[k], Value::Null, "{k} of a no-fix beacon");
+            assert!(
+                row.as_object().unwrap().contains_key(k),
+                "{k} stays present"
+            );
+        }
+        assert_eq!(row["gps_ok"], json!(false));
+        assert_eq!(row["armed"], json!(true));
+        assert_eq!(row["rssi_dbm"], json!(-60));
+    }
+
+    /// The radio block follows the supervisor: open on an interface, then closed
+    /// again when the radio goes away.
+    #[test]
+    fn the_radio_block_reports_whether_the_bus_can_hear() {
+        let t0 = Instant::now();
+        let mut table = NeighborTable::new(0);
+        let radio =
+            |t: &NeighborTable| neighbors_payload(1, t, &BTreeMap::new(), t0)["radio"].clone();
+        assert_eq!(radio(&table), json!({"open": false, "iface": null}));
+        table.set_radio_iface(Some("wlan1".to_string()));
+        assert_eq!(radio(&table), json!({"open": true, "iface": "wlan1"}));
+        table.set_radio_iface(None);
+        assert_eq!(radio(&table), json!({"open": false, "iface": null}));
     }
 
     /// The key sets are pinned as sets, so an ADDED key fails too — a consumer

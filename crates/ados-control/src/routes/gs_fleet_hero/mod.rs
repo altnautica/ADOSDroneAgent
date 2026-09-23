@@ -23,12 +23,24 @@
 //! ## Partial success is reported, not hidden
 //!
 //! A drone that does not answer is retried once. Still failing, it lands in the
-//! response's per-slot outcomes and the route answers **207**, while the new
-//! hero's promotion goes through regardless: a drone stuck on `hero` costs
-//! airtime, it does not endanger anything, so it must never gate the operator's
-//! selection. The selection runs on its own task and takes effect the moment
-//! the hero's own call resolves; a demotion still in flight a few seconds later
-//! is reported `pending` and finishes in the background (see [`select`]).
+//! response's per-slot outcomes. A demotion that failed or is still in flight
+//! answers **207**: a drone stuck on `hero` costs airtime, it does not endanger
+//! anything, so it must never gate the operator's selection. The selection runs
+//! on its own task and takes effect the moment the hero's own call resolves; a
+//! demotion still in flight a few seconds later is reported `pending` and
+//! finishes in the background (see [`select`]). A hero whose OWN promotion
+//! failed answers **502** with the same per-slot body, and the fan-out is not
+//! re-pointed at it: the drone is still a thumbnail, and the promotion is
+//! chased by the reconcile tick until it confirms.
+//!
+//! ## Overlapping operations
+//!
+//! Selections and reconcile passes run concurrently, so a slow call from an
+//! older operation can land on a drone AFTER a newer one did. Every call in
+//! flight is tracked with the generation and profile it carries. A newer
+//! confirmation does not clear a drone while an older call carrying a
+//! different profile is still out, and an older answer that contradicts the
+//! current selection queues the current assignment again.
 //!
 //! ## The beacon is the truth
 //!
@@ -118,6 +130,9 @@ struct Inner {
     hero: Option<String>,
     /// Assignments asked for but not confirmed, retried by the reconcile tick.
     unconfirmed: BTreeMap<String, VideoProfile>,
+    /// What the current selection assigns each drone. A late answer from an
+    /// older operation is checked against this.
+    wanted: BTreeMap<String, VideoProfile>,
     /// Bumped by every selection and carried back by every outcome, so a slow
     /// answer to an older selection is dropped instead of overwriting a newer
     /// one. Selections are no longer serialized behind the request that made
@@ -125,11 +140,51 @@ struct Inner {
     generation: u64,
     /// When each drone was last sent an assignment, for [`REISSUE_HOLDOFF`].
     issued: BTreeMap<String, Instant>,
+    /// Calls sent and not yet answered, per drone: the generation and profile
+    /// each one carries.
+    in_flight: BTreeMap<String, Vec<(u64, VideoProfile)>>,
 }
 
 impl Inner {
+    /// Stamp and track every call a plan is about to send.
+    fn issue(&mut self, plan: &HeroPlan, generation: u64, now: Instant) {
+        for t in &plan.targets {
+            self.issued.insert(t.device_id.clone(), now);
+            self.in_flight
+                .entry(t.device_id.clone())
+                .or_default()
+                .push((generation, t.profile));
+        }
+    }
+
+    /// Record one answered call, current or stale.
+    fn settle(&mut self, generation: u64, outcome: &SlotOutcome) {
+        let id = &outcome.device_id;
+        if let Some(calls) = self.in_flight.get_mut(id) {
+            if let Some(i) = calls
+                .iter()
+                .position(|c| *c == (generation, outcome.profile))
+            {
+                calls.remove(i);
+            }
+            if calls.is_empty() {
+                self.in_flight.remove(id);
+            }
+        }
+        if generation != self.generation {
+            self.note_stale(outcome);
+        }
+    }
+
+    /// A current-generation answer: a confirmation clears the drone unless an
+    /// older call carrying a different profile is still out (it may land
+    /// after this one); a failure is queued.
     fn note(&mut self, outcome: &SlotOutcome) {
-        if outcome.ok {
+        let contested = self
+            .in_flight
+            .get(&outcome.device_id)
+            .is_some_and(|calls| calls.iter().any(|(_, p)| *p != outcome.profile));
+        if outcome.ok && !contested {
             self.unconfirmed.remove(&outcome.device_id);
         } else {
             self.unconfirmed
@@ -137,9 +192,19 @@ impl Inner {
         }
     }
 
-    fn stamp(&mut self, plan: &HeroPlan, now: Instant) {
-        for t in &plan.targets {
-            self.issued.insert(t.device_id.clone(), now);
+    /// An answer from an older operation. A confirmed one landed on the drone,
+    /// possibly after the current selection's call, so a profile that
+    /// contradicts the current assignment queues that assignment again. A
+    /// failed one most likely never landed; if it did, the beacon holdoff
+    /// catches the disagreement.
+    fn note_stale(&mut self, outcome: &SlotOutcome) {
+        if !outcome.ok {
+            return;
+        }
+        if let Some(want) = self.wanted.get(&outcome.device_id).copied() {
+            if want != outcome.profile {
+                self.unconfirmed.insert(outcome.device_id.clone(), want);
+            }
         }
     }
 }
@@ -152,6 +217,9 @@ pub(super) struct TickInputs {
     /// Drones sent an assignment within [`REISSUE_HOLDOFF`]: their beacon may
     /// not have caught up yet.
     pub settling: BTreeSet<String>,
+    /// The selection these inputs belong to. A pass that finds a newer one
+    /// begun by the time it would send issues nothing.
+    pub generation: u64,
 }
 
 impl FleetHeroState {
@@ -169,16 +237,23 @@ impl FleetHeroState {
         let mut inner = self.inner.lock().await;
         inner.generation += 1;
         inner.unconfirmed.clear();
-        inner.stamp(plan, now);
-        inner.generation
+        inner.wanted = plan
+            .targets
+            .iter()
+            .map(|t| (t.device_id.clone(), t.profile))
+            .collect();
+        let generation = inner.generation;
+        inner.issue(plan, generation, now);
+        generation
     }
 
     /// Record the hero's own outcome: this is where a selection takes effect,
     /// and it is sticky whether or not the promotion took (a failed one is
-    /// queued like any other). Returns `false`, recording nothing, when a newer
-    /// selection has begun since.
+    /// queued like any other). Returns `false`, recording nothing but a stale
+    /// contradiction, when a newer selection has begun since.
     pub async fn record_hero(&self, generation: u64, hero: &str, outcome: &SlotOutcome) -> bool {
         let mut inner = self.inner.lock().await;
+        inner.settle(generation, outcome);
         if inner.generation != generation {
             return false;
         }
@@ -188,20 +263,32 @@ impl FleetHeroState {
     }
 
     /// Record one demotion's outcome: a confirmation clears, a failure is
-    /// queued for the reconcile tick. Dropped when a newer selection has begun.
+    /// queued for the reconcile tick. A newer selection having begun since
+    /// leaves only a stale contradiction to queue.
     pub async fn record_outcome(&self, generation: u64, outcome: &SlotOutcome) {
         let mut inner = self.inner.lock().await;
+        inner.settle(generation, outcome);
         if inner.generation == generation {
             inner.note(outcome);
         }
     }
 
     /// Stamp a reconcile pass's targets as issued now and return the generation
-    /// its outcomes belong to.
-    pub async fn begin_reissue(&self, plan: &HeroPlan, now: Instant) -> u64 {
+    /// its outcomes belong to, or `None` when a selection newer than the one
+    /// the pass decided from has begun: the pass then sends nothing, because
+    /// what it decided may contradict the new selection.
+    pub async fn begin_reissue(
+        &self,
+        plan: &HeroPlan,
+        now: Instant,
+        decided_at: u64,
+    ) -> Option<u64> {
         let mut inner = self.inner.lock().await;
-        inner.stamp(plan, now);
-        inner.generation
+        if inner.generation != decided_at {
+            return None;
+        }
+        inner.issue(plan, decided_at, now);
+        Some(decided_at)
     }
 
     /// Record a reconcile pass: confirmations clear. A failure changes nothing:
@@ -209,12 +296,21 @@ impl FleetHeroState {
     /// showed is re-checked once the holdoff has passed.
     pub async fn record_reissue(&self, generation: u64, outcomes: &[SlotOutcome]) {
         let mut inner = self.inner.lock().await;
-        if inner.generation != generation {
-            return;
+        for o in outcomes {
+            inner.settle(generation, o);
+            if inner.generation == generation && o.ok {
+                inner.note(o);
+            }
         }
-        for o in outcomes.iter().filter(|o| o.ok) {
-            inner.unconfirmed.remove(&o.device_id);
-        }
+    }
+
+    /// The hero, once its promotion has confirmed: what the fan-out may serve.
+    pub async fn confirmed_hero(&self) -> Option<String> {
+        let inner = self.inner.lock().await;
+        inner
+            .hero
+            .clone()
+            .filter(|h| !inner.unconfirmed.contains_key(h))
     }
 
     /// Drop everything held for drones that have left the fleet — chasing an
@@ -239,6 +335,7 @@ impl FleetHeroState {
                 .filter(|(_, at)| now.saturating_duration_since(**at) < REISSUE_HOLDOFF)
                 .map(|(id, _)| id.clone())
                 .collect(),
+            generation: inner.generation,
         }
     }
 }
@@ -392,12 +489,14 @@ pub async fn post_fleet_hero(State(state): State<AppState>, body: Option<Json<Va
         .into_response()
 }
 
-/// `200` when every registered drone confirmed, `207 Multi-Status` when at
-/// least one did not or has not answered yet — never a blanket `500`, because
-/// the operator's selection WAS made and the body says exactly which slots
-/// lagged.
+/// `200` when every registered drone confirmed; `502 Bad Gateway` when the
+/// hero's OWN promotion failed, because the drone the operator picked is still
+/// a thumbnail; `207 Multi-Status` when only demotions failed or have not
+/// answered yet. Each carries the same per-slot body.
 fn outcome_status(report: &SelectionReport) -> StatusCode {
-    if report.complete() {
+    if report.hero_failed() {
+        StatusCode::BAD_GATEWAY
+    } else if report.complete() {
         StatusCode::OK
     } else {
         StatusCode::MULTI_STATUS
@@ -661,11 +760,14 @@ mod tests {
 
         let inputs = st.tick_inputs(now).await;
         assert_eq!(inputs.hero.as_deref(), Some("b"));
-        assert!(
-            inputs.unconfirmed.is_empty(),
-            "the stale demotion of the new hero must not be queued: {:?}",
-            inputs.unconfirmed
+        assert_ne!(
+            inputs.unconfirmed.get("b"),
+            Some(&VideoProfile::Thumbnail),
+            "the stale demotion of the new hero must not be queued"
         );
+        // The stale promotion of `a` confirmed after the newer selection began,
+        // so `a` may be a second hero: its demotion is chased again.
+        assert_eq!(inputs.unconfirmed.get("a"), Some(&VideoProfile::Thumbnail));
     }
 
     #[tokio::test]
@@ -685,6 +787,143 @@ mod tests {
         st.prune(&slots(&["a"])).await;
         let settling = st.tick_inputs(t0).await.settling;
         assert!(settling.contains("a") && !settling.contains("b"));
+    }
+
+    #[tokio::test]
+    async fn a_stale_retry_landing_after_a_new_selection_requeues_the_new_assignment() {
+        // hero=a, b's demotion unconfirmed. A tick starts re-sending b its
+        // thumbnail, then the operator selects b. The selection's promotion
+        // confirms first; the tick's thumbnail lands after it, so b is a
+        // thumbnail again and its promotion must be chased.
+        let s = slots(&["a", "b"]);
+        let st = FleetHeroState::default();
+        let now = Instant::now();
+        let first = st.begin_selection(&plan_hero(&s, "a").unwrap(), now).await;
+        st.record_hero(first, "a", &outcome(1, "a", VideoProfile::Hero, true))
+            .await;
+        st.record_outcome(first, &outcome(2, "b", VideoProfile::Thumbnail, false))
+            .await;
+        let inputs = st.tick_inputs(now).await;
+        let retry = fanout::plan_retry(&s, &inputs.unconfirmed);
+        let tick = st
+            .begin_reissue(&retry, now, inputs.generation)
+            .await
+            .expect("nothing newer yet");
+
+        let second = st.begin_selection(&plan_hero(&s, "b").unwrap(), now).await;
+        assert!(
+            st.record_hero(second, "b", &outcome(2, "b", VideoProfile::Hero, true))
+                .await
+        );
+        assert!(
+            st.tick_inputs(now).await.unconfirmed.contains_key("b"),
+            "a confirmation cannot clear b while an older thumbnail call is still out"
+        );
+        assert_eq!(st.confirmed_hero().await, None);
+        st.record_reissue(tick, &[outcome(2, "b", VideoProfile::Thumbnail, true)])
+            .await;
+        let inputs = st.tick_inputs(now).await;
+        assert_eq!(inputs.hero.as_deref(), Some("b"));
+        assert_eq!(inputs.unconfirmed.get("b"), Some(&VideoProfile::Hero));
+    }
+
+    #[tokio::test]
+    async fn a_stale_promotion_landing_after_a_demotion_requeues_the_demotion() {
+        // The mirror case: a tick re-sending a its promotion races the
+        // operator moving hero to b. Without the requeue a stays a second hero.
+        let s = slots(&["a", "b"]);
+        let st = FleetHeroState::default();
+        let now = Instant::now();
+        let first = st.begin_selection(&plan_hero(&s, "a").unwrap(), now).await;
+        st.record_hero(first, "a", &outcome(1, "a", VideoProfile::Hero, false))
+            .await;
+        st.record_outcome(first, &outcome(2, "b", VideoProfile::Thumbnail, true))
+            .await;
+        let inputs = st.tick_inputs(now).await;
+        let retry = fanout::plan_retry(&s, &inputs.unconfirmed);
+        let tick = st
+            .begin_reissue(&retry, now, inputs.generation)
+            .await
+            .unwrap();
+
+        let second = st.begin_selection(&plan_hero(&s, "b").unwrap(), now).await;
+        st.record_hero(second, "b", &outcome(2, "b", VideoProfile::Hero, true))
+            .await;
+        // The stale promotion's answer comes back before the demotion's.
+        st.record_reissue(tick, &[outcome(1, "a", VideoProfile::Hero, true)])
+            .await;
+        assert_eq!(
+            st.tick_inputs(now).await.unconfirmed.get("a"),
+            Some(&VideoProfile::Thumbnail)
+        );
+        // The demotion's own confirmation now stands: nothing older is out.
+        st.record_outcome(second, &outcome(1, "a", VideoProfile::Thumbnail, true))
+            .await;
+        assert!(st.tick_inputs(now).await.unconfirmed.is_empty());
+        assert_eq!(st.confirmed_hero().await.as_deref(), Some("b"));
+    }
+
+    #[tokio::test]
+    async fn a_pass_decided_before_a_selection_began_sends_nothing() {
+        let s = slots(&["a", "b"]);
+        let st = FleetHeroState::default();
+        let now = Instant::now();
+        let first = st.begin_selection(&plan_hero(&s, "a").unwrap(), now).await;
+        st.record_outcome(first, &outcome(2, "b", VideoProfile::Thumbnail, false))
+            .await;
+        let inputs = st.tick_inputs(now).await;
+        st.begin_selection(&plan_hero(&s, "b").unwrap(), now).await;
+        let retry = fanout::plan_retry(&s, &inputs.unconfirmed);
+        assert_eq!(st.begin_reissue(&retry, now, inputs.generation).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_promotion_is_a_502_and_is_not_served_until_it_confirms() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-hero.json");
+        let s = slots(&["a", "b"]);
+        let st = Arc::new(FleetHeroState::default());
+        let refuse_b = |id: String, _p: VideoProfile| async move {
+            if id == "b" {
+                Err("drone answered HTTP 401".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        let report = select::run_selection(
+            Arc::clone(&st),
+            s.clone(),
+            plan_hero(&s, "b").unwrap(),
+            "b".into(),
+            refuse_b,
+            path.clone(),
+        )
+        .await;
+        assert_eq!(outcome_status(&report), StatusCode::BAD_GATEWAY);
+        let body = outcome_body("b", &report);
+        assert_eq!(body["slots"][1]["ok"], false);
+        assert_eq!(body["slots"][1]["error"], "drone answered HTTP 401");
+        assert!(
+            ados_groundlink::read_hero_from(&path).is_none(),
+            "the fan-out must not be pointed at a drone that is still a thumbnail"
+        );
+        assert_eq!(
+            st.hero().await.as_deref(),
+            Some("b"),
+            "the selection is kept"
+        );
+        assert_eq!(st.confirmed_hero().await, None);
+
+        // The tick's retry confirms, and only then is the hero served.
+        let inputs = st.tick_inputs(Instant::now()).await;
+        let retry = fanout::plan_retry(&s, &inputs.unconfirmed);
+        let g = st
+            .begin_reissue(&retry, Instant::now(), inputs.generation)
+            .await
+            .unwrap();
+        st.record_reissue(g, &[outcome(2, "b", VideoProfile::Hero, true)])
+            .await;
+        assert_eq!(st.confirmed_hero().await.as_deref(), Some("b"));
     }
 
     #[test]

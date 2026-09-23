@@ -25,7 +25,7 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect_outline, text, Canvas};
 use crate::pages::{blank_panel, Chrome, HitAction, HitZone, Page, PageContext};
-use crate::sidecar::{LcdPluginPage, LCD_PLUGIN_PAGE_PATH};
+use crate::sidecar::{LcdPluginPage, LcdPluginZone, LCD_PLUGIN_PAGE_PATH};
 use crate::widgets::{detail_back_zone, draw_detail_header, DETAIL_HEADER_H};
 
 /// The stable route id every navigator keys this page on.
@@ -43,6 +43,28 @@ const VALUE_X: i32 = 160;
 const FIRST_ROW_Y: i32 = HEADER_H + 8;
 /// Title shown on the header band when the sidecar carries no title.
 const DEFAULT_TITLE: &str = "Plugin";
+/// Height of the page-local zone region: zones sit below the top chrome band,
+/// so the panel under it is the whole addressable area.
+const ZONE_REGION_H: i32 = crate::pages::PANEL_H as i32 - crate::pages::TOP_BAR_H as i32;
+
+/// A declared zone intersected with the page-local zone region
+/// (`0..PANEL_W` x `0..ZONE_REGION_H`) as `(x, y, w, h)`, or `None` when none
+/// of it is on the panel. The extents are plugin-supplied, so the arithmetic
+/// saturates: an extent near the i32 range can neither wrap nor reach the draw
+/// or hit-test path as a rectangle larger than the panel.
+fn clip_zone(zone: &LcdPluginZone) -> Option<(i32, i32, i32, i32)> {
+    if zone.w <= 0 || zone.h <= 0 {
+        return None;
+    }
+    let x0 = zone.x.max(0);
+    let y0 = zone.y.max(0);
+    let x1 = zone
+        .x
+        .saturating_add(zone.w)
+        .min(crate::pages::PANEL_W as i32);
+    let y1 = zone.y.saturating_add(zone.h).min(ZONE_REGION_H);
+    (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
+}
 
 /// The reserved plugin page. Holds the sidecar path it reads its content from.
 pub struct PluginPage {
@@ -147,17 +169,17 @@ impl Page for PluginPage {
         // chrome height for the outline only (hit-testing stays page-local).
         let zone_font = LoadedFont::new(FontFace::SansBold, 11);
         for zone in &page.zones {
-            if zone.w <= 0 || zone.h <= 0 {
+            let Some((x, y, w, h)) = clip_zone(zone) else {
                 continue;
-            }
-            let gx = zone.x;
-            let gy = zone.y + crate::pages::TOP_BAR_H as i32;
+            };
+            let gx = x;
+            let gy = y + crate::pages::TOP_BAR_H as i32;
             fill_rect_outline(
                 &mut canvas,
                 gx,
                 gy,
-                gx + zone.w - 1,
-                gy + zone.h - 1,
+                gx + w - 1,
+                gy + h - 1,
                 palette.bg_secondary,
                 palette.border_default,
             );
@@ -167,7 +189,7 @@ impl Page for PluginPage {
                     &zone_font,
                     &zone.label,
                     gx + 6,
-                    gy + (zone.h - 11) / 2,
+                    gy + (h - 11) / 2,
                     palette.text_primary,
                 );
             }
@@ -182,14 +204,17 @@ impl Page for PluginPage {
         let mut zones = vec![detail_back_zone()];
         if let Some(page) = self.content() {
             for zone in &page.zones {
-                if zone.w <= 0 || zone.h <= 0 || zone.key.is_empty() {
+                if zone.key.is_empty() {
                     continue;
                 }
+                let Some((x, y, w, h)) = clip_zone(zone) else {
+                    continue;
+                };
                 zones.push(HitZone::new(
-                    zone.x,
-                    zone.y,
-                    zone.w,
-                    zone.h,
+                    x,
+                    y,
+                    w,
+                    h,
                     HitAction::Custom(zone.key.clone()),
                 ));
             }
@@ -202,7 +227,7 @@ impl Page for PluginPage {
 mod tests {
     use super::*;
     use crate::graphics::palette::DARK;
-    use crate::pages::PANEL_W;
+    use crate::pages::{PANEL_H, PANEL_W};
     use crate::sidecar::{LcdPluginRow, LcdPluginZone};
 
     fn write_page(dir: &std::path::Path, page: &LcdPluginPage) -> PathBuf {
@@ -304,5 +329,83 @@ mod tests {
         let c = page.render(&PageContext::default(), &DARK);
         assert_eq!(c.width(), PANEL_W);
         assert_eq!(page.hit_zones(&PageContext::default()).len(), 1);
+    }
+
+    #[test]
+    fn an_oversized_zone_is_clipped_to_the_panel_for_drawing_and_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = LcdPluginPage {
+            zones: vec![
+                LcdPluginZone {
+                    x: -50,
+                    y: 10,
+                    w: i32::MAX,
+                    h: i32::MAX,
+                    key: "huge".to_string(),
+                    label: "Huge".to_string(),
+                },
+                // Entirely off the panel: no outline, no hit zone.
+                LcdPluginZone {
+                    x: i32::MAX - 5,
+                    y: 0,
+                    w: 100,
+                    h: 100,
+                    key: "off".to_string(),
+                    label: String::new(),
+                },
+            ],
+            ..LcdPluginPage::default()
+        };
+        let page = PluginPage::with_sidecar_path(write_page(dir.path(), &content));
+
+        let c = page.render(&PageContext::default(), &DARK);
+        // The clipped outline reaches the panel's right and bottom edges.
+        assert_eq!(
+            c.pixel(PANEL_W as i32 - 1, PANEL_H as i32 - 1),
+            DARK.border_default
+        );
+
+        let zones = page.hit_zones(&PageContext::default());
+        assert_eq!(zones.len(), 2);
+        assert_eq!(zones[1].action, HitAction::Custom("huge".to_string()));
+        assert_eq!(
+            (zones[1].x, zones[1].y, zones[1].w, zones[1].h),
+            (0, 10, PANEL_W as i32, ZONE_REGION_H - 10)
+        );
+        assert!(zones[1].contains(PANEL_W as i32 - 1, ZONE_REGION_H - 1));
+    }
+
+    #[test]
+    fn load_drops_rows_zones_and_text_past_the_caps() {
+        use crate::sidecar::{
+            PLUGIN_PAGE_MAX_BYTES, PLUGIN_PAGE_MAX_ROWS, PLUGIN_PAGE_MAX_TEXT,
+            PLUGIN_PAGE_MAX_ZONES,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let row = LcdPluginRow {
+            label: "l".to_string(),
+            value: "é".repeat(PLUGIN_PAGE_MAX_TEXT + 10),
+        };
+        let zone = LcdPluginZone {
+            w: 10,
+            h: 10,
+            key: "k".to_string(),
+            ..LcdPluginZone::default()
+        };
+        let content = LcdPluginPage {
+            title: "t".repeat(PLUGIN_PAGE_MAX_TEXT + 1),
+            rows: vec![row; PLUGIN_PAGE_MAX_ROWS + 5],
+            zones: vec![zone; PLUGIN_PAGE_MAX_ZONES + 5],
+        };
+        let path = write_page(dir.path(), &content);
+        let loaded = LcdPluginPage::load(&path).unwrap();
+        assert_eq!(loaded.rows.len(), PLUGIN_PAGE_MAX_ROWS);
+        assert_eq!(loaded.zones.len(), PLUGIN_PAGE_MAX_ZONES);
+        assert_eq!(loaded.title.chars().count(), PLUGIN_PAGE_MAX_TEXT);
+        assert_eq!(loaded.rows[0].value.chars().count(), PLUGIN_PAGE_MAX_TEXT);
+
+        // A sidecar past the byte cap is not read at all.
+        std::fs::write(&path, vec![b' '; PLUGIN_PAGE_MAX_BYTES as usize + 1]).unwrap();
+        assert!(LcdPluginPage::load(&path).is_none());
     }
 }

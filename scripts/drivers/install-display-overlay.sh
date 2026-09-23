@@ -988,7 +988,7 @@ provision_hdmi_touch_rpi() {
     # Snapshot config.txt before editing (best-effort). Unlike the SPI-LCD
     # panel path this edit is NOT boot-critical -- HDMI video runs regardless,
     # only the touch controller depends on it -- so a snapshot failure warns
-    # and continues rather than aborting the install (Rule 26 fail-soft).
+    # and continues rather than aborting the install (fail-soft).
     snapshot_boot_config "${pi_config}" \
         || warn "Could not snapshot ${pi_config}; continuing (HDMI-touch edit is not boot-critical)."
 

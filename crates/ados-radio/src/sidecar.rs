@@ -304,7 +304,7 @@ pub(crate) fn build_stats_value(
         "channel_locked": channels.locked,
         // Which radio backend is driving the link. Always
         // "kernel" today — the Linux monitor-mode + wfb_tx/wfb_rx backend — so
-        // Mission Control can badge the live radio path (additive; Rule 28).
+        // Mission Control can badge the live radio path (additive).
         "backend": crate::backend::BackendKind::KernelMonitor.as_wire(),
         "profile": "drone",
         // Count of radio-group respawns since service start (watchdog kills,
@@ -325,7 +325,7 @@ pub(crate) fn build_stats_value(
         "tx_video_recvq_bytes": counters.tx_video_recvq_bytes,
         // The TX PHY reads back at the muted not-permitted floor: it injects
         // frames but radiates nothing. Mission Control renders a "PHY muted"
-        // badge so a silent dead link is a one-glance signal (Rule 28).
+        // badge so a silent dead link is a one-glance signal.
         "phy_muted": counters.phy_muted,
         // Smoothed radio transmit rate; valid_rx_packets_per_s is the uplink
         // valid-decode rate (0 on a drone-only rig with no rx.key).

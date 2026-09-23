@@ -30,7 +30,7 @@
 #
 #   ground station on the ground-side rig:
 #     scripts/test/e2e-install-rig.sh \
-#       --host groundnode.local --user skynode --profile ground-station
+#       --host gs-example.local --user skynode --profile ground-station
 #
 # When --host is omitted the script runs locally on the rig it is invoked on.
 #
@@ -117,7 +117,7 @@ Examples:
   e2e-install-rig.sh --host skynode.local --user radxa --profile drone
 
   # ground station, ground-side rig
-  e2e-install-rig.sh --host groundnode.local --user skynode \
+  e2e-install-rig.sh --host gs-example.local --user skynode \
     --profile ground-station
 EOF
 }

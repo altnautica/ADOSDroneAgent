@@ -86,10 +86,10 @@ UNAUTHENTICATED = {
     ("GET", "/api/dashboard/pin/status"),
     ("POST", "/api/dashboard/pin/verify"),
     ("POST", "/api/dashboard/pin/set"),
-    ("GET", "/api/v1/ground-station/ws/uplink"),
-    ("GET", "/api/v1/ground-station/pic/events"),
-    ("GET", "/api/v1/ground-station/ws/mesh"),
-    ("GET", "/api/v1/ground-station/ws/buttons"),
+    ("WS", "/api/v1/ground-station/ws/uplink"),
+    ("WS", "/api/v1/ground-station/pic/events"),
+    ("WS", "/api/v1/ground-station/ws/mesh"),
+    ("WS", "/api/v1/ground-station/ws/buttons"),
 }
 
 
@@ -110,7 +110,12 @@ def native_routes() -> list[tuple[str, str]]:
 
 
 def _walk(router, prefix: str, out: list[tuple[str, str]]) -> None:
-    """Collect ``(method, path)`` from a router tree, WebSockets included."""
+    """Collect ``(method, path)`` from a router tree, WebSockets included.
+
+    A WebSocket route is recorded as ``WS``, not ``GET``: it answers only an
+    upgrade, so a plain HTTP GET against it matches no route and 404s. Listing
+    it as GET let the client check clear exactly that call.
+    """
     for route in getattr(router, "routes", []):
         inner = getattr(route, "original_router", None)
         if inner is not None:
@@ -123,7 +128,7 @@ def _walk(router, prefix: str, out: list[tuple[str, str]]) -> None:
         full = wire_path(prefix + path)
         methods = getattr(route, "methods", None)
         if not methods:
-            out.append(("GET", full))  # a WebSocket upgrade
+            out.append(("WS", full))
             continue
         for method in sorted(methods):
             if method in ("HEAD", "OPTIONS"):
@@ -232,7 +237,8 @@ def main() -> int:
         "one-sided route rename from a silent 404 into a build failure.",
         "",
         "A `{name}` segment matches one path segment; `{*name}` swallows the",
-        "tail.",
+        "tail. Method `WS` marks a route that answers only a WebSocket upgrade;",
+        "a plain HTTP request to it is not served.",
         "",
         "## Native — `ados-control` on :8080",
         "",
@@ -302,6 +308,10 @@ RELAY_FORBIDDEN = {
     "/api/plugins/install",
     "/api/plugins/install_from_url",
     "/api/plugins/capability-token",
+    "/api/plugins/{plugin_id}/grant",
+    "/api/plugins/{plugin_id}/enable",
+    "/api/services/{name}/restart",
+    "/api/mavlink/signing/disable-on-fc",
     "/api/v1/setup/reset",
     "/api/v1/setup/reboot",
     "/api/v1/setup/cloud-choice",

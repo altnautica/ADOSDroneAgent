@@ -633,11 +633,11 @@ async def main() -> None:
 
     manager = MeshManager(config)
     # Direct-role nodes have no mesh to bring up. The systemd unit's
-    # ConditionPathExists gate only checks that the role sentinel file
+    # AssertPathExists gate only checks that the role sentinel file
     # exists, not that it reads `relay`/`receiver`, so this process can
     # still be launched on a direct node. A no-op is success, not a
-    # crash: exit cleanly so systemd does not treat it as a failure and
-    # restart-loop the unit (Restart=on-failure). Genuine setup failures
+    # crash: exit 0, the one status the unit's RestartPreventExitStatus=0
+    # exempts from Restart=always. Genuine setup failures
     # on relay/receiver still fall through to the exit-2 path below.
     if manager._role not in ("relay", "receiver"):
         slog.info("mesh_not_applicable_for_role", role=manager._role)

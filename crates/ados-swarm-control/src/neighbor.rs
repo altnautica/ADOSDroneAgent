@@ -21,8 +21,8 @@ pub use ados_swarmbus::beacon::{
 /// the local NED frame, and the raw beacon status byte.
 ///
 /// `pos` is dead-reckoned forward from the last beacon by the caller
-/// (`NeighborTable::predicted`), which is why a 2 Hz beacon feeds a 10 Hz
-/// control loop without the loop ever seeing a staircase.
+/// ([`crate::swarmbus::fixes_from_payload`]), which is why a 2 Hz beacon feeds a
+/// 10 Hz control loop without the loop ever seeing a staircase.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NeighborState {
     /// Fleet slot, `1..=FLEET_MAX_SLOTS`. Unique within a fleet.

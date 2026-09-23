@@ -22,9 +22,11 @@
 //! exempt set, the short-TTL caching wrapper) live with each surface, not here.
 //!
 //! The pairing state is the agent's `pairing.json` (`{ "paired": bool,
-//! "api_key": "..." }`). Read it with [`load_pairing`]; an absent, unreadable,
-//! or not-`paired:true`-with-a-key file reads as [`Pairing::Unpaired`] (open),
-//! matching the agent's "no key on file means open" stance.
+//! "api_key": "..." }`). Read it with [`load_pairing`]: an absent file, or one
+//! that is not `paired:true`, reads as [`Pairing::Unpaired`] (open). A file that
+//! exists but cannot be read or parsed, or claims `paired:true` with no key, is
+//! [`Pairing::Unreadable`] and fails closed: it may be a paired node's record on
+//! a failing card, and reading it as unpaired would open the claim to anyone.
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -46,6 +48,9 @@ pub enum Pairing {
     Unpaired,
     /// Paired with this exact key required from an off-box caller.
     Paired(String),
+    /// The file exists but could not be read or parsed. Treated as paired with
+    /// a key nobody can present: only the on-box operator is served.
+    Unreadable,
 }
 
 /// A data-plane access decision for a paired-or-unpaired agent.
@@ -81,6 +86,8 @@ pub fn data_plane_access(
 ) -> Access {
     match pairing {
         Pairing::Unpaired => Access::Accept,
+        Pairing::Unreadable if caller == CallerClass::OnBox => Access::Accept,
+        Pairing::Unreadable => Access::Unauthorized,
         Pairing::Paired(expected) => {
             if caller == CallerClass::OnBox {
                 return Access::Accept;
@@ -137,9 +144,12 @@ pub enum CallerClass {
     /// local operator (the `ados` CLI, a root-owned job), who already holds
     /// shell-level privilege that exceeds API auth.
     OnBox,
-    /// A first-boot lifeline: IPv4/IPv6 link-local, the AP hotspot subnet
-    /// (`192.168.4.0/24`) or the USB gadget subnet (`192.168.7.0/24`). These are
-    /// the surfaces a fresh unit is reached from and its PIN is first set on.
+    /// A first-boot lifeline: IPv4/IPv6 link-local, or a peer reached through
+    /// the agent's own AP hotspot (`192.168.4.1`) or USB gadget (`192.168.7.1`)
+    /// address. These are the surfaces a fresh unit is reached from and its PIN
+    /// is first set on. The subnet alone is not enough: a home or office LAN can
+    /// be numbered `192.168.4.0/24` too, and every host on it would otherwise be
+    /// a lifeline.
     Lifeline,
     /// Any other RFC1918 private-LAN peer (`10/8`, `172.16/12`, `192.168/16`):
     /// plausibly the operator's own browser on the local network rather than a
@@ -161,7 +171,16 @@ impl CallerClass {
     }
 }
 
-/// Classify a caller from its peer address and its request headers.
+/// The agent-owned first-boot addresses: the AP hotspot gateway and the USB
+/// gadget address. A private-LAN peer is a lifeline only when it reached one of
+/// these.
+pub const LIFELINE_LOCAL_ADDRS: [std::net::Ipv4Addr; 2] = [
+    std::net::Ipv4Addr::new(192, 168, 4, 1),
+    std::net::Ipv4Addr::new(192, 168, 7, 1),
+];
+
+/// Classify a caller from its peer address, the local address it reached, and
+/// its request headers.
 ///
 /// `has_header` answers whether the request carries a header by (lowercase)
 /// name; a transport with no headers (a raw TCP or UDP socket) passes
@@ -171,22 +190,36 @@ impl CallerClass {
 /// a tunnel terminating on `127.0.0.1` from reading as the local operator, a
 /// first-boot lifeline, or a PIN claimant.
 ///
+/// `local` is the address the connection arrived on (the accepted socket's
+/// local address; see [`local_addr_toward`] for a transport that has none).
+/// Lifeline trust for a private-LAN peer requires it to be one of
+/// [`LIFELINE_LOCAL_ADDRS`], so a LAN that merely shares the AP's numbering is
+/// the operator LAN, not a lifeline. `None` grants no such trust.
+///
 /// `peer` is `None` when the address could not be determined, which is
 /// [`CallerClass::Remote`]: an unidentifiable caller is exactly the one these
 /// gates exist for. An IPv4 address mapped onto IPv6 is classified as the IPv4
 /// address it carries.
-pub fn classify_caller(peer: Option<IpAddr>, has_header: impl Fn(&str) -> bool) -> CallerClass {
+pub fn classify_caller(
+    peer: Option<IpAddr>,
+    local: Option<IpAddr>,
+    has_header: impl Fn(&str) -> bool,
+) -> CallerClass {
     let Some(peer) = peer else {
         return CallerClass::Remote;
     };
     if FORWARDED_HEADERS.iter().any(|h| has_header(h)) {
         return CallerClass::Remote;
     }
+    let on_lifeline_addr = matches!(
+        local.map(|l| l.to_canonical()),
+        Some(IpAddr::V4(l)) if LIFELINE_LOCAL_ADDRS.contains(&l)
+    );
     match peer.to_canonical() {
         ip if ip.is_loopback() => CallerClass::OnBox,
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            if v4.is_link_local() || o[..3] == [192, 168, 4] || o[..3] == [192, 168, 7] {
+            if v4.is_link_local() || (on_lifeline_addr && is_rfc1918_v4(o)) {
                 CallerClass::Lifeline
             } else if is_rfc1918_v4(o) {
                 CallerClass::OperatorLan
@@ -200,6 +233,22 @@ pub fn classify_caller(peer: Option<IpAddr>, has_header: impl Fn(&str) -> bool) 
     }
 }
 
+/// The local address this host would use to reach `peer`: the kernel's route
+/// choice, read by connecting an unbound UDP socket (no packet is sent). For a
+/// transport that has no per-connection local address (a UDP listener bound to
+/// the wildcard), this is the address a reply to the peer leaves from, which is
+/// the interface the peer sits on. `None` when no route exists.
+pub fn local_addr_toward(peer: IpAddr) -> Option<IpAddr> {
+    let peer = peer.to_canonical();
+    let bind: std::net::SocketAddr = match peer {
+        IpAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+        IpAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    let socket = std::net::UdpSocket::bind(bind).ok()?;
+    socket.connect((peer, 9)).ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
+}
+
 /// True when an IPv4 octet array is in an RFC1918 private range: `10.0.0.0/8`,
 /// `172.16.0.0/12`, or `192.168.0.0/16`.
 fn is_rfc1918_v4(o: [u8; 4]) -> bool {
@@ -211,16 +260,19 @@ fn is_rfc1918_v4(o: [u8; 4]) -> bool {
     }
 }
 
-/// Load the pairing posture from a `pairing.json`. An absent file, an
-/// unreadable file, or a state that is not `paired:true` with a non-empty
-/// `api_key` is treated as unpaired (open), matching the agent: when not paired,
-/// access is open.
+/// Load the pairing posture from a `pairing.json`. An absent file, or a state
+/// that is not `paired:true`, is [`Pairing::Unpaired`] (open). A file that
+/// exists but cannot be read or parsed as a JSON object, or that says
+/// `paired:true` without a key, is [`Pairing::Unreadable`] (closed).
 pub fn load_pairing(path: &Path) -> Pairing {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Pairing::Unpaired;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Pairing::Unpaired,
+        Err(_) => return Pairing::Unreadable,
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Pairing::Unpaired;
+    let Ok(serde_json::Value::Object(value)) = serde_json::from_str::<serde_json::Value>(&text)
+    else {
+        return Pairing::Unreadable;
     };
     let paired = value
         .get("paired")
@@ -229,6 +281,7 @@ pub fn load_pairing(path: &Path) -> Pairing {
     let key = value.get("api_key").and_then(|v| v.as_str());
     match (paired, key) {
         (true, Some(k)) if !k.is_empty() => Pairing::Paired(k.to_string()),
+        (true, _) => Pairing::Unreadable,
         _ => Pairing::Unpaired,
     }
 }
@@ -239,8 +292,17 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
+    /// Classify a peer that reached this host on an ordinary LAN address.
     fn class(ip: &str) -> CallerClass {
-        classify_caller(Some(ip.parse().unwrap()), |_| false)
+        class_on(ip, Some("192.168.1.20"))
+    }
+
+    fn class_on(ip: &str, local: Option<&str>) -> CallerClass {
+        classify_caller(
+            Some(ip.parse().unwrap()),
+            local.map(|l| l.parse().unwrap()),
+            |_| false,
+        )
     }
 
     /// The local operator: a loopback peer with no relay header.
@@ -260,7 +322,7 @@ mod tests {
         let lo: IpAddr = "127.0.0.1".parse().unwrap();
         for header in FORWARDED_HEADERS {
             assert_eq!(
-                classify_caller(Some(lo), |h| h == header),
+                classify_caller(Some(lo), Some(lo), |h| h == header),
                 CallerClass::Remote,
                 "loopback + {header} is a relayed caller"
             );
@@ -275,7 +337,9 @@ mod tests {
         for ip in ["192.168.4.20", "192.168.1.50", "169.254.3.4", "fe80::1"] {
             let peer: IpAddr = ip.parse().unwrap();
             assert_eq!(
-                classify_caller(Some(peer), |h| h == "x-forwarded-for"),
+                classify_caller(Some(peer), Some("192.168.4.1".parse().unwrap()), |h| {
+                    h == "x-forwarded-for"
+                }),
                 CallerClass::Remote,
                 "{ip} + x-forwarded-for"
             );
@@ -284,7 +348,7 @@ mod tests {
 
     #[test]
     fn an_unknown_peer_is_remote() {
-        assert_eq!(classify_caller(None, |_| false), CallerClass::Remote);
+        assert_eq!(classify_caller(None, None, |_| false), CallerClass::Remote);
     }
 
     /// The lifelines a headless unpaired unit is actually reached from. These
@@ -293,17 +357,44 @@ mod tests {
     /// fresh device unreachable to its own operator.
     #[test]
     fn the_first_boot_lifelines_classify_as_lifelines() {
-        for ip in [
-            "192.168.4.1",         // the AP hotspot itself
-            "192.168.4.37",        // a phone joined to the hotspot
-            "192.168.7.1",         // the USB gadget
-            "192.168.7.42",        // a laptop on the USB gadget net
-            "169.254.11.9",        // IPv4 link-local
-            "fe80::1",             // IPv6 link-local
-            "::ffff:192.168.4.20", // an IPv4 lifeline mapped onto v6
+        for (ip, local) in [
+            // A phone joined to the hotspot, reaching the AP address.
+            ("192.168.4.37", Some("192.168.4.1")),
+            // A laptop on the USB gadget net.
+            ("192.168.7.42", Some("192.168.7.1")),
+            // Link-local needs no particular local address.
+            ("169.254.11.9", None),
+            ("fe80::1", None),
+            // An IPv4 lifeline mapped onto v6, on a v6 listener.
+            ("::ffff:192.168.4.20", Some("::ffff:192.168.4.1")),
         ] {
-            assert_eq!(class(ip), CallerClass::Lifeline, "{ip}");
+            assert_eq!(class_on(ip, local), CallerClass::Lifeline, "{ip}");
         }
+    }
+
+    /// A home or office LAN numbered like the AP subnet is the operator LAN,
+    /// not a lifeline: the drone is a client there, so the connection arrives
+    /// on its DHCP lease, never on the AP gateway address.
+    #[test]
+    fn a_lan_that_shares_the_ap_numbering_is_not_a_lifeline() {
+        for (ip, local) in [
+            ("192.168.4.37", Some("192.168.4.12")),
+            ("192.168.7.42", Some("192.168.7.9")),
+            ("192.168.4.37", None),
+        ] {
+            assert_eq!(
+                class_on(ip, local),
+                CallerClass::OperatorLan,
+                "{ip} via {local:?}"
+            );
+        }
+    }
+
+    /// The route-derived local address names the interface a peer sits on.
+    #[test]
+    fn local_addr_toward_loopback_is_loopback() {
+        let lo: IpAddr = "127.0.0.1".parse().unwrap();
+        assert_eq!(local_addr_toward(lo), Some(lo));
     }
 
     /// A browser on a private LAN is an operator-LAN caller, distinct from the
@@ -387,16 +478,45 @@ mod tests {
     }
 
     #[test]
-    fn paired_without_a_key_reads_as_unpaired() {
+    fn paired_without_a_key_is_unreadable() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_pairing(dir.path(), r#"{"paired": true, "api_key": ""}"#);
-        assert_eq!(load_pairing(&path), Pairing::Unpaired);
+        assert_eq!(load_pairing(&path), Pairing::Unreadable);
+    }
+
+    /// A file that exists but cannot be parsed is not "no pairing": it may be a
+    /// paired node's record on a failing card, and unpaired opens the claim.
+    #[test]
+    fn a_malformed_file_is_unreadable_and_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        for body in [
+            "this is not json",
+            "[]",
+            r#"{"paired": true, "api_key": "k""#,
+        ] {
+            let path = write_pairing(dir.path(), body);
+            assert_eq!(load_pairing(&path), Pairing::Unreadable, "{body}");
+        }
+        for caller in [
+            CallerClass::Lifeline,
+            CallerClass::OperatorLan,
+            CallerClass::Remote,
+        ] {
+            assert_eq!(
+                data_plane_access(&Pairing::Unreadable, caller, Some("anything")),
+                Access::Unauthorized
+            );
+        }
+        assert_eq!(
+            data_plane_access(&Pairing::Unreadable, CallerClass::OnBox, None),
+            Access::Accept
+        );
     }
 
     #[test]
-    fn malformed_file_reads_as_unpaired() {
+    fn a_file_without_paired_true_is_unpaired() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_pairing(dir.path(), "this is not json");
+        let path = write_pairing(dir.path(), "{}");
         assert_eq!(load_pairing(&path), Pairing::Unpaired);
     }
 

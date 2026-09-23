@@ -3,6 +3,9 @@
 //! Splits the inbound serial/network byte stream into complete MAVLink frames
 //! (v1 `0xFE` and v2 `0xFD`), tolerating junk before the next start-of-frame
 //! magic and leaving any partial trailing frame buffered for the next read.
+//! Every candidate frame's checksum is verified: a candidate that fails is not
+//! a frame, and the search resumes one byte after its start-of-frame, so a
+//! dropped byte costs the damaged frame and nothing after it.
 
 use bytes::Bytes;
 
@@ -59,10 +62,13 @@ pub(crate) fn frame_total_len(buf: &[u8]) -> Option<usize> {
     }
 }
 
-/// Drain every complete MAVLink frame (v1 `0xFE` and v2 `0xFD`) from the head of
-/// `buf`, returning the raw frames and leaving any partial trailing frame in
-/// `buf`. Junk before the next magic byte is dropped. Returns when the buffer
-/// holds only a partial frame.
+/// Drain every complete, checksum-valid MAVLink frame (v1 `0xFE` and v2 `0xFD`)
+/// from the head of `buf`, returning the raw frames and leaving any partial
+/// trailing frame in `buf`. Junk before the next magic byte is dropped, and a
+/// candidate whose checksum fails is skipped one byte at a time, so a
+/// start-of-frame byte inside a payload (after a UART overrun dropped a byte)
+/// cannot swallow the real frames that follow. Returns when the buffer holds
+/// only a partial frame.
 ///
 /// Yields [`Bytes`] rather than `Vec<u8>` because each frame is immediately
 /// handed to every fan-out consumer — the IPC socket, the aux tee, the
@@ -93,6 +99,11 @@ pub(crate) fn extract_frames(buf: &mut Vec<u8>) -> Vec<Bytes> {
         };
         if buf.len() < total {
             break;
+        }
+        if !ados_protocol::mavlink::frame_checksum_ok(&buf[..total]) {
+            // Not a frame: resume the search just past this start byte.
+            buf.drain(..1);
+            continue;
         }
         out.push(Bytes::copy_from_slice(&buf[..total]));
         buf.drain(..total);
@@ -242,6 +253,35 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0], frame);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn a_dropped_byte_costs_only_the_damaged_frame() {
+        // A UART overrun drops one payload byte. The damaged frame then reaches
+        // into the next one; its checksum fails, and every real frame after it
+        // must still come out.
+        let frame = heartbeat_frame();
+        let mut damaged = frame.clone();
+        damaged.remove(12);
+        let mut buf = damaged;
+        for _ in 0..3 {
+            buf.extend_from_slice(&frame);
+        }
+        let frames = extract_frames(&mut buf);
+        assert_eq!(frames.len(), 3, "the three intact frames survive");
+        assert!(frames.iter().all(|f| f == &frame));
+    }
+
+    #[test]
+    fn a_stx_inside_noise_is_not_taken_as_a_frame() {
+        // Line noise that happens to contain a start byte and a plausible
+        // length: without a checksum it would be cut and forwarded.
+        let frame = heartbeat_frame();
+        let mut buf = vec![0xFD, 0x05, 0x00, 0x00, 0x11, 0x01, 0x01, 0x21, 0x00, 0x00];
+        buf.extend_from_slice(&[0xAA; 7]);
+        buf.extend_from_slice(&frame);
+        let frames = extract_frames(&mut buf);
+        assert_eq!(frames, vec![Bytes::from(frame)]);
     }
 
     #[test]

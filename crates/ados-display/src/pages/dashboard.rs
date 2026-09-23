@@ -28,14 +28,15 @@ use embedded_graphics::pixelcolor::Rgb888;
 
 use crate::graphics::bar_meter::draw_bar;
 use crate::graphics::fonts::{FontFace, LoadedFont};
-use crate::graphics::palette::{Palette, ThresholdDirection};
+use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, text, Canvas};
 use crate::graphics::qr::render_qr;
 use crate::graphics::status_dot::draw_dot;
+use crate::graphics::thresholds;
 use crate::pages::{
-    blank_panel, tile_rects, ArmState, Chrome, CloudCtx, DroneCtx, HardwareItem, HitAction,
-    HitZone, LinkCtx, MeshCtx, NetworkCtx, Page, PageContext, PairingCtx, RadioCtx, RoleCtx,
-    CONTENT_H, CONTENT_Y, PANEL_W,
+    blank_panel, tile_rects, ArmState, Chrome, DroneCtx, HardwareItem, HitAction, HitZone, LinkCtx,
+    MeshCtx, MeshState, NetworkCtx, Page, PageContext, PairingCtx, RoleCtx, CONTENT_H, CONTENT_Y,
+    PANEL_W,
 };
 use crate::widgets::{bottom_bar_zones, draw_big_number, draw_bottom_bar, draw_tile, draw_top_bar};
 
@@ -48,18 +49,12 @@ const BITRATE_CAP_MBPS: f64 = 35.0;
 /// TX line once power is pushed past this and the supply path is host-VBUS.
 const BROWNOUT_TX_DBM_THRESHOLD: i64 = 12;
 
+/// The setup service's hardware-check id for the WFB radio adapter
+/// (`HardwareCheckItem(id="radio_wfb")`).
+const HW_RADIO_ID: &str = "radio_wfb";
+
 /// The live 4-tile dashboard, registered as `dashboard`.
 pub struct DashboardPage;
-
-impl DashboardPage {
-    /// The detail-page id each tile drills into, in `tile_rects` order.
-    const TILE_DETAILS: [&'static str; 4] = [
-        "details.radio_link",
-        "details.drone",
-        "details.mesh",
-        "details.uplink",
-    ];
-}
 
 impl Page for DashboardPage {
     fn id(&self) -> &'static str {
@@ -92,12 +87,16 @@ impl Page for DashboardPage {
         canvas
     }
 
-    fn hit_zones(&self, _ctx: &PageContext) -> Vec<HitZone> {
-        let tiles = tile_rects();
-        let mut zones: Vec<HitZone> = tiles
+    fn hit_zones(&self, ctx: &PageContext) -> Vec<HitZone> {
+        // The zones follow the same routing the paint uses, so a tap always opens
+        // the page behind the tile actually on screen.
+        let mut zones: Vec<HitZone> = tile_rects()
             .iter()
-            .zip(Self::TILE_DETAILS)
-            .map(|(t, detail)| HitZone::new(t.x, t.y, t.w, t.h, HitAction::OpenDetail(detail)))
+            .zip(route_tiles(ctx))
+            .filter_map(|(t, slot)| {
+                slot.detail()
+                    .map(|detail| HitZone::new(t.x, t.y, t.w, t.h, HitAction::OpenDetail(detail)))
+            })
             .collect();
         zones.extend(bottom_bar_zones());
         zones
@@ -118,6 +117,24 @@ enum Slot {
     Uplink,
 }
 
+impl Slot {
+    /// The detail page a tap on this tile opens, or `None` for a tile with
+    /// nothing to drill into.
+    fn detail(self) -> Option<&'static str> {
+        match self {
+            Slot::RadioLink => Some("details.radio_link"),
+            // The checklist's drill-in is the board and system view.
+            Slot::Hardware => Some("details.diagnostics"),
+            Slot::Drone => Some("details.drone"),
+            Slot::PairDrone => Some("details.pair_drone"),
+            Slot::Mesh => Some("details.mesh"),
+            // The wizard runs in a browser at the URL the tile shows.
+            Slot::SetupWizard => None,
+            Slot::Uplink => Some("details.uplink"),
+        }
+    }
+}
+
 /// Pick the four tile renderers for the current context.
 ///
 /// LINK slot swaps to HARDWARE only on a clear early-life signal: no RSSI and
@@ -135,7 +152,7 @@ fn route_tiles(ctx: &PageContext) -> [Slot; 4] {
     let radio_missing_in_hw_check = ctx
         .hardware_check
         .iter()
-        .find(|it| it.id.as_deref() == Some("wfb_radio"))
+        .find(|it| it.id.as_deref() == Some(HW_RADIO_ID))
         .map(|it| {
             matches!(
                 it.state.as_deref().map(str::to_ascii_lowercase).as_deref(),
@@ -200,9 +217,7 @@ fn render_inset(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
             Slot::RadioLink => draw_radio_link_tile(canvas, palette, x, y, w, h, ctx),
             Slot::Hardware => draw_hardware_tile(canvas, palette, x, y, w, h, &ctx.hardware_check),
             Slot::Drone => draw_drone_tile(canvas, palette, x, y, w, h, &ctx.drone, &ctx.pairing),
-            Slot::PairDrone => {
-                draw_pair_drone_tile(canvas, palette, x, y, w, h, &ctx.cloud, &ctx.pairing)
-            }
+            Slot::PairDrone => draw_pair_drone_tile(canvas, palette, x, y, w, h, ctx),
             Slot::Mesh => draw_mesh_tile(canvas, palette, x, y, w, h, &ctx.role, &ctx.mesh),
             Slot::SetupWizard => draw_setup_wizard_tile(canvas, palette, x, y, w, h, ctx),
             Slot::Uplink => draw_uplink_tile(
@@ -213,11 +228,33 @@ fn render_inset(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
                 w,
                 h,
                 &ctx.network,
-                &ctx.cloud,
-                &ctx.pairing,
+                ctx.cloud.paired,
+                ctx.cloud.latency_ms,
+                pair_code(ctx),
             ),
         }
     }
+}
+
+/// The pair code any pairing surface shows: the local pairing window's code,
+/// else the cloud one. Empty when neither is known.
+fn pair_code(ctx: &PageContext) -> &str {
+    ctx.pairing
+        .code
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or(ctx.cloud.pair_code.as_deref())
+        .unwrap_or("")
+}
+
+/// Whether the radio tile warns of a brownout: TX past the safe envelope on a
+/// radio whose declared supply path is host VBUS. An unknown supply path never
+/// warns; the warning is a statement about the topology, so it needs one.
+fn brownout_risk(link: &LinkCtx) -> bool {
+    link.topology.as_deref() == Some("host_vbus")
+        && link
+            .tx_power_dbm
+            .is_some_and(|p| p > BROWNOUT_TX_DBM_THRESHOLD)
 }
 
 // ── small format + measure helpers ──────────────────────────────────
@@ -290,18 +327,12 @@ fn draw_radio_link_tile(
     ctx: &PageContext,
 ) {
     let link: &LinkCtx = &ctx.link;
-    let radio: &RadioCtx = &ctx.radio;
     let rssi = link.rssi_dbm;
     let bitrate = link.bitrate_mbps;
     let fec_rec = link.fec_recovered;
     let fec_lost = link.fec_lost;
     let channel = link.channel;
     let tx_power_dbm = link.tx_power_dbm;
-    let topology = radio
-        .topology
-        .as_deref()
-        .unwrap_or("host_vbus")
-        .to_ascii_lowercase();
 
     let title_right = match channel {
         Some(c) => format!("ch {c}"),
@@ -311,12 +342,15 @@ fn draw_radio_link_tile(
 
     // Topology chip in the title-bar top-right, placed just left of where the
     // channel caption starts (or flush to the right edge when there is none).
-    let mut chip_anchor_x = x + w - 8;
-    if !title_right.is_empty() {
-        let right_text_w = measure(FontFace::MonoRegular, 11, &title_right);
-        chip_anchor_x = x + w - 8 - right_text_w - 4;
+    // No chip when the radio has not declared its supply path.
+    if let Some(topology) = link.topology.as_deref() {
+        let mut chip_anchor_x = x + w - 8;
+        if !title_right.is_empty() {
+            let right_text_w = measure(FontFace::MonoRegular, 11, &title_right);
+            chip_anchor_x = x + w - 8 - right_text_w - 4;
+        }
+        draw_topology_badge(canvas, palette, chip_anchor_x, y + 3, topology);
     }
-    draw_topology_badge(canvas, palette, chip_anchor_x, y + 3, &topology);
 
     // A stale snapshot carries no readings (the context nulls them); say why the
     // tile is empty rather than leaving a blank that reads as a dead radio.
@@ -341,7 +375,7 @@ fn draw_radio_link_tile(
         None => ("— dBm".to_string(), palette.text_tertiary, ""),
         Some(v) => (
             format!("{}", v.round() as i64),
-            palette.threshold_color(Some(v), -55.0, -75.0, ThresholdDirection::HigherIsBetter),
+            palette.grade(Some(v), thresholds::RSSI_DBM),
             "dBm",
         ),
     };
@@ -428,9 +462,7 @@ fn draw_radio_link_tile(
 
     // Brownout warning pill — only when on host-VBUS and TX is past the safe
     // envelope. Plain ASCII label for reliable rendering on the panel pipeline.
-    let brownout =
-        topology == "host_vbus" && tx_power_dbm.is_some_and(|p| p > BROWNOUT_TX_DBM_THRESHOLD);
-    if brownout {
+    if brownout_risk(link) {
         let label = "BROWNOUT RISK";
         let pill_font = LoadedFont::new(FontFace::SansBold, 10);
         let (pill_text_w, pill_text_h) = pill_font.text_size(label);
@@ -456,12 +488,13 @@ fn draw_radio_link_tile(
 }
 
 /// Topology badge palette for the radio-link chip: the four-char chip signals
-/// the radio's power-supply path.
-fn topology_badge(palette: &Palette, topology: &str) -> (&'static str, Rgb888) {
+/// the radio's power-supply path. An unrecognised value shows as itself.
+fn topology_badge<'a>(palette: &Palette, topology: &'a str) -> (&'a str, Rgb888) {
     match topology {
         "powered_hub" => ("HUB", palette.accent_primary),
         "external_5v" => ("EXT", palette.status_success),
-        _ => ("VBUS", palette.border_strong),
+        "host_vbus" => ("VBUS", palette.border_strong),
+        other => (other, palette.border_strong),
     }
 }
 
@@ -579,8 +612,7 @@ fn draw_drone_tile(
 
     // Battery headline + GPS sat count.
     if let Some(b) = battery {
-        let bat_color =
-            palette.threshold_color(Some(b), 50.0, 20.0, ThresholdDirection::HigherIsBetter);
+        let bat_color = palette.grade(Some(b), thresholds::BATTERY_PCT);
         draw_big_number(
             canvas,
             bx,
@@ -666,21 +698,19 @@ fn draw_mesh_tile(
         return;
     }
 
-    let up = mesh_block.up;
     let partition = mesh_block.partition;
-    let peer_count = mesh_block.peer_count;
+    let peers = match mesh_block.peer_count {
+        Some(n) => format!("{n} peers"),
+        None => "— peers".to_string(),
+    };
     let selected_gateway = mesh_block.selected_gateway.as_deref();
     let mesh_id = mesh_block.mesh_id.as_deref().unwrap_or("");
 
-    let (dot_color, status_label) = if !up {
-        (palette.text_tertiary, "down".to_string())
-    } else if partition {
-        (
-            palette.status_warning,
-            format!("partitioned · {peer_count} peers"),
-        )
-    } else {
-        (palette.status_success, format!("up · {peer_count} peers"))
+    let (dot_color, status_label) = match mesh_block.state() {
+        MeshState::Unknown => (palette.text_tertiary, "state unknown".to_string()),
+        MeshState::Down => (palette.status_error, "down".to_string()),
+        MeshState::Up if partition => (palette.status_warning, format!("partitioned · {peers}")),
+        MeshState::Up => (palette.status_success, format!("up · {peers}")),
     };
 
     // Status row: dot + label.
@@ -746,24 +776,10 @@ fn draw_uplink_tile(
     w: i32,
     h: i32,
     network: &NetworkCtx,
-    cloud: &CloudCtx,
-    pairing: &PairingCtx,
+    paired: bool,
+    latency_ms: Option<f64>,
+    pair_code: &str,
 ) {
-    let uplink_type = network
-        .uplink_type
-        .as_deref()
-        .unwrap_or("none")
-        .to_ascii_lowercase();
-    let uplink_reachable = network.uplink_reachable;
-    let latency_ms = cloud.latency_ms;
-    let paired = cloud.paired;
-    let pair_code = cloud
-        .pair_code
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .or(pairing.code.as_deref())
-        .unwrap_or("");
-
     let title_right = match latency_ms {
         Some(ms) => format!("{} ms", ms as i64),
         None => String::new(),
@@ -771,21 +787,7 @@ fn draw_uplink_tile(
     let (bx, by, bw, _bh) = draw_tile(canvas, palette, x, y, w, h, "Uplink / Cloud", &title_right);
 
     // Uplink status row.
-    let (dot_color, uplink_label) = if uplink_type == "none" || !uplink_reachable {
-        let color = if uplink_type == "none" {
-            palette.status_error
-        } else {
-            palette.status_warning
-        };
-        let label = if uplink_type != "none" {
-            uplink_type.clone()
-        } else {
-            "OFFLINE".to_string()
-        };
-        (color, label)
-    } else {
-        (palette.status_success, uplink_type.clone())
-    };
+    let (dot_color, uplink_label) = uplink_status(palette, network);
     draw_dot(canvas, bx + 7, by + 14, dot_color, 6, palette.bg_primary);
     let label_font = LoadedFont::new(FontFace::SansBold, 14);
     text(
@@ -842,6 +844,23 @@ fn draw_uplink_tile(
     }
 }
 
+/// The uplink row's dot colour and label. An uplink the agent does not report
+/// is unknown (`—`, tertiary), never OFFLINE: only a reported `none` is.
+fn uplink_status(palette: &Palette, network: &NetworkCtx) -> (Rgb888, String) {
+    let Some(kind) = network.uplink_type.as_deref().map(str::to_ascii_lowercase) else {
+        return (palette.text_tertiary, "—".to_string());
+    };
+    if kind == "none" {
+        return (palette.status_error, "OFFLINE".to_string());
+    }
+    let color = match network.uplink_reachable {
+        Some(true) => palette.status_success,
+        Some(false) => palette.status_warning,
+        None => palette.text_tertiary,
+    };
+    (color, kind)
+}
+
 // ── early-life: PAIR DRONE (replaces DRONE) ─────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -852,29 +871,15 @@ fn draw_pair_drone_tile(
     y: i32,
     w: i32,
     h: i32,
-    cloud: &CloudCtx,
-    pairing: &PairingCtx,
+    ctx: &PageContext,
 ) {
-    let code = pairing
-        .code
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .or(cloud.pair_code.as_deref())
-        .unwrap_or("")
-        .to_ascii_uppercase();
-    let setup_url = cloud
-        .pair_url
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .or(pairing.pair_url.as_deref())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("altnautica.com/command");
+    let code = pair_code(ctx).to_ascii_uppercase();
 
     let (bx, by, bw, bh) = draw_tile(canvas, palette, x, y, w, h, "Pair drone", "broadcast");
 
     // Broadcasting pulse — small dot in the title-bar slot. The pulse color
     // toggles when the agent is actively beaconing the code.
-    let pulse_color = if cloud.broadcasting {
+    let pulse_color = if ctx.cloud.broadcasting {
         palette.status_success
     } else {
         Rgb888::new(0x0E, 0x4D, 0x26)
@@ -889,14 +894,14 @@ fn draw_pair_drone_tile(
     );
 
     // Layout: QR sized so the right column fits the big code plus two hint
-    // lines. Cap so a readable text column remains.
+    // lines. Cap so a readable text column remains. No code, no QR: there is
+    // nothing for a phone to claim yet.
     let qr_size = (bh - 8).clamp(0, 78);
-    let payload = if code.is_empty() {
-        setup_url.to_string()
+    let qr = if code.is_empty() {
+        None
     } else {
-        format!("{setup_url}?pair={code}")
+        render_qr(&ctx.pair_deep_link(&code), qr_size as u32, 2)
     };
-    let qr = render_qr(&payload, qr_size as u32, 2);
     let text_x = if let Some(qr) = qr.as_ref() {
         // The matrix is dark-on-light by QR convention; the prior renderer
         // pasted dark modules as the bright foreground over the dark ground,
@@ -983,23 +988,25 @@ fn draw_hardware_tile(
 ) {
     let (bx, by, _bw, _bh) = draw_tile(canvas, palette, x, y, w, h, "Hardware", "checklist");
 
-    // The rows the operator can act on at the bench, in priority order. The
-    // boolean marks a required row whose absence reads as an error.
-    let rows: [(&str, &str, bool); 4] = [
-        ("board", "Companion compute", true),
-        ("wfb_radio", "WFB radio adapter", true),
-        ("mesh_dongle", "Mesh second dongle", false),
-        ("display", "Local display", false),
+    // The rows the operator can act on at the bench, in priority order, keyed by
+    // the setup service's hardware-check item ids. Whether a row is required
+    // comes from the item itself (it depends on the node's profile).
+    let rows: [(&str, &str); 4] = [
+        ("board", "Companion compute"),
+        (HW_RADIO_ID, "WFB radio adapter"),
+        ("mesh_dongle", "Mesh second dongle"),
+        ("display", "Local display"),
     ];
 
     let line_font = LoadedFont::new(FontFace::SansBold, 13);
     let detail_font = LoadedFont::new(FontFace::SansRegular, 11);
 
     let mut line_y = by + 4;
-    for (item_id, label, required) in rows {
+    for (item_id, label) in rows {
         let item = hardware_check
             .iter()
             .find(|it| it.id.as_deref() == Some(item_id));
+        let required = item.is_some_and(|it| it.required);
         let state_val = item
             .and_then(|it| it.state.as_deref())
             .unwrap_or("unknown")
@@ -1063,14 +1070,13 @@ fn draw_setup_wizard_tile(
     h: i32,
     ctx: &PageContext,
 ) {
-    let network: &NetworkCtx = &ctx.network;
     let completion = ctx.completion_percent;
     let next_action = ctx.next_action.as_deref().unwrap_or("");
 
     // The agent's setup server redirects "/" to the wizard, so the bare host
-    // URL is enough and saves horizontal pixels.
-    let host = network.mdns_host.as_deref().unwrap_or("groundnode");
-    let url = format!("http://{host}.local:8080");
+    // URL is enough and saves horizontal pixels. With no reach name known the
+    // tile says so instead of naming a host that may not resolve.
+    let url = ctx.setup_url();
 
     let title_right = match completion {
         Some(c) => format!("{}%", c as i64),
@@ -1079,9 +1085,17 @@ fn draw_setup_wizard_tile(
     let (bx, by, bw, _bh) = draw_tile(canvas, palette, x, y, w, h, "Setup wizard", &title_right);
 
     // URL — biggest monospace size that fits the body width.
-    let url_px = fit_font(FontFace::MonoBold, &url, bw, 14, 10);
-    let url_font = LoadedFont::new(FontFace::MonoBold, url_px);
-    text(canvas, &url_font, &url, bx, by + 4, palette.text_primary);
+    match url.as_deref() {
+        Some(url) => {
+            let url_px = fit_font(FontFace::MonoBold, url, bw, 14, 10);
+            let url_font = LoadedFont::new(FontFace::MonoBold, url_px);
+            text(canvas, &url_font, url, bx, by + 4, palette.text_primary);
+        }
+        None => {
+            let url_font = LoadedFont::new(FontFace::MonoBold, 14);
+            text(canvas, &url_font, "—", bx, by + 4, palette.text_tertiary);
+        }
+    }
 
     // Next action — label plus a measure-and-truncate value.
     let action_font = LoadedFont::new(FontFace::SansBold, 12);
@@ -1157,7 +1171,7 @@ mod tests {
     /// drone, mesh, uplink).
     fn live_ctx() -> PageContext {
         let mut ctx = PageContext {
-            hostname: "groundnode".into(),
+            hostname: "ados-9f2c1a".into(),
             clock: "13:47:23".into(),
             setup_finalized: true,
             completion_percent: Some(70.0),
@@ -1170,7 +1184,7 @@ mod tests {
         ctx.link.fec_lost = Some(3);
         ctx.link.channel = Some(161);
         ctx.link.tx_power_dbm = Some(5);
-        ctx.radio.topology = Some("host_vbus".into());
+        ctx.link.topology = Some("host_vbus".into());
         ctx.drone.device_id = Some("drone-AABBCC42F1".into());
         ctx.drone.fc_mode = Some("STAB".into());
         ctx.drone.battery_pct = Some(87.0);
@@ -1179,18 +1193,17 @@ mod tests {
         ctx.role.current = Some("receiver".into());
         ctx.role.configured = Some("receiver".into());
         ctx.role.mesh_capable = true;
-        ctx.mesh.up = true;
-        ctx.mesh.peer_count = 3;
-        ctx.mesh.selected_gateway = Some("groundnode-2".into());
+        ctx.mesh.up = Some(true);
+        ctx.mesh.peer_count = Some(3);
+        ctx.mesh.selected_gateway = Some("ados-9f2c1b".into());
         ctx.mesh.partition = false;
         ctx.mesh.mesh_id = Some("12ABCD".into());
         ctx.network.uplink_type = Some("eth".into());
-        ctx.network.uplink_reachable = true;
+        ctx.network.uplink_reachable = Some(true);
         ctx.cloud.paired = false;
         ctx.cloud.pair_code = Some("7YTFC7".into());
         ctx.cloud.latency_ms = Some(12.0);
         ctx.cloud.broadcasting = true;
-        ctx.cloud.pair_url = Some("altnautica.com/command".into());
         ctx.pairing.code = Some("7YTFC7".into());
         ctx.system.cpu_pct = Some(22.0);
         ctx.system.ram_used_mb = Some(1234.0);
@@ -1212,15 +1225,44 @@ mod tests {
         n
     }
 
+    /// A tile's tap opens the page behind the tile actually painted, not the
+    /// grid position's default: an early-life slot drills into its own page, and
+    /// the setup-wizard tile, which has nothing to drill into, takes no tap.
     #[test]
-    fn dashboard_has_four_tile_zones_plus_tabs() {
+    fn tile_zones_follow_the_painted_slot() {
         let page = DashboardPage;
-        let ctx = PageContext::default();
-        let zones = page.hit_zones(&ctx);
-        // Four tile drilldowns + five tabs.
-        assert_eq!(zones.len(), 9);
-        assert_eq!(zones[0].action, HitAction::OpenDetail("details.radio_link"));
-        assert_eq!(zones[3].action, HitAction::OpenDetail("details.uplink"));
+        let tile_actions = |ctx: &PageContext| -> Vec<HitAction> {
+            let tiles = tile_rects();
+            page.hit_zones(ctx)
+                .into_iter()
+                .filter(|z| tiles.iter().any(|t| (t.x, t.y) == (z.x, z.y)))
+                .map(|z| z.action)
+                .collect()
+        };
+
+        // Fresh rig: RADIO LINK, PAIR DRONE, SETUP WIZARD, UPLINK.
+        let early = PageContext::default();
+        assert_eq!(
+            tile_actions(&early),
+            vec![
+                HitAction::OpenDetail("details.radio_link"),
+                HitAction::OpenDetail("details.pair_drone"),
+                HitAction::OpenDetail("details.uplink"),
+            ]
+        );
+        // Five tabs follow the tiles.
+        assert_eq!(page.hit_zones(&early).len(), 3 + 5);
+
+        // Live rig: every default tile drills into its own detail.
+        assert_eq!(
+            tile_actions(&live_ctx()),
+            vec![
+                HitAction::OpenDetail("details.radio_link"),
+                HitAction::OpenDetail("details.drone"),
+                HitAction::OpenDetail("details.mesh"),
+                HitAction::OpenDetail("details.uplink"),
+            ]
+        );
     }
 
     #[test]
@@ -1259,17 +1301,67 @@ mod tests {
         assert_eq!(slots[3], Slot::Uplink);
     }
 
+    /// The radio row is identified by the setup service's own item id. The
+    /// fixture is the setup status shape that service emits, run through the
+    /// state mapper, so a renamed id on either side fails here.
     #[test]
     fn missing_radio_routes_link_slot_to_hardware() {
-        let mut ctx = PageContext::default();
-        ctx.hardware_check.push(HardwareItem {
-            id: Some("wfb_radio".into()),
-            label: Some("WFB radio adapter".into()),
-            state: Some("missing".into()),
-            fix_hint: Some("plug RTL8812EU/AU USB adapter".into()),
+        let setup = serde_json::json!({
+            "hardware_check": {
+                "profile": "ground_station",
+                "items": [
+                    {"id": "board", "label": "Companion compute", "required": true,
+                     "state": "ok", "detail": "", "fix_hint": ""},
+                    {"id": "radio_wfb", "label": "WFB radio adapter", "required": true,
+                     "state": "missing", "detail": "",
+                     "fix_hint": "Plug in an RTL8812EU/AU USB adapter."}
+                ]
+            }
         });
+        let mut src = crate::state_source::StateSource::with_paths(
+            "http://127.0.0.1:1",
+            std::path::Path::new("/nonexistent/pairing.json"),
+            "/nonexistent/hop.json".into(),
+        );
+        let ctx = src.compose(None, Some(&setup), None);
         let slots = route_tiles(&ctx);
         assert_eq!(slots[0], Slot::Hardware);
+    }
+
+    /// The brownout warning is a claim about the supply path, so it needs one.
+    /// An unknown topology never warns, whatever the TX power.
+    #[test]
+    fn brownout_needs_a_declared_host_vbus_topology() {
+        let mut link = LinkCtx {
+            tx_power_dbm: Some(15),
+            ..LinkCtx::default()
+        };
+        assert!(!brownout_risk(&link), "unknown topology must not warn");
+        link.topology = Some("powered_hub".into());
+        assert!(!brownout_risk(&link));
+        link.topology = Some("host_vbus".into());
+        assert!(brownout_risk(&link));
+        link.tx_power_dbm = Some(BROWNOUT_TX_DBM_THRESHOLD);
+        assert!(!brownout_risk(&link), "at the threshold is still safe");
+    }
+
+    /// An uplink the agent does not report is unknown, not OFFLINE; only a
+    /// reported `none` is offline, and a reported Ethernet uplink shows as such.
+    #[test]
+    fn an_unreported_uplink_is_unknown_not_offline() {
+        let mut network = NetworkCtx::default();
+        let (color, label) = uplink_status(&DARK, &network);
+        assert_eq!((label.as_str(), color), ("—", DARK.text_tertiary));
+
+        network.uplink_type = Some("none".into());
+        network.uplink_reachable = Some(false);
+        let (color, label) = uplink_status(&DARK, &network);
+        assert_eq!((label.as_str(), color), ("OFFLINE", DARK.status_error));
+
+        network.uplink_type = Some("eth".into());
+        network.uplink_reachable = Some(true);
+        let (color, label) = uplink_status(&DARK, &network);
+        assert_eq!((label.as_str(), color), ("eth", DARK.status_success));
     }
 
     #[test]

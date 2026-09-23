@@ -38,6 +38,8 @@ pub mod conf;
 pub mod fb_geometry;
 pub mod fb_writer;
 pub mod graphics;
+pub mod host_identity;
+pub mod log_tail;
 pub mod navigator;
 pub mod oled;
 pub mod pack;

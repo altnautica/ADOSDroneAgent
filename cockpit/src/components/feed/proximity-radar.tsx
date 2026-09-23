@@ -9,7 +9,7 @@
 //
 // Purely informational (pointer-events pass through) and reduced-motion-safe (no
 // animation — the arrow/marker are data-driven, not decorative motion). Honest
-// surfaces (Rule 44): with no live heading, track, or obstacle it shows the
+// surfaces: with no live heading, track, or obstacle it shows the
 // compass frame + "no heading" rather than a fabricated pose.
 
 import { useFlightTelemetryContext } from "@/hooks/flight-telemetry-context";

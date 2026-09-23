@@ -9,14 +9,13 @@ vendors detect captivity by probing specific URLs. This service:
 2. Answers HTTP GET for the probe paths with the exact status code
    the OS expects.
 
-Probe strategy. The spec `10-setup-webapp.md` section "Captive portal
-detection" says: "OS-specific probe URLs are all served with a 204
+Probe strategy. OS-specific probe URLs are all served with a 204
 No Content to signal 'no real internet' and trigger the captive
-portal UI". We follow that rule. Android/Chrome `/generate_204`,
+portal UI. Android/Chrome `/generate_204`,
 Apple `/hotspot-detect.html`, Windows `/connecttest.txt` all receive
-204. No redirects, no HTML body. That wording pins the choice.
+204. No redirects, no HTML body.
 
-Lifecycle per rule 26 and spec `10-setup-webapp.md`:
+Lifecycle:
 - If `/var/lib/ados/setup-complete` exists at start, the service
   logs and exits 0. The systemd unit runs with `Restart=no` so exit
   0 is a clean "done" signal.

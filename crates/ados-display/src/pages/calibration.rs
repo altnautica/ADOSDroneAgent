@@ -133,7 +133,17 @@ mod tests {
             let _ = failed.on_tap_raw((500, 500), std::path::Path::new("/nonexistent/touch.calib"));
         }
         assert!(failed.failed());
+        let inked = |c: &Canvas| {
+            (0..PANEL_H as i32)
+                .flat_map(|y| (0..PANEL_W as i32).map(move |x| (x, y)))
+                .filter(|&(x, y)| c.pixel(x, y) != DARK.bg_primary)
+                .count()
+        };
+        let clean = render_calibration(&CalibrationController::new(0), &DARK);
         let c = render_calibration(&failed, &DARK);
-        assert_eq!(c.width(), PANEL_W);
+        assert!(
+            inked(&c) > inked(&clean),
+            "the failed state paints the retry note on top of the clean screen"
+        );
     }
 }

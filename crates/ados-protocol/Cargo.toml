@@ -25,11 +25,11 @@ nix = { workspace = true }
 # Reads the aux port pair out of /etc/ados/config.yaml so every consumer of
 # the lane resolves the same operator-configured value.
 serde_norway = { workspace = true }
-# The shared no-provider rustls crypto-provider install (crypto.rs), so every
-# bare reqwest client builder in the agent installs the RustCrypto provider once
-# (no ring / aws-lc). Already in the workspace via ados-cloud.
-rustls = { version = "0.23", default-features = false }
-rustls-rustcrypto = "=0.0.2-alpha"
+# The shared rustls crypto-provider install (crypto.rs, behind the `tls`
+# feature), so every bare reqwest client builder in the agent installs the one
+# provider before its first build. Only the crates that speak TLS enable it;
+# the static service binaries link no TLS stack at all.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 rmp-serde = { workspace = true }
 rmpv = { workspace = true }
 hmac = { workspace = true }
@@ -78,3 +78,6 @@ mavlink = ["dep:rust_mavlink"]
 # daemon's ingest socket. Pulls in tracing + tracing-subscriber; the socket I/O
 # and bounded channel reuse the tokio dependency already present.
 tracing-layer = ["dep:tracing-subscriber"]
+# The process-default rustls crypto provider (`crypto::ensure_crypto_provider`)
+# for the crates that make TLS connections.
+tls = ["dep:rustls"]

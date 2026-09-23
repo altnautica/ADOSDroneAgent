@@ -4,7 +4,7 @@
 //! A fresh Raspberry Pi OS flash ships with I2C OFF (no `dtparam=i2c_arm=on` in
 //! the boot config, no `i2c-dev` module). The ground-station I2C OLED service
 //! gates on `/dev/i2c-1`, so without this step the OLED would silently never
-//! appear on a fresh install (Rule 26: no manual `raspi-config` step).
+//! appear on a fresh install (no manual `raspi-config` step).
 //!
 //! What it does (ground-station profile, Pi only):
 //!   * ensures an active `dtparam=i2c_arm=on` line in the Pi boot config

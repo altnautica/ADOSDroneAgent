@@ -1,20 +1,19 @@
-//! MQTT layer: the broker transport seam, the telemetry/status gateway, the
-//! MAVLink frame relay, and the WebRTC SDP signaling relay.
+//! MQTT layer: the broker transport seam, the MAVLink and MSP frame relays,
+//! and the WebRTC SDP signaling relay.
 //!
-//! Topics + QoS mirror the Python cloud relay exactly:
-//! * `ados/{id}/telemetry` q0  (gateway publishes vehicle state ~2 Hz)
-//! * `ados/{id}/status`    q1  (gateway publishes a small status doc)
+//! Topics + QoS:
 //! * `ados/{id}/mavlink/tx` q0 (relay publishes FC->GCS frames)
 //! * `ados/{id}/mavlink/rx` q0 (relay subscribes GCS->FC frames)
 //! * `ados/{id}/webrtc/offer`  q1 (signaling subscribes browser offers)
 //! * `ados/{id}/webrtc/answer` q1 (signaling publishes the SDP answer)
 //!
+//! Telemetry and status (`ados/{id}/telemetry`, `ados/{id}/status`) are
+//! published by the Python gateway, which authenticates as the bare
+//! `device_id`.
+//!
 //! The broker is `mqtt.altnautica.com:443` over WSS (`/mqtt`), TLS via the
-//! shared RustCrypto rustls config. The gateway authenticates as the bare
-//! `device_id`; the relays authenticate as `ados-{device_id}` — that per-relay
-//! username inconsistency is preserved exactly from the Python source (the
-//! broker ACL pattern keys on the bare-id form for the gateway's own topic
-//! subtree).
+//! shared ring-backed rustls config. The relays authenticate as
+//! `ados-{device_id}`.
 //!
 //! ## One ClientID per lane, never per device
 //!
@@ -27,13 +26,11 @@
 //! a flapping `mqttConnected` with no cloud telemetry and no cloud command
 //! authority.
 
-pub mod gateway;
 pub mod mavlink_relay;
 pub mod msp_relay;
 pub mod transport;
 pub mod webrtc_signaling;
 
-pub use gateway::{MqttGateway, StatusDoc};
 pub use mavlink_relay::{BoundedPublishQueue, MavlinkMqttRelay, INFLIGHT_LIMIT, QUEUE_MAXSIZE};
 pub use msp_relay::MspMqttRelay;
 pub use transport::{
@@ -54,12 +51,6 @@ pub const DEFAULT_BROKER_PORT: u16 = 443;
 pub const WS_PATH: &str = "/mqtt";
 
 /// Build the canonical topic strings for a device id.
-pub fn topic_telemetry(device_id: &str) -> String {
-    format!("ados/{device_id}/telemetry")
-}
-pub fn topic_status(device_id: &str) -> String {
-    format!("ados/{device_id}/status")
-}
 pub fn topic_mavlink_tx(device_id: &str) -> String {
     format!("ados/{device_id}/mavlink/tx")
 }
@@ -98,16 +89,7 @@ pub fn topic_atlas(device_id: &str, event_topic: &str) -> String {
     format!("ados/{device_id}/atlas/{leaf}")
 }
 
-/// The gateway's MQTT username: the bare device id (so the broker ACL pattern
-/// `ados/%u/#` substitutes to the agent's own topic subtree). Mirrors the
-/// gateway's `mqtt_user = self._device_id`.
-pub fn gateway_username(device_id: &str) -> String {
-    device_id.to_string()
-}
-
-/// The per-relay MQTT username: `ados-{device_id}`. Preserved verbatim from the
-/// Python relay construction (`username=f"ados-{device_id}"`), which differs
-/// from the gateway's bare-id form.
+/// The per-relay MQTT username: `ados-{device_id}`.
 pub fn relay_username(device_id: &str) -> String {
     format!("ados-{device_id}")
 }
@@ -128,8 +110,6 @@ mod tests {
 
     #[test]
     fn topics_match_the_python_strings() {
-        assert_eq!(topic_telemetry("d"), "ados/d/telemetry");
-        assert_eq!(topic_status("d"), "ados/d/status");
         assert_eq!(topic_mavlink_tx("d"), "ados/d/mavlink/tx");
         assert_eq!(topic_mavlink_rx("d"), "ados/d/mavlink/rx");
         assert_eq!(topic_msp_tx("d"), "ados/d/msp/tx");
@@ -137,13 +117,6 @@ mod tests {
         assert_eq!(topic_vision_detections("d"), "ados/d/vision/detections");
         assert_eq!(topic_webrtc_offer("d"), "ados/d/webrtc/offer");
         assert_eq!(topic_webrtc_answer("d"), "ados/d/webrtc/answer");
-    }
-
-    #[test]
-    fn username_inconsistency_is_preserved() {
-        // The gateway uses the bare device id; the relays prefix `ados-`.
-        assert_eq!(gateway_username("dev1"), "dev1");
-        assert_eq!(relay_username("dev1"), "ados-dev1");
     }
 
     #[test]

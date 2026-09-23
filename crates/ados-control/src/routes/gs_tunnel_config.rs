@@ -24,8 +24,11 @@
 //! successful relay is a `200` carrying `{is_error, response}` — `is_error`
 //! honestly marks whether the drone returned an error envelope.
 //!
-//! Over one WFB pair the bearer is point-to-point, so a `device_id` in the
-//! body is advisory (forwarded for a future multi-peer relay), not a route.
+//! The drone refuses any request that does not carry a relay ticket minted
+//! from the per-pair secret for that drone, because the radio key is shared by
+//! the whole fleet. The route mints it for `device_id` (or, when the body names
+//! none, the one registered drone) and adds it to the forwarded op as `ticket`.
+//! With no target it can name, the route refuses with `400`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -122,9 +125,9 @@ pub struct RelayedConfigRequest {
     /// The config op to relay: `{"op":"get"}` or
     /// `{"op":"put","key":"…","value":"…"}`.
     request: Value,
-    /// Advisory target device (point-to-point today; forwarded, not routed).
+    /// The drone the ticket is minted for. Optional only while exactly one
+    /// drone is registered.
     #[serde(default)]
-    #[allow(dead_code)]
     device_id: Option<String>,
     /// Per-request deadline in milliseconds; the daemon clamps it.
     #[serde(default)]
@@ -144,9 +147,18 @@ pub async fn post_relayed_config(
             "request must be a config op object",
         );
     }
+    let slots = crate::routes::gs_fleet_slot::registered_slots();
+    let Some(target) = ticket_target(body.device_id.as_deref(), &slots) else {
+        return detail(
+            StatusCode::BAD_REQUEST,
+            "device_id is required when more than one drone is registered",
+        );
+    };
+    let mut request = body.request;
+    request["ticket"] = json!(crate::routes::gs_fleet_slot::mint_ticket(&slots, &target));
     let mut forward = json!({
         "op": "config_request",
-        "request": body.request,
+        "request": request,
     });
     if let Some(ms) = body.timeout_ms {
         forward["timeout_ms"] = json!(ms);
@@ -159,6 +171,18 @@ pub async fn post_relayed_config(
             StatusCode::SERVICE_UNAVAILABLE,
             "config-over-radio channel not available",
         ),
+    }
+}
+
+/// The drone a relayed config request's ticket is minted for: the named one,
+/// or the only registered drone when none is named.
+fn ticket_target(named: Option<&str>, slots: &[ados_groundlink::FleetSlot]) -> Option<String> {
+    match named.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => Some(id.to_string()),
+        None => match slots {
+            [only] => Some(only.device_id.clone()),
+            _ => None,
+        },
     }
 }
 
@@ -280,5 +304,40 @@ mod tests {
             read_status(&path, SystemTime::now()).status(),
             StatusCode::OK
         );
+    }
+
+    fn slot(n: u8, id: &str, secret: &str) -> ados_groundlink::FleetSlot {
+        ados_groundlink::FleetSlot {
+            slot: n,
+            device_id: id.to_string(),
+            paired_at_ms: 0,
+            relay_secret: Some(secret.to_string()),
+        }
+    }
+
+    #[test]
+    fn the_ticket_names_the_addressed_drone_and_verifies_there() {
+        const SECRET: &str = "0123456789abcdef0123456789abcdef";
+        let one = vec![slot(1, "d1", SECRET)];
+        assert_eq!(ticket_target(None, &one).as_deref(), Some("d1"));
+        let two = vec![
+            slot(1, "d1", SECRET),
+            slot(2, "d2", "ffffffffffffffffffffffffffffffff"),
+        ];
+        assert_eq!(
+            ticket_target(None, &two),
+            None,
+            "with two drones the target must be named, never guessed"
+        );
+        assert_eq!(ticket_target(Some("d1"), &two).as_deref(), Some("d1"));
+
+        let ticket = crate::routes::gs_fleet_slot::mint_ticket(&two, "d1");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        ados_protocol::relay_ticket::RelayTicketIssuer::from_secret(SECRET.as_bytes())
+            .verify(&ticket, "d1", now)
+            .expect("d1 admits a ticket minted from its own secret");
     }
 }

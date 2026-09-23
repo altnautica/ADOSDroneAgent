@@ -688,7 +688,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     /// This drone's own device id, as `/etc/ados/device-id` would carry it.
-    const OWN_ID: &str = "77735cd38937";
+    const OWN_ID: &str = "0a1b2c3d4e5f";
 
     fn heartbeat_bytes() -> Vec<u8> {
         let msg = MavMessage::HEARTBEAT(HEARTBEAT_DATA {

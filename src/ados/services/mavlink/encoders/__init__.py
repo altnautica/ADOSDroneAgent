@@ -7,21 +7,20 @@ hold no state — sequence numbers are passed in by the caller so SEQ
 tracking can live wherever it makes sense for the host (per link, per
 ``(sys_id, comp_id)`` pair, or globally).
 
-Three taxonomies are exported alongside the functions:
+Two taxonomies are exported alongside the functions:
 
 * :data:`MESSAGE_ID_TO_ENCODER` — runtime dispatch for callers that have
   a message id and a payload dict and want a frame.
-* :data:`ENCODER_CAPABILITY_GATES` — message id to capability name. The
-  plugin IPC dispatcher consults this table before letting a plugin's
-  ``mavlink.send`` call reach the wire.
 * :data:`MESSAGE_NAMES` — message id to canonical name, useful for logs
   and error strings.
+
+Which capability a plugin needs to send a given message id is decided by
+the plugin host, not by this package.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Final
 
 from .rangefinder import (
     CRC_DISTANCE_SENSOR,
@@ -72,17 +71,9 @@ __all__ = [
     "encode_set_home_position",
     # Tables
     "MESSAGE_ID_TO_ENCODER",
-    "ENCODER_CAPABILITY_GATES",
     "MESSAGE_NAMES",
     "CRC_EXTRA_TABLE",
 ]
-
-# Capability names used by the plugin host. Kept as string constants so
-# this module has no runtime import dependency on the capability catalog
-# module — the canonical catalog at ``ados.plugins.capabilities`` is
-# checked at the IPC dispatcher layer, not here.
-_CAP_MAVLINK_WRITE: Final = "mavlink.write"
-_CAP_ESTIMATOR_POSE_INJECT: Final = "estimator.pose.inject"
 
 
 #: Dispatch table from message id to its encoder function. A caller
@@ -98,29 +89,6 @@ MESSAGE_ID_TO_ENCODER: dict[int, Callable[..., bytes]] = {
     MSG_ID_VISION_POSITION_DELTA: encode_vision_position_delta,
     MSG_ID_SET_GPS_GLOBAL_ORIGIN: encode_set_gps_global_origin,
     MSG_ID_SET_HOME_POSITION: encode_set_home_position,
-}
-
-
-#: Capability gate per message id. The plugin host's IPC dispatcher
-#: rejects ``mavlink.send`` calls whose msg id maps to a capability the
-#: calling plugin has not been granted. Estimator-injection messages
-#: route through their own capability so a plugin can be allowed to
-#: stream vision odometry without also being able to set arbitrary
-#: parameters or trigger commands.
-ENCODER_CAPABILITY_GATES: dict[int, str] = {
-    # Sensor publishers — "I observed something, here it is."
-    MSG_ID_OPTICAL_FLOW: _CAP_MAVLINK_WRITE,
-    MSG_ID_OPTICAL_FLOW_RAD: _CAP_MAVLINK_WRITE,
-    MSG_ID_DISTANCE_SENSOR: _CAP_MAVLINK_WRITE,
-    # Estimator-pose injection — touches the FC's nav state directly.
-    MSG_ID_VISION_POSITION_ESTIMATE: _CAP_ESTIMATOR_POSE_INJECT,
-    MSG_ID_GLOBAL_VISION_POSITION_ESTIMATE: _CAP_ESTIMATOR_POSE_INJECT,
-    MSG_ID_ODOMETRY: _CAP_ESTIMATOR_POSE_INJECT,
-    MSG_ID_VISION_POSITION_DELTA: _CAP_ESTIMATOR_POSE_INJECT,
-    # Companion-side setup. Mutates origin and home, so this is
-    # ``mavlink.write`` rather than estimator-inject.
-    MSG_ID_SET_GPS_GLOBAL_ORIGIN: _CAP_MAVLINK_WRITE,
-    MSG_ID_SET_HOME_POSITION: _CAP_MAVLINK_WRITE,
 }
 
 

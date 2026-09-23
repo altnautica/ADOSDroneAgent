@@ -1,25 +1,10 @@
-"""TLS, WireGuard, API security configuration."""
+"""API security configuration."""
 
 from __future__ import annotations
 
 import os
 
 from pydantic import BaseModel, Field
-
-from ados.core.paths import CA_CERT_PATH, DEVICE_CERT_PATH, DEVICE_KEY_PATH
-
-
-class TlsConfig(BaseModel):
-    enabled: bool = True
-    cert_path: str = str(DEVICE_CERT_PATH)
-    key_path: str = str(DEVICE_KEY_PATH)
-    ca_path: str = str(CA_CERT_PATH)
-
-
-class WireguardConfig(BaseModel):
-    enabled: bool = False
-    config_path: str = "/etc/wireguard/ados.conf"
-
 
 DEFAULT_CORS_ORIGINS: list[str] = [
     "http://localhost:4000",
@@ -70,8 +55,6 @@ class ApiSecurityConfig(BaseModel):
 
 
 class SecurityConfig(BaseModel):
-    tls: TlsConfig = TlsConfig()
-    wireguard: WireguardConfig = WireguardConfig()
     api: ApiSecurityConfig = ApiSecurityConfig()
     hmac_enabled: bool = False
     hmac_secret: str = ""

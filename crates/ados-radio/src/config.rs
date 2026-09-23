@@ -361,8 +361,7 @@ pub struct WfbConfig {
     /// figures, not a measurement of the vendored `rtl8812eu`; OpenIPC's
     /// `adaptive-link` — the working production reference for this loop — ships a
     /// profile table that tops out at MCS 2 in the field. Anything above 3 is
-    /// bench-only until the characterisation sweep in
-    /// `product/specs/ados-agent-rust-hybrid/wfb-video-pipeline-runbook.md`
+    /// bench-only until an MCS characterisation sweep
     /// measures which rungs this driver actually applies and holds. Clamped into
     /// `1..=5` on read, so a typo can never radiate an unmeasured rung.
     #[serde(default = "default_adaptive_mcs_max")]
@@ -726,13 +725,33 @@ impl WfbConfig {
     }
 }
 
-/// True when the agent profile resolves to `ground_station` — the WFB TX service
-/// must idle there (the GS runs `ados-wfb-rx`, not this) so it doesn't clobber
-/// the GS's own `wfb-stats.json`. Reads `agent.profile` from the config file,
-/// falling back to `profile.conf`. Defensive: the systemd unit is already
-/// profile-gated by the supervisor.
+/// The profile-source sentinel install writes and `ados profile set` flips. The
+/// resolver below consults it whenever `agent.profile` is `auto`, empty or absent.
+pub const PROFILE_CONF: &str = "/etc/ados/profile.conf";
+
+/// True when the agent profile resolves to a ground station. Reads
+/// `agent.profile` from the config file, falling back to `profile.conf`; see
+/// [`ground_station_from_config_text`] for the rules. The WFB TX service idles
+/// there (the GS runs `ados-wfb-rx`, not this) so it doesn't clobber the GS's own
+/// `wfb-stats.json`, and the swarm bus listens without transmitting.
 pub fn profile_is_ground_station(
     config_path: &std::path::Path,
+    profile_conf: &std::path::Path,
+) -> bool {
+    let text = std::fs::read_to_string(config_path).ok();
+    ground_station_from_config_text(text.as_deref(), profile_conf)
+}
+
+/// The one ground-station resolution rule every plane shares, over already-read
+/// config text so a caller that parsed the file for its own keys resolves the
+/// profile from the same bytes.
+///
+/// An explicit `agent.profile` of `ground_station` / `ground-station` is a ground
+/// station and `drone` is not. `auto`, empty, absent, or an unparseable config
+/// defer to `profile.conf`, whose `profile:` / `profile=` line decides; with no
+/// usable line the node is not a ground station.
+pub fn ground_station_from_config_text(
+    config_text: Option<&str>,
     profile_conf: &std::path::Path,
 ) -> bool {
     #[derive(Debug, Default, Deserialize)]
@@ -745,9 +764,8 @@ pub fn profile_is_ground_station(
         #[serde(default)]
         profile: Option<String>,
     }
-    let cfg_profile = std::fs::read_to_string(config_path)
-        .ok()
-        .and_then(|t| serde_norway::from_str::<Raw>(&t).ok())
+    let cfg_profile = config_text
+        .and_then(|t| serde_norway::from_str::<Raw>(t).ok())
         .and_then(|r| r.agent.profile);
     match cfg_profile.as_deref() {
         Some("ground_station") | Some("ground-station") => return true,

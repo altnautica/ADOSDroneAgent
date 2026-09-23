@@ -247,11 +247,19 @@ pub const RELAYED_HEADER: &str = "x-ados-relayed";
 ///   is profile-gated, so a relayed call lands on a drone and 404s today, but
 ///   the denylist is the layer that must not depend on where a route happens
 ///   to be mounted.
-/// - **Plugin install** — arbitrary code, self-granted permissions.
+/// - **Plugin install and grants** — arbitrary code, self-granted permissions,
+///   and enabling a plugin with the permissions it holds.
 /// - **Destructive setup** — factory reset, setup reset, cloud re-posture, and
-///   the two paths that take the node off the air outright: a reboot and a
-///   supervisor restart. A caller in radio range must not be able to drop an
-///   airborne aircraft's whole service stack.
+///   the paths that take the node off the air outright: a reboot, a supervisor
+///   restart, or a restart of any single service (`ados-mavlink` in flight is
+///   the aircraft's command link). A caller in radio range must not be able to
+///   drop an airborne aircraft's service stack.
+/// - **Flight-controller signing** — disabling MAVLink signing on the FC strips
+///   the protection the operator enabled.
+///
+/// `PUT /api/config` stays reachable, because the slot reconciler and the
+/// relayed settings surface write through it, but not for every key: see
+/// [`relay_config_key_forbidden`].
 ///
 /// Refused at the edge rather than per-handler so the rule holds for native and
 /// proxied routes alike, and cannot be missed when a route moves between them.
@@ -279,7 +287,9 @@ pub fn relay_forbidden(path: &str) -> bool {
         .any(|denied| path_covers(denied, path))
 }
 
-/// Whether `denied` covers `path`: the same route, or anything beneath it.
+/// Whether `denied` covers `path`: the same route, or anything beneath it. A
+/// `{name}` segment in `denied` matches any one non-empty segment, so a
+/// path-parameter route is named once as its template.
 ///
 /// `"/api/plugins/install"` covers `/api/plugins/install`,
 /// `/api/plugins/install/` and `/api/plugins/install/resume`, but NOT
@@ -287,10 +297,21 @@ pub fn relay_forbidden(path: &str) -> bool {
 /// deny an unrelated sibling and, worse, would let someone believe a subtree
 /// is covered because its name happens to share a prefix.
 fn path_covers(denied: &str, path: &str) -> bool {
-    if !path.starts_with(denied) {
-        return false;
+    let mut actual = path.split('/');
+    for want in denied.split('/') {
+        let Some(seg) = actual.next() else {
+            return false;
+        };
+        let is_param = want.len() >= 2 && want.starts_with('{') && want.ends_with('}');
+        if is_param {
+            if seg.is_empty() {
+                return false;
+            }
+        } else if seg != want {
+            return false;
+        }
     }
-    matches!(path.as_bytes().get(denied.len()), None | Some(b'/'))
+    true
 }
 
 /// Every subtree [`relay_forbidden`] refuses, as data. The predicate reads
@@ -311,6 +332,10 @@ pub const RELAY_FORBIDDEN_PATHS: &[&str] = &[
     "/api/plugins/install",
     "/api/plugins/install_from_url",
     "/api/plugins/capability-token",
+    "/api/plugins/{plugin_id}/grant",
+    "/api/plugins/{plugin_id}/enable",
+    "/api/services/{name}/restart",
+    "/api/mavlink/signing/disable-on-fc",
     "/api/v1/setup/reset",
     "/api/v1/setup/reboot",
     "/api/v1/setup/cloud-choice",
@@ -318,6 +343,33 @@ pub const RELAY_FORBIDDEN_PATHS: &[&str] = &[
     "/api/v1/system/restart-supervisor",
     "/api/v1/ground-station/factory-reset",
 ];
+
+/// The config write route whose body a relayed request is checked against.
+pub const RELAY_CONFIG_WRITE_PATH: &str = "/api/config";
+
+/// Config subtrees a relayed caller may not write. `security.*` holds the API
+/// key the proxied lane honours after a restart (a standing LAN credential),
+/// `server.cloud.*` names the broker the pairing key is sent to, and
+/// `mavlink.*` re-routes or opens the flight controller's own link.
+pub const RELAY_FORBIDDEN_CONFIG_KEYS: &[&str] = &["security", "server.cloud", "mavlink"];
+
+/// Whether a relayed `PUT /api/config` may not write `key` (a dotted path):
+/// the key is one of [`RELAY_FORBIDDEN_CONFIG_KEYS`] or lies beneath one.
+pub fn relay_config_key_forbidden(key: &str) -> bool {
+    let key = key.trim();
+    RELAY_FORBIDDEN_CONFIG_KEYS.iter().any(|denied| {
+        key == *denied
+            || key
+                .strip_prefix(denied)
+                .is_some_and(|rest| rest.starts_with('.'))
+    })
+}
+
+/// The PIN login paths: public, but charged to the caller's request budget at
+/// the edge, since they are the public paths a guesser loops on.
+pub fn is_pin_login(path: &str) -> bool {
+    matches!(path, "/api/dashboard/pin/verify" | "/api/dashboard/pin/set")
+}
 
 /// The endpoints that are public on both edges (no key, no rate limit even on
 /// TCP) so a fresh GCS can read the version, walk the local pairing handshake
@@ -449,15 +501,39 @@ pub fn unpaired_decision(path: &str, unpaired: bool, caller: CallerClass) -> Unp
     }
 }
 
-/// A fixed-window token-bucket rate limiter for the TCP edge. Each refill
-/// window grants `capacity` tokens; a request consumes one. When the bucket is
-/// empty within a window the request is rejected with 429. One shared bucket
-/// guards the whole TCP edge (the budget is per-agent, not per-route), which is
-/// enough to stop a runaway client from pinning the box.
+/// Who a request is charged to: the caller's address, with an IPv6 address
+/// reduced to its /64 (one host controls a whole /64, so keying on the full
+/// address would hand it 2^64 fresh budgets) and an IPv4-mapped address read
+/// as the IPv4 address. `None` is a caller with no address (the Unix socket).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PeerKey(Option<std::net::IpAddr>);
+
+impl PeerKey {
+    /// The key for a caller at `ip`.
+    pub fn of(ip: Option<std::net::IpAddr>) -> Self {
+        use std::net::{IpAddr, Ipv6Addr};
+        Self(ip.map(|ip| match ip.to_canonical() {
+            IpAddr::V6(v6) => {
+                let s = v6.segments();
+                IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+            }
+            v4 => v4,
+        }))
+    }
+}
+
+/// Past this many tracked callers, expired windows are dropped; a new caller
+/// that still finds the table full is refused rather than growing it.
+const MAX_RATE_PEERS: usize = 4096;
+
+/// A fixed-window request budget per caller for the TCP edge. Each caller gets
+/// `capacity` requests per `window`; past that it is answered 429 until its
+/// window rolls over. Keyed per caller rather than one shared bucket, so one
+/// host flooding the edge exhausts its own budget and nobody else's.
 pub struct RateLimiter {
     capacity: u32,
     window: Duration,
-    state: Mutex<RateState>,
+    peers: Mutex<std::collections::HashMap<PeerKey, RateState>>,
 }
 
 struct RateState {
@@ -466,28 +542,36 @@ struct RateState {
 }
 
 impl RateLimiter {
-    /// A limiter granting `capacity` requests per `window`.
+    /// A limiter granting each caller `capacity` requests per `window`.
     pub fn new(capacity: u32, window: Duration) -> Self {
         Self {
             capacity,
             window,
-            state: Mutex::new(RateState {
-                tokens: capacity,
-                window_start: Instant::now(),
-            }),
+            peers: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
-    /// The default control-surface budget: a generous per-second rate, matching
-    /// the FastAPI posture. Status polling and command bursts both fit under it.
+    /// The default control-surface budget per caller: a generous per-second
+    /// rate. A GCS, a dashboard and a cockpit on one host fit under it together.
     pub fn default_control() -> Self {
         Self::new(60, Duration::from_secs(1))
     }
 
-    /// Try to admit one request. Returns `true` when admitted, `false` when the
-    /// window's budget is exhausted.
-    pub fn check(&self) -> bool {
-        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+    /// Try to admit one request from `peer`. Returns `true` when admitted,
+    /// `false` when that caller's window budget is exhausted.
+    pub fn check(&self, peer: PeerKey) -> bool {
+        let mut peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
+        if !peers.contains_key(&peer) && peers.len() >= MAX_RATE_PEERS {
+            let window = self.window;
+            peers.retain(|_, s| s.window_start.elapsed() < window);
+            if peers.len() >= MAX_RATE_PEERS {
+                return false;
+            }
+        }
+        let s = peers.entry(peer).or_insert_with(|| RateState {
+            tokens: self.capacity,
+            window_start: Instant::now(),
+        });
         if s.window_start.elapsed() >= self.window {
             s.window_start = Instant::now();
             s.tokens = self.capacity;
@@ -913,21 +997,27 @@ mod tests {
     }
 
     #[test]
-    fn a_paired_state_without_a_key_reads_as_unpaired() {
+    fn a_paired_state_without_a_key_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
-        // paired:true but no api_key, or empty → open (matches the agent's
-        // "no key on file means open" stance).
+        // paired:true with no key is a damaged record, not an unclaimed node.
         let path = write_pairing(dir.path(), r#"{"paired": true, "api_key": ""}"#);
         let state = PairingState::with_path(path);
-        assert_eq!(state.current(), Pairing::Unpaired);
+        assert_eq!(state.current(), Pairing::Unreadable);
+        assert!(!state.authorize("/api/status", Some("")));
     }
 
+    /// A corrupt file must not open the data plane: that is exactly the state
+    /// in which the next claim would mint a fresh key for whoever asks.
     #[test]
-    fn malformed_pairing_file_reads_as_unpaired() {
+    fn a_malformed_pairing_file_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_pairing(dir.path(), "this is not json");
         let state = PairingState::with_path(path);
-        assert_eq!(state.current(), Pairing::Unpaired);
+        assert_eq!(state.current(), Pairing::Unreadable);
+        assert!(!state.authorize("/api/status", None));
+        assert!(!state.authorize("/api/status", Some("anything")));
+        // The public handshake paths still answer (the handler reports the fault).
+        assert!(state.authorize("/api/pairing/info", None));
     }
 
     #[test]
@@ -943,22 +1033,90 @@ mod tests {
         assert!(!constant_time_eq(b"", b"x"));
     }
 
+    fn peer(ip: &str) -> PeerKey {
+        PeerKey::of(Some(ip.parse().unwrap()))
+    }
+
     #[test]
     fn rate_limiter_admits_up_to_capacity_then_rejects() {
         let limiter = RateLimiter::new(3, Duration::from_secs(60));
-        assert!(limiter.check());
-        assert!(limiter.check());
-        assert!(limiter.check());
+        let a = peer("192.168.1.50");
+        assert!(limiter.check(a));
+        assert!(limiter.check(a));
+        assert!(limiter.check(a));
         // Fourth in the same window is rejected.
-        assert!(!limiter.check());
+        assert!(!limiter.check(a));
+    }
+
+    /// One host exhausting its budget leaves every other caller's untouched: a
+    /// single shared bucket let any LAN host 429 the paired operator.
+    #[test]
+    fn one_caller_exhausting_its_budget_does_not_starve_another() {
+        let limiter = RateLimiter::new(2, Duration::from_secs(60));
+        let flooder = peer("192.168.1.66");
+        while limiter.check(flooder) {}
+        assert!(
+            limiter.check(peer("192.168.1.50")),
+            "the operator is served"
+        );
+        // Addresses within one IPv6 /64 are one caller.
+        let v6 = peer("2001:db8:1:2::5");
+        assert!(limiter.check(v6));
+        assert!(limiter.check(peer("2001:db8:1:2::6")));
+        assert!(!limiter.check(peer("2001:db8:1:2:ffff::1")));
     }
 
     #[test]
     fn rate_limiter_refills_after_the_window() {
         let limiter = RateLimiter::new(1, Duration::from_millis(20));
-        assert!(limiter.check());
-        assert!(!limiter.check());
+        let a = peer("192.168.1.50");
+        assert!(limiter.check(a));
+        assert!(!limiter.check(a));
         std::thread::sleep(Duration::from_millis(30));
-        assert!(limiter.check(), "the window refilled");
+        assert!(limiter.check(a), "the window refilled");
+    }
+
+    /// The routes that carry a standing credential or take a service down are
+    /// refused over the relay, including the path-parameter ones.
+    #[test]
+    fn service_restarts_plugin_grants_and_signing_disable_are_refused_over_the_relay() {
+        for path in [
+            "/api/services/ados-mavlink/restart",
+            "/api/services/ados-wfb/restart",
+            "/api/plugins/com.example.tool/grant",
+            "/api/plugins/com.example.tool/enable",
+            "/api/mavlink/signing/disable-on-fc",
+        ] {
+            assert!(relay_forbidden(path), "{path} must not cross the relay");
+        }
+        for path in [
+            "/api/services",
+            "/api/plugins/com.example.tool",
+            "/api/plugins/com.example.tool/disable",
+            "/api/mavlink/signing/capability",
+        ] {
+            assert!(!relay_forbidden(path), "{path} stays reachable");
+        }
+    }
+
+    #[test]
+    fn relayed_config_writes_refuse_credential_and_link_keys() {
+        for key in [
+            "security.api.api_key",
+            "security",
+            "server.cloud.mqtt_broker",
+            "mavlink.endpoints",
+        ] {
+            assert!(relay_config_key_forbidden(key), "{key}");
+        }
+        for key in [
+            "video.wfb.fleet_slot",
+            "swarm.enabled",
+            "server.cloudy",
+            "mavlinkx",
+            "securityx.y",
+        ] {
+            assert!(!relay_config_key_forbidden(key), "{key}");
+        }
     }
 }

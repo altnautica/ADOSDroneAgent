@@ -196,7 +196,7 @@ async fn enabling_a_plugin_serves_it_without_restarting_the_daemon() {
     // The daemon is already up and has reconciled once with nothing installed,
     // which is exactly the situation an `ados plugin enable` lands in.
     assert_eq!(h.reconciler.reconcile().serving, 0);
-    let sock = h.socket_dir.join(format!("{PLUGIN_ID}.sock"));
+    let sock = ados_plugin_host::plugin_socket_path(&h.socket_dir, PLUGIN_ID);
     assert!(!sock.exists(), "nothing should be served yet");
 
     // The lifecycle controller writes state and pokes the daemon. No restart.
@@ -228,7 +228,7 @@ async fn disabling_a_plugin_tears_its_socket_and_token_down() {
     let h = harness();
     write_state(&h.state_path, PluginStatus::Running, &[]);
     assert_eq!(h.reconciler.reconcile().started, 1);
-    let sock = h.socket_dir.join(format!("{PLUGIN_ID}.sock"));
+    let sock = ados_plugin_host::plugin_socket_path(&h.socket_dir, PLUGIN_ID);
     let env_path = ados_plugin_host::token_env_path(PLUGIN_ID, Some(&h.socket_dir));
     assert!(sock.exists() && env_path.exists());
 
@@ -247,7 +247,7 @@ async fn an_expired_token_is_re_minted_in_place_instead_of_failing() {
     let h = harness();
     write_state(&h.state_path, PluginStatus::Running, &["mavlink.read"]);
     h.reconciler.reconcile();
-    let sock = h.socket_dir.join(format!("{PLUGIN_ID}.sock"));
+    let sock = ados_plugin_host::plugin_socket_path(&h.socket_dir, PLUGIN_ID);
 
     // Open a session with a token that is valid now and expires in one second.
     // Driving the clock this way reproduces exactly the state a long-running
@@ -312,7 +312,7 @@ async fn a_revoke_changes_the_enforcement_decision_on_the_live_session() {
     let h = harness();
     write_state(&h.state_path, PluginStatus::Running, &["mavlink.read"]);
     h.reconciler.reconcile();
-    let sock = h.socket_dir.join(format!("{PLUGIN_ID}.sock"));
+    let sock = ados_plugin_host::plugin_socket_path(&h.socket_dir, PLUGIN_ID);
     let token = token_from_env(&h.socket_dir);
 
     let mut client = UnixStream::connect(&sock).await.unwrap();
@@ -370,4 +370,58 @@ async fn reconciling_an_already_served_plugin_does_not_churn_it() {
     }
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(h.reconciler.serving(), vec![PLUGIN_ID.to_string()]);
+}
+
+#[tokio::test]
+async fn a_revoke_reaches_the_live_session_on_the_state_poll_alone() {
+    // The controller's control-socket poke is best effort. When it never
+    // arrives, the next state pass must still see the grant set moved and push
+    // the re-minted token into the open session.
+    let h = harness();
+    write_state(&h.state_path, PluginStatus::Running, &["mavlink.read"]);
+    h.reconciler.reconcile();
+    let sock = ados_plugin_host::plugin_socket_path(&h.socket_dir, PLUGIN_ID);
+    let token = token_from_env(&h.socket_dir);
+    let mut client = UnixStream::connect(&sock).await.unwrap();
+    send(&mut client, &request("hello", &token)).await;
+    assert_eq!(arg_bool(&recv(&mut client).await, "ready"), Some(true));
+
+    write_state(&h.state_path, PluginStatus::Running, &[]);
+    h.reconciler.reconcile();
+
+    let refresh = tokio::time::timeout(Duration::from_secs(2), recv(&mut client))
+        .await
+        .expect("the state pass must push a re-minted token");
+    assert_eq!(refresh.method, "token.refresh");
+    send(&mut client, &request("mavlink.subscribe", &token)).await;
+    let denied = recv(&mut client).await;
+    assert!(
+        denied
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("capability_denied"),
+        "the revoked capability must be refused, got {denied:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_state_file_keeps_every_plugin_served() {
+    // A failed read is not "nothing enabled": the pass must leave the socket
+    // and the token env file in place instead of tearing the plugin down.
+    let h = harness();
+    write_state(&h.state_path, PluginStatus::Running, &[]);
+    assert_eq!(h.reconciler.reconcile().started, 1);
+    let sock = ados_plugin_host::plugin_socket_path(&h.socket_dir, PLUGIN_ID);
+    let env_path = ados_plugin_host::token_env_path(PLUGIN_ID, Some(&h.socket_dir));
+
+    std::fs::write(&h.state_path, b"{ not json").unwrap();
+    let report = h.reconciler.reconcile();
+    assert_eq!(report.stopped, 0);
+    assert_eq!(report.serving, 1);
+    assert!(sock.exists() && env_path.exists());
+
+    // A missing file still means nothing is installed.
+    std::fs::remove_file(&h.state_path).unwrap();
+    assert_eq!(h.reconciler.reconcile().stopped, 1);
 }

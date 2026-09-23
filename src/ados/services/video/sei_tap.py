@@ -8,7 +8,7 @@ for the ADOS latency SEI marker, and persists rolling EWMA stats to
 
 This decouples the `/api/video/latency` endpoint from the LCD-bound
 LCD-side tap that used to live inside the OLED service. On a drone profile with no
-local LCD attached (e.g. groundnode after the 2026-05-08 swap), the
+local LCD attached, the
 OLED tap never runs and the latency file never gets written, so the
 GCS popover AIR row stayed blank even with SEI on. This tap fills the
 gap by being unconditional whenever wfb.sei_latency is true.

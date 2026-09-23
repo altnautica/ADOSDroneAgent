@@ -4,7 +4,7 @@
 // the centre utility action bar (Back/Menu/Record/…) and shares the same touch
 // look.
 //
-// Honest boundary (Rule 44): the ONLY control path here is the fixed set of
+// Honest boundary: the ONLY control path here is the fixed set of
 // MAVLink COMMAND_LONG actions — there is no virtual-stick / MANUAL_CONTROL and no
 // guided goto over this REST surface, so the bar contains only commands the agent
 // can genuinely execute. A skill the node cannot drive right now (no live FC link)

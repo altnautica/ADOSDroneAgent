@@ -30,6 +30,7 @@ import importlib
 import os
 import signal
 import sys
+import tempfile
 from pathlib import Path
 
 import click
@@ -38,6 +39,7 @@ from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import (
     PLUGIN_DATA_DIR,
     PLUGIN_RUN_DIR,
+    PLUGIN_SOCKET_NAME,
     PLUGINS_INSTALL_DIR,
 )
 from ados.plugins.archive import MANIFEST_FILENAME
@@ -190,7 +192,7 @@ async def _await_bridge(
     to fall into, so a plugin that reaches its lifecycle hooks is a plugin
     with host access.
     """
-    resolved_socket = socket_path or str(PLUGIN_RUN_DIR / f"{plugin_id}.sock")
+    resolved_socket = socket_path or str(PLUGIN_RUN_DIR / plugin_id / PLUGIN_SOCKET_NAME)
     attempt = 0
     while True:
         attempt += 1
@@ -389,7 +391,10 @@ def _prepare_plugin_dirs(plugin_id: str, agent_id: str) -> tuple[Path, Path, Pat
     env_data_dir = os.environ.get("ADOS_PLUGIN_DATA_DIR")
     data_dir = Path(env_data_dir) if env_data_dir else _data_dir_for(plugin_id, agent_id)
     config_dir = PLUGIN_DATA_DIR / plugin_id / "config"
-    temp_dir = PLUGIN_RUN_DIR / plugin_id
+    # Scratch space under the process temp dir, which the unit makes private
+    # to this plugin (PrivateTmp). The agent run dir is not writable from a
+    # plugin's sandbox.
+    temp_dir = Path(tempfile.gettempdir()) / plugin_id
     for d in (data_dir, config_dir, temp_dir):
         try:
             d.mkdir(parents=True, exist_ok=True)

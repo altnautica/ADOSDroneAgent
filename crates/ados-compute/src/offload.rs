@@ -22,7 +22,7 @@ pub trait Detector: Send + Sync {
     /// Whether this backend actually runs a model. The mock returns a fixed box
     /// with no accelerator, so a node wired to it produces placeholder
     /// detections; a status surface flags that rather than presenting it as a
-    /// working offload (Rule 44). A real backend overrides to `true`.
+    /// working offload. A real backend overrides to `true`.
     fn is_inference_capable(&self) -> bool {
         false
     }

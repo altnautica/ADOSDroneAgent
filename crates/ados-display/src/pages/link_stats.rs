@@ -13,18 +13,19 @@
 //!    latency, mediamtx ready + inbound rate, recording badge. Source:
 //!    [`PageContext::video`].
 //! 3. **SYSTEM** (bottom) — CPU% / RAM% / temp / disk. Source:
-//!    [`PageContext::health`].
+//!    [`PageContext::system`], the same readings the top bar shows.
 //!
-//! Values read green when in spec, amber when degraded, red when broken, via the
-//! threshold tiers below. The content region is the 480x244 frame below the top
-//! status bar, so every page-local y derives from [`CONTENT_Y`].
-
-use embedded_graphics::pixelcolor::Rgb888;
+//! Values read green when in spec, amber when degraded, red when broken, graded
+//! by the shared table in [`crate::graphics::thresholds`] so a metric reads the
+//! same color here as on every other page. The content region is the 480x244
+//! frame below the top status bar, so every page-local y derives from
+//! [`CONTENT_Y`].
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_circle, fill_rect, line, text, Canvas};
 use crate::graphics::sparkline::draw_sparkline;
+use crate::graphics::thresholds;
 use crate::pages::{
     blank_panel, Chrome, HitZone, Page, PageContext, CONTENT_H, CONTENT_Y, PANEL_W,
 };
@@ -43,54 +44,6 @@ const LINK_H: i32 = 100;
 const DEC_H: i32 = 76;
 /// SYSTEM band height (the remainder).
 const SYS_H: i32 = PAGE_H - LINK_H - DEC_H;
-
-/// Threshold tiers, picked to match the bench operating envelope.
-const RSSI_OK_DBM: f64 = -65.0;
-const RSSI_WARN_DBM: f64 = -80.0;
-const FPS_OK: f64 = 25.0;
-const FPS_WARN: f64 = 15.0;
-const TEMP_OK_C: f64 = 65.0;
-const TEMP_WARN_C: f64 = 75.0;
-const LOSS_OK: f64 = 1.0;
-const LOSS_WARN: f64 = 5.0;
-const MEM_WARN: f64 = 80.0;
-const MEM_CRIT: f64 = 90.0;
-
-/// Whether a higher or a lower measured value is the good direction.
-#[derive(Clone, Copy)]
-enum Better {
-    Higher,
-    Lower,
-}
-
-/// Map a value to a green / amber / red color against two cut points. A `None`
-/// value renders in the muted secondary tone.
-fn color_for(value: Option<f64>, ok: f64, warn: f64, palette: &Palette, better: Better) -> Rgb888 {
-    let v = match value {
-        Some(v) => v,
-        None => return palette.text_secondary,
-    };
-    match better {
-        Better::Higher => {
-            if v >= ok {
-                palette.status_success
-            } else if v >= warn {
-                palette.status_warning
-            } else {
-                palette.status_error
-            }
-        }
-        Better::Lower => {
-            if v <= ok {
-                palette.status_success
-            } else if v <= warn {
-                palette.status_warning
-            } else {
-                palette.status_error
-            }
-        }
-    }
-}
 
 /// The live link/decoder/system watch surface, registered as `link_stats`.
 pub struct LinkStatsPage;
@@ -194,13 +147,7 @@ fn draw_link_band(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext, y: 
         Some(v) => format!("{}", v as i64),
         None => "—".to_string(),
     };
-    let rssi_color = color_for(
-        link.rssi_dbm,
-        RSSI_OK_DBM,
-        RSSI_WARN_DBM,
-        palette,
-        Better::Higher,
-    );
+    let rssi_color = palette.grade(link.rssi_dbm, thresholds::RSSI_DBM);
     text(canvas, &big_f, &rssi_text, 12, y + 26, rssi_color);
     text(
         canvas,
@@ -246,13 +193,7 @@ fn draw_link_band(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext, y: 
         Some(loss) => format!("({loss:.1}%)"),
         None => "(—)".to_string(),
     };
-    let loss_color = color_for(
-        link.loss_percent,
-        LOSS_OK,
-        LOSS_WARN,
-        palette,
-        Better::Lower,
-    );
+    let loss_color = palette.grade(link.loss_percent, thresholds::LOSS_PCT);
     text(
         canvas,
         &med_f,
@@ -345,25 +286,17 @@ fn draw_dec_band(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext, y: i
         Some(v) => format!("{v:.1} fps"),
         None => "— fps".to_string(),
     };
-    let fps_color = color_for(video.fps, FPS_OK, FPS_WARN, palette, Better::Higher);
+    let fps_color = palette.grade(video.fps, thresholds::VIDEO_FPS);
     text(canvas, &mono_f, &fps_text, 12, y + 42, fps_color);
 
-    let (latency_text, latency_color) = match video.latency_ms {
-        Some(ms) => {
-            let color = if ms <= 80.0 {
-                palette.status_success
-            } else if ms <= 150.0 {
-                palette.status_warning
-            } else {
-                palette.status_error
-            };
-            (format!("{} ms", ms.round() as i64), color)
-        }
-        None => ("— ms".to_string(), palette.text_secondary),
+    let latency_text = match video.latency_ms {
+        Some(ms) => format!("{} ms", ms.round() as i64),
+        None => "— ms".to_string(),
     };
+    let latency_color = palette.grade(video.latency_ms, thresholds::VIDEO_LATENCY_MS);
     text(canvas, &mono_f, &latency_text, 110, y + 42, latency_color);
 
-    if !video.active {
+    if video.active == Some(false) {
         text(
             canvas,
             &med_f,
@@ -374,13 +307,12 @@ fn draw_dec_band(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext, y: i
         );
     }
 
-    // Stream column: mediamtx ready + inbound rate.
-    let ready = video.mediamtx_ready;
-    let ready_text = if ready { "ready" } else { "not-ready" };
-    let ready_color = if ready {
-        palette.status_success
-    } else {
-        palette.status_error
+    // Stream column: mediamtx ready + inbound rate. Unreported readiness is
+    // "—", never a red not-ready.
+    let (ready_text, ready_color) = match video.mediamtx_ready {
+        Some(true) => ("ready", palette.status_success),
+        Some(false) => ("not-ready", palette.status_error),
+        None => ("—", palette.text_tertiary),
     };
     fill_circle(canvas, 243, y + 30, 3, ready_color, None);
     text(
@@ -418,9 +350,9 @@ fn draw_dec_band(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext, y: i
 }
 
 /// Paint the SYSTEM band: a four-column CPU / RAM / TEMP / DISK grid from the
-/// health sidecar, with RAM and temperature threshold-colored.
+/// system block the top bar also reads, each value graded.
 fn draw_sys_band(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext, y: i32, h: i32) {
-    let health = &ctx.health;
+    let system = &ctx.system;
     fill_rect(canvas, 0, y, PAGE_W - 1, y + h - 1, palette.bg_secondary);
 
     let title_f = LoadedFont::new(FontFace::SansBold, 11);
@@ -429,45 +361,42 @@ fn draw_sys_band(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext, y: i
     let val_f = LoadedFont::new(FontFace::MonoBold, 14);
     let lab_f = LoadedFont::new(FontFace::SansRegular, 10);
 
-    let ram_color = color_for(
-        health.memory_percent,
-        MEM_WARN - 1.0,
-        MEM_CRIT - 1.0,
-        palette,
-        Better::Lower,
-    );
-    let temp_color = color_for(
-        health.temperature,
-        TEMP_OK_C,
-        TEMP_WARN_C,
-        palette,
-        Better::Lower,
-    );
-
-    let cpu_text = match health.cpu_percent {
+    let ram_pct = system.ram_pct();
+    let pct = |v: Option<f64>| match v {
         Some(v) => format!("{}%", v as i64),
         None => "—".to_string(),
     };
-    let ram_text = match health.memory_percent {
-        Some(v) => format!("{}%", v as i64),
-        None => "—".to_string(),
-    };
-    let temp_text = match health.temperature {
+    let cpu_text = pct(system.cpu_pct);
+    let ram_text = pct(ram_pct);
+    let temp_text = match system.temp_c {
         Some(v) => format!("{}°C", v as i64),
         None => "—".to_string(),
     };
-    let disk_text = match health.disk_percent {
-        Some(v) => format!("{}%", v as i64),
-        None => "—".to_string(),
-    };
+    let disk_text = pct(system.disk_pct);
 
     let x0 = 12;
     let col_w = (PAGE_W - 24) / 4;
     let columns = [
-        (cpu_text.as_str(), "CPU", palette.text_primary),
-        (ram_text.as_str(), "RAM", ram_color),
-        (temp_text.as_str(), "TEMP", temp_color),
-        (disk_text.as_str(), "DISK", palette.text_primary),
+        (
+            cpu_text.as_str(),
+            "CPU",
+            palette.grade(system.cpu_pct, thresholds::CPU_PCT),
+        ),
+        (
+            ram_text.as_str(),
+            "RAM",
+            palette.grade(ram_pct, thresholds::RAM_PCT),
+        ),
+        (
+            temp_text.as_str(),
+            "TEMP",
+            palette.grade(system.temp_c, thresholds::TEMP_C),
+        ),
+        (
+            disk_text.as_str(),
+            "DISK",
+            palette.grade(system.disk_pct, thresholds::DISK_PCT),
+        ),
     ];
     for (i, (value, label, color)) in columns.iter().enumerate() {
         let cx = x0 + i as i32 * col_w;
@@ -494,16 +423,17 @@ mod tests {
         ctx.link.fec_lost = Some(0);
         ctx.link.rssi_history = (0..60).map(|i| Some(-60.0 + (i % 8) as f64)).collect();
         ctx.video.decoder = Some("h264 v4l2m2m".to_string());
-        ctx.video.active = true;
+        ctx.video.active = Some(true);
         ctx.video.fps = Some(30.0);
         ctx.video.latency_ms = Some(64.0);
-        ctx.video.mediamtx_ready = true;
+        ctx.video.mediamtx_ready = Some(true);
         ctx.video.mediamtx_inbound_kbps = Some(4200.0);
         ctx.video.recording = true;
-        ctx.health.cpu_percent = Some(41.0);
-        ctx.health.memory_percent = Some(55.0);
-        ctx.health.disk_percent = Some(22.0);
-        ctx.health.temperature = Some(52.0);
+        ctx.system.cpu_pct = Some(41.0);
+        ctx.system.ram_used_mb = Some(2200.0);
+        ctx.system.ram_total_mb = Some(4000.0);
+        ctx.system.disk_pct = Some(22.0);
+        ctx.system.temp_c = Some(52.0);
         ctx
     }
 
@@ -525,52 +455,19 @@ mod tests {
         assert_eq!(c.width(), PANEL_W);
     }
 
+    /// The SYSTEM band and the top bar grade one reading: RAM at 75% is amber
+    /// in both, not amber in one and green in the other.
     #[test]
-    fn color_tiers_follow_direction() {
-        // Higher-is-better: above ok = success, between = warning, below = error.
-        assert_eq!(
-            color_for(
-                Some(-50.0),
-                RSSI_OK_DBM,
-                RSSI_WARN_DBM,
-                &DARK,
-                Better::Higher
-            ),
-            DARK.status_success
-        );
-        assert_eq!(
-            color_for(
-                Some(-72.0),
-                RSSI_OK_DBM,
-                RSSI_WARN_DBM,
-                &DARK,
-                Better::Higher
-            ),
-            DARK.status_warning
-        );
-        assert_eq!(
-            color_for(
-                Some(-88.0),
-                RSSI_OK_DBM,
-                RSSI_WARN_DBM,
-                &DARK,
-                Better::Higher
-            ),
-            DARK.status_error
-        );
-        // Lower-is-better: at/below ok = success, above warn = error.
-        assert_eq!(
-            color_for(Some(0.5), LOSS_OK, LOSS_WARN, &DARK, Better::Lower),
-            DARK.status_success
-        );
-        assert_eq!(
-            color_for(Some(9.0), LOSS_OK, LOSS_WARN, &DARK, Better::Lower),
-            DARK.status_error
-        );
-        // None renders muted.
-        assert_eq!(
-            color_for(None, FPS_OK, FPS_WARN, &DARK, Better::Higher),
-            DARK.text_secondary
-        );
+    fn the_system_band_grades_ram_like_the_top_bar() {
+        let mut ctx = PageContext::default();
+        ctx.system.ram_used_mb = Some(3000.0);
+        ctx.system.ram_total_mb = Some(4000.0);
+        let c = LinkStatsPage.render(&ctx, &DARK);
+        // The RAM value column is the second of four, in the SYSTEM band.
+        let band_y = OY + LINK_H + DEC_H;
+        let col_w = (PAGE_W - 24) / 4;
+        let amber = (band_y + 26..band_y + 44)
+            .any(|y| (12 + col_w..12 + 2 * col_w).any(|x| c.pixel(x, y) == DARK.status_warning));
+        assert!(amber, "75% RAM reads amber in the SYSTEM band");
     }
 }

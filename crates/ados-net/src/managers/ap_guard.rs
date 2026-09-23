@@ -401,7 +401,7 @@ mod tests {
         );
         guard.reconcile(true).await;
 
-        // The sidecar reflects the stand-down decision (Rule 44 diagnosability).
+        // The sidecar reflects the stand-down decision (diagnosability).
         let side = read_sidecar(&dir.path().join("ap-guard.json"));
         assert_eq!(side["standing_down"], true);
         assert_eq!(side["reason"], REASON_STANDDOWN);

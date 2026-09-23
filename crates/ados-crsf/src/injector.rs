@@ -90,6 +90,8 @@ impl InjectorAuth {
             // the lane on a node that is not yet claimed without protecting
             // anything, because there is no credential to protect it with.
             Pairing::Unpaired => Some(asserted.to_string()),
+            // An unreadable pairing file establishes no identity.
+            Pairing::Unreadable => None,
             Pairing::Paired(api_key) => {
                 let ticket = ticket?;
                 let issuer = WsTicketIssuer::from_api_key(&api_key);

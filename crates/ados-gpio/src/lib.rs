@@ -216,16 +216,24 @@ struct Request {
     pin: Option<u32>,
     #[serde(default)]
     level: Option<Level>,
+    // The beep fields are read wide and clamped in `parse_command`, so a value
+    // out of the narrow field's range (negative, a duty of 300, an hour-long
+    // phase) is corrected rather than failing the parse.
     #[serde(default)]
-    freq_hz: Option<u32>,
+    freq_hz: Option<i64>,
     #[serde(default)]
-    duty_pct: Option<u8>,
+    duty_pct: Option<i64>,
     #[serde(default)]
-    on_ms: Option<u32>,
+    on_ms: Option<i64>,
     #[serde(default)]
-    off_ms: Option<u32>,
+    off_ms: Option<i64>,
     #[serde(default)]
-    cycles: Option<u32>,
+    cycles: Option<i64>,
+}
+
+/// Clamp a wide request integer into `u32` (negative becomes 0).
+fn clamp_u32(v: i64) -> u32 {
+    v.clamp(0, i64::from(u32::MAX)) as u32
 }
 
 /// The outcome of parsing a request line: a routed [`Command`], or a terminal
@@ -282,11 +290,11 @@ pub fn parse_command(line: &[u8]) -> Parsed {
                 None => return Parsed::Error("E_MISSING_CYCLES".to_string()),
             };
             let pattern = BeepPattern {
-                freq_hz: req.freq_hz.unwrap_or(0),
-                duty_pct: req.duty_pct.unwrap_or(50),
-                on_ms,
-                off_ms: req.off_ms.unwrap_or(0),
-                cycles,
+                freq_hz: clamp_u32(req.freq_hz.unwrap_or(0)),
+                duty_pct: req.duty_pct.unwrap_or(50).clamp(0, 100) as u8,
+                on_ms: clamp_u32(on_ms),
+                off_ms: clamp_u32(req.off_ms.unwrap_or(0)),
+                cycles: clamp_u32(cycles),
             }
             .clamp();
             Parsed::Cmd(Command::Beep {
@@ -502,6 +510,24 @@ mod tests {
                 assert_eq!(pattern.off_ms, MAX_PHASE_MS);
                 assert_eq!(pattern.cycles, MAX_BEEP_CYCLES);
                 assert_eq!(pattern.duty_pct, 100);
+            }
+            other => panic!("expected a beep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn beep_fields_outside_their_wire_type_are_clamped_not_rejected() {
+        // duty 300 exceeds u8, a negative off_ms and an on_ms past u32::MAX
+        // exceed u32; each is corrected into bounds.
+        let c = cmd(
+            br#"{"op":"beep","pin":18,"on_ms":9999999999,"off_ms":-5,"cycles":2,"duty_pct":300}"#,
+        );
+        match c {
+            Command::Beep { pattern, .. } => {
+                assert_eq!(pattern.duty_pct, 100);
+                assert_eq!(pattern.on_ms, MAX_PHASE_MS);
+                assert_eq!(pattern.off_ms, 0);
+                assert_eq!(pattern.cycles, 2);
             }
             other => panic!("expected a beep, got {other:?}"),
         }

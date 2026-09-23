@@ -18,7 +18,7 @@
 #   * extlinux fdtoverlays / armbianEnv: fallbacks for non-managed images.
 #
 # overlay_source: bsp-disabled means "the dtbo already exists on /boot as a
-# .disabled twin; enable in place" — we never compile or vendor it (Rule 30:
+# .disabled twin; enable in place" — we never compile or vendor it (
 # no redistributing a BSP DTS we did not author).
 #
 # After activation the script always writes /etc/ados/camera.conf (read by the
@@ -37,7 +37,7 @@
 #     automatic reboot (deferred, and reported as degraded, under --no-reboot).
 #
 # A newly-staged overlay needs a reboot to take effect (u-boot reads the DT
-# only at boot), which is what keeps bring-up 100% automatic (Rule 26).
+# only at boot), which is what keeps bring-up 100% automatic.
 #
 # Idempotent. Re-running on a board whose overlay is already enabled is a no-op
 # for the boot config; camera.conf + modules-load are rewritten with current
@@ -437,7 +437,7 @@ EOF
 chmod 0644 "${CAMERA_CONF}"
 info "Wrote ${CAMERA_CONF} (overlay_state=${OVERLAY_STATE})."
 
-# Signal the install flow to perform the single automatic reboot (Rule 26).
+# Signal the install flow to perform the single automatic reboot.
 if [ "${OVERLAY_STATE}" = "pending_reboot" ]; then
     install -d -m 0755 "${RUN_ADOS_DIR}" 2>/dev/null || true
     echo "camera-overlay ${ENABLED_OVERLAY}" >> "${REBOOT_REQUIRED_FILE}" 2>/dev/null || true

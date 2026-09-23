@@ -201,7 +201,8 @@ function GsCellular() {
       case "modemmanager_not_installed":
         return "ModemManager not installed";
       default:
-        return presence.reason ?? "unknown";
+        // `not_probed` and any unknown reason: nothing was looked at.
+        return "unknown";
     }
   })();
 
