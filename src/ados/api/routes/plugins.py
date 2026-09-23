@@ -986,11 +986,11 @@ async def stream_install_job(websocket: WebSocket, job_id: str) -> None:
     The Starlette HTTP middleware does not process WebSocket
     handshakes, so the paired-key check runs inline before
     ``accept()``. Native clients can pass ``X-ADOS-Key``; browsers
-    pass an ``ados-ws-ticket`` minted for the ``plugins.install_job``
-    scope at ``POST /api/_ws/ticket``. The URL never carries the
-    pairing key.
+    pass an ``ados-ws-ticket`` minted for this job's
+    ``plugins.install_job:<job_id>`` scope at ``POST /api/_ws/ticket``.
+    The URL never carries the pairing key.
     """
-    accept_subprotocol = await authenticate_job_websocket(websocket)
+    accept_subprotocol = await authenticate_job_websocket(websocket, job_id)
     if accept_subprotocol is None:
         return
     if accept_subprotocol:

@@ -61,7 +61,7 @@
 //! `force` is absent by default, so a client that does not send it still gets
 //! the refusal on a paired rig.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -72,269 +72,6 @@ use serde_json::{json, Value};
 
 use crate::config_store::{section_path, update_config, ConfigWriteError};
 use crate::state::AppState;
-
-// ---------------------------------------------------------------------------
-// Path seam: the agent config file.
-// ---------------------------------------------------------------------------
-
-/// The agent config path (`ADOS_CONFIG`, default `/etc/ados/config.yaml`), the
-/// same resolution the sibling read/write routes use.
-fn config_yaml_path() -> PathBuf {
-    PathBuf::from(
-        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string()),
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Pair-status snapshot: the same `status(role)` the GET /api/wfb/pair read
-// computes, the input both branches of set_auto_pair start from.
-// ---------------------------------------------------------------------------
-
-/// The live pair-status snapshot for a role: the field set `set_auto_pair` reads
-/// before it branches, and that the persist path writes back from. Mirrors the
-/// dict the residual `PairManager.status(role)` returns.
-struct PairStatus {
-    paired: bool,
-    /// The peer device-id off the config (or the GS legacy mirror), or JSON null.
-    peer: Value,
-    /// The paired-at string off the config, demoted to null for a YAML-timestamp
-    /// (matching the residual `isinstance(str)` guard over the YAML-loaded value),
-    /// or null.
-    paired_at: Value,
-    /// The blake2b-8 key fingerprint, or JSON null when not paired / unreadable.
-    fingerprint: Value,
-    /// The current arm flag off the config (default true when absent). Computed for
-    /// status fidelity (and asserted by the read-parity test), but the handler's
-    /// response always reports the REQUESTED value, not this stored one — the
-    /// residual `set_auto_pair` returns `{**current, auto_pair_enabled: enabled}`,
-    /// overriding the status value — so the handler never reads this field.
-    #[allow(dead_code)]
-    auto_pair_enabled: bool,
-    /// `"drone"` or `"gs"`.
-    role: String,
-}
-
-/// Resolve the bind-protocol role from the agent's profile, mirroring the
-/// residual `_current_role(app)` → `_agent_role_from_profile`. The profile is the
-/// hyphen-wire form (`"drone"` / `"ground-station"`); the role is `"drone"` only
-/// when the profile is exactly `"drone"`, else `"gs"`.
-fn current_role(config_profile: &str) -> String {
-    current_role_at(
-        config_profile,
-        &crate::profile::profile_conf_path(),
-        &crate::profile::mesh_role_path(),
-    )
-}
-
-/// The path-injectable core of [`current_role`]: resolve the bind-protocol role off
-/// an explicit profile.conf + role-sentinel path. Threaded so a test drives it
-/// against a tempdir without mutating the process environment.
-fn current_role_at(config_profile: &str, profile_conf: &Path, role_path: &Path) -> String {
-    let (profile, _role) =
-        crate::profile::current_profile_and_role_at(config_profile, profile_conf, role_path);
-    if profile == "drone" {
-        "drone".to_string()
-    } else {
-        "gs".to_string()
-    }
-}
-
-/// Compute the live pair-status snapshot the manager reads, mirroring the
-/// residual `PairManager.status(role)` byte-for-byte: the role-appropriate key
-/// file is the paired signal (present AND exactly 64 bytes AND a readable
-/// fingerprint), and the peer / paired-at / auto-pair come off the config with the
-/// legacy `ground_station.*` fallback on the GS profile.
-fn read_pair_status(config_path: &Path, key_dir: &Path, role: &str) -> PairStatus {
-    // The shared radio-pair predicate: the role's key, exactly 64 bytes, with a
-    // readable fingerprint.
-    let fingerprint = crate::routes::wfb::paired_key_fingerprint(key_dir, role);
-    let paired = fingerprint.is_some();
-    let fingerprint: Value = fingerprint.map_or(Value::Null, |fp| json!(fp));
-
-    // Peer / paired-at / auto-pair off the raw config dict, mirroring the residual
-    // `_load_config_dict()` read (a present-but-non-string peer/paired-at reads as
-    // null, an absent auto-pair flag defaults to true).
-    let raw = crate::config::load_config_object(config_path);
-    let wfb_section = raw
-        .get("video")
-        .filter(|v| v.is_object())
-        .and_then(|v| v.get("wfb"))
-        .filter(|v| v.is_object());
-
-    let mut peer = wfb_section
-        .and_then(|w| w.get("paired_with_device_id"))
-        .filter(|v| v.is_string())
-        .cloned()
-        .unwrap_or(Value::Null);
-    let mut paired_at = wfb_section
-        .and_then(|w| w.get("paired_at"))
-        .map(paired_at_string)
-        .unwrap_or(Value::Null);
-    let auto_pair_enabled = wfb_section
-        .and_then(|w| w.get("auto_pair_enabled"))
-        .map(json_truthy)
-        .unwrap_or(true);
-
-    // GS-profile fallback: a rig migrated from an older config may carry the pair
-    // state under `ground_station.*` without the `video.wfb.*` mirror.
-    if role == "gs" && peer.is_null() {
-        let gs = raw.get("ground_station").filter(|v| v.is_object());
-        peer = gs
-            .and_then(|g| g.get("paired_drone_id"))
-            .filter(|v| v.is_string())
-            .cloned()
-            .unwrap_or(Value::Null);
-        if paired_at.is_null() {
-            paired_at = gs
-                .and_then(|g| g.get("paired_at"))
-                .map(paired_at_string)
-                .unwrap_or(Value::Null);
-        }
-    }
-
-    PairStatus {
-        paired,
-        peer,
-        paired_at,
-        fingerprint,
-        auto_pair_enabled,
-        role: role.to_string(),
-    }
-}
-
-/// The `paired_at` field value the status read reports, mirroring the residual
-/// pair-status read's `paired_at if isinstance(paired_at, str) else None`: a
-/// non-string value is null, and a YAML-timestamp-shaped string (which the
-/// residual's YAML loader resolves to a `datetime`, so its `isinstance(str)` guard
-/// demotes it to null) is also null. A non-timestamp string passes through.
-fn paired_at_string(v: &Value) -> Value {
-    match v.as_str() {
-        Some(s) if !is_yaml_timestamp(s) => json!(s),
-        _ => Value::Null,
-    }
-}
-
-/// Python `bool(x)` truthiness over a JSON value, for the `auto_pair_enabled`
-/// coercion: `null`/`false`/`0`/`0.0`/`""`/`[]`/`{}` are falsey, everything else
-/// truthy. Mirrors `bool(wfb_section.get("auto_pair_enabled", True))`.
-fn json_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
-}
-
-/// True when `s` matches the YAML implicit timestamp grammar a standard YAML loader
-/// resolves to a date/datetime (and therefore not a plain string). Reproduces the
-/// loader's implicit resolver: either a bare `YYYY-MM-DD` date, or a full datetime
-/// `YYYY-M-D` (single- or double-digit month/day) followed by a `T`/whitespace
-/// separator, `H:MM:SS`, an optional fractional second, and an optional `Z` or numeric
-/// timezone offset. Same rule as the sibling read module's `is_yaml_timestamp`.
-fn is_yaml_timestamp(s: &str) -> bool {
-    let b = s.as_bytes();
-
-    fn digits(b: &[u8], i: usize) -> usize {
-        let mut j = i;
-        while j < b.len() && b[j].is_ascii_digit() {
-            j += 1;
-        }
-        j - i
-    }
-
-    if digits(b, 0) != 4 {
-        return false;
-    }
-    let mut i = 4;
-    if b.get(i) != Some(&b'-') {
-        return false;
-    }
-    i += 1;
-    let month = digits(b, i);
-    if month == 0 || month > 2 {
-        return false;
-    }
-    i += month;
-    if b.get(i) != Some(&b'-') {
-        return false;
-    }
-    i += 1;
-    let day = digits(b, i);
-    if day == 0 || day > 2 {
-        return false;
-    }
-    i += day;
-
-    if i == s.len() {
-        return month == 2 && day == 2;
-    }
-
-    match b.get(i) {
-        Some(b'T') | Some(b't') => i += 1,
-        Some(b' ') | Some(b'\t') => {
-            while matches!(b.get(i), Some(b' ') | Some(b'\t')) {
-                i += 1;
-            }
-        }
-        _ => return false,
-    }
-    let hour = digits(b, i);
-    if hour == 0 || hour > 2 {
-        return false;
-    }
-    i += hour;
-    if b.get(i) != Some(&b':') {
-        return false;
-    }
-    i += 1;
-    if digits(b, i) != 2 {
-        return false;
-    }
-    i += 2;
-    if b.get(i) != Some(&b':') {
-        return false;
-    }
-    i += 1;
-    if digits(b, i) != 2 {
-        return false;
-    }
-    i += 2;
-
-    if b.get(i) == Some(&b'.') {
-        i += 1;
-        i += digits(b, i);
-    }
-
-    while matches!(b.get(i), Some(b' ') | Some(b'\t')) {
-        i += 1;
-    }
-    match b.get(i) {
-        None => return true,
-        Some(b'Z') | Some(b'z') => {
-            i += 1;
-        }
-        Some(b'+') | Some(b'-') => {
-            i += 1;
-            let tz_hour = digits(b, i);
-            if tz_hour == 0 || tz_hour > 2 {
-                return false;
-            }
-            i += tz_hour;
-            if b.get(i) == Some(&b':') {
-                i += 1;
-                if digits(b, i) != 2 {
-                    return false;
-                }
-                i += 2;
-            }
-        }
-        _ => return false,
-    }
-    i == s.len()
-}
 
 // ---------------------------------------------------------------------------
 // Persist: the arm flag, and only the arm flag.
@@ -408,14 +145,13 @@ pub async fn put_auto_pair(
     State(state): State<AppState>,
     Json(req): Json<AutoPairToggleRequest>,
 ) -> Response {
-    let cfg = crate::config::PairingConfig::load_from(&state.pairing_paths.config);
-    let role = current_role(&cfg.agent.profile);
+    let paths = &state.pairing_paths;
     put_auto_pair_at(
-        &config_yaml_path(),
-        &state.pairing_paths.wfb_key_dir,
+        &paths.config,
+        &paths.wfb_key_dir,
         Path::new(ados_protocol::pair_proof::PAIR_PROOF_PATH),
         Path::new(ados_protocol::pair_proof::AUTO_PAIR_RETRY_PATH),
-        &role,
+        crate::wfb_pair_state::bind_role(paths),
         req.enabled,
         req.force,
     )
@@ -453,19 +189,14 @@ fn put_auto_pair_at(
     key_dir: &Path,
     proof_path: &Path,
     retry_path: &Path,
-    role: &str,
+    role: &'static str,
     enabled: bool,
     force: bool,
 ) -> Response {
-    let status = read_pair_status(config_path, key_dir, role);
-    let mut body = json!({
-        "paired": status.paired,
-        "paired_with_device_id": status.peer,
-        "paired_at": status.paired_at,
-        "fingerprint": status.fingerprint,
-        "auto_pair_enabled": enabled,
-        "role": status.role,
-    });
+    let status = crate::wfb_pair_state::status(config_path, key_dir, role);
+    // The response reports the REQUESTED flag, not the stored one.
+    let mut body = Value::Object(status.to_json());
+    body["auto_pair_enabled"] = json!(enabled);
 
     // Re-arm on a paired rig is refused: the status snapshot with auto_pair_enabled
     // forced false and rearm_blocked added. NOTHING is persisted, so nothing is
@@ -527,7 +258,7 @@ fn put_auto_pair_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::routes::wfb::read_public_fingerprint;
+    use crate::wfb_pair_state::read_public_fingerprint;
 
     /// Read a response body as JSON.
     async fn body_json(resp: Response) -> Value {
@@ -547,24 +278,6 @@ mod tests {
         }
         std::fs::write(&path, &bytes).unwrap();
         read_public_fingerprint(&path).unwrap()
-    }
-
-    // ── role resolution ───────────────────────────────────────────────────────
-
-    #[test]
-    fn role_is_drone_only_for_the_drone_profile() {
-        let dir = tempfile::tempdir().unwrap();
-        // No profile.conf / mesh role sentinels around; the paths are threaded in
-        // explicitly so the test never mutates the process environment.
-        let profile_conf = dir.path().join("absent.conf");
-        let role_path = dir.path().join("absent.role");
-        assert_eq!(current_role_at("drone", &profile_conf, &role_path), "drone");
-        assert_eq!(
-            current_role_at("ground_station", &profile_conf, &role_path),
-            "gs"
-        );
-        // auto/empty with no sentinel falls back to drone → "drone".
-        assert_eq!(current_role_at("auto", &profile_conf, &role_path), "drone");
     }
 
     // ── the disable path (enabled=false): always persists ─────────────────────
@@ -1004,40 +717,6 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
-    }
-
-    // ── status read parity: paired-at demotion + auto-pair default ────────────
-
-    #[test]
-    fn status_demotes_a_yaml_timestamp_paired_at_to_null() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.yaml");
-        let keys = dir.path().join("wfb");
-        std::fs::create_dir_all(&keys).unwrap();
-        std::fs::write(
-            &cfg,
-            "video:\n  wfb:\n    paired_at: 2026-06-13T07:59:59+00:00\n    paired_with_device_id: drone-abc\n",
-        )
-        .unwrap();
-        let st = read_pair_status(&cfg, &keys, "drone");
-        // The timestamp-shaped paired_at demotes to null; the peer passes through.
-        assert_eq!(st.paired_at, Value::Null);
-        assert_eq!(st.peer, json!("drone-abc"));
-        // Absent auto-pair flag defaults true.
-        assert!(st.auto_pair_enabled);
-        assert!(!st.paired);
-    }
-
-    #[test]
-    fn status_reads_the_gs_legacy_peer_fallback() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.yaml");
-        let keys = dir.path().join("wfb");
-        std::fs::create_dir_all(&keys).unwrap();
-        // No canonical peer, only the legacy ground_station.paired_drone_id.
-        std::fs::write(&cfg, "ground_station:\n  paired_drone_id: drone-legacy\n").unwrap();
-        let st = read_pair_status(&cfg, &keys, "gs");
-        assert_eq!(st.peer, json!("drone-legacy"));
     }
 
     #[tokio::test]

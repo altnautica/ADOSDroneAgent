@@ -267,12 +267,7 @@ fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
 
 /// Paint the unpaired body: NOT PAIRED banner + pair code + QR.
 fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
-    let code = ctx
-        .cloud
-        .pair_code
-        .clone()
-        .or_else(|| ctx.pairing.code.clone())
-        .unwrap_or_default();
+    let code = ctx.pair_code().unwrap_or("");
 
     let msg_font = LoadedFont::new(FontFace::SansBold, 14);
     let msg = "NOT PAIRED";
@@ -288,16 +283,16 @@ fn render_unpaired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
 
     if !code.is_empty() {
         let code_font = LoadedFont::new(FontFace::MonoBold, 22);
-        let cw = code_font.text_size(&code).0 as i32;
+        let cw = code_font.text_size(code).0 as i32;
         text(
             canvas,
             &code_font,
-            &code,
+            code,
             (PAGE_W - cw) / 2,
             HEADER_H + 32,
             palette.text_primary,
         );
-        let qr_payload = ctx.pair_deep_link(&code);
+        let qr_payload = ctx.pair_deep_link(code);
         if let Some(qr) = render_qr(&qr_payload, 100, 2) {
             let qr_x = (PAGE_W - qr.size as i32) / 2;
             let qr_y = HEADER_H + 60;

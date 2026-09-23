@@ -16,7 +16,9 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, fill_rect_outline, line, text, Canvas};
 use crate::graphics::status_dot::draw_dot;
 use crate::graphics::thresholds;
-use crate::pages::{HitAction, HitZone, BOTTOM_BAR_H, PANEL_W, TOP_BAR_H};
+use crate::pages::{
+    HitAction, HitZone, BOTTOM_BAR_H, PANEL_W, TAB_COUNT, TAB_PAGE_IDS, TAB_WIDTH, TOP_BAR_H,
+};
 
 /// Height reserved for a tile's caps title row.
 pub const TILE_TITLE_BAR_H: i32 = 18;
@@ -163,21 +165,6 @@ pub fn draw_top_bar(
     line(canvas, 0, h - 1, w - 1, h - 1, palette.border_default);
 }
 
-/// One bottom-bar tab: stable zone id, the page id it routes to, and the icon to
-/// paint. Five tabs share the 480 px width at 96 px each.
-const TABS: [(&str, &str); 5] = [
-    ("dashboard", "dashboard"),
-    ("video", "video"),
-    ("settings", "settings"),
-    ("link_stats", "link_stats"),
-    ("channel_hops", "channel_hops"),
-];
-
-/// Number of bottom-bar tabs.
-pub const TAB_COUNT: i32 = 5;
-/// Width of one bottom-bar tab.
-pub const TAB_WIDTH: i32 = PANEL_W as i32 / TAB_COUNT;
-
 /// Paint a 24 px icon for `icon` centered in a tab cell at `(cx, cy)`.
 ///
 /// The icons are line-drawn to match the tab semantics the bitmap set carried:
@@ -266,10 +253,10 @@ pub fn draw_bottom_bar(canvas: &mut Canvas, palette: &Palette, active_tab: &str)
     fill_rect(canvas, 0, y, w - 1, y + h - 1, palette.bg_secondary);
     line(canvas, 0, y, w - 1, y, palette.border_default);
 
-    let mut zones = Vec::with_capacity(TABS.len());
-    for (i, (page_id, icon)) in TABS.iter().enumerate() {
+    let mut zones = Vec::with_capacity(TAB_COUNT);
+    for (i, &page_id) in TAB_PAGE_IDS.iter().enumerate() {
         let tab_x0 = i as i32 * TAB_WIDTH;
-        let is_active = *page_id == active_tab;
+        let is_active = page_id == active_tab;
         let icon_color = if is_active {
             palette.text_primary
         } else {
@@ -298,7 +285,7 @@ pub fn draw_bottom_bar(canvas: &mut Canvas, palette: &Palette, active_tab: &str)
 
         let cx = tab_x0 + TAB_WIDTH / 2;
         let cy = y + h / 2;
-        draw_tab_icon(canvas, icon, cx, cy, icon_color);
+        draw_tab_icon(canvas, page_id, cx, cy, icon_color);
 
         // Zones live in the page-local content frame; the bar is below the
         // content region so its y is mapped into the same coordinate space the
@@ -308,7 +295,7 @@ pub fn draw_bottom_bar(canvas: &mut Canvas, palette: &Palette, active_tab: &str)
             y - TOP_BAR_H as i32,
             TAB_WIDTH,
             h,
-            HitAction::GoTab(page_id_for(page_id)),
+            HitAction::GoTab(page_id),
         ));
     }
     zones
@@ -321,15 +308,16 @@ pub fn draw_bottom_bar(canvas: &mut Canvas, palette: &Palette, active_tab: &str)
 /// content frame: the bar sits directly below the 480x244 content region.
 pub fn bottom_bar_zones() -> Vec<HitZone> {
     let bar_top = (PANEL_H_CONTENT) as i32; // page-local y just below the content region
-    TABS.iter()
+    TAB_PAGE_IDS
+        .iter()
         .enumerate()
-        .map(|(i, (page_id, _))| {
+        .map(|(i, &page_id)| {
             HitZone::new(
                 i as i32 * TAB_WIDTH,
                 bar_top,
                 TAB_WIDTH,
                 BOTTOM_BAR_H as i32,
-                HitAction::GoTab(page_id_for(page_id)),
+                HitAction::GoTab(page_id),
             )
         })
         .collect()
@@ -339,7 +327,7 @@ pub fn bottom_bar_zones() -> Vec<HitZone> {
 /// icon knocked out in the background tone. Drawn over a frame that already
 /// carries the bottom bar; an unknown id paints nothing.
 pub fn draw_tab_pulse(canvas: &mut Canvas, palette: &Palette, page_id: &str) {
-    let Some(index) = TABS.iter().position(|(id, _)| *id == page_id) else {
+    let Some(index) = TAB_PAGE_IDS.iter().position(|id| *id == page_id) else {
         return;
     };
     let y = (canvas.height() as i32) - BOTTOM_BAR_H as i32;
@@ -353,24 +341,11 @@ pub fn draw_tab_pulse(canvas: &mut Canvas, palette: &Palette, page_id: &str) {
         palette.accent_primary,
     );
     let (cx, cy) = (x0 + TAB_WIDTH / 2, y + BOTTOM_BAR_H as i32 / 2);
-    draw_tab_icon(canvas, TABS[index].1, cx, cy, palette.bg_primary);
+    draw_tab_icon(canvas, TAB_PAGE_IDS[index], cx, cy, palette.bg_primary);
 }
 
 /// Page-local height of the content region (panel minus both chrome bars).
 const PANEL_H_CONTENT: u32 = crate::pages::CONTENT_H;
-
-/// Return the static page id for a tab name (lets the zone carry a `'static`
-/// route id without leaking allocations).
-fn page_id_for(page_id: &str) -> &'static str {
-    match page_id {
-        "dashboard" => "dashboard",
-        "video" => "video",
-        "settings" => "settings",
-        "link_stats" => "link_stats",
-        "channel_hops" => "channel_hops",
-        _ => "dashboard",
-    }
-}
 
 /// Paint a bordered content tile at `(x, y, w, h)` and return its inner body box.
 ///
@@ -603,7 +578,7 @@ mod tests {
         assert_eq!(zones[0].action, HitAction::GoTab("dashboard"));
         assert_eq!(zones[4].action, HitAction::GoTab("channel_hops"));
         // The tabs tile the full panel width.
-        assert_eq!(zones[0].w * TAB_COUNT, PANEL_W as i32);
+        assert_eq!(zones[0].w * TAB_COUNT as i32, PANEL_W as i32);
     }
 
     #[test]

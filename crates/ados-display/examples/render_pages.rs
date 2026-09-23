@@ -56,7 +56,6 @@ fn connected_context() -> PageContext {
             snr_db: Some(27.5),
             noise_dbm: Some(-92.0),
             loss_percent: Some(0.8),
-            bitrate_mbps: Some(18.4),
             bitrate_kbps: Some(18_400.0),
             fec_recovered: Some(214),
             fec_lost: Some(3),

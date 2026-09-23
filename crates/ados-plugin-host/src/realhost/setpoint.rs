@@ -13,18 +13,6 @@ use super::*;
 pub(super) const GUIDED_SOURCE_SYSTEM_ID: u8 = 1;
 pub(super) const GUIDED_SOURCE_COMPONENT_ID: u8 = 191;
 
-/// Read an optional u8 field. An absent key (or nil) is `None`; a present value
-/// out of u8 range (or a non-integer) is a clear error rather than a wrap.
-pub(super) fn u8_arg_opt(args: &Value, key: &str) -> Result<Option<u8>, HostError> {
-    match map_get(args, key) {
-        None | Some(Value::Nil) => Ok(None),
-        Some(_) => match arg_i64(args, key) {
-            Some(n) if (0..=u8::MAX as i64).contains(&n) => Ok(Some(n as u8)),
-            _ => Err(HostError::Rpc(format!("{key} out of range"))),
-        },
-    }
-}
-
 /// The `(target_system, target_component)` a plugin command is addressed to:
 /// each explicit arg wins, and an omitted one comes from `observed`, the
 /// autopilot identity seen on the router link. With neither, the command is
@@ -34,8 +22,8 @@ pub(super) fn command_target(
     args: &Value,
     observed: Option<(u8, u8)>,
 ) -> Result<(u8, u8), HostError> {
-    let system = u8_arg_opt(args, "target_system")?.or(observed.map(|o| o.0));
-    let component = u8_arg_opt(args, "target_component")?.or(observed.map(|o| o.1));
+    let system = arg_int::<u8>(args, "target_system")?.or(observed.map(|o| o.0));
+    let component = arg_int::<u8>(args, "target_component")?.or(observed.map(|o| o.1));
     match (system, component) {
         (Some(s), Some(c)) => Ok((s, c)),
         _ => Err(HostError::Rpc(
@@ -51,18 +39,6 @@ pub(super) fn command_target(
 /// TUNNEL frame from a plugin is wire-consistent with the agent's other sends.
 pub(super) const TUNNEL_SOURCE_SYSTEM_ID: u8 = GUIDED_SOURCE_SYSTEM_ID;
 pub(super) const TUNNEL_SOURCE_COMPONENT_ID: u8 = GUIDED_SOURCE_COMPONENT_ID;
-
-/// Read a required u16 field (the TUNNEL `payload_type`). An absent key, a
-/// non-integer, or a value outside the u16 range is a clear error.
-pub(super) fn required_u16_arg(args: &Value, key: &str) -> Result<u16, HostError> {
-    match map_get(args, key) {
-        None | Some(Value::Nil) => Err(HostError::Rpc(format!("{key} is required"))),
-        Some(_) => match arg_i64(args, key) {
-            Some(n) if (0..=u16::MAX as i64).contains(&n) => Ok(n as u16),
-            _ => Err(HostError::Rpc(format!("{key} out of range"))),
-        },
-    }
-}
 
 /// The MAVLink message id of the message this setpoint builds, for the response.
 pub(super) fn setpoint_msg_id(sp: &ados_protocol::mavlink::GuidedSetpoint) -> u32 {

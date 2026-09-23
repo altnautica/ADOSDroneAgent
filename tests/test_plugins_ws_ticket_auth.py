@@ -1,8 +1,8 @@
 """WebSocket auth for the in-flight install-job progress route.
 
 The route accepts either the ``X-ADOS-Key`` header (native clients) or
-an ``ados-ws-ticket`` minted for the ``plugins.install_job`` scope and
-passed through ``Sec-WebSocket-Protocol: ados-ws-ticket, <ticket>``,
+an ``ados-ws-ticket`` minted for the job's ``plugins.install_job:<job_id>``
+scope and passed through ``Sec-WebSocket-Protocol: ados-ws-ticket, <ticket>``,
 the same self-contained HMAC ticket the control front admits for every
 other stream. The pairing key never rides the URL.
 """
@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from ados.api.middleware.ws_auth import WS_TICKET_PROTOCOL
 from ados.api.routes import _plugins_helpers as helpers
 from ados.api.routes import plugins as plugins_route
-from ados.api.routes._plugins_helpers import JOB_STREAM_TICKET_SCOPE, write_sidecar
+from ados.api.routes._plugins_helpers import job_stream_ticket_scope, write_sidecar
 from ados.api.server import create_app
 from ados.core.ws_ticket import mint_ticket
 from ados.plugins.supervisor import PluginSupervisor
@@ -87,7 +87,7 @@ def test_ws_accepts_an_install_job_ticket(
 ):
     job_id = "job-ticket-ok"
     write_sidecar(job_id, {"stage": "completed", "pluginId": "p.x"})
-    ticket = mint_ticket(JOB_STREAM_TICKET_SCOPE, api_key=PAIR_KEY)
+    ticket = mint_ticket(job_stream_ticket_scope(job_id), api_key=PAIR_KEY)
 
     with paired_client.websocket_connect(
         f"/api/plugins/jobs/{job_id}",
@@ -111,11 +111,24 @@ def test_ws_rejects_a_ticket_for_another_scope(
     )
 
 
+def test_ws_rejects_a_ticket_for_another_job(
+    paired_client, isolated_sidecar, isolated_supervisor, quick_ws
+):
+    job_id = "job-mine"
+    write_sidecar(job_id, {"stage": "completed", "pluginId": "p.x"})
+    ticket = mint_ticket(job_stream_ticket_scope("job-other"), api_key=PAIR_KEY)
+    _expect_ws_rejected(
+        paired_client,
+        f"/api/plugins/jobs/{job_id}",
+        subprotocols=[WS_TICKET_PROTOCOL, ticket],
+    )
+
+
 def test_ws_rejects_a_ticket_signed_by_another_key(
     paired_client, isolated_sidecar, isolated_supervisor, quick_ws
 ):
     job_id = "job-forged"
-    ticket = mint_ticket(JOB_STREAM_TICKET_SCOPE, api_key="some-other-key")
+    ticket = mint_ticket(job_stream_ticket_scope(job_id), api_key="some-other-key")
     _expect_ws_rejected(
         paired_client,
         f"/api/plugins/jobs/{job_id}",
@@ -127,7 +140,7 @@ def test_the_retired_job_ticket_protocol_is_refused(
     paired_client, isolated_sidecar, isolated_supervisor, quick_ws
 ):
     job_id = "job-old-marker"
-    ticket = mint_ticket(JOB_STREAM_TICKET_SCOPE, api_key=PAIR_KEY)
+    ticket = mint_ticket(job_stream_ticket_scope(job_id), api_key=PAIR_KEY)
     _expect_ws_rejected(
         paired_client,
         f"/api/plugins/jobs/{job_id}",

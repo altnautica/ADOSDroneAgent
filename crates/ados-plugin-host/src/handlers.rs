@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use rmpv::Value;
 use tokio::sync::broadcast;
 
+use crate::args::{arg_map, arg_str};
 use crate::dispatch::Method;
 use crate::host::{HostError, HostResult, HostServices};
 
@@ -260,31 +261,6 @@ impl std::fmt::Display for RpcError {
 }
 
 impl std::error::Error for RpcError {}
-
-/// Read a string field from a msgpack-map `args` value.
-fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    match args {
-        Value::Map(entries) => entries
-            .iter()
-            .find(|(k, _)| k.as_str() == Some(key))
-            .and_then(|(_, v)| v.as_str()),
-        _ => None,
-    }
-}
-
-/// Read a map field from a msgpack-map `args`, coercing a missing or non-map
-/// value to an empty map (`env.args.get("payload") or {}`).
-fn arg_map(args: &Value, key: &str) -> Value {
-    match args {
-        Value::Map(entries) => entries
-            .iter()
-            .find(|(k, _)| k.as_str() == Some(key))
-            .map(|(_, v)| v.clone())
-            .filter(|v| matches!(v, Value::Map(_)))
-            .unwrap_or_else(|| Value::Map(vec![])),
-        _ => Value::Map(vec![]),
-    }
-}
 
 /// Outcome of an `event.publish` request that has passed the dispatch gate.
 pub enum PublishOutcome {

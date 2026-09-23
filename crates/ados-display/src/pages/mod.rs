@@ -59,6 +59,22 @@ pub const CONTENT_H: u32 = PANEL_H - TOP_BAR_H - BOTTOM_BAR_H;
 /// Top edge (in panel-global y) of the page content region.
 pub const CONTENT_Y: u32 = TOP_BAR_H;
 
+/// Number of bottom-bar tabs.
+pub const TAB_COUNT: usize = 5;
+/// Width of one bottom-bar tab (`480 / 5`).
+pub const TAB_WIDTH: i32 = PANEL_W as i32 / TAB_COUNT as i32;
+/// The bottom-bar tabs, left to right: each id is both the page the tab routes
+/// to and the icon it paints. Index `i` owns the horizontal band
+/// `[i*TAB_WIDTH, (i+1)*TAB_WIDTH)`. The painter and the tap router both read
+/// this one table.
+pub const TAB_PAGE_IDS: [&str; TAB_COUNT] = [
+    "dashboard",
+    "video",
+    "settings",
+    "link_stats",
+    "channel_hops",
+];
+
 /// Outer margin and inter-tile gap for the dashboard's inset 2x2 grid.
 pub const TILE_OUTER_MARGIN: i32 = 8;
 /// Gap between adjacent dashboard tiles.
@@ -176,8 +192,6 @@ pub struct LinkCtx {
     pub snr_db: Option<f64>,
     pub noise_dbm: Option<f64>,
     pub loss_percent: Option<f64>,
-    /// Throughput in megabits per second (the tile's display unit).
-    pub bitrate_mbps: Option<f64>,
     /// Throughput in kilobits per second (the canonical snapshot key).
     pub bitrate_kbps: Option<f64>,
     pub fec_recovered: Option<i64>,
@@ -208,6 +222,11 @@ impl LinkCtx {
     /// stopped refreshing it).
     pub fn is_stale(&self) -> bool {
         self.state.as_deref() == Some(LINK_STATE_STALE)
+    }
+
+    /// Throughput in megabits per second, the tiles' display unit.
+    pub fn bitrate_mbps(&self) -> Option<f64> {
+        self.bitrate_kbps.map(|kbps| kbps / 1000.0)
     }
 }
 
@@ -585,6 +604,16 @@ pub struct PageContext {
 pub const DEFAULT_MISSION_CONTROL_URL: &str = "https://command.altnautica.com";
 
 impl PageContext {
+    /// The pair code every pairing surface shows: the local pairing window's
+    /// code, else the cloud one. `None` when neither is known.
+    pub fn pair_code(&self) -> Option<&str> {
+        self.pairing
+            .code
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| self.cloud.pair_code.as_deref().filter(|s| !s.is_empty()))
+    }
+
     /// The Mission Control pairing deep link for `code`:
     /// `<mission control>/pair?code=<CODE>`, plus `&host=<lan host>` when the
     /// node's LAN name is known. Mission Control's `/pair` route reads exactly

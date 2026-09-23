@@ -34,6 +34,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
 
+use crate::args::{arg_str, map_get};
 use crate::invoke::{InvokeRegistry, DEFAULT_INVOKE_TIMEOUT};
 
 /// The directory the control socket lives in. Root-only (`0700`) and outside the
@@ -124,20 +125,6 @@ pub trait LifecycleControl: Send + Sync {
     fn reconcile(&self) -> (usize, usize, usize);
 }
 
-fn arg<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
-    match args {
-        Value::Map(m) => m
-            .iter()
-            .find(|(k, _)| k.as_str() == Some(key))
-            .map(|(_, v)| v),
-        _ => None,
-    }
-}
-
-fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    arg(args, key).and_then(|v| v.as_str())
-}
-
 fn ok_response(request_id: &str, scope: &str) -> Envelope {
     Envelope {
         version: PROTOCOL_VERSION,
@@ -213,7 +200,7 @@ async fn handle_request<H: ConfigControl>(host: &H, req: &Envelope) -> Envelope 
     let Some(key) = arg_str(&req.args, "key").filter(|s| !s.is_empty()) else {
         return err_response(&req.request_id, "key must be a non-empty string".into());
     };
-    let Some(value) = arg(&req.args, "value").cloned() else {
+    let Some(value) = map_get(&req.args, "value").cloned() else {
         return err_response(&req.request_id, "value missing".into());
     };
     // Scope defaults to drone (the per-drone namespace a skill toggle lives in);
@@ -268,10 +255,10 @@ async fn handle_tool_invoke(invoke: &InvokeRegistry, req: &Envelope) -> Envelope
     let Some(tool) = arg_str(&req.args, "tool").filter(|s| !s.is_empty()) else {
         return tool_err(&req.request_id, "tool must be a non-empty string".into());
     };
-    let arguments = arg(&req.args, "arguments")
+    let arguments = map_get(&req.args, "arguments")
         .cloned()
         .unwrap_or(Value::Map(vec![]));
-    let timeout = arg(&req.args, "timeout_ms")
+    let timeout = map_get(&req.args, "timeout_ms")
         .and_then(|v| v.as_u64())
         .map(Duration::from_millis)
         .unwrap_or(DEFAULT_INVOKE_TIMEOUT);

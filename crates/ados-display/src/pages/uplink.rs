@@ -91,7 +91,12 @@ impl Page for UplinkDetailPage {
         let mut canvas = blank_panel(palette);
         draw_detail_header(&mut canvas, palette, "Uplink");
 
-        render_cloud_band(&mut canvas, palette, &ctx.cloud);
+        render_cloud_band(
+            &mut canvas,
+            palette,
+            &ctx.cloud,
+            ctx.pair_code().unwrap_or(""),
+        );
         if ctx.uplink.modem_present {
             render_cellular_band(&mut canvas, palette, &ctx.uplink);
         } else {
@@ -106,7 +111,7 @@ impl Page for UplinkDetailPage {
 }
 
 /// Paint the top cloud-relay band: status badge + MQTT/HTTP/RTT + id/pair.
-fn render_cloud_band(canvas: &mut Canvas, palette: &Palette, cloud: &CloudCtx) {
+fn render_cloud_band(canvas: &mut Canvas, palette: &Palette, cloud: &CloudCtx, pair_code: &str) {
     let (label, severity) = cloud_state_label(cloud);
     let color = match severity {
         Severity::Ok => palette.status_success,
@@ -160,7 +165,6 @@ fn render_cloud_band(canvas: &mut Canvas, palette: &Palette, cloud: &CloudCtx) {
     );
 
     let drone_id = cloud.drone_id.clone().unwrap_or_default();
-    let pair_code = cloud.pair_code.clone().unwrap_or_default();
     let right_x = 240;
     if !drone_id.is_empty() {
         text(

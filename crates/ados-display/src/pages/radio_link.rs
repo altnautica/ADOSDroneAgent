@@ -114,15 +114,7 @@ impl Page for RadioLinkDetailPage {
 
         let link = &ctx.link;
 
-        // Bitrate canonical key is bitrate_kbps; accept legacy bitrate_mbps so a
-        // caller that only knows the heartbeat shape still renders.
-        let bitrate_mbps: Option<f64> = match link.bitrate_kbps {
-            Some(kbps) if kbps > 0.0 => Some(kbps / 1000.0),
-            _ => match link.bitrate_mbps {
-                Some(mbps) if mbps > 0.0 => Some(mbps),
-                _ => None,
-            },
-        };
+        let bitrate_mbps = link.bitrate_mbps().filter(|mbps| *mbps > 0.0);
 
         // Sparkline band y=44..120 (76 px tall, 16 px reserved for the footer).
         let spark_y = HEADER_H + 4;

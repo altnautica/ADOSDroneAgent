@@ -71,6 +71,34 @@ pub(super) async fn command_socket_roundtrip(
     ))
 }
 
+/// One command-socket forward: the exchange bounded by `budget`, with a service
+/// that did not answer mapped to the `not_available` reply. The `reason` tells a
+/// wedged service (`"<service> service did not answer within N ms"`) apart from
+/// one that is not there (`"<service> service unavailable"`), so a long apply
+/// that overran its budget never reads as an absent service.
+async fn forward_to(
+    service: &str,
+    sock_path: &std::path::Path,
+    request: &serde_json::Value,
+    budget: Duration,
+    method: &str,
+) -> Result<serde_json::Value, HostResult> {
+    command_socket_roundtrip(sock_path, request, budget)
+        .await
+        .map_err(|e| {
+            tracing::debug!(method, service, error = %e, "command forward failed");
+            let reason = if e.kind() == std::io::ErrorKind::TimedOut {
+                format!(
+                    "{service} service did not answer within {} ms",
+                    budget.as_millis()
+                )
+            } else {
+                format!("{service} service unavailable")
+            };
+            service_unavailable(method, &reason)
+        })
+}
+
 /// The graceful-degrade reply for a forward whose service did not answer: the
 /// socket is absent, refused the connection, or missed its budget.
 pub(super) fn service_unavailable(method: &str, reason: &str) -> HostResult {
@@ -168,13 +196,17 @@ impl RealHost {
         request: serde_json::Value,
         method: &str,
     ) -> HostResult {
-        match command_socket_roundtrip(&self.gpio_cmd_path, &request, COMMAND_FORWARD_TIMEOUT).await
+        match forward_to(
+            "gpio",
+            &self.gpio_cmd_path,
+            &request,
+            COMMAND_FORWARD_TIMEOUT,
+            method,
+        )
+        .await
         {
             Ok(reply) => json_to_mpv(&reply),
-            Err(e) => {
-                tracing::debug!(method, error = %e, "gpio command forward failed");
-                service_unavailable(method, "gpio service unavailable")
-            }
+            Err(unavailable) => unavailable,
         }
     }
 
@@ -192,13 +224,17 @@ impl RealHost {
         request: serde_json::Value,
         method: &str,
     ) -> HostResult {
-        match command_socket_roundtrip(&self.video_cmd_path, &request, VIDEO_FORWARD_TIMEOUT).await
+        match forward_to(
+            "video",
+            &self.video_cmd_path,
+            &request,
+            VIDEO_FORWARD_TIMEOUT,
+            method,
+        )
+        .await
         {
             Ok(reply) => json_to_mpv(&reply),
-            Err(e) => {
-                tracing::debug!(method, error = %e, "video command forward failed");
-                service_unavailable(method, "video service unavailable")
-            }
+            Err(unavailable) => unavailable,
         }
     }
 
@@ -217,20 +253,20 @@ impl RealHost {
         request: serde_json::Value,
         method: &str,
     ) -> (HostResult, bool) {
-        match command_socket_roundtrip(&self.radio_aux_cmd_path, &request, COMMAND_FORWARD_TIMEOUT)
-            .await
+        match forward_to(
+            "radio",
+            &self.radio_aux_cmd_path,
+            &request,
+            COMMAND_FORWARD_TIMEOUT,
+            method,
+        )
+        .await
         {
             Ok(reply) => {
                 let ok = reply.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
                 (json_to_mpv(&reply), ok)
             }
-            Err(e) => {
-                tracing::debug!(method, error = %e, "radio aux command forward failed");
-                (
-                    service_unavailable(method, "radio service unavailable"),
-                    false,
-                )
-            }
+            Err(unavailable) => (unavailable, false),
         }
     }
 

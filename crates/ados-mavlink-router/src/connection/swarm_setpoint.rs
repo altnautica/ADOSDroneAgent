@@ -488,7 +488,6 @@ async fn send_setpoint(fc: &Arc<FcConnection>, setpoint: &Setpoint) {
 mod tests {
     use super::*;
     use ados_swarm_control::geo::Ned;
-    use ados_swarm_control::precedence_from_wire;
 
     #[test]
     fn the_status_block_round_trips_every_precedence_level() {
@@ -506,7 +505,7 @@ mod tests {
             assert_eq!(s.precedence_wire(), level.as_wire(), "{level:?}");
         }
         assert_eq!(
-            precedence_from_wire(s.precedence_wire()),
+            ModePrecedence::from_wire(s.precedence_wire()),
             ModePrecedence::Hold
         );
     }

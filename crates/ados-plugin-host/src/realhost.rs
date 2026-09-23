@@ -52,10 +52,10 @@ use crate::host::{not_implemented, HostError, HostResult, HostServices};
 use crate::vehicle_events::FcIdentity;
 use crate::vision_client::VisionClient;
 
-mod args;
 mod caps;
 mod config_control;
 mod config_store;
+mod convert;
 mod display;
 mod facades;
 mod forwards;
@@ -64,17 +64,18 @@ mod mavlink_gate;
 mod offload;
 mod setpoint;
 
-use self::args::*;
 #[cfg(test)]
 use self::caps::*;
 use self::config_control::*;
 use self::config_store::*;
+use self::convert::*;
 use self::display::*;
 use self::facades::*;
 use self::forwards::*;
 use self::mavlink_gate::*;
 use self::offload::*;
 use self::setpoint::*;
+use crate::args::*;
 
 pub use self::caps::{write_ungrantable_caps, UNGRANTABLE_CAPS_SIDECAR};
 pub use self::config_store::{

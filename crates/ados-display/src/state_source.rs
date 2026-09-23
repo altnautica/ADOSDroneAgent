@@ -340,8 +340,10 @@ fn link_ctx(v: Option<&Value>) -> LinkCtx {
         snr_db: f64_field(v, "snr_db"),
         noise_dbm: f64_field(v, "noise_dbm"),
         loss_percent: f64_field(v, "loss_percent"),
-        bitrate_mbps: f64_field(v, "bitrate_mbps"),
-        bitrate_kbps: f64_field(v, "bitrate_kbps"),
+        // `bitrate_kbps` is canonical; a producer that only carries the
+        // megabit shim still resolves.
+        bitrate_kbps: f64_field(v, "bitrate_kbps")
+            .or_else(|| f64_field(v, "bitrate_mbps").map(|mbps| mbps * 1000.0)),
         // The producer key is `fec_failed`; the view also mirrors it as
         // `fec_lost`. Read either so both producer + view shapes resolve.
         fec_recovered: i64_field(v, "fec_recovered"),
@@ -916,7 +918,6 @@ mod tests {
         let ctx = src.compose(Some(&status), None, None);
         assert!(ctx.link.is_stale());
         assert_eq!(ctx.link.rssi_dbm, None);
-        assert_eq!(ctx.link.bitrate_mbps, None);
         assert_eq!(ctx.link.bitrate_kbps, None);
         assert_eq!(ctx.link.fec_recovered, None);
         assert_eq!(ctx.link.fec_lost, None);

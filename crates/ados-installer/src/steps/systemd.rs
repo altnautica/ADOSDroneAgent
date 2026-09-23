@@ -2489,6 +2489,96 @@ mod tests {
         );
     }
 
+    /// Every sandbox path a unit names without the `-` (ignore-if-missing)
+    /// prefix exists when the unit starts: systemd aborts namespace setup with
+    /// 226/NAMESPACE on an absent one, before any `Exec*` line runs, so the
+    /// unit crash-loops with nothing in its own log. A strict path is fine when
+    /// the OS always has it, the installer creates it, or the unit's own
+    /// `ConditionPathExists=` / `AssertPathExists=` gates the start on it.
+    #[test]
+    fn every_strict_sandbox_path_exists_before_its_unit_starts() {
+        /// Paths the base OS always has, or the installer creates (the
+        /// `/run/ados` tmpfiles entry, the state and data roots, the plugin
+        /// and peripheral dirs).
+        const PRESENT: &[&str] = &[
+            "/dev",
+            "/dev/shm",
+            "/etc",
+            "/sys/class/net",
+            "/tmp",
+            "/var/lock",
+            "/etc/ados",
+            "/etc/ados/peripherals",
+            "/run/ados",
+            "/var/ados",
+            "/var/lib/ados",
+        ];
+        const SANDBOX_KEYS: &[&str] = &[
+            "ReadWritePaths",
+            "ReadOnlyPaths",
+            "InaccessiblePaths",
+            "ExecPaths",
+            "NoExecPaths",
+        ];
+
+        /// The strict sandbox paths in one unit body that nothing guarantees.
+        fn unguaranteed_paths(name: &str, body: &str) -> Vec<String> {
+            let mut gated: Vec<&str> = Vec::new();
+            let mut strict: Vec<&str> = Vec::new();
+            for line in body.lines().map(str::trim) {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                let key = key.trim();
+                if key == "ConditionPathExists" || key == "AssertPathExists" {
+                    gated.push(value.trim());
+                } else if SANDBOX_KEYS.contains(&key) {
+                    strict.extend(
+                        value
+                            .split_whitespace()
+                            .map(|p| p.trim_start_matches('+'))
+                            .filter(|p| !p.starts_with('-')),
+                    );
+                }
+            }
+            strict
+                .into_iter()
+                .filter(|p| !PRESENT.contains(p) && !gated.contains(p))
+                .map(|p| format!("  {name}: {p} needs a `-` prefix or a guarantee"))
+                .collect()
+        }
+
+        // A strict path nothing creates is flagged; the `-` prefix or a start
+        // condition on the path clears it.
+        let bad = "[Service]\nReadWritePaths=/run/ados /etc/ados/mesh\n";
+        assert_eq!(unguaranteed_paths("bad.service", bad).len(), 1);
+        let optional = "[Service]\nReadWritePaths=/run/ados -/etc/ados/mesh\n";
+        assert!(unguaranteed_paths("ok.service", optional).is_empty());
+        let gated = "[Unit]\nConditionPathExists=/sys/kernel/config/usb_gadget\n\
+                     [Service]\nReadWritePaths=/sys/kernel/config/usb_gadget\n";
+        assert!(unguaranteed_paths("ok.service", gated).is_empty());
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
+        let mut checked = 0usize;
+        let mut problems: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("data/systemd is readable") {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+            if !(name.starts_with("ados-") && name.ends_with(".service")) {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("unit is readable");
+            checked += 1;
+            problems.extend(unguaranteed_paths(name, &body));
+        }
+        assert!(checked >= 40, "parsed only {checked} units");
+        assert!(
+            problems.is_empty(),
+            "these units fail namespace setup when the path is absent:\n{}",
+            problems.join("\n")
+        );
+    }
+
     #[test]
     fn gs_enable_list_is_subset_of_other_profile_drone_teardown() {
         // Everything the GS install enables, the drone install must explicitly

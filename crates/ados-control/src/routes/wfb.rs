@@ -245,13 +245,8 @@ async fn latest_wfb_history(state: &AppState, seconds: i64) -> Option<Value> {
 // GET /api/wfb/pair — pair-state snapshot.
 // ---------------------------------------------------------------------------
 
-/// `GET /api/wfb/pair` → the pair-state snapshot.
-///
-/// The role-appropriate key file (`tx.key` for a drone, `rx.key` for a ground
-/// station) is the paired signal: it must be present, exactly 64 bytes, and yield
-/// a readable blake2b-8 fingerprint. The peer device-id, paired-at, and the
-/// auto-pair flag come off the config (with the legacy `ground_station.*` fallback
-/// on the GS profile).
+/// `GET /api/wfb/pair` → the pair-state snapshot ([`crate::wfb_pair_state`])
+/// plus the fleet slot table.
 ///
 /// `slots` is the fleet roster: which drone holds which slot, and when it was
 /// issued. It used to be returned only by the pair WRITE, so reading it meant
@@ -259,82 +254,17 @@ async fn latest_wfb_history(state: &AppState, seconds: i64) -> Option<Value> {
 /// operator diagnosing a live fleet link can do.
 pub async fn get_wfb_pair_status(State(state): State<AppState>) -> Json<Value> {
     let paths = &state.pairing_paths;
-    let cfg = crate::config::PairingConfig::load_from(&paths.config);
-    let (_profile, role) = current_role(&cfg.agent.profile);
+    let role = crate::wfb_pair_state::bind_role(paths);
+    let status = crate::wfb_pair_state::status(&paths.config, &paths.wfb_key_dir, role);
 
-    // The shared radio-pair predicate: the role's key, exactly 64 bytes, with a
-    // readable fingerprint.
-    let fingerprint: Option<String> = paired_key_fingerprint(&paths.wfb_key_dir, &role);
-    let paired = fingerprint.is_some();
-    let fingerprint: Value = fingerprint.map_or(Value::Null, |fp| json!(fp));
-
-    // Peer / paired-at / auto-pair off the raw config dict, mirroring the Python
-    // `_load_config_dict()` read (a present-but-non-string peer/paired-at reads as
-    // null, an absent auto-pair flag defaults to true). `paired_at` is read through
-    // `paired_at_string`: an unquoted ISO timestamp in the YAML is a `datetime` to
-    // PyYAML's loader (so the Python read demotes it to null via `isinstance(str)`),
-    // while this YAML parser flattens it back to a string, so the timestamp-shaped
-    // string is demoted to null here too to keep the two reads byte-identical.
-    let raw = crate::config::load_config_object(&paths.config);
-    let wfb_section = raw
-        .get("video")
-        .filter(|v| v.is_object())
-        .and_then(|v| v.get("wfb"))
-        .filter(|v| v.is_object());
-
-    let mut peer = wfb_section
-        .and_then(|w| w.get("paired_with_device_id"))
-        .filter(|v| v.is_string())
-        .cloned()
-        .unwrap_or(Value::Null);
-    let mut paired_at = wfb_section
-        .and_then(|w| w.get("paired_at"))
-        .map(paired_at_string)
-        .unwrap_or(Value::Null);
-    let auto_pair_enabled = wfb_section
-        .and_then(|w| w.get("auto_pair_enabled"))
-        .map(json_truthy)
-        .unwrap_or(true);
-
-    // GS-profile fallback: a rig migrated from an older config may carry the pair
-    // state under `ground_station.*` without the `video.wfb.*` mirror.
-    if role == "gs" && peer.is_null() {
-        let gs = raw.get("ground_station").filter(|v| v.is_object());
-        peer = gs
-            .and_then(|g| g.get("paired_drone_id"))
-            .filter(|v| v.is_string())
-            .cloned()
-            .unwrap_or(Value::Null);
-        if paired_at.is_null() {
-            paired_at = gs
-                .and_then(|g| g.get("paired_at"))
-                .map(paired_at_string)
-                .unwrap_or(Value::Null);
-        }
-    }
-
-    // The fleet roster. A ground station separates its drones by their assigned
-    // slot, so "which drone holds which slot" is the first question a fleet link
-    // fault raises — and it was answerable only by re-pairing a drone (which is
-    // exactly what an operator diagnosing a live fleet must not do) or by
-    // reading the registry file over a shell. It is served here through the same
-    // renderer the pair write uses, so both stay field-for-field identical and
-    // neither can leak a slot's relay secret.
-    //
-    // Empty on a drone, which has no registry: a fleet's slots are issued by the
-    // ground station and only it holds the table.
+    // The fleet roster, served through the same renderer the pair write uses so
+    // both stay field-for-field identical and neither can leak a slot's relay
+    // secret. Empty on a drone, which has no registry: a fleet's slots are
+    // issued by the ground station and only it holds the table.
     let slots =
         crate::routes::gs_wfb_pair::slot_table(&crate::routes::gs_wfb_pair::load_registry());
 
-    Json(pair_snapshot(
-        paired,
-        peer,
-        paired_at,
-        fingerprint,
-        auto_pair_enabled,
-        &role,
-        slots,
-    ))
+    Json(pair_snapshot(status.to_json(), slots))
 }
 
 /// Compose the `GET /api/wfb/pair` body.
@@ -342,84 +272,9 @@ pub async fn get_wfb_pair_status(State(state): State<AppState>) -> Json<Value> {
 /// Split out so the response SHAPE is a unit under test. The fleet roster was
 /// missing from this body for the whole life of the route and nothing failed,
 /// because nothing asserted what the read is supposed to contain.
-fn pair_snapshot(
-    paired: bool,
-    peer: Value,
-    paired_at: Value,
-    fingerprint: Value,
-    auto_pair_enabled: bool,
-    role: &str,
-    slots: Vec<Value>,
-) -> Value {
-    json!({
-        "paired": paired,
-        "paired_with_device_id": peer,
-        "paired_at": paired_at,
-        "fingerprint": fingerprint,
-        "auto_pair_enabled": auto_pair_enabled,
-        "role": role,
-        "slots": slots,
-    })
-}
-
-/// The exact 64-byte size a complete WFB-ng key file is. Mirrors
-/// `WFB_KEY_FILE_BYTES`.
-const WFB_KEY_FILE_BYTES: usize = 64;
-
-/// The byte offset of the peer-public half (the second 32 bytes) inside a 64-byte
-/// WFB key file. Mirrors `WFB_PUBLIC_HALF_OFFSET`.
-const WFB_PUBLIC_HALF_OFFSET: usize = 32;
-
-/// The 16-hex-char public-key fingerprint of a WFB key file, or `None` when the
-/// file is absent or not exactly 64 bytes. The peer-public half is the second 32
-/// bytes; the fingerprint is `blake2b(pub, digest_size=8)` rendered as 16
-/// lowercase hex chars. Byte-identical to `key_mgr.read_public_fingerprint`.
-pub(crate) fn read_public_fingerprint(path: &Path) -> Option<String> {
-    use blake2::digest::{Update, VariableOutput};
-    use blake2::Blake2bVar;
-    let data = std::fs::read(path).ok()?;
-    if data.len() != WFB_KEY_FILE_BYTES {
-        return None;
-    }
-    let mut hasher = Blake2bVar::new(8).ok()?;
-    hasher.update(&data[WFB_PUBLIC_HALF_OFFSET..]);
-    let mut out = [0u8; 8];
-    hasher.finalize_variable(&mut out).ok()?;
-    Some(hex::encode(out))
-}
-
-/// The one radio-pair predicate every surface answers from (`GET /api/wfb/pair`,
-/// the auto-pair toggle, `/api/pairing/info`): the role's own key file —
-/// `tx.key` on a drone, `rx.key` on a ground station — is exactly 64 bytes and
-/// yields a fingerprint. Returns that fingerprint when paired. A truncated key,
-/// or a key left over from the other role, is not a pairing.
-pub(crate) fn paired_key_fingerprint(key_dir: &Path, bind_role: &str) -> Option<String> {
-    let name = if bind_role == "drone" {
-        "tx.key"
-    } else {
-        "rx.key"
-    };
-    read_public_fingerprint(&key_dir.join(name))
-}
-
-/// The bind-protocol role for a resolved (hyphen-wire) profile: `"drone"` only
-/// for the drone profile, `"gs"` otherwise.
-pub(crate) fn bind_role_for(profile: &str) -> &'static str {
-    if profile == "drone" {
-        "drone"
-    } else {
-        "gs"
-    }
-}
-
-/// Resolve the bind-protocol role from the agent's profile, mirroring the Python
-/// `_current_role(app)` → `_agent_role_from_profile`. The profile is the
-/// hyphen-wire form (`"drone"` / `"ground-station"`); the role is `"drone"` only
-/// when the profile is exactly `"drone"`, else `"gs"`.
-fn current_role(config_profile: &str) -> (String, String) {
-    let (profile, _role) = crate::profile::current_profile_and_role(config_profile);
-    let bind_role = bind_role_for(&profile);
-    (profile, bind_role.to_string())
+fn pair_snapshot(mut status: Map<String, Value>, slots: Vec<Value>) -> Value {
+    status.insert("slots".to_string(), Value::Array(slots));
+    Value::Object(status)
 }
 
 // ---------------------------------------------------------------------------
@@ -676,155 +531,6 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-/// Python `bool(x)` truthiness over a JSON value, for the `auto_pair_enabled`
-/// coercion: `null`/`false`/`0`/`0.0`/`""`/`[]`/`{}` are falsey, everything else
-/// truthy. Mirrors `bool(wfb_section.get("auto_pair_enabled", True))`.
-fn json_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
-}
-
-/// The `paired_at` field value the route reports, mirroring the Python pair-status
-/// read's `paired_at if isinstance(paired_at, str) else None`.
-///
-/// The Python handler loads the config with a YAML loader whose implicit resolver
-/// turns an *unquoted* ISO timestamp scalar into a `datetime` (so its
-/// `isinstance(str)` guard demotes it to `null`); the bind path that persists this
-/// field writes the timestamp unquoted, so the live Python read returns `null`. This
-/// YAML parser instead flattens both quoted and unquoted timestamps back to a
-/// string, so a string that the Python loader would have resolved to a timestamp is
-/// demoted to `null` here too. A non-string value is `null`; a non-timestamp string
-/// passes through unchanged.
-fn paired_at_string(v: &Value) -> Value {
-    match v.as_str() {
-        Some(s) if !is_yaml_timestamp(s) => json!(s),
-        _ => Value::Null,
-    }
-}
-
-/// True when `s` matches the YAML implicit timestamp grammar a standard YAML loader
-/// resolves to a date/datetime (and therefore not a plain string). Reproduces the
-/// loader's implicit resolver: either a bare `YYYY-MM-DD` date, or a full datetime
-/// `YYYY-M-D` (single- or double-digit month/day) followed by a `T`/whitespace
-/// separator, `H:MM:SS`, an optional fractional second, and an optional `Z` or
-/// numeric timezone offset.
-fn is_yaml_timestamp(s: &str) -> bool {
-    let b = s.as_bytes();
-
-    // Helper: read a run of ASCII digits from `i`, returning the count consumed.
-    fn digits(b: &[u8], i: usize) -> usize {
-        let mut j = i;
-        while j < b.len() && b[j].is_ascii_digit() {
-            j += 1;
-        }
-        j - i
-    }
-
-    // The date head is mandatory: four digits, `-`, then month/day groups. A bare
-    // `YYYY-MM-DD` (each group exactly two digits) is a date on its own; the
-    // datetime form allows 1- or 2-digit month/day and requires a time tail.
-    if digits(b, 0) != 4 {
-        return false;
-    }
-    let mut i = 4;
-    if b.get(i) != Some(&b'-') {
-        return false;
-    }
-    i += 1;
-    let month = digits(b, i);
-    if month == 0 || month > 2 {
-        return false;
-    }
-    i += month;
-    if b.get(i) != Some(&b'-') {
-        return false;
-    }
-    i += 1;
-    let day = digits(b, i);
-    if day == 0 || day > 2 {
-        return false;
-    }
-    i += day;
-
-    // Bare date: exactly `YYYY-MM-DD` (both groups two digits) with nothing trailing.
-    if i == s.len() {
-        return month == 2 && day == 2;
-    }
-
-    // Datetime: a `T`/`t` or whitespace separator, then `H:MM:SS`.
-    match b.get(i) {
-        Some(b'T') | Some(b't') => i += 1,
-        Some(b' ') | Some(b'\t') => {
-            while matches!(b.get(i), Some(b' ') | Some(b'\t')) {
-                i += 1;
-            }
-        }
-        _ => return false,
-    }
-    let hour = digits(b, i);
-    if hour == 0 || hour > 2 {
-        return false;
-    }
-    i += hour;
-    if b.get(i) != Some(&b':') {
-        return false;
-    }
-    i += 1;
-    if digits(b, i) != 2 {
-        return false;
-    }
-    i += 2;
-    if b.get(i) != Some(&b':') {
-        return false;
-    }
-    i += 1;
-    if digits(b, i) != 2 {
-        return false;
-    }
-    i += 2;
-
-    // Optional fractional second: `.` followed by zero or more digits.
-    if b.get(i) == Some(&b'.') {
-        i += 1;
-        i += digits(b, i);
-    }
-
-    // Optional timezone, possibly preceded by whitespace: `Z`/`z`, or a signed
-    // `HH` / `HH:MM` offset.
-    while matches!(b.get(i), Some(b' ') | Some(b'\t')) {
-        i += 1;
-    }
-    match b.get(i) {
-        None => return true,
-        Some(b'Z') | Some(b'z') => {
-            i += 1;
-        }
-        Some(b'+') | Some(b'-') => {
-            i += 1;
-            let tz_hour = digits(b, i);
-            if tz_hour == 0 || tz_hour > 2 {
-                return false;
-            }
-            i += tz_hour;
-            if b.get(i) == Some(&b':') {
-                i += 1;
-                if digits(b, i) != 2 {
-                    return false;
-                }
-                i += 2;
-            }
-        }
-        _ => return false,
-    }
-    i == s.len()
-}
-
 /// Render a microsecond-epoch timestamp as an ISO-8601 UTC string ending in `Z`,
 /// matching the Python `_iso_from_us` (`datetime.fromtimestamp(...).isoformat()`
 /// with `+00:00` replaced by `Z`). Microsecond precision is preserved when the
@@ -1021,66 +727,6 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_is_16_hex_of_blake2b_8_over_the_public_half() {
-        // A 64-byte key file: first 32 bytes the secret half, second 32 the public
-        // half. The fingerprint is blake2b-8 of the public half, 16 lowercase hex.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tx.key");
-        let mut bytes = vec![0u8; 64];
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        std::fs::write(&path, &bytes).unwrap();
-
-        // Compute the expected value the same way, independently.
-        let expected = {
-            use blake2::digest::{Update, VariableOutput};
-            use blake2::Blake2bVar;
-            let mut h = Blake2bVar::new(8).unwrap();
-            h.update(&bytes[32..]);
-            let mut out = [0u8; 8];
-            h.finalize_variable(&mut out).unwrap();
-            hex::encode(out)
-        };
-        let got = read_public_fingerprint(&path).unwrap();
-        assert_eq!(got, expected);
-        assert_eq!(got.len(), 16);
-        assert!(got.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn fingerprint_rejects_a_wrong_size_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rx.key");
-        std::fs::write(&path, vec![0u8; 32]).unwrap(); // half-size
-        assert_eq!(read_public_fingerprint(&path), None);
-        assert_eq!(
-            read_public_fingerprint(&dir.path().join("absent.key")),
-            None
-        );
-    }
-
-    #[test]
-    fn config_truthiness_matches_python_bool() {
-        assert!(!json_truthy(&Value::Null));
-        assert!(!json_truthy(&json!(false)));
-        assert!(json_truthy(&json!(true)));
-        assert!(!json_truthy(&json!(0)));
-        assert!(json_truthy(&json!(1)));
-        assert!(!json_truthy(&json!("")));
-        assert!(json_truthy(&json!("x")));
-        assert!(!json_truthy(&json!([])));
-        assert!(!json_truthy(&json!({})));
-    }
-
-    /// A failover sidecar past the freshness window must not be read as a
-    /// current state.
-    ///
-    /// The route's fallback used to be the string `"local"` — the HEALTHY state —
-    /// for an absent, unparseable or arbitrarily old file, so a node that had
-    /// failed over to the cloud relay and then lost the producer of this reading
-    /// reported itself locally bound.
-    #[test]
     fn an_aged_failover_sidecar_does_not_read_as_a_current_state() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wfb_failover.json");
@@ -1178,6 +824,24 @@ mod tests {
         assert!(out.get("bitrate_mbps").is_none());
     }
 
+    /// A pair-status snapshot with the given identity fields.
+    fn snapshot(
+        paired: bool,
+        peer: Value,
+        fingerprint: Value,
+        role: &'static str,
+    ) -> Map<String, Value> {
+        crate::wfb_pair_state::PairStatus {
+            paired,
+            peer,
+            paired_at: Value::Null,
+            fingerprint,
+            auto_pair_enabled: true,
+            role,
+        }
+        .to_json()
+    }
+
     #[test]
     fn the_pair_read_serves_the_fleet_slot_table() {
         // Which drone holds which slot is the first question a fleet link fault
@@ -1192,12 +856,7 @@ mod tests {
         let slots = crate::routes::gs_wfb_pair::slot_table(&registry);
 
         let body = pair_snapshot(
-            true,
-            json!("drone-a"),
-            Value::Null,
-            json!("0123456789abcdef"),
-            true,
-            "gs",
+            snapshot(true, json!("drone-a"), json!("0123456789abcdef"), "gs"),
             slots,
         );
         let table = body["slots"].as_array().expect("the read carries a roster");
@@ -1233,12 +892,7 @@ mod tests {
             .expect("allocation issues a secret");
 
         let body = pair_snapshot(
-            true,
-            json!("drone-a"),
-            Value::Null,
-            Value::Null,
-            true,
-            "gs",
+            snapshot(true, json!("drone-a"), Value::Null, "gs"),
             crate::routes::gs_wfb_pair::slot_table(&registry),
         );
         let rendered = serde_json::to_string(&body).unwrap();
@@ -1255,136 +909,10 @@ mod tests {
         // A drone holds no registry — slots are issued by the ground station.
         // An empty array keeps the client on one code path.
         let body = pair_snapshot(
-            false,
-            Value::Null,
-            Value::Null,
-            Value::Null,
-            true,
-            "drone",
+            snapshot(false, Value::Null, Value::Null, "drone"),
             Vec::new(),
         );
         assert_eq!(body["slots"], json!([]));
-    }
-
-    #[test]
-    fn pair_status_of_an_unpaired_drone_is_the_default_snapshot() {
-        // No key file, an empty config: paired false, every config field null,
-        // auto-pair defaults true, role drone. The golden shape the GCS pairing
-        // card reads.
-        let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("config.yaml");
-        std::fs::write(&cfg_path, "agent:\n  profile: drone\n").unwrap();
-        let raw = crate::config::load_config_object(&cfg_path);
-        // Drive the pieces the handler composes, without the AppState wiring.
-        let (_profile, role) = current_role("drone");
-        assert_eq!(role, "drone");
-        let key_path = dir.path().join("wfb").join("tx.key");
-        let paired = std::fs::metadata(&key_path)
-            .map(|m| m.is_file() && m.len() == WFB_KEY_FILE_BYTES as u64)
-            .unwrap_or(false);
-        assert!(!paired);
-        let wfb_section = raw
-            .get("video")
-            .filter(|v| v.is_object())
-            .and_then(|v| v.get("wfb"))
-            .filter(|v| v.is_object());
-        let auto_pair = wfb_section
-            .and_then(|w| w.get("auto_pair_enabled"))
-            .map(json_truthy)
-            .unwrap_or(true);
-        assert!(auto_pair); // absent → defaults true
-
-        let snapshot = json!({
-            "paired": paired,
-            "paired_with_device_id": Value::Null,
-            "paired_at": Value::Null,
-            "fingerprint": Value::Null,
-            "auto_pair_enabled": auto_pair,
-            "role": role,
-        });
-        let want = json!({
-            "paired": false,
-            "paired_with_device_id": null,
-            "paired_at": null,
-            "fingerprint": null,
-            "auto_pair_enabled": true,
-            "role": "drone",
-        });
-        assert_eq!(snapshot, want);
-    }
-
-    #[test]
-    fn paired_at_demotes_an_unquoted_timestamp_to_null() {
-        // The bind path persists `paired_at` as an unquoted ISO timestamp, which a
-        // standard YAML loader resolves to a `datetime`, so the Python read returns
-        // null (`isinstance(str)` fails). This YAML parser flattens it back to a
-        // string, so the route must demote the timestamp-shaped string to null to
-        // match the live Python read byte-for-byte. A genuine non-timestamp peer-id
-        // string still passes through.
-        let yaml = "video:\n  wfb:\n    paired_at: 2026-06-13T07:59:59+00:00\n    paired_with_device_id: drone-abc\n";
-        let raw: Value = serde_norway::from_str(yaml).unwrap();
-        let wfb = raw
-            .get("video")
-            .filter(|v| v.is_object())
-            .and_then(|v| v.get("wfb"))
-            .filter(|v| v.is_object());
-
-        // The parser does flatten the unquoted timestamp into a string, which is the
-        // exact condition that made the native read diverge from the Python read.
-        let raw_paired_at = wfb.and_then(|w| w.get("paired_at")).unwrap();
-        assert!(raw_paired_at.is_string());
-
-        // The route demotes it to null, matching Python; the device-id passes through.
-        let paired_at = wfb
-            .and_then(|w| w.get("paired_at"))
-            .map(paired_at_string)
-            .unwrap_or(Value::Null);
-        assert_eq!(paired_at, Value::Null);
-        let peer = wfb
-            .and_then(|w| w.get("paired_with_device_id"))
-            .filter(|v| v.is_string())
-            .cloned()
-            .unwrap_or(Value::Null);
-        assert_eq!(peer, json!("drone-abc"));
-    }
-
-    #[test]
-    fn is_yaml_timestamp_matches_the_loader_resolution() {
-        // The strings the standard YAML loader resolves to a date/datetime (so the
-        // Python read demotes them to null). The canonical bind-written form is the
-        // first case.
-        assert!(is_yaml_timestamp("2026-06-13T07:59:59+00:00"));
-        assert!(is_yaml_timestamp("2026-06-13")); // bare date
-        assert!(is_yaml_timestamp("2026-06-13 07:59:59")); // space separator
-        assert!(is_yaml_timestamp("2026-06-13T07:59:59")); // no timezone
-        assert!(is_yaml_timestamp("2026-06-13T07:59:59.123456+05:30")); // fraction + offset
-        assert!(is_yaml_timestamp("2026-06-13t07:59:59z")); // lowercase t/z
-
-        // Plain strings the loader keeps as `str` (so the Python read returns them).
-        assert!(!is_yaml_timestamp("not-a-date"));
-        assert!(!is_yaml_timestamp("unknown"));
-        assert!(!is_yaml_timestamp("drone-abc"));
-        assert!(!is_yaml_timestamp("07:59:59")); // bare time is not a timestamp
-        assert!(!is_yaml_timestamp("2026-06-13X07:59:59")); // bad separator
-        assert!(!is_yaml_timestamp("2026-06-13T07:59")); // missing seconds
-        assert!(!is_yaml_timestamp("")); // empty
-    }
-
-    #[test]
-    fn paired_at_string_passes_a_non_timestamp_and_nulls_non_strings() {
-        // A non-timestamp string is kept (the field can legitimately hold one); a
-        // number/bool/null is demoted to null, mirroring `isinstance(str)`.
-        assert_eq!(
-            paired_at_string(&json!("custom-label")),
-            json!("custom-label")
-        );
-        assert_eq!(
-            paired_at_string(&json!("2026-06-13T07:59:59+00:00")),
-            Value::Null
-        );
-        assert_eq!(paired_at_string(&json!(123)), Value::Null);
-        assert_eq!(paired_at_string(&json!(true)), Value::Null);
-        assert_eq!(paired_at_string(&Value::Null), Value::Null);
     }
 
     #[test]

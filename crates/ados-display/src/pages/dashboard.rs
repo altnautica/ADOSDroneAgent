@@ -35,8 +35,7 @@ use crate::graphics::status_dot::draw_dot;
 use crate::graphics::thresholds;
 use crate::pages::{
     blank_panel, tile_rects, ArmState, Chrome, DroneCtx, HardwareItem, HitAction, HitZone, LinkCtx,
-    MeshCtx, MeshState, NetworkCtx, Page, PageContext, PairingCtx, RoleCtx, CONTENT_H, CONTENT_Y,
-    PANEL_W,
+    MeshCtx, MeshState, NetworkCtx, Page, PageContext, RoleCtx, CONTENT_H, CONTENT_Y, PANEL_W,
 };
 use crate::widgets::{bottom_bar_zones, draw_big_number, draw_bottom_bar, draw_tile, draw_top_bar};
 
@@ -148,7 +147,7 @@ fn route_tiles(ctx: &PageContext) -> [Slot; 4] {
     let role = &ctx.role;
     let cloud = &ctx.cloud;
 
-    let no_link_signal = link.rssi_dbm.is_none() && link.bitrate_mbps.is_none();
+    let no_link_signal = link.rssi_dbm.is_none() && link.bitrate_kbps.is_none();
     let radio_missing_in_hw_check = ctx
         .hardware_check
         .iter()
@@ -216,7 +215,16 @@ fn render_inset(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
         match slot {
             Slot::RadioLink => draw_radio_link_tile(canvas, palette, x, y, w, h, ctx),
             Slot::Hardware => draw_hardware_tile(canvas, palette, x, y, w, h, &ctx.hardware_check),
-            Slot::Drone => draw_drone_tile(canvas, palette, x, y, w, h, &ctx.drone, &ctx.pairing),
+            Slot::Drone => draw_drone_tile(
+                canvas,
+                palette,
+                x,
+                y,
+                w,
+                h,
+                &ctx.drone,
+                ctx.pair_code().unwrap_or(""),
+            ),
             Slot::PairDrone => draw_pair_drone_tile(canvas, palette, x, y, w, h, ctx),
             Slot::Mesh => draw_mesh_tile(canvas, palette, x, y, w, h, &ctx.role, &ctx.mesh),
             Slot::SetupWizard => draw_setup_wizard_tile(canvas, palette, x, y, w, h, ctx),
@@ -230,21 +238,10 @@ fn render_inset(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
                 &ctx.network,
                 ctx.cloud.paired,
                 ctx.cloud.latency_ms,
-                pair_code(ctx),
+                ctx.pair_code().unwrap_or(""),
             ),
         }
     }
-}
-
-/// The pair code any pairing surface shows: the local pairing window's code,
-/// else the cloud one. Empty when neither is known.
-fn pair_code(ctx: &PageContext) -> &str {
-    ctx.pairing
-        .code
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .or(ctx.cloud.pair_code.as_deref())
-        .unwrap_or("")
 }
 
 /// Whether the radio tile warns of a brownout: TX past the safe envelope on a
@@ -328,7 +325,7 @@ fn draw_radio_link_tile(
 ) {
     let link: &LinkCtx = &ctx.link;
     let rssi = link.rssi_dbm;
-    let bitrate = link.bitrate_mbps;
+    let bitrate = link.bitrate_mbps();
     let fec_rec = link.fec_recovered;
     let fec_lost = link.fec_lost;
     let channel = link.channel;
@@ -537,7 +534,7 @@ fn draw_drone_tile(
     w: i32,
     h: i32,
     drone: &DroneCtx,
-    pairing: &PairingCtx,
+    code: &str,
 ) {
     let device_id = drone.device_id.as_deref();
     let fc_mode = drone.fc_mode.as_deref();
@@ -564,7 +561,6 @@ fn draw_drone_tile(
             by + (bh - eh as i32) / 2 - 6,
             palette.text_secondary,
         );
-        let code = pairing.code.as_deref().unwrap_or("");
         if !code.is_empty() {
             let code_str = format!("pair: {code}");
             let code_font = LoadedFont::new(FontFace::MonoBold, 12);
@@ -873,7 +869,7 @@ fn draw_pair_drone_tile(
     h: i32,
     ctx: &PageContext,
 ) {
-    let code = pair_code(ctx).to_ascii_uppercase();
+    let code = ctx.pair_code().unwrap_or("").to_ascii_uppercase();
 
     let (bx, by, bw, bh) = draw_tile(canvas, palette, x, y, w, h, "Pair drone", "broadcast");
 
@@ -1179,7 +1175,7 @@ mod tests {
             ..PageContext::default()
         };
         ctx.link.rssi_dbm = Some(-67.0);
-        ctx.link.bitrate_mbps = Some(20.0);
+        ctx.link.bitrate_kbps = Some(20000.0);
         ctx.link.fec_recovered = Some(1247);
         ctx.link.fec_lost = Some(3);
         ctx.link.channel = Some(161);

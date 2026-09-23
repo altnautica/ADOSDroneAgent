@@ -117,9 +117,9 @@ pub async fn get_pairing_info(
 
     // Radio-pair signal: the same predicate `GET /api/wfb/pair` answers from —
     // this role's own key file, exactly 64 bytes, with a readable fingerprint.
-    let radio_paired = crate::routes::wfb::paired_key_fingerprint(
+    let radio_paired = crate::wfb_pair_state::paired_key_fingerprint(
         &paths.wfb_key_dir,
-        crate::routes::wfb::bind_role_for(&profile),
+        crate::wfb_pair_state::bind_role_for(&profile),
     )
     .is_some();
 
@@ -531,34 +531,6 @@ mod tests {
         let bs = read_bind_state(&paths);
         assert_eq!(bs["active"], json!(false));
         assert_eq!(bs["phase"], Value::Null);
-    }
-
-    /// `radio_paired` answers from the shared predicate: this role's own key,
-    /// exactly 64 bytes. A truncated key, or a stale key of the other role, is
-    /// not a radio pairing.
-    #[test]
-    fn radio_paired_is_the_roles_own_complete_key() {
-        use crate::routes::wfb::paired_key_fingerprint;
-        let dir = tempfile::tempdir().unwrap();
-        let key_dir = dir.path().join("wfb");
-        std::fs::create_dir_all(&key_dir).unwrap();
-        assert!(
-            paired_key_fingerprint(&key_dir, "drone").is_none(),
-            "no key"
-        );
-        std::fs::write(key_dir.join("tx.key"), b"x").unwrap();
-        assert!(
-            paired_key_fingerprint(&key_dir, "drone").is_none(),
-            "a truncated tx.key is not a pairing"
-        );
-        std::fs::write(key_dir.join("rx.key"), [7u8; 64]).unwrap();
-        assert!(
-            paired_key_fingerprint(&key_dir, "drone").is_none(),
-            "a drone holding only a ground-station rx.key is not paired"
-        );
-        assert!(paired_key_fingerprint(&key_dir, "gs").is_some());
-        std::fs::write(key_dir.join("tx.key"), [7u8; 64]).unwrap();
-        assert!(paired_key_fingerprint(&key_dir, "drone").is_some());
     }
 
     fn test_paths(dir: &std::path::Path) -> PairingPaths {

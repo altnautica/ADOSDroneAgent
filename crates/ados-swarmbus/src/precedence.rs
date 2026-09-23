@@ -119,6 +119,21 @@ mod tests {
     use super::*;
     use crate::beacon::{STATUS_ARMED, STATUS_HERO, STATUS_PRECEDENCE_MASK};
 
+    /// `from_wire` is the exact inverse of `as_wire`, and a level this build does
+    /// not know (a newer peer's sixth level, or an empty string) reads as `hold`
+    /// rather than being misread as something it is not.
+    #[test]
+    fn from_wire_inverts_as_wire_and_degrades_unknown_to_hold() {
+        for level in ModePrecedence::ARBITRATION_ORDER {
+            assert_eq!(ModePrecedence::from_wire(level.as_wire()), level);
+        }
+        assert_eq!(
+            ModePrecedence::from_wire("murmuration"),
+            ModePrecedence::Hold
+        );
+        assert_eq!(ModePrecedence::from_wire(""), ModePrecedence::Hold);
+    }
+
     /// Every level survives the three-bit round trip, and each occupies a
     /// distinct encoding — a duplicated discriminant would silently merge two
     /// levels on the wire.

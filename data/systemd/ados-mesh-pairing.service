@@ -29,7 +29,9 @@ EnvironmentFile=-/etc/ados/env
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=no
 ProtectSystem=strict
-ReadWritePaths=/var/ados /run/ados /etc/ados /etc/ados/mesh
+# /etc/ados covers /etc/ados/mesh. Naming the subdirectory separately made
+# namespace setup fail on a node where nothing had created it yet.
+ReadWritePaths=/var/ados /run/ados /etc/ados
 
 MemoryMax=48M
 

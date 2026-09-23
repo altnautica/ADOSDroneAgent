@@ -46,6 +46,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::state::AppState;
+use crate::wfb_pair_state::read_public_fingerprint;
 
 // ---------------------------------------------------------------------------
 // Profile gate.
@@ -1353,28 +1354,6 @@ fn de_chunk(body: &[u8]) -> Vec<u8> {
 /// The exact 64-byte size a complete WFB-ng key file is.
 const WFB_KEY_FILE_BYTES: usize = 64;
 
-/// The byte offset of the peer-public half (the second 32 bytes) inside a 64-byte
-/// WFB key file.
-const WFB_PUBLIC_HALF_OFFSET: usize = 32;
-
-/// The 16-hex-char public-key fingerprint of a WFB key file, or `None` when the
-/// file is absent or not exactly 64 bytes. The peer-public half is the second 32
-/// bytes; the fingerprint is `blake2b(pub, digest_size=8)` rendered as 16 lowercase
-/// hex chars. Byte-identical to `key_mgr.read_public_fingerprint`.
-fn read_public_fingerprint(path: &Path) -> Option<String> {
-    use blake2::digest::{Update, VariableOutput};
-    use blake2::Blake2bVar;
-    let data = std::fs::read(path).ok()?;
-    if data.len() != WFB_KEY_FILE_BYTES {
-        return None;
-    }
-    let mut hasher = Blake2bVar::new(8).ok()?;
-    hasher.update(&data[WFB_PUBLIC_HALF_OFFSET..]);
-    let mut out = [0u8; 8];
-    hasher.finalize_variable(&mut out).ok()?;
-    Some(hex::encode(out))
-}
-
 /// A numeric signal value, or `None` if absent / non-numeric. A JSON `bool` is not
 /// a `Number`, so it is excluded naturally.
 fn signal_num(signals: &Map<String, Value>, key: &str) -> Option<f64> {
@@ -2068,31 +2047,6 @@ mod tests {
             "gps_sats": null,
         });
         assert_eq!(snapshot, want);
-    }
-
-    #[test]
-    fn fingerprint_is_blake2b_8_of_the_public_half() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rx.key");
-        let mut bytes = vec![0u8; 64];
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        std::fs::write(&path, &bytes).unwrap();
-        let expected = {
-            use blake2::digest::{Update, VariableOutput};
-            use blake2::Blake2bVar;
-            let mut h = Blake2bVar::new(8).unwrap();
-            h.update(&bytes[32..]);
-            let mut out = [0u8; 8];
-            h.finalize_variable(&mut out).unwrap();
-            hex::encode(out)
-        };
-        assert_eq!(read_public_fingerprint(&path), Some(expected));
-        // A wrong-size file yields no fingerprint.
-        let half = dir.path().join("half.key");
-        std::fs::write(&half, vec![0u8; 32]).unwrap();
-        assert_eq!(read_public_fingerprint(&half), None);
     }
 
     #[test]

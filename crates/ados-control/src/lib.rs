@@ -31,6 +31,7 @@ pub mod routes;
 pub mod routing;
 pub mod serve;
 pub mod state;
+mod wfb_pair_state;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

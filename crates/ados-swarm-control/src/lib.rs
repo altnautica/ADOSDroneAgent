@@ -67,7 +67,7 @@ pub use neighbor::{NearestSet, NeighborState};
 pub use precedence::{arbitrate, precedence_rank, ModePrecedence};
 pub use separation::{HardBreach, SeparationTuning};
 pub use setpoint::{Setpoint, SetpointKind, MAX_COMMAND_SPEED_MPS};
-pub use swarmbus::{fixes_from_payload, precedence_from_wire, EXTRA_EMERGENCY, EXTRA_PRECEDENCE};
+pub use swarmbus::{fixes_from_payload, EXTRA_EMERGENCY, EXTRA_PRECEDENCE};
 
 /// How long an empty neighbour table is tolerated before this layer stops
 /// emitting setpoints entirely.

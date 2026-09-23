@@ -18,6 +18,8 @@
 //! Metrics (`text_width` / `text_height`) report the same tight bounding box
 //! the page math expects so right-anchored and centered text lands correctly.
 
+use std::sync::OnceLock;
+
 use ab_glyph::{Font, FontRef, Glyph, ScaleFont};
 
 /// The four bundled DejaVu faces. These are the faces the page layout was
@@ -46,11 +48,24 @@ impl FontFace {
             FontFace::MonoBold => MONO_BOLD_TTF,
         }
     }
+
+    /// This face parsed once for the life of the process. A page builds a
+    /// [`LoadedFont`] per text run (and the auto-fit loops one per candidate
+    /// size), so the parse is shared rather than repeated per call.
+    fn parsed(self) -> &'static FontRef<'static> {
+        static FACES: [OnceLock<FontRef<'static>>; 4] = [const { OnceLock::new() }; 4];
+        FACES[self as usize].get_or_init(|| {
+            // The bundled bytes are valid TrueType; a parse failure would be a
+            // build-time corruption of the embedded asset, which the test suite
+            // catches. Treat it as unrecoverable rather than silently
+            // substituting a different face that would shift every metric.
+            FontRef::try_from_slice(self.ttf()).expect("embedded DejaVu face must parse")
+        })
+    }
 }
 
-/// A face parsed and held at a fixed pixel size, ready to rasterize. Build one
-/// per (face, size) pair; the page layer caches these the way the prior
-/// renderer cached its font handles.
+/// A face held at a fixed pixel size, ready to rasterize. Cheap to build: the
+/// face itself is parsed once per process (see `FontFace::parsed`).
 pub struct LoadedFont {
     font: FontRef<'static>,
     px: f32,
@@ -60,13 +75,8 @@ impl LoadedFont {
     /// Parse `face` and pin it at `px` pixels. The pixel size is the TrueType
     /// em size in device pixels, matching the page layout's size convention.
     pub fn new(face: FontFace, px: u32) -> Self {
-        // The bundled bytes are valid TrueType; a parse failure would be a
-        // build-time corruption of the embedded asset, which the test suite
-        // catches. Treat it as unrecoverable rather than silently substituting
-        // a different face that would shift every metric.
-        let font = FontRef::try_from_slice(face.ttf()).expect("embedded DejaVu face must parse");
         Self {
-            font,
+            font: face.parsed().clone(),
             px: px as f32,
         }
     }

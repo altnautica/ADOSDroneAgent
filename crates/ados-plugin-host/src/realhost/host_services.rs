@@ -174,7 +174,7 @@ impl HostServices for RealHost {
 
         // payload_type is required and must be a private (application) type; the
         // builder re-checks the floor, so an out-of-range type is refused twice.
-        let payload_type = required_u16_arg(args, "payload_type")?;
+        let payload_type = arg_int_required::<u16>(args, "payload_type")?;
 
         // payload accepts the same shapes as mavlink.send's msg_bytes (a binary
         // value or a list of byte-ints). It may be empty (a zero-byte tunnel
@@ -625,11 +625,13 @@ impl HostServices for RealHost {
         // opened the stream may transmit on it.
         let channel = map_get(args, "channel")
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| HostError::Rpc("channel missing or not an integer".to_string()))?
-            as u8;
-        if channel != 8 && channel != 9 {
-            return Err(HostError::Rpc(format!("unsupported aux channel {channel}")));
-        }
+            .ok_or_else(|| HostError::Rpc("channel missing or not an integer".to_string()))?;
+        // Checked on the full integer: narrowing first would wrap 264 onto 8.
+        let channel = match channel {
+            8 => 8u8,
+            9 => 9u8,
+            other => return Err(HostError::Rpc(format!("unsupported aux channel {other}"))),
+        };
         let payload = map_get(args, "payload")
             .map(|v| coerce_msg_bytes(v).map_err(|_| "payload must be bytes".to_string()))
             .transpose()

@@ -35,7 +35,7 @@ use crate::state::AppState;
 /// The class is what a scoped MCP token must hold to mint the ticket: the
 /// MAVLink WebSocket carries arbitrary commands to the flight controller, so its
 /// ticket is flight-class; the others are read-only event streams.
-const TICKET_SCOPES: [(&str, ScopeClass); 8] = [
+const TICKET_SCOPES: [(&str, ScopeClass); 7] = [
     ("setup.cloudflare_logs", ScopeClass::Read),
     ("gs.pic_events", ScopeClass::Read),
     ("gs.mavlink_ws", ScopeClass::Flight),
@@ -43,8 +43,26 @@ const TICKET_SCOPES: [(&str, ScopeClass); 8] = [
     ("gs.mesh_events", ScopeClass::Read),
     ("gs.button_events", ScopeClass::Read),
     ("vision.detections", ScopeClass::Read),
-    ("plugins.install_job", ScopeClass::Read),
 ];
+
+/// The plugin install-job progress scope is bound to one job:
+/// `plugins.install_job:<job_id>`, so a ticket opens that job's stream and no
+/// other. The residual progress route verifies against the job id in its path.
+const INSTALL_JOB_SCOPE_PREFIX: &str = "plugins.install_job:";
+
+/// Whether `scope` is an install-job scope naming a job id the progress route
+/// can serve: 1..=128 characters of `[A-Za-z0-9._-]`, the set the route's
+/// sidecar name keeps. A `|` would also break the ticket's field layout.
+fn install_job_scope_is_valid(scope: &str) -> bool {
+    scope
+        .strip_prefix(INSTALL_JOB_SCOPE_PREFIX)
+        .is_some_and(|job_id| {
+            (1..=128).contains(&job_id.len())
+                && job_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
+}
 
 /// The scope class a ticket for `scope` grants its holder, or `None` for a scope
 /// the agent does not mint.
@@ -53,6 +71,7 @@ fn ticket_scope_class(scope: &str) -> Option<ScopeClass> {
         .iter()
         .find(|(s, _)| *s == scope)
         .map(|(_, class)| *class)
+        .or_else(|| install_job_scope_is_valid(scope).then_some(ScopeClass::Read))
 }
 
 /// Whether the credential that reached this route may hold a ticket of `class`.
@@ -180,9 +199,30 @@ mod tests {
                 "{scope} must be mintable"
             );
         }
-        assert!(ticket_scope_class("plugins.install_job").is_some());
-        assert_eq!(TICKET_SCOPES.len(), 8);
+        assert_eq!(TICKET_SCOPES.len(), 7);
         assert_eq!(ticket_scope_class("gs.unknown"), None);
+    }
+
+    /// An install-progress ticket names one job; the bare scope, an empty id or
+    /// an id the progress route could not serve is refused.
+    #[test]
+    fn install_job_tickets_are_bound_to_one_job_id() {
+        assert_eq!(
+            ticket_scope_class("plugins.install_job:3f2a9c1e-7b4d-4c1a-9e0f-2b6d8a1c5e7f"),
+            Some(ScopeClass::Read)
+        );
+        for scope in [
+            "plugins.install_job",
+            "plugins.install_job:",
+            "plugins.install_job:a|b",
+            "plugins.install_job:../x",
+        ] {
+            assert_eq!(ticket_scope_class(scope), None, "{scope}");
+        }
+        assert_eq!(
+            ticket_scope_class(&format!("plugins.install_job:{}", "a".repeat(129))),
+            None
+        );
     }
 
     fn scopes_header(value: &str) -> HeaderMap {

@@ -1,72 +1,7 @@
-//! msgpack argument readers, reply converters and the Python-compat
+//! msgpack reply converters, argument coercions and the Python-compat
 //! formatting helpers the wire error strings use.
 
 use super::*;
-
-// ---------------------------------------------------------------------
-// rmpv arg helpers
-// ---------------------------------------------------------------------
-
-pub(super) fn map_get<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
-    match args {
-        Value::Map(entries) => entries
-            .iter()
-            .find(|(k, _)| k.as_str() == Some(key))
-            .map(|(_, v)| v),
-        _ => None,
-    }
-}
-
-pub(super) fn map_has(args: &Value, key: &str) -> bool {
-    matches!(args, Value::Map(entries) if entries.iter().any(|(k, _)| k.as_str() == Some(key)))
-}
-
-pub(super) fn arg_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
-    map_get(args, key).and_then(Value::as_str)
-}
-
-/// `env.args.get(key)` coerced to a clone, or `Value::Nil` when absent.
-pub(super) fn arg_owned(args: &Value, key: &str) -> Value {
-    map_get(args, key).cloned().unwrap_or(Value::Nil)
-}
-
-/// Read an integer field from a msgpack-map `args`, accepting a signed or
-/// unsigned msgpack integer. Returns `None` for an absent or non-integer value.
-pub(super) fn arg_i64(args: &Value, key: &str) -> Option<i64> {
-    let v = map_get(args, key)?;
-    v.as_i64()
-        .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
-}
-
-/// Read a numeric field from a msgpack-map `args` as an f64, accepting any
-/// msgpack number (a float OR an integer, so `0` and `0.0` both read). A present
-/// non-numeric value is an error (the caller distinguishes it from absent);
-/// `Ok(None)` is an absent key, which the caller defaults to 0.0. The returned
-/// f64 may be non-finite (a NaN/inf encoded by the client) — the setpoint
-/// validator rejects a non-finite value on an active axis downstream, so the
-/// finiteness check is one place, not scattered through the reads.
-pub(super) fn arg_f64_opt(args: &Value, key: &str) -> Result<Option<f64>, HostError> {
-    match map_get(args, key) {
-        None | Some(Value::Nil) => Ok(None),
-        Some(v) => match v.as_f64() {
-            Some(n) => Ok(Some(n)),
-            None => Err(HostError::Rpc(format!("{key} must be a number"))),
-        },
-    }
-}
-
-/// Read a numeric field as an f64, defaulting an absent key to 0.0 (an axis the
-/// type mask ignores is conventionally left at 0). A present non-number errors.
-pub(super) fn arg_f64(args: &Value, key: &str) -> Result<f64, HostError> {
-    Ok(arg_f64_opt(args, key)?.unwrap_or(0.0))
-}
-
-/// Read a numeric field as an f32, defaulting an absent key to 0.0. A present
-/// non-number errors. The f64→f32 narrowing matches the wire field width of the
-/// velocity / accel / yaw setpoint fields.
-pub(super) fn arg_f32(args: &Value, key: &str) -> Result<f32, HostError> {
-    Ok(arg_f64(args, key)? as f32)
-}
 
 /// Convert a `serde_json::Value` (a command-socket reply) to the msgpack
 /// `rmpv::Value` the plugin sees as the response `args`. Integers stay integers,

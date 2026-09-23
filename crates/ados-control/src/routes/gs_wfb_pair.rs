@@ -49,12 +49,10 @@ use ados_groundlink::{FleetRegistry, FLEET_MAX_SLOTS, FLEET_REGISTRY_PATH};
 
 use crate::routes::gs_cmd::groundlink_cmd_roundtrip;
 use crate::state::AppState;
+use crate::wfb_pair_state::read_public_fingerprint;
 
 /// The 64-byte wfb-ng key file size. Mirrors `key_mgr.WFB_KEY_FILE_BYTES`.
 const WFB_KEY_FILE_BYTES: u64 = 64;
-
-/// The peer-public half starts 32 bytes into the keypair file.
-const WFB_PUBLIC_HALF_OFFSET: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Profile gate + error envelopes (the nested error-object detail shape).
@@ -148,22 +146,6 @@ pub(crate) fn slot_table(registry: &FleetRegistry) -> Vec<Value> {
             })
         })
         .collect()
-}
-
-/// blake2b-8 over the peer-public half of a 64-byte key file, as 16 lowercase
-/// hex. `None` for an absent / wrong-size file. Mirrors
-/// `key_mgr.read_public_fingerprint`.
-fn read_public_fingerprint(path: &std::path::Path) -> Option<String> {
-    use blake2::digest::{Update, VariableOutput};
-    let data = std::fs::read(path).ok()?;
-    if data.len() != WFB_KEY_FILE_BYTES as usize {
-        return None;
-    }
-    let mut hasher = blake2::Blake2bVar::new(8).ok()?;
-    hasher.update(&data[WFB_PUBLIC_HALF_OFFSET..]);
-    let mut out = [0u8; 8];
-    hasher.finalize_variable(&mut out).ok()?;
-    Some(hex::encode(out))
 }
 
 // ---------------------------------------------------------------------------
@@ -800,23 +782,6 @@ mod tests {
         // It must still say WHY, or the operator cannot act on it.
         assert_eq!(obj["code"], "E_FLEET_KEY_MISMATCH");
         assert!(obj["message"].as_str().unwrap().contains("unpair"));
-    }
-
-    #[test]
-    fn read_public_fingerprint_is_16_hex_for_a_64_byte_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let key = dir.path().join("rx.key");
-        let mut bytes = vec![1u8; 32];
-        bytes.extend(std::iter::repeat_n(7u8, 32));
-        std::fs::write(&key, &bytes).unwrap();
-        let fp = read_public_fingerprint(&key).unwrap();
-        assert_eq!(fp.len(), 16);
-        assert!(fp
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-        // A short file has no fingerprint.
-        std::fs::write(&key, b"short").unwrap();
-        assert!(read_public_fingerprint(&key).is_none());
     }
 
     // ── the fleet gate ────────────────────────────────────────────────────────

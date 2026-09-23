@@ -46,7 +46,10 @@ use ados_hid::touch::{GestureKind, TouchGesture};
 
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
-use crate::pages::{HitAction, Page, PageContext, PanelAction, BOTTOM_BAR_H, PANEL_H, PANEL_W};
+use crate::pages::{
+    HitAction, Page, PageContext, PanelAction, BOTTOM_BAR_H, PANEL_H, TAB_COUNT, TAB_PAGE_IDS,
+    TAB_WIDTH,
+};
 use crate::sidecar::{self, LcdState, LCD_PAGE_REQUEST_PATH, LCD_STATE_PATH};
 use crate::widgets::draw_tab_pulse;
 
@@ -58,26 +61,9 @@ pub const DEFAULT_PAGE_ID: &str = "dashboard";
 /// Long enough for one or two frames at the post-tap boosted render rate.
 pub const TAP_FEEDBACK_LINGER_MS: i64 = 200;
 
-/// Width of one bottom-bar tab in landscape (`480 / 5`). The tab-tap router maps
-/// `start_x` into a tab index by integer-dividing by this.
-pub const TAB_WIDTH: i32 = PANEL_W as i32 / TAB_COUNT as i32;
-
-/// Number of tabs in the bottom bar.
-pub const TAB_COUNT: usize = 5;
-
 /// Top edge of the bottom tab bar in panel-global coordinates. A tap at or below
 /// this y in the content region routes to the tab bar, never to the page.
 pub const TAB_BAR_TOP_Y: i32 = PANEL_H as i32 - BOTTOM_BAR_H as i32;
-
-/// The ordered tab routes, left to right, matching the bottom-bar layout. Index
-/// `i` owns the horizontal band `[i*TAB_WIDTH, (i+1)*TAB_WIDTH)`.
-pub const TAB_PAGE_IDS: [&str; TAB_COUNT] = [
-    "dashboard",
-    "video",
-    "settings",
-    "link_stats",
-    "channel_hops",
-];
 
 /// The result of routing one physical-input event.
 ///
@@ -584,6 +570,7 @@ fn atomic_write(path: &Path, body: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pages::PANEL_W;
     use crate::pages::{
         about::AboutDetailPage, access_point::AccessPointDetailPage, channel_hops::ChannelHopsPage,
         dashboard::DashboardPage, diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage,

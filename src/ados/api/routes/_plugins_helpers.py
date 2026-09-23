@@ -53,23 +53,28 @@ log = get_logger("api.plugins.helpers")
 #     integration tests) that can set arbitrary headers on the
 #     handshake.
 #   * ``Sec-WebSocket-Protocol: ados-ws-ticket, <ticket>`` — browser
-#     clients mint a ticket for :data:`JOB_STREAM_TICKET_SCOPE` via the
-#     native ``POST /api/_ws/ticket`` and hand it to
+#     clients mint a ticket for :func:`job_stream_ticket_scope` of the
+#     job via the native ``POST /api/_ws/ticket`` and hand it to
 #     ``new WebSocket(url, ["ados-ws-ticket", ticket])``. The front
 #     admits the upgrade on the same self-contained HMAC ticket, so the
-#     handshake reaches this route on a paired node.
+#     handshake reaches this route on a paired node. The scope names the
+#     job, so a ticket opens that job's stream and no other.
 
 from ados.api.middleware.ws_auth import (
     authenticate_websocket as _authenticate_websocket_unified,
 )
 
-# The ticket scope for the install-job progress stream. Must match the
-# scope the native mint allows (ados-control ``TICKET_SCOPES``).
-JOB_STREAM_TICKET_SCOPE = "plugins.install_job"
+
+def job_stream_ticket_scope(job_id: str) -> str:
+    """The ticket scope for one install job's progress stream. Must match
+    the per-job scope the native mint allows (ados-control
+    ``install_job_scope_is_valid``)."""
+    return f"plugins.install_job:{job_id}"
 
 
-async def authenticate_job_websocket(websocket: Any) -> str | None:
-    """Validate either the ``X-ADOS-Key`` header or an ``ados-ws-ticket``.
+async def authenticate_job_websocket(websocket: Any, job_id: str) -> str | None:
+    """Validate either the ``X-ADOS-Key`` header or an ``ados-ws-ticket``
+    minted for this job.
 
     Returns the subprotocol the route should echo back in
     ``websocket.accept(subprotocol=...)`` when the ticket path is
@@ -78,7 +83,7 @@ async def authenticate_job_websocket(websocket: Any) -> str | None:
     echo), or ``None`` on rejection.
     """
     return await _authenticate_websocket_unified(
-        websocket, scope=JOB_STREAM_TICKET_SCOPE
+        websocket, scope=job_stream_ticket_scope(job_id)
     )
 
 

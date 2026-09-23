@@ -185,23 +185,9 @@ fn status_byte(n: &Value) -> u8 {
         | flag("gps_ok", crate::neighbor::STATUS_GPS_OK)
         | flag("hero", crate::neighbor::STATUS_HERO);
     if let Some(level) = n.get("mode_precedence").and_then(Value::as_str) {
-        status |= precedence_from_wire(level).as_status_bits();
+        status |= crate::ModePrecedence::from_wire(level).as_status_bits();
     }
     status
-}
-
-/// The inverse of `ModePrecedence::as_wire`. Anything unrecognised — including a
-/// peer running a newer build with a sixth level — reads as
-/// `ModePrecedence::Hold`, the safe "not commanding" floor.
-pub fn precedence_from_wire(wire: &str) -> crate::ModePrecedence {
-    use crate::ModePrecedence as P;
-    match wire {
-        "hard-separation" => P::HardSeparation,
-        "operator" => P::Operator,
-        "formation" => P::Formation,
-        "flocking" => P::Flocking,
-        _ => P::Hold,
-    }
 }
 
 #[cfg(test)]
@@ -487,17 +473,6 @@ mod tests {
             1,
             "a 10 Hz loop must not grow the buffer forever"
         );
-    }
-
-    #[test]
-    fn precedence_round_trips_through_the_wire_string() {
-        for level in ModePrecedence::ARBITRATION_ORDER {
-            assert_eq!(precedence_from_wire(level.as_wire()), level);
-        }
-        // A peer running a newer build with a sixth level degrades to "not
-        // commanding" rather than being misread as something it is not.
-        assert_eq!(precedence_from_wire("murmuration"), ModePrecedence::Hold);
-        assert_eq!(precedence_from_wire(""), ModePrecedence::Hold);
     }
 
     #[test]

@@ -4,6 +4,23 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.379] - 2026-09-24
+
+### Fixed
+
+- `radio.aux_stream.send` validates the channel before narrowing it, so an
+  out-of-range channel is refused instead of wrapping onto a valid one.
+- `ados-mesh-pairing.service` no longer lists a sandbox path that nothing
+  creates, which could stop the unit from starting. An installer test now
+  checks that every required sandbox path exists or is created.
+
+### Changed
+
+- One WFB pair-status module serves the pair read, the auto-pair toggle and
+  the pairing info route.
+- Plugin install-job WebSocket tickets are scoped to a single job.
+- Plugin host argument parsing and host forwards share one implementation.
+
 ## [0.99.378] - 2026-09-24
 
 ### Security

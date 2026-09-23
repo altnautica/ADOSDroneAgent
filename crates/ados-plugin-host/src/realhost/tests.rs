@@ -1814,6 +1814,11 @@ async fn a_gpio_service_that_never_answers_reads_as_unavailable() {
         field(&m, "error").and_then(Value::as_str),
         Some("not_available")
     );
+    // A wedged service is told apart from an absent one.
+    assert_eq!(
+        field(&m, "reason").and_then(Value::as_str),
+        Some("gpio service did not answer within 2000 ms")
+    );
 }
 
 // ---- video.source.set ------------------------------------------------
@@ -2128,6 +2133,20 @@ async fn radio_aux_send_rejects_bad_channel_or_payload_before_forwarding() {
             .await
         ),
         "unsupported aux channel 3"
+    );
+    // A channel past the byte range is refused, not wrapped onto 8 or 9.
+    assert_eq!(
+        err_body(
+            host.radio_aux_stream_send(
+                "p",
+                &map(&[
+                    ("channel", Value::from(264)),
+                    ("payload", Value::Binary(vec![1])),
+                ])
+            )
+            .await
+        ),
+        "unsupported aux channel 264"
     );
     // Missing payload.
     assert_eq!(
