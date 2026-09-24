@@ -29,8 +29,6 @@ struct RawConfig {
     #[serde(default)]
     vision: VisionSection,
     #[serde(default)]
-    atlas: AtlasSection,
-    #[serde(default)]
     ground_station: GroundStationSection,
     #[serde(default)]
     server: ServerSection,
@@ -75,17 +73,6 @@ struct VisionSection {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct AtlasSection {
-    /// `atlas.enabled`: opt-in for the world-model capture service. Mirrors
-    /// the key `ados-atlas` itself reads (`AtlasRuntimeConfig::enabled`), so
-    /// the supervisor starts it only when it will actually do work. Starting
-    /// it unconditionally is not an option: the binary exits cleanly when
-    /// atlas is off, which the monitor would read as a death and restart-loop.
-    #[serde(default)]
-    enabled: bool,
-}
-
-#[derive(Debug, Default, Deserialize)]
 struct GroundStationSection {
     #[serde(default)]
     role: Option<String>,
@@ -122,14 +109,8 @@ pub struct AgentConfig {
     /// configured engine actually comes up instead of staying silently dark —
     /// the engine self-gates on the same flag as a backstop. Without this the
     /// unit is never started (it is not in any install-time enable set), so a
-    /// `vision.enabled: true` config would never bring the vision → world-model
-    /// pipeline up.
+    /// `vision.enabled: true` config would never bring the vision pipeline up.
     pub vision_enabled: bool,
-    /// `atlas.enabled` is set. Like `vision_enabled`, and for the same reason:
-    /// `ados-atlas` is in no install-time enable set, so until the hardware
-    /// pass started it the world-model capture service was started by NOTHING
-    /// on any node — a registered, gated, packaged unit that never ran.
-    pub atlas_enabled: bool,
     /// `server.mode` is a cloud posture (`cloud` / `self_hosted`), i.e. the
     /// cloud relay is configured. Default `local` → false. The WFB auto-pair
     /// loop only fails over to the cloud relay when this is true; a local-first
@@ -171,7 +152,7 @@ impl AgentConfig {
     ///
     /// The three canonical paths honour the same `ADOS_CONFIG` / `ADOS_PROFILE_CONF`
     /// / `ADOS_MESH_ROLE` overrides the sibling daemons (`ados-control`,
-    /// `ados-compute`) already read, so a rootless per-user install (macOS
+    /// `ados-plugin-host`) already read, so a rootless per-user install (macOS
     /// workstation under `$HOME/.ados`) resolves its `workstation` profile from
     /// the same config file the rest of the node reads. Unset (the SBC default) →
     /// the `/etc/ados` FHS paths, unchanged.
@@ -242,7 +223,6 @@ impl AgentConfig {
             .map(str::to_string);
 
         let vision_enabled = raw.vision.enabled;
-        let atlas_enabled = raw.atlas.enabled;
 
         let cloud_relay_enabled = matches!(
             raw.server.mode.as_deref(),
@@ -263,7 +243,6 @@ impl AgentConfig {
             video_enabled,
             video_network_source,
             vision_enabled,
-            atlas_enabled,
             cloud_relay_enabled,
             configured_gs_role,
             headless_mode,

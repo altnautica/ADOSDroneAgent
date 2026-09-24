@@ -59,14 +59,6 @@ REQUIRED_CAP: dict[str, str | None] = {
     "cloud.publish": "cloud.publish",
     "cloud.records.put": "cloud.records",
     "offload.advertise": "vision.detection.publish",
-    "compute.dataset.write": "compute.dataset.write",
-    "compute.job.submit": "compute.job.submit",
-    "compute.job.read": "compute.job.read",
-    "compute.job.outputs": "compute.job.read",
-    "compute.job.cancel": "compute.job.submit",
-    "compute.stream.open": "compute.stream.open",
-    "compute.stream.close": "compute.stream.open",
-    "compute.stream.health": "compute.stream.open",
     "node.info": "node.info.read",
 }
 

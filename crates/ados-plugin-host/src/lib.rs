@@ -41,7 +41,6 @@
 
 pub mod archive;
 mod args;
-pub mod atlas_bridge;
 pub mod attestation;
 pub mod auto_update;
 pub mod backend;

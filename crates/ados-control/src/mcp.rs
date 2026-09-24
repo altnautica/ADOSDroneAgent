@@ -365,7 +365,6 @@ pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
             "/api/can/passthrough" => Some(Flight),
             // Operator-facing safe writes.
             "/api/vision/designate" | "/api/logs/push" => Some(SafeWrite),
-            p if p.starts_with("/api/atlas/capture/") => Some(SafeWrite),
             // Unpairing tears down the trust relationship.
             "/api/pairing/unpair" => Some(Destructive),
             // Running a plugin's MCP tool: the edge floor is admin. The connector
@@ -380,7 +379,6 @@ pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
         Method::PUT => match path {
             "/api/wfb/tx-power" | "/api/wfb/pair/auto-pair" => Some(Admin),
             "/api/vision/detector" => Some(Admin),
-            "/api/atlas/config" => Some(SafeWrite),
             p if is_plugin_config(p) => Some(Admin),
             p if p.starts_with("/api/v1/network/") => Some(Admin),
             p if p.starts_with("/api/v1/ground-station/") => Some(Admin),
@@ -730,14 +728,6 @@ mod tests {
         );
         assert_eq!(
             route_scope(&Method::POST, "/api/vision/designate"),
-            Some(ScopeClass::SafeWrite)
-        );
-        assert_eq!(
-            route_scope(&Method::POST, "/api/atlas/capture/start"),
-            Some(ScopeClass::SafeWrite)
-        );
-        assert_eq!(
-            route_scope(&Method::PUT, "/api/atlas/config"),
             Some(ScopeClass::SafeWrite)
         );
         assert_eq!(

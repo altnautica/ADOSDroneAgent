@@ -205,10 +205,6 @@ module = [
     "PIL.*",
     "pycuda",
     "pycuda.*",
-    "torch",
-    "torch.*",
-    "transformers",
-    "transformers.*",
 ]
 ignore_missing_imports = true
 

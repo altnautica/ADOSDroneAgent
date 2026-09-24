@@ -28,7 +28,6 @@
 //! Same posture as the state client — read-only, absent socket is normal, the route
 //! degrades to a structurally-complete empty table rather than failing.
 
-pub mod atlas_control_client;
 pub mod cmd;
 pub mod logd_client;
 pub mod mavlink_client;
@@ -37,7 +36,6 @@ pub mod state_client;
 pub mod swarm_client;
 pub mod vision_client;
 
-pub use atlas_control_client::{AtlasControlClient, AtlasControlError};
 pub use logd_client::LogdQueryClient;
 pub use mavlink_client::{AckStream, FrameRead, MavlinkIpcClient};
 pub use plugin_control_client::{PluginControlClient, PluginControlError};

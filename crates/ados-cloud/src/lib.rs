@@ -35,7 +35,6 @@
 //!   plugin's gated stream messages onto the broker and records into the
 //!   cloud, on the device's own credentials.
 
-pub mod atlas_bearer;
 pub mod config;
 pub mod dispatch;
 pub mod ground_station;
@@ -47,9 +46,7 @@ pub mod pairing;
 pub mod plugin_publish;
 pub mod plugin_update;
 pub mod tls;
-pub mod vision_bearer;
 
-pub use atlas_bearer::CloudBearer;
 pub use config::CloudConfig;
 pub use dispatch::{CommandResult, CommandStatus};
 pub use ground_station::{CloudRelayBridge, GsHeartbeat, ThrottleState, UplinkSnapshot};
@@ -60,4 +57,3 @@ pub use mqtt::{
     WebrtcSignalingRelay,
 };
 pub use pairing::PairingState;
-pub use vision_bearer::CloudDetectionPublisher;

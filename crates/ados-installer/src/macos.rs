@@ -3,11 +3,10 @@
 //! An Apple-Silicon Mac runs the ADOS agent's `workstation` profile as a set of
 //! per-user LaunchAgents under `$HOME/.ados` — no root, no systemd, no apt, no
 //! Python venv. The workstation profile is Rust-only: the native HTTP control
-//! surface (`ados-control`, the LAN pairing + REST front on `:8080`) and the
-//! compute engine (`ados-compute`, the reconstruct / offload job API on `:8092`),
-//! plus the shared core daemons the supervisor orchestrates (`ados-supervisor`,
-//! `ados-cloud`, `ados-logd`) and the plugin host (`ados-plugin-host`), which
-//! runs each installed extension as its own LaunchAgent.
+//! surface (`ados-control`, the LAN pairing + REST front on `:8080`), the shared
+//! core daemons the supervisor orchestrates (`ados-supervisor`, `ados-cloud`,
+//! `ados-logd`) and the plugin host (`ados-plugin-host`), which runs each
+//! installed extension as its own LaunchAgent.
 //!
 //! There is no prebuilt Mach-O binary for these services, so the installer builds
 //! them from the source tree (`cargo build --release`) into `$HOME/.ados/bin`,
@@ -21,7 +20,6 @@
 //! runs without a single `sudo` and with zero follow-up commands (the agents
 //! `RunAtLoad` and `KeepAlive` on crash, so a reboot brings the node back).
 
-use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -42,8 +40,6 @@ use crate::steps::extensions::{
 /// GCS reaches the workstation on the same port a drone/GS agent uses; the health
 /// gate polls it.
 const CONTROL_PORT: u16 = 8080;
-/// The compute engine's job-API bind port (mirrors the dev-node contract).
-const COMPUTE_PORT: u16 = 8092;
 
 /// One managed daemon: its service/binary name and whether launchd should keep it
 /// alive across a crash. Every daemon is `RunAtLoad` (launchd starts it at load
@@ -56,11 +52,11 @@ struct Daemon {
 }
 
 /// The workstation daemon set registered as LaunchAgents. `ados-supervisor` is
-/// the orchestrator; `ados-control` is the LAN front (`:8080`); `ados-compute`
-/// is the engine (`:8092`); `ados-cloud` is the (idle-in-local-mode) relay;
-/// `ados-logd` is the durable logging store; `ados-plugin-host` serves the
-/// per-plugin sockets and tokens. `ados-tui` is built + installed but NOT
-/// registered — it is an interactive terminal UI, not a background daemon.
+/// the orchestrator; `ados-control` is the LAN front (`:8080`); `ados-cloud` is
+/// the (idle-in-local-mode) relay; `ados-logd` is the durable logging store;
+/// `ados-plugin-host` serves the per-plugin sockets and tokens. `ados-tui` is
+/// built + installed but NOT registered — it is an interactive terminal UI, not
+/// a background daemon.
 const DAEMONS: &[Daemon] = &[
     Daemon {
         name: "ados-supervisor",
@@ -68,10 +64,6 @@ const DAEMONS: &[Daemon] = &[
     },
     Daemon {
         name: "ados-control",
-        keep_alive: true,
-    },
-    Daemon {
-        name: "ados-compute",
         keep_alive: true,
     },
     Daemon {
@@ -95,7 +87,6 @@ const DAEMONS: &[Daemon] = &[
 const WORKSTATION_BINARIES: &[&str] = &[
     "ados-supervisor",
     "ados-control",
-    "ados-compute",
     "ados-cloud",
     "ados-logd",
     "ados-plugin-host",
@@ -108,7 +99,6 @@ struct Paths {
     ados_home: PathBuf,
     bin: PathBuf,
     run: PathBuf,
-    compute: PathBuf,
     log: PathBuf,
     config: PathBuf,
     profile_conf: PathBuf,
@@ -131,7 +121,6 @@ impl Paths {
         Ok(Paths {
             bin: ados_home.join("bin"),
             run: ados_home.join("run"),
-            compute: ados_home.join("compute"),
             log: ados_home.join("log"),
             config: ados_home.join("config.yaml"),
             profile_conf: ados_home.join("profile.conf"),
@@ -223,8 +212,6 @@ impl Paths {
             &self.ados_home,
             &self.bin,
             &self.run,
-            &self.compute,
-            &self.compute.join("work"),
             &self.log,
             &self.launch_agents,
             // The logging store's DB dir, created explicitly so a create failure
@@ -470,15 +457,14 @@ fn ensure_cargo() -> Result<()> {
 }
 
 /// Install the system dependencies via Homebrew, best-effort. `ffmpeg` backs the
-/// video + capture paths; `colmap` seeds the accurate gaussian-splat
-/// reconstruction (the engine falls back to a working random-init path without
-/// it). Neither is required for the node to come up, so a missing `brew` or a
-/// slow bottle only degrades — it never blocks the install.
+/// video paths and the extensions that decode a drone's camera stream. It is not
+/// required for the node to come up, so a missing `brew` or a slow bottle only
+/// degrades — it never blocks the install.
 fn install_brew_deps() {
     if !exec::run_ok("sh", &["-c", "command -v brew"]) {
         println!(
-            "  deps: Homebrew not found; skipping ffmpeg/colmap \
-             (install brew + `brew install ffmpeg colmap` to enable video + accurate reconstruction)"
+            "  deps: Homebrew not found; skipping ffmpeg \
+             (install brew + `brew install ffmpeg` to enable video)"
         );
         return;
     }
@@ -490,17 +476,6 @@ fn install_brew_deps() {
         if !exec::run_ok("brew", &["install", "ffmpeg"]) {
             println!("  deps: ffmpeg install reported a non-zero status (continuing)");
         }
-    }
-    // colmap is the accurate-reconstruction seed. It is heavy to build from
-    // source, so only pull it when a bottle keeps it quick; otherwise leave a
-    // one-line note (the engine's random-init path still works).
-    if have_tool("colmap") {
-        println!("  deps: colmap already present (accurate reconstruction seed)");
-    } else {
-        println!(
-            "  deps: colmap not installed; the reconstruction engine uses its \
-             random-init path (run `brew install colmap` for the accurate seed)"
-        );
     }
 }
 
@@ -702,7 +677,7 @@ fn write_identity_and_config(args: &Args, paths: &Paths, profile: &str) -> Resul
 }
 
 /// Build the workstation `config.yaml` body (pure). A Rust-only workstation node:
-/// identity + local server posture + atlas enabled (the reconstruction surface).
+/// identity + local server posture.
 fn workstation_config_yaml(short_id: &str, name: &str, profile: &str) -> String {
     format!(
         "# ADOS Workstation Configuration\n\
@@ -715,19 +690,13 @@ profile: \"{profile}\"\n  \
 tier: \"auto\"\n\
 \n\
 server:\n  \
-mode: \"local\"\n\
-\n\
-# The world-model reconstruction surface. Enabled so the compute engine serves\n\
-# the Atlas job API; the drone/GCS submits reconstruction + offload work to it.\n\
-atlas:\n  \
-enabled: true\n"
+mode: \"local\"\n"
     )
 }
 
-/// The shared environment every daemon plist carries. Mirrors the dev-node
-/// contract (`scripts/dev/run-compute-node-macos.sh`) so the LAN-paired GCS
-/// reaches `ados-control` on `:8080` and the compute card reads the heartbeat
-/// sidecar under the per-user run dir — every path pinned under `$HOME/.ados`.
+/// The shared environment every daemon plist carries, so the LAN-paired GCS
+/// reaches `ados-control` on `:8080` and every daemon reads its sidecars under
+/// the per-user run dir — every path pinned under `$HOME/.ados`.
 ///
 /// The plugin lifecycle runs in three of these daemons (`ados-plugin-host`
 /// serves the plugins, `ados-control` installs them over REST, `ados-cloud`
@@ -741,7 +710,6 @@ fn build_env(
 ) -> Vec<(String, String)> {
     let run = paths.run.to_string_lossy().to_string();
     let config = paths.config.to_string_lossy().to_string();
-    let node_id = format!("mac-{}", hostname_slug());
     let path = |p: PathBuf| p.to_string_lossy().to_string();
     let plugins = paths.plugin_paths(plugin_runner);
     vec![
@@ -790,28 +758,6 @@ fn build_env(
         ("ADOS_DEVICE_ID".into(), device_id.to_string()),
         ("ADOS_CONTROL_SOCKET".into(), format!("{run}/control.sock")),
         ("ADOS_CONTROL_PORT".into(), CONTROL_PORT.to_string()),
-        (
-            "ADOS_COMPUTE_DB".into(),
-            paths.compute.join("jobs.db").to_string_lossy().to_string(),
-        ),
-        (
-            "ADOS_COMPUTE_WORK".into(),
-            paths.compute.join("work").to_string_lossy().to_string(),
-        ),
-        // The compute job API binds the LAN (0.0.0.0), not loopback: a drone
-        // forwards capture keyframes to it and the GCS fetches the reconstructed
-        // world models from it, both off-box (loopback would break Atlas). The
-        // pairing gate is the auth boundary — an off-box caller needs the pairing
-        // key. ADOS_COMPUTE_PUBLIC_URL is deliberately left unset so the daemon
-        // derives the artifact base from its mDNS `<hostname>.local` name, the
-        // same path a Linux node uses — so both platforms advertise a consistent,
-        // DHCP-stable URL rather than macOS baking in a LAN IP that can change.
-        (
-            "ADOS_COMPUTE_BIND".into(),
-            format!("0.0.0.0:{COMPUTE_PORT}"),
-        ),
-        ("ADOS_COMPUTE_NODE_ID".into(), node_id),
-        ("ADOS_ATLAS_ENABLED".into(), "1".into()),
         // The plugin lifecycle layout (`ados_plugin_host::Paths::from_env`).
         // `ADOS_RUN_DIR` above is its run dir; the unit dir is the per-user
         // LaunchAgents dir, where each plugin's job lands beside the core ones.
@@ -840,8 +786,8 @@ fn build_env(
 }
 
 /// A PATH for the launchd job environment that includes Homebrew (Apple-silicon
-/// `/opt/homebrew`, Intel `/usr/local`) so a daemon can find `ffmpeg` / `colmap`
-/// / `git`. launchd's default job PATH omits the Homebrew prefixes.
+/// `/opt/homebrew`, Intel `/usr/local`) so a daemon can find `ffmpeg` / `git`.
+/// launchd's default job PATH omits the Homebrew prefixes.
 fn launchd_path() -> String {
     "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()
 }
@@ -1038,14 +984,13 @@ struct HealthReport {
 /// answers. Every daemon in [`DAEMONS`] must be loaded + running under launchd
 /// AND stay running across a re-sample (a `ados-logd` that crash-loops on its DB —
 /// the original silent-failure class — is caught by the pid changing / vanishing),
-/// `ados-control` must return a 2xx from `/api/status` (not just any HTTP code),
-/// and `ados-compute` must actually be listening on its job-API port.
+/// and `ados-control` must return a 2xx from `/api/status` (not just any HTTP
+/// code).
 fn health_poll(uid: u32) -> HealthReport {
     // The control surface is the slowest to answer (it builds its full router), so
     // waiting for its 2xx also gives the other daemons time to reach steady state
     // before the launchd re-sample below.
     let control_ok = wait_control_2xx(CONTROL_PORT);
-    let compute_ok = wait_port_open(COMPUTE_PORT);
 
     // Wait for each launchd daemon to reach STEADY STATE — the same running pid
     // held across several consecutive samples. A fresh KeepAlive job commonly
@@ -1067,14 +1012,12 @@ fn health_poll(uid: u32) -> HealthReport {
     for (name, label) in &labels {
         match wait_daemon_steady(uid, label) {
             SteadyOutcome::Stable => {
-                // Combine the launchd steady-state proof with the functional proof
-                // for the two daemons that have one.
+                // Combine the launchd steady-state proof with the control
+                // surface's functional proof.
                 if *name == "ados-control" && !control_ok {
                     failures.push(format!(
                         "{name}: not returning 2xx on :{CONTROL_PORT}/api/status"
                     ));
-                } else if *name == "ados-compute" && !compute_ok {
-                    failures.push(format!("{name}: not listening on :{COMPUTE_PORT}"));
                 }
             }
             SteadyOutcome::CrashLooping => failures.push(format!(
@@ -1089,7 +1032,7 @@ fn health_poll(uid: u32) -> HealthReport {
 
     if failures.is_empty() {
         println!(
-            "  health: all {} daemons up (control 2xx, compute :{COMPUTE_PORT}, launchd running+stable)",
+            "  health: all {} daemons up (control 2xx, launchd running+stable)",
             DAEMONS.len()
         );
     } else {
@@ -1205,20 +1148,6 @@ fn wait_control_2xx(port: u16) -> bool {
         std::thread::sleep(Duration::from_millis(750));
     }
     println!(" (no 2xx)");
-    false
-}
-
-/// Poll a loopback TCP port until a connection is accepted (bounded ~20s). Proves
-/// the daemon that should own the port (`ados-compute` on its job-API port) is
-/// actually listening, not merely loaded under launchd.
-fn wait_port_open(port: u16) -> bool {
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    for _ in 0..20 {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
     false
 }
 
@@ -1349,9 +1278,6 @@ fn print_summary(paths: &Paths, device_id: &str, uid: u32, report: &HealthReport
     }
     println!("  device id     : {device_id}");
     println!("  control (GCS) : http://127.0.0.1:{CONTROL_PORT}   http://{ip}:{CONTROL_PORT}");
-    println!(
-        "  compute       : http://127.0.0.1:{COMPUTE_PORT}   ·   serves the fleet on your LAN (pairing-gated)"
-    );
     println!("  logs          : {}/", paths.log.display());
     println!(
         "  agents        : {}/co.ados.*.plist",
@@ -1408,24 +1334,8 @@ fn hostname_full() -> String {
     }
 }
 
-/// A DNS-safe slug of the short hostname for the compute node id (`mac-<slug>`).
-fn hostname_slug() -> String {
-    let res = exec::run("hostname", &["-s"]);
-    let raw = res.stdout.trim().to_ascii_lowercase();
-    let slug: String = raw
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() {
-        "node".to_string()
-    } else {
-        slug
-    }
-}
-
 /// This host's LAN IPv4 (`en0`, then `en1`), or `127.0.0.1`. Used for the
-/// browser-reachable artifact base + the operator reach block.
+/// operator reach block.
 fn lan_ipv4() -> String {
     for iface in ["en0", "en1"] {
         let res = exec::run("ipconfig", &["getifaddr", iface]);
@@ -1534,19 +1444,17 @@ gui/501/co.ados.logd = {
     }
 
     #[test]
-    fn workstation_config_carries_identity_and_atlas() {
+    fn workstation_config_carries_identity() {
         let cfg = workstation_config_yaml("abcd1234", "my-mac", "workstation");
         assert!(cfg.contains("device_id: \"abcd1234\""));
         assert!(cfg.contains("name: \"my-mac\""));
         assert!(cfg.contains("profile: \"workstation\""));
         assert!(cfg.contains("mode: \"local\""));
-        assert!(cfg.contains("enabled: true"));
     }
 
     #[test]
     fn label_maps_service_to_reverse_dns() {
         assert_eq!(label_for("ados-control"), "co.ados.control");
-        assert_eq!(label_for("ados-compute"), "co.ados.compute");
         assert_eq!(label_for("ados-supervisor"), "co.ados.supervisor");
         // The reverse-DNS prefix is what the plist filename + service target use.
         assert!(label_for("ados-cloud").starts_with("co.ados."));
@@ -1558,7 +1466,6 @@ gui/501/co.ados.logd = {
         let paths = Paths {
             bin: home.join(".ados/bin"),
             run: home.join(".ados/run"),
-            compute: home.join(".ados/compute"),
             log: home.join(".ados/log"),
             config: home.join(".ados/config.yaml"),
             profile_conf: home.join(".ados/profile.conf"),
@@ -1585,12 +1492,11 @@ gui/501/co.ados.logd = {
             Some("/Users/tester/.ados/run")
         );
         assert_eq!(get("ADOS_DEVICE_ID").as_deref(), Some("0011aabbccdd"));
-        assert_eq!(get("ADOS_ATLAS_ENABLED").as_deref(), Some("1"));
         assert_eq!(
             get("ADOS_LOGD_DB").as_deref(),
             Some("/Users/tester/.ados/logd/logs.db")
         );
-        // The compute config path uses the compute-specific env var name.
+        // The config path also rides the alternate env var name some daemons read.
         assert_eq!(
             get("ADOS_CONFIG_YAML").as_deref(),
             Some("/Users/tester/.ados/config.yaml")
@@ -1621,7 +1527,7 @@ gui/501/co.ados.logd = {
             Some("/Users/tester/.ados/secrets/setup-token")
         );
         // The launchd PATH must carry the Homebrew prefixes so a daemon finds
-        // ffmpeg/colmap/git.
+        // ffmpeg/git.
         assert!(get("PATH").unwrap().contains("/opt/homebrew/bin"));
         // The plugin lifecycle is home-rooted too; its unit dir is the per-user
         // LaunchAgents dir, so a plugin job lands beside the core ones.
@@ -1652,7 +1558,6 @@ gui/501/co.ados.logd = {
         let paths = Paths {
             bin: home.join(".ados/bin"),
             run: home.join(".ados/run"),
-            compute: home.join(".ados/compute"),
             log: home.join(".ados/log"),
             config: home.join(".ados/config.yaml"),
             profile_conf: home.join(".ados/profile.conf"),
@@ -1743,7 +1648,6 @@ gui/501/co.ados.logd = {
         let paths = Paths {
             bin: home.join(".ados/bin"),
             run: home.join(".ados/run"),
-            compute: home.join(".ados/compute"),
             log: home.join(".ados/log"),
             config: home.join(".ados/config.yaml"),
             profile_conf: home.join(".ados/profile.conf"),
@@ -1786,7 +1690,6 @@ gui/501/co.ados.logd = {
         let paths = Paths {
             bin: home.join(".ados/bin"),
             run: home.join(".ados/run"),
-            compute: home.join(".ados/compute"),
             log: home.join(".ados/log"),
             config: home.join(".ados/config.yaml"),
             profile_conf: home.join(".ados/profile.conf"),
@@ -1812,17 +1715,5 @@ gui/501/co.ados.logd = {
             ..Args::default()
         };
         assert_eq!(status_profile(&flagged, &paths), "workstation");
-    }
-
-    #[test]
-    fn hostname_slug_is_dns_safe() {
-        // The slug helper shells to `hostname`, so just assert the shape it must
-        // always produce (non-empty, lowercase alnum/dash, no leading/trailing dash).
-        let s = hostname_slug();
-        assert!(!s.is_empty());
-        assert!(!s.starts_with('-') && !s.ends_with('-'));
-        assert!(s
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
     }
 }

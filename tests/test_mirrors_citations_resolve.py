@@ -73,7 +73,11 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: 123 -> 120: the Python plugin lifecycle (routes, supervisor, state and
 #: auto-update) was deleted when the native lifecycle routes landed; the three
 #: Rust comments that cited it now say what the code does instead.
-MIN_CITATIONS = 120
+#:
+#: 120 -> 118: the world-model capture crate was deleted from the workspace,
+#: and its two citations (the capture control socket's bind hygiene and the
+#: keyframe session's `on_frame`) went with the crate that held them.
+MIN_CITATIONS = 118
 
 
 def _rust_sources() -> list[Path]:

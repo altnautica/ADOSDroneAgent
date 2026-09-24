@@ -45,11 +45,6 @@ pub const WS_TICKET_SUBPROTOCOL: &str = "ados-ws-ticket";
 /// the raw `:8765` MAVLink WS for an off-box paired caller.
 pub const SCOPE_MAVLINK_WS: &str = "gs.mavlink_ws";
 
-/// The world-model descriptor stream scope: a ticket minted by a workstation
-/// for this scope authorizes its `/ws/atlas/<device_id>` stream for a browser,
-/// which cannot set a header on the handshake.
-pub const SCOPE_ATLAS_WORLD_WS: &str = "compute.atlas_world";
-
 /// The RC channel-injection scope for one named client.
 ///
 /// Unlike [`SCOPE_MAVLINK_WS`] this is not a fixed string, because the ticket

@@ -140,10 +140,6 @@ fn topic_well_formed(topic: &str) -> bool {
 /// The namespace every plugin's own topics live under.
 const PLUGIN_NAMESPACE: &str = "plugin.";
 
-/// The host-owned world-model namespace. Only a host bridge may publish there;
-/// no plugin, whatever its id, may put a world model on the bus under it.
-const HOST_ATLAS_NAMESPACE: &str = "plugin.atlas.";
-
 /// A topic one plugin owns and shares: it may publish it, and another plugin
 /// may subscribe with `event.subscribe` plus `subscribe_capability`. Declared
 /// in the owner's manifest (`agent.contributes.shared_topics`).
@@ -275,15 +271,14 @@ pub fn is_subscribe_allowed(
 /// `events.is_publish_allowed`: the plugin's own namespace is always
 /// publishable; a shared topic is publishable by its owner with
 /// `event.publish`; otherwise `event.publish` is required and the reserved
-/// namespaces (including every other plugin's) are refused. The host world
-/// model namespace is refused even to a plugin whose id would make it "own".
+/// namespaces (including every other plugin's) are refused.
 pub fn is_publish_allowed(
     plugin_id: &str,
     topic: &str,
     granted_caps: &BTreeSet<String>,
     shared: &SharedTopics,
 ) -> bool {
-    if !topic_well_formed(topic) || topic.starts_with(HOST_ATLAS_NAMESPACE) {
+    if !topic_well_formed(topic) {
         return false;
     }
     if topic.starts_with(&format!("{PLUGIN_NAMESPACE}{plugin_id}.")) {
@@ -414,8 +409,8 @@ pub fn event_deliver_args(event: &Event) -> Value {
 /// bodies; a real host returns [`Err(HostError)`](HostError) for a soft failure,
 /// which the server renders into the response envelope `error` field.
 ///
-/// Async because the vision, compute, command-socket (GPIO, video, radio aux)
-/// and config-write methods await a socket, an HTTP reply or file work; the
+/// Async because the vision, command-socket (GPIO, video, radio aux), cloud
+/// relay and config-write methods await a socket or file work; the
 /// in-process methods complete synchronously.
 ///
 /// `granted_caps` is the caller's verified capability set. Only the
@@ -488,18 +483,6 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::VisionInfer => host.vision_infer(plugin_id, args).await,
         Method::VisionPublishDetection => host.vision_publish_detection(plugin_id, args).await,
         Method::VisionDesignateTrack => host.vision_designate_track(plugin_id, args).await,
-        // Compute offload: proxy to the paired compute node over HTTP, await the
-        // reply, and return the node's response map.
-        Method::ComputeDatasetWrite => host.compute_dataset_write(plugin_id, args).await,
-        Method::ComputeJobSubmit => host.compute_job_submit(plugin_id, args).await,
-        Method::ComputeJobRead => host.compute_job_read(plugin_id, args).await,
-        Method::ComputeJobOutputs => host.compute_job_outputs(plugin_id, args).await,
-        Method::ComputeJobCancel => host.compute_job_cancel(plugin_id, args).await,
-        // Streaming perception offload: open / close / read-health of a live
-        // frames→detections session on the paired compute node.
-        Method::ComputeStreamOpen => host.compute_stream_open(plugin_id, args).await,
-        Method::ComputeStreamClose => host.compute_stream_close(plugin_id, args).await,
-        Method::ComputeStreamHealth => host.compute_stream_health(plugin_id, args).await,
         // The event surface, ping, and the streaming subscribe methods never
         // reach here; the server short-circuits `vision.subscribe_frames`,
         // `vision.subscribe_detections` and `button.subscribe`, arming the
@@ -735,17 +718,11 @@ mod tests {
     }
 
     #[test]
-    fn publish_refuses_other_plugins_and_the_world_model_namespace() {
+    fn publish_refuses_other_plugins_namespaces() {
         let publish = caps(&["event.publish"]);
         assert!(!is_publish_allowed(
             "com.example.a",
             "plugin.com.example.b.status",
-            &publish,
-            &none()
-        ));
-        assert!(!is_publish_allowed(
-            "com.example.a",
-            "plugin.atlas.occupancy",
             &publish,
             &none()
         ));
@@ -777,7 +754,7 @@ mod tests {
         assert!(!may_deliver("com.acme", &private, &none()));
         assert!(may_deliver("com.acme.tools", &private, &none()));
         let host = event(
-            "plugin.atlas.occupancy",
+            "plugin.com.example.shared",
             crate::vehicle_events::HOST_PUBLISHER,
         );
         assert!(may_deliver("com.acme", &host, &none()));

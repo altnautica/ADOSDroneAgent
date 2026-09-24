@@ -2,8 +2,8 @@
 //!
 //! Maps the supervisor's lifecycle verbs onto the modern `launchctl` subcommand
 //! surface in the GUI domain of the running user (`gui/<uid>/<label>`). A unit
-//! name like `ados-compute.service` maps to the reverse-DNS launchd label
-//! `co.ados.compute`. launchd has no direct `reset-failed` analogue, so that
+//! name like `ados-control.service` maps to the reverse-DNS launchd label
+//! `co.ados.control`. launchd has no direct `reset-failed` analogue, so that
 //! verb is a documented best-effort no-op. A missing `launchctl` or a timeout is
 //! a soft failure, matching the systemd backend.
 

@@ -16,11 +16,9 @@ from .network import NetworkConfig
 from .radio import RadioConfig
 from .security import SecurityConfig
 from .system import (
-    AtlasConfig,
     DiscoveryConfig,
     LoggingConfig,
     PairingConfig,
-    PerceptionConfig,
     SwarmConfig,
     UiConfig,
     VisionConfig,
@@ -61,8 +59,6 @@ class ADOSConfig(BaseModel):
     pairing: PairingConfig = PairingConfig()
     discovery: DiscoveryConfig = DiscoveryConfig()
     vision: VisionConfig = VisionConfig()
-    atlas: AtlasConfig = AtlasConfig()
-    perception: PerceptionConfig = PerceptionConfig()
     swarm: SwarmConfig = SwarmConfig()
     battery: BatteryConfig = BatteryConfig()
     ground_station: GroundStationConfig = GroundStationConfig()

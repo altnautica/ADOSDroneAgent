@@ -40,12 +40,6 @@ pub const WFB_RELAY_JSON: &str = "/run/ados/wfb-relay.json";
 /// Receiver-role snapshot (merged-stream FEC combine stats).
 pub const WFB_RECEIVER_JSON: &str = "/run/ados/wfb-receiver.json";
 
-/// Atlas aux-lane relay snapshot: the relay loop's forward counters for the
-/// world-model events it bridges off the WFB aux stream onto the LAN. Written by
-/// the relay loop, read cross-process by the API layer for the GS Atlas relay
-/// card. Resolve at write/read time via [`run_path`] so `ADOS_RUN_DIR` is honored.
-pub const ATLAS_RELAY_JSON: &str = "/run/ados/atlas-relay.json";
-
 /// Cross-process mesh-event journal: a newline-delimited JSON stream the
 /// relay/receiver loops and the supervisor's role transition append to and the
 /// REST layer tails. Each line is one event object

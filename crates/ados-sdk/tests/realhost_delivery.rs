@@ -112,7 +112,7 @@ async fn publish_and_record_reach_the_relay_under_the_plugin_id() {
     let published = h
         .ctx
         .cloud
-        .publish("atlas.pose", &[1, 2, 3])
+        .publish("track.pose", &[1, 2, 3])
         .await
         .expect("publish");
     assert_eq!(ok_flag(&published), Some(true));
@@ -132,7 +132,7 @@ async fn publish_and_record_reach_the_relay_under_the_plugin_id() {
     let seen = relay.await.unwrap();
     assert_eq!(seen[0].kind, CloudPublishKind::Stream);
     assert_eq!(seen[0].plugin_id, PLUGIN_ID);
-    assert_eq!(seen[0].stream.as_deref(), Some("atlas.pose"));
+    assert_eq!(seen[0].stream.as_deref(), Some("track.pose"));
     assert_eq!(seen[0].payload, vec![1, 2, 3]);
 
     assert_eq!(seen[1].kind, CloudPublishKind::Record);

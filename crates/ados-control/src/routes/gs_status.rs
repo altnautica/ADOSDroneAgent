@@ -131,12 +131,6 @@ fn wfb_relay_path() -> PathBuf {
     run_dir().join("wfb-relay.json")
 }
 
-/// The Atlas aux-lane relay sidecar (`/run/ados/atlas-relay.json`) the relay loop
-/// writes; the sidecar fallback for `/wfb/atlas-relay/status`.
-fn atlas_relay_path() -> PathBuf {
-    run_dir().join("atlas-relay.json")
-}
-
 /// The receiver-state sidecar (`/run/ados/wfb-receiver.json`) the receiver loop
 /// writes; the sidecar fallback for the two `/wfb/receiver/*` routes.
 fn wfb_receiver_path() -> PathBuf {
@@ -988,33 +982,6 @@ pub async fn get_wfb_relay_status(State(state): State<AppState>) -> Response {
         return Json(fresh_snapshot_body(detail)).into_response();
     }
     let path = wfb_relay_path();
-    match read_fresh_json(&path, SystemTime::now()) {
-        Some(snap) => Json(fresh_snapshot_body(snap)).into_response(),
-        None => Json(stale_snapshot_body(read_json_or_empty(&path))).into_response(),
-    }
-}
-
-/// `GET /api/v1/ground-station/wfb/atlas-relay/status` → the Atlas aux-lane relay's
-/// forward counters.
-///
-/// `404` `E_WRONG_ROLE` off a relay node. On a relay, reads the store's most-recent
-/// `gs.atlas_relay` event (the relay loop ships the same body it writes to the
-/// sidecar), falling back to the `/run/ados/atlas-relay.json` sidecar. The body is
-/// the relay's `{up, datagrams_seen, forwarded, malformed, forward_failed,
-/// compute_url, listen_port, generated_at_ms}` snapshot; both sources are
-/// age-gated, and with neither current the keys are nulled under `stale: true`.
-pub async fn get_atlas_relay_status(State(state): State<AppState>) -> Response {
-    let role = match ground_station_role(&state) {
-        Some(r) => r,
-        None => return profile_mismatch(),
-    };
-    if role != "relay" {
-        return wrong_role("relay");
-    }
-    if let Some(detail) = latest_event_detail(&state, "gs.atlas_relay").await {
-        return Json(fresh_snapshot_body(detail)).into_response();
-    }
-    let path = atlas_relay_path();
     match read_fresh_json(&path, SystemTime::now()) {
         Some(snap) => Json(fresh_snapshot_body(snap)).into_response(),
         None => Json(stale_snapshot_body(read_json_or_empty(&path))).into_response(),

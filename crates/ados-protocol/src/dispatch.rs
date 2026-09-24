@@ -69,14 +69,6 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "cloud.publish", required_cap: Some("cloud.publish"), inline: false },
     DispatchMethod { method: "cloud.records.put", required_cap: Some("cloud.records"), inline: false },
     DispatchMethod { method: "offload.advertise", required_cap: Some("vision.detection.publish"), inline: false },
-    DispatchMethod { method: "compute.dataset.write", required_cap: Some("compute.dataset.write"), inline: false },
-    DispatchMethod { method: "compute.job.submit", required_cap: Some("compute.job.submit"), inline: false },
-    DispatchMethod { method: "compute.job.read", required_cap: Some("compute.job.read"), inline: false },
-    DispatchMethod { method: "compute.job.outputs", required_cap: Some("compute.job.read"), inline: false },
-    DispatchMethod { method: "compute.job.cancel", required_cap: Some("compute.job.submit"), inline: false },
-    DispatchMethod { method: "compute.stream.open", required_cap: Some("compute.stream.open"), inline: false },
-    DispatchMethod { method: "compute.stream.close", required_cap: Some("compute.stream.open"), inline: false },
-    DispatchMethod { method: "compute.stream.health", required_cap: Some("compute.stream.open"), inline: false },
     DispatchMethod { method: "node.info", required_cap: Some("node.info.read"), inline: false },
 ];
 

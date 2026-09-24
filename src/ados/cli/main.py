@@ -818,7 +818,7 @@ def _stop_service_with_kill_fallback(service: str) -> None:
 # The macOS workstation daemons registered as per-user LaunchAgents by the
 # installer (macos.rs). `ados-tui` is installed but is not a daemon, so it has no
 # LaunchAgent to boot out. The reverse-DNS labels are `co.ados.<tail>`.
-_MACOS_DAEMONS = ("supervisor", "control", "compute", "cloud", "logd")
+_MACOS_DAEMONS = ("supervisor", "control", "cloud", "logd")
 
 
 def _macos_ados_home() -> Path:

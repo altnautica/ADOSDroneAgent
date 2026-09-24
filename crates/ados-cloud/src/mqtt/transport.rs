@@ -1,6 +1,6 @@
 //! The broker transport seam.
 //!
-//! [`MqttTransport`] is the small async surface the Atlas bearer and the signaling
+//! [`MqttTransport`] is the small async surface the plugin publish lane and the signaling
 //! relay route through (`publish`, `subscribe`, and a stream of incoming
 //! messages). A test fake implements it without a broker; [`RumqttcTransport`]
 //! is the real rumqttc-next client over WSS+TLS.

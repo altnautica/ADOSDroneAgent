@@ -2370,7 +2370,7 @@ mod tests {
         // retired, so a legitimate shrink below this is a deliberate edit here,
         // and the message has to say so rather than accusing the scan.
         assert!(
-            checked >= 40,
+            checked >= 39,
             "parsed only {checked} unit files under {}. Either the scan is broken, \
              or units were legitimately removed -- if the latter, lower this floor \
              deliberately rather than deleting the check",
@@ -2460,7 +2460,7 @@ mod tests {
             problems.extend(restart_policy_problems(name, &body));
         }
         assert!(
-            checked >= 40,
+            checked >= 39,
             "parsed only {checked} ados-*.service files under {}",
             dir.display()
         );
@@ -2556,7 +2556,7 @@ mod tests {
             checked += 1;
             problems.extend(unguaranteed_paths(name, &body));
         }
-        assert!(checked >= 40, "parsed only {checked} units");
+        assert!(checked >= 39, "parsed only {checked} units");
         assert!(
             problems.is_empty(),
             "these units fail namespace setup when the path is absent:\n{}",

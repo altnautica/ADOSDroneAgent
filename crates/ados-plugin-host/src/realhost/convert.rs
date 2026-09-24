@@ -30,22 +30,12 @@ pub(super) fn json_to_mpv(value: &serde_json::Value) -> Value {
     }
 }
 
-/// Render a typed reply struct (any `Serialize`: a compute-node reply, the
-/// node facts) as the msgpack response map the SDK facade parses, mapping it
-/// 1:1 through JSON (the struct's serde field names are the keys it reads).
-pub(super) fn compute_reply<T: serde::Serialize>(value: &T) -> Result<HostResult, HostError> {
+/// Render a typed reply struct (any `Serialize`, e.g. the node facts) as the
+/// msgpack response map the SDK facade parses, mapping it 1:1 through JSON
+/// (the struct's serde field names are the keys it reads).
+pub(super) fn serialize_reply<T: serde::Serialize>(value: &T) -> Result<HostResult, HostError> {
     let json = serde_json::to_value(value).map_err(|e| HostError::Rpc(e.to_string()))?;
     Ok(json_to_mpv(&json))
-}
-
-/// A sub-value of the args map as `serde_json`, for forwarding `meta` / `params`
-/// to the compute node verbatim. Absent / null / non-convertible becomes an
-/// empty object (the facade always sends a dict; the node expects an object).
-pub(super) fn compute_json_arg(args: &Value, key: &str) -> serde_json::Value {
-    map_get(args, key)
-        .and_then(|v| serde_json::to_value(v).ok())
-        .filter(|v| !v.is_null())
-        .unwrap_or_else(|| serde_json::Value::Object(Default::default()))
 }
 
 /// Coerce a msgpack value to raw bytes, mirroring the Python `msg_bytes`

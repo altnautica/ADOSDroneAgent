@@ -87,13 +87,6 @@ export interface AgentConfig {
     models_dir?: string;
     models_cache_max_mb?: number;
   };
-  atlas?: {
-    enabled?: boolean;
-    capture_profile?: "orbit" | "lawnmower" | "freeform" | "inspection";
-    pose_tier?: "auto" | "local" | "offload" | "hybrid";
-    reconstruct_steps?: number;
-    hfov_deg?: number;
-  };
   swarm?: {
     enabled?: boolean;
     role?: string;
@@ -111,18 +104,6 @@ export interface AgentConfig {
     temp_spike_dc_per_s?: number;
     predictive_window_s?: number;
     reserve_percent?: number;
-  };
-  // Two-tier perception execution: the drone-side offload target + the
-  // workstation-side serving toggle. Read on the Offload settings page.
-  perception?: {
-    offload?: {
-      enabled?: string;
-      compute_node_addr?: string;
-    };
-    serving?: {
-      enabled?: string;
-      detector_model?: string;
-    };
   };
   [key: string]: unknown;
 }

@@ -19,13 +19,11 @@
 //! set would be served with the auth SKIPPED. The `native_set_matches_router`
 //! test pins the full set so the two never drift.
 
-pub mod atlas;
 pub mod battery;
 pub mod camera_config;
 pub mod can;
 pub mod cloud_link;
 pub mod command;
-pub mod compute_status;
 pub mod config_rw;
 pub mod config_schema;
 pub mod dashboard_pin;
@@ -98,7 +96,6 @@ pub mod wfb;
 pub mod wfb_local_bind;
 pub mod wfb_pair_write;
 pub mod wfb_write;
-pub mod workstation_credential;
 pub mod ws_ticket;
 
 use axum::extract::DefaultBodyLimit;
@@ -332,37 +329,12 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
                 .patch(plugins_proxy::plugin_http)
                 .delete(plugins_proxy::plugin_http),
         )
-        // The compute node's cluster status, read from its heartbeat sidecar, so
-        // a LAN-paired GCS renders the compute-cluster card local-first.
-        .route(
-            "/api/compute/status",
-            get(compute_status::get_compute_status),
-        )
         // Whether the cloud relay is talking to the cloud: broker session and
         // last status POST, from the relay's own sidecar.
         .route("/api/cloud/link", get(cloud_link::get_cloud_link))
         // Recent log entries and their live SSE tail, from the durable store.
         .route("/api/logs", get(logs::get_logs))
         .route("/api/logs/stream", get(logs::get_logs_stream))
-        // The credentials workstations issued this node for their lanes: the
-        // ground station installs one, the lanes present it (never listed back).
-        .route(
-            "/api/compute/workstation-credential",
-            get(workstation_credential::get_workstation_credentials)
-                .post(workstation_credential::install_workstation_credential),
-        )
-        // ADOS Atlas per-drone world-model capture: readiness (drone-local facts
-        // + live session state), the per-drone enable/config write, and the live
-        // capture-session controls forwarded to the capture service's socket.
-        .route("/api/atlas/readiness", get(atlas::get_atlas_readiness))
-        .route("/api/atlas/config", put(atlas::put_atlas_config))
-        .route("/api/atlas/capture/start", post(atlas::post_capture_start))
-        .route("/api/atlas/capture/stop", post(atlas::post_capture_stop))
-        .route("/api/atlas/capture/pause", post(atlas::post_capture_pause))
-        .route(
-            "/api/atlas/capture/resume",
-            post(atlas::post_capture_resume),
-        )
         // WebSocket auth ticket mint: exchanges the pairing key (LAN-edge auth)
         // for a short-lived self-contained HMAC ticket a browser GCS hands to the
         // MAVLink WS proxy through the subprotocol list.
@@ -532,10 +504,6 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route(
             "/api/v1/ground-station/wfb/relay/status",
             get(gs_status::get_wfb_relay_status),
-        )
-        .route(
-            "/api/v1/ground-station/wfb/atlas-relay/status",
-            get(gs_status::get_atlas_relay_status),
         )
         .route(
             "/api/v1/ground-station/wfb/receiver/relays",

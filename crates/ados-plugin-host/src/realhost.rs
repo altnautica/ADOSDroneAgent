@@ -5,8 +5,8 @@
 //! responsibility: `mavlink_gate` (outbound frame classification and the
 //! component gate), `facades` (component registrar), `config_store` and
 //! `config_control` (plugin config and its persistence), `forwards`
-//! (command-socket services), `setpoint` (flight request parsing), `offload`
-//! (perception sessions), `display` (the reserved plugin page), `node_info`
+//! (command-socket services), `setpoint` (flight request parsing), `advertise`
+//! (the offload-link advertisement), `display` (the reserved plugin page), `node_info`
 //! (the node facts), `caps` (the ungrantable capability set) and `args`
 //! (msgpack readers). The argument
 //! validation, the inline capability gates, the error strings and the
@@ -26,7 +26,7 @@
 //! One [`Arc<RealHost>`] is shared across every per-plugin accept task, so every
 //! facade is behind a [`std::sync::Mutex`]. Every lock is taken and released
 //! with no `.await` in between, so a std mutex is correct: the async methods
-//! (command-socket forwards, config persistence, offload) await only after
+//! (command-socket forwards, config persistence, cloud relay) await only after
 //! their guard is dropped.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -37,16 +37,10 @@ use std::time::{Duration, SystemTime};
 
 use rmpv::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{broadcast, Notify};
-use tokio::task::JoinHandle;
+use tokio::sync::broadcast;
 
-use ados_compute::{
-    run_offload_orchestrator, ComputeClient, ComputeJobKind, NodeEndpoint, OrchestratorConfig,
-};
-use ados_protocol::node_credential::WorkstationCredentials;
-use ados_protocol::offload_link::{read_offload_link_from, OFFLOAD_LINK_SIDECAR};
+use ados_protocol::offload_link::OFFLOAD_LINK_SIDECAR;
 
-use crate::button_client::RECONNECT_INTERVAL;
 use crate::frame_link::{FrameLink, SendError};
 use crate::host::{not_implemented, HostError, HostResult, HostServices};
 use crate::vehicle_events::FcIdentity;
@@ -64,7 +58,6 @@ mod forwards;
 mod host_services;
 mod mavlink_gate;
 mod node_info;
-mod offload;
 mod setpoint;
 mod telemetry;
 
@@ -77,7 +70,6 @@ use self::display::*;
 use self::facades::*;
 use self::forwards::*;
 use self::mavlink_gate::*;
-use self::offload::*;
 use self::setpoint::*;
 use self::telemetry::*;
 use crate::args::*;
@@ -132,10 +124,6 @@ pub struct RealHost {
     /// MAVLink link.
     msp: Option<Arc<FrameLink>>,
     vision: Option<Arc<VisionClient>>,
-    /// The paired compute node's offload client. `None` until the supervisor
-    /// wires a discovered/paired node; the `compute_*` methods return
-    /// `not_implemented` while unwired (the MAVLink/vision not-available posture).
-    compute: Option<Arc<ComputeClient>>,
     plugin_runtime_lookup: Option<SharedRuntimeLookup>,
     agent_id_lookup: Option<AgentIdLookup>,
     /// Sidecar path the reserved display page reads its content from. The
@@ -177,18 +165,6 @@ pub struct RealHost {
     /// [`aux_reader`](Self::aux_reader): one connection to the state socket
     /// however many plugins read it.
     state_reader: std::sync::OnceLock<broadcast::Sender<Arc<Value>>>,
-    /// Live streaming perception-offload sessions a plugin opened, keyed by
-    /// session id. Each holds its cancel handle + orchestrator task + the node
-    /// reach for health reads. A session is closed on an explicit
-    /// `compute.stream.close` or when its opener disconnects (SAFE-by-default: a
-    /// session never outlives the plugin that opened it).
-    offload_streams: Mutex<HashMap<String, OffloadStreamHandle>>,
-    /// Monotonic counter minting a unique session id when the plugin omits one.
-    offload_session_seq: AtomicU64,
-    /// The store of credentials workstations issued this drone, from which an
-    /// offload session presents the one its node issued (the canonical
-    /// `/etc/ados/workstation-credentials.json`; a builder overrides it in tests).
-    workstation_credentials_path: PathBuf,
     /// The offload-link sidecar the perception-tier decision is read from (the
     /// canonical `/run/ados/offload-link.json`; a builder overrides it in tests).
     /// Reusing the sidecar keeps the tier decision one source of truth,
@@ -227,7 +203,6 @@ impl RealHost {
             mavlink: None,
             msp: None,
             vision: None,
-            compute: None,
             plugin_runtime_lookup: None,
             agent_id_lookup: None,
             display_page_path: PathBuf::from(LCD_PLUGIN_PAGE_PATH),
@@ -238,9 +213,6 @@ impl RealHost {
             aux_reader: std::sync::OnceLock::new(),
             vehicle_state_sock: PathBuf::from(VEHICLE_STATE_SOCK),
             state_reader: std::sync::OnceLock::new(),
-            offload_streams: Mutex::new(HashMap::new()),
-            offload_session_seq: AtomicU64::new(0),
-            workstation_credentials_path: WorkstationCredentials::default_path(),
             offload_link_path: PathBuf::from(OFFLOAD_LINK_SIDECAR),
             state_path: PathBuf::from(crate::state::PLUGIN_STATE_PATH),
             cloud_publish_path: ados_protocol::cloud_publish::socket_path(),
@@ -266,13 +238,6 @@ impl RealHost {
     /// style; the daemon passes its run dir's, tests a stub's).
     pub fn with_vehicle_state_socket(mut self, path: PathBuf) -> Self {
         self.vehicle_state_sock = path;
-        self
-    }
-
-    /// Override the workstation-credential store path (builder style, tests).
-    /// Production uses the canonical path from [`Self::new`].
-    pub fn with_workstation_credentials_path(mut self, path: PathBuf) -> Self {
-        self.workstation_credentials_path = path;
         self
     }
 
@@ -341,15 +306,6 @@ impl RealHost {
     /// MAVLink not-available posture.
     pub fn with_vision(mut self, vision: Arc<VisionClient>) -> Self {
         self.vision = Some(vision);
-        self
-    }
-
-    /// Wire the paired compute node's offload client (builder style). The
-    /// supervisor calls this once it has a node base url and key (from discovery
-    /// and LAN pairing). When unwired the `compute_*` methods return the
-    /// `not_implemented` shape, matching the MAVLink/vision not-available posture.
-    pub fn with_compute(mut self, compute: Arc<ComputeClient>) -> Self {
-        self.compute = Some(compute);
         self
     }
 

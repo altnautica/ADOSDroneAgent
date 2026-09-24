@@ -68,10 +68,10 @@ pub mod seams;
 pub mod stats;
 
 pub use args::{
-    aux_rx_port, control_rx_port, data_rx_args, gs_atlas_rx_args, gs_aux_tx_args,
-    gs_rx_control_args, gs_tx_control_args, video_rx_port, AUX_TX_PORT, DEFAULT_REG_DOMAIN,
-    RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE, STATE_BLOCKED_UNPAIRED, STATE_NO_INJECTION,
-    STATE_REG_BLOCKED, STATE_SEARCHING, TX_CONTROL_PORT,
+    aux_rx_port, control_rx_port, data_rx_args, gs_aux_rx_args, gs_aux_tx_args, gs_rx_control_args,
+    gs_tx_control_args, video_rx_port, AUX_TX_PORT, DEFAULT_REG_DOMAIN, RX_HEALTH_POLL_INTERVAL_S,
+    STATE_ACTIVE, STATE_BLOCKED_UNPAIRED, STATE_NO_INJECTION, STATE_REG_BLOCKED, STATE_SEARCHING,
+    TX_CONTROL_PORT,
 };
 pub use loops::{stats_reader_loop, zombie_watchdog};
 pub use seams::{DataRxHandle, IwChannelSetter, SharedValidCounter, SystemClock};
@@ -444,7 +444,7 @@ impl WfbRxManager {
         // no inbound frames costs essentially nothing.
         let aux = GsWfbProcess::spawn(
             "wfb_rx",
-            &gs_atlas_rx_args(iface, &rx_key, aux_rx_port(primary_slot), drone),
+            &gs_aux_rx_args(iface, &rx_key, aux_rx_port(primary_slot), drone),
             Stdout::Null,
             Some("/run/ados/wfb-gs-aux-rx.log"),
         )
@@ -536,7 +536,7 @@ impl WfbRxManager {
         };
         let aux = GsWfbProcess::spawn(
             "wfb_rx",
-            &gs_atlas_rx_args(iface, &rx_key, aux_rx_port(slot), drone),
+            &gs_aux_rx_args(iface, &rx_key, aux_rx_port(slot), drone),
             Stdout::Null,
             Some(&format!("/run/ados/wfb-gs-aux-rx-{slot}.log")),
         )

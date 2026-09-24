@@ -72,7 +72,6 @@ use tokio::process::Command;
 /// GS rig's Hardware tab can restart the receive WFB stack.
 const ALLOWED_UNITS: &[&str] = &[
     "ados-api",
-    "ados-atlas",
     "ados-cloud",
     "ados-discovery",
     "ados-ethernet",

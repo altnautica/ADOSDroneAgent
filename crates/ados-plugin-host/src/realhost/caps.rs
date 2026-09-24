@@ -159,13 +159,5 @@ pub(super) const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         VisionSubscribeDetections,
         VisionDesignateTrack,
         ButtonSubscribe,
-        ComputeDatasetWrite,
-        ComputeJobSubmit,
-        ComputeJobRead,
-        ComputeJobOutputs,
-        ComputeJobCancel,
-        ComputeStreamOpen,
-        ComputeStreamClose,
-        ComputeStreamHealth,
     ]
 };

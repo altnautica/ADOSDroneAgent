@@ -154,22 +154,8 @@ fn native_routes() -> Vec<NativeRoute> {
         put("/api/plugins/{plugin_id}/x/{*rest}"),
         patch("/api/plugins/{plugin_id}/x/{*rest}"),
         delete("/api/plugins/{plugin_id}/x/{*rest}"),
-        // Compute-node cluster status (read from the heartbeat sidecar).
-        get("/api/compute/status"),
         // Cloud relay link state (read from the cloud-link sidecar).
         get("/api/cloud/link"),
-        // The workstation-issued credentials this node presents on its lanes:
-        // the install write + the (secret-free) listing.
-        get("/api/compute/workstation-credential"),
-        post("/api/compute/workstation-credential"),
-        // ADOS Atlas per-drone world-model capture: readiness read + the enable
-        // config write + the live capture-session controls.
-        get("/api/atlas/readiness"),
-        put("/api/atlas/config"),
-        post("/api/atlas/capture/start"),
-        post("/api/atlas/capture/stop"),
-        post("/api/atlas/capture/pause"),
-        post("/api/atlas/capture/resume"),
         // WebSocket auth ticket mint.
         post("/api/_ws/ticket"),
         // Dashboard-access PIN gate (status/verify/set public-exempt at the edge,
@@ -236,7 +222,6 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/status"),
         get("/api/v1/ground-station/wfb"),
         get("/api/v1/ground-station/wfb/relay/status"),
-        get("/api/v1/ground-station/wfb/atlas-relay/status"),
         get("/api/v1/ground-station/wfb/receiver/relays"),
         get("/api/v1/ground-station/wfb/receiver/combined"),
         // Relay-proxy to a WFB-linked drone (profile-gated). A wildcard tail:
@@ -824,7 +809,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            200,
+            190,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -851,7 +836,6 @@ mod tests {
             "/api/v1/ground-station/status",
             "/api/v1/ground-station/wfb",
             "/api/v1/ground-station/wfb/relay/status",
-            "/api/v1/ground-station/wfb/atlas-relay/status",
             "/api/v1/ground-station/wfb/receiver/relays",
             "/api/v1/ground-station/wfb/receiver/combined",
             "/api/v1/ground-station/role",
@@ -875,9 +859,6 @@ mod tests {
             "/api/v1/network/client/configured",
             "/api/v1/network/mac/adapters",
             "/api/plugins/{plugin_id}/state",
-            "/api/compute/status",
-            "/api/atlas/readiness",
-            "/api/compute/workstation-credential",
             "/api/cloud/link",
             "/api/logs",
             "/api/logs/stream",
@@ -890,14 +871,6 @@ mod tests {
         // The CAN passthrough 501 stub is native (POST).
         assert!(has(Method::POST, "/api/can/passthrough"));
         assert!(has(Method::POST, "/api/services/{name}/restart"));
-        // The ADOS Atlas capture control writes.
-        assert!(has(Method::PUT, "/api/atlas/config"));
-        assert!(has(Method::POST, "/api/atlas/capture/start"));
-        assert!(has(Method::POST, "/api/atlas/capture/stop"));
-        assert!(has(Method::POST, "/api/atlas/capture/pause"));
-        // The workstation credential install (a key-gated write).
-        assert!(has(Method::POST, "/api/compute/workstation-credential"));
-        assert!(has(Method::POST, "/api/atlas/capture/resume"));
         assert!(has(Method::POST, "/api/v1/system/restart-supervisor"));
         assert!(has(Method::POST, "/api/mavlink/signing/enroll-fc"));
         assert!(has(Method::POST, "/api/mavlink/signing/disable-on-fc"));

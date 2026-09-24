@@ -55,7 +55,7 @@ pub async fn get_plugin_state(AxumPath(plugin_id): AxumPath<String>) -> Response
 }
 
 /// Whether `id` can name a state sidecar: a plugin id (`com.example.follow`) or a
-/// first-party feature id (`atlas`). Lowercase alphanumeric first, then lowercase
+/// single-segment feature id (`demo`). Lowercase alphanumeric first, then lowercase
 /// alphanumeric, `.` or `-`, with no `..`. The id is joined into a filesystem path,
 /// and axum percent-decodes the segment, so anything that could carry a `/` or a
 /// parent step must be refused before the join.
@@ -219,9 +219,9 @@ mod tests {
             let resp = read_plugin_state(&plugins, id, SystemTime::now());
             assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{id}");
         }
-        // A first-party single-segment id still resolves.
-        write_sidecar(&plugins, "atlas", &json!({ "state": "idle" }));
-        let resp = read_plugin_state(&plugins, "atlas", SystemTime::now());
+        // A single-segment id still resolves.
+        write_sidecar(&plugins, "demo", &json!({ "state": "idle" }));
+        let resp = read_plugin_state(&plugins, "demo", SystemTime::now());
         assert_eq!(resp.status(), StatusCode::OK);
     }
 }

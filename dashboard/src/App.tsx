@@ -24,7 +24,6 @@ import { LogsRoute } from "@/routes/logs-route";
 import { PairingRoute } from "@/routes/pairing-route";
 import { PeripheralsRoute } from "@/routes/peripherals-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
-import { AtlasSwarmSettings } from "@/routes/settings/atlas-swarm-settings";
 import { BatterySettings } from "@/routes/settings/battery-settings";
 import { CellularSettings } from "@/routes/settings/cellular-settings";
 import { CameraSettings } from "@/routes/settings/camera-settings";
@@ -34,11 +33,11 @@ import { DisplaySettings } from "@/routes/settings/display-settings";
 import { MacPinSettings } from "@/routes/settings/mac-pin-settings";
 import { MavlinkSettings } from "@/routes/settings/mavlink-settings";
 import { NetworkSettings } from "@/routes/settings/network-settings";
-import { OffloadSettings } from "@/routes/settings/offload-settings";
 import { ProfileSettings } from "@/routes/settings/profile-settings";
 import { RegionSettings } from "@/routes/settings/region-settings";
 import { SecuritySettings } from "@/routes/settings/security-settings";
 import { SelfHealSettings } from "@/routes/settings/self-heal-settings";
+import { SwarmSettings } from "@/routes/settings/swarm-settings";
 import { VisionSettings } from "@/routes/settings/vision-settings";
 import { VideoRoute } from "@/routes/video-route";
 
@@ -195,16 +194,15 @@ export function App() {
                     }
                   />
                   <Route
-                    path="atlas-swarm"
+                    path="swarm"
                     element={
                       <ProfileGate allow={["drone"]}>
-                        <AtlasSwarmSettings />
+                        <SwarmSettings />
                       </ProfileGate>
                     }
                   />
                   <Route path="discovery" element={<DiscoverySettings />} />
                   <Route path="display" element={<DisplaySettings />} />
-                  <Route path="offload" element={<OffloadSettings />} />
                   <Route path="advanced" element={<AdvancedSettings />} />
                 </Route>
                 <Route

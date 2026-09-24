@@ -1,5 +1,3 @@
-import { Link } from "react-router-dom";
-
 import {
   ConfigEnumField,
   ConfigNumberField,
@@ -122,7 +120,7 @@ export function VisionSettings() {
         </>
       )}
 
-      {/* Honest boundary: model selection + offload are managed elsewhere. */}
+      {/* Honest boundary: model selection is managed elsewhere. */}
       <Card>
         <CardContent className="pt-5 pb-5 space-y-1.5">
           <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
@@ -131,15 +129,7 @@ export function VisionSettings() {
           <p className="text-xs text-muted-foreground leading-relaxed">
             The active detector model is not a config key here; it is selected in
             Mission Control's vision hub, which writes the engine's detector and
-            restarts it. Where detection runs (on this node or offloaded to a
-            workstation) is set on the{" "}
-            <Link
-              to="/settings/offload"
-              className="underline underline-offset-2 hover:text-foreground"
-            >
-              Offload
-            </Link>{" "}
-            page.
+            restarts it.
           </p>
         </CardContent>
       </Card>

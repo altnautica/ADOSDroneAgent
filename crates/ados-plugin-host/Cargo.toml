@@ -23,10 +23,6 @@ path = "src/bin/ados-plugin-host.rs"
 # command surface build their FC frames with), so a setpoint this host emits is
 # byte-identical to one any other surface would.
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer", "mavlink"] }
-# The compute-offload HTTP client (submit/dataset/read/cancel/outputs). The host
-# forwards a plugin's gated `compute.*` calls to its paired compute node through
-# this client; it never re-implements the job API.
-ados-compute = { path = "../ados-compute" }
 # The PIC arbiter's sidecar read and injector-refusal decision, shared with the
 # router's FC-write gate. With injector arbitration armed the host checks it
 # before queueing a command, so a plugin reads `pic_refused` for the command the
@@ -97,9 +93,6 @@ tracing-journald = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-# Test-only: serve the ados-compute job-API router over loopback so the
-# compute-offload host route can be driven end-to-end against a real client.
-axum = { workspace = true }
 # Paused-clock harness for the telemetry pacing test, which asserts gaps and
 # a newest-wins coalesce without spending real seconds. Dev-only: resolver 2
 # keeps test-util out of the shipped binary's features.

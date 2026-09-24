@@ -77,7 +77,7 @@ def test_uninstall_macos_boots_out_agents_and_purges(tmp_path, monkeypatch):
     (ados_home / "bin").mkdir(parents=True)
     launch_agents = home / "Library" / "LaunchAgents"
     launch_agents.mkdir(parents=True)
-    for tail in ("supervisor", "control", "compute", "cloud", "logd"):
+    for tail in ("supervisor", "control", "cloud", "logd"):
         (launch_agents / f"co.ados.{tail}.plist").write_text("x")
 
     monkeypatch.setattr(cli_main.platform, "system", lambda: "Darwin")
@@ -100,9 +100,9 @@ def test_uninstall_macos_boots_out_agents_and_purges(tmp_path, monkeypatch):
 
     res = CliRunner().invoke(cli_main.cli, ["uninstall", "--purge", "--yes"])
     assert res.exit_code == 0, res.output
-    # All five daemons booted out of the user's GUI domain.
-    assert len(booted) == 5
-    assert booted == [f"gui/501/co.ados.{t}" for t in ("supervisor", "control", "compute", "cloud", "logd")]
+    # All four daemons booted out of the user's GUI domain.
+    assert len(booted) == 4
+    assert booted == [f"gui/501/co.ados.{t}" for t in ("supervisor", "control", "cloud", "logd")]
     # Plists removed, and --purge dropped ~/.ados entirely.
     assert not list(launch_agents.glob("co.ados.*.plist"))
     assert not ados_home.exists()

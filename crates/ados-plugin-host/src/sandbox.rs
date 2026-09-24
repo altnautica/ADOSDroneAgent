@@ -147,8 +147,6 @@ pub const FILESYSTEM_HOST_CAP: &str = "filesystem.host";
 /// * `wfb`, `mesh`: the radio link keys, and the mesh PSK and id.
 /// * `ap-passphrase`, `hostapd-gs.conf`: the ground-station access point
 ///   passphrase, in both places it is written.
-/// * `workstation-credentials.json`: the credentials compute nodes issued this
-///   drone.
 /// * `model-registry-auth.json`: the model registry tokens.
 /// * `plugin-config.json`: every plugin's stored config, which a plugin reads
 ///   (its own, only) through the host.
@@ -169,7 +167,6 @@ pub const ALWAYS_INACCESSIBLE: &[&str] = &[
     "/etc/ados/mesh",
     "/etc/ados/ap-passphrase",
     "/etc/ados/hostapd-gs.conf",
-    "/etc/ados/workstation-credentials.json",
     "/etc/ados/model-registry-auth.json",
     "/etc/ados/plugin-config.json",
 ];
@@ -405,7 +402,7 @@ mod tests {
         "InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys -/etc/ados/pairing.json \
          -/etc/ados/config.yaml -/etc/ados/mcp-token.json -/etc/ados/dashboard-pin.json \
          -/etc/ados/wfb -/etc/ados/mesh -/etc/ados/ap-passphrase -/etc/ados/hostapd-gs.conf \
-         -/etc/ados/workstation-credentials.json -/etc/ados/model-registry-auth.json \
+         -/etc/ados/model-registry-auth.json \
          -/etc/ados/plugin-config.json -/srv -/mnt -/media -/boot",
     ];
 

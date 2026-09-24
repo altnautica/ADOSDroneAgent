@@ -91,9 +91,9 @@ Rust, under `crates/`, 31 workspace members. The flight-critical path:
 - Installer: `crates/ados-installer/`
 - Plugin host: `crates/ados-plugin-host/`
 - Vision engine: `crates/ados-vision/`
-- World model and offload: `crates/ados-atlas/`,
-  `crates/ados-atlas-transport/`, `crates/ados-offload/`,
-  `crates/ados-compute/`
+- Perception offload tier decision: `crates/ados-offload/`. The World Engine
+  (world model, compute node, offload sessions) is the
+  `com.altnautica.world-engine` extension, not core.
 - Swarm: `crates/ados-swarm-control/`, `crates/ados-swarmbus/`
 - Peripherals: `crates/ados-crsf/`, `crates/ados-display/`,
   `crates/ados-hid/`, `crates/ados-gpio/`, `crates/ados-hal-probe/`
@@ -115,7 +115,6 @@ Python, under `src/ados/`:
 - Dashboard SPA: `src/ados/dashboard/`
 - Cockpit SPA: `src/ados/cockpit/`
 - Bootstrap and profile detection: `src/ados/bootstrap/`
-- Compute service: `src/ados/compute/`
 - Data files (plugin catalog, param metadata): `src/ados/data/`
 - Setup facade and terminal status data: `src/ados/setup/`
 - Tests: `tests/`

@@ -409,7 +409,7 @@ TemporaryFileSystem=/run/ados:ro
 BindReadOnlyPaths=-/run/ados/logd.sock
 ReadWritePaths=/var/ados/plugin-data /var/log/ados/plugins /srv /mnt /media /boot
 ProtectHome=read-only
-InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys -/etc/ados/pairing.json -/etc/ados/config.yaml -/etc/ados/mcp-token.json -/etc/ados/dashboard-pin.json -/etc/ados/wfb -/etc/ados/mesh -/etc/ados/ap-passphrase -/etc/ados/hostapd-gs.conf -/etc/ados/workstation-credentials.json -/etc/ados/model-registry-auth.json -/etc/ados/plugin-config.json
+InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys -/etc/ados/pairing.json -/etc/ados/config.yaml -/etc/ados/mcp-token.json -/etc/ados/dashboard-pin.json -/etc/ados/wfb -/etc/ados/mesh -/etc/ados/ap-passphrase -/etc/ados/hostapd-gs.conf -/etc/ados/model-registry-auth.json -/etc/ados/plugin-config.json
 
 [Install]
 WantedBy=ados-supervisor.service

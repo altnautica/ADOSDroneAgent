@@ -127,6 +127,6 @@ impl RealHost {
         let info = tokio::task::spawn_blocking(move || sources.read(now))
             .await
             .map_err(|e| HostError::Rpc(format!("node.info read failed: {e}")))?;
-        compute_reply(&info)
+        serialize_reply(&info)
     }
 }

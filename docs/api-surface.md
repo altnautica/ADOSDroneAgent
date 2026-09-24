@@ -25,19 +25,10 @@ limiter, pairing gate, MCP-scope admission.
 | Method | Path | Notes |
 | --- | --- | --- |
 | POST | `/api/_ws/ticket` |  |
-| POST | `/api/atlas/capture/pause` |  |
-| POST | `/api/atlas/capture/resume` |  |
-| POST | `/api/atlas/capture/start` |  |
-| POST | `/api/atlas/capture/stop` |  |
-| PUT | `/api/atlas/config` |  |
-| GET | `/api/atlas/readiness` |  |
 | POST | `/api/can/passthrough` |  |
 | GET | `/api/cloud/link` |  |
 | POST | `/api/command` |  |
 | GET | `/api/commands` |  |
-| GET | `/api/compute/status` |  |
-| GET | `/api/compute/workstation-credential` |  |
-| POST | `/api/compute/workstation-credential` |  |
 | GET | `/api/config` |  |
 | PUT | `/api/config` |  |
 | GET | `/api/config/schema` |  |
@@ -177,7 +168,6 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/v1/ground-station/ui/screens` |  |
 | GET | `/api/v1/ground-station/wfb` |  |
 | PUT | `/api/v1/ground-station/wfb` |  |
-| GET | `/api/v1/ground-station/wfb/atlas-relay/status` |  |
 | DELETE | `/api/v1/ground-station/wfb/pair` | relay-forbidden |
 | POST | `/api/v1/ground-station/wfb/pair` | relay-forbidden |
 | DELETE | `/api/v1/ground-station/wfb/pair/{device_id}` |  |
@@ -225,7 +215,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-200 native routes.
+190 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

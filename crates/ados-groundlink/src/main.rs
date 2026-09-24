@@ -355,13 +355,6 @@ async fn run_relay_or_receiver(
     let snap = mesh::MeshSnapshot::new(role_label, "bat0", "802.11s");
     tokio::spawn(mesh::run_poll_loop(snap, Some(ingest.clone())));
 
-    // Atlas world-model aux-lane relay (off the WFB aux stream onto the LAN). Inert
-    // unless this node is the relay role AND `ground_station.atlas.enabled` with a
-    // configured compute base URL. It shares the role `Shutdown`, so a
-    // SIGTERM/SIGINT tears it down with the rest of the relay. A non-Atlas ground
-    // station spawns nothing here and is byte-unchanged.
-    let atlas_task = maybe_spawn_atlas_relay(is_relay, shutdown.clone(), Some(ingest.clone()));
-
     let role_task = {
         let shutdown = shutdown.clone();
         let ingest = Some(ingest.clone());
@@ -384,78 +377,8 @@ async fn run_relay_or_receiver(
             shutdown.trigger();
         }
     }
-    // Give the loop a moment to flush its down-state on signal-triggered exit. The
-    // Atlas relay self-stops on the shared `Shutdown`; the abort is a no-op if it
-    // already returned, and reaps it on the role-task-exit path (no signal fired).
+    // Give the loop a moment to flush its down-state on signal-triggered exit.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    if let Some(t) = atlas_task {
-        t.abort();
-    }
-}
-
-/// Spawn the ground-station Atlas aux-lane relay when (and only when) this node is
-/// in the `relay` role and `ground_station.atlas.enabled` is set with a configured
-/// `compute_base_url`. Returns the task handle so the caller can reap it on
-/// teardown, or `None` when Atlas is disabled / not the relay role. When
-/// `compute_base_url` is unset the task auto-resolves the workstation node over
-/// mDNS (retrying until it answers or shutdown). Inert by default → a non-Atlas
-/// ground station never reads the block and is byte-unchanged.
-///
-/// The relay reads the decoded WFB aux datagrams (the `wfb_rx -p 2` re-emit
-/// loopback port, `ground_station.atlas.listen_port`, defaulting to the first
-/// drone slot's `AUX_RX_PORT_BASE + slot`) and re-POSTs each framed Atlas event
-/// onto the LAN into the compute node's event router, so the field RF lane
-/// reaches the same receiver the direct-LAN bearer uses.
-fn maybe_spawn_atlas_relay(
-    is_relay: bool,
-    shutdown: Shutdown,
-    ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    if !is_relay {
-        return None;
-    }
-    let cfg =
-        ados_groundlink::GroundStationConfig::load_from(std::path::Path::new(CONFIG_YAML)).atlas;
-    if !cfg.enabled {
-        return None;
-    }
-    let listen_port = cfg.listen_port;
-    let configured_url = cfg.compute_base_url.filter(|u| !u.trim().is_empty());
-    Some(tokio::spawn(async move {
-        // Use the configured compute base URL, or auto-resolve the workstation
-        // node over mDNS so a field relay needs no hand-configured URL. The
-        // resolve loop self-stops on the shared `Shutdown`.
-        let compute_url = match configured_url {
-            Some(url) => url,
-            None => {
-                tracing::info!(
-                    "ground_station.atlas.compute_base_url unset; auto-resolving the compute node over mDNS"
-                );
-                loop {
-                    if let Some(url) =
-                        ados_groundlink::mdns::resolve_compute_base_url(Duration::from_secs(5))
-                            .await
-                    {
-                        tracing::info!(compute_url = %url, "auto-resolved the compute node over mDNS");
-                        break url;
-                    }
-                    tokio::select! {
-                        _ = shutdown.wait() => return,
-                        _ = tokio::time::sleep(Duration::from_secs(10)) => {}
-                    }
-                }
-            }
-        };
-        tracing::info!(
-            listen_port,
-            compute_url = %compute_url,
-            "starting ground-station Atlas aux-lane relay"
-        );
-        match ados_groundlink::run_atlas_relay(listen_port, compute_url, shutdown, ingest).await {
-            Ok(stats) => tracing::info!(?stats, "atlas relay exited"),
-            Err(e) => tracing::warn!(error = %e, "atlas relay failed to bind/run"),
-        }
-    }))
 }
 
 /// The standalone (`direct`) receive plane.
@@ -545,12 +468,9 @@ async fn run_direct(
     // plane, so a ground control station connected to this ground station sees
     // the vehicle over the ports it already uses.
     //
-    // Deliberately confined to this role. The Atlas relay reads the SAME decoded
-    // aux port in the relay role, and only one process may hold a UDP bind, so
-    // running both would leave the loser dead. They do not meet today because
-    // the Atlas relay is spawned only for the relay role and this only for
-    // direct. Anything that later wants both on one node has to demultiplex the
-    // lane once and fan out in-process, not bind the port twice.
+    // Only one process may hold a UDP bind on the decoded aux port, so anything
+    // that later wants a second reader of the lane on this node has to
+    // demultiplex it once here and fan out in-process, not bind the port twice.
     let aux_counters = ados_groundlink::AuxCounters::new();
     let aux_shutdown = Shutdown::new();
     // The relayed-node cache: status and identity frames the linked drone pushes

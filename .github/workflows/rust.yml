@@ -78,8 +78,8 @@ jobs:
       - name: Clippy (host target, all features)
         run: cargo clippy --all-targets --all-features -- -D warnings
 
-      # Some crates carry bundled C (SQLite, zstd) and — via rerun's
-      # re_redap_client, pulled transitively through ados-compute — ring, whose
+      # Some crates carry bundled C (SQLite, zstd) and — via rustls in the
+      # cloud relay and the plugin host's archive download — ring, whose
       # build script needs an aarch64-linux-musl C compiler. zig cc is that
       # compiler (the same tech cargo-zigbuild uses for the publish jobs);
       # exposing it under the target-triple name cc-rs looks for lets the musl
@@ -112,9 +112,9 @@ jobs:
       # which has no aarch64-musl prebuilt, so --all-features cannot target
       # musl; the host clippy above already covers the onnx path.
       - name: Clippy (aarch64-musl target, default features)
-        # No per-crate excludes. ados-logd, ados-cloud, ados-compute and
-        # ados-plugin-host were excluded because their bundled C (SQLite,
-        # zstd, and ring via rerun's re_redap_client) needs an
+        # No per-crate excludes. ados-logd, ados-cloud and ados-plugin-host
+        # were excluded because their bundled C (SQLite, zstd, and ring via
+        # rustls) needs an
         # aarch64-linux-musl C compiler that clippy invokes through their
         # build scripts. The zig cross-cc shim installed in the two steps
         # directly above IS that compiler and runs before this step, so the
@@ -836,9 +836,9 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      # ados-plugin-host depends on ados-compute, which bundles C (SQLite, zstd)
-      # and — through rerun's re_redap_client — ring, so it needs the zig C
-      # cross-compiler like publish-compute, not plain musl-tools.
+      # ados-plugin-host fetches plugin archives over rustls, which links ring,
+      # whose build script compiles C, so it needs the zig C cross-compiler, not
+      # plain musl-tools.
       - name: Install zig
         uses: mlugg/setup-zig@v2
 
@@ -913,9 +913,9 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      # ados-control links ados-compute (bundled SQLite, zstd, and ring through
-      # rerun's re_redap_client) via ados-groundlink -> ados-plugin-host, so it
-      # cross-compiles through the zig C toolchain like publish-plugin-host.
+      # ados-control links ados-plugin-host (ring through rustls, for plugin
+      # archive downloads), so it cross-compiles through the zig C toolchain like
+      # publish-plugin-host.
       - name: Install zig
         uses: mlugg/setup-zig@v2
 
@@ -1038,147 +1038,6 @@ jobs:
             --prerelease --title "Prebuilt ados-cloud (rolling)" --notes ""
           gh release upload "$RELEASE_TAG" rel/* --clobber
 
-  # Build the compute reconstructor/offload daemon as a static arm64 binary and
-  # publish it for the compute profile. (An x86_64/macOS compute host builds from
-  # source; this covers an aarch64 compute appliance, mirroring the cloud job.)
-  publish-compute:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-compute
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install zig
-        uses: mlugg/setup-zig@v2
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
-      - name: Build static ados-compute (bundled SQLite via zig)
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-compute
-
-      - name: Stage artifacts + checksums
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-compute rel/ados-compute-aarch64
-          ( cd rel && sha256sum ados-compute-aarch64 > ados-compute-aarch64.sha256 )
-
-      - name: Sign artifacts (only when the signing key is present)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-compute-aarch64 -x rel/ados-compute-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-compute (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  publish-atlas:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-atlas
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install zig
-        uses: mlugg/setup-zig@v2
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
-      - name: Build static ados-atlas via zig
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-atlas
-
-      - name: Stage artifacts + checksums
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-atlas rel/ados-atlas-aarch64
-          ( cd rel && sha256sum ados-atlas-aarch64 > ados-atlas-aarch64.sha256 )
-
-      - name: Sign artifacts (only when the signing key is present)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-atlas-aarch64 -x rel/ados-atlas-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-atlas (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
   # Build the ground-station data-plane as a static arm64 binary and publish it
   # to a rolling prerelease the installer fetches. Static (musl) so one binary
   # runs on every supported board regardless of its glibc. Runs only on pushes
@@ -1199,9 +1058,9 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      # ados-groundlink links ados-compute (bundled SQLite, zstd, and ring through
-      # rerun's re_redap_client) via ados-plugin-host, so it
-      # cross-compiles through the zig C toolchain like publish-plugin-host.
+      # ados-groundlink links ados-plugin-host (ring through rustls, for plugin
+      # archive downloads), so it cross-compiles through the zig C toolchain like
+      # publish-plugin-host.
       - name: Install zig
         uses: mlugg/setup-zig@v2
 
@@ -1925,8 +1784,6 @@ jobs:
       - publish-plugin-host
       - publish-control
       - publish-cloud
-      - publish-compute
-      - publish-atlas
       - publish-groundlink
       - publish-net
       - publish-hid
@@ -1959,8 +1816,6 @@ jobs:
         prebuilt-plugin-host
         prebuilt-control
         prebuilt-cloud
-        prebuilt-compute
-        prebuilt-atlas
         prebuilt-groundlink
         prebuilt-net
         prebuilt-hid

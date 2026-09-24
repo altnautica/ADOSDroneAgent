@@ -74,7 +74,7 @@ impl OffloadSession {
         self.target_gate.record(now_ms);
     }
 
-    /// A drift-corrected pose arrived from the node on `atlas.pose.offload`.
+    /// A drift-corrected pose arrived from the node.
     /// `now_ms` is the local monotonic time of arrival.
     pub fn on_pose(&mut self, now_ms: i64) {
         self.pose_gate.record(now_ms);

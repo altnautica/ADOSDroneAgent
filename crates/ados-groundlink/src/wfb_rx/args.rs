@@ -111,13 +111,14 @@ pub fn data_rx_args(iface: &str, rx_key: &Path, channel_port: u16, link_id: u32)
     ]
 }
 
-/// GS Atlas-aux RX `wfb_rx` args: radio_id 2 (the aux application stream the drone
-/// radiates small Atlas events on), decoded to `atlas_port`. Same shape as
-/// `data_rx_args` with the aux radio_id; the asymmetric-by-direction aux pair means the
-/// GS receives on `-p 2` (the drone egresses on p2), never p3.
+/// GS aux RX `wfb_rx` args: radio_id 2 (the aux application stream the drone
+/// radiates its status, identity, MAVLink and plugin frames on), decoded to
+/// `aux_port`. Same shape as `data_rx_args` with the aux radio_id; the
+/// asymmetric-by-direction aux pair means the GS receives on `-p 2` (the drone
+/// egresses on p2), never p3.
 ///
 /// `link_id` is the transmitting drone's — one instance per registered slot.
-pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16, link_id: u32) -> Vec<String> {
+pub fn gs_aux_rx_args(iface: &str, rx_key: &Path, aux_port: u16, link_id: u32) -> Vec<String> {
     vec![
         "-p".into(),
         "2".into(),
@@ -126,7 +127,7 @@ pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16, link_id: u3
         "-c".into(),
         "127.0.0.1".into(),
         "-u".into(),
-        atlas_port.to_string(),
+        aux_port.to_string(),
         "-K".into(),
         rx_key.to_string_lossy().into_owned(),
         "-l".into(),
@@ -137,7 +138,7 @@ pub fn gs_atlas_rx_args(iface: &str, rx_key: &Path, atlas_port: u16, link_id: u3
 
 /// GS aux-uplink TX `wfb_tx` args: radio_id 3, loopback ingress `aux_tx_port`,
 /// light FEC. The ground→drone half of the aux pair, and the mirror of
-/// `gs_atlas_rx_args`: the drone egresses on p2 and listens on p3, so the
+/// `gs_aux_rx_args`: the drone egresses on p2 and listens on p3, so the
 /// ground listens on p2 and egresses on p3.
 ///
 /// Without this the aux lane was downlink-only. The drone has always run
@@ -290,10 +291,10 @@ mod tests {
     }
 
     #[test]
-    fn gs_atlas_rx_uses_radio_id_2_and_the_slot_aux_port() {
-        // The drone egresses Atlas events on the aux radio_id 2; the GS receives
+    fn gs_aux_rx_uses_radio_id_2_and_the_slot_aux_port() {
+        // The drone egresses its aux frames on radio_id 2; the GS receives
         // on p2 (NOT p3), decoding to that slot's aux port.
-        let a = gs_atlas_rx_args(
+        let a = gs_aux_rx_args(
             "wlan1",
             Path::new("/etc/ados/wfb/rx.key"),
             aux_rx_port(3),
@@ -401,7 +402,7 @@ mod tests {
         // The whole point of the pair: each rig receives on the radio_id its
         // peer transmits on. If these two ever end up equal the lane talks to
         // itself and the link goes silent in one direction with no error.
-        let rx = gs_atlas_rx_args("wlan1", Path::new("/k"), aux_rx_port(1), link_id(1, 1));
+        let rx = gs_aux_rx_args("wlan1", Path::new("/k"), aux_rx_port(1), link_id(1, 1));
         let tx = gs_aux_tx_args(
             "wlan1",
             Path::new("/k"),
@@ -485,8 +486,8 @@ mod tests {
                 drone,
             ),
             (
-                "atlas_rx",
-                gs_atlas_rx_args("wlan1", key, aux_rx_port(6), drone),
+                "aux_rx",
+                gs_aux_rx_args("wlan1", key, aux_rx_port(6), drone),
                 drone,
             ),
             (

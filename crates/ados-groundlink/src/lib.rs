@@ -15,7 +15,6 @@
 
 pub mod acquire;
 pub mod app_lane;
-pub mod atlas_relay;
 pub mod aux_consumer;
 pub mod aux_peers;
 pub mod cmdsock;
@@ -43,7 +42,6 @@ pub use acquire::{AcquireState, ChannelAcquirer};
 pub use ados_protocol::aux_rpc_proxy::{
     AuxRpcProxy, AuxRpcResponseIngest, RpcError, RpcResponseOwned, RPC_DEFAULT_TIMEOUT,
 };
-pub use atlas_relay::{run_atlas_relay, AtlasRelayStats};
 pub use aux_consumer::{
     run_aux_consumer, supervise_aux_consumer, AuxCounters, AuxCountersSnapshot, AuxSinks,
     AuxSinksOwned,
@@ -53,7 +51,7 @@ pub use fleet::{
     FleetRegistry, FleetSlot, FLEET_MAX_SLOTS, FLEET_RECONCILE_INTERVAL, FLEET_REGISTRY_PATH,
 };
 pub use fleet_hero::{hero_path, read_hero_from, write_hero_to, FleetHero, FLEET_HERO_JSON};
-pub use gs_config::{AtlasRelayConfig, GroundStationConfig};
+pub use gs_config::GroundStationConfig;
 pub use mesh::{get_current_role, MeshSnapshot};
 pub use pairing::{decrypt_invite, encrypt_invite, InviteBundle};
 pub use presence::GsPresenceCache;

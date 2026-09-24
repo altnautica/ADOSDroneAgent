@@ -2,8 +2,8 @@ name: deep-tests
 
 # The `#[ignore]`d tests are the only place this repository exercises a real
 # ONNX model against real pixels. Nothing scheduled them, and none of the
-# environment variables they read (ADOS_TEST_COCO_ONNX, ADOS_TEST_PERSON_RGB,
-# ADOS_TEST_RTSP) was set by any workflow, so the entire real-model proof
+# environment variables they read (ADOS_TEST_COCO_ONNX, ADOS_TEST_PERSON_RGB)
+# was set by any workflow, so the entire real-model proof
 # surface had never run in CI. `cargo test` does compile them, so what was
 # missing is execution, not compilation.
 #
@@ -80,7 +80,6 @@ jobs:
               echo "\`ADOS_TEST_COCO_ONNX_URL\` is not set on this repository, so the"
               echo "COCO ONNX model cannot be fetched and these tests did not execute:"
               echo
-              echo "- \`ados-compute/tests/onnx_offload.rs\`"
               echo "- \`ados-vision/tests/onnx_coco_infer.rs\` (both cases)"
               echo
               echo "Set the repository variable to a URL for the YOLOv8n COCO ONNX export"
@@ -117,12 +116,11 @@ jobs:
           ADOS_TEST_PERSON_RGB: ${{ steps.model.outputs.person }}
         run: |
           set -uo pipefail
-          # --ignored runs ONLY the ignored tests. ADOS_TEST_RTSP is left unset
-          # on purpose: offload_live_rtsp needs a live camera, which a hosted
-          # runner does not have and cannot fake, and g3_gate needs a real
-          # flight controller. Both are named in the inventory above so their
-          # absence is recorded rather than implied.
-          cargo test --features onnx -p ados-vision -p ados-compute -- --ignored --nocapture
+          # --ignored runs ONLY the ignored tests. g3_gate needs a real flight
+          # controller, which a hosted runner does not have and cannot fake; it
+          # is named in the inventory below so its absence is recorded rather
+          # than implied.
+          cargo test --features onnx -p ados-vision -- --ignored --nocapture
 
       - name: Record the outcome
         if: always()
@@ -135,6 +133,5 @@ jobs:
           {
             echo
             echo "Never runnable on a hosted runner, by design:"
-            echo "- \`ados-compute/tests/offload_live_rtsp.rs\` — needs a live RTSP camera"
             echo "- \`ados-mavlink-router/tests/g3_gate.rs\` — needs a real flight controller"
           } >> "$GITHUB_STEP_SUMMARY"

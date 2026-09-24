@@ -11,8 +11,8 @@ description = "Native HTTP control surface: the same status/pairing/command API 
 # LAN-edge auth, the shared app state, and the route Router; the binary inits
 # logging + systemd notify and runs the lifecycle. The binary is the LAN front
 # on :8080 (the installer writes the front marker and enables its unit on every
-# install). Through ados-groundlink it links ados-compute's bundled C (SQLite,
-# zstd, ring), so its release build cross-compiles with cargo-zigbuild.
+# install). Through ados-plugin-host it links rustls, whose `ring` provider
+# compiles C, so its release build cross-compiles with cargo-zigbuild.
 [[bin]]
 name = "ados-control"
 path = "src/main.rs"
@@ -148,7 +148,7 @@ sysinfo = { workspace = true }
 # The always-on `_ados._tcp` advert. The GCS Add-a-Node card browses this
 # service, so the process that answers `/api/pairing/*` is the one that must
 # publish it — a record pointing at a front that is not running is worse than
-# no record. Same version the compute + groundlink adverts use, so one mDNS
+# no record. Same version the groundlink advert uses, so one mDNS
 # implementation ships on the box.
 mdns-sd = "0.13"
 

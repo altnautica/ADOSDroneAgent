@@ -8,7 +8,7 @@
 /// Map a systemd-style unit name to a launchd reverse-DNS label.
 ///
 /// Strips a trailing `.service` and rewrites an `ados-` prefix to the `co.ados.`
-/// domain, so `ados-compute.service` becomes `co.ados.compute`. A name without
+/// domain, so `ados-control.service` becomes `co.ados.control`. A name without
 /// the `ados-` prefix is used as-is (minus the suffix).
 pub fn unit_to_label(unit: &str) -> String {
     let base = unit.strip_suffix(".service").unwrap_or(unit);
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn unit_to_label_strips_suffix_and_maps_prefix() {
-        assert_eq!(unit_to_label("ados-compute.service"), "co.ados.compute");
+        assert_eq!(unit_to_label("ados-control.service"), "co.ados.control");
         assert_eq!(unit_to_label("ados-wfb"), "co.ados.wfb");
         // A multi-segment service tail is preserved after the domain rewrite.
         assert_eq!(unit_to_label("ados-wfb-rx.service"), "co.ados.wfb-rx");
@@ -130,8 +130,8 @@ mod tests {
     #[test]
     fn render_plist_emits_program_args_env_and_keepalive() {
         let plist = render_plist(
-            "co.ados.compute",
-            "/opt/ados/bin/ados-compute",
+            "co.ados.control",
+            "/opt/ados/bin/ados-control",
             &["--profile".to_string(), "compute".to_string()],
             &[("ADOS_HOME".to_string(), "/var/ados".to_string())],
             true,
@@ -143,9 +143,9 @@ mod tests {
         assert!(plist.trim_end().ends_with("</plist>"));
         // Label + program argv[0] + args in order.
         assert!(plist.contains("<key>Label</key>"));
-        assert!(plist.contains("<string>co.ados.compute</string>"));
+        assert!(plist.contains("<string>co.ados.control</string>"));
         assert!(plist.contains("<key>ProgramArguments</key>"));
-        assert!(plist.contains("<string>/opt/ados/bin/ados-compute</string>"));
+        assert!(plist.contains("<string>/opt/ados/bin/ados-control</string>"));
         assert!(plist.contains("<string>--profile</string>"));
         assert!(plist.contains("<string>compute</string>"));
         // Environment variables dict.

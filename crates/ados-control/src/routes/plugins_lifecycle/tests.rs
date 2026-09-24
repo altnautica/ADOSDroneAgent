@@ -619,7 +619,7 @@ async fn the_passthrough_rewrites_the_path_and_drops_the_operator_key() {
     let (status, body) = send(
         &f.state,
         Request::builder()
-            .uri("/api/plugins/com.example.web/x/atlas/a%20b?since=5")
+            .uri("/api/plugins/com.example.web/x/jobs/a%20b?since=5")
             .header("x-ados-key", "secret")
             .header("x-plugin-header", "kept")
             .body(Body::empty())
@@ -630,7 +630,7 @@ async fn the_passthrough_rewrites_the_path_and_drops_the_operator_key() {
     assert_eq!(body, b"hi");
     let head = upstream.await.unwrap().to_ascii_lowercase();
     assert!(
-        head.starts_with("get /atlas/a%20b?since=5 http/1.1\r\n"),
+        head.starts_with("get /jobs/a%20b?since=5 http/1.1\r\n"),
         "{head}"
     );
     assert!(head.contains("x-plugin-header: kept"));

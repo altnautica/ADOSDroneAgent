@@ -259,138 +259,12 @@ impl WfbSection {
     }
 }
 
-fn default_camera_width() -> u32 {
-    1280
-}
-fn default_camera_height() -> u32 {
-    720
-}
-
-/// The `video.camera:` slice — the encoder's frame size. The offload reconciler
-/// advertises this to the compute node so its `ffmpeg` reads fixed
-/// `width*height*3` RGB24 frames off the drone's RTSP feed (a mismatch misframes,
-/// so this must be the true source size). Mirrors the Python `video.camera`
-/// width/height (default 1280x720).
-#[derive(Debug, Clone, Deserialize)]
-pub struct CameraSection {
-    #[serde(default = "default_camera_width")]
-    pub width: u32,
-    #[serde(default = "default_camera_height")]
-    pub height: u32,
-}
-
-impl Default for CameraSection {
-    fn default() -> Self {
-        CameraSection {
-            width: default_camera_width(),
-            height: default_camera_height(),
-        }
-    }
-}
-
-/// The `video:` section. The nested `wfb` slice (auto-pair) and the `camera`
-/// frame size (offload) are read here.
+/// The `video:` section. Only the nested `wfb` slice (auto-pair, aux status)
+/// is read here.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct VideoSection {
     #[serde(default)]
     pub wfb: WfbSection,
-    #[serde(default)]
-    pub camera: CameraSection,
-}
-
-/// The `atlas:` section. Only the enable gate is read here; the cameras /
-/// selection / intrinsics are the capture service's concern (`ados-atlas`). The
-/// Atlas forwarder reads this gate so a non-Atlas agent does no Atlas work.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct AtlasSection {
-    /// Whether Atlas world-model capture + forwarding is enabled. Mirrors the
-    /// `atlas.enabled` key the capture service reads.
-    #[serde(default)]
-    pub enabled: bool,
-    /// A static compute-node address (`host:port`) to forward to when mDNS
-    /// discovery is not available (a segmented / bridged network where multicast
-    /// does not cross to the compute node). When set, the forwarder builds the
-    /// direct-LAN bearer straight from it instead of browsing mDNS. Overridable
-    /// per-run via the `ADOS_ATLAS_COMPUTE_ADDR` env var.
-    #[serde(default)]
-    pub compute_node_addr: Option<String>,
-}
-
-fn default_perception_mode() -> String {
-    "auto".to_string()
-}
-
-/// The `perception.offload:` slice (drone side): where the heavy detector runs.
-#[derive(Debug, Clone, Deserialize)]
-pub struct OffloadSection {
-    /// Tri-state `auto` | `on` | `off`. `auto` = offload when NPU-less + a
-    /// workstation is reachable (the default). An unknown value reads as `auto`
-    /// (neither forced-on nor off), so a typo never silently disables offload.
-    #[serde(default = "default_perception_mode")]
-    pub enabled: String,
-    /// A pinned workstation address (`host:port`); empty = auto-discover over
-    /// mDNS. Overridable per-run via `ADOS_PERCEPTION_OFFLOAD_ADDR`.
-    #[serde(default)]
-    pub compute_node_addr: Option<String>,
-}
-
-impl Default for OffloadSection {
-    fn default() -> Self {
-        OffloadSection {
-            enabled: default_perception_mode(),
-            compute_node_addr: None,
-        }
-    }
-}
-
-impl OffloadSection {
-    /// The operator turned offload off explicitly.
-    pub fn is_off(&self) -> bool {
-        self.enabled.trim().eq_ignore_ascii_case("off")
-    }
-    /// The operator forced offload on (offload even with a local accelerator).
-    pub fn is_forced_on(&self) -> bool {
-        self.enabled.trim().eq_ignore_ascii_case("on")
-    }
-}
-
-/// The `perception.serving:` slice (workstation side): whether this node serves
-/// offload for other drones and which detector by default.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ServingSection {
-    /// Tri-state `auto` | `on` | `off`. `auto` = auto-accept + serve (default).
-    #[serde(default = "default_perception_mode")]
-    pub enabled: String,
-    /// The served detector model id; empty = the daemon's default.
-    #[serde(default)]
-    pub detector_model: Option<String>,
-}
-
-impl Default for ServingSection {
-    fn default() -> Self {
-        ServingSection {
-            enabled: default_perception_mode(),
-            detector_model: None,
-        }
-    }
-}
-
-impl ServingSection {
-    /// Serving is disabled explicitly.
-    pub fn is_off(&self) -> bool {
-        self.enabled.trim().eq_ignore_ascii_case("off")
-    }
-}
-
-/// The `perception:` section — two-tier execution config. `offload` is read on a
-/// drone, `serving` on a workstation; both default so a fresh agent needs no
-/// setup.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PerceptionSection {
-    #[serde(default)]
-    pub offload: OffloadSection,
-    #[serde(default)]
-    pub serving: ServingSection,
 }
 
 /// The slice of the agent config the cloud relay reads. Every field defaults so
@@ -405,65 +279,6 @@ pub struct CloudConfig {
     pub pairing: PairingSection,
     #[serde(default)]
     pub video: VideoSection,
-    #[serde(default)]
-    pub atlas: AtlasSection,
-    #[serde(default)]
-    pub perception: PerceptionSection,
-}
-
-/// The `ADOS_ATLAS_ENABLED` env override (truthy = `1` / `true` / `yes` / `on`,
-/// case-insensitive). Lets a bench / a unit flip Atlas on or off without editing
-/// the yaml, matching the env-override convention the other crates use.
-fn atlas_env_override() -> Option<bool> {
-    std::env::var("ADOS_ATLAS_ENABLED").ok().map(|v| {
-        matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
-}
-
-/// The static compute-node address (`host:port`) to forward Atlas events to when
-/// mDNS discovery cannot reach the node: the `ADOS_ATLAS_COMPUTE_ADDR` env var
-/// wins, else the `atlas.compute_node_addr` config field. Whitespace / empty is
-/// treated as unset (fall back to mDNS).
-pub fn atlas_compute_addr(config: &CloudConfig) -> Option<String> {
-    if let Ok(v) = std::env::var("ADOS_ATLAS_COMPUTE_ADDR") {
-        let t = v.trim();
-        if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
-    config
-        .atlas
-        .compute_node_addr
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-/// The pinned workstation address (`host:port`) the perception offload targets when
-/// set, so the reconciler skips mDNS and offloads straight to it (a segmented / bridged
-/// network, or an operator who pinned a specific box). The
-/// `ADOS_PERCEPTION_OFFLOAD_ADDR` env var wins, else the
-/// `perception.offload.compute_node_addr` field. Whitespace / empty ⇒ unset
-/// (auto-discover).
-pub fn perception_offload_addr(config: &CloudConfig) -> Option<String> {
-    if let Ok(v) = std::env::var("ADOS_PERCEPTION_OFFLOAD_ADDR") {
-        let t = v.trim();
-        if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
-    config
-        .perception
-        .offload
-        .compute_node_addr
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
 }
 
 impl CloudConfig {
@@ -520,30 +335,6 @@ pub fn config_path() -> std::path::PathBuf {
         .into()
 }
 
-/// Whether Atlas is enabled RIGHT NOW: the `ADOS_ATLAS_ENABLED` env override
-/// when set, else the `atlas.enabled` key read fresh from `path`. A missing,
-/// unreadable or unparseable file reads disabled.
-///
-/// Fresh on every call, not the startup snapshot: the GCS enables Atlas by
-/// writing the key and restarting only the capture service, so a forwarder that
-/// judged the gate once at relay start would never forward an enabled drone's
-/// keyframes until the next reboot.
-pub fn atlas_enabled_in(path: &Path) -> bool {
-    if let Some(forced) = atlas_env_override() {
-        return forced;
-    }
-    #[derive(Default, Deserialize)]
-    struct Raw {
-        #[serde(default)]
-        atlas: AtlasSection,
-    }
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_norway::from_str::<Raw>(&text).ok())
-        .map(|raw| raw.atlas.enabled)
-        .unwrap_or(false)
-}
-
 impl CloudConfig {
     /// The agent profile in the WIRE form the receiver's fleet view
     /// discriminates on (`drone` | `ground-station` | `workstation` |
@@ -554,8 +345,7 @@ impl CloudConfig {
     /// `profile.conf` (honouring `ADOS_PROFILE_CONF`), the same resolution every
     /// other agent service uses; anything unresolved is `drone`. This is the ONE
     /// profile discrimination in the relay, so the bind role, the advertised
-    /// profile, the aux identity and the offload gate can never disagree about
-    /// what this node is.
+    /// profile and the aux identity can never disagree about what this node is.
     pub fn wire_profile(&self) -> String {
         self.wire_profile_at(&ados_config::profile_conf_path())
     }
@@ -720,75 +510,6 @@ server:
         let cfg = CloudConfig::load_from(&path);
         assert!(cfg.cloud_logs_enabled());
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn the_atlas_gate_is_read_fresh_and_the_env_override_wins() {
-        // The env var is process-global; keep every assertion in one test so the
-        // set/remove is serial and no parallel test sees a stale override.
-        let prev = std::env::var("ADOS_ATLAS_ENABLED").ok();
-        std::env::remove_var("ADOS_ATLAS_ENABLED");
-
-        // Absent file / atlas section → off.
-        assert!(!atlas_enabled_in(Path::new(
-            "/nonexistent/ados/config.yaml"
-        )));
-        let path = temp_yaml("atlas-gate", "agent:\n  device_id: d1\n");
-        assert!(!atlas_enabled_in(&path));
-
-        // The operator enables Atlas while the relay runs: the next read sees it.
-        std::fs::write(&path, "atlas:\n  enabled: true\n").unwrap();
-        assert!(atlas_enabled_in(&path));
-        // ...and disabling it is seen the same way.
-        std::fs::write(&path, "atlas:\n  enabled: false\n").unwrap();
-        assert!(!atlas_enabled_in(&path));
-
-        // The env override wins over the yaml in both directions.
-        std::env::set_var("ADOS_ATLAS_ENABLED", "1");
-        assert!(atlas_enabled_in(&path), "env=1 forces on over yaml=false");
-        std::fs::write(&path, "atlas:\n  enabled: true\n").unwrap();
-        std::env::set_var("ADOS_ATLAS_ENABLED", "false");
-        assert!(
-            !atlas_enabled_in(&path),
-            "env=false forces off over yaml=true"
-        );
-        let _ = std::fs::remove_file(&path);
-
-        // Restore the prior environment for the rest of the suite.
-        match prev {
-            Some(v) => std::env::set_var("ADOS_ATLAS_ENABLED", v),
-            None => std::env::remove_var("ADOS_ATLAS_ENABLED"),
-        }
-    }
-
-    #[test]
-    fn atlas_compute_addr_prefers_env_then_config() {
-        // The env var is process-global; guard + restore it in one serial test.
-        let prev = std::env::var("ADOS_ATLAS_COMPUTE_ADDR").ok();
-        std::env::remove_var("ADOS_ATLAS_COMPUTE_ADDR");
-
-        let mut cfg = CloudConfig::default();
-        assert_eq!(atlas_compute_addr(&cfg), None);
-
-        // A whitespace-only config value is treated as unset.
-        cfg.atlas.compute_node_addr = Some("   ".to_string());
-        assert_eq!(atlas_compute_addr(&cfg), None);
-
-        // The config field is used when set.
-        cfg.atlas.compute_node_addr = Some("10.0.0.9:8092".to_string());
-        assert_eq!(atlas_compute_addr(&cfg), Some("10.0.0.9:8092".to_string()));
-
-        // The env var wins over the config field.
-        std::env::set_var("ADOS_ATLAS_COMPUTE_ADDR", "192.168.1.5:8092");
-        assert_eq!(
-            atlas_compute_addr(&cfg),
-            Some("192.168.1.5:8092".to_string())
-        );
-
-        match prev {
-            Some(v) => std::env::set_var("ADOS_ATLAS_COMPUTE_ADDR", v),
-            None => std::env::remove_var("ADOS_ATLAS_COMPUTE_ADDR"),
-        }
     }
 
     #[test]

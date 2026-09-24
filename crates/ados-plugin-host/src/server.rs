@@ -1893,15 +1893,15 @@ async fn pace_snapshots(
 ///
 /// These are the stateless forwards whose reply waits on another process: the
 /// cloud relay (a record write waits out the cloud's own answer, up to fifteen
-/// seconds), the vision engine, the supervisor's video-pipeline restart and the
-/// compute node. Awaited inline, each would stall every other request and every
-/// push on the connection for its whole round trip.
+/// seconds), the vision engine and the supervisor's video-pipeline restart.
+/// Awaited inline, each would stall every other request and every push on the
+/// connection for its whole round trip.
 ///
 /// Everything else stays inline, in arrival order: the in-process methods
 /// answer at once, output commands (MAVLink, MSP, GPIO, aux datagrams) must
 /// reach their line in the order sent, and the methods that take or release
-/// session state (the aux stream's ownership, an offload session) must never
-/// land after the session that made them is released.
+/// session state (the aux stream's ownership) must never land after the
+/// session that made them is released.
 fn runs_detached(method: Method) -> bool {
     matches!(
         method,
@@ -1912,12 +1912,6 @@ fn runs_detached(method: Method) -> bool {
             | Method::VisionInfer
             | Method::VisionPublishDetection
             | Method::VisionDesignateTrack
-            | Method::ComputeDatasetWrite
-            | Method::ComputeJobSubmit
-            | Method::ComputeJobRead
-            | Method::ComputeJobOutputs
-            | Method::ComputeJobCancel
-            | Method::ComputeStreamHealth
     )
 }
 

@@ -22,9 +22,6 @@ ados-radio = { path = "../ados-radio" }
 ados-supervisor = { path = "../ados-supervisor" }
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
-# The Atlas stream lane: the GS relay re-POSTs decoded WFB-aux datagrams into the
-# compute receiver via the LAN bearer.
-ados-atlas-transport = { path = "../ados-atlas-transport" }
 # The installed-plugin inventory (id + contract version) the aux node-identity
 # consumer compares a peer against, so a version mismatch across an
 # upgrade-mixed pair is surfaced instead of silently misreading the plugin wire.
@@ -81,5 +78,3 @@ nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-# Stand up the compute event router in-process for the Atlas relay round-trip test.
-axum = { workspace = true }

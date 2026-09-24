@@ -19,12 +19,6 @@ from ados.sdk.cameras import (
     primary_camera_id,
     resolve_camera_selection,
 )
-from ados.sdk.compute import (
-    ComputeClient,
-    JobStatus,
-    OffloadStreamSession,
-    Submission,
-)
 from ados.sdk.drivers import (
     CameraCandidate,
     CameraCapabilities,
@@ -119,16 +113,11 @@ __all__ = [
     "LOCK_UNCERTAIN",
     "LOCK_LOST",
     "DEFAULT_COAST_WINDOW_S",
-    # Perception-offload freshness/link gate
+    # Perception-offload freshness/link gate and execution tiers
     "FreshnessGate",
     "GateState",
     "LockGate",
     "LockState",
-    # Compute offload (jobs + streaming perception sessions)
-    "ComputeClient",
-    "Submission",
-    "JobStatus",
-    "OffloadStreamSession",
     "ExecutionTier",
     "ResolvedTier",
     # Vision

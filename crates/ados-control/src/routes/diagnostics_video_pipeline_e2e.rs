@@ -21,7 +21,7 @@
 //! Both drive the real `drone_hops` / `gs_hops` / `resolve_hops` verdict + the real
 //! `build_video_diagnostics` JSON assembly.
 //!
-//! What the full Atlas sim-bench VM run adds on top of this (the bench step, an
+//! What the full sim-bench VM run adds on top of this (the bench step, an
 //! internal harness at the monorepo root): a synthetic camera feeding the REAL agent
 //! video pipeline (ffmpeg → mediamtx → wfb tee → wfb_tx) on an OrbStack Linux VM, so
 //! the mediamtx `bytesReceived` and the wfb-stats sidecar are produced by the live

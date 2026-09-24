@@ -22,13 +22,13 @@ logger = logging.getLogger(__name__)
 
 
 class ExecutionTier(str, enum.Enum):
-    """Where a plugin's inference model runs, chosen when it opens a stream.
+    """Where a plugin wants its inference model to run.
 
     ``LOCAL`` runs the model on the drone's own accelerator (the existing vision
     path — the plugin registers its model with the engine). ``OFFLOAD`` runs it
     on a paired compute node: the drone streams its camera to the node, the node
     runs the model, and detections return onto the drone's shared
-    ``vision.detection`` bus. ``AUTO`` lets the runtime pick — local when the
+    ``vision.detection`` bus. ``AUTO`` defers to the agent — local when the
     drone has a usable accelerator, offload when it is NPU-less and a compute
     node is paired. Either way the detections land on the same bus, so downstream
     (the cockpit, other plugins, the lock/behaviour gate) is
@@ -36,8 +36,9 @@ class ExecutionTier(str, enum.Enum):
 
     The tier decision itself is the agent's, from ``ados_offload::pick_tier``
     reading the offload-link sidecar; it is NOT reimplemented here. A plugin
-    passes its intent to ``ctx.compute.open_stream`` and the host resolves the
-    tier and reports it back on the session (``session.execution``).
+    that holds an offload link publishes it through the ``offload.advertise``
+    host method (gated on ``vision.detection.publish``), and the agent reports
+    the tier it resolved as a :class:`ResolvedTier`.
     """
 
     LOCAL = "local"
@@ -49,17 +50,16 @@ class ExecutionTier(str, enum.Enum):
 
 
 class ResolvedTier(str, enum.Enum):
-    """The perception tier the host RESOLVED for a session — distinct from the
-    plugin's :class:`ExecutionTier` *intent*.
+    """The perception tier the agent RESOLVED — distinct from a plugin's
+    :class:`ExecutionTier` *intent*.
 
-    A plugin passes an :class:`ExecutionTier` intent (``local`` / ``offload`` /
-    ``auto``) to ``ctx.compute.open_stream``; the host resolves it against the
-    live board + offload signals (``ados_offload::pick_tier``) and reports one of
-    these back on ``session.execution``. The resolved domain is a SUPERSET of the
-    intent: it drops ``auto`` (already decided) and adds ``hybrid`` (a light local
-    model plus the node) and ``none`` (no perception path — odometry only). So a
-    resolved tier must never be forced back through :class:`ExecutionTier`, which
-    has no ``hybrid`` / ``none`` member and would raise on them.
+    The agent resolves the tier from the live board and offload-link signals
+    (``ados_offload::pick_tier``) and reports it as ``perceptionTier`` on
+    ``/api/status``. The resolved domain is a SUPERSET of the intent: it drops
+    ``auto`` (already decided) and adds ``hybrid`` (a light local model plus the
+    node) and ``none`` (no perception path — odometry only). So a resolved tier
+    must never be forced back through :class:`ExecutionTier`, which has no
+    ``hybrid`` / ``none`` member and would raise on them.
     """
 
     LOCAL = "local"
@@ -73,19 +73,18 @@ class ResolvedTier(str, enum.Enum):
 
     @classmethod
     def parse(cls, value: str) -> ResolvedTier:
-        """Parse a host-reported tier string, TOTAL and never raising.
+        """Parse an agent-reported tier string, TOTAL and never raising.
 
         A recognised value maps to its member; an unrecognised one (a
-        forward/unknown tier from a newer host) degrades to :attr:`LOCAL` — the
+        forward/unknown tier from a newer agent) degrades to :attr:`LOCAL` — the
         on-drone path, matching the absent-key default — and logs, so an
-        unexpected reply can never crash the plugin's ``open_stream``.
+        unexpected value can never crash the plugin reading it.
         """
         try:
             return cls(value)
         except ValueError:
             logger.warning(
-                "unknown resolved perception tier %r from the host; "
-                "treating the session as %r",
+                "unknown resolved perception tier %r from the agent; treating it as %r",
                 value,
                 cls.LOCAL.value,
             )

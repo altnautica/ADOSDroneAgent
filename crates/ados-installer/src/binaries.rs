@@ -42,10 +42,6 @@ pub struct PrebuiltBinary {
 const BOTH: &[&str] = &["drone", "ground_station"];
 const DRONE: &[&str] = &["drone"];
 const GROUND: &[&str] = &["ground_station"];
-/// The workstation-class profiles: the operator's `workstation` (a GPU box / Mac
-/// / spare box that reconstructs + serves perception offload) and the lean
-/// headless `compute` worker. Distinct from the SBC profiles.
-const WORKSTATION: &[&str] = &["workstation", "compute"];
 /// Every profile, including the workstation-class nodes. Used for the
 /// profile-agnostic core services every node needs (orchestrator, cloud relay,
 /// control front, plugin host, logging, TUI) so a `--profile workstation` or
@@ -208,19 +204,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::Hard,
         profiles: DRONE,
     },
-    // The world-model capture service. Best-effort + opt-in: it runs behind the
-    // capture feature flag (inert by default), so a missing binary degrades only
-    // the opt-in capture path without aborting the install. Fetched + placed so
-    // enabling capture works on demand — and, crucially, so an upgrade keeps it in
-    // step with the vision engine it shares a shared-memory ring layout with.
-    PrebuiltBinary {
-        service: "ados-atlas",
-        asset: "ados-atlas-aarch64",
-        release_tag: "prebuilt-atlas",
-        dest: "/opt/ados/bin/ados-atlas",
-        gate: Gate::BestEffort,
-        profiles: DRONE,
-    },
     // The decentralized swarm state bus. Fetched on BOTH FC-bearing profiles,
     // matching its supervisor gate: a drone broadcasts its beacon and a ground
     // station listens so the operator's fleet view is local-first. Best-effort
@@ -324,23 +307,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         dest: "/usr/local/bin/mediamtx",
         gate: Gate::BestEffort,
         profiles: BOTH,
-    },
-    // The compute reconstructor/offload daemon. Best-effort so a workstation
-    // host that cannot use this aarch64 prebuilt degrades + reports rather
-    // than failing the install. How a workstation gets the daemon by host:
-    //   - macOS (any arch): the macOS install path builds every service from
-    //     source, so this catalog entry is not consulted there.
-    //   - aarch64 Linux: this prebuilt is fetched.
-    //   - non-aarch64 Linux (e.g. an x86_64 GPU box): NOT yet supported — the
-    //     preflight arch gate stops the Linux install before any fetch, and a
-    //     Linux build-from-source path is a scoped follow-up.
-    PrebuiltBinary {
-        service: "ados-compute",
-        asset: "ados-compute-aarch64",
-        release_tag: "prebuilt-compute",
-        dest: "/opt/ados/bin/ados-compute",
-        gate: Gate::BestEffort,
-        profiles: WORKSTATION,
     },
 ];
 
@@ -792,8 +758,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_twenty_five_entries() {
-        assert_eq!(PREBUILT.len(), 25);
+    fn catalog_has_twenty_three_entries() {
+        assert_eq!(PREBUILT.len(), 23);
     }
 
     /// The camera boot probe is fetched on every profile even though the CSI
@@ -860,25 +826,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn drone_profile_fetches_the_atlas_capture_service() {
-        let svcs: Vec<&str> = for_profile("drone").iter().map(|b| b.service).collect();
-        assert!(
-            svcs.contains(&"ados-atlas"),
-            "a drone install must fetch ados-atlas so an upgrade keeps the ring \
-             reader in step with the vision engine that writes the ring"
-        );
-    }
-
     /// The workstation-class profiles are full agents. `compute` used to be absent
     /// from every profile set, so a `--profile compute` Linux install fetched no
     /// binary at all — not even the supervisor its unit execs.
     #[test]
-    fn workstation_class_profiles_fetch_the_cores_and_the_compute_daemon() {
+    fn workstation_class_profiles_fetch_the_cores() {
         for profile in ["workstation", "compute"] {
             let svcs: Vec<&str> = for_profile(profile).iter().map(|b| b.service).collect();
             // The orchestrator, cloud relay, control front (LAN pairing), plugin
-            // host, logging, and TUI, plus the compute daemon.
+            // host, logging, and TUI.
             for svc in [
                 "ados-supervisor",
                 "ados-cloud",
@@ -886,7 +842,6 @@ mod tests {
                 "ados-plugin-host",
                 "ados-logd",
                 "ados-tui",
-                "ados-compute",
             ] {
                 assert!(
                     svcs.contains(&svc),
@@ -906,13 +861,6 @@ mod tests {
                 );
             }
         }
-        // The compute daemon degrades (build-from-source on an uncovered arch).
-        let compute = PREBUILT
-            .iter()
-            .find(|b| b.service == "ados-compute")
-            .expect("ados-compute in the catalog");
-        assert_eq!(compute.gate, Gate::BestEffort);
-        assert_eq!(compute.release_tag, "prebuilt-compute");
     }
 
     /// Extensions target every node profile, so every profile runs the plugin

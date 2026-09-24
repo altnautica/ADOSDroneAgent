@@ -11,7 +11,6 @@ import {
   Monitor,
   Radar,
   Route,
-  Share2,
   ShieldAlert,
   Signal,
   UserCog,
@@ -138,20 +137,13 @@ const SECTIONS: SectionLink[] = [
     allow: ["drone"],
   },
   {
-    to: "/settings/atlas-swarm",
-    label: "Atlas & swarm",
+    to: "/settings/swarm",
+    label: "Swarm",
     icon: Boxes,
-    blurb: "World-model capture and swarm defaults.",
+    blurb: "Swarm participation and formation defaults.",
     group: "Video & vision",
-    // World-model capture and swarm coordination are drone-fleet surfaces.
+    // Swarm coordination is a drone-fleet surface.
     allow: ["drone"],
-  },
-  {
-    to: "/settings/offload",
-    label: "Offload",
-    icon: Share2,
-    blurb: "Perception offload: drone target or workstation serving.",
-    group: "Video & vision",
   },
   // CLOUD & REMOTE
   {

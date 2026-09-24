@@ -520,38 +520,6 @@ impl Supervisor {
             }
         }
 
-        // Start the world-model capture service on the same terms as the
-        // vision engine it consumes.
-        //
-        // `ados-atlas` was started by NOTHING: it is in no install-time enable
-        // set, `start()` only walks the Core tier, the hardware pass did not
-        // mention it, and no hot-plug class routes to it — so a registered,
-        // profile-gated, packaged unit with a fetched binary never ran on any
-        // node, and an `atlas.enabled: true` config was silently inert.
-        //
-        // Gated on the config flag rather than started unconditionally: the
-        // binary exits cleanly (status 0) when atlas is off, which the monitor
-        // would read as a death and restart-loop against.
-        if self.config.atlas_enabled {
-            if let Some(i) = self.index_of("ados-atlas") {
-                if !gate_allows(&self.services[i], &self.config) {
-                    tracing::warn!(
-                        profile = %self.config.profile_wire,
-                        headless = self.config.headless_mode,
-                        "atlas enabled but ados-atlas is gated off for this node; \
-                         world-model capture runs on the drone profile and is excluded \
-                         from headless mode"
-                    );
-                } else if has_video_source {
-                    self.start_service("ados-atlas").await;
-                } else {
-                    tracing::warn!(
-                        "atlas enabled but no camera source configured; ados-atlas not started"
-                    );
-                }
-            }
-        }
-
         // A relay / receiver ground station's units (batman, then its WFB
         // plane) are enabled by nothing, so after a reboot they only run if this
         // pass starts them. The direct role's receive plane is this node's radio
@@ -945,7 +913,6 @@ mod tests {
             video_enabled: true,
             video_network_source: None,
             vision_enabled: false,
-            atlas_enabled: false,
             cloud_relay_enabled: false,
             configured_gs_role: "direct".to_string(),
             headless_mode: false,
@@ -1002,9 +969,8 @@ mod tests {
         // The FC router never runs on the FC-less workstation node — it never fetches
         // the router binary, so an unconditional start would crash-loop.
         assert!(!gate_allows(&spec("ados-mavlink"), &c));
-        // The core infra the workstation node DOES run, plus the compute daemon.
+        // The core infra the workstation node DOES run.
         assert!(gate_allows(&spec("ados-cloud"), &c));
-        assert!(gate_allows(&spec("ados-compute"), &c));
         // The pipe-set gate keeps the router on the FC-bearing profiles.
         assert!(gate_allows(&spec("ados-mavlink"), &cfg("drone")));
         assert!(gate_allows(&spec("ados-mavlink"), &cfg("ground_station")));
@@ -1771,43 +1737,5 @@ mod tests {
             "the adoption sweep must never issue a start; calls={:?}",
             pm.calls()
         );
-    }
-
-    #[tokio::test]
-    async fn atlas_enabled_starts_the_world_model_capture_service() {
-        // Regression: `ados-atlas` was started by NOTHING — not the Core tier
-        // walk, not the hardware pass, not a hot-plug class, and it is in no
-        // install-time enable set. A registered, gated, packaged unit with a
-        // fetched binary that never ran on any node.
-        let mock = Arc::new(MockProcessManager::new());
-        let bind = Arc::new(BindOrchestrator::new());
-        let mut config = cfg("drone");
-        config.atlas_enabled = true;
-        config.video_network_source = Some("rtsp://cam/scene".to_string());
-        let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
-
-        sup.detect_and_start_hardware().await;
-
-        assert!(
-            mock.calls().contains(&"start:ados-atlas".to_string()),
-            "atlas.enabled did not bring the capture service up; calls={:?}",
-            mock.calls()
-        );
-    }
-
-    #[tokio::test]
-    async fn atlas_disabled_leaves_the_capture_service_alone() {
-        // The binary exits cleanly when atlas is off, so an unconditional start
-        // would be read as a death and restart-looped.
-        let mock = Arc::new(MockProcessManager::new());
-        let bind = Arc::new(BindOrchestrator::new());
-        let mut config = cfg("drone");
-        config.atlas_enabled = false;
-        config.video_network_source = Some("rtsp://cam/scene".to_string());
-        let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
-
-        sup.detect_and_start_hardware().await;
-
-        assert!(!mock.calls().contains(&"start:ados-atlas".to_string()));
     }
 }

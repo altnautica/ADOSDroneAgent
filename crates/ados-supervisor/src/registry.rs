@@ -177,22 +177,6 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // core. On an NPU board the engine reaches its model through the
     // ados-vision-rknn sidecar.
     def("ados-vision", Hardware, Some("drone"), None),
-    // The world-model capture service: subscribes the vision frame ring, selects
-    // pose-tagged keyframes, and publishes the keyframe + pose + capture-state
-    // streams a compute node reconstructs from. Drone-only (the air side owns the
-    // cameras) to match the prebuilt catalog. It self-gates on `atlas.enabled`
-    // (it exits cleanly when atlas is off, the default), so the unit is a clean
-    // no-op until provisioning enables it. NOT in the headless KEEP set:
-    // world-model capture is excluded from the lean headless core.
-    def("ados-atlas", Hardware, Some("drone"), None),
-    // The compute engine: the job store, the scheduler, and the REST job API.
-    // Profile-gated to `workstation|compute` so it runs on the operator's
-    // workstation (a GPU box, a Mac, or any spare box that also carries the UI)
-    // AND on a lean headless `compute` worker (engine-only, a cluster slave),
-    // never on a drone or ground station. It serves the local-first job API a
-    // drone or GCS submits reconstruction and offload work to. NOT in the headless
-    // KEEP set: the compute profile is heavy, not the lean drone headless core.
-    def("ados-compute", Core, Some("workstation|compute"), None),
     // On-demand.
     def("ados-discovery", OnDemand, None, None),
     // The native HTTP control surface: the LAN front on `:8080` on every
@@ -358,13 +342,11 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 32, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 30, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health/logd are the
         // cross-profile always-on core (the single cloud unit serves the gateway
         // + heartbeat on both profiles, spawning the ground-station bridge when
-        // the role resolves to a ground station). ados-compute is the Core
-        // service of the workstation profile (it auto-runs only on a workstation
-        // node).
+        // the role resolves to a ground station).
         let core: Vec<_> = specs
             .iter()
             .filter(|s| s.category == Category::Core)
@@ -378,16 +360,9 @@ mod tests {
                 "ados-api",
                 "ados-cloud",
                 "ados-health",
-                "ados-logd",
-                "ados-compute"
+                "ados-logd"
             ]
         );
-        // The compute engine is a Core service of the workstation + compute
-        // profiles and is NOT in the headless keep set (the compute profile is heavy).
-        let compute = specs.iter().find(|s| s.name == "ados-compute").unwrap();
-        assert_eq!(compute.profile_gate, Some("workstation|compute"));
-        assert_eq!(compute.category, Category::Core);
-        assert!(!compute.headless_keep);
         // The drone TX manager is drone-gated; the GS RX is role-gated to direct.
         let wfb = specs.iter().find(|s| s.name == "ados-wfb").unwrap();
         assert_eq!(wfb.profile_gate, Some("drone"));
@@ -409,13 +384,6 @@ mod tests {
         assert_eq!(vis.profile_gate, Some("drone"));
         assert_eq!(vis.category, Category::Hardware);
         assert!(!vis.headless_keep);
-        // The world-model capture service is a drone-gated Hardware unit and is
-        // NOT in the headless keep set (world-model capture is excluded from the
-        // lean core, like vision).
-        let atlas = specs.iter().find(|s| s.name == "ados-atlas").unwrap();
-        assert_eq!(atlas.profile_gate, Some("drone"));
-        assert_eq!(atlas.category, Category::Hardware);
-        assert!(!atlas.headless_keep);
         // The CRSF RC lane is a Hardware unit on both FC-bearing profiles
         // (ground-side transmitter today, drone-side for the relay last mile),
         // never in the headless keep set. Its presence here is what arms the

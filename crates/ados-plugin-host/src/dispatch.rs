@@ -106,17 +106,6 @@ pub enum Method {
     /// subscriptions this never reaches the facade: the server short-circuits it
     /// and pushes `button.deliver` events.
     ButtonSubscribe,
-    // Compute offload: the host routes these to its paired compute connection.
-    ComputeDatasetWrite,
-    ComputeJobSubmit,
-    ComputeJobRead,
-    ComputeJobOutputs,
-    ComputeJobCancel,
-    // Streaming perception offload: open / close / read-health of a live
-    // frames→detections session on a paired compute node.
-    ComputeStreamOpen,
-    ComputeStreamClose,
-    ComputeStreamHealth,
 }
 
 impl Method {
@@ -191,14 +180,6 @@ impl Method {
             "cloud.publish" => Self::CloudPublish,
             "cloud.records.put" => Self::CloudRecordsPut,
             "offload.advertise" => Self::OffloadAdvertise,
-            "compute.dataset.write" => Self::ComputeDatasetWrite,
-            "compute.job.submit" => Self::ComputeJobSubmit,
-            "compute.job.read" => Self::ComputeJobRead,
-            "compute.job.outputs" => Self::ComputeJobOutputs,
-            "compute.job.cancel" => Self::ComputeJobCancel,
-            "compute.stream.open" => Self::ComputeStreamOpen,
-            "compute.stream.close" => Self::ComputeStreamClose,
-            "compute.stream.health" => Self::ComputeStreamHealth,
             _ => return None,
         })
     }
@@ -253,14 +234,6 @@ impl Method {
             Self::VisionSubscribeDetections => vision_methods::SUBSCRIBE_DETECTIONS,
             Self::VisionDesignateTrack => vision_methods::DESIGNATE_TRACK,
             Self::ButtonSubscribe => BUTTON_SUBSCRIBE,
-            Self::ComputeDatasetWrite => "compute.dataset.write",
-            Self::ComputeJobSubmit => "compute.job.submit",
-            Self::ComputeJobRead => "compute.job.read",
-            Self::ComputeJobOutputs => "compute.job.outputs",
-            Self::ComputeJobCancel => "compute.job.cancel",
-            Self::ComputeStreamOpen => "compute.stream.open",
-            Self::ComputeStreamClose => "compute.stream.close",
-            Self::ComputeStreamHealth => "compute.stream.health",
         }
     }
 
@@ -566,14 +539,6 @@ mod tests {
         Method::VisionSubscribeDetections,
         Method::VisionDesignateTrack,
         Method::ButtonSubscribe,
-        Method::ComputeDatasetWrite,
-        Method::ComputeJobSubmit,
-        Method::ComputeJobRead,
-        Method::ComputeJobOutputs,
-        Method::ComputeJobCancel,
-        Method::ComputeStreamOpen,
-        Method::ComputeStreamClose,
-        Method::ComputeStreamHealth,
     ];
 
     #[test]
@@ -715,69 +680,6 @@ mod tests {
             ),
             Gate::Allow(Method::VisionPublishDetection)
         );
-    }
-
-    #[test]
-    fn compute_methods_gate_on_their_capability() {
-        // Submit + cancel share the submit cap; read + outputs share the read cap.
-        for m in ["compute.job.submit", "compute.job.cancel"] {
-            assert_eq!(
-                gate(m, false, &caps(&[])),
-                Gate::CapabilityDenied("capability_denied: compute.job.submit".to_string())
-            );
-            assert!(matches!(
-                gate(m, false, &caps(&["compute.job.submit"])),
-                Gate::Allow(_)
-            ));
-        }
-        for m in ["compute.job.read", "compute.job.outputs"] {
-            assert_eq!(
-                gate(m, false, &caps(&[])),
-                Gate::CapabilityDenied("capability_denied: compute.job.read".to_string())
-            );
-            assert!(matches!(
-                gate(m, false, &caps(&["compute.job.read"])),
-                Gate::Allow(_)
-            ));
-        }
-        assert_eq!(
-            gate("compute.dataset.write", false, &caps(&[])),
-            Gate::CapabilityDenied("capability_denied: compute.dataset.write".to_string())
-        );
-        assert_eq!(
-            gate(
-                "compute.dataset.write",
-                false,
-                &caps(&["compute.dataset.write"])
-            ),
-            Gate::Allow(Method::ComputeDatasetWrite)
-        );
-        assert_eq!(
-            gate("compute.job.submit", false, &caps(&["compute.job.submit"])),
-            Gate::Allow(Method::ComputeJobSubmit)
-        );
-    }
-
-    #[test]
-    fn compute_stream_methods_gate_on_the_open_capability() {
-        // open / close / health are the one open-a-stream surface: all three are
-        // refused without `compute.stream.open` and allowed with it (the opener
-        // manages the session it opened). The `compute.job.submit` cap does NOT
-        // satisfy them — a streaming session is a distinct grant.
-        for (method, variant) in [
-            ("compute.stream.open", Method::ComputeStreamOpen),
-            ("compute.stream.close", Method::ComputeStreamClose),
-            ("compute.stream.health", Method::ComputeStreamHealth),
-        ] {
-            assert_eq!(
-                gate(method, false, &caps(&["compute.job.submit"])),
-                Gate::CapabilityDenied("capability_denied: compute.stream.open".to_string())
-            );
-            assert_eq!(
-                gate(method, false, &caps(&["compute.stream.open"])),
-                Gate::Allow(variant)
-            );
-        }
     }
 
     #[test]

@@ -22,14 +22,6 @@ ados-protocol = { path = "../ados-protocol", features = ["tracing-layer", "tls"]
 ados-offload = { path = "../ados-offload" }
 ados-config = { path = "../ados-config" }
 ados-plugin-host = { path = "../ados-plugin-host" }
-# The Atlas stream lane: this crate hosts the Cloud bearer (it owns the broker
-# connection) implementing the lane crate's AtlasBearer trait. Layering points
-# the heavy cloud crate at the lean lane crate, never the reverse.
-ados-atlas-transport = { path = "../ados-atlas-transport" }
-# The Atlas forwarder browses for a compute node over mDNS
-# (`ados_compute::mdns::resolve_compute`) to build the direct-LAN bearer. A
-# one-way edge: ados-compute never depends on ados-cloud.
-ados-compute = { path = "../ados-compute" }
 # The per-adapter stable-MAC verdicts the heartbeat's `macStability` block
 # carries. The projection lives in the crate that owns the state file so the
 # LAN status body and this heartbeat ship one shape, not two.
@@ -62,11 +54,10 @@ async-trait = { workspace = true }
 parking_lot = { workspace = true }
 
 # TLS stack: rustls with the ring crypto provider and the bundled webpki trust
-# anchors. ring is already linked into this crate's graph (the compute client's
-# dependencies pull it), so the TLS path uses that one mature provider rather
-# than a second, pre-release one. These deps are specific to this crate (no
-# other crate builds its own TLS client config), so they are declared here
-# rather than in the workspace table.
+# anchors: the one mature provider the agent's other HTTPS clients (the plugin
+# host's archive download) also use, rather than a second, pre-release one.
+# These deps are specific to this crate's broker and update clients, so they
+# are declared here rather than in the workspace table.
 rustls = { version = "0.23", default-features = false, features = [
     "ring",
     "std",

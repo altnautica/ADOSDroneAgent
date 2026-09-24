@@ -25,14 +25,6 @@
 //! forbid it outright. A refused open is reported as [`AuxEgressError::Disabled`]
 //! — a distinct variant, because a deliberately disabled lane is an operator
 //! choice to report once and live with, not a fault to retry hard against.
-//!
-//! ## Relationship to the Atlas WFB bearer
-//!
-//! The Atlas transport carries its own copy of this handshake, written before
-//! this client existed and wired into that crate's bearer-ladder error type.
-//! Converging the two is a worthwhile follow-up, but it changes a shipping lane
-//! and belongs in its own change; this module is deliberately generic (raw
-//! payload + channel tag, no event type) so that convergence is a small step.
 
 use std::path::PathBuf;
 use std::time::Duration;

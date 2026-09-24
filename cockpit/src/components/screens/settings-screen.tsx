@@ -2,7 +2,7 @@
 // 48px rows over the whole `GET /api/config` dump, written back one leaf at a
 // time with `PUT /api/config {key,value}`. It leads with a curated grouping of
 // the common set (Profile / Network / Radio / Mesh / Display / Cloud /
-// Perception / Camera / System) and an "All settings" node that exposes the
+// Vision / Camera / System) and an "All settings" node that exposes the
 // complete raw tree, so nothing is unreachable. One shared config snapshot backs
 // every drill level (config-store); the reboot-pending banner lives in the shell.
 //

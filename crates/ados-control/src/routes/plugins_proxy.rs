@@ -133,12 +133,12 @@ mod tests {
 
     #[test]
     fn the_upstream_target_keeps_encoding_and_query() {
-        let uri: Uri = "/api/plugins/com.example.web/x/atlas/a%20b/c?x=1&y=2"
+        let uri: Uri = "/api/plugins/com.example.web/x/jobs/a%20b/c?x=1&y=2"
             .parse()
             .unwrap();
         assert_eq!(
             upstream_target(&uri).as_deref(),
-            Some("/atlas/a%20b/c?x=1&y=2")
+            Some("/jobs/a%20b/c?x=1&y=2")
         );
         let bare: Uri = "/api/plugins/com.example.web/x/status".parse().unwrap();
         assert_eq!(upstream_target(&bare).as_deref(), Some("/status"));

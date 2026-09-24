@@ -24,65 +24,9 @@
 use std::time::Duration;
 
 use crate::heartbeat::{
-    ClusterSlave, ConfigErrorEntry, CrsfBlock, HeartbeatPayload, LinkedPeerHb, RadioBlock,
-    RemoteAccess, VideoStreamHb,
+    ConfigErrorEntry, CrsfBlock, HeartbeatPayload, LinkedPeerHb, RadioBlock, RemoteAccess,
+    VideoStreamHb,
 };
-
-/// The compute-node heartbeat sidecar written by `ados-compute`
-/// (`/run/ados/compute-heartbeat.json`). Absent on a non-compute node — then
-/// every compute field stays `None` and is omitted from the heartbeat.
-const COMPUTE_HEARTBEAT_SIDECAR: &str = "/run/ados/compute-heartbeat.json";
-
-/// A compute sidecar not re-written within this window is treated as absent, so
-/// a dead/hung `ados-compute` (whose tmpfs file persists) never makes the relay
-/// fold a frozen-but-live compute state forever. 4x the
-/// producer's 5 s write cadence.
-const COMPUTE_SIDECAR_STALE_MS: i64 = 20_000;
-
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ComputeSidecar {
-    /// The producer's sidecar schema version (absent ⇒ `0` from an older writer).
-    #[serde(default)]
-    version: u16,
-    /// The producer's write time; absent/stale ⇒ the sidecar is treated as gone.
-    generated_at_ms: Option<i64>,
-    compute_role: Option<String>,
-    compute_cluster_master_id: Option<String>,
-    compute_queue_depth: Option<i64>,
-    compute_active_jobs: Option<i64>,
-    /// Live streaming perception-offload sessions (a node serving N drones).
-    compute_active_sessions: Option<i64>,
-    compute_workers_idle: Option<i64>,
-    compute_cluster_aggregate_workers_idle: Option<i64>,
-    compute_cluster_slaves: Option<Vec<ClusterSlave>>,
-}
-
-/// Read + parse the compute heartbeat sidecar at `path`, or `None` when it is
-/// absent, unparseable, missing its write-time, or STALE (older than the
-/// staleness budget at `now_ms`). A stale file folds to absent compute fields,
-/// so a dead/hung producer stops asserting frozen state on the heartbeat.
-fn read_compute_sidecar_from(path: &std::path::Path, now_ms: i64) -> Option<ComputeSidecar> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let sidecar: ComputeSidecar = serde_json::from_str(&text).ok()?;
-    match sidecar.generated_at_ms {
-        Some(gen) if now_ms.saturating_sub(gen) <= COMPUTE_SIDECAR_STALE_MS => {
-            // Best-effort drift signal: warn (never reject) on a producer/reader
-            // version mismatch, then fold the sidecar in anyway.
-            ados_protocol::sidecar::check_sidecar_version(
-                "compute-heartbeat",
-                sidecar.version,
-                ados_compute::COMPUTE_HEARTBEAT_SIDECAR_VERSION,
-            );
-            Some(sidecar)
-        }
-        _ => None,
-    }
-}
-
-fn read_compute_sidecar(now_ms: i64) -> Option<ComputeSidecar> {
-    read_compute_sidecar_from(std::path::Path::new(COMPUTE_HEARTBEAT_SIDECAR), now_ms)
-}
 
 const VIDEO_STREAMS_SIDECAR: &str = "/run/ados/video-streams.json";
 
@@ -332,10 +276,9 @@ fn now_epoch_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// The directory every plugin / feature writes its own state sidecar into
-/// (`<id>-state.json`): sandboxed plugins via the plugin host, plus first-party
-/// services (e.g. `ados-atlas`) that surface telemetry the same way. The
-/// heartbeat ferries each slice opaquely under `pluginState[<id>]`.
+/// The directory every plugin writes its own state sidecar into
+/// (`<id>-state.json`) through the plugin host. The heartbeat ferries each
+/// slice opaquely under `pluginState[<id>]`.
 const PLUGIN_STATE_DIR: &str = "/run/ados/plugins";
 
 /// A plugin sidecar not re-written within this window is treated as absent, so a
@@ -596,9 +539,6 @@ pub fn build_payload(
 /// A payload carrying only the required + native fields, an all-`absent` radio
 /// block, and no optional enrichment.
 fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
-    // Fold the compute-node sidecar (compute profile only; None elsewhere, and
-    // None when the file is stale so a dead producer is not folded forever).
-    let compute = read_compute_sidecar(now_epoch_ms()).unwrap_or_default();
     let video_streams = read_video_streams_sidecar(now_epoch_ms());
     // Fold the WFB linked-peers list (None on a drone / a peerless ground node,
     // and None when every entry is stale so a dead listener is not folded
@@ -764,14 +704,6 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         linked_peers,
         display_type: None,
         can_buses: None,
-        compute_role: compute.compute_role,
-        compute_cluster_master_id: compute.compute_cluster_master_id,
-        compute_queue_depth: compute.compute_queue_depth,
-        compute_active_jobs: compute.compute_active_jobs,
-        compute_active_sessions: compute.compute_active_sessions,
-        compute_workers_idle: compute.compute_workers_idle,
-        compute_cluster_aggregate_workers_idle: compute.compute_cluster_aggregate_workers_idle,
-        compute_cluster_slaves: compute.compute_cluster_slaves,
         plugin_state,
         config_errors,
     }
@@ -961,17 +893,6 @@ mod tests {
         }
     }
 
-    fn write_sidecar(dir: &std::path::Path, body: serde_json::Value) -> std::path::PathBuf {
-        use std::io::Write;
-        std::fs::create_dir_all(dir).unwrap();
-        let path = dir.join("compute-heartbeat.json");
-        std::fs::File::create(&path)
-            .unwrap()
-            .write_all(body.to_string().as_bytes())
-            .unwrap();
-        path
-    }
-
     #[test]
     fn folded_video_legs_advertise_a_same_origin_whep_path_only() {
         // VID-09: the GCS must never be handed an absolute `host:port` media
@@ -1014,52 +935,6 @@ mod tests {
         assert_eq!(legs[1].live, None);
     }
 
-    #[test]
-    fn a_fresh_compute_sidecar_folds_but_a_stale_or_missing_one_does_not() {
-        let dir = std::env::temp_dir().join(format!("ados-cloud-hb-{}", std::process::id()));
-        let path = write_sidecar(
-            &dir,
-            serde_json::json!({
-                "generatedAtMs": 1_000_000,
-                "computeRole": "master",
-                "computeClusterMasterId": "node-a",
-                "computeQueueDepth": 2,
-                "computeActiveJobs": 1,
-                "computeActiveSessions": 4,
-                "computeWorkersIdle": 3,
-                "computeClusterAggregateWorkersIdle": 5,
-                "computeClusterSlaves": [
-                    {"nodeId": "s1", "accelerators": ["mps"], "workersIdle": 1, "queueDepth": 0}
-                ]
-            }),
-        );
-        // Fresh (within the 20 s budget) → folds.
-        let fresh = read_compute_sidecar_from(&path, 1_000_000 + 5_000).unwrap();
-        assert_eq!(fresh.compute_role.as_deref(), Some("master"));
-        assert_eq!(fresh.compute_workers_idle, Some(3));
-        // Live streaming offload sessions fold onto the heartbeat too (distinct
-        // from queued/active reconstruction jobs).
-        assert_eq!(fresh.compute_active_sessions, Some(4));
-        assert_eq!(fresh.compute_cluster_slaves.unwrap()[0].node_id, "s1");
-        // Stale (past the budget) → None: a dead/hung producer is not folded.
-        assert!(read_compute_sidecar_from(&path, 1_000_000 + 25_000).is_none());
-        // Missing file → None.
-        assert!(read_compute_sidecar_from(&dir.join("nope.json"), 1_000_000).is_none());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_sidecar_without_a_write_time_is_treated_as_absent() {
-        let dir = std::env::temp_dir().join(format!("ados-cloud-hb-nots-{}", std::process::id()));
-        // No generatedAtMs → conservative: treated as gone (cannot age-gate it).
-        let path = write_sidecar(
-            &dir,
-            serde_json::json!({ "computeRole": "master", "computeWorkersIdle": 3 }),
-        );
-        assert!(read_compute_sidecar_from(&path, 1_000_000).is_none());
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
     fn write_named(dir: &std::path::Path, name: &str, body: &str) {
         use std::io::Write;
         std::fs::create_dir_all(dir).unwrap();
@@ -1074,7 +949,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ados-cloud-plugins-{}", std::process::id()));
         write_named(
             &dir,
-            "atlas-state.json",
+            "com.example.world-state.json",
             r#"{"state":"active","gaussianCount":42}"#,
         );
         write_named(&dir, "follow-me-state.json", r#"{"lock":"locked"}"#);
@@ -1083,8 +958,8 @@ mod tests {
 
         let out = read_plugin_state_sidecars_from(&dir, std::time::SystemTime::now());
         // Keyed by id (filename minus -state.json); the slice is opaque/verbatim.
-        assert_eq!(out["atlas"]["state"], "active");
-        assert_eq!(out["atlas"]["gaussianCount"], 42);
+        assert_eq!(out["com.example.world"]["state"], "active");
+        assert_eq!(out["com.example.world"]["gaussianCount"], 42);
         assert_eq!(out["follow-me"]["lock"], "locked");
         // Malformed JSON + non-state files are skipped, never the whole read.
         assert!(!out.contains_key("bad"));
@@ -1096,7 +971,11 @@ mod tests {
     fn a_stale_plugin_sidecar_is_dropped() {
         let dir =
             std::env::temp_dir().join(format!("ados-cloud-plugins-stale-{}", std::process::id()));
-        write_named(&dir, "atlas-state.json", r#"{"state":"active"}"#);
+        write_named(
+            &dir,
+            "com.example.world-state.json",
+            r#"{"state":"active"}"#,
+        );
         // A reference `now` an hour after the just-written file -> past the gate.
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
         assert!(read_plugin_state_sidecars_from(&dir, later).is_empty());

@@ -37,8 +37,6 @@
 //! - [`dashboard_session`] — self-contained HMAC session tokens the dashboard
 //!   PIN gate mints, keyed off the pairing key + the PIN salt so a reset revokes
 //!   every live session; accepted as an alternative data-plane credential.
-//! - [`node_credential`] — the scoped credential a workstation issues a drone
-//!   for its lanes: the header, the lane names and the drone-side store.
 //! - [`mavlink_ingest`] — the client for a node's MAVLink republish seam, over
 //!   which frames received off-board (a ground station's radio lane) enter that
 //!   node's own frame fan-out. The mirror of the MAVLink socket's inbound path,
@@ -49,7 +47,6 @@
 //!   so a loop that was busy when the stop arrived still sees it.
 
 pub mod ap_country;
-pub mod atlas;
 pub mod aux_egress;
 pub mod aux_mux;
 pub mod aux_ports;
@@ -59,7 +56,6 @@ pub mod buttons;
 pub mod capabilities;
 pub mod cloud_link;
 pub mod cloud_publish;
-pub mod compute;
 pub mod config_tunnel_ingest;
 pub mod contracts;
 #[cfg(feature = "tls")]
@@ -81,10 +77,8 @@ pub mod mavlink_ingest;
 pub mod mcp_token;
 pub mod msp;
 pub mod netif;
-pub mod node_credential;
 pub mod node_info;
 pub mod node_status;
-pub mod offload;
 pub mod offload_link;
 pub mod pair_proof;
 pub mod pairing_posture;

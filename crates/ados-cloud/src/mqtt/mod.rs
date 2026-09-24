@@ -23,11 +23,10 @@
 //! client presents the same ClientID, so every process/lane that dials the
 //! broker for one device must carry its own id: `ados-{id}` (MAVLink relay),
 //! `ados-{id}-msp` (MSP byte plane), `ados-{id}-webrtc` (SDP signaling),
-//! `ados-{id}-atlas`, `ados-{id}-vision`, `ados-{id}-plugin-update`,
-//! `ados-{id}-plugin-publish`. Two lanes sharing an id do not
-//! degrade — they evict each other in a sub-second loop forever, which reads as
-//! a flapping `mqttConnected` with no cloud telemetry and no cloud command
-//! authority.
+//! `ados-{id}-plugin-update`, `ados-{id}-plugin-publish`. Two lanes sharing an
+//! id do not degrade — they evict each other in a sub-second loop forever,
+//! which reads as a flapping `mqttConnected` with no cloud telemetry and no
+//! cloud command authority.
 
 pub mod mavlink_relay;
 pub mod msp_relay;
@@ -93,17 +92,6 @@ pub fn topic_plugin_update_available(device_id: &str) -> String {
 pub fn topic_plugin_stream(device_id: &str, plugin_id: &str, stream: &str) -> String {
     format!("ados/{device_id}/plugin/{plugin_id}/{stream}")
 }
-/// Map an Atlas event topic to its cloud topic under `ados/{id}/atlas/...`.
-/// The `plugin.atlas.` / `atlas.` prefix is dropped and dots become slashes, so
-/// `atlas.keyframe`->`ados/{id}/atlas/keyframe`, `atlas.pose.offload`->
-/// `ados/{id}/atlas/pose/offload`, `plugin.atlas.pose`->`ados/{id}/atlas/pose`.
-pub fn topic_atlas(device_id: &str, event_topic: &str) -> String {
-    let leaf = event_topic
-        .trim_start_matches("plugin.atlas.")
-        .trim_start_matches("atlas.")
-        .replace('.', "/");
-    format!("ados/{device_id}/atlas/{leaf}")
-}
 
 /// The per-relay MQTT username: `ados-{device_id}`.
 pub fn relay_username(device_id: &str) -> String {
@@ -156,8 +144,6 @@ mod tests {
             relay_username("dev1"),
             msp_client_id("dev1"),
             format!("ados-{}-{WEBRTC_LANE}", "dev1"),
-            format!("ados-{}-atlas", "dev1"),
-            format!("ados-{}-vision", "dev1"),
             format!("ados-{}-plugin-update", "dev1"),
             format!("ados-{}-{PLUGIN_PUBLISH_LANE}", "dev1"),
         ];

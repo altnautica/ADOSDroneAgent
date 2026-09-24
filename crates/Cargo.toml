@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-compute", "ados-atlas", "ados-atlas-transport", "ados-offload", "ados-swarmbus", "ados-swarm-control", "ados-rate-control"]
+members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-offload", "ados-swarmbus", "ados-swarm-control", "ados-rate-control"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,16 +12,15 @@ edition = "2021"
 # the shipped aarch64 binaries run on hosts this repo does not control, and an
 # undeclared requirement surfaces there as a raw compile error instead of a
 # readable "needs a newer toolchain".
-# Raised from 1.88 because the declaration was false: the workspace has not
-# built on 1.88 for some time. 1.93 is the maximum `rust-version` across the
-# whole resolved graph, computed from `cargo metadata` rather than guessed from
-# whichever crate the MSRV job named first — the first raise to 1.92 only
-# revealed the next one up (`fixed@1.31.0` wants 1.93), which is what chasing
-# an error message one crate at a time looks like. The two drivers are `rerun`,
-# exact-pinned at `=0.33.1` in ados-compute to match the GCS web-viewer's .rrd
-# encoding, and `fixed`, pulled in transitively. Lowering this is a product
-# decision, not a build fix; raising it means re-running that computation, not
-# reading the failure.
+# Raised from 1.88 because the declaration was false: the workspace had not
+# built on 1.88 for some time. The raise to 1.93 was computed from `cargo
+# metadata` as the maximum `rust-version` across the whole resolved graph,
+# rather than guessed from whichever crate the MSRV job named first. The
+# crates that drove it are no longer in this workspace; the graph's maximum is
+# now 1.89 (the `rumqttc-next` MQTT client). 1.93 stays declared until an
+# older toolchain is proven to build and test the workspace: lowering this is
+# a product decision backed by a CI run, not a comment edit, and raising it
+# means re-running that computation, not reading the failure.
 rust-version = "1.93"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/altnautica/ADOSDroneAgent"
