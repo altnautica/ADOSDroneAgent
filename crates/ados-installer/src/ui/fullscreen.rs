@@ -387,7 +387,7 @@ fn glyph_colored(theme: &Theme, g: &Group, spinner: usize) -> String {
 fn detail_token(g: &Group) -> String {
     match g.status {
         GStatus::Ok | GStatus::Failed => g.elapsed.map(fmt_dur).unwrap_or_default(),
-        GStatus::Skipped => "cached".to_string(),
+        GStatus::Skipped => "skipped".to_string(),
         GStatus::Running => match g.sub {
             Some((done, total)) => short_bar(done, total),
             None => g.elapsed_now().map(fmt_dur).unwrap_or_default(),

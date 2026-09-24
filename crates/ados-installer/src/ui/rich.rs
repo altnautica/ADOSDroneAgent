@@ -240,7 +240,7 @@ fn color_glyph(theme: &Theme, status: GStatus, glyph: &str) -> String {
 fn detail_for(theme: &Theme, g: &Group) -> String {
     match g.status {
         GStatus::Ok | GStatus::Failed => g.elapsed.map(fmt_dur).unwrap_or_default(),
-        GStatus::Skipped => "cached".to_string(),
+        GStatus::Skipped => "skipped".to_string(),
         GStatus::Running => match g.sub {
             Some((done, total)) => progress_bar(theme, done, total),
             None => g.elapsed_now().map(fmt_dur).unwrap_or_default(),

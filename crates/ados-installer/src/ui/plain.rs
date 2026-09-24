@@ -59,7 +59,7 @@ fn group_line(model: &Model, idx: usize) -> String {
         _ => "[..]  ",
     };
     let detail = match g.status {
-        GStatus::Skipped => "already configured".to_string(),
+        GStatus::Skipped => "skipped".to_string(),
         _ => g
             .elapsed
             .map(|d| format!("({})", fmt_dur(d)))
