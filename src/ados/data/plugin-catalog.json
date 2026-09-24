@@ -3,20 +3,6 @@
   "source": "first-party-bundled",
   "plugins": [
     {
-      "id": "com.altnautica.battery-health-panel",
-      "name": "ADOS Battery Health Panel",
-      "version": "1.0.2",
-      "description": "Cell-level battery diagnostics, predictive time-to-min, and anomaly alerts.",
-      "author": "Altnautica",
-      "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/battery-health-panel",
-      "license": "GPL-3.0-or-later",
-      "risk": "low",
-      "category": "telemetry",
-      "halves": ["gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/battery-health-panel-v1.0.2/com.altnautica.battery-health-panel-1.0.2.signed.adosplug",
-      "archive_sha256": "ac0365e13d405aaa6e54b9b952abc36e4665bd20a344c4893b147508b082c125"
-    },
-    {
       "id": "com.altnautica.thermal-flir-lepton-usb",
       "name": "ADOS Thermal Camera FLIR Lepton (USB)",
       "version": "1.0.2",

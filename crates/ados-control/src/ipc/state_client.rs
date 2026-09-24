@@ -141,6 +141,18 @@ impl StateIpcClient {
         }
     }
 
+    /// The latest snapshot with the instant it arrived, under the same
+    /// [`STATE_STALE_AFTER`] gate as [`Self::snapshot`]. A periodic reader
+    /// compares the instant with the one it last saw to tell a fresh frame from
+    /// the one it already consumed.
+    pub fn snapshot_at(&self) -> Option<(Instant, Value)> {
+        let held = self.snapshot.lock();
+        match held.as_ref() {
+            Some((at, value)) if at.elapsed() <= STATE_STALE_AFTER => Some((*at, value.clone())),
+            _ => None,
+        }
+    }
+
     /// Overwrite the held snapshot directly. Test-only seam: a test can prime the
     /// cell without a live socket. Not used on the production read path.
     #[cfg(test)]

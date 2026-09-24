@@ -15,6 +15,7 @@
     "features.catalog",
     "ground_station.profile",
     "signing.mavlink",
-    "webrtc.signaling.last_error"
+    "webrtc.signaling.last_error",
+    "battery.health"
   ]
 }

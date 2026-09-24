@@ -1,4 +1,5 @@
 import {
+  BatteryMedium,
   Boxes,
   Cloud,
   Cpu,
@@ -170,6 +171,15 @@ const SECTIONS: SectionLink[] = [
     // The operating region governs the RF radio; only the radio profiles have
     // a regulatory domain to set.
     allow: ["drone", "ground_station"],
+  },
+  {
+    to: "/settings/battery",
+    label: "Battery",
+    icon: BatteryMedium,
+    blurb: "Cell health, sag and time-to-reserve.",
+    group: "System & safety",
+    // Battery telemetry comes from the flight controller the drone carries.
+    allow: ["drone"],
   },
   {
     to: "/settings/self-heal",

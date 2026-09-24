@@ -176,6 +176,8 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/status/full"),
         // The swarm neighbour table (profile-agnostic: served on drones too).
         get("/api/swarm/neighbors"),
+        // Per-pack battery health (the battery engine's read model).
+        get("/api/v1/battery"),
         // System resources snapshot (CPU/memory/swap/disk/temperatures).
         get("/api/system"),
         // Composite triage snapshot (LCD Diagnostics + GCS remote-display).
@@ -751,7 +753,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            172,
+            173,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -771,6 +773,7 @@ mod tests {
             "/api/wfb/pair/failover-status",
             "/api/status/full",
             "/api/swarm/neighbors",
+            "/api/v1/battery",
             "/api/video/latency",
             "/api/video/config",
             "/api/video/roster",

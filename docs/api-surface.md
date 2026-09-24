@@ -81,6 +81,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/system` |  |
 | GET | `/api/telemetry` |  |
 | GET | `/api/time` |  |
+| GET | `/api/v1/battery` |  |
 | GET | `/api/v1/diagnostics` |  |
 | POST | `/api/v1/ground-station/bluetooth/pair` |  |
 | GET | `/api/v1/ground-station/bluetooth/paired` |  |
@@ -197,7 +198,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-172 native routes.
+173 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

@@ -51,8 +51,10 @@ use crate::state::AppState;
 /// The runtime-only keys the state snapshot carries alongside the vehicle state. `/api/telemetry`
 /// strips them so it surfaces only the vehicle fields the GCS expects; `/api/status` reads them as
 /// the FC connection triple + the service uptime + the FC-liveness detail (transport_open /
-/// mavlink_alive / heartbeat_age_s / fc_source / fc_link_hint). set.
-const IPC_ONLY_KEYS: [&str; 12] = [
+/// mavlink_alive / heartbeat_age_s / fc_source / fc_link_hint). set. `batteries` is the per-pack
+/// BATTERY_STATUS list the battery engine reads and `/api/v1/battery` serves; the telemetry shape
+/// keeps its single-pack `battery` block.
+const IPC_ONLY_KEYS: [&str; 13] = [
     "fc_connected",
     "fc_port",
     "fc_baud",
@@ -65,6 +67,7 @@ const IPC_ONLY_KEYS: [&str; 12] = [
     "fc_command_down_gated",
     "fc_variant",
     "fc_firmware",
+    "batteries",
 ];
 
 /// Runtime extras that describe the AGENT's own operation rather than the

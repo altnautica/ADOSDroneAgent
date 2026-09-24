@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::auth::PairingState;
+use crate::battery::{BatteryConfig, BatteryEngine};
 use crate::dashboard_pin::DashboardPin;
 use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient, SwarmIpcClient};
 use crate::routes::status::process_uptime_seconds;
@@ -237,6 +238,10 @@ pub struct AppState {
     /// The aux response listener's cancel handle and task, held so a shutdown
     /// path has something to signal.
     pub aux_response_listener: Option<Arc<AuxResponseListener>>,
+    /// The battery health engine `/api/v1/battery` reads. Fed by the battery
+    /// task the daemon starts; a state built without one serves an engine that
+    /// has seen no sample, which the route reports as stale with no packs.
+    pub battery: Arc<parking_lot::Mutex<BatteryEngine>>,
 }
 
 /// The aux response listener's shutdown handles.
@@ -299,6 +304,9 @@ impl AppState {
             swarm: SwarmIpcClient::disconnected(),
             aux_rpc_proxy: None,
             aux_response_listener: None,
+            battery: Arc::new(parking_lot::Mutex::new(BatteryEngine::new(
+                BatteryConfig::default(),
+            ))),
         }
     }
 
@@ -337,6 +345,12 @@ impl AppState {
     /// disconnected client and primes it directly.
     pub fn with_swarm(mut self, swarm: SwarmIpcClient) -> Self {
         self.swarm = swarm;
+        self
+    }
+
+    /// Attach the battery engine the daemon's battery task feeds.
+    pub fn with_battery(mut self, battery: Arc<parking_lot::Mutex<BatteryEngine>>) -> Self {
+        self.battery = battery;
         self
     }
 

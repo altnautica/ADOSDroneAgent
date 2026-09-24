@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from .agent import AgentConfig
 from .api import ApiConfig
+from .battery import BatteryConfig
 from .cloud import RemoteAccessConfig, ServerConfig
 from .ground_station import GroundStationConfig
 from .mavlink import MavlinkConfig
@@ -63,6 +64,7 @@ class ADOSConfig(BaseModel):
     atlas: AtlasConfig = AtlasConfig()
     perception: PerceptionConfig = PerceptionConfig()
     swarm: SwarmConfig = SwarmConfig()
+    battery: BatteryConfig = BatteryConfig()
     ground_station: GroundStationConfig = GroundStationConfig()
     ui: UiConfig = Field(default_factory=UiConfig)
 

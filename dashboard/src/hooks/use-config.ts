@@ -100,6 +100,18 @@ export interface AgentConfig {
     default_formation?: "line" | "column" | "wedge" | "grid" | "circle";
     default_spacing?: number;
   };
+  // Battery health engine thresholds. Integers only: voltages in mV, the
+  // temperature-rise rate in 0.1 °C/s. Read on the Battery settings page.
+  battery?: {
+    enabled?: boolean;
+    low_cell_mv?: number;
+    critical_cell_mv?: number;
+    cell_divergence_mv?: number;
+    voltage_drop_mv_per_s?: number;
+    temp_spike_dc_per_s?: number;
+    predictive_window_s?: number;
+    reserve_percent?: number;
+  };
   // Two-tier perception execution: the drone-side offload target + the
   // workstation-side serving toggle. Read on the Offload settings page.
   perception?: {

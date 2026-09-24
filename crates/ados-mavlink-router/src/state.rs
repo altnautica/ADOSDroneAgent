@@ -10,9 +10,76 @@
 //! by the caller via [`VehicleState::to_wire_with`]; this type owns only the
 //! vehicle-derived fields so it stays I/O-free and unit-testable.
 
+use std::collections::BTreeMap;
+
 use ados_protocol::flight_modes::{ArduPilotFirmware, MAV_AUTOPILOT_PX4};
-use ados_protocol::mavlink::ardupilotmega::{MavAutopilot, MavMessage};
+use ados_protocol::mavlink::ardupilotmega::{MavAutopilot, MavMessage, BATTERY_STATUS_DATA};
 use serde_json::{json, Map, Value};
+
+/// How many distinct BATTERY_STATUS ids the snapshot tracks. MAVLink allows 256;
+/// a real airframe carries one to four packs, and the cap bounds what a
+/// misbehaving or spoofed stream can make the snapshot grow to. A new id past the
+/// cap is ignored; the packs already tracked keep updating.
+pub const MAX_BATTERY_PACKS: usize = 8;
+
+/// One battery as its own BATTERY_STATUS stream reports it, keyed by the
+/// message `id`. Every reading MAVLink lets an autopilot mark "not measured" is
+/// an `Option` published as `null`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BatteryPack {
+    pub id: u8,
+    /// Volts, with the unfilled-cell sentinel (`UINT16_MAX`) dropped.
+    pub cell_voltages: Vec<f64>,
+    /// Amps; `None` when `current_battery` is -1.
+    pub current_a: Option<f64>,
+    /// Percent; `None` when `battery_remaining` is -1.
+    pub remaining_pct: Option<i64>,
+    /// Degrees Celsius; `None` when `temperature` is `INT16_MAX`.
+    pub temperature_c: Option<f64>,
+    /// mAh; `None` when `current_consumed` is -1.
+    pub consumed_mah: Option<i64>,
+    /// Wh (the wire's hJ / 36); `None` when `energy_consumed` is -1.
+    pub consumed_wh: Option<f64>,
+    /// `MAV_BATTERY_FUNCTION` as its numeric value.
+    pub function: u8,
+}
+
+impl BatteryPack {
+    fn from_status(m: &BATTERY_STATUS_DATA) -> Self {
+        Self {
+            id: m.id,
+            cell_voltages: cell_voltages(&m.voltages),
+            current_a: (m.current_battery != -1).then(|| m.current_battery as f64 / 100.0),
+            remaining_pct: (m.battery_remaining != -1).then_some(m.battery_remaining as i64),
+            temperature_c: (m.temperature != i16::MAX).then(|| m.temperature as f64 / 100.0),
+            consumed_mah: (m.current_consumed != -1).then_some(m.current_consumed as i64),
+            consumed_wh: (m.energy_consumed != -1).then(|| m.energy_consumed as f64 / 36.0),
+            function: m.battery_function as u8,
+        }
+    }
+
+    fn to_wire(&self) -> Value {
+        json!({
+            "id": self.id,
+            "cell_voltages": self.cell_voltages,
+            "current_a": self.current_a,
+            "remaining_pct": self.remaining_pct,
+            "temperature_c": self.temperature_c,
+            "consumed_mah": self.consumed_mah,
+            "consumed_wh": self.consumed_wh,
+            "function": self.function,
+        })
+    }
+}
+
+/// BATTERY_STATUS cell voltages in volts, with the unfilled-cell sentinel
+/// (`UINT16_MAX`) dropped.
+fn cell_voltages(raw: &[u16]) -> Vec<f64> {
+    raw.iter()
+        .filter(|&&v| v != 0xFFFF)
+        .map(|&v| v as f64 / 1000.0)
+        .collect()
+}
 
 /// PX4 `(main_mode, sub_mode)` -> mode name. PX4 packs the mode into
 /// `custom_mode` differently from ArduPilot (a `(main << 16) | (sub << 24)`
@@ -207,6 +274,10 @@ pub struct VehicleState {
     pub battery_voltages: Vec<f64>,
     pub battery_current_consumed: i64,
     pub battery_energy_consumed: i64,
+    /// Every battery the FC reports, keyed by BATTERY_STATUS `id`, at most
+    /// [`MAX_BATTERY_PACKS`] ids. The single-pack fields above keep tracking
+    /// the most recent BATTERY_STATUS of any id.
+    pub battery_packs: BTreeMap<u8, BatteryPack>,
     // RC_CHANNELS
     pub rc_channels: Vec<i64>,
     /// `None` when RC_CHANNELS reports UINT8_MAX (invalid/unknown).
@@ -278,6 +349,7 @@ impl Default for VehicleState {
             battery_voltages: Vec::new(),
             battery_current_consumed: 0,
             battery_energy_consumed: 0,
+            battery_packs: BTreeMap::new(),
             rc_channels: vec![0; 18],
             rc_rssi: None,
             last_heartbeat: String::new(),
@@ -393,14 +465,14 @@ impl VehicleState {
             MavMessage::BATTERY_STATUS(m) => {
                 self.battery_temperature =
                     (m.temperature != i16::MAX).then(|| m.temperature as f64 / 100.0);
-                self.battery_voltages = m
-                    .voltages
-                    .iter()
-                    .filter(|&&v| v != 0xFFFF)
-                    .map(|&v| v as f64 / 1000.0)
-                    .collect();
+                self.battery_voltages = cell_voltages(&m.voltages);
                 self.battery_current_consumed = m.current_consumed as i64;
                 self.battery_energy_consumed = m.energy_consumed as i64;
+                if self.battery_packs.contains_key(&m.id)
+                    || self.battery_packs.len() < MAX_BATTERY_PACKS
+                {
+                    self.battery_packs.insert(m.id, BatteryPack::from_status(m));
+                }
                 None
             }
             MavMessage::RC_CHANNELS(m) => {
@@ -488,6 +560,9 @@ impl VehicleState {
                 "temperature": self.battery_temperature,
                 "cell_voltages": self.battery_voltages,
             },
+            // One entry per BATTERY_STATUS id, ordered by id. `battery` above
+            // stays the single-pack view every existing reader projects.
+            "batteries": self.battery_packs.values().map(BatteryPack::to_wire).collect::<Vec<_>>(),
             "gps": {
                 "fix_type": self.gps_fix_type,
                 "satellites": self.gps_satellites,
@@ -837,6 +912,55 @@ mod tests {
         assert_eq!(s.battery_current_consumed, 1500);
     }
 
+    /// Each BATTERY_STATUS id is its own pack on the wire, ordered by id, and a
+    /// later frame for one id replaces only that pack. A ninth distinct id is
+    /// ignored so the snapshot cannot grow without bound.
+    #[test]
+    fn battery_status_keeps_one_pack_per_id_in_id_order() {
+        let status = |id: u8, cells: &[u16], current_ca: i16, remaining: i8| {
+            let mut voltages = [u16::MAX; 10];
+            voltages[..cells.len()].copy_from_slice(cells);
+            MavMessage::BATTERY_STATUS(BATTERY_STATUS_DATA {
+                current_consumed: 1200,
+                energy_consumed: 3600,
+                temperature: 3150,
+                voltages,
+                current_battery: current_ca,
+                id,
+                battery_function: MavBatteryFunction::MAV_BATTERY_FUNCTION_ALL,
+                mavtype: MavBatteryType::MAV_BATTERY_TYPE_LIPO,
+                battery_remaining: remaining,
+            })
+        };
+        let mut s = VehicleState::default();
+        s.update_from_message(&status(1, &[3900, 3910, 3905], 1250, 70), TS);
+        s.update_from_message(&status(0, &[4100, 4090, 4080, 4070], 2000, 80), TS);
+        s.update_from_message(&status(1, &[3880, 3890, 3885], 1300, 69), TS);
+
+        let wire = s.to_wire();
+        let packs = wire["batteries"].as_array().unwrap();
+        assert_eq!(packs.len(), 2);
+        assert_eq!(packs[0]["id"], json!(0));
+        assert_eq!(packs[0]["cell_voltages"], json!([4.1, 4.09, 4.08, 4.07]));
+        assert_eq!(packs[0]["current_a"], json!(20.0));
+        assert_eq!(packs[0]["remaining_pct"], json!(80));
+        assert_eq!(packs[1]["id"], json!(1));
+        assert_eq!(packs[1]["cell_voltages"], json!([3.88, 3.89, 3.885]));
+        assert_eq!(packs[1]["current_a"], json!(13.0));
+        assert_eq!(packs[1]["remaining_pct"], json!(69));
+        assert_eq!(packs[1]["temperature_c"], json!(31.5));
+        assert_eq!(packs[1]["consumed_mah"], json!(1200));
+        assert_eq!(packs[1]["consumed_wh"], json!(100.0));
+        // The single-pack view follows the most recent frame of any id.
+        assert_eq!(wire["battery"]["cell_voltages"], json!([3.88, 3.89, 3.885]));
+
+        for id in 2..=9 {
+            s.update_from_message(&status(id, &[3900], 0, 50), TS);
+        }
+        let ids: Vec<u8> = s.battery_packs.keys().copied().collect();
+        assert_eq!(ids, (0..MAX_BATTERY_PACKS as u8).collect::<Vec<_>>());
+    }
+
     #[test]
     fn param_value_returns_persist_tuple_and_trims_nulls() {
         let mut s = VehicleState::default();
@@ -874,6 +998,7 @@ mod tests {
             "velocity",
             "attitude",
             "battery",
+            "batteries",
             "gps",
             "rc",
             "throttle",
@@ -1156,6 +1281,17 @@ mod tests {
             ("rc", "rssi"),
         ] {
             assert_eq!(wire[group][key], Value::Null, "{group}.{key}");
+        }
+        let pack = &wire["batteries"][0];
+        assert_eq!(pack["cell_voltages"], json!([]));
+        for key in [
+            "current_a",
+            "remaining_pct",
+            "temperature_c",
+            "consumed_mah",
+            "consumed_wh",
+        ] {
+            assert_eq!(pack[key], Value::Null, "batteries[0].{key}");
         }
     }
 }

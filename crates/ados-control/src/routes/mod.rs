@@ -20,6 +20,7 @@
 //! test pins the full set so the two never drift.
 
 pub mod atlas;
+pub mod battery;
 pub mod camera_config;
 pub mod can;
 pub mod cloud_link;
@@ -366,6 +367,10 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // than a ground-station fan-out. Guaranteed 200; a node not running the bus
         // answers with a structurally-complete, null-identified empty table.
         .route("/api/swarm/neighbors", get(swarm::get_neighbors))
+        // Per-pack battery health: latest reading, time-to-reserve projection,
+        // live anomalies and their history. Guaranteed 200; stale or empty when
+        // the engine has no fresh sample.
+        .route("/api/v1/battery", get(battery::get_battery))
         // System resources: CPU / memory / swap / disk / per-sensor temperatures
         // from the logging store's hardware snapshot (the LCD + GCS resource read).
         .route("/api/system", get(system_resources::get_system_resources))

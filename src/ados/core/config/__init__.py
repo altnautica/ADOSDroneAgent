@@ -17,6 +17,7 @@ per-domain files alongside this barrel:
 * ``security.py`` — :class:`SecurityConfig` and friends, plus
   :data:`DEFAULT_CORS_ORIGINS`
 * ``api.py`` — :class:`ApiConfig`, :class:`RestApiConfig`
+* ``battery.py`` — :class:`BatteryConfig`
 * ``system.py`` — :class:`VisionConfig`,
   :class:`LoggingConfig`, :class:`PairingConfig`, :class:`DiscoveryConfig`,
   :class:`SwarmConfig`, :class:`SwarmFlockConfig`,
@@ -46,6 +47,7 @@ from ._migrators import _deep_merge, apply_migrations
 from ._yaml import StringTimestampLoader
 from .agent import AgentConfig
 from .api import ApiConfig, RestApiConfig
+from .battery import BatteryConfig
 from .cloud import (
     CloudflareTunnelConfig,
     CloudServerConfig,
@@ -101,6 +103,8 @@ __all__ = [
     # api
     "ApiConfig",
     "RestApiConfig",
+    # battery
+    "BatteryConfig",
     # mavlink
     "EndpointConfig",
     "MavlinkConfig",

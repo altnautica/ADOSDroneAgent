@@ -28,7 +28,7 @@ pub const API_VERSION: &str = "1";
 /// leaving it in the list only steers a client away from the path that does
 /// work. This list is the canonical surface contract between the agent and the
 /// GCS; order matters, since it is emitted as a JSON array.
-pub const CAPABILITIES: [&str; 14] = [
+pub const CAPABILITIES: [&str; 15] = [
     // /api/status/full consolidated endpoint (fewer round-trips).
     "status.full",
     // /api/version endpoint (this one). Trivially true.
@@ -60,6 +60,8 @@ pub const CAPABILITIES: [&str; 14] = [
     "signing.mavlink",
     // WebRTC SDP signaling broker rejection surfaced via cloud status.
     "webrtc.signaling.last_error",
+    // /api/v1/battery per-pack battery health (cells, sag, time-to-reserve).
+    "battery.health",
     // `can.passthrough` deliberately absent: POST /api/can/passthrough answers a
     // fixed 501 and has never opened a CAN channel, so claiming it here would
     // tell a client the bus is reachable through the agent and steer it off the
@@ -264,7 +266,7 @@ mod tests {
     /// there in the same release, so the served list is pinned whole.
     #[test]
     fn served_capabilities_match_the_gcs_contract() {
-        const AGENT_CAPABILITIES_FROZEN: [&str; 14] = [
+        const AGENT_CAPABILITIES_FROZEN: [&str; 15] = [
             "status.full",
             "version.endpoint",
             "services.control",
@@ -279,6 +281,7 @@ mod tests {
             "ground_station.profile",
             "signing.mavlink",
             "webrtc.signaling.last_error",
+            "battery.health",
         ];
         assert_eq!(
             CAPABILITIES, AGENT_CAPABILITIES_FROZEN,

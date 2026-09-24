@@ -264,6 +264,67 @@
       "title": "AtlasSelectionParams",
       "type": "object"
     },
+    "BatteryConfig": {
+      "description": "Per-pack cell, sag, temperature and time-to-reserve thresholds.\n\n``critical_cell_mv`` must stay below ``low_cell_mv``, otherwise the\nwarning band between the two collapses and ``cell_low`` can never fire\nbefore ``cell_critical``.",
+      "properties": {
+        "cell_divergence_mv": {
+          "default": 50,
+          "maximum": 500,
+          "minimum": 10,
+          "title": "Cell Divergence Mv",
+          "type": "integer"
+        },
+        "critical_cell_mv": {
+          "default": 3300,
+          "maximum": 4000,
+          "minimum": 2500,
+          "title": "Critical Cell Mv",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "low_cell_mv": {
+          "default": 3500,
+          "maximum": 4200,
+          "minimum": 2500,
+          "title": "Low Cell Mv",
+          "type": "integer"
+        },
+        "predictive_window_s": {
+          "default": 30,
+          "maximum": 300,
+          "minimum": 5,
+          "title": "Predictive Window S",
+          "type": "integer"
+        },
+        "reserve_percent": {
+          "default": 25,
+          "maximum": 50,
+          "minimum": 5,
+          "title": "Reserve Percent",
+          "type": "integer"
+        },
+        "temp_spike_dc_per_s": {
+          "default": 50,
+          "maximum": 200,
+          "minimum": 5,
+          "title": "Temp Spike Dc Per S",
+          "type": "integer"
+        },
+        "voltage_drop_mv_per_s": {
+          "default": 500,
+          "maximum": 5000,
+          "minimum": 100,
+          "title": "Voltage Drop Mv Per S",
+          "type": "integer"
+        }
+      },
+      "title": "BatteryConfig",
+      "type": "object"
+    },
     "CameraConfig": {
       "properties": {
         "bitrate_kbps": {
@@ -2335,6 +2396,19 @@
           "min_translation_m": 0.5
         },
         "socket_dir": "/run/ados"
+      }
+    },
+    "battery": {
+      "$ref": "#/$defs/BatteryConfig",
+      "default": {
+        "cell_divergence_mv": 50,
+        "critical_cell_mv": 3300,
+        "enabled": true,
+        "low_cell_mv": 3500,
+        "predictive_window_s": 30,
+        "reserve_percent": 25,
+        "temp_spike_dc_per_s": 50,
+        "voltage_drop_mv_per_s": 500
       }
     },
     "discovery": {

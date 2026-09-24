@@ -25,6 +25,7 @@ import { PairingRoute } from "@/routes/pairing-route";
 import { PeripheralsRoute } from "@/routes/peripherals-route";
 import { AdvancedSettings } from "@/routes/settings/advanced-settings";
 import { AtlasSwarmSettings } from "@/routes/settings/atlas-swarm-settings";
+import { BatterySettings } from "@/routes/settings/battery-settings";
 import { CellularSettings } from "@/routes/settings/cellular-settings";
 import { CameraSettings } from "@/routes/settings/camera-settings";
 import { CloudSettings } from "@/routes/settings/cloud-settings";
@@ -152,6 +153,14 @@ export function App() {
                     element={
                       <ProfileGate allow={["drone", "ground_station"]}>
                         <RegionSettings />
+                      </ProfileGate>
+                    }
+                  />
+                  <Route
+                    path="battery"
+                    element={
+                      <ProfileGate allow={["drone"]}>
+                        <BatterySettings />
                       </ProfileGate>
                     }
                   />
