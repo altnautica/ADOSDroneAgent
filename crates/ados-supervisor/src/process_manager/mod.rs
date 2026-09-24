@@ -63,6 +63,14 @@ pub trait ProcessManager: Send + Sync {
         None
     }
 
+    /// Whether the service manager has a job queued or running on the unit (a
+    /// start, stop or restart it has not finished): `Some(true)` pending,
+    /// `Some(false)` none, `None` when this backend cannot tell. Defaulted to
+    /// `None`, the honest answer wherever there is no job queue to read.
+    async fn job_pending(&self, _unit: &str) -> Option<bool> {
+        None
+    }
+
     /// Mask the unit so a stray `start` cannot bring it up (idempotent).
     async fn mask(&self, unit: &str);
 

@@ -1221,18 +1221,23 @@ fn reconcile_logd_unit() {
 /// the supervisor).
 fn reconcile_control_unit() {
     const UNIT: &str = "ados-control.service";
-    // Either marker selects the native control surface: `control-rust-enabled`
-    // runs it on the alternate LAN port alongside FastAPI; `front-rust-enabled`
-    // runs it as the LAN front (the drop-in reconciled below binds it to :8080).
-    let pinned_on = Path::new(CONFIG_DIR).join("control-rust-enabled").exists()
-        || Path::new(CONFIG_DIR).join("front-rust-enabled").exists();
-    if pinned_on {
+    if control_unit_wanted() {
         enable_if_present(UNIT);
     } else {
         let _ = exec::run("systemctl", &["stop", UNIT]);
         let _ = exec::run("systemctl", &["disable", UNIT]);
         let _ = exec::run("systemctl", &["reset-failed", UNIT]);
     }
+}
+
+/// Whether this node runs the native control surface: either marker selects it.
+/// `control-rust-enabled` runs it on the alternate LAN port alongside FastAPI;
+/// `front-rust-enabled` runs it as the LAN front (the drop-in reconciled below
+/// binds it to :8080). The enable here, the start step's kick and the health
+/// gate's wait all read this one predicate.
+pub(crate) fn control_unit_wanted() -> bool {
+    Path::new(CONFIG_DIR).join("control-rust-enabled").exists()
+        || Path::new(CONFIG_DIR).join("front-rust-enabled").exists()
 }
 
 /// The systemd drop-in directory + body that bind the native control surface to

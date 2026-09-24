@@ -119,6 +119,17 @@ impl ProcessManager for SystemdManager {
         total
     }
 
+    /// `systemctl show <unit> --property=Job --value`: the job id while a
+    /// start, stop or restart is queued or running on the unit, empty when
+    /// there is none. `is-active` cannot answer this: a unit whose restart job
+    /// is still waiting on an ordering dependency reads `active` throughout.
+    async fn job_pending(&self, unit: &str) -> Option<bool> {
+        let out = run(&["show", unit, "--property=Job", "--value"], PROBE_TIMEOUT).await?;
+        out.status
+            .success()
+            .then(|| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+    }
+
     /// `systemctl mask <unit>` (idempotent).
     async fn mask(&self, unit: &str) {
         let _ = run(&["mask", unit], PROBE_TIMEOUT).await;

@@ -21,12 +21,15 @@
 pub mod pose;
 
 use std::collections::HashMap;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ados_protocol::framebus::{
     self, Detection, DetectionBatch, FrameDescriptor, ModelMetadata, RingLayout,
     VISION_DETECTION_VERSION,
 };
+use ados_protocol::vision_rpc;
 use rmpv::Value;
 
 use crate::client::{ClientError, OffloadAdvertisement, PluginIpcClient};
@@ -111,7 +114,18 @@ impl VisionClient {
     pub(crate) fn new(ipc: Arc<PluginIpcClient>) -> Self {
         Self {
             ipc,
-            rings: Arc::new(Mutex::new(RingCache::default())),
+            rings: Arc::new(Mutex::new(RingCache::new(PathBuf::from(DEFAULT_SHM_DIR)))),
+        }
+    }
+
+    /// Resolve frame rings under `dir` instead of `/dev/shm`, with an empty
+    /// ring cache. Mirrors the Python client's `shm_dir`; the engine's
+    /// counterpart is `ADOS_SHM_DIR`. Call before subscribing: an existing
+    /// subscription keeps the cache it was registered with.
+    pub fn with_shm_dir(self, dir: impl Into<PathBuf>) -> Self {
+        Self {
+            ipc: self.ipc,
+            rings: Arc::new(Mutex::new(RingCache::new(dir.into()))),
         }
     }
 
@@ -164,14 +178,10 @@ impl VisionClient {
     }
 
     /// Register an inference model with the engine. Sends
-    /// [`methods::REGISTER_MODEL`] (gated on `vision.model.register`) carrying
-    /// the model metadata as a msgpack blob the engine decodes with
-    /// [`ModelMetadata::from_msgpack`].
+    /// [`methods::REGISTER_MODEL`] (gated on `vision.model.register`) in the
+    /// [`vision_rpc`] shape the engine decodes.
     pub async fn register_model(&self, model: &ModelMetadata) -> Result<Value, ClientError> {
-        let blob = model
-            .to_msgpack()
-            .map_err(|e| ClientError::Rpc(format!("model metadata encode failed: {e}")))?;
-        self.ipc.vision_register_model(&blob).await
+        self.ipc.vision_register_model(model).await
     }
 
     /// Read this plugin's resolved model-delivery status: one
@@ -188,29 +198,25 @@ impl VisionClient {
     /// Run a registered model against one frame on the shared backend and
     /// return its detections. Sends [`methods::INFER`] (gated on
     /// `vision.model.register`); the engine arbitrates access to the
-    /// accelerator. The frame is passed by descriptor (the engine reads the
-    /// same ring), so no pixels cross the RPC envelope.
+    /// accelerator. The frame is passed by descriptor (the engine reads its own
+    /// ring), so no pixels cross the RPC envelope. A frame whose slot the ring
+    /// has since recycled is an error; infer on a fresher frame.
     pub async fn infer(
         &self,
         model_id: &str,
         frame: &Frame,
     ) -> Result<Vec<Detection>, ClientError> {
-        let desc = frame
-            .descriptor
-            .to_msgpack()
-            .map_err(|e| ClientError::Rpc(format!("frame descriptor encode failed: {e}")))?;
-        let resp = self.ipc.vision_infer(model_id, &desc).await?;
-        decode_detections(&resp)
+        let reply = self.ipc.vision_infer(model_id, &frame.descriptor).await?;
+        vision_rpc::decode_infer_reply(&reply)
+            .map(|batch| batch.detections)
+            .map_err(|e| ClientError::Rpc(format!("infer reply decode failed: {e}")))
     }
 
     /// Publish a detection batch on `vision.detection`. Sends
-    /// [`methods::PUBLISH_DETECTION`] (gated on `vision.detection.publish`)
-    /// carrying the batch as a msgpack blob.
+    /// [`methods::PUBLISH_DETECTION`] (gated on `vision.detection.publish`) in
+    /// the [`vision_rpc`] shape the engine decodes.
     pub async fn publish_detection(&self, batch: &DetectionBatch) -> Result<Value, ClientError> {
-        let blob = batch
-            .to_msgpack()
-            .map_err(|e| ClientError::Rpc(format!("detection batch encode failed: {e}")))?;
-        self.ipc.vision_publish_detection(&blob).await
+        self.ipc.vision_publish_detection(batch).await
     }
 
     /// Publish a single detection against one frame, building the
@@ -315,68 +321,129 @@ impl VisionClient {
     ///
     /// This is the operator-designation path: the engine presents a lock state
     /// only for a track a caller designated, so this is what makes a lock mean
-    /// "the target that was chosen" rather than "whatever scored highest".
+    /// "the target that was chosen" rather than "whatever scored highest". The
+    /// detection's box, label and confidence cross; it must carry a box.
     pub async fn designate_track(
         &self,
         camera_id: &str,
         detection: &Detection,
     ) -> Result<Value, ClientError> {
-        let blob = rmp_serde::to_vec_named(detection)
-            .map_err(|e| ClientError::Rpc(format!("detection encode failed: {e}")))?;
-        self.ipc
-            .vision_designate_track(camera_id, Value::Binary(blob))
-            .await
+        self.ipc.vision_designate_track(camera_id, detection).await
     }
 }
 
-/// Mapped `/dev/shm` rings, keyed by the descriptor's `shm_name`. One ring per
-/// camera; held read-only for the life of the subscription.
-#[derive(Default)]
+/// Where the engine creates its frame rings.
+const DEFAULT_SHM_DIR: &str = "/dev/shm";
+
+/// Mapped frame rings under `dir`, keyed by the descriptor's `shm_name`. One
+/// ring per camera.
 struct RingCache {
+    dir: PathBuf,
     rings: HashMap<String, MappedRing>,
 }
 
-/// One memory-mapped frame ring: the read-only mmap plus the layout recorded in
-/// its header.
+impl RingCache {
+    fn new(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            rings: HashMap::new(),
+        }
+    }
+}
+
+/// One memory-mapped frame ring: the read-only mmap, the layout recorded in its
+/// header, and which file it is.
 struct MappedRing {
     map: memmap2::Mmap,
     layout: RingLayout,
+    /// `(st_dev, st_ino)` of the mapped file, read off the descriptor that was
+    /// mapped, so it names exactly the bytes in `map`.
+    file_id: (u64, u64),
+    /// The highest sequence read out of this mapping.
+    last_seq: u64,
+}
+
+impl MappedRing {
+    /// Read the descriptor's slot through the seqlock, recording its sequence
+    /// when the read holds.
+    fn read(&mut self, descriptor: &FrameDescriptor) -> Option<Vec<u8>> {
+        let pixels = framebus::read_slot(&self.map, &self.layout, descriptor.slot, descriptor.seq)
+            .ok()
+            .flatten()?;
+        self.last_seq = self.last_seq.max(descriptor.seq);
+        Some(pixels)
+    }
+
+    /// Whether `path` still names the file this mapping holds.
+    fn is_named_by(&self, path: &Path) -> bool {
+        std::fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == self.file_id)
+    }
 }
 
 /// Resolve a descriptor to a [`Frame`], mapping the ring on first sight of its
 /// `shm_name`. Returns `None` on a torn/stale read, a ring that cannot be
 /// mapped, or a layout/region mismatch — the frame is dropped (latest-wins).
-fn resolve_frame(cache: &Arc<Mutex<RingCache>>, descriptor: FrameDescriptor) -> Option<Frame> {
+///
+/// The engine replaces a ring by unlinking its file and creating a new one
+/// under the same name — every engine start does, sweeping the last run's
+/// rings — and the new ring's sequence starts over at 1. A mapping of the old
+/// file stays readable but never again holds the frame being described (or,
+/// on a coincidental sequence, holds the previous run's pixels), which left a
+/// subscriber silent until its process restarted. So a sequence at or below
+/// one this mapping has already served, or a slot it cannot read, is checked
+/// against the file the name names now, and a replaced ring is mapped afresh.
+/// A live stream pays nothing for this: its sequence only climbs and its reads
+/// hold.
+fn resolve_frame(cache: &Mutex<RingCache>, descriptor: FrameDescriptor) -> Option<Frame> {
     let mut guard = cache.lock().expect("ring cache lock");
-    let ring = match guard.rings.get(&descriptor.shm_name) {
-        Some(r) => r,
-        None => {
-            let mapped = map_ring(&descriptor.shm_name)?;
-            guard.rings.insert(descriptor.shm_name.clone(), mapped);
-            guard
-                .rings
-                .get(&descriptor.shm_name)
-                .expect("just inserted")
+    let cache = &mut *guard;
+    let path = cache.dir.join(&descriptor.shm_name);
+    if let Some(ring) = cache.rings.get_mut(&descriptor.shm_name) {
+        let regressed = descriptor.seq <= ring.last_seq;
+        if !regressed {
+            if let Some(pixels) = ring.read(&descriptor) {
+                return Some(Frame { descriptor, pixels });
+            }
         }
-    };
-    let pixels = framebus::read_slot(&ring.map, &ring.layout, descriptor.slot, descriptor.seq)
-        .ok()
-        .flatten()?;
-    Some(Frame { descriptor, pixels })
+        if ring.is_named_by(&path) {
+            // Still the live ring: the same descriptor resolved again (once per
+            // matching subscription), or a slot the writer already recycled.
+            let pixels = if regressed {
+                ring.read(&descriptor)
+            } else {
+                None
+            }?;
+            return Some(Frame { descriptor, pixels });
+        }
+        cache.rings.remove(&descriptor.shm_name);
+    }
+    let mut ring = map_ring(&path)?;
+    let pixels = ring.read(&descriptor);
+    cache.rings.insert(descriptor.shm_name.clone(), ring);
+    Some(Frame {
+        descriptor,
+        pixels: pixels?,
+    })
 }
 
-/// Map `/dev/shm/<shm_name>` read-only and read the ring layout from its header.
-/// `None` if the file is missing, cannot be mapped, or has no valid header.
-fn map_ring(shm_name: &str) -> Option<MappedRing> {
-    let path = format!("/dev/shm/{shm_name}");
-    let file = std::fs::File::open(&path).ok()?;
+/// Map the ring file at `path` read-only and read the ring layout from its
+/// header. `None` if the file is missing, cannot be mapped, or has no valid
+/// header.
+fn map_ring(path: &Path) -> Option<MappedRing> {
+    let file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
     // SAFETY: the region is a POSIX shared-memory object the vision engine
     // owns; mapping it read-only is sound. A concurrent writer recycling slots
     // is the expected case and is detected by the per-slot seqlock in
     // `read_slot`, which discards any torn read.
     let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
     let layout = RingLayout::read_header(&map)?;
-    Some(MappedRing { map, layout })
+    Some(MappedRing {
+        map,
+        layout,
+        file_id: (meta.dev(), meta.ino()),
+        last_seq: 0,
+    })
 }
 
 /// Decode a [`FrameDescriptor`] from a `vision.deliver` envelope `args` map. The
@@ -392,20 +459,6 @@ fn decode_descriptor(payload: &Value) -> Option<FrameDescriptor> {
     // single source of truth in framebus.
     let bytes = rmp_serde::to_vec_named(payload).ok()?;
     FrameDescriptor::from_msgpack(&bytes).ok()
-}
-
-/// Decode the `detections` field of an `infer` response: a binary blob holding
-/// a msgpack array of [`Detection`].
-fn decode_detections(args: &Value) -> Result<Vec<Detection>, ClientError> {
-    match map_get(args, "detections") {
-        Some(Value::Binary(blob)) => rmp_serde::from_slice(&blob)
-            .map_err(|e| ClientError::Rpc(format!("detections decode failed: {e}"))),
-        // An empty / absent field is no detections, not an error.
-        None | Some(Value::Nil) => Ok(Vec::new()),
-        Some(other) => Err(ClientError::Rpc(format!(
-            "detections field is not binary: {other:?}"
-        ))),
-    }
 }
 
 /// Read a key from an `rmpv` map value.
@@ -483,37 +536,5 @@ mod tests {
             framebus::read_slot(&region, &read_layout, slot, seq + 1).unwrap(),
             None
         );
-    }
-
-    #[test]
-    fn detections_decode_empty_when_absent() {
-        let args = Value::Map(vec![]);
-        assert!(decode_detections(&args).unwrap().is_empty());
-    }
-
-    #[test]
-    fn detections_decode_from_a_blob() {
-        let dets = vec![Detection {
-            bbox: Some(framebus::BoundingBox {
-                x: 1.0,
-                y: 2.0,
-                width: 3.0,
-                height: 4.0,
-            }),
-            class_label: "weed".into(),
-            confidence: 0.9,
-            track_id: Some(7),
-            assoc_confidence: None,
-            lock_state: None,
-            attributes: None,
-            mask: None,
-            keypoints: None,
-            depth: None,
-            world_pos: None,
-        }];
-        let blob = rmp_serde::to_vec_named(&dets).unwrap();
-        let args = Value::Map(vec![(Value::from("detections"), Value::Binary(blob))]);
-        let back = decode_detections(&args).unwrap();
-        assert_eq!(back, dets);
     }
 }

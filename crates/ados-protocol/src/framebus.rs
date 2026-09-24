@@ -416,7 +416,9 @@ pub fn read_slot(
 
 /// Plugin RPC method names for the vision surface. The plugin host gates each
 /// on the matching capability before routing to the vision engine over
-/// `/run/ados/vision.sock`.
+/// `/run/ados/vision.sock`. The request args of `REGISTER_MODEL`, `INFER`,
+/// `PUBLISH_DETECTION` and `DESIGNATE_TRACK` are defined in
+/// [`crate::vision_rpc`].
 pub mod methods {
     /// Subscribe to `vision.frame` descriptors. Gated on `vision.frame.read`.
     /// The host then delivers descriptors as `vision.deliver` events.
@@ -439,10 +441,9 @@ pub mod methods {
     pub const DELIVER_DETECTION: &str = "vision.deliver_detection";
 
     /// Designate the engine's single-object follow target: lock the camera's
-    /// tracker onto a specific box (the operator's click-to-follow pick). Served
-    /// by the engine to trusted on-box callers; not yet exposed to the plugin
-    /// capability dispatch (a plugin-facing gate lands with the follow-me
-    /// plugin). Args: `{camera_id, bbox, class_label?, confidence?}`.
+    /// tracker onto a specific box (the operator's click-to-follow pick).
+    /// Gated on `vision.track.designate`; the control plane's click-to-follow
+    /// route sends it too.
     pub const DESIGNATE_TRACK: &str = "vision.designate_track";
 
     /// List the engine's registered models — a read-back of the model registry

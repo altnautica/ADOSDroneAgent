@@ -293,6 +293,12 @@ impl VisionEngine {
             }
             let layout =
                 ados_protocol::framebus::RingLayout::for_frame(slots, width, height, format);
+            // Retire the outgrown ring before creating its replacement. Both
+            // open the same path, and the old writer's drop unlinks it: dropped
+            // after, it would unlink the replacement's name, leaving a ring no
+            // consumer can map. Dropped first, the name names a new file, which
+            // a consumer holding the old mapping detects and remaps.
+            cams.remove(camera_id);
             let shm_name = format!("{}{camera_id}", crate::ring::RING_NAME_PREFIX);
             let writer = RingWriter::open_or_create(&shm_name, layout, budget)
                 .map_err(|e| anyhow!("ring open for {camera_id}: {e}"))?;
@@ -327,6 +333,35 @@ impl VisionEngine {
         // A send error just means no subscribers; that is fine.
         let _ = self.frame_tx.send(desc.clone());
         Ok(desc)
+    }
+
+    /// Read the pixels a descriptor this engine published names, out of the
+    /// camera's ring through the per-slot seqlock. The engine writes the ring,
+    /// so it reads its own region rather than mapping the file. Errors when the
+    /// camera has no ring, the descriptor names a ring other than the camera's
+    /// current one, or the slot has been recycled since.
+    pub async fn read_frame(&self, desc: &FrameDescriptor) -> Result<Vec<u8>> {
+        let cams = self.cameras.lock().await;
+        let cr = cams
+            .get(&desc.camera_id)
+            .ok_or_else(|| anyhow!("no frame ring for camera {}", desc.camera_id))?;
+        if cr.writer.shm_name() != desc.shm_name {
+            return Err(anyhow!(
+                "ring {} is not camera {}'s ring",
+                desc.shm_name,
+                desc.camera_id
+            ));
+        }
+        cr.writer
+            .read_frame(desc.slot, desc.seq)
+            .map_err(|e| anyhow!("ring read: {e}"))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "ring slot {} no longer holds seq {} (torn/stale)",
+                    desc.slot,
+                    desc.seq
+                )
+            })
     }
 
     /// Register a model. Engine-run models are loaded on the backend now (a load
@@ -943,16 +978,30 @@ mod tests {
     async fn ring_grows_for_a_larger_frame() {
         let e = engine();
         let small = vec![0u8; FrameFormat::Rgb24.frame_bytes(8, 8)];
-        e.publish_frame("c", 1, 0, 8, 8, FrameFormat::Rgb24, &small)
+        e.publish_frame("ring-grow", 1, 0, 8, 8, FrameFormat::Rgb24, &small)
             .await
             .unwrap();
         // A bigger frame forces a ring resize without error.
-        let big = vec![0u8; FrameFormat::Rgb24.frame_bytes(16, 16)];
+        let big = vec![7u8; FrameFormat::Rgb24.frame_bytes(16, 16)];
         let d = e
-            .publish_frame("c", 2, 0, 16, 16, FrameFormat::Rgb24, &big)
+            .publish_frame("ring-grow", 2, 0, 16, 16, FrameFormat::Rgb24, &big)
             .await
             .unwrap();
         assert_eq!(d.width, 16);
+        assert_eq!(e.read_frame(&d).await.unwrap(), big);
+        // A consumer maps the grown ring by the name the descriptor carries,
+        // so the outgrown ring's teardown must not have unlinked it.
+        #[cfg(target_os = "linux")]
+        {
+            let dir = std::env::var("ADOS_SHM_DIR").unwrap_or_else(|_| "/dev/shm".into());
+            let ring = std::fs::read(std::path::Path::new(&dir).join(&d.shm_name))
+                .expect("the grown ring is still named");
+            let layout = ados_protocol::framebus::RingLayout::read_header(&ring).unwrap();
+            assert_eq!(
+                ados_protocol::framebus::read_slot(&ring, &layout, d.slot, d.seq).unwrap(),
+                Some(big)
+            );
+        }
     }
 
     #[tokio::test]

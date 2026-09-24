@@ -35,6 +35,10 @@ const RADIO_UNITS: [&str; 2] = ["ados-wfb", "ados-wfb-rx"];
 /// every pass.
 const LOG_STORE_UNIT: &str = "ados-logd";
 
+/// This process's own unit, whose pending job tells the monitor that the
+/// service manager is stopping or restarting it (and so every `PartOf=` unit).
+const SUPERVISOR_UNIT: &str = "ados-supervisor";
+
 /// How often the monitor adopts gate-allowed catalog rows that are `active`
 /// but were never started by this process.
 ///
@@ -100,6 +104,13 @@ pub fn gate_allows(spec: &ServiceSpec, config: &AgentConfig) -> bool {
         }
     }
     true
+}
+
+/// Whether the supervisor's own shutdown stops this row: it is running and
+/// this process brought it up, rather than adopting a unit its enablement
+/// started (see [`Supervisor::stop`]).
+fn stops_on_shutdown(spec: &ServiceSpec) -> bool {
+    spec.state == ServiceState::Running && !spec.adopted
 }
 
 pub struct Supervisor {
@@ -439,14 +450,26 @@ impl Supervisor {
     /// Graceful shutdown in dependency-aware tiers: HTTP frontend first (so no
     /// new requests land on dying hardware services), then hardware, on-demand,
     /// and finally the rest of core. Poll `is-active` between tiers.
+    ///
+    /// Tears down only the rows this process brought up. An adopted row is left
+    /// to the service manager: every catalog unit is `PartOf=` the supervisor,
+    /// so systemd already propagates the supervisor's stop to it, and on
+    /// `systemctl restart ados-supervisor` it propagates a restart that brings
+    /// the unit straight back. A `systemctl stop` from here lands after that
+    /// restart and leaves the unit down for good, because the replacement
+    /// process starts only its own rows and the adoption sweep only promotes a
+    /// unit that is already active. That is how a supervisor restart used to take
+    /// `ados-control`, the operator's `:8080`, down with every other
+    /// installer-started unit. Under launchd the installer loads and unloads
+    /// each LaunchAgent itself, and a `bootout` from here unloads the job with
+    /// nothing to load it again.
     pub async fn stop(&mut self) {
         tracing::info!("supervisor stopping");
 
         // Tier 0: the API frontend stops accepting requests first.
         if self
             .index_of("ados-api")
-            .map(|i| self.services[i].state == ServiceState::Running)
-            .unwrap_or(false)
+            .is_some_and(|i| stops_on_shutdown(&self.services[i]))
         {
             self.stop_service("ados-api").await;
             self.wait_for_stop(&["ados-api"], Duration::from_secs(5))
@@ -457,11 +480,7 @@ impl Supervisor {
             let tier: Vec<&'static str> = self
                 .services
                 .iter()
-                .filter(|s| {
-                    s.name != "ados-api"
-                        && s.category == category
-                        && s.state == ServiceState::Running
-                })
+                .filter(|s| s.name != "ados-api" && s.category == category && stops_on_shutdown(s))
                 .map(|s| s.name)
                 .collect();
             for name in &tier {
@@ -660,6 +679,7 @@ impl Supervisor {
                 continue;
             }
             if let Some(i) = self.index_of(name) {
+                self.services[i].adopted = true;
                 self.set_state(i, ServiceState::Running, "adopted_already_active");
                 tracing::info!(service = name, "adopted a unit this process did not start");
             }
@@ -701,9 +721,25 @@ impl Supervisor {
         true
     }
 
+    /// Whether the service manager is stopping or restarting this supervisor
+    /// right now: a job is pending on its own unit. Every catalog unit is
+    /// `PartOf=` the supervisor, so systemd stops or restarts all of them in the
+    /// same transaction, and a unit that goes inactive in that window was
+    /// stopped on purpose. Restarting it undoes `systemctl stop ados-supervisor`
+    /// (the unit outlives the supervisor), and a start queued behind the
+    /// supervisor's own job (ados-logd is ordered after it) blocks the monitor
+    /// pass, so SIGTERM goes unhandled until systemd's stop timeout kills the
+    /// process. A start job still pending right after READY holds one pass at
+    /// most. `None` (launchd, a failed probe) reads as not cycling, so the
+    /// monitor keeps restarting.
+    async fn service_manager_cycling_self(&self) -> bool {
+        self.pm.job_pending(SUPERVISOR_UNIT).await == Some(true)
+    }
+
     /// The service half of a monitor pass: detect deaths and stalls, auto-
     /// restart, adopt units this process did not start, then retry every
-    /// parked service whose cooldown has elapsed.
+    /// parked service whose cooldown has elapsed. Restarts are held while
+    /// systemd stops or restarts the supervisor itself.
     ///
     /// Split out from [`monitor_pass`](Self::monitor_pass) so it is drivable
     /// without the network/hardware reconcilers, and stamps monitor progress
@@ -714,6 +750,9 @@ impl Supervisor {
         // without holding an immutable borrow across the await.
         let mut to_restart: Vec<&'static str> = Vec::new();
         let now = Instant::now();
+        // Latched once a death is seen while systemd cycles the supervisor, so
+        // the rest of the pass holds without probing again.
+        let mut held = false;
 
         for spec in &self.services {
             if matches!(spec.state, ServiceState::Running | ServiceState::Starting) {
@@ -739,6 +778,16 @@ impl Supervisor {
                 continue;
             };
             if !active && self.services[i].state == ServiceState::Running {
+                if held || self.service_manager_cycling_self().await {
+                    // This is the supervisor's own stop or restart reaching the
+                    // unit, not a failure. The process is about to get SIGTERM.
+                    held = true;
+                    tracing::info!(
+                        service = name,
+                        "unit stopped while systemd cycles the supervisor; not restarting"
+                    );
+                    continue;
+                }
                 tracing::warn!(service = name, "service died");
                 self.work_proof.forget(name);
                 let _ = self.record_failure_and_emit(i, Instant::now(), "died");
@@ -773,7 +822,11 @@ impl Supervisor {
             self.adopt_active_units().await;
         }
 
-        // Parked-service retry (bounded by the cooldown).
+        // Parked-service retry (bounded by the cooldown). Held, like the
+        // auto-restart above, while systemd cycles the supervisor.
+        if to_retry.is_empty() || held || self.service_manager_cycling_self().await {
+            return;
+        }
         for name in to_retry {
             if self.restart_blocked_by_bind(name).await {
                 continue;
@@ -1109,6 +1162,9 @@ mod tests {
         /// When set, every liveness probe returns no verdict — a busy service
         /// manager, or fork failing under memory pressure.
         probes_fail: std::sync::atomic::AtomicBool,
+        /// When set, the supervisor's own unit has a job pending: systemd is
+        /// stopping or restarting it, and every `PartOf=` unit with it.
+        supervisor_job_pending: std::sync::atomic::AtomicBool,
     }
 
     impl MockProcessManager {
@@ -1120,6 +1176,7 @@ mod tests {
                 work_counter_known: std::sync::atomic::AtomicBool::new(false),
                 all_inactive: std::sync::atomic::AtomicBool::new(false),
                 probes_fail: std::sync::atomic::AtomicBool::new(false),
+                supervisor_job_pending: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn record(&self, verb: &str, unit: &str) {
@@ -1150,6 +1207,10 @@ mod tests {
         }
         fn fail_probes(&self) {
             self.probes_fail
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn cycle_supervisor(&self) {
+            self.supervisor_job_pending
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -1187,6 +1248,15 @@ mod tests {
             self.work_counter_known
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .then(|| self.work_counter.load(std::sync::atomic::Ordering::Relaxed))
+        }
+        async fn job_pending(&self, unit: &str) -> Option<bool> {
+            self.record("job_pending", unit);
+            Some(
+                unit == SUPERVISOR_UNIT
+                    && self
+                        .supervisor_job_pending
+                        .load(std::sync::atomic::Ordering::Relaxed),
+            )
         }
         async fn mask(&self, unit: &str) {
             self.record("mask", unit);
@@ -1694,6 +1764,82 @@ mod tests {
             1,
             "the adopted unit's death went unnoticed"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_leaves_an_adopted_unit_to_the_service_manager() {
+        // Regression: `systemctl restart ados-supervisor` restarts every
+        // `PartOf=` unit, then this process's shutdown ran `systemctl stop` on
+        // every Running row, adopted ones included. The replacement process
+        // starts only its own rows and adopts only active ones, so ados-control
+        // (the operator's :8080) stayed down until someone started it by hand.
+        let pm = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+        assert!(sup.start_service("ados-mavlink").await);
+        sup.reconcile_services().await;
+        let adopted: Vec<&str> = sup
+            .services
+            .iter()
+            .filter(|s| s.adopted)
+            .map(|s| s.name)
+            .collect();
+        assert!(adopted.contains(&"ados-control"), "adopted={adopted:?}");
+
+        // Every unit reports stopped, so each tier's stop wait returns at once.
+        pm.deactivate_all();
+        sup.stop().await;
+
+        let calls = pm.calls();
+        assert!(
+            calls.contains(&"stop:ados-mavlink".to_string()),
+            "a row this process started must still be torn down; calls={calls:?}"
+        );
+        for name in adopted {
+            assert!(
+                !calls.contains(&format!("stop:{name}")),
+                "shutdown stopped {name}, a unit systemd brings up and cycles; calls={calls:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nothing_is_restarted_while_systemd_cycles_the_supervisor() {
+        // `systemctl stop|restart ados-supervisor` stops every PartOf= unit in
+        // the same transaction, before this process gets SIGTERM. Read as deaths,
+        // those stops were auto-restarted: after a `stop` the control front
+        // outlived the supervisor, and a restart queued behind the supervisor's
+        // own job blocked the pass until systemd SIGKILLed the process.
+        let pm = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+        assert!(sup.start_service("ados-mavlink").await);
+        sup.reconcile_services().await; // adopts ados-control and the rest
+        let parked = sup.index_of("ados-video").unwrap();
+        sup.services[parked].state = ServiceState::Failed; // due for a parked retry
+        let starts_before = pm
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("start:"))
+            .count();
+
+        pm.cycle_supervisor();
+        pm.deactivate_all();
+        sup.reconcile_services().await;
+
+        let calls = pm.calls();
+        let starts = calls.iter().filter(|c| c.starts_with("start:")).count();
+        assert_eq!(
+            starts, starts_before,
+            "a unit was restarted while systemd cycles the supervisor; calls={calls:?}"
+        );
+        for name in ["ados-mavlink", "ados-control"] {
+            let i = sup.index_of(name).unwrap();
+            assert!(
+                sup.services[i].failure_times.is_empty(),
+                "{name}'s stop by the supervisor's own cycle was counted as a failure"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

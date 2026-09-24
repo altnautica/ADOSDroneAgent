@@ -180,11 +180,13 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // On-demand.
     def("ados-discovery", OnDemand, None, None),
     // The native HTTP control surface: the LAN front on `:8080` on every
-    // profile. The installer enables it (it writes the front marker on every
-    // install) and systemd starts it with the supervisor, so this row is
-    // OnDemand — the supervisor never starts it itself — and the adoption sweep
-    // brings it under death detection. In the KEEP set because the lean headless
-    // profile runs it as its only HTTP surface.
+    // profile, the operator's API. systemd owns its lifecycle, as it does the
+    // plugin host's: the installer enables it (it writes the front marker on
+    // every install), `WantedBy=` pulls it up with the supervisor and `PartOf=`
+    // cycles it on a supervisor restart. So this row is OnDemand (the supervisor
+    // never starts it itself), the adoption sweep brings it under death
+    // detection, and shutdown leaves it to systemd. In the KEEP set because the
+    // lean headless profile runs it as its only HTTP surface.
     def_keep("ados-control", OnDemand, None, None),
     // Peripheral Manager registry. Cross-profile.
     def("ados-peripherals", Hardware, None, None),
@@ -282,6 +284,13 @@ pub struct ServiceSpec {
     pub failure_times: VecDeque<Instant>,
     /// Last monitor-driven retry of a parked service (cooldown bound).
     pub last_retry_at: Option<Instant>,
+    /// Set when the adoption sweep promoted this row: the unit was brought up
+    /// by its own enablement (the installer enables it, `WantedBy=` the
+    /// supervisor or `multi-user.target`), not by this process. Sticky for the
+    /// life of the process, because a death-restart by the monitor does not
+    /// change what brings the unit up. Shutdown leaves an adopted unit to the
+    /// service manager (see `Supervisor::stop`).
+    pub adopted: bool,
 }
 
 impl ServiceSpec {
@@ -295,6 +304,7 @@ impl ServiceSpec {
             state: ServiceState::Stopped,
             failure_times: VecDeque::new(),
             last_retry_at: None,
+            adopted: false,
         }
     }
 
@@ -453,6 +463,30 @@ mod tests {
             logd.headless_keep,
             "a lean flight node is the node that most needs its own recorder"
         );
+    }
+
+    #[test]
+    fn every_catalog_unit_is_part_of_the_supervisor() {
+        // The supervisor's shutdown leaves every adopted row to systemd, which is
+        // sound only because `PartOf=` carries the supervisor's own stop and
+        // restart to the unit. A unit without it would keep running after
+        // `systemctl stop ados-supervisor` and would not be cycled by a restart.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
+        for def in SERVICE_REGISTRY {
+            let path = dir.join(format!("{}.service", def.name));
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+            let part_of = body
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("PartOf="))
+                .flat_map(str::split_whitespace)
+                .any(|u| u == "ados-supervisor.service");
+            assert!(
+                part_of,
+                "{} is not PartOf=ados-supervisor.service",
+                def.name
+            );
+        }
     }
 
     #[test]

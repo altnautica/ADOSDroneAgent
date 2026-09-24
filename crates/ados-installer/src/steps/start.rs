@@ -88,13 +88,13 @@ impl Step for Start {
             );
         }
 
-        // The native plugin host owns the per-plugin sockets and is PartOf the
-        // supervisor, so the restart above stopped it; bring it back. There is no
-        // longer a packaged host to pin instead, so this is unconditional; the
-        // unit's ConditionPathExists keeps a box whose binary has not landed yet
-        // inactive rather than restart-looping. A fresh box must come up with the
-        // native host serving the plugin sockets and zero manual steps.
-        // Cross-profile (every profile fetches the binary).
+        // The native plugin host owns the per-plugin sockets. It is PartOf and
+        // WantedBy the supervisor, so the restart above cycles it or pulls it
+        // up; the explicit start covers a unit that was left inactive before this
+        // install. There is no longer a packaged host to pin instead, so this is
+        // unconditional; the unit's ConditionPathExists keeps a box whose binary
+        // has not landed yet inactive rather than restart-looping. Cross-profile
+        // (every profile fetches the binary).
         {
             let _ = exec::run(
                 "systemctl",
@@ -106,9 +106,28 @@ impl Step for Start {
             );
         }
 
-        // On a ground station, kick the GS unit set with --no-block. The
-        // supervisor's PartOf= chain stops these on its restart above with
-        // nothing subsequently re-starting them; this brings them back.
+        // The native control surface owns :8080, the operator's API. The restart
+        // above cycles it through PartOf=, but the process it replaced is the
+        // PREVIOUS release's supervisor, and that shutdown used to run
+        // `systemctl stop` on every unit it had adopted, this one included,
+        // after systemd had already restarted it. Start it so an upgrade from
+        // such a release comes back with its API; on a current supervisor it is
+        // already active and this is a no-op. The health gate waits for it.
+        if crate::steps::systemd::control_unit_wanted() {
+            let _ = exec::run(
+                "systemctl",
+                &["start", "--no-block", "ados-control.service"],
+            );
+            tracing::info!(
+                unit = "ados-control.service",
+                "native control surface started (--no-block)"
+            );
+        }
+
+        // On a ground station, kick the GS unit set with --no-block. Several are
+        // WantedBy=multi-user.target, which a supervisor restart never pulls in,
+        // and the previous release's supervisor stopped the adopted ones on its
+        // way out; this brings them up now rather than at the next boot.
         // Best-effort: a unit that is not deployed / not enabled is a no-op.
         if ctx.profile == "ground_station" {
             for unit in GROUND_STATION_START_UNITS {

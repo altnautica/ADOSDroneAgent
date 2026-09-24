@@ -48,3 +48,9 @@ tempfile = "3"
 futures-util = "0.3"
 # The cloud round-trip test reads the record the host re-encoded as JSON.
 serde_json = { workspace = true }
+# Non-poisoning locks for the state the end-to-end tests collect from callbacks.
+parking_lot = { workspace = true }
+# The vision wire tests serve the real engine's `vision.sock` in-process, so
+# what the SDK builds is decoded by the engine's own handlers, not a copy.
+ados-vision = { path = "../ados-vision" }
+anyhow = { workspace = true }

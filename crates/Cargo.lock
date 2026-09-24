@@ -519,10 +519,13 @@ version = "0.1.0"
 dependencies = [
  "ados-plugin-host",
  "ados-protocol",
+ "ados-vision",
+ "anyhow",
  "async-trait",
  "futures-core",
  "futures-util",
  "memmap2",
+ "parking_lot",
  "rmp-serde",
  "rmpv",
  "serde",

@@ -14,13 +14,16 @@
 //!   connection. Every published descriptor is pushed as a `vision.deliver`
 //!   event envelope whose `args` map carries the encoded descriptor as a binary
 //!   `descriptor` field (the host fans these out to subscribed plugins).
-//! - `vision.register_model` — register a model; `args` is the msgpack
-//!   [`ModelMetadata`] map.
-//! - `vision.infer` — run a registered engine-run model against one frame; the
-//!   frame is named by `{shm_name, slot, seq}` (read from the ring) or carried
-//!   inline as a binary `frame` field plus `{width, height, format}`.
-//! - `vision.publish_detection` — publish a [`DetectionBatch`] (`args` is the
-//!   batch map). Used by plugin-side models.
+//! - `vision.register_model` — register a model.
+//! - `vision.infer` — run a registered engine-run model against one frame this
+//!   engine published, named by its descriptor; the reply carries the batch.
+//! - `vision.publish_detection` — publish a [`DetectionBatch`]. Used by
+//!   plugin-side models and offloaded detection.
+//! - `vision.designate_track` — lock a camera's tracker onto a box.
+//!
+//! The `args` of the four plugin-facing requests are the shapes
+//! [`ados_protocol::vision_rpc`] defines, decoded with its decoders so the SDK
+//! that built them and this server cannot disagree.
 //!
 //! Each request gets one response envelope sharing the request's `request_id`;
 //! an error sets the envelope `error` field, which the host surfaces to the
@@ -29,11 +32,9 @@
 use std::sync::Arc;
 
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
-use ados_protocol::framebus::{
-    methods, BoundingBox, Detection, DetectionBatch, FrameDescriptor, FrameFormat, ModelMetadata,
-    VISION_DETECTION_VERSION,
-};
+use ados_protocol::framebus::{methods, DetectionBatch, FrameDescriptor, VISION_DETECTION_VERSION};
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
+use ados_protocol::vision_rpc;
 use anyhow::{anyhow, Result};
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -215,7 +216,7 @@ async fn handle_list_models(engine: &Arc<VisionEngine>) -> Result<Value> {
 }
 
 async fn handle_register(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
-    let meta: ModelMetadata = decode_args(args)?;
+    let meta = vision_rpc::decode_register_model(args)?;
     let model_id = meta.id.clone();
     let (exec, had_backend) = engine.register_model(meta).await?;
     Ok(ok_map(&[
@@ -226,110 +227,50 @@ async fn handle_register(engine: &Arc<VisionEngine>, args: &Value) -> Result<Val
     ]))
 }
 
+/// Handle `vision.infer`: read the named frame out of the camera's ring (a torn
+/// or recycled slot is an error, so the caller retries with a fresh descriptor)
+/// and run the model on it. The reply is the batch, not published: a plugin
+/// that wants it on the bus publishes it.
 async fn handle_infer(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
-    let req: InferRequest = decode_args(args)?;
-    let (frame, width, height, format) = req.resolve_frame()?;
+    let req = vision_rpc::decode_infer(args)?;
+    let desc = &req.frame;
+    let pixels = engine.read_frame(desc).await?;
     let detections = engine
-        .infer(&req.model_id, &frame, width, height, format)
+        .infer(&req.model_id, &pixels, desc.width, desc.height, desc.format)
         .await?;
     let batch = DetectionBatch {
         v: VISION_DETECTION_VERSION,
         model_id: req.model_id.clone(),
-        camera_id: req.camera_id.clone().unwrap_or_default(),
-        frame_id: req.frame_id.unwrap_or(0),
-        ts_ms: req.ts_ms.unwrap_or(0),
-        frame_width: width,
-        frame_height: height,
+        camera_id: desc.camera_id.clone(),
+        frame_id: desc.frame_id,
+        ts_ms: desc.ts_ms,
+        frame_width: desc.width,
+        frame_height: desc.height,
         detections,
     };
-    // Encode the batch as a binary field so the host returns it unchanged.
-    let bytes = batch
-        .to_msgpack()
-        .map_err(|e| anyhow!("encode detection batch: {e}"))?;
-    Ok(ok_map(&[
-        ("model_id", Value::from(req.model_id)),
-        ("batch", Value::Binary(bytes)),
-    ]))
+    Ok(vision_rpc::infer_reply(&batch)?)
 }
 
+/// Handle `vision.publish_detection`. The decoder refuses a batch whose version
+/// this build does not speak, so a mis-versioned batch is rejected loudly at
+/// this plugin ingress rather than relayed to be mis-read downstream.
 async fn handle_publish(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
-    let batch: DetectionBatch = decode_args(args)?;
-    // decode_args is a generic deserialize (a missing `v` fails here because the
-    // field has no default, but a mismatched one would not), so re-check the
-    // contract version at this plugin ingress and reject a mis-versioned batch
-    // loudly rather than relaying it to be silently mis-read downstream.
-    if batch.v != VISION_DETECTION_VERSION {
-        return Err(anyhow!(
-            "detection batch version {} != supported {VISION_DETECTION_VERSION}",
-            batch.v
-        ));
-    }
+    let batch = vision_rpc::decode_publish_detection(args)?;
     let reached = engine.publish_detection(batch);
     Ok(ok_map(&[("subscribers", Value::from(reached as u64))]))
 }
 
 /// Handle `vision.designate_track`: lock the named camera's tracker onto a
-/// specific box (the operator's click-to-follow pick), overriding the auto-lock.
-/// Args: `{camera_id, bbox:{x,y,width,height}, class_label?, confidence?}`. The
-/// box fields are read with numeric coercion so an int- or float-encoded value
-/// decodes the same. `class_label` / `confidence` default to a neutral label and
-/// full confidence (the operator's pick overrides the auto-lock regardless).
+/// specific box (the operator's click-to-follow pick, or a plugin's),
+/// overriding the auto-lock.
 async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
-    let map = args
-        .as_map()
-        .ok_or_else(|| anyhow!("designate args not a map"))?;
-    let camera_id =
-        map_str(map, "camera_id").ok_or_else(|| anyhow!("designate missing camera_id"))?;
-    let bbox_map = map_get(map, "bbox")
-        .and_then(|v| v.as_map())
-        .ok_or_else(|| anyhow!("designate missing bbox"))?;
-    let bf = |k: &str| map_get(bbox_map, k).and_then(num_f32).unwrap_or(0.0);
-    let target = Detection {
-        bbox: Some(BoundingBox {
-            x: bf("x"),
-            y: bf("y"),
-            width: bf("width"),
-            height: bf("height"),
-        }),
-        class_label: map_str(map, "class_label").unwrap_or_default(),
-        confidence: map_get(map, "confidence").and_then(num_f32).unwrap_or(1.0),
-        track_id: None,
-        assoc_confidence: None,
-        lock_state: None,
-        attributes: None,
-        mask: None,
-        keypoints: None,
-        depth: None,
-        world_pos: None,
-    };
-    let track_id = engine.designate(&camera_id, &target).await;
+    let req = vision_rpc::decode_designate_track(args)?;
+    let track_id = engine.designate(&req.camera_id, &req.target).await;
     Ok(ok_map(&[
         ("designated", Value::Boolean(track_id.is_some())),
         ("track_id", track_id.map(Value::from).unwrap_or(Value::Nil)),
-        ("camera_id", Value::from(camera_id)),
+        ("camera_id", Value::from(req.camera_id)),
     ]))
-}
-
-/// Look up a key in a msgpack map by string key.
-fn map_get<'a>(map: &'a [(Value, Value)], key: &str) -> Option<&'a Value> {
-    map.iter()
-        .find(|(k, _)| k.as_str() == Some(key))
-        .map(|(_, v)| v)
-}
-
-/// A string-valued map entry.
-fn map_str(map: &[(Value, Value)], key: &str) -> Option<String> {
-    map_get(map, key)
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
-}
-
-/// Coerce a msgpack number (f64 / i64 / u64) to f32.
-fn num_f32(v: &Value) -> Option<f32> {
-    v.as_f64()
-        .or_else(|| v.as_i64().map(|i| i as f64))
-        .or_else(|| v.as_u64().map(|u| u as f64))
-        .map(|f| f as f32)
 }
 
 /// Spawn the per-connection frame-descriptor push task. Every published
@@ -503,131 +444,13 @@ fn execution_str(e: ados_protocol::framebus::ModelExecution) -> &'static str {
     }
 }
 
-/// Decode an rmpv args map into a typed struct via msgpack round-trip. The args
-/// arrive as an `rmpv::Value`; re-encode and decode into `T` so the same named
-/// fields the contract uses bind directly.
-fn decode_args<T: serde::de::DeserializeOwned>(args: &Value) -> Result<T> {
-    let bytes = rmp_serde::to_vec_named(args).map_err(|e| anyhow!("re-encode args: {e}"))?;
-    rmp_serde::from_slice(&bytes).map_err(|e| anyhow!("decode args: {e}"))
-}
-
-/// An `infer` request. The frame is either named in the shared ring
-/// (`shm_name` + `slot` + `seq`) or carried inline as a binary `frame` field
-/// with explicit dimensions.
-#[derive(Debug, serde::Deserialize)]
-struct InferRequest {
-    model_id: String,
-    #[serde(default)]
-    camera_id: Option<String>,
-    #[serde(default)]
-    frame_id: Option<u64>,
-    #[serde(default)]
-    ts_ms: Option<i64>,
-    // Ring-named frame.
-    #[serde(default)]
-    shm_name: Option<String>,
-    #[serde(default)]
-    slot: Option<u32>,
-    #[serde(default)]
-    seq: Option<u64>,
-    // Inline frame.
-    #[serde(default)]
-    frame: Option<serde_bytes_compat::Bytes>,
-    #[serde(default)]
-    width: Option<u32>,
-    #[serde(default)]
-    height: Option<u32>,
-    #[serde(default)]
-    format: Option<FrameFormat>,
-}
-
-impl InferRequest {
-    /// Resolve the frame bytes plus dimensions/format. The width, height, and
-    /// format always come from the request (the host knows them from the
-    /// descriptor it holds); the bytes come either from an inline binary `frame`
-    /// field or from the named ring slot (mapped read-only, seqlock-validated).
-    /// A torn or stale ring read is an error so the caller retries with a fresh
-    /// descriptor.
-    fn resolve_frame(&self) -> Result<(Vec<u8>, u32, u32, FrameFormat)> {
-        let width = self.width.ok_or_else(|| anyhow!("infer needs width"))?;
-        let height = self.height.ok_or_else(|| anyhow!("infer needs height"))?;
-        let format = self.format.ok_or_else(|| anyhow!("infer needs format"))?;
-        if let Some(bytes) = &self.frame {
-            return Ok((bytes.0.clone(), width, height, format));
-        }
-        let shm_name = self
-            .shm_name
-            .as_deref()
-            .ok_or_else(|| anyhow!("infer needs a shm_name or an inline frame"))?;
-        let slot = self.slot.ok_or_else(|| anyhow!("ring frame needs slot"))?;
-        let seq = self.seq.ok_or_else(|| anyhow!("ring frame needs seq"))?;
-        let bytes = read_ring_frame(shm_name, slot, seq)?;
-        Ok((bytes, width, height, format))
-    }
-}
-
-/// Map a `/dev/shm` ring read-only and read the named slot, validating the
-/// seqlock. Linux-only (no `/dev/shm` off Linux); off Linux this errors, which
-/// pushes a caller toward the inline path the tests use.
-#[cfg(target_os = "linux")]
-fn read_ring_frame(shm_name: &str, slot: u32, seq: u64) -> Result<Vec<u8>> {
-    use ados_protocol::framebus::{read_slot, RingLayout};
-    let dir = std::env::var("ADOS_SHM_DIR").unwrap_or_else(|_| "/dev/shm".to_string());
-    let path = std::path::PathBuf::from(dir).join(shm_name);
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .open(&path)
-        .map_err(|e| anyhow!("open ring {shm_name}: {e}"))?;
-    // SAFETY: the ring file is sized by the writer; the mapping is read-only and
-    // bounded to the file length, and a torn read is caught by the seqlock.
-    let map = unsafe { memmap2::Mmap::map(&file)? };
-    let layout = RingLayout::read_header(&map[..]).ok_or_else(|| anyhow!("bad ring header"))?;
-    read_slot(&map[..], &layout, slot, seq)
-        .map_err(|e| anyhow!("ring read: {e}"))?
-        .ok_or_else(|| anyhow!("ring slot {slot} no longer holds seq {seq} (torn/stale)"))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_ring_frame(_shm_name: &str, _slot: u32, _seq: u64) -> Result<Vec<u8>> {
-    Err(anyhow!(
-        "ring-named frames require /dev/shm; use an inline frame off Linux"
-    ))
-}
-
-/// A tiny `serde_bytes`-equivalent so a msgpack binary field deserializes into
-/// owned bytes without pulling the `serde_bytes` crate.
-mod serde_bytes_compat {
-    use serde::de::{Deserialize, Deserializer};
-
-    #[derive(Debug, Clone, Default)]
-    pub struct Bytes(pub Vec<u8>);
-
-    impl<'de> Deserialize<'de> for Bytes {
-        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where
-            D: Deserializer<'de>,
-        {
-            // rmpv decodes a msgpack `bin` to a Value::Binary; route through it
-            // so both `bin` and `array<u8>` shapes are accepted.
-            let v = rmpv::Value::deserialize(deserializer)?;
-            let bytes = match v {
-                rmpv::Value::Binary(b) => b,
-                rmpv::Value::Array(items) => items
-                    .into_iter()
-                    .filter_map(|i| i.as_u64().map(|n| n as u8))
-                    .collect(),
-                _ => Vec::new(),
-            };
-            Ok(Bytes(bytes))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::MockBackend;
-    use ados_protocol::framebus::{ModelExecution, ModelKind};
+    use ados_protocol::framebus::{
+        BoundingBox, Detection, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
+    };
 
     fn engine() -> Arc<VisionEngine> {
         VisionEngine::new(Box::new(MockBackend), 4)
@@ -660,7 +483,7 @@ mod tests {
             model_path: None,
             head: ados_protocol::framebus::DetectionHead::Yolo8,
         };
-        let args: Value = rmp_serde::from_slice(&meta.to_msgpack().unwrap()).unwrap();
+        let args = vision_rpc::register_model_args(&meta).unwrap();
         let (resp, err) = dispatch(&e, &req_env(methods::REGISTER_MODEL, args)).await;
         assert!(err.is_none());
         // The response carries registered=true and the model id.
@@ -712,10 +535,24 @@ mod tests {
         assert_eq!(models[0].output_classes, vec!["person".to_string()]);
     }
 
+    /// Publish one 2x2 rgb24 frame on `uvc-0` and return its descriptor.
+    async fn published_frame(e: &Arc<VisionEngine>) -> FrameDescriptor {
+        e.publish_frame(
+            "uvc-0",
+            7,
+            1_700_000_000_000,
+            2,
+            2,
+            FrameFormat::Rgb24,
+            &[9u8; 12],
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
-    async fn infer_inline_frame_returns_a_batch() {
+    async fn infer_runs_on_the_frame_a_descriptor_names() {
         let e = engine();
-        // Register an engine-run model.
         let meta = ModelMetadata {
             id: "m".into(),
             kind: ModelKind::Detection,
@@ -728,44 +565,46 @@ mod tests {
             head: ados_protocol::framebus::DetectionHead::Yolo8,
         };
         e.register_model(meta).await.unwrap();
+        let desc = published_frame(&e).await;
 
-        let args = Value::Map(vec![
-            (Value::from("model_id"), Value::from("m")),
-            (Value::from("camera_id"), Value::from("uvc-0")),
-            (Value::from("frame_id"), Value::from(7u64)),
-            (Value::from("frame"), Value::Binary(vec![0u8; 12])),
-            (Value::from("width"), Value::from(2u32)),
-            (Value::from("height"), Value::from(2u32)),
-            (Value::from("format"), Value::from("rgb24")),
-        ]);
+        let args = vision_rpc::infer_args("m", &desc).unwrap();
         let (resp, err) = dispatch(&e, &req_env(methods::INFER, args)).await;
         assert!(err.is_none(), "infer errored: {err:?}");
-        let map = as_map(&resp);
-        // The batch comes back as a binary field decodable to a DetectionBatch.
-        let batch_bytes = match get(&map, "batch") {
-            Some(Value::Binary(b)) => b,
-            other => panic!("expected binary batch, got {other:?}"),
-        };
-        let batch = DetectionBatch::from_msgpack(&batch_bytes).unwrap();
+        let batch = vision_rpc::decode_infer_reply(&resp).unwrap();
         assert_eq!(batch.model_id, "m");
         assert_eq!(batch.camera_id, "uvc-0");
         assert_eq!(batch.frame_id, 7);
+        assert_eq!((batch.frame_width, batch.frame_height), (2, 2));
         assert!(batch.detections.is_empty()); // mock backend
     }
 
     #[tokio::test]
-    async fn infer_unknown_model_returns_error() {
+    async fn infer_on_a_recycled_slot_or_unknown_model_errors() {
         let e = engine();
-        let args = Value::Map(vec![
-            (Value::from("model_id"), Value::from("nope")),
-            (Value::from("frame"), Value::Binary(vec![0u8; 4])),
-            (Value::from("width"), Value::from(1u32)),
-            (Value::from("height"), Value::from(1u32)),
-            (Value::from("format"), Value::from("rgb24")),
-        ]);
-        let (_resp, err) = dispatch(&e, &req_env(methods::INFER, args)).await;
-        assert!(err.is_some());
+        let desc = published_frame(&e).await;
+        let (_resp, err) = dispatch(
+            &e,
+            &req_env(
+                methods::INFER,
+                vision_rpc::infer_args("nope", &desc).unwrap(),
+            ),
+        )
+        .await;
         assert!(err.unwrap().contains("unknown model"));
+
+        // A descriptor whose slot the ring has since recycled is refused, so the
+        // caller retries with a fresh one instead of reading another frame.
+        let mut stale = desc.clone();
+        stale.seq += 1;
+        let (_resp, err) = dispatch(
+            &e,
+            &req_env(
+                methods::INFER,
+                vision_rpc::infer_args("nope", &stale).unwrap(),
+            ),
+        )
+        .await;
+        assert!(err.unwrap().contains("torn/stale"));
     }
 
     #[tokio::test]
@@ -782,7 +621,7 @@ mod tests {
             frame_height: 480,
             detections: vec![],
         };
-        let args: Value = rmp_serde::from_slice(&batch.to_msgpack().unwrap()).unwrap();
+        let args = vision_rpc::publish_detection_args(&batch).unwrap();
         let (resp, err) = dispatch(&e, &req_env(methods::PUBLISH_DETECTION, args)).await;
         assert!(err.is_none());
         let map = as_map(&resp);

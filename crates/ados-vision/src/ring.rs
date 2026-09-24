@@ -15,7 +15,8 @@
 use std::path::PathBuf;
 
 use ados_protocol::framebus::{
-    write_slot, FrameDescriptor, FrameFormat, RingError, RingLayout, FRAMEBUS_DESCRIPTOR_VERSION,
+    read_slot, write_slot, FrameDescriptor, FrameFormat, RingError, RingLayout,
+    FRAMEBUS_DESCRIPTOR_VERSION,
 };
 use thiserror::Error;
 
@@ -128,6 +129,14 @@ enum Region {
 }
 
 impl Region {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            #[cfg(target_os = "linux")]
+            Region::Mmap { map, .. } => &map[..],
+            Region::Heap(v) => &v[..],
+        }
+    }
+
     fn as_mut_slice(&mut self) -> &mut [u8] {
         match self {
             #[cfg(target_os = "linux")]
@@ -261,6 +270,13 @@ impl RingWriter {
             seq,
             byte_len: data.len() as u32,
         })
+    }
+
+    /// Read back the frame a descriptor from this ring names, through the same
+    /// seqlock a consumer reads it with. `Ok(None)` when the slot no longer
+    /// holds `seq`.
+    pub fn read_frame(&self, slot: u32, seq: u64) -> Result<Option<Vec<u8>>, RingError> {
+        read_slot(self.region.as_slice(), &self.layout, slot, seq)
     }
 }
 

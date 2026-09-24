@@ -15,7 +15,7 @@ import struct
 import msgpack
 import pytest
 
-from ados.plugins.errors import CapabilityDenied
+from ados.plugins.errors import CapabilityDenied, PluginError
 from ados.sdk.testing import FakeVisionEngine
 from ados.sdk.testing.stubs import FakeIpcClient
 from ados.sdk.vision import (
@@ -36,6 +36,7 @@ from ados.sdk.vision import (
     Pose,
     RingLayout,
     VisionClient,
+    _RingResolver,
     read_slot,
     write_slot,
 )
@@ -505,6 +506,50 @@ async def test_end_to_end_camera_filter_drops_other_cameras():
         engine.close()
 
 
+def _ring_file(path, layout: RingLayout, frames: dict[int, bytes]) -> None:
+    """Create ``path`` as a new ring file (a new inode, the way an engine start
+    re-creates its rings) holding ``frames`` keyed by sequence."""
+    region = bytearray(layout.total_len())
+    layout.write_header(region)
+    for seq, pixels in frames.items():
+        write_slot(region, layout, seq % layout.slot_count, seq, pixels)
+    path.unlink(missing_ok=True)
+    path.write_bytes(bytes(region))
+
+
+def test_resolver_follows_a_ring_the_engine_replaced(tmp_path):
+    # An engine restart unlinks each ring and re-creates it under the same
+    # name with its sequence starting over; a cached mapping of the old file
+    # must not keep a subscriber silent, nor hand it the old run's pixels.
+    layout = RingLayout.for_frame(4, 4, 4, FrameFormat.RGB24)
+    path = tmp_path / "ados-vision-uvc-0"
+
+    def desc(seq: int) -> FrameDescriptor:
+        return FrameDescriptor(
+            camera_id="uvc-0", frame_id=seq, ts_ms=seq, width=4, height=4,
+            format=FrameFormat.RGB24, shm_name=path.name,
+            slot=seq % layout.slot_count, seq=seq, byte_len=layout.slot_bytes,
+        )
+
+    resolver = _RingResolver(shm_dir=tmp_path)
+    try:
+        # First run: more frames than slots, so every slot is past seq 1.
+        _ring_file(path, layout, {s: bytes([s]) * 48 for s in range(1, 7)})
+        first = resolver.resolve(desc(6))
+        assert first is not None and first.pixels == bytes([6]) * 48
+
+        _ring_file(path, layout, {1: bytes([0xB1]) * 48})
+        after = resolver.resolve(desc(1))
+        assert after is not None
+        assert after.pixels == bytes([0xB1]) * 48
+        # The same descriptor resolved again (a second subscription) still
+        # resolves.
+        again = resolver.resolve(desc(1))
+        assert again is not None and again.pixels == bytes([0xB1]) * 48
+    finally:
+        resolver.close()
+
+
 # ---------------------------------------------------------------------------
 # VisionClient RPC shaping + capability gating (over FakeIpcClient).
 # ---------------------------------------------------------------------------
@@ -544,19 +589,23 @@ async def test_register_model_denied_without_cap():
 
 async def test_infer_passes_descriptor_and_decodes_detections():
     ipc = _ipc({"vision.model.register"})
-    # Stage the engine's infer response: detections as a msgpack blob, matching
-    # the wire the host returns.
-    dets = [
-        Detection(
-            bbox=BoundingBox(1.0, 2.0, 3.0, 4.0),
-            class_label="weed",
-            confidence=0.9,
-            track_id=7,
-        ).to_dict()
-    ]
-    ipc.set_response(
-        "vision.infer", {"detections": msgpack.packb(dets, use_bin_type=True)}
+    # Stage the engine's infer reply: the model's batch as a msgpack blob,
+    # matching the wire the host returns.
+    reply = DetectionBatch(
+        model_id="com.example.weeds",
+        camera_id="uvc-0",
+        frame_id=1,
+        ts_ms=1,
+        detections=[
+            Detection(
+                bbox=BoundingBox(1.0, 2.0, 3.0, 4.0),
+                class_label="weed",
+                confidence=0.9,
+                track_id=7,
+            )
+        ],
     )
+    ipc.set_response("vision.infer", {"batch": reply.to_msgpack()})
     client = VisionClient(ipc)
 
     descriptor = FrameDescriptor(
@@ -581,14 +630,16 @@ async def test_infer_passes_descriptor_and_decodes_detections():
     ]
 
 
-async def test_infer_empty_response_is_no_detections():
+async def test_infer_reply_without_a_batch_is_an_error():
+    # An engine answer the client cannot read is not "no detections".
     ipc = _ipc({"vision.model.register"})
     client = VisionClient(ipc)
     descriptor = FrameDescriptor(
         camera_id="uvc-0", frame_id=1, ts_ms=1, width=2, height=2,
         format=FrameFormat.RGB24, shm_name="r", slot=0, seq=1, byte_len=12,
     )
-    assert await client.infer("m", Frame(descriptor, bytes(12))) == []
+    with pytest.raises(PluginError, match="batch"):
+        await client.infer("m", Frame(descriptor, bytes(12)))
 
 
 async def test_publish_detection_sends_batch_blob_under_correct_cap():

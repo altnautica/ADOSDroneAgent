@@ -25,6 +25,7 @@ use std::time::Duration;
 use ados_protocol::frame::{decode_len, FrameError, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::node_info::NodeInfo;
 use ados_protocol::plugin::{CapabilityToken, Envelope, PROTOCOL_VERSION, TELEMETRY_STATE_TOPIC};
+use ados_protocol::vision_rpc;
 use rmpv::Value;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -100,6 +101,11 @@ pub enum ClientError {
     /// Any other error string the host returned in the envelope `error` field.
     #[error("rpc error: {0}")]
     Rpc(String),
+}
+
+/// A vision request this client could not build.
+pub(crate) fn vision_args_error(e: vision_rpc::VisionArgsError) -> ClientError {
+    ClientError::Rpc(format!("vision request encode failed: {e}"))
 }
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Envelope>>>>;
@@ -566,16 +572,16 @@ impl PluginIpcClient {
             .args)
     }
 
-    /// Designate the tracker's locked target, overriding its auto-lock.
+    /// Designate the tracker's locked target, overriding its auto-lock. Only
+    /// the target's box, label and confidence cross; the box is required. The
+    /// required cap is `vision.track.designate`.
     pub async fn vision_designate_track(
         &self,
         camera_id: &str,
-        detection: Value,
+        target: &ados_protocol::framebus::Detection,
     ) -> Result<Value, ClientError> {
-        let args = Value::Map(vec![
-            (Value::from("camera_id"), Value::from(camera_id)),
-            (Value::from("detection"), detection),
-        ]);
+        let args =
+            vision_rpc::designate_track_args(camera_id, target).map_err(vision_args_error)?;
         Ok(self
             .send_request(
                 ados_protocol::framebus::methods::DESIGNATE_TRACK,
@@ -861,13 +867,13 @@ impl PluginIpcClient {
             .args)
     }
 
-    /// Register an inference model, carrying its metadata as a msgpack blob the
-    /// engine decodes. The required cap is `vision.model.register`.
-    pub async fn vision_register_model(&self, model_blob: &[u8]) -> Result<Value, ClientError> {
-        let args = Value::Map(vec![(
-            Value::from("model"),
-            Value::Binary(model_blob.to_vec()),
-        )]);
+    /// Register an inference model. The required cap is
+    /// `vision.model.register`.
+    pub async fn vision_register_model(
+        &self,
+        model: &ados_protocol::framebus::ModelMetadata,
+    ) -> Result<Value, ClientError> {
+        let args = vision_rpc::register_model_args(model).map_err(vision_args_error)?;
         Ok(self
             .send_request(
                 ados_protocol::framebus::methods::REGISTER_MODEL,
@@ -878,21 +884,16 @@ impl PluginIpcClient {
             .args)
     }
 
-    /// Run a registered model against one frame (named by descriptor blob) on
-    /// the shared backend and return the engine's response. The required cap is
-    /// `vision.model.register`.
+    /// Run a registered model against one frame, named by the descriptor the
+    /// engine published for it, on the shared backend and return the engine's
+    /// reply (decode it with [`vision_rpc::decode_infer_reply`]). The required
+    /// cap is `vision.model.register`.
     pub async fn vision_infer(
         &self,
         model_id: &str,
-        descriptor_blob: &[u8],
+        frame: &ados_protocol::framebus::FrameDescriptor,
     ) -> Result<Value, ClientError> {
-        let args = Value::Map(vec![
-            (Value::from("model_id"), Value::from(model_id)),
-            (
-                Value::from("descriptor"),
-                Value::Binary(descriptor_blob.to_vec()),
-            ),
-        ]);
+        let args = vision_rpc::infer_args(model_id, frame).map_err(vision_args_error)?;
         Ok(self
             .send_request(
                 ados_protocol::framebus::methods::INFER,
@@ -903,13 +904,13 @@ impl PluginIpcClient {
             .args)
     }
 
-    /// Publish a detection batch (a msgpack blob) on `vision.detection`. The
-    /// required cap is `vision.detection.publish`.
-    pub async fn vision_publish_detection(&self, batch_blob: &[u8]) -> Result<Value, ClientError> {
-        let args = Value::Map(vec![(
-            Value::from("batch"),
-            Value::Binary(batch_blob.to_vec()),
-        )]);
+    /// Publish a detection batch on `vision.detection`. The required cap is
+    /// `vision.detection.publish`.
+    pub async fn vision_publish_detection(
+        &self,
+        batch: &ados_protocol::framebus::DetectionBatch,
+    ) -> Result<Value, ClientError> {
+        let args = vision_rpc::publish_detection_args(batch).map_err(vision_args_error)?;
         Ok(self
             .send_request(
                 ados_protocol::framebus::methods::PUBLISH_DETECTION,

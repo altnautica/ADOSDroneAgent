@@ -8,7 +8,11 @@
 //!   2. supervisor active       — `systemctl is-active ados-supervisor`.
 //!   3. profile units enabled   — `systemctl is-enabled <unit>` for the set the
 //!      profile must enable.
-//!   4. REST reachable          — `curl ... http://127.0.0.1:8080/api/pairing/info`
+//!   4. REST reachable          — first a bounded wait for the native control
+//!      front (`ados-control`, which owns :8080) to be `active` after the start
+//!      step's supervisor restart, recorded as `control-active:<state>` when it
+//!      never gets there; then
+//!      `curl ... http://127.0.0.1:8080/api/pairing/info`
 //!      (the UNAUTHENTICATED endpoint; `/api/status` returns 401 when paired,
 //!      which `curl -f` would wrongly read as a miss).
 //!   5. **NEW** — every `Gate::Hard` prebuilt binary for the profile EXISTS and
@@ -47,12 +51,14 @@
 //! status derivation flips to `failed` and the result names the missing piece.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::binaries::{self, Gate};
 use crate::ctx::Ctx;
 use crate::env::{SERVICE_NAME, VENV_DIR};
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use crate::steps::systemd::control_unit_wanted;
 
 /// The set of systemd units that MUST be enabled for a profile's install to be
 /// complete (`expected_profile_units`). Drone needs only the supervisor (its
@@ -94,6 +100,52 @@ fn venv_importable() -> bool {
 /// True when the supervisor unit is active.
 fn supervisor_active() -> bool {
     exec::run_ok("systemctl", &["is-active", "--quiet", SERVICE_NAME])
+}
+
+/// The native control front's unit. Under the front marker every install
+/// writes it owns :8080, so the REST probe can only answer once it is active.
+const CONTROL_UNIT: &str = "ados-control.service";
+
+/// How many one-second polls the gate spends waiting for the control front to
+/// reach `active`. A supervisor restart cycles the unit in milliseconds (it is
+/// PartOf the supervisor), so the bound is for a unit that is crash-looping or
+/// was never started, not a slow one.
+const CONTROL_ACTIVE_POLLS: u32 = 60;
+const CONTROL_ACTIVE_POLL: Duration = Duration::from_secs(1);
+
+/// The control front's `systemctl is-active` word (`active`, `activating`,
+/// `inactive`, `failed`, ...).
+fn control_active_state() -> String {
+    exec::run("systemctl", &["is-active", CONTROL_UNIT])
+        .stdout
+        .trim()
+        .to_string()
+}
+
+/// Poll `probe` until it reports `active`, at most `polls` times with `sleep`
+/// between. On timeout returns the last state reported, so the miss says what
+/// the unit was doing rather than only that it was not ready. Pure given its
+/// probe and sleep, so the bound is unit-testable.
+fn wait_until_active(
+    mut probe: impl FnMut() -> String,
+    polls: u32,
+    mut sleep: impl FnMut(),
+) -> Result<(), String> {
+    let mut last = String::new();
+    for attempt in 0..polls {
+        last = probe();
+        if last == "active" {
+            return Ok(());
+        }
+        if attempt + 1 < polls {
+            sleep();
+        }
+    }
+    Err(if last.is_empty() {
+        "unknown".to_string()
+    } else {
+        last
+    })
 }
 
 /// True when the agent REST API answers on the unauthenticated pairing-info
@@ -338,7 +390,26 @@ impl Step for Health {
             }
         }
 
-        // 4. REST reachable.
+        // 4. REST reachable. The start step has just restarted the supervisor,
+        // so first wait (bounded) for the control front's unit to be active:
+        // probing the port while the unit is still cycling is a race, and a unit
+        // that never comes up is named with the state systemd reports instead of
+        // surfacing only as an unreachable port.
+        if control_unit_wanted() {
+            if let Err(state) =
+                wait_until_active(control_active_state, CONTROL_ACTIVE_POLLS, || {
+                    std::thread::sleep(CONTROL_ACTIVE_POLL)
+                })
+            {
+                tracing::error!(
+                    unit = CONTROL_UNIT,
+                    state = %state,
+                    waited_s = CONTROL_ACTIVE_POLLS,
+                    "control front never became active"
+                );
+                misses.push(format!("control-active:{state}"));
+            }
+        }
         if !rest_reachable() {
             misses.push("api-reachable".to_string());
         }
@@ -429,6 +500,31 @@ impl Step for Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_control_wait_is_bounded_and_names_the_last_state() {
+        // A unit that comes up on the third poll returns then, without sleeping
+        // out the rest of the bound.
+        let mut states = ["inactive", "activating", "active"].into_iter();
+        let mut sleeps = 0;
+        let up = wait_until_active(|| states.next().unwrap().to_string(), 10, || sleeps += 1);
+        assert_eq!(up, Ok(()));
+        assert_eq!(sleeps, 2);
+
+        // A unit that never comes up stops after the bound, and the miss carries
+        // what systemd last reported rather than a bare timeout.
+        let mut probes = 0;
+        let down = wait_until_active(
+            || {
+                probes += 1;
+                "failed".to_string()
+            },
+            5,
+            || {},
+        );
+        assert_eq!(down, Err("failed".to_string()));
+        assert_eq!(probes, 5);
+    }
 
     #[test]
     fn drone_expects_only_the_supervisor() {
