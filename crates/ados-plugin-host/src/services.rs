@@ -566,8 +566,17 @@ mod tests {
                 "HTTP/1.1 503 Busy\r\n\r\n",
             ] {
                 let (mut s, _) = listener.accept().unwrap();
+                // Read the whole request head before answering: replying and
+                // closing mid-request leaves the client writing into a closed
+                // socket (EPIPE), which is not the answer under test.
+                let mut head = Vec::new();
                 let mut buf = [0u8; 256];
-                let _ = s.read(&mut buf);
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                }
                 s.write_all(reply.as_bytes()).unwrap();
             }
         });

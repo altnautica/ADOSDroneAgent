@@ -595,8 +595,9 @@ enum Wire {
 
 impl MockStateServer {
     /// Bind a state socket in `dir` and start serving the canned `snapshot` in
-    /// the chosen wire format. The first accepted client gets the frame on
-    /// connect.
+    /// the chosen wire format. Each accepted client gets the frame on connect
+    /// and again every 200 ms, the way the producer republishes, so the held
+    /// snapshot never ages past the client's staleness bound mid-test.
     async fn start(dir: &Path, snapshot: Value, wire: Wire) -> Self {
         let path = dir.join("mock-state.sock");
         let listener = UnixListener::bind(&path).unwrap();
@@ -611,16 +612,21 @@ impl MockStateServer {
                     _ = &mut stop_rx => return,
                     accepted = listener.accept() => {
                         if let Ok((mut conn, _addr)) = accepted {
-                            let _ = conn.write_all(&frame).await;
-                            let _ = conn.flush().await;
-                            // Hold the connection open so the client keeps the
-                            // snapshot; a fresh accept loop serves a reconnect.
+                            let frame = frame.clone();
                             tokio::spawn(async move {
+                                let mut tick = tokio::time::interval(Duration::from_millis(200));
                                 let mut sink = [0u8; 64];
                                 loop {
-                                    match conn.read(&mut sink).await {
-                                        Ok(0) | Err(_) => return,
-                                        Ok(_) => {}
+                                    tokio::select! {
+                                        _ = tick.tick() => {
+                                            if conn.write_all(&frame).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        read = conn.read(&mut sink) => match read {
+                                            Ok(0) | Err(_) => return,
+                                            Ok(_) => {}
+                                        },
                                     }
                                 }
                             });

@@ -4,6 +4,15 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.381] - 2026-09-24
+
+### Fixed
+
+- A plugin's `telemetry.extend` channels are kept in the published-state
+  sidecar on their own budget, so a fast telemetry channel no longer evicts
+  the plugin's on-change state read-backs. The first eviction of a topic is
+  logged.
+
 ## [0.99.380] - 2026-09-24
 
 ### Security

@@ -27,10 +27,22 @@ use std::path::{Path, PathBuf};
 use rmpv::Value;
 use serde_json::{json, Map, Value as Json};
 
-/// Maximum distinct topics retained in one plugin's sidecar. A plugin that
+/// Maximum distinct event topics retained in one plugin's sidecar. A plugin that
 /// publishes more than this keeps the most-recently-updated topics (the oldest
 /// by last-update timestamp is evicted), so the file stays bounded.
 pub const MAX_TOPICS: usize = 8;
+
+/// Maximum `telemetry.extend` channels mirrored into the sidecar, budgeted apart
+/// from the event topics so a fast telemetry channel never evicts a plugin's
+/// on-change Skill read-backs.
+pub const MAX_TELEMETRY_CHANNELS: usize = 8;
+
+/// The topic prefix the host mirrors `telemetry.extend` channels under.
+pub const TELEMETRY_TOPIC_PREFIX: &str = "telemetry.";
+
+fn is_telemetry(topic: &str) -> bool {
+    topic.starts_with(TELEMETRY_TOPIC_PREFIX)
+}
 
 /// Maximum serialized sidecar size in bytes. A single event whose serialized
 /// form alone exceeds this is refused (the prior sidecar is left untouched); an
@@ -87,7 +99,9 @@ pub fn record(
             ts_ms,
         },
     );
-    cap(&mut entries);
+    for evicted in cap(&mut entries) {
+        note_eviction(plugin_id, &evicted);
+    }
 
     let body = serialize(&entries);
     write_atomic(&path, body.as_bytes())
@@ -128,34 +142,59 @@ fn load_entries(path: &Path) -> BTreeMap<String, Entry> {
     out
 }
 
-/// Cap the entry map to [`MAX_TOPICS`] then to [`MAX_BYTES`], evicting the
-/// oldest-updated topic each round (the smallest `ts_ms`, ties broken by topic
-/// name so eviction is deterministic). The just-inserted topic has the newest
-/// `ts_ms`, so it is never the one evicted.
-fn cap(entries: &mut BTreeMap<String, Entry>) {
-    while entries.len() > MAX_TOPICS {
-        if let Some(victim) = oldest_topic(entries) {
+/// Cap the event topics to [`MAX_TOPICS`] and the telemetry mirrors to
+/// [`MAX_TELEMETRY_CHANNELS`], each on its own budget, then the whole map to
+/// [`MAX_BYTES`]. Each round evicts the oldest-updated topic of the class over
+/// budget (the smallest `ts_ms`, ties broken by topic name so eviction is
+/// deterministic). The just-inserted topic has the newest `ts_ms`, so it is
+/// never the one evicted. Returns the evicted topics.
+fn cap(entries: &mut BTreeMap<String, Entry>) -> Vec<String> {
+    let mut evicted = Vec::new();
+    for (telemetry, budget) in [(false, MAX_TOPICS), (true, MAX_TELEMETRY_CHANNELS)] {
+        let in_class = |t: &str| is_telemetry(t) == telemetry;
+        while entries.keys().filter(|t| in_class(t)).count() > budget {
+            let Some(victim) = oldest_topic(entries, in_class) else {
+                break;
+            };
             entries.remove(&victim);
-        } else {
-            break;
+            evicted.push(victim);
         }
     }
     while serialize(entries).len() > MAX_BYTES && entries.len() > 1 {
-        if let Some(victim) = oldest_topic(entries) {
-            entries.remove(&victim);
-        } else {
+        let Some(victim) = oldest_topic(entries, |_| true) else {
             break;
-        }
+        };
+        entries.remove(&victim);
+        evicted.push(victim);
     }
+    evicted
 }
 
-/// The topic with the smallest `ts_ms` (ties broken by topic name), or `None`
-/// when the map is empty.
-fn oldest_topic(entries: &BTreeMap<String, Entry>) -> Option<String> {
+/// The topic accepted by `keep` with the smallest `ts_ms` (ties broken by topic
+/// name), or `None` when there is none.
+fn oldest_topic(entries: &BTreeMap<String, Entry>, keep: impl Fn(&str) -> bool) -> Option<String> {
     entries
         .iter()
+        .filter(|(topic, _)| keep(topic))
         .min_by(|(at, ae), (bt, be)| ae.ts_ms.cmp(&be.ts_ms).then_with(|| at.cmp(bt)))
         .map(|(topic, _)| topic.clone())
+}
+
+/// Log a topic's first eviction for a plugin. Nothing else tells the plugin
+/// author or the GCS that a state read-back fell out of the sidecar; once per
+/// topic keeps a plugin that churns past its budget from flooding the log.
+fn note_eviction(plugin_id: &str, topic: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    let first = SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut seen| seen.insert((plugin_id.to_string(), topic.to_string())))
+        .unwrap_or(false);
+    if first {
+        tracing::warn!(plugin_id, topic, "plugin_state_topic_evicted");
+    }
 }
 
 /// Serialize the entry map to the sidecar JSON shape: a top-level object keyed
@@ -352,6 +391,40 @@ mod tests {
         // The oldest (t0, ts 0) was evicted; the newest is present.
         assert!(!obj.contains_key("t0"), "oldest topic evicted");
         assert!(obj.contains_key("t_new"), "newest topic kept");
+    }
+
+    #[test]
+    fn telemetry_mirrors_never_evict_event_topics() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        // A full set of on-change Skill read-backs, then a fast telemetry
+        // channel publishing many times after them.
+        for i in 0..MAX_TOPICS {
+            record(
+                p,
+                "demo",
+                &format!("skill{i}"),
+                &Value::from(i as i64),
+                i as i64,
+            )
+            .unwrap();
+        }
+        for tick in 0..20 {
+            record(
+                p,
+                "demo",
+                "telemetry.gimbal",
+                &Value::from(tick),
+                100 + tick,
+            )
+            .unwrap();
+        }
+        let doc = read_doc(&sidecar_path(p, "demo"));
+        let obj = doc.as_object().unwrap();
+        for i in 0..MAX_TOPICS {
+            assert!(obj.contains_key(&format!("skill{i}")), "skill{i} kept");
+        }
+        assert!(obj.contains_key("telemetry.gimbal"));
     }
 
     #[test]
