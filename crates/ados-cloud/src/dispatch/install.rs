@@ -8,15 +8,17 @@
 //! idempotency short-circuit, the allowlisted size-capped download, the staged
 //! archive install, the requested-permission grant loop, and the ACK shape.
 //!
-//! The download is behind a [`DownloadSource`] seam so the install logic is
-//! unit-tested with no network; [`HttpDownloadSource`] is the live blocking
-//! client (allowlist + size cap enforced).
+//! The download is behind the plugin host's [`DownloadSource`] seam so the
+//! install logic is unit-tested with no network; its `HttpDownloadSource` is
+//! the live blocking client (allowlist + size cap enforced).
 
 use std::path::Path;
 
+use ados_plugin_host::download::{
+    fetch_capped, validate_download_url, verify_sha256, DownloadSource, DOWNLOAD_MAX_BYTES,
+};
 use ados_plugin_host::PluginSupervisor;
 
-use super::download::{validate_download_url, DownloadError, DOWNLOAD_MAX_BYTES};
 use super::seen_jobs;
 use super::{CommandResult, CommandStatus};
 
@@ -76,35 +78,6 @@ impl InstallCommand {
     }
 }
 
-/// The archive-download seam. Production downloads over HTTPS with the
-/// allowlist and size cap; tests inject the bytes directly. `Send + Sync` so
-/// the source can be shared into the blocking install task spawned off the
-/// async reactor.
-pub trait DownloadSource: Send + Sync {
-    /// Fetch the archive bytes for a validated signed URL. Returns the raw
-    /// `.adosplug` bytes, or a [`DownloadError`].
-    fn fetch(&self, signed_url: &str) -> Result<Vec<u8>, DownloadError>;
-}
-
-/// Verify a downloaded body against an expected SHA256 (case-insensitive hex).
-/// Empty `expected` is a no-op (the row declared no hash; the supervisor's
-/// Ed25519 check is the backstop). Mirrors `verify_sha256` in the download
-/// module.
-pub fn verify_sha256(body: &[u8], expected: &str) -> Result<(), DownloadError> {
-    if expected.is_empty() {
-        return Ok(());
-    }
-    use sha2::{Digest, Sha256};
-    let actual = hex::encode(Sha256::digest(body));
-    if actual.eq_ignore_ascii_case(expected) {
-        Ok(())
-    } else {
-        Err(DownloadError::HostNotAllowed(format!(
-            "sha256 mismatch: expected {expected}, got {actual}"
-        )))
-    }
-}
-
 /// Run the cloud-relay install. Mirrors `RemoteInstallReceiver.handle_install`:
 /// validate jobId, idempotency short-circuit, download (allowlist + size cap +
 /// optional sha), stage the archive, `install_archive`, grant the requested
@@ -130,7 +103,7 @@ pub fn handle_install(
         return CommandResult::failed(format!("download failed: {e}"))
             .with_data(serde_json::json!({"code": "download_failed", "jobId": cmd.job_id}));
     }
-    let archive_bytes = match source.fetch(&cmd.signed_url) {
+    let archive_bytes = match fetch_capped(source, &cmd.signed_url, DOWNLOAD_MAX_BYTES) {
         Ok(b) => b,
         Err(e) => {
             return CommandResult::failed(format!("download failed: {e}"))
@@ -205,86 +178,12 @@ impl InstallCommand {
     }
 }
 
-/// The live download source: a blocking HTTPS GET with the allowlist + size cap.
-/// Every redirect hop re-runs the allowlist, and the body is read through a
-/// counted reader that stops one byte past the cap, so a hostile row can steer
-/// neither the destination nor the agent's memory. TLS is the shared ring-backed
-/// rustls config.
-pub struct HttpDownloadSource {
-    client: reqwest::blocking::Client,
-}
-
-/// Most redirect hops a download may follow. Each hop is allowlist-checked.
-const DOWNLOAD_MAX_REDIRECTS: usize = 5;
-
-impl HttpDownloadSource {
-    pub fn new() -> Self {
-        let policy = reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= DOWNLOAD_MAX_REDIRECTS {
-                return attempt.error("too many redirects");
-            }
-            match super::download::validate_parsed_url(attempt.url()) {
-                Ok(()) => attempt.follow(),
-                Err(e) => attempt.error(e),
-            }
-        });
-        let client = reqwest::blocking::Client::builder()
-            .use_preconfigured_tls(crate::tls::client_config())
-            .redirect(policy)
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .expect("reqwest blocking client builds");
-        HttpDownloadSource { client }
-    }
-}
-
-impl Default for HttpDownloadSource {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Read `body` to the end, refusing it once it passes `cap` bytes. Reads at most
-/// `cap + 1` bytes, so an oversize body is never held whole.
-fn read_capped(body: impl std::io::Read, cap: usize) -> Result<Vec<u8>, DownloadError> {
-    use std::io::Read;
-    let mut out = Vec::new();
-    body.take(cap as u64 + 1)
-        .read_to_end(&mut out)
-        .map_err(|_| DownloadError::Transport)?;
-    if out.len() > cap {
-        return Err(DownloadError::TooLarge);
-    }
-    Ok(out)
-}
-
-impl DownloadSource for HttpDownloadSource {
-    fn fetch(&self, signed_url: &str) -> Result<Vec<u8>, DownloadError> {
-        // Allowlist re-check at the transport boundary (defense-in-depth; the
-        // caller validated too).
-        validate_download_url(signed_url)?;
-        let resp = self
-            .client
-            .get(signed_url)
-            .send()
-            .map_err(|_| DownloadError::Transport)?;
-        if !resp.status().is_success() {
-            return Err(DownloadError::Transport);
-        }
-        if resp
-            .content_length()
-            .is_some_and(|n| n > DOWNLOAD_MAX_BYTES as u64)
-        {
-            return Err(DownloadError::TooLarge);
-        }
-        read_capped(resp, DOWNLOAD_MAX_BYTES)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_plugin_host::supervisor::{Paths, RecordingSystemctl};
+    use ados_plugin_host::backend::RecordingBackend;
+    use ados_plugin_host::download::StaticDownloadSource;
+    use ados_plugin_host::supervisor::Paths;
     use std::io::Write;
     use std::sync::Arc;
     use zip::write::SimpleFileOptions;
@@ -299,17 +198,11 @@ mod tests {
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
             loopback_guard_state: dir.join("plugin-loopback-guard.json"),
+            socket_dir: dir.join("sockets"),
+            token_secret: dir.join("secrets/plugin-token-secret"),
+            runner: dir.join("bin/ados-plugin-runner"),
+            run_dir: dir.join("run"),
         }
-    }
-
-    #[test]
-    fn capped_read_stops_one_byte_past_the_cap_on_an_endless_body() {
-        // An endless body must be refused after cap + 1 bytes, not buffered.
-        assert_eq!(
-            read_capped(std::io::repeat(7), 16),
-            Err(DownloadError::TooLarge)
-        );
-        assert_eq!(read_capped(&[1u8; 16][..], 16), Ok(vec![1u8; 16]));
     }
 
     fn build_archive() -> Vec<u8> {
@@ -327,23 +220,23 @@ mod tests {
         buf
     }
 
-    struct FakeSource(Vec<u8>);
-    impl DownloadSource for FakeSource {
-        fn fetch(&self, _url: &str) -> Result<Vec<u8>, DownloadError> {
-            Ok(self.0.clone())
-        }
+    /// Serves the test archive at every URL the tests use.
+    fn fake_source(body: Vec<u8>) -> StaticDownloadSource {
+        StaticDownloadSource::default()
+            .with("https://abc.convex.cloud/x", body.clone())
+            .with("https://evil.example.com/x", body)
     }
 
     fn supervisor(dir: &Path) -> PluginSupervisor {
         PluginSupervisor::new(paths_in(dir), false, None, "1.0.0")
-            .with_systemctl(Arc::new(RecordingSystemctl::default()))
+            .with_backend(Arc::new(RecordingBackend::default()))
     }
 
     /// A signature-enforcing supervisor, matching the live cloud-relay posture
     /// (`PluginSupervisor::production` bakes require_signed=true).
     fn signed_supervisor(dir: &Path) -> PluginSupervisor {
         let sup = PluginSupervisor::new(paths_in(dir), true, None, "1.0.0")
-            .with_systemctl(Arc::new(RecordingSystemctl::default()));
+            .with_backend(Arc::new(RecordingBackend::default()));
         assert!(
             sup.require_signed(),
             "the cloud-install posture must enforce signing"
@@ -366,7 +259,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sup = supervisor(dir.path());
         let seen = dir.path().join("seen.json");
-        let src = FakeSource(build_archive());
+        let src = fake_source(build_archive());
         let r = handle_install(
             &mut sup,
             &install_cmd("j1", "https://abc.convex.cloud/x"),
@@ -398,7 +291,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sup = signed_supervisor(dir.path());
         let seen = dir.path().join("seen.json");
-        let src = FakeSource(build_archive()); // build_archive() is unsigned
+        let src = fake_source(build_archive()); // build_archive() is unsigned
         let r = handle_install(
             &mut sup,
             &install_cmd("j-unsigned", "https://abc.convex.cloud/x"),
@@ -436,7 +329,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sup = supervisor(dir.path());
         let seen = dir.path().join("seen.json");
-        let src = FakeSource(build_archive());
+        let src = fake_source(build_archive());
         let r = handle_install(
             &mut sup,
             &install_cmd("j2", "https://evil.example.com/x"),
@@ -452,7 +345,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sup = supervisor(dir.path());
         let seen = dir.path().join("seen.json");
-        let src = FakeSource(build_archive());
+        let src = fake_source(build_archive());
         let mut cmd = install_cmd("j3", "https://abc.convex.cloud/x");
         cmd.expected_sha256 = "00".repeat(32);
         let r = handle_install(&mut sup, &cmd, &src, &seen);
@@ -464,7 +357,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sup = supervisor(dir.path());
         let seen = dir.path().join("seen.json");
-        let src = FakeSource(build_archive());
+        let src = fake_source(build_archive());
         let r = handle_install(
             &mut sup,
             &install_cmd("", "https://abc.convex.cloud/x"),
@@ -472,16 +365,5 @@ mod tests {
             &seen,
         );
         assert_eq!(r.status, CommandStatus::Failed);
-    }
-
-    #[test]
-    fn verify_sha256_matches_case_insensitively() {
-        use sha2::{Digest, Sha256};
-        let body = b"abc";
-        let h = hex::encode(Sha256::digest(body));
-        assert!(verify_sha256(body, &h).is_ok());
-        assert!(verify_sha256(body, &h.to_uppercase()).is_ok());
-        assert!(verify_sha256(body, "").is_ok());
-        assert!(verify_sha256(body, &"00".repeat(32)).is_err());
     }
 }

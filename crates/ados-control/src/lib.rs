@@ -216,9 +216,9 @@ impl Default for DaemonPaths {
         // `/var/lib/ados/params.json` — the file the router persists atomically.
         let params_path = crate::param_store::default_params_path();
         // The profile/role sentinels honour `ADOS_PROFILE_CONF` / `ADOS_MESH_ROLE`
-        // (the same overrides `crate::profile` resolves under), defaulting to
-        // `/etc/ados/profile.conf` + `/etc/ados/mesh/role`.
-        let profile_conf_path = crate::profile::profile_conf_path();
+        // (`ados_config::profile_conf_path` and `crate::profile::mesh_role_path`),
+        // defaulting to `/etc/ados/profile.conf` + `/etc/ados/mesh/role`.
+        let profile_conf_path = ados_config::profile_conf_path();
         let mesh_role_path = crate::profile::mesh_role_path();
         Self {
             control_socket,

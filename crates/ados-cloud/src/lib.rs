@@ -31,6 +31,9 @@
 //! - [`log_push`] — the explicit, account-gated cloud export of a chosen log
 //!   window from the durable on-device store, driven by an operator-triggered
 //!   request file and default-off.
+//! - [`plugin_publish`] — the relay side of the cloud-publish socket: a
+//!   plugin's gated stream messages onto the broker and records into the
+//!   cloud, on the device's own credentials.
 
 pub mod atlas_bearer;
 pub mod config;
@@ -41,6 +44,7 @@ pub mod log_push;
 pub mod loops;
 pub mod mqtt;
 pub mod pairing;
+pub mod plugin_publish;
 pub mod plugin_update;
 pub mod tls;
 pub mod vision_bearer;

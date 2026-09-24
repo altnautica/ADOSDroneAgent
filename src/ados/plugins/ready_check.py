@@ -8,9 +8,8 @@ into one of two shapes here, once, at manifest validation:
   the agent GETs it and a 2xx is ready. Loopback only, because the request is
   made by the agent, not by the plugin.
 * Anything else is an argv, split with POSIX shell quoting rules but never run
-  by a shell. The supervisor runs it as the ``ados`` user inside the plugin's
-  sandbox through ``systemd-run`` (see
-  :func:`ados.plugins.systemd.probe_command`), never in the API process.
+  by a shell. The native plugin host runs it as the ``ados`` user inside the
+  plugin's sandbox, never in the API process.
 
 Control characters are refused in either form.
 """

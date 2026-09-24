@@ -58,6 +58,7 @@ pub mod aux_rpc_proxy;
 pub mod buttons;
 pub mod capabilities;
 pub mod cloud_link;
+pub mod cloud_publish;
 pub mod compute;
 pub mod config_tunnel_ingest;
 pub mod contracts;
@@ -71,6 +72,7 @@ pub mod frame;
 pub mod framebus;
 pub mod hwcaps;
 pub mod ipc;
+pub mod launchd;
 pub mod link_feedback;
 pub mod logd;
 #[cfg(feature = "mavlink")]

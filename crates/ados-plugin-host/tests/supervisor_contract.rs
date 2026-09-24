@@ -11,7 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ados_plugin_host::archive::parse_archive_bytes;
-use ados_plugin_host::supervisor::RecordingSystemctl;
+use ados_plugin_host::backend::RecordingBackend;
 use ados_plugin_host::{Paths, PluginStatus, PluginSupervisor};
 use zip::write::SimpleFileOptions;
 
@@ -40,15 +40,19 @@ fn paths_in(dir: &Path) -> Paths {
         log_dir: dir.join("logs"),
         control_dir: dir.join("plugin-host"),
         loopback_guard_state: dir.join("plugin-loopback-guard.json"),
+        socket_dir: dir.join("sockets"),
+        token_secret: dir.join("secrets/plugin-token-secret"),
+        runner: dir.join("bin/ados-plugin-runner"),
+        run_dir: dir.join("run"),
     }
 }
 
 #[test]
 fn full_lifecycle_via_public_api() {
     let dir = tempfile::tempdir().unwrap();
-    let rec = Arc::new(RecordingSystemctl::default());
-    let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "1.0.0")
-        .with_systemctl(rec.clone());
+    let rec = Arc::new(RecordingBackend::default());
+    let mut sup =
+        PluginSupervisor::new(paths_in(dir.path()), false, None, "1.0.0").with_backend(rec.clone());
 
     // install (unsigned accepted because require_signed=false).
     let archive = parse_archive_bytes(build_archive()).expect("parse archive");

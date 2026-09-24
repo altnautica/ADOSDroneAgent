@@ -6,13 +6,15 @@
 //! surface (`ados-control`, the LAN pairing + REST front on `:8080`) and the
 //! compute engine (`ados-compute`, the reconstruct / offload job API on `:8092`),
 //! plus the shared core daemons the supervisor orchestrates (`ados-supervisor`,
-//! `ados-cloud`, `ados-logd`).
+//! `ados-cloud`, `ados-logd`) and the plugin host (`ados-plugin-host`), which
+//! runs each installed extension as its own LaunchAgent.
 //!
 //! There is no prebuilt Mach-O binary for these services, so the installer builds
 //! them from the source tree (`cargo build --release`) into `$HOME/.ados/bin`,
 //! writes the operator config + identity, renders one launchd plist per daemon
-//! (via the same `render_plist` the runtime `LaunchdManager` manages), bootstraps
-//! them into the user's GUI domain, and waits for the control surface to answer.
+//! (via the same `ados_protocol::launchd` renderer and label mapper the runtime
+//! `LaunchdManager` uses), bootstraps them into the user's GUI domain, and waits
+//! for the control surface to answer.
 //!
 //! Every path hangs off `$HOME`; nothing writes under `/opt`, `/etc`, or
 //! `/Library` (the root-owned FHS + system-domain launchd), so the whole flow
@@ -26,12 +28,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 
-use ados_supervisor::process_manager::{render_plist, unit_to_label, PlistLogPaths};
+use ados_protocol::launchd::{current_uid, render_plist, unit_to_label, PlistLogPaths};
 
 use crate::cli::Args;
 use crate::exec;
 use crate::result::{now_iso8601_utc, InstallResult};
 use crate::steps::config_identity::pairing_json;
+use crate::steps::extensions::{
+    install_world_engine, world_engine_default, ExtensionOutcome, NodeTarget, MANUAL_INSTALL,
+};
 
 /// The control surface's LAN port. The plist pins `ADOS_CONTROL_PORT=8080` so the
 /// GCS reaches the workstation on the same port a drone/GS agent uses; the health
@@ -41,7 +46,7 @@ const CONTROL_PORT: u16 = 8080;
 const COMPUTE_PORT: u16 = 8092;
 
 /// One managed daemon: its service/binary name and whether launchd should keep it
-/// alive across a crash. All five are `RunAtLoad` (launchd starts them at load
+/// alive across a crash. Every daemon is `RunAtLoad` (launchd starts it at load
 /// and at login); `KeepAlive { Crashed: true }` restarts a crashed one.
 struct Daemon {
     /// The binary + service name (also the `ados-<tail>` → `co.ados.<tail>` seed).
@@ -53,8 +58,9 @@ struct Daemon {
 /// The workstation daemon set registered as LaunchAgents. `ados-supervisor` is
 /// the orchestrator; `ados-control` is the LAN front (`:8080`); `ados-compute`
 /// is the engine (`:8092`); `ados-cloud` is the (idle-in-local-mode) relay;
-/// `ados-logd` is the durable logging store. `ados-tui` is built + installed but
-/// NOT registered — it is an interactive terminal UI, not a background daemon.
+/// `ados-logd` is the durable logging store; `ados-plugin-host` serves the
+/// per-plugin sockets and tokens. `ados-tui` is built + installed but NOT
+/// registered — it is an interactive terminal UI, not a background daemon.
 const DAEMONS: &[Daemon] = &[
     Daemon {
         name: "ados-supervisor",
@@ -76,18 +82,23 @@ const DAEMONS: &[Daemon] = &[
         name: "ados-logd",
         keep_alive: true,
     },
+    Daemon {
+        name: "ados-plugin-host",
+        keep_alive: true,
+    },
 ];
 
 /// Every binary the workstation install builds from source and places under the
-/// per-user bin dir. Mirrors `binaries::for_profile("workstation")` (the six the
-/// prebuilt catalog would fetch on an aarch64 SBC): the five daemons above plus
-/// the interactive `ados-tui`.
+/// per-user bin dir. Mirrors `binaries::for_profile("workstation")` (what the
+/// prebuilt catalog would fetch on an aarch64 SBC): the daemons above plus the
+/// interactive `ados-tui`.
 const WORKSTATION_BINARIES: &[&str] = &[
     "ados-supervisor",
     "ados-control",
     "ados-compute",
     "ados-cloud",
     "ados-logd",
+    "ados-plugin-host",
     "ados-tui",
 ];
 
@@ -178,6 +189,34 @@ impl Paths {
         self.ados_home.join("install-result.json")
     }
 
+    /// The plugin lifecycle layout (`ados_plugin_host::Paths`), every entry
+    /// under the per-user home. The single source for both the `ADOS_PLUGIN_*`
+    /// environment the daemons read ([`build_env`]) and the controller the
+    /// installer's own World Engine step drives, so the two cannot disagree.
+    /// Plugin LaunchAgents land beside the core ones in `~/Library/LaunchAgents`.
+    fn plugin_paths(&self, runner: &Path) -> ados_plugin_host::Paths {
+        ados_plugin_host::Paths {
+            install_dir: self.ados_home.join("plugins"),
+            unit_dir: self.launch_agents.clone(),
+            state_path: self.ados_home.join("plugin-state/plugin-state.json"),
+            log_dir: self.log.join("plugins"),
+            control_dir: self.run.join("plugin-host"),
+            loopback_guard_state: self
+                .run
+                .join(ados_protocol::plugin_loopback_guard::SIDECAR_NAME),
+            socket_dir: self.run.join("plugins"),
+            token_secret: self.secrets_dir().join("plugin-token-secret"),
+            runner: runner.to_path_buf(),
+            run_dir: self.run.clone(),
+        }
+    }
+
+    /// The per-plugin config store the plugin host reads and writes
+    /// (`ADOS_PLUGIN_CONFIG_PATH`, Linux `/etc/ados/plugin-config.json`).
+    fn plugin_config(&self) -> PathBuf {
+        self.ados_home.join("plugin-config.json")
+    }
+
     /// Create the directories the install writes into.
     fn ensure_dirs(&self) -> Result<()> {
         for dir in [
@@ -199,6 +238,15 @@ impl Paths {
             &self.recordings_dir(),
             &self.wfb_key_dir(),
             &self.secrets_dir(),
+            // The plugin lifecycle tree (see `plugin_paths`): installs, state,
+            // logs, the per-plugin sockets, the host's control dir, and each
+            // HTTP-serving plugin's socket dir.
+            &self.ados_home.join("plugins"),
+            &self.ados_home.join("plugin-state"),
+            &self.log.join("plugins"),
+            &self.run.join("plugins"),
+            &self.run.join("plugin-host"),
+            &self.run.join("plugin-http"),
         ] {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("create {} failed", dir.display()))?;
@@ -250,11 +298,15 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 
     // 4. Render + bootstrap the LaunchAgents.
     let uid = current_uid();
-    let env = build_env(&paths, &device_id, &agent_version);
+    let runner = resolve_plugin_runner(&paths);
+    let env = build_env(&paths, &device_id, &agent_version, &runner);
     register_launch_agents(&paths, &env, uid)?;
 
     // 5. Prove every daemon came up (not just that the control port answers).
     let report = health_poll(uid);
+
+    // 5b. The World Engine extension, on a node that came up.
+    install_extensions(args, &paths, &profile, &agent_version, &runner, &report);
 
     // 6. Record the outcome so the control surface can serve the real version and
     //    `ados status` / the CLI can read the recorded result.
@@ -270,8 +322,9 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
 }
 
-/// Tear down a macOS workstation install: bootout every LaunchAgent, remove the
-/// plists, and (when `purge`) delete `$HOME/.ados` (identity + config + binaries).
+/// Tear down a macOS workstation install: bootout every LaunchAgent (each
+/// installed plugin's first, then the core daemons), remove the plists, and
+/// (when `purge`) delete `$HOME/.ados` (identity + config + binaries).
 pub fn uninstall(purge: bool) -> Result<ExitCode> {
     if is_root() {
         eprintln!("error: on macOS run the uninstall WITHOUT sudo (per-user agents)");
@@ -279,8 +332,10 @@ pub fn uninstall(purge: bool) -> Result<ExitCode> {
     }
     let paths = Paths::resolve()?;
     let uid = current_uid();
-    for d in DAEMONS {
-        let label = label_for(d.name);
+    let labels = plugin_agent_labels(&paths.launch_agents)
+        .into_iter()
+        .chain(DAEMONS.iter().map(|d| label_for(d.name)));
+    for label in labels {
         let target = format!("gui/{uid}/{label}");
         let _ = exec::run("launchctl", &["bootout", &target]);
         let plist = paths.launch_agents.join(format!("{label}.plist"));
@@ -400,16 +455,6 @@ fn resolve_profile(args: &Args) -> Result<String> {
 /// dependency is pulled into the pure-logic crate.
 fn is_root() -> bool {
     exec::run("id", &["-u"]).stdout.trim() == "0"
-}
-
-/// The effective uid for the `gui/<uid>` launchd domain. Falls back to 501 (the
-/// first macOS user account) only if `id -u` is somehow unreadable.
-fn current_uid() -> u32 {
-    exec::run("id", &["-u"])
-        .stdout
-        .trim()
-        .parse::<u32>()
-        .unwrap_or(501)
 }
 
 /// Ensure `cargo` is reachable (the install builds the service binaries from
@@ -683,11 +728,22 @@ enabled: true\n"
 /// contract (`scripts/dev/run-compute-node-macos.sh`) so the LAN-paired GCS
 /// reaches `ados-control` on `:8080` and the compute card reads the heartbeat
 /// sidecar under the per-user run dir — every path pinned under `$HOME/.ados`.
-fn build_env(paths: &Paths, device_id: &str, agent_version: &str) -> Vec<(String, String)> {
+///
+/// The plugin lifecycle runs in three of these daemons (`ados-plugin-host`
+/// serves the plugins, `ados-control` installs them over REST, `ados-cloud`
+/// over the cloud relay), so the whole `ADOS_PLUGIN_*` layout rides the shared
+/// environment and every one of them resolves the same per-user tree.
+fn build_env(
+    paths: &Paths,
+    device_id: &str,
+    agent_version: &str,
+    plugin_runner: &Path,
+) -> Vec<(String, String)> {
     let run = paths.run.to_string_lossy().to_string();
     let config = paths.config.to_string_lossy().to_string();
     let node_id = format!("mac-{}", hostname_slug());
     let path = |p: PathBuf| p.to_string_lossy().to_string();
+    let plugins = paths.plugin_paths(plugin_runner);
     vec![
         ("HOME".into(), paths.home.to_string_lossy().to_string()),
         ("PATH".into(), launchd_path()),
@@ -756,6 +812,30 @@ fn build_env(paths: &Paths, device_id: &str, agent_version: &str) -> Vec<(String
         ),
         ("ADOS_COMPUTE_NODE_ID".into(), node_id),
         ("ADOS_ATLAS_ENABLED".into(), "1".into()),
+        // The plugin lifecycle layout (`ados_plugin_host::Paths::from_env`).
+        // `ADOS_RUN_DIR` above is its run dir; the unit dir is the per-user
+        // LaunchAgents dir, where each plugin's job lands beside the core ones.
+        ("ADOS_PLUGIN_INSTALL_DIR".into(), path(plugins.install_dir)),
+        ("ADOS_PLUGIN_UNIT_DIR".into(), path(plugins.unit_dir)),
+        ("ADOS_PLUGIN_STATE".into(), path(plugins.state_path)),
+        ("ADOS_PLUGIN_LOG_DIR".into(), path(plugins.log_dir)),
+        ("ADOS_PLUGIN_HOST_DIR".into(), path(plugins.control_dir)),
+        ("ADOS_PLUGIN_SOCKET_DIR".into(), path(plugins.socket_dir)),
+        (
+            "ADOS_PLUGIN_TOKEN_SECRET".into(),
+            path(plugins.token_secret),
+        ),
+        ("ADOS_PLUGIN_RUNNER".into(), path(plugins.runner)),
+        // The plugin host's per-plugin config store and the device id it hands
+        // each plugin, off the root-owned `/etc/ados` defaults.
+        (
+            "ADOS_PLUGIN_CONFIG_PATH".into(),
+            path(paths.plugin_config()),
+        ),
+        (
+            "ADOS_DEVICE_ID_PATH".into(),
+            path(paths.device_id_file.clone()),
+        ),
     ]
 }
 
@@ -832,10 +912,118 @@ fn wait_label_gone(target: &str) {
     }
 }
 
-/// `co.ados.<tail>` label for an `ados-<tail>` service name (reuses the runtime
-/// backend's mapper so the installer and the supervisor agree on the label).
+/// `co.ados.<tail>` label for an `ados-<tail>` service name (the shared mapper,
+/// so the installer and the supervisor agree on the label).
 fn label_for(name: &str) -> String {
     unit_to_label(name)
+}
+
+/// The label prefix every plugin LaunchAgent carries (`co.ados.plugin.<token>`,
+/// as the plugin host's launchd backend writes them). The dot keeps it apart
+/// from the core `co.ados.plugin-host` daemon.
+const PLUGIN_AGENT_PREFIX: &str = "co.ados.plugin.";
+
+/// The labels of every plugin LaunchAgent under `launch_agents`, read from the
+/// plist file names, sorted. An unreadable dir has none.
+fn plugin_agent_labels(launch_agents: &Path) -> Vec<String> {
+    let mut labels: Vec<String> = std::fs::read_dir(launch_agents)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".plist")
+                .filter(|label| label.starts_with(PLUGIN_AGENT_PREFIX))
+                .map(str::to_string)
+        })
+        .collect();
+    labels.sort();
+    labels
+}
+
+/// The `co.ados.<tail>` tails of the core daemons, space-separated, for the
+/// summary's shell teardown line. Derived from [`DAEMONS`] so it names exactly
+/// the jobs this install registered.
+fn teardown_daemon_names() -> String {
+    DAEMONS
+        .iter()
+        .map(|d| d.name.strip_prefix("ados-").unwrap_or(d.name))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The Python plugin runner a Python-runtime plugin's LaunchAgent execs: the
+/// `ados-plugin-runner` console script the `ados` package installs beside the
+/// `ados` command, resolved on this shell's PATH. When it is not on PATH the
+/// per-user bin path is used and a note says Python-runtime plugins will not
+/// start until the runner is installed; Rust-runtime plugins never exec it.
+fn resolve_plugin_runner(paths: &Paths) -> PathBuf {
+    let res = exec::run("sh", &["-c", "command -v ados-plugin-runner"]);
+    let found = res.stdout.trim();
+    if res.success() && !found.is_empty() {
+        return PathBuf::from(found);
+    }
+    let fallback = paths.bin.join("ados-plugin-runner");
+    println!(
+        "  plugins: ados-plugin-runner is not on PATH; Python-runtime plugins will not start \
+         until the `ados` package's runner is installed (expected at {})",
+        fallback.display()
+    );
+    fallback
+}
+
+/// Install the World Engine extension when the operator (`--world-engine`) or
+/// the profile default asked for it: the same controller, bundled catalog and
+/// sha256 pin as the Linux `extensions` step. Runs only on a node that came up,
+/// since the extension's agent half talks to the plugin host. Best-effort: an
+/// unpublished extension or a failed install prints the manual command and
+/// never fails the install.
+fn install_extensions(
+    args: &Args,
+    paths: &Paths,
+    profile: &str,
+    agent_version: &str,
+    runner: &Path,
+    report: &HealthReport,
+) {
+    if !args
+        .world_engine
+        .unwrap_or_else(|| world_engine_default(profile))
+    {
+        println!("  extensions: World Engine not selected");
+        return;
+    }
+    if !report.up {
+        println!(
+            "  extensions: World Engine skipped because the node did not come up; install it \
+             later with `{MANUAL_INSTALL}`"
+        );
+        return;
+    }
+    println!("  extensions: installing the World Engine …");
+    let result = install_world_engine(NodeTarget {
+        paths: paths.plugin_paths(runner),
+        profile: ados_config::normalize_profile(Some(profile)),
+        agent_version: agent_version.to_string(),
+        // The HAL sidecar under the daemons' ADOS_RUN_DIR.
+        board_sidecar: paths.run.join("board.json"),
+        // launchd enforces no sandbox, so a network grant never waits on the
+        // Linux-only loopback guard.
+        guard_wait: Duration::ZERO,
+    });
+    match result {
+        Ok(ExtensionOutcome::Installed { version, .. }) => {
+            println!("  extensions: World Engine {version} installed and enabled")
+        }
+        Ok(ExtensionOutcome::AlreadyInstalled { version }) => println!(
+            "  extensions: World Engine {version} already installed; plugin auto-update keeps \
+             it current"
+        ),
+        Ok(ExtensionOutcome::Unavailable(reason)) | Err(reason) => println!(
+            "  extensions: World Engine not installed: {reason}. Install it later with \
+             `{MANUAL_INSTALL}`"
+        ),
+    }
 }
 
 /// The outcome of the health gate: whether the node is up, plus the human-readable
@@ -847,7 +1035,7 @@ struct HealthReport {
 }
 
 /// Prove the whole workstation node came up, not merely that the control port
-/// answers. Every one of the five daemons must be loaded + running under launchd
+/// answers. Every daemon in [`DAEMONS`] must be loaded + running under launchd
 /// AND stay running across a re-sample (a `ados-logd` that crash-loops on its DB —
 /// the original silent-failure class — is caught by the pid changing / vanishing),
 /// `ados-control` must return a 2xx from `/api/status` (not just any HTTP code),
@@ -1185,7 +1373,14 @@ fn print_summary(paths: &Paths, device_id: &str, uid: u32, report: &HealthReport
     println!();
     // Fallback teardown if the `ados` CLI did not install (best-effort on macOS).
     println!("  Tear down (or: ados uninstall --purge):");
-    println!("    for s in supervisor control compute cloud logd; do launchctl bootout gui/{uid}/co.ados.$s 2>/dev/null; done");
+    println!(
+        "    for p in {}/co.ados.plugin.*.plist; do [ -e \"$p\" ] && launchctl bootout gui/{uid}/$(basename \"$p\" .plist); done",
+        paths.launch_agents.display()
+    );
+    println!(
+        "    for s in {}; do launchctl bootout gui/{uid}/co.ados.$s 2>/dev/null; done",
+        teardown_daemon_names()
+    );
     println!("    rm {}/co.ados.*.plist", paths.launch_agents.display());
     println!("    rm -rf {}", paths.ados_home.display());
 }
@@ -1373,7 +1568,12 @@ gui/501/co.ados.logd = {
             ados_home: home.join(".ados"),
             home,
         };
-        let env = build_env(&paths, "0011aabbccdd", "1.2.3");
+        let env = build_env(
+            &paths,
+            "0011aabbccdd",
+            "1.2.3",
+            Path::new("/Users/tester/.local/bin/ados-plugin-runner"),
+        );
         let get = |k: &str| env.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone());
         assert_eq!(get("ADOS_CONTROL_PORT").as_deref(), Some("8080"));
         assert_eq!(
@@ -1423,6 +1623,93 @@ gui/501/co.ados.logd = {
         // The launchd PATH must carry the Homebrew prefixes so a daemon finds
         // ffmpeg/colmap/git.
         assert!(get("PATH").unwrap().contains("/opt/homebrew/bin"));
+        // The plugin lifecycle is home-rooted too; its unit dir is the per-user
+        // LaunchAgents dir, so a plugin job lands beside the core ones.
+        assert_eq!(
+            get("ADOS_PLUGIN_UNIT_DIR").as_deref(),
+            Some("/Users/tester/Library/LaunchAgents")
+        );
+        assert_eq!(
+            get("ADOS_PLUGIN_RUNNER").as_deref(),
+            Some("/Users/tester/.local/bin/ados-plugin-runner")
+        );
+        for (key, _) in env.iter().filter(|(k, _)| k.starts_with("ADOS_PLUGIN_")) {
+            let value = get(key).unwrap();
+            assert!(
+                value.starts_with("/Users/tester/"),
+                "{key}={value} escapes the per-user home"
+            );
+        }
+    }
+
+    /// The daemons resolve their plugin layout from the plist environment
+    /// (`Paths::from_env`); the installer's own World Engine step drives
+    /// `plugin_paths` directly. A misspelled variable would leave a daemon on a
+    /// root-owned Linux default while the installer wrote the per-user tree.
+    #[test]
+    fn the_plist_environment_resolves_to_the_layout_the_installer_drives() {
+        let home = PathBuf::from("/Users/tester");
+        let paths = Paths {
+            bin: home.join(".ados/bin"),
+            run: home.join(".ados/run"),
+            compute: home.join(".ados/compute"),
+            log: home.join(".ados/log"),
+            config: home.join(".ados/config.yaml"),
+            profile_conf: home.join(".ados/profile.conf"),
+            device_id_file: home.join(".ados/device-id"),
+            pairing: home.join(".ados/pairing.json"),
+            launch_agents: home.join("Library/LaunchAgents"),
+            ados_home: home.join(".ados"),
+            home,
+        };
+        let runner = Path::new("/Users/tester/.local/bin/ados-plugin-runner");
+        let env = build_env(&paths, "0011aabbccdd", "1.2.3", runner);
+        let keys: Vec<&(String, String)> = env
+            .iter()
+            .filter(|(k, _)| k.starts_with("ADOS_PLUGIN_") || k == "ADOS_RUN_DIR")
+            .collect();
+        // No other test in this crate reads these variables.
+        let saved: Vec<(String, Option<std::ffi::OsString>)> = keys
+            .iter()
+            .map(|(k, _)| (k.clone(), std::env::var_os(k)))
+            .collect();
+        for (k, v) in &keys {
+            std::env::set_var(k, v);
+        }
+        let resolved = ados_plugin_host::Paths::from_env();
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(&k, v),
+                None => std::env::remove_var(&k),
+            }
+        }
+        assert_eq!(
+            format!("{resolved:?}"),
+            format!("{:?}", paths.plugin_paths(runner))
+        );
+    }
+
+    #[test]
+    fn plugin_agents_are_found_by_label_and_never_confused_with_the_host() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "co.ados.plugin.com-altnautica-world-engine.plist",
+            "co.ados.plugin.com-example-x.plist",
+            // The core plugin host daemon, not a plugin.
+            "co.ados.plugin-host.plist",
+            "co.ados.control.plist",
+            "com.other.agent.plist",
+        ] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        assert_eq!(
+            plugin_agent_labels(dir.path()),
+            vec![
+                "co.ados.plugin.com-altnautica-world-engine".to_string(),
+                "co.ados.plugin.com-example-x".to_string(),
+            ]
+        );
+        assert!(plugin_agent_labels(&dir.path().join("absent")).is_empty());
     }
 
     #[test]

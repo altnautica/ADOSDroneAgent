@@ -425,3 +425,55 @@ async fn an_unreadable_state_file_keeps_every_plugin_served() {
     std::fs::remove_file(&h.state_path).unwrap();
     assert_eq!(h.reconciler.reconcile().stopped, 1);
 }
+
+/// A shared topic is live for exactly as long as its owner is served: the
+/// event gates read the registry the reconciler keeps equal to the enabled
+/// plugins' declarations.
+#[tokio::test]
+async fn a_shared_topic_follows_its_owners_enable_and_disable() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_dir = dir.path().join("sockets");
+    let state_path = dir.path().join("state/plugin-state.json");
+    let install_dir = dir.path().join("plugins");
+    std::fs::create_dir_all(&socket_dir).unwrap();
+    let plugin_dir = install_dir.join(PLUGIN_ID);
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("manifest.yaml"),
+        format!(
+            "{MANIFEST}  contributes:\n    shared_topics:\n      - topic: plugin.reactive.pose\n        subscribe_capability: telemetry.read\n"
+        ),
+    )
+    .unwrap();
+    let issuer = Arc::new(
+        ados_plugin_host::shared_issuer(&dir.path().join("secrets/plugin-token-secret")).unwrap(),
+    );
+    let mint = Arc::new(TokenMint::new(
+        issuer.clone(),
+        state_path.clone(),
+        socket_dir.clone(),
+        String::new(),
+    ));
+    let server = Arc::new(
+        PluginIpcServer::new(
+            &socket_dir,
+            issuer,
+            Arc::new(EventBus::new()),
+            Arc::new(NoopHost),
+        )
+        .with_token_mint(mint.clone()),
+    );
+    let topics = server.shared_topics();
+    let reconciler = PluginReconciler::new(server, mint, state_path.clone(), install_dir);
+
+    write_state(&state_path, PluginStatus::Running, &[]);
+    reconciler.reconcile();
+    let declared = topics.find("plugin.reactive.pose").expect("registered");
+    assert_eq!(declared.owner, PLUGIN_ID);
+    assert_eq!(declared.subscribe_capability, "telemetry.read");
+
+    write_state(&state_path, PluginStatus::Disabled, &[]);
+    reconciler.reconcile();
+    assert!(topics.find("plugin.reactive.pose").is_none());
+    reconciler.shutdown();
+}

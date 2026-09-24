@@ -25,14 +25,14 @@ use std::sync::Mutex;
 use ados_plugin_host::{Paths, PluginSupervisor};
 
 use ados_cloud::config::CloudConfig;
-use ados_cloud::dispatch::install::DownloadSource;
 use ados_cloud::ground_station::{bridge as gs_bridge, CloudRelayBridge};
 use ados_cloud::loops::{
     atlas_forwarder, atlas_jobs, aux_status, beacon, command_poll, enrichment, heartbeat,
     offload_reconciler,
 };
 use ados_cloud::mqtt::{run_webrtc_signaling, MavlinkMqttRelay, MspMqttRelay};
-use ados_cloud::{dispatch, pairing::PairingState, plugin_update};
+use ados_cloud::{dispatch, pairing::PairingState, plugin_publish, plugin_update};
+use ados_plugin_host::download::DownloadSource;
 
 /// The shared, single-instance plugin supervisor handle. Its lifecycle methods
 /// are synchronous and take `&mut self` (filesystem + `systemctl`), so a `std`
@@ -140,7 +140,8 @@ async fn main() -> Result<()> {
         let board_id = (board_name != "unknown").then_some(board_name);
         let tier = (1..=4).contains(&board_tier).then_some(board_tier as u8);
         let mut sup =
-            PluginSupervisor::production(Paths::default(), board_id, env!("CARGO_PKG_VERSION"))
+            PluginSupervisor::production(Paths::from_env(), board_id, env!("CARGO_PKG_VERSION"))
+                .with_profile(ados_config::node_profile())
                 .with_board_tier(tier)
                 .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());
         if let Err(e) = sup.discover() {
@@ -259,6 +260,18 @@ async fn main() -> Result<()> {
             supervisor.clone(),
             shutdown_rx.clone(),
         ),
+        // ── Plugin cloud publish ───────────────────────────────
+        // Serve the root-only cloud-publish socket the plugin host forwards
+        // gated `cloud.publish` / `cloud.records.put` calls to: stream messages
+        // onto the broker at QoS 0 through a bounded drop-oldest queue, records
+        // into the cloud with this device's key. Bound on every posture, so a
+        // local-only or unpaired node answers with the reason.
+        tokio::spawn(plugin_publish::run(
+            config.clone(),
+            http.clone(),
+            convex_url.clone(),
+            shutdown_rx.clone(),
+        )),
     ];
 
     // Relay supervision. The MAVLink-over-MQTT relay runs a real
@@ -435,7 +448,7 @@ fn spawn_heartbeat(
                     let base = heartbeat::HeartbeatBase {
                         device_id: config.agent.device_id.clone(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
-                        profile: Some(config.wire_profile().to_string()),
+                        profile: Some(config.wire_profile()),
                         role: None,
                         uptime_seconds: started.elapsed().as_secs() as i64,
                         board_name,
@@ -733,7 +746,7 @@ fn spawn_command_poll(
 ) -> tokio::task::JoinHandle<()> {
     // A blocking client for the install download (the supervisor install path is
     // synchronous; the download seam is blocking). Built once and reused.
-    let download: SharedDownload = Arc::new(dispatch::install::HttpDownloadSource::new());
+    let download: SharedDownload = Arc::new(ados_plugin_host::download::HttpDownloadSource::new());
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(command_poll::POLL_INTERVAL);
         loop {
@@ -1026,18 +1039,16 @@ fn spawn_gs_bridge(
 mod tests {
     use super::*;
     use ados_cloud::dispatch::loopback;
-    use ados_cloud::dispatch::{install::DownloadSource, CommandStatus};
+    use ados_cloud::dispatch::CommandStatus;
+    use ados_plugin_host::download::{DownloadBody, DownloadError, DownloadSource};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     /// A no-network download source (never consulted on the no-plugin paths).
     struct NoSource;
     impl DownloadSource for NoSource {
-        fn fetch(
-            &self,
-            _url: &str,
-        ) -> Result<Vec<u8>, ados_cloud::dispatch::download::DownloadError> {
-            Err(ados_cloud::dispatch::download::DownloadError::Unparseable)
+        fn open(&self, _url: &str) -> Result<DownloadBody, DownloadError> {
+            Err(DownloadError::Unparseable)
         }
     }
 
@@ -1073,6 +1084,10 @@ mod tests {
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
             loopback_guard_state: dir.join("plugin-loopback-guard.json"),
+            socket_dir: dir.join("sockets"),
+            token_secret: dir.join("secrets/plugin-token-secret"),
+            runner: dir.join("bin/ados-plugin-runner"),
+            run_dir: dir.join("run"),
         };
         Arc::new(Mutex::new(PluginSupervisor::new(
             paths, false, None, "1.0.0",
@@ -1103,6 +1118,10 @@ mod tests {
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
             loopback_guard_state: dir.join("plugin-loopback-guard.json"),
+            socket_dir: dir.join("sockets"),
+            token_secret: dir.join("secrets/plugin-token-secret"),
+            runner: dir.join("bin/ados-plugin-runner"),
+            run_dir: dir.join("run"),
         };
         let sup = PluginSupervisor::production(paths, None, env!("CARGO_PKG_VERSION"))
             .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());

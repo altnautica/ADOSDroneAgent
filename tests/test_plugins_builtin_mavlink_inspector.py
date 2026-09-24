@@ -14,32 +14,27 @@ from typing import Any
 
 import pytest
 
+from ados.plugins.builtin import builtin_manifest
 from ados.plugins.builtin.mavlink_inspector import (
     PLUGIN_ID,
     SUBSCRIBED_TOPICS,
     MavlinkInspectorPlugin,
-    get_manifest,
 )
-from ados.plugins.manifest import PluginManifest
 
 
-def test_get_manifest_returns_plugin_manifest() -> None:
-    m = get_manifest()
-    assert isinstance(m, PluginManifest)
+def test_shipped_manifest_declares_the_plugin_and_its_permissions() -> None:
+    m = builtin_manifest(PLUGIN_ID)
+    assert m is not None
     assert m.id == PLUGIN_ID
     assert m.agent is not None
     assert m.agent.isolation == "subprocess"
+    assert m.agent.entrypoint == (
+        f"{MavlinkInspectorPlugin.__module__}:{MavlinkInspectorPlugin.__name__}"
+    )
     assert {p.id for p in m.agent.permissions} == {
         "event.publish",
         "event.subscribe",
     }
-
-
-
-def test_listed_among_the_builtin_plugins() -> None:
-    from ados.plugins.builtin import builtin_manifests
-
-    assert PLUGIN_ID in builtin_manifests()
 
 
 # ---------------------------------------------------------------------

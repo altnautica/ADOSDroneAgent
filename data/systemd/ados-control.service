@@ -39,14 +39,21 @@ EnvironmentFile=-/etc/ados/env
 # exactly as the sibling daemons do. /etc/systemd/network is where the MAC-pin
 # unpin route deletes its next-boot .link; it carries the '-' prefix because a
 # host without systemd-networkd may not have the directory.
+#
+# It also serves the plugin lifecycle (/api/plugins): an install unpacks under
+# /var/ados/plugins and writes the plugin's units plus the shared slice under
+# /etc/systemd/system, and a remove deletes the plugin's logs under
+# /var/log/ados/plugins.
 NoNewPrivileges=yes
 ProtectSystem=strict
 PrivateTmp=yes
-ReadWritePaths=/var/ados /etc/ados /run/ados /var/lib/ados -/etc/systemd/network
+ReadWritePaths=/var/ados /etc/ados /run/ados /var/lib/ados /var/log/ados /etc/systemd/system -/etc/systemd/network
 
-# The surface is lightweight (no Python runtime, no plugin load); cap it so a
-# runaway can never starve the box.
-MemoryMax=128M
+# No Python runtime and no plugin code runs in-process, but a plugin install
+# holds the archive (at most 50 MiB) and its decompressed entries (at most
+# 100 MiB) in memory while it verifies them; the cap leaves room for that
+# on top of the serving footprint so an install is never OOM-killed mid-swap.
+MemoryMax=384M
 
 StandardOutput=journal
 StandardError=journal

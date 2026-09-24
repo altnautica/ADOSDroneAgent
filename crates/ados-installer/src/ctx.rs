@@ -31,6 +31,11 @@ pub struct Ctx {
     /// `--no-rtl-driver` opts out (a workstation/compute node or a rig with no
     /// long-range radio does not need it). The `dkms` step honours this.
     pub install_rtl8812eu: bool,
+    /// Whether the `extensions` step installs the first-party World Engine
+    /// extension: the `--world-engine` / `--no-world-engine` choice (the wizard
+    /// writes the same field), else the profile default
+    /// ([`crate::steps::extensions::world_engine_default`]).
+    pub install_world_engine: bool,
     /// Release channel selector (default `edge` — clone + build from source,
     /// matching the predecessor installer's default).
     pub channel: String,
@@ -144,6 +149,9 @@ impl Ctx {
             .unwrap_or_else(|| "drone".to_string());
         let channel = resolve_channel(args.channel.as_deref());
         let install_rtl8812eu = !args.no_rtl_driver;
+        let install_world_engine = args
+            .world_engine
+            .unwrap_or_else(|| crate::steps::extensions::world_engine_default(&profile));
         // A pinned channel installs an explicit release, so an upgrade with no
         // `--version` must reuse the pinned one rather than fail or drift.
         let mut args = args;
@@ -160,6 +168,7 @@ impl Ctx {
             force,
             profile,
             install_rtl8812eu,
+            install_world_engine,
             channel,
             region_pinned: None,
             cloud_from_anywhere: false,
@@ -300,6 +309,27 @@ mod tests {
         assert_eq!(ctx.profile, "ground_station");
         assert_eq!(ctx.channel, "edge");
         assert!(ctx.force);
+    }
+
+    #[test]
+    fn the_world_engine_follows_the_profile_unless_a_flag_pins_it() {
+        let ctx_for = |profile: &str, choice: Option<bool>| {
+            let a = Args {
+                profile: Some(profile.to_string()),
+                world_engine: choice,
+                ..Args::default()
+            };
+            Ctx::from_args(a, EnvInfo::probe(), Checkpoint::new()).install_world_engine
+        };
+        // Workstation-class nodes are where the engine runs its heavy half.
+        assert!(ctx_for("workstation", None));
+        assert!(ctx_for("compute", None));
+        // An aircraft or a ground station opts in explicitly.
+        assert!(!ctx_for("drone", None));
+        assert!(!ctx_for("ground_station", None));
+        // An explicit flag wins over the profile default in both directions.
+        assert!(!ctx_for("workstation", Some(false)));
+        assert!(ctx_for("drone", Some(true)));
     }
 
     #[test]

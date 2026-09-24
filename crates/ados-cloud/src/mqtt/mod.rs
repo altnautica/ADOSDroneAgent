@@ -7,6 +7,8 @@
 //! * `ados/{id}/msp/{tx,rx}` q0 (the MSP byte plane, same shape)
 //! * `ados/{id}/webrtc/offer`  q1 (signaling subscribes browser offers)
 //! * `ados/{id}/webrtc/answer` q1 (signaling publishes the SDP answer)
+//! * `ados/{id}/plugin/{plugin_id}/{stream}` q0 (a plugin's own live stream,
+//!   published for it by the cloud-publish lane)
 //!
 //! The broker is chosen by the server posture (see
 //! [`crate::config::CloudConfig::relay_transport`]): the managed broker
@@ -21,7 +23,8 @@
 //! client presents the same ClientID, so every process/lane that dials the
 //! broker for one device must carry its own id: `ados-{id}` (MAVLink relay),
 //! `ados-{id}-msp` (MSP byte plane), `ados-{id}-webrtc` (SDP signaling),
-//! `ados-{id}-atlas`, `ados-{id}-vision`. Two lanes sharing an id do not
+//! `ados-{id}-atlas`, `ados-{id}-vision`, `ados-{id}-plugin-update`,
+//! `ados-{id}-plugin-publish`. Two lanes sharing an id do not
 //! degrade — they evict each other in a sub-second loop forever, which reads as
 //! a flapping `mqttConnected` with no cloud telemetry and no cloud command
 //! authority.
@@ -84,6 +87,12 @@ pub fn topic_webrtc_answer(device_id: &str) -> String {
 pub fn topic_plugin_update_available(device_id: &str) -> String {
     format!("ados/{device_id}/plugin/update_available")
 }
+/// A plugin's own live stream topic (q0). The plugin id is reverse-DNS, so it
+/// always has a dot and can never be mistaken for a fixed `plugin/<name>` topic
+/// such as `update_available`.
+pub fn topic_plugin_stream(device_id: &str, plugin_id: &str, stream: &str) -> String {
+    format!("ados/{device_id}/plugin/{plugin_id}/{stream}")
+}
 /// Map an Atlas event topic to its cloud topic under `ados/{id}/atlas/...`.
 /// The `plugin.atlas.` / `atlas.` prefix is dropped and dots become slashes, so
 /// `atlas.keyframe`->`ados/{id}/atlas/keyframe`, `atlas.pose.offload`->
@@ -115,6 +124,10 @@ pub fn msp_client_id(device_id: &str) -> String {
 /// its own broker principal beside the MAVLink relay's `ados-{device_id}`.
 pub const WEBRTC_LANE: &str = "webrtc";
 
+/// The cloud-publish lane's MQTT ClientID suffix
+/// (`ados-{device_id}-plugin-publish`).
+pub const PLUGIN_PUBLISH_LANE: &str = "plugin-publish";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +141,10 @@ mod tests {
         assert_eq!(topic_vision_detections("d"), "ados/d/vision/detections");
         assert_eq!(topic_webrtc_offer("d"), "ados/d/webrtc/offer");
         assert_eq!(topic_webrtc_answer("d"), "ados/d/webrtc/answer");
+        assert_eq!(
+            topic_plugin_stream("d", "com.example.a", "pose"),
+            "ados/d/plugin/com.example.a/pose"
+        );
     }
 
     #[test]
@@ -141,6 +158,8 @@ mod tests {
             format!("ados-{}-{WEBRTC_LANE}", "dev1"),
             format!("ados-{}-atlas", "dev1"),
             format!("ados-{}-vision", "dev1"),
+            format!("ados-{}-plugin-update", "dev1"),
+            format!("ados-{}-{PLUGIN_PUBLISH_LANE}", "dev1"),
         ];
         assert_eq!(msp_client_id("dev1"), "ados-dev1-msp");
         let unique: std::collections::BTreeSet<&String> = ids.iter().collect();

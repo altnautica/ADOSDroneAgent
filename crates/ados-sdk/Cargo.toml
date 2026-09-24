@@ -46,3 +46,5 @@ memmap2 = { workspace = true }
 ados-plugin-host = { path = "../ados-plugin-host" }
 tempfile = "3"
 futures-util = "0.3"
+# The cloud round-trip test reads the record the host re-encoded as JSON.
+serde_json = { workspace = true }

@@ -10,6 +10,7 @@
 use crate::cli::Args;
 use crate::env;
 use crate::steps::config_identity::slugify_hostname;
+use crate::steps::extensions::world_engine_default;
 use crate::ui::theme::Theme;
 use crate::ui::tty::Tty;
 use crate::wizard::widgets::{
@@ -197,12 +198,22 @@ fn profile_stage(tty: &mut Tty, theme: &Theme, args: &mut Args) -> Nav {
         default_idx,
     ) {
         Flow::Value(i) => {
-            args.profile = Some(choices[i].id.clone());
+            set_profile(args, &choices[i].id);
             Nav::Next
         }
         Flow::Back => Nav::Back,
         Flow::Abort => Nav::Abort,
     }
+}
+
+/// Record the chosen profile. A CHANGE of profile drops the World Engine
+/// answer so the features screen offers the new profile's default; the first
+/// pick keeps a `--world-engine` / `--no-world-engine` the operator passed.
+fn set_profile(args: &mut Args, chosen: &str) {
+    if args.profile.as_deref().is_some_and(|p| p != chosen) {
+        args.world_engine = None;
+    }
+    args.profile = Some(chosen.to_string());
 }
 
 // ── stage: hardware check ──────────────────────────────────────────────────
@@ -315,9 +326,11 @@ fn components_stage(
     // The feature list is profile-shaped: a drone / ground station is offered the
     // long-range radio (default on, but OPTIONAL — a Wi-Fi-indoor or a future
     // LoRa build can turn it off); a workstation has no long-range radio and no
-    // onboard camera/display, so it is offered only the internet-reach option.
-    // A workstation never installs the RTL driver; for drone/ground the radio
-    // item's result below decides `no_rtl_driver`.
+    // onboard camera/display, so it is offered the internet-reach option. Every
+    // profile is offered the World Engine extension, on by default where its
+    // heavy half runs (workstation / compute). A workstation never installs the
+    // RTL driver; for drone/ground the radio item's result below decides
+    // `no_rtl_driver`.
     args.no_rtl_driver = is_workstation;
 
     let mut items = Vec::new();
@@ -361,6 +374,7 @@ fn components_stage(
         checked: false,
         locked: false,
     });
+    items.push(world_engine_item(args, &profile));
 
     match checklist(
         tty,
@@ -380,6 +394,7 @@ fn components_stage(
                         args.display = Some(if it.checked { "auto" } else { "none" }.to_string())
                     }
                     "cloud" => extras.cloud_from_anywhere = it.checked,
+                    WORLD_ENGINE_ITEM => args.world_engine = Some(it.checked),
                     _ => {}
                 }
             }
@@ -387,6 +402,23 @@ fn components_stage(
         }
         Flow::Back => Nav::Back,
         Flow::Abort => Nav::Abort,
+    }
+}
+
+/// The checklist id of the World Engine feature row.
+const WORLD_ENGINE_ITEM: &str = "world_engine";
+
+/// The World Engine feature row: pre-set to the operator's answer so far (a
+/// flag, or an earlier pass through this screen), else the profile default.
+fn world_engine_item(args: &Args, profile: &str) -> CheckItem {
+    CheckItem {
+        id: WORLD_ENGINE_ITEM.into(),
+        label: "World Engine (3D world model + compute offload)".into(),
+        benefit: "3D capture and reconstruction, plus perception offload.".into(),
+        checked: args
+            .world_engine
+            .unwrap_or_else(|| world_engine_default(profile)),
+        locked: false,
     }
 }
 
@@ -976,6 +1008,18 @@ fn review_summary(
             "On my network"
         },
     ));
+    rows.push(kv(
+        theme,
+        "Extension",
+        if args
+            .world_engine
+            .unwrap_or_else(|| world_engine_default(&profile))
+        {
+            "World Engine"
+        } else {
+            "none"
+        },
+    ));
     // Region + pairing are radio-profile concerns; a workstation shows neither.
     if has_radio {
         rows.push(kv(
@@ -1236,6 +1280,71 @@ mod tests {
             // Review is always the terminal step.
             assert_eq!(steps.last(), Some(&Step::Review));
         }
+    }
+
+    #[test]
+    fn the_world_engine_row_defaults_per_profile_and_keeps_an_answer() {
+        let with = |profile: &str, choice: Option<bool>| Args {
+            profile: Some(profile.into()),
+            world_engine: choice,
+            ..Args::default()
+        };
+        for (profile, on) in [
+            ("workstation", true),
+            ("compute", true),
+            ("drone", false),
+            ("ground_station", false),
+        ] {
+            let item = world_engine_item(&with(profile, None), profile);
+            assert_eq!(item.checked, on, "{profile} default");
+            assert!(!item.locked, "{profile}: the operator can always change it");
+        }
+        // An answer already given (a flag, or an earlier pass) is what shows.
+        assert!(world_engine_item(&with("drone", Some(true)), "drone").checked);
+        assert!(!world_engine_item(&with("workstation", Some(false)), "workstation").checked);
+    }
+
+    #[test]
+    fn changing_the_profile_resets_the_world_engine_answer() {
+        // The first pick keeps a flag the operator passed.
+        let mut args = Args {
+            world_engine: Some(true),
+            ..Args::default()
+        };
+        set_profile(&mut args, "drone");
+        assert_eq!(args.world_engine, Some(true));
+        // Re-picking the same profile keeps the answer.
+        set_profile(&mut args, "drone");
+        assert_eq!(args.world_engine, Some(true));
+        // A different profile offers its own default again.
+        args.world_engine = Some(false);
+        set_profile(&mut args, "workstation");
+        assert_eq!(args.world_engine, None);
+        assert_eq!(args.profile.as_deref(), Some("workstation"));
+    }
+
+    #[test]
+    fn the_review_names_the_world_engine_choice() {
+        let theme = crate::ui::theme::Theme::detect(true, true);
+        let rows = |args: &Args| {
+            review_summary(
+                &theme,
+                args,
+                &WizardExtras::default(),
+                &Collected::default(),
+            )
+            .join("\n")
+        };
+        let ws = Args {
+            profile: Some("workstation".into()),
+            ..Args::default()
+        };
+        assert!(rows(&ws).contains("World Engine"));
+        let drone = Args {
+            profile: Some("drone".into()),
+            ..Args::default()
+        };
+        assert!(!rows(&drone).contains("World Engine"));
     }
 
     #[test]

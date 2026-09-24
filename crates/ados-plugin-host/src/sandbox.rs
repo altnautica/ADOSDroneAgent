@@ -66,11 +66,12 @@ use std::collections::BTreeSet;
 
 /// One device capability and the cgroup device rules it unlocks.
 ///
-/// The right-hand side is a systemd device-node *group* name (the
-/// `/proc/devices` name, matched by `DeviceAllow=char-<name>`), not a path, so
-/// the rule covers every minor the kernel enumerates — `char-i2c` matches
-/// `/dev/i2c-0` through `/dev/i2c-N` without the renderer having to know how
-/// many buses a board exposes.
+/// A `char-<name>` entry is a systemd device-node *group* name (the
+/// `/proc/devices` name), so the rule covers every minor the kernel enumerates
+/// — `char-i2c` matches `/dev/i2c-0` through `/dev/i2c-N` without the renderer
+/// having to know how many buses a board exposes. An entry naming a `/dev`
+/// path matches that one node; it is used where a driver registers as a misc
+/// device or under a name that differs between driver releases.
 pub const DEVICE_CAP_RULES: &[(&str, &[&str])] = &[
     // A UART plugin may be handed a USB serial adapter, a native UART, or a CDC
     // ACM modem; all three are the same grant to an operator.
@@ -86,12 +87,42 @@ pub const DEVICE_CAP_RULES: &[(&str, &[&str])] = &[
     ("hardware.usb", &["char-usb_device rw"]),
     ("hardware.usb.uvc", &["char-video4linux rw"]),
     // A CSI capture path is V4L2 plus, on the Rockchip and Broadcom ISPs, a DRM
-    // render node for the buffer allocator.
+    // render node for the buffer allocator. The DRM driver registers major 226
+    // as `drm`.
     (
         "hardware.camera.csi",
-        &["char-video4linux rw", "char-dri rw"],
+        &["char-video4linux rw", "char-drm rw"],
+    ),
+    // GPU and neural accelerators: DRM card/render nodes (which also carry a
+    // DRM-based RKNPU), the Mali kbase and legacy RKNPU misc nodes, and the
+    // NVIDIA control, device, UVM and modeset nodes.
+    (
+        GPU_CAP,
+        &[
+            "char-drm rw",
+            "/dev/mali0 rw",
+            "/dev/rknpu rw",
+            "/dev/nvidiactl rw",
+            "/dev/nvidia0 rw",
+            "/dev/nvidia-uvm rw",
+            "/dev/nvidia-uvm-tools rw",
+            "/dev/nvidia-modeset rw",
+            "char-nvidia-frontend rw",
+            "char-nvidia-uvm rw",
+        ],
     ),
 ];
+
+/// The capability that unlocks the GPU and neural-accelerator device nodes.
+pub const GPU_CAP: &str = "hardware.gpu";
+
+/// The groups the accelerator nodes are owned by on a stock Debian/Ubuntu
+/// image; the plugin user joins them with the GPU grant, since the device
+/// policy admits a node but the file mode still has to.
+pub const GPU_SUPPLEMENTARY_GROUPS: &str = "video render";
+
+/// The capability that lets a declared service bind its declared TCP ports.
+pub const NETWORK_LISTEN_CAP: &str = "network.listen";
 
 /// The capability that unlocks outbound sockets.
 pub const NETWORK_OUTBOUND_CAP: &str = "network.outbound";
@@ -138,6 +169,7 @@ pub const BASE_READ_WRITE_PATHS: &[&str] = &["/var/ados/plugin-data", "/var/log/
 pub fn sandbox_enforced_caps() -> BTreeSet<&'static str> {
     let mut set: BTreeSet<&'static str> = DEVICE_CAP_RULES.iter().map(|(cap, _)| *cap).collect();
     set.insert(NETWORK_OUTBOUND_CAP);
+    set.insert(NETWORK_LISTEN_CAP);
     set.insert(FILESYSTEM_HOST_CAP);
     set
 }
@@ -150,8 +182,15 @@ pub fn sandbox_enforced_caps() -> BTreeSet<&'static str> {
 /// re-rendering an unchanged grant set produces a byte-identical unit and the
 /// supervisors can skip the restart. `loopback_guard_active` is the verdict of
 /// [`crate::loopback_guard`]; without it a `network.outbound` grant renders the
-/// no-grant socket policy.
-pub fn sandbox_directives(granted: &BTreeSet<String>, loopback_guard_active: bool) -> Vec<String> {
+/// no-grant socket policy. `listen_ports` are the TCP ports the unit's process
+/// declares it serves (a declared service's `listen_ports`; empty for the main
+/// unit, which never listens): with `network.listen` granted each one gets a
+/// `SocketBindAllow=`, and every unit denies every other bind.
+pub fn sandbox_directives(
+    granted: &BTreeSet<String>,
+    loopback_guard_active: bool,
+    listen_ports: &[u16],
+) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
 
     // ---- devices ----------------------------------------------------
@@ -175,6 +214,9 @@ pub fn sandbox_directives(granted: &BTreeSet<String>, loopback_guard_active: boo
                 lines.push(format!("DeviceAllow={rule}"));
             }
         }
+        if granted.contains(GPU_CAP) {
+            lines.push(format!("SupplementaryGroups={GPU_SUPPLEMENTARY_GROUPS}"));
+        }
     }
 
     // ---- sockets ----------------------------------------------------
@@ -189,6 +231,15 @@ pub fn sandbox_directives(granted: &BTreeSet<String>, loopback_guard_active: boo
         lines.push("RestrictAddressFamilies=AF_UNIX".to_string());
         lines.push("IPAddressDeny=any".to_string());
     }
+    // No plugin process binds an inet port unless it is a declared service
+    // granted `network.listen`, and then only the ports it declared. A listener
+    // also needs the inet families above, which only `network.outbound` opens.
+    if granted.contains(NETWORK_LISTEN_CAP) {
+        for port in listen_ports {
+            lines.push(format!("SocketBindAllow=tcp:{port}"));
+        }
+    }
+    lines.push("SocketBindDeny=any".to_string());
 
     // ---- filesystem -------------------------------------------------
     // The agent run dir goes first: an empty read-only tmpfs, with only the
@@ -236,7 +287,7 @@ mod tests {
 
     #[test]
     fn no_grant_gives_private_dev_and_no_outbound_sockets() {
-        let lines = sandbox_directives(&caps(&[]), true);
+        let lines = sandbox_directives(&caps(&[]), true, &[]);
         assert!(lines.contains(&"PrivateDevices=yes".to_string()));
         assert!(lines.contains(&"RestrictAddressFamilies=AF_UNIX".to_string()));
         assert!(lines.contains(&"IPAddressDeny=any".to_string()));
@@ -245,7 +296,7 @@ mod tests {
 
     #[test]
     fn granting_i2c_does_not_also_open_the_camera() {
-        let lines = sandbox_directives(&caps(&["hardware.i2c"]), true);
+        let lines = sandbox_directives(&caps(&["hardware.i2c"]), true, &[]);
         assert!(lines.contains(&"DevicePolicy=closed".to_string()));
         assert!(lines.contains(&"DeviceAllow=char-i2c rw".to_string()));
         assert!(!lines
@@ -257,7 +308,7 @@ mod tests {
 
     #[test]
     fn network_grant_opens_the_inet_families_when_the_loopback_guard_is_active() {
-        let lines = sandbox_directives(&caps(&["network.outbound"]), true);
+        let lines = sandbox_directives(&caps(&["network.outbound"]), true, &[]);
         assert!(lines
             .contains(&"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string()));
         // No systemd address filter: it would also cut ingress to the plugin's
@@ -268,16 +319,16 @@ mod tests {
 
     #[test]
     fn network_grant_without_the_loopback_guard_keeps_the_no_grant_socket_policy() {
-        let lines = sandbox_directives(&caps(&["network.outbound"]), false);
+        let lines = sandbox_directives(&caps(&["network.outbound"]), false, &[]);
         assert!(lines.contains(&"RestrictAddressFamilies=AF_UNIX".to_string()));
         assert!(lines.contains(&"IPAddressDeny=any".to_string()));
-        assert_eq!(lines, sandbox_directives(&caps(&[]), false));
+        assert_eq!(lines, sandbox_directives(&caps(&[]), false, &[]));
     }
 
     #[test]
     fn filesystem_grant_moves_the_data_roots_from_inaccessible_to_writable() {
-        let without = sandbox_directives(&caps(&[]), true);
-        let with = sandbox_directives(&caps(&["filesystem.host"]), true);
+        let without = sandbox_directives(&caps(&[]), true, &[]);
+        let with = sandbox_directives(&caps(&["filesystem.host"]), true, &[]);
         let rw_without = without
             .iter()
             .find(|l| l.starts_with("ReadWritePaths="))
@@ -315,7 +366,7 @@ mod tests {
 
     #[test]
     fn the_agent_run_dir_is_hidden_whatever_is_granted() {
-        let none = sandbox_directives(&caps(&[]), true);
+        let none = sandbox_directives(&caps(&[]), true, &[]);
         let tail = &none[none.len() - NO_GRANT_FILESYSTEM.len()..];
         assert_eq!(tail, NO_GRANT_FILESYSTEM);
 
@@ -324,7 +375,10 @@ mod tests {
         // nothing but the log sink is bound back, least of all another
         // plugin's socket dir.
         let everything: Vec<&str> = sandbox_enforced_caps().into_iter().collect();
-        for lines in [none.clone(), sandbox_directives(&caps(&everything), true)] {
+        for lines in [
+            none.clone(),
+            sandbox_directives(&caps(&everything), true, &[]),
+        ] {
             assert!(lines.contains(&"TemporaryFileSystem=/run/ados:ro".to_string()));
             for line in &lines {
                 if let Some(paths) = line.strip_prefix("ReadWritePaths=") {
@@ -339,20 +393,81 @@ mod tests {
 
     #[test]
     fn uvc_and_csi_together_emit_one_video4linux_rule() {
-        let lines = sandbox_directives(&caps(&["hardware.usb.uvc", "hardware.camera.csi"]), true);
+        let lines = sandbox_directives(
+            &caps(&["hardware.usb.uvc", "hardware.camera.csi"]),
+            true,
+            &[],
+        );
         let count = lines
             .iter()
             .filter(|l| l.as_str() == "DeviceAllow=char-video4linux rw")
             .count();
         assert_eq!(count, 1, "{lines:?}");
-        assert!(lines.contains(&"DeviceAllow=char-dri rw".to_string()));
+        assert!(lines.contains(&"DeviceAllow=char-drm rw".to_string()));
     }
 
     #[test]
     fn the_same_grant_set_renders_identically() {
-        let a = sandbox_directives(&caps(&["hardware.i2c", "network.outbound"]), true);
-        let b = sandbox_directives(&caps(&["network.outbound", "hardware.i2c"]), true);
+        let a = sandbox_directives(&caps(&["hardware.i2c", "network.outbound"]), true, &[]);
+        let b = sandbox_directives(&caps(&["network.outbound", "hardware.i2c"]), true, &[]);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn only_a_granted_listener_may_bind_and_only_its_declared_ports() {
+        // Every unit denies every inet bind.
+        let none = sandbox_directives(&caps(&[]), true, &[8092]);
+        assert!(none.contains(&"SocketBindDeny=any".to_string()));
+        assert!(!none.iter().any(|l| l.starts_with("SocketBindAllow=")));
+        // Declared ports without the grant stay closed.
+        let declared_only = sandbox_directives(&caps(&["network.outbound"]), true, &[8092]);
+        assert!(!declared_only
+            .iter()
+            .any(|l| l.starts_with("SocketBindAllow=")));
+        // The grant opens exactly the declared ports and keeps the deny.
+        let granted = sandbox_directives(
+            &caps(&["network.outbound", "network.listen"]),
+            true,
+            &[8092, 8093],
+        );
+        let allows: Vec<&str> = granted
+            .iter()
+            .filter(|l| l.starts_with("SocketBindAllow="))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            allows,
+            ["SocketBindAllow=tcp:8092", "SocketBindAllow=tcp:8093"]
+        );
+        assert!(granted.contains(&"SocketBindDeny=any".to_string()));
+        // A unit with nothing to listen on gains nothing from the grant.
+        assert_eq!(
+            sandbox_directives(&caps(&["network.listen"]), true, &[]),
+            sandbox_directives(&caps(&[]), true, &[])
+        );
+    }
+
+    #[test]
+    fn the_gpu_grant_opens_the_accelerator_nodes_and_their_groups() {
+        let lines = sandbox_directives(&caps(&["hardware.gpu"]), true, &[]);
+        assert!(lines.contains(&"DevicePolicy=closed".to_string()));
+        for rule in [
+            "DeviceAllow=char-drm rw",
+            "DeviceAllow=/dev/mali0 rw",
+            "DeviceAllow=/dev/nvidiactl rw",
+        ] {
+            assert!(
+                lines.contains(&rule.to_string()),
+                "{rule} missing: {lines:?}"
+            );
+        }
+        assert!(lines.contains(&"SupplementaryGroups=video render".to_string()));
+        // A CSI grant shares the DRM node but not the accelerator groups.
+        let csi = sandbox_directives(&caps(&["hardware.camera.csi"]), true, &[]);
+        assert!(!csi.iter().any(|l| l.starts_with("SupplementaryGroups=")));
+        assert!(!csi
+            .iter()
+            .any(|l| l.contains("nvidia") || l.contains("mali")));
     }
 
     #[test]

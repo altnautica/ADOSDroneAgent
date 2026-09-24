@@ -65,6 +65,11 @@ ados-supervisor = { path = "../ados-supervisor" }
 # producer and the HTTP surface cannot drift apart on a contract Mission Control is
 # typed against. No radio code is reachable from here.
 ados-swarmbus = { path = "../ados-swarmbus" }
+# The plugin lifecycle controller: the native `/api/plugins/*` routes install,
+# grant, enable, disable and remove through the same `PluginSupervisor` the
+# cloud relay and the plugin-host daemon use, and fetch catalog/URL archives
+# through its allowlisted download module (reqwest + rustls/ring).
+ados-plugin-host = { path = "../ados-plugin-host" }
 # Non-poisoning blocking locks for the IPC snapshot cells. No guard crosses an
 # await; async coordination stays on `tokio::sync`.
 parking_lot = { workspace = true }
@@ -157,6 +162,8 @@ tower = { workspace = true, features = ["util"] }
 ados-mavlink-router = { path = "../ados-mavlink-router" }
 # Paused-clock tests for the hero selection's report window.
 tokio = { workspace = true, features = ["test-util"] }
+# Builds `.adosplug` fixtures for the native plugin lifecycle route tests.
+zip = { workspace = true }
 
 # Linux-only edge: systemd readiness/watchdog notify + journald log layer for
 # the daemon, and the nix group-ownership helper for the trusted socket. Confined

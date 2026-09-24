@@ -469,6 +469,16 @@ pub fn read_persisted_version() -> Option<String> {
     parse_conf_value(&body, "version")
 }
 
+/// The installed agent version, read straight from the package's `__version__`
+/// in the agent venv (mirrors the bash `get_installed_version`). `None` when the
+/// venv is absent or cannot import the package.
+pub fn installed_agent_version() -> Option<String> {
+    let py = format!("{VENV_DIR}/bin/python");
+    let res = crate::exec::run(&py, &["-c", "import ados; print(ados.__version__)"]);
+    let v = res.stdout.trim();
+    (res.success() && !v.is_empty()).then(|| v.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

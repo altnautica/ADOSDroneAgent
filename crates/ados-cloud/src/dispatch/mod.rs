@@ -8,7 +8,6 @@
 //! dispatcher's `execute_command`, which has since been deleted; this is the
 //! implementation.
 
-pub mod download;
 pub mod install;
 pub mod loopback;
 pub mod plugin_commands;

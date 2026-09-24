@@ -48,8 +48,9 @@ use std::time::{Duration, SystemTime};
 use ados_protocol::plugin::TOKEN_TTL_SECONDS;
 use tokio::task::JoinHandle;
 
+use crate::handlers::SharedTopic;
 use crate::host::HostServices;
-use crate::manifest::PluginManifest;
+use crate::manifest::{PluginManifest, SharedTopicDecl};
 use crate::server::PluginIpcServer;
 use crate::state::{self, PluginStatus};
 use crate::token_secret::TokenMint;
@@ -96,10 +97,19 @@ pub struct PluginReconciler<H: HostServices> {
     /// or revoke takes effect within one poll even when the controller's
     /// control-socket poke never arrived.
     minted: Mutex<BTreeMap<String, BTreeSet<String>>>,
-    /// Parsed "has a subprocess agent half" per plugin, keyed by the manifest
-    /// mtime it was read at, so an unchanged manifest is not re-parsed every
-    /// poll.
-    manifests: Mutex<BTreeMap<String, (SystemTime, bool)>>,
+    /// What the reconciler reads off each plugin's manifest, keyed by the
+    /// manifest mtime it was read at, so an unchanged manifest is not re-parsed
+    /// every poll.
+    manifests: Mutex<BTreeMap<String, (SystemTime, ManifestFacts)>>,
+}
+
+/// The parts of a manifest the reconciler acts on.
+#[derive(Clone, Default)]
+struct ManifestFacts {
+    /// Whether it declares a subprocess agent half (the only kind served).
+    subprocess: bool,
+    /// The topics it shares on the event bus.
+    shared_topics: Vec<SharedTopicDecl>,
 }
 
 impl<H: HostServices> PluginReconciler<H> {
@@ -168,6 +178,7 @@ impl<H: HostServices> PluginReconciler<H> {
         if let Ok(mut cache) = self.manifests.lock() {
             cache.retain(|id, _| wanted.contains_key(id));
         }
+        self.refresh_shared_topics(wanted.keys());
 
         // ---- stop what should no longer be served ----------------------
         let stale: Vec<String> = self
@@ -260,31 +271,65 @@ impl<H: HostServices> PluginReconciler<H> {
         report
     }
 
-    /// Whether `plugin_id`'s manifest declares a subprocess agent half. The
-    /// parse is cached against the manifest's mtime; a missing or unparseable
-    /// manifest is `false`, so that plugin is skipped rather than the pass
-    /// failing.
+    /// Whether `plugin_id`'s manifest declares a subprocess agent half. A
+    /// missing or unparseable manifest is `false`, so that plugin is skipped
+    /// rather than the pass failing.
     fn is_subprocess_agent(&self, plugin_id: &str) -> bool {
+        self.manifest_facts(plugin_id).subprocess
+    }
+
+    /// The facts of `plugin_id`'s manifest, parsed once per manifest mtime.
+    fn manifest_facts(&self, plugin_id: &str) -> ManifestFacts {
         let path = self.install_dir.join(plugin_id).join("manifest.yaml");
         let Ok(mtime) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
-            return false;
+            return ManifestFacts::default();
         };
         let cached = self
             .manifests
             .lock()
             .ok()
-            .and_then(|c| c.get(plugin_id).copied());
-        if let Some((seen, answer)) = cached {
+            .and_then(|c| c.get(plugin_id).cloned());
+        if let Some((seen, facts)) = cached {
             if seen == mtime {
-                return answer;
+                return facts;
             }
         }
-        let answer = read_plugin_manifest(&self.install_dir, plugin_id)
-            .is_some_and(|m| m.is_subprocess_agent());
+        let facts = read_plugin_manifest(&self.install_dir, plugin_id)
+            .map(|m| ManifestFacts {
+                subprocess: m.is_subprocess_agent(),
+                shared_topics: m.agent.map(|a| a.shared_topics()).unwrap_or_default(),
+            })
+            .unwrap_or_default();
         if let Ok(mut cache) = self.manifests.lock() {
-            cache.insert(plugin_id.to_string(), (mtime, answer));
+            cache.insert(plugin_id.to_string(), (mtime, facts.clone()));
         }
-        answer
+        facts
+    }
+
+    /// Make the server's shared-topic registry the declarations of the plugins
+    /// that should be served. A topic two plugins both declare (install
+    /// refuses the second) goes to the first by id, never to both.
+    fn refresh_shared_topics<'a>(&self, wanted: impl Iterator<Item = &'a String>) {
+        let mut topics: Vec<SharedTopic> = Vec::new();
+        for id in wanted {
+            for decl in self.manifest_facts(id).shared_topics {
+                if let Some(owner) = topics.iter().find(|t| t.topic == decl.topic) {
+                    tracing::warn!(
+                        plugin_id = %id,
+                        topic = %decl.topic,
+                        owner = %owner.owner,
+                        "shared topic already owned; ignoring the second declaration"
+                    );
+                    continue;
+                }
+                topics.push(SharedTopic {
+                    topic: decl.topic,
+                    owner: id.clone(),
+                    subscribe_capability: decl.subscribe_capability,
+                });
+            }
+        }
+        self.server.shared_topics().replace(topics);
     }
 
     fn record_minted(&self, plugin_id: &str, caps: BTreeSet<String>) {

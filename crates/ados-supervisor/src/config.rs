@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
-pub const PROFILE_CONF: &str = "/etc/ados/profile.conf";
 pub const MESH_ROLE_PATH: &str = "/etc/ados/mesh/role";
 pub const RUN_DIR: &str = "/run/ados";
 
@@ -178,14 +177,13 @@ impl AgentConfig {
     /// the `/etc/ados` FHS paths, unchanged.
     pub fn load() -> Self {
         let config_yaml = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
-        let profile_conf =
-            std::env::var("ADOS_PROFILE_CONF").unwrap_or_else(|_| PROFILE_CONF.to_string());
+        let profile_conf = ados_config::profile_conf_path();
         let mesh_role =
             std::env::var("ADOS_MESH_ROLE").unwrap_or_else(|_| MESH_ROLE_PATH.to_string());
         let run_dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| RUN_DIR.to_string());
         Self::load_from_inner(
             Path::new(&config_yaml),
-            Path::new(&profile_conf),
+            &profile_conf,
             Path::new(&mesh_role),
             Path::new(&run_dir),
             true,
@@ -219,7 +217,7 @@ impl AgentConfig {
             ados_config::write_config_status("supervisor", config_error.as_deref());
         }
 
-        let profile_wire = resolve_profile(raw.agent.profile.as_deref(), profile_conf);
+        let profile_wire = ados_config::resolve_profile(raw.agent.profile.as_deref(), profile_conf);
 
         let role = if profile_wire == "ground-station" {
             Some(read_current_role(mesh_role))
@@ -326,57 +324,6 @@ pub fn log_store_wanted(config_yaml: &Path) -> bool {
         .map(|dir| dir.join(LOGD_PIN_OFF_MARKER).exists())
         .unwrap_or(false);
     !pinned_off && ados_config::log_store::read_gate(config_yaml).enabled
-}
-
-/// Wire-contract profile string from a raw value. `"ground_station"` becomes
-/// the hyphen form; `"workstation"` (the operator's console) and `"compute"` (a
-/// lean engine-only worker) stay as-is; `"drone"`/`"auto"`/empty/unknown collapse
-/// to `"drone"`.
-pub fn normalize_profile(raw: Option<&str>) -> String {
-    match raw {
-        Some("ground_station") | Some("ground-station") => "ground-station".to_string(),
-        Some("workstation") => "workstation".to_string(),
-        Some("compute") => "compute".to_string(),
-        _ => "drone".to_string(),
-    }
-}
-
-/// Profile resolution order: explicit `config.agent.profile`, else the
-/// `profile:` value in `profile.conf`, else `drone`.
-pub fn resolve_profile(config_profile: Option<&str>, profile_conf: &Path) -> String {
-    let raw = match config_profile {
-        None | Some("") | Some("auto") => read_profile_conf_value(profile_conf),
-        Some(v) => Some(v.to_string()),
-    };
-    normalize_profile(raw.as_deref())
-}
-
-/// Read the canonical `profile:` value out of `profile.conf`. Accepts the YAML
-/// form (`profile: X`) and the legacy `key=value` form (`profile=X`). Returns
-/// the underscore form, or `None` on any error / unrecognized value.
-pub fn read_profile_conf_value(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines() {
-        let stripped = line.trim();
-        if stripped.is_empty() || stripped.starts_with('#') {
-            continue;
-        }
-        let value = if let Some(rest) = stripped.strip_prefix("profile:") {
-            Some(rest)
-        } else {
-            stripped.strip_prefix("profile=")
-        };
-        if let Some(value) = value {
-            let v = value.trim().trim_matches(|c| c == '"' || c == '\'');
-            if matches!(
-                v,
-                "drone" | "ground_station" | "ground-station" | "workstation" | "compute"
-            ) {
-                return Some(v.replace('-', "_"));
-            }
-        }
-    }
-    None
 }
 
 /// Read the on-disk role sentinel. Falls back to `direct` if missing,
@@ -547,14 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_keyvalue_profile_conf_parses() {
-        let dir = tempfile::tempdir().unwrap();
-        let pc = dir.path().join("profile.conf");
-        write(&pc, "profile=drone\n");
-        assert_eq!(read_profile_conf_value(&pc).as_deref(), Some("drone"));
-    }
-
-    #[test]
     fn workstation_and_compute_profiles_resolve_and_never_collapse_to_drone() {
         // Both the operator's workstation and a lean engine-only compute worker must
         // survive profile resolution (a `compute` value used to fall through to
@@ -575,10 +514,6 @@ mod tests {
         let compute = load("compute");
         assert_eq!(compute.profile_wire, "compute");
         assert_eq!(compute.profile_gate(), "compute");
-        // The profile.conf (auto-config) path recognizes `compute` too.
-        let pc = dir.path().join("profile.conf");
-        write(&pc, "profile: compute\n");
-        assert_eq!(read_profile_conf_value(&pc).as_deref(), Some("compute"));
     }
 
     #[test]

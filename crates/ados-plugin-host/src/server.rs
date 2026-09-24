@@ -19,19 +19,22 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
-use ados_protocol::plugin::{CapabilityToken, Envelope, TokenIssuer, PROTOCOL_VERSION};
+use ados_protocol::plugin::{
+    CapabilityToken, Envelope, TokenIssuer, PROTOCOL_VERSION, TELEMETRY_STATE_MAX_HZ,
+    TELEMETRY_STATE_TOPIC,
+};
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::sync::{broadcast, mpsc};
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 
 use crate::dispatch::{gate, Gate, Method};
-use crate::handlers::{self, Event, EventBus, PublishOutcome};
-use crate::host::HostServices;
+use crate::handlers::{self, Event, EventBus, PublishOutcome, SharedTopics};
+use crate::host::{HostError, HostResult, HostServices};
 use crate::invoke::{InvokeRegistry, InvokeRequest};
 use crate::token_secret::TokenMint;
 
@@ -73,17 +76,12 @@ fn prepare_plugin_socket_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
 }
 
-#[cfg(target_os = "linux")]
+/// Whether this process owns the file `meta` describes: its uid is the
+/// effective uid. The same check on Linux and macOS, where the plugin host
+/// runs as root and as the operator respectively.
 fn owned_by_this_process(meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     meta.uid() == nix::unistd::geteuid().as_raw()
-}
-
-/// Development hosts run no plugin units, so there is no other owner to guard
-/// against.
-#[cfg(not(target_os = "linux"))]
-fn owned_by_this_process(_meta: &std::fs::Metadata) -> bool {
-    true
 }
 
 /// The event method the host pushes a rotated capability token on.
@@ -100,6 +98,16 @@ pub const TOKEN_REFRESH_METHOD: &str = "token.refresh";
 /// Fixed, with no cap on attempts, so a socket recovers on its own once the
 /// transient condition (fd pressure) clears.
 pub(crate) const ACCEPT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The shortest gap between two `telemetry.state` pushes to one plugin.
+const TELEMETRY_STATE_MIN_INTERVAL: Duration =
+    Duration::from_millis(1000 / TELEMETRY_STATE_MAX_HZ as u64);
+
+/// Most detached host-method calls (see [`runs_detached`]) one connection may
+/// have running at once. Past it, the next slow call waits for one to finish,
+/// so a plugin flooding slow calls degrades to sequential instead of growing
+/// the task set without bound.
+const DETACHED_MAX_IN_FLIGHT: usize = 32;
 
 /// Errors raised while running one plugin's socket server.
 #[derive(Debug, thiserror::Error)]
@@ -194,6 +202,8 @@ pub struct PluginIpcServer<H: HostServices> {
     /// `None` in a bare server (tests, the in-process smoke path), where an
     /// expired token stays expired.
     mint: Option<Arc<TokenMint>>,
+    /// The shared topics of the served plugins, which the event gates read.
+    shared_topics: Arc<SharedTopics>,
 }
 
 impl<H: HostServices> PluginIpcServer<H> {
@@ -211,7 +221,14 @@ impl<H: HostServices> PluginIpcServer<H> {
             invoke: Arc::new(InvokeRegistry::new()),
             refresh: Arc::new(RefreshRegistry::new()),
             mint: None,
+            shared_topics: Arc::new(SharedTopics::default()),
         }
+    }
+
+    /// The shared-topic registry the event gates read, so the reconciler can
+    /// keep it equal to the served plugins' declarations.
+    pub fn shared_topics(&self) -> Arc<SharedTopics> {
+        self.shared_topics.clone()
     }
 
     /// Attach the token mint so an expired token is re-minted in place rather
@@ -265,6 +282,7 @@ impl<H: HostServices> PluginIpcServer<H> {
         let invoke = self.invoke.clone();
         let refresh = self.refresh.clone();
         let mint = self.mint.clone();
+        let shared_topics = self.shared_topics.clone();
         let task = tokio::spawn(async move {
             loop {
                 let stream = match listener.accept().await {
@@ -286,6 +304,7 @@ impl<H: HostServices> PluginIpcServer<H> {
                     invoke: invoke.clone(),
                     refresh: refresh.clone(),
                     mint: mint.clone(),
+                    shared_topics: shared_topics.clone(),
                 };
                 // Every accepted connection is a new session; its teardown
                 // releases only what it acquired.
@@ -337,6 +356,8 @@ struct Connection<H: HostServices> {
     refresh: Arc<RefreshRegistry>,
     /// Mints this plugin's current token from state, for the on-expiry re-mint.
     mint: Option<Arc<TokenMint>>,
+    /// The shared topics of the served plugins.
+    shared_topics: Arc<SharedTopics>,
 }
 
 impl<H: HostServices> Connection<H> {
@@ -464,6 +485,20 @@ impl<H: HostServices> Connection<H> {
         let mut dz_subscribed = false;
         let (dz_tx, mut dz_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
 
+        // Vehicle-state subscribe. One `telemetry.subscribe` per connection arms
+        // a pacing forwarder off the host's shared state reader into this
+        // channel, so the select loop writes the `telemetry.state` events with no
+        // competing writers. The forwarder keeps only the newest snapshot, so
+        // the channel needs no depth.
+        let mut telemetry_subscribed = false;
+        let (tel_tx, mut tel_rx) = mpsc::channel::<Arc<Value>>(1);
+
+        // Slow host methods (see `runs_detached`) run off this loop, so a relay
+        // or engine round trip never holds up the connection's other requests
+        // and pushes. The select loop writes each reply as it lands; its request
+        // id correlates it, as it does every response.
+        let mut in_flight: JoinSet<DetachedReply> = JoinSet::new();
+
         // MCP tool invocation: register an outbound-request sender so the control
         // socket can reach THIS live connection (the host->plugin request flow),
         // and track pending replies here so the read branch can resolve them. On
@@ -561,7 +596,10 @@ impl<H: HostServices> Connection<H> {
                             &aux_tx,
                             &mut dz_subscribed,
                             &dz_tx,
+                            &mut telemetry_subscribed,
+                            &tel_tx,
                             &mut forwarders,
+                            &mut in_flight,
                         )
                         .await
                     {
@@ -610,7 +648,7 @@ impl<H: HostServices> Connection<H> {
                 evt = bus_rx.recv() => {
                     match evt {
                         Ok(event) => {
-                            if handlers::may_deliver(&self.plugin_id, &event)
+                            if handlers::may_deliver(&self.plugin_id, &event, &self.shared_topics)
                                 && subscriptions.iter().any(|p| handlers::topic_matches(p, &event.topic))
                             {
                                 if let Err(e) = self.deliver_event(&mut write_half, &token, &event).await {
@@ -712,6 +750,23 @@ impl<H: HostServices> Connection<H> {
                         }
                     }
                 }
+                snapshot = tel_rx.recv() => {
+                    // None means the telemetry forwarder dropped its sender;
+                    // keep serving requests rather than tearing down.
+                    if let Some(snapshot) = snapshot {
+                        if let Err(e) = self
+                            .deliver_telemetry_state(&mut write_half, &token, &snapshot)
+                            .await
+                        {
+                            break Err(e);
+                        }
+                    }
+                }
+                Some(done) = in_flight.join_next(), if !in_flight.is_empty() => {
+                    if let Err(e) = write_detached_reply(&mut write_half, done).await {
+                        break Err(e);
+                    }
+                }
                 fresh = refresh_rx.recv() => {
                     // A rotated token for this session. Adopt it (so the gate
                     // runs against the operator's current grant set from the
@@ -773,11 +828,13 @@ impl<H: HostServices> Connection<H> {
         // plugin reads when it reconnects.
         self.refresh.unregister_if(&self.plugin_id, &refresh_tx);
 
-        // Stop the per-subscription forwarder tasks and the request reader so
-        // none survive the session.
+        // Stop the per-subscription forwarder tasks, the detached host calls
+        // and the request reader so none survive the session. A detached call
+        // is a stateless forward, so cutting it short leaves nothing held.
         for f in forwarders {
             f.abort();
         }
+        in_flight.abort_all();
         reader.abort();
         result
     }
@@ -804,7 +861,10 @@ impl<H: HostServices> Connection<H> {
         aux_tx: &tokio::sync::mpsc::Sender<(u8, Vec<u8>)>,
         dz_subscribed: &mut bool,
         dz_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+        telemetry_subscribed: &mut bool,
+        tel_tx: &mpsc::Sender<Arc<Value>>,
         forwarders: &mut Vec<JoinHandle<()>>,
+        in_flight: &mut JoinSet<DetachedReply>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
         if token.is_expired(now_secs()) {
@@ -887,7 +947,10 @@ impl<H: HostServices> Connection<H> {
                     aux_tx,
                     dz_subscribed,
                     dz_tx,
+                    telemetry_subscribed,
+                    tel_tx,
                     forwarders,
+                    in_flight,
                 )
                 .await
             }
@@ -918,11 +981,42 @@ impl<H: HostServices> Connection<H> {
         aux_tx: &tokio::sync::mpsc::Sender<(u8, Vec<u8>)>,
         dz_subscribed: &mut bool,
         dz_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+        telemetry_subscribed: &mut bool,
+        tel_tx: &mpsc::Sender<Arc<Value>>,
         forwarders: &mut Vec<JoinHandle<()>>,
+        in_flight: &mut JoinSet<DetachedReply>,
     ) -> Result<(), ServerError> {
         match method {
             Method::Ping => {
                 let result = handlers::ping_result(&self.plugin_id);
+                send_response(write_half, &env.request_id, result).await
+            }
+            // telemetry.subscribe arms the per-connection vehicle-state push,
+            // like button.subscribe arms the press stream: one subscribe per
+            // connection (a second is idempotent; re-arming would double every
+            // snapshot), and a forwarder off the host's shared reader that paces
+            // to TELEMETRY_STATE_MAX_HZ, newest wins. The response names the
+            // topic the snapshots arrive on.
+            Method::TelemetrySubscribe => {
+                if *telemetry_subscribed {
+                    let result = Value::Map(vec![(
+                        Value::from("already_subscribed"),
+                        Value::Boolean(true),
+                    )]);
+                    return send_response(write_half, &env.request_id, result).await;
+                }
+                *telemetry_subscribed = true;
+                if let Some(rx) = self.host.telemetry_state_stream(&self.plugin_id) {
+                    forwarders.push(tokio::spawn(pace_snapshots(
+                        rx,
+                        tel_tx.clone(),
+                        TELEMETRY_STATE_MIN_INTERVAL,
+                    )));
+                }
+                let result = Value::Map(vec![
+                    (Value::from("subscribed"), Value::Boolean(true)),
+                    (Value::from("topic"), Value::from(TELEMETRY_STATE_TOPIC)),
+                ]);
                 send_response(write_half, &env.request_id, result).await
             }
             Method::EventPublish => {
@@ -930,6 +1024,7 @@ impl<H: HostServices> Connection<H> {
                     &self.plugin_id,
                     &env.args,
                     &token.granted_caps,
+                    &self.shared_topics,
                     now_ms(),
                 ) {
                     PublishOutcome::Publish(event) => {
@@ -966,7 +1061,12 @@ impl<H: HostServices> Connection<H> {
                 }
             }
             Method::EventSubscribe => {
-                match handlers::prepare_subscribe(&self.plugin_id, &env.args, &token.granted_caps) {
+                match handlers::prepare_subscribe(
+                    &self.plugin_id,
+                    &env.args,
+                    &token.granted_caps,
+                    &self.shared_topics,
+                ) {
                     Ok(pattern) => {
                         if subscriptions.contains(&pattern) {
                             let result = Value::Map(vec![(
@@ -1312,6 +1412,11 @@ impl<H: HostServices> Connection<H> {
             // returns Ok(not_implemented) (mirroring the Python stub bodies); a
             // real host returns Err(HostError) for a soft failure, which becomes
             // the response envelope `error` field with the exact Python wire body.
+            // A slow forward runs detached; its reply lands through the loop.
+            other if runs_detached(other) => {
+                self.spawn_detached(write_half, in_flight, token, other, env)
+                    .await
+            }
             other => {
                 match handlers::route_host_method(
                     &*self.host,
@@ -1332,6 +1437,35 @@ impl<H: HostServices> Connection<H> {
                 }
             }
         }
+    }
+
+    /// Start a slow host method off the dispatch loop (see [`runs_detached`]).
+    /// The gate already passed, so the call carries the caps it was granted.
+    /// At [`DETACHED_MAX_IN_FLIGHT`] the next call to finish is answered first.
+    async fn spawn_detached<W: AsyncWriteExt + Unpin>(
+        &self,
+        write_half: &mut W,
+        in_flight: &mut JoinSet<DetachedReply>,
+        token: &CapabilityToken,
+        method: Method,
+        env: &Envelope,
+    ) -> Result<(), ServerError> {
+        if in_flight.len() >= DETACHED_MAX_IN_FLIGHT {
+            if let Some(done) = in_flight.join_next().await {
+                write_detached_reply(write_half, done).await?;
+            }
+        }
+        let host = Arc::clone(&self.host);
+        let plugin_id = self.plugin_id.clone();
+        let args = env.args.clone();
+        let granted = token.granted_caps.clone();
+        let request_id = env.request_id.clone();
+        in_flight.spawn(async move {
+            let result =
+                handlers::route_host_method(&*host, method, &plugin_id, &args, &granted).await;
+            (request_id, result)
+        });
+        Ok(())
     }
 
     /// Mirror a merged `telemetry.extend` channel into the plugin's state
@@ -1388,6 +1522,43 @@ impl<H: HostServices> Connection<H> {
             capability: "event.subscribe".to_string(),
             args: handlers::event_deliver_args(event),
             request_id: format!("evt-{}", event.timestamp_ms),
+            token: token.to_token_string(),
+            error: None,
+        };
+        write_frame(write_half, &env).await
+    }
+
+    /// Push one vehicle-state snapshot to the plugin as an `event.deliver` on
+    /// [`TELEMETRY_STATE_TOPIC`], in the shape every event takes (`topic`,
+    /// `payload`, `publisher`, `timestamp_ms`), so the SDK routes it like any
+    /// other event. The payload is the state object itself. A token rotated
+    /// without `telemetry.read` stops the stream at the next snapshot.
+    async fn deliver_telemetry_state<W: AsyncWriteExt + Unpin>(
+        &self,
+        write_half: &mut W,
+        token: &CapabilityToken,
+        snapshot: &Value,
+    ) -> Result<(), ServerError> {
+        const READ_CAP: &str = "telemetry.read";
+        if !token.granted_caps.contains(READ_CAP) {
+            return Ok(());
+        }
+        let ts = now_ms();
+        let env = Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "event".to_string(),
+            method: "event.deliver".to_string(),
+            capability: READ_CAP.to_string(),
+            args: Value::Map(vec![
+                (Value::from("topic"), Value::from(TELEMETRY_STATE_TOPIC)),
+                (Value::from("payload"), snapshot.clone()),
+                (
+                    Value::from("publisher"),
+                    Value::from(crate::vehicle_events::HOST_PUBLISHER),
+                ),
+                (Value::from("timestamp_ms"), Value::Integer(ts.into())),
+            ]),
+            request_id: format!("tel-{ts}"),
             token: token.to_token_string(),
             error: None,
         };
@@ -1677,6 +1848,97 @@ fn vision_subscribe_camera_id(args: &Value) -> String {
             .unwrap_or("")
             .to_string(),
         _ => String::new(),
+    }
+}
+
+/// Forward the host's vehicle-state snapshots to one connection, at most one
+/// per `min_interval`, newest wins: a snapshot that arrives inside the interval
+/// replaces the one waiting, so a producer burst never becomes a plugin burst
+/// and a paced plugin never receives stale state. The first snapshot goes at
+/// once. Returns when the host's reader or the connection goes away.
+async fn pace_snapshots(
+    mut rx: broadcast::Receiver<Arc<Value>>,
+    tx: mpsc::Sender<Arc<Value>>,
+    min_interval: Duration,
+) {
+    let mut last_sent: Option<tokio::time::Instant> = None;
+    loop {
+        let mut snapshot = match rx.recv().await {
+            Ok(snapshot) => snapshot,
+            // Fell behind the fanout: the next recv resumes at the tail, which
+            // is the snapshot this subscriber wants anyway.
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => return,
+        };
+        if let Some(due) = last_sent.map(|sent| sent + min_interval) {
+            if tokio::time::Instant::now() < due {
+                tokio::time::sleep_until(due).await;
+                loop {
+                    match rx.try_recv() {
+                        Ok(newer) => snapshot = newer,
+                        Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        if tx.send(snapshot).await.is_err() {
+            return; // connection gone
+        }
+        last_sent = Some(tokio::time::Instant::now());
+    }
+}
+
+/// Whether a host method runs off the connection's dispatch loop.
+///
+/// These are the stateless forwards whose reply waits on another process: the
+/// cloud relay (a record write waits out the cloud's own answer, up to fifteen
+/// seconds), the vision engine, the supervisor's video-pipeline restart and the
+/// compute node. Awaited inline, each would stall every other request and every
+/// push on the connection for its whole round trip.
+///
+/// Everything else stays inline, in arrival order: the in-process methods
+/// answer at once, output commands (MAVLink, MSP, GPIO, aux datagrams) must
+/// reach their line in the order sent, and the methods that take or release
+/// session state (the aux stream's ownership, an offload session) must never
+/// land after the session that made them is released.
+fn runs_detached(method: Method) -> bool {
+    matches!(
+        method,
+        Method::CloudPublish
+            | Method::CloudRecordsPut
+            | Method::VideoSourceSet
+            | Method::VisionRegisterModel
+            | Method::VisionInfer
+            | Method::VisionPublishDetection
+            | Method::VisionDesignateTrack
+            | Method::ComputeDatasetWrite
+            | Method::ComputeJobSubmit
+            | Method::ComputeJobRead
+            | Method::ComputeJobOutputs
+            | Method::ComputeJobCancel
+            | Method::ComputeStreamHealth
+    )
+}
+
+/// A detached host-method call's outcome: the request id it answers and the
+/// handler's result.
+type DetachedReply = (String, Result<HostResult, HostError>);
+
+/// Answer a finished detached call. A handler that panicked took its request id
+/// with it, so there is nothing to address a reply to: the plugin's own request
+/// timeout answers the caller, and the session keeps serving.
+async fn write_detached_reply<W: AsyncWriteExt + Unpin>(
+    write_half: &mut W,
+    done: Result<DetachedReply, JoinError>,
+) -> Result<(), ServerError> {
+    match done {
+        Ok((request_id, Ok(result))) => send_response(write_half, &request_id, result).await,
+        Ok((request_id, Err(e))) => send_error(write_half, &request_id, &e.body()).await,
+        Err(e) => {
+            tracing::error!(error = %e, "detached host method did not complete");
+            Ok(())
+        }
     }
 }
 
@@ -2039,5 +2301,59 @@ mod tests {
         }
         accept.abort();
         server.stop_plugin(plugin_id);
+    }
+
+    fn seq_of(snapshot: &Value) -> i64 {
+        snapshot
+            .as_map()
+            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("seq")))
+            .and_then(|(_, v)| v.as_i64())
+            .expect("seq")
+    }
+
+    fn snapshot(seq: i64) -> Arc<Value> {
+        Arc::new(Value::Map(vec![(Value::from("seq"), Value::from(seq))]))
+    }
+
+    /// A producer faster than the cap reaches the plugin no faster than the
+    /// cap, and what does reach it is the newest state, never a queued stale
+    /// one: the final delivery is the final snapshot.
+    #[tokio::test(start_paused = true)]
+    async fn telemetry_pacing_caps_the_rate_and_delivers_the_newest_state() {
+        let (fanout, rx) = broadcast::channel(8);
+        let (tx, mut paced) = mpsc::channel(1);
+        let pacer = tokio::spawn(pace_snapshots(rx, tx, TELEMETRY_STATE_MIN_INTERVAL));
+        // 100 Hz for one second: ten times the cap.
+        let producer = tokio::spawn(async move {
+            for seq in 0..100 {
+                fanout.send(snapshot(seq)).unwrap();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let mut arrivals = Vec::new();
+        while let Some(s) = paced.recv().await {
+            arrivals.push((tokio::time::Instant::now(), seq_of(&s)));
+        }
+        producer.await.unwrap();
+        pacer.await.unwrap();
+
+        assert_eq!(
+            arrivals.first().map(|a| a.1),
+            Some(0),
+            "the first goes at once"
+        );
+        assert_eq!(arrivals.last().map(|a| a.1), Some(99), "newest wins");
+        for pair in arrivals.windows(2) {
+            assert!(
+                pair[1].0 - pair[0].0 >= TELEMETRY_STATE_MIN_INTERVAL,
+                "{} and {} came {:?} apart",
+                pair[0].1,
+                pair[1].1,
+                pair[1].0 - pair[0].0
+            );
+            assert!(pair[1].1 > pair[0].1, "a snapshot went backwards");
+        }
+        assert!(arrivals.len() <= 11, "{} deliveries in 1 s", arrivals.len());
     }
 }

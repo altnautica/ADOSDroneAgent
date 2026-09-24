@@ -2,8 +2,8 @@
 
 Generates a throwaway keypair, packs a fixture plugin into a signed
 archive, then walks the resulting archive back through the agent's
-canonical signature-verification path to confirm the bytes match what
-the verifier expects.
+canonical payload hash and an Ed25519 verify to confirm the bytes match
+what the verifier expects.
 """
 
 from __future__ import annotations
@@ -14,16 +14,13 @@ import zipfile
 from pathlib import Path
 
 from click.testing import CliRunner
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 from ados.cli.plugin import plugin_group
 from ados.plugins.archive import (
     MANIFEST_FILENAME,
     SIGNATURE_FILENAME,
     open_archive,
-)
-from ados.plugins.signing import (
-    TrustedKey,
-    verify_archive_signature,
 )
 
 _MANIFEST_YAML = """\
@@ -186,16 +183,10 @@ def test_sign_round_trip_verifies(tmp_path: Path) -> None:
     assert contents.signature_b64 == data["signature_b64"]
 
     pub_pem = (keys_dir / f"{signer_id}.pem").read_bytes()
-    trusted = {
-        signer_id: TrustedKey(signer_id=signer_id, pem=pub_pem)
-    }
-    # No exception ⇒ signature verifies.
-    verify_archive_signature(
-        contents.payload_hash,
-        contents.signature_b64,
-        contents.signer_id,
-        trusted_keys=trusted,
-        revocations=set(),
+    assert contents.signature_b64 is not None
+    # Raises InvalidSignature when the bytes do not verify.
+    load_pem_public_key(pub_pem).verify(  # type: ignore[union-attr]
+        base64.b64decode(contents.signature_b64), contents.payload_hash
     )
 
 

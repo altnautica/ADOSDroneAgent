@@ -1705,11 +1705,20 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # ados-installer links ados-plugin-host (the World Engine extension step
+      # installs through its lifecycle controller), which bundles C (SQLite,
+      # zstd) and ring, so it needs the zig C cross-compiler like
+      # publish-plugin-host, not plain musl-tools.
+      - name: Install zig
+        uses: mlugg/setup-zig@v2
 
-      - name: Build static ados-installer
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-installer
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Build static ados-installer (bundled C via zig)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-installer
 
       - name: Stage artifact + checksum
         run: |

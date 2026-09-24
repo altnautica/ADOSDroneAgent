@@ -143,16 +143,69 @@ impl MspClient {
     }
 }
 
-/// `ctx.telemetry` — extend the heartbeat schema.
+/// `ctx.telemetry` — read the vehicle state and extend the heartbeat schema.
 #[derive(Clone)]
 pub struct TelemetryClient {
     ipc: Arc<PluginIpcClient>,
 }
 
 impl TelemetryClient {
+    /// Receive the vehicle-state snapshot (armed, mode, position, attitude,
+    /// battery, ...), the newest at most ten times a second. The callback gets
+    /// the state object itself, a map keyed as the agent's state wire. A node
+    /// with no flight controller never fires it. Needs `telemetry.read`.
+    pub async fn subscribe(&self, callback: EventCallback) -> Result<(), ClientError> {
+        let on_deliver = move |args: Value| {
+            let Value::Map(entries) = args else {
+                return;
+            };
+            if let Some((_, state)) = entries
+                .into_iter()
+                .find(|(k, _)| k.as_str() == Some("payload"))
+            {
+                callback(state);
+            }
+        };
+        self.ipc.telemetry_subscribe(Arc::new(on_deliver)).await
+    }
+
     /// Add a channel of fields to the telemetry stream that ships to the GCS.
     pub async fn extend(&self, channel: &str, payload: Value) -> Result<Value, ClientError> {
         self.ipc.telemetry_extend(channel, payload).await
+    }
+}
+
+/// `ctx.cloud` — this plugin's own cloud stream and cloud records.
+///
+/// Both go through the agent's cloud relay under the plugin's verified id, so a
+/// plugin only ever publishes into its own namespace. The relay being down is
+/// the resting state on an unpaired or offline node: both calls then answer a
+/// `not_available` map rather than an error.
+#[derive(Clone)]
+pub struct CloudClient {
+    ipc: Arc<PluginIpcClient>,
+}
+
+impl CloudClient {
+    /// Publish one lossy message on the plugin's cloud stream `stream`. Needs
+    /// `cloud.publish`. See [`PluginIpcClient::cloud_publish`].
+    pub async fn publish(&self, stream: &str, payload: &[u8]) -> Result<Value, ClientError> {
+        self.ipc.cloud_publish(stream, payload).await
+    }
+
+    /// Upsert the record `key` in the plugin's cloud collection `collection`,
+    /// about `device_id` when given (else this node). Needs `cloud.records`.
+    /// See [`PluginIpcClient::cloud_records_put`].
+    pub async fn put_record(
+        &self,
+        collection: &str,
+        key: &str,
+        data: Value,
+        device_id: Option<&str>,
+    ) -> Result<Value, ClientError> {
+        self.ipc
+            .cloud_records_put(collection, key, data, device_id)
+            .await
     }
 }
 
@@ -550,6 +603,8 @@ pub struct PluginContext {
     pub display: DisplayClient,
     /// The additive auxiliary radio stream.
     pub radio: RadioClient,
+    /// The plugin's cloud stream and cloud records.
+    pub cloud: CloudClient,
     pub process: ProcessClient,
     pub lifecycle: LifecycleClient,
     ipc: Arc<PluginIpcClient>,
@@ -585,6 +640,7 @@ impl PluginContext {
             gpio: GpioClient { ipc: ipc.clone() },
             display: DisplayClient { ipc: ipc.clone() },
             radio: RadioClient { ipc: ipc.clone() },
+            cloud: CloudClient { ipc: ipc.clone() },
             config: ConfigClient {
                 ipc: ipc.clone(),
                 static_config: Arc::new(static_config),

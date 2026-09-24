@@ -14,8 +14,8 @@
 //!   reader loop, and dispatch event / MAVLink pushes to topic-matched
 //!   callbacks. Ports `ados.plugins.ipc_client`.
 //! - [`PluginContext`] — the plugin-facing facade with `events`, `mavlink`,
-//!   `telemetry`, `peripheral_manager`, `camera`, `config`, `process`, and
-//!   `lifecycle` sub-clients. Ports `ados.plugins.ipc.context`.
+//!   `telemetry`, `peripheral_manager`, `camera`, `config`, `process`,
+//!   `cloud`, and `lifecycle` sub-clients. Ports `ados.plugins.ipc.context`.
 //! - [`drivers`] — the hardware driver traits (`CameraDriver`, `GimbalDriver`,
 //!   `LidarDriver`, `GpsDriver`, `EscDriver`, `PayloadActuatorDriver`) and
 //!   their candidate / capability / sample types. Ports `ados.sdk.drivers`.
@@ -23,6 +23,8 @@
 //!   entry that reads `--socket` / `--token` / `--agent-id` off argv and env,
 //!   connects, and drives `on_install` .. `on_disable`. Ports
 //!   `ados.plugins.runner` for the `runtime: rust` case.
+//! - [`http`] — the operator-facing HTTP socket of an `agent.http` plugin: the
+//!   host-provided path and a listener bind helper.
 //!
 //! The agent capability catalog is re-exported from `ados-protocol` as
 //! [`capabilities`]; the SDK does not maintain its own copy.
@@ -30,18 +32,34 @@
 pub mod client;
 pub mod context;
 pub mod drivers;
+pub mod http;
 pub mod lifecycle;
 pub mod msp;
 pub mod testing;
 pub mod vision;
 
-pub use client::{ClientError, EventCallback, PluginIpcClient};
+pub use client::{ClientError, EventCallback, OffloadAdvertisement, PluginIpcClient};
 pub use context::{
-    CameraClient, ConfigClient, EventsClient, LifecycleClient, MavlinkClient, PeripheralClient,
-    PluginContext, ProcessClient, TelemetryClient,
+    CameraClient, CloudClient, ConfigClient, EventsClient, LifecycleClient, MavlinkClient,
+    PeripheralClient, PluginContext, ProcessClient, TelemetryClient,
 };
 pub use lifecycle::{run_plugin, run_plugin_with, Plugin, RunnerArgs, RunnerError};
 pub use vision::{Frame, FrameCallback, Odometry, Pose, VisionClient, VIO_COMPONENT_ID};
+
+/// The env var the host sets on every plugin unit to this node's profile.
+pub const NODE_PROFILE_ENV: &str = "ADOS_NODE_PROFILE";
+
+/// This node's profile (`drone`, `ground-station`, `workstation` or
+/// `compute`), as the host exported it into the plugin's environment. `drone`
+/// only when the variable is unset or empty, which a host-started plugin never
+/// sees.
+pub fn node_profile() -> String {
+    std::env::var(NODE_PROFILE_ENV)
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "drone".to_string())
+}
 
 /// The generated agent capability catalog, re-exported from `ados-protocol` so
 /// a plugin author references one source of truth for capability ids. The

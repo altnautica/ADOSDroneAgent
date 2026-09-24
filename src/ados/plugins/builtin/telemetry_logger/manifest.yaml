@@ -1,0 +1,16 @@
+schema_version: 1
+id: io.altnautica.telemetry-logger
+version: 0.1.0
+name: Telemetry Logger
+description: >-
+  Subscribes to public lifecycle events and emits a structured log line per
+  event for journald/operator dashboards.
+author: Altnautica
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.9.0"
+agent:
+  entrypoint: ados.plugins.builtin.telemetry_logger:TelemetryLoggerPlugin
+  permissions:
+    - event.subscribe

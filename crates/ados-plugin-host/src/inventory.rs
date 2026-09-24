@@ -84,7 +84,7 @@ pub fn installed_contract_versions(paths: &Paths) -> Vec<(String, u16)> {
 
 /// The installed inventory read from the production default paths.
 pub fn installed_contract_versions_default() -> Vec<(String, u16)> {
-    installed_contract_versions(&Paths::default())
+    installed_contract_versions(&Paths::from_env())
 }
 
 #[cfg(test)]
@@ -157,6 +157,10 @@ agent:
             log_dir: dir.path().join("logs"),
             control_dir: dir.path().join("plugin-host"),
             loopback_guard_state: dir.path().join("plugin-loopback-guard.json"),
+            socket_dir: dir.path().join("sockets"),
+            token_secret: dir.path().join("secrets/plugin-token-secret"),
+            runner: dir.path().join("bin/ados-plugin-runner"),
+            run_dir: dir.path().join("run"),
         };
         std::fs::create_dir_all(dir.path().join("state")).unwrap();
         std::fs::write(

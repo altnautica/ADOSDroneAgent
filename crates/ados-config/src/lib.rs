@@ -18,8 +18,18 @@
 //! `write_config_status` publishes a service's surfaced error (or its absence) to
 //! a per-service status sidecar so a remote Health surface can show a malformed
 //! config, not just the log.
+//!
+//! [`node_profile`] and [`resolve_profile`] resolve the node profile
+//! (`drone` / `ground-station` / `workstation` / `compute`) from `agent.profile`
+//! and `profile.conf`, the one resolution every service shares.
 
 pub mod log_store;
+mod profile;
+
+pub use profile::{
+    node_profile, node_profile_at, normalize_profile, profile_conf_path, read_profile_conf_value,
+    resolve_profile, PROFILE_CONF,
+};
 
 use std::fmt::Display;
 use std::path::Path;

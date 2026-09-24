@@ -50,7 +50,6 @@ API_ROUTERS = [
     "vision_detections",
     "ground_station",
     "network",
-    "plugins",
 ]
 ROOT_ROUTERS = ["whep"]
 

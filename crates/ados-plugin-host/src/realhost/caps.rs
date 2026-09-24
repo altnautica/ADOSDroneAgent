@@ -14,16 +14,16 @@ impl RealHost {
     /// methods listed here have no body at all on this host, so a capability that
     /// gates only these can do nothing but error.
     ///
-    /// `mavlink.subscribe` and `vision.subscribe_frames` are deliberately absent:
-    /// the server short-circuits both to the stream methods this host overrides
-    /// (`mavlink_subscribe_stream` / `vision_subscribe_stream`), so they never
+    /// `telemetry.subscribe`, `mavlink.subscribe` and `vision.subscribe_frames`
+    /// are deliberately absent: the server short-circuits each to the stream
+    /// method this host overrides (`telemetry_state_stream`,
+    /// `mavlink_subscribe_stream`, `vision_subscribe_stream`), so they never
     /// reach the not_implemented trait default.
     ///
     /// A `#[cfg(test)]` test (`unimplemented_methods_match_reality`) asserts this
     /// list is exactly the set of methods that return `not_implemented` from a
     /// freshly-built host, so it cannot silently drift as methods are wired.
     pub const UNIMPLEMENTED_HOST_METHODS: &'static [crate::dispatch::Method] = &[
-        crate::dispatch::Method::TelemetrySubscribe,
         crate::dispatch::Method::MissionRead,
         crate::dispatch::Method::MissionWrite,
         crate::dispatch::Method::RecordingStart,
@@ -147,6 +147,9 @@ pub(super) const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         RadioAuxStreamClose,
         RadioAuxStreamSend,
         RadioAuxStreamSubscribe,
+        CloudPublish,
+        CloudRecordsPut,
+        OffloadAdvertise,
         VisionSubscribeFrames,
         VisionRegisterModel,
         VisionReadModel,

@@ -246,8 +246,8 @@ impl RealHost {
     ///
     /// A missing service / connection / IO error / missed budget degrades to the
     /// `not_available` shape rather than erroring, matching the GPIO / mavlink
-    /// not-available paths — the radio service may not be up on this board (e.g.
-    /// a ground-station profile, or a drone with no adapter).
+    /// not-available paths — the aux lane's service may not be up (e.g. a drone
+    /// with no adapter).
     pub(super) async fn forward_radio_aux(
         &self,
         request: serde_json::Value,

@@ -21,6 +21,25 @@ use crate::artifacts::artifact_router;
 use crate::auth::{require_lane, ComputeAuth};
 use crate::offload_ws::{offload_ws_router, DetectionBroadcaster};
 
+/// The world-model capture ingest (`POST /api/atlas/event` and its probe).
+pub(crate) const ATLAS_INGEST: NodeLane = NodeLane::from_static("atlas.ingest");
+/// The world-model descriptor stream (`GET /ws/atlas/<device_id>`).
+pub(crate) const ATLAS_WORLD: NodeLane = NodeLane::from_static("atlas.world");
+/// The offloaded-detection return stream (`GET /ws/offload/<session_id>`).
+pub(crate) const OFFLOAD_STREAM: NodeLane = NodeLane::from_static("offload.stream");
+/// Reconstruction artifacts (`GET /artifacts/*`).
+pub(crate) const ARTIFACTS: NodeLane = NodeLane::from_static("artifacts.read");
+/// Submitting an offload session and reading its health.
+pub(crate) const JOB_SUBMIT: NodeLane = NodeLane::from_static("jobs.submit");
+/// Every lane this node serves, in wire order: the default grant for a drone.
+pub(crate) const ALL: [NodeLane; 5] = [
+    ATLAS_INGEST,
+    ATLAS_WORLD,
+    OFFLOAD_STREAM,
+    ARTIFACTS,
+    JOB_SUBMIT,
+];
+
 /// The Atlas lanes, mounted only while Atlas is enabled on this node.
 pub struct AtlasLanes {
     /// Where decoded capture events go (the receiver loop drains it).
@@ -47,17 +66,12 @@ pub fn lane_router(auth: Arc<ComputeAuth>, routes: LaneRoutes) -> Router {
             require_lane,
         ))
     };
-    let mut router = gate(artifact_router(routes.work_root), NodeLane::Artifacts).merge(gate(
-        offload_ws_router(routes.offload),
-        NodeLane::OffloadStream,
-    ));
+    let mut router = gate(artifact_router(routes.work_root), ARTIFACTS)
+        .merge(gate(offload_ws_router(routes.offload), OFFLOAD_STREAM));
     if let Some(atlas) = routes.atlas {
         router = router
-            .merge(gate(
-                atlas_event_router(atlas.events),
-                NodeLane::AtlasIngest,
-            ))
-            .merge(gate(world_ws_router(atlas.world), NodeLane::AtlasWorld));
+            .merge(gate(atlas_event_router(atlas.events), ATLAS_INGEST))
+            .merge(gate(world_ws_router(atlas.world), ATLAS_WORLD));
     }
     router
 }
@@ -172,7 +186,7 @@ mod tests {
         let m = f
             .auth
             .credentials
-            .mint("drone-1", &[NodeLane::AtlasIngest], OWNER, 1)
+            .mint("drone-1", &[ATLAS_INGEST], OWNER, 1)
             .unwrap();
         let cred = [("x-ados-node-credential", m.credential.as_str())];
         assert_eq!(

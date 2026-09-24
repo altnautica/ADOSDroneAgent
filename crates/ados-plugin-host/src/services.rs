@@ -12,27 +12,28 @@
 
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::backend::{ProbeSpec, UnitSpec};
 use crate::errors::SupervisorError;
-use crate::manifest::{AgentIsolation, PluginManifest};
-use crate::sandbox::sandbox_directives;
+use crate::manifest::{bin_reference, canonical_profile, AgentIsolation, PluginManifest};
+use crate::sandbox::{sandbox_directives, NETWORK_LISTEN_CAP, NETWORK_OUTBOUND_CAP};
+use crate::supervisor::Paths;
 use crate::systemd::{
-    sanitize_unit_name, service_log_path_for, HARDENING_DIRECTIVES, PLUGIN_SLICE_NAME,
-    PLUGIN_UNIT_DIR, PLUGIN_UNIT_PREFIX,
+    path_token, resolve_program, runner_context, sanitize_unit_name, service_log_path_for,
+    PLUGIN_SLICE_NAME, PLUGIN_UNIT_PREFIX,
 };
-
-/// How long one command readiness probe may run before systemd stops it.
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long an HTTP readiness probe may take.
 const HTTP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The only host an HTTP readiness probe may name.
 const LOOPBACK_HOST: &str = "127.0.0.1";
+
+/// Most TCP ports one service may declare.
+pub const MAX_LISTEN_PORTS: usize = 4;
 
 /// One declared service.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,19 @@ pub struct ServiceSpec {
     pub command: String,
     pub ready_check: Option<ReadyCheck>,
     pub restart: String,
+    /// Node profiles the service runs on; `None` means every profile.
+    pub profiles: Option<Vec<String>>,
+    /// TCP ports the service serves, opened by the `network.listen` grant.
+    pub listen_ports: Vec<u16>,
+}
+
+impl ServiceSpec {
+    /// Whether the service runs on a node of `profile`.
+    pub fn applies_to(&self, profile: &str) -> bool {
+        self.profiles
+            .as_ref()
+            .is_none_or(|p| p.iter().any(|x| x == profile))
+    }
 }
 
 /// A parsed `ready_check`.
@@ -69,6 +83,10 @@ enum RawService {
         restart: String,
         #[serde(default = "default_slice")]
         slice: String,
+        #[serde(default)]
+        profiles: Option<Vec<String>>,
+        #[serde(default)]
+        listen_ports: Vec<u16>,
     },
 }
 
@@ -83,6 +101,13 @@ fn default_slice() -> String {
 /// The services a manifest declares, validated. Only a subprocess agent half
 /// gets extra units; anything else declares none. A bare string element is the
 /// legacy shape and means `{name: s, command: s}`.
+///
+/// Beyond the shape, a declared service is refused when its command names a
+/// `bin:` entry the manifest's `binaries` does not have, when it names an
+/// unknown profile, or when it declares listen ports outside 1024..=65535,
+/// more than [`MAX_LISTEN_PORTS`], twice, or without the plugin declaring both
+/// `network.listen` (the bind grant) and `network.outbound` (the inet socket
+/// families a listener needs).
 pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, SupervisorError> {
     let Some(agent) = manifest.agent.as_ref() else {
         return Ok(Vec::new());
@@ -103,17 +128,36 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
             manifest.id
         ))
     })?;
+    let declared = manifest.declared_permissions();
     raw.into_iter()
         .map(|r| {
-            let (name, command, ready_check, restart, slice) = match r {
-                RawService::Bare(s) => (s.clone(), s, None, default_restart(), default_slice()),
+            let (name, command, ready_check, restart, slice, profiles, listen_ports) = match r {
+                RawService::Bare(s) => (
+                    s.clone(),
+                    s,
+                    None,
+                    default_restart(),
+                    default_slice(),
+                    None,
+                    Vec::new(),
+                ),
                 RawService::Full {
                     name,
                     command,
                     ready_check,
                     restart,
                     slice,
-                } => (name, command, ready_check, restart, slice),
+                    profiles,
+                    listen_ports,
+                } => (
+                    name,
+                    command,
+                    ready_check,
+                    restart,
+                    slice,
+                    profiles,
+                    listen_ports,
+                ),
             };
             validate_name(&name)?;
             if slice != PLUGIN_SLICE_NAME {
@@ -130,6 +174,19 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
             if command.is_empty() {
                 return Err(SupervisorError(format!("service {name}: empty command")));
             }
+            let argv = service_argv(&command)?;
+            if let Some(bin) = bin_reference(&argv[0]) {
+                if !agent.binaries.contains_key(bin) {
+                    return Err(SupervisorError(format!(
+                        "service {name}: command names {:?}, which agent.binaries does not declare",
+                        argv[0]
+                    )));
+                }
+            }
+            let profiles = profiles
+                .map(|list| normalize_service_profiles(&name, list))
+                .transpose()?;
+            validate_listen_ports(&name, &listen_ports, &declared)?;
             let ready_check = ready_check
                 .as_deref()
                 .map(parse_ready_check)
@@ -142,9 +199,75 @@ pub fn declared_services(manifest: &PluginManifest) -> Result<Vec<ServiceSpec>, 
                 command,
                 ready_check,
                 restart,
+                profiles,
+                listen_ports,
             })
         })
         .collect()
+}
+
+fn normalize_service_profiles(
+    name: &str,
+    list: Vec<String>,
+) -> Result<Vec<String>, SupervisorError> {
+    if list.is_empty() {
+        return Err(SupervisorError(format!(
+            "service {name}: profiles must list at least one profile"
+        )));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for raw in list {
+        let Some(p) = canonical_profile(&raw) else {
+            return Err(SupervisorError(format!(
+                "service {name}: profile {raw:?} is not a node profile"
+            )));
+        };
+        if !out.iter().any(|x| x == p) {
+            out.push(p.to_string());
+        }
+    }
+    Ok(out)
+}
+
+fn validate_listen_ports(
+    name: &str,
+    ports: &[u16],
+    declared: &BTreeSet<String>,
+) -> Result<(), SupervisorError> {
+    if ports.is_empty() {
+        return Ok(());
+    }
+    if ports.len() > MAX_LISTEN_PORTS {
+        return Err(SupervisorError(format!(
+            "service {name}: at most {MAX_LISTEN_PORTS} listen_ports"
+        )));
+    }
+    let mut seen: BTreeSet<u16> = BTreeSet::new();
+    for port in ports {
+        if *port < 1024 {
+            return Err(SupervisorError(format!(
+                "service {name}: listen port {port} is outside 1024..=65535"
+            )));
+        }
+        if !seen.insert(*port) {
+            return Err(SupervisorError(format!(
+                "service {name}: listen port {port} appears twice"
+            )));
+        }
+    }
+    let missing: Vec<&str> = [NETWORK_LISTEN_CAP, NETWORK_OUTBOUND_CAP]
+        .into_iter()
+        .filter(|cap| !declared.contains(*cap))
+        .collect();
+    if !missing.is_empty() {
+        return Err(SupervisorError(format!(
+            "service {name}: declares listen_ports but the plugin does not declare {}; a \
+             listener needs network.listen to bind and network.outbound for the inet socket \
+             families",
+            missing.join(" and ")
+        )));
+    }
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<(), SupervisorError> {
@@ -261,12 +384,12 @@ fn split_argv(text: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Render a plugin-authored `command` as one `ExecStart=` value: split as an
-/// argv and re-emitted in systemd quoting with `%` and `$` doubled, so no
-/// specifier or variable expands. Refuses a control character (a newline would
-/// start a new directive), an empty command, a first word carrying a systemd
-/// prefix character, and a lone `;` word (systemd's command separator).
-pub fn exec_start_value(command: &str) -> Result<String, SupervisorError> {
+/// Split a plugin-authored `command` into its argv, refusing a control
+/// character (a newline would start a new unit directive), an empty command, a
+/// first word carrying a systemd exec prefix, and a lone `;` word (systemd's
+/// command separator). Each word is later re-quoted by [`exec_word`] with `%`
+/// and `$` doubled, so no specifier or variable expands.
+pub fn service_argv(command: &str) -> Result<Vec<String>, SupervisorError> {
     if command.chars().any(char::is_control) {
         return Err(SupervisorError(
             "service command must not contain control characters".to_string(),
@@ -290,14 +413,12 @@ pub fn exec_start_value(command: &str) -> Result<String, SupervisorError> {
             "service command must not contain a lone ';' word".to_string(),
         ));
     }
-    Ok(argv
-        .iter()
-        .map(|w| exec_word(w))
-        .collect::<Vec<_>>()
-        .join(" "))
+    Ok(argv)
 }
 
-fn exec_word(word: &str) -> String {
+/// Quote one exec word for a systemd `ExecStart=` line: a plain word passes
+/// through, anything else is double-quoted with `%` and `$` doubled.
+pub(crate) fn exec_word(word: &str) -> String {
     let plain = !word.is_empty()
         && word
             .chars()
@@ -323,36 +444,26 @@ pub fn service_unit_name_for(plugin_id: &str, service_name: &str) -> String {
     )
 }
 
-/// The unit file path for a declared service under `unit_dir`.
-pub fn service_unit_path_for(
-    plugin_id: &str,
-    service_name: &str,
-    unit_dir: Option<&Path>,
-) -> PathBuf {
-    unit_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(PLUGIN_UNIT_DIR))
-        .join(service_unit_name_for(plugin_id, service_name))
-}
-
-/// Render the unit for one declared service: its own `ExecStart` in the
-/// plugin's install dir, the shared plugin slice, the main unit's hardening and
-/// resource envelope, and the plugin's capability sandbox.
-pub fn render_service_unit(
+/// Build the unit for one declared service: its own exec line in the plugin's
+/// install dir (a leading `bin:<name>` resolved to this host's binary), the
+/// plugin's identity (host socket, token file, binds), the shared plugin
+/// slice, the main unit's hardening and resource envelope, and the plugin's
+/// capability sandbox with the service's declared listen ports.
+pub fn build_service_spec(
     manifest: &PluginManifest,
     service: &ServiceSpec,
-    install_dir: &Path,
+    paths: &Paths,
+    profile: &str,
     granted: &BTreeSet<String>,
     loopback_guard_active: bool,
-) -> Result<String, SupervisorError> {
+) -> Result<UnitSpec, SupervisorError> {
     let Some(agent) = manifest.agent.as_ref() else {
         return Err(SupervisorError(format!(
             "plugin {} has no agent half; no service unit needed",
             manifest.id
         )));
     };
-    let res = &agent.resources;
-    let working_dir = install_dir.join(&manifest.id);
+    let working_dir = paths.install_dir.join(&manifest.id);
     if working_dir
         .to_string_lossy()
         .chars()
@@ -363,91 +474,44 @@ pub fn render_service_unit(
             working_dir.display()
         )));
     }
-    Ok(format!(
-        "\
-[Unit]
-Description=ADOS plugin {plugin_id} service {service_name}
-After=ados-supervisor.service
-PartOf=ados-supervisor.service
-StartLimitIntervalSec=0
-
-[Service]
-Slice={slice}
-Type=simple
-WorkingDirectory={working_dir}
-ExecStart={exec_start}
-Restart={restart}
-RestartSec=2s
-MemoryMax={max_ram_mb}M
-CPUQuota={max_cpu_percent}%
-TasksMax={max_pids}
-StandardOutput=append:{log_path}
-StandardError=append:{log_path}
-User=ados
-Group=ados
-{hardening}
-# ---- capability sandbox (re-rendered on every grant/revoke) ----
-{sandbox}
-
-[Install]
-WantedBy=ados-supervisor.service
-",
-        plugin_id = manifest.id,
-        service_name = service.name,
-        slice = PLUGIN_SLICE_NAME,
-        working_dir = working_dir.display(),
-        exec_start = exec_start_value(&service.command)?,
-        restart = service.restart,
-        max_ram_mb = res.max_ram_mb,
-        max_cpu_percent = res.max_cpu_percent,
-        max_pids = res.max_pids,
-        log_path = service_log_path_for(&manifest.id, &service.name),
-        hardening = HARDENING_DIRECTIVES.join("\n"),
-        sandbox = sandbox_directives(granted, loopback_guard_active).join("\n"),
-    ))
+    let mut argv = service_argv(&service.command)?;
+    if bin_reference(&argv[0]).is_some() {
+        argv[0] = resolve_program(manifest, &argv[0], paths)?;
+    }
+    let mut spec = runner_context(manifest, paths, profile)?;
+    spec.description = format!("ADOS plugin {} service {}", manifest.id, service.name);
+    spec.argv = argv;
+    spec.working_dir = Some(working_dir);
+    spec.log_path = service_log_path_for(&paths.log_dir, &manifest.id, &service.name);
+    spec.restart = service.restart.clone();
+    spec.resources = agent.resources.clone();
+    spec.sandbox_directives =
+        sandbox_directives(granted, loopback_guard_active, &service.listen_ports);
+    Ok(spec)
 }
 
-/// The `systemd-run` argv that runs one command readiness probe as a transient
-/// unit with exactly what the plugin's services get: the `ados` user, the
-/// hardening, the resource envelope, the capability sandbox and the plugin
-/// slice. The argv is passed through as separate words; no shell sees it.
-pub fn probe_command(
+/// The readiness probe for a command `ready_check`: the argv run in the
+/// plugin's install dir with the plugin's resource envelope and capability
+/// sandbox.
+pub fn probe_spec(
     manifest: &PluginManifest,
     argv: &[String],
-    install_dir: &Path,
+    paths: &Paths,
     granted: &BTreeSet<String>,
     loopback_guard_active: bool,
-) -> Vec<String> {
-    let mut out: Vec<String> = [
-        "systemd-run",
-        "--quiet",
-        "--wait",
-        "--pipe",
-        "--collect",
-        "--uid=ados",
-        "--gid=ados",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    out.push(format!("--slice={PLUGIN_SLICE_NAME}"));
-    out.push(format!(
-        "--working-directory={}",
-        install_dir.join(&manifest.id).display()
-    ));
-    let mut properties: Vec<String> = HARDENING_DIRECTIVES.iter().map(|s| s.to_string()).collect();
-    if let Some(agent) = manifest.agent.as_ref() {
-        let res = &agent.resources;
-        properties.push(format!("MemoryMax={}M", res.max_ram_mb));
-        properties.push(format!("CPUQuota={}%", res.max_cpu_percent));
-        properties.push(format!("TasksMax={}", res.max_pids));
-    }
-    properties.push(format!("RuntimeMaxSec={}", PROBE_TIMEOUT.as_secs()));
-    properties.extend(sandbox_directives(granted, loopback_guard_active));
-    out.extend(properties.into_iter().map(|p| format!("--property={p}")));
-    out.push("--".to_string());
-    out.extend(argv.iter().cloned());
-    out
+) -> Result<ProbeSpec, SupervisorError> {
+    let working_dir = paths.install_dir.join(&manifest.id);
+    path_token("install dir", &working_dir)?;
+    Ok(ProbeSpec {
+        argv: argv.to_vec(),
+        working_dir,
+        resources: manifest
+            .agent
+            .as_ref()
+            .map(|a| a.resources.clone())
+            .unwrap_or_default(),
+        sandbox_directives: sandbox_directives(granted, loopback_guard_active, &[]),
+    })
 }
 
 /// GET a loopback URL; ready on a 2xx status.
@@ -524,27 +588,30 @@ mod tests {
 
     #[test]
     fn a_service_command_cannot_smuggle_a_directive_or_a_specifier() {
-        assert!(exec_start_value("bin/x\nExecStartPre=+/bin/sh").is_err());
-        assert!(exec_start_value("+bin/x").is_err());
-        assert!(exec_start_value("bin/x ; rm").is_err());
-        assert_eq!(
-            exec_start_value("bin/x --name '%h $HOME'").unwrap(),
-            "bin/x --name \"%%h $$HOME\""
-        );
+        assert!(service_argv("bin/x\nExecStartPre=+/bin/sh").is_err());
+        assert!(service_argv("+bin/x").is_err());
+        assert!(service_argv("bin/x ; rm").is_err());
+        let words: Vec<String> = service_argv("bin/x --name '%h $HOME'")
+            .unwrap()
+            .iter()
+            .map(|w| exec_word(w))
+            .collect();
+        assert_eq!(words.join(" "), "bin/x --name \"%%h $$HOME\"");
+    }
+
+    fn render(m: &PluginManifest, granted: &[&str]) -> String {
+        let granted: BTreeSet<String> = granted.iter().map(|s| s.to_string()).collect();
+        let s = &declared_services(m).unwrap()[0];
+        let paths = crate::supervisor::tests_support::fhs_paths();
+        crate::backend::render_systemd(
+            &build_service_spec(m, s, &paths, "workstation", &granted, true).unwrap(),
+        )
     }
 
     #[test]
     fn a_service_unit_runs_in_the_plugin_slice_under_the_plugin_sandbox() {
         let m = manifest("      - name: api\n        command: bin/api\n");
-        let s = &declared_services(&m).unwrap()[0];
-        let unit = render_service_unit(
-            &m,
-            s,
-            Path::new("/var/ados/plugins"),
-            &BTreeSet::new(),
-            false,
-        )
-        .unwrap();
+        let unit = render(&m, &[]);
         assert!(unit.contains("Slice=ados-plugins.slice"));
         assert!(unit.contains("WorkingDirectory=/var/ados/plugins/com.example.svc"));
         assert!(unit.contains("ExecStart=bin/api"));
@@ -554,6 +621,76 @@ mod tests {
             service_unit_name_for("com.example.svc", "api"),
             "ados-plugin-com-example-svc-api.service"
         );
+    }
+
+    #[test]
+    fn a_service_shares_the_plugins_identity_on_the_host_socket() {
+        // A declared service reaches the host SDK exactly as the main process
+        // does: same socket, same token file, same socket-dir bind.
+        let unit = render(
+            &manifest("      - name: api\n        command: bin/api\n"),
+            &[],
+        );
+        assert!(unit.contains(
+            "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.svc/host.sock"
+        ));
+        assert!(unit.contains("EnvironmentFile=-/run/ados/plugins/com.example.svc.token.env"));
+        assert!(unit.contains("BindReadOnlyPaths=/run/ados/plugins/com.example.svc\n"));
+        assert!(unit.contains("Environment=ADOS_NODE_PROFILE=workstation\n"));
+    }
+
+    fn listener(perms: &str) -> String {
+        format!(
+            "id: com.example.svc\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\n\
+             agent:\n  entrypoint: agent/py/x.py\n  permissions: [{perms}]\n  contributes:\n    \
+             services:\n      - name: node\n        command: bin/node\n        \
+             listen_ports: [8092]\n        profiles: [workstation, ground_station]\n"
+        )
+    }
+
+    #[test]
+    fn a_listener_binds_only_its_declared_ports_and_only_when_granted() {
+        let m =
+            PluginManifest::from_yaml_text(&listener("network.listen, network.outbound")).unwrap();
+        let s = &declared_services(&m).unwrap()[0];
+        assert_eq!(s.listen_ports, vec![8092]);
+        assert_eq!(
+            s.profiles,
+            Some(vec![
+                "workstation".to_string(),
+                "ground-station".to_string()
+            ])
+        );
+        assert!(s.applies_to("workstation") && !s.applies_to("drone"));
+
+        let ungranted = render(&m, &["network.outbound"]);
+        assert!(ungranted.contains("SocketBindDeny=any"));
+        assert!(!ungranted.contains("SocketBindAllow="));
+        let granted = render(&m, &["network.outbound", "network.listen"]);
+        assert!(
+            granted.contains("SocketBindAllow=tcp:8092\nSocketBindDeny=any"),
+            "{granted}"
+        );
+    }
+
+    #[test]
+    fn listen_ports_without_the_listen_and_network_permissions_are_refused() {
+        for perms in ["", "network.listen", "network.outbound"] {
+            let m = PluginManifest::from_yaml_text(&listener(perms)).unwrap();
+            let err = declared_services(&m).unwrap_err();
+            assert!(
+                err.0.contains("declares listen_ports"),
+                "{perms:?}: {}",
+                err.0
+            );
+        }
+        let too_low = listener("network.listen, network.outbound").replace("[8092]", "[80]");
+        let err =
+            declared_services(&PluginManifest::from_yaml_text(&too_low).unwrap()).unwrap_err();
+        assert!(err.0.contains("outside 1024..=65535"), "{}", err.0);
+        let too_many = listener("network.listen, network.outbound")
+            .replace("[8092]", "[2001, 2002, 2003, 2004, 2005]");
+        assert!(declared_services(&PluginManifest::from_yaml_text(&too_many).unwrap()).is_err());
     }
 
     #[test]

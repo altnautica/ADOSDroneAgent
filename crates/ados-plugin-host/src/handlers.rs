@@ -140,10 +140,51 @@ fn topic_well_formed(topic: &str) -> bool {
 /// The namespace every plugin's own topics live under.
 const PLUGIN_NAMESPACE: &str = "plugin.";
 
-/// The host-owned world-model namespace. Its topics are read-gated by a
-/// capability, so only a host bridge may publish there; no plugin, whatever its
-/// id, may put a world model on the bus.
+/// The host-owned world-model namespace. Only a host bridge may publish there;
+/// no plugin, whatever its id, may put a world model on the bus under it.
 const HOST_ATLAS_NAMESPACE: &str = "plugin.atlas.";
+
+/// A topic one plugin owns and shares: it may publish it, and another plugin
+/// may subscribe with `event.subscribe` plus `subscribe_capability`. Declared
+/// in the owner's manifest (`agent.contributes.shared_topics`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedTopic {
+    pub topic: String,
+    pub owner: String,
+    pub subscribe_capability: String,
+}
+
+/// The shared topics of the plugins currently served, kept current by the
+/// reconciler and read on every subscribe, publish and delivery.
+#[derive(Debug, Default)]
+pub struct SharedTopics {
+    inner: parking_lot::RwLock<Vec<SharedTopic>>,
+}
+
+impl SharedTopics {
+    pub fn new(topics: Vec<SharedTopic>) -> Self {
+        SharedTopics {
+            inner: parking_lot::RwLock::new(topics),
+        }
+    }
+
+    /// Replace the whole set.
+    pub fn replace(&self, topics: Vec<SharedTopic>) {
+        *self.inner.write() = topics;
+    }
+
+    /// The declaration of exactly `topic`, if a served plugin shares it.
+    pub fn find(&self, topic: &str) -> Option<SharedTopic> {
+        self.inner.read().iter().find(|t| t.topic == topic).cloned()
+    }
+
+    fn owned_by(&self, topic: &str, plugin_id: &str) -> bool {
+        self.inner
+            .read()
+            .iter()
+            .any(|t| t.topic == topic && t.owner == plugin_id)
+    }
+}
 
 /// Whether an event may be delivered to `subscriber_id`.
 ///
@@ -151,15 +192,17 @@ const HOST_ATLAS_NAMESPACE: &str = "plugin.atlas.";
 /// of `plugin.com.acme.tools.`: a topic-prefix check alone cannot tell the two
 /// plugins' namespaces apart. Delivery closes that gap using the host-stamped
 /// publisher: an event under `plugin.` reaches a subscriber only when that
-/// subscriber published it or the host did. So a plugin cannot read another
-/// plugin's private events by subscribing to a longer prefix, and cannot spoof
-/// them by publishing under one.
-pub fn may_deliver(subscriber_id: &str, event: &Event) -> bool {
+/// subscriber published it, the host did, or it is a shared topic and its
+/// declared owner did. So a plugin cannot read another plugin's private events
+/// by subscribing to a longer prefix, and cannot spoof them by publishing under
+/// one.
+pub fn may_deliver(subscriber_id: &str, event: &Event, shared: &SharedTopics) -> bool {
     if !event.topic.starts_with(PLUGIN_NAMESPACE) {
         return true;
     }
     event.publisher_plugin_id == subscriber_id
         || event.publisher_plugin_id == crate::vehicle_events::HOST_PUBLISHER
+        || shared.owned_by(&event.topic, &event.publisher_plugin_id)
 }
 
 /// Topics any plugin may subscribe to without an explicit allowlist entry.
@@ -180,40 +223,47 @@ pub const PUBLIC_TOPICS_FOR_SUBSCRIBE: &[&str] = &[
 /// publishes frame descriptors and detections there, and a plugin reaches the surface
 /// through the gated `vision.*` methods, not by publishing the topic itself. A plugin
 /// may still subscribe to `vision.*` with `event.subscribe` plus the matching read cap.
+/// `telemetry.` is the host's too: `telemetry.state` is the vehicle state a plugin
+/// reads through `telemetry.subscribe`, so no plugin may publish a look-alike.
 /// `plugin.` is reserved too: every plugin publishes only under its own
-/// `plugin.<id>.` prefix, never into another plugin's.
+/// `plugin.<id>.` prefix or on the shared topics it declares, never into another
+/// plugin's.
 const RESERVED_PUBLISH_PREFIXES: &[&str] = &[
-    "vehicle.", "mavlink.", "mission.", "safety.", "agent.", "swarm.", "gps.", "vision.", "plugin.",
+    "vehicle.",
+    "mavlink.",
+    "mission.",
+    "safety.",
+    "agent.",
+    "swarm.",
+    "gps.",
+    "vision.",
+    "telemetry.",
+    "plugin.",
 ];
 
 /// Whether the plugin may subscribe to `topic_pattern`. Mirrors
-/// `events.is_subscribe_allowed`: requires `event.subscribe`, then a
-/// capability-gated shared-data topic, the plugin's own `plugin.<id>.`
-/// namespace, or a public lifecycle topic.
+/// `events.is_subscribe_allowed`: requires `event.subscribe`, then a shared
+/// topic, the plugin's own `plugin.<id>.` namespace, or a public lifecycle
+/// topic.
 ///
-/// The shared-data arm is an ADDITIONAL requirement on top of
-/// `event.subscribe`, never a replacement for it. `plugin.atlas.*` is
-/// documented as a namespace any plugin may consume, but the namespace check
-/// below grants a plugin only its OWN `plugin.<id>.` prefix, so before this
-/// arm existed the world model was reachable by exactly one plugin: whichever
-/// one happened to be named `atlas`. A plugin id is not a capability model.
-///
-/// Adding the topics to `PUBLIC_TOPICS_FOR_SUBSCRIBE` would have been the
-/// opposite error. A reconstruction is derived imagery of wherever the
-/// aircraft flew and an occupancy field is a planning input, so neither is
-/// public. The mapping lives in `ados_protocol::atlas` beside the topic
-/// constants themselves and matches exact topics, so a look-alike such as
-/// `plugin.atlas.occupancy.evil` inherits nothing.
+/// The shared-topic arm is an ADDITIONAL requirement on top of
+/// `event.subscribe`, never a replacement for it: a subscriber needs the
+/// capability the owner declared for that topic (a catalog capability such as
+/// `telemetry.read`, or one the owner declares itself), which the operator
+/// granted it. The owner itself needs none. Shared topics match exactly, so a
+/// look-alike such as `<shared topic>.evil` inherits nothing and falls through
+/// to the ordinary namespace rule.
 pub fn is_subscribe_allowed(
     plugin_id: &str,
     topic_pattern: &str,
     granted_caps: &BTreeSet<String>,
+    shared: &SharedTopics,
 ) -> bool {
     if !granted_caps.contains("event.subscribe") || !topic_well_formed(topic_pattern) {
         return false;
     }
-    if let Some(cap) = ados_protocol::atlas::atlas_topic_subscribe_capability(topic_pattern) {
-        return granted_caps.contains(cap);
+    if let Some(topic) = shared.find(topic_pattern) {
+        return topic.owner == plugin_id || granted_caps.contains(&topic.subscribe_capability);
     }
     if topic_pattern.starts_with(&format!("{PLUGIN_NAMESPACE}{plugin_id}.")) {
         return true;
@@ -223,10 +273,16 @@ pub fn is_subscribe_allowed(
 
 /// Whether the plugin may publish to `topic`. Mirrors
 /// `events.is_publish_allowed`: the plugin's own namespace is always
-/// publishable; otherwise `event.publish` is required and the reserved
+/// publishable; a shared topic is publishable by its owner with
+/// `event.publish`; otherwise `event.publish` is required and the reserved
 /// namespaces (including every other plugin's) are refused. The host world
 /// model namespace is refused even to a plugin whose id would make it "own".
-pub fn is_publish_allowed(plugin_id: &str, topic: &str, granted_caps: &BTreeSet<String>) -> bool {
+pub fn is_publish_allowed(
+    plugin_id: &str,
+    topic: &str,
+    granted_caps: &BTreeSet<String>,
+    shared: &SharedTopics,
+) -> bool {
     if !topic_well_formed(topic) || topic.starts_with(HOST_ATLAS_NAMESPACE) {
         return false;
     }
@@ -235,6 +291,9 @@ pub fn is_publish_allowed(plugin_id: &str, topic: &str, granted_caps: &BTreeSet<
     }
     if !granted_caps.contains("event.publish") {
         return false;
+    }
+    if let Some(declared) = shared.find(topic) {
+        return declared.owner == plugin_id;
     }
     !RESERVED_PUBLISH_PREFIXES
         .iter()
@@ -278,6 +337,7 @@ pub fn prepare_publish(
     plugin_id: &str,
     args: &Value,
     granted_caps: &BTreeSet<String>,
+    shared: &SharedTopics,
     now_ms: i64,
 ) -> PublishOutcome {
     let Some(topic) = arg_str(args, "topic") else {
@@ -288,7 +348,7 @@ pub fn prepare_publish(
             "topic must be 1-{EVENT_TOPIC_MAX_BYTES} printable ASCII bytes"
         )));
     }
-    if !is_publish_allowed(plugin_id, topic, granted_caps) {
+    if !is_publish_allowed(plugin_id, topic, granted_caps, shared) {
         return PublishOutcome::Denied(RpcError(format!("publish not permitted on topic {topic}")));
     }
     let payload = arg_map(args, "payload");
@@ -312,6 +372,7 @@ pub fn prepare_subscribe(
     plugin_id: &str,
     args: &Value,
     granted_caps: &BTreeSet<String>,
+    shared: &SharedTopics,
 ) -> Result<String, RpcError> {
     let Some(pattern) = arg_str(args, "topic") else {
         return Err(RpcError("topic must be a string".to_string()));
@@ -321,7 +382,7 @@ pub fn prepare_subscribe(
             "topic must be 1-{EVENT_TOPIC_MAX_BYTES} printable ASCII bytes"
         )));
     }
-    if !is_subscribe_allowed(plugin_id, pattern, granted_caps) {
+    if !is_subscribe_allowed(plugin_id, pattern, granted_caps, shared) {
         return Err(RpcError(format!("subscribe not permitted on {pattern}")));
     }
     Ok(pattern.to_string())
@@ -345,7 +406,8 @@ pub fn event_deliver_args(event: &Event) -> Value {
 }
 
 /// Route a host-coupled method to its [`HostServices`] hook. The event surface,
-/// `ping`, `mavlink.subscribe`, and `vision.subscribe_frames` are handled in the
+/// `ping`, and the streaming subscribe methods (`telemetry.subscribe`,
+/// `mavlink.subscribe`, `vision.subscribe_frames`, ...) are handled in the
 /// server before this is reached (they arm a push stream); this routes the
 /// remaining host-coupled methods. With the [`NoopHost`](crate::host::NoopHost)
 /// every one returns `Ok(not_implemented(...))`, mirroring the Python stub
@@ -356,9 +418,10 @@ pub fn event_deliver_args(event: &Event) -> Value {
 /// and config-write methods await a socket, an HTTP reply or file work; the
 /// in-process methods complete synchronously.
 ///
-/// `granted_caps` is the caller's verified capability set. Only the three
+/// `granted_caps` is the caller's verified capability set. Only the
 /// payload-gated methods (`mavlink.send`, `mavlink.register_component`,
-/// `peripheral.register_driver`) consume it; they apply their capability gate
+/// `peripheral.register_driver`, and `cloud.publish` for its detection stream)
+/// consume it; they apply their capability gate
 /// inside the handler, after argument validation, exactly where the Python
 /// handlers apply it. The other methods are fully gated at the dispatch level and
 /// ignore it.
@@ -370,7 +433,6 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
     granted_caps: &BTreeSet<String>,
 ) -> Result<HostResult, HostError> {
     match method {
-        Method::TelemetrySubscribe => host.telemetry_subscribe(plugin_id, args),
         Method::TelemetryExtend => host.telemetry_extend(plugin_id, args),
         Method::MissionRead => host.mission_read(plugin_id, args),
         Method::MissionWrite => host.mission_write(plugin_id, args),
@@ -409,6 +471,12 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::RadioAuxStreamSubscribe => {
             Ok(crate::host::not_implemented("radio.aux_stream.subscribe"))
         }
+        // Cloud relay: forward to the relay's local publish socket. A publish
+        // on the shared detection stream is checked inline against
+        // `vision.detection.publish`, so this one consumes `granted_caps`.
+        Method::CloudPublish => host.cloud_publish(plugin_id, args, granted_caps).await,
+        Method::CloudRecordsPut => host.cloud_records_put(plugin_id, args).await,
+        Method::OffloadAdvertise => host.offload_advertise(plugin_id, args).await,
         // Vision request/response methods proxy to the engine and await its
         // reply. (vision.subscribe_frames is handled in the server, where it
         // arms the frame-descriptor push stream, never reaching here.)
@@ -445,7 +513,9 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         | Method::ButtonSubscribe
         // display.zone.subscribe arms the tap push stream in the server (like
         // button.subscribe) and never reaches the facade.
-        | Method::DisplayZoneSubscribe => Ok(crate::host::not_implemented("event")),
+        | Method::DisplayZoneSubscribe
+        // telemetry.subscribe arms the paced vehicle-state push in the server.
+        | Method::TelemetrySubscribe => Ok(crate::host::not_implemented("event")),
     }
 }
 
@@ -455,6 +525,27 @@ mod tests {
 
     fn caps(items: &[&str]) -> BTreeSet<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn none() -> SharedTopics {
+        SharedTopics::default()
+    }
+
+    /// `com.example.mapper` shares a pose topic (catalog capability) and a
+    /// world topic (a capability it declares itself).
+    fn mapper() -> SharedTopics {
+        SharedTopics::new(vec![
+            SharedTopic {
+                topic: "plugin.mapper.pose".to_string(),
+                owner: "com.example.mapper".to_string(),
+                subscribe_capability: "telemetry.read".to_string(),
+            },
+            SharedTopic {
+                topic: "plugin.mapper.occupancy".to_string(),
+                owner: "com.example.mapper".to_string(),
+                subscribe_capability: "plugin.mapper.world.read".to_string(),
+            },
+        ])
     }
 
     #[test]
@@ -468,7 +559,12 @@ mod tests {
 
     #[test]
     fn publish_allows_own_namespace_without_publish_cap() {
-        assert!(is_publish_allowed("demo", "plugin.demo.metric", &caps(&[])));
+        assert!(is_publish_allowed(
+            "demo",
+            "plugin.demo.metric",
+            &caps(&[]),
+            &none()
+        ));
     }
 
     #[test]
@@ -476,96 +572,116 @@ mod tests {
         assert!(!is_publish_allowed(
             "demo",
             "mavlink.x",
-            &caps(&["event.publish"])
+            &caps(&["event.publish"]),
+            &none()
         ));
         assert!(is_publish_allowed(
             "demo",
             "custom.topic",
-            &caps(&["event.publish"])
+            &caps(&["event.publish"]),
+            &none()
         ));
     }
 
     #[test]
-    fn subscribe_refuses_shared_world_data_without_the_read_capability() {
-        // `event.subscribe` alone is not enough. A reconstruction descriptor
-        // names where imagery of wherever the aircraft flew can be fetched, so
-        // it is gated on top of the subscribe capability rather than by it.
+    fn a_shared_topic_needs_the_owners_declared_capability_on_top_of_subscribe() {
+        let shared = mapper();
+        let topic = "plugin.mapper.occupancy";
+        // `event.subscribe` alone is not enough, and a different capability
+        // does not substitute for the declared one.
         assert!(!is_subscribe_allowed(
-            "demo",
-            ados_protocol::atlas::PLUGIN_ATLAS_OCCUPANCY_TOPIC,
-            &caps(&["event.subscribe"])
-        ));
-    }
-
-    #[test]
-    fn subscribe_allows_shared_world_data_with_the_read_capability() {
-        assert!(is_subscribe_allowed(
-            "demo",
-            ados_protocol::atlas::PLUGIN_ATLAS_OCCUPANCY_TOPIC,
-            &caps(&[
-                "event.subscribe",
-                ados_protocol::atlas::ATLAS_WORLD_READ_CAP
-            ])
-        ));
-    }
-
-    #[test]
-    fn subscribe_gates_the_world_pose_on_telemetry_read() {
-        let topic = ados_protocol::atlas::PLUGIN_ATLAS_POSE_TOPIC;
-        // The pose is the same class of data as vehicle telemetry, in the
-        // world frame, so it takes the capability that already covers that —
-        // and the artifact capability does not substitute for it.
-        assert!(!is_subscribe_allowed(
-            "demo",
+            "com.example.viewer",
             topic,
-            &caps(&["event.subscribe"])
+            &caps(&["event.subscribe"]),
+            &shared
         ));
         assert!(!is_subscribe_allowed(
-            "demo",
+            "com.example.viewer",
             topic,
-            &caps(&[
-                "event.subscribe",
-                ados_protocol::atlas::ATLAS_WORLD_READ_CAP
-            ])
+            &caps(&["event.subscribe", "telemetry.read"]),
+            &shared
         ));
         assert!(is_subscribe_allowed(
-            "demo",
+            "com.example.viewer",
             topic,
-            &caps(&["event.subscribe", ados_protocol::atlas::ATLAS_POSE_READ_CAP])
+            &caps(&["event.subscribe", "plugin.mapper.world.read"]),
+            &shared
         ));
-    }
-
-    #[test]
-    fn a_plugin_named_atlas_no_longer_gets_the_namespace_for_free() {
-        // The revocation this gate performs, stated as a test so it cannot be
-        // mistaken for a no-op: the own-namespace rule used to hand the whole
-        // shared world-model namespace to whichever plugin was named `atlas`.
-        assert!(!is_subscribe_allowed(
-            "atlas",
-            ados_protocol::atlas::PLUGIN_ATLAS_SPLAT_TOPIC,
-            &caps(&["event.subscribe"])
-        ));
-        // Its own non-shared topics are unaffected.
+        // A catalog capability works the same way.
         assert!(is_subscribe_allowed(
-            "atlas",
-            "plugin.atlas.private-metric",
-            &caps(&["event.subscribe"])
+            "com.example.viewer",
+            "plugin.mapper.pose",
+            &caps(&["event.subscribe", "telemetry.read"]),
+            &shared
+        ));
+        // The declared capability never replaces event.subscribe.
+        assert!(!is_subscribe_allowed(
+            "com.example.viewer",
+            topic,
+            &caps(&["plugin.mapper.world.read"]),
+            &shared
+        ));
+        // The owner needs no extra capability to read its own topic.
+        assert!(is_subscribe_allowed(
+            "com.example.mapper",
+            topic,
+            &caps(&["event.subscribe"]),
+            &shared
         ));
     }
 
     #[test]
-    fn subscribe_does_not_let_a_look_alike_topic_inherit_the_grant() {
-        // The mapping matches exact topics, so a longer topic that merely
-        // starts with a gated one names no capability and falls through to the
-        // ordinary namespace rule.
+    fn a_shared_topic_is_matched_exactly() {
+        // A longer topic that merely starts with a shared one names no
+        // capability and falls through to the ordinary namespace rule.
         assert!(!is_subscribe_allowed(
-            "demo",
-            "plugin.atlas.occupancy.evil",
-            &caps(&[
-                "event.subscribe",
-                ados_protocol::atlas::ATLAS_WORLD_READ_CAP
-            ])
+            "com.example.viewer",
+            "plugin.mapper.occupancy.evil",
+            &caps(&["event.subscribe", "plugin.mapper.world.read"]),
+            &mapper()
         ));
+        // Undeclared, the same topic is some other plugin's private namespace.
+        assert!(!is_subscribe_allowed(
+            "com.example.viewer",
+            "plugin.mapper.occupancy",
+            &caps(&["event.subscribe", "plugin.mapper.world.read"]),
+            &none()
+        ));
+    }
+
+    #[test]
+    fn only_the_owner_publishes_a_shared_topic_and_only_with_event_publish() {
+        let shared = mapper();
+        let topic = "plugin.mapper.pose";
+        assert!(is_publish_allowed(
+            "com.example.mapper",
+            topic,
+            &caps(&["event.publish"]),
+            &shared
+        ));
+        assert!(!is_publish_allowed(
+            "com.example.mapper",
+            topic,
+            &caps(&[]),
+            &shared
+        ));
+        assert!(!is_publish_allowed(
+            "com.example.impostor",
+            topic,
+            &caps(&["event.publish"]),
+            &shared
+        ));
+    }
+
+    #[test]
+    fn a_shared_topic_is_delivered_only_from_its_owner() {
+        let shared = mapper();
+        let from_owner = event("plugin.mapper.pose", "com.example.mapper");
+        assert!(may_deliver("com.example.viewer", &from_owner, &shared));
+        let spoofed = event("plugin.mapper.pose", "com.example.impostor");
+        assert!(!may_deliver("com.example.viewer", &spoofed, &shared));
+        // Without the declaration the owner's event stays private.
+        assert!(!may_deliver("com.example.viewer", &from_owner, &none()));
     }
 
     #[test]
@@ -573,13 +689,20 @@ mod tests {
         assert!(is_subscribe_allowed(
             "demo",
             "agent.ready",
-            &caps(&["event.subscribe"])
+            &caps(&["event.subscribe"]),
+            &none()
         ));
-        assert!(!is_subscribe_allowed("demo", "agent.ready", &caps(&[])));
+        assert!(!is_subscribe_allowed(
+            "demo",
+            "agent.ready",
+            &caps(&[]),
+            &none()
+        ));
         assert!(is_subscribe_allowed(
             "demo",
             "plugin.demo.x",
-            &caps(&["event.subscribe"])
+            &caps(&["event.subscribe"]),
+            &none()
         ));
     }
 
@@ -602,7 +725,7 @@ mod tests {
     #[test]
     fn prepare_publish_denies_reserved_topic() {
         let args = Value::Map(vec![(Value::from("topic"), Value::from("mavlink.x"))]);
-        match prepare_publish("demo", &args, &caps(&["event.publish"]), 0) {
+        match prepare_publish("demo", &args, &caps(&["event.publish"]), &none(), 0) {
             PublishOutcome::Denied(e) => {
                 assert_eq!(e.0, "publish not permitted on topic mavlink.x")
             }
@@ -616,17 +739,20 @@ mod tests {
         assert!(!is_publish_allowed(
             "com.example.a",
             "plugin.com.example.b.status",
-            &publish
+            &publish,
+            &none()
         ));
         assert!(!is_publish_allowed(
             "com.example.a",
-            ados_protocol::atlas::PLUGIN_ATLAS_OCCUPANCY_TOPIC,
-            &publish
+            "plugin.atlas.occupancy",
+            &publish,
+            &none()
         ));
         assert!(is_publish_allowed(
             "com.example.a",
             "plugin.com.example.a.status",
-            &caps(&[])
+            &caps(&[]),
+            &none()
         ));
     }
 
@@ -645,16 +771,20 @@ mod tests {
         // delivery keys on the host-stamped publisher, so neither plugin reads
         // or spoofs the other's events.
         let spoof = event("plugin.com.acme.tools.status", "com.acme");
-        assert!(!may_deliver("com.acme.tools", &spoof));
+        assert!(!may_deliver("com.acme.tools", &spoof, &none()));
         let private = event("plugin.com.acme.tools.status", "com.acme.tools");
-        assert!(!may_deliver("com.acme", &private));
-        assert!(may_deliver("com.acme.tools", &private));
+        assert!(!may_deliver("com.acme", &private, &none()));
+        assert!(may_deliver("com.acme.tools", &private, &none()));
         let host = event(
             "plugin.atlas.occupancy",
             crate::vehicle_events::HOST_PUBLISHER,
         );
-        assert!(may_deliver("com.acme", &host));
-        assert!(may_deliver("com.acme", &event("vehicle.armed", "host")));
+        assert!(may_deliver("com.acme", &host, &none()));
+        assert!(may_deliver(
+            "com.acme",
+            &event("vehicle.armed", "host"),
+            &none()
+        ));
     }
 
     #[test]
@@ -662,10 +792,10 @@ mod tests {
         let long = format!("plugin.demo.{}", "a".repeat(EVENT_TOPIC_MAX_BYTES));
         let args = Value::Map(vec![(Value::from("topic"), Value::from(long.as_str()))]);
         assert!(matches!(
-            prepare_publish("demo", &args, &caps(&[]), 0),
+            prepare_publish("demo", &args, &caps(&[]), &none(), 0),
             PublishOutcome::Denied(_)
         ));
-        assert!(prepare_subscribe("demo", &args, &caps(&["event.subscribe"])).is_err());
+        assert!(prepare_subscribe("demo", &args, &caps(&["event.subscribe"]), &none()).is_err());
 
         let big = Value::Map(vec![(
             Value::from("blob"),
@@ -676,7 +806,7 @@ mod tests {
             (Value::from("payload"), big),
         ]);
         assert!(matches!(
-            prepare_publish("demo", &args, &caps(&[]), 0),
+            prepare_publish("demo", &args, &caps(&[]), &none(), 0),
             PublishOutcome::Denied(_)
         ));
     }

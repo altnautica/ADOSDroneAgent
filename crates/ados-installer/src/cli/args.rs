@@ -86,6 +86,11 @@ pub struct Args {
     /// `--no-rtl-driver` — skip building the RTL8812EU WFB radio driver (a node
     /// with no long-range radio, e.g. workstation/compute, does not need it).
     pub no_rtl_driver: bool,
+    /// `--world-engine` / `--no-world-engine` — install (or skip) the first-party
+    /// World Engine extension (3D world model + compute offload). `None` means
+    /// the profile default: on for workstation/compute, off for
+    /// drone/ground-station. The last of the two flags wins.
+    pub world_engine: Option<bool>,
     /// `--no-reboot` — never perform the single automatic reboot, even when
     /// provisioning is staged that needs one (a camera/display overlay, an I2C
     /// dtparam). The install then reports `degraded` and NAMES what is staged,
@@ -141,6 +146,8 @@ impl Args {
                 "--no-color" => args.no_color = true,
                 "--ascii" => args.ascii = true,
                 "--no-rtl-driver" => args.no_rtl_driver = true,
+                "--world-engine" => args.world_engine = Some(true),
+                "--no-world-engine" => args.world_engine = Some(false),
                 "--no-reboot" => args.no_reboot = true,
                 "--yes" | "-y" => args.yes = true,
                 "--non-interactive" => args.non_interactive = true,
@@ -308,6 +315,33 @@ mod tests {
     fn no_rtl_driver_flag_parses() {
         assert!(Args::parse(["--no-rtl-driver"]).unwrap().no_rtl_driver);
         assert!(!Args::default().no_rtl_driver);
+    }
+
+    #[test]
+    fn world_engine_flags_parse_to_an_explicit_choice() {
+        assert_eq!(
+            Args::parse(["--world-engine"]).unwrap().world_engine,
+            Some(true)
+        );
+        assert_eq!(
+            Args::parse(["--no-world-engine"]).unwrap().world_engine,
+            Some(false)
+        );
+        // Absent means "the profile decides", not off.
+        assert_eq!(Args::default().world_engine, None);
+        // The last flag wins, so a wrapper can append an override.
+        assert_eq!(
+            Args::parse(["--world-engine", "--no-world-engine"])
+                .unwrap()
+                .world_engine,
+            Some(false)
+        );
+        assert_eq!(
+            Args::parse(["--no-world-engine", "--world-engine"])
+                .unwrap()
+                .world_engine,
+            Some(true)
+        );
     }
 
     #[test]

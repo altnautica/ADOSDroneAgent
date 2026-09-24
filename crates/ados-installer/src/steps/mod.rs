@@ -22,6 +22,8 @@
 //!               start  ←── systemd + fetch_binaries
 //!                 │
 //!               health
+//!                 │
+//!             extensions (optional)
 //! ```
 
 use crate::graph::Step;
@@ -34,6 +36,7 @@ pub mod config_identity;
 pub mod config_migrate;
 pub mod deps;
 pub mod dkms;
+pub mod extensions;
 pub mod fetch_binaries;
 pub mod gpu_provision;
 pub mod health;
@@ -88,6 +91,10 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(systemd::Systemd),
         Box::new(start::Start),
         Box::new(health::Health),
+        // After health, so the plugin host (its sockets and its loopback guard)
+        // and the control surface are up before the World Engine extension is
+        // installed and enabled against them.
+        Box::new(extensions::Extensions),
         // LAST, after health. Arming a hard-reset-on-stall BEFORE the step that
         // starts every service meant a slow startup reset the board mid-install,
         // and again on every boot after. It is default-off now, but someone will
@@ -111,7 +118,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 24);
+        assert_eq!(order.len(), 25);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -163,6 +170,10 @@ mod tests {
         assert!(pos("systemd") < pos("start"));
         assert!(pos("fetch_binaries") < pos("start"));
         assert!(pos("start") < pos("health"));
+        // The extension installs against a running, health-checked node, and
+        // the reboot decision is taken after it.
+        assert!(pos("health") < pos("extensions"));
+        assert!(pos("extensions") < pos("reboot"));
         // Config migration runs after the config is written and before
         // anything starts a unit that would load it. This edge is the whole
         // point of the step: it is what keeps migration off eleven concurrent

@@ -1,22 +1,16 @@
-"""ADOS Drone Agent plugin host.
+"""ADOS Drone Agent plugin support (Python side).
 
 Plugins extend the agent without modifying core. A plugin is an
 ``.adosplug`` archive (signed zip) containing a ``manifest.yaml``,
-optional Python wheel for the agent half, and optional GCS bundle.
-The agent loads, validates, and supervises plugins via the
-:class:`PluginSupervisor` in :mod:`ados.plugins.supervisor`.
+an optional agent half, and an optional GCS bundle. The native plugin
+host (``ados-plugin-host`` plus the ``/api/plugins`` lifecycle in
+``ados-control``) installs, verifies, sandboxes and supervises them;
+each subprocess plugin runs as a generated service unit.
 
-Two install modes are supported:
-
-* **Built-in plugins** are first-party Python packages registered via
-  the ``ados.plugins`` entry-points group. They run in-process inside
-  the supervisor when the manifest declares ``isolation: inprocess``.
-* **Third-party plugins** are installed from ``.adosplug`` archives
-  into ``/var/ados/plugins/<plugin-id>/``. Each one runs as a
-  generated systemd unit (``ados-plugin-<id>.service``) inside a
-  shared ``ados-plugins.slice`` cgroup slice. systemd handles
-  restart-on-failure, resource limits (via slice and per-unit drops),
-  and watchdog. The supervisor mediates lifecycle.
+What stays in Python: the manifest model (:mod:`ados.plugins.manifest`),
+the archive packer/parser used by ``ados plugin sign`` and ``lint``, the
+``ados-plugin-runner`` that hosts a Python agent half and its IPC client,
+and the built-in plugins under :mod:`ados.plugins.builtin`.
 
 Public API surface kept narrow on purpose. Plugin authors consume
 :mod:`ados_sdk` (the SDK package), not this module directly.
@@ -28,7 +22,6 @@ from ados.plugins.errors import (
     ManifestError,
     PluginError,
     SignatureError,
-    SupervisorError,
 )
 from ados.plugins.manifest import (
     AgentBlock,
@@ -43,5 +36,4 @@ __all__ = [
     "PluginError",
     "PluginManifest",
     "SignatureError",
-    "SupervisorError",
 ]

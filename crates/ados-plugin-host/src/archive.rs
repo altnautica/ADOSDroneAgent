@@ -61,6 +61,11 @@ pub struct ArchiveContents {
     pub payload_hash: [u8; 32],
     pub signer_id: Option<String>,
     pub signature_b64: Option<String>,
+    /// The `SIGNATURE` entry verbatim, when the archive carries one.
+    pub signature_text: Option<String>,
+    /// Lowercase hex sha256 of every entry except `SIGNATURE`, by path: the
+    /// list the canonical payload hash is computed over.
+    pub file_digests: BTreeMap<String, String>,
     /// The raw archive bytes, retained so the caller can unpack after verify.
     pub raw_archive_bytes: Vec<u8>,
 }
@@ -129,12 +134,22 @@ fn read_entry_bounded<R: Read>(reader: &mut R, name: &str) -> Result<Vec<u8>, Ar
 /// lowercase hex of the entry bytes' sha256, exactly as Python's
 /// `hashlib.sha256(...).hexdigest()`.
 pub fn canonical_payload_hash(entries: &BTreeMap<String, Vec<u8>>) -> [u8; 32] {
+    canonical_hash_of_digests(&entry_digests(entries))
+}
+
+/// The lowercase hex sha256 of every entry except [`SIGNATURE_FILENAME`].
+pub fn entry_digests(entries: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, String> {
+    entries
+        .iter()
+        .filter(|(path, _)| path.as_str() != SIGNATURE_FILENAME)
+        .map(|(path, bytes)| (path.clone(), hex::encode(Sha256::digest(bytes))))
+        .collect()
+}
+
+/// The canonical payload hash over already-computed per-entry digests.
+pub fn canonical_hash_of_digests(digests: &BTreeMap<String, String>) -> [u8; 32] {
     let mut h = Sha256::new();
-    for (path, bytes) in entries {
-        if path == SIGNATURE_FILENAME {
-            continue;
-        }
-        let digest = hex::encode(Sha256::digest(bytes));
+    for (path, digest) in digests {
         h.update(format!("{path}\n{digest}\n").as_bytes());
     }
     h.finalize().into()
@@ -187,14 +202,20 @@ pub fn parse_archive_bytes(raw: Vec<u8>) -> Result<ArchiveContents, LifecycleErr
     let manifest = PluginManifest::from_yaml_text(manifest_text)
         .map_err(|e: ManifestError| ArchiveError(e.0))?;
 
-    let payload_hash = canonical_payload_hash(&entries);
+    let file_digests = entry_digests(&entries);
+    let payload_hash = canonical_hash_of_digests(&file_digests);
     let (signer_id, signature_b64) = read_signature(entries.get(SIGNATURE_FILENAME))?;
+    let signature_text = entries
+        .get(SIGNATURE_FILENAME)
+        .map(|b| String::from_utf8_lossy(b).into_owned());
 
     Ok(ArchiveContents {
         manifest,
         payload_hash,
         signer_id,
         signature_b64,
+        signature_text,
+        file_digests,
         raw_archive_bytes: raw,
     })
 }
@@ -300,18 +321,43 @@ fn read_signature(
 /// exists, and the agent binary at `agent.entrypoint` when
 /// `agent.runtime: rust`. A Python agent's `module:Class` entrypoint is
 /// resolved by the runner, not a packed file, so any value containing a `:` is
-/// excluded. Byte-identical to `_required_entrypoints` in
-/// `ados/plugins/archive.py`.
-fn required_entrypoints(manifest: &PluginManifest) -> Vec<(&'static str, &str)> {
-    let mut required: Vec<(&'static str, &str)> = Vec::new();
+/// excluded. A `bin:<name>` entrypoint or service command requires this host's
+/// `<arch>-<os>` entry of `agent.binaries`, unless that path is delivered as a
+/// payload (fetched and hash-checked separately).
+fn required_entrypoints(manifest: &PluginManifest, arch_os: &str) -> Vec<(String, String)> {
+    let mut required: Vec<(String, String)> = Vec::new();
     if let Some(gcs) = &manifest.gcs {
         if !gcs.entrypoint.contains(':') {
-            required.push(("gcs.entrypoint", gcs.entrypoint.as_str()));
+            required.push(("gcs.entrypoint".to_string(), gcs.entrypoint.clone()));
         }
     }
-    if let Some(agent) = &manifest.agent {
-        if agent.runtime == crate::manifest::AgentRuntime::Rust && !agent.entrypoint.contains(':') {
-            required.push(("agent.entrypoint", agent.entrypoint.as_str()));
+    let Some(agent) = &manifest.agent else {
+        return required;
+    };
+    let payload_paths: BTreeSet<&str> = agent.payloads.iter().map(|p| p.path.as_str()).collect();
+    let mut bins: Vec<(String, String)> = Vec::new();
+    match crate::manifest::bin_reference(&agent.entrypoint) {
+        Some(name) => bins.push(("agent.entrypoint".to_string(), name.to_string())),
+        None => {
+            if agent.runtime == crate::manifest::AgentRuntime::Rust
+                && !agent.entrypoint.contains(':')
+            {
+                required.push(("agent.entrypoint".to_string(), agent.entrypoint.clone()));
+            }
+        }
+    }
+    for service in crate::services::declared_services(manifest).unwrap_or_default() {
+        if let Some(first) = service.command.split_whitespace().next() {
+            if let Some(name) = crate::manifest::bin_reference(first) {
+                bins.push((format!("service {}", service.name), name.to_string()));
+            }
+        }
+    }
+    for (label, name) in bins {
+        if let Some(path) = agent.binary_path(&name, arch_os) {
+            if !payload_paths.contains(path) {
+                required.push((format!("{label} binary {name}"), path.to_string()));
+            }
         }
     }
     required
@@ -323,13 +369,15 @@ fn required_entrypoints(manifest: &PluginManifest) -> Vec<(&'static str, &str)> 
 /// archive (packed or unpacked). Without this check a cloud-relayed install of
 /// an archive whose GCS bundle or agent binary was never built reported
 /// success, then surfaced as an empty iframe or a unit dying with 203/EXEC —
-/// the failure landing two layers away from its cause.
+/// the failure landing two layers away from its cause. `arch_os` selects the
+/// `binaries` entry a `bin:` reference needs on this host.
 pub fn verify_entrypoints_present(
     manifest: &PluginManifest,
     present_paths: &BTreeSet<String>,
+    arch_os: &str,
 ) -> Result<(), ArchiveError> {
-    for (label, rel) in required_entrypoints(manifest) {
-        if !present_paths.contains(rel) {
+    for (label, rel) in required_entrypoints(manifest, arch_os) {
+        if !present_paths.contains(&rel) {
             return Err(ArchiveError(format!(
                 "plugin {}: manifest declares {label} {rel:?} but that file is \
                  not present in the archive",

@@ -140,6 +140,9 @@ include = ["ados*"]
 "ados.dashboard" = ["static/**/*"]
 "ados.cockpit" = ["static/**/*"]
 "ados.data" = ["*.json"]
+"ados.plugins.builtin.geofence" = ["manifest.yaml"]
+"ados.plugins.builtin.mavlink_inspector" = ["manifest.yaml"]
+"ados.plugins.builtin.telemetry_logger" = ["manifest.yaml"]
 
 
 [tool.ruff]

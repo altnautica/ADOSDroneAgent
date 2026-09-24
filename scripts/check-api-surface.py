@@ -69,10 +69,13 @@ SOCKET_HINT = re.compile(r"""wss?://|WebSocket|["'`]wss?:?["'`]""")
 METHOD_WINDOW_LINES = 6
 
 # A client interpolation, with whatever call sits inside it
-# (``${encodeURIComponent(id)}``). Collapsed to one placeholder segment before
-# literals are extracted, because the regex above would otherwise stop at the
-# opening paren and report half a path.
-INTERPOLATION = re.compile(r"\$\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}")
+# (``${encodeURIComponent(id)}``, or a Python f-string's ``{_seg(plugin_id)}``).
+# Collapsed to one placeholder segment before literals are extracted, because
+# the regex above would otherwise stop at the opening paren and report half a
+# path.
+INTERPOLATION = re.compile(
+    r"\$\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}|\{[A-Za-z_][\w.]*\([^{}()]*\)\}"
+)
 
 # A line that is prose, not a call. Doc comments name path FAMILIES
 # (``/api/v1/setup/*``, ``/api/pairing/*``) that no router registers verbatim,

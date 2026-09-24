@@ -51,7 +51,9 @@ use crate::host::{not_implemented, HostError, HostResult, HostServices};
 use crate::vehicle_events::FcIdentity;
 use crate::vision_client::VisionClient;
 
+mod advertise;
 mod caps;
+mod cloud;
 mod config_control;
 mod config_store;
 mod convert;
@@ -62,6 +64,7 @@ mod host_services;
 mod mavlink_gate;
 mod offload;
 mod setpoint;
+mod telemetry;
 
 #[cfg(test)]
 use self::caps::*;
@@ -74,6 +77,7 @@ use self::forwards::*;
 use self::mavlink_gate::*;
 use self::offload::*;
 use self::setpoint::*;
+use self::telemetry::*;
 use crate::args::*;
 
 pub use self::caps::{write_ungrantable_caps, UNGRANTABLE_CAPS_SIDECAR};
@@ -161,6 +165,15 @@ pub struct RealHost {
     /// per-instance (rather than `static`) so a test host with an overridden
     /// `radio_aux_cmd_path` round-trips against its stub.
     aux_reader: std::sync::OnceLock<tokio::sync::broadcast::Sender<(u8, Vec<u8>)>>,
+    /// The MAVLink service's vehicle-state socket `telemetry.subscribe` reads
+    /// (the canonical `/run/ados/state.sock`; the daemon passes its run dir's,
+    /// a builder overrides it in tests).
+    vehicle_state_sock: PathBuf,
+    /// The process-global vehicle-state reader, started lazily on the first
+    /// `telemetry.subscribe` and shared by every subscribing plugin, like
+    /// [`aux_reader`](Self::aux_reader): one connection to the state socket
+    /// however many plugins read it.
+    state_reader: std::sync::OnceLock<broadcast::Sender<Arc<Value>>>,
     /// Live streaming perception-offload sessions a plugin opened, keyed by
     /// session id. Each holds its cancel handle + orchestrator task + the node
     /// reach for health reads. A session is closed on an explicit
@@ -184,6 +197,10 @@ pub struct RealHost {
     /// per call so a fresh resolution (e.g. an operator sideload flipping
     /// `needs_model`→`resolved`) is picked up without a restart.
     state_path: PathBuf,
+    /// The cloud relay's local publish socket `cloud.publish` and
+    /// `cloud.records.put` forward to (`<run dir>/cloud-publish.sock`; a
+    /// builder overrides it in tests).
+    cloud_publish_path: PathBuf,
     /// The autopilot's MAVLink identity, recorded from its heartbeats on the
     /// router link. Commands a plugin sends without a target are addressed to
     /// it.
@@ -213,11 +230,14 @@ impl RealHost {
             video_cmd_path: PathBuf::from(VIDEO_CMD_SOCK),
             aux_stream_owner: Mutex::new(None),
             aux_reader: std::sync::OnceLock::new(),
+            vehicle_state_sock: PathBuf::from(VEHICLE_STATE_SOCK),
+            state_reader: std::sync::OnceLock::new(),
             offload_streams: Mutex::new(HashMap::new()),
             offload_session_seq: AtomicU64::new(0),
             workstation_credentials_path: WorkstationCredentials::default_path(),
             offload_link_path: PathBuf::from(OFFLOAD_LINK_SIDECAR),
             state_path: PathBuf::from(crate::state::PLUGIN_STATE_PATH),
+            cloud_publish_path: ados_protocol::cloud_publish::socket_path(),
             fc_identity: Arc::new(FcIdentity::default()),
         }
     }
@@ -226,6 +246,19 @@ impl RealHost {
     /// tests). Production uses the canonical `/var/ados/state/plugin-state.json`.
     pub fn with_state_path(mut self, path: PathBuf) -> Self {
         self.state_path = path;
+        self
+    }
+
+    /// Override the cloud relay publish socket (builder style, tests).
+    pub fn with_cloud_publish_path(mut self, path: PathBuf) -> Self {
+        self.cloud_publish_path = path;
+        self
+    }
+
+    /// Override the vehicle-state socket `telemetry.subscribe` reads (builder
+    /// style; the daemon passes its run dir's, tests a stub's).
+    pub fn with_vehicle_state_socket(mut self, path: PathBuf) -> Self {
+        self.vehicle_state_sock = path;
         self
     }
 

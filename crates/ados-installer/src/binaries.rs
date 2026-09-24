@@ -33,7 +33,8 @@ pub struct PrebuiltBinary {
     pub dest: &'static str,
     /// Hard vs best-effort gate.
     pub gate: Gate,
-    /// Profiles that need this binary (`drone` and/or `ground_station`).
+    /// Profiles that need this binary (`drone`, `ground_station`,
+    /// `workstation`, `compute`).
     pub profiles: &'static [&'static str],
 }
 
@@ -41,13 +42,15 @@ pub struct PrebuiltBinary {
 const BOTH: &[&str] = &["drone", "ground_station"];
 const DRONE: &[&str] = &["drone"];
 const GROUND: &[&str] = &["ground_station"];
-/// The workstation profile (a GPU box / Mac / spare box that reconstructs +
-/// serves perception offload). Distinct from the SBC profiles.
-const WORKSTATION: &[&str] = &["workstation"];
-/// Every profile, including the workstation node. Used for the profile-agnostic core
-/// services every node needs (orchestrator, cloud relay, control front,
-/// logging, TUI) so a `--profile workstation` install fetches them too.
-const ANY: &[&str] = &["drone", "ground_station", "workstation"];
+/// The workstation-class profiles: the operator's `workstation` (a GPU box / Mac
+/// / spare box that reconstructs + serves perception offload) and the lean
+/// headless `compute` worker. Distinct from the SBC profiles.
+const WORKSTATION: &[&str] = &["workstation", "compute"];
+/// Every profile, including the workstation-class nodes. Used for the
+/// profile-agnostic core services every node needs (orchestrator, cloud relay,
+/// control front, plugin host, logging, TUI) so a `--profile workstation` or
+/// `--profile compute` install fetches them too.
+const ANY: &[&str] = &["drone", "ground_station", "workstation", "compute"];
 
 /// The full catalog of prebuilt service binaries.
 ///
@@ -122,13 +125,16 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: ANY,
     },
+    // The native plugin host: the per-plugin sockets, token minting and unit
+    // refresh. Every profile runs it — extensions target workstation and compute
+    // nodes as well as the SBC profiles — so it is fetched on all of them.
     PrebuiltBinary {
         service: "ados-plugin-host",
         asset: "ados-plugin-host-aarch64",
         release_tag: "prebuilt-plugin-host",
         dest: "/opt/ados/bin/ados-plugin-host",
         gate: Gate::BestEffort,
-        profiles: BOTH,
+        profiles: ANY,
     },
     PrebuiltBinary {
         service: "ados-cloud",
@@ -339,7 +345,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
 ];
 
 /// The subset of the catalog needed by `profile`
-/// (`drone` | `ground_station` | `workstation`).
+/// (`drone` | `ground_station` | `workstation` | `compute`).
 pub fn for_profile(profile: &str) -> Vec<&'static PrebuiltBinary> {
     PREBUILT
         .iter()
@@ -797,7 +803,7 @@ mod tests {
     /// board with no camera has nothing to undo it.
     #[test]
     fn every_profile_fetches_the_camera_boot_probe() {
-        for profile in ["drone", "ground_station", "workstation"] {
+        for profile in ["drone", "ground_station", "workstation", "compute"] {
             let svcs: Vec<&str> = for_profile(profile).iter().map(|b| b.service).collect();
             assert!(
                 svcs.contains(&"ados-camera-probe"),
@@ -864,38 +870,41 @@ mod tests {
         );
     }
 
+    /// The workstation-class profiles are full agents. `compute` used to be absent
+    /// from every profile set, so a `--profile compute` Linux install fetched no
+    /// binary at all — not even the supervisor its unit execs.
     #[test]
-    fn workstation_profile_fetches_the_cores_and_the_compute_daemon() {
-        let svcs: Vec<&str> = for_profile("workstation")
-            .iter()
-            .map(|b| b.service)
-            .collect();
-        // The workstation node is a full agent: the orchestrator, cloud relay,
-        // control front (LAN pairing), logging, and TUI, plus the compute daemon.
-        for svc in [
-            "ados-supervisor",
-            "ados-cloud",
-            "ados-control",
-            "ados-logd",
-            "ados-tui",
-            "ados-compute",
-        ] {
-            assert!(
-                svcs.contains(&svc),
-                "workstation profile must fetch {svc}: {svcs:?}"
-            );
-        }
-        // It does NOT fetch the SBC-only flight/radio/video surfaces.
-        for svc in [
-            "ados-mavlink-router",
-            "ados-video",
-            "ados-vision",
-            "ados-radio",
-        ] {
-            assert!(
-                !svcs.contains(&svc),
-                "workstation profile must NOT fetch {svc}: {svcs:?}"
-            );
+    fn workstation_class_profiles_fetch_the_cores_and_the_compute_daemon() {
+        for profile in ["workstation", "compute"] {
+            let svcs: Vec<&str> = for_profile(profile).iter().map(|b| b.service).collect();
+            // The orchestrator, cloud relay, control front (LAN pairing), plugin
+            // host, logging, and TUI, plus the compute daemon.
+            for svc in [
+                "ados-supervisor",
+                "ados-cloud",
+                "ados-control",
+                "ados-plugin-host",
+                "ados-logd",
+                "ados-tui",
+                "ados-compute",
+            ] {
+                assert!(
+                    svcs.contains(&svc),
+                    "{profile} profile must fetch {svc}: {svcs:?}"
+                );
+            }
+            // It does NOT fetch the SBC-only flight/radio/video surfaces.
+            for svc in [
+                "ados-mavlink-router",
+                "ados-video",
+                "ados-vision",
+                "ados-radio",
+            ] {
+                assert!(
+                    !svcs.contains(&svc),
+                    "{profile} profile must NOT fetch {svc}: {svcs:?}"
+                );
+            }
         }
         // The compute daemon degrades (build-from-source on an uncovered arch).
         let compute = PREBUILT
@@ -904,6 +913,21 @@ mod tests {
             .expect("ados-compute in the catalog");
         assert_eq!(compute.gate, Gate::BestEffort);
         assert_eq!(compute.release_tag, "prebuilt-compute");
+    }
+
+    /// Extensions target every node profile, so every profile runs the plugin
+    /// host. The shipped unit is enable-linked everywhere; a profile that did not
+    /// fetch the binary left it inactive behind its `ConditionPathExists`.
+    #[test]
+    fn every_profile_fetches_the_plugin_host() {
+        for profile in ["drone", "ground_station", "workstation", "compute"] {
+            assert!(
+                for_profile(profile)
+                    .iter()
+                    .any(|b| b.service == "ados-plugin-host"),
+                "{profile} must fetch ados-plugin-host"
+            );
+        }
     }
 
     #[test]

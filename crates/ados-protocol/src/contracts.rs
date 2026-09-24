@@ -38,6 +38,7 @@ pub const CONTRACTS: &[ContractMeta] = &[
     ContractMeta { id: "rest.openapi", version: 0, wire: "json", transport: "http", status: "metadata", description: "Native control-surface REST API; versioned by the OpenAPI info.version string, not a registry integer." },
     ContractMeta { id: "state.v1", version: 1, wire: "newline-json", transport: "unix-stream", status: "metadata", description: "Legacy newline-terminated JSON vehicle-state frame; superseded by state.v2. No on-wire version integer." },
     ContractMeta { id: "ws_ticket", version: 1, wire: "string", transport: "websocket-subprotocol", status: "metadata", description: "String-tagged (v1) HMAC-SHA256 WebSocket auth ticket; the version is a string tag, not a wire integer." },  // ados_protocol::ws_ticket::TICKET_KEY_LABEL
+    ContractMeta { id: "cloud-publish", version: 1, wire: "msgpack", transport: "unix-stream", status: "active", description: "Plugin data leaving the node through the cloud relay: the plugin host forwards a gated stream message (QoS 0 broker publish) or keyed JSON record (cloud record upsert) to ados-cloud over a root-only socket, one length-prefixed msgpack request and reply per exchange." },  // ados_protocol::cloud_publish::CLOUD_PUBLISH_VERSION
 ];
 
 /// Every versioned on-disk state sidecar. The file path is carried in

@@ -242,6 +242,9 @@ pub struct AppState {
     /// task the daemon starts; a state built without one serves an engine that
     /// has seen no sample, which the route reports as stale with no packs.
     pub battery: Arc<parking_lot::Mutex<BatteryEngine>>,
+    /// The plugin lifecycle the `/api/plugins/*` routes drive: the write lock
+    /// around the node's `PluginSupervisor` plus the seams tests redirect.
+    pub plugins: crate::routes::plugins_lifecycle::PluginLifecycle,
 }
 
 /// The aux response listener's shutdown handles.
@@ -290,6 +293,8 @@ impl AppState {
         dashboard_pin: Arc<DashboardPin>,
         mcp_tokens: Arc<crate::mcp::McpTokenStore>,
     ) -> Self {
+        let plugins =
+            crate::routes::plugins_lifecycle::PluginLifecycle::production(board_path.clone());
         Self {
             pairing,
             state,
@@ -307,6 +312,7 @@ impl AppState {
             battery: Arc::new(parking_lot::Mutex::new(BatteryEngine::new(
                 BatteryConfig::default(),
             ))),
+            plugins,
         }
     }
 
@@ -351,6 +357,15 @@ impl AppState {
     /// Attach the battery engine the daemon's battery task feeds.
     pub fn with_battery(mut self, battery: Arc<parking_lot::Mutex<BatteryEngine>>) -> Self {
         self.battery = battery;
+        self
+    }
+
+    /// Replace the plugin lifecycle (a test points it at a tempdir layout).
+    pub fn with_plugins(
+        mut self,
+        plugins: crate::routes::plugins_lifecycle::PluginLifecycle,
+    ) -> Self {
+        self.plugins = plugins;
         self
     }
 

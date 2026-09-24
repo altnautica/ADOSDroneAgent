@@ -1326,11 +1326,8 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // hoisted above the respawn loop; this bring-up's command socket just
         // takes a clone, so a subscriber attached after a respawn is fed by the
         // same still-running receive half.
-        let aux_cmd_state = AuxCmdState {
-            proc: proc.clone(),
-            cfg: Arc::new(cfg.clone()),
-            rx_tx: aux_app_tx.clone(),
-        };
+        let aux_cmd_state =
+            AuxCmdState::radio(proc.clone(), Arc::new(cfg.clone()), aux_app_tx.clone());
         let aux_cmd_cancel = task_cancel.clone();
         let aux_cmd_sock_path = ados_radio::paths::run_path("radio-aux.sock");
         let aux_cmd_server = tokio::spawn(async move {

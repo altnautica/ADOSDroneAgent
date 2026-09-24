@@ -59,7 +59,7 @@ pub async fn get_plugin_state(AxumPath(plugin_id): AxumPath<String>) -> Response
 /// alphanumeric, `.` or `-`, with no `..`. The id is joined into a filesystem path,
 /// and axum percent-decodes the segment, so anything that could carry a `/` or a
 /// parent step must be refused before the join.
-fn is_state_id(id: &str) -> bool {
+pub(crate) fn is_state_id(id: &str) -> bool {
     let mut bytes = id.bytes();
     bytes
         .next()

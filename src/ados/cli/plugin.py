@@ -1,8 +1,14 @@
 """``ados plugin`` CLI subcommand tree.
 
-Wires the plugin supervisor to the operator's terminal. Output is
-human-readable by default; ``--json`` switches to a machine envelope
-``{"ok": bool, "code": int, "kind": str, "data": ...}``.
+The lifecycle commands (``list``, ``info``, ``install``, ``enable``,
+``disable``, ``remove``, ``perms``, ``pin``, ``unpin``, ``auto-update``)
+drive the native plugin lifecycle over the local control surface
+(``/api/plugins``); the agent owns plugin state, units and signature checks.
+``logs`` reads the plugin log files, and ``lint``, ``test``, ``sign`` and
+``keygen`` are local developer tools.
+
+Output is human-readable by default; ``--json`` switches to a machine
+envelope ``{"ok": bool, "code": int, "kind": str, "data": ...}``.
 
 Exit code map:
 
@@ -21,19 +27,15 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import asdict
 from pathlib import Path
+from typing import Any, NoReturn
+from urllib.parse import quote
 
 import click
 
+from ados.cli import _agent_http
 from ados.plugins.builtin import builtin_manifest, builtin_manifests
-from ados.plugins.errors import (
-    ArchiveError,
-    ManifestError,
-    SignatureError,
-    SupervisorError,
-)
-from ados.plugins.supervisor import PluginSupervisor
+from ados.plugins.errors import ArchiveError, ManifestError
 
 EXIT_OK = 0
 EXIT_GENERIC = 1
@@ -57,8 +59,26 @@ KIND_BY_CODE = {
     EXIT_COMPATIBILITY: "compatibility_failed",
 }
 
+# The agent's lifecycle error envelope ``{ok: false, code, kind, detail}``
+# numbers its codes; this maps them onto the CLI exit codes above.
+_EXIT_BY_AGENT_CODE = {
+    10: EXIT_SIGNATURE_INVALID,
+    11: EXIT_PERMISSION_DENIED,
+    12: EXIT_MANIFEST_INVALID,
+    13: EXIT_RESOURCE_LIMIT,
+    14: EXIT_NOT_FOUND,
+    17: EXIT_COMPATIBILITY,
+    18: EXIT_COMPATIBILITY,  # incompatible: target profile, host arch, ...
+    19: EXIT_PERMISSION_DENIED,  # refused: first-party-only gates
+}
 
-def _emit_ok(as_json: bool, data: dict | list | None = None) -> None:
+_UNSIGNED_HINT = (
+    "The agent installs only signed archives unless its services run with "
+    "ADOS_PLUGIN_REQUIRE_SIGNED=0 (developer mode)."
+)
+
+
+def _emit_ok(as_json: bool, data: dict[str, Any] | list[Any] | None = None) -> None:
     if as_json:
         click.echo(json.dumps({"ok": True, "code": 0, "kind": "ok", "data": data}))
 
@@ -82,28 +102,61 @@ def _emit_err(
             click.echo(f"Hint: {hint}", err=True)
 
 
-def _make_supervisor(*, allow_unsigned: bool = False) -> PluginSupervisor:
-    # Detect the board so the supervisor can enforce board-id and
-    # compute-tier compatibility gates. Detection is best-effort: if it
-    # fails the supervisor falls back to lenient (no board/tier floor).
-    board_id: str | None = None
-    board_tier: int | None = None
-    try:
-        from ados.hal.detect import detect_board
+def _fail(as_json: bool, code: int, message: str, hint: str | None = None) -> NoReturn:
+    _emit_err(as_json, code, message, hint)
+    sys.exit(code)
 
-        board = detect_board()
-        if board is not None:
-            board_id = board.name
-            board_tier = board.tier
-    except Exception:  # noqa: BLE001 — detection is advisory, never fatal
-        pass
-    sup = PluginSupervisor(
-        require_signed=not allow_unsigned,
-        current_board_id=board_id,
-        current_board_tier=board_tier,
-    )
-    sup.discover()
-    return sup
+
+def _seg(value: str) -> str:
+    """One URL path segment, escaped so an argument can never add another."""
+    return quote(value, safe="")
+
+
+def _call(method: str, path: str, as_json: bool, **kwargs: Any) -> _agent_http.AgentResponse:
+    """One control-surface request; an unreachable or refusing agent exits here."""
+    try:
+        return _agent_http.call(method, path, **kwargs)
+    except click.ClickException as exc:
+        _fail(as_json, EXIT_GENERIC, exc.message)
+
+
+def _failure(response: _agent_http.AgentResponse) -> tuple[int, str]:
+    """The CLI exit code and message for an agent error answer."""
+    body = response.body
+    if isinstance(body, dict):
+        code = body.get("code")
+        message = str(body.get("detail") or f"agent answered HTTP {response.status}")
+    else:
+        # Not the lifecycle envelope (a proxy page, an empty 404): name the
+        # status and keep only the start of the text.
+        code = None
+        text = str(body).strip()
+        message = f"agent answered HTTP {response.status}" + (f": {text[:200]}" if text else "")
+    if isinstance(code, int) and code in _EXIT_BY_AGENT_CODE:
+        return _EXIT_BY_AGENT_CODE[code], message
+    if message.startswith("incompatible:"):
+        return EXIT_COMPATIBILITY, message
+    if response.status == 404:
+        return EXIT_NOT_FOUND, message
+    return EXIT_GENERIC, message
+
+
+def _agent(method: str, path: str, as_json: bool, **kwargs: Any) -> Any:
+    """Call the control surface and return the body of a 2xx answer.
+
+    An error answer is printed through the CLI envelope and exits with the
+    mapped code.
+    """
+    response = _call(method, path, as_json, **kwargs)
+    if not response.ok:
+        exit_code, message = _failure(response)
+        hint = _UNSIGNED_HINT if exit_code == EXIT_SIGNATURE_INVALID else None
+        _fail(as_json, exit_code, message, hint)
+    return response.body
+
+
+def _is_builtin_install(install: dict[str, Any]) -> bool:
+    return str(install.get("source_uri") or "").startswith("builtin:")
 
 
 @click.group("plugin", help="Install, enable, and inspect plugins.")
@@ -120,18 +173,17 @@ def plugin_group() -> None:
     help="Include built-in plugins that ship with the agent and are not installed.",
 )
 def list_plugins(as_json: bool, show_all: bool) -> None:
-    sup = _make_supervisor()
-    rows = []
-    for inst in sup.installs():
-        rows.append(
-            {
-                "id": inst.plugin_id,
-                "version": inst.version,
-                "status": inst.status,
-                "signer": inst.signer_id,
-                "kind": "third-party",
-            }
-        )
+    body = _agent("GET", "/api/plugins", as_json)
+    rows = [
+        {
+            "id": inst["plugin_id"],
+            "version": inst["version"],
+            "status": inst["status"],
+            "signer": inst.get("signer_id"),
+            "kind": "built-in" if _is_builtin_install(inst) else "third-party",
+        }
+        for inst in body.get("installs", [])
+    ]
     if show_all:
         installed = {row["id"] for row in rows}
         for plugin_id, manifest in builtin_manifests().items():
@@ -160,15 +212,88 @@ def list_plugins(as_json: bool, show_all: bool) -> None:
         )
 
 
+def _catalog_entry(plugin_id: str, as_json: bool) -> dict[str, Any] | None:
+    catalog = _agent("GET", "/api/v1/plugins/catalog", as_json)
+    plugins = catalog.get("plugins", []) if isinstance(catalog, dict) else []
+    return next((p for p in plugins if p.get("id") == plugin_id), None)
+
+
+def _plan_install(
+    source: str, as_json: bool
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """Resolve ``source`` to a consent preview plus the install request to send.
+
+    Returns ``(summary, install_path, request_kwargs)``. The summary carries
+    ``plugin_id``, ``version``, ``risk`` and ``permissions`` for the approval
+    prompt; nothing is installed yet.
+    """
+    archive = Path(source)
+    if archive.is_file():
+        upload = {"file": (archive.name, archive.read_bytes(), "application/zip")}
+        summary = _agent("POST", "/api/plugins/parse", as_json, files=upload)
+        return summary, "/api/plugins/install", {"files": upload}
+    builtin = builtin_manifest(source)
+    if builtin is not None:
+        summary = {
+            "plugin_id": builtin.id,
+            "version": builtin.version,
+            "risk": builtin.risk,
+            "permissions": [{"id": p} for p in sorted(builtin.declared_permissions())],
+        }
+        return summary, "/api/plugins/install_builtin", {"json_body": {"plugin_id": source}}
+    if source.startswith(("https://", "http://")):
+        summary = _agent("POST", "/api/plugins/parse_from_url", as_json, json_body={"url": source})
+        # Pin the install to the exact bytes the operator just reviewed.
+        body = {"url": source, "expected_sha256": summary.get("archive_sha256")}
+        return summary, "/api/plugins/install_from_url", {"json_body": body}
+    entry = _catalog_entry(source, as_json)
+    if entry is None:
+        _fail(
+            as_json,
+            EXIT_NOT_FOUND,
+            f"{source} is not an archive file, a built-in plugin id, a URL, "
+            "or a catalog plugin id",
+            hint="List built-in plugins with: ados plugin list --all",
+        )
+    url = entry.get("download_url") or ""
+    sha256 = entry.get("archive_sha256") or ""
+    if not url or not sha256:
+        _fail(as_json, EXIT_NOT_FOUND, f"catalog entry {source} has no published download yet")
+    summary = _agent(
+        "POST",
+        "/api/plugins/parse_from_url",
+        as_json,
+        json_body={"url": url, "expected_sha256": sha256},
+    )
+    body = {"url": url, "expected_sha256": sha256, "from_catalog": True}
+    return summary, "/api/plugins/install_from_url", {"json_body": body}
+
+
+def _grant_all(plugin_id: str, permissions: list[str], as_json: bool) -> list[str]:
+    """Grant each permission; one the agent refuses is reported and skipped."""
+    granted: list[str] = []
+    for perm in permissions:
+        response = _call(
+            "POST",
+            f"/api/plugins/{_seg(plugin_id)}/grant",
+            as_json,
+            json_body={"permission_id": perm},
+        )
+        if response.ok:
+            granted.append(perm)
+        else:
+            click.echo(f"Warning: {perm} not granted: {_failure(response)[1]}", err=True)
+    return granted
+
+
 @plugin_group.command(
-    "install", help="Install a .adosplug archive, or a built-in plugin by id."
+    "install",
+    help=(
+        "Install a .adosplug archive, a built-in plugin by id, an archive URL, "
+        "or a first-party catalog plugin by id."
+    ),
 )
 @click.argument("source")
-@click.option(
-    "--allow-unsigned",
-    is_flag=True,
-    help="Skip signature verification (developer mode only).",
-)
 @click.option(
     "--yes",
     "auto_yes",
@@ -176,104 +301,59 @@ def list_plugins(as_json: bool, show_all: bool) -> None:
     help="Skip permission approval prompt; refuses high/critical permissions.",
 )
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def install(
-    source: str, allow_unsigned: bool, auto_yes: bool, as_json: bool
-) -> None:
-    archive = Path(source)
-    is_builtin = not archive.exists() and builtin_manifest(source) is not None
-    if not is_builtin and not archive.is_file():
-        _emit_err(
-            as_json,
-            EXIT_NOT_FOUND,
-            f"{source} is neither an archive file nor a built-in plugin id",
-            hint="List built-in plugins with: ados plugin list --all",
-        )
-        sys.exit(EXIT_NOT_FOUND)
-    try:
-        sup = _make_supervisor(allow_unsigned=allow_unsigned)
-        result = (
-            sup.install_builtin(source) if is_builtin else sup.install_archive(archive)
-        )
-    except ManifestError as exc:
-        _emit_err(as_json, EXIT_MANIFEST_INVALID, str(exc))
-        sys.exit(EXIT_MANIFEST_INVALID)
-    except SignatureError as exc:
-        _emit_err(
-            as_json,
-            EXIT_SIGNATURE_INVALID,
-            str(exc),
-            hint="Run with --allow-unsigned in developer mode.",
-        )
-        sys.exit(EXIT_SIGNATURE_INVALID)
-    except ArchiveError as exc:
-        _emit_err(as_json, EXIT_GENERIC, str(exc))
-        sys.exit(EXIT_GENERIC)
-    except SupervisorError as exc:
-        _emit_err(as_json, EXIT_COMPATIBILITY, str(exc))
-        sys.exit(EXIT_COMPATIBILITY)
-
-    # Permission approval flow (textual; the GCS uses a richer dialog).
+def install(source: str, auto_yes: bool, as_json: bool) -> None:
+    summary, install_path, request = _plan_install(source, as_json)
+    risk = summary.get("risk")
     if not as_json:
-        click.echo(f"Plugin: {result.plugin_id} v{result.version}")
-        click.echo(f"Risk:   {result.risk}")
+        click.echo(f"Plugin: {summary.get('plugin_id')} v{summary.get('version')}")
+        click.echo(f"Risk:   {risk}")
         click.echo("Permissions requested:")
-        for perm in result.permissions_requested:
-            click.echo(f"  - {perm}")
-    if not auto_yes and not as_json:
-        approved = click.confirm("Approve permissions?", default=False)
-        if not approved:
-            sup.remove(result.plugin_id, keep_data=False)
-            click.echo("Install cancelled. Plugin uninstalled.")
-            sys.exit(EXIT_OK)
-        for perm in result.permissions_requested:
-            sup.grant_permission(result.plugin_id, perm)
-    elif auto_yes:
-        # A provisioned, signed grant can authorize an unattended install of a
-        # high/critical-risk plugin. With the grant covering EVERY requested
-        # permission the install proceeds and is enabled; otherwise it fails
-        # closed and is removed, exactly as before.
-        if result.risk in ("high", "critical"):
-            covered = sup.grant_covers(result.plugin_id, result.permissions_requested)
-            if sorted(covered) != sorted(set(result.permissions_requested)):
-                _emit_err(
-                    as_json,
-                    EXIT_PERMISSION_DENIED,
-                    f"--yes refuses {result.risk}-risk plugins",
-                    hint=(
-                        "No signed grant covers every requested permission. "
-                        "Re-run interactively and approve them after review, or "
-                        "provision a grant at /etc/ados/plugin-grants/."
-                    ),
-                )
-                sup.remove(result.plugin_id, keep_data=False)
-                sys.exit(EXIT_PERMISSION_DENIED)
-            for perm in result.permissions_requested:
-                sup.grant_permission(result.plugin_id, perm)
-            sup.enable(result.plugin_id)
-            if not as_json:
-                click.echo(f"Installed and enabled {result.plugin_id} (granted).")
-            _emit_ok(as_json, asdict(result))
-            return
-        for perm in result.permissions_requested:
-            sup.grant_permission(result.plugin_id, perm)
+        for perm in summary.get("permissions", []):
+            label = perm.get("label")
+            click.echo(f"  - {perm['id']}" + (f" ({label})" if label else ""))
 
+    # Permission approval (textual; the GCS uses a richer dialog). Consent is
+    # given before anything is installed, so a declined install leaves nothing.
+    grant = False
+    if auto_yes:
+        if risk in ("high", "critical"):
+            _fail(
+                as_json,
+                EXIT_PERMISSION_DENIED,
+                f"--yes refuses {risk}-risk plugins",
+                hint="Re-run without --yes and approve the permissions after review.",
+            )
+        grant = True
+    elif not as_json:
+        if not click.confirm("Approve permissions?", default=False):
+            click.echo("Install cancelled.")
+            sys.exit(EXIT_OK)
+        grant = True
+
+    result = _agent("POST", install_path, as_json, timeout=None, **request)
+    plugin_id = result["plugin_id"]
+    requested = list(result.get("permissions_requested") or [])
+    granted = _grant_all(plugin_id, requested, as_json) if grant else []
+    data = {
+        "plugin_id": plugin_id,
+        "version": result.get("version"),
+        "signer_id": result.get("signer_id"),
+        "risk": result.get("risk"),
+        "permissions_requested": requested,
+        "granted": granted,
+    }
     if as_json:
-        _emit_ok(as_json, asdict(result))
+        _emit_ok(as_json, data)
     else:
-        click.echo(f"Installed {result.plugin_id} v{result.version}.")
-        click.echo(f"Run: ados plugin enable {result.plugin_id}")
+        click.echo(f"Installed {plugin_id} v{result.get('version')}.")
+        click.echo(f"Run: ados plugin enable {plugin_id}")
 
 
 @plugin_group.command("enable", help="Enable an installed plugin.")
 @click.argument("plugin_id")
 @click.option("--json", "as_json", is_flag=True)
 def enable(plugin_id: str, as_json: bool) -> None:
-    try:
-        sup = _make_supervisor()
-        sup.enable(plugin_id)
-    except SupervisorError as exc:
-        _emit_err(as_json, EXIT_NOT_FOUND, str(exc))
-        sys.exit(EXIT_NOT_FOUND)
+    _agent("POST", f"/api/plugins/{_seg(plugin_id)}/enable", as_json, timeout=None)
     _emit_ok(as_json, {"plugin_id": plugin_id, "status": "running"})
     if not as_json:
         click.echo(f"{plugin_id}: enabled.")
@@ -283,12 +363,7 @@ def enable(plugin_id: str, as_json: bool) -> None:
 @click.argument("plugin_id")
 @click.option("--json", "as_json", is_flag=True)
 def disable(plugin_id: str, as_json: bool) -> None:
-    try:
-        sup = _make_supervisor()
-        sup.disable(plugin_id)
-    except SupervisorError as exc:
-        _emit_err(as_json, EXIT_NOT_FOUND, str(exc))
-        sys.exit(EXIT_NOT_FOUND)
+    _agent("POST", f"/api/plugins/{_seg(plugin_id)}/disable", as_json)
     _emit_ok(as_json, {"plugin_id": plugin_id, "status": "disabled"})
     if not as_json:
         click.echo(f"{plugin_id}: disabled.")
@@ -299,21 +374,27 @@ def disable(plugin_id: str, as_json: bool) -> None:
 @click.option("--keep-data", is_flag=True, help="Preserve plugin data directory.")
 @click.option("--json", "as_json", is_flag=True)
 def remove(plugin_id: str, keep_data: bool, as_json: bool) -> None:
-    try:
-        sup = _make_supervisor()
-        sup.remove(plugin_id, keep_data=keep_data)
-    except SupervisorError as exc:
-        _emit_err(as_json, EXIT_NOT_FOUND, str(exc))
-        sys.exit(EXIT_NOT_FOUND)
+    _agent(
+        "DELETE",
+        f"/api/plugins/{_seg(plugin_id)}",
+        as_json,
+        params={"keep_data": "true" if keep_data else "false"},
+    )
     _emit_ok(as_json, {"plugin_id": plugin_id, "status": "removed"})
     if not as_json:
         click.echo(f"{plugin_id}: removed.")
 
 
 @plugin_group.command(
-    "perms", help="Show or revoke permissions on an installed plugin."
+    "perms", help="Show, grant, or revoke permissions on an installed plugin."
 )
 @click.argument("plugin_id")
+@click.option(
+    "--grant",
+    "grant_id",
+    default=None,
+    help="Grant a permission the plugin declares.",
+)
 @click.option(
     "--revoke",
     "revoke_id",
@@ -329,51 +410,61 @@ def remove(plugin_id: str, keep_data: bool, as_json: bool) -> None:
 )
 @click.option("--json", "as_json", is_flag=True)
 def perms(
-    plugin_id: str, revoke_id: str | None, auto_yes: bool, as_json: bool
+    plugin_id: str,
+    grant_id: str | None,
+    revoke_id: str | None,
+    auto_yes: bool,
+    as_json: bool,
 ) -> None:
-    sup = _make_supervisor()
-    install = next(
-        (i for i in sup.installs() if i.plugin_id == plugin_id), None
-    )
-    if install is None:
-        _emit_err(as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} not installed")
-        sys.exit(EXIT_NOT_FOUND)
+    if grant_id and revoke_id:
+        _fail(as_json, EXIT_GENERIC, "pass either --grant or --revoke, not both")
+    if grant_id:
+        _agent(
+            "POST",
+            f"/api/plugins/{_seg(plugin_id)}/grant",
+            as_json,
+            json_body={"permission_id": grant_id},
+        )
+        _emit_ok(as_json, {"plugin_id": plugin_id, "granted": grant_id})
+        if not as_json:
+            click.echo(f"{plugin_id}: granted {grant_id}.")
+        return
     if revoke_id:
-        # Confirm intent before revoking a granted capability. The
-        # plugin loses access to the protected resource on the next
-        # token rotation, which can break a running workload. JSON
-        # callers and `--yes` operators skip the prompt.
+        # Confirm intent before revoking a granted capability. The plugin
+        # loses access to the protected resource, which can break a running
+        # workload. JSON callers and `--yes` operators skip the prompt.
         if not auto_yes and not as_json:
-            click.echo(
-                f"About to revoke '{revoke_id}' from '{plugin_id}'."
-            )
+            click.echo(f"About to revoke '{revoke_id}' from '{plugin_id}'.")
             click.echo(
                 "The plugin will lose access to the protected resource immediately."
             )
             if not click.confirm("Continue?", default=False):
                 click.echo("Revoke cancelled.")
                 sys.exit(EXIT_OK)
-        try:
-            from ados.plugins.state import revoke_permission, save_state, state_lock
-
-            with state_lock():
-                revoke_permission(install, revoke_id)
-                save_state(sup.installs())
-        except Exception as exc:  # noqa: BLE001
-            _emit_err(as_json, EXIT_GENERIC, str(exc))
-            sys.exit(EXIT_GENERIC)
-        _emit_ok(as_json, {"plugin_id": plugin_id, "revoked": revoke_id})
+        result = _agent(
+            "DELETE",
+            f"/api/plugins/{_seg(plugin_id)}/perms/{_seg(revoke_id)}",
+            as_json,
+        )
+        _emit_ok(
+            as_json,
+            {
+                "plugin_id": plugin_id,
+                "revoked": revoke_id,
+                "granted": result.get("granted", []),
+            },
+        )
         if not as_json:
             click.echo(f"{plugin_id}: revoked {revoke_id}.")
         return
+    detail = _agent("GET", f"/api/plugins/{_seg(plugin_id)}", as_json)
     rows = [
         {
             "permission_id": pid,
-            "granted": grant.granted,
-            "granted_at": grant.granted_at,
-            "revoked_at": grant.revoked_at,
+            "granted": grant.get("granted", False),
+            "granted_at": grant.get("granted_at"),
         }
-        for pid, grant in sorted(install.permissions.items())
+        for pid, grant in sorted(detail["install"].get("permissions", {}).items())
     ]
     if as_json:
         _emit_ok(as_json, rows)
@@ -436,24 +527,21 @@ def logs(plugin_id: str, lines: int, follow: bool, as_json: bool) -> None:
         click.echo(line.rstrip())
 
 
+
 @plugin_group.command(
     "pin",
-    help="Pin a plugin to its current version; auto-update will skip it.",
+    help="Pin a plugin to a version; auto-update will skip it.",
 )
 @click.argument("plugin_id")
 @click.argument("version")
 @click.option("--json", "as_json", is_flag=True)
 def pin(plugin_id: str, version: str, as_json: bool) -> None:
-    from ados.plugins.state import save_state, state_lock
-
-    sup = _make_supervisor()
-    install = sup.find_install(plugin_id)
-    if install is None:
-        _emit_err(as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} not installed")
-        sys.exit(EXIT_NOT_FOUND)
-    with state_lock():
-        install.pinned_version = version
-        save_state(sup.installs())
+    _agent(
+        "POST",
+        f"/api/plugins/{_seg(plugin_id)}/pin",
+        as_json,
+        json_body={"version": version},
+    )
     _emit_ok(as_json, {"plugin_id": plugin_id, "pinned_version": version})
     if not as_json:
         click.echo(f"{plugin_id}: pinned to {version}.")
@@ -466,16 +554,7 @@ def pin(plugin_id: str, version: str, as_json: bool) -> None:
 @click.argument("plugin_id")
 @click.option("--json", "as_json", is_flag=True)
 def unpin(plugin_id: str, as_json: bool) -> None:
-    from ados.plugins.state import save_state, state_lock
-
-    sup = _make_supervisor()
-    install = sup.find_install(plugin_id)
-    if install is None:
-        _emit_err(as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} not installed")
-        sys.exit(EXIT_NOT_FOUND)
-    with state_lock():
-        install.pinned_version = None
-        save_state(sup.installs())
+    _agent("POST", f"/api/plugins/{_seg(plugin_id)}/unpin", as_json)
     _emit_ok(as_json, {"plugin_id": plugin_id, "pinned_version": None})
     if not as_json:
         click.echo(f"{plugin_id}: unpinned.")
@@ -489,134 +568,54 @@ def unpin(plugin_id: str, as_json: bool) -> None:
 @click.argument("state", type=click.Choice(["on", "off"]))
 @click.option("--json", "as_json", is_flag=True)
 def auto_update(plugin_id: str, state: str, as_json: bool) -> None:
-    from ados.plugins.state import save_state, state_lock
-
-    sup = _make_supervisor()
-    install = sup.find_install(plugin_id)
-    if install is None:
-        _emit_err(as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} not installed")
-        sys.exit(EXIT_NOT_FOUND)
-    new_value = state == "on"
-    with state_lock():
-        install.auto_update = new_value
-        save_state(sup.installs())
-    _emit_ok(as_json, {"plugin_id": plugin_id, "auto_update": new_value})
+    enabled = state == "on"
+    _agent(
+        "POST",
+        f"/api/plugins/{_seg(plugin_id)}/auto-update",
+        as_json,
+        json_body={"enabled": enabled},
+    )
+    _emit_ok(as_json, {"plugin_id": plugin_id, "auto_update": enabled})
     if not as_json:
         click.echo(f"{plugin_id}: auto-update {state}.")
-
-
-@plugin_group.command(
-    "check-updates",
-    help="Run the auto-update poll once and print outcomes per plugin.",
-)
-@click.option("--json", "as_json", is_flag=True)
-def check_updates(as_json: bool) -> None:
-    """Synchronous wrapper around the auto-update poll for operator use.
-
-    Useful when the operator wants to verify the registry round trip
-    without waiting for the daily cadence. Honours pin / auto-update
-    flags on each install. Requires the agent to be paired (cloud
-    credentials live in the pairing state).
-    """
-    import asyncio
-
-    from ados.core.config import load_config
-    from ados.core.pairing import PairingManager
-    from ados.hal.detect import detect_board
-    from ados.plugins.auto_update import check_one_plugin
-
-    config = load_config()
-    pairing = PairingManager(state_path=config.pairing.state_path)
-    convex_url = config.pairing.convex_url
-    if not (pairing.is_paired and convex_url):
-        _emit_err(
-            as_json,
-            EXIT_GENERIC,
-            "agent is not paired to the cloud relay",
-            hint="Pair with 'ados pair' before running check-updates.",
-        )
-        sys.exit(EXIT_GENERIC)
-
-    board = detect_board()
-    current_board_id = board.name if board else None
-    sup = _make_supervisor()
-    installs = [
-        i for i in sup.installs() if i.status in ("enabled", "running")
-    ]
-    if not installs:
-        if as_json:
-            _emit_ok(as_json, [])
-        else:
-            click.echo("No enabled plugins to check.")
-        return
-
-    async def _run() -> list[dict]:
-        import httpx
-
-        from ados.plugins.auto_update import REGISTRY_TIMEOUT_SECONDS
-
-        rows: list[dict] = []
-        async with httpx.AsyncClient(timeout=REGISTRY_TIMEOUT_SECONDS) as http:
-            for install in installs:
-                outcome = await check_one_plugin(
-                    install=install,
-                    supervisor=sup,
-                    http_client=http,
-                    convex_url=convex_url,
-                    api_key=pairing.api_key,
-                    device_id=config.agent.device_id,
-                    current_board_id=current_board_id,
-                )
-                rows.append(
-                    {"plugin_id": install.plugin_id, "outcome": outcome.value}
-                )
-        return rows
-
-    results = asyncio.run(_run())
-    if as_json:
-        _emit_ok(as_json, results)
-        return
-    click.echo(f"{'PLUGIN':40} OUTCOME")
-    for row in results:
-        click.echo(f"{row['plugin_id']:40} {row['outcome']}")
 
 
 @plugin_group.command("info", help="Print manifest summary and runtime state.")
 @click.argument("plugin_id")
 @click.option("--json", "as_json", is_flag=True)
 def info(plugin_id: str, as_json: bool) -> None:
-    sup = _make_supervisor()
-    install = next(
-        (i for i in sup.installs() if i.plugin_id == plugin_id), None
-    )
+    response = _call("GET", f"/api/plugins/{_seg(plugin_id)}", as_json)
     builtin = builtin_manifest(plugin_id)
-    if install is None and builtin is None:
-        _emit_err(
-            as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} is not installed"
-        )
-        sys.exit(EXIT_NOT_FOUND)
+    if not response.ok:
+        exit_code, message = _failure(response)
+        if exit_code != EXIT_NOT_FOUND or builtin is None:
+            _fail(as_json, exit_code, message)
+    detail = response.body if response.ok else None
+    install = detail["install"] if detail is not None else None
     payload = {
         "plugin_id": plugin_id,
-        "install": asdict(install)
-        if install is not None
-        else None,
+        "install": install,
+        "manifest": detail["manifest"] if detail is not None else None,
+        "granted_capabilities": (
+            detail.get("granted_capabilities", []) if detail is not None else []
+        ),
         "is_builtin": builtin is not None,
         "available_version": builtin.version if builtin is not None else None,
     }
     if as_json:
         _emit_ok(as_json, payload)
         return
-    if install:
-        click.echo(f"Plugin:   {install.plugin_id}")
-        click.echo(f"Version:  {install.version}")
-        click.echo(f"Status:   {install.status}")
-        click.echo(f"Signer:   {install.signer_id or '-'}")
-        click.echo(f"Source:   {install.source}")
+    if install is not None:
+        click.echo(f"Plugin:   {install['plugin_id']}")
+        click.echo(f"Version:  {install['version']}")
+        click.echo(f"Status:   {install['status']}")
+        click.echo(f"Signer:   {install.get('signer_id') or '-'}")
+        click.echo(f"Source:   {install.get('source')}")
         click.echo("Permissions:")
-        for pid, grant in sorted(install.permissions.items()):
-            state = "GRANTED" if grant.granted else "DENIED"
+        for pid, grant in sorted(install.get("permissions", {}).items()):
+            state = "GRANTED" if grant.get("granted") else "DENIED"
             click.echo(f"  {pid:30} {state}")
-    else:
+    elif builtin is not None:
         click.echo(f"Built-in plugin: {plugin_id} (not installed)")
         click.echo(f"Version: {builtin.version}")
         click.echo(f"Install: ados plugin install {plugin_id}")

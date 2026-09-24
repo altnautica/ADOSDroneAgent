@@ -524,19 +524,9 @@ fn write_result(failures: &FailureAccumulator, status: &str, profile: &str) {
     }
 }
 
-/// The installed agent version, read straight from the package's `__version__`
-/// (mirrors the bash `get_installed_version`). `unknown` when the venv is
-/// absent or cannot import the package.
+/// The installed agent version, or `unknown` when the venv cannot report it.
 fn installed_version() -> String {
-    let py = format!("{}/bin/python", env::VENV_DIR);
-    let res = exec::run(&py, &["-c", "import ados; print(ados.__version__)"]);
-    if res.success() {
-        let v = res.stdout.trim();
-        if !v.is_empty() {
-            return v.to_string();
-        }
-    }
-    "unknown".to_string()
+    env::installed_agent_version().unwrap_or_else(|| "unknown".to_string())
 }
 
 /// The board id: the persisted override sentinel first, then the device-tree

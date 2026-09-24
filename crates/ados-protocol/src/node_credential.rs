@@ -16,6 +16,7 @@
 //! [`WORKSTATION_CREDENTIALS_PATH`]). Issuing and verifying live with the
 //! workstation.
 
+use std::borrow::Cow;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -32,52 +33,65 @@ pub const WORKSTATION_CREDENTIALS_PATH: &str = "/etc/ados/workstation-credential
 /// installs that keep `/etc/ados` elsewhere).
 pub const WORKSTATION_CREDENTIALS_ENV: &str = "ADOS_WORKSTATION_CREDENTIALS";
 
-/// One drone-to-workstation lane a credential can be scoped to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub enum NodeLane {
-    /// `POST /api/atlas/event` (+ its health probe): capture events into the
-    /// workstation's world-model ingest.
-    #[serde(rename = "atlas.ingest")]
-    AtlasIngest,
-    /// `GET /ws/atlas/<device_id>`: the world-model descriptor stream.
-    #[serde(rename = "atlas.world")]
-    AtlasWorld,
-    /// `GET /ws/offload/<session_id>`: the offloaded-detection return stream.
-    #[serde(rename = "offload.stream")]
-    OffloadStream,
-    /// `GET /artifacts/*`: reconstruction artifacts.
-    #[serde(rename = "artifacts.read")]
-    Artifacts,
-    /// `POST /api/compute/jobs` and `GET /api/compute/sessions`: submitting an
-    /// offload session and reading its health.
-    #[serde(rename = "jobs.submit")]
-    JobSubmit,
+/// One drone-to-workstation lane a credential can be scoped to, by its wire
+/// name (`atlas.ingest`, `offload.stream`, ...). The lane vocabulary belongs to
+/// the service that serves the lanes; this type only guarantees a name is well
+/// formed: 1-64 characters of `[a-z0-9._-]`. Anything else is refused when it
+/// is parsed or deserialized, so a stored or requested lane can never smuggle
+/// arbitrary text.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct NodeLane(Cow<'static, str>);
+
+/// Longest lane name.
+pub const NODE_LANE_MAX_LEN: usize = 64;
+
+const fn is_lane_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || bytes.len() > NODE_LANE_MAX_LEN {
+        return false;
+    }
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'_' || b == b'-') {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 impl NodeLane {
-    /// Every lane, in wire order. The default grant for a drone.
-    pub const ALL: [NodeLane; 5] = [
-        NodeLane::AtlasIngest,
-        NodeLane::AtlasWorld,
-        NodeLane::OffloadStream,
-        NodeLane::Artifacts,
-        NodeLane::JobSubmit,
-    ];
-
-    /// The wire name.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            NodeLane::AtlasIngest => "atlas.ingest",
-            NodeLane::AtlasWorld => "atlas.world",
-            NodeLane::OffloadStream => "offload.stream",
-            NodeLane::Artifacts => "artifacts.read",
-            NodeLane::JobSubmit => "jobs.submit",
-        }
+    /// A lane from a name known at compile time, for a service's own lane
+    /// constants. Panics (at compile time, in a `const`) on a malformed name.
+    pub const fn from_static(name: &'static str) -> Self {
+        assert!(
+            is_lane_name(name),
+            "node lane names are [a-z0-9._-]{{1,64}}"
+        );
+        NodeLane(Cow::Borrowed(name))
     }
 
-    /// Parse a wire name; `None` for anything this build does not know.
+    /// Parse a wire name; `None` when it is not a well-formed lane name.
     pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|l| l.as_str() == s)
+        is_lane_name(s).then(|| NodeLane(Cow::Owned(s.to_string())))
+    }
+
+    /// The wire name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for NodeLane {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        NodeLane::parse(&raw).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "node lane {raw:?} must be 1-{NODE_LANE_MAX_LEN} characters of [a-z0-9._-]"
+            ))
+        })
     }
 }
 
@@ -202,21 +216,32 @@ mod tests {
         InstalledCredential {
             workstation_node_id: node.into(),
             credential: secret.into(),
-            lanes: NodeLane::ALL.to_vec(),
+            lanes: vec![NodeLane::from_static("atlas.ingest")],
             installed_at_ms: 1,
         }
     }
 
     #[test]
-    fn lane_names_round_trip_and_match_serde() {
-        for lane in NodeLane::ALL {
-            assert_eq!(NodeLane::parse(lane.as_str()), Some(lane));
-            assert_eq!(
-                serde_json::to_value(lane).unwrap(),
-                serde_json::json!(lane.as_str())
-            );
+    fn a_lane_is_its_wire_name_and_nothing_malformed_parses() {
+        let lane = NodeLane::parse("offload.stream").unwrap();
+        assert_eq!(lane.as_str(), "offload.stream");
+        assert_eq!(lane, NodeLane::from_static("offload.stream"));
+        assert_eq!(
+            serde_json::to_value(&lane).unwrap(),
+            serde_json::json!("offload.stream")
+        );
+        let back: NodeLane = serde_json::from_str("\"jobs.submit\"").unwrap();
+        assert_eq!(back.as_str(), "jobs.submit");
+        for bad in [
+            "",
+            "Atlas.Ingest",
+            "atlas ingest",
+            "atlas/ingest",
+            &"a".repeat(65),
+        ] {
+            assert!(NodeLane::parse(bad).is_none(), "{bad:?}");
+            assert!(serde_json::from_value::<NodeLane>(serde_json::json!(bad)).is_err());
         }
-        assert_eq!(NodeLane::parse("cloud.write"), None);
     }
 
     #[test]

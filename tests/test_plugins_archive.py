@@ -1,4 +1,4 @@
-"""Plugin .adosplug archive packer/unpacker tests."""
+"""Plugin .adosplug archive packer/parser tests."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from ados.plugins.archive import (
     open_archive,
     pack_directory,
     parse_archive_bytes,
-    unpack_to,
 )
 from ados.plugins.errors import ArchiveError, SignatureError
 from ados.plugins.manifest import PluginManifest
@@ -130,24 +129,6 @@ def test_archive_total_decompression_cap_refuses_the_sum(
         parse_archive_bytes(archive_bytes)
 
 
-def test_unpack_refuses_a_bomb_without_writing_anything(tmp_path: Path) -> None:
-    """The refusal is whole-archive: nothing is extracted, so no caller is
-    left to clean up a half-populated install directory."""
-    archive_bytes = _make_zip(
-        {
-            MANIFEST_FILENAME: _good_manifest_yaml().encode(),
-            "agent/plugin.py": b"# stub\n",
-            "assets/bomb.bin": b"\0" * ENTRY_MAX_BYTES,
-        }
-    )
-    dest = tmp_path / "unpacked"
-
-    with pytest.raises(ArchiveError, match="ratio cap"):
-        unpack_to(archive_bytes, dest)
-
-    assert not dest.exists(), "a refused archive must not create the install dir"
-
-
 def test_signature_well_formed_round_trips() -> None:
     sig_blob = b"altnautica-2026-A\nQUJDREVGRw==\n"
     archive_bytes = _make_zip(
@@ -173,7 +154,7 @@ def test_signature_malformed_raises() -> None:
         parse_archive_bytes(archive_bytes)
 
 
-def test_pack_and_unpack_round_trip(tmp_path: Path) -> None:
+def test_pack_and_parse_round_trip(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
     (src / "agent").mkdir()
@@ -187,38 +168,13 @@ def test_pack_and_unpack_round_trip(tmp_path: Path) -> None:
     raw = out.read_bytes()
     contents = parse_archive_bytes(raw)
     assert contents.manifest.id == "com.example.basic"
-
-    dest = tmp_path / "unpacked"
-    unpack_to(raw, dest)
-    assert (dest / MANIFEST_FILENAME).exists()
-    assert (dest / "agent" / "plugin.py").read_text() == "# stub"
-
-
-def test_unpack_restores_exec_bit_for_executable_entries(tmp_path: Path) -> None:
-    """An exec-marked agent/bin entry must come back runnable (systemd
-    ExecStart needs it); a plain entry must stay non-executable."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(MANIFEST_FILENAME, _good_manifest_yaml().encode())
-        # An executable binary entry carrying group/world write in its zip
-        # mode, which is outside the signed payload hash.
-        info = zipfile.ZipInfo("agent/bin/geofence")
-        info.external_attr = 0o777 << 16
-        zf.writestr(info, b"#!/bin/sh\n")
-    raw = buf.getvalue()
-
-    dest = tmp_path / "unpacked"
-    unpack_to(raw, dest)
-
-    bin_mode = (dest / "agent" / "bin" / "geofence").stat().st_mode
-    assert bin_mode & 0o777 == 0o755, f"agent/bin entry must unpack 0755 (mode {oct(bin_mode)})"
-    mani_mode = (dest / MANIFEST_FILENAME).stat().st_mode
-    assert not (mani_mode & 0o111), "plain entry must not gain exec bits"
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        assert zf.read("agent/plugin.py") == b"# stub"
 
 
 @pytest.mark.parametrize("alias", ["./manifest.yaml", "agent//x.py", "agent/./x.py"])
-def test_dot_and_empty_segments_cannot_alias_an_entry(alias: str, tmp_path: Path) -> None:
-    """``./manifest.yaml`` unpacks over ``manifest.yaml``; the validated
+def test_dot_and_empty_segments_cannot_alias_an_entry(alias: str) -> None:
+    """``./manifest.yaml`` would unpack over ``manifest.yaml``; the validated
     manifest and the one written to disk must never be able to differ."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -227,8 +183,6 @@ def test_dot_and_empty_segments_cannot_alias_an_entry(alias: str, tmp_path: Path
     raw = buf.getvalue()
     with pytest.raises(ArchiveError, match="unsafe archive entry path"):
         parse_archive_bytes(raw)
-    with pytest.raises(ArchiveError):
-        unpack_to(raw, tmp_path / "out")
 
 
 def _manifest_with_gcs_yaml(gcs_entrypoint: str = "gcs/plugin.bundle.js") -> str:
@@ -358,10 +312,9 @@ def test_pack_complete_gcs_tree_round_trips(tmp_path: Path) -> None:
     assert out.exists()
 
     raw = out.read_bytes()
-    dest = tmp_path / "unpacked"
-    unpack_to(raw, dest)
-    assert (dest / "gcs" / "plugin.bundle.js").read_text() == "export const x = 1;"
-    assert (dest / "agent" / "plugin.py").read_text() == "# stub"
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        assert zf.read("gcs/plugin.bundle.js") == b"export const x = 1;"
+        assert zf.read("agent/plugin.py") == b"# stub"
 
 
 def test_pack_raises_when_rust_binary_missing(tmp_path: Path) -> None:

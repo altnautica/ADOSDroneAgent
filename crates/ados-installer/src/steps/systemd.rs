@@ -52,12 +52,10 @@ const UNIVERSAL_UNITS: &[&str] = &[
     // `WantedBy=ados-supervisor.service` auto-starts it with the supervisor
     // (the ados-peripherals pattern); the supervisor only monitors it.
     "ados-discovery.service",
-    // The native plugin host owns the per-plugin sockets by default. It is a
-    // swap unit whose ExecStart runs the native binary unless the operator
-    // pins the packaged path with the fallback marker (then `/bin/true`, and
-    // the packaged host server on the supervisor's loop serves instead). Both
-    // profiles fetch the binary, so it is enabled cross-profile here and the
-    // supervisor pulls it up via `WantedBy=ados-supervisor.service`.
+    // The native plugin host owns the per-plugin sockets. Every profile fetches
+    // the binary, so it is enabled cross-profile here and the supervisor pulls
+    // it up via `WantedBy=ados-supervisor.service`; its `ConditionPathExists`
+    // keeps a box whose binary has not landed inactive.
     "ados-plugin-host.service",
     // GPIO-output service (status buzzer / LED). Enabled cross-profile so the
     // supervisor manages it on either an air or a ground node; its ExecStart
@@ -2483,11 +2481,13 @@ mod tests {
     fn every_strict_sandbox_path_exists_before_its_unit_starts() {
         /// Paths the base OS always has, or the installer creates (the
         /// `/run/ados` tmpfiles entry, the state and data roots, the plugin
-        /// and peripheral dirs).
+        /// and peripheral dirs, and the `/var/log/ados` retention tmpfiles
+        /// entry plus the plugin log dir the slice setup creates).
         const PRESENT: &[&str] = &[
             "/dev",
             "/dev/shm",
             "/etc",
+            "/etc/systemd/system",
             "/sys/class/net",
             "/tmp",
             "/var/lock",
@@ -2496,6 +2496,7 @@ mod tests {
             "/run/ados",
             "/var/ados",
             "/var/lib/ados",
+            "/var/log/ados",
         ];
         const SANDBOX_KEYS: &[&str] = &[
             "ReadWritePaths",

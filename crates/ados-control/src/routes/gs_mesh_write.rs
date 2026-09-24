@@ -107,15 +107,6 @@ fn config_yaml_path() -> PathBuf {
     )
 }
 
-/// The profile-source sentinel (`ADOS_PROFILE_CONF`, default
-/// `/etc/ados/profile.conf`), the same file the FastAPI mesh-capability gate
-/// reads. install.sh writes it as YAML.
-fn profile_conf_path() -> PathBuf {
-    std::env::var("ADOS_PROFILE_CONF")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(crate::profile::PROFILE_CONF))
-}
-
 /// The persistent mesh dir (`<mesh-role parent>`), so a test override of
 /// `ADOS_MESH_ROLE` carries the identity/psk sentinels alongside it. In
 /// production this resolves to `/etc/ados/mesh`.
@@ -137,7 +128,7 @@ fn mesh_dir() -> PathBuf {
 /// `_read_yaml_or_empty(PROFILE_CONF).get("mesh_capable", False)`; a missing file
 /// / key / a non-true value is not mesh-capable. Mirrors that read.
 fn mesh_capable() -> bool {
-    let Ok(text) = std::fs::read_to_string(profile_conf_path()) else {
+    let Ok(text) = std::fs::read_to_string(ados_config::profile_conf_path()) else {
         return false;
     };
     let Ok(doc) = serde_norway::from_str::<Value>(&text) else {

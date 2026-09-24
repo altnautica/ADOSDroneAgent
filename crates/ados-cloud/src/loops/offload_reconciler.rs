@@ -196,7 +196,7 @@ async fn resolve_node(
 /// transient mDNS miss can never tear down a healthy offload.
 fn keep_offloading(config: &CloudConfig) -> bool {
     should_attempt(
-        config.wire_profile(),
+        &config.wire_profile(),
         config.perception.offload.is_off(),
         config.perception.offload.is_forced_on(),
         board_npu_tops(),

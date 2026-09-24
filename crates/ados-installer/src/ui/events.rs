@@ -29,6 +29,7 @@ pub const INSTALL_GROUPS: GroupMap = &[
     ("Registering services", &["watchdog", "systemd"]),
     ("Starting agent", &["start"]),
     ("Verifying", &["health"]),
+    ("Adding extensions", &["extensions"]),
 ];
 
 /// The uninstall checklist groups (one per teardown phase; see
@@ -152,6 +153,7 @@ mod tests {
             "systemd",
             "start",
             "health",
+            "extensions",
         ];
         for step in chain {
             let hits = INSTALL_GROUPS
@@ -173,6 +175,10 @@ mod tests {
         assert_eq!(group_index_for_step(INSTALL_GROUPS, "deps"), Some(1));
         assert_eq!(
             group_index_for_step(INSTALL_GROUPS, "health"),
+            Some(INSTALL_GROUPS.len() - 2)
+        );
+        assert_eq!(
+            group_index_for_step(INSTALL_GROUPS, "extensions"),
             Some(INSTALL_GROUPS.len() - 1)
         );
         assert_eq!(group_index_for_step(INSTALL_GROUPS, "nope"), None);

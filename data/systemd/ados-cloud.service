@@ -35,15 +35,18 @@ PrivateTmp=yes
 # /etc is writable because a remote plugin-install command unpacks the
 # plugin and writes its per-plugin unit + the shared slice under
 # /etc/systemd/system. The radio bind keygen no longer runs here (it moved
-# to the supervisor); runtime config writes land under /etc/ados.
-ReadWritePaths=/var/ados /var/lib/ados /run/ados /etc/ados /etc
+# to the supervisor); runtime config writes land under /etc/ados. A remote
+# uninstall deletes the plugin's logs under /var/log/ados/plugins.
+ReadWritePaths=/var/ados /var/lib/ados /run/ados /etc/ados /etc /var/log/ados
 
-# No elevated capabilities needed: the cloud relay does HTTP + MQTT
-# heartbeat and, on a remote-install command, asks PID 1 to reload/enable
-# units over the system bus (which needs no caller capability). The bind
-# orchestrator that previously justified CAP_SYS_ADMIN/CAP_NET_ADMIN moved
-# to the supervisor, so the bounding set is emptied.
-CapabilityBoundingSet=
+# The cloud relay does HTTP + MQTT heartbeat and, on a remote-install
+# command, asks PID 1 to reload/enable units over the system bus (which
+# needs no caller capability). The one capability it keeps is CAP_CHOWN: a
+# remote enable of an HTTP-serving plugin hands the plugin's socket dir
+# under /run/ados/plugin-http to the ados account its sandboxed unit runs
+# as, and root without CAP_CHOWN cannot. The bind orchestrator that
+# previously justified CAP_SYS_ADMIN/CAP_NET_ADMIN moved to the supervisor.
+CapabilityBoundingSet=CAP_CHOWN
 
 # Memory cap sized for the bind orchestrator's worst case: the cloud
 # service itself (~30M Python runtime + plugins) plus the bind window's

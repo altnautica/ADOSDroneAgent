@@ -22,9 +22,7 @@
 //! rendered for an earlier grant keeps `IPAddressDeny=any`: without the guard,
 //! the capability is not safe to hold.
 
-use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use ados_protocol::plugin_loopback_guard::GuardState;
 use serde::Deserialize;
@@ -140,7 +138,21 @@ pub fn install(ruleset: &str, sidecar: &Path) -> GuardState {
     state
 }
 
+/// Off Linux there is no nftables and no plugin sandbox for the guard to
+/// complement, so the verdict is inactive: a `network.outbound` grant stays
+/// refused there rather than reading as guarded.
+#[cfg(not(target_os = "linux"))]
+fn load(_ruleset: &str) -> GuardState {
+    GuardState::unavailable(format!(
+        "the loopback guard needs nftables, which {} does not have",
+        std::env::consts::OS
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn load(ruleset: &str) -> GuardState {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
     let mut child = match Command::new("nft")
         .args(["-f", "-"])
         .stdin(Stdio::piped())

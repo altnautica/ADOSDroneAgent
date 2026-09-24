@@ -1,0 +1,17 @@
+schema_version: 1
+id: io.altnautica.mavlink-inspector
+version: 0.1.0
+name: MAVLink Inspector
+description: >-
+  Subscribes to vehicle state changes and republishes a snapshot under
+  plugin.<id>.snapshot for diagnostic UIs.
+author: Altnautica
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.9.0"
+agent:
+  entrypoint: ados.plugins.builtin.mavlink_inspector:MavlinkInspectorPlugin
+  permissions:
+    - event.subscribe
+    - event.publish

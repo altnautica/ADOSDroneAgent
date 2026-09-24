@@ -23,73 +23,8 @@ from __future__ import annotations
 
 from ados.plugins._dispatch_generated import (
     INLINE_GATED,
-    KNOWN_METHODS,
     REQUIRED_CAP,
 )
-
-# The canonical method -> required-cap mapping. Locked here so a drift in the
-# generated table (or an accidental hand-edit) is a test failure. The Rust
-# enum locks the same set on its side (``enum_matches_generated_table``), and
-# the codegen ``--check`` gate guarantees both generated files come from the
-# one TOML, so this list IS the cross-language contract.
-EXPECTED: dict[str, str | None] = {
-    "event.publish": None,
-    "event.subscribe": None,
-    "ping": None,
-    "tool.invoke": "mcp.expose",
-    "telemetry.subscribe": "telemetry.read",
-    "telemetry.extend": "telemetry.extend",
-    "mission.read": "mission.read",
-    "mission.write": "mission.write",
-    "recording.start": "recording.write",
-    "recording.stop": "recording.write",
-    "mavlink.subscribe": "mavlink.read",
-    "mavlink.send": "mavlink.write",
-    "mavlink.tunnel.send": "mavlink.tunnel",
-    "mavlink.register_component": None,
-    "peripheral.register_driver": None,
-    "peripheral.unregister_driver": None,
-    "camera.claim": "sensor.camera.register",
-    "camera.release": "sensor.camera.register",
-    "camera.get_frame": "sensor.camera.register",
-    "video.source.set": "video.source.set",
-    "config.get": None,
-    "config.set": None,
-    "msp.send": "msp.write",
-    "msp.subscribe": "msp.read",
-    "process.spawn": "process.spawn",
-    "vision.subscribe_frames": "vision.frame.read",
-    "vision.read_model": "vision.model.read",
-    "vision.register_model": "vision.model.register",
-    "vision.infer": "vision.model.register",
-    "vision.publish_detection": "vision.detection.publish",
-    "vision.subscribe_detections": "vision.detection.subscribe",
-    "vision.designate_track": "vision.track.designate",
-    "button.subscribe": "button.subscribe",
-    "display.page.set": "display.oled.page",
-    "display.zone.subscribe": "display.oled.page",
-    "gpio.output.set": "hardware.gpio_out",
-    "gpio.buzzer.beep": "hardware.gpio_out",
-    "flight.guided_setpoint.send": "flight.guided_setpoint",
-    "flight.rate_setpoint.send": "flight.rate_setpoint",
-    "radio.aux_stream.open": "radio.aux_stream",
-    "radio.aux_stream.close": "radio.aux_stream",
-    "radio.aux_stream.send": "radio.aux_stream",
-    "radio.aux_stream.subscribe": "radio.aux_stream",
-    "compute.job.submit": "compute.job.submit",
-    "compute.job.read": "compute.job.read",
-    "compute.job.cancel": "compute.job.submit",
-    "compute.job.outputs": "compute.job.read",
-    "compute.dataset.write": "compute.dataset.write",
-    "compute.stream.open": "compute.stream.open",
-    "compute.stream.close": "compute.stream.open",
-    "compute.stream.health": "compute.stream.open",
-}
-
-
-def test_generated_required_cap_matches_the_canonical_table() -> None:
-    assert REQUIRED_CAP == EXPECTED
-    assert KNOWN_METHODS == frozenset(EXPECTED)
 
 
 def test_inline_gated_set_is_the_payload_gated_methods() -> None:

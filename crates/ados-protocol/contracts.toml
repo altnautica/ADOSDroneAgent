@@ -213,6 +213,15 @@ status = "metadata"
 rust_const = "ados_protocol::ws_ticket::TICKET_KEY_LABEL"
 description = "String-tagged (v1) HMAC-SHA256 WebSocket auth ticket; the version is a string tag, not a wire integer."
 
+[[contract]]
+id = "cloud-publish"
+version = 1
+wire = "msgpack"
+transport = "unix-stream"
+status = "active"
+rust_const = "ados_protocol::cloud_publish::CLOUD_PUBLISH_VERSION"
+description = "Plugin data leaving the node through the cloud relay: the plugin host forwards a gated stream message (QoS 0 broker publish) or keyed JSON record (cloud record upsert) to ados-cloud over a root-only socket, one length-prefixed msgpack request and reply per exchange."
+
 # ===========================================================================
 # SIDECARS — versioned on-disk state files
 # ===========================================================================

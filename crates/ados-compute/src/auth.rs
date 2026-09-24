@@ -184,7 +184,7 @@ impl ComputeAuth {
 pub fn job_api_lane(method: &Method, path: &str) -> Option<NodeLane> {
     match (method, path) {
         (&Method::POST, "/api/compute/jobs") | (&Method::GET, "/api/compute/sessions") => {
-            Some(NodeLane::JobSubmit)
+            Some(crate::lanes::JOB_SUBMIT)
         }
         _ => None,
     }
@@ -207,7 +207,7 @@ pub fn decide(
     pairing: &Pairing,
     caller: CallerClass,
     presented: Presented<'_>,
-    lane: Option<NodeLane>,
+    lane: Option<&NodeLane>,
     credentials: &NodeCredentialStore,
     now_unix: i64,
 ) -> Access {
@@ -223,7 +223,7 @@ pub fn decide(
     {
         return Access::Accept;
     }
-    if lane == NodeLane::AtlasWorld
+    if *lane == crate::lanes::ATLAS_WORLD
         && presented.ws_ticket.is_some_and(|t| {
             WsTicketIssuer::from_api_key(owner_key)
                 .verify(t, SCOPE_ATLAS_WORLD_WS, now_unix)
@@ -277,8 +277,8 @@ fn access_for(
 ) -> Access {
     let headers = req.headers();
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
-    let ticket = match lane {
-        Some(NodeLane::AtlasWorld) => offered_ticket(headers),
+    let ticket = match &lane {
+        Some(l) if *l == crate::lanes::ATLAS_WORLD => offered_ticket(headers),
         _ => None,
     };
     decide(
@@ -289,7 +289,7 @@ fn access_for(
             node_credential: header(NODE_CREDENTIAL_HEADER),
             ws_ticket: ticket.as_deref(),
         },
-        lane,
+        lane.as_ref(),
         &auth.credentials,
         now_unix(),
     )
@@ -386,7 +386,7 @@ mod tests {
         let m = s
             .mint(
                 "drone-1",
-                &[NodeLane::AtlasIngest, NodeLane::JobSubmit],
+                &[crate::lanes::ATLAS_INGEST, crate::lanes::JOB_SUBMIT],
                 OWNER,
                 1,
             )
@@ -402,7 +402,7 @@ mod tests {
                 &paired(),
                 lan,
                 with_cred,
-                Some(NodeLane::AtlasIngest),
+                Some(&crate::lanes::ATLAS_INGEST),
                 &s,
                 now
             ),
@@ -413,7 +413,7 @@ mod tests {
                 &paired(),
                 lan,
                 with_cred,
-                Some(NodeLane::JobSubmit),
+                Some(&crate::lanes::JOB_SUBMIT),
                 &s,
                 now
             ),
@@ -425,7 +425,7 @@ mod tests {
                 &paired(),
                 lan,
                 with_cred,
-                Some(NodeLane::Artifacts),
+                Some(&crate::lanes::ARTIFACTS),
                 &s,
                 now
             ),
@@ -442,7 +442,14 @@ mod tests {
             ..Presented::default()
         };
         assert_eq!(
-            decide(&paired(), lan, as_key, Some(NodeLane::AtlasIngest), &s, now),
+            decide(
+                &paired(),
+                lan,
+                as_key,
+                Some(&crate::lanes::ATLAS_INGEST),
+                &s,
+                now
+            ),
             Access::Unauthorized
         );
     }
@@ -451,13 +458,13 @@ mod tests {
     fn a_paired_lane_refuses_an_offbox_caller_with_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        for lane in NodeLane::ALL {
+        for lane in crate::lanes::ALL {
             assert_eq!(
                 decide(
                     &paired(),
                     CallerClass::OperatorLan,
                     Presented::default(),
-                    Some(lane),
+                    Some(&lane),
                     &s,
                     now_unix()
                 ),
@@ -474,7 +481,7 @@ mod tests {
                     &paired(),
                     CallerClass::OperatorLan,
                     owner,
-                    Some(lane),
+                    Some(&lane),
                     &s,
                     now_unix()
                 ),
@@ -486,7 +493,7 @@ mod tests {
                     &Pairing::Unpaired,
                     CallerClass::OperatorLan,
                     Presented::default(),
-                    Some(lane),
+                    Some(&lane),
                     &s,
                     now_unix()
                 ),
@@ -497,7 +504,7 @@ mod tests {
                     &paired(),
                     CallerClass::OnBox,
                     Presented::default(),
-                    Some(lane),
+                    Some(&lane),
                     &s,
                     now_unix()
                 ),
@@ -523,7 +530,7 @@ mod tests {
                 &paired(),
                 CallerClass::OperatorLan,
                 offered,
-                Some(NodeLane::AtlasWorld),
+                Some(&crate::lanes::ATLAS_WORLD),
                 &s,
                 now
             ),
@@ -534,7 +541,7 @@ mod tests {
                 &paired(),
                 CallerClass::OperatorLan,
                 offered,
-                Some(NodeLane::Artifacts),
+                Some(&crate::lanes::ARTIFACTS),
                 &s,
                 now
             ),
@@ -546,7 +553,7 @@ mod tests {
                 &paired(),
                 CallerClass::OperatorLan,
                 offered,
-                Some(NodeLane::AtlasWorld),
+                Some(&crate::lanes::ATLAS_WORLD),
                 &s,
                 now + 31
             ),
@@ -564,7 +571,7 @@ mod tests {
                 &paired(),
                 CallerClass::OperatorLan,
                 forged,
-                Some(NodeLane::AtlasWorld),
+                Some(&crate::lanes::ATLAS_WORLD),
                 &s,
                 now
             ),
@@ -576,11 +583,11 @@ mod tests {
     fn only_offload_submit_and_session_health_are_node_reachable_on_the_job_api() {
         assert_eq!(
             job_api_lane(&Method::POST, "/api/compute/jobs"),
-            Some(NodeLane::JobSubmit)
+            Some(crate::lanes::JOB_SUBMIT)
         );
         assert_eq!(
             job_api_lane(&Method::GET, "/api/compute/sessions"),
-            Some(NodeLane::JobSubmit)
+            Some(crate::lanes::JOB_SUBMIT)
         );
         for (m, p) in [
             (Method::GET, "/api/compute/jobs"),

@@ -1,4 +1,4 @@
-"""``.adosplug`` archive packer and unpacker.
+"""``.adosplug`` archive packer and parser.
 
 Archive layout (zip, no compression for binary stability):
 
@@ -27,9 +27,9 @@ The archive size limit is 50MB. The per-entry size limit is 25MB, checked
 against the bytes actually read rather than the size the entry declares.
 The sum of every entry's decompressed bytes is capped at 100MB, and a
 single entry may not expand by more than 200x from its compressed size.
-Every limit fails at parse/unpack with :class:`ArchiveError` before any
-file is written. Path traversal entries (``..`` segments, absolute paths,
-symlinks) are rejected.
+Every limit fails at parse with :class:`ArchiveError`. Path traversal
+entries (``..`` segments, absolute paths, symlinks) are rejected.
+Unpacking into the install directory is the native plugin host's job.
 """
 
 from __future__ import annotations
@@ -37,7 +37,6 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import io
-import os
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -138,7 +137,6 @@ class ArchiveContents:
     payload_hash: bytes
     signer_id: str | None
     signature_b64: str | None
-    raw_archive_bytes: bytes
 
 
 SYMLINK_MODE = 0o120000
@@ -173,23 +171,17 @@ def _is_symlink_entry(info: zipfile.ZipInfo) -> bool:
     return (mode & 0o170000) == SYMLINK_MODE
 
 
-def _read_members_bounded(
-    zf: zipfile.ZipFile,
-) -> list[tuple[zipfile.ZipInfo, str, bytes]]:
+def _read_members_bounded(zf: zipfile.ZipFile) -> dict[str, bytes]:
     """Read every file member under the decompression bounds.
 
-    One reader for both the parse path and the unpack path, so the caps
-    cannot hold on one and not the other. The declared uncompressed size is
-    used only as a cheap early reject: the authoritative check is the number
-    of bytes actually produced, because a zip is free to declare anything.
+    The declared uncompressed size is used only as a cheap early reject: the
+    authoritative check is the number of bytes actually produced, because a
+    zip is free to declare anything.
 
-    Returns ``(info, safe_name, data)`` per file member, in archive order.
-    Refuses the whole archive by raising :class:`ArchiveError`; because the
-    caller receives nothing until every member has passed, an unpack can
-    never leave a half-extracted tree behind.
+    Returns ``{safe_name: data}`` per file member, in archive order.
+    Refuses the whole archive by raising :class:`ArchiveError`.
     """
-    members: list[tuple[zipfile.ZipInfo, str, bytes]] = []
-    seen: set[str] = set()
+    members: dict[str, bytes] = {}
     total = 0
     for info in zf.infolist():
         name = _safe_member_path(info.filename)
@@ -231,10 +223,9 @@ def _read_members_bounded(
             raise ArchiveError(
                 f"archive decompresses past the total cap {TOTAL_DECOMPRESSED_MAX}"
             )
-        if name in seen:
+        if name in members:
             raise ArchiveError(f"archive entry {name} appears twice")
-        seen.add(name)
-        members.append((info, name, data))
+        members[name] = data
     return members
 
 
@@ -258,8 +249,8 @@ def open_archive(path: str | Path) -> ArchiveContents:
 
     Validates structural sanity (zip well-formed, manifest present and
     parseable, no path traversal, size bounds). Signature verification
-    is a separate step in :mod:`ados.plugins.signing` so callers can
-    surface different failures with different exit codes.
+    is the native plugin host's job at install; ``ados plugin lint``
+    and ``ados plugin sign`` only need the parsed structure.
     """
     p = Path(path)
     if not p.exists():
@@ -293,12 +284,8 @@ def parse_archive_bytes(raw: bytes) -> ArchiveContents:
     except zipfile.BadZipFile as exc:
         raise ArchiveError(f"not a valid zip archive: {exc}") from exc
 
-    try:
-        entries: dict[str, bytes] = {
-            name: data for _info, name, data in _read_members_bounded(zf)
-        }
-    finally:
-        zf.close()
+    with zf:
+        entries = _read_members_bounded(zf)
 
     manifest_bytes = entries.get(MANIFEST_FILENAME)
     if manifest_bytes is None:
@@ -319,7 +306,6 @@ def parse_archive_bytes(raw: bytes) -> ArchiveContents:
         payload_hash=payload_hash,
         signer_id=signer_id,
         signature_b64=signature_b64,
-        raw_archive_bytes=raw,
     )
 
 
@@ -340,39 +326,6 @@ def _read_signature(blob: bytes | None) -> tuple[str | None, str | None]:
             f"SIGNATURE must be 2 non-blank lines (signer-id + sig), got {len(lines)}",
         )
     return lines[0], lines[1]
-
-
-def _restore_exec_mode(target: Path, info: zipfile.ZipInfo) -> None:
-    """Set an unpacked file's mode from the zip entry's exec bit.
-
-    An unpacked ``agent/bin/<id>`` Rust-plugin binary must be runnable by the
-    generated systemd ``ExecStart``, so an entry carrying an exec bit becomes
-    ``0755``; every other file is ``0644``. The entry's own bits are never
-    applied: zip metadata is outside the signed payload hash (content only),
-    so a re-zipped signed archive could otherwise install a group- or
-    world-writable binary.
-    """
-    mode = (info.external_attr >> 16) & 0o777
-    os.chmod(target, 0o755 if mode & 0o111 else 0o644)
-
-
-def unpack_to(archive_bytes: bytes, dest: Path) -> None:
-    """Unpack archive bytes to ``dest`` directory. Caller is responsible for
-    having validated the archive (signature etc.) first.
-
-    Every member is read and bound-checked before the first byte is written,
-    so an archive that breaches a decompression cap is refused whole rather
-    than leaving a partially extracted install directory behind for a caller
-    to clean up.
-    """
-    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
-        members = _read_members_bounded(zf)
-    dest.mkdir(parents=True, exist_ok=True)
-    for info, name, data in members:
-        target = dest / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-        _restore_exec_mode(target, info)
 
 
 def _required_entrypoints(manifest: PluginManifest) -> list[tuple[str, str]]:
@@ -466,4 +419,5 @@ def serialize_manifest(manifest: PluginManifest) -> bytes:
     import yaml
 
     payload = manifest.model_dump(mode="json", exclude_none=True)
-    return yaml.safe_dump(payload, sort_keys=True).encode("utf-8")
+    text: str = yaml.safe_dump(payload, sort_keys=True)
+    return text.encode("utf-8")

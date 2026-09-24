@@ -74,6 +74,8 @@ pub mod params_single;
 pub mod params_write;
 pub mod peer_backfill;
 pub mod plugins_config;
+pub mod plugins_lifecycle;
+pub mod plugins_proxy;
 pub mod plugins_state;
 pub mod plugins_tools;
 pub mod reachable_addr;
@@ -226,12 +228,109 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         )
         // Plugin published-state read: a plugin's latest state per topic, read
         // from the plugin host's per-plugin state sidecar so a LAN-paired GCS can
-        // poll the plugin's own published state (a follow read-back, etc.). A
-        // path-param route under the otherwise-proxied /api/plugins prefix; only
-        // this exact GET is served natively, the rest of /api/plugins proxies.
+        // poll the plugin's own published state (a follow read-back, etc.).
         .route(
             "/api/plugins/:plugin_id/state",
             get(plugins_state::get_plugin_state),
+        )
+        // The plugin lifecycle (see routes/plugins_lifecycle): the bundled
+        // catalog, list and detail, the GCS asset, manifest, attestation and
+        // readiness reads, parse and install (upload, URL, built-in), grant,
+        // revoke, enable, disable, remove, the update preferences, the capability
+        // token and the install-job progress stream. The two upload routes take
+        // an archive-sized multipart body; the handler still caps the file.
+        .route(
+            "/api/v1/plugins/catalog",
+            get(plugins_lifecycle::get_catalog),
+        )
+        .route("/api/plugins", get(plugins_lifecycle::list_plugins))
+        .route(
+            "/api/plugins/parse",
+            post(plugins_lifecycle::parse_plugin)
+                .layer(DefaultBodyLimit::max(plugins_lifecycle::UPLOAD_BODY_LIMIT)),
+        )
+        .route(
+            "/api/plugins/install",
+            post(plugins_lifecycle::install_plugin)
+                .layer(DefaultBodyLimit::max(plugins_lifecycle::UPLOAD_BODY_LIMIT)),
+        )
+        .route(
+            "/api/plugins/parse_from_url",
+            post(plugins_lifecycle::parse_from_url),
+        )
+        .route(
+            "/api/plugins/install_from_url",
+            post(plugins_lifecycle::install_from_url),
+        )
+        .route(
+            "/api/plugins/install_builtin",
+            post(plugins_lifecycle::install_builtin),
+        )
+        .route(
+            "/api/plugins/capability-token",
+            post(plugins_lifecycle::mint_capability_token),
+        )
+        .route(
+            "/api/plugins/jobs/:job_id",
+            get(plugins_lifecycle::stream_install_job),
+        )
+        .route(
+            "/api/plugins/:plugin_id",
+            get(plugins_lifecycle::get_plugin).delete(plugins_lifecycle::remove_plugin),
+        )
+        .route(
+            "/api/plugins/:plugin_id/gcs/*asset_path",
+            get(plugins_lifecycle::get_gcs_asset),
+        )
+        .route(
+            "/api/plugins/:plugin_id/manifest",
+            get(plugins_lifecycle::get_manifest),
+        )
+        .route(
+            "/api/plugins/:plugin_id/attestation",
+            get(plugins_lifecycle::get_attestation),
+        )
+        .route(
+            "/api/plugins/:plugin_id/readiness",
+            get(plugins_lifecycle::get_readiness),
+        )
+        .route(
+            "/api/plugins/:plugin_id/grant",
+            post(plugins_lifecycle::grant_permission),
+        )
+        .route(
+            "/api/plugins/:plugin_id/perms/:permission_id",
+            delete(plugins_lifecycle::revoke_permission),
+        )
+        .route(
+            "/api/plugins/:plugin_id/enable",
+            post(plugins_lifecycle::enable_plugin),
+        )
+        .route(
+            "/api/plugins/:plugin_id/disable",
+            post(plugins_lifecycle::disable_plugin),
+        )
+        .route(
+            "/api/plugins/:plugin_id/pin",
+            post(plugins_lifecycle::pin_plugin),
+        )
+        .route(
+            "/api/plugins/:plugin_id/unpin",
+            post(plugins_lifecycle::unpin_plugin),
+        )
+        .route(
+            "/api/plugins/:plugin_id/auto-update",
+            post(plugins_lifecycle::set_auto_update),
+        )
+        // A plugin's own HTTP API (`agent.http: true`), every method and a
+        // WebSocket upgrade, forwarded to its `plugin-http/<id>/http.sock`.
+        .route(
+            "/api/plugins/:plugin_id/x/*rest",
+            get(plugins_proxy::plugin_http)
+                .post(plugins_proxy::plugin_http)
+                .put(plugins_proxy::plugin_http)
+                .patch(plugins_proxy::plugin_http)
+                .delete(plugins_proxy::plugin_http),
         )
         // The compute node's cluster status, read from its heartbeat sidecar, so
         // a LAN-paired GCS renders the compute-cluster card local-first.

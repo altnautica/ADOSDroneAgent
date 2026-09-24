@@ -70,7 +70,7 @@ pub(crate) async fn mint(
         Ok(k) => k,
         Err((status, why)) => return error(status, why),
     };
-    let lanes = req.lanes.unwrap_or_else(|| NodeLane::ALL.to_vec());
+    let lanes = req.lanes.unwrap_or_else(|| crate::lanes::ALL.to_vec());
     // The store fsyncs its file; keep that off the async workers.
     let minted = tokio::task::spawn_blocking(move || {
         auth.credentials

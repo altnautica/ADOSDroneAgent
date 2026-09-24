@@ -25,10 +25,12 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
 use crate::config::CloudConfig;
-use crate::dispatch::install::{verify_sha256, DownloadSource, HttpDownloadSource};
 use crate::mqtt::topic_plugin_update_available;
 use crate::mqtt::transport::{MqttQos, MqttTransport, RumqttcTransport};
 use crate::pairing::PairingState;
+use ados_plugin_host::download::{
+    fetch_capped, verify_sha256, HttpDownloadSource, DOWNLOAD_MAX_BYTES,
+};
 
 /// Bound on one registry query.
 const REGISTRY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -111,7 +113,8 @@ impl UpdateSource for CloudUpdateSource {
     }
 
     fn download(&self, url: &str, sha256: &str) -> Result<Vec<u8>, String> {
-        let body = self.download.fetch(url).map_err(|e| e.to_string())?;
+        let body =
+            fetch_capped(&self.download, url, DOWNLOAD_MAX_BYTES).map_err(|e| e.to_string())?;
         verify_sha256(&body, sha256).map_err(|e| e.to_string())?;
         Ok(body)
     }

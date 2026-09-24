@@ -176,19 +176,6 @@ WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
 HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
 
 
-# Plugin loopback-guard verdict (``{"active": bool, "reason": str}``). Written
-# by the plugin-host daemon once it has loaded (or failed to load) the nftables
-# rule that keeps a network-capable plugin off the agent's own loopback
-# listeners. A ``network.outbound`` grant needs it to read active; absent reads
-# as unavailable.
-PLUGIN_LOOPBACK_GUARD_JSON = ADOS_RUN_DIR / "plugin-loopback-guard.json"
-
-# Capabilities the running plugin host cannot back (``{"caps": [str, ...]}``).
-# Written by the plugin-host daemon at startup; every method such a capability
-# gates answers ``not_implemented`` on this host, so a grant is refused rather
-# than handed out to fail at call time. Absent reads as an empty set.
-PLUGIN_UNGRANTABLE_CAPS_JSON = ADOS_RUN_DIR / "plugin-ungrantable-caps.json"
-
 # Sentinel files
 UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
 
@@ -281,15 +268,11 @@ PERIPHERALS_DIR = ADOS_ETC_DIR / "peripherals"
 PERIPHERALS_GLOB = "/etc/ados/peripherals/*.yaml"
 
 # Plugins
-PLUGIN_KEYS_DIR = ADOS_ETC_DIR / "plugin-keys"
-PLUGIN_REVOCATIONS_PATH = ADOS_ETC_DIR / "plugin-revocations.json"
 PLUGIN_RUN_DIR = ADOS_RUN_DIR / "plugins"
 # A plugin's host socket lives alone in its own directory under PLUGIN_RUN_DIR
 # (``<PLUGIN_RUN_DIR>/<id>/host.sock``): that directory is the one path under
 # the agent run dir the plugin's unit binds back into its mount namespace.
 PLUGIN_SOCKET_NAME = "host.sock"
-PLUGIN_UNIT_DIR = Path("/etc/systemd/system")
-PLUGIN_UNIT_PREFIX = "ados-plugin-"
 
 # Mesh
 MESH_DIR = ADOS_ETC_DIR / "mesh"
@@ -332,12 +315,12 @@ SETUP_STATE_PATH = SETUP_STATE_DIR / "state.json"
 # cached runner. Owned by the agent; readable by the GCS.
 HARDWARE_STATE_PATH = SETUP_STATE_DIR / "hardware-state.json"
 
-# Plugins (installed third-party bundles, plugin data, plugin configs)
+# Plugins (installed bundles, plugin data, plugin logs). The native plugin
+# host owns install state; the runner and the CLI read these.
 PLUGINS_INSTALL_DIR = ADOS_VAR_DIR / "plugins"
 PLUGIN_DATA_DIR = ADOS_VAR_DIR / "plugin-data"
 ADOS_LOG_DIR = Path("/var/log/ados")
 PLUGIN_LOG_DIR = ADOS_LOG_DIR / "plugins"
-PLUGIN_STATE_PATH = STATE_DIR / "plugin-state.json"
 
 # Install-result record. Written atomically by the install pipeline with the
 # outcome of the last install/upgrade (status, version, profile, board, kernel

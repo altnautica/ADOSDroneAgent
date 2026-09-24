@@ -39,7 +39,7 @@ use ados_plugin_host::manifest::PluginManifest;
 use ados_plugin_host::pic_gate::PicGate;
 use ados_plugin_host::realhost::RealHost;
 use ados_plugin_host::reconcile::PluginReconciler;
-use ados_plugin_host::server::DEFAULT_SOCKET_DIR;
+use ados_plugin_host::supervisor::Paths;
 use ados_plugin_host::token_secret::TokenMint;
 use ados_plugin_host::vision_client::VisionClient;
 use ados_plugin_host::{EventBus, PluginIpcServer, PluginSupervisor};
@@ -78,50 +78,11 @@ fn read_board_identity(run_dir: &Path) -> (Option<String>, Option<u8>) {
     (id, tier)
 }
 
-/// The run directory holding the IPC sockets the agent's other services bind
-/// (`mavlink.sock`, `state.sock`). Overridable for tests / non-default layouts,
-/// matching the `ADOS_RUN_DIR` env the MAVLink router honours.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
-
-/// The per-plugin socket directory, where the per-plugin sockets, token env
-/// files, and the published-state sidecars live. Honours `ADOS_PLUGIN_SOCKET_DIR`
-/// (the same env the native front reads to locate a plugin's state sidecar),
-/// defaulting to [`DEFAULT_SOCKET_DIR`] so both daemons agree on the path.
-fn plugin_socket_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("ADOS_PLUGIN_SOCKET_DIR").unwrap_or_else(|_| DEFAULT_SOCKET_DIR.to_string()),
-    )
-}
-
-/// The root-only directory the control socket binds in. Honours
-/// `ADOS_PLUGIN_HOST_DIR` (the same env `ados-control` reads to reach it),
-/// defaulting to [`ados_plugin_host::DEFAULT_CONTROL_DIR`]. Kept apart from the
-/// per-plugin socket dir, which every plugin unit can write.
-fn plugin_host_control_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("ADOS_PLUGIN_HOST_DIR")
-            .unwrap_or_else(|_| ados_plugin_host::DEFAULT_CONTROL_DIR.to_string()),
-    )
-}
-
 /// The running agent semver, used by the supervisor's compatibility gate. The
 /// `ADOS_AGENT_VERSION` env mirrors the Python `ados.__version__` source; the
 /// crate version is the inert fallback when the env is unset.
 fn agent_version() -> String {
     std::env::var("ADOS_AGENT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
-}
-
-/// The persisted HMAC issuer secret path. Overridable via
-/// `ADOS_PLUGIN_TOKEN_SECRET` for tests / non-default layouts; otherwise the
-/// 0600 file under `/etc/ados/secrets` both the daemon and the unit-generation
-/// path read so a runner's token verifies in this daemon.
-fn secret_path() -> PathBuf {
-    PathBuf::from(
-        std::env::var("ADOS_PLUGIN_TOKEN_SECRET")
-            .unwrap_or_else(|_| ados_plugin_host::PLUGIN_TOKEN_SECRET_PATH.to_string()),
-    )
 }
 
 fn init_logging() {
@@ -282,8 +243,17 @@ fn parse_injector_arbitration(yaml: &str) -> bool {
 /// The MAVLink and MSP links are always wired. Each reconnects on its own, so a
 /// router that is not up yet (or restarts later) heals without a host restart;
 /// until it is up a send answers `sent: false` with reason `disconnected`.
-async fn build_host(install_dir: PathBuf, run_dir: PathBuf, bus: &Arc<EventBus>) -> Arc<RealHost> {
-    let mut host = RealHost::new();
+async fn build_host(
+    install_dir: PathBuf,
+    run_dir: PathBuf,
+    state_path: PathBuf,
+    bus: &Arc<EventBus>,
+) -> Arc<RealHost> {
+    // The state file `vision.read_model` reads resolved model status from, and
+    // the vehicle-state socket `telemetry.subscribe` reads snapshots from.
+    let mut host = RealHost::new()
+        .with_state_path(state_path)
+        .with_vehicle_state_socket(run_dir.join("state.sock"));
 
     // Injector arbitration (default off). When armed, the MAVLink + MSP links
     // declare themselves autonomous injectors on every connection so the
@@ -428,14 +398,13 @@ fn config_store_path() -> PathBuf {
 /// control socket; the install dir / run dir feed the host lookups.
 /// `secret_path` is the persisted HMAC secret the issuer is built from; the
 /// same file feeds the unit-generation path, so a runner's token verifies here.
-async fn wire(
-    state_path: PathBuf,
-    install_dir: PathBuf,
-    socket_dir: PathBuf,
-    control_dir: PathBuf,
-    run_dir: PathBuf,
-    secret_path: &Path,
-) -> WiredDaemon<RealHost> {
+async fn wire(paths: &Paths) -> WiredDaemon<RealHost> {
+    let state_path = paths.state_path.clone();
+    let install_dir = paths.install_dir.clone();
+    let socket_dir = paths.socket_dir.clone();
+    let control_dir = paths.control_dir.clone();
+    let run_dir = paths.run_dir.clone();
+    let secret_path = paths.token_secret.as_path();
     // Build the issuer from the persisted secret so a runner started by its own
     // unit can present a token this daemon verifies. A failure to read/create
     // the secret falls back to a per-process random key (the in-process smoke
@@ -453,7 +422,7 @@ async fn wire(
         }
     });
     let bus = Arc::new(EventBus::new());
-    let host = build_host(install_dir.clone(), run_dir, &bus).await;
+    let host = build_host(install_dir.clone(), run_dir, state_path.clone(), &bus).await;
 
     // The paired device id scopes each plugin's per-drone data dir, written into
     // the runner's env file by the mint. Empty on an unpaired node (node scope).
@@ -535,23 +504,21 @@ async fn wire(
 async fn main() -> Result<()> {
     init_logging();
 
-    let paths = ados_plugin_host::supervisor::Paths::default();
-    let install_dir = paths.install_dir.clone();
-    let state_path = paths.state_path.clone();
-    // The per-plugin + state-sidecar socket dir. Honours
-    // `ADOS_PLUGIN_SOCKET_DIR` (the same env `ados-control` reads) so a test /
-    // SITL run points both daemons at a writable tempdir instead of
-    // `/run/ados/plugins`. The control socket binds in its own root-only dir.
-    let socket_dir = plugin_socket_dir();
-    let control_dir = plugin_host_control_dir();
-    let run = run_dir();
+    // Every host path from its `ADOS_PLUGIN_*` / `ADOS_RUN_DIR` variable, so a
+    // per-user install (the macOS workstation) or a test run points the whole
+    // daemon at its own layout. The control socket binds in its own root-only
+    // dir, apart from the per-plugin socket dir.
+    let paths = Paths::from_env();
+    let run = paths.run_dir.clone();
     let version = agent_version();
+    let profile = ados_config::node_profile();
     let (board_id, board_tier) = read_board_identity(&run);
 
     tracing::info!(
-        install_dir = %install_dir.display(),
-        socket_dir = %socket_dir.display(),
+        install_dir = %paths.install_dir.display(),
+        socket_dir = %paths.socket_dir.display(),
         run_dir = %run.display(),
+        profile = %profile,
         agent_version = %version,
         board_id = ?board_id,
         board_tier = ?board_tier,
@@ -588,7 +555,8 @@ async fn main() -> Result<()> {
     {
         tracing::warn!(path = %ungrantable_sidecar.display(), error = %e, "could not publish the ungrantable capability list");
     }
-    let mut supervisor = PluginSupervisor::production(paths, board_id, version)
+    let mut supervisor = PluginSupervisor::production(paths.clone(), board_id, version)
+        .with_profile(profile)
         .with_board_tier(board_tier)
         .with_ungrantable_caps(ungrantable);
     if let Err(e) = supervisor.discover() {
@@ -599,16 +567,7 @@ async fn main() -> Result<()> {
     // as a side effect; the reconciler reads state itself from now on.
     drop(supervisor);
 
-    let secret = secret_path();
-    let daemon = wire(
-        state_path,
-        install_dir,
-        socket_dir,
-        control_dir,
-        run,
-        &secret,
-    )
-    .await;
+    let daemon = wire(&paths).await;
     // The shared-secret issuer is owned by the daemon for the session lifetime;
     // it both verifies the runner's `hello` token and backs the mint that
     // writes each served plugin's token env file.
@@ -640,7 +599,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_plugin_host::supervisor::{Paths, RecordingSystemctl};
+    use ados_plugin_host::backend::RecordingBackend;
     use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
     use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
     use rmpv::Value;
@@ -662,6 +621,10 @@ mod tests {
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
             loopback_guard_state: dir.join("plugin-loopback-guard.json"),
+            socket_dir: dir.join("sockets"),
+            token_secret: dir.join("secrets/plugin-token-secret"),
+            runner: dir.join("bin/ados-plugin-runner"),
+            run_dir: dir.join("run"),
         }
     }
 
@@ -726,16 +689,14 @@ mod tests {
     async fn wiring_serves_an_enabled_plugin_and_pings() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = paths_in(dir.path());
-        let install_dir = paths.install_dir.clone();
-        let state_path = paths.state_path.clone();
-        let socket_dir = dir.path().join("sockets");
-        let run = dir.path().join("run");
+        let socket_dir = paths.socket_dir.clone();
+        let secret = paths.token_secret.clone();
 
-        // Install + enable one subprocess plugin via a recording systemctl, then
+        // Install + enable one subprocess plugin via a recording backend, then
         // discover so the install is in memory.
-        let rec = Arc::new(RecordingSystemctl::default());
+        let rec = Arc::new(RecordingBackend::default());
         let mut supervisor =
-            PluginSupervisor::new(paths, false, None, "1.0.0").with_systemctl(rec.clone());
+            PluginSupervisor::new(paths.clone(), false, None, "1.0.0").with_backend(rec.clone());
         let archive = ados_plugin_host::archive::parse_archive_bytes(build_unsigned_archive(
             SUBPROC_MANIFEST,
         ))
@@ -748,16 +709,7 @@ mod tests {
 
         // Wire the daemon (no mavlink router up -> slot stays None, fine).
         // A tempdir secret path makes the issuer persist a shared secret.
-        let secret = dir.path().join("secrets/plugin-token-secret");
-        let daemon = wire(
-            state_path,
-            install_dir,
-            socket_dir.clone(),
-            dir.path().join("plugin-host"),
-            run,
-            &secret,
-        )
-        .await;
+        let daemon = wire(&paths).await;
         assert_eq!(
             daemon.reconciler.serving().len(),
             1,
@@ -830,6 +782,7 @@ mod tests {
         let host = build_host(
             install_dir,
             dir.path().join("run"),
+            dir.path().join("state/plugin-state.json"),
             &Arc::new(EventBus::new()),
         )
         .await;
@@ -859,37 +812,42 @@ mod tests {
     /// runtimes — the practical stand-in for a full live two-process launch.
     #[test]
     fn unit_env_token_and_socket_are_consistent_for_both_runtimes() {
-        use ados_plugin_host::systemd::render_unit;
+        use ados_plugin_host::backend::render_systemd;
+        use ados_plugin_host::systemd::build_unit_spec;
         use ados_protocol::plugin::CapabilityToken;
 
         for runtime in ["python", "rust"] {
             let dir = tempfile::tempdir().expect("tempdir");
-            let socket_dir = dir.path().join("plugins");
-            let secret = dir.path().join("secrets/plugin-token-secret");
+            let paths = paths_in(dir.path());
+            let socket_dir = paths.socket_dir.clone();
+            let secret = paths.token_secret.clone();
             let plugin_id = "com.example.consistency";
 
             // The unit the install path writes: it must reference the env file
-            // and carry the static socket Environment line.
+            // the mint writes and carry the static socket Environment line.
             let manifest_yaml = format!(
                 "id: {plugin_id}\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0,<99.0.0\"\nagent:\n  entrypoint: agent/x\n  runtime: {runtime}\n  permissions:\n    - mavlink.read\n"
             );
             let manifest =
                 ados_plugin_host::PluginManifest::from_yaml_text(&manifest_yaml).expect("manifest");
-            let unit = render_unit(&manifest, dir.path(), &BTreeSet::new(), false)
-                .expect("render")
-                .expect("unit");
+            let unit = render_systemd(
+                &build_unit_spec(&manifest, &paths, "drone", &BTreeSet::new(), false)
+                    .expect("build")
+                    .expect("unit"),
+            );
+            let env_file = ados_plugin_host::token_env_path(plugin_id, Some(&socket_dir));
+            let sock = ados_plugin_host::plugin_socket_path(&socket_dir, plugin_id);
             // Both runtimes deliver the token via the same env file + static
             // socket Environment line.
             assert!(
-                unit.contains(
-                    "EnvironmentFile=-/run/ados/plugins/com.example.consistency.token.env"
-                ),
+                unit.contains(&format!("EnvironmentFile=-{}", env_file.display())),
                 "{runtime} unit missing EnvironmentFile: {unit}"
             );
             assert!(
-                unit.contains(
-                    "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.consistency/host.sock"
-                ),
+                unit.contains(&format!(
+                    "Environment=ADOS_PLUGIN_SOCKET={}",
+                    sock.display()
+                )),
                 "{runtime} unit missing socket Environment: {unit}"
             );
             // Never on the command line.
@@ -903,7 +861,6 @@ mod tests {
             // runner token and writes the env file. A separately-built issuer
             // (a stand-in for the serving daemon process) verifies it.
             let minting = ados_plugin_host::shared_issuer(&secret).expect("issuer");
-            let sock = ados_plugin_host::plugin_socket_path(&socket_dir, plugin_id);
             ados_plugin_host::write_token_env(
                 &minting,
                 plugin_id,
@@ -914,8 +871,7 @@ mod tests {
             )
             .expect("write env");
 
-            let env_path = ados_plugin_host::token_env_path(plugin_id, Some(&socket_dir));
-            let body = std::fs::read_to_string(&env_path).expect("env file");
+            let body = std::fs::read_to_string(&env_file).expect("env file");
             let token_line = body
                 .lines()
                 .find_map(|l| l.strip_prefix("ADOS_PLUGIN_TOKEN="))

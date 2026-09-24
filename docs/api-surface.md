@@ -68,10 +68,36 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/params/{name}` |  |
 | POST | `/api/params/{name}` |  |
 | GET | `/api/ping` | unauthenticated by design |
+| GET | `/api/plugins` |  |
+| POST | `/api/plugins/capability-token` | relay-forbidden |
+| POST | `/api/plugins/install` | relay-forbidden |
+| POST | `/api/plugins/install_builtin` |  |
+| POST | `/api/plugins/install_from_url` | relay-forbidden |
+| WS | `/api/plugins/jobs/{job_id}` |  |
+| POST | `/api/plugins/parse` |  |
+| POST | `/api/plugins/parse_from_url` |  |
+| DELETE | `/api/plugins/{plugin_id}` |  |
+| GET | `/api/plugins/{plugin_id}` |  |
+| GET | `/api/plugins/{plugin_id}/attestation` |  |
+| POST | `/api/plugins/{plugin_id}/auto-update` |  |
 | GET | `/api/plugins/{plugin_id}/config` |  |
 | PUT | `/api/plugins/{plugin_id}/config` |  |
+| POST | `/api/plugins/{plugin_id}/disable` |  |
+| POST | `/api/plugins/{plugin_id}/enable` | relay-forbidden |
+| GET | `/api/plugins/{plugin_id}/gcs/{*asset_path}` |  |
+| POST | `/api/plugins/{plugin_id}/grant` | relay-forbidden |
+| GET | `/api/plugins/{plugin_id}/manifest` |  |
+| DELETE | `/api/plugins/{plugin_id}/perms/{permission_id}` |  |
+| POST | `/api/plugins/{plugin_id}/pin` |  |
+| GET | `/api/plugins/{plugin_id}/readiness` |  |
 | GET | `/api/plugins/{plugin_id}/state` |  |
 | POST | `/api/plugins/{plugin_id}/tools/{tool}/invoke` |  |
+| POST | `/api/plugins/{plugin_id}/unpin` |  |
+| DELETE | `/api/plugins/{plugin_id}/x/{*rest}` |  |
+| GET | `/api/plugins/{plugin_id}/x/{*rest}` |  |
+| PATCH | `/api/plugins/{plugin_id}/x/{*rest}` |  |
+| POST | `/api/plugins/{plugin_id}/x/{*rest}` |  |
+| PUT | `/api/plugins/{plugin_id}/x/{*rest}` |  |
 | POST | `/api/relay/peer-secret` |  |
 | GET | `/api/services` |  |
 | POST | `/api/services/{name}/restart` | relay-forbidden |
@@ -170,6 +196,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/v1/network/mac/adapters` |  |
 | POST | `/api/v1/network/mac/pin` |  |
 | DELETE | `/api/v1/network/mac/{iface}` |  |
+| GET | `/api/v1/plugins/catalog` |  |
 | POST | `/api/v1/system/restart-supervisor` | relay-forbidden |
 | GET | `/api/v2/observability/{*upstream_path}` |  |
 | GET | `/api/version` | unauthenticated by design |
@@ -198,7 +225,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-173 native routes.
+200 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 
@@ -212,21 +239,6 @@ absent (a known feature, not on this profile) rather than `404`.
 | POST | `/api/pairing/accept` | relay-forbidden |
 | GET | `/api/peripherals` |  |
 | POST | `/api/peripherals/scan` |  |
-| GET | `/api/plugins` |  |
-| POST | `/api/plugins/capability-token` | relay-forbidden |
-| POST | `/api/plugins/install` | relay-forbidden |
-| POST | `/api/plugins/install_from_url` | relay-forbidden |
-| WS | `/api/plugins/jobs/{job_id}` |  |
-| POST | `/api/plugins/parse` |  |
-| POST | `/api/plugins/parse_from_url` |  |
-| DELETE | `/api/plugins/{plugin_id}` |  |
-| GET | `/api/plugins/{plugin_id}` |  |
-| POST | `/api/plugins/{plugin_id}/disable` |  |
-| POST | `/api/plugins/{plugin_id}/enable` | relay-forbidden |
-| GET | `/api/plugins/{plugin_id}/gcs/{*asset_path}` |  |
-| POST | `/api/plugins/{plugin_id}/grant` | relay-forbidden |
-| DELETE | `/api/plugins/{plugin_id}/perms/{permission_id}` |  |
-| GET | `/api/plugins/{plugin_id}/readiness` |  |
 | GET | `/api/v1/dashboard/snapshot` |  |
 | POST | `/api/v1/display/calibrate/start` |  |
 | GET | `/api/v1/display/calibrate/status` |  |
@@ -239,7 +251,6 @@ absent (a known feature, not on this profile) rather than `404`.
 | GET | `/api/v1/peripherals/{peripheral_id}` |  |
 | POST | `/api/v1/peripherals/{peripheral_id}/action` |  |
 | POST | `/api/v1/peripherals/{peripheral_id}/config` |  |
-| GET | `/api/v1/plugins/catalog` |  |
 | POST | `/api/v1/setup/apply` |  |
 | POST | `/api/v1/setup/cloud-choice` | relay-forbidden |
 | WS | `/api/v1/setup/cloudflare/logs` |  |
@@ -271,12 +282,13 @@ absent (a known feature, not on this profile) rather than `404`.
 | GET | `/api/vision/models` |  |
 | POST | `/api/vision/models/{model_id}/download` |  |
 | GET | `/api/vision/models/{model_id}/status` |  |
+| POST | `/api/vision/plugin-models/{plugin_id}/deliver` |  |
 | GET | `/hls/{*path}` |  |
 | POST | `/whep` |  |
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-66 residual routes.
+51 residual routes.
 
 ## Logging store — `ados-logd` on :8090
 

@@ -30,7 +30,8 @@ use crate::state::AppState;
 /// to the routes it knows about stops a stray client minting tickets for a scope
 /// the agent never checks. Each entry must have a handler that verifies a ticket
 /// for it (`gs.*` in [`crate::routes::gs_ws`], the MAVLink-WS scope in the router
-/// proxy, the vision + setup streams, the plugin install-job progress stream).
+/// proxy, the vision + setup streams, the plugin install-job progress stream,
+/// a plugin's HTTP passthrough).
 ///
 /// The class is what a scoped MCP token must hold to mint the ticket: the
 /// MAVLink WebSocket carries arbitrary commands to the flight controller, so its
@@ -47,8 +48,13 @@ const TICKET_SCOPES: [(&str, ScopeClass); 7] = [
 
 /// The plugin install-job progress scope is bound to one job:
 /// `plugins.install_job:<job_id>`, so a ticket opens that job's stream and no
-/// other. The residual progress route verifies against the job id in its path.
+/// other. The LAN edge verifies it against the job id in the stream's path.
 const INSTALL_JOB_SCOPE_PREFIX: &str = "plugins.install_job:";
+
+/// A plugin HTTP passthrough scope is bound to one plugin:
+/// `plugins.http:<plugin_id>` opens WebSockets under
+/// `/api/plugins/<plugin_id>/x/` and no other plugin's.
+const PLUGIN_HTTP_SCOPE_PREFIX: &str = "plugins.http:";
 
 /// Whether `scope` is an install-job scope naming a job id the progress route
 /// can serve: 1..=128 characters of `[A-Za-z0-9._-]`, the set the route's
@@ -64,6 +70,13 @@ fn install_job_scope_is_valid(scope: &str) -> bool {
         })
 }
 
+/// Whether `scope` is a passthrough scope naming a well-formed plugin id.
+fn plugin_http_scope_is_valid(scope: &str) -> bool {
+    scope
+        .strip_prefix(PLUGIN_HTTP_SCOPE_PREFIX)
+        .is_some_and(crate::routes::plugins_lifecycle::is_plugin_id)
+}
+
 /// The scope class a ticket for `scope` grants its holder, or `None` for a scope
 /// the agent does not mint.
 fn ticket_scope_class(scope: &str) -> Option<ScopeClass> {
@@ -71,7 +84,25 @@ fn ticket_scope_class(scope: &str) -> Option<ScopeClass> {
         .iter()
         .find(|(s, _)| *s == scope)
         .map(|(_, class)| *class)
-        .or_else(|| install_job_scope_is_valid(scope).then_some(ScopeClass::Read))
+        .or_else(|| {
+            (install_job_scope_is_valid(scope) || plugin_http_scope_is_valid(scope))
+                .then_some(ScopeClass::Read)
+        })
+}
+
+/// The ticket scope a WebSocket upgrade on a native `path` must carry, for the
+/// routes whose scope names the path's own id: an install job's progress
+/// stream (`/api/plugins/jobs/<job_id>`) and a plugin's HTTP passthrough
+/// (`/api/plugins/<plugin_id>/x/...`). `None` for any other path, so a ticket
+/// minted for one job or plugin opens nothing else.
+pub(crate) fn path_bound_scope(path: &str) -> Option<String> {
+    let mut segments = path.strip_prefix("/api/plugins/")?.split('/');
+    let scope = match (segments.next(), segments.next(), segments.next()) {
+        (Some("jobs"), Some(job_id), None) => format!("{INSTALL_JOB_SCOPE_PREFIX}{job_id}"),
+        (Some(plugin_id), Some("x"), Some(_)) => format!("{PLUGIN_HTTP_SCOPE_PREFIX}{plugin_id}"),
+        _ => return None,
+    };
+    ticket_scope_class(&scope).map(|_| scope)
 }
 
 /// Whether the credential that reached this route may hold a ticket of `class`.
@@ -223,6 +254,42 @@ mod tests {
             ticket_scope_class(&format!("plugins.install_job:{}", "a".repeat(129))),
             None
         );
+    }
+
+    /// A passthrough ticket names one well-formed plugin id, and a native
+    /// upgrade path demands the ticket bound to its own id.
+    #[test]
+    fn plugin_http_tickets_are_bound_to_one_plugin() {
+        assert_eq!(
+            ticket_scope_class("plugins.http:com.example.web"),
+            Some(ScopeClass::Read)
+        );
+        for scope in [
+            "plugins.http",
+            "plugins.http:",
+            "plugins.http:Com.Example",
+            "plugins.http:a|b",
+            "plugins.http:../x",
+            "plugins.http:a/b",
+        ] {
+            assert_eq!(ticket_scope_class(scope), None, "{scope}");
+        }
+        assert_eq!(
+            path_bound_scope("/api/plugins/com.example.web/x/ws/live").as_deref(),
+            Some("plugins.http:com.example.web")
+        );
+        assert_eq!(
+            path_bound_scope("/api/plugins/jobs/job-1").as_deref(),
+            Some("plugins.install_job:job-1")
+        );
+        for path in [
+            "/api/plugins/com.example.web/x",
+            "/api/plugins/com.example.web/config",
+            "/api/plugins/jobs/a/b",
+            "/api/vision/detections/ws",
+        ] {
+            assert_eq!(path_bound_scope(path), None, "{path}");
+        }
     }
 
     fn scopes_header(value: &str) -> HeaderMap {

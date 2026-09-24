@@ -5,10 +5,10 @@ battery percent, last event timestamp) and republishes a snapshot
 under its own ``plugin.<id>.snapshot`` namespace so diagnostic UIs
 have a single canonical state object to render.
 
-The plugin ships with the agent package: its manifest lives in code and
-``PluginSupervisor.install_builtin`` materialises it as an installed
-subprocess plugin that the plugin host serves through the shared runner,
-exactly like a third-party plugin. The same lifecycle hooks
+The plugin ships with the agent package: its manifest is the
+``manifest.yaml`` beside this module, which the native plugin lifecycle
+installs as a subprocess plugin that the plugin host serves through the
+shared runner, exactly like a third-party plugin. The same lifecycle hooks
 third-party plugins implement run here too, which doubles this
 module as a worked example of an aggregator plugin that combines
 ``event.subscribe`` and ``event.publish``.
@@ -17,14 +17,10 @@ module as a worked example of an aggregator plugin that combines
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from ados.core.logging import get_logger
-from ados.plugins.manifest import (
-    AgentBlock,
-    Compatibility,
-    PluginManifest,
-)
 
 log = get_logger("plugin.builtin.mavlink_inspector")
 
@@ -37,29 +33,6 @@ SUBSCRIBED_TOPICS: tuple[str, ...] = (
     "vehicle.battery_low",
     "agent.ready",
 )
-
-
-def get_manifest() -> PluginManifest:
-    """Return the manifest for the built-in MAVLink inspector plugin."""
-    return PluginManifest(
-        schema_version=1,
-        id=PLUGIN_ID,
-        version="0.1.0",
-        name="MAVLink Inspector",
-        description=(
-            "Subscribes to vehicle state changes and republishes a snapshot "
-            "under plugin.<id>.snapshot for diagnostic UIs."
-        ),
-        author="Altnautica",
-        license="GPL-3.0-or-later",
-        risk="low",
-        compatibility=Compatibility(ados_version=">=0.9.0"),
-        agent=AgentBlock(
-            entrypoint="ados.plugins.builtin.mavlink_inspector:MavlinkInspectorPlugin",
-            permissions=["event.subscribe", "event.publish"],
-        ),
-    )
-
 
 
 class MavlinkInspectorPlugin:
@@ -104,7 +77,9 @@ class MavlinkInspectorPlugin:
         # agent.ready falls through with a timestamp refresh only.
         self._state["last_event_ts_ms"] = int(time.time() * 1000)
 
-    def _make_callback(self, ctx: Any, topic: str):
+    def _make_callback(
+        self, ctx: Any, topic: str
+    ) -> Callable[[dict[str, Any]], Awaitable[None]]:
         async def _callback(payload: dict[str, Any]) -> None:
             self._apply(topic, payload)
             await ctx.events.publish(

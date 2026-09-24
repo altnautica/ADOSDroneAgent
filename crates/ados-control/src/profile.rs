@@ -1,29 +1,15 @@
 //! Profile + role resolution for the pairing-info wire contract.
 //!
-//! The agent stores `profile` internally as `"drone"` / `"ground_station"`
-//! (underscore form), but the GCS-facing wire contract uses the hyphenated
-//! `"ground-station"`. This module bridges the two exactly as the Python
-//! `ados.core.profile.current_profile_and_role` does, so the native pairing-info
-//! endpoint emits the same `profile` + `role` discriminators the FastAPI
-//! endpoint (and the cloud heartbeat) do.
-//!
-//! Resolution order, matching the Python:
-//!
-//! 1. `agent.profile` from the loaded config when it is an explicit value
-//!    (`"drone"` / `"ground_station"`).
-//! 2. `/etc/ados/profile.conf` when the config field is `"auto"`, empty, or
-//!    absent — install.sh writes this file and `ados profile set` flips it.
-//! 3. `"drone"` as the final fallback.
+//! The profile itself comes from the shared [`ados_config::resolve_profile`]
+//! (explicit `agent.profile`, else `profile.conf`, else `drone`, in the
+//! hyphenated wire form). This module pairs it with the ground-station role, the
+//! same `profile` + `role` discriminators the cloud heartbeat emits.
 //!
 //! `role` is `"direct" | "relay" | "receiver"` for a ground station (read from
 //! the `/etc/ados/mesh/role` sentinel, defaulting to `"direct"`), and `None` for
-//! a drone.
+//! every other profile.
 
 use std::path::{Path, PathBuf};
-
-/// The profile-source sentinel install.sh writes. Overridable via
-/// `ADOS_PROFILE_CONF` for tests (no env in production; the path is fixed).
-pub const PROFILE_CONF: &str = "/etc/ados/profile.conf";
 
 /// The ground-station role sentinel the role manager writes. Overridable via
 /// `ADOS_MESH_ROLE` for tests.
@@ -31,48 +17,6 @@ pub const MESH_ROLE_PATH: &str = "/etc/ados/mesh/role";
 
 /// The valid ground-station roles, matching the Python `VALID_ROLES`.
 const VALID_ROLES: [&str; 3] = ["direct", "relay", "receiver"];
-
-/// Normalize a raw profile value to the wire-contract string. `"ground_station"`
-/// becomes `"ground-station"`; `"workstation"` and `"compute"` pass through
-/// unchanged; `"drone"`, `"auto"`, `""`, and any unknown value fall back to
-/// `"drone"` for wire purposes. Mirrors `normalize_profile`.
-fn normalize_profile(raw: Option<&str>) -> &'static str {
-    match raw {
-        Some("ground_station") => "ground-station",
-        Some("workstation") => "workstation",
-        Some("compute") => "compute",
-        _ => "drone",
-    }
-}
-
-/// Read the canonical `profile:` value out of `profile.conf`, returning the
-/// underscore form (`"drone"` / `"ground_station"`) or `None` on any error /
-/// unrecognized value. Accepts both the YAML form (`profile: X`) and the legacy
-/// key=value form (`profile=X`), mirroring `_read_profile_conf_value`.
-fn read_profile_conf_value(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines() {
-        let stripped = line.trim();
-        if stripped.is_empty() || stripped.starts_with('#') {
-            continue;
-        }
-        let raw = if let Some(rest) = stripped.strip_prefix("profile:") {
-            rest
-        } else if let Some(rest) = stripped.strip_prefix("profile=") {
-            rest
-        } else {
-            continue;
-        };
-        let value = raw.trim().trim_matches(|c| c == '"' || c == '\'');
-        if matches!(
-            value,
-            "drone" | "ground_station" | "ground-station" | "workstation" | "compute"
-        ) {
-            return Some(value.replace('-', "_"));
-        }
-    }
-    None
-}
 
 /// Read the on-disk ground-station role sentinel, defaulting to `"direct"` when
 /// the file is missing, unreadable, or carries an unknown value. Mirrors
@@ -87,17 +31,9 @@ fn read_role(path: &Path) -> String {
     "direct".to_string()
 }
 
-/// The profile-source sentinel path, honouring `ADOS_PROFILE_CONF` for tests.
+/// The ground-station role sentinel path, honouring `ADOS_MESH_ROLE` for tests.
 /// `pub(crate)` so a profile-gated route can resolve the live path once and hand
 /// it to a path-injectable gate core (a test passes a tempdir path instead).
-pub(crate) fn profile_conf_path() -> PathBuf {
-    std::env::var("ADOS_PROFILE_CONF")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(PROFILE_CONF))
-}
-
-/// The ground-station role sentinel path, honouring `ADOS_MESH_ROLE` for tests.
-/// `pub(crate)` for the same reason as [`profile_conf_path`].
 pub(crate) fn mesh_role_path() -> PathBuf {
     std::env::var("ADOS_MESH_ROLE")
         .map(PathBuf::from)
@@ -109,7 +45,11 @@ pub(crate) fn mesh_role_path() -> PathBuf {
 /// wire string; `role` is `Some("direct"|"relay"|"receiver")` for a ground
 /// station and `None` for a drone.
 pub fn current_profile_and_role(config_profile: &str) -> (String, Option<String>) {
-    current_profile_and_role_at(config_profile, &profile_conf_path(), &mesh_role_path())
+    current_profile_and_role_at(
+        config_profile,
+        &ados_config::profile_conf_path(),
+        &mesh_role_path(),
+    )
 }
 
 /// The path-injectable core, for tests. `config_profile` is the raw
@@ -119,26 +59,9 @@ pub fn current_profile_and_role_at(
     profile_conf: &Path,
     role_path: &Path,
 ) -> (String, Option<String>) {
-    // An explicit config value wins; "auto"/empty falls back to profile.conf.
-    let raw_owned;
-    let raw: Option<&str> = if config_profile.is_empty() || config_profile == "auto" {
-        match read_profile_conf_value(profile_conf) {
-            Some(v) => {
-                raw_owned = v;
-                Some(raw_owned.as_str())
-            }
-            None => None,
-        }
-    } else {
-        Some(config_profile)
-    };
-
-    let profile = normalize_profile(raw);
-    if profile == "ground-station" {
-        (profile.to_string(), Some(read_role(role_path)))
-    } else {
-        (profile.to_string(), None)
-    }
+    let profile = ados_config::resolve_profile(Some(config_profile), profile_conf);
+    let role = (profile == "ground-station").then(|| read_role(role_path));
+    (profile, role)
 }
 
 #[cfg(test)]

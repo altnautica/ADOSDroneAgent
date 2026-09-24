@@ -59,12 +59,27 @@
 //! A failed apply (a spawn failure on `open`) replies `{"ok":false,"error":"..."}`
 //! and leaves the aux pair closed, so the host can surface the error. The socket
 //! only mutates the aux pair it owns; it never round-trips the on-disk config.
+//!
+//! ## The same socket on a ground station
+//!
+//! A ground station serves this exact protocol from its receive-plane service,
+//! so a plugin half written against it runs unchanged on either node. The
+//! difference is only what backs it (see [`AuxCmdState::ground`]): the ground
+//! uplink `wfb_tx` belongs to the receive chain and already carries MAVLink,
+//! relay RPC, link feedback and the config tunnel, so there is no pair to spawn.
+//! `open`/`close` gate this socket's application egress instead, `send` accepts
+//! only the two application channels (a plugin must never be able to inject a
+//! MAVLink frame onto that shared uplink), and inbound `AppStream` datagrams
+//! arrive in-process from the service's own aux consumer rather than over
+//! `publish`, which stays available with the same semantics.
 
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use ados_protocol::aux_mux::AuxChannel;
+use ados_protocol::aux_egress::{AuxEgress, AuxEgressError};
+use ados_protocol::aux_mux::{self, AuxChannel};
 use ados_protocol::ipc::{bind_command_socket, read_newline_line, OperatorListener};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -78,21 +93,90 @@ use crate::process::RadioProcesses;
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
-/// The shared state the aux command handlers act on: the live process group (to
-/// open / close the aux pair) and the boot config (the source of the effective
-/// aux ports / FEC / MCS an `open` applies). The `proc` mutex is the SAME handle
-/// the watchdogs + operator command socket hold, so this socket reaches the live
-/// radio. Constructed once per bring-up and shared with every accepted
+/// The shared state the aux command handlers act on: what carries the lane, the
+/// operator dead-switch, and the inbound application fan-out.
+/// Constructed once per bring-up on a drone ([`Self::radio`]) or once per
+/// service on a ground station ([`Self::ground`]) and shared with every accepted
 /// connection.
 #[derive(Clone)]
 pub struct AuxCmdState {
-    pub proc: Arc<Mutex<RadioProcesses>>,
-    pub cfg: Arc<WfbConfig>,
+    lane: AuxLane,
+    /// The operator dead-switch (`aux_enable`). Off refuses every op that would
+    /// move application traffic in either direction.
+    aux_enable: bool,
     /// Fan-out for inbound application datagrams. `subscribe` connections stream
-    /// from this; the `publish` op is what feeds it, carrying each `AppStream` /
-    /// `AppCommand` payload the aux-uplink consumer decoded in the MAVLink
-    /// router process. Items are `(channel as u8, payload)`.
-    pub rx_tx: broadcast::Sender<(u8, Vec<u8>)>,
+    /// from this; [`Self::publish`] (the `publish` op, or a ground station's
+    /// in-process aux consumer) feeds it. Items are `(channel as u8, payload)`.
+    rx_tx: broadcast::Sender<(u8, Vec<u8>)>,
+}
+
+/// What an outbound `send` goes through, and what `open` / `close` / `status`
+/// act on.
+#[derive(Clone)]
+enum AuxLane {
+    /// Drone: this service owns the additive aux transmit/receive pair. `proc` is
+    /// the SAME handle the watchdogs + operator command socket hold, so an `open`
+    /// reaches the live radio group; `cfg` is the boot config, the source of the
+    /// effective aux ports / FEC / MCS an `open` applies.
+    Radio {
+        proc: Arc<Mutex<RadioProcesses>>,
+        cfg: Arc<WfbConfig>,
+    },
+    /// Ground station: the uplink `wfb_tx` is owned by the receive chain and
+    /// shared with every other plane on the lane, so `open` / `close` only gate
+    /// this socket's application egress. `open` is shared by every connection.
+    Uplink {
+        egress: Arc<AuxEgress>,
+        tx_port: u16,
+        open: Arc<AtomicBool>,
+    },
+}
+
+impl AuxCmdState {
+    /// The drone side: `open` / `close` drive the additive aux pair in `proc`,
+    /// `send` writes to its loopback transmit ingress, and the aux-uplink
+    /// consumer in the MAVLink router feeds `rx_tx` over the `publish` op.
+    pub fn radio(
+        proc: Arc<Mutex<RadioProcesses>>,
+        cfg: Arc<WfbConfig>,
+        rx_tx: broadcast::Sender<(u8, Vec<u8>)>,
+    ) -> Self {
+        Self {
+            aux_enable: cfg.aux_enable,
+            lane: AuxLane::Radio { proc, cfg },
+            rx_tx,
+        }
+    }
+
+    /// The ground-station side: `send` goes out through an egress connected to
+    /// the uplink transmit ingress `tx_port` (the receive chain's aux `wfb_tx`),
+    /// and the caller feeds inbound application datagrams through
+    /// [`Self::publish`]. Fails only when the loopback egress socket cannot be
+    /// created.
+    pub async fn ground(
+        tx_port: u16,
+        aux_enable: bool,
+        rx_tx: broadcast::Sender<(u8, Vec<u8>)>,
+    ) -> Result<Self, AuxEgressError> {
+        let egress = AuxEgress::connected_to_udp(tx_port).await?;
+        Ok(Self {
+            lane: AuxLane::Uplink {
+                egress: Arc::new(egress),
+                tx_port,
+                open: Arc::new(AtomicBool::new(false)),
+            },
+            aux_enable,
+            rx_tx,
+        })
+    }
+
+    /// Inject one inbound application payload into the subscriber fan-out and
+    /// return the reply the `publish` op would send (see
+    /// [`publish_app_datagram`]): refused when the lane is disabled or the
+    /// channel is not an application channel, otherwise the subscriber count.
+    pub fn publish(&self, channel: u8, payload: Vec<u8>) -> Value {
+        publish_app_datagram(self.aux_enable, &self.rx_tx, channel, payload)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,7 +268,7 @@ async fn write_json_line<W: AsyncWriteExt + Unpin>(w: &mut W, v: &Value) -> io::
 /// disconnects or asks to close. The operator dead-switch is checked first so a
 /// disabled deployment refuses the subscribe without holding a connection open.
 async fn serve_subscriber(stream: &mut UnixStream, state: &AuxCmdState) -> io::Result<()> {
-    if !state.cfg.aux_enable {
+    if !state.aux_enable {
         return write_json_line(stream, &json!({"ok": false, "error": "E_AUX_DISABLED"})).await;
     }
     write_json_line(stream, &json!({"ok": true})).await?;
@@ -295,7 +379,7 @@ fn aux_disabled_reply(aux_enable: bool) -> Option<Value> {
     }
 }
 
-/// Apply a validated command to the live aux pair.
+/// Apply a validated command to the lane this state carries.
 async fn apply(cmd: Command, state: &AuxCmdState) -> Value {
     match cmd {
         Command::Open => {
@@ -304,60 +388,109 @@ async fn apply(cmd: Command, state: &AuxCmdState) -> Value {
             // and so NO process is spawned (the lock + open below is never
             // reached). (`open_aux_stream` enforces the same guard structurally,
             // so a cap-holding caller can never open the stream when disabled.)
-            if let Some(reply) = aux_disabled_reply(state.cfg.aux_enable) {
+            if let Some(reply) = aux_disabled_reply(state.aux_enable) {
                 return reply;
             }
-            // Idempotent open: brings up the additive aux pair on the config's
-            // effective aux ports/FEC/MCS. Never touches the data/control planes.
-            if state.proc.lock().await.open_aux_stream(&state.cfg).await {
-                json!({
-                    "ok": true,
-                    "active": true,
-                    "tx_port": state.cfg.aux_tx_port,
-                    "rx_port": state.cfg.aux_rx_port,
-                })
-            } else {
-                json!({"ok": false, "error": "E_AUX_OPEN_FAILED"})
+            match &state.lane {
+                AuxLane::Radio { proc, cfg } => {
+                    // Idempotent open: brings up the additive aux pair on the
+                    // config's effective aux ports/FEC/MCS. Never touches the
+                    // data/control planes.
+                    if proc.lock().await.open_aux_stream(cfg).await {
+                        json!({
+                            "ok": true,
+                            "active": true,
+                            "tx_port": cfg.aux_tx_port,
+                            "rx_port": cfg.aux_rx_port,
+                        })
+                    } else {
+                        json!({"ok": false, "error": "E_AUX_OPEN_FAILED"})
+                    }
+                }
+                // The uplink transmitter already runs; opening admits this
+                // socket's sends. No `rx_port`: inbound traffic reaches a client
+                // only through `subscribe`, fed per drone slot in-process, so no
+                // single receive port describes it.
+                AuxLane::Uplink { tx_port, open, .. } => {
+                    open.store(true, Ordering::Release);
+                    json!({"ok": true, "active": true, "tx_port": tx_port})
+                }
             }
         }
         Command::Close => {
-            state.proc.lock().await.close_aux_stream().await;
+            match &state.lane {
+                AuxLane::Radio { proc, .. } => proc.lock().await.close_aux_stream().await,
+                // Closes the gate, never the shared uplink transmitter.
+                AuxLane::Uplink { open, .. } => open.store(false, Ordering::Release),
+            }
             json!({"ok": true, "active": false})
         }
         Command::Status => {
-            let active = state.proc.lock().await.aux_active();
+            let active = match &state.lane {
+                AuxLane::Radio { proc, .. } => proc.lock().await.aux_active(),
+                AuxLane::Uplink { open, .. } => open.load(Ordering::Acquire),
+            };
             json!({"ok": true, "active": active})
         }
         Command::Send { frame } => {
             // The operator dead-switch is checked first (no datagram is written
             // while the aux lane is disabled by policy), and the pair must be
             // open — the stream exists only between an open and its close.
-            if let Some(reply) = aux_disabled_reply(state.cfg.aux_enable) {
+            if let Some(reply) = aux_disabled_reply(state.aux_enable) {
                 return reply;
             }
-            if !state.proc.lock().await.aux_active() {
-                return json!({"ok": false, "error": "E_AUX_NOT_OPEN"});
+            match &state.lane {
+                AuxLane::Radio { proc, cfg } => {
+                    if !proc.lock().await.aux_active() {
+                        return json!({"ok": false, "error": "E_AUX_NOT_OPEN"});
+                    }
+                    // Write the already-aux-framed datagram to the local aux
+                    // transmit ingress; wfb_tx radiates it and the paired node's
+                    // aux-rx re-emits it to its own subscribers. A fresh socket
+                    // per send (bound to an ephemeral port) is dropped after the
+                    // datagram — one-shot, like open/close, with no per-send
+                    // state.
+                    let sock = match tokio::net::UdpSocket::bind(("127.0.0.1", 0)).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            return json!({"ok": false, "error": format!("E_AUX_SEND_UDP: {e}")})
+                        }
+                    };
+                    if let Err(e) = sock.send_to(&frame, ("127.0.0.1", cfg.aux_tx_port)).await {
+                        return json!({"ok": false, "error": format!("E_AUX_SEND: {e}")});
+                    }
+                    json!({"ok": true})
+                }
+                AuxLane::Uplink { egress, open, .. } => {
+                    if !open.load(Ordering::Acquire) {
+                        return json!({"ok": false, "error": "E_AUX_NOT_OPEN"});
+                    }
+                    send_uplink(egress, &frame).await
+                }
             }
-            // Write the already-aux-framed datagram to the local aux transmit
-            // ingress; wfb_tx radiates it and the paired node's aux-rx re-emits
-            // it to its own subscribers. A fresh socket per send (bound to an
-            // ephemeral port) is dropped after the datagram — one-shot, like
-            // open/close, with no per-send state.
-            let sock = match tokio::net::UdpSocket::bind(("127.0.0.1", 0)).await {
-                Ok(s) => s,
-                Err(e) => return json!({"ok": false, "error": format!("E_AUX_SEND_UDP: {e}")}),
-            };
-            if let Err(e) = sock
-                .send_to(&frame, ("127.0.0.1", state.cfg.aux_tx_port))
-                .await
-            {
-                return json!({"ok": false, "error": format!("E_AUX_SEND: {e}")});
-            }
-            json!({"ok": true})
         }
-        Command::Publish { channel, payload } => {
-            publish_app_datagram(state.cfg.aux_enable, &state.rx_tx, channel, payload)
-        }
+        Command::Publish { channel, payload } => state.publish(channel, payload),
+    }
+}
+
+/// Emit one `send` frame onto a ground station's shared aux uplink.
+///
+/// The frame is decoded before it goes anywhere: that uplink also carries the
+/// drone's MAVLink, relay RPC, link feedback and config tunnel, so only the two
+/// application channels may pass. A frame that does not decode (bad magic, a
+/// length that disagrees with the bytes, a payload over
+/// [`aux_mux::AUX_MAX_PAYLOAD`]) is refused rather than radiated as garbage.
+async fn send_uplink(egress: &AuxEgress, frame: &[u8]) -> Value {
+    let (channel, payload) = match aux_mux::decode(frame) {
+        Ok(decoded) => decoded,
+        Err(e) => return json!({"ok": false, "error": format!("E_BAD_FRAME: {e:?}")}),
+    };
+    if !matches!(channel, AuxChannel::AppStream | AuxChannel::AppCommand) {
+        return json!({"ok": false, "error": "E_BAD_CHANNEL"});
+    }
+    match egress.send(channel, payload).await {
+        Ok(()) => json!({"ok": true}),
+        Err(e) => json!({"ok": false, "error": format!("E_AUX_SEND: {e}")}),
     }
 }
 
@@ -600,5 +733,116 @@ mod tests {
         let v = reply(b"");
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().starts_with("E_BAD_REQUEST"));
+    }
+
+    /// A ground-station state whose uplink egress points at a loopback socket
+    /// the test reads, standing in for the receive chain's aux `wfb_tx`.
+    async fn uplink(aux_enable: bool) -> (AuxCmdState, tokio::net::UdpSocket) {
+        let wire = tokio::net::UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = wire.local_addr().unwrap().port();
+        let (tx, _) = broadcast::channel(16);
+        let state = AuxCmdState::ground(port, aux_enable, tx).await.unwrap();
+        (state, wire)
+    }
+
+    fn send_cmd(channel: AuxChannel, payload: &[u8]) -> Command {
+        Command::Send {
+            frame: aux_mux::encode(channel, payload).unwrap(),
+        }
+    }
+
+    /// Nothing arrived at the stand-in transmitter within a short window.
+    async fn assert_nothing_radiated(wire: &tokio::net::UdpSocket) {
+        let mut buf = [0u8; 64];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                wire.recv_from(&mut buf)
+            )
+            .await
+            .is_err(),
+            "nothing may reach the uplink"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_ground_uplink_sends_only_between_open_and_close() {
+        // The drone contract, kept on the ground: a send before open (or after
+        // close) is E_AUX_NOT_OPEN, and an open admits the send, which reaches
+        // the uplink ingress as the identical aux frame.
+        let (state, wire) = uplink(true).await;
+        let port = wire.local_addr().unwrap().port();
+        let v = apply(send_cmd(AuxChannel::AppCommand, b"go"), &state).await;
+        assert_eq!(v["error"], "E_AUX_NOT_OPEN");
+        assert_nothing_radiated(&wire).await;
+
+        let v = apply(Command::Open, &state).await;
+        assert_eq!(v, json!({"ok": true, "active": true, "tx_port": port}));
+        assert_eq!(apply(Command::Status, &state).await["active"], true);
+
+        let v = apply(send_cmd(AuxChannel::AppCommand, b"go"), &state).await;
+        assert_eq!(v, json!({"ok": true}));
+        let mut buf = [0u8; 64];
+        let (n, _) = wire.recv_from(&mut buf).await.unwrap();
+        assert_eq!(
+            &buf[..n],
+            aux_mux::encode(AuxChannel::AppCommand, b"go")
+                .unwrap()
+                .as_slice()
+        );
+
+        assert_eq!(
+            apply(Command::Close, &state).await,
+            json!({"ok": true, "active": false})
+        );
+        let v = apply(send_cmd(AuxChannel::AppStream, b"x"), &state).await;
+        assert_eq!(v["error"], "E_AUX_NOT_OPEN");
+    }
+
+    #[tokio::test]
+    async fn the_ground_uplink_refuses_every_frame_that_is_not_application_traffic() {
+        // The ground uplink also carries the drone's MAVLink, relay RPC, link
+        // feedback and config tunnel. A socket client must never inject into
+        // those planes, and a malformed frame must never be radiated.
+        let (state, wire) = uplink(true).await;
+        apply(Command::Open, &state).await;
+        for channel in [
+            AuxChannel::Mavlink,
+            AuxChannel::Request,
+            AuxChannel::LinkFeedback,
+            AuxChannel::ConfigTunnel,
+        ] {
+            let v = apply(send_cmd(channel, &[0xFD, 0x09]), &state).await;
+            assert_eq!(v["error"], "E_BAD_CHANNEL", "channel {}", channel as u8);
+        }
+        let mut truncated = aux_mux::encode(AuxChannel::AppStream, b"hello").unwrap();
+        truncated.pop();
+        let v = apply(Command::Send { frame: truncated }, &state).await;
+        assert!(v["error"].as_str().unwrap().starts_with("E_BAD_FRAME"));
+        let v = apply(
+            Command::Send {
+                frame: b"raw".to_vec(),
+            },
+            &state,
+        )
+        .await;
+        assert!(v["error"].as_str().unwrap().starts_with("E_BAD_FRAME"));
+        assert_nothing_radiated(&wire).await;
+    }
+
+    #[tokio::test]
+    async fn the_ground_uplink_honours_the_operator_dead_switch() {
+        let (state, wire) = uplink(false).await;
+        assert_eq!(
+            apply(Command::Open, &state).await["error"],
+            "E_AUX_DISABLED"
+        );
+        let v = apply(send_cmd(AuxChannel::AppCommand, b"go"), &state).await;
+        assert_eq!(v["error"], "E_AUX_DISABLED");
+        assert_eq!(
+            state.publish(AuxChannel::AppStream as u8, vec![1])["error"],
+            "E_AUX_DISABLED"
+        );
+        assert_nothing_radiated(&wire).await;
     }
 }

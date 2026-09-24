@@ -1,13 +1,13 @@
 //! Bridge from the Atlas bus onto the plugin event bus.
 //!
 //! `ados-atlas` publishes its shared-data topics (`plugin.atlas.pose` and the
-//! world-model artifact descriptors) on the local atlas bus. A plugin reaches
-//! them only through this host: every `plugin.atlas.*` event is republished on
-//! the plugin [`EventBus`] as a host event, so the subscribe gate
-//! ([`ados_protocol::atlas::atlas_topic_subscribe_capability`]) and the
-//! delivery gate ([`crate::handlers::may_deliver`]) decide who receives it.
-//! Capture-internal topics (keyframes, capture state, offloaded pose) stay on
-//! the atlas bus.
+//! world-model artifact descriptors) on the local atlas bus. Every
+//! `plugin.atlas.*` event is republished on the plugin [`EventBus`] as a host
+//! event. A plugin subscribes to a shared topic only through a plugin's
+//! `shared_topics` declaration (see [`crate::handlers::is_subscribe_allowed`]),
+//! and no plugin may declare or publish under `plugin.atlas.`, so these host
+//! events reach no plugin subscriber. Capture-internal topics (keyframes,
+//! capture state, offloaded pose) stay on the atlas bus.
 
 use std::path::PathBuf;
 use std::sync::Arc;

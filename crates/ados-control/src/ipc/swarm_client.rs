@@ -73,7 +73,14 @@ impl SwarmIpcHandle {
         if let Some(tx) = self.stop.take() {
             let _ = tx.send(());
         }
-        let _ = self.join.await;
+        // A panicked reader must not be swallowed here: under the release
+        // profile's `panic = "abort"` it already killed the process, so tests
+        // re-raise it to see the same failure.
+        if let Err(e) = self.join.await {
+            if e.is_panic() {
+                std::panic::resume_unwind(e.into_panic());
+            }
+        }
     }
 }
 
@@ -156,7 +163,14 @@ async fn read_loop(socket_path: PathBuf, published: Published, stop: oneshot::Re
                 match connected {
                     Ok(stream) => {
                         tracing::debug!(path = %socket_path.display(), "swarm socket connected");
-                        process_stream(BufReader::new(stream), &published, &mut stop).await;
+                        if process_stream(BufReader::new(stream), &published, &mut stop).await
+                            == StreamEnd::Stopped
+                        {
+                            // The stop signal already resolved inside the read; polling
+                            // a completed oneshot again panics, so return here.
+                            tracing::info!("swarm client stopping");
+                            return;
+                        }
                         // The stream ended. Pace the reconnect so a peer that
                         // accepts and closes at once cannot spin this loop.
                         tokio::select! {
@@ -192,13 +206,14 @@ async fn process_stream<R>(
     mut reader: R,
     published: &Published,
     stop: &mut std::pin::Pin<&mut oneshot::Receiver<()>>,
-) where
+) -> StreamEnd
+where
     R: tokio::io::AsyncRead + Unpin,
 {
     loop {
         let line = tokio::select! {
             biased;
-            _ = &mut **stop => return,
+            _ = &mut **stop => return StreamEnd::Stopped,
             r = read_newline_line(&mut reader, MAX_LINE) => r,
         };
         match line {
@@ -207,9 +222,17 @@ async fn process_stream<R>(
                     *published.lock() = Some((value, Instant::now()));
                 }
             }
-            Ok(None) | Err(_) => return,
+            Ok(None) | Err(_) => return StreamEnd::Ended,
         }
     }
+}
+
+/// Why [`process_stream`] returned: the stream ended on its own, or the stop
+/// signal fired (and is therefore consumed and must not be polled again).
+#[derive(Debug, PartialEq, Eq)]
+enum StreamEnd {
+    Ended,
+    Stopped,
 }
 
 #[cfg(test)]

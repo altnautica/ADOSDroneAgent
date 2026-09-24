@@ -18,6 +18,13 @@ OPTIONS:
                                        Agent profile to install
     --name <hostname>                  mDNS hostname to set
     --no-rtl-driver                    Skip the RTL8812EU WFB radio driver build
+    --world-engine / --no-world-engine Install (or skip) the World Engine
+                                       extension (3D world model + compute
+                                       offload). Default: on for workstation
+                                       and compute, off for drone and ground
+                                       station. An installed extension is left
+                                       alone; plugin auto-update keeps it
+                                       current.
     --no-reboot                        Do not perform the single automatic
                                        reboot when provisioning needs one (a
                                        camera/display overlay, an I2C dtparam).

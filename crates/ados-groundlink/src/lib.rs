@@ -14,6 +14,7 @@
 //! and the mesh tap-to-pair crypto.
 
 pub mod acquire;
+pub mod app_lane;
 pub mod atlas_relay;
 pub mod aux_consumer;
 pub mod aux_peers;

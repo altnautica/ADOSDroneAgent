@@ -436,3 +436,65 @@ async fn config_persists_across_a_reconnect() {
     let resp = recv(&mut client).await;
     assert_eq!(args_str(&resp, "value"), Some("v"));
 }
+
+/// A cloud record write waits out the cloud's own answer, which takes seconds;
+/// a ping sent behind it on the same connection is answered while the write is
+/// still parked on the relay, and the write's reply still reaches its request.
+#[tokio::test]
+async fn a_slow_cloud_record_put_does_not_hold_up_a_ping_on_the_same_connection() {
+    use ados_protocol::cloud_publish::CloudPublishReply;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let relay_path = dir.path().join("cloud-publish.sock");
+    let relay = tokio::net::UnixListener::bind(&relay_path).expect("bind relay");
+    let (parked_tx, parked_rx) = tokio::sync::oneshot::channel::<()>();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let relay_task = tokio::spawn(async move {
+        let (mut stream, _) = relay.accept().await.expect("accept");
+        let mut len = [0u8; 4];
+        stream.read_exact(&mut len).await.expect("read len");
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        stream.read_exact(&mut body).await.expect("read body");
+        parked_tx.send(()).expect("test waiting");
+        release_rx.await.expect("released");
+        stream
+            .write_all(&CloudPublishReply::accepted().encode().expect("encode"))
+            .await
+            .expect("write reply");
+    });
+
+    let h = harness(
+        RealHost::new().with_cloud_publish_path(relay_path),
+        &[PLUGIN_A],
+    );
+    let (mut client, token) = hello(&h, PLUGIN_A, &["cloud.records"]).await;
+
+    let mut put = request(
+        "cloud.records.put",
+        &token,
+        map(&[
+            ("collection", Value::from("jobs")),
+            ("key", Value::from("job-1")),
+            ("data", map(&[("state", Value::from("done"))])),
+        ]),
+    );
+    put.request_id = "put-1".to_string();
+    send(&mut client, &put).await;
+    parked_rx.await.expect("the write reached the relay");
+
+    let mut ping = request("ping", &token, Value::Map(vec![]));
+    ping.request_id = "ping-1".to_string();
+    send(&mut client, &ping).await;
+    let first = tokio::time::timeout(Duration::from_secs(2), recv(&mut client))
+        .await
+        .expect("the ping waited behind the record write");
+    assert_eq!(first.request_id, "ping-1");
+    assert_eq!(args_bool(&first, "pong"), Some(true));
+
+    release_tx.send(()).expect("relay waiting");
+    let second = recv(&mut client).await;
+    assert_eq!(second.request_id, "put-1");
+    assert_eq!(second.error, None);
+    assert_eq!(args_bool(&second, "ok"), Some(true));
+    relay_task.await.expect("relay");
+}

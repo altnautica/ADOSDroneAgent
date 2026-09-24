@@ -27,6 +27,7 @@ CONTRACT_VERSIONS: dict[str, int] = {
     "rest.openapi": 0,
     "state.v1": 1,
     "ws_ticket": 1,
+    "cloud-publish": 1,
 }
 
 SIDECAR_VERSIONS: dict[str, int] = {
@@ -192,6 +193,13 @@ CONTRACT_CATALOG: dict[str, dict[str, object]] = {
         "transport": "websocket-subprotocol",
         "status": "metadata",
         "description": "String-tagged (v1) HMAC-SHA256 WebSocket auth ticket; the version is a string tag, not a wire integer.",
+    },
+    "cloud-publish": {
+        "version": 1,
+        "wire": "msgpack",
+        "transport": "unix-stream",
+        "status": "active",
+        "description": "Plugin data leaving the node through the cloud relay: the plugin host forwards a gated stream message (QoS 0 broker publish) or keyed JSON record (cloud record upsert) to ados-cloud over a root-only socket, one length-prefixed msgpack request and reply per exchange.",
     },
 }
 

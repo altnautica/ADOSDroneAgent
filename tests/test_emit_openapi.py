@@ -17,11 +17,3 @@ def test_emit_openapi_does_not_duplicate_v1_prefixes() -> None:
     # moved rather than the route being resurrected to satisfy a test.
     assert "/api/v1/ground-station/factory-reset" in paths
     assert "/api/v1/peripherals" in paths
-
-
-def test_emit_openapi_includes_plugin_routes() -> None:
-    spec = build_spec_app().openapi()
-    paths = spec["paths"]
-
-    assert "/api/plugins" in paths
-    assert "/api/plugins/install" in paths

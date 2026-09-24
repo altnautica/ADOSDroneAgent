@@ -325,6 +325,13 @@ fn new_token_id() -> Result<String, getrandom::Error> {
 /// gated routes an MCP token can present against.
 pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
     use ScopeClass::*;
+    // The plugin lifecycle and a plugin's own HTTP API moved here from the
+    // Python surface, where no MCP token ever reached them. They stay out of an
+    // MCP token's reach, reads included (an install record or a plugin's API is
+    // not a telemetry read).
+    if is_plugin_lifecycle(path) {
+        return None;
+    }
     // A GET carries no side effect on the agent, so every native read is `read` —
     // EXCEPT a GET whose response body carries a secret, which needs the
     // `secret_read` scope so a plain `read` token cannot reach it. No native GET is
@@ -417,6 +424,30 @@ fn is_plugin_config(path: &str) -> bool {
         Some(id) => !id.is_empty() && !id.contains('/'),
         None => false,
     }
+}
+
+/// `GET /api/plugins/{plugin_id}/state`: a plugin's published-state read.
+fn is_plugin_state(path: &str) -> bool {
+    match path
+        .strip_prefix("/api/plugins/")
+        .and_then(|r| r.strip_suffix("/state"))
+    {
+        Some(id) => !id.is_empty() && !id.contains('/'),
+        None => false,
+    }
+}
+
+/// The plugin lifecycle routes (`/api/plugins`, `/api/v1/plugins/*`, and every
+/// `/api/plugins/*` path other than a plugin's config, published state and MCP
+/// tool invocation), including the `/x/` passthrough to a plugin's own API.
+fn is_plugin_lifecycle(path: &str) -> bool {
+    if path == "/api/plugins" || path == "/api/v1/plugins" || path.starts_with("/api/v1/plugins/") {
+        return true;
+    }
+    path.starts_with("/api/plugins/")
+        && !is_plugin_config(path)
+        && !is_plugin_state(path)
+        && !is_plugin_tool_invoke(path)
 }
 
 /// Native `GET` routes whose response body carries a secret and therefore need the
@@ -743,5 +774,36 @@ mod tests {
         // A trailing-slash / multi-segment name is not a param write.
         assert_eq!(route_scope(&Method::POST, "/api/params/"), None);
         assert_eq!(route_scope(&Method::POST, "/api/params/a/b"), None);
+    }
+
+    /// The native plugin lifecycle is unreachable with any MCP token, reads
+    /// included, while a plugin's config, published state and tool invocation
+    /// keep their classes.
+    #[test]
+    fn plugin_lifecycle_routes_stay_fail_closed() {
+        for (method, path) in [
+            (Method::GET, "/api/plugins"),
+            (Method::GET, "/api/plugins/com.x.p"),
+            (Method::GET, "/api/plugins/com.x.p/attestation"),
+            (Method::GET, "/api/plugins/com.x.p/gcs/plugin.bundle.js"),
+            (Method::GET, "/api/plugins/com.x.p/x/status"),
+            (Method::GET, "/api/plugins/com.x.p/x/tools/a/invoke"),
+            (Method::GET, "/api/plugins/jobs/job-1"),
+            (Method::GET, "/api/v1/plugins/catalog"),
+            (Method::POST, "/api/plugins/install"),
+            (Method::POST, "/api/plugins/com.x.p/enable"),
+            (Method::POST, "/api/plugins/com.x.p/x/config"),
+            (Method::DELETE, "/api/plugins/com.x.p"),
+        ] {
+            assert_eq!(route_scope(&method, path), None, "{method} {path}");
+        }
+        assert_eq!(
+            route_scope(&Method::GET, "/api/plugins/com.x.p/state"),
+            Some(ScopeClass::Read)
+        );
+        assert_eq!(
+            route_scope(&Method::GET, "/api/plugins/com.x.p/config"),
+            Some(ScopeClass::SecretRead)
+        );
     }
 }

@@ -26,6 +26,16 @@ pub const PROTOCOL_VERSION: i64 = 1;
 /// Default capability-token lifetime in seconds (`TOKEN_TTL_SECONDS`).
 pub const TOKEN_TTL_SECONDS: i64 = 600;
 
+/// The event topic the host pushes the vehicle-state snapshot on, to a plugin
+/// that armed `telemetry.subscribe` (capability `telemetry.read`). The event's
+/// payload is the state object the MAVLink service publishes on `state.sock`.
+pub const TELEMETRY_STATE_TOPIC: &str = "telemetry.state";
+
+/// Most `telemetry.state` events the host pushes to one plugin per second. A
+/// snapshot that arrives sooner replaces the one waiting, so a plugin always
+/// receives the newest state.
+pub const TELEMETRY_STATE_MAX_HZ: u32 = 10;
+
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Error)]

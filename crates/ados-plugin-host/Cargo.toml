@@ -32,6 +32,11 @@ ados-compute = { path = "../ados-compute" }
 # before queueing a command, so a plugin reads `pic_refused` for the command the
 # router would drop rather than a `sent` it never got.
 ados-hid = { path = "../ados-hid" }
+# The node profile (`drone | ground-station | workstation | compute`) the
+# lifecycle controller gates `agent.target_profiles`, per-profile services and
+# payloads against, resolved from the same config and profile.conf every
+# daemon reads.
+ados-config = { path = "../ados-config" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -59,14 +64,28 @@ serde_norway = { workspace = true }
 # The shared secret lets a runner spawned by a separate systemd unit present a
 # token the daemon can verify; a per-process random secret could not.
 getrandom = { workspace = true }
+# Non-poisoning mutex for the recording service backend's call log.
+parking_lot = { workspace = true }
+# Allowlisted HTTPS download of plugin archives and install-time payloads
+# (`download.rs`): a blocking client on rustls with the ring provider and the
+# bundled webpki roots, the one TLS posture the agent's other HTTPS clients use.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-manual-roots-no-provider",
+    "blocking",
+] }
 
-# Linux-only edge: setting the socket file mode to 0o660 after bind, the
-# advisory file lock around the state read-modify-write, and the daemon's
-# systemd readiness/watchdog notify + journald log layer. Confined to a target
-# section so the pure-logic core still builds and tests on a non-Linux dev
-# host (where the mode set, the lock, and the notify are no-ops).
-[target.'cfg(target_os = "linux")'.dependencies]
+# Unix edge: the advisory file lock around the state read-modify-write and the
+# socket-dir owner check (Linux and macOS alike, since the plugin host runs on
+# both).
+[target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
+
+# Linux-only edge: the daemon's systemd readiness/watchdog notify + journald
+# log layer. Confined to a target section so the core still builds and tests on
+# a macOS host, where neither exists.
+[target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = { workspace = true }
 tracing-journald = { workspace = true }
 
@@ -75,3 +94,7 @@ tempfile = "3"
 # Test-only: serve the ados-compute job-API router over loopback so the
 # compute-offload host route can be driven end-to-end against a real client.
 axum = { workspace = true }
+# Paused-clock harness for the telemetry pacing test, which asserts gaps and
+# a newest-wins coalesce without spending real seconds. Dev-only: resolver 2
+# keeps test-util out of the shipped binary's features.
+tokio = { workspace = true, features = ["test-util"] }

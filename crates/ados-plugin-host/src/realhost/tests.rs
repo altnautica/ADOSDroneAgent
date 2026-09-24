@@ -130,7 +130,6 @@ fn unimplemented_methods_match_reality() {
     for method in RealHost::UNIMPLEMENTED_HOST_METHODS {
         use crate::dispatch::Method;
         let r = match method {
-            Method::TelemetrySubscribe => host.telemetry_subscribe("p", &empty),
             Method::MissionRead => host.mission_read("p", &empty),
             Method::MissionWrite => host.mission_write("p", &empty),
             Method::RecordingStart => host.recording_start("p", &empty),
@@ -173,7 +172,6 @@ fn ungrantable_caps_are_the_dead_capabilities() {
     // a wired surface needs.
     let ungrantable = RealHost::ungrantable_caps();
     let expected: BTreeSet<String> = [
-        "telemetry.read",
         "mission.read",
         "mission.write",
         "recording.write",
@@ -1449,10 +1447,6 @@ async fn vision_methods_proxy_to_a_wired_engine() {
 fn stubbed_methods_inherit_not_implemented() {
     let host = RealHost::new();
     for (got, name) in [
-        (
-            host.telemetry_subscribe("p", &Value::Map(vec![])),
-            "telemetry.subscribe",
-        ),
         (host.mission_read("p", &Value::Map(vec![])), "mission.read"),
         (
             host.mission_write("p", &Value::Map(vec![])),
@@ -3185,4 +3179,227 @@ async fn a_tap_already_on_disk_is_not_replayed_to_the_first_subscriber() {
         .unwrap();
     assert_eq!(got, b"back");
     task.abort();
+}
+
+/// A stand-in cloud relay: accepts `count` connections on `path`, decodes each
+/// request frame, and answers with `reply`. Returns the decoded requests.
+fn cloud_relay_stub(
+    path: std::path::PathBuf,
+    count: usize,
+    reply: ados_protocol::cloud_publish::CloudPublishReply,
+) -> tokio::task::JoinHandle<Vec<ados_protocol::cloud_publish::CloudPublishRequest>> {
+    let listener = tokio::net::UnixListener::bind(&path).expect("bind relay stub");
+    tokio::spawn(async move {
+        let mut seen = Vec::new();
+        for _ in 0..count {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut len = [0u8; 4];
+            stream.read_exact(&mut len).await.expect("read len");
+            let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+            stream.read_exact(&mut body).await.expect("read body");
+            seen.push(
+                ados_protocol::cloud_publish::CloudPublishRequest::decode(&body).expect("decode"),
+            );
+            stream
+                .write_all(&reply.encode().expect("encode reply"))
+                .await
+                .expect("write reply");
+        }
+        seen
+    })
+}
+
+#[tokio::test]
+async fn cloud_publish_forwards_under_the_callers_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("cloud-publish.sock");
+    let relay = cloud_relay_stub(
+        sock.clone(),
+        2,
+        ados_protocol::cloud_publish::CloudPublishReply::accepted(),
+    );
+    let host = RealHost::new().with_cloud_publish_path(sock);
+
+    let args = map(&[
+        ("stream", Value::from("atlas.pose")),
+        ("payload", Value::Binary(vec![1, 2, 3])),
+        // A plugin cannot name itself someone else.
+        ("plugin_id", Value::from("com.example.other")),
+    ]);
+    let m = ok_map(
+        host.cloud_publish("com.example.mapper", &args, &caps(&["cloud.publish"]))
+            .await,
+    );
+    assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+
+    let record = map(&[
+        ("collection", Value::from("jobs")),
+        ("key", Value::from("job-1")),
+        (
+            "data",
+            Value::Map(vec![(Value::from("state"), Value::from("done"))]),
+        ),
+        ("device_id", Value::from("drone01")),
+    ]);
+    let m = ok_map(host.cloud_records_put("com.example.mapper", &record).await);
+    assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+
+    let seen = relay.await.unwrap();
+    assert_eq!(seen[0].plugin_id, "com.example.mapper");
+    assert_eq!(seen[0].stream.as_deref(), Some("atlas.pose"));
+    assert_eq!(seen[0].payload, vec![1, 2, 3]);
+    assert_eq!(seen[1].plugin_id, "com.example.mapper");
+    assert_eq!(seen[1].collection.as_deref(), Some("jobs"));
+    assert_eq!(seen[1].key.as_deref(), Some("job-1"));
+    assert_eq!(seen[1].device_id.as_deref(), Some("drone01"));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&seen[1].payload).unwrap(),
+        serde_json::json!({"state": "done"})
+    );
+}
+
+#[tokio::test]
+async fn the_shared_detection_stream_needs_the_detection_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = RealHost::new().with_cloud_publish_path(dir.path().join("absent.sock"));
+    let args = map(&[
+        ("stream", Value::from("vision.detections")),
+        ("payload", Value::Binary(b"{}".to_vec())),
+    ]);
+    assert_eq!(
+        err_body(
+            host.cloud_publish("com.example.detector", &args, &caps(&["cloud.publish"]))
+                .await
+        ),
+        "capability_denied: vision.detection.publish"
+    );
+    // With it, the request goes out; the relay being down is the
+    // not_available shape, not a refusal.
+    let m = ok_map(
+        host.cloud_publish(
+            "com.example.detector",
+            &args,
+            &caps(&["cloud.publish", "vision.detection.publish"]),
+        )
+        .await,
+    );
+    assert_eq!(
+        field(&m, "error").and_then(Value::as_str),
+        Some("not_available")
+    );
+}
+
+#[tokio::test]
+async fn a_relay_refusal_and_a_bad_name_are_errors_to_the_plugin() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("cloud-publish.sock");
+    let relay = cloud_relay_stub(
+        sock.clone(),
+        1,
+        ados_protocol::cloud_publish::CloudPublishReply::refused("record too large"),
+    );
+    let host = RealHost::new().with_cloud_publish_path(sock);
+    let bad = map(&[
+        ("stream", Value::from("Not A Stream")),
+        ("payload", Value::Binary(vec![])),
+    ]);
+    assert!(host.cloud_publish("p", &bad, &caps(&[])).await.is_err());
+    let record = map(&[
+        ("collection", Value::from("jobs")),
+        ("key", Value::from("k")),
+        ("data", Value::from(1)),
+    ]);
+    assert_eq!(
+        err_body(host.cloud_records_put("com.example.mapper", &record).await),
+        "cloud relay refused: record too large"
+    );
+    relay.await.unwrap();
+}
+
+#[test]
+fn cloud_methods_are_gated_on_their_capabilities() {
+    use crate::dispatch::{gate, Gate, Method};
+    for (method, variant, cap) in [
+        ("cloud.publish", Method::CloudPublish, "cloud.publish"),
+        (
+            "cloud.records.put",
+            Method::CloudRecordsPut,
+            "cloud.records",
+        ),
+    ] {
+        assert_eq!(
+            gate(method, false, &caps(&[])),
+            Gate::CapabilityDenied(format!("capability_denied: {cap}"))
+        );
+        assert_eq!(gate(method, false, &caps(&[cap])), Gate::Allow(variant));
+    }
+}
+
+#[tokio::test]
+async fn an_advertised_offload_link_is_what_the_tier_readers_parse() {
+    use ados_protocol::offload_link::read_offload_link_from;
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = dir.path().join("offload-link.json");
+    let host = RealHost::new().with_offload_link_path(sidecar.clone());
+    let args = map(&[
+        ("paired", Value::Boolean(true)),
+        ("bearer_acceptable", Value::Boolean(true)),
+        ("target", Value::from("node.local:8092")),
+        ("device_id", Value::from("ws-1")),
+        ("model_id", Value::from("yolo")),
+    ]);
+    let m = ok_map(host.offload_advertise("com.example.offload", &args).await);
+    assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let link = read_offload_link_from(&sidecar, now).expect("fresh link parses");
+    assert!(link.is_offload_path());
+    assert_eq!(link.target.as_deref(), Some("node.local:8092"));
+    assert_eq!(link.device_id.as_deref(), Some("ws-1"));
+    assert_eq!(link.model_id.as_deref(), Some("yolo"));
+    assert_eq!(
+        link.version,
+        ados_protocol::offload_link::OFFLOAD_LINK_SIDECAR_VERSION
+    );
+    // The host stamps the write time, so the link ages out on its own.
+    let stale = now + ados_protocol::offload_link::OFFLOAD_LINK_STALE_MS + 1_000;
+    assert!(read_offload_link_from(&sidecar, stale).is_none());
+
+    // An honest "no link": paired false, nulls allowed.
+    let none = map(&[
+        ("paired", Value::Boolean(false)),
+        ("bearer_acceptable", Value::Boolean(false)),
+        ("target", Value::Nil),
+    ]);
+    ok_map(host.offload_advertise("com.example.offload", &none).await);
+    let link = read_offload_link_from(&sidecar, now).unwrap();
+    assert!(!link.is_offload_path());
+    assert_eq!(link.target, None);
+
+    // Malformed facts are refused and leave the last good link in place.
+    let bad = map(&[("paired", Value::from("yes"))]);
+    assert!(host
+        .offload_advertise("com.example.offload", &bad)
+        .await
+        .is_err());
+}
+
+#[test]
+fn offload_advertise_is_gated_on_detection_publish() {
+    use crate::dispatch::{gate, Gate, Method};
+    assert_eq!(
+        gate("offload.advertise", false, &caps(&[])),
+        Gate::CapabilityDenied("capability_denied: vision.detection.publish".to_string())
+    );
+    assert_eq!(
+        gate(
+            "offload.advertise",
+            false,
+            &caps(&["vision.detection.publish"])
+        ),
+        Gate::Allow(Method::OffloadAdvertise)
+    );
 }

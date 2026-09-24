@@ -196,6 +196,7 @@ dependencies = [
  "ados-mavlink-router",
  "ados-net",
  "ados-offload",
+ "ados-plugin-host",
  "ados-protocol",
  "ados-supervisor",
  "ados-swarmbus",
@@ -233,6 +234,7 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "zip",
 ]
 
 [[package]]
@@ -378,8 +380,8 @@ dependencies = [
  "ados-config",
  "ados-hal-probe",
  "ados-macpin",
+ "ados-plugin-host",
  "ados-protocol",
- "ados-supervisor",
  "anyhow",
  "getrandom 0.2.17",
  "hex",
@@ -397,6 +399,7 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "zip",
 ]
 
 [[package]]
@@ -510,6 +513,7 @@ name = "ados-plugin-host"
 version = "0.1.0"
 dependencies = [
  "ados-compute",
+ "ados-config",
  "ados-hid",
  "ados-protocol",
  "anyhow",
@@ -520,8 +524,11 @@ dependencies = [
  "hex",
  "jsonschema",
  "nix 0.29.0",
+ "parking_lot",
+ "reqwest",
  "rmp-serde",
  "rmpv",
+ "rustls",
  "sd-notify",
  "serde",
  "serde_json",
@@ -533,6 +540,7 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "webpki-roots 0.26.11",
  "zip",
 ]
 
@@ -608,6 +616,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

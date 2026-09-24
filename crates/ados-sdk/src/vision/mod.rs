@@ -29,7 +29,7 @@ use ados_protocol::framebus::{
 };
 use rmpv::Value;
 
-use crate::client::{ClientError, PluginIpcClient};
+use crate::client::{ClientError, OffloadAdvertisement, PluginIpcClient};
 
 pub use pose::{Odometry, Pose, POSE_COVARIANCE_LEN, VIO_COMPONENT_ID};
 
@@ -234,6 +234,18 @@ impl VisionClient {
             detections: vec![detection],
         };
         self.publish_detection(&batch).await
+    }
+
+    /// Report the perception-offload link this plugin holds, so the node's
+    /// perception tier reads `offload` while it is live. Re-advertise at least
+    /// every ~10 s (the link goes stale after 20 s) and send `paired: false`
+    /// when the link drops. Gated on `vision.detection.publish`. See
+    /// [`PluginIpcClient::offload_advertise`].
+    pub async fn advertise_offload(
+        &self,
+        advert: &OffloadAdvertisement,
+    ) -> Result<Value, ClientError> {
+        self.ipc.offload_advertise(advert).await
     }
 
     /// Register this plugin as the visual-odometry MAVLink component so the FC

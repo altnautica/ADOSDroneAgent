@@ -25,13 +25,19 @@ ados-hal-probe = { path = "../ados-hal-probe" }
 # The one definition of a node's resolvable mDNS reach name
 # (`ados_protocol::reach`). The installer's success card hands an operator a
 # hostname to dial, so it applies the same rule the pairing probe and the mDNS
-# advert do rather than formatting its own.
+# advert do rather than formatting its own. Also the launchd plist renderer
+# (`ados_protocol::launchd::render_plist`) and the reverse-DNS label mapper
+# (`unit_to_label`) the macOS workstation install writes into
+# `~/Library/LaunchAgents`, shared with the supervisor's runtime
+# `LaunchdManager` that then manages those jobs.
 ados-protocol = { path = "../ados-protocol" }
-# Reused for the launchd plist renderer (`render_plist`) + the reverse-DNS
-# label mapper (`unit_to_label`) the macOS workstation install writes into
-# `~/Library/LaunchAgents`; the runtime `LaunchdManager` in the same module
-# then manages those jobs.
-ados-supervisor = { path = "../ados-supervisor" }
+# The plugin lifecycle controller. The World Engine extension step installs
+# the first-party extension through the same `PluginSupervisor` (signature
+# verify, compatibility gates, unit render) and the same allowlisted,
+# sha-pinned download (`ados_plugin_host::download`) the native REST routes
+# and the cloud relay use, so an install-time extension is never a second
+# install path.
+ados-plugin-host = { path = "../ados-plugin-host" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -66,3 +72,6 @@ nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Builds the throwaway `.adosplug` the extension step's install-path test
+# serves through a static download source.
+zip = { workspace = true }

@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ados_protocol::frame::{decode_len, FrameError, HEADER_SIZE, PLUGIN_MAX_FRAME};
-use ados_protocol::plugin::{CapabilityToken, Envelope, PROTOCOL_VERSION};
+use ados_protocol::plugin::{CapabilityToken, Envelope, PROTOCOL_VERSION, TELEMETRY_STATE_TOPIC};
 use rmpv::Value;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -34,6 +34,32 @@ use tokio::task::JoinHandle;
 
 /// Default per-request timeout. Mirrors `DEFAULT_REQUEST_TIMEOUT_S = 5.0`.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Slack added on top of the relay's own record-write bound before the client
+/// gives up on a `cloud.records.put`. The host forwards the write and waits up
+/// to [`ados_protocol::cloud_publish::RECORD_REPLY_TIMEOUT`] for the cloud's
+/// answer; the client must outlast that wait or it reports a timeout for a
+/// write the cloud then accepts.
+const RECORD_REPLY_SLACK: Duration = Duration::from_secs(2);
+
+/// The offload link a plugin running perception offload reports through
+/// [`PluginIpcClient::offload_advertise`]. The host stamps the schema version
+/// and write time and publishes it as the offload-link sidecar
+/// ([`ados_protocol::offload_link::OffloadLink`]) the perception-tier decision
+/// reads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OffloadAdvertisement {
+    /// A compute node resolved and is reachable.
+    pub paired: bool,
+    /// The bearer to that node is healthy enough to offload over.
+    pub bearer_acceptable: bool,
+    /// The node's job-API address (`host:port`).
+    pub target: Option<String>,
+    /// The node's device id, when discovery reported one.
+    pub device_id: Option<String>,
+    /// The detector model id the offload session runs.
+    pub model_id: Option<String>,
+}
 
 /// The host's token-rotation push. Wire contract, pinned here because the
 /// plugin side must adopt the token the host re-minted or it cannot reconnect
@@ -321,6 +347,20 @@ impl PluginIpcClient {
             .send_request("telemetry.extend", "telemetry.extend", args)
             .await?
             .args)
+    }
+
+    /// Subscribe to the vehicle-state snapshot and register a callback. The
+    /// host pushes the state object as an event on [`TELEMETRY_STATE_TOPIC`],
+    /// at most [`TELEMETRY_STATE_MAX_HZ`](ados_protocol::plugin::TELEMETRY_STATE_MAX_HZ)
+    /// times a second and always the newest; the callback receives the event's
+    /// args map (`topic`, `payload`, `publisher`, `timestamp_ms`) like any event.
+    /// Gated on `telemetry.read`. A node with no flight controller never fires
+    /// it.
+    pub async fn telemetry_subscribe(&self, callback: EventCallback) -> Result<(), ClientError> {
+        register_callback(&self.event_callbacks, TELEMETRY_STATE_TOPIC, callback);
+        self.send_request("telemetry.subscribe", "telemetry.read", Value::Map(vec![]))
+            .await?;
+        Ok(())
     }
 
     // ---- Peripheral manager ------------------------------------------
@@ -860,18 +900,128 @@ impl PluginIpcClient {
             .args)
     }
 
+    // ---- Cloud --------------------------------------------------------
+
+    /// Publish one message on this plugin's own cloud stream.
+    ///
+    /// The host forwards `{stream, payload}` to the cloud relay under the
+    /// caller's verified plugin id, which publishes it at QoS 0 on
+    /// `ados/{device_id}/plugin/{plugin_id}/{stream}`. `stream` must match
+    /// `[a-z0-9][a-z0-9._-]{0,63}` and `payload` is opaque bytes of at most
+    /// [`ados_protocol::cloud_publish::MAX_PAYLOAD`]. The stream
+    /// [`ados_protocol::cloud_publish::VISION_DETECTIONS_STREAM`] instead lands
+    /// on the core detection topic and additionally needs
+    /// `vision.detection.publish`. Gated on `cloud.publish`.
+    ///
+    /// The reply is `{ok: true}` once the relay queued the message (the lane is
+    /// lossy, so this is not broker delivery), or a `not_available` map while
+    /// the relay is down.
+    pub async fn cloud_publish(&self, stream: &str, payload: &[u8]) -> Result<Value, ClientError> {
+        let args = Value::Map(vec![
+            (Value::from("stream"), Value::from(stream)),
+            (Value::from("payload"), Value::Binary(payload.to_vec())),
+        ]);
+        Ok(self
+            .send_request("cloud.publish", "cloud.publish", args)
+            .await?
+            .args)
+    }
+
+    /// Upsert one record `{collection, key, data}` into this plugin's own cloud
+    /// records in the operator's account.
+    ///
+    /// `collection` must match `[a-z0-9_.-]{1,64}`, `key` is 1..=256 UTF-8
+    /// bytes, and `data` must be JSON-representable (the host re-encodes it as
+    /// JSON, at most [`ados_protocol::cloud_publish::MAX_PAYLOAD`]). The record's
+    /// subject is `device_id` when given (e.g. the drone a workstation wrote a
+    /// job for), otherwise this node. Gated on `cloud.records`.
+    ///
+    /// The reply is `{ok: true}` only once the cloud accepted the write, so this
+    /// call waits past the relay's record bound rather than the default request
+    /// timeout; a `not_available` map comes back while the relay is down.
+    pub async fn cloud_records_put(
+        &self,
+        collection: &str,
+        key: &str,
+        data: Value,
+        device_id: Option<&str>,
+    ) -> Result<Value, ClientError> {
+        let mut args = vec![
+            (Value::from("collection"), Value::from(collection)),
+            (Value::from("key"), Value::from(key)),
+            (Value::from("data"), data),
+        ];
+        if let Some(device_id) = device_id {
+            args.push((Value::from("device_id"), Value::from(device_id)));
+        }
+        let args = Value::Map(args);
+        let timeout = self
+            .request_timeout
+            .max(ados_protocol::cloud_publish::RECORD_REPLY_TIMEOUT + RECORD_REPLY_SLACK);
+        Ok(self
+            .send_request_within("cloud.records.put", "cloud.records", args, timeout)
+            .await?
+            .args)
+    }
+
+    // ---- Perception offload -------------------------------------------
+
+    /// Report the perception-offload link this plugin holds.
+    ///
+    /// The host writes it as the offload-link sidecar, which goes stale
+    /// [`ados_protocol::offload_link::OFFLOAD_LINK_STALE_MS`] (20 s) after the
+    /// last write, so a plugin keeps an active link counted by re-advertising at
+    /// least every ~10 s, and advertises `paired: false` as soon as the link
+    /// drops rather than waiting out the window. The optional strings must be
+    /// 1..=256 printable bytes. Gated on `vision.detection.publish`. The reply
+    /// is `{ok: true}`.
+    pub async fn offload_advertise(
+        &self,
+        advert: &OffloadAdvertisement,
+    ) -> Result<Value, ClientError> {
+        let opt = |v: &Option<String>| v.as_deref().map_or(Value::Nil, Value::from);
+        let args = Value::Map(vec![
+            (Value::from("paired"), Value::Boolean(advert.paired)),
+            (
+                Value::from("bearer_acceptable"),
+                Value::Boolean(advert.bearer_acceptable),
+            ),
+            (Value::from("target"), opt(&advert.target)),
+            (Value::from("device_id"), opt(&advert.device_id)),
+            (Value::from("model_id"), opt(&advert.model_id)),
+        ]);
+        Ok(self
+            .send_request("offload.advertise", "vision.detection.publish", args)
+            .await?
+            .args)
+    }
+
     // ------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------
 
-    /// Mint a request id, park a waiter, write the frame, then await the routed
-    /// response. Mirrors `_send_request`, including the error-string mapping to
-    /// typed `capability_denied` / `allowlist_violation` errors.
+    /// Send a request under the client's default timeout. See
+    /// [`send_request_within`](Self::send_request_within).
     async fn send_request(
         &self,
         method: &str,
         capability: &str,
         args: Value,
+    ) -> Result<Envelope, ClientError> {
+        self.send_request_within(method, capability, args, self.request_timeout)
+            .await
+    }
+
+    /// Mint a request id, park a waiter, write the frame, then await the routed
+    /// response for at most `timeout`. Mirrors `_send_request`, including the
+    /// error-string mapping to typed `capability_denied` /
+    /// `allowlist_violation` errors.
+    async fn send_request_within(
+        &self,
+        method: &str,
+        capability: &str,
+        args: Value,
+        timeout: Duration,
     ) -> Result<Envelope, ClientError> {
         let n = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let rid = format!("r{n}");
@@ -913,7 +1063,7 @@ impl PluginIpcClient {
             }
         }
 
-        let response = match tokio::time::timeout(self.request_timeout, rx).await {
+        let response = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(env)) => env,
             // The waiter was dropped: the reader loop ended before the response.
             Ok(Err(_)) => {
@@ -922,7 +1072,7 @@ impl PluginIpcClient {
             }
             Err(_) => {
                 self.pending.lock().expect("pending lock").remove(&rid);
-                return Err(ClientError::Timeout(self.request_timeout));
+                return Err(ClientError::Timeout(timeout));
             }
         };
 

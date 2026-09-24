@@ -156,7 +156,8 @@ fn configure(supervisor: &mut PluginSupervisor, cmd: &PluginCommand) -> Result<(
 mod tests {
     use super::*;
     use crate::dispatch::CommandStatus;
-    use ados_plugin_host::supervisor::{Paths, RecordingSystemctl};
+    use ados_plugin_host::backend::RecordingBackend;
+    use ados_plugin_host::supervisor::Paths;
     use std::io::Write;
     use std::sync::Arc;
     use zip::write::SimpleFileOptions;
@@ -171,6 +172,10 @@ mod tests {
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
             loopback_guard_state: dir.join("plugin-loopback-guard.json"),
+            socket_dir: dir.join("sockets"),
+            token_secret: dir.join("secrets/plugin-token-secret"),
+            runner: dir.join("bin/ados-plugin-runner"),
+            run_dir: dir.join("run"),
         }
     }
 
@@ -191,7 +196,7 @@ mod tests {
 
     fn installed_supervisor(dir: &Path) -> PluginSupervisor {
         let mut sup = PluginSupervisor::new(paths_in(dir), false, None, "1.0.0")
-            .with_systemctl(Arc::new(RecordingSystemctl::default()));
+            .with_backend(Arc::new(RecordingBackend::default()));
         let contents = ados_plugin_host::archive::parse_archive_bytes(build_archive()).unwrap();
         sup.install_contents(contents, Path::new("/tmp/x.adosplug"))
             .unwrap();

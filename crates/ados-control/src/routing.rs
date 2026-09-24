@@ -29,7 +29,7 @@ pub enum RouteMode {
     /// The front answers this route itself.
     Native,
     /// The front forwards this route to the residual Python. `permanent` marks a
-    /// prefix the agent keeps in Python by design (vision/plugins/setup/…), so a
+    /// prefix the agent keeps in Python by design (vision/setup/peripherals/…), so a
     /// graceful-degradation reply can return `501` (feature absent on this
     /// profile) rather than `404` when the upstream is gone.
     Proxied { permanent: bool },
@@ -62,6 +62,7 @@ fn native_routes() -> Vec<NativeRoute> {
     let post = |path| route(Method::POST, path);
     let put = |path| route(Method::PUT, path);
     let delete = |path| route(Method::DELETE, path);
+    let patch = |path| route(Method::PATCH, path);
     // The upgrade request is a GET, which is what the auth edge matches on.
     let ws = |path| NativeRoute {
         method: Method::GET,
@@ -120,9 +121,39 @@ fn native_routes() -> Vec<NativeRoute> {
         // Plugin MCP-tool invocation (an MCP client runs a plugin's tool → live
         // host; a two-param {plugin_id}/{tool} template).
         post("/api/plugins/{plugin_id}/tools/{tool}/invoke"),
-        // Plugin published-state read (a {plugin_id} template under the otherwise
-        // permanent-Python /api/plugins prefix; only this exact GET is native).
+        // Plugin published-state read.
         get("/api/plugins/{plugin_id}/state"),
+        // The plugin lifecycle: catalog, list, detail and its reads, parse and
+        // install, the per-plugin lifecycle writes, the capability token and the
+        // install-job progress stream.
+        get("/api/v1/plugins/catalog"),
+        get("/api/plugins"),
+        post("/api/plugins/parse"),
+        post("/api/plugins/install"),
+        post("/api/plugins/parse_from_url"),
+        post("/api/plugins/install_from_url"),
+        post("/api/plugins/install_builtin"),
+        post("/api/plugins/capability-token"),
+        ws("/api/plugins/jobs/{job_id}"),
+        get("/api/plugins/{plugin_id}"),
+        delete("/api/plugins/{plugin_id}"),
+        get("/api/plugins/{plugin_id}/gcs/{*asset_path}"),
+        get("/api/plugins/{plugin_id}/manifest"),
+        get("/api/plugins/{plugin_id}/attestation"),
+        get("/api/plugins/{plugin_id}/readiness"),
+        post("/api/plugins/{plugin_id}/grant"),
+        delete("/api/plugins/{plugin_id}/perms/{permission_id}"),
+        post("/api/plugins/{plugin_id}/enable"),
+        post("/api/plugins/{plugin_id}/disable"),
+        post("/api/plugins/{plugin_id}/pin"),
+        post("/api/plugins/{plugin_id}/unpin"),
+        post("/api/plugins/{plugin_id}/auto-update"),
+        // A plugin's own HTTP API, every method (a WebSocket upgrade is a GET).
+        get("/api/plugins/{plugin_id}/x/{*rest}"),
+        post("/api/plugins/{plugin_id}/x/{*rest}"),
+        put("/api/plugins/{plugin_id}/x/{*rest}"),
+        patch("/api/plugins/{plugin_id}/x/{*rest}"),
+        delete("/api/plugins/{plugin_id}/x/{*rest}"),
         // Compute-node cluster status (read from the heartbeat sidecar).
         get("/api/compute/status"),
         // Cloud relay link state (read from the cloud-link sidecar).
@@ -379,23 +410,21 @@ pub fn native_route_table() -> Vec<(String, &'static str)> {
 }
 
 /// The path prefixes the agent keeps in Python by design — the ecosystem-bound
-/// features (vision/AI, the plugin runtime, the setup facade, peripherals,
-/// the WebRTC playback endpoint, the LCD/OLED display surface). A request under
-/// one of these is a known feature that has not migrated, NOT an unknown path:
-/// when the residual upstream is gone (the zero-Python headless profile), the
-/// proxy answers `501` for these rather than `404`.
+/// features (vision/AI, the setup facade, peripherals, the WebRTC playback
+/// endpoint, the LCD/OLED display surface). A request under one of these is a
+/// known feature that has not migrated, NOT an unknown path: when the residual
+/// upstream is gone (the zero-Python headless profile), the proxy answers `501`
+/// for these rather than `404`.
 ///
 /// These are the paths as MOUNTED, not as the feature is named. The FastAPI app
 /// includes each router under `/api` and several routers carry their own `/v1`
 /// prefix, so the served path is `/api/v1/setup`, not `/api/setup`. Both the
-/// unversioned and `/v1` forms of peripherals and plugins are live and are
-/// listed separately. Touch-panel calibration needs no entry of its own: those
+/// unversioned and `/v1` forms of peripherals are live and are listed
+/// separately. Touch-panel calibration needs no entry of its own: those
 /// routes hang off the display and setup routers (`/api/v1/display/calibrate/*`,
 /// `/api/v1/setup/display/calibrate/*`) and are already covered.
-pub const PERMANENT_PYTHON_PREFIXES: [&str; 8] = [
+pub const PERMANENT_PYTHON_PREFIXES: [&str; 6] = [
     "/api/vision",
-    "/api/plugins",
-    "/api/v1/plugins",
     "/api/v1/setup",
     "/api/peripherals",
     "/api/v1/peripherals",
@@ -587,7 +616,7 @@ mod tests {
     fn unknown_and_proxied_paths_are_not_native() {
         // A permanent-Python feature path.
         assert!(!is_native(&Method::GET, "/api/vision/state"));
-        assert!(!is_native(&Method::POST, "/api/plugins/install"));
+        assert!(!is_native(&Method::GET, "/api/vision/detections/latest"));
         // An unknown path entirely.
         assert!(!is_native(&Method::GET, "/api/does-not-exist"));
         // A path that merely shares a native prefix is not an exact match.
@@ -686,6 +715,51 @@ mod tests {
         assert!(!is_native(&Method::PATCH, p));
     }
 
+    /// The plugin lifecycle is native: every route keeps the front's auth lane
+    /// and none of them reaches the residual Python, and the passthrough to a
+    /// plugin's own API is native under each method it forwards.
+    #[test]
+    fn the_plugin_lifecycle_is_native_not_residual() {
+        for (m, p) in [
+            (Method::GET, "/api/plugins"),
+            (Method::GET, "/api/v1/plugins/catalog"),
+            (Method::POST, "/api/plugins/install"),
+            (Method::POST, "/api/plugins/install_from_url"),
+            (Method::GET, "/api/plugins/com.example.web"),
+            (Method::DELETE, "/api/plugins/com.example.web"),
+            (
+                Method::GET,
+                "/api/plugins/com.example.web/gcs/assets/app.js",
+            ),
+            (Method::GET, "/api/plugins/com.example.web/attestation"),
+            (
+                Method::DELETE,
+                "/api/plugins/com.example.web/perms/event.publish",
+            ),
+            (Method::GET, "/api/plugins/jobs/3f2a9c1e"),
+        ] {
+            assert!(is_native(&m, p), "{m} {p} must be native");
+            assert!(
+                !is_permanent_python_path(p),
+                "{p} must not read as residual"
+            );
+        }
+        let passthrough = "/api/plugins/com.example.web/x/api/live";
+        for m in [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ] {
+            assert!(
+                is_native(&m, passthrough),
+                "{m} {passthrough} must be native"
+            );
+        }
+        assert!(!is_native(&Method::GET, "/api/plugins/com.example.web/x"));
+    }
+
     #[test]
     fn permanent_prefix_match_needs_a_segment_boundary() {
         // The exact prefix and a child path match.
@@ -718,9 +792,6 @@ mod tests {
             "/api/v1/peripherals",
             // routes/peripherals.py: unprefixed, mounted under /api
             "/api/peripherals/scan",
-            // routes/plugins.py: unprefixed, but one route is declared /v1/...
-            "/api/plugins/install",
-            "/api/v1/plugins/catalog",
             // routes/vision_models.py + vision_detections.py: unprefixed
             "/api/vision/models",
             "/api/vision/detections/latest",
@@ -753,7 +824,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            173,
+            200,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);

@@ -1049,7 +1049,7 @@ fn build_mesh_block(config_profile: &str) -> Value {
     build_mesh_block_at(
         config_profile,
         &mesh_role_path(),
-        &profile_conf_path(),
+        &ados_config::profile_conf_path(),
         &run_dir().join("mesh-state.json"),
     )
 }
@@ -1114,14 +1114,6 @@ fn mesh_role_path() -> PathBuf {
     std::env::var("ADOS_MESH_ROLE")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(crate::profile::MESH_ROLE_PATH))
-}
-
-/// The profile-conf path (`ADOS_PROFILE_CONF` override, default
-/// `/etc/ados/profile.conf`), the same path the crate's profile module resolves.
-fn profile_conf_path() -> PathBuf {
-    std::env::var("ADOS_PROFILE_CONF")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(crate::profile::PROFILE_CONF))
 }
 
 /// The current ground-station role from the role sentinel, defaulting to `direct`

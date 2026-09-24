@@ -203,19 +203,11 @@ fn with_added_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// Block-mode advisory file lock around a state read-modify-write.
 ///
 /// The lock is held on the sibling `.lock` file (not on `state.json` itself) so
-/// the atomic rename in [`save_state`] does not invalidate the lock fd. On
-/// Linux this is a real `flock(LOCK_EX)` held by an owning [`nix::fcntl::Flock`]
-/// guard that releases on drop; on a non-Linux dev host the guard holds nothing
-/// (the controller logic still serializes within a single process via the
-/// `&mut self` borrow), which keeps the pure-logic core testable off-target.
-// `drop_non_drop` on an explicit `drop(lock)`: on Linux this type owns the
-// `Flock` guard and the drop genuinely releases the lock, which the callers in
-// `supervisor.rs` depend on because they re-enter the state path afterwards. On
-// a non-Linux dev host the struct has no fields, so the same call is a no-op
-// and clippy is right about that build and wrong about the one that ships.
-// The `#[allow]` therefore lives at the two call sites in `supervisor.rs`.
+/// the atomic rename in [`save_state`] does not invalidate the lock fd. It is a
+/// real `flock(LOCK_EX)` held by an owning [`nix::fcntl::Flock`] guard that
+/// releases on drop, on Linux and macOS alike: every writer of the state file
+/// (the plugin host, the control plane, the cloud relay) takes it.
 pub struct StateLock {
-    #[cfg(target_os = "linux")]
     _flock: nix::fcntl::Flock<std::fs::File>,
 }
 
@@ -234,19 +226,9 @@ impl StateLock {
             .write(true)
             .truncate(false)
             .open(&lock_path)?;
-        #[cfg(target_os = "linux")]
-        {
-            let flock = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
-                .map_err(|(_, e)| LifecycleError::Io(std::io::Error::other(e)))?;
-            Ok(StateLock { _flock: flock })
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            // The lock file path now exists (matching Linux semantics); the
-            // file handle drops here and the guard holds nothing.
-            drop(file);
-            Ok(StateLock {})
-        }
+        let flock = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_, e)| LifecycleError::Io(std::io::Error::other(e)))?;
+        Ok(StateLock { _flock: flock })
     }
 }
 
@@ -316,8 +298,8 @@ pub fn is_permission_granted(install: &PluginInstall, permission_id: &str) -> bo
 
 /// The set of capability ids currently granted to an install. Capability ids
 /// are the granted permission ids (the gate checks `token.granted_caps`
-/// against the method's required capability). Mirrors the Python
-/// `get_granted_caps`: the granted permission keys of the install record.
+/// against the method's required capability): the permission keys of the
+/// install record whose grant is set.
 pub fn granted_caps(install: &PluginInstall) -> std::collections::BTreeSet<String> {
     install
         .permissions

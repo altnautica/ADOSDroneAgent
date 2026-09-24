@@ -5,10 +5,10 @@ republishes a structured alert under its own ``plugin.<id>.alert``
 namespace so other plugins, the GCS, and operator-facing log streams
 have one canonical alert shape to render.
 
-The plugin ships with the agent package: its manifest lives in code and
-``PluginSupervisor.install_builtin`` materialises it as an installed
-subprocess plugin that the plugin host serves through the shared runner,
-exactly like a third-party plugin. The same lifecycle hooks
+The plugin ships with the agent package: its manifest is the
+``manifest.yaml`` beside this module, which the native plugin lifecycle
+installs as a subprocess plugin that the plugin host serves through the
+shared runner, exactly like a third-party plugin. The same lifecycle hooks
 third-party plugins implement run here too, which doubles this
 module as the simplest worked example for the SDK.
 """
@@ -18,38 +18,10 @@ from __future__ import annotations
 from typing import Any
 
 from ados.core.logging import get_logger
-from ados.plugins.manifest import (
-    AgentBlock,
-    Compatibility,
-    PluginManifest,
-)
 
 log = get_logger("plugin.builtin.geofence")
 
 PLUGIN_ID = "io.altnautica.geofence"
-
-
-def get_manifest() -> PluginManifest:
-    """Return the manifest for the built-in geofence plugin."""
-    return PluginManifest(
-        schema_version=1,
-        id=PLUGIN_ID,
-        version="0.1.0",
-        name="Geofence",
-        description=(
-            "Republishes geofence breaches under a stable plugin namespace "
-            "so other plugins and the GCS render them consistently."
-        ),
-        author="Altnautica",
-        license="GPL-3.0-or-later",
-        risk="low",
-        compatibility=Compatibility(ados_version=">=0.9.0"),
-        agent=AgentBlock(
-            entrypoint="ados.plugins.builtin.geofence:GeofencePlugin",
-            permissions=["event.subscribe", "event.publish"],
-        ),
-    )
-
 
 
 class GeofencePlugin:

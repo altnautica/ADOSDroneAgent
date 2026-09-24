@@ -20,6 +20,7 @@
 //! behind a host-service hook.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use rmpv::Value;
 
@@ -97,12 +98,22 @@ pub fn not_implemented(method: &str) -> HostResult {
 /// other 14 methods are fully gated at the dispatch level and do not see the
 /// caps. The asymmetry documents which methods gate on payload.
 pub trait HostServices: Send + Sync + 'static {
-    fn telemetry_subscribe(
+    /// A receiver for the vehicle-state snapshot fanout, when this host has a
+    /// state reader. The server obtains one per `telemetry.subscribe` and
+    /// pushes each snapshot, paced to at most
+    /// [`TELEMETRY_STATE_MAX_HZ`](ados_protocol::plugin::TELEMETRY_STATE_MAX_HZ),
+    /// as an `event.deliver` on
+    /// [`TELEMETRY_STATE_TOPIC`](ados_protocol::plugin::TELEMETRY_STATE_TOPIC).
+    ///
+    /// The default returns `None`, so [`NoopHost`] arms no stream and the
+    /// subscription stays quiet. A real host returns `Some` even while the state
+    /// socket is down: a node with no flight controller is a resting state, not
+    /// an error a plugin has to handle.
+    fn telemetry_state_stream(
         &self,
         _plugin_id: &str,
-        _args: &Value,
-    ) -> Result<HostResult, HostError> {
-        Ok(not_implemented("telemetry.subscribe"))
+    ) -> Option<tokio::sync::broadcast::Receiver<Arc<Value>>> {
+        None
     }
     fn telemetry_extend(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
         Ok(not_implemented("telemetry.extend"))
@@ -360,6 +371,44 @@ pub trait HostServices: Send + Sync + 'static {
         _plugin_id: &str,
     ) -> Option<tokio::sync::broadcast::Receiver<(u8, Vec<u8>)>> {
         None
+    }
+
+    /// Publish one message `{stream, payload: bytes}` on the plugin's own cloud
+    /// stream through the cloud relay. Gated at the dispatch level on
+    /// `cloud.publish`; publishing on the shared detection stream additionally
+    /// needs `vision.detection.publish`, which a real host checks against
+    /// `granted_caps`. The default returns `not_implemented`.
+    fn cloud_publish(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+        _granted_caps: &std::collections::BTreeSet<String>,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("cloud.publish")))
+    }
+
+    /// Write one record `{collection, key, data}` into the plugin's own cloud
+    /// collection through the cloud relay. Gated at the dispatch level on
+    /// `cloud.records`. The default returns `not_implemented`.
+    fn cloud_records_put(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("cloud.records.put")))
+    }
+
+    /// Report the perception-offload link the plugin holds
+    /// `{paired, bearer_acceptable, target?, device_id?, model_id?}`. A real
+    /// host stamps it and writes the offload-link sidecar the perception-tier
+    /// decision reads. Gated at the dispatch level on
+    /// `vision.detection.publish`. The default returns `not_implemented`.
+    fn offload_advertise(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("offload.advertise")))
     }
 
     /// Open a connection session for `plugin_id` and return its id. Resources

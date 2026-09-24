@@ -69,7 +69,11 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: USB gadget service, the residual logs routes and the route request models
 #: were deleted; the 31 Rust comments that cited them now say what the code
 #: does instead.
-MIN_CITATIONS = 123
+#:
+#: 123 -> 120: the Python plugin lifecycle (routes, supervisor, state and
+#: auto-update) was deleted when the native lifecycle routes landed; the three
+#: Rust comments that cited it now say what the code does instead.
+MIN_CITATIONS = 120
 
 
 def _rust_sources() -> list[Path]:

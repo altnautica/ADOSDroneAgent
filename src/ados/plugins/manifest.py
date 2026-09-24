@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -50,6 +50,73 @@ SEMVER_PATTERN = re.compile(
     r"(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$"
 )
 
+Profile = Literal["drone", "ground-station", "workstation", "compute"]
+
+PROFILES: tuple[str, ...] = get_args(Profile)
+"""Node profiles a plugin can target. Mirrors ``ados_config::node_profile()``."""
+
+_PROFILE_ALIASES = {"ground_station": "ground-station"}
+"""Underscore spellings accepted on input and rewritten to the canonical id."""
+
+BIN_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+"""Name of a packaged binary, referenced as ``bin:<name>``."""
+
+ARCH_OS_PATTERN = re.compile(r"^[a-z0-9_]+-[a-z0-9_]+$")
+"""``<arch>-<os>`` build key, e.g. ``aarch64-linux`` or ``aarch64-macos``."""
+
+DECLARED_CAP_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+"""Name segment of a plugin-declared capability ``plugin.<leaf>.<name>``."""
+
+SHARED_TOPIC_PATTERN = re.compile(r"^plugin\.[a-z0-9-]+\.[a-z0-9._-]+$")
+"""A topic a plugin publishes for other plugins: ``plugin.<leaf>.<rest>``."""
+
+CONTRIBUTION_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+"""Id of a GCS agent page or node surface contribution."""
+
+SHA256_HEX_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+BIN_PREFIX = "bin:"
+
+STANDARD_RESOURCE_CEILINGS: dict[str, int] = {
+    "max_ram_mb": 4096,
+    "max_cpu_percent": 100,
+    "max_pids": 256,
+}
+"""Per-field ceilings for the ``standard`` resource class. The ``heavy``
+class is bounded only by the field limits on :class:`ResourceLimits`."""
+
+
+def _plugin_leaf(plugin_id: str) -> str:
+    """Last dot-segment of a plugin id (``com.example.world-engine`` ->
+    ``world-engine``); the namespace for its declared capabilities and topics."""
+    return plugin_id.rsplit(".", 1)[-1]
+
+
+def _normalize_profiles(raw: Any) -> Any:
+    """Rewrite accepted profile spellings to the canonical id before the
+    ``Literal`` check runs."""
+    if not isinstance(raw, list):
+        return raw
+    return [_PROFILE_ALIASES.get(p, p) if isinstance(p, str) else p for p in raw]
+
+
+def _require_non_empty_profiles(value: list[str] | None, field: str) -> None:
+    if value is not None and not value:
+        raise ManifestError(f"{field} must list at least one profile when present")
+
+
+def _bin_reference(token: str, field: str) -> str | None:
+    """The ``<name>`` of a ``bin:<name>`` token, or ``None`` when ``token`` is
+    not a packaged-binary reference. Refuses a malformed name."""
+    if not token.startswith(BIN_PREFIX):
+        return None
+    name = token[len(BIN_PREFIX) :]
+    if not BIN_NAME_PATTERN.fullmatch(name):
+        raise ManifestError(
+            f"{field} {token!r}: binary name must match {BIN_NAME_PATTERN.pattern}"
+        )
+    return name
+
 
 class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -73,9 +140,31 @@ def _normalize_permission(value: Any) -> dict[str, Any]:
 
 
 class ResourceLimits(_StrictModel):
-    max_ram_mb: int = Field(96, ge=8, le=4096)
-    max_cpu_percent: int = Field(25, ge=1, le=100)
-    max_pids: int = Field(12, ge=1, le=256)
+    """Hard resource envelope for the plugin's processes.
+
+    ``class`` picks the ceiling set: ``standard`` caps each field at
+    :data:`STANDARD_RESOURCE_CEILINGS`; ``heavy`` lifts the caps to the field
+    bounds below for plugins that run large models or simulations."""
+
+    model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
+
+    resource_class: Literal["standard", "heavy"] = Field("standard", alias="class")
+    max_ram_mb: int = Field(96, ge=8, le=65536)
+    max_cpu_percent: int = Field(25, ge=1, le=3200)
+    max_pids: int = Field(12, ge=1, le=4096)
+
+    @model_validator(mode="after")
+    def _enforce_class_ceilings(self) -> ResourceLimits:
+        if self.resource_class == "heavy":
+            return self
+        for field, ceiling in STANDARD_RESOURCE_CEILINGS.items():
+            value = getattr(self, field)
+            if value > ceiling:
+                raise ManifestError(
+                    f"agent.resources.{field}={value} exceeds the standard class "
+                    f"ceiling {ceiling}; set resources.class: heavy to raise it"
+                )
+        return self
 
 
 class MavlinkComponent(_StrictModel):
@@ -171,12 +260,19 @@ class ServiceSpec(_StrictModel):
       never a shell). The renderer re-quotes each word for systemd and
       refuses control characters and systemd exec prefixes; the plugin
       author is responsible for an absolute path or a binary on ``PATH``.
+      A first word of ``bin:<name>`` runs the packaged binary ``<name>``
+      from ``agent.binaries``.
     * ``ready_check`` — how readiness is probed. ``None`` ⇒ the service
       is ready iff its unit is active. An ``http(s)://127.0.0.1:<port>``
       URL ⇒ an HTTP GET, ready on a 2xx status. Any other value ⇒ an
       argv (POSIX quoting, never a shell) run as the plugin user inside
       the plugin's sandbox, ready on exit code 0.
     * ``restart`` — systemd restart policy for the unit.
+    * ``profiles`` — node profiles the service runs on. ``None`` ⇒ every
+      profile the plugin targets; an empty list is refused.
+    * ``listen_ports`` — TCP/UDP ports the service binds (1024-65535, at
+      most four, unique). Declaring any requires the ``network.listen`` and
+      ``network.outbound`` capabilities.
     * ``slice`` — cgroup slice the unit runs in. Always the shared plugin
       slice; any other value is refused, so a plugin cannot move its own
       service out of the plugin resource envelope.
@@ -191,6 +287,10 @@ class ServiceSpec(_StrictModel):
     ready_check: str | None = None
     restart: Literal["always", "on-failure", "no"] = "on-failure"
     slice: str = "ados-plugins.slice"
+    profiles: list[Profile] | None = None
+    listen_ports: list[Annotated[int, Field(ge=1024, le=65535)]] = Field(
+        default_factory=list, max_length=4
+    )
 
     @field_validator("name")
     @classmethod
@@ -200,6 +300,30 @@ class ServiceSpec(_StrictModel):
                 f"service name {v!r} must be lowercase alnum plus ._- , "
                 "starting with an alnum"
             )
+        return v
+
+    @field_validator("command")
+    @classmethod
+    def _validate_command(cls, v: str) -> str:
+        _bin_reference(v.split()[0], "service command")
+        return v
+
+    @field_validator("profiles", mode="before")
+    @classmethod
+    def _canonical_profiles(cls, raw: Any) -> Any:
+        return _normalize_profiles(raw)
+
+    @field_validator("profiles")
+    @classmethod
+    def _validate_profiles(cls, v: list[Profile] | None) -> list[Profile] | None:
+        _require_non_empty_profiles(v, "service profiles")
+        return v
+
+    @field_validator("listen_ports")
+    @classmethod
+    def _validate_listen_ports(cls, v: list[int]) -> list[int]:
+        if len(set(v)) != len(v):
+            raise ManifestError(f"service listen_ports {v} contains a duplicate port")
         return v
 
     @field_validator("slice")
@@ -223,6 +347,30 @@ class ServiceSpec(_StrictModel):
             raise ManifestError(f"service ready_check {v!r} is invalid: {exc}") from exc
         return v
 
+    def bin_name(self) -> str | None:
+        """The packaged binary the command runs (``bin:<name>``), if any."""
+        return _bin_reference(self.command.split()[0], "service command")
+
+
+class SharedTopic(_StrictModel):
+    """A topic the plugin publishes for other plugins to subscribe to.
+
+    ``topic`` lives in the plugin's own namespace (``plugin.<leaf>.<rest>``);
+    a subscriber needs ``subscribe_capability``, which is either a catalog
+    capability or one of this plugin's ``declared_capabilities``."""
+
+    topic: str = Field(..., min_length=1, max_length=128)
+    subscribe_capability: str = Field(..., min_length=1)
+
+    @field_validator("topic")
+    @classmethod
+    def _validate_topic(cls, v: str) -> str:
+        if not SHARED_TOPIC_PATTERN.fullmatch(v):
+            raise ManifestError(
+                f"shared topic {v!r} must match plugin.<leaf>.<name> over [a-z0-9._-]"
+            )
+        return v
+
 
 class AgentContributes(_StrictModel):
     services: list[ServiceSpec] = Field(default_factory=list)
@@ -237,6 +385,7 @@ class AgentContributes(_StrictModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
     resources: list[dict[str, Any]] = Field(default_factory=list)
     prompts: list[dict[str, Any]] = Field(default_factory=list)
+    shared_topics: list[SharedTopic] = Field(default_factory=list)
 
     @field_validator("services", mode="before")
     @classmethod
@@ -263,6 +412,23 @@ _ENTRYPOINT_PATH = re.compile(r"[A-Za-z0-9._/-]+")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+def _is_relative_posix_path(value: str) -> bool:
+    """A relative posix path over ``[A-Za-z0-9._/-]`` with no empty segment
+    and no segment starting with ``..``."""
+    return bool(_ENTRYPOINT_PATH.fullmatch(value)) and all(
+        part and not part.startswith("..") for part in value.split("/")
+    )
+
+
+def _validate_relative_path(value: str, field: str) -> str:
+    if not _is_relative_posix_path(value):
+        raise ManifestError(
+            f"{field} {value!r} must be a relative posix path over "
+            "[A-Za-z0-9._/-] with no empty or '..' segment"
+        )
+    return value
+
+
 def _validate_entrypoint(value: str) -> str:
     """Accept exactly what the Rust manifest parser accepts.
 
@@ -279,9 +445,7 @@ def _validate_entrypoint(value: str) -> str:
             _IDENTIFIER.fullmatch(part) for part in module.split(".")
         )
     else:
-        ok = bool(_ENTRYPOINT_PATH.fullmatch(value)) and all(
-            part and not part.startswith("..") for part in value.split("/")
-        )
+        ok = _is_relative_posix_path(value)
     if not ok:
         raise ManifestError(
             f"entrypoint {value!r} must be a relative posix path over "
@@ -291,13 +455,75 @@ def _validate_entrypoint(value: str) -> str:
     return value
 
 
+class PayloadSpec(_StrictModel):
+    """A large file fetched at install time instead of shipped in the archive
+    (model weights, maps). The installer downloads ``source``, checks the
+    size and SHA-256, and places it at ``path`` under the plugin directory.
+    ``profiles`` / ``arch_os`` narrow which nodes fetch it; ``None`` means
+    every node the plugin installs on."""
+
+    path: str = Field(..., min_length=1)
+    source: str = Field(..., min_length=1)
+    sha256: str
+    size_bytes: int = Field(..., ge=1, le=1_073_741_824)
+    profiles: list[Profile] | None = None
+    arch_os: str | None = None
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, v: str) -> str:
+        return _validate_relative_path(v, "payload path")
+
+    @field_validator("source")
+    @classmethod
+    def _validate_source(cls, v: str) -> str:
+        if not v.startswith("https://"):
+            raise ManifestError(f"payload source must use https://, got {v!r}")
+        return v
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256(cls, v: str) -> str:
+        if not SHA256_HEX_PATTERN.fullmatch(v):
+            raise ManifestError(
+                f"payload sha256 {v!r} must be 64 lowercase hex characters"
+            )
+        return v
+
+    @field_validator("profiles", mode="before")
+    @classmethod
+    def _canonical_profiles(cls, raw: Any) -> Any:
+        return _normalize_profiles(raw)
+
+    @field_validator("arch_os")
+    @classmethod
+    def _validate_arch_os(cls, v: str | None) -> str | None:
+        if v is not None and not ARCH_OS_PATTERN.fullmatch(v):
+            raise ManifestError(f"payload arch_os {v!r} must look like aarch64-linux")
+        return v
+
+
+class DeclaredCapability(_StrictModel):
+    """A capability the plugin defines for other plugins to request, e.g. to
+    subscribe to one of its shared topics. The id is namespaced to the
+    plugin: ``plugin.<leaf>.<name>`` (checked on :class:`PluginManifest`,
+    which knows the plugin id)."""
+
+    id: str = Field(..., min_length=1)
+    risk: Literal["low", "medium", "high", "critical"]
+    description: str = ""
+
+
+
+
 class AgentBlock(_StrictModel):
     """Agent-half manifest block."""
 
     entrypoint: str
-    """Either an entry-point id (``module:Class``) for built-in plugins,
-    or a relative path to a Python module inside the archive for
-    third-party plugins."""
+    """An entry-point id (``module:Class``) for built-in plugins, a relative
+    path to a Python module inside the archive for third-party plugins, or
+    ``bin:<name>`` naming a packaged binary in ``binaries`` (``rust``
+    runtime only)."""
 
     isolation: Literal["subprocess", "inprocess"] = "subprocess"
     """Default subprocess. ``inprocess`` is allowed only for first-party
@@ -339,22 +565,37 @@ class AgentBlock(_StrictModel):
     Default false preserves single-config behavior from the v1
     schema. Schema v2."""
 
-    target_profiles: list[Literal["drone", "ground-station", "workstation"]] = Field(
-        default_factory=lambda: ["drone"],
-    )
+    target_profiles: list[Profile] = Field(default_factory=lambda: ["drone"])
     """Node profiles the plugin is compatible with. Default ``["drone"]``
-    so existing manifests that omit the field stay drone-only — which
-    matches the only first-party plugin that exists today
-    (``com.altnautica.vision-nav``). A plugin that wants to surface on a
-    ground station declares ``["ground-station"]``, on the operator
-    workstation ``["workstation"]``; a multi-target plugin declares more
-    than one. Schema v2 — older manifests get the default."""
+    so manifests that omit the field stay drone-only. A plugin that wants
+    to surface on a ground station declares ``["ground-station"]``, on the
+    operator workstation ``["workstation"]``, on a headless compute node
+    ``["compute"]``; a multi-target plugin declares more than one.
+    ``ground_station`` is accepted and rewritten to ``ground-station``."""
+
+    binaries: dict[str, dict[str, str]] = Field(default_factory=dict)
+    """Packaged binaries by name, each a map of ``<arch>-<os>`` to the
+    archive-relative path of that build. Referenced as ``bin:<name>`` from
+    ``entrypoint`` or the first word of a service ``command``."""
+
+    payloads: list[PayloadSpec] = Field(default_factory=list)
+    """Files fetched at install time and verified by SHA-256."""
+
+    http: bool = False
+    """True when the plugin serves an HTTP surface the host proxies."""
+
+    declared_capabilities: list[DeclaredCapability] = Field(default_factory=list)
+    """Capabilities this plugin defines (``plugin.<leaf>.<name>``) for other
+    plugins to request."""
+
+    @field_validator("target_profiles", mode="before")
+    @classmethod
+    def _canonical_profiles(cls, raw: Any) -> Any:
+        return _normalize_profiles(raw)
 
     @field_validator("target_profiles")
     @classmethod
-    def _validate_target_profiles(
-        cls, value: list[str]
-    ) -> list[Literal["drone", "ground-station", "workstation"]]:
+    def _validate_target_profiles(cls, value: list[Profile]) -> list[Profile]:
         if not value:
             raise ManifestError(
                 "agent.target_profiles must list at least one profile",
@@ -362,19 +603,33 @@ class AgentBlock(_StrictModel):
         # Dedupe preserving order so the wire shape stays deterministic
         # across reads. Pydantic's Literal validation runs before this
         # hook, so each entry is already a known profile string.
-        seen: set[str] = set()
-        deduped: list[Literal["drone", "ground-station", "workstation"]] = []
-        for entry in value:
-            if entry in seen:
-                continue
-            seen.add(entry)
-            deduped.append(entry)  # type: ignore[arg-type]
-        return deduped
+        return list(dict.fromkeys(value))
 
     @field_validator("entrypoint")
     @classmethod
     def _validate_entrypoint(cls, v: str) -> str:
+        if _bin_reference(v, "agent.entrypoint") is not None:
+            return v
         return _validate_entrypoint(v)
+
+    @field_validator("binaries")
+    @classmethod
+    def _validate_binaries(
+        cls, raw: dict[str, dict[str, str]]
+    ) -> dict[str, dict[str, str]]:
+        for name, builds in raw.items():
+            if not BIN_NAME_PATTERN.fullmatch(name):
+                raise ManifestError(
+                    f"agent.binaries key {name!r} must match {BIN_NAME_PATTERN.pattern}"
+                )
+            for arch_os, path in builds.items():
+                if not ARCH_OS_PATTERN.fullmatch(arch_os):
+                    raise ManifestError(
+                        f"agent.binaries[{name!r}] key {arch_os!r} must look like "
+                        "aarch64-linux"
+                    )
+                _validate_relative_path(path, f"agent.binaries[{name!r}][{arch_os!r}]")
+        return raw
 
     @field_validator("test_fixtures")
     @classmethod
@@ -403,9 +658,13 @@ class AgentBlock(_StrictModel):
         """Log a warning for any permission id not in the canonical
         catalog. Older or experimental manifests must still load, so
         this never rejects; it only flags drift between the manifest
-        author and the host's known capability set.
+        author and the host's known capability set. ``plugin.*`` ids are
+        capabilities other plugins declare, so they are outside the
+        catalog by design and never flagged.
         """
         for perm in self.permissions:
+            if perm.id.startswith("plugin."):
+                continue
             if not is_known_agent_capability(perm.id):
                 log.warning(
                     "plugin_manifest_unknown_agent_capability",
@@ -471,6 +730,125 @@ class AgentBlock(_StrictModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_binary_references(self) -> AgentBlock:
+        """Every ``bin:<name>`` (the entrypoint or a service command's
+        first word) must name a key of ``binaries``, and a ``bin:``
+        entrypoint only makes sense for the ``rust`` runtime."""
+        entry_bin = _bin_reference(self.entrypoint, "agent.entrypoint")
+        if entry_bin is not None and self.runtime != "rust":
+            raise ManifestError(
+                f"agent.entrypoint {self.entrypoint!r} is a packaged binary; "
+                "set agent.runtime: rust"
+            )
+        referenced = [("agent.entrypoint", entry_bin)] + [
+            (f"service {svc.name!r} command", svc.bin_name())
+            for svc in self.contributes.services
+        ]
+        for where, name in referenced:
+            if name is not None and name not in self.binaries:
+                raise ManifestError(
+                    f"{where} runs bin:{name} but agent.binaries has no {name!r} key"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_unique_ids(self) -> AgentBlock:
+        paths = [p.path for p in self.payloads]
+        if len(set(paths)) != len(paths):
+            raise ManifestError("agent.payloads paths must be unique")
+        cap_ids = [c.id for c in self.declared_capabilities]
+        if len(set(cap_ids)) != len(cap_ids):
+            raise ManifestError("agent.declared_capabilities ids must be unique")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_listener_capabilities(self) -> AgentBlock:
+        """A service that binds a port needs ``network.listen``, and also
+        ``network.outbound``: only that grant opens the inet socket
+        families a listener needs."""
+        if not any(svc.listen_ports for svc in self.contributes.services):
+            return self
+        declared = {p.id for p in self.permissions}
+        missing = [
+            cap for cap in ("network.listen", "network.outbound") if cap not in declared
+        ]
+        if missing:
+            raise ManifestError(
+                "a service declares listen_ports but agent.permissions is missing "
+                + ", ".join(missing)
+            )
+        return self
+
+
+def _validate_contribution_id(value: str, field: str) -> str:
+    if not CONTRIBUTION_ID_PATTERN.fullmatch(value):
+        raise ManifestError(
+            f"{field} {value!r} must match {CONTRIBUTION_ID_PATTERN.pattern}"
+        )
+    return value
+
+
+class AgentPage(_StrictModel):
+    """A full page the plugin adds to a node's navigation in the GCS.
+
+    ``section`` / ``after`` / ``order`` place it in the menu; ``profile``
+    narrows the node profiles it appears on (``None`` = every profile).
+    ``setup_for`` marks this page as the setup flow of another page in the
+    same list."""
+
+    id: str
+    title: str = Field(..., min_length=1, max_length=80)
+    icon: str | None = None
+    section: str | None = None
+    after: str | None = None
+    order: int | None = None
+    profile: list[Profile] | None = None
+    setup_for: str | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str) -> str:
+        return _validate_contribution_id(v, "agent page id")
+
+    @field_validator("profile", mode="before")
+    @classmethod
+    def _canonical_profiles(cls, raw: Any) -> Any:
+        return _normalize_profiles(raw)
+
+    @field_validator("profile")
+    @classmethod
+    def _validate_profile(cls, v: list[Profile] | None) -> list[Profile] | None:
+        _require_non_empty_profiles(v, "agent page profile")
+        return v
+
+
+class NodeSurface(_StrictModel):
+    """A card the plugin adds to a node's overview in the GCS, shown on the
+    listed node profiles, optionally under one of the fixed groups."""
+
+    id: str
+    title: str = Field(..., min_length=1, max_length=80)
+    profile: list[Profile]
+    group: Literal["status", "vehicle", "link", "device", "compute"] | None = None
+    order: int | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, v: str) -> str:
+        return _validate_contribution_id(v, "node surface id")
+
+    @field_validator("profile", mode="before")
+    @classmethod
+    def _canonical_profiles(cls, raw: Any) -> Any:
+        return _normalize_profiles(raw)
+
+    @field_validator("profile")
+    @classmethod
+    def _validate_profile(cls, v: list[Profile]) -> list[Profile]:
+        _require_non_empty_profiles(v, "node surface profile")
+        return v
+
 
 class GcsContributes(_StrictModel):
     panels: list[dict[str, Any]] = Field(default_factory=list)
@@ -506,6 +884,42 @@ class GcsContributes(_StrictModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
     resources: list[dict[str, Any]] = Field(default_factory=list)
     prompts: list[dict[str, Any]] = Field(default_factory=list)
+    # Plugin settings rendered by the GCS settings surface. Free-form; the
+    # agent does not interpret them.
+    settings: list[dict[str, Any]] = Field(default_factory=list)
+    agent_pages: list[AgentPage] = Field(default_factory=list)
+    node_surfaces: list[NodeSurface] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_pages_and_surfaces(self) -> GcsContributes:
+        """Page and surface ids are unique; ``setup_for`` names another page
+        in the same list, and that page is not itself a setup page."""
+        page_ids = [p.id for p in self.agent_pages]
+        if len(set(page_ids)) != len(page_ids):
+            raise ManifestError("gcs.contributes.agent_pages ids must be unique")
+        surface_ids = [s.id for s in self.node_surfaces]
+        if len(set(surface_ids)) != len(surface_ids):
+            raise ManifestError("gcs.contributes.node_surfaces ids must be unique")
+        by_id = {p.id: p for p in self.agent_pages}
+        for page in self.agent_pages:
+            if page.setup_for is None:
+                continue
+            if page.setup_for == page.id:
+                raise ManifestError(
+                    f"agent page {page.id!r} cannot be its own setup_for"
+                )
+            target = by_id.get(page.setup_for)
+            if target is None:
+                raise ManifestError(
+                    f"agent page {page.id!r} setup_for {page.setup_for!r} names "
+                    "no page in agent_pages"
+                )
+            if target.setup_for is not None:
+                raise ManifestError(
+                    f"agent page {page.id!r} setup_for {page.setup_for!r} names a "
+                    "page that is itself a setup page"
+                )
+        return self
 
 
 class GcsBlock(_StrictModel):
@@ -515,7 +929,7 @@ class GcsBlock(_StrictModel):
     """Relative path inside the archive to the GCS bundle entrypoint
     (``gcs/plugin.bundle.js``)."""
 
-    isolation: Literal["iframe", "worker", "inline"] = "iframe"
+    isolation: Literal["iframe", "inline"] = "iframe"
     """Inline is restricted to first-party signers."""
 
     permissions: list[PermissionRef] = Field(default_factory=list)
@@ -717,6 +1131,41 @@ class PluginManifest(_StrictModel):
                 f"plugin {self.id} declares neither agent nor gcs half; "
                 "at least one is required"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_plugin_namespace(self) -> PluginManifest:
+        """Declared capabilities and shared topics live under the plugin's
+        own ``plugin.<leaf>.`` namespace, and a shared topic's
+        ``subscribe_capability`` is a catalog capability or one this plugin
+        declares."""
+        if self.agent is None:
+            return self
+        prefix = f"plugin.{_plugin_leaf(self.id)}."
+        declared: set[str] = set()
+        for cap in self.agent.declared_capabilities:
+            name = cap.id.removeprefix(prefix)
+            if name == cap.id or not DECLARED_CAP_NAME_PATTERN.fullmatch(name):
+                raise ManifestError(
+                    f"declared capability {cap.id!r} must be {prefix}<name> with "
+                    f"<name> matching {DECLARED_CAP_NAME_PATTERN.pattern}"
+                )
+            declared.add(cap.id)
+        topics = [t.topic for t in self.agent.contributes.shared_topics]
+        if len(set(topics)) != len(topics):
+            raise ManifestError("agent.contributes.shared_topics topics must be unique")
+        for shared in self.agent.contributes.shared_topics:
+            if not shared.topic.startswith(prefix):
+                raise ManifestError(
+                    f"shared topic {shared.topic!r} must start with {prefix!r}"
+                )
+            cap = shared.subscribe_capability
+            if not is_known_agent_capability(cap) and cap not in declared:
+                raise ManifestError(
+                    f"shared topic {shared.topic!r} subscribe_capability {cap!r} is "
+                    "neither a known agent capability nor one of this plugin's "
+                    "declared_capabilities"
+                )
         return self
 
     @classmethod

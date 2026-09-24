@@ -505,7 +505,13 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
                     .session_valid(&edge.pairing.current(), &tok)
             })
             .unwrap_or(false);
-        if !session_ok {
+        // A browser cannot set `X-ADOS-Key` on a WebSocket handshake. A native
+        // stream whose ticket scope names the path's own id (an install job's
+        // progress, a plugin's HTTP passthrough) is admitted on a ticket minted
+        // for exactly that scope; any other ticket opens nothing here.
+        let ticket_ok = !session_ok
+            && native_ws_ticket_admits(request.headers(), &edge.pairing.current(), &path);
+        if !session_ok && !ticket_ok {
             // Last-resort: a scoped MCP token (behind the default-off accept flag).
             // Admitted only for a native route whose class the token's scopes cover;
             // a verified-but-wrong-scope token is a 403, an absent/invalid one falls
@@ -651,20 +657,7 @@ fn ws_upgrade_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing) -> boo
     let Pairing::Paired(key) = pairing else {
         return false;
     };
-    // Flatten the offered subprotocols (comma-joined within one header and/or
-    // split across several); the ticket itself carries no comma so it survives.
-    let offered: Vec<String> = headers
-        .get_all("sec-websocket-protocol")
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|raw| raw.split(','))
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let Some(pos) = offered.iter().position(|p| p == "ados-ws-ticket") else {
-        return false;
-    };
-    let Some(token) = offered.get(pos + 1) else {
+    let Some(token) = offered_ticket(headers) else {
         return false;
     };
     // The scope is the token's 2nd `|`-field (`v1|<scope>|<issued>|<expires>|<mac>`).
@@ -674,8 +667,46 @@ fn ws_upgrade_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing) -> boo
         return false;
     };
     WsTicketIssuer::from_api_key(key)
-        .verify(token, scope, now_unix())
+        .verify(&token, scope, now_unix())
         .is_ok()
+}
+
+/// True when a WebSocket upgrade to a native `path` carries a ticket minted for
+/// the scope bound to that path (see
+/// [`crate::routes::ws_ticket::path_bound_scope`]). The route itself therefore
+/// needs no ticket check: only the one scope it serves gets through.
+fn native_ws_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing, path: &str) -> bool {
+    if !crate::proxy::is_websocket_upgrade(headers) {
+        return false;
+    }
+    let Pairing::Paired(key) = pairing else {
+        return false;
+    };
+    let (Some(scope), Some(token)) = (
+        crate::routes::ws_ticket::path_bound_scope(path),
+        offered_ticket(headers),
+    ) else {
+        return false;
+    };
+    WsTicketIssuer::from_api_key(key)
+        .verify(&token, &scope, now_unix())
+        .is_ok()
+}
+
+/// The ticket a WebSocket handshake offers: the entry after the
+/// `ados-ws-ticket` marker in its `Sec-WebSocket-Protocol` list (comma-joined
+/// within one header and/or split across several; a ticket has no comma).
+fn offered_ticket(headers: &http::HeaderMap) -> Option<String> {
+    let offered: Vec<String> = headers
+        .get_all("sec-websocket-protocol")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|raw| raw.split(','))
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let pos = offered.iter().position(|p| p == "ados-ws-ticket")?;
+    offered.get(pos + 1).cloned()
 }
 
 /// The dashboard session a request presents: the `X-ADOS-Dashboard-Session`
@@ -1101,6 +1132,56 @@ mod tests {
             .token;
         let bad = ws_headers(Some(&format!("ados-ws-ticket, {forged}")));
         assert!(!ws_upgrade_ticket_admits(&bad, &paired));
+    }
+
+    /// A native plugin stream admits only a ticket minted for the scope its own
+    /// path names: the passthrough for that plugin, the progress stream for
+    /// that job. Another plugin's, another job's or an unrelated scope's
+    /// authentic ticket is refused.
+    #[test]
+    fn a_native_plugin_stream_admits_only_its_own_scoped_ticket() {
+        let key = "ados_secret";
+        let paired = Pairing::Paired(key.to_string());
+        let issuer = WsTicketIssuer::from_api_key(key);
+        let offer = |scope: &str| {
+            ws_headers(Some(&format!(
+                "ados-ws-ticket, {}",
+                issuer.mint(scope, 30).token
+            )))
+        };
+        let web = "/api/plugins/com.example.web/x/live";
+        assert!(native_ws_ticket_admits(
+            &offer("plugins.http:com.example.web"),
+            &paired,
+            web
+        ));
+        for scope in [
+            "plugins.http:com.example.other",
+            "plugins.install_job:job-1",
+            "vision.detections",
+        ] {
+            assert!(
+                !native_ws_ticket_admits(&offer(scope), &paired, web),
+                "{scope}"
+            );
+        }
+        let job = "/api/plugins/jobs/job-1";
+        assert!(native_ws_ticket_admits(
+            &offer("plugins.install_job:job-1"),
+            &paired,
+            job
+        ));
+        assert!(!native_ws_ticket_admits(
+            &offer("plugins.install_job:job-2"),
+            &paired,
+            job
+        ));
+        // A path with no bound scope admits no ticket at all.
+        assert!(!native_ws_ticket_admits(
+            &offer("plugins.http:com.example.web"),
+            &paired,
+            "/api/plugins/com.example.web"
+        ));
     }
 
     /// Build an `EdgeAuth` over temp paths: a paired agent (`api_key=ados_secret`,

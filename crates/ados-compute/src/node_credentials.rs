@@ -216,7 +216,7 @@ impl NodeCredentialStore {
     }
 
     /// Whether `token` is a live credential for `lane` issued under `owner_key`.
-    pub fn admits(&self, token: &str, lane: NodeLane, owner_key: &str) -> bool {
+    pub fn admits(&self, token: &str, lane: &NodeLane, owner_key: &str) -> bool {
         let Some((id, secret)) = parse_token(token) else {
             return false;
         };
@@ -224,7 +224,7 @@ impl NodeCredentialStore {
         let Some(record) = records.iter().find(|r| r.id == id) else {
             return false;
         };
-        record.lanes.contains(&lane)
+        record.lanes.contains(lane)
             && constant_time_eq(
                 record.owner_binding.as_bytes(),
                 owner_binding(owner_key).as_bytes(),
@@ -294,29 +294,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         let m = s
-            .mint("drone-1", &[NodeLane::AtlasIngest], "owner-key", 10)
+            .mint("drone-1", &[crate::lanes::ATLAS_INGEST], "owner-key", 10)
             .unwrap();
         assert_eq!(m.workstation_node_id, "ws-node");
-        assert!(s.admits(&m.credential, NodeLane::AtlasIngest, "owner-key"));
+        assert!(s.admits(&m.credential, &crate::lanes::ATLAS_INGEST, "owner-key"));
         // Another lane is refused.
-        assert!(!s.admits(&m.credential, NodeLane::JobSubmit, "owner-key"));
+        assert!(!s.admits(&m.credential, &crate::lanes::JOB_SUBMIT, "owner-key"));
         // A re-paired node (new owner key) refuses what the old owner issued.
-        assert!(!s.admits(&m.credential, NodeLane::AtlasIngest, "new-owner"));
+        assert!(!s.admits(&m.credential, &crate::lanes::ATLAS_INGEST, "new-owner"));
         // A tampered secret is refused.
         let forged = format!("{}x", m.credential);
-        assert!(!s.admits(&forged, NodeLane::AtlasIngest, "owner-key"));
-        assert!(!s.admits("", NodeLane::AtlasIngest, "owner-key"));
-        assert!(!s.admits("owner-key", NodeLane::AtlasIngest, "owner-key"));
+        assert!(!s.admits(&forged, &crate::lanes::ATLAS_INGEST, "owner-key"));
+        assert!(!s.admits("", &crate::lanes::ATLAS_INGEST, "owner-key"));
+        assert!(!s.admits("owner-key", &crate::lanes::ATLAS_INGEST, "owner-key"));
     }
 
     #[test]
     fn reissuing_for_a_peer_rotates_its_credential() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let first = s.mint("drone-1", &NodeLane::ALL, "k", 1).unwrap();
-        let second = s.mint("drone-1", &NodeLane::ALL, "k", 2).unwrap();
-        assert!(!s.admits(&first.credential, NodeLane::AtlasIngest, "k"));
-        assert!(s.admits(&second.credential, NodeLane::AtlasIngest, "k"));
+        let first = s.mint("drone-1", &crate::lanes::ALL, "k", 1).unwrap();
+        let second = s.mint("drone-1", &crate::lanes::ALL, "k", 2).unwrap();
+        assert!(!s.admits(&first.credential, &crate::lanes::ATLAS_INGEST, "k"));
+        assert!(s.admits(&second.credential, &crate::lanes::ATLAS_INGEST, "k"));
         assert_eq!(s.list(Some("k")).len(), 1);
     }
 
@@ -324,15 +324,15 @@ mod tests {
     fn revoke_refuses_the_credential_and_survives_a_restart() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let a = s.mint("drone-a", &NodeLane::ALL, "k", 1).unwrap();
-        let b = s.mint("drone-b", &NodeLane::ALL, "k", 1).unwrap();
+        let a = s.mint("drone-a", &crate::lanes::ALL, "k", 1).unwrap();
+        let b = s.mint("drone-b", &crate::lanes::ALL, "k", 1).unwrap();
         assert!(s.revoke(&a.id).unwrap());
         assert!(!s.revoke(&a.id).unwrap());
-        assert!(!s.admits(&a.credential, NodeLane::AtlasIngest, "k"));
+        assert!(!s.admits(&a.credential, &crate::lanes::ATLAS_INGEST, "k"));
 
         let reopened = store(dir.path());
-        assert!(!reopened.admits(&a.credential, NodeLane::AtlasIngest, "k"));
-        assert!(reopened.admits(&b.credential, NodeLane::AtlasIngest, "k"));
+        assert!(!reopened.admits(&a.credential, &crate::lanes::ATLAS_INGEST, "k"));
+        assert!(reopened.admits(&b.credential, &crate::lanes::ATLAS_INGEST, "k"));
         let listed = reopened.list(Some("k"));
         assert_eq!(listed.len(), 1);
         assert!(listed[0].current);
@@ -343,7 +343,7 @@ mod tests {
     fn the_store_keeps_no_secret_and_is_owner_only() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let m = s.mint("drone-1", &NodeLane::ALL, "k", 1).unwrap();
+        let m = s.mint("drone-1", &crate::lanes::ALL, "k", 1).unwrap();
         let path = dir.path().join("creds.json");
         let on_disk = std::fs::read_to_string(&path).unwrap();
         let secret = m.credential.rsplit('.').next().unwrap();
@@ -362,7 +362,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         assert!(matches!(
-            s.mint(" ", &NodeLane::ALL, "k", 1),
+            s.mint(" ", &crate::lanes::ALL, "k", 1),
             Err(CredentialError::BadPeer)
         ));
         assert!(matches!(

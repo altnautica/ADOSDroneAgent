@@ -94,7 +94,7 @@ impl Step for Start {
         // unit's ConditionPathExists keeps a box whose binary has not landed yet
         // inactive rather than restart-looping. A fresh box must come up with the
         // native host serving the plugin sockets and zero manual steps.
-        // Cross-profile (both profiles fetch the binary).
+        // Cross-profile (every profile fetches the binary).
         {
             let _ = exec::run(
                 "systemctl",

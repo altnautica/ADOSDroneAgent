@@ -42,11 +42,14 @@
 pub mod archive;
 mod args;
 pub mod atlas_bridge;
+pub mod attestation;
 pub mod auto_update;
+pub mod backend;
 pub mod button_client;
 pub mod control;
 pub mod control_client;
 pub mod dispatch;
+pub mod download;
 pub mod errors;
 pub mod frame_link;
 pub mod handlers;
@@ -70,6 +73,7 @@ pub mod token_secret;
 pub mod vehicle_events;
 pub mod vision_client;
 
+pub use backend::{ServiceBackend, UnitSpec};
 pub use control::{
     control_socket_path, serve_control, ConfigControl, LifecycleControl, CONTROL_SOCKET_NAME,
     DEFAULT_CONTROL_DIR, METHOD_PLUGIN_RECONCILE, METHOD_TOKEN_ROTATE,
@@ -93,7 +97,7 @@ pub use server::{
 };
 pub use signing::{is_first_party_signer, FIRST_PARTY_SIGNERS};
 pub use state::{PluginInstall, PluginSource, PluginStatus};
-pub use supervisor::{semver_in_range, InstallResult, Paths, PluginSupervisor, SystemctlRunner};
+pub use supervisor::{semver_in_range, InstallResult, Paths, PluginSupervisor};
 pub use token_secret::{
     load_or_create_secret, shared_issuer, token_env_path, write_token_env, TokenMint,
     PLUGIN_TOKEN_SECRET_PATH,
@@ -122,22 +126,21 @@ pub const HANDLER_GATED_CAPS: &[&str] = &[
     "mcp.expose",
 ];
 
-/// Capabilities enforced by the generated systemd unit rather than by any wire
+/// Capabilities enforced by the generated service unit rather than by any wire
 /// gate.
 ///
-/// Opening `/dev/i2c-1`, calling `socket(AF_INET)`, and reading `/srv` are
-/// direct syscalls inside the plugin's own process. There is no RPC the host
-/// could refuse, so for these the grant has to change the sandbox: the unit
-/// carries `DeviceAllow=` / `RestrictAddressFamilies=` / `InaccessiblePaths=`
-/// derived from the granted set, and the supervisors re-render and restart on
-/// every grant and revoke.
+/// Opening `/dev/i2c-1`, calling `socket(AF_INET)`, binding a TCP port, and
+/// reading `/srv` are direct syscalls inside the plugin's own process. There
+/// is no RPC the host could refuse, so for these the grant has to change the
+/// sandbox: the unit carries `DeviceAllow=` / `RestrictAddressFamilies=` /
+/// `SocketBindAllow=` / `InaccessiblePaths=` derived from the granted set, and
+/// the supervisors re-render and restart on every grant and revoke.
 ///
 /// This is a real enforcement mechanism, just a different one, so it counts
 /// toward the catalog's `enforced` flag — which is why it is named here and
-/// unioned into the guard tests below. Before it existed these ten
-/// capabilities were decorative: the install dialog told the operator a plugin
-/// had been granted (or denied) I2C, SPI, GPIO, USB, host filesystem and
-/// outbound network, and nothing downstream acted on the answer.
+/// unioned into the guard tests below. On a service backend that cannot
+/// express a sandbox (launchd) the controller installs first-party plugins
+/// only, so the flag never describes a gate that is absent.
 ///
 /// The authoritative list lives in [`sandbox::sandbox_enforced_caps`]; this
 /// constant mirrors it so the doc and the guard tests read from one place, and
@@ -146,11 +149,13 @@ pub const SANDBOX_ENFORCED_CAPS: &[&str] = &[
     "filesystem.host",
     "hardware.camera.csi",
     "hardware.gpio",
+    "hardware.gpu",
     "hardware.i2c",
     "hardware.spi",
     "hardware.uart",
     "hardware.usb",
     "hardware.usb.uvc",
+    "network.listen",
     "network.outbound",
 ];
 
@@ -248,10 +253,10 @@ mod capability_enforcement_guard {
         // every sandbox-enforced capability, granting it must produce different
         // unit text. A cap that renders identically granted and ungranted is
         // decorative again, with a guard test vouching for it.
-        let none = super::sandbox::sandbox_directives(&BTreeSet::new(), true);
+        let none = super::sandbox::sandbox_directives(&BTreeSet::new(), true, &[8092]);
         for cap in SANDBOX_ENFORCED_CAPS {
             let one: BTreeSet<String> = std::iter::once(cap.to_string()).collect();
-            let with = super::sandbox::sandbox_directives(&one, true);
+            let with = super::sandbox::sandbox_directives(&one, true, &[8092]);
             assert_ne!(
                 none, with,
                 "{cap} is declared sandbox-enforced but changes nothing in the unit"

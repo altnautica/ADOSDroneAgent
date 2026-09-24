@@ -82,6 +82,12 @@ pub enum Method {
     RadioAuxStreamClose,
     RadioAuxStreamSend,
     RadioAuxStreamSubscribe,
+    // Cloud relay: publish on the plugin's own cloud stream, or write a record
+    // into the plugin's own cloud collection.
+    CloudPublish,
+    CloudRecordsPut,
+    // Perception offload: report the offload link the plugin holds.
+    OffloadAdvertise,
     // Vision: frame-descriptor subscribe, model register, inference, and
     // detection publish. The engine owns the cameras and the inference backend;
     // the host proxies these to it over its socket.
@@ -175,6 +181,9 @@ impl Method {
             "radio.aux_stream.close" => Self::RadioAuxStreamClose,
             "radio.aux_stream.send" => Self::RadioAuxStreamSend,
             "radio.aux_stream.subscribe" => Self::RadioAuxStreamSubscribe,
+            "cloud.publish" => Self::CloudPublish,
+            "cloud.records.put" => Self::CloudRecordsPut,
+            "offload.advertise" => Self::OffloadAdvertise,
             "compute.dataset.write" => Self::ComputeDatasetWrite,
             "compute.job.submit" => Self::ComputeJobSubmit,
             "compute.job.read" => Self::ComputeJobRead,
@@ -225,6 +234,9 @@ impl Method {
             Self::RadioAuxStreamClose => "radio.aux_stream.close",
             Self::RadioAuxStreamSend => "radio.aux_stream.send",
             Self::RadioAuxStreamSubscribe => "radio.aux_stream.subscribe",
+            Self::CloudPublish => "cloud.publish",
+            Self::CloudRecordsPut => "cloud.records.put",
+            Self::OffloadAdvertise => "offload.advertise",
             Self::VisionSubscribeFrames => vision_methods::SUBSCRIBE_FRAMES,
             Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
             Self::VisionReadModel => vision_methods::READ_MODEL,
@@ -534,6 +546,9 @@ mod tests {
         Method::RadioAuxStreamClose,
         Method::RadioAuxStreamSend,
         Method::RadioAuxStreamSubscribe,
+        Method::CloudPublish,
+        Method::CloudRecordsPut,
+        Method::OffloadAdvertise,
         Method::VisionSubscribeFrames,
         Method::VisionRegisterModel,
         Method::VisionReadModel,

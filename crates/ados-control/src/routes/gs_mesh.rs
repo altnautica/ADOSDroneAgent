@@ -69,7 +69,7 @@ fn resolved_profile_at(config: &Path, profile_conf: &Path, role_path: &Path) -> 
 fn is_ground_station() -> bool {
     is_ground_station_at(
         &config_path(),
-        &crate::profile::profile_conf_path(),
+        &ados_config::profile_conf_path(),
         &crate::profile::mesh_role_path(),
     )
 }

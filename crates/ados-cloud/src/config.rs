@@ -550,19 +550,19 @@ impl CloudConfig {
     /// `compute`).
     ///
     /// The config field is the INTERNAL form and may be `ground_station`
-    /// (underscore) or `auto`. `auto`, empty, and anything unrecognized resolve
-    /// to `drone`: the resolved profile lives in `/etc/ados/profile.conf` on a
-    /// real rig, and a node that means to be a ground station sets its profile.
-    /// This is the ONE profile discrimination in the relay, so the bind role,
-    /// the advertised profile, the aux identity and the offload gate can never
-    /// disagree about what this node is.
-    pub fn wire_profile(&self) -> &'static str {
-        match self.agent.profile.as_str() {
-            "ground_station" | "ground-station" => "ground-station",
-            "workstation" => "workstation",
-            "compute" => "compute",
-            _ => "drone",
-        }
+    /// (underscore) or `auto`. An explicit value wins; `auto` and empty defer to
+    /// `profile.conf` (honouring `ADOS_PROFILE_CONF`), the same resolution every
+    /// other agent service uses; anything unresolved is `drone`. This is the ONE
+    /// profile discrimination in the relay, so the bind role, the advertised
+    /// profile, the aux identity and the offload gate can never disagree about
+    /// what this node is.
+    pub fn wire_profile(&self) -> String {
+        self.wire_profile_at(&ados_config::profile_conf_path())
+    }
+
+    /// The path-injectable core of [`wire_profile`](Self::wire_profile).
+    pub fn wire_profile_at(&self, profile_conf: &Path) -> String {
+        ados_config::resolve_profile(Some(&self.agent.profile), profile_conf)
     }
 
     /// The MQTT broker the relay lanes dial for this posture, or `None` when
@@ -910,5 +910,22 @@ server:
         let cfg3 = CloudConfig::load_from(&path3);
         assert!(cfg3.effective_convex_url().is_empty());
         let _ = std::fs::remove_file(&path3);
+    }
+
+    #[test]
+    fn an_auto_profile_resolves_through_profile_conf() {
+        // A default install leaves `agent.profile: auto` and records the node's
+        // profile in profile.conf; a ground station must advertise itself as one.
+        let conf = temp_yaml("profile-conf-gs", "# header\nprofile: ground_station\n");
+        let mut cfg = CloudConfig::default();
+        assert_eq!(cfg.agent.profile, "auto");
+        assert_eq!(cfg.wire_profile_at(&conf), "ground-station");
+        // An explicit config value still wins over profile.conf.
+        cfg.agent.profile = "drone".to_string();
+        assert_eq!(cfg.wire_profile_at(&conf), "drone");
+        let _ = std::fs::remove_file(&conf);
+        // No profile.conf: `auto` is a drone.
+        cfg.agent.profile = "auto".to_string();
+        assert_eq!(cfg.wire_profile_at(&conf), "drone");
     }
 }

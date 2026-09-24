@@ -4,6 +4,16 @@
       "additionalProperties": false,
       "description": "Agent-half manifest block.",
       "properties": {
+        "binaries": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": "Binaries",
+          "type": "object"
+        },
         "contains_vendor_binary": {
           "default": false,
           "title": "Contains Vendor Binary",
@@ -12,9 +22,21 @@
         "contributes": {
           "$ref": "#/$defs/AgentContributes"
         },
+        "declared_capabilities": {
+          "items": {
+            "$ref": "#/$defs/DeclaredCapability"
+          },
+          "title": "Declared Capabilities",
+          "type": "array"
+        },
         "entrypoint": {
           "title": "Entrypoint",
           "type": "string"
+        },
+        "http": {
+          "default": false,
+          "title": "Http",
+          "type": "boolean"
         },
         "isolation": {
           "default": "subprocess",
@@ -30,6 +52,13 @@
             "$ref": "#/$defs/MavlinkComponent"
           },
           "title": "Mavlink Components",
+          "type": "array"
+        },
+        "payloads": {
+          "items": {
+            "$ref": "#/$defs/PayloadSpec"
+          },
+          "title": "Payloads",
           "type": "array"
         },
         "per_drone_config": {
@@ -76,7 +105,8 @@
             "enum": [
               "drone",
               "ground-station",
-              "workstation"
+              "workstation",
+              "compute"
             ],
             "type": "string"
           },
@@ -138,6 +168,13 @@
           "title": "Services",
           "type": "array"
         },
+        "shared_topics": {
+          "items": {
+            "$ref": "#/$defs/SharedTopic"
+          },
+          "title": "Shared Topics",
+          "type": "array"
+        },
         "tools": {
           "items": {
             "additionalProperties": true,
@@ -159,6 +196,109 @@
         }
       },
       "title": "AgentContributes",
+      "type": "object"
+    },
+    "AgentPage": {
+      "additionalProperties": false,
+      "description": "A full page the plugin adds to a node's navigation in the GCS.\n\n``section`` / ``after`` / ``order`` place it in the menu; ``profile``\nnarrows the node profiles it appears on (``None`` = every profile).\n``setup_for`` marks this page as the setup flow of another page in the\nsame list.",
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After"
+        },
+        "icon": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Icon"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "order": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Order"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "drone",
+                  "ground-station",
+                  "workstation",
+                  "compute"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "setup_for": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Setup For"
+        },
+        "title": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "title": "AgentPage",
       "type": "object"
     },
     "Compatibility": {
@@ -207,6 +347,38 @@
         "ados_version"
       ],
       "title": "Compatibility",
+      "type": "object"
+    },
+    "DeclaredCapability": {
+      "additionalProperties": false,
+      "description": "A capability the plugin defines for other plugins to request, e.g. to\nsubscribe to one of its shared topics. The id is namespaced to the\nplugin: ``plugin.<leaf>.<name>`` (checked on :class:`PluginManifest`,\nwhich knows the plugin id).",
+      "properties": {
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "risk": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "title": "Risk",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "risk"
+      ],
+      "title": "DeclaredCapability",
       "type": "object"
     },
     "FcParameter": {
@@ -270,7 +442,6 @@
           "default": "iframe",
           "enum": [
             "iframe",
-            "worker",
             "inline"
           ],
           "title": "Isolation",
@@ -300,12 +471,26 @@
     "GcsContributes": {
       "additionalProperties": false,
       "properties": {
+        "agent_pages": {
+          "items": {
+            "$ref": "#/$defs/AgentPage"
+          },
+          "title": "Agent Pages",
+          "type": "array"
+        },
         "models": {
           "items": {
             "additionalProperties": true,
             "type": "object"
           },
           "title": "Models",
+          "type": "array"
+        },
+        "node_surfaces": {
+          "items": {
+            "$ref": "#/$defs/NodeSurface"
+          },
+          "title": "Node Surfaces",
           "type": "array"
         },
         "notifications": {
@@ -354,6 +539,14 @@
             "type": "object"
           },
           "title": "Resources",
+          "type": "array"
+        },
+        "settings": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Settings",
           "type": "array"
         },
         "skills": {
@@ -487,6 +680,140 @@
         "component_kind"
       ],
       "title": "MavlinkComponent",
+      "type": "object"
+    },
+    "NodeSurface": {
+      "additionalProperties": false,
+      "description": "A card the plugin adds to a node's overview in the GCS, shown on the\nlisted node profiles, optionally under one of the fixed groups.",
+      "properties": {
+        "group": {
+          "anyOf": [
+            {
+              "enum": [
+                "status",
+                "vehicle",
+                "link",
+                "device",
+                "compute"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "order": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Order"
+        },
+        "profile": {
+          "items": {
+            "enum": [
+              "drone",
+              "ground-station",
+              "workstation",
+              "compute"
+            ],
+            "type": "string"
+          },
+          "title": "Profile",
+          "type": "array"
+        },
+        "title": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "profile"
+      ],
+      "title": "NodeSurface",
+      "type": "object"
+    },
+    "PayloadSpec": {
+      "additionalProperties": false,
+      "description": "A large file fetched at install time instead of shipped in the archive\n(model weights, maps). The installer downloads ``source``, checks the\nsize and SHA-256, and places it at ``path`` under the plugin directory.\n``profiles`` / ``arch_os`` narrow which nodes fetch it; ``None`` means\nevery node the plugin installs on.",
+      "properties": {
+        "arch_os": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Arch Os"
+        },
+        "path": {
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "profiles": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "drone",
+                  "ground-station",
+                  "workstation",
+                  "compute"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profiles"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "maximum": 1073741824,
+          "minimum": 1,
+          "title": "Size Bytes",
+          "type": "integer"
+        },
+        "source": {
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "source",
+        "sha256",
+        "size_bytes"
+      ],
+      "title": "PayloadSpec",
       "type": "object"
     },
     "PermissionRef": {
@@ -627,24 +954,34 @@
     },
     "ResourceLimits": {
       "additionalProperties": false,
+      "description": "Hard resource envelope for the plugin's processes.\n\n``class`` picks the ceiling set: ``standard`` caps each field at\n:data:`STANDARD_RESOURCE_CEILINGS`; ``heavy`` lifts the caps to the field\nbounds below for plugins that run large models or simulations.",
       "properties": {
+        "class": {
+          "default": "standard",
+          "enum": [
+            "standard",
+            "heavy"
+          ],
+          "title": "Class",
+          "type": "string"
+        },
         "max_cpu_percent": {
           "default": 25,
-          "maximum": 100,
+          "maximum": 3200,
           "minimum": 1,
           "title": "Max Cpu Percent",
           "type": "integer"
         },
         "max_pids": {
           "default": 12,
-          "maximum": 256,
+          "maximum": 4096,
           "minimum": 1,
           "title": "Max Pids",
           "type": "integer"
         },
         "max_ram_mb": {
           "default": 96,
-          "maximum": 4096,
+          "maximum": 65536,
           "minimum": 8,
           "title": "Max Ram Mb",
           "type": "integer"
@@ -683,18 +1020,49 @@
     },
     "ServiceSpec": {
       "additionalProperties": false,
-      "description": "A long-running service a plugin declares on top of its main half.\n\nThe supervisor renders one extra systemd unit per spec under the\nplugin slice and starts/stops it across the plugin's enable/disable\nlifecycle. Each spec reports readiness on the heartbeat so the GCS\ncan show whether the declared daemon is actually up and serving.\n\nFields:\n\n* ``name`` \u2014 short identifier, unique within the plugin. Used to\n  build the unit name (``ados-plugin-<id>-<name>.service``, with\n  dots and underscores sanitized to hyphens) and to key the\n  readiness entry. Lowercase alnum plus ``.``, ``_``, ``-``.\n* ``command`` \u2014 the exec line the unit runs, as an argv (POSIX quoting,\n  never a shell). The renderer re-quotes each word for systemd and\n  refuses control characters and systemd exec prefixes; the plugin\n  author is responsible for an absolute path or a binary on ``PATH``.\n* ``ready_check`` \u2014 how readiness is probed. ``None`` \u21d2 the service\n  is ready iff its unit is active. An ``http(s)://127.0.0.1:<port>``\n  URL \u21d2 an HTTP GET, ready on a 2xx status. Any other value \u21d2 an\n  argv (POSIX quoting, never a shell) run as the plugin user inside\n  the plugin's sandbox, ready on exit code 0.\n* ``restart`` \u2014 systemd restart policy for the unit.\n* ``slice`` \u2014 cgroup slice the unit runs in. Always the shared plugin\n  slice; any other value is refused, so a plugin cannot move its own\n  service out of the plugin resource envelope.\n\nBackward-compatible: a bare string element in ``services`` is\ncoerced to ``{\"name\": <s>, \"command\": <s>}`` so existing\n``services: [\"foo\"]`` manifests still parse.",
+      "description": "A long-running service a plugin declares on top of its main half.\n\nThe supervisor renders one extra systemd unit per spec under the\nplugin slice and starts/stops it across the plugin's enable/disable\nlifecycle. Each spec reports readiness on the heartbeat so the GCS\ncan show whether the declared daemon is actually up and serving.\n\nFields:\n\n* ``name`` \u2014 short identifier, unique within the plugin. Used to\n  build the unit name (``ados-plugin-<id>-<name>.service``, with\n  dots and underscores sanitized to hyphens) and to key the\n  readiness entry. Lowercase alnum plus ``.``, ``_``, ``-``.\n* ``command`` \u2014 the exec line the unit runs, as an argv (POSIX quoting,\n  never a shell). The renderer re-quotes each word for systemd and\n  refuses control characters and systemd exec prefixes; the plugin\n  author is responsible for an absolute path or a binary on ``PATH``.\n  A first word of ``bin:<name>`` runs the packaged binary ``<name>``\n  from ``agent.binaries``.\n* ``ready_check`` \u2014 how readiness is probed. ``None`` \u21d2 the service\n  is ready iff its unit is active. An ``http(s)://127.0.0.1:<port>``\n  URL \u21d2 an HTTP GET, ready on a 2xx status. Any other value \u21d2 an\n  argv (POSIX quoting, never a shell) run as the plugin user inside\n  the plugin's sandbox, ready on exit code 0.\n* ``restart`` \u2014 systemd restart policy for the unit.\n* ``profiles`` \u2014 node profiles the service runs on. ``None`` \u21d2 every\n  profile the plugin targets; an empty list is refused.\n* ``listen_ports`` \u2014 TCP/UDP ports the service binds (1024-65535, at\n  most four, unique). Declaring any requires the ``network.listen`` and\n  ``network.outbound`` capabilities.\n* ``slice`` \u2014 cgroup slice the unit runs in. Always the shared plugin\n  slice; any other value is refused, so a plugin cannot move its own\n  service out of the plugin resource envelope.\n\nBackward-compatible: a bare string element in ``services`` is\ncoerced to ``{\"name\": <s>, \"command\": <s>}`` so existing\n``services: [\"foo\"]`` manifests still parse.",
       "properties": {
         "command": {
           "minLength": 1,
           "title": "Command",
           "type": "string"
         },
+        "listen_ports": {
+          "items": {
+            "maximum": 65535,
+            "minimum": 1024,
+            "type": "integer"
+          },
+          "maxItems": 4,
+          "title": "Listen Ports",
+          "type": "array"
+        },
         "name": {
           "maxLength": 64,
           "minLength": 1,
           "title": "Name",
           "type": "string"
+        },
+        "profiles": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "drone",
+                  "ground-station",
+                  "workstation",
+                  "compute"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profiles"
         },
         "ready_check": {
           "anyOf": [
@@ -729,6 +1097,29 @@
         "command"
       ],
       "title": "ServiceSpec",
+      "type": "object"
+    },
+    "SharedTopic": {
+      "additionalProperties": false,
+      "description": "A topic the plugin publishes for other plugins to subscribe to.\n\n``topic`` lives in the plugin's own namespace (``plugin.<leaf>.<rest>``);\na subscriber needs ``subscribe_capability``, which is either a catalog\ncapability or one of this plugin's ``declared_capabilities``.",
+      "properties": {
+        "subscribe_capability": {
+          "minLength": 1,
+          "title": "Subscribe Capability",
+          "type": "string"
+        },
+        "topic": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Topic",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic",
+        "subscribe_capability"
+      ],
+      "title": "SharedTopic",
       "type": "object"
     },
     "VendorAttribution": {

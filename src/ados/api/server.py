@@ -20,7 +20,6 @@ from ados.api.routes import (
     pairing,
     peripherals,
     peripherals_v1,
-    plugins,
     setup,
     video,
     vision_detections,
@@ -95,8 +94,6 @@ def create_app(agent: Any) -> FastAPI:
     app.include_router(vision_detections.router, prefix="/api")
     app.include_router(ground_station.router, prefix="/api")
     app.include_router(network.router, prefix="/api")
-    # Plugin lifecycle: install / enable / disable / remove.
-    app.include_router(plugins.router, prefix="/api")
 
     # The WebSocket-auth ticket mint (POST /api/_ws/ticket) is served by the
     # native control surface; the residual WebSocket routes verify the
@@ -136,6 +133,7 @@ def create_app(agent: Any) -> FastAPI:
         )
 
     from starlette.responses import RedirectResponse, Response
+    from starlette.types import Scope
 
     async def _cockpit_index_redirect(request: Any) -> RedirectResponse:
         # A bare /cockpit (no trailing slash) does not match the StaticFiles
@@ -166,7 +164,7 @@ def create_app(agent: Any) -> FastAPI:
         nothing looks stale.
         """
 
-        async def get_response(self, path: str, scope: dict) -> Response:  # type: ignore[override]
+        async def get_response(self, path: str, scope: Scope) -> Response:
             response = await super().get_response(path, scope)
             if path.startswith("assets/"):
                 # The name carries a content hash, so these are safe forever.
@@ -233,7 +231,7 @@ def create_app(agent: Any) -> FastAPI:
             super().__init__(directory=directory, html=True, **kwargs)
             self.index_path = Path(directory) / "index.html"
 
-        async def get_response(self, path: str, scope: dict) -> Response:  # type: ignore[override]
+        async def get_response(self, path: str, scope: Scope) -> Response:
             try:
                 return await super().get_response(path, scope)
             except StarletteHTTPException as exc:

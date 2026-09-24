@@ -336,7 +336,8 @@ pub async fn run_daily_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::supervisor::{Paths, RecordingSystemctl};
+    use crate::backend::RecordingBackend;
+    use crate::supervisor::Paths;
     use std::io::Write;
     use std::path::Path;
 
@@ -348,6 +349,10 @@ mod tests {
             log_dir: dir.join("logs"),
             control_dir: dir.join("plugin-host"),
             loopback_guard_state: dir.join("plugin-loopback-guard.json"),
+            socket_dir: dir.join("sockets"),
+            token_secret: dir.join("secrets/plugin-token-secret"),
+            runner: dir.join("bin/ados-plugin-runner"),
+            run_dir: dir.join("run"),
         }
     }
 
@@ -418,7 +423,7 @@ mod tests {
 
     fn running_v1(dir: &Path) -> PluginSupervisor {
         let mut sup = PluginSupervisor::new(paths_in(dir), false, None, "1.0.0")
-            .with_systemctl(Arc::new(RecordingSystemctl::default()));
+            .with_backend(Arc::new(RecordingBackend::default()));
         let contents =
             crate::archive::parse_archive_bytes(archive(&manifest("1.0.0", &["hardware.spi"])))
                 .unwrap();

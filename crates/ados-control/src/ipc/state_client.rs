@@ -97,7 +97,14 @@ impl StateIpcHandle {
         if let Some(tx) = self.stop.take() {
             let _ = tx.send(());
         }
-        let _ = self.join.await;
+        // A panicked reader must not be swallowed here: under the release
+        // profile's `panic = "abort"` it already killed the process, so tests
+        // re-raise it to see the same failure.
+        if let Err(e) = self.join.await {
+            if e.is_panic() {
+                std::panic::resume_unwind(e.into_panic());
+            }
+        }
     }
 }
 
@@ -190,7 +197,14 @@ async fn read_loop(socket_path: PathBuf, snapshot: Snapshot, stop: oneshot::Rece
                 match connected {
                     Ok(stream) => {
                         tracing::debug!(path = %socket_path.display(), "state socket connected");
-                        process_stream(BufReader::new(stream), &snapshot, &mut stop).await;
+                        if process_stream(BufReader::new(stream), &snapshot, &mut stop).await
+                            == StreamEnd::Stopped
+                        {
+                            // The stop signal already resolved inside the read; polling
+                            // a completed oneshot again panics, so return here.
+                            tracing::info!("state client stopping");
+                            return;
+                        }
                         // The stream ended (EOF or error). Pace the reconnect so a
                         // peer that accepts and closes at once cannot spin this loop.
                         tokio::select! {
@@ -216,6 +230,14 @@ async fn read_loop(socket_path: PathBuf, snapshot: Snapshot, stop: oneshot::Rece
     }
 }
 
+/// Why [`process_stream`] returned: the stream ended on its own, or the stop
+/// signal fired (and is therefore consumed and must not be polled again).
+#[derive(Debug, PartialEq, Eq)]
+enum StreamEnd {
+    Ended,
+    Stopped,
+}
+
 /// Read frames from one connected stream until EOF, a read error, or shutdown,
 /// updating the shared snapshot on each decoded frame. The seam is injectable:
 /// `reader` is any async byte source, so a test feeds canned frames without a
@@ -224,20 +246,21 @@ async fn process_stream<R>(
     mut reader: R,
     snapshot: &Snapshot,
     stop: &mut std::pin::Pin<&mut oneshot::Receiver<()>>,
-) where
+) -> StreamEnd
+where
     R: tokio::io::AsyncRead + Unpin,
 {
     loop {
         let frame = tokio::select! {
             biased;
-            _ = &mut **stop => return,
+            _ = &mut **stop => return StreamEnd::Stopped,
             r = read_state_value(&mut reader) => r,
         };
         match frame {
             Ok(Some(value)) => {
                 *snapshot.lock() = Some((Instant::now(), value));
             }
-            Ok(None) | Err(_) => return,
+            Ok(None) | Err(_) => return StreamEnd::Ended,
         }
     }
 }

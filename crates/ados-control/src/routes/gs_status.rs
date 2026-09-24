@@ -143,15 +143,6 @@ fn wfb_receiver_path() -> PathBuf {
     run_dir().join("wfb-receiver.json")
 }
 
-/// The profile-source sentinel install.sh writes (`/etc/ados/profile.conf`),
-/// overridable via `ADOS_PROFILE_CONF` for tests. The `/status` role block reads
-/// its `mesh_capable` flag from here, matching the Python `profile.conf` read.
-fn profile_conf_path() -> PathBuf {
-    PathBuf::from(
-        std::env::var("ADOS_PROFILE_CONF").unwrap_or_else(|_| "/etc/ados/profile.conf".to_string()),
-    )
-}
-
 /// How fresh a ground-station snapshot must be to be served as a live reading:
 /// 10 seconds.
 ///
@@ -246,7 +237,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     // `mesh_capable` reads the `profile.conf` flag. They diverge briefly during a
     // role transition; clients that drive state decisions prefer `current`.
     let configured_role = ground_station_config_role(&state.pairing_paths.config);
-    let mesh_capable = profile_conf_mesh_capable(&profile_conf_path());
+    let mesh_capable = profile_conf_mesh_capable(&ados_config::profile_conf_path());
     let role_block = json!({
         "current": role,
         "configured": configured_role,

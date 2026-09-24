@@ -582,6 +582,33 @@ async fn run_direct(
             .into_iter()
             .collect(),
     );
+    // The plugin application lane: `radio-aux.sock`, the same socket and
+    // protocol the drone's radio service serves. The aux consumers below hand
+    // it every decoded AppStream datagram in-process (they already own the
+    // decoded ports; nothing binds them twice), and its `send` goes out on the
+    // uplink ingress the receive chain's aux `wfb_tx` reads.
+    let (app_fanout, _) =
+        tokio::sync::broadcast::channel(ados_groundlink::app_lane::APP_FANOUT_DEPTH);
+    let app_lane = match ados_radio::aux_cmd::AuxCmdState::ground(
+        config.aux_tx_port,
+        config.aux_enable,
+        app_fanout,
+    )
+    .await
+    {
+        Ok(state) => Some(state),
+        Err(e) => {
+            tracing::warn!(error = %e, "ground_app_lane_unavailable");
+            None
+        }
+    };
+    let app_lane_task = app_lane.clone().map(|state| {
+        let shutdown = aux_shutdown.clone();
+        tokio::spawn(async move {
+            let path = ados_groundlink::app_lane::socket_path();
+            ados_groundlink::app_lane::serve(state, &path, shutdown).await
+        })
+    });
     let spawn_aux_consumer = {
         let aux_counters = aux_counters.clone();
         let aux_peers = aux_peers.clone();
@@ -594,10 +621,9 @@ async fn run_direct(
                 ados_protocol::aux_rpc_proxy::DEFAULT_RESPONSE_SOCK,
             )),
             config_tunnel: Some(config_tunnel_ingest.clone()),
-            // No application-stream consumer runs on a ground node yet: an
-            // AppStream frame is counted and dropped until a sink service
-            // registers here.
-            app_stream: None,
+            app_stream: app_lane.map(|state| {
+                Arc::new(state) as Arc<dyn ados_groundlink::aux_consumer::AppStreamSink>
+            }),
             local_plugins: Some(local_plugins.clone()),
         };
         move |slot: u8| -> tokio::task::JoinHandle<()> {
@@ -706,6 +732,9 @@ async fn run_direct(
     // The persister waits on the same latching signal and stops on its own;
     // the abort just reaps it without waiting out a write in progress.
     aux_peers_task.abort();
+    if let Some(t) = app_lane_task {
+        t.abort();
+    }
 
     // Restore the resolved injection adapter to managed mode on the way out.
     restore_managed_if_resolved(&resolved_iface).await;

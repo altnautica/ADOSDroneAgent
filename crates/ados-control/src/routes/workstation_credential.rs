@@ -137,7 +137,10 @@ mod tests {
         InstallRequest {
             workstation_node_id: node.into(),
             credential: cred.into(),
-            lanes: NodeLane::ALL.to_vec(),
+            lanes: vec![
+                NodeLane::from_static("atlas.ingest"),
+                NodeLane::from_static("offload.stream"),
+            ],
         }
     }
 

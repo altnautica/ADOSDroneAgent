@@ -1,0 +1,17 @@
+schema_version: 1
+id: io.altnautica.geofence
+version: 0.1.0
+name: Geofence
+description: >-
+  Republishes geofence breaches under a stable plugin namespace so other
+  plugins and the GCS render them consistently.
+author: Altnautica
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.9.0"
+agent:
+  entrypoint: ados.plugins.builtin.geofence:GeofencePlugin
+  permissions:
+    - event.subscribe
+    - event.publish

@@ -16,21 +16,13 @@ class ManifestError(PluginError):
 
 
 class SignatureError(PluginError):
-    """Raised when an archive signature is missing, malformed, or invalid.
+    """Raised when an archive's ``SIGNATURE`` entry is malformed.
 
-    Sub-classified so the CLI can map to the right exit code:
-
-    * ``MISSING``: archive is unsigned and the install path requires signed.
-    * ``INVALID``: signature does not verify against any trusted key.
-    * ``REVOKED``: signature verifies but the signer key is on the revocation list.
-    * ``UNKNOWN_SIGNER``: signature shape is valid but the signer id is not on
-      the trusted-keys list.
+    Verifying the signature against trusted keys is the native plugin
+    host's job; the Python parser only checks the entry's shape.
     """
 
-    KIND_MISSING = "missing"
     KIND_INVALID = "invalid"
-    KIND_REVOKED = "revoked"
-    KIND_UNKNOWN_SIGNER = "unknown_signer"
 
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(message)
@@ -40,14 +32,6 @@ class SignatureError(PluginError):
 class ArchiveError(PluginError):
     """Raised on malformed ``.adosplug`` archives (bad zip, missing manifest,
     path-traversal entries, oversized payload)."""
-
-
-class SupervisorError(PluginError):
-    """Raised on lifecycle transitions that are illegal or fail to apply.
-
-    Examples: enabling an uninstalled plugin, removing a plugin while it is
-    still running, systemd unit write fails, cgroup slice not present.
-    """
 
 
 class CapabilityDenied(PluginError):

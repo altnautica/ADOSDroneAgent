@@ -25,6 +25,29 @@ impl HostServices for RealHost {
         ]))
     }
 
+    fn telemetry_state_stream(&self, _plugin_id: &str) -> Option<broadcast::Receiver<Arc<Value>>> {
+        // One connection to the state socket for the whole host, shared by
+        // every subscriber, started on first use so a node whose plugins never
+        // read telemetry never opens it. A socket that is absent or closes is
+        // retried on the fixed host-reader interval with no cap.
+        //
+        // Always `Some`: no flight controller (a workstation, a bench) is a
+        // resting state, so the subscription succeeds and stays quiet.
+        let tx = self.state_reader.get_or_init(|| {
+            let (tx, _rx) = broadcast::channel(STATE_BROADCAST_DEPTH);
+            let path = self.vehicle_state_sock.clone();
+            let task_tx = tx.clone();
+            tokio::spawn(async move {
+                crate::button_client::reconnect_forever("vehicle-state", || {
+                    state_pump(&path, &task_tx)
+                })
+                .await;
+            });
+            tx
+        });
+        Some(tx.subscribe())
+    }
+
     fn mavlink_send(
         &self,
         plugin_id: &str,
@@ -609,6 +632,31 @@ impl HostServices for RealHost {
             }
         }
         Ok(reply)
+    }
+
+    async fn offload_advertise(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        self.advertise_offload(args)
+    }
+
+    async fn cloud_publish(
+        &self,
+        plugin_id: &str,
+        args: &Value,
+        granted_caps: &BTreeSet<String>,
+    ) -> Result<HostResult, HostError> {
+        self.publish_to_cloud(plugin_id, args, granted_caps).await
+    }
+
+    async fn cloud_records_put(
+        &self,
+        plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        self.put_cloud_record(plugin_id, args).await
     }
 
     async fn radio_aux_stream_send(

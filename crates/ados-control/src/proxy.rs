@@ -139,6 +139,20 @@ pub(crate) async fn forward_plain(
     forward_within(socket, request, UPSTREAM_HEAD_TIMEOUT, on_absent).await
 }
 
+/// Forward any request, WebSocket upgrades included, to a local
+/// HTTP-over-Unix-socket service, answering `on_absent()` when nothing serves
+/// the socket or the exchange breaks before a response head.
+pub(crate) async fn forward(
+    socket: &Path,
+    request: Request,
+    on_absent: impl FnOnce() -> Response,
+) -> Response {
+    if is_websocket_upgrade(request.headers()) {
+        return proxy_upgrade_within(socket, request, UPSTREAM_HEAD_TIMEOUT, on_absent).await;
+    }
+    forward_plain(socket, request, on_absent).await
+}
+
 async fn forward_within(
     socket: &Path,
     request: Request,
@@ -256,23 +270,27 @@ pub(crate) fn is_websocket_upgrade(headers: &http::HeaderMap) -> bool {
 /// `101` is in flight in both directions the upgraded streams carry the WebSocket
 /// frames verbatim. The front does not parse the frames — it is a byte pipe.
 async fn proxy_upgrade(socket: &Path, request: Request) -> Response {
-    proxy_upgrade_within(socket, request, UPSTREAM_HEAD_TIMEOUT).await
+    let permanent = routing::is_permanent_python_path(request.uri().path());
+    proxy_upgrade_within(socket, request, UPSTREAM_HEAD_TIMEOUT, move || {
+        absent_reply(permanent)
+    })
+    .await
 }
 
 async fn proxy_upgrade_within(
     socket: &Path,
     mut request: Request,
     head_timeout: std::time::Duration,
+    on_absent: impl FnOnce() -> Response,
 ) -> Response {
-    let permanent = routing::is_permanent_python_path(request.uri().path());
     let stream = match UnixStream::connect(socket).await {
         Ok(s) => s,
-        Err(_) => return absent_reply(permanent),
+        Err(_) => return on_absent(),
     };
     let (mut sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await
     {
         Ok(pair) => pair,
-        Err(_) => return absent_reply(permanent),
+        Err(_) => return on_absent(),
     };
     // The upgrade-bearing connection must keep being driven AFTER the response so
     // hyper can surface the upgraded IO; `with_upgrades` exposes it.
@@ -291,7 +309,7 @@ async fn proxy_upgrade_within(
     // upstream socket and the driver task forever.
     let upstream = match tokio::time::timeout(head_timeout, sender.send_request(request)).await {
         Ok(Ok(resp)) => resp,
-        Ok(Err(_)) => return absent_reply(permanent),
+        Ok(Err(_)) => return on_absent(),
         Err(_) => {
             conn_task.abort();
             return detail(
@@ -521,7 +539,12 @@ mod tests {
             .unwrap();
         let resp = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            proxy_upgrade_within(&path, request, std::time::Duration::from_millis(200)),
+            proxy_upgrade_within(
+                &path,
+                request,
+                std::time::Duration::from_millis(200),
+                || absent_reply(false),
+            ),
         )
         .await
         .expect("the proxy must not wait on a wedged upgrade");
