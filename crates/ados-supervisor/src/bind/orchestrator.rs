@@ -780,17 +780,20 @@ impl BindOrchestrator {
         socat::kill_stale_bind_socats().await;
         self.pm.stop(role.bind_unit()).await;
         self.pm.start(role.normal_unit()).await;
-        // Same recovery as the success path: the drone's video pipeline does not
-        // re-attach to the restarted wfb_tx on its own, so restart it too — video
-        // resumes without a drone reboot after a failed/aborted bind.
-        if role == BindRole::Drone {
-            self.pm.restart("ados-video.service").await;
+        // Same recovery as the success path, for a drone that holds a key: its
+        // video pipeline does not re-attach to the restarted wfb_tx on its own.
+        // A drone with no key has no radio link for video to re-attach to, and
+        // an unpaired drone runs a bind every ~40 s, so nudging it here would
+        // tear its LAN video down on every attempt.
+        let key_held = super::keys::read_public_fingerprint(Path::new(role.key_path())).is_ok();
+        if video_nudge_after_failed_bind(role, key_held) {
+            self.pm.try_restart("ados-video.service").await;
         }
         // A bind attempt cycles the adapter's monitor mode and, on a ground
         // station, regenerates the shared key file the swarm bus derives its key
         // from. Restart it with the radio so it is back on the live adapter and
-        // the key on disk.
-        self.pm.restart(super::ADOS_SWARMBUS_UNIT).await;
+        // the key on disk — if it is running; a stopped bus stays stopped.
+        self.pm.try_restart(super::ADOS_SWARMBUS_UNIT).await;
         // Heal the global reg domain on the way out: a failed/cancelled/watchdog
         // retry cycled the bind unit's monitor mode and may have left the baked
         // country as the global domain. Without this, a retrying bind re-poisons
@@ -1246,9 +1249,30 @@ async fn iface_nm_enumerable(iface: &str) -> bool {
     run_iface_cmd("nmcli", &["-t", "device", "show", iface]).await
 }
 
+/// Whether a failed or aborted bind should cycle the drone's video pipeline.
+///
+/// Only a drone that holds a key has a radio link its video must re-attach to.
+/// A drone with none is simply unpaired, and its auto-pair loop runs a bind
+/// roughly every 40 s: nudging video there tears the LAN stream down on every
+/// attempt for no link at all. Pure for testing.
+fn video_nudge_after_failed_bind(role: BindRole, key_held: bool) -> bool {
+    role == BindRole::Drone && key_held
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_bind_cycles_video_only_on_a_drone_that_holds_a_key() {
+        // An unpaired drone binds every ~40 s; cycling its video each time
+        // drops the LAN stream the operator is watching.
+        assert!(!video_nudge_after_failed_bind(BindRole::Drone, false));
+        assert!(video_nudge_after_failed_bind(BindRole::Drone, true));
+        // A ground station has no video pipeline to cycle.
+        assert!(!video_nudge_after_failed_bind(BindRole::Gs, true));
+        assert!(!video_nudge_after_failed_bind(BindRole::Gs, false));
+    }
 
     #[test]
     fn upstream_key_fresh_rejects_stale_missing_and_accepts_fresh() {

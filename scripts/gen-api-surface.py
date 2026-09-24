@@ -39,11 +39,7 @@ OUT = REPO / "docs" / "api-surface.md"
 # added there and not here is a surface the table would silently omit, which
 # ``check-api-surface.py`` then reports as an unresolvable client path.
 API_ROUTERS = [
-    "config",
-    "logs",
-    "observability",
     "video",
-    "wfb",
     "pairing",
     "setup",
     "dashboard",
@@ -143,7 +139,7 @@ def residual_routes() -> list[tuple[str, str]]:
     schema omits WebSocket routes entirely (four of the ground station's live
     surfaces are upgrades) and rewrites a tail-swallowing ``{name:path}``
     parameter to a plain ``{name}``, which would make
-    `/api/v2/observability/v1/query` unresolvable against its own route.
+    a tail route unresolvable against its own path.
     """
     from ados.api import routes as routes_pkg
 

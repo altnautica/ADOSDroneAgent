@@ -34,11 +34,12 @@
 //!
 //! ## Bounds
 //!
-//! A level-triggered confirm hold, a per-fingerprint episode budget and a
-//! wall-clock cooldown, all persisted, so neither a reboot nor a crash loop
-//! turns recovery into a bind storm. A bind already in flight suspends the
-//! trigger, because a bind window is `rf_unverified` by construction and would
-//! otherwise feed itself.
+//! A level-triggered confirm hold and a wall-clock cooldown between episodes,
+//! both persisted, so neither a reboot nor a crash loop turns recovery into a
+//! bind storm. There is no episode budget: recovery keeps going, one episode
+//! per cooldown, for as long as the key has never worked. A bind already in
+//! flight suspends the trigger, because a bind window is `rf_unverified` by
+//! construction and would otherwise feed itself.
 
 pub mod machine;
 
@@ -54,8 +55,7 @@ use ados_protocol::pair_proof::{
 use crate::bind::BindRole;
 use machine::{
     decide_rearm, drone_signals, gs_signals, HoldTrigger, RearmInput, RearmSignals, RearmStep,
-    DEFAULT_MAX_REARM_EPISODES, DEFAULT_REARM_COOLDOWN_S, PAIR_REARM_KIND, REARM_CONFIRM_HOLD,
-    STATS_FRESH_CEILING,
+    DEFAULT_REARM_COOLDOWN_S, PAIR_REARM_KIND, REARM_CONFIRM_HOLD, STATS_FRESH_CEILING,
 };
 
 /// The radio's own stats sidecar — the source of both signals.
@@ -67,7 +67,6 @@ const WFB_STATS_PATH: &str = "/run/ados/wfb-stats.json";
 pub struct PairRearmConfig {
     pub enabled: bool,
     pub confirm_hold: Duration,
-    pub max_episodes: u32,
     pub cooldown_s: u64,
     pub stats_fresh_ceiling: Duration,
 }
@@ -77,7 +76,6 @@ impl Default for PairRearmConfig {
         Self {
             enabled: true,
             confirm_hold: REARM_CONFIRM_HOLD,
-            max_episodes: DEFAULT_MAX_REARM_EPISODES,
             cooldown_s: DEFAULT_REARM_COOLDOWN_S,
             stats_fresh_ceiling: STATS_FRESH_CEILING,
         }
@@ -110,8 +108,6 @@ pub fn read_config_from(text: &str) -> PairRearmConfig {
         #[serde(default)]
         confirm_hold_s: Option<u64>,
         #[serde(default)]
-        max_episodes: Option<u32>,
-        #[serde(default)]
         cooldown_s: Option<u64>,
         #[serde(default)]
         stats_fresh_ceiling_s: Option<u64>,
@@ -131,9 +127,6 @@ pub fn read_config_from(text: &str) -> PairRearmConfig {
                 .confirm_hold_s
                 .map(|s| Duration::from_secs(s.max(1)))
                 .unwrap_or(REARM_CONFIRM_HOLD),
-            // Zero episodes would mean "never recover"; disabling is what
-            // `enabled: false` is for, so the floor is one.
-            max_episodes: r.max_episodes.unwrap_or(DEFAULT_MAX_REARM_EPISODES).max(1),
             cooldown_s: r.cooldown_s.unwrap_or(DEFAULT_REARM_COOLDOWN_S),
             stats_fresh_ceiling: r
                 .stats_fresh_ceiling_s
@@ -151,8 +144,6 @@ pub enum RearmEvent {
     Armed { episode: u32, forced: bool },
     /// This key was confirmed working for the first time; it is latched now.
     Proven,
-    /// Every episode for this key is spent and it still does not work.
-    Exhausted { episodes: u32 },
     /// The record was discarded because the key on disk changed.
     Cleared,
 }
@@ -163,17 +154,16 @@ impl RearmEvent {
         match self {
             RearmEvent::Armed { .. } => "armed",
             RearmEvent::Proven => "proven",
-            RearmEvent::Exhausted { .. } => "exhausted",
             RearmEvent::Cleared => "cleared",
         }
     }
 
-    /// Severity: opening a bind window on a rig that believed it was paired, and
-    /// giving up on one, are both conditions an operator should see; a proof or
-    /// a key swap is informational.
+    /// Severity: opening a bind window on a rig that believed it was paired is
+    /// a condition an operator should see; a proof or a key swap is
+    /// informational.
     pub fn level(&self) -> Level {
         match self {
-            RearmEvent::Armed { .. } | RearmEvent::Exhausted { .. } => Level::Warn,
+            RearmEvent::Armed { .. } => Level::Warn,
             RearmEvent::Proven | RearmEvent::Cleared => Level::Info,
         }
     }
@@ -220,9 +210,6 @@ pub struct PairProofLatch {
     path: PathBuf,
     trigger: HoldTrigger,
     hold: Duration,
-    /// `Exhausted` is a level that repeats every tick, so it is announced once
-    /// and re-announced only after the state leaves it.
-    exhausted_reported: bool,
 }
 
 impl PairProofLatch {
@@ -238,7 +225,6 @@ impl PairProofLatch {
             path,
             trigger: HoldTrigger::with_hold(REARM_CONFIRM_HOLD),
             hold: REARM_CONFIRM_HOLD,
-            exhausted_reported: false,
         }
     }
 
@@ -276,7 +262,6 @@ impl PairProofLatch {
             // debounce (a new key deserves a fresh hold, not the previous key's
             // accumulated fault), and say so once.
             self.release(now);
-            self.exhausted_reported = false;
             self.save(&proof);
             return LatchOutcome {
                 rearm: false,
@@ -319,36 +304,20 @@ impl PairProofLatch {
             forced: proof.force_rearm,
             hold_armed,
             episodes: proof.rearm_episodes,
-            max_episodes: inputs.cfg.max_episodes,
             last_rearm_at: proof.last_rearm_at,
             cooldown_s: inputs.cfg.cooldown_s,
             now_unix,
         });
 
-        if !matches!(step, RearmStep::Exhausted) {
-            self.exhausted_reported = false;
-        }
-
         let mut rearm = false;
-        match step {
-            RearmStep::Arm { episode, forced } => {
-                // Spend the episode at ARM time, not on success: the budget
-                // exists to bound attempts, and an attempt that fails is exactly
-                // the one that must count.
-                proof.record_rearm(now_unix);
-                self.save(&proof);
-                rearm = true;
-                event = Some(RearmEvent::Armed { episode, forced });
-            }
-            // Exhausted is a level that repeats every tick, so it is announced
-            // on the way in and not again until the state leaves it.
-            RearmStep::Exhausted if !self.exhausted_reported => {
-                self.exhausted_reported = true;
-                event = Some(RearmEvent::Exhausted {
-                    episodes: proof.rearm_episodes,
-                });
-            }
-            _ => {}
+        if let RearmStep::Arm { episode, forced } = step {
+            // Record the episode at ARM time, not on success: the cooldown is
+            // anchored on the attempt, and an attempt that fails is exactly the
+            // one the next episode must wait out.
+            proof.record_rearm(now_unix);
+            self.save(&proof);
+            rearm = true;
+            event = Some(RearmEvent::Armed { episode, forced });
         }
 
         LatchOutcome { rearm, step, event }
@@ -365,43 +334,25 @@ impl PairProofLatch {
 }
 
 /// Build the `wfb.pair.rearm` detail map. Bland fields only.
-pub fn rearm_detail(
-    event: &RearmEvent,
-    role: &str,
-    fingerprint: &str,
-    max_episodes: u32,
-) -> Fields {
+pub fn rearm_detail(event: &RearmEvent, role: &str, fingerprint: &str) -> Fields {
     let mut d = Fields::new();
     d.insert("state".to_string(), Value::from(event.state()));
     d.insert("role".to_string(), Value::from(role));
     d.insert("key_fingerprint".to_string(), Value::from(fingerprint));
-    d.insert("max_episodes".to_string(), Value::from(max_episodes as u64));
-    match event {
-        RearmEvent::Armed { episode, forced } => {
-            d.insert("episode".to_string(), Value::from(*episode as u64));
-            d.insert("forced".to_string(), Value::from(*forced));
-        }
-        RearmEvent::Exhausted { episodes } => {
-            d.insert("episode".to_string(), Value::from(*episodes as u64));
-        }
-        _ => {}
+    if let RearmEvent::Armed { episode, forced } = event {
+        d.insert("episode".to_string(), Value::from(*episode as u64));
+        d.insert("forced".to_string(), Value::from(*forced));
     }
     d
 }
 
 /// Ship one re-arm transition to the logging store. Best-effort: an absent
 /// logging daemon drops it.
-pub fn emit_rearm(
-    events: &EventEmitter,
-    event: &RearmEvent,
-    role: &str,
-    fingerprint: &str,
-    max_episodes: u32,
-) {
+pub fn emit_rearm(events: &EventEmitter, event: &RearmEvent, role: &str, fingerprint: &str) {
     events.emit(
         PAIR_REARM_KIND,
         event.level(),
-        rearm_detail(event, role, fingerprint, max_episodes),
+        rearm_detail(event, role, fingerprint),
     );
 }
 

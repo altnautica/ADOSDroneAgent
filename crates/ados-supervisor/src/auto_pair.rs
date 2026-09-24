@@ -75,10 +75,11 @@ fn retry_backoff() -> Duration {
     RETRY_BACKOFF + Duration::from_secs(jitter)
 }
 
-/// Cap on consecutive bind attempts before the rig stops retrying the local
-/// radio bind and asks the operator to fall back to the cloud relay. Real bind
-/// failures (radio adapter died, tunnel never came up, watchdog fired) count
-/// toward this; a flaky bench is not left in a forever-retry loop.
+/// Consecutive failed bind attempts after which a rig with a cloud relay
+/// configured tells the operator to fall back to it (the `cloud_relay` sidecar
+/// state). It is a signal, not a stop: the local bind keeps running on its fixed
+/// retry interval, because the peer it is waiting for may be powered on at any
+/// time and a rig that stopped looking needs a human to start it again.
 pub const MAX_LOCAL_BIND_ATTEMPTS: u32 = 10;
 
 /// Sidecar file shared with the API process, which exposes the value over a
@@ -103,48 +104,64 @@ pub fn should_attempt(armed: bool, already_paired: bool) -> bool {
 ///
 /// The latch deliberately overrides BOTH gates: a rig holding a key that has
 /// never worked is paired by the file check and disarmed by the config, and
-/// those are exactly the two states that left it stuck. The latch's own hold,
-/// budget and cooldown are what bound it. Pure for testing.
+/// those are exactly the two states that left it stuck. The latch's own hold
+/// and cooldown are what bound it. Pure for testing.
 pub fn should_attempt_or_rearm(armed: bool, already_paired: bool, rearm: bool) -> bool {
     should_attempt(armed, already_paired) || rearm
 }
 
 /// Whether the loop should run a bind given the adapter presence. A dongle-less
-/// boot (no injection-capable WFB adapter) must NOT run a bind: the bind would
-/// fail and burn one of the limited local-bind attempts, eventually flipping the
-/// rig to the cloud-relay fallback even though the operator simply has not
-/// plugged the radio in yet. Skipping without counting lets the rig keep waiting
-/// for the adapter indefinitely and bind the moment it appears. Pure for testing.
+/// boot (no injection-capable WFB adapter) must NOT run a bind: it would fail,
+/// count toward the cloud-relay signal, and tell the operator to fall back even
+/// though they simply have not plugged the radio in yet. Skipping without
+/// counting lets the rig keep waiting for the adapter indefinitely and bind the
+/// moment it appears. Pure for testing.
 pub fn adapter_ready_to_bind(wfb_adapter_present: bool) -> bool {
     wfb_adapter_present
 }
 
-/// Decide whether the attempt count has reached the cap that flips the rig from
-/// local-bind retries to the cloud-relay fallback. Pure for testing. Mirrors the
-/// `attempt >= MAX_LOCAL_BIND_ATTEMPTS` gate: it fires on the Nth consecutive
-/// non-paired bind attempt so an operator on a flaky bench is not stuck retrying
-/// forever.
+/// Decide whether the attempt count has reached the cap at which a rig with a
+/// cloud relay configured signals the fallback. Pure for testing.
 pub fn failover_reached(attempt: u32) -> bool {
     attempt >= MAX_LOCAL_BIND_ATTEMPTS
 }
 
-/// Apply an operator local-retry request to the loop's failover state: clear the
-/// cloud-relay park and restart the attempt count. Returns whether a request was
+/// What the failover sidecar should say after a failed local bind: the cloud
+/// relay once the cap is reached on a node that has one configured, nothing new
+/// otherwise. A local-first node has no relay to fall back to, so it never
+/// signals one. Pure for testing.
+pub fn failover_after_failure(attempt: u32, cloud_relay_enabled: bool) -> Option<FailoverState> {
+    (cloud_relay_enabled && failover_reached(attempt)).then_some(FailoverState::CloudRelay)
+}
+
+/// Whether a bind runs this tick. The cloud-relay signal deliberately does not
+/// appear here: signalling the fallback never stops the local loop. Pure for
+/// testing.
+pub fn bind_this_tick(
+    armed: bool,
+    already_paired: bool,
+    rearm: bool,
+    adapter_present: bool,
+) -> bool {
+    should_attempt_or_rearm(armed, already_paired, rearm) && adapter_ready_to_bind(adapter_present)
+}
+
+/// Apply an operator local-retry request: restart the attempt count so the
+/// cloud-relay signal is re-earned from zero. Returns whether a request was
 /// applied. Pure for testing.
-pub fn apply_retry_request(requested: bool, attempt: &mut u32, parked_on_cloud: &mut bool) -> bool {
+pub fn apply_retry_request(requested: bool, attempt: &mut u32) -> bool {
     if requested {
         *attempt = 0;
-        *parked_on_cloud = false;
     }
     requested
 }
 
 /// The two failover states the sidecar can hold.
 ///
-/// `Local` means the rig is still trying to bind over its own radio; `CloudRelay`
-/// means it has given up the local loop and asked the operator to fall back to
-/// the cloud relay. The wire strings are the only contract the API reader cares
-/// about.
+/// `Local` means the rig is binding over its own radio; `CloudRelay` means its
+/// local attempts have kept failing and it is telling the operator to fall back
+/// to the cloud relay — while it keeps trying locally. The wire strings are the
+/// only contract the API reader cares about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailoverState {
     Local,
@@ -339,7 +356,6 @@ async fn run_latch(
     } else {
         None
     };
-    let max_episodes = cfg.max_episodes;
     let outcome = latch.step(
         LatchInputs {
             fingerprint: fingerprint.clone(),
@@ -357,7 +373,7 @@ async fn run_latch(
             state = event.state(),
             "auto_pair_rearm_transition"
         );
-        emit_rearm(events, event, role.as_str(), fp, max_episodes);
+        emit_rearm(events, event, role.as_str(), fp);
     }
     outcome.rearm
 }
@@ -384,8 +400,9 @@ pub async fn run(
 
 /// The loop body with an injectable failover writer (so a test can target a temp
 /// path). Resets the failover sidecar to `local` on start, drives one bind per
-/// armed+unpaired tick, flips to `cloud_relay` after the attempt cap *only when
-/// a cloud relay is configured*, and persists `local` again on a successful pair.
+/// armed+unpaired tick forever, flips the sidecar to `cloud_relay` after the
+/// attempt cap *only when a cloud relay is configured*, and persists `local`
+/// again on a successful pair.
 async fn run_with_failover(
     orch: Arc<BindOrchestrator>,
     role: BindRole,
@@ -407,12 +424,9 @@ async fn run_with_failover(
     if failover.sync(FailoverState::Local) {
         emit_failover(&events, FailoverState::Local);
     }
-    // Cumulative count of bind attempts; reaching the cap flips to cloud_relay.
+    // Consecutive failed bind attempts; reaching the cap signals the cloud
+    // relay (it never stops the loop).
     let mut attempt: u32 = 0;
-    // Set once the attempt cap has flipped this rig to the cloud relay. The loop
-    // stays alive (so a later recovery can resume the local link) but stops
-    // spending local attempts until something re-arms it.
-    let mut parked_on_cloud = false;
     // The per-key proof latch: the only thing that can re-open a bind window on
     // a rig this loop otherwise considers finished.
     let mut latch = crate::pair_proof::PairProofLatch::new(role);
@@ -420,13 +434,12 @@ async fn run_with_failover(
         if *shutdown.borrow() {
             break;
         }
-        // The operator's "retry local" request: the one thing that revisits a
-        // parked verdict for a rig with no key (the latch below only acts on a
-        // key). Handled like a fresh run: local again, attempts from zero.
+        // The operator's "retry local" request: the cloud-relay signal goes
+        // back to local and the attempt count restarts from zero.
         let retry_requested = ados_protocol::pair_proof::take_local_retry_request_at(
             std::path::Path::new(ados_protocol::pair_proof::AUTO_PAIR_RETRY_PATH),
         );
-        if apply_retry_request(retry_requested, &mut attempt, &mut parked_on_cloud) {
+        if apply_retry_request(retry_requested, &mut attempt) {
             tracing::info!(role = role.as_str(), "auto_pair_local_retry_requested");
             if failover.sync(FailoverState::Local) {
                 emit_failover(&events, FailoverState::Local);
@@ -435,10 +448,10 @@ async fn run_with_failover(
         let armed = read_armed();
         let fingerprint = key_fingerprint(role);
         let paired = fingerprint.is_some();
-        // A dongle-less boot must not run (and fail) a bind: that would burn the
-        // limited local-bind attempts and flip to cloud_relay when the operator
-        // has simply not plugged the radio in yet. Skip without counting so the
-        // rig keeps waiting and binds the moment the adapter appears.
+        // A dongle-less boot must not run (and fail) a bind: that would count
+        // toward the cloud-relay signal when the operator has simply not plugged
+        // the radio in yet. Skip without counting so the rig keeps waiting and
+        // binds the moment the adapter appears.
         let adapter_present = adapter_ready_to_bind(crate::hardware::has_wfb_adapter());
         if should_attempt(armed, paired) && !adapter_present {
             tracing::info!(role = role.as_str(), "auto_pair_waiting_for_wfb_adapter");
@@ -450,14 +463,7 @@ async fn run_with_failover(
         } else {
             false
         };
-        // A re-arm bypasses `parked_on_cloud` deliberately: parking means the
-        // local attempts were spent, and a rig stuck on a key that never worked
-        // is precisely the case where that verdict deserves revisiting. The
-        // latch's own budget and cooldown bound how often it may.
-        if should_attempt_or_rearm(armed, paired, rearm)
-            && adapter_present
-            && (!parked_on_cloud || rearm)
-        {
+        if bind_this_tick(armed, paired, rearm, adapter_present) {
             // Tear down an in-flight bind if the supervisor shuts down.
             let mut cancel_rx = shutdown.clone();
             let cancel = async move {
@@ -503,26 +509,16 @@ async fn run_with_failover(
                         attempt,
                         "auto_pair_attempt_unpaired"
                     );
-                    // Fail over to the cloud relay only when it is actually
-                    // configured (`server.mode` = cloud / self_hosted). In
-                    // local-first / offline operation WFB is the only link, so
-                    // the loop keeps retrying the local bind forever instead of
-                    // giving up at the attempt cap and stranding the rig with no
-                    // link at all.
-                    if cloud_relay_enabled && failover_reached(attempt) {
-                        if failover.sync(FailoverState::CloudRelay) {
-                            emit_failover(&events, FailoverState::CloudRelay);
+                    // Signal the cloud relay only when one is actually
+                    // configured (`server.mode` = cloud / self_hosted); a
+                    // local-first node has nothing to fall back to. Either way
+                    // the loop keeps binding on its fixed interval: the peer it
+                    // is waiting for may come up at any moment.
+                    if let Some(state) = failover_after_failure(attempt, cloud_relay_enabled) {
+                        if failover.sync(state) {
+                            emit_failover(&events, state);
+                            tracing::warn!(attempts = attempt, "wfb_failover_to_cloud_relay");
                         }
-                        tracing::warn!(attempts = attempt, "wfb_failover_to_cloud_relay");
-                        // Park on the cloud path instead of exiting. The sidecar
-                        // stays at `cloud_relay` and no further local attempts are
-                        // counted, but the loop remains alive so the local link can
-                        // be recovered later. Exiting here meant a ground station
-                        // that gave up after the attempt cap was no longer in a
-                        // bind window when its drone came back — the two could
-                        // never meet again without a restart.
-                        parked_on_cloud = true;
-                        continue;
                     }
                 }
                 Err(BindStartError::Busy) => {
@@ -643,58 +639,53 @@ mod tests {
     }
 
     #[test]
-    fn parking_on_the_cloud_relay_stops_spending_attempts_without_ending_the_loop() {
-        // Model the loop's decision after the attempt cap flips a rig to the
-        // cloud relay. Before, this path `break`s and the task is gone: a ground
-        // station that gave up was no longer in a bind window when its drone came
-        // back, so the two could never meet again without a restart. Now it parks
-        // — no further local attempts are spent, but the loop keeps evaluating so
-        // something can re-arm it later.
-        let armed = true;
-        let paired = false;
+    fn the_cloud_relay_signal_never_stops_the_local_bind_loop() {
+        // The cap used to park the rig: no further local binds until an operator
+        // asked for one, so an unpaired rig whose peer came up an hour later
+        // never met it. The cap now only flips the sidecar; every tick that has
+        // an armed, unpaired rig and an adapter still binds.
         let mut attempt: u32 = 0;
-        let mut parked_on_cloud = false;
-        let mut ticks_evaluated = 0u32;
-
+        let mut binds = 0u32;
+        let mut signalled = None;
         for _ in 0..(MAX_LOCAL_BIND_ATTEMPTS + 20) {
-            ticks_evaluated += 1;
-            let adapter_present = adapter_ready_to_bind(true);
-            if should_attempt(armed, paired) && adapter_present && !parked_on_cloud {
+            if bind_this_tick(true, false, false, true) {
+                binds += 1;
                 attempt += 1;
-                if failover_reached(attempt) {
-                    parked_on_cloud = true;
+                if let Some(state) = failover_after_failure(attempt, true) {
+                    signalled = Some(state);
                 }
             }
         }
-
-        // Attempts stopped at the cap...
-        assert_eq!(attempt, MAX_LOCAL_BIND_ATTEMPTS);
-        assert!(parked_on_cloud);
-        // ...but the loop kept running every tick rather than exiting.
-        assert_eq!(ticks_evaluated, MAX_LOCAL_BIND_ATTEMPTS + 20);
+        assert_eq!(binds, MAX_LOCAL_BIND_ATTEMPTS + 20, "every tick binds");
+        assert_eq!(signalled, Some(FailoverState::CloudRelay));
     }
 
     #[test]
-    fn a_local_retry_request_unparks_a_rig_and_restarts_the_attempts() {
-        // A rig with no key that spent its attempts is parked; only the operator's
-        // retry request brings it back, and it gets the full attempt budget again.
+    fn only_a_node_with_a_cloud_relay_signals_the_fallback() {
+        assert_eq!(
+            failover_after_failure(MAX_LOCAL_BIND_ATTEMPTS - 1, true),
+            None
+        );
+        assert_eq!(
+            failover_after_failure(MAX_LOCAL_BIND_ATTEMPTS, true),
+            Some(FailoverState::CloudRelay)
+        );
+        // Local-first: WFB is the only link, so there is nothing to fall back to.
+        assert_eq!(
+            failover_after_failure(MAX_LOCAL_BIND_ATTEMPTS + 50, false),
+            None
+        );
+        // No adapter, no bind — and no attempt counted toward the signal.
+        assert!(!bind_this_tick(true, false, false, false));
+    }
+
+    #[test]
+    fn a_local_retry_request_restarts_the_attempt_count() {
         let mut attempt = MAX_LOCAL_BIND_ATTEMPTS;
-        let mut parked_on_cloud = true;
-        assert!(!apply_retry_request(
-            false,
-            &mut attempt,
-            &mut parked_on_cloud
-        ));
-        assert!(parked_on_cloud);
-        assert!(apply_retry_request(
-            true,
-            &mut attempt,
-            &mut parked_on_cloud
-        ));
-        assert!(!parked_on_cloud);
+        assert!(!apply_retry_request(false, &mut attempt));
+        assert_eq!(attempt, MAX_LOCAL_BIND_ATTEMPTS);
+        assert!(apply_retry_request(true, &mut attempt));
         assert_eq!(attempt, 0);
-        // Unparked, an armed unpaired rig attempts again on the next tick.
-        assert!(should_attempt(true, false) && !parked_on_cloud);
     }
 
     #[test]

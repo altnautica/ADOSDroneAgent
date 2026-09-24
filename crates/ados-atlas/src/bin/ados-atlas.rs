@@ -10,7 +10,6 @@
 
 use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
 
 use ados_atlas::publish::AtlasPublisher;
 use ados_atlas::runtime::{select_pose_tier, AtlasRuntimeConfig, CONFIG_YAML};
@@ -18,7 +17,8 @@ use ados_atlas::{
     build_pose_provider, new_session_id, run_capture_loop, serve_control, AtlasControlCmd,
     AtlasFrameSource, CaptureSession, VisionFrameSource,
 };
-use tokio::sync::{mpsc, Notify};
+use ados_protocol::shutdown::Shutdown;
+use tokio::sync::mpsc;
 
 fn init_tracing() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -98,12 +98,15 @@ async fn main() {
     let publisher = match AtlasPublisher::bind(&config.atlas_socket_path()).await {
         Ok(p) => p,
         Err(e) => {
+            // A real startup fault, not an idle exit: a non-zero status so the
+            // unit restarts it (exit 0 is reserved for "nothing to do here").
             tracing::error!(error = %e, "ados-atlas failed to bind the atlas bus");
-            return;
+            std::process::exit(1);
         }
     };
-    let session = CaptureSession::new(config.capture.clone());
-    let cancel = Arc::new(Notify::new());
+    let session =
+        CaptureSession::with_pose_interval(config.capture.clone(), config.pose_publish_interval_ms);
+    let cancel = Shutdown::new();
 
     // The inbound control socket the GCS drives the session through (start / stop
     // / pause / resume / status). A bind failure is non-fatal: the daemon still
@@ -147,7 +150,7 @@ async fn main() {
     tokio::select! {
         _ = wait_for_shutdown() => {
             tracing::info!("ados-atlas stopping");
-            cancel.notify_waiters();
+            cancel.trigger();
             let _ = handle.await;
             tracing::info!("ados-atlas stopped");
         }

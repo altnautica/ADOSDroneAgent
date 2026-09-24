@@ -71,21 +71,6 @@ def patch_role(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_display_get(client):
-    """GET /display returns the persisted HDMI display config."""
-    resp = client.get(f"{GS_PREFIX}/display")
-    assert resp.status_code == 200
-
-
-# ---------------------------------------------------------------------------
-# Group 5: /mesh, /role
-# ---------------------------------------------------------------------------
-#
-# The uplink change stream (`/ws/uplink`) is served natively by the front (the
-# Rust `ados-control` surface polls the durable store + does its own WebSocket
-# auth), so its routes are validated by the `ados-control` crate tests, not here.
-
-
 def test_mesh_neighbors_direct_404(client, patch_role):
     """GET /mesh/neighbors on a direct node returns 404."""
     patch_role("direct")
@@ -98,29 +83,3 @@ def test_mesh_neighbors_direct_404(client, patch_role):
 # ---------------------------------------------------------------------------
 
 
-def test_pair_accept_wrong_role(client, patch_role):
-    """POST /pair/accept requires the receiver role."""
-    patch_role("direct")
-    resp = client.post(f"{GS_PREFIX}/pair/accept", json={"duration_s": 60})
-    assert resp.status_code == 409
-    assert resp.json()["detail"]["error"]["code"] == "E_WRONG_ROLE"
-
-
-def test_pair_close_wrong_role(client, patch_role):
-    """POST /pair/close requires the receiver role."""
-    patch_role("direct")
-    resp = client.post(f"{GS_PREFIX}/pair/close")
-    assert resp.status_code == 409
-
-
-def test_pair_accept_validation(client):
-    """POST /pair/accept validates duration_s bounds."""
-    resp = client.post(f"{GS_PREFIX}/pair/accept", json={"duration_s": 1})
-    assert resp.status_code == 422
-
-
-def test_pair_revoke_wrong_role(client, patch_role):
-    """POST /pair/revoke/{device_id} requires the receiver role."""
-    patch_role("direct")
-    resp = client.post(f"{GS_PREFIX}/pair/revoke/dev-123")
-    assert resp.status_code == 409

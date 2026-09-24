@@ -36,7 +36,7 @@ from tests.api_runtime_utils import build_api_runtime
 
 @pytest.fixture
 def agent_app():
-    return build_api_runtime(uptime_seconds=0.0)
+    return build_api_runtime()
 
 
 @pytest.fixture

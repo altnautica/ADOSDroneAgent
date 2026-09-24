@@ -110,20 +110,6 @@ async def _video_access(
     advertised in ``streams``; the top-level ``whep_url`` / ``hls_url`` stay the
     primary (`main`) leg for back-compat.
     """
-    pipeline = runtime.video_pipeline()
-    if pipeline is not None:
-        status = pipeline.get_status()
-        mtx = status.get("mediamtx", {})
-        running = bool(mtx.get("running"))
-        recorder = status.get("recorder", {})
-        return VideoAccess(
-            state="running" if running else str(status.get("state", "stopped")),
-            whep_url=_PRIMARY_WHEP if running else None,
-            hls_url=_PRIMARY_HLS if running else None,
-            recording=bool(recorder.get("recording", False)),
-            streams=_stream_legs(config) if running else [],
-        )
-
     # THE RULE, mirrored from `build_video_block_with` in ados-control: mediamtx
     # readiness is NOT evidence that video exists. Its WHEP endpoint answers with
     # zero publishers, so it proves only that mediamtx is bound. The pipeline's

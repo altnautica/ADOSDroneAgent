@@ -114,21 +114,22 @@ def is_vcl_nal_type(nal_byte: int) -> bool:
     return (nal_byte & 0x1F) in (1, 5)
 
 
-def _find_start_code(buf: bytes, start: int) -> tuple[int, int] | None:
+def _find_start_code(buf: bytes | bytearray, start: int) -> tuple[int, int] | None:
     """Find the next Annex-B start code at or after ``start``.
 
     Returns ``(offset, sc_len)`` where ``sc_len`` is 3 or 4. Returns
     None if no complete start code is found in the buffer.
+
+    Searches with ``bytes.find`` (C speed): this runs over every byte of the
+    encoder output in the live video path, and a per-byte Python scan cost
+    a large share of a small SBC core at normal bitrates.
     """
-    n = len(buf)
-    i = start
-    while i < n:
-        if i + 4 <= n and buf[i : i + 4] == b"\x00\x00\x00\x01":
-            return (i, 4)
-        if i + 3 <= n and buf[i : i + 3] == b"\x00\x00\x01":
-            return (i, 3)
-        i += 1
-    return None
+    j = buf.find(b"\x00\x00\x01", start)
+    if j < 0:
+        return None
+    if j > start and buf[j - 1] == 0:
+        return (j - 1, 4)
+    return (j, 3)
 
 
 def inject_stream(

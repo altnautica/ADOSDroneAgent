@@ -20,11 +20,11 @@ use crate::graph::{Step, StepKind, StepOutcome};
 /// The ground-station units the start step kicks with `--no-block` (the START
 /// half of `enable_ground_station_units`; the ENABLE half ran in `systemd`).
 ///
-/// `ados-usb-gadget.service` is deliberately absent, mirroring the enable list:
-/// the native `ados-net` daemon composes the OTG gadget in-process, so starting
-/// the packaged unit would race a second composer onto the same UDC.
+/// No OTG gadget unit is here: the native `ados-net` daemon composes the gadget
+/// in-process and the packaged unit is retired.
 const GROUND_STATION_START_UNITS: &[&str] = &[
     "ados-wfb-rx.service",
+    "ados-mesh-pairing.service",
     "ados-mediamtx-gs.service",
     "ados-oled.service",
     "ados-hostapd.service",
@@ -34,9 +34,9 @@ const GROUND_STATION_START_UNITS: &[&str] = &[
     "ados-input.service",
     "ados-pic.service",
     "ados-uplink-router.service",
-    // ados-wifi-client.service and ados-usb-gadget.service are absent on
-    // purpose: ados-net owns both in-process and the install subsumes their
-    // packaged units, so kicking them here restarts something already stopped.
+    // ados-wifi-client.service is absent on purpose: ados-net owns the station
+    // in-process and the install subsumes its packaged unit, so kicking it here
+    // restarts something already stopped.
 ];
 
 /// Start the top-level supervisor unit (+ the GS unit set on a ground station).
@@ -133,6 +133,15 @@ mod tests {
         assert!(GROUND_STATION_START_UNITS.contains(&"ados-wfb-rx.service"));
         assert!(GROUND_STATION_START_UNITS.contains(&"ados-hostapd.service"));
         assert!(GROUND_STATION_START_UNITS.contains(&"ados-setup-captive.service"));
+        // Every REST pairing call reaches this daemon over its socket; a
+        // ground station that never starts it cannot pair anything.
+        assert!(GROUND_STATION_START_UNITS.contains(&"ados-mesh-pairing.service"));
+        for unit in GROUND_STATION_START_UNITS {
+            assert!(
+                crate::steps::systemd::GROUND_STATION_ENABLE_UNITS.contains(unit),
+                "{unit} is started but not enabled, so it would not come back after a reboot"
+            );
+        }
     }
 
     #[test]

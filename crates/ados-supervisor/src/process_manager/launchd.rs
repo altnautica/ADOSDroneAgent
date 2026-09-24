@@ -53,7 +53,11 @@ async fn service_target(unit: &str) -> String {
 }
 
 async fn run(args: &[&str], dur: Duration) -> Option<std::process::Output> {
-    match timeout(dur, Command::new("launchctl").args(args).output()).await {
+    let child = Command::new("launchctl")
+        .args(args)
+        .kill_on_drop(true)
+        .output();
+    match timeout(dur, child).await {
         Ok(Ok(out)) => Some(out),
         Ok(Err(_)) => None, // spawn error (launchctl missing)
         Err(_) => None,     // timed out
@@ -86,20 +90,33 @@ impl ProcessManager for LaunchdManager {
         ok(&run(&["kickstart", "-k", &target], ACT_TIMEOUT).await)
     }
 
+    /// Restart only a job that is running: `kickstart -k` on a job that is
+    /// not would start it, which is the caller's decision to make.
+    async fn try_restart(&self, unit: &str) -> bool {
+        match self.is_active(unit).await {
+            Some(true) => self.restart(unit).await,
+            Some(false) => true,
+            None => false,
+        }
+    }
+
     /// No-op: launchd has no `reset-failed` analogue. `kickstart -k` already
     /// forces a restart regardless of the prior exit state, so there is no
     /// failed-burst counter to clear before a start.
     async fn reset_failed(&self, _unit: &str) {}
 
-    /// True when `launchctl print gui/<uid>/<label>` reports `state = running`.
-    async fn is_active(&self, unit: &str) -> bool {
+    /// `launchctl print gui/<uid>/<label>`: a job that prints `state = running`
+    /// is active; a job that prints something else, or is not loaded (non-zero
+    /// exit), is not; a timed-out or unspawnable probe is no verdict.
+    async fn is_active(&self, unit: &str) -> Option<bool> {
         let target = service_target(unit).await;
-        match run(&["print", &target], PROBE_TIMEOUT).await {
-            Some(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .any(|l| l.trim() == "state = running"),
-            _ => false,
-        }
+        let out = run(&["print", &target], PROBE_TIMEOUT).await?;
+        Some(
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .any(|l| l.trim() == "state = running"),
+        )
     }
 
     /// `launchctl disable gui/<uid>/<label>` (idempotent).

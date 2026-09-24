@@ -48,22 +48,6 @@ jobs:
       - name: Lint with ruff
         run: ruff check .
 
-      - name: Demo boots
-        # `ados demo` is the supported no-hardware path and nothing else in CI
-        # boots it. The failure it catches -- a module the demo path imports
-        # going away -- is one the unit tests only partially cover, since the
-        # single test touching the demo command drives the CLI with the app
-        # mocked out and so cannot see a process that starts and then fails to
-        # serve.
-        #
-        # Once, not once per matrix leg: nothing on the demo path is
-        # version-sensitive (the tree carries no PEP 695 syntax and the floor is
-        # 3.11), so three boots would cost three times as much to learn the same
-        # thing. macOS is verified locally rather than on a runner -- see the
-        # note in scripts/smoke-demo.sh.
-        if: matrix.python-version == '3.11'
-        run: bash scripts/smoke-demo.sh
-
       - name: Run tests
         run: pytest -v
 

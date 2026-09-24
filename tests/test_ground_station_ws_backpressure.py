@@ -23,7 +23,7 @@ def client(tmp_path, monkeypatch):
 
     cfg = ADOSConfig()
     cfg.agent.profile = "ground_station"
-    app = build_api_runtime(config=cfg, uptime_seconds=0.0)
+    app = build_api_runtime(config=cfg)
     return TestClient(create_app(app))
 
 

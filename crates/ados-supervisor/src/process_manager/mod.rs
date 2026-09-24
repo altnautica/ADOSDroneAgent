@@ -28,16 +28,27 @@ pub trait ProcessManager: Send + Sync {
     /// Stop the unit. True when the stop verb succeeded.
     async fn stop(&self, unit: &str) -> bool;
 
-    /// Restart the unit (a fresh spawn cycle). True on success.
+    /// Restart the unit (a fresh spawn cycle). True on success. Starts a unit
+    /// that is not running, so it is for units the caller owns.
     async fn restart(&self, unit: &str) -> bool;
+
+    /// Restart the unit only if it is currently running; a stopped unit stays
+    /// stopped. For nudging a unit whose start is some other caller's decision.
+    async fn try_restart(&self, unit: &str) -> bool;
 
     /// Clear a failed / start-limit-hit state so a following `start` is not a
     /// no-op on a unit that crash-looped past the start-limit burst. Best-effort,
     /// no return value.
     async fn reset_failed(&self, unit: &str);
 
-    /// True only when the unit is currently active/running.
-    async fn is_active(&self, unit: &str) -> bool;
+    /// Whether the unit is currently active: `Some(true)` running,
+    /// `Some(false)` definitely not running, `None` when the manager could not
+    /// answer (a timed-out or unspawnable probe).
+    ///
+    /// `None` is no verdict. A caller must never read it as a death: under
+    /// memory pressure or a busy service manager every probe can fail at once,
+    /// and treating that as "inactive" restarts every healthy unit on the node.
+    async fn is_active(&self, unit: &str) -> Option<bool>;
 
     /// Cumulative bytes the unit's main process has read plus written since it
     /// started, or `None` when this backend cannot resolve it.

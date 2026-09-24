@@ -37,7 +37,7 @@
 //! the on-disk config (the REST layer owns persistence).
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
 use std::sync::Arc;
 
 use ados_protocol::ipc::{bind_command_socket, serve_rpc};
@@ -50,16 +50,68 @@ use crate::process::RadioProcesses;
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
+/// Sentinel for "no power applied yet" in [`TxPowerState::effective`].
+const NO_EFFECTIVE_POWER: i8 = i8::MIN;
+
+/// The TX power the operator asked for and the power the driver last accepted.
+///
+/// Process-lifetime, like the adaptive flag: it outlives every radio respawn, so
+/// a live change survives a watchdog kill (the next bring-up applies the
+/// requested value, not the boot config) and the heartbeat reports the power the
+/// radio is actually running rather than the value it came up with.
+#[derive(Debug)]
+pub struct TxPowerState {
+    requested: AtomicI8,
+    effective: AtomicI8,
+}
+
+impl TxPowerState {
+    /// Start from the configured power with nothing applied yet.
+    pub fn new(requested_dbm: i8) -> Self {
+        Self {
+            requested: AtomicI8::new(requested_dbm),
+            effective: AtomicI8::new(NO_EFFECTIVE_POWER),
+        }
+    }
+
+    /// The operator's requested power: what every bring-up and PHY recovery
+    /// applies.
+    pub fn requested(&self) -> i8 {
+        self.requested.load(Ordering::Relaxed)
+    }
+
+    /// The power the driver last accepted, or `None` before any apply succeeded.
+    pub fn effective(&self) -> Option<i8> {
+        match self.effective.load(Ordering::Relaxed) {
+            NO_EFFECTIVE_POWER => None,
+            dbm => Some(dbm),
+        }
+    }
+
+    /// Record a new operator request.
+    pub fn record_request(&self, dbm: i8) {
+        self.requested.store(dbm, Ordering::Relaxed);
+    }
+
+    /// Record the outcome of an apply. `None` (every ramp step rejected) leaves
+    /// the previous effective power, which is still what the radio runs.
+    pub fn record_applied(&self, effective: Option<i8>) {
+        if let Some(dbm) = effective {
+            self.effective.store(dbm, Ordering::Relaxed);
+        }
+    }
+}
+
 /// The shared radio state the command handlers mutate: the live process group
-/// (for the FEC/MCS/TX-power/manual-tier knobs) and the adaptive-controller
-/// enable flag (for the auto/manual toggle). Both outlive a single radio
-/// bring-up — the `proc` mutex is swapped in place on a respawn and the flag is
-/// read by the bitrate controller each tick — so this handle is constructed once
-/// at service start and shared with every accepted connection.
+/// (for the FEC/MCS/TX-power/manual-tier knobs), the adaptive-controller enable
+/// flag (for the auto/manual toggle), and the TX power record. The flag and the
+/// power record outlive a single radio bring-up; the `proc` handle is the
+/// current bring-up's group.
 #[derive(Clone)]
 pub struct CmdState {
     pub proc: Arc<Mutex<RadioProcesses>>,
     pub adaptive_enabled: Arc<AtomicBool>,
+    pub tx_power: Arc<TxPowerState>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,8 +287,12 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
         Command::SetTxPower { tx_power_dbm } => {
             // TX power retunes the live adapter in place (no respawn). A driver
             // that rejects every ramp step yields null; the REST layer still
-            // persists the operator's preference on that path.
+            // persists the operator's preference on that path. The request is
+            // recorded either way so every later bring-up applies it, and the
+            // accepted value becomes what the heartbeat reports.
+            state.tx_power.record_request(tx_power_dbm);
             let effective = state.proc.lock().await.apply_tx_power(tx_power_dbm).await;
+            state.tx_power.record_applied(effective);
             json!({"ok": true, "effective_dbm": effective})
         }
         Command::TierAuto => {
@@ -304,6 +360,26 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The request always moves (every later bring-up applies it); the reported
+    /// power moves only when the driver accepted a value, because a fully
+    /// rejected set leaves the radio on its previous power.
+    #[test]
+    fn tx_power_state_reports_what_the_driver_accepted() {
+        let s = TxPowerState::new(5);
+        assert_eq!(s.requested(), 5);
+        assert_eq!(s.effective(), None);
+        s.record_applied(Some(5));
+        assert_eq!(s.effective(), Some(5));
+
+        s.record_request(12);
+        s.record_applied(None);
+        assert_eq!(s.requested(), 12);
+        assert_eq!(s.effective(), Some(5));
+
+        s.record_applied(Some(12));
+        assert_eq!(s.effective(), Some(12));
+    }
 
     /// Extract the early-reply `Value` from a parse, or panic if the parse
     /// produced an apply-ready command instead.

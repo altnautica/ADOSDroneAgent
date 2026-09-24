@@ -24,19 +24,20 @@ mod reg_gate;
 mod sidecar;
 mod txrate;
 
+use ados_protocol::shutdown::Shutdown;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{watch, Notify};
+use tokio::sync::watch;
 
 use ados_radio::adapter;
 use ados_radio::aux_cmd::{self, AuxCmdState};
 use ados_radio::bitrate::{
     new_enabled, new_snapshot, BitrateController, EnabledHandle, SnapshotHandle,
 };
-use ados_radio::cmdsock::{self, CmdState};
+use ados_radio::cmdsock::{self, CmdState, TxPowerState};
 use ados_radio::config::WfbConfig;
 use ados_radio::hop::derive_pair_key;
 use ados_radio::link_quality::LinkStats;
@@ -44,22 +45,26 @@ use ados_radio::link_state::derive_link_state;
 use ados_radio::paths::{read_bind_sentinel_active, read_shared_key, WFB_TX_KEY};
 use ados_radio::process::RadioProcesses;
 use ados_radio::watchdog::{
-    aux_liveness_watchdog, new_counters, tx_health_watchdog, video_recvq_watchdog, CounterHandle,
-    WatchdogCounters, WatchdogFired,
+    aux_liveness_watchdog, control_plane_watchdog, new_counters, tx_health_watchdog,
+    video_recvq_watchdog, CounterHandle, WatchdogCounters, WatchdogFired,
 };
 
 use bringup::{channel_from_iface, ensure_monitor_and_channel, ensure_radiating};
 use hop_supervisor::{emit_presence_beacons, proof_only_listener, run_hop_supervisor};
-use reg_gate::{decide_reg_gate, RegGateDecision, REG_BLOCKED_RETRY_SECS, STATE_REG_BLOCKED};
+use reg_gate::{decide_reg_gate, RegGateDecision, BRINGUP_RETRY_SECS, STATE_REG_BLOCKED};
 use sidecar::{
     build_stats_value, json_object_to_fields, read_device_id, write_adapters_sidecar,
     write_stats_sidecar, AdapterInfo, ChannelTruth, RegPosture, RegSnapshot,
 };
-use txrate::{read_tx_bytes, TxLiveness, TxRates};
+use txrate::{TxLiveness, TxRates};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 /// Poll interval while waiting for the WFB TX key (unpaired state).
 const KEY_WAIT_INTERVAL: Duration = Duration::from_secs(5);
+/// Minimum gap between two heartbeat regulatory reconciles. One reconcile runs
+/// `iw reg set` with a bounded verify retry (~10 s worst case); a domain that
+/// will not take must not re-run it on every 2 s tick.
+const REG_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[tokio::main]
 async fn main() {
@@ -261,6 +266,14 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
     // and between the bitrate controller and the operator command socket so the
     // auto/manual link-tier toggle survives a watchdog kill or a channel hop.
     let adaptive_enabled: EnabledHandle = new_enabled(cfg);
+    // The operator's TX power request and the power the driver last accepted,
+    // shared with the command socket. Process-lifetime like the adaptive flag, so
+    // a live change survives a respawn and the heartbeat reports what is applied.
+    let tx_power = Arc::new(TxPowerState::new(cfg.tx_power_dbm));
+    // The data-plane trio the previous radio group was running (an operator
+    // manual tier or preset, or an adaptive step). Every respawn brings the new
+    // group up on it rather than on the boot config; `None` until a group ran.
+    let mut retained_trio: Option<(u8, u8, u8)> = None;
 
     // Application datagram fan-out, shared by every aux `subscribe` connection.
     // Created ONCE, outside the respawn loop, like `bitrate_snapshot` /
@@ -301,7 +314,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     posture: reg_posture.clone(),
                     ..RegSnapshot::default()
                 },
-                cfg.tx_power_dbm,
+                tx_power.requested(),
                 None,
                 &LinkStats::default(),
                 cfg,
@@ -413,7 +426,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                             enabled_channels: Vec::new(),
                             posture: reg_posture.clone(),
                         },
-                        cfg.tx_power_dbm,
+                        tx_power.requested(),
                         None,
                         &LinkStats::default(),
                         cfg,
@@ -426,7 +439,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     tokio::select! {
                         biased;
                         _ = wait_for_shutdown_flag(&mut shutdown) => return,
-                        _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
+                        _ = tokio::time::sleep(Duration::from_secs(BRINGUP_RETRY_SECS)) => continue,
                     }
                 }
             }
@@ -461,7 +474,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     posture: reg_posture.clone(),
                     ..RegSnapshot::default()
                 },
-                cfg.tx_power_dbm,
+                tx_power.requested(),
                 // The scanned-and-none-found record: the injection verdict is
                 // a measured false, not the null an unscanned rig reports.
                 Some(&AdapterInfo::none_found()),
@@ -476,7 +489,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown_flag(&mut shutdown) => return,
-                _ = tokio::time::sleep(Duration::from_secs(10)) => continue,
+                _ = tokio::time::sleep(Duration::from_secs(BRINGUP_RETRY_SECS)) => continue,
             }
         };
 
@@ -588,7 +601,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                             enabled_channels: gate_enabled.iter().copied().collect(),
                             posture: reg_posture.clone(),
                         },
-                        cfg.tx_power_dbm,
+                        tx_power.requested(),
                         None,
                         &LinkStats::default(),
                         cfg,
@@ -601,7 +614,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     tokio::select! {
                         biased;
                         _ = wait_for_shutdown_flag(&mut shutdown) => return,
-                        _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
+                        _ = tokio::time::sleep(Duration::from_secs(BRINGUP_RETRY_SECS)) => continue,
                     }
                 }
             }
@@ -615,17 +628,17 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // station can decode (advancing tx_bytes with zero usable RF), so the
         // channel must land — verified — before TX starts. On total failure,
         // re-enter the selection loop rather than start a dead TX.
-        if !ensure_monitor_and_channel(iface, cfg.channel).await {
+        if !ensure_monitor_and_channel(iface, rendezvous_ch).await {
             tracing::error!(
                 iface,
-                channel = cfg.channel,
+                channel = rendezvous_ch,
                 note = "monitor mode + channel never landed (EBUSY); not starting TX, retrying bring-up",
                 "wfb_channel_set_unrecovered"
             );
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown_flag(&mut shutdown) => return,
-                _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
+                _ = tokio::time::sleep(Duration::from_secs(BRINGUP_RETRY_SECS)) => continue,
             }
         }
 
@@ -683,13 +696,16 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // rf_unverified rather than aborting bring-up.
         let effective_tx_dbm = match ensure_radiating(
             iface,
-            cfg.channel,
-            cfg.tx_power_dbm,
+            rendezvous_ch,
+            tx_power.requested(),
             unrestricted,
         )
         .await
         {
-            Some(dbm) => dbm,
+            Some(dbm) => {
+                tx_power.record_applied(Some(dbm));
+                dbm
+            }
             None => {
                 // The PHY stayed pinned at the muted not-permitted floor through
                 // every recovery attempt. Starting wfb_tx now injects into a dead
@@ -698,14 +714,14 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                 // re-enter bring-up instead of starting a TX that cannot radiate.
                 tracing::error!(
                     iface,
-                    channel = cfg.channel,
+                    channel = rendezvous_ch,
                     note = "PHY muted at txpower floor after recovery; not starting TX, retrying bring-up",
                     "wfb_phy_muted_unrecovered"
                 );
                 tokio::select! {
                     biased;
                     _ = wait_for_shutdown_flag(&mut shutdown) => return,
-                    _ = tokio::time::sleep(Duration::from_secs(REG_BLOCKED_RETRY_SECS)) => continue,
+                    _ = tokio::time::sleep(Duration::from_secs(BRINGUP_RETRY_SECS)) => continue,
                 }
             }
         };
@@ -761,14 +777,23 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // stats rx (each in its own session — the orphan fix; control plane
         // carries HopAnnounce/HopAck over the air, so it MUST run for FHSS).
         let key_path = Path::new(WFB_TX_KEY);
-        let proc = match RadioProcesses::spawn(iface, cfg, key_path, link.clone()).await {
+        // Bring the data plane up on the trio the previous group was running, so
+        // a watchdog kill or a data-tx crash never reverts a pinned manual tier,
+        // preset or adaptive step to the boot config.
+        let spawn_cfg = match retained_trio {
+            Some((fec_k, fec_n, mcs)) => {
+                ados_radio::process::data_cfg_from_retained(cfg, fec_k, fec_n, mcs)
+            }
+            None => cfg.clone(),
+        };
+        let proc = match RadioProcesses::spawn(iface, &spawn_cfg, key_path, link.clone()).await {
             Ok(p) => Arc::new(tokio::sync::Mutex::new(p)),
             Err(e) => {
                 tracing::warn!(error = %e, "wfb_spawn_failed");
                 tokio::select! {
                     biased;
                     _ = wait_for_shutdown_flag(&mut shutdown) => return,
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => continue,
+                    _ = tokio::time::sleep(Duration::from_secs(BRINGUP_RETRY_SECS)) => continue,
                 }
             }
         };
@@ -805,21 +830,21 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             &bitrate_snapshot.lock().await.clone(),
             Some(&metrics),
         );
-        tracing::info!(iface, channel = cfg.channel, pid, "wfb_service_ready");
+        tracing::info!(iface, channel = rendezvous_ch, pid, "wfb_service_ready");
 
         // ── Run watchdogs + hop supervisor concurrently ──────────────────
         // Per-bring-up cancel for the worker tasks. Each worker is also aborted
-        // explicitly on respawn/shutdown below, so this `Notify` is the graceful
+        // explicitly on respawn/shutdown below, so this latching `Shutdown` is the graceful
         // wake; a small bridge task fires it once the latched shutdown watch flips
-        // so a worker's own `cancel.notified()` arm wins promptly. The bridge is
+        // so a worker's own `cancel.wait()` arm wins promptly. The bridge is
         // aborted alongside the workers, never outliving the bring-up.
-        let task_cancel = Arc::new(Notify::new());
+        let task_cancel = Shutdown::new();
         let cancel_bridge = {
             let task_cancel = task_cancel.clone();
             let mut bridge_shutdown = shutdown.clone();
             tokio::spawn(async move {
                 let _ = bridge_shutdown.wait_for(|s| *s).await;
-                task_cancel.notify_waiters();
+                task_cancel.trigger();
             })
         };
         let iface_str = iface.clone();
@@ -834,6 +859,11 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let hb_rendezvous = rendezvous_ch;
         let hb_link = link.clone();
         let hb_iface = iface_str.clone();
+        // The data plane's own stats totals (process-lifetime for this group, so
+        // a retune respawn keeps feeding the same handle): the heartbeat's
+        // transmit liveness and both data-plane watchdogs read them.
+        let data_stats = proc.lock().await.data_stats();
+        let hb_data_stats = data_stats.clone();
         let hb_restart = restart_count.clone();
         let hb_counters = counters.clone();
         let hb_bitrate = bitrate_snapshot.clone();
@@ -846,11 +876,14 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let hb_events = events.clone();
         let hb_metrics = metrics.clone();
         let hb_usb_speed = adapter_info.usb_speed_mbps;
+        let hb_tx_power = tx_power.clone();
         let mut heartbeat = tokio::spawn(async move {
-            const HEARTBEAT_INTERVAL_S: f64 = 2.0;
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             let mut tx_live = TxLiveness::new();
-            let mut prev_packets: i64 = 0;
+            // When the heartbeat last ran the regulatory reconcile. The
+            // reconcile's bounded retry can take ~10 s, so it runs at most once
+            // per REG_RECONCILE_INTERVAL and never holds up every sidecar write.
+            let mut last_reconcile: Option<Instant> = None;
             // Previous link-lock state, so a lock/unlock event fires only on a
             // real transition (not every heartbeat). `None` until the first tick.
             let mut prev_locked: Option<bool> = None;
@@ -866,9 +899,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        if let Some(v) = read_tx_bytes(&hb_iface).await {
-                            tx_live.observe(v);
-                        }
+                        tx_live.observe(hb_data_stats.totals().bytes_injected);
                         // Live PHY-mute readback: the TX PHY pinned at the muted
                         // not-permitted floor injects frames but radiates nothing
                         // (the RTL8812EU `set type monitor` mute). Surfaced on the
@@ -884,14 +915,10 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                             c.phy_muted = phy_muted;
                             *c
                         };
-                        // Uplink valid-decode rate over the heartbeat interval.
-                        // 0 on a drone-only rig (no rx.key → packets stay 0).
-                        let pkt_delta = (stats.packets_received - prev_packets).max(0) as f64;
-                        prev_packets = stats.packets_received;
-                        let rates = TxRates {
-                            tx_bytes_per_s: tx_live.tx_bytes_per_s(),
-                            valid_rx_packets_per_s: pkt_delta / HEARTBEAT_INTERVAL_S,
-                        };
+                        // Uplink valid-decode rate: the latest per-interval
+                        // decode count from the rx-control stats stream. 0 on a
+                        // drone hearing no uplink.
+                        let rates = TxRates::sample(&tx_live, &stats);
                         // The key can be removed (unpair) at runtime; re-check.
                         let tx_key_present = Path::new(WFB_TX_KEY).exists();
                         let bind_active = read_bind_sentinel_active();
@@ -1066,8 +1093,14 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                         // so membership (or an empty/unknown set) is the same gate
                         // the bring-up used; this can never cap the radio. Skipped
                         // entirely while the live domain already matches (the cheap
-                        // common case), so the steady-state cost is one comparison.
-                        if !reg_status.verified {
+                        // common case), and run at most once per
+                        // REG_RECONCILE_INTERVAL: a domain that will not take costs
+                        // one bounded attempt per interval, never the sidecar
+                        // cadence.
+                        let reconcile_due = last_reconcile
+                            .is_none_or(|at| now.saturating_duration_since(at) >= REG_RECONCILE_INTERVAL);
+                        if !reg_status.verified && reconcile_due {
+                            last_reconcile = Some(now);
                             let channel_ok = hb_enabled.is_empty()
                                 || hb_enabled.contains(&hb_rendezvous);
                             if let ados_radio::adapter::ReassertOutcome::Reasserted {
@@ -1112,7 +1145,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                             state.as_str(),
                             &channels,
                             &reg,
-                            effective_tx_dbm,
+                            hb_tx_power.effective().unwrap_or(effective_tx_dbm),
                             Some(&hb_adapter),
                             &stats,
                             &hb_cfg,
@@ -1132,7 +1165,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                             json_object_to_fields(&body),
                         );
                     }
-                    _ = hb_cancel.notified() => break,
+                    _ = hb_cancel.wait() => break,
                 }
             }
         });
@@ -1140,23 +1173,16 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let tx_cancel = task_cancel.clone();
         let tx_iface = iface_str.clone();
         let tx_counters = counters.clone();
-        // Hand the watchdog the shared process handle, not a captured PID: the
-        // data plane is respawned (new PID) on every FEC/MCS/tier/adaptive
-        // change, so the watchdog must resolve the live data-tx PID each poll to
-        // keep its ingress (`rchar`) signal pinned to the running process.
-        let tx_proc = proc.clone();
+        let tx_stats = data_stats.clone();
         let mut watchdog1 = tokio::spawn(async move {
-            tx_health_watchdog(&tx_iface, tx_proc, tx_counters, tx_cancel).await
+            tx_health_watchdog(&tx_iface, tx_stats, tx_counters, tx_cancel).await
         });
 
         let recvq_cancel = task_cancel.clone();
         let recvq_counters = counters.clone();
-        // Same shared process handle as watchdog1, and for the same reason: the
-        // queue watchdog now cross-checks read progress on the live data-tx PID
-        // before calling a deep queue a wedge, so it must follow respawns too.
-        let recvq_proc = proc.clone();
+        let recvq_stats = data_stats.clone();
         let mut watchdog2 = tokio::spawn(async move {
-            video_recvq_watchdog(recvq_proc, recvq_counters, recvq_cancel).await
+            video_recvq_watchdog(recvq_stats, recvq_counters, recvq_cancel).await
         });
 
         // Auxiliary application-stream liveness watchdog. Idles while the aux pair
@@ -1173,28 +1199,37 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let aux_watchdog =
             tokio::spawn(async move { aux_liveness_watchdog(aux_wd_proc, aux_wd_cancel).await });
 
-        // Data-tx exit watch. The counter watchdog only fires after a 30 s flat
-        // window, so a `wfb_tx` that crashes on its own (segfault, OOM kill, a
+        // Control-plane delta-counter watchdog. The tx-control transmitter and the
+        // rx-control receiver carry HopAnnounce/beacons, HopAck and the only link
+        // measurement; each one's own stats counter must advance inside a 30 s
+        // window, and a live process with a flat counter trips a group respawn.
+        let ctl_cancel = task_cancel.clone();
+        let ctl_proc = proc.clone();
+        let mut control_watchdog =
+            tokio::spawn(async move { control_plane_watchdog(ctl_proc, ctl_cancel).await });
+
+        // Group exit watch. The counter watchdogs only fire after a 30 s flat
+        // window, so a plane that crashes on its own (segfault, OOM kill, a
         // driver-rejected arg on respawn) would otherwise leave the link dead for
-        // up to 30 s. This arm polls the data-plane child's liveness on a 1 s
-        // cadence and completes the moment it has exited, tripping an immediate
-        // respawn of the whole radio group via the run-loop select. A brief lock
-        // per poll (a non-blocking `try_wait` reap) does not contend with the FEC/
-        // MCS setters in practice.
+        // up to 30 s. This arm polls every plane's liveness on a 1 s cadence and
+        // completes the moment any has exited, tripping an immediate respawn of
+        // the whole radio group via the run-loop select. A brief lock per poll
+        // (non-blocking `try_wait` reaps) does not contend with the FEC/MCS
+        // setters in practice.
         let exit_cancel = task_cancel.clone();
         let exit_proc = proc.clone();
-        let mut data_tx_exit = tokio::spawn(async move {
+        let mut group_exit = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             tick.tick().await; // consume the immediate first tick
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        if !exit_proc.lock().await.data_tx_running() {
-                            tracing::warn!("wfb_data_tx_exited_respawning");
+                        if let Some(plane) = exit_proc.lock().await.exited_plane() {
+                            tracing::warn!(plane, "wfb_plane_exited_respawning");
                             return;
                         }
                     }
-                    _ = exit_cancel.notified() => return,
+                    _ = exit_cancel.wait() => return,
                 }
             }
         });
@@ -1214,7 +1249,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // The ladder's top-rung cap and the rung wfb_tx was actually spawned on,
         // so the ladder starts believing reality rather than its own default.
         let bc_mcs_cap = cfg.adaptive_mcs_max;
-        let bc_mcs_start = cfg.mcs_index;
+        let bc_mcs_start = spawn_cfg.mcs_index;
         // The watchdog counters carry the transmit-queue congestion flag, which
         // is the ladder's only feedback on a drone: it cannot hear its own
         // downlink, so it never gets a link sample to fold in.
@@ -1234,6 +1269,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let cmd_state = CmdState {
             proc: proc.clone(),
             adaptive_enabled: adaptive_enabled.clone(),
+            tx_power: tx_power.clone(),
         };
         let cmd_cancel = task_cancel.clone();
         let cmd_sock_path = ados_radio::paths::run_path("wfb-cmd.sock");
@@ -1244,7 +1280,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                         tracing::warn!(error = %e, "wfb_command_socket_serve_ended");
                     }
                 }
-                _ = cmd_cancel.notified() => {}
+                _ = cmd_cancel.wait() => {}
             }
         });
 
@@ -1275,7 +1311,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                         tracing::warn!(error = %e, "radio_command_socket_serve_ended");
                     }
                 }
-                _ = radio_cmd_cancel.notified() => {}
+                _ = radio_cmd_cancel.wait() => {}
             }
         });
 
@@ -1304,7 +1340,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                         tracing::warn!(error = %e, "aux_command_socket_serve_ended");
                     }
                 }
-                _ = aux_cmd_cancel.notified() => {}
+                _ = aux_cmd_cancel.wait() => {}
             }
         });
 
@@ -1407,7 +1443,8 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     watchdog1.abort();
                     watchdog2.abort();
                     aux_watchdog.abort();
-                    data_tx_exit.abort();
+                    control_watchdog.abort();
+                    group_exit.abort();
                     bitrate_ctrl.abort();
                     cmd_server.abort();
                     radio_cmd_server.abort();
@@ -1427,17 +1464,22 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     match result {
                         Ok(WatchdogFired::PhyMuted) => {
                             tracing::warn!(iface, "watchdog_phy_muted: attempting in-place PHY recovery");
-                            if ensure_radiating(iface, cfg.channel, cfg.tx_power_dbm, unrestricted)
-                                .await
-                                .is_some()
+                            if let Some(dbm) = ensure_radiating(
+                                iface,
+                                rendezvous_ch,
+                                tx_power.requested(),
+                                unrestricted,
+                            )
+                            .await
                             {
+                                tx_power.record_applied(Some(dbm));
                                 tracing::info!(iface, "watchdog_phy_recovered_in_place");
                                 let tx_cancel = task_cancel.clone();
                                 let tx_iface = iface_str.clone();
                                 let tx_counters = counters.clone();
-                                let tx_proc = proc.clone();
+                                let tx_stats = data_stats.clone();
                                 watchdog1 = tokio::spawn(async move {
-                                    tx_health_watchdog(&tx_iface, tx_proc, tx_counters, tx_cancel).await
+                                    tx_health_watchdog(&tx_iface, tx_stats, tx_counters, tx_cancel).await
                                 });
                                 continue;
                             }
@@ -1454,9 +1496,14 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                         tracing::warn!("video_recvq_watchdog_fired");
                     }
                 }
-                _ = &mut data_tx_exit => {
-                    // The data-plane wfb_tx exited on its own — respawn the whole
-                    // group immediately (the falls-through path below handles it).
+                result = &mut control_watchdog => {
+                    if let Ok(WatchdogFired::ControlStalled) = result {
+                        tracing::warn!("control_plane_watchdog_fired");
+                    }
+                }
+                _ = &mut group_exit => {
+                    // A plane exited on its own — respawn the whole group
+                    // immediately (the falls-through path below handles it).
                 }
                 _ = &mut hop => {}
                 _ = &mut beacon => {}
@@ -1475,7 +1522,8 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             watchdog1.abort();
             watchdog2.abort();
             aux_watchdog.abort();
-            data_tx_exit.abort();
+            control_watchdog.abort();
+            group_exit.abort();
             bitrate_ctrl.abort();
             cmd_server.abort();
             radio_cmd_server.abort();
@@ -1496,14 +1544,22 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         watchdog1.abort();
         watchdog2.abort();
         aux_watchdog.abort();
-        data_tx_exit.abort();
+        control_watchdog.abort();
+        group_exit.abort();
         bitrate_ctrl.abort();
         cmd_server.abort();
         radio_cmd_server.abort();
         aux_cmd_server.abort();
         hop.abort();
         beacon.abort();
-        proc.lock().await.kill_all().await;
+        {
+            // Keep the trio the dying group was running (a pinned manual tier,
+            // a preset, or an adaptive step) for the next bring-up.
+            let mut p = proc.lock().await;
+            let (fec_k, fec_n) = p.data_fec();
+            retained_trio = Some((fec_k, fec_n, p.data_mcs()));
+            p.kill_all().await;
+        }
         // The radio group will respawn at the top of the loop — count it.
         restart_count.fetch_add(1, Ordering::Relaxed);
         let wd = *counters.lock().await;
@@ -1519,7 +1575,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                 enabled_channels: enabled_channels_vec.clone(),
                 posture: reg_posture.clone(),
             },
-            effective_tx_dbm,
+            tx_power.effective().unwrap_or(effective_tx_dbm),
             Some(&adapter_info),
             &LinkStats::default(),
             cfg,
@@ -1541,7 +1597,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
 /// it is already set (the latch never loses an edge) and on a closed channel
 /// (the sender dropped — treat as shutdown). The single owner of the `&mut`
 /// receiver for the run-loop's own shutdown checks; worker tasks get their wake
-/// via the per-bring-up `Notify` bridge.
+/// via the per-bring-up `Shutdown` bridge.
 async fn wait_for_shutdown_flag(shutdown: &mut watch::Receiver<bool>) {
     // `wait_for` resolves as soon as the predicate holds — including on the
     // current value — and on sender-drop it returns `Err`, which we also treat as

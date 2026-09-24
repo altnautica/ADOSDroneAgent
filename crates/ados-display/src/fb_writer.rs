@@ -317,9 +317,12 @@ fn writer_loop<S: FrameSink>(shared: Arc<Shared>, mut sink: S) {
                 shared.pending.lock().unwrap().last_written_hash = Some(frame.input_hash);
             }
             Err(e) => {
-                // Disconnected SPI bus or a closed mapping. Stop trying.
+                // A failed write (an SPI hiccup, a driver rebind) must not
+                // freeze the panel on its last image for the life of the
+                // service: log it and keep serving. The last-written hash is
+                // left alone, so the next frame is written even if its input
+                // matches the one that just failed.
                 tracing::warn!(error = %e, "framebuffer write failed");
-                return;
             }
         }
 
@@ -514,7 +517,7 @@ mod tests {
     struct FakeSink {
         writes: Arc<Mutex<Vec<Vec<u8>>>>,
         write_count: Arc<AtomicUsize>,
-        fail_after: Option<usize>,
+        fail_on: Option<usize>,
         /// Optional per-write delay so the test can fill the pending slot while
         /// the writer is "busy".
         delay: Option<std::time::Duration>,
@@ -525,7 +528,7 @@ mod tests {
             Self {
                 writes: Arc::new(Mutex::new(Vec::new())),
                 write_count: Arc::new(AtomicUsize::new(0)),
-                fail_after: None,
+                fail_on: None,
                 delay: None,
             }
         }
@@ -537,10 +540,8 @@ mod tests {
                 std::thread::sleep(d);
             }
             let n = self.write_count.fetch_add(1, Ordering::SeqCst);
-            if let Some(limit) = self.fail_after {
-                if n >= limit {
-                    return Err(std::io::Error::other("simulated SPI disconnect"));
-                }
+            if self.fail_on == Some(n) {
+                return Err(std::io::Error::other("simulated SPI disconnect"));
             }
             self.writes.lock().unwrap().push(buf.to_vec());
             Ok(())
@@ -648,18 +649,20 @@ mod tests {
     }
 
     #[test]
-    fn write_error_stops_the_writer_without_panicking() {
+    fn a_failed_write_does_not_freeze_the_panel() {
         let mut sink = FakeSink::new();
-        sink.fail_after = Some(1); // first write ok, second errors
+        sink.fail_on = Some(1); // the second write fails once
+        let recorded = sink.writes.clone();
         let mut w = FbWriter::spawn(sink);
         w.present(Frame::new(vec![1], b"a"));
         wait_until(|| w.stats().writes == 1);
-        w.present(Frame::new(vec![2], b"b")); // triggers the error path
-                                              // The writer exits on error; cleanup joins cleanly.
+        w.present(Frame::new(vec![2], b"b")); // this write errors
         std::thread::sleep(std::time::Duration::from_millis(50));
+        w.present(Frame::new(vec![2], b"b")); // the same input again
+        wait_until(|| w.stats().writes == 2);
         w.cleanup();
-        // Only the first frame was recorded; the writer stopped after the error.
-        assert_eq!(w.stats().writes, 1);
+        assert_eq!(w.stats().writes, 2, "the writer must keep serving");
+        assert_eq!(recorded.lock().unwrap().last(), Some(&vec![2]));
     }
 
     #[test]

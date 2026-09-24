@@ -19,9 +19,11 @@ import { useResource } from "@/hooks/use-resource";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { ApiError, apiFetch } from "@/lib/api";
 import { resolveFirmwareType } from "@/lib/fc-firmware";
+import { fmtNum, fmtPercent, fmtVoltage } from "@/lib/format";
 import { loadParamMetadata, type ParamMetadata } from "@/lib/param-metadata";
 import {
   buildRows,
+  paramWriteBlock,
   categoryCounts,
   filterRows,
   formatParamValue,
@@ -122,7 +124,6 @@ function ParametersTab() {
       <MspSettingsTab
         firmware={firmwareType}
         firmwareVersion={snap.data?.fc?.firmware ?? undefined}
-        armed={snap.data?.fc?.armed ?? false}
       />
     );
   }
@@ -144,7 +145,9 @@ function MavlinkParams() {
     staleTime: Infinity,
   }).data;
 
-  const armed = snap.data?.fc?.armed ?? false;
+  // Writes go out only while the FC itself reports disarmed. `null` is the
+  // agent saying the heartbeat has not reported it yet, which is not disarmed.
+  const writeBlock = paramWriteBlock(snap.data?.fc?.armed);
   const isPx4 = firmwareType === "px4";
 
   const [search, setSearch] = useState("");
@@ -316,7 +319,7 @@ function MavlinkParams() {
           </Button>
           <Button
             size="sm"
-            disabled={dirtyCount === 0 || !!saveProgress || armed}
+            disabled={dirtyCount === 0 || !!saveProgress || writeBlock !== null}
             onClick={() => setConfirmOpen(true)}
           >
             <Save className="h-3.5 w-3.5" />
@@ -326,11 +329,7 @@ function MavlinkParams() {
           </Button>
         </div>
 
-        {armed && (
-          <p className="text-xs text-warn">
-            Vehicle is armed — parameter writes are blocked. Disarm to save changes.
-          </p>
-        )}
+        {writeBlock && <p className="text-xs text-warn">{writeBlock}</p>}
 
         {params.isLoading && (
           <p className="text-sm text-muted-foreground">loading parameters…</p>
@@ -594,64 +593,91 @@ function SensorsTab() {
   return <MavlinkSensors />;
 }
 
-function MavlinkSensors() {
-  const snap = useSnapshot();
-  const sensors = snap.data?.sensors ?? [];
+// GET /api/telemetry — the router's live vehicle snapshot (attitude in
+// radians, battery, GPS, position). Every field is absent or null until the FC
+// reports it; nothing here is defaulted.
+interface VehicleTelemetry {
+  armed?: boolean | null;
+  mode?: string | null;
+  attitude?: { roll?: number | null; pitch?: number | null; yaw?: number | null };
+  battery?: { voltage?: number | null; current?: number | null; remaining?: number | null };
+  gps?: { fix_type?: number | null; satellites?: number | null; eph?: number | null };
+  position?: { lat?: number | null; lon?: number | null; alt_rel?: number | null };
+}
 
-  if (sensors.length === 0) {
+function SensorField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between border-b border-border/50 py-1.5 last:border-b-0">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="font-mono text-sm">{value}</span>
+    </div>
+  );
+}
+
+function MavlinkSensors() {
+  const t = useResource<VehicleTelemetry>("vehicle-telemetry", "/api/telemetry", 1_000);
+  const v = t.data;
+  const deg = (rad: number | null | undefined) =>
+    rad == null ? "—" : `${fmtNum((rad * 180) / Math.PI, 1)}°`;
+  const hasPosition = v?.position?.lat != null && v?.position?.lon != null;
+
+  if (t.isError && !v) {
     return (
       <Card>
-        <CardContent className="pt-5 pb-5 flex items-start gap-3">
-          <Radio className="h-5 w-5 text-muted-foreground mt-0.5" />
-          <div>
-            <div className="text-sm font-medium">No sensors reported.</div>
-            <div className="text-xs text-muted-foreground mt-1">
-              Sensors come from the FC's vehicle-state stream. Connect a
-              FC, plug in peripherals (rangefinder, optical flow, airspeed,
-              barometer), and the list populates.
-            </div>
-          </div>
+        <CardContent className="pt-5 pb-5 text-sm text-destructive">
+          Couldn&apos;t read the vehicle state from the agent.
         </CardContent>
       </Card>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-      {sensors.map((s) => (
-        <Card key={s.id}>
-          <CardContent className="pt-4 pb-4 space-y-1.5">
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-sm">{s.id}</span>
-              {s.state && (
-                <span
-                  className={cn(
-                    "ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border",
-                    s.state === "ok"
-                      ? "border-ok/40 text-ok"
-                      : s.state === "error" || s.state === "failed"
-                        ? "border-destructive/40 text-destructive"
-                        : "border-muted-foreground/40 text-muted-foreground",
-                  )}
-                >
-                  {s.state}
-                </span>
-              )}
-            </div>
-            {s.name && (
-              <div className="text-xs text-muted-foreground">{s.name}</div>
-            )}
-            {s.value !== undefined && s.value !== null && (
-              <pre className="text-[11px] text-muted-foreground font-mono whitespace-pre-wrap break-all">
-                {typeof s.value === "object"
-                  ? JSON.stringify(s.value, null, 2)
-                  : String(s.value)}
-              </pre>
-            )}
-          </CardContent>
-        </Card>
-      ))}
-      <p className="md:col-span-2 text-[11px] text-muted-foreground">
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+      <Card>
+        <CardContent className="pt-4 pb-4">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">Attitude</div>
+          <SensorField label="roll" value={deg(v?.attitude?.roll)} />
+          <SensorField label="pitch" value={deg(v?.attitude?.pitch)} />
+          <SensorField label="yaw" value={deg(v?.attitude?.yaw)} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="pt-4 pb-4">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">Battery</div>
+          <SensorField label="voltage" value={fmtVoltage(v?.battery?.voltage ?? null)} />
+          <SensorField
+            label="current"
+            value={v?.battery?.current != null ? `${fmtNum(v.battery.current, 2)} A` : "—"}
+          />
+          <SensorField label="remaining" value={fmtPercent(v?.battery?.remaining ?? null)} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="pt-4 pb-4">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">GPS</div>
+          <SensorField label="fix type" value={v?.gps?.fix_type != null ? String(v.gps.fix_type) : "—"} />
+          <SensorField label="sats" value={v?.gps?.satellites != null ? String(v.gps.satellites) : "—"} />
+          <SensorField label="hdop" value={fmtNum(v?.gps?.eph ?? null, 2)} />
+          <SensorField
+            label="position"
+            value={hasPosition ? `${fmtNum(v!.position!.lat!, 5)}, ${fmtNum(v!.position!.lon!, 5)}` : "—"}
+          />
+          <SensorField
+            label="alt (rel)"
+            value={v?.position?.alt_rel != null ? `${fmtNum(v.position.alt_rel, 1)} m` : "—"}
+          />
+        </CardContent>
+      </Card>
+      <Card className="md:col-span-2 lg:col-span-3">
+        <CardContent className="pt-4 pb-4 grid grid-cols-2 gap-x-6">
+          <SensorField label="mode" value={v?.mode ?? "—"} />
+          <SensorField
+            label="armed"
+            value={v?.armed === true ? "ARMED" : v?.armed === false ? "disarmed" : "—"}
+          />
+        </CardContent>
+      </Card>
+      <p className="md:col-span-2 lg:col-span-3 text-[11px] text-muted-foreground">
         Want to edit FC parameters? Use the{" "}
         <Link to="/telemetry" className="text-primary hover:underline">
           Parameters tab

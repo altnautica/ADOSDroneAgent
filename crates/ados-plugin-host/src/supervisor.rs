@@ -12,7 +12,7 @@
 //! * `compatibility.ados_version` must include the running agent version.
 //! * `compatibility.supported_boards` (if non-empty) must include the current
 //!   HAL board id.
-//! * `isolation: inprocess` (agent) requires a first-party signer.
+//! * `isolation: inprocess` (agent) is refused: nothing runs an in-process half.
 //! * `isolation: inline` (GCS) requires a first-party signer.
 //!
 //! The `systemctl` calls and filesystem ops are real, but the crate stays
@@ -53,6 +53,10 @@ use crate::errors::{
     LifecycleError, ManifestError, SignatureError, SignatureErrorKind, SupervisorError,
 };
 use crate::manifest::{AgentIsolation, GcsIsolation, PluginManifest};
+use crate::services::{
+    declared_services, probe_command, render_service_unit, service_unit_name_for,
+    service_unit_path_for, ReadyCheck, ServiceSpec,
+};
 use crate::signing::{
     is_first_party_signer, load_revocation_list, load_trusted_keys, verify_archive_signature,
 };
@@ -87,32 +91,74 @@ pub trait SystemctlRunner: Send + Sync {
     fn run(&self, args: &[&str]) -> Result<(), SupervisorError>;
 }
 
-/// Production runner: shells out to `systemctl` with a 15s timeout-equivalent
-/// (the agent control plane is synchronous and short).
+/// How long one `systemctl` call may take before it is abandoned. The same
+/// bound the Python supervisor applies. Killing the client does not cancel
+/// the job systemd already queued; it only frees the caller, which otherwise
+/// held the controller (and the cloud relay's supervisor mutex) for as long as
+/// a wedged plugin took to stop.
+pub const SYSTEMCTL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Production runner: shells out to `systemctl`, bounded by [`SYSTEMCTL_TIMEOUT`].
 pub struct RealSystemctl;
 
 impl SystemctlRunner for RealSystemctl {
     fn run(&self, args: &[&str]) -> Result<(), SupervisorError> {
-        let output = std::process::Command::new("systemctl")
-            .args(args)
-            .output()
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    SupervisorError("systemctl not found; is this a systemd host?".to_string())
-                } else {
-                    SupervisorError(format!("systemctl {} failed to spawn: {e}", args.join(" ")))
-                }
-            })?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(SupervisorError(format!(
-                "systemctl {} failed: {}",
-                args.join(" "),
-                stderr.trim()
-            )));
-        }
-        Ok(())
+        run_bounded("systemctl", args, SYSTEMCTL_TIMEOUT)
     }
+}
+
+/// Run `program args...`, waiting at most `deadline` for it to exit. A child
+/// still running at the deadline is killed and reported as a timeout.
+fn run_bounded(
+    program: &str,
+    args: &[&str],
+    deadline: std::time::Duration,
+) -> Result<(), SupervisorError> {
+    use std::io::Read;
+    let label = format!("{program} {}", args.join(" "));
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                SupervisorError(format!("{program} not found; is this a systemd host?"))
+            } else {
+                SupervisorError(format!("{label} failed to spawn: {e}"))
+            }
+        })?;
+    // Drain stderr on its own thread so a chatty child can never block on a
+    // full pipe while this thread waits for it to exit.
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            text
+        })
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(SupervisorError(format!(
+                    "{label} timed out after {}s",
+                    deadline.as_secs_f64()
+                )));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => return Err(SupervisorError(format!("{label} wait failed: {e}"))),
+        }
+    };
+    if !status.success() {
+        let text = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
+        return Err(SupervisorError(format!("{label} failed: {}", text.trim())));
+    }
+    Ok(())
 }
 
 /// Filesystem + unit-dir layout the controller writes to. Tests point these at
@@ -168,12 +214,6 @@ pub struct PluginSupervisor {
     /// caller with a different host (e.g. tests, or a future fully-wired host)
     /// imposes no refusal.
     ungrantable_caps: BTreeSet<String>,
-    /// Built-in plugin manifests keyed by id. The discovery of built-ins from
-    /// Python entry-points stays in the Python loader; the Rust controller
-    /// accepts them via [`PluginSupervisor::set_builtins`] so the lifecycle
-    /// logic (manifest-for, hash tamper check, isolation gate) is identical for
-    /// built-in and third-party plugins.
-    builtin: std::collections::BTreeMap<String, PluginManifest>,
 }
 
 impl PluginSupervisor {
@@ -193,7 +233,6 @@ impl PluginSupervisor {
             agent_version: agent_version.into(),
             systemctl: Arc::new(RealSystemctl),
             installs: Vec::new(),
-            builtin: std::collections::BTreeMap::new(),
             ungrantable_caps: BTreeSet::new(),
             current_board_tier: None,
         }
@@ -256,20 +295,42 @@ impl PluginSupervisor {
         self
     }
 
-    /// Provide the built-in plugin manifests discovered out-of-band (Python
-    /// entry-points). Keyed by plugin id.
-    pub fn set_builtins(&mut self, builtins: std::collections::BTreeMap<String, PluginManifest>) {
-        self.builtin = builtins;
-    }
-
     /// Read on-disk state and filter each install's granted permissions down to
     /// what its manifest currently declares (defends against a tampered state
-    /// file). Built-ins must be set via [`set_builtins`] first if the device
-    /// has any built-in installs recorded.
+    /// file).
     pub fn discover(&mut self) -> Result<(), LifecycleError> {
         self.installs = load_state(Some(&self.paths.state_path));
-        // Collect the ids to reconcile up-front so the manifest lookups can
-        // borrow `self` immutably while the filter mutates each install.
+        self.filter_installs_against_manifests();
+        tracing::info!(
+            installed_count = self.installs.len(),
+            "plugin_supervisor_discovered"
+        );
+        Ok(())
+    }
+
+    /// Re-read the install list from disk before a read-modify-write.
+    ///
+    /// This controller is long-lived (the cloud relay holds one for its whole
+    /// life) and the state file has other writers: the LAN install path and the
+    /// CLI. Every mutator runs this under [`StateLock`] so it modifies what is on
+    /// disk now, not the list it read at boot; saving the boot-time copy erased
+    /// every install another writer had recorded since. An unreadable file is
+    /// an error, never an empty list: writing over state that could not be read
+    /// would drop every install in it.
+    fn reload_installs(&mut self) -> Result<(), LifecycleError> {
+        self.installs = state::load_state_checked(Some(&self.paths.state_path)).map_err(|e| {
+            SupervisorError(format!(
+                "plugin state is unreadable ({e}); refusing to overwrite it"
+            ))
+        })?;
+        self.filter_installs_against_manifests();
+        Ok(())
+    }
+
+    /// Filter every install's grants down to what its manifest declares.
+    fn filter_installs_against_manifests(&mut self) {
+        // Collect the ids up-front so the manifest lookups can borrow `self`
+        // immutably while the filter mutates each install.
         let ids: Vec<String> = self.installs.iter().map(|i| i.plugin_id.clone()).collect();
         for id in ids {
             let declared = match self.manifest_for(&id) {
@@ -280,12 +341,6 @@ impl PluginSupervisor {
                 filter_permissions_against_manifest(install, &declared);
             }
         }
-        tracing::info!(
-            builtin_count = self.builtin.len(),
-            installed_count = self.installs.len(),
-            "plugin_supervisor_discovered"
-        );
-        Ok(())
     }
 
     /// Current in-memory install list.
@@ -296,6 +351,58 @@ impl PluginSupervisor {
     /// The install record for `plugin_id`, if installed.
     pub fn find_install(&self, plugin_id: &str) -> Option<&PluginInstall> {
         find_install(&self.installs, plugin_id)
+    }
+
+    /// The tamper-checked manifest of an installed or built-in plugin.
+    pub fn installed_manifest(&self, plugin_id: &str) -> Result<PluginManifest, SupervisorError> {
+        self.manifest_for(plugin_id)
+    }
+
+    /// Re-read state from disk, so a long-lived holder sees installs another
+    /// writer recorded since it last looked.
+    pub fn refresh(&mut self) -> Result<(), LifecycleError> {
+        let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+        self.reload_installs()
+    }
+
+    /// Record the most recent auto-update attempt on an install:
+    /// `{version, outcome, error}`. A plugin removed meanwhile is a no-op.
+    pub fn note_update_attempt(
+        &mut self,
+        plugin_id: &str,
+        version: &str,
+        outcome: &str,
+        error: Option<&str>,
+    ) -> Result<(), LifecycleError> {
+        self.update_record(plugin_id, |install| {
+            install.last_update_attempt = Some(serde_json::json!({
+                "version": version,
+                "outcome": outcome,
+                "error": error,
+            }));
+        })
+    }
+
+    /// Stamp the auto-update check time on an install, whatever the outcome,
+    /// so the GCS sees the check ran.
+    pub fn note_update_check(&mut self, plugin_id: &str, at_ms: i64) -> Result<(), LifecycleError> {
+        self.update_record(plugin_id, |install| {
+            install.last_update_check_at = Some(at_ms)
+        })
+    }
+
+    fn update_record(
+        &mut self,
+        plugin_id: &str,
+        f: impl FnOnce(&mut PluginInstall),
+    ) -> Result<(), LifecycleError> {
+        let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+        self.reload_installs()?;
+        let Some(install) = state::find_install_mut(&mut self.installs, plugin_id) else {
+            return Ok(());
+        };
+        f(install);
+        save_state(&self.installs, Some(&self.paths.state_path))
     }
 
     // ------------------------------------------------------------------
@@ -374,32 +481,59 @@ impl PluginSupervisor {
             )?;
         }
 
-        self.check_compatibility(&manifest, contents.signer_id.as_deref())?;
+        self.check_compatibility(&manifest)?;
         self.reject_inline_for_third_party(&manifest, contents.signer_id.as_deref())?;
+        // A malformed service block (a foreign slice, an off-box ready_check,
+        // an unrenderable command) is refused here, as the Python manifest
+        // model refuses it at parse, rather than surfacing at enable.
+        for service in declared_services(&manifest)? {
+            crate::services::exec_start_value(&service.command)?;
+        }
+
+        let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+        self.reload_installs()?;
         if !allow_downgrade {
             self.reject_downgrade(&manifest)?;
         }
 
-        let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
-
+        // Unpack and check into a staging dir beside the target. Every check
+        // runs against the staging copy, so a bad archive leaves an existing
+        // install exactly as it was; only a validated tree replaces it.
         let target = plugin_install_target(&self.paths.install_dir, &manifest.id)?;
-        if target.exists() {
-            std::fs::remove_dir_all(&target)?;
+        let staging = self
+            .paths
+            .install_dir
+            .join(format!(".{}.staging", manifest.id));
+        if staging.exists() {
+            std::fs::remove_dir_all(&staging)?;
         }
-        unpack_to(&contents.raw_archive_bytes, &target)?;
+        let staged = unpack_to(&contents.raw_archive_bytes, &staging)
+            .map_err(LifecycleError::from)
+            .and_then(|()| {
+                // A manifest that declares a GCS half (or a rust agent binary)
+                // must actually ship the file it points at. Fail here rather
+                // than letting a missing bundle surface later as an empty
+                // iframe or a unit dying with 203/EXEC — the operator cannot
+                // diagnose either.
+                crate::archive::verify_entrypoints_present(
+                    &manifest,
+                    &crate::archive::unpacked_paths(&staging),
+                )
+                .map_err(LifecycleError::from)
+            });
+        if let Err(e) = staged {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
 
-        // A manifest that declares a GCS half (or a rust agent binary) must
-        // actually ship the file it points at. Fail here rather than letting a
-        // missing bundle surface later as an empty iframe or a unit dying with
-        // 203/EXEC — the operator cannot diagnose either. The half-unpacked
-        // dir goes with it so a retry starts clean.
-        if let Err(e) = crate::archive::verify_entrypoints_present(
-            &manifest,
-            &crate::archive::unpacked_paths(&target),
-        ) {
-            let _ = std::fs::remove_dir_all(&target);
-            return Err(e.into());
+        let previous = find_install(&self.installs, &manifest.id).cloned();
+        if let Some(previous) = &previous {
+            // Stop what runs from the files about to be replaced: a later
+            // `systemctl start` on the still-active unit is a no-op, so the old
+            // version would keep running while state reports the new one.
+            self.stop_for_replacement(previous);
         }
+        swap_into_place(&staging, &target)?;
 
         // Write the systemd unit for subprocess agent halves. A fresh install
         // has granted nothing yet, so the unit renders with the most
@@ -430,8 +564,9 @@ impl PluginSupervisor {
             enabled_at: None,
             failure_reason: None,
             permissions: std::collections::BTreeMap::new(),
-            auto_update: true,
-            pinned_version: None,
+            // The operator's update preferences outlive a reinstall.
+            auto_update: previous.as_ref().is_none_or(|p| p.auto_update),
+            pinned_version: previous.as_ref().and_then(|p| p.pinned_version.clone()),
             last_update_check_at: None,
             last_update_attempt: None,
             model_status: None,
@@ -471,6 +606,7 @@ impl PluginSupervisor {
         permission_id: &str,
     ) -> Result<(), LifecycleError> {
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+        self.reload_installs()?;
         let manifest = self.manifest_for(plugin_id)?;
         if !manifest.declared_permissions().contains(permission_id) {
             return Err(SupervisorError(format!(
@@ -534,6 +670,7 @@ impl PluginSupervisor {
         permission_id: &str,
     ) -> Result<(), LifecycleError> {
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+        self.reload_installs()?;
         let manifest = self.manifest_for(plugin_id)?;
         let install = self.require_install_mut(plugin_id)?;
         revoke_permission(install, permission_id);
@@ -612,6 +749,39 @@ impl PluginSupervisor {
                 }
             }
         }
+        // Declared services run under the same capability sandbox as the main
+        // unit, so they follow every grant and revoke too. A service whose unit
+        // enable() never wrote is rendered when it starts.
+        let running = self
+            .find_install(plugin_id)
+            .is_some_and(|i| matches!(i.status, PluginStatus::Running));
+        for service in self.services_of(plugin_id, manifest) {
+            let path = service_unit_path_for(plugin_id, &service.name, Some(&self.paths.unit_dir));
+            if !path.exists() {
+                continue;
+            }
+            let rendered = match render_service_unit(
+                manifest,
+                &service,
+                &self.paths.install_dir,
+                &granted,
+                guard.active,
+            ) {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::warn!(plugin_id, service = %service.name, error = %e, "plugin_service_render_failed");
+                    continue;
+                }
+            };
+            if std::fs::read_to_string(&path).unwrap_or_default() != rendered {
+                std::fs::write(&path, rendered.as_bytes())?;
+                self.systemctl.run(&["daemon-reload"])?;
+                if running {
+                    self.systemctl
+                        .run(&["restart", &service_unit_name_for(plugin_id, &service.name)])?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -643,11 +813,12 @@ impl PluginSupervisor {
         Ok(())
     }
 
-    /// Enable a plugin. Idempotent: a running plugin is left running. Built-in
-    /// / `inprocess` plugins only flip state; subprocess plugins are
-    /// `systemctl enable + start`.
+    /// Enable a plugin. Idempotent: a running plugin is left running. A plugin
+    /// with no agent unit (a GCS-only plugin) only flips state; subprocess
+    /// plugins are `systemctl enable + start`.
     pub fn enable(&mut self, plugin_id: &str) -> Result<(), LifecycleError> {
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+        self.reload_installs()?;
         let manifest = self.manifest_for(plugin_id)?;
         let is_subprocess = manifest.is_subprocess_agent();
         {
@@ -666,9 +837,15 @@ impl PluginSupervisor {
         let unit = unit_name_for(plugin_id);
         self.systemctl.run(&["enable", &unit])?;
         self.systemctl.run(&["start", &unit])?;
+        // Each declared service under its own unit, additional to the main
+        // runner. A failure on one is surfaced as not-ready with its reason,
+        // never as a failed enable: the plugin's main half still runs.
+        self.start_declared_services(plugin_id, &manifest);
+        let service_status = self.service_readiness(plugin_id, &manifest);
         let install = self.require_install_mut(plugin_id)?;
         install.status = PluginStatus::Running;
         install.enabled_at = Some(now_ms());
+        install.service_status = service_status;
         save_state(&self.installs, Some(&self.paths.state_path))?;
         tracing::info!(plugin_id, "plugin_enabled");
         Ok(())
@@ -678,6 +855,7 @@ impl PluginSupervisor {
     /// Subprocess plugins are `systemctl stop + disable`.
     pub fn disable(&mut self, plugin_id: &str) -> Result<(), LifecycleError> {
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+        self.reload_installs()?;
         let manifest = self.manifest_for(plugin_id)?;
         let is_subprocess = manifest.is_subprocess_agent();
         {
@@ -687,6 +865,9 @@ impl PluginSupervisor {
             }
         }
         if is_subprocess {
+            // The declared services first (best-effort, so a missing unit does
+            // not block the main teardown), then the main runner.
+            self.stop_declared_services(plugin_id, &manifest);
             let unit = unit_name_for(plugin_id);
             self.systemctl.run(&["stop", &unit])?;
             self.systemctl.run(&["disable", &unit])?;
@@ -694,6 +875,7 @@ impl PluginSupervisor {
         let install = self.require_install_mut(plugin_id)?;
         install.status = PluginStatus::Disabled;
         install.enabled_at = None;
+        install.service_status = None;
         save_state(&self.installs, Some(&self.paths.state_path))?;
         tracing::info!(plugin_id, "plugin_disabled");
         Ok(())
@@ -702,8 +884,13 @@ impl PluginSupervisor {
     /// Remove a plugin: disable it (if running/enabled), remove the unit, delete
     /// the unpacked dir and (unless `keep_data`) the log, and drop the state.
     pub fn remove(&mut self, plugin_id: &str, keep_data: bool) -> Result<(), LifecycleError> {
-        // disable() takes the lock itself; run it first, outside the lock below.
-        let status = self.require_install_ref(plugin_id)?.status;
+        // disable() takes the lock itself; decide against current state, run it
+        // outside the lock below, then re-read under the lock for the removal.
+        let status = {
+            let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+            self.reload_installs()?;
+            self.require_install_ref(plugin_id)?.status
+        };
         if matches!(status, PluginStatus::Running | PluginStatus::Enabled) {
             if let Err(e) = self.disable(plugin_id) {
                 tracing::warn!(plugin_id, error = %e, "plugin_disable_during_remove_failed");
@@ -711,8 +898,13 @@ impl PluginSupervisor {
         }
 
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
+        self.reload_installs()?;
+        self.require_install_ref(plugin_id)?;
         let manifest = self.manifest_for(plugin_id)?;
         if manifest.is_subprocess_agent() {
+            // disable() already stopped the declared services; delete their
+            // unit files alongside the main unit.
+            self.delete_declared_service_units(plugin_id, &manifest);
             let unit_path = unit_path_for(plugin_id, Some(&self.paths.unit_dir));
             if unit_path.exists() {
                 std::fs::remove_file(&unit_path)?;
@@ -755,13 +947,9 @@ impl PluginSupervisor {
             .ok_or_else(|| SupervisorError(format!("plugin {plugin_id} is not installed")))
     }
 
-    /// Resolve the manifest for a plugin: built-in first, otherwise read off the
-    /// unpacked dir. For a disk-backed manifest the recorded `manifest_hash` is
-    /// re-checked against the on-disk bytes (tamper detection).
+    /// Resolve the manifest for a plugin off its unpacked dir, re-checking the
+    /// recorded `manifest_hash` against the on-disk bytes (tamper detection).
     fn manifest_for(&self, plugin_id: &str) -> Result<PluginManifest, SupervisorError> {
-        if let Some(builtin) = self.builtin.get(plugin_id) {
-            return Ok(builtin.clone());
-        }
         let manifest_path = self
             .paths
             .install_dir
@@ -794,11 +982,7 @@ impl PluginSupervisor {
     }
 
     /// Run the version + board + tier + inprocess-isolation gates.
-    fn check_compatibility(
-        &self,
-        manifest: &PluginManifest,
-        signer_id: Option<&str>,
-    ) -> Result<(), LifecycleError> {
+    fn check_compatibility(&self, manifest: &PluginManifest) -> Result<(), LifecycleError> {
         let constraint = manifest.compatibility.ados_version.trim();
         if constraint.is_empty() {
             return Err(ManifestError(format!(
@@ -837,17 +1021,20 @@ impl PluginSupervisor {
                 .into());
             }
         }
-        if let Some(agent) = &manifest.agent {
-            if agent.isolation == AgentIsolation::Inprocess
-                && signer_id.map(is_first_party_signer) != Some(true)
-            {
-                return Err(SupervisorError(format!(
-                    "plugin {} requests inprocess isolation but signer {} is not first-party",
-                    manifest.id,
-                    signer_id.unwrap_or("<none>")
-                ))
-                .into());
-            }
+        // Nothing executes an in-process agent half: every plugin runs as its
+        // own unit. Accepting one would install a plugin that reads enabled and
+        // never runs, whoever signed it.
+        if manifest
+            .agent
+            .as_ref()
+            .is_some_and(|a| a.isolation == AgentIsolation::Inprocess)
+        {
+            return Err(SupervisorError(format!(
+                "plugin {} requests inprocess isolation, which this agent does not run; \
+                 use subprocess isolation",
+                manifest.id
+            ))
+            .into());
         }
         Ok(())
     }
@@ -921,6 +1108,174 @@ impl PluginSupervisor {
         self.systemctl.run(&["daemon-reload"])?;
         Ok(())
     }
+
+    /// Stop a plugin whose files are about to be replaced by a reinstall.
+    ///
+    /// Best-effort: an old manifest that no longer reads, or a unit that is
+    /// already gone, must not block the install. The reinstalled record lands as
+    /// `Installed`, so the operator's next enable starts the NEW version.
+    fn stop_for_replacement(&self, previous: &PluginInstall) {
+        if !matches!(
+            previous.status,
+            PluginStatus::Running | PluginStatus::Enabled
+        ) {
+            return;
+        }
+        let manifest = match self.manifest_for(&previous.plugin_id) {
+            Ok(m) if m.is_subprocess_agent() => m,
+            Ok(_) => return,
+            Err(e) => {
+                tracing::warn!(
+                    plugin_id = %previous.plugin_id,
+                    error = %e,
+                    "plugin_reinstall_old_manifest_unreadable"
+                );
+                return;
+            }
+        };
+        // The declared services are stopped, disabled and deleted: the new
+        // version may declare different ones, and enable() renders them afresh.
+        self.stop_declared_services(&previous.plugin_id, &manifest);
+        self.delete_declared_service_units(&previous.plugin_id, &manifest);
+        if let Err(e) = self
+            .systemctl
+            .run(&["stop", &unit_name_for(&previous.plugin_id)])
+        {
+            tracing::warn!(
+                plugin_id = %previous.plugin_id,
+                error = %e,
+                "plugin_reinstall_stop_failed"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Declared extra services (additive to the main runner unit)
+    // ------------------------------------------------------------------
+
+    /// The services `manifest` declares. A block that no longer validates
+    /// (install refused it, so only a tampered or pre-validation install can
+    /// carry one) is logged and treated as declaring none.
+    fn services_of(&self, plugin_id: &str, manifest: &PluginManifest) -> Vec<ServiceSpec> {
+        declared_services(manifest).unwrap_or_else(|e| {
+            tracing::warn!(plugin_id, error = %e, "plugin_services_unreadable");
+            Vec::new()
+        })
+    }
+
+    /// Render, enable and start one unit per declared service. Best-effort per
+    /// service: a failure is logged and surfaces as not-ready on the readiness
+    /// probe; it never aborts the enable of the plugin's main half.
+    fn start_declared_services(&self, plugin_id: &str, manifest: &PluginManifest) {
+        let granted = self
+            .find_install(plugin_id)
+            .map(state::granted_caps)
+            .unwrap_or_default();
+        let guard =
+            ados_protocol::plugin_loopback_guard::read_state_at(&self.paths.loopback_guard_state);
+        for service in self.services_of(plugin_id, manifest) {
+            let result = render_service_unit(
+                manifest,
+                &service,
+                &self.paths.install_dir,
+                &granted,
+                guard.active,
+            )
+            .and_then(|unit| {
+                let path =
+                    service_unit_path_for(plugin_id, &service.name, Some(&self.paths.unit_dir));
+                std::fs::write(&path, unit.as_bytes())
+                    .map_err(|e| SupervisorError(format!("write {}: {e}", path.display())))?;
+                self.systemctl.run(&["daemon-reload"])?;
+                let unit = service_unit_name_for(plugin_id, &service.name);
+                self.systemctl.run(&["enable", &unit])?;
+                self.systemctl.run(&["start", &unit])
+            });
+            if let Err(e) = result {
+                tracing::warn!(plugin_id, service = %service.name, error = %e, "plugin_service_start_failed");
+            }
+        }
+    }
+
+    /// Stop and disable each declared service unit. Best-effort.
+    fn stop_declared_services(&self, plugin_id: &str, manifest: &PluginManifest) {
+        for service in self.services_of(plugin_id, manifest) {
+            let unit = service_unit_name_for(plugin_id, &service.name);
+            for verb in ["stop", "disable"] {
+                if let Err(e) = self.systemctl.run(&[verb, &unit]) {
+                    tracing::warn!(plugin_id, service = %service.name, verb, error = %e, "plugin_service_stop_failed");
+                }
+            }
+        }
+    }
+
+    /// Delete each declared service's unit file. Best-effort.
+    fn delete_declared_service_units(&self, plugin_id: &str, manifest: &PluginManifest) {
+        for service in self.services_of(plugin_id, manifest) {
+            let path = service_unit_path_for(plugin_id, &service.name, Some(&self.paths.unit_dir));
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Probe each declared service: `[{name, ready, reason}]`, or `None` when
+    /// the plugin declares none (the heartbeat then omits the block).
+    ///
+    /// No `ready_check`: ready iff the unit is active. An HTTP check: ready on
+    /// a 2xx GET. A command: ready on exit 0, run sandboxed as the plugin user
+    /// through `systemd-run`. A probe error is `ready: false` with the reason.
+    fn service_readiness(
+        &self,
+        plugin_id: &str,
+        manifest: &PluginManifest,
+    ) -> Option<serde_json::Value> {
+        let services = self.services_of(plugin_id, manifest);
+        if services.is_empty() {
+            return None;
+        }
+        let granted = self
+            .find_install(plugin_id)
+            .map(state::granted_caps)
+            .unwrap_or_default();
+        let guard =
+            ados_protocol::plugin_loopback_guard::read_state_at(&self.paths.loopback_guard_state);
+        let entries = services
+            .iter()
+            .map(|service| {
+                let (ready, reason) = match &service.ready_check {
+                    None => {
+                        let unit = service_unit_name_for(plugin_id, &service.name);
+                        match self.systemctl.run(&["is-active", "--quiet", &unit]) {
+                            Ok(()) => (true, None),
+                            Err(_) => (false, Some("unit not active".to_string())),
+                        }
+                    }
+                    Some(ReadyCheck::Http { url, port, path }) => {
+                        crate::services::probe_http(*port, path, url.starts_with("https://"))
+                    }
+                    Some(ReadyCheck::Command(argv)) => {
+                        let cmd = probe_command(
+                            manifest,
+                            argv,
+                            &self.paths.install_dir,
+                            &granted,
+                            guard.active,
+                        );
+                        let args: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
+                        match run_bounded(
+                            &cmd[0],
+                            &args,
+                            crate::services::PROBE_TIMEOUT + std::time::Duration::from_secs(5),
+                        ) {
+                            Ok(()) => (true, None),
+                            Err(e) => (false, Some(e.0.chars().take(200).collect())),
+                        }
+                    }
+                };
+                serde_json::json!({"name": service.name, "ready": ready, "reason": reason})
+            })
+            .collect();
+        Some(serde_json::Value::Array(entries))
+    }
 }
 
 /// The default signature-enforcement policy for [`PluginSupervisor::production`]:
@@ -940,11 +1295,12 @@ pub fn require_signed_default() -> bool {
 
 /// The plugin's unpacked dir: a direct child of `install_dir` named by the id.
 ///
-/// The install path runs `remove_dir_all` on this and then unpacks into it, as
-/// root, so an id that is absolute, carries a separator, or walks up with `..`
-/// would aim both at an arbitrary host directory. The manifest parser already
-/// refuses such an id; this is the check at the point of use, so no id that
-/// reaches here some other way can widen the blast radius past one plugin dir.
+/// The install path swaps a freshly unpacked tree into this dir and deletes
+/// the one it replaces, as root, so an id that is absolute, carries a
+/// separator, or walks up with `..` would aim both at an arbitrary host
+/// directory. The manifest parser already refuses such an id; this is the check
+/// at the point of use, so no id that reaches here some other way can widen the
+/// blast radius past one plugin dir.
 fn plugin_install_target(install_dir: &Path, plugin_id: &str) -> Result<PathBuf, SupervisorError> {
     let mut components = Path::new(plugin_id).components();
     match (components.next(), components.next()) {
@@ -954,6 +1310,27 @@ fn plugin_install_target(install_dir: &Path, plugin_id: &str) -> Result<PathBuf,
             install_dir.display()
         ))),
     }
+}
+
+/// Replace `target` with the validated `staging` tree by renames, so the
+/// install dir only ever holds a complete old tree or a complete new one.
+fn swap_into_place(staging: &Path, target: &Path) -> Result<(), LifecycleError> {
+    if !target.exists() {
+        std::fs::rename(staging, target)?;
+        return Ok(());
+    }
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let retired = target.with_file_name(format!(".{name}.retired"));
+    if retired.exists() {
+        std::fs::remove_dir_all(&retired)?;
+    }
+    std::fs::rename(target, &retired)?;
+    std::fs::rename(staging, target)?;
+    let _ = std::fs::remove_dir_all(&retired);
+    Ok(())
 }
 
 /// Bounded semver-range parser for the constraint vocabulary.
@@ -1204,6 +1581,109 @@ mod tests {
         assert_eq!(reloaded[0].status, PluginStatus::Installed);
     }
 
+    const OTHER_MANIFEST: &str = "id: com.example.other\nversion: 1.0.0\nrisk: low\ncompatibility:\n  ados_version: \">=0.1.0,<2.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n";
+
+    /// A long-lived controller must modify what is on disk now, not the list
+    /// it read at boot. The cloud relay holds one for its whole life while the
+    /// LAN install path writes the same state file; saving the stale copy
+    /// erased the other writer's install.
+    #[test]
+    fn a_mutation_keeps_an_install_another_writer_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(RecordingSystemctl::default());
+        let mut relay = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_systemctl(rec.clone());
+        relay
+            .install_contents(
+                parse_archive_bytes(build_unsigned_archive(SUBPROC_MANIFEST)).unwrap(),
+                Path::new("/tmp/thermal.adosplug"),
+            )
+            .unwrap();
+
+        // A second writer (the LAN path) records its own install.
+        let mut lan = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_systemctl(rec.clone());
+        lan.discover().unwrap();
+        lan.install_contents(
+            parse_archive_bytes(build_unsigned_archive(OTHER_MANIFEST)).unwrap(),
+            Path::new("/tmp/other.adosplug"),
+        )
+        .unwrap();
+
+        // The relay's controller, still holding its earlier view, mutates.
+        relay.enable("com.example.thermal").unwrap();
+
+        let on_disk = load_state(Some(&dir.path().join("state/plugin-state.json")));
+        let ids: BTreeSet<&str> = on_disk.iter().map(|i| i.plugin_id.as_str()).collect();
+        assert!(
+            ids.contains("com.example.other"),
+            "the other writer's install was erased: {ids:?}"
+        );
+        assert!(ids.contains("com.example.thermal"));
+    }
+
+    /// A reinstall checks the new archive before touching the old install, and
+    /// stops the running plugin before its files are swapped.
+    #[test]
+    fn a_bad_reinstall_keeps_the_working_install_and_a_good_one_stops_the_old_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(RecordingSystemctl::default());
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_systemctl(rec.clone());
+        sup.install_contents(
+            parse_archive_bytes(build_unsigned_archive(SUBPROC_MANIFEST)).unwrap(),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        sup.enable("com.example.thermal").unwrap();
+        let installed_file = dir.path().join("plugins/com.example.thermal/agent/py/x.py");
+        assert!(installed_file.exists());
+
+        // v1.1.0 declares a GCS bundle it does not ship: refused.
+        let broken = SUBPROC_MANIFEST.replace("version: 1.0.0", "version: 1.1.0")
+            + "gcs:\n  entrypoint: gcs/dist/index.js\n";
+        let err = sup
+            .install_contents(
+                parse_archive_bytes(build_unsigned_archive(&broken)).unwrap(),
+                Path::new("/tmp/thermal-broken.adosplug"),
+            )
+            .unwrap_err();
+        assert!(format!("{err}").contains("not present"), "{err}");
+        assert!(
+            installed_file.exists(),
+            "a refused archive must leave the working install on disk"
+        );
+        assert_eq!(
+            sup.find_install("com.example.thermal").unwrap().status,
+            PluginStatus::Running
+        );
+        assert!(!dir
+            .path()
+            .join("plugins/.com.example.thermal.staging")
+            .exists());
+
+        // A good v1.1.0 stops the running unit before replacing its files.
+        rec.calls.lock().unwrap().clear();
+        let good = SUBPROC_MANIFEST.replace("version: 1.0.0", "version: 1.1.0");
+        sup.install_contents(
+            parse_archive_bytes(build_unsigned_archive(&good)).unwrap(),
+            Path::new("/tmp/thermal-good.adosplug"),
+        )
+        .unwrap();
+        let calls = rec.calls.lock().unwrap();
+        assert!(
+            calls.iter().any(|c| c
+                == &vec![
+                    "stop".to_string(),
+                    "ados-plugin-com-example-thermal.service".to_string()
+                ]),
+            "the old process must be stopped before the swap: {calls:?}"
+        );
+        let record = sup.find_install("com.example.thermal").unwrap();
+        assert_eq!(record.version, "1.1.0");
+        assert_eq!(record.status, PluginStatus::Installed);
+    }
+
     #[test]
     fn enable_then_disable_subprocess_drives_systemctl() {
         let dir = tempfile::tempdir().unwrap();
@@ -1445,41 +1925,25 @@ mod tests {
         assert!(format!("{err}").contains("does not support board"), "{err}");
     }
 
+    /// Nothing runs an in-process agent half, so it is refused whoever signed
+    /// it; a first-party signature used to let one install and read enabled
+    /// while never running.
     #[test]
-    fn inprocess_from_non_first_party_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
-            .with_systemctl(Arc::new(RecordingSystemctl::default()));
-        let manifest = "id: com.evil.inproc\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: pkg:Class\n  isolation: inprocess\n";
-        // Build a "signed" contents struct with a non-first-party signer; we
-        // bypass require_signed and just exercise the isolation gate.
-        let mut contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
-        contents.signer_id = Some("third-party".to_string());
-        contents.signature_b64 = Some("QUJD".to_string());
-        let err = sup
-            .install_contents(contents, Path::new("/tmp/x.adosplug"))
-            .unwrap_err();
-        assert!(format!("{err}").contains("not first-party"), "{err}");
-    }
-
-    #[test]
-    fn inprocess_from_first_party_is_ok() {
+    fn inprocess_is_refused_even_from_a_first_party_signer() {
         let dir = tempfile::tempdir().unwrap();
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
             .with_systemctl(Arc::new(RecordingSystemctl::default()));
         let manifest = "id: com.altnautica.inproc\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: pkg:Class\n  isolation: inprocess\n";
-        let mut contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
-        contents.signer_id = Some("altnautica-2026-A".to_string());
-        contents.signature_b64 = Some("QUJD".to_string());
-        // inprocess -> no unit written, no systemctl daemon-reload needed.
-        let res = sup
-            .install_contents(contents, Path::new("/tmp/x.adosplug"))
-            .unwrap();
-        assert_eq!(res.signer_id.as_deref(), Some("altnautica-2026-A"));
-        assert!(!dir
-            .path()
-            .join("units/ados-plugin-com-altnautica-inproc.service")
-            .exists());
+        for signer in ["altnautica-2026-A", "third-party"] {
+            let mut contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
+            contents.signer_id = Some(signer.to_string());
+            contents.signature_b64 = Some("QUJD".to_string());
+            let err = sup
+                .install_contents(contents, Path::new("/tmp/x.adosplug"))
+                .unwrap_err();
+            assert!(format!("{err}").contains("does not run"), "{signer}: {err}");
+        }
+        assert!(sup.installs().is_empty());
     }
 
     #[test]
@@ -1559,5 +2023,66 @@ mod tests {
         let install = sup.find_install("com.example.thermal").unwrap();
         assert!(install.permissions.contains_key("hardware.spi"));
         assert!(!install.permissions.contains_key("mission.write"));
+    }
+
+    /// A hung `systemctl` must not hold the controller: the call is abandoned
+    /// at its deadline and reported as a timeout.
+    #[test]
+    fn a_hung_systemctl_call_is_abandoned_at_its_deadline() {
+        let started = std::time::Instant::now();
+        let err = run_bounded("sleep", &["30"], std::time::Duration::from_millis(200)).unwrap_err();
+        assert!(err.0.contains("timed out"), "{}", err.0);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(run_bounded("false", &[], std::time::Duration::from_secs(5)).is_err());
+        assert!(run_bounded("true", &[], std::time::Duration::from_secs(5)).is_ok());
+    }
+
+    /// Declared services follow the plugin's lifecycle on this path exactly as
+    /// on the LAN path: rendered and started on enable, readiness recorded,
+    /// stopped on disable, unit files deleted on remove.
+    #[test]
+    fn declared_services_follow_enable_disable_and_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(RecordingSystemctl::default());
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_systemctl(rec.clone());
+        let manifest = SUBPROC_MANIFEST.to_string()
+            + "  contributes:\n    services:\n      - name: bridge\n        command: bin/bridge --fast\n";
+        sup.install_contents(
+            parse_archive_bytes(build_unsigned_archive(&manifest)).unwrap(),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        let svc_unit = "ados-plugin-com-example-thermal-bridge.service".to_string();
+        let svc_path = dir.path().join("units").join(&svc_unit);
+        let called = |verb: &str| {
+            rec.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c == &vec![verb.to_string(), svc_unit.clone()])
+        };
+
+        sup.enable("com.example.thermal").unwrap();
+        let unit = std::fs::read_to_string(&svc_path).expect("service unit written");
+        assert!(unit.contains("ExecStart=bin/bridge --fast"));
+        assert!(called("enable") && called("start"));
+        assert_eq!(
+            sup.find_install("com.example.thermal")
+                .unwrap()
+                .service_status,
+            Some(serde_json::json!([{"name": "bridge", "ready": true, "reason": null}]))
+        );
+
+        sup.disable("com.example.thermal").unwrap();
+        assert!(called("stop"));
+        assert!(sup
+            .find_install("com.example.thermal")
+            .unwrap()
+            .service_status
+            .is_none());
+
+        sup.remove("com.example.thermal", false).unwrap();
+        assert!(!svc_path.exists(), "the service unit file must be deleted");
     }
 }

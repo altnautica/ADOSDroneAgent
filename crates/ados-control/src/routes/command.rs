@@ -306,7 +306,9 @@ pub struct CommandRequest {
     pub args: Vec<Value>,
 }
 
-/// `POST /api/command` → `{"status":"ok","cmd":<cmd>, "ack": {...}}`.
+/// `POST /api/command` → `{"status":"ok","cmd":<cmd>, "ack": {...}}` when the FC
+/// ACCEPTED it, else `{"status":"error","message":<why>, ...}` with the same `ack`
+/// block (a rejection, an unfinished IN_PROGRESS, or no ACK at all).
 ///
 /// 503 `{"detail": ...}` when the FC is not connected OR the MAVLink socket
 /// cannot be reached (the command never silently drops). 400 `{"detail": ...}`
@@ -356,6 +358,7 @@ pub async fn execute_command(
     match send_awaiting_ack(&state.mavlink, &base_long, &AckConfig::default()).await {
         Ok(outcome) => {
             merge_ack(&mut body, &outcome);
+            settle_status(&mut body, &outcome);
             (StatusCode::OK, Json(body)).into_response()
         }
         Err(e) => {
@@ -726,7 +729,14 @@ async fn send_awaiting_ack(
                 // stream is now desynced and unusable. Break to the next attempt,
                 // which opens a fresh one (or give up after the budget).
                 FrameRead::Timeout => break,
-                // The stream closed; no more frames will arrive.
+                // The stream closed; no more frames will arrive. An IN_PROGRESS
+                // already seen is still the FC's answer: accepted and executing.
+                FrameRead::Eof if in_progress => {
+                    return Ok(AckOutcome::Acked {
+                        result: MAV_RESULT_IN_PROGRESS,
+                        statustext: None,
+                    })
+                }
                 FrameRead::Eof => return Ok(AckOutcome::NoAck),
             }
         }
@@ -819,6 +829,26 @@ fn merge_ack(body: &mut Value, outcome: &AckOutcome) {
     };
     if let Value::Object(map) = body {
         map.insert("ack".to_string(), ack);
+    }
+}
+
+/// Settle the body's top-level `status` from the FC's answer. The body is built
+/// as `"status": "ok"` before the send; only an ACCEPTED ACK keeps it. A
+/// rejection, an in-progress without a final result, or no ACK at all becomes
+/// `"status": "error"` with a `message`, the body-level failure convention the
+/// cloud dispatcher and other consumers read, so a DENIED arm is never reported
+/// as a completed command. The `ack` block keeps the full detail.
+fn settle_status(body: &mut Value, outcome: &AckOutcome) {
+    let message = match outcome {
+        AckOutcome::Acked { result, .. } if *result == MAV_RESULT_ACCEPTED => return,
+        AckOutcome::Acked { result, statustext } => statustext
+            .clone()
+            .unwrap_or_else(|| format!("flight controller answered {}", mav_result_name(*result))),
+        AckOutcome::NoAck => "no acknowledgement from the flight controller".to_string(),
+    };
+    if let Value::Object(map) = body {
+        map.insert("status".to_string(), json!("error"));
+        map.insert("message".to_string(), json!(message));
     }
 }
 
@@ -1326,6 +1356,71 @@ mod tests {
         merge_ack(&mut body, &AckOutcome::NoAck);
         assert_eq!(body["ack"]["observed"], json!(false));
         assert!(body["ack"].get("result").is_none());
+    }
+
+    #[test]
+    fn only_an_accepted_ack_keeps_the_ok_status() {
+        let accepted = AckOutcome::Acked {
+            result: 0,
+            statustext: None,
+        };
+        let mut body = json!({"status": "ok", "cmd": "arm"});
+        settle_status(&mut body, &accepted);
+        assert_eq!(body["status"], json!("ok"));
+        assert!(body.get("message").is_none());
+
+        let denied = AckOutcome::Acked {
+            result: 2,
+            statustext: Some("PreArm: 3D accel calibration needed".to_string()),
+        };
+        let mut body = json!({"status": "ok", "cmd": "arm"});
+        settle_status(&mut body, &denied);
+        assert_eq!(body["status"], json!("error"));
+        assert_eq!(
+            body["message"],
+            json!("PreArm: 3D accel calibration needed")
+        );
+
+        let failed = AckOutcome::Acked {
+            result: 4,
+            statustext: None,
+        };
+        let mut body = json!({"status": "ok", "cmd": "rtl"});
+        settle_status(&mut body, &failed);
+        assert_eq!(body["status"], json!("error"));
+        assert_eq!(body["message"], json!("flight controller answered FAILED"));
+
+        let mut body = json!({"status": "ok", "cmd": "land"});
+        settle_status(&mut body, &AckOutcome::NoAck);
+        assert_eq!(body["status"], json!("error"));
+    }
+
+    #[tokio::test]
+    async fn a_close_after_in_progress_reports_in_progress_not_silence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mavlink.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        // IN_PROGRESS, then the stream closes before any final result.
+        let responses = vec![ack_frame(
+            TARGET_SYSTEM,
+            MavCmd::MAV_CMD_NAV_TAKEOFF,
+            MavResult::MAV_RESULT_IN_PROGRESS,
+        )];
+        let server = tokio::spawn(fake_fc(listener, responses, Duration::ZERO));
+
+        let client = MavlinkIpcClient::new(path.clone());
+        let (long, _b) = build_command("takeoff", &[json!(15.0)], COPTER).unwrap();
+        let outcome = send_awaiting_ack(&client, &long, &test_cfg())
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            AckOutcome::Acked {
+                result: MAV_RESULT_IN_PROGRESS,
+                statustext: None
+            }
+        );
+        server.await.unwrap();
     }
 
     /// A minimal fake FC on a unix socket: accept one client, drain its

@@ -80,6 +80,10 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/mavlink/ports"),
         // Agent-config JSON Schema (the committed, build-time-embedded asset).
         get("/api/config/schema"),
+        get("/api/v2/observability/{*upstream_path}"),
+        // Agent config read + one-key write.
+        get("/api/config"),
+        put("/api/config"),
         // Pairing handshake.
         get("/api/pairing/info"),
         get("/api/pairing/code"),
@@ -92,6 +96,8 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/can/passthrough"),
         // Operator cloud-export trigger: writes the push-request file the cloud
         // service consumes (a thin trigger; the response is the brief poll result).
+        get("/api/logs"),
+        get("/api/logs/stream"),
         post("/api/logs/push"),
         // The per-pair relay credential a ground station offers over the radio.
         // Reachable over the relay on purpose: it is the only path to a drone
@@ -119,6 +125,12 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/plugins/{plugin_id}/state"),
         // Compute-node cluster status (read from the heartbeat sidecar).
         get("/api/compute/status"),
+        // Cloud relay link state (read from the cloud-link sidecar).
+        get("/api/cloud/link"),
+        // The workstation-issued credentials this node presents on its lanes:
+        // the install write + the (secret-free) listing.
+        get("/api/compute/workstation-credential"),
+        post("/api/compute/workstation-credential"),
         // ADOS Atlas per-drone world-model capture: readiness read + the enable
         // config write + the live capture-session controls.
         get("/api/atlas/readiness"),
@@ -157,6 +169,9 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/wfb/history"),
         get("/api/wfb/pair"),
         get("/api/wfb/pair/failover-status"),
+        get("/api/wfb/pair/local-bind"),
+        post("/api/wfb/pair/local-bind"),
+        post("/api/wfb/pair/unpair"),
         // Consolidated status.
         get("/api/status/full"),
         // The swarm neighbour table (profile-agnostic: served on drones too).
@@ -181,6 +196,9 @@ fn native_routes() -> Vec<NativeRoute> {
         // Drone attention-profile write: hero / thumbnail. Retargets the local
         // encoder through ados-video's command socket.
         post("/api/video/profile"),
+        // Node-local recording (any profile), the ground-station recorder.
+        post("/api/video/record/start"),
+        post("/api/video/record/stop"),
         // Ground-station status + radio (profile-gated).
         get("/api/v1/ground-station/status"),
         get("/api/v1/ground-station/wfb"),
@@ -212,6 +230,11 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/v1/ground-station/modem-status"),
         // Ground-station pairing / PIC / captive token (profile-gated).
         get("/api/v1/ground-station/pair/pending"),
+        post("/api/v1/ground-station/pair/accept"),
+        post("/api/v1/ground-station/pair/close"),
+        post("/api/v1/ground-station/pair/approve/{device_id}"),
+        post("/api/v1/ground-station/pair/revoke/{device_id}"),
+        post("/api/v1/ground-station/pair/join"),
         get("/api/v1/ground-station/pic"),
         get("/api/v1/ground-station/captive-token"),
         // Ground-station CRSF RC lane (profile-gated): the staleness-gated
@@ -728,7 +751,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            154,
+            172,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -780,6 +803,10 @@ mod tests {
             "/api/plugins/{plugin_id}/state",
             "/api/compute/status",
             "/api/atlas/readiness",
+            "/api/compute/workstation-credential",
+            "/api/cloud/link",
+            "/api/logs",
+            "/api/logs/stream",
         ] {
             assert!(has(Method::GET, p), "{p} must be in the native set");
         }
@@ -794,6 +821,8 @@ mod tests {
         assert!(has(Method::POST, "/api/atlas/capture/start"));
         assert!(has(Method::POST, "/api/atlas/capture/stop"));
         assert!(has(Method::POST, "/api/atlas/capture/pause"));
+        // The workstation credential install (a key-gated write).
+        assert!(has(Method::POST, "/api/compute/workstation-credential"));
         assert!(has(Method::POST, "/api/atlas/capture/resume"));
         assert!(has(Method::POST, "/api/v1/system/restart-supervisor"));
         assert!(has(Method::POST, "/api/mavlink/signing/enroll-fc"));
@@ -813,6 +842,8 @@ mod tests {
         assert!(has(Method::PUT, "/api/video/roster"));
         // The drone attention-profile write (hero / thumbnail).
         assert!(has(Method::POST, "/api/video/profile"));
+        assert!(has(Method::POST, "/api/video/record/start"));
+        assert!(has(Method::POST, "/api/video/record/stop"));
         // The WFB radio writes + the GS network priority + GS wfb config writes.
         assert!(has(Method::POST, "/api/wfb/channel"));
         assert!(has(Method::PUT, "/api/wfb/tx-power"));

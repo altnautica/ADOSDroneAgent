@@ -64,7 +64,12 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: `ados.security` package were deleted, so the Rust download validator and
 #: the WFB pair write no longer mirror anything; their citations went with
 #: the Python they named.
-MIN_CITATIONS = 154
+#:
+#: 154 -> 123: the demo runtime, the in-process role and mesh managers, the
+#: USB gadget service, the residual logs routes and the route request models
+#: were deleted; the 31 Rust comments that cited them now say what the code
+#: does instead.
+MIN_CITATIONS = 123
 
 
 def _rust_sources() -> list[Path]:

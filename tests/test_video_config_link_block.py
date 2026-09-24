@@ -3,8 +3,7 @@
 The GCS Video Link panel polls only this endpoint and reads
 ``config.link.*``. Without the block the panel renders dead, so these
 tests assert the block is present and carries the live liveness fields
-from the in-process WfbManager status (drone) or the shared wfb-stats
-snapshot file (ground station, separate process).
+from the wfb-stats snapshot file the native radio writes.
 """
 
 from __future__ import annotations
@@ -16,8 +15,8 @@ import pytest
 from ados.api.routes.video import encoder_config
 
 
-def _make_app(*, wfb_status=None, config_channel=149):
-    """Build a fake agent app with optional in-process WfbManager."""
+def _make_app(*, config_channel=149):
+    """Build a fake agent app carrying the wfb and camera config."""
     app = MagicMock()
     wfb_cfg = MagicMock()
     wfb_cfg.channel = config_channel
@@ -34,46 +33,7 @@ def _make_app(*, wfb_status=None, config_channel=149):
     app.config.video.camera = MagicMock(
         bitrate_kbps=4000, width=1280, height=720, fps=30, codec="h264"
     )
-
-    if wfb_status is None:
-        app.wfb_manager.return_value = None
-    else:
-        mgr = MagicMock()
-        mgr.get_status.return_value = wfb_status
-        app.wfb_manager.return_value = mgr
-    app.bitrate_controller = lambda: None
-    app.hop_supervisor = lambda: None
     return app
-
-
-@pytest.mark.asyncio
-async def test_link_block_present_from_wfb_manager():
-    """Drone path: link block carries WfbManager.get_status() fields."""
-    status = {
-        "tx_bytes_per_s": 512000.0,
-        "valid_rx_packets_per_s": 0.0,
-        "video_inbound_bytes_per_s": 0.0,
-        "rx_silent_seconds": None,
-        "channel_locked": True,
-        "acquire_state": "locked",
-        "channel": 153,
-    }
-    app = _make_app(wfb_status=status)
-    with patch(
-        "ados.api.routes.video.encoder_config.get_agent_app",
-        return_value=app,
-    ), patch(
-        "ados.api.routes.video.encoder_config._read_state_file",
-        return_value=None,
-    ):
-        resp = await encoder_config.get_video_config()
-
-    assert "link" in resp
-    link = resp["link"]
-    assert link["tx_bytes_per_s"] == 512000.0
-    assert link["channel_locked"] is True
-    assert link["acquire_state"] == "locked"
-    assert link["channel"] == 153
 
 
 @pytest.mark.asyncio
@@ -87,7 +47,7 @@ async def test_link_block_present_from_stats_file_on_ground():
         "acquire_state": "locked",
         "channel": 44,
     }
-    app = _make_app(wfb_status=None, config_channel=149)
+    app = _make_app(config_channel=149)
     with patch(
         "ados.api.routes.video.encoder_config.get_agent_app",
         return_value=app,
@@ -108,7 +68,7 @@ async def test_link_block_present_from_stats_file_on_ground():
 @pytest.mark.asyncio
 async def test_link_block_stable_shape_when_no_data():
     """No manager and no stats file → all fields present, channel from cfg."""
-    app = _make_app(wfb_status=None, config_channel=161)
+    app = _make_app(config_channel=161)
     with patch(
         "ados.api.routes.video.encoder_config.get_agent_app",
         return_value=app,
@@ -139,24 +99,24 @@ async def test_link_block_stable_shape_when_no_data():
 
 @pytest.mark.asyncio
 async def test_link_block_forwards_the_rf_unverified_verdict():
-    """The radio's own verdict rides the link block in both directions.
-
-    An in-process manager IS the live producer, so its reading is fresh by
-    construction and needs no staleness gate.
-    """
+    """The radio's own verdict rides the link block in both directions when
+    the stats snapshot is fresh."""
     unverified = {
         "tx_bytes_per_s": 750000.0,
         "channel_locked": False,
         "rf_unverified": True,
         "channel": 149,
     }
-    app = _make_app(wfb_status=unverified)
+    app = _make_app()
     with patch(
         "ados.api.routes.video.encoder_config.get_agent_app",
         return_value=app,
     ), patch(
         "ados.api.routes.video.encoder_config._read_state_file",
-        return_value=None,
+        return_value=unverified,
+    ), patch(
+        "ados.api.routes.video.encoder_config._stats_age_seconds",
+        return_value=1.0,
     ):
         link = (await encoder_config.get_video_config())["link"]
     assert link["rf_unverified"] is True
@@ -164,13 +124,15 @@ async def test_link_block_forwards_the_rf_unverified_verdict():
     assert link["channel_locked"] is False
 
     proven = {"channel_locked": True, "rf_unverified": False, "channel": 149}
-    app = _make_app(wfb_status=proven)
     with patch(
         "ados.api.routes.video.encoder_config.get_agent_app",
         return_value=app,
     ), patch(
         "ados.api.routes.video.encoder_config._read_state_file",
-        return_value=None,
+        return_value=proven,
+    ), patch(
+        "ados.api.routes.video.encoder_config._stats_age_seconds",
+        return_value=1.0,
     ):
         link = (await encoder_config.get_video_config())["link"]
     assert link["rf_unverified"] is False
@@ -217,7 +179,7 @@ async def test_link_block_drops_a_stale_verdict_from_the_stats_file():
         "rf_unverified": False,
         "channel": 44,
     }
-    app = _make_app(wfb_status=None, config_channel=149)
+    app = _make_app(config_channel=149)
     with patch(
         "ados.api.routes.video.encoder_config.get_agent_app",
         return_value=app,

@@ -47,10 +47,6 @@ use serde_json::{json, Map, Value};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
-// Config seam: the `video.wfb` slice the status base block reads.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Runtime-dir seam: the sidecar files the radio writes.
 // ---------------------------------------------------------------------------
 
@@ -116,7 +112,10 @@ pub async fn get_wfb_status(State(state): State<AppState>) -> Json<Value> {
 /// staleness check). `None` when the store is unreachable, holds no such event, or the
 /// `detail` is absent/non-object, so the caller falls back to the sidecar file.
 async fn latest_wfb_status(state: &AppState) -> Option<(Map<String, Value>, i64)> {
-    let rows = logd_query_events(state, "link.wfb_status", 1).await?;
+    let rows = state
+        .logd
+        .rows("events", 1, Some("link.wfb_status"))
+        .await?;
     let row = rows.first()?.as_object()?;
     let detail = row.get("detail")?.as_object()?;
     if detail.is_empty() {
@@ -189,14 +188,7 @@ async fn latest_wfb_history(state: &AppState, seconds: i64) -> Option<Value> {
     for (metric, _key) in HIST_KEYS {
         params.push(("metric", metric.to_string()));
     }
-    let query = encode_query(&params);
-    let path = format!("/v1/aggregate?{query}");
-
-    let (status, body) = logd_get(state, &path).await.ok()?;
-    if status >= 400 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_slice(&body).ok()?;
+    let parsed = state.logd.query_json("/v1/aggregate", &params).await?;
     let buckets = parsed.get("data")?.as_array()?;
 
     // Group the per-metric buckets into one sample per bucket instant. A BTreeMap
@@ -364,7 +356,10 @@ fn fresh_failover_sidecar(path: &Path, now: SystemTime) -> Option<Map<String, Va
 /// unrecognized value / the row is older than [`FAILOVER_FRESH_S`], so the route
 /// falls back to the sidecar and then to the stale reply.
 async fn latest_wfb_failover(state: &AppState) -> Option<String> {
-    let rows = logd_query_events(state, "wfb.pair.failover", 1).await?;
+    let rows = state
+        .logd
+        .rows("events", 1, Some("wfb.pair.failover"))
+        .await?;
     let row = rows.first()?.as_object()?;
     let ts_us = row.get("ts_us").and_then(Value::as_i64)?;
     let now_us = SystemTime::now()
@@ -384,152 +379,8 @@ async fn latest_wfb_failover(state: &AppState) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// logd query seam: HTTP-over-UDS reads of the store's /v1 API.
-// ---------------------------------------------------------------------------
-
-/// Query the store for the newest `events` rows of one `event_kind`. Returns the
-/// `data` array, or `None` when the store is unreachable / the response is an
-/// error / does not parse. Mirrors the Python `query_rows("events", limit,
-/// event_kind=...)`.
-async fn logd_query_events(state: &AppState, event_kind: &str, limit: i64) -> Option<Vec<Value>> {
-    let params = [
-        ("kind", "events".to_string()),
-        ("limit", limit.to_string()),
-        ("event_kind", event_kind.to_string()),
-    ];
-    let query = encode_query(&params);
-    let path = format!("/v1/query?{query}");
-    let (status, body) = logd_get(state, &path).await.ok()?;
-    if status >= 400 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_slice(&body).ok()?;
-    parsed
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|a| a.to_vec())
-}
-
-/// A minimal HTTP/1.1 `GET` over the logging-store query Unix socket, returning
-/// the status code + the decoded body. The socket path comes from the app state's
-/// logd client so a test redirects it. `Connection: close` reads the body to EOF;
-/// a chunked body is de-chunked. Bounded so a runaway response cannot exhaust
-/// memory. Mirrors the read side of the Python `query_rows` httpx-over-UDS call.
-async fn logd_get(state: &AppState, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A hard ceiling on the response read; a normal events/aggregate page is a
-    /// few KiB, so this only guards a runaway body.
-    const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
-
-    let socket = state.logd.socket_path();
-    let mut stream = tokio::net::UnixStream::connect(socket).await?;
-    let head = format!("GET {path} HTTP/1.1\r\nHost: logd\r\nConnection: close\r\n\r\n");
-    stream.write_all(head.as_bytes()).await?;
-    stream.flush().await?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            break; // EOF (Connection: close).
-        }
-        if raw.len() + n > MAX_READ_BYTES {
-            return Err(std::io::Error::other("logd response too large"));
-        }
-        raw.extend_from_slice(&buf[..n]);
-    }
-    parse_http_response(&raw)
-}
-
-/// Split a raw HTTP/1.1 response into the status code + decoded body. De-chunks a
-/// `Transfer-Encoding: chunked` body; otherwise returns the body after the header
-/// terminator as-is.
-fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
-    let sep = b"\r\n\r\n";
-    let split = raw
-        .windows(sep.len())
-        .position(|w| w == sep)
-        .ok_or_else(|| std::io::Error::other("malformed http response (no header terminator)"))?;
-    let head = &raw[..split];
-    let body = &raw[split + sep.len()..];
-
-    let head_str = String::from_utf8_lossy(head);
-    let status = head_str
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| std::io::Error::other("malformed http status line"))?;
-
-    let chunked = head_str
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked");
-    let body = if chunked {
-        de_chunk(body)
-    } else {
-        body.to_vec()
-    };
-    Ok((status, body))
-}
-
-/// De-chunk a `Transfer-Encoding: chunked` body: `<hexlen>\r\n<data>\r\n`
-/// repeated until a zero-length chunk.
-fn de_chunk(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    while let Some(crlf) = rest.windows(2).position(|w| w == b"\r\n") {
-        let len_line = &rest[..crlf];
-        let len = usize::from_str_radix(String::from_utf8_lossy(len_line).trim(), 16).unwrap_or(0);
-        if len == 0 {
-            break;
-        }
-        let data_start = crlf + 2;
-        if rest.len() < data_start + len {
-            out.extend_from_slice(&rest[data_start..]);
-            break;
-        }
-        out.extend_from_slice(&rest[data_start..data_start + len]);
-        let next = data_start + len;
-        rest = if rest.len() >= next + 2 {
-            &rest[next + 2..]
-        } else {
-            &[]
-        };
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
 // Small shared helpers.
 // ---------------------------------------------------------------------------
-
-/// Percent-encode a query-parameter list into a `key=value&...` string. Only the
-/// characters the store's query values use (`-`, digits, letters, `s`) appear, so
-/// a conservative reserved-character escape is sufficient; encode the reserved
-/// `&`, `=`, `%`, `+`, and space to be safe.
-fn encode_query(params: &[(&str, String)]) -> String {
-    params
-        .iter()
-        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Conservative percent-encoding for the query helper: pass through the
-/// unreserved set (`A-Za-z0-9-._~`) verbatim and percent-encode every other byte.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
 
 /// Render a microsecond-epoch timestamp as an ISO-8601 UTC string ending in `Z`,
 /// matching the Python `_iso_from_us` (`datetime.fromtimestamp(...).isoformat()`
@@ -664,8 +515,7 @@ mod tests {
 
     #[test]
     fn finalize_derives_frequency_bandwidth_and_bitrate_mbps() {
-        // A merged body on channel 149 with 5000 kbps must re-derive 5745/20 and a
-        // 5.0 mbps shim. Mirrors the FastAPI `_finalize_status`.
+        // A merged body on channel 149 with 5000 kbps must re-derive 5745/20 and a 5.0 mbps shim.
         let mut merged = Map::new();
         merged.insert("channel".to_string(), json!(149));
         merged.insert("bitrate_kbps".to_string(), json!(5000));
@@ -913,28 +763,5 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(body["slots"], json!([]));
-    }
-
-    #[test]
-    fn de_chunk_reassembles_a_chunked_body() {
-        let chunked = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        assert_eq!(de_chunk(chunked), b"hello world");
-    }
-
-    #[test]
-    fn parse_http_response_reads_status_and_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
-        let (status, body) = parse_http_response(raw).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, b"{}");
-    }
-
-    #[test]
-    fn percent_encode_escapes_reserved_chars() {
-        // The unreserved set passes through; the space + `-` cases the query uses.
-        assert_eq!(percent_encode("link.rssi_dbm"), "link.rssi_dbm");
-        assert_eq!(percent_encode("-60s"), "-60s");
-        assert_eq!(percent_encode("a b"), "a%20b");
-        assert_eq!(percent_encode("k=v"), "k%3Dv");
     }
 }

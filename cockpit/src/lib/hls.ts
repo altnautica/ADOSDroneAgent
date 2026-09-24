@@ -1,4 +1,4 @@
-import { mediaAuthHeaders } from "./media-auth";
+import { mediaAuthHeaders, withMediaAuth } from "./media-auth";
 // Lazy HLS player. iOS / macOS Safari can play HLS natively via the
 // `<video>` element's `src` attribute. Chrome / Firefox / Edge need
 // hls.js as a Media Source Extensions adapter. We dynamic-import
@@ -19,13 +19,21 @@ export interface HlsResult {
   error?: string;
 }
 
+/**
+ * Start HLS playback of `hlsUrl` into `videoEl`. `onLost` fires once if an
+ * established session later dies beyond hls.js's own recovery, so the caller
+ * stops calling a dead stream live and retries.
+ */
 export async function startHls(
   hlsUrl: string,
   videoEl: HTMLVideoElement,
+  onLost?: () => void,
 ): Promise<HlsResult> {
-  // Native HLS path (Safari, iOS, some Smart TVs)
+  // Native HLS path (Safari, iOS, some Smart TVs). The element fetches the
+  // playlist and segments itself and cannot send a header, so the session
+  // rides the query string the agent accepts on the media plane only.
   if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
-    videoEl.src = hlsUrl;
+    videoEl.src = withMediaAuth(hlsUrl);
     try {
       await videoEl.play();
     } catch {
@@ -93,6 +101,7 @@ export async function startHls(
 
   return new Promise<HlsResult>((resolve) => {
     let resolved = false;
+    let manifestTimer: ReturnType<typeof setTimeout> | null = null;
     const cleanup = () => {
       try {
         hls.destroy();
@@ -102,6 +111,8 @@ export async function startHls(
       videoEl.removeAttribute("src");
     };
     const settle = (result: HlsResult) => {
+      if (manifestTimer) clearTimeout(manifestTimer);
+      manifestTimer = null;
       if (!resolved) {
         resolved = true;
         resolve(result);
@@ -145,6 +156,11 @@ export async function startHls(
           break;
       }
       cleanup();
+      if (resolved) {
+        // The session was established and has now died: tell the caller.
+        onLost?.();
+        return;
+      }
       settle({
         ok: false,
         error: `HLS error: ${data.details ?? data.type}`,
@@ -154,9 +170,13 @@ export async function startHls(
     hls.attachMedia(videoEl);
     hls.loadSource(hlsUrl);
 
-    // Safety net: 8s without a manifest = give up so the layer can
-    // retry.
-    setTimeout(() => {
+    // Safety net: 8s without a manifest = give up so the layer can retry.
+    // Tear the player down first: a live hls.js left behind keeps fetching
+    // segments and claims the <video> the next attempt plays into.
+    manifestTimer = setTimeout(() => {
+      manifestTimer = null;
+      if (resolved) return;
+      cleanup();
       settle({ ok: false, error: "HLS manifest timeout (8s)." });
     }, 8000);
   });

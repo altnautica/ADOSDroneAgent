@@ -30,14 +30,15 @@ pub use crate::usb_rehome::machine::RehomeTrigger as HoldTrigger;
 /// a radio that is still coming up.
 pub const REARM_CONFIRM_HOLD: Duration = Duration::from_secs(600);
 
-/// Re-arm episodes allowed per key fingerprint, ever. Survives reboots (the
-/// record is persistent), so a rig that cannot bind does not spend its life
-/// re-binding.
-pub const DEFAULT_MAX_REARM_EPISODES: u32 = 5;
-
 /// Wall-clock wait between re-arm episodes, anchored on the persisted
 /// `last_rearm_at` rather than an in-process timer, so a restart (or a crash
 /// loop) cannot shorten it.
+///
+/// This is the only bound. There is no episode budget: a budget latched a
+/// permanent "exhausted" verdict per key that survived reboots, so a drone
+/// holding a key from a reflashed peer stopped trying after a couple of hours
+/// and needed someone to reach it before it would ever bind again. A fixed
+/// cooldown keeps recovery going at a pace that cannot become a bind storm.
 pub const DEFAULT_REARM_COOLDOWN_S: u64 = 1800;
 
 /// Max age of `wfb-stats.json` before its signals count as no signal at all. The
@@ -113,8 +114,6 @@ pub enum RearmStep {
     /// The condition holds but the wall-clock cooldown from the last episode has
     /// not elapsed.
     Cooldown { remaining_s: u64 },
-    /// Every episode for this key is spent and the fault persists.
-    Exhausted,
 }
 
 /// Everything [`decide_rearm`] needs, read once by the caller.
@@ -126,9 +125,7 @@ pub struct RearmInput {
     pub forced: bool,
     /// The unproven condition has held for the full confirm window.
     pub hold_armed: bool,
-    /// Episodes already spent on this fingerprint.
     pub episodes: u32,
-    pub max_episodes: u32,
     /// Wall clock of the last episode, from the persisted record.
     pub last_rearm_at: Option<u64>,
     pub cooldown_s: u64,
@@ -139,9 +136,10 @@ pub struct RearmInput {
 ///
 /// Precedence matters. The operator force runs first because it exists to
 /// override exactly this machine. The proven latch runs next, ahead of the
-/// hold, the budget and the cooldown, so no combination of inputs can re-bind a
-/// pair that has worked — that path is closed by construction rather than by
-/// every later branch happening to decline.
+/// hold and the cooldown, so no combination of inputs can re-bind a pair that
+/// has worked — that path is closed by construction rather than by every later
+/// branch happening to decline. A never-proven key is re-armed for as long as
+/// the fault persists, one episode per cooldown.
 pub fn decide_rearm(input: RearmInput) -> RearmStep {
     if input.forced {
         return RearmStep::Arm {
@@ -154,9 +152,6 @@ pub fn decide_rearm(input: RearmInput) -> RearmStep {
     }
     if !input.hold_armed {
         return RearmStep::Idle;
-    }
-    if input.episodes >= input.max_episodes {
-        return RearmStep::Exhausted;
     }
     if let Some(last) = input.last_rearm_at {
         let ready_at = last.saturating_add(input.cooldown_s);
@@ -183,7 +178,6 @@ mod tests {
             forced: false,
             hold_armed: true,
             episodes: 0,
-            max_episodes: DEFAULT_MAX_REARM_EPISODES,
             last_rearm_at: None,
             cooldown_s: DEFAULT_REARM_COOLDOWN_S,
             now_unix: 1_000_000,
@@ -260,36 +254,29 @@ mod tests {
         );
     }
 
-    // ── budget + cooldown ─────────────────────────────────────────────────────
+    // ── cooldown ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn the_episode_budget_is_bounded() {
-        for spent in 0..DEFAULT_MAX_REARM_EPISODES {
-            assert!(
-                matches!(
-                    decide_rearm(RearmInput {
-                        episodes: spent,
-                        ..base()
-                    }),
-                    RearmStep::Arm { .. }
-                ),
-                "{spent} spent should still arm"
+    fn a_fault_that_persists_keeps_being_retried_one_episode_per_cooldown() {
+        // There is no budget: the hundredth episode arms on the same terms as
+        // the second. A key from a peer that was reflashed yesterday is still
+        // worth re-arming today.
+        for spent in [1u32, 5, 6, 100] {
+            let last = 1_000_000u64;
+            assert_eq!(
+                decide_rearm(RearmInput {
+                    episodes: spent,
+                    last_rearm_at: Some(last),
+                    now_unix: last + DEFAULT_REARM_COOLDOWN_S,
+                    ..base()
+                }),
+                RearmStep::Arm {
+                    episode: spent + 1,
+                    forced: false
+                },
+                "{spent} spent must still arm once the cooldown has passed"
             );
         }
-        assert_eq!(
-            decide_rearm(RearmInput {
-                episodes: DEFAULT_MAX_REARM_EPISODES,
-                ..base()
-            }),
-            RearmStep::Exhausted
-        );
-        assert_eq!(
-            decide_rearm(RearmInput {
-                episodes: DEFAULT_MAX_REARM_EPISODES + 7,
-                ..base()
-            }),
-            RearmStep::Exhausted
-        );
     }
 
     #[test]
@@ -340,11 +327,11 @@ mod tests {
     // ── the operator escape hatch ─────────────────────────────────────────────
 
     #[test]
-    fn force_overrides_the_proven_latch_the_budget_and_the_cooldown() {
+    fn force_overrides_the_proven_latch_and_the_cooldown() {
         let blocked = RearmInput {
             proven: true,
             hold_armed: false,
-            episodes: DEFAULT_MAX_REARM_EPISODES + 3,
+            episodes: 8,
             last_rearm_at: Some(1_000_000),
             ..base()
         };
@@ -355,7 +342,7 @@ mod tests {
                 ..blocked
             }),
             RearmStep::Arm {
-                episode: DEFAULT_MAX_REARM_EPISODES + 4,
+                episode: 9,
                 forced: true
             }
         );

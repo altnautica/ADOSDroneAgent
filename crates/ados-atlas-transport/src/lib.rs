@@ -10,10 +10,9 @@
 //!    drone, compute node, and GCS share a network; keyframes stream direct over
 //!    LAN HTTP. A real indoor-commercial production topology and the lead-testable
 //!    path (local-first).
-//! 2. **Post-flight LAN bulk** — the landed drone bulk-uploads the full bag.
-//! 3. **WFB relay** — the ground agent bridges a decimated lane WFB<->LAN
+//! 2. **WFB relay** — the ground agent bridges a decimated lane WFB<->LAN
 //!    (the carrier lands with the ground-agent relay role).
-//! 4. **Cloud relay** — MQTT/Convex for off-LAN reach, an opt-in cloud lane.
+//! 3. **Cloud relay** — MQTT/Convex for off-LAN reach, an opt-in cloud lane.
 //!
 //! [`LoopbackBearer`] is the in-process bearer for tests and the same-host case.
 //! [`WorldBroadcaster`] is the compute-side fan-out a world-model consumer (the

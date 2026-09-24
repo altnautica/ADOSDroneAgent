@@ -124,7 +124,7 @@ def test_is_known_capability():
 
 @pytest.fixture
 def agent_app():
-    return build_api_runtime(uptime_seconds=0.0)
+    return build_api_runtime()
 
 
 @pytest.fixture

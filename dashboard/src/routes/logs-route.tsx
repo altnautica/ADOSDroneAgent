@@ -10,7 +10,8 @@ import { useResource } from "@/hooks/use-resource";
 
 interface LogEntry {
   seq?: number;
-  timestamp: number | string;
+  /** Null when the store row carried no time. */
+  timestamp: number | string | null;
   level: string;
   logger: string;
   message: string;
@@ -41,10 +42,11 @@ const TONE: Record<string, string> = {
 };
 
 function fmtTs(ts: LogEntry["timestamp"]): string {
+  if (ts === null) return "—";
   if (typeof ts === "number") {
     return new Date(ts * 1000).toLocaleTimeString();
   }
-  return String(ts);
+  return ts;
 }
 
 export function LogsRoute() {

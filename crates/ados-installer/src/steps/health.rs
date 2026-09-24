@@ -67,6 +67,7 @@ pub fn expected_profile_units(profile: &str) -> &'static [&'static str] {
         "ground_station" => &[
             "ados-supervisor.service",
             "ados-wfb-rx.service",
+            "ados-mesh-pairing.service",
             "ados-mediamtx-gs.service",
             "ados-hostapd.service",
             "ados-dnsmasq-gs.service",
@@ -101,10 +102,10 @@ fn supervisor_active() -> bool {
 /// endpoint. A paired agent returns 401 on `/api/status` (which `curl -f`
 /// treats as failure), so we probe `/api/pairing/info` exactly like the bash.
 ///
-/// The `start` step launched the supervisor moments ago; its `ados-api` child
-/// takes a few seconds to bind `:8080`, so a single immediate probe is a false
-/// miss. Poll with a grace window (returns the instant it answers), the same
-/// way the bash health gate waits for the API to come up.
+/// The `start` step launched the supervisor moments ago; the native control
+/// front (`ados-control`, which owns `:8080`) takes a few seconds to bind, so a
+/// single immediate probe is a false miss. Poll with a grace window (returns
+/// the instant it answers).
 fn rest_reachable() -> bool {
     const ATTEMPTS: u32 = 20;
     const DELAY: std::time::Duration = std::time::Duration::from_secs(3);

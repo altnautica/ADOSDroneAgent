@@ -174,18 +174,48 @@ where
     tokio::task::spawn_blocking(f).await.ok()
 }
 
-/// True when `unit` reports `active`.
+/// Whether `unit` is running: `Some(true)` when systemd reports it active,
+/// `Some(false)` when systemd answered with any other state, and `None` when no
+/// answer came (no `systemctl`, a spawn failure, a timeout), so a caller can show
+/// "unknown" rather than "down".
+///
+/// `systemctl is-active` exits non-zero for every state but active, so the state
+/// is read from stdout whatever the exit status.
 ///
 /// One definition, replacing the two byte-identical `hostapd_running()` copies
 /// that had drifted into `routes::gs_network` and `routes::gs_status`. A
 /// duplicated liveness probe is how two surfaces come to give an operator two
 /// different answers about the same unit.
-pub async fn unit_is_active(unit: &str) -> bool {
-    capture_systemctl(&["is-active", unit], PROBE_TIMEOUT)
+pub async fn unit_state(unit: &str) -> Option<bool> {
+    let child = Command::new("systemctl")
+        .args(["is-active", unit])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("SYSTEMD_COLORS", "0")
+        .env("LANG", "C")
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let out = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
         .await
-        .text()
-        .trim()
-        == "active"
+        .ok()?
+        .ok()?;
+    parse_is_active(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Read a `systemctl is-active` answer. Empty output is no answer.
+fn parse_is_active(stdout: &str) -> Option<bool> {
+    match stdout.lines().next().map(str::trim) {
+        None | Some("") => None,
+        Some(state) => Some(matches!(state, "active" | "reloading")),
+    }
+}
+
+/// True only when `unit` is known to be active; an unanswered probe is false.
+/// For callers where unknown and down lead to the same honest output.
+pub async fn unit_is_active(unit: &str) -> bool {
+    unit_state(unit).await == Some(true)
 }
 
 /// True when `program` resolves on `PATH`.
@@ -259,6 +289,14 @@ mod tests {
     #[tokio::test]
     async fn offload_returns_the_value() {
         assert_eq!(offload(|| 7u8).await, Some(7));
+    }
+
+    #[test]
+    fn is_active_answers_are_read_whatever_the_exit_status() {
+        assert_eq!(parse_is_active("active\n"), Some(true));
+        assert_eq!(parse_is_active("inactive\n"), Some(false));
+        assert_eq!(parse_is_active("failed\n"), Some(false));
+        assert_eq!(parse_is_active(""), None);
     }
 
     #[tokio::test]

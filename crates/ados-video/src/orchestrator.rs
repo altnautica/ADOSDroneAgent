@@ -3,15 +3,16 @@
 //! This is the integration core that wires the leaf modules (camera
 //! discovery, the encoder command builder, mediamtx, the wfb radio tap, the
 //! camera-state sidecar) into the long-lived supervisor the drone runs on the
-//! air side. It owns the full lifecycle: cold start, the 5 s health tick with
-//! exponential-backoff restart + circuit breaker, the separate cloud-push and
-//! wfb-tee restart ladders, the camera-hotplug-woken retry from the error
-//! state, and the RAII teardown of every child process on shutdown.
+//! air side. It owns the full lifecycle: cold start, the 5 s health tick whose
+//! cadence is also every ladder's fixed retry cadence (pipeline restart, cloud
+//! push, wfb tap, vision tap, secondary legs), the camera-hotplug-woken retry
+//! from the error state, and the RAII teardown of every child process on
+//! shutdown.
 //!
-//! The sequencing is a faithful port of the Python `VideoPipeline`
-//! orchestrator (`services/video/pipeline/pipeline.py`): the same start order,
-//! the same grace / inbound-stall / wfb-stale health rules, the same backoff
-//! ladders. The process-group ownership (setsid + killpg) that the Python
+//! The sequencing follows the Python `VideoPipeline` orchestrator
+//! (`services/video/pipeline/pipeline.py`): the same start order and the same
+//! grace / inbound-stall / wfb-stale health rules. The process-group ownership
+//! (setsid + killpg) that the Python
 //! version did by hand lives structurally in [`crate::process::ManagedProcess`]
 //! now, so a dropped future can never orphan a publish-bridge ffmpeg onto the
 //! mediamtx `/main` slot.
@@ -25,31 +26,22 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ados_protocol::shutdown::Shutdown;
 use tokio::sync::{Mutex, Notify};
 
 use crate::config::{AgentVideoConfig, CameraConfig, ResolvedLeg};
 use crate::discover::{self, DiscoveryResult};
 use crate::encoder::{EncoderEnv, EncoderKind};
+use crate::health::{
+    grace_decision, inbound_decision, sei_tap_session_wedged, should_fallback_to_software,
+    GraceDecision, InboundDecision, PipelineState, StartError, HEALTH_CHECK_INTERVAL,
+    SEI_TAP_SESSION_MAX,
+};
 use crate::mediamtx::{MediamtxManager, MAIN_PATH};
 use crate::process::ManagedProcess;
 use crate::profile::{EncoderControl, EncoderSettings, EncoderState, VideoProfile};
-use crate::shutdown::Shutdown;
 use crate::wfb_tee::{
     wfb_tee_output_is_stalled, wfb_tee_progress_is_stale, ProgressTracker, WFB_TEE_PROGRESS_TIMEOUT,
-};
-
-// The pipeline's pure health-decision logic (constants, FSM states, the
-// backoff / circuit-breaker / grace / inbound-flow decisions) lives in
-// [`crate::health`]. Re-exported at this module path so the original
-// `orchestrator::HEALTH_CHECK_INTERVAL`, `orchestrator::PipelineState`,
-// `orchestrator::backoff_delay`, etc. callers keep resolving unchanged.
-pub use crate::health::{
-    backoff_delay, circuit_breaker_tripped, grace_decision, healthy_window_elapsed,
-    inbound_decision, retry_cap, sei_tap_session_wedged, should_fallback_to_software,
-    GraceDecision, InboundDecision, PipelineState, StartError, BASE_RESTART_DELAY,
-    CIRCUIT_BREAKER_ATTEMPTS, HEALTHY_RESET_WINDOW, HEALTH_CHECK_INTERVAL, INBOUND_FLOW_STALL,
-    MAX_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA, SEI_TAP_SESSION_MAX, STARTUP_GRACE_MAX,
-    WFB_TEE_RESTART_CEILING,
 };
 
 // --- orchestrator ------------------------------------------------------------
@@ -88,17 +80,6 @@ pub struct VideoOrchestrator {
     /// mediamtx `sourceOnDemand` pulls and own no process here. Empty on a
     /// single-leg / network-only node.
     pub(crate) secondary_encoders: Vec<(String, ManagedProcess)>,
-    /// Per-leg respawn attempts for local secondary encoders, so a permanently
-    /// broken local secondary camera is given up on rather than respawned every
-    /// tick forever (a bounded circuit breaker; network-pull legs are unaffected).
-    /// The count is CONSECUTIVE-failure, not lifetime: it is cleared once a leg
-    /// runs healthy for a window (see `secondary_started_at`), so a flaky-but-
-    /// recoverable camera is not permanently abandoned after enough total deaths.
-    pub(crate) secondary_respawn_attempts: std::collections::HashMap<String, u32>,
-    /// When each local secondary encoder was last (re)started, so a leg that has
-    /// run healthy for `HEALTHY_RESET_WINDOW` clears its respawn count — the
-    /// secondary analog of the primary's `note_healthy_tick` restart-count reset.
-    pub(crate) secondary_started_at: std::collections::HashMap<String, Instant>,
     pub(crate) wfb_tee: Option<ManagedProcess>,
     /// True when the PRIMARY encoder's own argv carries the radio's RTP output,
     /// so [`Self::wfb_tee`] is deliberately `None` and must not be spawned,
@@ -152,11 +133,9 @@ pub struct VideoOrchestrator {
     pub(crate) inbound_bytes_changed_at: Instant,
     pub(crate) video_inbound_bytes_per_s: f64,
 
-    /// The instant a healthy run began, or `None` (the armed sentinel,
-    /// Python's `0.0`) when the next healthy tick should re-stamp it. A failed
-    /// probe re-arms it to `None`.
-    pub(crate) last_healthy_at: Option<Instant>,
-
+    /// Consecutive failed recovery attempts of each ladder, for the log lines
+    /// only: every ladder retries on the next health tick however high these
+    /// climb, and each is cleared by the attempt that succeeds.
     pub(crate) restart_count: u32,
     pub(crate) cloud_restart_count: u32,
     pub(crate) wfb_tee_restart_count: u32,
@@ -175,31 +154,21 @@ pub struct VideoOrchestrator {
     /// Consecutive cold-start attempts whose encoder never produced a first
     /// packet. Drives the software fallback: a hardware / GStreamer encoder that
     /// cannot stream on this box is abandoned for ffmpeg libx264 rather than
-    /// crash-looped until the circuit breaker.
+    /// restarted against the same wall forever.
     pub(crate) no_first_packet_failures: u32,
     /// Latched once the hardware / GStreamer encoder has been abandoned this
     /// process lifetime, forcing the encoder command onto the software path. A
     /// process restart / reboot clears it, so the hardware path is retried fresh.
     pub(crate) force_software: bool,
 
-    /// Earliest instant the cloud-push branch may retry, or `None` when it may
-    /// retry now. The cloud relay is the SECONDARY path; its backoff/park must
-    /// never block the whole tick body and starve primary-radio (wfb-tee)
-    /// recovery. So instead of sleeping the tick on the cloud backoff, the
-    /// cloud branch stamps a deadline here and the tick falls through to the
-    /// wfb / vision branches; the cloud branch is skipped until the deadline
-    /// elapses.
-    pub(crate) cloud_retry_after: Option<Instant>,
-
-    /// Serializes teardown+respawn across the cold start and the health-check
-    /// restart (held only around the bounded region, never across a backoff
-    /// sleep). A runtime camera change is not a distinct operation: a fresh
-    /// `/dev/video*` node fires SIGUSR1 → `camera_plugged` → the retry path,
-    /// which re-runs the same locked teardown+respawn, so there is no separate
-    /// switch lock.
+    /// Serializes teardown+respawn across the cold start, the health-check
+    /// restart and the attention-switch respawn. A runtime camera change is not
+    /// a distinct operation: a fresh `/dev/video*` node fires SIGUSR1 →
+    /// `camera_plugged` → the retry path, which re-runs the same locked
+    /// teardown+respawn, so there is no separate switch lock.
     pub(crate) restart_lock: Arc<Mutex<()>>,
-    /// Fired by SIGUSR1 (a fresh `/dev/video*` node) to short-circuit the
-    /// no-primary backoff sleep.
+    /// Fired by SIGUSR1 (a fresh `/dev/video*` node) so a pipeline parked in
+    /// the error state retries at once instead of on the next health tick.
     pub(crate) camera_plugged: Arc<Notify>,
 
     pub(crate) python_executable: String,
@@ -248,13 +217,20 @@ impl VideoOrchestrator {
         env: EncoderEnv,
     ) -> Self {
         let now = Instant::now();
+        // On a multi-leg node the primary leg IS the primary camera: its source
+        // and encode-plane settings (geometry, bitrate, orientation, encoder,
+        // GOP) drive the primary encoder. Without this overlay every per-leg
+        // edit of the primary was saved and then ignored in favour of the
+        // legacy `video.camera` block.
+        let camera_cfg = config.primary_camera_config(camera_cfg);
         let legs = config.resolve_legs(&camera_cfg);
 
         // Attention profile, resolved before the first encoder command is
-        // built. The `video.camera` block IS the hero profile, so capture it
-        // now; the boot profile then overwrites the live capture settings so a
-        // fleet node cold-starts at 320x180/1 fps instead of grabbing 48% of the
-        // shared channel's airtime before the ground station can demote it.
+        // built. The primary camera's settings ARE the hero profile, so capture
+        // them now; the boot profile then overwrites the live capture settings
+        // so a fleet node cold-starts at 320x180/1 fps instead of grabbing 48%
+        // of the shared channel's airtime before the ground station can demote
+        // it.
         let mut camera_cfg = camera_cfg;
         let hero_base = crate::profile::base_settings(VideoProfile::Hero, &camera_cfg);
         let boot = crate::profile::boot_profile(&config.mode);
@@ -283,8 +259,6 @@ impl VideoOrchestrator {
             .with_recording(recording_params),
             encoder: None,
             secondary_encoders: Vec::new(),
-            secondary_respawn_attempts: std::collections::HashMap::new(),
-            secondary_started_at: std::collections::HashMap::new(),
             wfb_tee: None,
             encoder_emits_wfb_rtp: false,
             cloud_push: None,
@@ -304,7 +278,6 @@ impl VideoOrchestrator {
             inbound_bytes_value: -1,
             inbound_bytes_changed_at: now,
             video_inbound_bytes_per_s: 0.0,
-            last_healthy_at: None,
             restart_count: 0,
             cloud_restart_count: 0,
             wfb_tee_restart_count: 0,
@@ -313,7 +286,6 @@ impl VideoOrchestrator {
             last_start_error: StartError::None,
             no_first_packet_failures: 0,
             force_software: false,
-            cloud_retry_after: None,
             restart_lock: Arc::new(Mutex::new(())),
             camera_plugged: Arc::new(Notify::new()),
             python_executable: discover::python_executable(),
@@ -487,12 +459,8 @@ impl VideoOrchestrator {
         .await;
     }
 
-    /// Write the video-streams sidecar (the resolved leg list: id/role/codec)
-    /// so the out-of-process status surfaces can advertise each leg + the GCS
-    /// can populate its stream switcher. Best-effort — a write failure is
-    /// logged, never fatal. Honors [`Self::video_streams_path`].
     /// Sample each leg's mediamtx inbound-byte counter and derive per-leg
-    /// liveness (`leg_live`): a leg whose counter advanced is live; a leg flat
+    /// liveness (`leg_live`): a leg whose counter moved is live; a leg flat
     /// for `LEG_FLAT_SECS` is stalled. Surfaces a dead secondary leg in the
     /// sidecar. mediamtx owns per-path re-establishment for a
     /// `sourceOnDemand` pull when a reader re-attaches; this is the detection.
@@ -513,7 +481,7 @@ impl VideoOrchestrator {
                 continue;
             };
             let entry = self.leg_inbound.entry(id.clone()).or_insert((cur, now));
-            if cur > entry.0 {
+            if leg_counter_moved(entry.0, cur) {
                 entry.0 = cur;
                 entry.1 = now;
                 self.leg_live.insert(id, true);
@@ -535,6 +503,10 @@ impl VideoOrchestrator {
         self.leg_live.retain(|k, _| present.contains(k.as_str()));
     }
 
+    /// Write the video-streams sidecar (the resolved leg list: id/role/codec)
+    /// so the out-of-process status surfaces can advertise each leg + the GCS
+    /// can populate its stream switcher. Best-effort — a write failure is
+    /// logged, never fatal. Honors [`Self::video_streams_path`].
     pub(crate) async fn refresh_video_streams(&self) {
         let snap =
             crate::video_streams::VideoStreamsSnapshot::from_legs(&self.legs, &self.leg_live);
@@ -856,9 +828,9 @@ impl VideoOrchestrator {
         true
     }
 
-    /// The main service loop. Drives the 5 s health tick, the restart ladders,
-    /// and the camera-hotplug-woken retry, terminating on `shutdown` with a
-    /// full teardown of every child process.
+    /// The main service loop. Drives the 5 s health tick (every ladder's fixed
+    /// retry cadence) and the camera-hotplug-woken retry, terminating on
+    /// `shutdown` with a full teardown of every child process.
     pub async fn run(mut self, shutdown: Shutdown) {
         tracing::info!("video_pipeline_service_start");
         let mut tick = tokio::time::interval(HEALTH_CHECK_INTERVAL);
@@ -880,6 +852,10 @@ impl VideoOrchestrator {
         // start, so a switch may already be pending. Subscribe first (so nothing
         // arriving from here on is missed), then reconcile once.
         self.apply_desired_encoder().await;
+        // A fresh `/dev/video*` node retries a parked pipeline at once rather
+        // than on the next tick. A local handle so the select arm borrows it,
+        // not `self`.
+        let camera_plugged = Arc::clone(&self.camera_plugged);
 
         loop {
             tokio::select! {
@@ -888,7 +864,13 @@ impl VideoOrchestrator {
                     break;
                 }
                 _ = tick.tick() => {
-                    self.tick_once(&shutdown).await;
+                    self.tick_once().await;
+                }
+                _ = camera_plugged.notified() => {
+                    if self.state != PipelineState::Running {
+                        tracing::info!("camera_plugged: retrying the pipeline now");
+                        self.tick_retry_from_error().await;
+                    }
                 }
                 _ = telemetry_tick.tick() => {
                     self.emit_telemetry(&telemetry);
@@ -906,11 +888,12 @@ impl VideoOrchestrator {
             }
         }
 
-        // Final teardown: wfb tee → vision tap → cloud push → encoder →
-        // mediamtx. The ManagedProcess Drop killpg is the backstop;
+        // Final teardown: wfb tee → vision tap → secondary legs → cloud push →
+        // encoder → mediamtx. The ManagedProcess Drop killpg is the backstop;
         // this is the graceful ordered path.
         self.stop_wfb_tee().await;
         self.stop_vision_tap().await;
+        self.stop_secondary_encoders().await;
         self.stop_cloud_push().await;
         if let Some(mut tap) = self.sei_tap.take() {
             tap.terminate(Duration::from_secs(2)).await;
@@ -957,12 +940,10 @@ impl VideoOrchestrator {
     /// One iteration of the run loop's body, factored out so the `select!`
     /// arm stays small. Handles the Running health ladder and the
     /// Error/Stopped retry-from-error path.
-    async fn tick_once(&mut self, shutdown: &Shutdown) {
+    async fn tick_once(&mut self) {
         match self.state {
-            PipelineState::Running => self.tick_running(shutdown).await,
-            PipelineState::Error | PipelineState::Stopped => {
-                self.tick_retry_from_error(shutdown).await
-            }
+            PipelineState::Running => self.tick_running().await,
+            PipelineState::Error | PipelineState::Stopped => self.tick_retry_from_error().await,
             PipelineState::Starting => {
                 // A transient Starting state outside start_stream() shouldn't
                 // persist; nothing to do this tick.
@@ -970,9 +951,11 @@ impl VideoOrchestrator {
         }
     }
 
-    /// The Running-state health ladder: health → cloud → wfb, each with its own
-    /// restart cadence.
-    async fn tick_running(&mut self, shutdown: &Shutdown) {
+    /// The Running-state health ladder: health → cloud → wfb → vision → SEI.
+    /// Every ladder acts on this tick and retries on the next one; nothing in
+    /// here sleeps, so the run loop stays responsive to shutdown and to an
+    /// attention switch.
+    async fn tick_running(&mut self) {
         let health_ok = self.check_health().await;
         // Sample per-leg liveness, then re-stamp the leg-list sidecar EVERY tick,
         // regardless of the PRIMARY's health: the advertised legs are static
@@ -983,10 +966,7 @@ impl VideoOrchestrator {
         self.sample_leg_liveness().await;
         self.refresh_video_streams().await;
         if health_ok {
-            self.note_healthy_tick();
             self.refresh_camera_state().await;
-        } else {
-            self.note_unhealthy_tick();
         }
 
         // Supervise the isolated secondary-leg encoders (best-effort respawn of
@@ -997,11 +977,11 @@ impl VideoOrchestrator {
             // A run that never produced a first packet is an encoder that cannot
             // stream on this box (a hardware/GStreamer path that will not
             // negotiate/publish here). After a few such failures, abandon it for
-            // the software ffmpeg path rather than crash-loop until the circuit
-            // breaker — the software path always runs, so a bad HW encoder can no
-            // longer brick video. A run that streamed then stalled has
-            // first_packet_seen set, so it resets the counter instead of tripping
-            // this.
+            // the software ffmpeg path rather than restart the same encoder
+            // forever — the software path always runs, so a bad HW encoder can
+            // no longer brick video. A run that streamed then stalled has
+            // first_packet_seen set, so it resets the counter instead of
+            // tripping this.
             if !self.first_packet_seen {
                 self.no_first_packet_failures += 1;
                 if should_fallback_to_software(self.no_first_packet_failures, self.force_software) {
@@ -1016,33 +996,10 @@ impl VideoOrchestrator {
                 self.no_first_packet_failures = 0;
             }
             self.restart_count += 1;
-            if circuit_breaker_tripped(self.restart_count) {
-                tracing::error!(
-                    attempts = self.restart_count,
-                    "pipeline_circuit_breaker: too many failures, waiting 5 minutes"
-                );
-                self.state = PipelineState::Error;
-                // Keep the camera-state sidecar fresh across the long park so a
-                // present camera does not read as `unknown` to the staleness
-                // gate while the orchestrator is wedged.
-                self.refresh_camera_state().await;
-                interruptible_sleep(MAX_RESTART_DELAY, shutdown, &self.camera_plugged, false).await;
-                self.restart_count = 0;
-                return;
-            }
-            let delay = backoff_delay(self.restart_count, BASE_RESTART_DELAY, MAX_RESTART_DELAY);
             tracing::warn!(
                 attempt = self.restart_count,
-                backoff_s = delay.as_secs_f64(),
                 "pipeline_health_check_failed: restarting"
             );
-            // Back off BEFORE taking the restart lock (the Python discipline:
-            // the lock is never held across the long sleep). Refresh the
-            // camera-state sidecar before the sleep so it stays fresh while the
-            // pipeline is unhealthy.
-            self.refresh_camera_state().await;
-            let pre = delay.saturating_sub(HEALTH_CHECK_INTERVAL);
-            interruptible_sleep(pre, shutdown, &self.camera_plugged, false).await;
             let _guard = self.restart_lock.clone().lock_owned().await;
             self.stop_stream().await;
             let ok = self.start_stream().await;
@@ -1053,44 +1010,22 @@ impl VideoOrchestrator {
             return;
         }
 
-        // Encoder healthy — check the cloud push ladder. The cloud relay is the
-        // SECONDARY path: its backoff/park is a non-blocking deadline, never an
-        // in-tick sleep, so a configured-but-unreachable relay can never starve
-        // the wfb-tee recovery below. A pending `cloud_retry_after` deadline in
-        // the future suppresses the branch (the tick falls through to wfb /
-        // vision); once the deadline elapses the branch runs, attempts the
-        // re-arm, and either succeeds or stamps a fresh deadline. This branch
-        // never `return`s, so an unhealthy cloud push no longer short-circuits
-        // the radio fan-out.
-        let cloud_due = self
-            .cloud_retry_after
-            .map(|deadline| Instant::now() >= deadline)
-            .unwrap_or(true);
-        if cloud_due {
-            self.tick_cloud_push().await;
-        }
+        // Encoder healthy — check the cloud push. The cloud relay is the
+        // SECONDARY path and its re-arm is a bare spawn, so an unreachable relay
+        // costs one short-lived ffmpeg per tick and never delays the wfb-tee
+        // recovery below. This branch never `return`s.
+        self.tick_cloud_push().await;
 
-        // Encoder + cloud fine — check the wfb tee ladder (no circuit breaker;
-        // Video retries forever).
+        // Encoder + cloud fine — check the wfb tee ladder (video retries
+        // forever).
         if !self.check_wfb_tee_health().await {
             if !self.mediamtx.path_ready(MAIN_PATH).await {
                 tracing::warn!("wfb_tee_source_down: RTSP source not ready; deferring tee respawn");
                 self.stop_wfb_tee().await;
             } else {
                 self.wfb_tee_restart_count += 1;
-                let delay = backoff_delay(
-                    self.wfb_tee_restart_count,
-                    BASE_RESTART_DELAY,
-                    WFB_TEE_RESTART_CEILING,
-                );
-                tracing::warn!(
-                    attempt = self.wfb_tee_restart_count,
-                    backoff_s = delay.as_secs_f64(),
-                    "wfb_tee_restarting"
-                );
+                tracing::warn!(attempt = self.wfb_tee_restart_count, "wfb_tee_restarting");
                 self.stop_wfb_tee().await;
-                let pre = delay.saturating_sub(HEALTH_CHECK_INTERVAL);
-                interruptible_sleep(pre, shutdown, &self.camera_plugged, false).await;
                 self.start_wfb_tee().await;
                 if self.wfb_tee.is_some() {
                     self.wfb_tee_restart_count = 0;
@@ -1100,9 +1035,9 @@ impl VideoOrchestrator {
         }
 
         // Vision tap ladder (additive, lowest priority). Same shape as the wfb
-        // tap: defer the respawn when the RTSP source is down, otherwise back
-        // off and restart. No circuit breaker — an additive consumer retries
-        // forever and never affects the encode/radio verdict above.
+        // tap: defer the respawn when the RTSP source is down, otherwise
+        // restart. An additive consumer retries forever and never affects the
+        // encode/radio verdict above.
         let vision_supervised = self.vision_enabled() && !self.config.vision.raw_tap;
         if vision_supervised && !self.check_vision_tap_health().await {
             if !self.mediamtx.path_ready(MAIN_PATH).await {
@@ -1112,19 +1047,11 @@ impl VideoOrchestrator {
                 self.stop_vision_tap().await;
             } else {
                 self.vision_tap_restart_count += 1;
-                let delay = backoff_delay(
-                    self.vision_tap_restart_count,
-                    BASE_RESTART_DELAY,
-                    WFB_TEE_RESTART_CEILING,
-                );
                 tracing::warn!(
                     attempt = self.vision_tap_restart_count,
-                    backoff_s = delay.as_secs_f64(),
                     "vision_tap_restarting"
                 );
                 self.stop_vision_tap().await;
-                let pre = delay.saturating_sub(HEALTH_CHECK_INTERVAL);
-                interruptible_sleep(pre, shutdown, &self.camera_plugged, false).await;
                 self.start_vision_tap().await;
                 if self.vision_tap.is_some() {
                     self.vision_tap_restart_count = 0;
@@ -1134,9 +1061,9 @@ impl VideoOrchestrator {
         }
 
         // Healthy tick — if SEI latency is on and the one-shot tap exited (it
-        // runs a single read session), respawn it. No circuit breaker (latency
-        // telemetry retries forever); deferred when the path is not
-        // ready so there is no hot-loop against a dead source.
+        // runs a single read session), respawn it. Latency telemetry retries
+        // forever; deferred when the path is not ready so there is no hot-loop
+        // against a dead source.
         //
         // `!is_running()` alone is not sufficient even for a one-shot. The tap
         // is a real RTSP consumer, and a session whose connect blocks forever
@@ -1169,120 +1096,36 @@ impl VideoOrchestrator {
         }
     }
 
-    /// The non-blocking cloud-push re-arm step, run from `tick_running` only
-    /// when any pending `cloud_retry_after` deadline has elapsed.
+    /// The cloud-push re-arm step, run on every Running tick.
     ///
-    /// Unlike the encoder/wfb ladders this NEVER sleeps the tick: a configured
-    /// cloud relay that is unreachable must not stall the primary-radio (wfb)
-    /// recovery that runs after it. On an unhealthy push it tears down the
-    /// stale process, then either parks for the circuit-breaker window or stamps
-    /// a backoff deadline and tries the re-arm immediately (so a transient
-    /// outage recovers on the first due tick); a persistent failure re-stamps
-    /// the deadline on the following due tick. On a healthy push it clears the
-    /// deadline and the counter.
+    /// On an unhealthy push it tears down the stale process and spawns a fresh
+    /// one; a relay that stays unreachable is retried on the next tick. On a
+    /// healthy push it clears the failure counter.
     async fn tick_cloud_push(&mut self) {
         if self.check_cloud_push_health().await {
-            // Healthy (or not configured / not running) — nothing to do; clear
-            // any leftover backoff state.
-            self.cloud_retry_after = None;
+            // Healthy (or not configured / not running).
             self.cloud_restart_count = 0;
             return;
         }
         // Unhealthy: the slot is absent (full-restart re-arm needed) or the
-        // process exited. Reap any stale process first.
+        // process exited or wedged. Reap any stale process first.
         self.stop_cloud_push().await;
         self.cloud_restart_count += 1;
-        if circuit_breaker_tripped(self.cloud_restart_count) {
-            tracing::error!(
-                attempts = self.cloud_restart_count,
-                "cloud_push_circuit_breaker: parking cloud push 5 minutes (radio recovery continues)"
-            );
-            self.cloud_retry_after = Some(Instant::now() + MAX_RESTART_DELAY);
-            self.cloud_restart_count = 0;
-            return;
-        }
-        let delay = backoff_delay(
-            self.cloud_restart_count,
-            BASE_RESTART_DELAY,
-            MAX_RESTART_DELAY,
-        );
-        tracing::warn!(
-            attempt = self.cloud_restart_count,
-            backoff_s = delay.as_secs_f64(),
-            "cloud_push_restarting"
-        );
+        tracing::warn!(attempt = self.cloud_restart_count, "cloud_push_restarting");
         if self.start_cloud_push().await {
-            // Re-armed — clear the backoff state.
-            self.cloud_retry_after = None;
             self.cloud_restart_count = 0;
-        } else {
-            // Failed to re-arm — defer the next attempt by the backoff window
-            // WITHOUT blocking the tick, so the wfb branch keeps running.
-            self.cloud_retry_after = Some(Instant::now() + delay);
         }
     }
 
-    /// The Error/Stopped retry-from-error path: exponential backoff with the
-    /// no-camera-vs-real-wedge cap split and a SIGUSR1-woken sleep.
-    async fn tick_retry_from_error(&mut self, shutdown: &Shutdown) {
+    /// The Error/Stopped retry path: one cold-start attempt per tick (or per
+    /// camera hotplug), forever.
+    async fn tick_retry_from_error(&mut self) {
         self.restart_count += 1;
-        let cap = retry_cap(self.last_start_error);
-        let wake_on_camera = self.last_start_error == StartError::NoPrimaryCamera;
-        // Keep the camera-state sidecar fresh across the retry backoff sleep so
-        // a present-but-wedged camera (the last-known snapshot) does not read as
-        // `unknown` to the staleness gate while the pipeline is parked in the
-        // Error state. `start_stream` re-discovers + re-persists on the actual
-        // retry; this only covers the long sleep windows.
-        self.refresh_camera_state().await;
-        if circuit_breaker_tripped(self.restart_count) {
-            tracing::warn!(
-                attempts = self.restart_count,
-                backoff_s = cap.as_secs_f64(),
-                "pipeline_retry_backoff: 10 consecutive failures, backing off"
-            );
-            interruptible_sleep(cap, shutdown, &self.camera_plugged, wake_on_camera).await;
-            self.restart_count = 0;
-            return;
-        }
-        let delay = backoff_delay(self.restart_count, BASE_RESTART_DELAY, cap);
-        tracing::info!(
-            attempt = self.restart_count,
-            backoff_s = delay.as_secs_f64(),
-            "pipeline_retry_from_error"
-        );
-        let pre = delay.saturating_sub(HEALTH_CHECK_INTERVAL);
-        interruptible_sleep(pre, shutdown, &self.camera_plugged, wake_on_camera).await;
+        tracing::info!(attempt = self.restart_count, "pipeline_retry_from_error");
         if self.start_stream().await {
             self.restart_count = 0;
             tracing::info!("pipeline_recovered: stream started after retry");
         }
-    }
-
-    /// Stamp a healthy probe and clear the restart counter once the run has been
-    /// continuously healthy for the reset window. The first healthy tick after an
-    /// unhealthy probe (or cold start) only stamps `last_healthy_at`; the counter
-    /// clears only after the window elapses with no intervening unhealthy tick.
-    fn note_healthy_tick(&mut self) {
-        let now = Instant::now();
-        let Some(since) = self.last_healthy_at else {
-            // Armed sentinel — begin the healthy run, do not clear yet.
-            self.last_healthy_at = Some(now);
-            return;
-        };
-        if self.restart_count > 0 && healthy_window_elapsed(since, now) {
-            tracing::info!(
-                window_s = HEALTHY_RESET_WINDOW.as_secs(),
-                attempts = self.restart_count,
-                "pipeline_restart_counter_reset: healthy window reached"
-            );
-            self.restart_count = 0;
-        }
-    }
-
-    /// Re-arm the consecutive-healthy timer on a failed probe so the window has to
-    /// start over before the counter can clear.
-    fn note_unhealthy_tick(&mut self) {
-        self.last_healthy_at = None;
     }
 }
 
@@ -1301,10 +1144,18 @@ fn liveness_on_flat(is_network_pull: bool) -> Option<bool> {
     }
 }
 
+/// Whether a leg's mediamtx `bytesReceived` counter shows new work since the
+/// last sample. ANY change counts: a counter that went DOWN is a fresh
+/// publisher on the path (the per-path counter restarts when the source
+/// reconnects, e.g. after a secondary encoder respawn), which is progress, not a
+/// stall. Only an unchanged counter is flat.
+fn leg_counter_moved(previous: u64, current: u64) -> bool {
+    current != previous
+}
+
 /// Write resolved attention settings into the live capture config the encoder
-/// command builder reads. Only the four encode knobs move; source, codec and
-/// codec preference are the operator's and never touched by an attention
-/// switch.
+/// command builder reads. Only the four encode knobs move; source and codec are
+/// the operator's and never touched by an attention switch.
 pub(crate) fn apply_settings_to(cfg: &mut CameraConfig, s: EncoderSettings) {
     cfg.width = s.width;
     cfg.height = s.height;
@@ -1342,31 +1193,6 @@ pub fn ceiling_change_is_deferrable(live: EncoderSettings, target: EncoderSettin
     // exactly the threshold applies.
     live.bitrate_kbps.abs_diff(target.bitrate_kbps) * 100
         < live.bitrate_kbps * CEILING_DEFER_PERCENT
-}
-
-/// Sleep up to `dur`, waking early on shutdown or (when `wake_on_camera`) on a
-/// camera-plugged SIGUSR1. A zero / negative duration returns immediately.
-async fn interruptible_sleep(
-    dur: Duration,
-    shutdown: &Shutdown,
-    camera_plugged: &Arc<Notify>,
-    wake_on_camera: bool,
-) {
-    if dur.is_zero() {
-        return;
-    }
-    if wake_on_camera {
-        tokio::select! {
-            _ = tokio::time::sleep(dur) => {}
-            _ = camera_plugged.notified() => {}
-            _ = shutdown.wait() => {}
-        }
-    } else {
-        tokio::select! {
-            _ = tokio::time::sleep(dur) => {}
-            _ = shutdown.wait() => {}
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1941,13 +1767,7 @@ mod tests {
 
         o.supervise_secondary_encoders().await;
 
-        // The mute encoder was retained-out of the live set and counted as a
-        // respawn attempt, which is what routes it into the respawn ladder.
-        assert_eq!(
-            o.secondary_respawn_attempts.get("cam2"),
-            Some(&1),
-            "a mute leg must enter the same respawn ladder an exit does"
-        );
+        // The mute encoder was reaped — the same path an exit takes.
         assert!(
             !o.secondary_encoders.iter().any(|(id, _)| id == "cam2"),
             "the wedged process must be dropped, not left running forever"
@@ -1965,7 +1785,6 @@ mod tests {
 
         o.supervise_secondary_encoders().await;
 
-        assert!(!o.secondary_respawn_attempts.contains_key("cam2"));
         assert!(o.secondary_encoders.iter().any(|(id, _)| id == "cam2"));
         if let Some((_, mut p)) = o.secondary_encoders.pop() {
             p.terminate(Duration::from_secs(1)).await;
@@ -1986,10 +1805,49 @@ mod tests {
 
         o.supervise_secondary_encoders().await;
 
-        assert!(!o.secondary_respawn_attempts.contains_key("cam2"));
+        assert!(
+            o.secondary_encoders.iter().any(|(id, _)| id == "cam2"),
+            "an unsampled leg is not mute"
+        );
         if let Some((_, mut p)) = o.secondary_encoders.pop() {
             p.terminate(Duration::from_secs(1)).await;
         }
+    }
+
+    /// A respawned secondary encoder is a new publisher on its path and must
+    /// get a fresh liveness window. Carrying the dead encoder's `live: false`
+    /// and flat-since stamp across the respawn marked the new one mute at birth,
+    /// so the next tick killed it before it could publish a frame — forever.
+    #[tokio::test]
+    async fn a_respawned_secondary_starts_a_fresh_liveness_window() {
+        let mut o = test_orch();
+        o.state = PipelineState::Running;
+        o.leg_live.insert("cam2".to_string(), false);
+        o.leg_inbound.insert(
+            "cam2".to_string(),
+            (1_000_000, Instant::now() - Duration::from_secs(60)),
+        );
+
+        let fresh = ManagedProcess::spawn("test-secondary", "sleep", &["30".into()]).unwrap();
+        o.note_secondary_spawned("cam2", fresh);
+        o.supervise_secondary_encoders().await;
+
+        assert!(
+            o.secondary_encoders.iter().any(|(id, _)| id == "cam2"),
+            "the fresh encoder must survive the next tick"
+        );
+        assert!(!o.leg_live.contains_key("cam2"));
+        assert!(!o.leg_inbound.contains_key("cam2"));
+        o.stop_secondary_encoders().await;
+    }
+
+    /// mediamtx restarts a path's byte counter when a new publisher connects,
+    /// so a counter that went DOWN is a fresh encoder at work, not a stall.
+    #[test]
+    fn a_reset_leg_counter_is_progress_not_a_stall() {
+        assert!(leg_counter_moved(5_000_000, 1_200));
+        assert!(leg_counter_moved(10, 20));
+        assert!(!leg_counter_moved(10, 10));
     }
 
     /// Every `start_stream` must RE-ENUMERATE the camera, never reuse the
@@ -2063,88 +1921,39 @@ mod tests {
         assert!(o.check_cloud_push_health().await);
     }
 
-    // --- a down cloud relay must not starve wfb recovery --------------------
+    // --- every ladder retries at the tick cadence, forever ------------------
 
+    /// A pipeline that has failed far past any attempt count still retries on
+    /// this tick, and the tick returns promptly. The old ladder backed off
+    /// exponentially and, from the tenth failure, parked for five minutes inside
+    /// the tick — dark video long after the cause was gone, and every attention
+    /// switch queued behind the sleep.
     #[tokio::test]
-    async fn tick_cloud_push_parks_without_blocking_on_breaker_trip() {
-        // With the cloud restart counter at the breaker edge, the next
-        // unhealthy step must PARK via a future deadline (not sleep the tick)
-        // so the wfb branch keeps running. The whole call must return in well
-        // under the 300 s park window.
-        let mut o = cloud_orch();
-        o.state = PipelineState::Running;
-        // An exited cloud_push reads unhealthy (reaped in tick_cloud_push).
-        let mut p = ManagedProcess::spawn("test-cloud-push", "true", &[]).unwrap();
-        for _ in 0..50 {
-            if !p.is_running() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(!p.is_running(), "test process should have exited");
-        o.cloud_push = Some(p);
-        // One increment away from tripping the breaker.
-        o.cloud_restart_count = CIRCUIT_BREAKER_ATTEMPTS - 1;
+    async fn a_pipeline_that_keeps_failing_retries_every_tick_without_parking() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut o = test_orch();
+        o.camera_state_path = Some(dir.path().join("camera-state.json"));
+        o.video_streams_path = Some(dir.path().join("video-streams.json"));
+        // `printf` stands in for the discovery interpreter: no camera, fast.
+        o.python_executable = "printf".to_string();
+        o.state = PipelineState::Error;
+        o.restart_count = 40;
 
-        let before = Instant::now();
-        o.tick_cloud_push().await;
-        let elapsed = before.elapsed();
+        tokio::time::timeout(Duration::from_secs(3), o.tick_retry_from_error())
+            .await
+            .expect("a retry tick must never sleep a backoff or a park");
 
-        // Returned promptly — it did NOT sleep the 300 s park window.
-        assert!(
-            elapsed < Duration::from_secs(5),
-            "tick_cloud_push blocked for {elapsed:?}; it must never sleep the tick"
-        );
-        // Parked: a future retry deadline is stamped and the counter reset.
-        let deadline = o.cloud_retry_after.expect("a park deadline was stamped");
-        assert!(
-            deadline > Instant::now(),
-            "the deadline must be in the future"
-        );
-        assert_eq!(o.cloud_restart_count, 0);
-        // The stale process slot was reaped.
-        assert!(o.cloud_push.is_none());
+        assert_eq!(o.restart_count, 41, "the attempt ran");
+        assert_eq!(o.last_start_error, StartError::NoPrimaryCamera);
     }
 
     #[tokio::test]
-    async fn parked_cloud_deadline_suppresses_branch_so_wfb_runs() {
-        // The cloud branch is gated on `cloud_due`. A park deadline in the
-        // future makes the branch NOT due, so the tick falls through to the wfb
-        // / vision branches — the anti-starvation invariant. This asserts the
-        // exact gate the run loop uses.
-        let mut o = cloud_orch();
-        o.cloud_retry_after = Some(Instant::now() + Duration::from_secs(300));
-        let cloud_due = o
-            .cloud_retry_after
-            .map(|deadline| Instant::now() >= deadline)
-            .unwrap_or(true);
-        assert!(
-            !cloud_due,
-            "a future park deadline must suppress the cloud branch"
-        );
-
-        // Once the deadline has elapsed the branch becomes due again.
-        o.cloud_retry_after = Some(Instant::now() - Duration::from_secs(1));
-        let cloud_due = o
-            .cloud_retry_after
-            .map(|deadline| Instant::now() >= deadline)
-            .unwrap_or(true);
-        assert!(
-            cloud_due,
-            "an elapsed park deadline must re-open the cloud branch"
-        );
-    }
-
-    #[tokio::test]
-    async fn tick_cloud_push_clears_state_when_healthy() {
-        // When cloud is disabled the absent slot is healthy; tick_cloud_push
-        // must clear any leftover backoff state and not park.
+    async fn tick_cloud_push_clears_the_failure_count_when_healthy() {
+        // Cloud disabled: the absent slot is healthy and the count clears.
         let mut o = test_orch();
         o.state = PipelineState::Running;
         o.cloud_restart_count = 3;
-        o.cloud_retry_after = Some(Instant::now() + Duration::from_secs(10));
         o.tick_cloud_push().await;
-        assert!(o.cloud_retry_after.is_none());
         assert_eq!(o.cloud_restart_count, 0);
     }
 
@@ -2282,11 +2091,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_wedged_pipeline_keeps_its_error_reason_across_the_park() {
-        // The circuit breaker sets Error, then refresh_camera_state keeps the
-        // sidecar fresh across the 5-minute park. The reason that motivated the
-        // park must survive that refresh — erasing it one line later is what
-        // sent operators hunting through journals.
+    async fn a_refresh_in_the_error_state_keeps_the_error_reason() {
+        // A camera-state refresh while the pipeline sits in Error must restamp
+        // the standing failure and its reason, not erase them — a bare `error`
+        // is what sends operators hunting through journals.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("camera-state.json");
         let mut o = test_orch();
@@ -2379,32 +2187,6 @@ mod tests {
     }
 
     #[test]
-    fn note_healthy_tick_sentinel_state_machine() {
-        let mut o = test_orch();
-        // Cold start: armed sentinel.
-        assert_eq!(o.last_healthy_at, None);
-        // A failing run accrued a couple of restarts.
-        o.restart_count = 3;
-        // First healthy tick only stamps the sentinel; counter is NOT cleared
-        // (the window hasn't elapsed yet).
-        o.note_healthy_tick();
-        assert!(o.last_healthy_at.is_some());
-        assert_eq!(o.restart_count, 3);
-        // Backdate the stamp past the window, then a healthy tick clears it.
-        o.last_healthy_at = Some(Instant::now() - Duration::from_secs(61));
-        o.note_healthy_tick();
-        assert_eq!(o.restart_count, 0);
-        // An unhealthy tick re-arms the sentinel.
-        o.restart_count = 2;
-        o.note_unhealthy_tick();
-        assert_eq!(o.last_healthy_at, None);
-        // Next healthy tick re-stamps (does not clear) — the window restarts.
-        o.note_healthy_tick();
-        assert!(o.last_healthy_at.is_some());
-        assert_eq!(o.restart_count, 2);
-    }
-
-    #[test]
     fn a_flat_on_demand_leg_is_unknown_not_dead() {
         // A network-pull (sourceOnDemand) leg with no reader reads flat; that is
         // "no viewer", not "dead", so it must be UNKNOWN (None), never a
@@ -2413,46 +2195,40 @@ mod tests {
         assert_eq!(liveness_on_flat(false), Some(false));
     }
 
-    #[tokio::test]
-    async fn secondary_respawn_counter_resets_after_a_healthy_window() {
-        let mut o = test_orch();
-        o.state = PipelineState::Running;
-        // A running secondary encoder (a real long-lived child), accrued respawns,
-        // and a start stamp older than the healthy window.
-        let proc =
-            ManagedProcess::spawn("test-secondary", "sleep", &["30".into()]).expect("spawn sleep");
-        o.secondary_encoders.push(("sub".into(), proc));
-        o.secondary_respawn_attempts.insert("sub".into(), 4);
-        o.secondary_started_at
-            .insert("sub".into(), Instant::now() - Duration::from_secs(61));
-
-        o.supervise_secondary_encoders().await;
-
-        assert!(
-            !o.secondary_respawn_attempts.contains_key("sub"),
-            "a leg that ran healthy past the window clears its respawn count"
+    /// On a multi-leg node the primary leg's own settings drive the primary
+    /// encoder and the hero profile — an edit to the primary leg's bitrate,
+    /// geometry or orientation must not be ignored in favour of the legacy
+    /// `video.camera` block.
+    #[test]
+    fn the_primary_legs_settings_drive_the_primary_encoder() {
+        let cameras: Vec<crate::config::CameraLeg> = serde_norway::from_str(
+            "- { id: ir, source: rtsp://192.168.144.25:8554/ir, role: ir }\n\
+             - { id: eo, source: /dev/video0, role: primary, width: 1920, height: 1080, \
+                 fps: 25, bitrate_kbps: 2500, rotation: 180 }\n",
+        )
+        .unwrap();
+        let config = AgentVideoConfig {
+            // Not a shared-channel node, so it boots straight at hero.
+            mode: "cloud".to_string(),
+            cameras,
+            ..AgentVideoConfig::default()
+        };
+        let o = VideoOrchestrator::new(
+            config,
+            CameraConfig::default(),
+            std::path::Path::new("/tmp"),
+            EncoderEnv::detect(),
         );
-        o.stop_secondary_encoders().await;
-    }
-
-    #[tokio::test]
-    async fn secondary_respawn_counter_holds_within_the_healthy_window() {
-        let mut o = test_orch();
-        o.state = PipelineState::Running;
-        let proc =
-            ManagedProcess::spawn("test-secondary", "sleep", &["30".into()]).expect("spawn sleep");
-        o.secondary_encoders.push(("sub".into(), proc));
-        o.secondary_respawn_attempts.insert("sub".into(), 4);
-        // Started just now — the window has NOT elapsed, so the count must hold.
-        o.secondary_started_at.insert("sub".into(), Instant::now());
-
-        o.supervise_secondary_encoders().await;
-
         assert_eq!(
-            o.secondary_respawn_attempts.get("sub").copied(),
-            Some(4),
-            "a leg still inside the healthy window keeps its respawn count"
+            o.hero_base,
+            EncoderSettings {
+                width: 1920,
+                height: 1080,
+                fps: 25,
+                bitrate_kbps: 2500
+            }
         );
-        o.stop_secondary_encoders().await;
+        assert_eq!(o.camera_cfg.rotation, 180);
+        assert_eq!(o.camera_cfg.source, "/dev/video0");
     }
 }

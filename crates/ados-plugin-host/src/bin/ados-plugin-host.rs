@@ -333,6 +333,9 @@ async fn build_host(install_dir: PathBuf, run_dir: PathBuf, bus: &Arc<EventBus>)
         mavlink.subscribe(),
         host.fc_identity(),
     );
+    // The atlas bus's shared-data topics (live pose, world-model descriptors)
+    // reach plugins only through this bridge, behind the subscribe gate.
+    ados_plugin_host::atlas_bridge::spawn_atlas_bridge(Arc::clone(bus), run_dir.join("atlas.sock"));
     host = host
         .with_mavlink(mavlink)
         .with_msp(Arc::new(link("msp.sock")));

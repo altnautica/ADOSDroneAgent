@@ -215,10 +215,16 @@ fn parse_ply_vertex_count(header: &str) -> u64 {
 /// The vertex count of a PLY file from its header, 0 on any read error / missing
 /// count.
 fn ply_vertex_count(path: &Path) -> u64 {
-    let Ok(bytes) = std::fs::read(path) else {
+    use std::io::Read;
+    // The header sits in the first few KB; never read the point body.
+    let mut head = Vec::with_capacity(4096);
+    let Ok(file) = std::fs::File::open(path) else {
         return 0;
     };
-    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]);
+    if file.take(4096).read_to_end(&mut head).is_err() {
+        return 0;
+    }
+    let head = String::from_utf8_lossy(&head);
     parse_ply_vertex_count(&head)
 }
 

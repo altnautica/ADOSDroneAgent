@@ -28,24 +28,18 @@ function buildBanners(
   }
 
   if (status.isSuccess && snapshot.isSuccess) {
-    if (status.data.profile === "drone" && snapshot.data.fc.connected === false) {
+    // An MSP flight controller never sends a MAVLink heartbeat, so
+    // `fc.connected` stays false for it; `fcReachable` covers both.
+    if (
+      status.data.profile === "drone" &&
+      snapshot.data.fc?.connected === false &&
+      heartbeat.data?.fcReachable !== true
+    ) {
       banners.push({
         id: "fc-disconnected",
         severity: "warn",
         message: "Flight controller is disconnected.",
       });
-    }
-    if (status.data.profile === "drone") {
-      const cloud = snapshot.data.cloud;
-      if (cloud.mqtt_state && cloud.mqtt_state !== "connected" && cloud.mqtt_state !== "online") {
-        if (cloud.mqtt_state !== "unknown") {
-          banners.push({
-            id: "cloud-relay-down",
-            severity: "warn",
-            message: `Cloud relay ${cloud.mqtt_state}.`,
-          });
-        }
-      }
     }
   }
 

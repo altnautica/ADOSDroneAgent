@@ -110,6 +110,10 @@ pub fn build_native_enrichment_with(prev_cpu: &mut Option<CpuSample>, services: 
 /// current sample. Omits `cpuPercent` on the first tick (no prior sample) or when
 /// `/proc/stat` is unreadable.
 fn fold_cpu(obj: &mut Map<String, Value>, prev: &mut Option<CpuSample>) {
+    // The logical CPU count this process can schedule on, a measured host fact.
+    if let Ok(n) = std::thread::available_parallelism() {
+        obj.insert("cpuCores".to_string(), json!(n.get()));
+    }
     let cur = match read_proc_stat_cpu() {
         Some(s) => s,
         None => return,
@@ -177,6 +181,9 @@ fn fold_memory(obj: &mut Map<String, Value>) {
     };
 
     obj.insert("memoryTotalMb".to_string(), json!(info.total_mb));
+    // The host RAM the kernel reports, the same measured figure the fleet view
+    // labels as the board's RAM.
+    obj.insert("boardRamMb".to_string(), json!(info.total_mb));
     obj.insert("memoryAvailableMb".to_string(), json!(info.available_mb));
     obj.insert("memoryUsedMb".to_string(), json!(info.used_mb));
     obj.insert("memoryCacheMb".to_string(), json!(info.cache_mb));
@@ -426,7 +433,8 @@ fn read_state_snapshot() -> Option<Value> {
 
 /// Fold the `ados-*` service fleet in from one `systemctl list-units`. Omits the
 /// `services` key when systemctl is absent / errors. Each entry is the Convex
-/// service-object shape (`name`/`status`/`uptimeSeconds`/`memoryMb`).
+/// service-object shape reduced to what `list-units` actually reports
+/// (`name`/`status`).
 fn fold_services(obj: &mut Map<String, Value>) {
     let out = match run_with_timeout(
         "systemctl",
@@ -450,10 +458,9 @@ fn fold_services(obj: &mut Map<String, Value>) {
 /// Parse `systemctl list-units --no-legend` output into the heartbeat service
 /// objects. Columns are `UNIT LOAD ACTIVE SUB DESCRIPTION`; the name is the unit
 /// minus `.service`, the status is `running` when SUB is `running` else the SUB
-/// verbatim (matching the Python `_systemd_services_fallback`). `uptimeSeconds`
-/// and `memoryMb` are emitted as zero — the cloud relay does not have the
-/// per-unit accounting the API process does, and the Convex validator accepts the
-/// keys as optional with these defaults. Pure for unit testing.
+/// verbatim. `list-units` carries no per-unit accounting, so `uptimeSeconds`,
+/// `memoryMb` and `cpuPercent` are omitted (the receiver declares them
+/// optional) rather than asserted as a fabricated `0`. Pure for unit testing.
 pub fn parse_systemctl_units(out: &str) -> Vec<Value> {
     let mut services = Vec::new();
     for line in out.lines() {
@@ -482,8 +489,6 @@ pub fn parse_systemctl_units(out: &str) -> Vec<Value> {
         services.push(json!({
             "name": name,
             "status": status,
-            "uptimeSeconds": 0,
-            "memoryMb": 0.0,
         }));
     }
     services
@@ -678,8 +683,9 @@ ados-cloud.service      loaded inactive dead   ADOS cloud relay
         assert_eq!(svcs.len(), 3);
         assert_eq!(svcs[0]["name"], "ados-supervisor");
         assert_eq!(svcs[0]["status"], "running");
-        assert_eq!(svcs[0]["uptimeSeconds"], 0);
-        assert_eq!(svcs[0]["memoryMb"], 0.0);
+        // list-units measures no per-unit accounting, so none is asserted.
+        assert!(svcs[0].get("uptimeSeconds").is_none());
+        assert!(svcs[0].get("memoryMb").is_none());
         // A non-running SUB carries through verbatim, not "running".
         assert_eq!(svcs[2]["name"], "ados-cloud");
         assert_eq!(svcs[2]["status"], "dead");

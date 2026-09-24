@@ -199,22 +199,26 @@ pub async fn run_vision_tap_server<R>(
 
     // Reader owns ffmpeg stdout exclusively. read_exact is safe here because it
     // is the only awaiter of the stream.
+    //
+    // Each frame is read into its own buffer and MOVED into the channel — no
+    // per-frame copy. The buffer the channel just released is reclaimed for
+    // the next read whenever the server has finished with it, so a steady tap
+    // allocates only when the engine is still writing the previous frame.
     let reader = tokio::spawn(async move {
         let mut stdout = stdout;
-        let mut buf = vec![0u8; frame_size];
+        let mut spare: Option<Vec<u8>> = None;
         loop {
-            match stdout.read_exact(&mut buf).await {
-                Ok(_) => {
-                    // Newest-frame-wins: a slow engine simply misses frames.
-                    if tx.send(Some(Arc::new(buf.clone()))).is_err() {
-                        return; // server gone
-                    }
-                }
-                Err(e) => {
-                    tracing::info!(error = %e, "vision_tap_source_eof");
-                    return;
-                }
+            let mut buf = spare.take().unwrap_or_else(|| vec![0u8; frame_size]);
+            if let Err(e) = stdout.read_exact(&mut buf).await {
+                tracing::info!(error = %e, "vision_tap_source_eof");
+                return;
             }
+            // Newest-frame-wins: a slow engine simply misses frames.
+            let previous = tx.send_replace(Some(Arc::new(buf)));
+            if tx.is_closed() {
+                return; // server gone
+            }
+            spare = previous.and_then(|frame| Arc::try_unwrap(frame).ok());
         }
     });
 

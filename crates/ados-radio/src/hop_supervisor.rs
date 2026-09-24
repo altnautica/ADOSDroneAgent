@@ -9,13 +9,13 @@
 //! `auto_hop_enabled: false` case so the received-side lock proof works
 //! regardless of hop config.
 
+use ados_protocol::shutdown::Shutdown;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
-use tokio::sync::Notify;
 
 use ados_radio::hop::{
     build_hop_announce, build_presence_beacon, hop_announce_interval, hop_announce_rounds,
@@ -112,7 +112,7 @@ pub(crate) async fn emit_presence_beacons(
     iface: &str,
     fallback_channel: u8,
     pair_key: &[u8; 32],
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     let Ok(sock) = tokio::net::UdpSocket::bind("0.0.0.0:0").await else {
         return;
@@ -138,7 +138,31 @@ pub(crate) async fn emit_presence_beacons(
                     .send_to(&pkt, format!("127.0.0.1:{HOP_CONTROL_PORT}"))
                     .await;
             }
-            _ = cancel.notified() => return,
+            _ = cancel.wait() => return,
+        }
+    }
+}
+
+/// Retry cadence for binding the control-plane return port. Fixed and uncapped:
+/// a port briefly held by a restarting sibling must not cost the received-side
+/// proof for the rest of the bring-up.
+const ACK_BIND_RETRY: Duration = Duration::from_secs(5);
+
+/// Bind the control-plane return port (`127.0.0.1:5810`), retrying every
+/// [`ACK_BIND_RETRY`] until it binds or `cancel` fires (`None`). Loopback only:
+/// the one producer is the rx-control `wfb_rx` re-emitting on 127.0.0.1, and
+/// nothing on the network should be able to post into this listener.
+async fn bind_ack_socket(cancel: &Shutdown) -> Option<tokio::net::UdpSocket> {
+    loop {
+        match tokio::net::UdpSocket::bind(("127.0.0.1", HOP_ACK_PORT)).await {
+            Ok(s) => return Some(s),
+            Err(e) => {
+                tracing::warn!(error = %e, port = HOP_ACK_PORT, "hop_ack_socket_bind_failed_retrying");
+                tokio::select! {
+                    _ = tokio::time::sleep(ACK_BIND_RETRY) => {}
+                    _ = cancel.wait() => return None,
+                }
+            }
         }
     }
 }
@@ -156,17 +180,10 @@ pub(crate) async fn proof_only_listener(
     device_id: &str,
     rx_proof: ados_radio::link_proof::RxProof,
     reference: Instant,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
-    let sock = match tokio::net::UdpSocket::bind(format!("0.0.0.0:{HOP_ACK_PORT}")).await {
-        Ok(s) => s,
-        Err(e) => {
-            // The port is taken or unbindable: fall back to a plain wait so the
-            // task still ends cleanly on cancel rather than spinning.
-            tracing::warn!(error = %e, "proof_listener_bind_failed");
-            cancel.notified().await;
-            return;
-        }
+    let Some(sock) = bind_ack_socket(&cancel).await else {
+        return;
     };
     let pair_key = *pair_key;
     let own_device_id = device_id.to_string();
@@ -184,7 +201,7 @@ pub(crate) async fn proof_only_listener(
                     }
                 }
             }
-            _ = cancel.notified() => return,
+            _ = cancel.wait() => return,
         }
     }
 }
@@ -207,9 +224,11 @@ pub(crate) async fn run_hop_supervisor(
     proof_reference: Instant,
     operating_channel: Arc<AtomicU64>,
     mut manual_rx: tokio::sync::mpsc::Receiver<ManualHopRequest>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
-    let state = Arc::new(tokio::sync::Mutex::new(HopState::new(cfg.channel)));
+    let state = Arc::new(tokio::sync::Mutex::new(HopState::new(
+        cfg.rendezvous_channel(),
+    )));
     // The unattended periodic-execution path is opt-in (off by default). The
     // reactive hop + the GS-coordinated follow run regardless; this only gates the
     // time-based periodic scan+hop and drives the honest sidecar `enabled` flag.
@@ -221,14 +240,10 @@ pub(crate) async fn run_hop_supervisor(
         (!enabled_channels.is_empty()).then(|| enabled_channels.as_ref());
 
     // ── Control-plane listener on 5810: HopAck vs PresenceBeacon ──────────
-    let ack_sock = match tokio::net::UdpSocket::bind(format!("0.0.0.0:{HOP_ACK_PORT}")).await {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            tracing::warn!(error = %e, "hop_ack_socket_bind_failed");
-            cancel.notified().await;
-            return;
-        }
+    let Some(ack_sock) = bind_ack_socket(&cancel).await else {
+        return;
     };
+    let ack_sock = Arc::new(ack_sock);
     // Acked target channels flow from the listener to the hop loop.
     let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<u8>(8);
     let lst_state = state.clone();
@@ -279,7 +294,7 @@ pub(crate) async fn run_hop_supervisor(
                         }
                     }
                 }
-                _ = lst_cancel.notified() => break,
+                _ = lst_cancel.wait() => break,
             }
         }
     });
@@ -299,7 +314,7 @@ pub(crate) async fn run_hop_supervisor(
                     &hb_enabled,
                     periodic_hop_enabled,
                 ).await,
-                _ = hb_cancel.notified() => break,
+                _ = hb_cancel.wait() => break,
             }
         }
     });
@@ -309,7 +324,7 @@ pub(crate) async fn run_hop_supervisor(
         Err(_) => {
             listener.abort();
             hb_writer.abort();
-            cancel.notified().await;
+            cancel.wait().await;
             return;
         }
     };
@@ -481,7 +496,7 @@ pub(crate) async fn run_hop_supervisor(
                     operating_channel.store(state.lock().await.channel as u64, Ordering::Relaxed);
                 }
             }
-            _ = cancel.notified() => {
+            _ = cancel.wait() => {
                 listener.abort();
                 hb_writer.abort();
                 return;
@@ -681,7 +696,19 @@ async fn write_hop_supervisor_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_radio::hop::{build_hop_announce, derive_pair_key, parse_hop_announce, HopState};
+    use ados_radio::hop::{
+        build_hop_announce, derive_pair_key, parse_hop_announce, HopState, PeerPresence,
+    };
+
+    /// A decoded ground-station beacon, as the listener records it.
+    fn gs_beacon() -> PeerPresence {
+        PeerPresence {
+            device_id: "gs-0001".to_string(),
+            role: "gs".to_string(),
+            channel: 149,
+            rssi_dbm: -50,
+        }
+    }
 
     /// The enabled-channel set helper for the verdict tests: the U-NII-3 home
     /// band so a request for 153 is in-set and a request for 36 is out-of-set.
@@ -854,7 +881,7 @@ mod tests {
         // HopState cooldown (reactive_allowed) with the predicate to confirm the
         // loop's actual gate respects the cooldown.
         let mut s = HopState::new(149);
-        s.on_peer_seen();
+        s.on_peer_beacon(gs_beacon());
         // Before any hop the cooldown is met (None last_hop_at).
         assert!(s.reactive_allowed());
         assert!(reactive_should_fire(
@@ -883,7 +910,7 @@ mod tests {
         assert!(!never.peer_fresh_within(PEER_FRESH_SKIP_SECS));
 
         let mut seen = HopState::new(149);
-        seen.on_peer_seen();
+        seen.on_peer_beacon(gs_beacon());
         // Just-seen peer is fresh so the periodic scan is skipped.
         assert!(seen.peer_fresh_within(PEER_FRESH_SKIP_SECS));
     }

@@ -13,13 +13,8 @@ import { useResource } from "@/hooks/use-resource";
 import { apiFetch } from "@/lib/api";
 import { DASH } from "@/lib/format";
 import { fmtMb } from "@/lib/format-status";
+import { laneForToken, uplinkTokenLabel } from "@/lib/uplink-lanes";
 
-interface EthernetLane {
-  link?: boolean;
-  speed_mbps?: number | null;
-  ip?: string | null;
-  gateway?: string | null;
-}
 interface WifiClientLane {
   enabled_on_boot?: boolean;
   connected?: boolean;
@@ -28,8 +23,11 @@ interface WifiClientLane {
   ip?: string | null;
 }
 interface GsNetwork {
-  ethernet?: EthernetLane;
+  /** Always null on the native front: no live ethernet probe exists, so the
+   *  leg is "not probed", never "down". */
+  ethernet?: null;
   wifi_client?: WifiClientLane;
+  /** The router's interface-role token (eth0 / wlan0_client / wwan0 / usb0). */
   active_uplink?: string | null;
   priority?: string[];
   share_uplink?: boolean;
@@ -49,20 +47,9 @@ interface ModemLane {
   state?: string | null;
 }
 
-const LANE_LABEL: Record<string, string> = {
-  ethernet: "Ethernet",
-  wifi_client: "WiFi client",
-  wifi: "WiFi client",
-  modem: "4G modem",
-  cellular: "4G modem",
-};
-
-function laneLabel(key: string): string {
-  return LANE_LABEL[key] ?? key;
-}
-
 /** A lane row: a status dot, the lane name, an "active" marker on the live
- *  uplink, and the lane's key detail (IP / SSID / speed) as the hint. */
+ *  uplink, and the lane's key detail as the hint. `up` is null when the agent
+ *  has no reading for the lane, which renders a dash rather than "down". */
 function LaneRow({
   name,
   up,
@@ -71,20 +58,15 @@ function LaneRow({
   right,
 }: {
   name: string;
-  up: boolean;
+  up: boolean | null;
   active: boolean;
   detail?: string;
   right?: string;
 }) {
   const tone: Tone = active ? "ok" : up ? "warn" : "muted";
+  const state = active ? "active" : up == null ? DASH : up ? "ready" : "down";
   return (
-    <Row
-      label={name}
-      left={<Dot tone={tone} />}
-      hint={detail}
-      value={right ?? (active ? "active" : up ? "ready" : "down")}
-      tone={tone}
-    />
+    <Row label={name} left={<Dot tone={tone} />} hint={detail} value={right ?? state} tone={tone} />
   );
 }
 
@@ -100,12 +82,10 @@ export function UplinkScreen() {
 
   const n = net.data;
   const active = n?.active_uplink ?? null;
-  const eth = n?.ethernet;
+  const activeLane = laneForToken(active);
   const wifi = n?.wifi_client;
   const m = modem.data;
 
-  const ethIp = eth?.ip ?? undefined;
-  const ethSpeed = eth?.speed_mbps != null ? `${eth.speed_mbps} Mbps` : undefined;
   const wifiDetail = [wifi?.ssid, wifi?.ip].filter(Boolean).join(" · ") || undefined;
   const modemDetail = [m?.operator, m?.technology, m?.apn].filter((v) => v && v !== "unknown").join(" · ") || undefined;
 
@@ -120,7 +100,7 @@ export function UplinkScreen() {
         right={
           <div className="flex items-center gap-[0.5rem]">
             <Dot tone={active ? "ok" : "muted"} />
-            <span className="text-[0.8rem] text-surface-foreground">{active ? laneLabel(active) : "no uplink"}</span>
+            <span className="text-[0.8rem] text-surface-foreground">{active ? uplinkTokenLabel(active) : "no uplink"}</span>
             <StaleBadge stale={net.stale} />
           </div>
         }
@@ -133,30 +113,28 @@ export function UplinkScreen() {
       ) : (
         <div className="flex flex-col gap-[0.15rem]">
           <SectionHeader>Lanes</SectionHeader>
-          <LaneRow
-            name="Ethernet"
-            up={Boolean(eth?.link)}
-            active={active === "ethernet"}
-            detail={[ethIp, ethSpeed].filter(Boolean).join(" · ") || undefined}
-          />
+          {/* The agent has no live ethernet or USB-tether probe; those lanes are
+              known only when they are the active uplink. */}
+          <LaneRow name="Ethernet" up={null} active={activeLane === "ethernet"} />
           <LaneRow
             name="WiFi client"
-            up={Boolean(wifi?.connected)}
-            active={active === "wifi_client" || active === "wifi"}
+            up={typeof wifi?.connected === "boolean" ? wifi.connected : null}
+            active={activeLane === "wifi"}
             detail={wifiDetail}
           />
           <LaneRow
             name="4G modem"
-            up={Boolean(m?.connected)}
-            active={active === "modem" || active === "cellular"}
+            up={typeof m?.connected === "boolean" ? m.connected : null}
+            active={activeLane === "modem"}
             detail={modemDetail}
-            right={m?.state ?? undefined}
+            right={activeLane === "modem" ? undefined : (m?.state ?? undefined)}
           />
+          <LaneRow name="USB tether" up={null} active={activeLane === "usb"} />
 
           {n?.priority?.length ? (
             <>
               <SectionHeader>Failover priority</SectionHeader>
-              <Row label="Order" value={n.priority.map(laneLabel).join("  ›  ")} mono={false} />
+              <Row label="Order" value={n.priority.map(uplinkTokenLabel).join("  ›  ")} mono={false} />
             </>
           ) : null}
 

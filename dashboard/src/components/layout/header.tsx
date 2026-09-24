@@ -22,12 +22,15 @@ function profileVariant(profile?: string) {
   return "default" as const;
 }
 
+/** The node's mDNS reach name — only the name the agent reports avahi as
+ *  publishing (`network.mdns_host`, already `.local`-qualified), never one
+ *  built from the operator's device label. */
 function CopyHost({ host }: { host: string }) {
   const [copied, setCopied] = useState(false);
 
   const onCopy = async () => {
     try {
-      await navigator.clipboard.writeText(`${host}.local`);
+      await navigator.clipboard.writeText(host);
       setCopied(true);
       setTimeout(() => setCopied(false), 1200);
     } catch {
@@ -51,7 +54,7 @@ function CopyHost({ host }: { host: string }) {
           )}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="bottom">copy {host}.local</TooltipContent>
+      <TooltipContent side="bottom">copy {host}</TooltipContent>
     </Tooltip>
   );
 }
@@ -61,7 +64,8 @@ export function Header() {
   const heartbeat = useHeartbeat();
   const toggleMobileNav = useUiStore((s) => s.toggleMobileNav);
 
-  const host = status.data?.device_name ?? "device";
+  const deviceName = status.data?.device_name || null;
+  const mdnsHost = status.data?.network?.mdns_host?.trim() || null;
   const profile = status.data?.profile ?? "auto";
   const role = status.data?.ground_role;
   const board = heartbeat.data?.board?.name ?? "";
@@ -106,7 +110,8 @@ export function Header() {
             )}
             aria-label={online ? "online" : "offline"}
           />
-          <CopyHost host={host} />
+          {deviceName && <span className="text-sm tracking-tight truncate">{deviceName}</span>}
+          {mdnsHost && <CopyHost host={mdnsHost} />}
           <Badge variant={profileVariant(profile)} className="shrink-0">
             {profile}
             {role && profile === "ground_station" ? ` · ${role}` : ""}

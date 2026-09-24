@@ -32,8 +32,6 @@ class ServerConfig(BaseModel):
     mode: Literal["cloud", "self_hosted", "local"] = "local"
     cloud: CloudServerConfig = CloudServerConfig()
     self_hosted: SelfHostedServerConfig = SelfHostedServerConfig()
-    telemetry_rate: int = 2
-    heartbeat_interval: int = 5
     mqtt_transport: str = "websockets"  # "tcp" or "websockets"
     # Empty uses the bare device id, which the broker ACL `ados/%u/#` keys on.
     mqtt_username: str = ""

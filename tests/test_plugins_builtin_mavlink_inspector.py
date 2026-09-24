@@ -20,9 +20,6 @@ from ados.plugins.builtin.mavlink_inspector import (
     MavlinkInspectorPlugin,
     get_manifest,
 )
-from ados.plugins.builtin.mavlink_inspector import (
-    manifest as module_manifest,
-)
 from ados.plugins.manifest import PluginManifest
 
 
@@ -31,25 +28,18 @@ def test_get_manifest_returns_plugin_manifest() -> None:
     assert isinstance(m, PluginManifest)
     assert m.id == PLUGIN_ID
     assert m.agent is not None
-    assert m.agent.isolation == "inprocess"
+    assert m.agent.isolation == "subprocess"
     assert {p.id for p in m.agent.permissions} == {
         "event.publish",
         "event.subscribe",
     }
 
 
-def test_module_manifest_attribute_matches_callable() -> None:
-    """Loader probes ``.manifest`` first; both paths must agree."""
-    assert isinstance(module_manifest, PluginManifest)
-    assert module_manifest.id == get_manifest().id
 
+def test_listed_among_the_builtin_plugins() -> None:
+    from ados.plugins.builtin import builtin_manifests
 
-def test_loader_picks_up_mavlink_inspector_entry_point() -> None:
-    from ados.plugins.loader import load_builtin_manifests
-
-    manifests = load_builtin_manifests()
-    ids = [m.id for m in manifests]
-    assert PLUGIN_ID in ids
+    assert PLUGIN_ID in builtin_manifests()
 
 
 # ---------------------------------------------------------------------

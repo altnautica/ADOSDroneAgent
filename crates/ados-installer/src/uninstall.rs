@@ -79,13 +79,13 @@ pub fn dropin_files() -> Vec<&'static str> {
     ]
 }
 
-/// The `/usr/local/bin/ados*` symlinks the install creates.
+/// The `/usr/local/bin/ados*` symlinks the install creates — read from the
+/// install's own list so the two surfaces cannot drift.
 fn symlinks() -> Vec<&'static str> {
-    vec![
-        "/usr/local/bin/ados",
-        "/usr/local/bin/ados-agent",
-        "/usr/local/bin/ados-supervisor",
-    ]
+    crate::steps::fetch_binaries::global_symlinks()
+        .into_iter()
+        .map(|(_, link)| link)
+        .collect()
 }
 
 /// Discover every `ados-*.{service,slice,target,timer}` unit file under the
@@ -315,10 +315,11 @@ mod tests {
     }
 
     #[test]
-    fn symlink_set_includes_the_three_global_links() {
+    fn symlink_set_is_the_installed_commands_and_nothing_retired() {
         let s = symlinks();
         assert!(s.contains(&"/usr/local/bin/ados"));
-        assert!(s.contains(&"/usr/local/bin/ados-agent"));
         assert!(s.contains(&"/usr/local/bin/ados-supervisor"));
+        // The demo console script is gone, so its command is not installed.
+        assert!(!s.contains(&"/usr/local/bin/ados-agent"));
     }
 }

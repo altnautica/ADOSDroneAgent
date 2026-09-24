@@ -9,15 +9,18 @@
 //! then the opt-in cloud lane — local-first.
 //!
 //! The compute node is discovered over mDNS (a service advertising
-//! `profile=workstation`); its job-API base URL backs the direct-LAN bearer.
+//! `profile=workstation`, preferring one that issued this drone a credential);
+//! its job-API base URL backs the direct-LAN bearer, which presents the
+//! credential that node issued.
 //! When the LAN bearer stops carrying (the node went away, or the ladder fell
 //! over to a slower lane), the loop re-resolves and rebuilds the ladder; while
 //! no LAN bearer is present it periodically re-browses so a node that boots after
 //! the drone is still picked up.
 //!
-//! INERT by default: it early-returns unless Atlas is enabled
-//! ([`crate::config::CloudConfig::atlas_enabled`]), so a non-Atlas agent does no
-//! Atlas work and is byte-unchanged.
+//! INERT while Atlas is disabled: it re-reads the `atlas.enabled` gate
+//! ([`crate::config::atlas_enabled_in`]) on a fixed interval before every bus
+//! connection, does no Atlas work while it is off, and starts forwarding within
+//! one interval of the operator enabling it — no relay restart needed.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -33,11 +36,11 @@ use ados_protocol::atlas::{
 };
 use ados_protocol::frame::PLUGIN_MAX_FRAME;
 use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
+use ados_protocol::node_credential::WorkstationCredentials;
 
 use crate::atlas_bearer::CloudBearer;
-use crate::config::{atlas_compute_addr, CloudConfig};
-use crate::mqtt::transport::{RumqttcTransport, TransportConfig};
-use crate::mqtt::WS_PATH;
+use crate::config::{atlas_compute_addr, atlas_enabled_in, config_path, CloudConfig};
+use crate::mqtt::transport::RumqttcTransport;
 use crate::pairing::PairingState;
 
 /// The local atlas bus the capture service publishes onto.
@@ -57,10 +60,8 @@ const LAN_MISS_THRESHOLD: u32 = 5;
 /// failing fast.
 const CONNECT_RETRIES: u32 = 30;
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
-/// The in-flight ceiling for the dedicated Atlas cloud session (matches the
-/// MAVLink relay's Rule-37 high ceiling — the publish path is the limit).
-const CLOUD_INFLIGHT: u16 = 1000;
-const CLOUD_KEEP_ALIVE: Duration = Duration::from_secs(30);
+/// How often a disabled forwarder re-reads the Atlas gate.
+const GATE_POLL: Duration = Duration::from_secs(5);
 /// While a compute node is resolved, re-write the forwarder handoff at least this
 /// often so its mtime stays fresh (the capture service drops a stale handoff so a
 /// gone node never lingers on the Stream card). Comfortably under the reader's
@@ -92,9 +93,9 @@ fn now_ms() -> i64 {
 /// Map a bearer kind to the GCS Stream-card vocabulary the handoff carries.
 fn bearer_label(kind: BearerKind) -> &'static str {
     match kind {
-        // Loopback / bulk are same-host LAN-direct-ish; the live ladder only ever
+        // Loopback is the same-host LAN-direct case; the live ladder only ever
         // carries over DirectLan / WfbRelay / Cloud on real hardware.
-        BearerKind::DirectLan | BearerKind::Loopback | BearerKind::PostFlightBulk => "direct-lan",
+        BearerKind::DirectLan | BearerKind::Loopback => "direct-lan",
         BearerKind::WfbRelay => "wfb-relay",
         BearerKind::Cloud => "cloud",
     }
@@ -190,13 +191,8 @@ fn write_forward_status(status: &AtlasForwardStatus) {
     }
 }
 
-/// Run the Atlas forwarder until `shutdown` flips. INERT unless Atlas is enabled.
+/// Run the Atlas forwarder until `shutdown` flips. INERT while Atlas is disabled.
 pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) {
-    // INERT: a non-Atlas agent does no work and is byte-unchanged.
-    if !config.atlas_enabled() {
-        tracing::debug!("atlas forwarder idle: atlas is not enabled");
-        return;
-    }
     tracing::info!("atlas forwarder starting");
 
     // The cloud transport is built at most once and reused across ladder
@@ -210,11 +206,27 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     // reconnects so a blip never drops the resolved node from the Stream card.
     let mut fwd = ForwardStatus::default();
 
+    let gate_path = config_path();
+    let mut was_enabled = false;
     loop {
         if *shutdown.borrow() {
             break;
         }
 
+        // The gate is read fresh before every bus connection: the capture
+        // service closes the bus when Atlas is turned off, which lands the loop
+        // here, and turning it on is seen within one poll.
+        let enabled = atlas_enabled_in(&gate_path);
+        if enabled != was_enabled {
+            tracing::info!(enabled, "atlas forwarder gate changed");
+            was_enabled = enabled;
+        }
+        if !enabled {
+            if sleep_or_shutdown(&mut shutdown, GATE_POLL).await {
+                break;
+            }
+            continue;
+        }
         // (Re)connect the atlas bus subscriber.
         let mut stream =
             match connect_with_retry(ATLAS_SOCK, CONNECT_RETRIES, CONNECT_RETRY_DELAY).await {
@@ -367,28 +379,42 @@ async fn forward_event(ladder: &BearerLadder, body: &[u8], device_id: &str) -> F
 /// the resolved compute node's device id (`Some` iff a direct-LAN bearer is
 /// present — a compute node was resolved). The cloud transport is built at most
 /// once (the first time cloud relay is the posture AND the agent is paired) and
-/// reused on every rebuild.
+/// reused on every rebuild. The installed workstation credentials are re-read
+/// on every rebuild, so one installed after boot is picked up on the next
+/// re-resolve.
 async fn build_ladder(
     config: &CloudConfig,
     cloud_transport: &mut Option<Arc<RumqttcTransport>>,
 ) -> (BearerLadder, Option<String>) {
     let mut bearers: Vec<Box<dyn AtlasBearer>> = Vec::new();
+    let credentials =
+        WorkstationCredentials::load_or_empty(&WorkstationCredentials::default_path());
 
     // ── Direct LAN (first-class): a resolved compute node's job-API URL ──
     // A static compute-node address (config `atlas.compute_node_addr` or the
     // `ADOS_ATLAS_COMPUTE_ADDR` env) wins over mDNS, for segmented networks
-    // where multicast is not forwarded to the node. It carries `host:port`.
+    // where multicast is not forwarded to the node. It carries `host:port`, and
+    // no node id, so it presents the sole installed credential.
     let compute_node_id = if let Some(addr) = atlas_compute_addr(config) {
         let base = format!("http://{addr}");
         tracing::info!(base = %base, "atlas forwarder using the static compute node address");
-        bearers.push(Box::new(LanHttpBearer::new(base)));
+        let credential = credentials.for_node(None).map(|c| c.credential.clone());
+        bearers.push(Box::new(LanHttpBearer::new(base, credential)));
         Some(addr)
     } else {
-        match ados_compute::mdns::resolve_compute(RESOLVE_TIMEOUT).await {
+        let issuers: Vec<String> = credentials
+            .workstations
+            .iter()
+            .map(|c| c.workstation_node_id.clone())
+            .collect();
+        match ados_compute::mdns::resolve_compute(RESOLVE_TIMEOUT, &issuers).await {
             Some(node) => {
                 let base = format!("http://{}:{}", node.host, node.job_api_port);
                 tracing::info!(base = %base, node = %node.device_id, "atlas forwarder resolved compute node");
-                bearers.push(Box::new(LanHttpBearer::new(base)));
+                let credential = credentials
+                    .for_node(Some(&node.device_id))
+                    .map(|c| c.credential.clone());
+                bearers.push(Box::new(LanHttpBearer::new(base, credential)));
                 Some(node.device_id)
             }
             None => {
@@ -419,26 +445,23 @@ async fn build_ladder(
     (BearerLadder::new(bearers), compute_node_id)
 }
 
-/// Build the dedicated Atlas cloud transport, or `None` while unpaired. It uses
-/// a DISTINCT client id (`ados-{device}-atlas`) so it never collides with the
-/// MAVLink relay's `ados-{device}` session (a same-id second session kicks the
-/// first); the username + key are the device's own, so the broker ACL still
-/// authorizes its `ados/{device}/atlas/*` topics.
+/// Build the dedicated Atlas cloud transport, or `None` while unpaired or when
+/// this posture has no broker. It uses a DISTINCT client id
+/// (`ados-{device}-atlas`) so it never collides with the MAVLink relay's
+/// `ados-{device}` session (a same-id second session kicks the first); the
+/// username + key are the device's own, so the broker ACL still authorizes its
+/// `ados/{device}/atlas/*` topics.
 fn build_cloud_transport(config: &CloudConfig) -> Option<Arc<RumqttcTransport>> {
     let pairing = PairingState::load();
-    let api_key = pairing.api_key()?;
-    let cfg = TransportConfig {
-        client_id: format!("ados-{}-atlas", config.agent.device_id),
-        host: config.server.cloud.mqtt_broker.clone(),
-        port: config.server.cloud.mqtt_port,
-        ws_path: WS_PATH.to_string(),
-        username: format!("ados-{}", config.agent.device_id),
-        password: api_key.to_string(),
-        inflight: CLOUD_INFLIGHT,
-        keep_alive: CLOUD_KEEP_ALIVE,
-    };
+    let cfg = config.relay_transport(Some("atlas"), pairing.api_key()?)?;
     tracing::info!("atlas forwarder cloud lane connecting");
-    Some(RumqttcTransport::connect(&cfg))
+    match RumqttcTransport::connect(&cfg) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::warn!(error = %e, "atlas forwarder cloud lane not built");
+            None
+        }
+    }
 }
 
 /// Sleep for `delay` unless shutdown flips first. Returns `true` if shutdown was

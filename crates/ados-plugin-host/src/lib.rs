@@ -41,6 +41,8 @@
 
 pub mod archive;
 mod args;
+pub mod atlas_bridge;
+pub mod auto_update;
 pub mod button_client;
 pub mod control;
 pub mod control_client;
@@ -58,6 +60,7 @@ pub mod realhost;
 pub mod reconcile;
 pub mod sandbox;
 pub mod server;
+pub mod services;
 pub mod signing;
 pub mod state;
 pub mod state_sidecar;

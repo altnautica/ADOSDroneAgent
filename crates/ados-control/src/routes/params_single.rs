@@ -13,9 +13,10 @@
 //! When the name is present the body is `{"name": <name>, "value": <value>}` with
 //! the value passed through verbatim from the cache (preserving its exact JSON
 //! number form, the same way the full-list route clones the blob). When the name
-//! is absent — an empty or unreadable cache, or a name not in it — the route
-//! returns the FastAPI 404 `{"detail": "Parameter '<name>' not found"}`, the exact
-//! status and message the proxied FastAPI route raised.
+//! is absent — an empty cache, or a name not in it — the route returns the
+//! FastAPI 404 `{"detail": "Parameter '<name>' not found"}`, the exact status and
+//! message the proxied FastAPI route raised. A cache that exists but cannot be
+//! read or parsed is a 503.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -31,11 +32,14 @@ use crate::state::AppState;
 ///
 /// Reads the value from the router's on-disk parameter cache (the same source the
 /// full-list read uses). A name present in the cache returns `200` with the value
-/// verbatim; any absent-file / unreadable / missing-name case returns the FastAPI
-/// `404` with the byte-identical not-found message. Never panics on a seam error:
-/// an absent cache is the not-found case, never a 500.
+/// verbatim; an absent file or a missing name returns the FastAPI `404` with the
+/// byte-identical not-found message. A cache file that exists but cannot be read
+/// or parsed is a `503`, never a false "not found".
 pub async fn get_param(Path(name): Path<String>, State(state): State<AppState>) -> Response {
-    let params = crate::param_store::read_param_blob(&state.params_path);
+    let params = match crate::param_store::read_param_blob(&state.params_path) {
+        Ok(params) => params,
+        Err(e) => return detail(StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+    };
     match params.get(&name) {
         Some(value) => Json(json!({ "name": name, "value": value })).into_response(),
         None => detail(

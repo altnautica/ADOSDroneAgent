@@ -10,12 +10,13 @@
 //! therefore targets a full-duplex USB-serial RC module bridge, which owns
 //! the bus direction itself — the host only holds the frame cadence.
 
+use ados_protocol::shutdown::Shutdown;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
 use crate::channels::build_rc_frame;
@@ -127,7 +128,7 @@ pub async fn run_tx<W: AsyncWrite + Unpin>(
     rate_hz: u16,
     counters: Arc<WireCounters>,
     oob: Arc<OobQueue>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) -> TxExit {
     let period = Duration::from_secs_f64(1.0 / f64::from(rate_hz.max(1)));
     let mut ticker = tokio::time::interval(period);
@@ -137,7 +138,7 @@ pub async fn run_tx<W: AsyncWrite + Unpin>(
     loop {
         tokio::select! {
             biased;
-            _ = cancel.notified() => return TxExit::Cancelled,
+            _ = cancel.wait() => return TxExit::Cancelled,
             _ = ticker.tick() => {}
         }
         let (values, _source) = merge.lock().await.current(Instant::now());
@@ -173,7 +174,7 @@ pub async fn run_rx<R: AsyncRead + Unpin>(
     mut reader: R,
     telemetry: Arc<Mutex<TelemetryState>>,
     counters: Arc<WireCounters>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) -> RxExit {
     let mut parser = Parser::new();
     let mut folded_crc: u64 = 0;
@@ -182,7 +183,7 @@ pub async fn run_rx<R: AsyncRead + Unpin>(
     loop {
         let n = tokio::select! {
             biased;
-            _ = cancel.notified() => return RxExit::Cancelled,
+            _ = cancel.wait() => return RxExit::Cancelled,
             read = reader.read(&mut buf) => match read {
                 Ok(0) | Err(_) => return RxExit::StreamClosed,
                 Ok(n) => n,
@@ -263,7 +264,7 @@ mod tests {
             .unwrap();
         let counters = Arc::new(WireCounters::default());
         let telemetry = Arc::new(Mutex::new(TelemetryState::default()));
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
 
         let oob = Arc::new(OobQueue::default());
         // A parameter frame queued out-of-band rides between RC frames.
@@ -303,7 +304,7 @@ mod tests {
         })
         .await;
         deadline.expect("six frames within the deadline");
-        cancel.notify_waiters();
+        cancel.trigger();
         assert_eq!(tx.await.unwrap(), TxExit::Cancelled);
 
         assert!(parser.crc_errors == 0, "clean loopback has no crc errors");
@@ -342,7 +343,7 @@ mod tests {
         let (mut writer, rx_side) = tokio::io::duplex(4096);
         let counters = Arc::new(WireCounters::default());
         let telemetry = Arc::new(Mutex::new(TelemetryState::default()));
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let rx = tokio::spawn(run_rx(
             rx_side,
             telemetry.clone(),
@@ -399,7 +400,7 @@ mod tests {
         let (_tx_keep, rx_side) = tokio::io::duplex(4096);
         let counters = Arc::new(WireCounters::default());
         let telemetry = Arc::new(Mutex::new(TelemetryState::default()));
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let tx = tokio::spawn(run_tx(
             tx_side,
             inject_merge(),
@@ -410,7 +411,7 @@ mod tests {
         ));
         let rx = tokio::spawn(run_rx(rx_side, telemetry, counters, cancel.clone()));
         tokio::time::sleep(Duration::from_millis(50)).await;
-        cancel.notify_waiters();
+        cancel.trigger();
         let (tx_exit, rx_exit) = tokio::time::timeout(Duration::from_secs(5), async {
             (tx.await.unwrap(), rx.await.unwrap())
         })
@@ -428,7 +429,7 @@ mod tests {
         let (tx_side, rx_side) = tokio::io::duplex(64);
         drop(rx_side);
         let counters = Arc::new(WireCounters::default());
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let exit = tokio::time::timeout(
             Duration::from_secs(5),
             run_tx(

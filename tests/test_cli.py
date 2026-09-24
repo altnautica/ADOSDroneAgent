@@ -64,8 +64,8 @@ def test_help_shows_only_public_commands() -> None:
     # The primitive operator surface listed in `ados --help`.
     expected = {"status", "update", "uninstall", "logs", "pair", "unpair", "help"}
     assert expected <= names, f"missing public commands: {expected - names}"
-    # Advanced groups + install + demo are hidden from the primary surface
-    # (they still work); legacy names never existed publicly.
+    # Advanced groups + install are hidden from the primary surface (they
+    # still work); legacy names never existed publicly.
     for hidden in (
         "hardware",
         "network",
@@ -74,7 +74,6 @@ def test_help_shows_only_public_commands() -> None:
         "radio",
         "rust",
         "install",
-        "demo",
         "tui",
         "config",
         "gs",
@@ -117,40 +116,6 @@ def test_update_check_only_does_not_install() -> None:
     assert "Current version: 0.10.0" in result.output
     assert "Latest (main):   0.10.1" in result.output
     upgrade.assert_not_called()
-
-
-def test_demo_uses_user_writable_pairing_state(tmp_path) -> None:
-    """Demo mode remains available as a hidden no-hardware development path."""
-    from ados.core.config import ADOSConfig
-
-    config = ADOSConfig()
-    apps = []
-
-    class FakeAgentApp:
-        def __init__(self, app_config, demo):
-            self.config = app_config
-            self.demo = demo
-            apps.append(self)
-
-        def request_shutdown(self):
-            pass
-
-        async def start(self):
-            return None
-
-    with (
-        patch("pathlib.Path.home", return_value=tmp_path),
-        patch("ados.core.config.load_config", return_value=config),
-        patch("ados.core.logging.configure_logging"),
-        patch("ados.core.main.AgentApp", FakeAgentApp),
-    ):
-        result = runner.invoke(cli, ["demo", "--port", "18080"])
-
-    assert result.exit_code == 0
-    assert apps
-    assert apps[0].demo is True
-    assert config.pairing.state_path == str(tmp_path / ".ados" / "demo-pairing.json")
-    assert config.pairing.convex_url == ""
 
 
 def test_install_command_is_hidden_but_registered() -> None:

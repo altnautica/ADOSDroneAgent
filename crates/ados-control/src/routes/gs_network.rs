@@ -239,12 +239,10 @@ async fn ap_view(cfg: &Value) -> Value {
         .unwrap_or(AP_DEFAULT_CHANNEL);
     let interface = ap_interface(cfg);
 
-    // `systemctl is-active ados-hostapd.service` trimming to `active`, reproducing
-    // the manager's `_is_unit_active`. An absent `systemctl` / a spawn error / a
-    // timeout all read as not running, matching the manager's `except` returning
-    // `False`.
-    let running = crate::probe::unit_is_active(HOSTAPD_UNIT).await;
-    let clients = if running {
+    // `systemctl is-active ados-hostapd.service`. A probe that got no answer
+    // (no `systemctl`, a spawn error, a timeout) is unknown, not down.
+    let running = crate::probe::unit_state(HOSTAPD_UNIT).await;
+    let clients = if running == Some(true) {
         station_dump_macs(&interface).await
     } else {
         Vec::new()
@@ -307,16 +305,17 @@ fn ap_view_compose(
     ssid: &str,
     channel: i64,
     interface: &str,
-    running: bool,
+    running: Option<bool>,
     clients: Vec<String>,
 ) -> Value {
+    let up = running == Some(true);
     json!({
         "enabled": running,
         "running": running,
         "ssid": ssid,
         "channel": channel,
         "interface": interface,
-        "gateway": if running { Value::String(AP_GATEWAY_IP.to_string()) } else { Value::Null },
+        "gateway": if up { Value::String(AP_GATEWAY_IP.to_string()) } else { Value::Null },
         "connected_clients": clients,
     })
 }
@@ -422,27 +421,34 @@ fn short_id(device_id: &str) -> String {
 /// `{enabled_on_boot, connected, ssid, signal, ip}`. An unreachable socket
 /// degrades to the full default the Python `except` returns.
 async fn wifi_client_view() -> Value {
-    let status = match wifi_status().await {
-        Some(s) => s,
-        None => {
-            return json!({
-                "enabled_on_boot": false,
-                "connected": false,
-                "ssid": Value::Null,
-                "signal": Value::Null,
-                "ip": Value::Null,
-            });
-        }
-    };
+    let status = wifi_status().await;
     let enabled_on_boot = load_json_object(&gs_wifi_client_json())
         .and_then(|m| m.get("enabled_on_boot").map(json_truthy))
         .unwrap_or(false);
+    wifi_client_view_compose(status.as_ref(), enabled_on_boot)
+}
+
+/// Compose the Wi-Fi client leg. `enabled_on_boot` is a config fact and is
+/// always reported. The live legs come from the net daemon's status reply; when
+/// the daemon did not answer, or its reply omits `connected`, the station state
+/// is unknown and reads `null`, never a fabricated "disconnected".
+fn wifi_client_view_compose(status: Option<&Map<String, Value>>, enabled_on_boot: bool) -> Value {
+    let field = |k: &str| {
+        status
+            .and_then(|s| s.get(k))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
     json!({
         "enabled_on_boot": enabled_on_boot,
-        "connected": status.get("connected").map(json_truthy).unwrap_or(false),
-        "ssid": status.get("ssid").cloned().unwrap_or(Value::Null),
-        "signal": status.get("signal").cloned().unwrap_or(Value::Null),
-        "ip": status.get("ip").cloned().unwrap_or(Value::Null),
+        "connected": status
+            .and_then(|s| s.get("connected"))
+            .map(json_truthy)
+            .map(Value::Bool)
+            .unwrap_or(Value::Null),
+        "ssid": field("ssid"),
+        "signal": field("signal"),
+        "ip": field("ip"),
     })
 }
 
@@ -830,7 +836,7 @@ fn modem_status_body(mmcli_present: bool) -> Value {
 /// degrades to the manager-absent default shape. Mirrors the framing the radio /
 /// Wi-Fi command sockets use (one newline-terminated JSON each way).
 pub(crate) async fn wifi_status() -> Option<Map<String, Value>> {
-    let reply = wifi_cmd_roundtrip(r#"{"op":"wifi_status"}"#).await?;
+    let reply = wifi_cmd_roundtrip(&json!({"op": "wifi_status"})).await?;
     let obj = reply.as_object()?;
     if obj.get("ok").map(json_truthy) != Some(true) {
         return None;
@@ -842,38 +848,10 @@ pub(crate) async fn wifi_status() -> Option<Map<String, Value>> {
 /// one newline-terminated JSON reply. Bounded so a runaway reply cannot exhaust
 /// memory. `None` on an unreachable socket, a read error, or an unparseable
 /// reply.
-async fn wifi_cmd_roundtrip(request: &str) -> Option<Value> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A status reply is a few hundred bytes; bound the read to guard a runaway.
-    const MAX_REPLY_BYTES: usize = 64 * 1024;
-
-    let mut stream = tokio::net::UnixStream::connect(wifi_cmd_sock())
+async fn wifi_cmd_roundtrip(request: &Value) -> Option<Value> {
+    crate::ipc::cmd::roundtrip(&wifi_cmd_sock(), request, crate::ipc::cmd::QUICK)
         .await
-        .ok()?;
-    let line = format!("{request}\n");
-    stream.write_all(line.as_bytes()).await.ok()?;
-    stream.flush().await.ok()?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 8 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await.ok()?;
-        if n == 0 {
-            break; // EOF: the server replies once then closes.
-        }
-        if raw.len() + n > MAX_REPLY_BYTES {
-            return None;
-        }
-        raw.extend_from_slice(&buf[..n]);
-        // The reply is one newline-terminated line; stop at the first newline.
-        if raw.contains(&b'\n') {
-            break;
-        }
-    }
-    let text = String::from_utf8(raw).ok()?;
-    let line = text.lines().next()?;
-    serde_json::from_str(line).ok()
+        .ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -886,129 +864,14 @@ async fn wifi_cmd_roundtrip(request: &str) -> Option<Value> {
 /// yields `Some(Value::Null)`, so a store-first reader learns "no uplink" without a
 /// separate probe.
 async fn latest_uplink_active(state: &AppState) -> Option<Value> {
-    let detail = latest_event_detail(state, "net.uplink_active").await?;
+    let detail = state.logd.latest_event_detail("net.uplink_active").await?;
     detail.get("active_uplink").cloned()
 }
 
 /// The store's most-recent modem cumulative-usage block, or `None` when the store is
 /// unreachable / holds no such event.
 async fn latest_modem_usage(state: &AppState) -> Option<Map<String, Value>> {
-    latest_event_detail(state, "net.modem_usage").await
-}
-
-/// Query the store for the newest `events` row of one `event_kind` and return
-/// its `detail` body, or `None` when the store is unreachable / the response is
-/// an error / there is no such event / the detail is absent / non-object /
-/// empty. Mirrors the Python `query_rows("events", 1, event_kind=...)` read.
-async fn latest_event_detail(state: &AppState, event_kind: &str) -> Option<Map<String, Value>> {
-    let params = [
-        ("kind", "events".to_string()),
-        ("limit", "1".to_string()),
-        ("event_kind", event_kind.to_string()),
-    ];
-    let query = encode_query(&params);
-    let path = format!("/v1/query?{query}");
-    let (status, body) = logd_get(state, &path).await.ok()?;
-    if status >= 400 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_slice(&body).ok()?;
-    let rows = parsed.get("data")?.as_array()?;
-    let detail = rows.first()?.as_object()?.get("detail")?.as_object()?;
-    if detail.is_empty() {
-        return None;
-    }
-    Some(detail.clone())
-}
-
-/// A minimal HTTP/1.1 `GET` over the logging-store query Unix socket, returning
-/// the status code + the decoded body. The socket path comes from the app
-/// state's logd client so a test redirects it. `Connection: close` reads to EOF;
-/// a chunked body is de-chunked. Bounded so a runaway response cannot exhaust
-/// memory.
-async fn logd_get(state: &AppState, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A hard ceiling on the response read; an events page is a few KiB.
-    const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
-
-    let socket = state.logd.socket_path();
-    let mut stream = tokio::net::UnixStream::connect(socket).await?;
-    let head = format!("GET {path} HTTP/1.1\r\nHost: logd\r\nConnection: close\r\n\r\n");
-    stream.write_all(head.as_bytes()).await?;
-    stream.flush().await?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            break; // EOF (Connection: close).
-        }
-        if raw.len() + n > MAX_READ_BYTES {
-            return Err(std::io::Error::other("logd response too large"));
-        }
-        raw.extend_from_slice(&buf[..n]);
-    }
-    parse_http_response(&raw)
-}
-
-/// Split a raw HTTP/1.1 response into the status code + decoded body. De-chunks a
-/// `Transfer-Encoding: chunked` body; otherwise returns the body after the header
-/// terminator as-is.
-fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
-    let sep = b"\r\n\r\n";
-    let split = raw
-        .windows(sep.len())
-        .position(|w| w == sep)
-        .ok_or_else(|| std::io::Error::other("malformed http response (no header terminator)"))?;
-    let head = &raw[..split];
-    let body = &raw[split + sep.len()..];
-
-    let head_str = String::from_utf8_lossy(head);
-    let status = head_str
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| std::io::Error::other("malformed http status line"))?;
-
-    let chunked = head_str
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked");
-    let body = if chunked {
-        de_chunk(body)
-    } else {
-        body.to_vec()
-    };
-    Ok((status, body))
-}
-
-/// De-chunk a `Transfer-Encoding: chunked` body: `<hexlen>\r\n<data>\r\n`
-/// repeated until a zero-length chunk.
-fn de_chunk(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    while let Some(crlf) = rest.windows(2).position(|w| w == b"\r\n") {
-        let len_line = &rest[..crlf];
-        let len = usize::from_str_radix(String::from_utf8_lossy(len_line).trim(), 16).unwrap_or(0);
-        if len == 0 {
-            break;
-        }
-        let data_start = crlf + 2;
-        if rest.len() < data_start + len {
-            out.extend_from_slice(&rest[data_start..]);
-            break;
-        }
-        out.extend_from_slice(&rest[data_start..data_start + len]);
-        let next = data_start + len;
-        rest = if rest.len() >= next + 2 {
-            &rest[next + 2..]
-        } else {
-            &[]
-        };
-    }
-    out
+    state.logd.latest_event_detail("net.modem_usage").await
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,29 +901,6 @@ fn share_uplink_flag(cfg: &Value) -> bool {
 // ---------------------------------------------------------------------------
 // Small shared helpers.
 // ---------------------------------------------------------------------------
-
-/// Percent-encode a query-parameter list into a `key=value&...` string.
-fn encode_query(params: &[(&str, String)]) -> String {
-    params
-        .iter()
-        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Conservative percent-encoding: pass through the unreserved set
-/// (`A-Za-z0-9-._~`) verbatim and percent-encode every other byte.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
 
 /// Python `bool(x)` truthiness over a JSON value: `null`/`false`/`0`/`0.0`/`""`/
 /// `[]`/`{}` are falsey, everything else truthy. Mirrors the `bool(...)` coercion
@@ -1120,7 +960,7 @@ mod tests {
             "ADOS-GS-0000",
             AP_DEFAULT_CHANNEL,
             AP_IFACE,
-            false,
+            Some(false),
             Vec::new(),
         );
         let priority = priority_list_from(None);
@@ -1168,7 +1008,7 @@ mod tests {
             "ADOS-GS-D9DB",
             6,
             "wlan0",
-            true,
+            Some(true),
             vec!["dc:ea:e7:30:74:a6".to_string()],
         );
         let want = json!({
@@ -1188,7 +1028,7 @@ mod tests {
         // A down AP reports enabled + running false, keeps the resolved SSID +
         // channel + interface, and gates the gateway to null + the clients to the
         // empty list (the manager's status reports the gateway only when up).
-        let view = ap_view_compose("ADOS-GS-ABCD", 11, "wlan0", false, Vec::new());
+        let view = ap_view_compose("ADOS-GS-ABCD", 11, "wlan0", Some(false), Vec::new());
         assert_eq!(view["enabled"], json!(false));
         assert_eq!(view["running"], json!(false));
         assert_eq!(view["ssid"], json!("ADOS-GS-ABCD"));
@@ -1196,6 +1036,14 @@ mod tests {
         assert_eq!(view["interface"], json!("wlan0"));
         assert_eq!(view["gateway"], Value::Null);
         assert_eq!(view["connected_clients"], json!([]));
+    }
+
+    #[test]
+    fn an_unanswered_hostapd_probe_reads_unknown_not_down() {
+        let view = ap_view_compose("ADOS-GS-ABCD", 11, "wlan0", None, Vec::new());
+        assert_eq!(view["running"], Value::Null);
+        assert_eq!(view["enabled"], Value::Null);
+        assert_eq!(view["gateway"], Value::Null);
     }
 
     #[test]
@@ -1410,11 +1258,13 @@ mod tests {
     }
 
     #[test]
-    fn wifi_client_view_default_shape_when_the_socket_is_down() {
-        let v = wifi_client_view_from(None, false);
+    fn wifi_client_view_is_unknown_when_the_daemon_does_not_answer() {
+        // The daemon is down: the station state is unknown, while the
+        // enabled_on_boot config fact is still reported.
+        let v = wifi_client_view_compose(None, true);
         let want = json!({
-            "enabled_on_boot": false,
-            "connected": false,
+            "enabled_on_boot": true,
+            "connected": null,
             "ssid": null,
             "signal": null,
             "ip": null,
@@ -1437,7 +1287,7 @@ mod tests {
             "security": "WPA2",
         }))
         .unwrap();
-        let v = wifi_client_view_from(Some(&status), true);
+        let v = wifi_client_view_compose(Some(&status), true);
         let want = json!({
             "enabled_on_boot": true,
             "connected": true,
@@ -1651,43 +1501,8 @@ mod tests {
         assert!(json_truthy(&json!("x")));
     }
 
-    #[test]
-    fn de_chunk_reassembles_a_chunked_body() {
-        let chunked = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        assert_eq!(de_chunk(chunked), b"hello world");
-    }
-
-    #[test]
-    fn parse_http_response_reads_status_and_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
-        let (status, body) = parse_http_response(raw).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, b"{}");
-    }
-
     // --- Pure test seams mirroring the async handlers' composition, so the
     // shapes can be asserted without the socket / store wiring. ---
-
-    /// The `wifi_client` leg as composed from a `wifi_status` reply (or `None`)
-    /// + the `enabled_on_boot` flag, without the socket / file IO.
-    fn wifi_client_view_from(status: Option<&Map<String, Value>>, enabled_on_boot: bool) -> Value {
-        match status {
-            None => json!({
-                "enabled_on_boot": false,
-                "connected": false,
-                "ssid": Value::Null,
-                "signal": Value::Null,
-                "ip": Value::Null,
-            }),
-            Some(st) => json!({
-                "enabled_on_boot": enabled_on_boot,
-                "connected": st.get("connected").map(json_truthy).unwrap_or(false),
-                "ssid": st.get("ssid").cloned().unwrap_or(Value::Null),
-                "signal": st.get("signal").cloned().unwrap_or(Value::Null),
-                "ip": st.get("ip").cloned().unwrap_or(Value::Null),
-            }),
-        }
-    }
 
     /// The priority list as composed from an optional priority-file object.
     fn priority_list_from(obj: Option<&Map<String, Value>>) -> Value {

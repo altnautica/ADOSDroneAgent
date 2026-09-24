@@ -177,7 +177,7 @@ export async function getDroneStatus(signal?: AbortSignal): Promise<GsStatus> {
     ap_ip: null,
     usb_ip: null,
     uplink_type: null,
-    uplink_reachable: false,
+    uplink_reachable: null,
   };
 
   return {

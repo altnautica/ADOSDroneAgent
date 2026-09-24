@@ -35,7 +35,6 @@ pub mod process_spawn;
 pub mod receiver;
 pub mod relay;
 pub mod sidecars;
-pub mod tx_liveness;
 pub mod watchdog;
 pub mod wfb_rx;
 
@@ -60,8 +59,5 @@ pub use presence::GsPresenceCache;
 pub use receiver::ReceiverState;
 pub use relay::RelayState;
 pub use sidecars::write_json_atomic;
-pub use tx_liveness::{
-    watch_tx_liveness, TxLivenessWindow, TxVerdict, TX_POLL_INTERVAL, TX_SILENCE_WINDOW,
-};
 pub use watchdog::ValidPacketWatchdog;
 pub use wfb_rx::WfbRxManager;

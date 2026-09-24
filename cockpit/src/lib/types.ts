@@ -44,7 +44,9 @@ export interface NetworkView {
   ap_ip: string | null;
   usb_ip: string | null;
   uplink_type: string | null;
-  uplink_reachable: boolean;
+  /** Null when the node does not report reachability (a drone composes its
+   *  status without an uplink probe): unknown, never "unreachable". */
+  uplink_reachable: boolean | null;
 }
 
 /** Box health snapshot. */
@@ -110,8 +112,8 @@ export interface ButtonEvent {
  *  and republished locally. Every leaf is nullable; the endpoint returns `{}`
  *  when no vehicle has been heard, so all blocks are optional. Attitude angles
  *  are RADIANS (raw MAVLink ATTITUDE); position/velocity are metres and m/s;
- *  heading is degrees; `battery.remaining` is a percentage with `-1` meaning
- *  unknown. */
+ *  heading is degrees; `battery.remaining` is a percentage. A reading the FC
+ *  has not reported is `null`, never a sentinel. */
 export interface VehicleAttitude {
   roll: number | null;
   pitch: number | null;

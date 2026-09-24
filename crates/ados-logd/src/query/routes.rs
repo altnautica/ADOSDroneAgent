@@ -31,7 +31,6 @@ use ados_protocol::logd::{
 use crate::writer::{ControlMsg, MarkResult};
 
 use super::aggregate::{self, AggregateParams};
-use super::auth::PairingState;
 use super::export::{self, Format};
 use super::openapi;
 use super::pagination::{Cursor, CursorError};
@@ -62,14 +61,15 @@ pub struct AppState {
     pub tail_slots: Arc<TailSlots>,
     /// The concurrent-export cap (bulk streams are far heavier than a query).
     pub export_slots: Arc<ExportSlots>,
-    /// The pairing reader used by the TCP edge auth layer.
-    pub pairing: Arc<PairingState>,
     /// The control sender to the single writer. The mark-synced handler enqueues
     /// a request here and awaits the reply; it never writes the store itself.
     pub mark_synced: mpsc::Sender<crate::writer::ControlMsg>,
     /// The writer's liveness stamp. Read (never written) by `healthz` and
     /// `stats`.
     pub writer_health: crate::writer::WriterHealth,
+    /// The store's latest structural-check verdict, refreshed in the
+    /// background. `healthz` and `stats` report it; neither runs the check.
+    pub integrity: stats::IntegrityVerdict,
 }
 
 impl AppState {
@@ -324,8 +324,7 @@ pub async fn sessions(
 pub async fn stats(State(state): State<AppState>) -> Result<Response, ApiErr> {
     let resp = run_blocking(move || {
         let conn = state.open_ro()?;
-        let writer_alive = state.writer_alive();
-        match stats::gather(&conn, &state.db_path, &state.ingest, writer_alive) {
+        match stats::gather(&conn, &state.db_path, &state.ingest, state.integrity.get()) {
             Ok(s) => Ok(envelope(s, 1, None, None).into_response()),
             Err(e) => Ok(read_error(e).into_response()),
         }
@@ -401,12 +400,11 @@ pub async fn synced(
 /// Liveness/readiness. Public on both edges.
 pub async fn healthz(State(state): State<AppState>) -> Response {
     let writer_alive = state.writer_alive();
-    let health = tokio::task::spawn_blocking(move || {
-        let conn = db::open_readonly(&state.db_path).ok();
-        stats::health(conn.as_ref(), writer_alive)
-    })
-    .await
-    .unwrap_or_else(|_| stats::health(None, false));
+    let integrity = state.integrity.get();
+    let db_open = tokio::task::spawn_blocking(move || db::open_readonly(&state.db_path).is_ok())
+        .await
+        .unwrap_or(false);
+    let health = stats::health(db_open, writer_alive, integrity);
 
     let status = if health.ok {
         StatusCode::OK
@@ -682,10 +680,8 @@ mod tests {
             ingest: Arc::new(crate::ingest::IngestStats::default()),
             tail_slots: Arc::new(super::super::sse::TailSlots::default()),
             export_slots: Arc::new(super::super::sse::ExportSlots::default()),
-            pairing: Arc::new(super::super::auth::PairingState::with_path(
-                std::path::PathBuf::from("/nonexistent/pairing.json"),
-            )),
             mark_synced: tx,
+            integrity: super::super::stats::IntegrityVerdict::new(),
             writer_health: health,
         };
         (state, rx)
@@ -708,10 +704,8 @@ mod tests {
             ingest: Arc::new(crate::ingest::IngestStats::default()),
             tail_slots: Arc::new(super::super::sse::TailSlots::default()),
             export_slots: Arc::new(super::super::sse::ExportSlots::default()),
-            pairing: Arc::new(super::super::auth::PairingState::with_path(
-                std::path::PathBuf::from("/nonexistent/pairing.json"),
-            )),
             mark_synced: tx,
+            integrity: super::super::stats::IntegrityVerdict::new(),
             writer_health: crate::writer::WriterHealth::new(),
         };
         let req = SyncRequest {

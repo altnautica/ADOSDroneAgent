@@ -17,13 +17,69 @@
 //! - `Drop` also calls `killpg` so a process never outlives its Rust owner.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::config::WfbConfig;
 
+// Every plane's stderr goes to a truncated log file. A piped stderr that nobody
+// reads fills its 64 KiB kernel buffer and `wfb_tx` then blocks inside
+// `fprintf(stderr)`: it prints a dropped-packets line every stats interval while
+// the link is congested, so an undrained pipe wedges the transmitter within the
+// hour.
+const DATA_TX_LOG: &str = "/run/ados/wfb-drone-data-tx.log";
 const TX_CONTROL_LOG: &str = "/run/ados/wfb-drone-tx-control.log";
 const RX_CONTROL_LOG: &str = "/run/ados/wfb-drone-rx-control.log";
 const AUX_TX_LOG: &str = "/run/ados/wfb-drone-aux-tx.log";
 const AUX_RX_LOG: &str = "/run/ados/wfb-drone-aux-rx.log";
+
+/// Cumulative totals from one `wfb_tx` plane's own per-second `PKT` stats line
+/// (`vendor/wfb-ng/src/tx.cpp:796-797`). The counts on the wire are per
+/// interval; they are summed here. One handle per plane, shared by every process
+/// that plane ever runs, so a respawn keeps counting on the same totals.
+///
+/// These are the watchdogs' delta counters. They are the transmitter's own
+/// account of its work: `/proc/<pid>/io` never sees it (`wfb_tx` reads its UDP
+/// ingress with `recvmsg` and injects with `sendmsg`, neither on the vfs path
+/// the kernel's `rchar`/`wchar` accounting follows), and the RTL monitor
+/// netdev's byte counters are not a reliable primary signal.
+#[derive(Debug, Default)]
+pub struct TxPlaneCounters {
+    lines: AtomicU64,
+    bytes_in: AtomicU64,
+    bytes_injected: AtomicU64,
+}
+
+/// A point-in-time read of a [`TxPlaneCounters`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TxPlaneTotals {
+    /// Stats lines printed. `wfb_tx` prints one every second from the top of its
+    /// poll loop whether or not traffic moved, so this proves the loop turns.
+    pub lines: u64,
+    /// Bytes read off the plane's UDP ingress.
+    pub bytes_in: u64,
+    /// Bytes successfully injected onto the radio.
+    pub bytes_injected: u64,
+}
+
+impl TxPlaneCounters {
+    /// Fold one parsed stats line into the totals.
+    pub fn record(&self, pkt: &crate::tx_liveness::TxPkt) {
+        self.lines.fetch_add(1, Ordering::Relaxed);
+        self.bytes_in.fetch_add(pkt.bytes_in, Ordering::Relaxed);
+        self.bytes_injected
+            .fetch_add(pkt.bytes_injected, Ordering::Relaxed);
+    }
+
+    /// The totals as of now.
+    pub fn totals(&self) -> TxPlaneTotals {
+        TxPlaneTotals {
+            lines: self.lines.load(Ordering::Relaxed),
+            bytes_in: self.bytes_in.load(Ordering::Relaxed),
+            bytes_injected: self.bytes_injected.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// True when a Reed-Solomon `(k, n)` ratio is valid for `wfb_tx`: a positive
 /// data-shard count and at least one parity shard (`n > k`). Mirrors the Python
@@ -44,7 +100,7 @@ pub fn mcs_index_valid(mcs: u8) -> bool {
 /// preserved across a hop — the operator's pinned manual tier or the adaptive
 /// FEC/MCS is not reverted to the boot defaults. Pure so a respawn can assert the
 /// retained trio reaches the data-plane args without spawning a real process.
-fn data_cfg_from_retained(cfg: &WfbConfig, fec_k: u8, fec_n: u8, mcs_index: u8) -> WfbConfig {
+pub fn data_cfg_from_retained(cfg: &WfbConfig, fec_k: u8, fec_n: u8, mcs_index: u8) -> WfbConfig {
     WfbConfig {
         fec_k,
         fec_n,
@@ -214,32 +270,46 @@ pub struct WfbProcess {
     #[cfg(target_os = "linux")]
     pgid: nix::unistd::Pid,
     inner: tokio::process::Child,
+    /// The task draining a transmitter's stdout stats stream into its plane's
+    /// [`TxPlaneCounters`]. Owned by the process so every spawn path — first
+    /// bring-up, hop respawn, data-plane retune respawn, aux open and restart —
+    /// is measured, and aborted with it.
+    stats_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl WfbProcess {
-    /// Spawn the **data-plane** `wfb_tx`. stderr is piped (drained by the
-    /// caller); the Rule-37 watchdog reads `/proc/<pid>/io` + iface stats.
+    /// Spawn the **data-plane** `wfb_tx`. stderr → truncated log file; its
+    /// stats stream feeds `stats`, the TX-health and receive-queue watchdogs'
+    /// delta counters.
     pub async fn spawn_data_tx(
         iface: &str,
         cfg: &WfbConfig,
         key_path: &Path,
         link_id: u32,
+        stats: Arc<TxPlaneCounters>,
     ) -> std::io::Result<Self> {
-        Self::spawn_in_group("wfb_tx", &data_tx_args(iface, cfg, key_path, link_id), None).await
+        Self::spawn_tx_plane(
+            &data_tx_args(iface, cfg, key_path, link_id),
+            DATA_TX_LOG,
+            stats,
+        )
+        .await
     }
 
     /// Spawn the **tx-control** `wfb_tx` (over-the-air HopAnnounce/PresenceBeacon
-    /// transport). stderr → truncated log file (avoids the PIPE deadlock).
+    /// transport). stderr → truncated log file; its stats stream feeds `stats`,
+    /// the control-plane watchdog's transmit counter.
     pub async fn spawn_tx_control(
         iface: &str,
         cfg: &WfbConfig,
         key_path: &Path,
         link_id: u32,
+        stats: Arc<TxPlaneCounters>,
     ) -> std::io::Result<Self> {
-        Self::spawn_in_group(
-            "wfb_tx",
+        Self::spawn_tx_plane(
             &tx_control_args(iface, cfg, key_path, link_id),
-            Some(TX_CONTROL_LOG),
+            TX_CONTROL_LOG,
+            stats,
         )
         .await
     }
@@ -260,24 +330,25 @@ impl WfbProcess {
         Self::spawn_in_group_piped_stdout(
             "wfb_rx",
             &rx_control_args(iface, key_path, link_id),
-            Some(RX_CONTROL_LOG),
+            RX_CONTROL_LOG,
         )
         .await
     }
 
     /// Spawn the **auxiliary tx** `wfb_tx` (radio_id 2, application ingress).
-    /// stderr → truncated log file (avoids the PIPE deadlock), same as the
-    /// control planes.
+    /// stderr → truncated log file; its stats stream feeds `stats`, the aux
+    /// watchdog's delta counter.
     pub async fn spawn_aux_tx(
         iface: &str,
         cfg: &WfbConfig,
         key_path: &Path,
         link_id: u32,
+        stats: Arc<TxPlaneCounters>,
     ) -> std::io::Result<Self> {
-        Self::spawn_in_group(
-            "wfb_tx",
+        Self::spawn_tx_plane(
             &aux_tx_args(iface, cfg, key_path, link_id),
-            Some(AUX_TX_LOG),
+            AUX_TX_LOG,
+            stats,
         )
         .await
     }
@@ -294,7 +365,7 @@ impl WfbProcess {
         Self::spawn_in_group(
             "wfb_rx",
             &aux_rx_args(iface, cfg, key_path, link_id),
-            Some(AUX_RX_LOG),
+            AUX_RX_LOG,
         )
         .await
     }
@@ -305,59 +376,47 @@ impl WfbProcess {
         self.inner.stdout.take()
     }
 
-    /// Spawn `program` with `args` as a process-group leader (setsid). When
-    /// `stderr_log` is `Some`, stderr is redirected to that file (truncated);
-    /// otherwise stderr is piped for the caller to drain. stdout is always
-    /// discarded (PKT-stats would fill the pipe).
+    /// Spawn a `wfb_tx` plane with stdout piped and drained by an owned reader
+    /// that folds every stats line into `stats`. An unread stdout pipe would
+    /// fill at 64 KiB and block the transmitter in `fprintf(stdout)`.
+    async fn spawn_tx_plane(
+        args: &[String],
+        stderr_log: &str,
+        stats: Arc<TxPlaneCounters>,
+    ) -> std::io::Result<Self> {
+        let mut p = Self::spawn_in_group_piped_stdout("wfb_tx", args, stderr_log).await?;
+        p.stats_task = p
+            .take_stdout()
+            .map(|out| tokio::spawn(tx_stats_reader_loop(out, stats)));
+        Ok(p)
+    }
+
+    /// Spawn `program` with `args` as a process-group leader (setsid), stderr
+    /// redirected to the truncated `stderr_log` file and stdout discarded.
     async fn spawn_in_group(
         program: &str,
         args: &[String],
-        stderr_log: Option<&str>,
+        stderr_log: &str,
     ) -> std::io::Result<Self> {
         let mut cmd = tokio::process::Command::new(program);
-        cmd.args(args).stdout(std::process::Stdio::null());
-
-        match stderr_log {
-            Some(path) => {
-                let file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(path)?;
-                cmd.stderr(std::process::Stdio::from(file));
-            }
-            None => {
-                cmd.stderr(std::process::Stdio::piped());
-            }
-        }
-
+        cmd.args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(truncated_log(stderr_log)?);
         Self::finish_spawn(cmd)
     }
 
-    /// Like [`spawn_in_group`] but pipes stdout (for the stats reader). When
-    /// `stderr_log` is `Some` stderr is redirected to that truncated file (which
-    /// avoids the PIPE deadlock for a process whose stderr nobody drains);
-    /// otherwise it is discarded. setsid + killpg discipline is identical.
+    /// Like [`spawn_in_group`] but pipes stdout (for a stats reader). stderr
+    /// still goes to the truncated `stderr_log` file; setsid + killpg discipline
+    /// is identical.
     async fn spawn_in_group_piped_stdout(
         program: &str,
         args: &[String],
-        stderr_log: Option<&str>,
+        stderr_log: &str,
     ) -> std::io::Result<Self> {
         let mut cmd = tokio::process::Command::new(program);
-        cmd.args(args).stdout(std::process::Stdio::piped());
-        match stderr_log {
-            Some(path) => {
-                let file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(path)?;
-                cmd.stderr(std::process::Stdio::from(file));
-            }
-            None => {
-                cmd.stderr(std::process::Stdio::null());
-            }
-        }
+        cmd.args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(truncated_log(stderr_log)?);
         Self::finish_spawn(cmd)
     }
 
@@ -387,6 +446,7 @@ impl WfbProcess {
             #[cfg(target_os = "linux")]
             pgid,
             inner: child,
+            stats_task: None,
         })
     }
 
@@ -395,7 +455,7 @@ impl WfbProcess {
         matches!(self.inner.try_wait(), Ok(None))
     }
 
-    /// The OS PID, for reading `/proc/<pid>/io`.
+    /// The OS PID, or `None` once the child has been reaped.
     pub fn pid(&self) -> Option<u32> {
         self.inner.id()
     }
@@ -407,21 +467,36 @@ impl WfbProcess {
     }
 
     #[cfg(target_os = "linux")]
-    fn killpg_now(&self) {
+    fn killpg_now(&mut self) {
         use nix::sys::signal::{self, Signal};
         let _ = signal::killpg(self.pgid, Signal::SIGKILL);
     }
 
+    /// Off Linux there is no setsid group to signal; kill the child itself so a
+    /// `kill().await` can never wait on a process nothing signalled.
     #[cfg(not(target_os = "linux"))]
-    fn killpg_now(&self) {
-        // No-op on non-Linux.
+    fn killpg_now(&mut self) {
+        let _ = self.inner.start_kill();
     }
 }
 
 impl Drop for WfbProcess {
     fn drop(&mut self) {
         self.killpg_now();
+        if let Some(t) = self.stats_task.take() {
+            t.abort();
+        }
     }
+}
+
+/// Open (create + truncate) a plane's stderr log file.
+fn truncated_log(path: &str) -> std::io::Result<std::process::Stdio> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    Ok(std::process::Stdio::from(file))
 }
 
 /// The wfb-ng radio port (`-p`) the video data plane occupies. Also selects its
@@ -463,6 +538,17 @@ pub struct RadioProcesses {
     /// shared `LinkStats`. `None` only when the stdout handle could not be
     /// taken, which would leave the link block at its no-measurement defaults.
     stats_reader: Option<tokio::task::JoinHandle<()>>,
+    /// Each transmit plane's cumulative stats totals, fed by the reader every
+    /// `WfbProcess` of that plane owns. Process-lifetime handles: a hop respawn,
+    /// a retune respawn or an aux restart keeps counting on the same totals, so
+    /// the watchdogs judge deltas without ever re-resolving a PID.
+    data_stats: Arc<TxPlaneCounters>,
+    control_stats: Arc<TxPlaneCounters>,
+    aux_stats: Arc<TxPlaneCounters>,
+    /// Stats lines the rx-control `wfb_rx` printed. It dumps a `PKT` line every
+    /// `-l 1000` interval unconditionally (even with no RF arriving), so a live
+    /// receiver advances it once a second.
+    rx_stats_lines: Arc<AtomicU64>,
     /// Auxiliary application-stream transmit (radio_id 2). `None` whenever the
     /// aux stream is closed, which is the boot state (safe-by-default): no aux
     /// process is ever spawned until something explicitly opens the stream.
@@ -556,10 +642,17 @@ impl RadioProcesses {
     ) -> std::io::Result<Self> {
         let own_link_id = crate::config::link_id(cfg.fleet_id, cfg.fleet_slot);
         let uplink_link_id = crate::config::link_id(cfg.fleet_id, crate::config::SLOT_GROUND);
-        let data_tx = WfbProcess::spawn_data_tx(iface, cfg, key_path, own_link_id).await?;
-        let tx_control = WfbProcess::spawn_tx_control(iface, cfg, key_path, own_link_id).await?;
+        let data_stats = Arc::new(TxPlaneCounters::default());
+        let control_stats = Arc::new(TxPlaneCounters::default());
+        let rx_stats_lines = Arc::new(AtomicU64::new(0));
+        let data_tx =
+            WfbProcess::spawn_data_tx(iface, cfg, key_path, own_link_id, data_stats.clone())
+                .await?;
+        let tx_control =
+            WfbProcess::spawn_tx_control(iface, cfg, key_path, own_link_id, control_stats.clone())
+                .await?;
         let mut rx_control = WfbProcess::spawn_rx_control(iface, key_path, uplink_link_id).await?;
-        let stats_reader = Self::spawn_stats_reader(&mut rx_control, link);
+        let stats_reader = Self::spawn_stats_reader(&mut rx_control, link, rx_stats_lines.clone());
 
         tracing::info!(
             fleet_id = cfg.fleet_id,
@@ -574,6 +667,10 @@ impl RadioProcesses {
             tx_control,
             rx_control,
             stats_reader,
+            data_stats,
+            control_stats,
+            aux_stats: Arc::new(TxPlaneCounters::default()),
+            rx_stats_lines,
             // Safe-by-default: the auxiliary stream never starts at boot. It is
             // brought up only by an explicit open_aux_stream call.
             aux_tx: None,
@@ -601,9 +698,10 @@ impl RadioProcesses {
     fn spawn_stats_reader(
         rx_control: &mut WfbProcess,
         link: std::sync::Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
+        rx_stats_lines: Arc<AtomicU64>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         match rx_control.take_stdout() {
-            Some(out) => Some(tokio::spawn(stats_reader_loop(out, link))),
+            Some(out) => Some(tokio::spawn(stats_reader_loop(out, link, rx_stats_lines))),
             None => {
                 tracing::warn!("rx_control_stdout_unavailable: link stats will stay unmeasured");
                 None
@@ -611,17 +709,45 @@ impl RadioProcesses {
         }
     }
 
-    /// The data-plane PID, for the Rule-37 TX watchdog.
+    /// The data-plane PID, for the logs.
     pub fn data_tx_pid(&self) -> Option<u32> {
         self.data_tx.pid()
     }
 
-    /// True while the data-plane `wfb_tx` has not exited. A cheap `try_wait`
-    /// reap (it never blocks), so an exit-watch task can poll it on a short
-    /// interval to catch a self-crashed transmitter immediately rather than
-    /// waiting out the 30 s counter watchdog.
-    pub fn data_tx_running(&mut self) -> bool {
-        self.data_tx.is_running()
+    /// The first plane of the group that has exited, or `None` while all three
+    /// run. A cheap `try_wait` reap (it never blocks), so an exit-watch task can
+    /// poll it on a short interval and respawn the group the moment any plane
+    /// crashes, rather than waiting out a 30 s counter window.
+    pub fn exited_plane(&mut self) -> Option<&'static str> {
+        if !self.data_tx.is_running() {
+            Some("data_tx")
+        } else if !self.tx_control.is_running() {
+            Some("tx_control")
+        } else if !self.rx_control.is_running() {
+            Some("rx_control")
+        } else {
+            None
+        }
+    }
+
+    /// The control planes' cumulative stats counters, for the delta-counter
+    /// watchdog: the tx-control plane's totals and the rx-control stats lines.
+    pub fn control_progress(&self) -> (TxPlaneTotals, u64) {
+        (
+            self.control_stats.totals(),
+            self.rx_stats_lines.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The data plane's stats totals handle, for the TX-health and
+    /// receive-queue watchdogs and the heartbeat's transmit rate.
+    pub fn data_stats(&self) -> Arc<TxPlaneCounters> {
+        self.data_stats.clone()
+    }
+
+    /// The aux transmit plane's stats totals.
+    pub fn aux_totals(&self) -> TxPlaneTotals {
+        self.aux_stats.totals()
     }
 
     /// The data plane's currently-running Reed-Solomon `(k, n)` ratio.
@@ -843,6 +969,22 @@ impl RadioProcesses {
         self.aux_rx.as_ref().and_then(|p| p.pid())
     }
 
+    /// True while a plugin still wants the aux stream: it was opened and not
+    /// closed. The retained settings outlive a failed restart, so a pair that is
+    /// wanted but down is exactly the case the watchdog must keep retrying.
+    pub fn aux_wanted(&self) -> bool {
+        self.aux_settings.is_some()
+    }
+
+    /// True when either half of an open aux pair has exited. A cheap `try_wait`
+    /// reap: an exited child keeps its PID until reaped, so the PID alone never
+    /// reveals a crash.
+    pub fn aux_exited(&mut self) -> bool {
+        let tx_dead = self.aux_tx.as_mut().is_some_and(|p| !p.is_running());
+        let rx_dead = self.aux_rx.as_mut().is_some_and(|p| !p.is_running());
+        tx_dead || rx_dead
+    }
+
     /// Open the auxiliary application stream: spawn the aux tx (radio_id 2) and
     /// aux rx (radio_id 3) pair on the SAME injection interface as the data and
     /// control planes, using the aux settings from `cfg`. ADDITIVE — it never
@@ -873,14 +1015,21 @@ impl RadioProcesses {
             return true;
         }
         let key_path = self.tx_key_path.clone();
-        let aux_tx =
-            match WfbProcess::spawn_aux_tx(&self.iface, cfg, &key_path, self.own_link_id).await {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "aux_tx_spawn_failed");
-                    return false;
-                }
-            };
+        let aux_tx = match WfbProcess::spawn_aux_tx(
+            &self.iface,
+            cfg,
+            &key_path,
+            self.own_link_id,
+            self.aux_stats.clone(),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "aux_tx_spawn_failed");
+                return false;
+            }
+        };
         let aux_rx = match WfbProcess::spawn_aux_rx(
             &self.iface,
             cfg,
@@ -936,9 +1085,9 @@ impl RadioProcesses {
     /// only touches the aux pair, never the data plane or the control planes.
     ///
     /// A no-op (`false`) when the stream is not open (nothing to restart). On a
-    /// re-spawn failure the aux pair is left closed but the retained settings are
-    /// KEPT, so a later whole-group respawn (a channel hop) still re-opens it — the
-    /// primary link is unaffected regardless of the additive aux pair's health.
+    /// re-spawn failure the aux pair is left down but the retained settings are
+    /// KEPT, so the aux watchdog retries it on its next poll — the primary link is
+    /// unaffected regardless of the additive aux pair's health.
     pub async fn restart_aux_stream(&mut self) -> bool {
         let Some(settings) = self.aux_settings else {
             return false;
@@ -952,8 +1101,14 @@ impl RadioProcesses {
         }
         let aux_cfg = settings.to_cfg();
         let key_path = self.tx_key_path.clone();
-        let aux_tx =
-            WfbProcess::spawn_aux_tx(&self.iface, &aux_cfg, &key_path, self.own_link_id).await;
+        let aux_tx = WfbProcess::spawn_aux_tx(
+            &self.iface,
+            &aux_cfg,
+            &key_path,
+            self.own_link_id,
+            self.aux_stats.clone(),
+        )
+        .await;
         let aux_rx =
             WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path, self.uplink_link_id).await;
         match (aux_tx, aux_rx) {
@@ -1003,25 +1158,36 @@ impl RadioProcesses {
         let data_cfg =
             data_cfg_from_retained(cfg, self.data_fec_k, self.data_fec_n, self.data_mcs_index);
         let key_path = self.tx_key_path.clone();
-        let data_tx =
-            match WfbProcess::spawn_data_tx(&self.iface, &data_cfg, &key_path, self.own_link_id)
-                .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "respawn_group_data_tx_failed");
-                    return false;
-                }
-            };
-        let tx_control =
-            match WfbProcess::spawn_tx_control(&self.iface, cfg, &key_path, self.own_link_id).await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "respawn_group_tx_control_failed");
-                    return false;
-                }
-            };
+        let data_tx = match WfbProcess::spawn_data_tx(
+            &self.iface,
+            &data_cfg,
+            &key_path,
+            self.own_link_id,
+            self.data_stats.clone(),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "respawn_group_data_tx_failed");
+                return false;
+            }
+        };
+        let tx_control = match WfbProcess::spawn_tx_control(
+            &self.iface,
+            cfg,
+            &key_path,
+            self.own_link_id,
+            self.control_stats.clone(),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "respawn_group_tx_control_failed");
+                return false;
+            }
+        };
         let mut rx_control =
             match WfbProcess::spawn_rx_control(&self.iface, &key_path, self.uplink_link_id).await {
                 Ok(p) => p,
@@ -1030,20 +1196,28 @@ impl RadioProcesses {
                     return false;
                 }
             };
-        let stats_reader = Self::spawn_stats_reader(&mut rx_control, link);
+        let stats_reader =
+            Self::spawn_stats_reader(&mut rx_control, link, self.rx_stats_lines.clone());
         self.data_tx = data_tx;
         self.tx_control = tx_control;
         self.rx_control = rx_control;
         self.stats_reader = stats_reader;
         // kill_all cleared the aux processes but kept aux_settings; re-open the
         // aux pair on the NEW channel iff it was open before the hop. A re-open
-        // failure leaves the aux stream closed (settings dropped) but does NOT
-        // fail the whole group — the data + control planes are already up, so the
-        // primary link is healthy regardless of the additive aux pair.
+        // failure leaves the pair down with the settings KEPT, so the aux
+        // watchdog keeps retrying it, and does NOT fail the whole group — the
+        // data + control planes are already up, so the primary link is healthy
+        // regardless of the additive aux pair.
         if let Some(settings) = self.aux_settings {
             let aux_cfg = settings.to_cfg();
-            let aux_tx =
-                WfbProcess::spawn_aux_tx(&self.iface, &aux_cfg, &key_path, self.own_link_id).await;
+            let aux_tx = WfbProcess::spawn_aux_tx(
+                &self.iface,
+                &aux_cfg,
+                &key_path,
+                self.own_link_id,
+                self.aux_stats.clone(),
+            )
+            .await;
             let aux_rx =
                 WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path, self.uplink_link_id)
                     .await;
@@ -1060,12 +1234,11 @@ impl RadioProcesses {
                         tracing::warn!(error = %e, "respawn_group_aux_rx_failed");
                     }
                     // Drop any half that spawned so a partial re-open does not
-                    // leave one process running, and forget the settings.
+                    // leave one process running; the watchdog retries the pair.
                     drop(tx);
                     drop(rx);
                     self.aux_tx = None;
                     self.aux_rx = None;
-                    self.aux_settings = None;
                 }
             }
         }
@@ -1089,8 +1262,14 @@ impl RadioProcesses {
             ..WfbConfig::default()
         };
         self.data_tx.kill().await;
-        match WfbProcess::spawn_data_tx(&self.iface, &cfg, &self.tx_key_path, self.own_link_id)
-            .await
+        match WfbProcess::spawn_data_tx(
+            &self.iface,
+            &cfg,
+            &self.tx_key_path,
+            self.own_link_id,
+            self.data_stats.clone(),
+        )
+        .await
         {
             Ok(p) => {
                 self.data_tx = p;
@@ -1109,9 +1288,10 @@ impl RadioProcesses {
     /// respawn (a channel hop) can re-open the aux pair on the new channel; a
     /// `close` is what clears the settings.
     pub async fn kill_all(&mut self) {
-        // Abort the reader BEFORE killing its producer: the reader owns the only
-        // read end of rx-control's stats pipe, and leaving it live against a
-        // killed process just makes it return on EOF a moment later.
+        // Abort the receiver's reader BEFORE killing its producer: it owns the
+        // only read end of rx-control's stats pipe, and leaving it live against
+        // a killed process just makes it return on EOF a moment later. The
+        // transmitters' readers are owned by their `WfbProcess`.
         if let Some(r) = self.stats_reader.take() {
             r.abort();
         }
@@ -1128,11 +1308,14 @@ impl RadioProcesses {
 }
 
 /// Read `wfb_rx` stdout line-by-line, feed the link-quality monitor, and update
-/// the shared `LinkStats` the sidecar + reactive-hop logic read. Ends on EOF
-/// (process death) or task abort.
+/// the shared `LinkStats` the sidecar + reactive-hop logic read. Every stats
+/// line also advances `rx_stats_lines`. Ends on EOF (process death) or task
+/// abort; on EOF the link block returns to its no-measurement defaults so a
+/// dead receiver's last reading is never reported as live.
 async fn stats_reader_loop(
     stdout: tokio::process::ChildStdout,
     link: std::sync::Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
+    rx_stats_lines: Arc<AtomicU64>,
 ) {
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -1140,7 +1323,21 @@ async fn stats_reader_loop(
     while let Ok(Some(line)) = lines.next_line().await {
         let now_iso = now_iso();
         if let Some(stats) = mon.feed_line(&line, &now_iso) {
+            rx_stats_lines.fetch_add(1, Ordering::Relaxed);
             *link.lock().await = stats;
+        }
+    }
+    *link.lock().await = crate::link_quality::LinkStats::default();
+}
+
+/// Drain a `wfb_tx` plane's stdout and fold every stats line into its plane's
+/// totals. Ends on EOF or task abort.
+async fn tx_stats_reader_loop(stdout: tokio::process::ChildStdout, stats: Arc<TxPlaneCounters>) {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(pkt) = crate::tx_liveness::parse_tx_pkt(line.trim_end()) {
+            stats.record(&pkt);
         }
     }
 }
@@ -1156,6 +1353,54 @@ fn now_iso() -> String {
 mod tests {
     use super::*;
     use crate::config::{link_id, FLEET_MAX_SLOTS, SLOT_GROUND};
+
+    /// A plane that writes more than a pipe's worth of stderr must keep running
+    /// to completion. `wfb_tx` prints a dropped-packets line every stats interval
+    /// while congested; with stderr on an undrained pipe it blocks in
+    /// `fprintf(stderr)` once 64 KiB accumulate and stops transmitting.
+    #[tokio::test]
+    async fn a_plane_never_blocks_on_its_own_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("plane.log");
+        let args = vec![
+            "-c".to_string(),
+            "head -c 262144 /dev/zero >&2; exit 0".to_string(),
+        ];
+        let mut p = WfbProcess::spawn_in_group("sh", &args, log.to_str().unwrap())
+            .await
+            .unwrap();
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(10), p.inner.wait())
+            .await
+            .expect("a plane writing 256 KiB of stderr must not block");
+        assert!(exited.unwrap().success());
+        assert_eq!(std::fs::metadata(&log).unwrap().len(), 262_144);
+    }
+
+    /// A transmitter's own per-second stats lines accumulate into its plane's
+    /// totals: the lines themselves (the loop is turning) and the per-interval
+    /// ingress and injection bytes, summed.
+    #[tokio::test]
+    async fn tx_plane_stats_lines_accumulate_into_the_plane_totals() {
+        let mut child = tokio::process::Command::new("sh")
+            .args([
+                "-c",
+                "printf '1\\tPKT\\t0:2:200:2:230:0:0\\nSession restarted\\n2\\tPKT\\t0:1:100:1:115:0:0\\n'",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stats = Arc::new(TxPlaneCounters::default());
+        tx_stats_reader_loop(child.stdout.take().unwrap(), stats.clone()).await;
+        let _ = child.wait().await;
+        assert_eq!(
+            stats.totals(),
+            TxPlaneTotals {
+                lines: 2,
+                bytes_in: 300,
+                bytes_injected: 345,
+            }
+        );
+    }
 
     /// Read the value following `flag` in an arg vector.
     fn arg_after(args: &[String], flag: &str) -> String {

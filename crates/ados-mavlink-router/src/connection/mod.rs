@@ -45,6 +45,7 @@ use std::time::{Duration, Instant};
 
 use ados_protocol::mavlink::ardupilotmega::MavMessage;
 use ados_protocol::mavlink::{self, MavHeader};
+use ados_protocol::shutdown::Shutdown;
 use bytes::Bytes;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpStream, UdpSocket};
@@ -52,14 +53,14 @@ use tokio::sync::{broadcast, Mutex};
 
 use crate::config::{CrsfMavlinkSource, MavlinkConfig, CRSF_MAVLINK_BAUD};
 use crate::param_cache::ParamCache;
-use crate::state::VehicleState;
+use crate::state::{VehicleSource, VehicleState};
 
 use ados_protocol::hwcaps::is_rc_bridge_usb_id;
 use framing::{count_msp_frame_starts, extract_frames};
 use send_scheduler::STREAM_DEFAULT;
 use transport::{
     fc_variant_for_port, is_candidate_port, now_iso, open_serial, open_udp_listen, parse_net_spec,
-    persist_params, probe_baud, same_device, split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec,
+    probe_baud, same_device, split_serial, BoxedReadHalf, BoxedWriteHalf, NetSpec, ParamPersister,
     ProbeOutcome, UdpAdapter, BAUD_CANDIDATES, BAUD_FALLBACK,
 };
 
@@ -230,6 +231,9 @@ pub struct FcConnection {
     /// pairing/PIC reads + HMAC verify are cached off the router loop and the
     /// lock never spans an `.await`. Inert until a producer arms the gate.
     injector_gate: std::sync::Mutex<injector_gate::InjectorGateCache>,
+    /// The single writer the parameter cache is persisted through, newest
+    /// snapshot wins.
+    param_persister: ParamPersister,
 }
 
 impl FcConnection {
@@ -273,6 +277,7 @@ impl FcConnection {
             param_last_cached_count: AtomicUsize::new(0),
             aux_uplink: Mutex::new(None),
             injector_gate: std::sync::Mutex::new(injector_gate::InjectorGateCache::new()),
+            param_persister: ParamPersister::new(),
         })
     }
 
@@ -525,8 +530,8 @@ impl FcConnection {
     /// actually is.
     ///
     /// Serialising happens under the params lock; the caller does the blocking
-    /// write off-reactor via [`persist_params`], so neither the lock nor a worker
-    /// thread is held across disk I/O.
+    /// write off-reactor through [`ParamPersister`], so neither the lock nor a
+    /// worker thread is held across disk I/O.
     async fn record_param(
         &self,
         name: &str,
@@ -547,18 +552,6 @@ impl FcConnection {
             .map(|body| (pc.path().to_path_buf(), body))
     }
 
-    /// Whether a HEARTBEAT with this source identity is our OWN injected
-    /// companion heartbeat — identified by the FULL (system_id, component_id)
-    /// pair, never system_id alone. A companion computer shares the vehicle's
-    /// system_id (commonly 1) and is distinguished only by its component_id
-    /// (191 vs the autopilot's 1), so a system_id-only check would wrongly
-    /// treat the FC's own heartbeat as ours whenever the agent's configured
-    /// system_id equals the FC's — and the link would never read alive even
-    /// while the autopilot streams HEARTBEAT at 1 Hz.
-    fn is_own_heartbeat(&self, system_id: u8, component_id: u8) -> bool {
-        system_id == self.cfg.system_id && component_id == self.cfg.component_id
-    }
-
     /// Connect-and-read loop. Returns only on shutdown via `cancel`.
     ///
     /// Three things end a live session: the read half hits EOF/error (the FC
@@ -568,11 +561,11 @@ impl FcConnection {
     /// with a fresh half, after a fixed [`RECONNECT_INTERVAL`] that never grows
     /// and never gives up. The interval floor is also what keeps a persistently
     /// unwritable port from tight-looping on its failed writes.
-    pub async fn run(&self, cancel: std::sync::Arc<tokio::sync::Notify>) {
+    pub async fn run(&self, cancel: Shutdown) {
         loop {
             let stream = tokio::select! {
                 s = self.open() => s,
-                _ = cancel.notified() => return,
+                _ = cancel.wait() => return,
             };
             let Some((read_half, write_half, port, baud)) = stream else {
                 // The transport could not be opened — the configured endpoint is
@@ -582,7 +575,7 @@ impl FcConnection {
                 self.open_failed.store(true, Ordering::Relaxed);
                 tokio::select! {
                     _ = tokio::time::sleep(RECONNECT_INTERVAL) => {}
-                    _ = cancel.notified() => return,
+                    _ = cancel.wait() => return,
                 }
                 continue;
             };
@@ -625,7 +618,7 @@ impl FcConnection {
                 _ = self.reconnect.notified() => {
                     tracing::warn!("fc_write_failed_reconnecting");
                 }
-                _ = cancel.notified() => {
+                _ = cancel.wait() => {
                     self.connected.store(false, Ordering::Relaxed);
                     *self.last_heartbeat_at.lock().await = None;
                     *self.writer.lock().await = None;
@@ -655,7 +648,7 @@ impl FcConnection {
             // (driven by `open_failed`) is what names the cause to the operator.
             tokio::select! {
                 _ = tokio::time::sleep(RECONNECT_INTERVAL) => {}
-                _ = cancel.notified() => return,
+                _ = cancel.wait() => return,
             }
         }
     }
@@ -668,7 +661,7 @@ impl FcConnection {
     /// publishes is shape- and value-compatible with the Python demo's. The
     /// link reports as connected (port `demo`, baud 0) for the run's lifetime.
     /// Returns only on shutdown via `cancel`.
-    pub async fn run_demo(&self, cancel: std::sync::Arc<tokio::sync::Notify>) {
+    pub async fn run_demo(&self, cancel: Shutdown) {
         *self.port.lock().await = "demo".to_string();
         self.baud.store(0, Ordering::Relaxed);
         self.connected.store(true, Ordering::Relaxed);
@@ -707,13 +700,13 @@ impl FcConnection {
                                 .record_param(&name, value as f64, ptype, &mut since_save)
                                 .await
                             {
-                                persist_params(path, body);
+                                self.param_persister.persist(path, body);
                             }
                         }
                     }
                     *self.last_msg_at.lock().await = Instant::now();
                 }
-                _ = cancel.notified() => {
+                _ = cancel.wait() => {
                     self.connected.store(false, Ordering::Relaxed);
                     tracing::info!("fc_demo_stopped");
                     return;
@@ -736,6 +729,9 @@ impl FcConnection {
         // Rolling MSP-evidence accumulator for the link-hint detector.
         let mut msp_count: usize = 0;
         let mut msp_window = Instant::now();
+        // Which component on this link is the vehicle. Per session: a re-opened
+        // link latches afresh from its first autopilot HEARTBEAT.
+        let mut vehicle = VehicleSource::default();
         loop {
             let n = match reader.read(&mut chunk).await {
                 Ok(0) => return, // EOF: link gone
@@ -744,10 +740,10 @@ impl FcConnection {
             };
             // An MSP FC speaks MSP (not MAVLink) on FC->host: forward the raw chunk
             // verbatim so a polling MSP GCS receives the FC's responses, and skip
-            // MAVLink framing entirely. extract_frames does no CRC check and would
-            // carve garbage "frames" from MSP payload bytes that contain 0xFD/0xFE,
-            // so running it for an MSP FC would fan corrupt bytes onto the frame
-            // lane alongside the raw ones. is_msp is false for a MAVLink FC, so the
+            // MAVLink framing entirely: an MSP stream carries no MAVLink, so
+            // scanning it only spends CPU on 0xFD/0xFE payload bytes and risks a
+            // chance checksum match putting a bogus frame on the frame lane
+            // alongside the raw ones. is_msp is false for a MAVLink FC, so the
             // framing path below is byte-unchanged; the MSP link hint comes from the
             // USB-descriptor variant, so the MSP-start sniff is unnecessary here too.
             if is_msp {
@@ -823,31 +819,27 @@ impl FcConnection {
                     }
                 }
                 if let Ok((header, msg)) = mavlink::parse_any(&frame) {
-                    // Learn the FC system id from its heartbeats, and stamp the
-                    // heartbeat-freshness clock the alive gate reads. Bump the
-                    // clock for any HEARTBEAT that is NOT our own injected
-                    // companion one — identified by the full (system_id,
-                    // component_id) identity, NOT system_id alone. A companion
-                    // shares the vehicle's system_id (commonly 1) and differs
-                    // only by component_id (191 vs the autopilot's 1), so a
-                    // system_id-only filter wrongly discards the FC's own
-                    // heartbeat whenever the agent's configured system_id equals
-                    // the FC's — the link then never reads alive even though the
-                    // autopilot is streaming. A port that opens but never hears
-                    // the autopilot still stays not-alive.
+                    // Only the vehicle's own frames drive the link and the state.
+                    // The FC forwards every other component's broadcast traffic
+                    // here too (a ground station's HEARTBEAT on a telemetry radio,
+                    // a gimbal, a second companion); those stay on the fan-out
+                    // above but never touch armed, mode, the alive clock, the
+                    // target system or the parameter cache. Our own companion
+                    // HEARTBEAT names no autopilot, so it is excluded the same way.
+                    if !vehicle.admit(header.system_id, header.component_id, &msg) {
+                        continue;
+                    }
                     if let MavMessage::HEARTBEAT(_) = &msg {
-                        if !self.is_own_heartbeat(header.system_id, header.component_id) {
-                            self.target_system
-                                .store(header.system_id, Ordering::Relaxed);
-                            *self.last_heartbeat_at.lock().await = Some(Instant::now());
-                            // A real FC HEARTBEAT clears any MSP suspicion so a
-                            // link that started noisy (or recovered) reads as
-                            // healthy at once, and re-arms the once-per-episode
-                            // warning for any future MSP episode.
-                            *self.last_msp_at.lock().await = None;
-                            self.msp_warned.store(false, Ordering::Relaxed);
-                            msp_count = 0;
-                        }
+                        self.target_system
+                            .store(header.system_id, Ordering::Relaxed);
+                        *self.last_heartbeat_at.lock().await = Some(Instant::now());
+                        // A real FC HEARTBEAT clears any MSP suspicion so a link
+                        // that started noisy (or recovered) reads as healthy at
+                        // once, and re-arms the once-per-episode warning for any
+                        // future MSP episode.
+                        *self.last_msp_at.lock().await = None;
+                        self.msp_warned.store(false, Ordering::Relaxed);
+                        msp_count = 0;
                     }
                     // `Instant::now()` rather than the hoisted `now`: the
                     // cadence tracker measures inter-arrival gaps and needs a
@@ -867,7 +859,7 @@ impl FcConnection {
                             .record_param(&name, value as f64, ptype, &mut since_save)
                             .await
                         {
-                            persist_params(path, body);
+                            self.param_persister.persist(path, body);
                         }
                     }
                 }
@@ -1443,6 +1435,21 @@ mod command_gate_tests {
             "the FC command path wrote the heartbeat"
         );
     }
+
+    /// The parameter sweep's send-failure flag must reflect whether the
+    /// PARAM_REQUEST_LIST reached the FC. With no writer it never left, and the
+    /// GCS must be told that rather than shown an indefinite "priming".
+    #[tokio::test]
+    async fn a_sweep_that_never_reaches_the_fc_reports_the_send_failure() {
+        let c = conn_with(gated_mavlink_cfg());
+        c.connected.store(true, Ordering::Relaxed);
+        c.tick_param_sweep().await;
+        assert!(c.param_priming());
+        assert!(
+            c.param_sweep_send_failed(),
+            "a request that reached no writer is a failed send"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1586,24 +1593,95 @@ mod liveness_tests {
         assert_eq!(c.link_hint().await, "no_heartbeat");
     }
 
-    #[test]
-    fn fc_heartbeat_is_recognized_when_it_shares_the_agent_system_id() {
-        // The standard ArduPilot companion config: FC sysid 1 / compid 1, agent
-        // companion sysid 1 / compid 191. The FC heartbeat SHARES the agent's
-        // system_id but differs by component_id, so it must NOT be filtered as
-        // our own — else the link never reads alive while the FC streams.
+    /// Serialise one HEARTBEAT as the given component.
+    fn heartbeat_from(
+        system_id: u8,
+        component_id: u8,
+        mavtype: ados_protocol::mavlink::ardupilotmega::MavType,
+        autopilot: ados_protocol::mavlink::ardupilotmega::MavAutopilot,
+        armed: bool,
+    ) -> Vec<u8> {
+        use ados_protocol::mavlink::ardupilotmega::{MavModeFlag, MavState, HEARTBEAT_DATA};
+        let msg = MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode: 4,
+            mavtype,
+            autopilot,
+            base_mode: if armed {
+                MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED
+            } else {
+                MavModeFlag::empty()
+            },
+            system_status: MavState::MAV_STATE_ACTIVE,
+            mavlink_version: 3,
+        });
+        let header = MavHeader {
+            system_id,
+            component_id,
+            sequence: 0,
+        };
+        mavlink::serialize_v2(header, &msg).unwrap()
+    }
+
+    /// A flight controller forwards a ground station's HEARTBEAT (from a
+    /// telemetry radio on another port) and a companion's to this link. Only the
+    /// autopilot's describes the vehicle: the ground station's must not disarm
+    /// it in the snapshot or re-point requests at the ground station.
+    #[tokio::test]
+    async fn a_forwarded_ground_station_heartbeat_never_drives_the_vehicle() {
+        use ados_protocol::mavlink::ardupilotmega::{MavAutopilot, MavType};
         let c = conn_with(MavlinkConfig::default());
-        assert_eq!(c.cfg.system_id, 1, "default companion system_id is 1");
-        assert_ne!(
-            c.cfg.component_id, 1,
-            "the companion component_id must differ from the autopilot's (1)"
+        let mut wire = heartbeat_from(
+            1,
+            1,
+            MavType::MAV_TYPE_QUADROTOR,
+            MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+            true,
         );
-        // The FC's own heartbeat (autopilot component 1) is NOT ours → counted.
-        assert!(!c.is_own_heartbeat(1, 1));
-        // Our own companion heartbeat (matching sysid AND compid) is filtered.
-        assert!(c.is_own_heartbeat(c.cfg.system_id, c.cfg.component_id));
-        // A heartbeat from a different system is also not ours.
-        assert!(!c.is_own_heartbeat(2, 1));
+        wire.extend(heartbeat_from(
+            255,
+            190,
+            MavType::MAV_TYPE_GCS,
+            MavAutopilot::MAV_AUTOPILOT_INVALID,
+            false,
+        ));
+        wire.extend(heartbeat_from(
+            1,
+            191,
+            MavType::MAV_TYPE_ONBOARD_CONTROLLER,
+            MavAutopilot::MAV_AUTOPILOT_INVALID,
+            false,
+        ));
+        c.read_loop(Box::pin(std::io::Cursor::new(wire))).await;
+
+        let s = c.state.lock().await;
+        assert!(
+            s.armed,
+            "the ground station's base mode must not disarm the vehicle"
+        );
+        assert_eq!(s.mode, "GUIDED");
+        assert_eq!(s.mav_type, MavType::MAV_TYPE_QUADROTOR as i64);
+        drop(s);
+        assert_eq!(c.target_system.load(Ordering::Relaxed), 1);
+        assert!(c.last_heartbeat_at.lock().await.is_some());
+    }
+
+    /// A link that only carries somebody else's HEARTBEAT is not a live
+    /// vehicle link.
+    #[tokio::test]
+    async fn a_ground_station_heartbeat_alone_does_not_make_the_link_alive() {
+        use ados_protocol::mavlink::ardupilotmega::{MavAutopilot, MavType};
+        let c = conn_with(MavlinkConfig::default());
+        c.connected.store(true, Ordering::Relaxed);
+        let wire = heartbeat_from(
+            255,
+            190,
+            MavType::MAV_TYPE_GCS,
+            MavAutopilot::MAV_AUTOPILOT_INVALID,
+            false,
+        );
+        c.read_loop(Box::pin(std::io::Cursor::new(wire))).await;
+        assert!(!c.mavlink_alive().await);
+        assert_eq!(c.target_system.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1708,7 +1786,7 @@ mod liveness_tests {
             serial_port: format!("tcp:{}:{}", addr.ip(), addr.port()),
             ..MavlinkConfig::default()
         });
-        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cancel = Shutdown::new();
         let run_conn = c.clone();
         let run_cancel = cancel.clone();
         let mut run_task = tokio::spawn(async move { run_conn.run(run_cancel).await });
@@ -1728,7 +1806,7 @@ mod liveness_tests {
                 ),
             }
         }
-        cancel.notify_waiters();
+        cancel.trigger();
 
         for (i, pair) in stamps.windows(2).enumerate() {
             let gap = pair[1] - pair[0];
@@ -1943,7 +2021,7 @@ mod passthrough_tests {
         let c = conn();
         *c.fc_variant.lock().await = Some("betaflight".into());
 
-        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cancel = Shutdown::new();
 
         // Raw lane -> MSP socket (the new producer, verbatim from `main()`).
         {
@@ -1962,7 +2040,7 @@ mod passthrough_tests {
                             Err(broadcast::error::RecvError::Lagged(_)) => continue,
                             Err(broadcast::error::RecvError::Closed) => break,
                         },
-                        _ = cancel.notified() => break,
+                        _ = cancel.wait() => break,
                     }
                 }
             });
@@ -1984,7 +2062,7 @@ mod passthrough_tests {
                             Err(broadcast::error::RecvError::Lagged(_)) => continue,
                             Err(broadcast::error::RecvError::Closed) => break,
                         },
-                        _ = cancel.notified() => break,
+                        _ = cancel.wait() => break,
                     }
                 }
             });
@@ -2027,7 +2105,7 @@ mod passthrough_tests {
             "the mavlink socket must stay silent for an MSP FC"
         );
 
-        cancel.notify_waiters();
+        cancel.trigger();
         let _ = std::fs::remove_file(&msp_path);
         let _ = std::fs::remove_file(&mav_path);
     }

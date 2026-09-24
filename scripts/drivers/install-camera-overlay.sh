@@ -232,7 +232,7 @@ ensure_camera_packages() {
         return 0
     fi
     info "Installing camera userspace packages: ${missing[*]}"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" >/dev/null 2>&1 \
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y "${missing[@]}" >/dev/null 2>&1 \
         || warn "Could not install ${missing[*]} (offline?); camera capture tools may be unavailable."
 }
 

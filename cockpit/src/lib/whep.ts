@@ -90,10 +90,9 @@ export async function startWhep(
   };
 
   try {
-    const offer = await pc.createOffer({
-      offerToReceiveVideo: true,
-      offerToReceiveAudio: true,
-    });
+    // The recvonly video transceiver is the whole offer. The legacy
+    // offerToReceive* options would add an audio transceiver back.
+    const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
     // Wait briefly for ICE candidates so the answer can address them

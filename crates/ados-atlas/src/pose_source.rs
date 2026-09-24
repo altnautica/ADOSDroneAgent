@@ -228,11 +228,23 @@ pub fn diagonal_cov(position_sigma_m: f64, orientation_sigma_rad: f64) -> Vec<f6
 /// Convert one decoded state snapshot into a local-frame pose, fixing the
 /// session anchor on the first valid fix. The caller decodes the wire frame
 /// (v1 JSON or v2 msgpack) into a field-addressed value first.
+///
+/// The sample's age is the POSITION's age, not the snapshot's: the router
+/// republishes the snapshot on an unconditional cadence, so a GPS or position
+/// stream that stalls behind a live heartbeat still arrives "fresh" every
+/// frame. `position_age_ms` is how long ago the router last decoded a
+/// position; the arrival instant is back-dated by it so the capture loop's
+/// freshness gate sees the real age. A snapshot with no decoded position
+/// (`position_age_ms` null or absent) carries no pose at all.
 fn parse_state_pose(
     v: &serde_json::Value,
     anchor: &Arc<Mutex<Option<GlobalAnchor>>>,
     prior: &PosePrior,
 ) -> Option<PoseSample> {
+    let position_age_ms = v.get("position_age_ms")?.as_u64()?;
+    let age_ns = i64::try_from(position_age_ms)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1_000_000);
     let pos = v.get("position")?;
     let att = v.get("attitude")?;
     let lat = pos.get("lat")?.as_f64()?;
@@ -303,8 +315,8 @@ fn parse_state_pose(
         },
         anchor: anchor_now,
         source: PoseSource::LocalVio,
-        ts_ms: now_ms(),
-        arrival_mono_ns: mono_ns(),
+        ts_ms: now_ms().saturating_sub(age_ns / 1_000_000),
+        arrival_mono_ns: mono_ns().saturating_sub(age_ns),
         health,
         cov,
     })
@@ -519,7 +531,7 @@ mod tests {
         let anchor = Arc::new(Mutex::new(None));
         let prior = PosePrior::default();
         let v: serde_json::Value = serde_json::from_str(
-            r#"{"position":{"lat":12.97,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3,"eph":1.2,"epv":1.8}}"#,
+            r#"{"position_age_ms":40,"position":{"lat":12.97,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3,"eph":1.2,"epv":1.8}}"#,
         )
         .unwrap();
         let s = parse_state_pose(&v, &anchor, &prior).expect("a pose");
@@ -539,7 +551,7 @@ mod tests {
         // The position variance tracks the FC's reported DOP: worse DOP, larger
         // variance. This is what makes the reconstructor's prior honest.
         let sharp: serde_json::Value = serde_json::from_str(
-            r#"{"position":{"lat":12.97,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3,"eph":0.6,"epv":0.8}}"#,
+            r#"{"position_age_ms":40,"position":{"lat":12.97,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3,"eph":0.6,"epv":0.8}}"#,
         )
         .unwrap();
         let s_sharp = parse_state_pose(&sharp, &anchor, &prior).unwrap();
@@ -551,7 +563,7 @@ mod tests {
         );
         // A second sample moved north reuses the anchor (non-zero north offset).
         let v2: serde_json::Value = serde_json::from_str(
-            r#"{"position":{"lat":12.971,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3}}"#,
+            r#"{"position_age_ms":40,"position":{"lat":12.971,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3}}"#,
         )
         .unwrap();
         let s2 = parse_state_pose(&v2, &anchor, &prior).unwrap();
@@ -559,10 +571,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_position_is_back_dated_and_a_never_decoded_one_is_no_pose() {
+        // The router republishes the snapshot on its own cadence, so a stalled
+        // GPS arrives "fresh" every frame. The position's own age must carry
+        // into the arrival instant the freshness gate reads.
+        let anchor = Arc::new(Mutex::new(None));
+        let prior = PosePrior::default();
+        let stale: serde_json::Value = serde_json::from_str(
+            r#"{"position_age_ms":5000,"position":{"lat":12.97,"lon":77.59,"alt_msl":900.0,"alt_rel":10.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":3}}"#,
+        )
+        .unwrap();
+        let before = mono_ns();
+        let s = parse_state_pose(&stale, &anchor, &prior).expect("a pose");
+        assert!(
+            before - s.arrival_mono_ns >= 4_900_000_000,
+            "a 5 s old position must read 5 s old, got {} ns",
+            before - s.arrival_mono_ns
+        );
+        // No position ever decoded: no pose, never a fresh-looking origin.
+        let never: serde_json::Value = serde_json::from_str(
+            r#"{"position_age_ms":null,"position":{"lat":0.0,"lon":0.0,"alt_rel":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":0}}"#,
+        )
+        .unwrap();
+        assert!(parse_state_pose(&never, &anchor, &prior).is_none());
+    }
+
+    #[test]
     fn parse_state_pose_without_fix_is_degraded_origin() {
         let anchor = Arc::new(Mutex::new(None));
         let v: serde_json::Value = serde_json::from_str(
-            r#"{"position":{"lat":0.0,"lon":0.0,"alt_msl":0.0,"alt_rel":2.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":0}}"#,
+            r#"{"position_age_ms":40,"position":{"lat":0.0,"lon":0.0,"alt_msl":0.0,"alt_rel":2.0,"heading":0.0},"attitude":{"roll":0.0,"pitch":0.0,"yaw":0.0},"gps":{"fix_type":0}}"#,
         )
         .unwrap();
         let s = parse_state_pose(&v, &anchor, &PosePrior::default()).unwrap();

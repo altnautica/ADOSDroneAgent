@@ -65,14 +65,28 @@ pub(super) async fn control_interface() -> Option<String> {
     }
 }
 
+/// Ceiling on every adapter subprocess (`iw`, `ip`, `nmcli`). A driver wedged
+/// mid-retune or an unresponsive NetworkManager must cost one failed call, never
+/// a bring-up, heartbeat or hop loop parked forever.
+pub(crate) const ADAPTER_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub(super) async fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), ()> {
-    let status = tokio::process::Command::new(cmd)
+    // `kill_on_drop` makes the timeout a real bound: dropping the future at the
+    // deadline would otherwise leave the wedged tool running.
+    let fut = tokio::process::Command::new(cmd)
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .await
-        .map_err(|_| ())?;
+        .kill_on_drop(true)
+        .status();
+    let status = match tokio::time::timeout(ADAPTER_CMD_TIMEOUT, fut).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) => return Err(()),
+        Err(_) => {
+            tracing::warn!(cmd, ?args, "adapter_cmd_timeout");
+            return Err(());
+        }
+    };
     if status.success() {
         Ok(())
     } else {
@@ -81,11 +95,18 @@ pub(super) async fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), ()> {
 }
 
 pub(super) async fn run_cmd_output(cmd: &str, args: &[&str]) -> Result<String, ()> {
-    let out = tokio::process::Command::new(cmd)
+    let fut = tokio::process::Command::new(cmd)
         .args(args)
-        .output()
-        .await
-        .map_err(|_| ())?;
+        .kill_on_drop(true)
+        .output();
+    let out = match tokio::time::timeout(ADAPTER_CMD_TIMEOUT, fut).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(_)) => return Err(()),
+        Err(_) => {
+            tracing::warn!(cmd, ?args, "adapter_cmd_timeout");
+            return Err(());
+        }
+    };
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 

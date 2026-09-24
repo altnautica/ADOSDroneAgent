@@ -45,19 +45,22 @@
 
 use serde::{Deserialize, Serialize};
 
-/// One service entry in the heartbeat `services[]` array. The cloud loop sources
-/// these from `get_services_status()`; the always-present keys are `name`,
-/// `status`, `cpuPercent`, `memoryMb`, `uptimeSeconds`, `category`, with `pid`
-/// included only when it is a real positive value (Convex rejects `null` for a
-/// `v.number()`).
+/// One service entry in the heartbeat `services[]` array. `name` and `status`
+/// are always present; the per-unit accounting (`cpuPercent`, `memoryMb`,
+/// `uptimeSeconds`) and `pid` are included only when a producer measured them —
+/// the receiver declares each optional, and a fabricated `0` reads as a real
+/// "0 MB, up 0 s".
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceEntry {
     pub name: String,
     pub status: String,
-    pub cpu_percent: f64,
-    pub memory_mb: f64,
-    pub uptime_seconds: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uptime_seconds: Option<i64>,
     pub category: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<i64>,
@@ -361,17 +364,28 @@ pub struct HeartbeatPayload {
     pub memory_percent: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_percent: Option<f64>,
-    // temperature is deleted when None (Convex v.float64() rejects null).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    pub memory_used_mb: i64,
-    pub memory_total_mb: i64,
-    pub disk_used_gb: f64,
-    pub disk_total_gb: f64,
-    pub cpu_cores: i64,
-    pub board_ram_mb: i64,
-    pub cpu_history: Vec<f64>,
-    pub memory_history: Vec<f64>,
+    // Absolute resource values, host facts and the history series: all
+    // measured by the enrichment producer and optional on the receiver, so an
+    // unmeasured one is OMITTED rather than asserted as 0 / [] (a node that
+    // reads "0 cores, 0 MB RAM" is lying, not unknown).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_used_mb: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_total_mb: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_used_gb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_total_gb: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_cores: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub board_ram_mb: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_history: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_history: Option<Vec<f64>>,
 
     // --- FC link ---
     // The FC connection is observed by the enrichment producer (it reads the
@@ -380,8 +394,12 @@ pub struct HeartbeatPayload {
     // whose FC is actually up.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fc_connected: Option<bool>,
-    pub fc_port: String,
-    pub fc_baud: i64,
+    // The serial port and baud of the FC link, lifted by the enrichment producer
+    // when the router reports a real one; omitted otherwise (never `""` / 0).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fc_port: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fc_baud: Option<i64>,
     // FC link gated-truth detail. The LAN `/api/status` already carries these; the
     // enrichment producer lifts them from the state snapshot so a cloud-relay drone
     // can render "port open · no MAVLink" + the diagnostic hint, not just a
@@ -432,8 +450,12 @@ pub struct HeartbeatPayload {
     // "unknown" rather than the native loop asserting "stopped" over a live feed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video_state: Option<String>,
-    pub video_whep_port: i64,
-    pub mavlink_ws_port: i64,
+    // The media and MAVLink WebSocket ports: omitted until a producer reports
+    // a port it actually serves on, never a fabricated 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_whep_port: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mavlink_ws_port: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mavlink_ws_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -867,17 +889,17 @@ mod tests {
             memory_percent: Some(0.0),
             disk_percent: Some(0.0),
             temperature: None,
-            memory_used_mb: 0,
-            memory_total_mb: 0,
-            disk_used_gb: 0.0,
-            disk_total_gb: 0.0,
-            cpu_cores: 0,
-            board_ram_mb: 0,
-            cpu_history: vec![],
-            memory_history: vec![],
+            memory_used_mb: None,
+            memory_total_mb: None,
+            disk_used_gb: None,
+            disk_total_gb: None,
+            cpu_cores: None,
+            board_ram_mb: None,
+            cpu_history: None,
+            memory_history: None,
             fc_connected: Some(false),
-            fc_port: String::new(),
-            fc_baud: 0,
+            fc_port: None,
+            fc_baud: None,
             transport_open: None,
             mavlink_alive: None,
             heartbeat_age_s: None,
@@ -893,8 +915,8 @@ mod tests {
             api_url: None,
             agent_version: "0.1.0".to_string(),
             video_state: Some("stopped".to_string()),
-            video_whep_port: 0,
-            mavlink_ws_port: 0,
+            video_whep_port: None,
+            mavlink_ws_port: None,
             mavlink_ws_url: None,
             video_whep_url: None,
             mission_control_url: None,

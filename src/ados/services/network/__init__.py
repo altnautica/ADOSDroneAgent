@@ -1,1 +1,1 @@
-"""Network services — captive portal, interface roles, WiFi command-socket client."""
+"""Network helpers: interface role classification shared by the ground-station managers."""

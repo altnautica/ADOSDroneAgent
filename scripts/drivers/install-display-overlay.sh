@@ -694,7 +694,7 @@ ensure_dtc() {
         return 0
     fi
     info "Installing device-tree-compiler..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y device-tree-compiler
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y device-tree-compiler
 }
 
 # Records the path of the most recently snapshotted boot config so the
@@ -1243,7 +1243,7 @@ case "${BOARD_ID}" in
                 PI_OVERLAYS_DIR="$(dirname "${PI_CONFIG}")/overlays"
                 if [ ! -f "${PI_OVERLAYS_DIR}/waveshare35a.dtbo" ]; then
                     info "waveshare35a.dtbo missing; fetching from Waveshare."
-                    DEBIAN_FRONTEND=noninteractive apt-get install -y unzip wget >/dev/null 2>&1 || true
+                    DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y unzip wget >/dev/null 2>&1 || true
                     WS_TMP="$(mktemp -d)"
                     if ! wget -q https://files.waveshare.com/wiki/common/Waveshare35a.zip -O "${WS_TMP}/Waveshare35a.zip"; then
                         rm -rf "${WS_TMP}"

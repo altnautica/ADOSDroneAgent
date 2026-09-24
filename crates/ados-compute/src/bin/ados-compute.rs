@@ -3,11 +3,12 @@
 //! periodically reclaims terminal jobs, and serves the REST job API on a single
 //! TCP listener. The supervisor starts it for the `compute` profile.
 //!
-//! Local-first reach: the job API is gated by the pairing posture
-//! (unpaired ⇒ open, paired + on-box ⇒ open, paired + off-box ⇒ `X-ADOS-Key`),
-//! so binding a non-loopback address is safe. It still defaults to `127.0.0.1`;
-//! the installer opts a node into serving the LAN with `ADOS_COMPUTE_BIND`. mDNS
-//! discovery wraps this surface later.
+//! Local-first reach: the job API and the drone lanes are gated by the pairing
+//! posture (unpaired ⇒ open, paired + on-box ⇒ open, paired + off-box ⇒ the
+//! owner's `X-ADOS-Key`, or a credential this node issued a drone for that
+//! lane), so binding a non-loopback address is safe. It still defaults to
+//! `127.0.0.1`; the installer opts a node into serving the LAN with
+//! `ADOS_COMPUTE_BIND`.
 //!
 //! Worker note: the worker claims the next job under the engine lock, then
 //! releases the lock and runs the (real, possibly minutes-long) backend
@@ -31,6 +32,8 @@
 //! - `ADOS_COMPUTE_RETENTION_S` terminal-job retention seconds (default `86400`)
 //! - `ADOS_PAIRING_JSON`      pairing.json path (default `/etc/ados/pairing.json`,
 //!   the same override the rest of the agent honours)
+//! - `ADOS_COMPUTE_NODE_CREDENTIALS` the store of credentials issued to drones
+//!   (default `/var/ados/compute/node-credentials.json`)
 //! - `ADOS_ATLAS_ENABLED`     overrides the `atlas.enabled` config gate (`1`/`true`
 //!   to mount the world-model event receiver); absent, the `atlas.enabled` key of
 //!   `/etc/ados/config.yaml` is read (default disabled, so a non-atlas node is
@@ -43,15 +46,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use ados_atlas_transport::{atlas_event_router, world_ws_router, AtlasEvent, WorldBroadcaster};
+use ados_atlas_transport::{AtlasEvent, WorldBroadcaster};
 use ados_compute::{
-    artifact_router, build_atlas_jobs_sidecar, build_rerun_output, build_router_with_base,
-    derive_descriptors, derive_occupancy, derive_public_base, offload_ws_router,
-    rewrite_output_to_artifact_url, submit_reconstruct_job, write_atlas_jobs_sidecar,
-    write_compute_heartbeat, AtlasIngest, BackendResult, Cluster, ComputeAuth, ComputeJobState,
-    DetectionBroadcaster, Detector, Engine, JobStore, LiveReconstructConfig, MockDetector,
-    OffloadSessionManager, Prepared, PreparedInput, Scheduler, SelectingReconstructor, SessionSpec,
-    WorldDescriptorSet, DEFAULT_PAIRING_PATH,
+    build_atlas_jobs_sidecar, build_rerun_output, build_router_with_base, derive_descriptors,
+    derive_occupancy, derive_public_base, lane_router, rewrite_output_to_artifact_url,
+    submit_reconstruct_job, write_atlas_jobs_sidecar, write_compute_heartbeat, AtlasIngest,
+    AtlasLanes, BackendResult, Cluster, ComputeAuth, ComputeJobState, DetectionBroadcaster,
+    Detector, Engine, JobStore, LaneRoutes, LiveReconstructConfig, MockDetector,
+    NodeCredentialStore, OffloadSessionManager, Prepared, PreparedInput, Scheduler,
+    SelectingReconstructor, SessionSpec, WorldDescriptorSet, DEFAULT_NODE_CREDENTIALS_PATH,
+    DEFAULT_PAIRING_PATH,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex};
@@ -68,6 +72,9 @@ const ATLAS_EVENT_CHANNEL_CAP: usize = 256;
 /// granularity + the skip-while-running reconcile). The cadence's own thresholds
 /// are much coarser (tens of seconds / keyframes); this is just the poll period.
 const LIVE_CADENCE_TICK_SECS: u64 = 2;
+/// How often the receiver looks for capture sessions that went silent without
+/// a `Bagged` frame.
+const IDLE_SWEEP: Duration = Duration::from_secs(60);
 /// Broadcaster/channel depth (batches) for the streaming-offload detection return
 /// lane. A slow WS subscriber past this buffer lags and skips (never blocking the
 /// detector); the pump keeps pace with the detector on this bound.
@@ -437,44 +444,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let hs = state.clone();
     tokio::spawn(async move { heartbeat_loop(hs, atlas).await });
 
-    let auth = Arc::new(ComputeAuth::new(PathBuf::from(env_or(
-        "ADOS_PAIRING_JSON",
-        DEFAULT_PAIRING_PATH,
-    ))));
-    // The artifact server hands reconstruction outputs (.ply / .rrd / .tif / .jpg)
-    // to the GCS over the LAN, path-jailed to the work root, on the same listener.
-    let mut router = build_router_with_base(
-        state.clone(),
-        auth,
-        std::sync::Arc::from(public_base.as_str()),
-        // The live session registry so /api/compute/status carries the state
-        // breakdown + /api/compute/sessions serves the live records.
-        offload_sessions.registry(),
-    )
-    .merge(artifact_router(work_root.clone()))
-    // The per-session offload detection return stream (node -> drone) rides the
-    // same job-API listener: the drone subscribes at /ws/offload/<session_id>.
-    // Unauthed like the atlas event route below (a LAN-local detection stream);
-    // the compute pairing gate wraps only the /api/compute/* routes.
-    .merge(offload_ws_router(offload_broadcaster.clone()));
+    // The credentials this node issues drones for its lanes, bound to the owner
+    // key and persisted beside the job store.
+    let credentials = NodeCredentialStore::open(
+        PathBuf::from(env_or(
+            "ADOS_COMPUTE_NODE_CREDENTIALS",
+            DEFAULT_NODE_CREDENTIALS_PATH,
+        )),
+        node_id.clone(),
+    );
+    let auth = Arc::new(ComputeAuth::new(
+        PathBuf::from(env_or("ADOS_PAIRING_JSON", DEFAULT_PAIRING_PATH)),
+        credentials,
+    ));
 
     // Atlas world-model receiver. INERT unless atlas is enabled (single
-    // canonical gate): when on, mount POST /api/atlas/event alongside the compute
-    // job API on the same listener, and drain decoded events into the job queue
-    // (a bagged capture-state submits the reconstruct job the workers pick up).
-    // When off, neither the route nor the drain task exists, so a non-atlas
-    // workstation node is byte-unchanged.
-    if atlas {
+    // canonical gate): when on, POST /api/atlas/event is mounted beside the job
+    // API and decoded events drain into the job queue (a bagged capture-state
+    // submits the reconstruct job the workers pick up), and every completed
+    // generation's `plugin.atlas.{splat,pointcloud,mesh,occupancy}` descriptors
+    // are served per device at /ws/atlas/<device_id>. When off, neither route nor
+    // the drain task exists, so a non-atlas workstation node is byte-unchanged.
+    let atlas_lanes = if atlas {
         let live_config = live_reconstruct_config();
         let (atlas_tx, atlas_rx) = mpsc::channel::<AtlasEvent>(ATLAS_EVENT_CHANNEL_CAP);
-        router = router.merge(atlas_event_router(atlas_tx));
-        // The world model as shared DATA, not only as a picture: every completed
-        // generation publishes `plugin.atlas.{splat,pointcloud,mesh,occupancy}`
-        // descriptors here, and a consumer (the GCS Live World, or a drone
-        // republishing onto its own plugin bus) subscribes per device at
-        // /ws/atlas/<device_id>. Before this, the four topics were declared in
-        // the protocol with no publisher and no subscriber anywhere in the tree.
-        router = router.merge(world_ws_router(world_broadcaster.clone()));
         let rs = state.clone();
         let wr = work_root.clone();
         tokio::spawn(async move { atlas_receiver_loop(atlas_rx, rs, wr, live_config).await });
@@ -484,12 +477,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "atlas enabled: world-model event receiver mounted at POST /api/atlas/event, \
              descriptor stream at GET /ws/atlas/<device_id>"
         );
-    }
+        Some(AtlasLanes {
+            events: atlas_tx,
+            world: world_broadcaster.clone(),
+        })
+    } else {
+        None
+    };
+
+    // The owner's job API, plus the lanes a drone uses on the same listener
+    // (artifacts, the offload detection return stream, the Atlas ingest and
+    // world stream), each behind its own credential gate.
+    let router = build_router_with_base(
+        state.clone(),
+        auth.clone(),
+        std::sync::Arc::from(public_base.as_str()),
+        // The live session registry so /api/compute/status carries the state
+        // breakdown + /api/compute/sessions serves the live records.
+        offload_sessions.registry(),
+    )
+    .merge(lane_router(
+        auth,
+        LaneRoutes {
+            work_root: work_root.clone(),
+            offload: offload_broadcaster.clone(),
+            atlas: atlas_lanes,
+        },
+    ));
 
     // Permissive CORS so the GCS can read this listener cross-origin from the
     // browser on an HTTP origin (the compute-client fetches `:8092` directly on
     // http; the proxy is HTTPS-only). Matches ados-control's `:8080`. Outermost
-    // layer: OPTIONS preflights are answered ahead of the per-route pairing gate.
+    // layer: OPTIONS preflights are answered ahead of the per-route gates.
     let router = router.layer(CorsLayer::permissive());
 
     let listener = TcpListener::bind(&bind).await?;
@@ -584,12 +603,35 @@ async fn worker_loop(
                 // back out (PreparedInput is not Clone, and both are needed after
                 // the run — input for the rerun/world-model write, job for finalize).
                 let now = now_ms();
-                let (mut result, job, input) = tokio::task::spawn_blocking(move || {
+                let failed_job = job.clone();
+                let joined = tokio::task::spawn_blocking(move || {
                     let r = Scheduler::run_backend(&*reconstructor, &*detector, &job, &input, now);
                     (r, job, input)
                 })
-                .await
-                .expect("reconstruct worker task panicked");
+                .await;
+                // A panicking backend fails its job and the worker keeps
+                // claiming: letting the panic unwind this task would take the
+                // slot down for the life of the daemon and strand the job in
+                // Running until the next restart.
+                let (mut result, job, input) = match joined {
+                    Ok(done) => done,
+                    Err(e) => {
+                        tracing::error!(job = %failed_job.id, error = %e, "backend task panicked");
+                        let engine = state.lock().await;
+                        if let Err(e) = engine.scheduler().finalize(
+                            &failed_job,
+                            BackendResult {
+                                outputs: Vec::new(),
+                                detections: Vec::new(),
+                                error: Some(format!("backend panicked: {e}")),
+                            },
+                            now_ms(),
+                        ) {
+                            tracing::error!(job = %failed_job.id, error = %e, "finalize failed");
+                        }
+                        continue;
+                    }
+                };
                 // Write the Rerun world-model .rrd from the real capture + the
                 // reconstruction geometry so the GCS World viewer renders real data
                 // (camera trajectory + the reconstructed point cloud). Reconstruct
@@ -836,8 +878,10 @@ async fn heartbeat_loop(state: Arc<Mutex<Engine>>, atlas: bool) {
 /// When live reconstruction is enabled, the loop ALSO runs the per-session cadence
 /// ([`run_live_cycles`]) on a tick and after each keyframe: it periodically
 /// snapshots the growing capture and enqueues a real reconstruct so the world
-/// model updates during the flight, not only at the end. When disabled, it is the
-/// event-only drain (final bag reconstruct only) — byte-unchanged.
+/// model updates during the flight, not only at the end. In both modes a slow
+/// sweep finalizes any session that went silent without a `Bagged` frame (see
+/// [`AtlasIngest::idle_bags`]), so a capture whose bag was lost is still
+/// reconstructed and its state released.
 async fn atlas_receiver_loop(
     mut rx: mpsc::Receiver<AtlasEvent>,
     state: Arc<Mutex<Engine>>,
@@ -846,28 +890,36 @@ async fn atlas_receiver_loop(
 ) {
     let mut ingest = AtlasIngest::with_live_config(work_root, live_config);
 
-    if !live_config.enabled {
-        while let Some(event) = rx.recv().await {
-            drain_event(&mut ingest, &state, &event).await;
-        }
-        tracing::info!("atlas receiver loop ended (event channel closed)");
-        return;
-    }
-
     let mut tick = tokio::time::interval(Duration::from_secs(LIVE_CADENCE_TICK_SECS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut idle_sweep = tokio::time::interval(IDLE_SWEEP);
+    idle_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             maybe_event = rx.recv() => {
                 let Some(event) = maybe_event else { break };
                 drain_event(&mut ingest, &state, &event).await;
                 // A keyframe may have hit the count trigger; check promptly.
-                run_live_cycles(&mut ingest, &state).await;
+                if live_config.enabled {
+                    run_live_cycles(&mut ingest, &state).await;
+                }
             }
-            _ = tick.tick() => {
+            _ = tick.tick(), if live_config.enabled => {
                 // The interval trigger + the skip-while-running reconcile.
                 run_live_cycles(&mut ingest, &state).await;
             }
+            _ = idle_sweep.tick() => match ingest.idle_bags(now_ms()) {
+                Ok(bags) => {
+                    for (dataset, job) in bags {
+                        let engine = state.lock().await;
+                        match submit_reconstruct_job(engine.scheduler().store(), &dataset, &job) {
+                            Ok(job_id) => tracing::info!(job = %job_id, "atlas idle session finalized: reconstruct job enqueued"),
+                            Err(e) => tracing::error!(error = %e, "atlas reconstruct submit failed"),
+                        }
+                    }
+                }
+                Err(e) => tracing::error!(error = %e, "atlas idle session finalize failed"),
+            },
         }
     }
     tracing::info!("atlas receiver loop ended (event channel closed)");

@@ -17,10 +17,11 @@ transient, not a terminal state. :func:`_await_bridge` therefore retries on a
 fixed interval forever, logging periodically, until both appear.
 
 Exit codes:
-* 0 graceful shutdown
+* 0 graceful shutdown (SIGTERM / SIGINT)
 * 1 plugin error (lifecycle hook raised)
 * 2 unable to load manifest or entry-point
-* 3 SIGTERM honored
+* 4 the host connection closed; systemd restarts the runner, which waits for
+  the bridge again
 """
 
 from __future__ import annotations
@@ -44,11 +45,7 @@ from ados.core.paths import (
 )
 from ados.plugins.archive import MANIFEST_FILENAME
 from ados.plugins.errors import ManifestError, PluginError
-from ados.plugins.ipc_client import (
-    PluginContext,
-    PluginIpcClient,
-    _BarePluginContext,
-)
+from ados.plugins.ipc_client import PluginContext, PluginIpcClient
 from ados.plugins.manifest import PluginManifest
 from ados.plugins.process_sandbox import (
     SpawnedProcess,
@@ -321,23 +318,36 @@ async def _run(
     ctx_process.spawn = _spawn_and_track  # type: ignore[method-assign]
 
     shutdown = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
-    def _signal_handler(_signum: int, _frame) -> None:
+    def _on_signal() -> None:
         log.info("plugin_runner_signal_received", plugin_id=plugin_id)
         shutdown.set()
 
-    signal.signal(signal.SIGTERM, _signal_handler)
-    signal.signal(signal.SIGINT, _signal_handler)
+    # Registered on the loop, not with signal.signal: a plain handler's
+    # Event.set() only schedules the waiter and does not wake a loop parked in
+    # select, so an idle plugin would sit out the stop timeout and be killed
+    # before on_stop ran.
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _on_signal)
 
+    connection_lost = False
     try:
         await _maybe_await(getattr(plugin, "on_install", None), ctx)
         await _maybe_await(getattr(plugin, "on_enable", None), ctx)
-        await _maybe_await(getattr(plugin, "on_configure", None), ctx, {})
+        await _maybe_await(getattr(plugin, "on_configure", None), ctx, static_config)
         await _maybe_await(getattr(plugin, "on_start", None), ctx)
         log.info("plugin_runner_ready", plugin_id=plugin_id)
-        await shutdown.wait()
+        connection_lost = await _wait_for_stop(shutdown, ipc_client.disconnected)
+        if connection_lost:
+            log.warning(
+                "plugin_runner_host_connection_lost",
+                plugin_id=plugin_id,
+                detail="exiting so systemd restarts the runner and it reconnects",
+            )
         await _maybe_await(getattr(plugin, "on_stop", None), ctx)
-        await _maybe_await(getattr(plugin, "on_disable", None), ctx)
+        if not connection_lost:
+            await _maybe_await(getattr(plugin, "on_disable", None), ctx)
     except PluginError as exc:
         log.error("plugin_runtime_error", plugin_id=plugin_id, error=str(exc))
         return 1
@@ -351,14 +361,38 @@ async def _run(
         return 1
     finally:
         terminate_all(spawned)
-        if isinstance(ipc_client, PluginIpcClient):
-            try:
-                await ipc_client.close()
-            except Exception:  # noqa: BLE001
-                pass
+        try:
+            await ipc_client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
+
+    if connection_lost:
+        return 4
 
     log.info("plugin_runner_clean_exit", plugin_id=plugin_id)
     return 0
+
+
+async def _wait_for_stop(
+    shutdown: asyncio.Event, disconnected: asyncio.Event
+) -> bool:
+    """Wait for a stop signal or for the host connection to drop.
+
+    Returns True when the connection dropped first. A runner that ignored the
+    drop would stay active under systemd with no subscriptions and no way to
+    send, so the caller exits and lets the unit's restart reconnect it.
+    """
+    stop = asyncio.create_task(shutdown.wait())
+    lost = asyncio.create_task(disconnected.wait())
+    try:
+        await asyncio.wait({stop, lost}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        stop.cancel()
+        lost.cancel()
+    return disconnected.is_set() and not shutdown.is_set()
+
 
 
 async def _maybe_await(callable_or_none, *args) -> None:
@@ -437,17 +471,11 @@ def _read_static_config(plugin_id: str, agent_id: str) -> dict:
 
 
 def _spawn_allowlist(manifest: PluginManifest) -> frozenset[str]:
-    """Extract the manifest's ``agent.subprocess_spawn`` allowlist.
-
-    The manifest field is added by the v1.1 manifest schema work;
-    until that lands the AgentBlock will not carry the attribute, and
-    we treat that as an empty allowlist (every spawn is denied).
-    """
-    agent_block = manifest.agent
-    if agent_block is None:
+    """The manifest's ``agent.subprocess_spawn`` allowlist; empty denies every
+    spawn."""
+    if manifest.agent is None:
         return frozenset()
-    raw = getattr(agent_block, "subprocess_spawn", None) or []
-    return frozenset(str(name) for name in raw)
+    return frozenset(manifest.agent.subprocess_spawn or ())
 
 
 @click.command()
@@ -488,8 +516,4 @@ def main(
     sys.exit(code)
 
 
-# Re-export for back-compat. Older callers import _BarePluginContext from
-# :mod:`ados.plugins.runner`; the class itself moved to
-# :mod:`ados.plugins.ipc_client` so the runner-side import preserved the
-# v1.0 surface without duplicating the body.
-__all__ = ["_BarePluginContext", "main"]
+__all__ = ["main"]

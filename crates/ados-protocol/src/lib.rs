@@ -37,12 +37,16 @@
 //! - [`dashboard_session`] — self-contained HMAC session tokens the dashboard
 //!   PIN gate mints, keyed off the pairing key + the PIN salt so a reset revokes
 //!   every live session; accepted as an alternative data-plane credential.
+//! - [`node_credential`] — the scoped credential a workstation issues a drone
+//!   for its lanes: the header, the lane names and the drone-side store.
 //! - [`mavlink_ingest`] — the client for a node's MAVLink republish seam, over
 //!   which frames received off-board (a ground station's radio lane) enter that
 //!   node's own frame fan-out. The mirror of the MAVLink socket's inbound path,
 //!   which travels toward a flight controller rather than away from one.
 //! - [`flight_modes`] — the ArduPilot flight-mode tables keyed by vehicle type,
 //!   shared by the router's mode decode and the control surface's mode encode.
+//! - [`shutdown`] — the latching shutdown signal a service's run loops await,
+//!   so a loop that was busy when the stop arrived still sees it.
 
 pub mod ap_country;
 pub mod atlas;
@@ -53,6 +57,7 @@ pub mod aux_rpc;
 pub mod aux_rpc_proxy;
 pub mod buttons;
 pub mod capabilities;
+pub mod cloud_link;
 pub mod compute;
 pub mod config_tunnel_ingest;
 pub mod contracts;
@@ -74,6 +79,7 @@ pub mod mavlink_ingest;
 pub mod mcp_token;
 pub mod msp;
 pub mod netif;
+pub mod node_credential;
 pub mod node_status;
 pub mod offload;
 pub mod offload_link;
@@ -86,6 +92,7 @@ pub mod relay_ticket;
 pub mod rest;
 pub mod retry;
 pub mod secret_gen;
+pub mod shutdown;
 pub mod sidecar;
 pub mod state;
 pub mod tap;

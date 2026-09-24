@@ -8,8 +8,18 @@
 //! skeleton resolves at startup.
 
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Deserialize;
+
+use crate::mqtt::transport::{BrokerWire, TransportConfig};
+use crate::mqtt::WS_PATH;
+
+/// The MQTT in-flight ceiling every relay lane dials with: the publish path is
+/// the limit, not the client's internal queue.
+pub const RELAY_INFLIGHT: u16 = 1000;
+/// The MQTT keep-alive every relay lane dials with.
+pub const RELAY_KEEP_ALIVE: Duration = Duration::from_secs(30);
 
 /// Canonical config location, overridable via the `ADOS_CONFIG` env var the
 /// systemd unit sets (same convention as the other crates).
@@ -28,10 +38,10 @@ pub struct CloudSection {
 }
 
 fn default_mqtt_broker() -> String {
-    "mqtt.altnautica.com".to_string()
+    crate::mqtt::DEFAULT_BROKER_HOST.to_string()
 }
 fn default_mqtt_port() -> u16 {
-    443
+    crate::mqtt::DEFAULT_BROKER_PORT
 }
 fn default_server_mode() -> String {
     "local".to_string()
@@ -39,8 +49,8 @@ fn default_server_mode() -> String {
 fn default_mqtt_transport() -> String {
     "websockets".to_string()
 }
-fn default_telemetry_rate() -> u32 {
-    2
+fn default_self_hosted_mqtt_port() -> u16 {
+    8883
 }
 
 impl Default for CloudSection {
@@ -53,16 +63,30 @@ impl Default for CloudSection {
     }
 }
 
-/// The `server.self_hosted:` section: an operator's own Convex deployment. Only
-/// `url` is read here (the MQTT coordinates + api_key the relay reads live
-/// elsewhere). Used as the convex-URL fallback when `pairing.convex_url` is
+/// The `server.self_hosted:` section: an operator's own Convex deployment and
+/// MQTT broker. `url` is the convex-URL fallback when `pairing.convex_url` is
 /// empty but the operator chose the self_hosted posture, so a self-hosted pair
-/// that only wrote `server.self_hosted.url` still beacons. Mirrors the Python
-/// `SelfHostedServerConfig`.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// that only wrote `server.self_hosted.url` still beacons. `mqtt_broker` /
+/// `mqtt_port` are the broker the relay dials in that posture. Mirrors the
+/// Python `SelfHostedServerConfig`.
+#[derive(Debug, Clone, Deserialize)]
 pub struct SelfHostedSection {
     #[serde(default)]
     pub url: String,
+    #[serde(default)]
+    pub mqtt_broker: String,
+    #[serde(default = "default_self_hosted_mqtt_port")]
+    pub mqtt_port: u16,
+}
+
+impl Default for SelfHostedSection {
+    fn default() -> Self {
+        SelfHostedSection {
+            url: String::new(),
+            mqtt_broker: String::new(),
+            mqtt_port: default_self_hosted_mqtt_port(),
+        }
+    }
 }
 
 /// The `server:` section: the cloud endpoint + the relay mode + transport.
@@ -74,10 +98,10 @@ pub struct ServerSection {
     pub cloud: CloudSection,
     #[serde(default)]
     pub self_hosted: SelfHostedSection,
+    /// How the relay reaches the broker: `websockets` (MQTT over a TLS
+    /// WebSocket on `/mqtt`, the default) or `tcp` (MQTT over TLS on the port).
     #[serde(default = "default_mqtt_transport")]
     pub mqtt_transport: String,
-    #[serde(default = "default_telemetry_rate")]
-    pub telemetry_rate: u32,
     /// The operator opt-in for explicit log-window cloud export. Default OFF:
     /// the durable on-device store is the source of truth and nothing is exported
     /// to the cloud account unless the operator turns this on. Even when on, an
@@ -94,7 +118,6 @@ impl Default for ServerSection {
             cloud: CloudSection::default(),
             self_hosted: SelfHostedSection::default(),
             mqtt_transport: default_mqtt_transport(),
-            telemetry_rate: default_telemetry_rate(),
             cloud_logs_enabled: false,
         }
     }
@@ -487,13 +510,122 @@ impl CloudConfig {
     pub fn cloud_logs_enabled(&self) -> bool {
         self.server.cloud_logs_enabled
     }
+}
 
-    /// Whether the Atlas world-model forwarder should run. The
-    /// `ADOS_ATLAS_ENABLED` env var, when set, wins over the yaml `atlas.enabled`
-    /// key; absent both, Atlas is OFF so a non-Atlas agent does no Atlas work
-    /// (its loop early-returns and the process is byte-unchanged).
-    pub fn atlas_enabled(&self) -> bool {
-        atlas_env_override().unwrap_or(self.atlas.enabled)
+/// The config file the relay reads: the `ADOS_CONFIG` override the systemd unit
+/// sets, else the canonical path.
+pub fn config_path() -> std::path::PathBuf {
+    std::env::var("ADOS_CONFIG")
+        .unwrap_or_else(|_| CONFIG_YAML.to_string())
+        .into()
+}
+
+/// Whether Atlas is enabled RIGHT NOW: the `ADOS_ATLAS_ENABLED` env override
+/// when set, else the `atlas.enabled` key read fresh from `path`. A missing,
+/// unreadable or unparseable file reads disabled.
+///
+/// Fresh on every call, not the startup snapshot: the GCS enables Atlas by
+/// writing the key and restarting only the capture service, so a forwarder that
+/// judged the gate once at relay start would never forward an enabled drone's
+/// keyframes until the next reboot.
+pub fn atlas_enabled_in(path: &Path) -> bool {
+    if let Some(forced) = atlas_env_override() {
+        return forced;
+    }
+    #[derive(Default, Deserialize)]
+    struct Raw {
+        #[serde(default)]
+        atlas: AtlasSection,
+    }
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_norway::from_str::<Raw>(&text).ok())
+        .map(|raw| raw.atlas.enabled)
+        .unwrap_or(false)
+}
+
+impl CloudConfig {
+    /// The agent profile in the WIRE form the receiver's fleet view
+    /// discriminates on (`drone` | `ground-station` | `workstation` |
+    /// `compute`).
+    ///
+    /// The config field is the INTERNAL form and may be `ground_station`
+    /// (underscore) or `auto`. `auto`, empty, and anything unrecognized resolve
+    /// to `drone`: the resolved profile lives in `/etc/ados/profile.conf` on a
+    /// real rig, and a node that means to be a ground station sets its profile.
+    /// This is the ONE profile discrimination in the relay, so the bind role,
+    /// the advertised profile, the aux identity and the offload gate can never
+    /// disagree about what this node is.
+    pub fn wire_profile(&self) -> &'static str {
+        match self.agent.profile.as_str() {
+            "ground_station" | "ground-station" => "ground-station",
+            "workstation" => "workstation",
+            "compute" => "compute",
+            _ => "drone",
+        }
+    }
+
+    /// The MQTT broker the relay lanes dial for this posture, or `None` when
+    /// there is no broker to dial.
+    ///
+    /// `cloud` dials the managed broker (`server.cloud.*`); `self_hosted` dials
+    /// the operator's broker (`server.self_hosted.*`) and ONLY that one — a
+    /// self-hosted node with no broker configured has no relay, it never falls
+    /// back to the managed broker with its pairing key. Anything else is
+    /// local-first. `server.mqtt_transport = "tcp"` is MQTT over TLS on the
+    /// port; everything else is a TLS WebSocket, where the MQTT-TLS default port
+    /// 8883 is served through the tunnel on 443.
+    pub fn mqtt_endpoint(&self) -> Option<(String, u16, BrokerWire)> {
+        let (host, port) = match self.server.mode.as_str() {
+            "cloud" => (
+                self.server.cloud.mqtt_broker.trim(),
+                self.server.cloud.mqtt_port,
+            ),
+            "self_hosted" => (
+                self.server.self_hosted.mqtt_broker.trim(),
+                self.server.self_hosted.mqtt_port,
+            ),
+            _ => return None,
+        };
+        if host.is_empty() {
+            return None;
+        }
+        let wire = if self.server.mqtt_transport.trim() == "tcp" {
+            BrokerWire::Tls
+        } else {
+            BrokerWire::Wss
+        };
+        let port = if wire == BrokerWire::Wss && port == 8883 {
+            443
+        } else {
+            port
+        };
+        Some((host.to_string(), port, wire))
+    }
+
+    /// The dial config for one relay lane, or `None` when this posture has no
+    /// broker. Every lane authenticates as `ados-{device_id}` with the pairing
+    /// key; `lane` suffixes the ClientID (`ados-{id}-{lane}`) because a broker
+    /// evicts an existing session when a second client presents the same id,
+    /// and the MAVLink relay holds the bare `ados-{id}`.
+    pub fn relay_transport(&self, lane: Option<&str>, api_key: &str) -> Option<TransportConfig> {
+        let (host, port, wire) = self.mqtt_endpoint()?;
+        let device_id = &self.agent.device_id;
+        let client_id = match lane {
+            Some(lane) => format!("ados-{device_id}-{lane}"),
+            None => format!("ados-{device_id}"),
+        };
+        Some(TransportConfig {
+            client_id,
+            host,
+            port,
+            wire,
+            ws_path: WS_PATH.to_string(),
+            username: format!("ados-{device_id}"),
+            password: api_key.to_string(),
+            inflight: RELAY_INFLIGHT,
+            keep_alive: RELAY_KEEP_ALIVE,
+        })
     }
 }
 
@@ -504,8 +636,7 @@ impl CloudConfig {
     /// startup entry, so it also publishes the config-status sidecar: a malformed
     /// config surfaces on the remote Health view, not just in the log.
     pub fn load() -> Self {
-        let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
-        let (config, error) = Self::load_reporting(Path::new(&path));
+        let (config, error) = Self::load_reporting(&config_path());
         ados_config::write_config_status("cloud", error.as_deref());
         config
     }
@@ -592,35 +723,36 @@ server:
     }
 
     #[test]
-    fn atlas_enabled_reads_the_yaml_gate_and_the_env_override() {
+    fn the_atlas_gate_is_read_fresh_and_the_env_override_wins() {
         // The env var is process-global; keep every assertion in one test so the
         // set/remove is serial and no parallel test sees a stale override.
         let prev = std::env::var("ADOS_ATLAS_ENABLED").ok();
         std::env::remove_var("ADOS_ATLAS_ENABLED");
 
-        // Absent atlas section → off.
-        assert!(!CloudConfig::default().atlas_enabled());
+        // Absent file / atlas section → off.
+        assert!(!atlas_enabled_in(Path::new(
+            "/nonexistent/ados/config.yaml"
+        )));
+        let path = temp_yaml("atlas-gate", "agent:\n  device_id: d1\n");
+        assert!(!atlas_enabled_in(&path));
 
-        // yaml `atlas.enabled: true` → on.
-        let on = temp_yaml("atlas-on", "atlas:\n  enabled: true\n");
-        let cfg_on = CloudConfig::load_from(&on);
-        assert!(cfg_on.atlas_enabled());
-        let _ = std::fs::remove_file(&on);
-
-        // yaml `atlas.enabled: false` → off.
-        let off = temp_yaml("atlas-off", "atlas:\n  enabled: false\n");
-        let cfg_off = CloudConfig::load_from(&off);
-        assert!(!cfg_off.atlas_enabled());
-        let _ = std::fs::remove_file(&off);
+        // The operator enables Atlas while the relay runs: the next read sees it.
+        std::fs::write(&path, "atlas:\n  enabled: true\n").unwrap();
+        assert!(atlas_enabled_in(&path));
+        // ...and disabling it is seen the same way.
+        std::fs::write(&path, "atlas:\n  enabled: false\n").unwrap();
+        assert!(!atlas_enabled_in(&path));
 
         // The env override wins over the yaml in both directions.
         std::env::set_var("ADOS_ATLAS_ENABLED", "1");
-        assert!(cfg_off.atlas_enabled(), "env=1 forces on over yaml=false");
+        assert!(atlas_enabled_in(&path), "env=1 forces on over yaml=false");
+        std::fs::write(&path, "atlas:\n  enabled: true\n").unwrap();
         std::env::set_var("ADOS_ATLAS_ENABLED", "false");
         assert!(
-            !cfg_on.atlas_enabled(),
+            !atlas_enabled_in(&path),
             "env=false forces off over yaml=true"
         );
+        let _ = std::fs::remove_file(&path);
 
         // Restore the prior environment for the rest of the suite.
         match prev {

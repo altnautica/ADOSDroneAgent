@@ -78,13 +78,18 @@ class AllowlistViolation(PluginError):
         self.basename = basename
 
 
-class HostUnavailable(PluginError):
-    """Raised when the host service the call routes through has not
-    been wired yet (e.g., the FC connection has not initialized)."""
-
 log = get_logger("plugins.ipc_client")
 
 DEFAULT_REQUEST_TIMEOUT_S = 5.0
+
+#: Host-pushed deliveries waiting for the plugin's callbacks. Bounded so a
+#: callback slower than the stream it subscribed to sheds the newest frames
+#: instead of growing the runner without limit.
+DELIVERY_QUEUE_MAX = 1024
+
+#: Log one line per this many dropped deliveries, so a saturated callback is
+#: visible without one log line per frame.
+DELIVERY_DROP_LOG_EVERY = 100
 
 
 class PluginIpcClient:
@@ -120,6 +125,22 @@ class PluginIpcClient:
             Callable[[dict], Awaitable[None] | None]
         ] = []
         self._reader_task: asyncio.Task | None = None
+        self._dispatch_task: asyncio.Task | None = None
+        # Deliveries (events, MAVLink, detections, buttons, MSP) are handed from
+        # the reader to a dispatcher task instead of being awaited inline: a
+        # callback that issues a request would otherwise wait for a response
+        # frame that only the blocked reader could read.
+        self._deliveries: asyncio.Queue[Envelope] = asyncio.Queue(
+            maxsize=DELIVERY_QUEUE_MAX
+        )
+        self._dropped_deliveries = 0
+        # tool.invoke handlers run as their own tasks for the same reason; the
+        # set keeps a reference so a running handler is not garbage collected.
+        self._tool_tasks: set[asyncio.Task] = set()
+        # Set once the connection to the host is gone (EOF, frame error, or
+        # close). The runner exits on it so systemd restarts the plugin and the
+        # bridge is re-established, instead of a plugin that stays up and inert.
+        self.disconnected = asyncio.Event()
         self._next_id = 0
         # MCP tool handlers the plugin registers (the SDK @tool decorator fills
         # this). The host asks the plugin to run one by name via a tool.invoke
@@ -150,13 +171,22 @@ class PluginIpcClient:
             str(self._socket_path)
         )
         self._reader_task = asyncio.create_task(self._reader_loop())
-        # Handshake.
-        await self._send_request("hello", capability="", args={})
+        self._dispatch_task = asyncio.create_task(self._dispatch_loop())
+        # Handshake. A refused or dropped hello leaves nothing running: the
+        # runner retries with a fresh client, so this one must not linger.
+        try:
+            await self._send_request("hello", capability="", args={})
+        except BaseException:
+            await self.close()
+            raise
         log.info("plugin_ipc_client_connected", plugin_id=self._plugin_id)
 
     async def close(self) -> None:
-        if self._reader_task is not None:
-            self._reader_task.cancel()
+        # Set first: a deliberate close is not a lost connection.
+        self.disconnected.set()
+        for task in (self._reader_task, self._dispatch_task, *self._tool_tasks):
+            if task is not None:
+                task.cancel()
         if self._writer is not None:
             try:
                 self._writer.close()
@@ -478,7 +508,7 @@ class PluginIpcClient:
         args: dict,
         timeout_s: float = DEFAULT_REQUEST_TIMEOUT_S,
     ) -> Envelope:
-        if self._writer is None:
+        if self._writer is None or self.disconnected.is_set():
             raise PluginError("ipc client not connected")
         self._next_id += 1
         rid = f"r{self._next_id}"
@@ -518,6 +548,14 @@ class PluginIpcClient:
         return response
 
     async def _reader_loop(self) -> None:
+        """Route every frame from the host; never run plugin code here.
+
+        Responses resolve their pending future and token refreshes are adopted
+        inline (both are quick and must stay ordered with the frames around
+        them). Deliveries go to the dispatcher queue and a ``tool.invoke`` runs
+        as its own task, so a callback or tool handler that issues a request can
+        always receive its response.
+        """
         assert self._reader is not None
         try:
             while True:
@@ -533,22 +571,14 @@ class PluginIpcClient:
                 if env is None:
                     return
                 if env.type == "event":
-                    if env.method == "mavlink.deliver":
-                        await self._dispatch_mavlink(env)
-                    elif env.method == "vision.deliver_detection":
-                        await self._dispatch_detection(env)
-                    elif env.method == "button.deliver":
-                        await self._dispatch_button(env)
-                    elif env.method == "msp.deliver":
-                        await self._dispatch_msp(env)
-                    elif env.method == _TOKEN_REFRESH_METHOD:
+                    if env.method == _TOKEN_REFRESH_METHOD:
                         self._adopt_refreshed_token(env)
                     else:
-                        await self._dispatch_event(env)
+                        self._enqueue_delivery(env)
                 elif env.type == "request" and env.method == _TOOL_INVOKE_METHOD:
-                    # Host -> plugin request: run one of the plugin's tools and
-                    # reply with a correlated response.
-                    await self._handle_tool_invoke(env)
+                    task = asyncio.create_task(self._handle_tool_invoke(env))
+                    self._tool_tasks.add(task)
+                    task.add_done_callback(self._tool_tasks.discard)
                 else:
                     fut = self._pending.get(env.request_id)
                     if fut is not None and not fut.done():
@@ -561,6 +591,56 @@ class PluginIpcClient:
                 plugin_id=self._plugin_id,
                 error=str(exc),
             )
+        finally:
+            self._on_connection_lost()
+
+    def _on_connection_lost(self) -> None:
+        """Mark the bridge gone and fail every in-flight request at once, so no
+        caller sits out its full timeout on a connection that cannot answer."""
+        if not self.disconnected.is_set():
+            log.warning("plugin_ipc_disconnected", plugin_id=self._plugin_id)
+        self.disconnected.set()
+        for fut in self._pending.values():
+            if not fut.done():
+                fut.set_exception(PluginError("ipc connection to the host closed"))
+
+    def _enqueue_delivery(self, env: Envelope) -> None:
+        try:
+            self._deliveries.put_nowait(env)
+        except asyncio.QueueFull:
+            self._dropped_deliveries += 1
+            if self._dropped_deliveries % DELIVERY_DROP_LOG_EVERY == 1:
+                log.warning(
+                    "plugin_ipc_deliveries_dropped",
+                    plugin_id=self._plugin_id,
+                    dropped_total=self._dropped_deliveries,
+                    method=env.method,
+                )
+
+    async def _dispatch_loop(self) -> None:
+        """Run the plugin's callbacks for each delivery, in arrival order."""
+        while True:
+            env = await self._deliveries.get()
+            try:
+                if env.method == "mavlink.deliver":
+                    await self._dispatch_mavlink(env)
+                elif env.method == "vision.deliver_detection":
+                    await self._dispatch_detection(env)
+                elif env.method == "button.deliver":
+                    await self._dispatch_button(env)
+                elif env.method == "msp.deliver":
+                    await self._dispatch_msp(env)
+                else:
+                    await self._dispatch_event(env)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - one bad delivery must not stop the stream
+                log.error(
+                    "plugin_ipc_dispatch_failed",
+                    plugin_id=self._plugin_id,
+                    method=env.method,
+                    error=str(exc),
+                )
 
     def _adopt_refreshed_token(self, env: Envelope) -> None:
         """Replace the token this client presents with the host's fresh one.
@@ -749,85 +829,14 @@ def _matches(pattern: str, topic: str) -> bool:
     return _fnm.fnmatchcase(topic, pattern)
 
 
-# ---------------------------------------------------------------------------
-# PluginContext: re-export the public surface from the context module.
-# The facade classes live in :mod:`ados.plugins.ipc.context` so this module
-# stays focused on the wire-level IPC client. Existing imports of
-# :class:`PluginContext` from :mod:`ados.plugins.ipc_client` still work.
-# ---------------------------------------------------------------------------
+# PluginContext lives in :mod:`ados.plugins.ipc.context` so this module stays
+# focused on the wire-level client; it is re-exported here because the runner
+# and the SDK test harness build it next to the client.
+from ados.plugins.ipc.context import PluginContext  # noqa: E402
 
-
-from ados.plugins.ipc.context import (  # noqa: E402, F401
-    PluginContext,
-    _ConfigClient,
-    _EventsClient,
-    _LifecycleClient,
-    _MAVLinkClient,
-    _PeripheralManagerClient,
-    _ProcessClient,
-    _TelemetryClient,
-)
-
-
-class _NullIpcClient:
-    """No-op stand-in for :class:`PluginIpcClient`.
-
-    Used by :class:`_BarePluginContext` when no real IPC bridge has
-    been wired yet (early supervisor boot, certain test paths). Every
-    method raises :class:`HostUnavailable`. The shape mirrors the
-    real client so attribute lookup succeeds; calls fail loudly.
-    """
-
-    def __init__(self, plugin_id: str) -> None:
-        self._plugin_id = plugin_id
-
-    def _unavail(self, _name: str) -> Any:
-        raise HostUnavailable(
-            f"plugin {self._plugin_id}: IPC bridge not connected"
-        )
-
-    async def ping(self) -> dict: return self._unavail("ping")
-    async def event_publish(self, *_a, **_k) -> int: return self._unavail("event_publish")
-    async def event_subscribe(self, *_a, **_k) -> None: return self._unavail("event_subscribe")
-    async def mavlink_send(self, *_a, **_k) -> dict: return self._unavail("mavlink_send")
-    async def mavlink_subscribe(self, *_a, **_k) -> None: return self._unavail("mavlink_subscribe")
-    async def msp_send(self, *_a, **_k) -> dict: return self._unavail("msp_send")
-    async def msp_subscribe(self, *_a, **_k) -> None: return self._unavail("msp_subscribe")
-    async def vision_subscribe_detections(self, *_a, **_k) -> None: return self._unavail("vision_subscribe_detections")
-    async def vision_read_model(self, *_a, **_k) -> list: return self._unavail("vision_read_model")
-    async def mavlink_register_component(self, *_a, **_k) -> dict: return self._unavail("mavlink_register_component")
-    async def telemetry_extend(self, *_a, **_k) -> dict: return self._unavail("telemetry_extend")
-    async def peripheral_register_driver(self, *_a, **_k) -> dict: return self._unavail("peripheral_register_driver")
-    async def peripheral_unregister_driver(self, *_a, **_k) -> dict: return self._unavail("peripheral_unregister_driver")
-    async def camera_claim(self, *_a, **_k) -> dict: return self._unavail("camera_claim")
-    async def camera_release(self, *_a, **_k) -> dict: return self._unavail("camera_release")
-    async def camera_get_frame(self, *_a, **_k) -> dict: return self._unavail("camera_get_frame")
-    async def config_get(self, *_a, **_k) -> Any: return self._unavail("config_get")
-    async def config_set(self, *_a, **_k) -> dict: return self._unavail("config_set")
-    async def process_spawn(self, *_a, **_k) -> dict: return self._unavail("process_spawn")
-
-
-class _BarePluginContext(PluginContext):
-    """Deprecated alias retained for v1.0 lifecycle-hook tests.
-
-    Subclasses :class:`PluginContext` so any call site that type-checks
-    against the bare shape still works. New code should construct
-    :class:`PluginContext` directly.
-    """
-
-    def __init__(
-        self,
-        *,
-        plugin_id: str,
-        version: str,
-        ipc: PluginIpcClient | None = None,
-    ) -> None:
-        if ipc is None:
-            ipc = _NullIpcClient(plugin_id)  # type: ignore[assignment]
-        super().__init__(
-            plugin_id=plugin_id,
-            plugin_version=version,
-            config={},
-            ipc=ipc,  # type: ignore[arg-type]
-            agent_id="",
-        )
+__all__ = [
+    "AllowlistViolation",
+    "InvalidComponent",
+    "PluginContext",
+    "PluginIpcClient",
+]

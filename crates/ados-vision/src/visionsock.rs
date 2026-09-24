@@ -41,11 +41,14 @@ use tokio::net::UnixStream;
 
 use crate::engine::VisionEngine;
 
+/// Fixed wait after a failed `accept()` before accepting again, with no cap.
+const ACCEPT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Bind `vision.sock` and serve clients until `cancel` is notified.
 pub async fn serve(
     engine: Arc<VisionEngine>,
     socket_path: &str,
-    cancel: Arc<tokio::sync::Notify>,
+    cancel: ados_protocol::shutdown::Shutdown,
 ) -> Result<()> {
     // The shared helper owns the create-dir / remove-stale / bind / chmod
     // hygiene. 0o660 keeps the socket off the world while still reachable by the
@@ -67,12 +70,18 @@ pub async fn serve(
                         });
                     }
                     Err(e) => {
+                        // Transient (fd pressure, an aborted connect): keep the
+                        // socket up and accept again after a fixed wait, rather
+                        // than leave every vision client refused until restart.
                         tracing::warn!(error = %e, "vision_sock_accept_failed");
-                        break;
+                        tokio::select! {
+                            _ = tokio::time::sleep(ACCEPT_RETRY_INTERVAL) => {}
+                            _ = cancel.wait() => break,
+                        }
                     }
                 }
             }
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
         }
     }
     let _ = std::fs::remove_file(socket_path);
@@ -85,7 +94,7 @@ pub async fn serve(
 async fn handle_client(
     engine: Arc<VisionEngine>,
     stream: UnixStream,
-    cancel: Arc<tokio::sync::Notify>,
+    cancel: ados_protocol::shutdown::Shutdown,
 ) -> Result<()> {
     let (mut read_half, write_half) = stream.into_split();
     // The writer is shared between the request-response path and the frame push
@@ -102,7 +111,7 @@ async fn handle_client(
                     break;
                 }
             }
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
         }
         let len = match decode_len(header, PLUGIN_MAX_FRAME, true) {
             Ok(n) => n,

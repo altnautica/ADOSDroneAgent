@@ -1,9 +1,10 @@
-//! Supervisor control socket — the cross-process trigger seam for the bind FSM.
+//! Supervisor control socket — the cross-process trigger seam for the work that
+//! lives in this process: the bind FSM and the ground-station role transition.
 //!
-//! The bind orchestrator lives in this (supervisor) process, but a bind is
-//! triggered from the FastAPI `/wfb/pair/local-bind` route + the cloud auto-pair
-//! supervisor, which run in OTHER processes. They reach the orchestrator over a
-//! Unix socket at [`SUPERVISOR_SOCK`] speaking one newline-JSON request →
+//! The bind orchestrator and the role transition run in this (supervisor)
+//! process, but they are triggered from the REST front, the FastAPI routes and
+//! the cloud auto-pair supervisor, which run in OTHER processes. They reach it
+//! over a Unix socket at [`SUPERVISOR_SOCK_NAME`] under the run dir, speaking one newline-JSON request →
 //! newline-JSON response per connection:
 //!   - `{"op":"start_bind","role":"drone","peer_device_id":null,"source":"operator",
 //!      "fleet_id":1,"fleet_slot":3}`
@@ -11,15 +12,25 @@
 //!     or `{"ok":false,"error":"E_BIND_IN_PROGRESS"}` when one already runs.
 //!   - `{"op":"bind_status"}` → `{"ok":true,"session":{…}|null}`.
 //!   - `{"op":"cancel_bind"}` → aborts the in-flight session → `{"ok":true}`.
+//!   - `{"op":"set_role","role":"relay","reason":"rest"}` → blocks for the
+//!     transition → `{"ok":true,"role","previous","units_started",
+//!     "units_stopped","ts_ms","noop"}`, or `{"ok":false,"error":…}` for a
+//!     refused one (`E_INVALID_ROLE`, `E_PROFILE_MISMATCH`, `E_BIND_IN_PROGRESS`).
 //!
 //! `cancel_bind` arrives on a SEPARATE connection from the blocked `start_bind`,
 //! so it routes through [`BindOrchestrator::cancel_current`] (a notify), not the
 //! per-call cancel future. The caller (FastAPI) applies its own wall-clock
 //! timeout and fires `cancel_bind` on timeout, matching the Python route's
 //! `wait_for` + per-request cancel_event.
+//!
+//! `set_role` is handed to the supervisor loop, which owns the service table,
+//! and runs there to completion: a requester that disconnects, or that is killed
+//! because it ran inside a unit the transition stopped, does not cut it short.
 
 use std::path::Path;
 use std::sync::Arc;
+
+use tokio::sync::{mpsc, oneshot};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -27,12 +38,17 @@ use serde_json::{json, Value};
 use super::keys::FleetIdentity;
 use super::orchestrator::{BindOrchestrator, BindStartError};
 use super::BindRole;
+use crate::role::RoleRequest;
 
-/// Supervisor control socket path (sibling to mavlink.sock / state.sock).
-pub const SUPERVISOR_SOCK: &str = "/run/ados/supervisor.sock";
+/// The supervisor control socket's file name under the run dir (sibling to
+/// mavlink.sock / state.sock): `/run/ados/supervisor.sock` on a root install.
+pub const SUPERVISOR_SOCK_NAME: &str = "supervisor.sock";
 
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
+
+/// Fixed wait between attempts to bind a command socket that failed to bind.
+pub const SOCKET_BIND_RETRY: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -53,6 +69,10 @@ struct Request {
     /// could collide with a flying peer's `channel_id`.
     #[serde(default)]
     fleet_slot: Option<u8>,
+    /// Why a `set_role` was requested (`rest`, `factory_reset`), recorded on the
+    /// `role_changed` event.
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// Build the fleet assignment to persist with the key, or `None` when the
@@ -72,36 +92,59 @@ fn fleet_from_request(fleet_id: Option<u16>, fleet_slot: Option<u8>) -> Option<F
     }
 }
 
-/// Bind the control socket and serve requests until the listener errors. Run as
-/// its own task from the supervisor main loop. Removes a stale socket first and
-/// chmods it 0660 (root-owned; the api + cloud services run as root on target).
-/// Returns only on a bind error; the accept loop never exits on the happy path.
+/// Bind the control socket and serve requests for the life of the process. Run
+/// as its own task from the supervisor main loop. The shared helper removes a
+/// stale socket first and chmods it 0660 (root-owned; the api + cloud services
+/// run as root on target).
+///
+/// A bind that fails is retried on a fixed [`SOCKET_BIND_RETRY`] interval until
+/// it succeeds: this socket is how the GCS pairing route reaches the bind FSM,
+/// and a supervisor that gave up on it at boot could not be paired until
+/// someone restarted it by hand.
 ///
 /// The wire is one newline-JSON request → one newline-JSON response per
 /// connection, so the shared one-shot RPC server owns the accept loop and the
 /// framing; this module supplies only the parse + route via [`dispatch`]. A
 /// blocking `start_bind` runs on its connection's own task, so a concurrent
 /// `cancel_bind` on a separate connection is still accepted and handled.
-pub async fn serve(orch: Arc<BindOrchestrator>, sock_path: &Path) -> std::io::Result<()> {
-    // The shared helper owns the create-dir / remove-stale / bind / chmod hygiene
-    // (0660, root-owned; the api + cloud services run as root on target).
-    let listener = ados_protocol::ipc::bind_command_socket(sock_path, 0o660)?;
+pub async fn serve(
+    orch: Arc<BindOrchestrator>,
+    roles: mpsc::Sender<RoleRequest>,
+    sock_path: &Path,
+) {
+    let listener = loop {
+        match ados_protocol::ipc::bind_command_socket(sock_path, 0o660) {
+            Ok(l) => break l,
+            Err(e) => {
+                tracing::warn!(
+                    path = %sock_path.display(),
+                    error = %e,
+                    "supervisor control socket bind failed; retrying"
+                );
+                tokio::time::sleep(SOCKET_BIND_RETRY).await;
+            }
+        }
+    };
     tracing::info!(path = %sock_path.display(), "supervisor control socket listening");
     ados_protocol::ipc::serve_rpc(listener, MAX_REQUEST_BYTES, move |req: Vec<u8>| {
         let orch = orch.clone();
+        let roles = roles.clone();
         async move {
-            let resp = dispatch(&req, &orch).await;
+            let resp = dispatch(&req, &orch, &roles).await;
             serde_json::to_vec(&resp)
                 .unwrap_or_else(|_| br#"{"ok":false,"error":"E_ENCODE"}"#.to_vec())
         }
     })
     .await;
-    Ok(())
 }
 
-/// Parse + route one request to the orchestrator. Pure async over the
-/// orchestrator handle — unit-testable without a socket.
-async fn dispatch(line: &[u8], orch: &Arc<BindOrchestrator>) -> Value {
+/// Parse + route one request. Pure async over the orchestrator handle and the
+/// supervisor loop's role channel — unit-testable without a socket.
+async fn dispatch(
+    line: &[u8],
+    orch: &Arc<BindOrchestrator>,
+    roles: &mpsc::Sender<RoleRequest>,
+) -> Value {
     let req: Request = match serde_json::from_slice(line) {
         Ok(r) => r,
         Err(e) => return json!({"ok": false, "error": format!("E_BAD_REQUEST: {e}")}),
@@ -134,6 +177,23 @@ async fn dispatch(line: &[u8], orch: &Arc<BindOrchestrator>) -> Value {
             orch.cancel_current();
             json!({"ok": true})
         }
+        "set_role" => {
+            let Some(target) = req.role.filter(|r| !r.is_empty()) else {
+                return json!({"ok": false, "error": "E_MISSING_ROLE"});
+            };
+            let (reply, answer) = oneshot::channel();
+            let request = RoleRequest {
+                target,
+                reason: req.reason.unwrap_or_else(|| "operator".to_string()),
+                reply,
+            };
+            if roles.send(request).await.is_err() {
+                return json!({"ok": false, "error": "E_SUPERVISOR_STOPPING"});
+            }
+            answer
+                .await
+                .unwrap_or_else(|_| json!({"ok": false, "error": "E_SUPERVISOR_STOPPING"}))
+        }
         other => json!({"ok": false, "error": format!("E_UNKNOWN_OP: {other}")}),
     }
 }
@@ -144,10 +204,15 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
+    /// A role channel whose loop is gone, for the bind-op tests.
+    fn no_roles() -> mpsc::Sender<RoleRequest> {
+        mpsc::channel(1).0
+    }
+
     #[tokio::test]
     async fn dispatch_status_when_idle_is_null_session() {
         let orch = Arc::new(BindOrchestrator::new());
-        let v = dispatch(br#"{"op":"bind_status"}"#, &orch).await;
+        let v = dispatch(br#"{"op":"bind_status"}"#, &orch, &no_roles()).await;
         assert_eq!(v["ok"], true);
         assert!(v["session"].is_null());
     }
@@ -155,16 +220,19 @@ mod tests {
     #[tokio::test]
     async fn dispatch_cancel_is_ok_when_idle() {
         let orch = Arc::new(BindOrchestrator::new());
-        let v = dispatch(br#"{"op":"cancel_bind"}"#, &orch).await;
+        let v = dispatch(br#"{"op":"cancel_bind"}"#, &orch, &no_roles()).await;
         assert_eq!(v["ok"], true);
     }
 
     #[tokio::test]
     async fn dispatch_bad_json_and_bad_op_and_bad_role() {
         let orch = Arc::new(BindOrchestrator::new());
-        assert_eq!(dispatch(b"not json", &orch).await["ok"], false);
-        assert_eq!(dispatch(br#"{"op":"frob"}"#, &orch).await["ok"], false);
-        let bad_role = dispatch(br#"{"op":"start_bind","role":"bogus"}"#, &orch).await;
+        assert_eq!(dispatch(b"not json", &orch, &no_roles()).await["ok"], false);
+        assert_eq!(
+            dispatch(br#"{"op":"frob"}"#, &orch, &no_roles()).await["ok"],
+            false
+        );
+        let bad_role = dispatch(br#"{"op":"start_bind","role":"bogus"}"#, &orch, &no_roles()).await;
         assert_eq!(bad_role["ok"], false);
         assert_eq!(bad_role["error"], "E_BAD_ROLE");
     }
@@ -178,6 +246,7 @@ mod tests {
         let v = dispatch(
             br#"{"op":"start_bind","role":"drone","source":"operator"}"#,
             &orch,
+            &no_roles(),
         )
         .await;
         assert_eq!(v["ok"], true);
@@ -225,6 +294,36 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_socket_that_fails_to_bind_is_retried_until_it_binds() {
+        // The parent of the socket path is a regular file, so the first bind
+        // fails. Once the obstacle is gone the next fixed-interval attempt must
+        // bind: a supervisor that gave up here could not be paired until it was
+        // restarted by hand.
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("run");
+        std::fs::write(&parent, b"not a directory").unwrap();
+        let sock = parent.join("supervisor.sock");
+        let server = tokio::spawn({
+            let sock = sock.clone();
+            async move { serve(Arc::new(BindOrchestrator::new()), no_roles(), &sock).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!sock.exists());
+
+        std::fs::remove_file(&parent).unwrap();
+        std::fs::create_dir(&parent).unwrap();
+        tokio::time::advance(SOCKET_BIND_RETRY + std::time::Duration::from_millis(10)).await;
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(sock.exists(), "the retry must bind once the path is usable");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn end_to_end_socket_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -232,7 +331,7 @@ mod tests {
         let orch = Arc::new(BindOrchestrator::new());
         let server = tokio::spawn({
             let sock = sock.clone();
-            async move { serve(orch, &sock).await }
+            async move { serve(orch, no_roles(), &sock).await }
         });
         // Wait for the socket file to appear (bind happens inside serve()).
         for _ in 0..50 {

@@ -180,16 +180,71 @@ pub(crate) async fn write_then_flush(w: &mut BoxedWriteHalf, data: &[u8]) -> std
     w.flush().await
 }
 
-/// Persist the serialised parameter bytes to disk off the reactor. The atomic
-/// temp-file + rename write is blocking disk I/O, so it runs on a blocking pool
-/// thread rather than stalling a tokio worker. Fire-and-forget: a write failure
-/// is logged, not awaited, so the read loop is never delayed by the disk.
-pub(crate) fn persist_params(path: std::path::PathBuf, body: Vec<u8>) {
-    tokio::task::spawn_blocking(move || {
-        if let Err(e) = crate::param_cache::write_atomic(&path, &body) {
-            tracing::warn!(error = %e, "param_cache_save_failed");
+/// The latest serialised parameter cache waiting to be written, and whether a
+/// writer is already draining it.
+#[derive(Default)]
+struct PersistQueue {
+    pending: Option<(std::path::PathBuf, Vec<u8>)>,
+    writing: bool,
+}
+
+/// Writes the parameter cache to disk off the reactor, one write at a time,
+/// newest snapshot wins.
+///
+/// A change outside a sweep is persisted at once, so a bulk parameter write
+/// from a ground station produces a burst of snapshots. Handing each to its own
+/// blocking task let several writers truncate and rename the same temp file
+/// concurrently: a reader could catch a half-written cache and an older
+/// snapshot could be renamed in last. Here a single writer drains the queue;
+/// a snapshot that arrives while it is busy replaces the one waiting, so the
+/// last write to land is always the newest state.
+#[derive(Clone)]
+pub(crate) struct ParamPersister {
+    queue: std::sync::Arc<std::sync::Mutex<PersistQueue>>,
+    write: fn(&std::path::Path, &[u8]) -> std::io::Result<()>,
+}
+
+impl ParamPersister {
+    pub(crate) fn new() -> Self {
+        Self::with_writer(crate::param_cache::write_atomic)
+    }
+
+    fn with_writer(write: fn(&std::path::Path, &[u8]) -> std::io::Result<()>) -> Self {
+        Self {
+            queue: std::sync::Arc::new(std::sync::Mutex::new(PersistQueue::default())),
+            write,
         }
-    });
+    }
+
+    /// Queue `body` for `path` and start the writer if none is running. Never
+    /// blocks the caller on the disk.
+    pub(crate) fn persist(&self, path: std::path::PathBuf, body: Vec<u8>) {
+        {
+            let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+            q.pending = Some((path, body));
+            if q.writing {
+                return;
+            }
+            q.writing = true;
+        }
+        let queue = self.queue.clone();
+        let write = self.write;
+        tokio::task::spawn_blocking(move || loop {
+            let next = {
+                let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
+                match q.pending.take() {
+                    Some(next) => next,
+                    None => {
+                        q.writing = false;
+                        return;
+                    }
+                }
+            };
+            if let Err(e) = write(&next.0, &next.1) {
+                tracing::warn!(error = %e, "param_cache_save_failed");
+            }
+        });
+    }
 }
 
 /// Open a serial port at the given baud as an async stream.
@@ -331,6 +386,48 @@ pub(crate) async fn probe_baud(port: &str, baud: u32) -> ProbeOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How many simulated writes are in flight at once, and the most ever seen.
+    static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// A slow disk write that records overlap and keeps the last body written.
+    fn slow_write(path: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
+        use std::sync::atomic::Ordering;
+        let now = ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+        PEAK.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(15));
+        std::fs::write(path, body)?;
+        ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// A burst of cache snapshots (a bulk parameter write) is written by one
+    /// writer at a time and ends on the newest snapshot, never an older one.
+    #[tokio::test]
+    async fn a_burst_of_cache_writes_is_serialised_and_ends_on_the_newest() {
+        use std::sync::atomic::Ordering;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("params.json");
+        let persister = ParamPersister::with_writer(slow_write);
+        for i in 0..6u8 {
+            persister.persist(path.clone(), vec![i]);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        for _ in 0..200 {
+            let idle = !persister
+                .queue
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .writing;
+            if idle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(PEAK.load(Ordering::SeqCst), 1, "writes must never overlap");
+        assert_eq!(std::fs::read(&path).unwrap(), vec![5u8]);
+    }
 
     #[test]
     fn parse_net_spec_detects_tcp_and_udp() {

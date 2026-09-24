@@ -64,7 +64,11 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Best-effort: a bind failure is logged and the task returns, because a rig
 /// with no writable run dir must still stream video — it just cannot be
 /// retargeted at runtime.
-pub async fn serve(control: Arc<EncoderControl>, path: &Path, shutdown: crate::shutdown::Shutdown) {
+pub async fn serve(
+    control: Arc<EncoderControl>,
+    path: &Path,
+    shutdown: ados_protocol::shutdown::Shutdown,
+) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -399,7 +403,7 @@ mod tests {
         let sock = dir.path().join("video-encoder.sock");
         let ctl = control();
         let _applier = spawn_applier(Arc::clone(&ctl));
-        let shutdown = crate::shutdown::Shutdown::new();
+        let shutdown = ados_protocol::shutdown::Shutdown::new();
         let server = {
             let ctl = Arc::clone(&ctl);
             let sock = sock.clone();

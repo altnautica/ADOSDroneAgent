@@ -1,23 +1,21 @@
 """PluginSupervisor: lifecycle and state for installed plugins.
 
-Sub-supervisor under the existing :mod:`ados.core.supervisor`.
 Responsibilities:
 
-* Discover built-in plugins via the ``ados.plugins`` entry-points group.
 * Read on-disk install state (``/var/ados/state/plugin-state.json``)
-  and reconcile against unpacked third-party archives at
-  ``/var/ados/plugins/<id>/``.
+  and reconcile against unpacked plugins at ``/var/ados/plugins/<id>/``.
 * Install a ``.adosplug`` archive: verify signature, run manifest
   compatibility checks, unpack, write systemd unit, persist state.
-* Enable a plugin: ``systemctl enable + start`` (or import + lifecycle
-  hook for inprocess built-ins).
+* Install a built-in plugin (:mod:`ados.plugins.builtin`): the same
+  install, from a manifest shipped in the agent package.
+* Enable a plugin: ``systemctl enable + start``.
 * Disable a plugin: ``systemctl stop + disable``.
 * Remove a plugin: stop, remove unit, delete unpacked dir, delete state.
 * Read-only queries used by the CLI and REST API.
 
-The supervisor does not run plugin code itself for subprocess plugins.
-The actual plugin runner is the ``ados-plugin-runner`` binary that
-systemd starts; see :mod:`ados.plugins.runner`.
+The supervisor does not run plugin code itself. Every agent half runs as
+its own systemd unit through ``ados-plugin-runner`` (or its own binary for
+a rust plugin); see :mod:`ados.plugins.runner`.
 
 Compatibility checks at install time:
 
@@ -25,8 +23,8 @@ Compatibility checks at install time:
   agent's version.
 * Plugin ``compatibility.supported_boards`` (if non-empty) must include
   the current HAL board id.
-* ``isolation: inprocess`` requires first-party signer (see
-  :func:`ados.plugins.signing.is_first_party_signer`).
+* ``isolation: inprocess`` is refused: no process runs an in-process
+  agent half.
 * ``isolation: inline`` (GCS) requires first-party signer; enforced on
   the GCS side too.
 """
@@ -53,15 +51,16 @@ from ados.plugins import systemd as _systemd
 from ados.plugins.archive import (
     MANIFEST_FILENAME,
     open_archive,
+    serialize_manifest,
     unpack_to,
     verify_entrypoints_present,
 )
+from ados.plugins.builtin import builtin_manifest
 from ados.plugins.errors import (
     ManifestError,
     SignatureError,
     SupervisorError,
 )
-from ados.plugins.loader import load_builtin_manifests
 from ados.plugins.manifest import PluginManifest
 from ados.plugins.ready_check import PROBE_TIMEOUT_S, HttpProbe, parse_ready_check
 from ados.plugins.signing import (
@@ -84,6 +83,7 @@ from ados.plugins.state import (
     remove_install,
     revoke_permission,
     save_state,
+    state_file_key,
     state_lock,
     upsert_install,
 )
@@ -136,22 +136,33 @@ class PluginSupervisor:
         self._current_board_id = current_board_id
         self._current_board_tier = current_board_tier
         self._installs: list[PluginInstall] = []
-        self._builtin: dict[str, PluginManifest] = {}
+        # Identity of the state file the in-memory list was read from. Other
+        # processes (the CLI, the Rust cloud-relay path) write the same file,
+        # so every read and every locked mutation re-reads it when it changed;
+        # saving a stale copy would silently erase their installs and grants.
+        self._state_key: tuple[int, int, int] | None = None
 
     # ------------------------------------------------------------------
     # Boot-time discovery
     # ------------------------------------------------------------------
 
     def discover(self) -> None:
-        """Read on-disk state, load built-in entry-points, sanity-check.
+        """Read on-disk state and sanity-check it.
 
         Also filters in-memory permission grants down to what the
         manifest currently declares, defending against a tampered
         state file.
         """
+        self._refresh_installs(force=True)
+        log.info("plugin_supervisor_discovered", installed_count=len(self._installs))
+
+    def _refresh_installs(self, *, force: bool = False) -> None:
+        """Re-read the state file when another writer changed it."""
+        key = state_file_key()
+        if not force and key == self._state_key:
+            return
+        self._state_key = key
         self._installs = load_state()
-        for manifest in load_builtin_manifests():
-            self._builtin[manifest.id] = manifest
         for install in self._installs:
             try:
                 manifest = self._manifest_for(install.plugin_id)
@@ -160,20 +171,24 @@ class PluginSupervisor:
             filter_permissions_against_manifest(
                 install, manifest.declared_permissions()
             )
-        log.info(
-            "plugin_supervisor_discovered",
-            builtin_count=len(self._builtin),
-            installed_count=len(self._installs),
-        )
 
-    def builtin_manifests(self) -> dict[str, PluginManifest]:
-        return dict(self._builtin)
+    def _save(self) -> None:
+        """Persist the in-memory list and adopt the file it produced.
+
+        Called only under :func:`state_lock`, so no other writer can land
+        between the write and the stat; recording the new key keeps this
+        instance from re-reading (and replacing the objects of) its own write.
+        """
+        save_state(self._installs)
+        self._state_key = state_file_key()
 
     def installs(self) -> list[PluginInstall]:
+        self._refresh_installs()
         return list(self._installs)
 
     def find_install(self, plugin_id: str) -> PluginInstall | None:
         """Return the install record for ``plugin_id`` or None if not installed."""
+        self._refresh_installs()
         return find_install(self._installs, plugin_id)
 
     # ------------------------------------------------------------------
@@ -222,37 +237,95 @@ class PluginSupervisor:
         if not allow_downgrade:
             self._reject_downgrade(manifest)
 
-        with state_lock():
-            target = self._install_dir / manifest.id
-            if target.exists():
-                shutil.rmtree(target)
-            unpack_to(contents.raw_archive_bytes, target)
-
+        def _populate(staging: Path) -> None:
+            unpack_to(contents.raw_archive_bytes, staging)
             # A manifest that declares a GCS half (or a rust agent binary)
             # must actually ship the file it points at. Fail the install
-            # loudly here rather than letting a missing bundle surface
-            # later as an empty iframe or a unit that cannot start.
+            # loudly here rather than letting a missing bundle surface later
+            # as an empty iframe or a unit that cannot start.
             unpacked = {
-                p.relative_to(target).as_posix()
-                for p in target.rglob("*")
+                p.relative_to(staging).as_posix()
+                for p in staging.rglob("*")
                 if p.is_file()
             }
             verify_entrypoints_present(manifest, unpacked)
-
             # Install the agent half's vendored wheels into a per-plugin site
-            # dir. The archive layout has always documented an
-            # ``agent/wheel/`` slot and nothing installed it, so any agent
-            # half importing a package outside the agent venv died at
-            # entrypoint import with a unit flapping on an ImportError.
-            self._install_agent_wheels(manifest, target)
+            # dir, so an agent half importing a package outside the agent venv
+            # does not die at entrypoint import.
+            self._install_agent_wheels(manifest, staging)
+
+        return self._commit_install(
+            manifest,
+            populate=_populate,
+            source_uri=str(archive_path),
+            signer_id=contents.signer_id,
+        )
+
+    def install_builtin(self, plugin_id: str) -> InstallResult:
+        """Install a plugin that ships inside the agent package.
+
+        The manifest comes from :mod:`ados.plugins.builtin` rather than an
+        archive, so there is no signature to verify: the code is the agent's
+        own. Everything after that is an ordinary install: the manifest is
+        written to the plugin's install dir, its unit is rendered, and the
+        plugin host serves it once it is enabled.
+        """
+        manifest = builtin_manifest(plugin_id)
+        if manifest is None:
+            raise SupervisorError(f"{plugin_id} is not a built-in plugin")
+        self._check_compatibility(manifest, None)
+        body = serialize_manifest(manifest)
+
+        def _populate(staging: Path) -> None:
+            staging.mkdir(parents=True)
+            (staging / MANIFEST_FILENAME).write_bytes(body)
+
+        return self._commit_install(
+            manifest,
+            populate=_populate,
+            source_uri=f"builtin:{plugin_id}",
+            signer_id=None,
+        )
+
+    def _commit_install(
+        self,
+        manifest: PluginManifest,
+        *,
+        populate,
+        source_uri: str,
+        signer_id: str | None,
+    ) -> InstallResult:
+        """Stage, swap in, render the unit and record one install.
+
+        ``populate(staging)`` fills a fresh staging dir and runs every
+        content check; it raising leaves an existing install exactly as it
+        was. Wrapped in :func:`state_lock` so concurrent install/remove flows
+        on the same host serialize.
+        """
+        with state_lock():
+            self._refresh_installs()
+            target = self._install_dir / manifest.id
+            staging = self._install_dir / f".{manifest.id}.staging"
+            if staging.exists():
+                shutil.rmtree(staging)
+            try:
+                populate(staging)
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+
+            previous = find_install(self._installs, manifest.id)
+            if previous is not None:
+                # Stop what runs from the files about to be replaced; a
+                # `systemctl start` on the still-active unit would otherwise be
+                # a no-op and the old version would keep running.
+                self._stop_for_replacement(previous)
+            self._swap_into_place(staging, target)
 
             # Write systemd unit for subprocess agent halves. A fresh install
             # has granted nothing yet, so the unit renders with the most
             # restrictive sandbox; grant/revoke re-renders it.
-            if (
-                manifest.agent is not None
-                and manifest.agent.isolation == "subprocess"
-            ):
+            if manifest.agent is not None and manifest.agent.isolation == "subprocess":
                 self._ensure_slice_exists()
                 unit_path = unit_path_for(manifest.id)
                 unit_path.write_text(
@@ -269,26 +342,30 @@ class PluginSupervisor:
                 plugin_id=manifest.id,
                 version=manifest.version,
                 source="local_file",
-                source_uri=str(archive_path),
-                signer_id=contents.signer_id,
+                source_uri=source_uri,
+                signer_id=signer_id,
                 manifest_hash=manifest_hash,
                 status="installed",
                 installed_at=_now_ms(),
                 permissions={},
             )
+            if previous is not None:
+                # Operator update preferences outlive a reinstall.
+                install.auto_update = previous.auto_update
+                install.pinned_version = previous.pinned_version
             self._installs = upsert_install(self._installs, install)
-            save_state(self._installs)
+            self._save()
 
         log.info(
             "plugin_installed",
             plugin_id=manifest.id,
             version=manifest.version,
-            signer_id=contents.signer_id,
+            signer_id=signer_id,
         )
         return InstallResult(
             plugin_id=manifest.id,
             version=manifest.version,
-            signer_id=contents.signer_id,
+            signer_id=signer_id,
             risk=manifest.risk,
             permissions_requested=sorted(manifest.declared_permissions()),
         )
@@ -371,7 +448,7 @@ class PluginSupervisor:
                     "could reach the agent's own loopback services"
                 )
             grant_permission(install, permission_id)
-            save_state(self._installs)
+            self._save()
         self._apply_permission_change(plugin_id, manifest)
 
     def revoke_permission(self, plugin_id: str, permission_id: str) -> None:
@@ -384,7 +461,7 @@ class PluginSupervisor:
             install = self._require_install(plugin_id)
             manifest = self._manifest_for(plugin_id)
             revoke_permission(install, permission_id)
-            save_state(self._installs)
+            self._save()
         self._apply_permission_change(plugin_id, manifest)
 
     def _apply_permission_change(
@@ -414,28 +491,39 @@ class PluginSupervisor:
         itself applied: the CLI and the GCS said success while the plugin kept
         its old grant set until someone restarted ``ados-plugin-host``.
         """
-        install = find_install(self._installs, plugin_id)
-        granted = (
-            sorted(
-                pid for pid, g in install.permissions.items() if g.granted
-            )
-            if install is not None
-            else []
-        )
+        install = self.find_install(plugin_id)
+        granted = self._granted(plugin_id)
+        running = install is not None and install.status == "running"
 
         if manifest.agent is not None and manifest.agent.isolation == "subprocess":
-            unit_path = unit_path_for(plugin_id)
-            rendered = render_unit(manifest, self._install_dir, granted)
-            previous = (
-                unit_path.read_text(encoding="utf-8")
-                if unit_path.exists()
-                else ""
-            )
-            if previous != rendered:
-                unit_path.write_text(rendered, encoding="utf-8")
-                self._systemctl("daemon-reload")
-                if install is not None and install.status == "running":
-                    self._systemctl("restart", unit_name_for(plugin_id))
+            if self._write_if_changed(
+                unit_path_for(plugin_id),
+                render_unit(manifest, self._install_dir, granted),
+            ) and running:
+                self._systemctl("restart", unit_name_for(plugin_id))
+            # Declared services run under the same capability sandbox as the
+            # main unit, so they follow every grant and revoke too. A service
+            # whose unit enable() never wrote is rendered when it starts.
+            for service in self._declared_services(manifest):
+                svc_path = service_unit_path_for(plugin_id, service.name)
+                if not svc_path.exists():
+                    continue
+                try:
+                    rendered = render_service_unit(
+                        manifest, service, self._install_dir, granted
+                    )
+                except ValueError as exc:
+                    log.warning(
+                        "plugin_service_render_failed",
+                        plugin_id=plugin_id,
+                        service=service.name,
+                        error=str(exc),
+                    )
+                    continue
+                if self._write_if_changed(svc_path, rendered) and running:
+                    self._systemctl(
+                        "restart", service_unit_name_for(plugin_id, service.name)
+                    )
 
         # Re-mint the live token. A plugin host that is not up has nothing to
         # re-mint against and picks the new grant set off state on its next
@@ -454,10 +542,10 @@ class PluginSupervisor:
             manifest = self._manifest_for(plugin_id)
             if install.status == "running":
                 return  # idempotent; state already correct
-            if manifest.agent is None or manifest.agent.isolation == "inprocess":
+            if manifest.agent is None:
                 install.status = "enabled"
                 install.enabled_at = _now_ms()
-                save_state(self._installs)
+                self._save()
                 return
             # Flip state to enabled and persist BEFORE starting the unit, then
             # have the plugin host bind the socket and write the token env off
@@ -469,7 +557,7 @@ class PluginSupervisor:
             # few seconds of dead plugin.
             install.status = "enabled"
             install.enabled_at = _now_ms()
-            save_state(self._installs)
+            self._save()
             host_control.reconcile()
             unit = unit_name_for(plugin_id)
             self._systemctl("enable", unit)
@@ -485,7 +573,7 @@ class PluginSupervisor:
             install.service_status = self._compute_service_readiness(
                 plugin_id, manifest
             )
-            save_state(self._installs)
+            self._save()
         log.info("plugin_enabled", plugin_id=plugin_id)
 
     def disable(self, plugin_id: str) -> None:
@@ -508,7 +596,7 @@ class PluginSupervisor:
             install.status = "disabled"
             install.enabled_at = None
             install.service_status = None
-            save_state(self._installs)
+            self._save()
         log.info("plugin_disabled", plugin_id=plugin_id)
 
     def remove(self, plugin_id: str, *, keep_data: bool = False) -> None:
@@ -524,6 +612,7 @@ class PluginSupervisor:
                     error=str(exc),
                 )
         with state_lock():
+            self._refresh_installs()
             manifest = self._manifest_for(plugin_id)
             if (
                 manifest.agent is not None
@@ -549,7 +638,7 @@ class PluginSupervisor:
                 if log_file.exists():
                     log_file.unlink()
             self._installs = remove_install(self._installs, plugin_id)
-            save_state(self._installs)
+            self._save()
         log.info("plugin_removed", plugin_id=plugin_id, keep_data=keep_data)
 
     # ------------------------------------------------------------------
@@ -557,20 +646,80 @@ class PluginSupervisor:
     # ------------------------------------------------------------------
 
     def _require_install(self, plugin_id: str) -> PluginInstall:
-        install = find_install(self._installs, plugin_id)
+        install = self.find_install(plugin_id)
         if install is None:
             raise SupervisorError(f"plugin {plugin_id} is not installed")
         return install
+
+    def _granted(self, plugin_id: str) -> list[str]:
+        """The plugin's currently granted capability ids, sorted."""
+        install = self.find_install(plugin_id)
+        if install is None:
+            return []
+        return sorted(pid for pid, g in install.permissions.items() if g.granted)
+
+    def _write_if_changed(self, path: Path, text: str) -> bool:
+        """Write a unit file and reload systemd only when its text changed."""
+        previous = path.read_text(encoding="utf-8") if path.exists() else ""
+        if previous == text:
+            return False
+        path.write_text(text, encoding="utf-8")
+        self._systemctl("daemon-reload")
+        return True
+
+    def _stop_for_replacement(self, install: PluginInstall) -> None:
+        """Stop a plugin whose files are about to be replaced by a reinstall.
+
+        Its declared-service units are stopped, disabled and deleted (the new
+        version may declare different ones; enable() renders them afresh), and
+        the main unit is stopped. Best-effort: an old manifest that no longer
+        reads, or a unit that is already gone, must not block the install.
+        """
+        if install.status not in ("running", "enabled"):
+            return
+        try:
+            manifest = self._manifest_for(install.plugin_id)
+        except (SupervisorError, ManifestError) as exc:
+            log.warning(
+                "plugin_reinstall_old_manifest_unreadable",
+                plugin_id=install.plugin_id,
+                error=str(exc),
+            )
+            return
+        if manifest.agent is None or manifest.agent.isolation != "subprocess":
+            return
+        self._stop_declared_services(install.plugin_id, manifest)
+        for service in self._declared_services(manifest):
+            service_unit_path_for(install.plugin_id, service.name).unlink(
+                missing_ok=True
+            )
+        try:
+            self._systemctl("stop", unit_name_for(install.plugin_id))
+        except SupervisorError as exc:
+            log.warning(
+                "plugin_reinstall_stop_failed",
+                plugin_id=install.plugin_id,
+                error=str(exc),
+            )
+
+    @staticmethod
+    def _swap_into_place(staging: Path, target: Path) -> None:
+        """Replace ``target`` with the validated ``staging`` tree by renames."""
+        if not target.exists():
+            staging.rename(target)
+            return
+        retired = target.with_name(f".{target.name}.retired")
+        if retired.exists():
+            shutil.rmtree(retired)
+        target.rename(retired)
+        staging.rename(target)
+        shutil.rmtree(retired, ignore_errors=True)
 
     def manifest_for(self, plugin_id: str) -> PluginManifest:
         """Public accessor: the manifest for an installed/built-in plugin (tamper-checked)."""
         return self._manifest_for(plugin_id)
 
     def _manifest_for(self, plugin_id: str) -> PluginManifest:
-        # Built-in first; otherwise read from unpacked dir.
-        builtin = self._builtin.get(plugin_id)
-        if builtin is not None:
-            return builtin
         manifest_path = self._install_dir / plugin_id / MANIFEST_FILENAME
         if not manifest_path.exists():
             raise SupervisorError(
@@ -626,14 +775,13 @@ class PluginSupervisor:
                 f"plugin {manifest.id} requires compute tier {min_tier}; "
                 f"this board is tier {self._current_board_tier}"
             )
-        if (
-            manifest.agent is not None
-            and manifest.agent.isolation == "inprocess"
-            and (signer_id is None or not is_first_party_signer(signer_id))
-        ):
+        if manifest.agent is not None and manifest.agent.isolation == "inprocess":
+            # Nothing executes an in-process agent half: every plugin runs as
+            # its own unit. Accepting one would install a plugin that reads
+            # enabled and never runs.
             raise SupervisorError(
-                f"plugin {manifest.id} requests inprocess isolation but "
-                f"signer {signer_id} is not first-party"
+                f"plugin {manifest.id} requests inprocess isolation, which this "
+                "agent does not run; use subprocess isolation"
             )
 
     def _reject_downgrade(self, manifest: PluginManifest) -> None:
@@ -643,7 +791,7 @@ class PluginSupervisor:
         the semver-range gate has already had its say, and refusing here over
         a formatting detail would block a legitimate install.
         """
-        install = find_install(self._installs, manifest.id)
+        install = self.find_install(manifest.id)
         if install is None:
             return
         try:
@@ -748,8 +896,7 @@ class PluginSupervisor:
     def _declared_services(self, manifest: PluginManifest):
         """The list of ``ServiceSpec`` a plugin declares, or empty.
 
-        Only subprocess agent halves get extra units; an inprocess
-        built-in has no systemd footprint to attach services to.
+        Only subprocess agent halves get extra units.
         """
         agent = manifest.agent
         if agent is None or agent.isolation != "subprocess":
@@ -765,11 +912,14 @@ class PluginSupervisor:
         service is logged and left to surface as not-ready(reason) on
         the readiness probe; it never aborts the enable of the plugin's
         main half."""
+        granted = self._granted(plugin_id)
         for service in self._declared_services(manifest):
             try:
                 svc_unit_path = service_unit_path_for(plugin_id, service.name)
                 svc_unit_path.write_text(
-                    render_service_unit(manifest, service, self._install_dir),
+                    render_service_unit(
+                        manifest, service, self._install_dir, granted
+                    ),
                     encoding="utf-8",
                 )
                 self._systemctl("daemon-reload")
@@ -848,7 +998,7 @@ class PluginSupervisor:
             return (False, f"invalid ready_check: {exc}")
         if isinstance(probe, HttpProbe):
             return self._probe_http_ready(probe.url)
-        return self._probe_command_ready(manifest, probe.argv)
+        return self._probe_command_ready(plugin_id, manifest, probe.argv)
 
     def _unit_is_active(self, unit: str) -> bool:
         """``systemctl is-active --quiet <unit>`` ⇒ exit 0 means active."""
@@ -877,16 +1027,18 @@ class PluginSupervisor:
             return (False, f"http probe failed: {exc}")
 
     def _probe_command_ready(
-        self, manifest: PluginManifest, argv: tuple[str, ...]
+        self, plugin_id: str, manifest: PluginManifest, argv: tuple[str, ...]
     ) -> tuple[bool, str | None]:
         """Run a declared readiness argv; ready on exit 0.
 
         The argv is plugin-authored, so it never runs in this process and
         never through a shell: ``systemd-run`` starts it as a transient unit
-        with the ``ados`` user and the same sandbox and resource envelope the
-        plugin's declared services get (:func:`probe_command`).
+        with the ``ados`` user and the same sandbox, grant set and resource
+        envelope the plugin's declared services get (:func:`probe_command`).
         """
-        command = probe_command(manifest, argv, self._install_dir)
+        command = probe_command(
+            manifest, argv, self._install_dir, self._granted(plugin_id)
+        )
         try:
             proc = subprocess.run(
                 command,

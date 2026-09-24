@@ -26,6 +26,7 @@ from pathlib import Path
 
 import click
 
+from ados.plugins.builtin import builtin_manifest, builtin_manifests
 from ados.plugins.errors import (
     ArchiveError,
     ManifestError,
@@ -116,7 +117,7 @@ def plugin_group() -> None:
     "--all",
     "show_all",
     is_flag=True,
-    help="Include built-in plugins discovered via entry-points.",
+    help="Include built-in plugins that ship with the agent and are not installed.",
 )
 def list_plugins(as_json: bool, show_all: bool) -> None:
     sup = _make_supervisor()
@@ -132,13 +133,16 @@ def list_plugins(as_json: bool, show_all: bool) -> None:
             }
         )
     if show_all:
-        for plugin_id, manifest in sup.builtin_manifests().items():
+        installed = {row["id"] for row in rows}
+        for plugin_id, manifest in builtin_manifests().items():
+            if plugin_id in installed:
+                continue
             rows.append(
                 {
                     "id": plugin_id,
                     "version": manifest.version,
-                    "status": "builtin",
-                    "signer": "altnautica",
+                    "status": "available",
+                    "signer": None,
                     "kind": "built-in",
                 }
             )
@@ -156,8 +160,10 @@ def list_plugins(as_json: bool, show_all: bool) -> None:
         )
 
 
-@plugin_group.command("install", help="Install a .adosplug archive.")
-@click.argument("archive", type=click.Path(exists=True, dir_okay=False))
+@plugin_group.command(
+    "install", help="Install a .adosplug archive, or a built-in plugin by id."
+)
+@click.argument("source")
 @click.option(
     "--allow-unsigned",
     is_flag=True,
@@ -171,11 +177,23 @@ def list_plugins(as_json: bool, show_all: bool) -> None:
 )
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 def install(
-    archive: str, allow_unsigned: bool, auto_yes: bool, as_json: bool
+    source: str, allow_unsigned: bool, auto_yes: bool, as_json: bool
 ) -> None:
+    archive = Path(source)
+    is_builtin = not archive.exists() and builtin_manifest(source) is not None
+    if not is_builtin and not archive.is_file():
+        _emit_err(
+            as_json,
+            EXIT_NOT_FOUND,
+            f"{source} is neither an archive file nor a built-in plugin id",
+            hint="List built-in plugins with: ados plugin list --all",
+        )
+        sys.exit(EXIT_NOT_FOUND)
     try:
         sup = _make_supervisor(allow_unsigned=allow_unsigned)
-        result = sup.install_archive(Path(archive))
+        result = (
+            sup.install_builtin(source) if is_builtin else sup.install_archive(archive)
+        )
     except ManifestError as exc:
         _emit_err(as_json, EXIT_MANIFEST_INVALID, str(exc))
         sys.exit(EXIT_MANIFEST_INVALID)
@@ -571,7 +589,7 @@ def info(plugin_id: str, as_json: bool) -> None:
     install = next(
         (i for i in sup.installs() if i.plugin_id == plugin_id), None
     )
-    builtin = sup.builtin_manifests().get(plugin_id)
+    builtin = builtin_manifest(plugin_id)
     if install is None and builtin is None:
         _emit_err(
             as_json, EXIT_NOT_FOUND, f"plugin {plugin_id} is not installed"
@@ -583,6 +601,7 @@ def info(plugin_id: str, as_json: bool) -> None:
         if install is not None
         else None,
         "is_builtin": builtin is not None,
+        "available_version": builtin.version if builtin is not None else None,
     }
     if as_json:
         _emit_ok(as_json, payload)
@@ -598,8 +617,9 @@ def info(plugin_id: str, as_json: bool) -> None:
             state = "GRANTED" if grant.granted else "DENIED"
             click.echo(f"  {pid:30} {state}")
     else:
-        click.echo(f"Built-in plugin: {plugin_id}")
+        click.echo(f"Built-in plugin: {plugin_id} (not installed)")
         click.echo(f"Version: {builtin.version}")
+        click.echo(f"Install: ados plugin install {plugin_id}")
 
 
 @plugin_group.command(

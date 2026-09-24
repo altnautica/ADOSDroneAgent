@@ -123,7 +123,7 @@ def unpaired_client(short_sock_path, monkeypatch):
     monkeypatch.setattr(
         route, "VISION_DETECTIONS_SOCK", short_sock_path, raising=False
     )
-    app_double = build_api_runtime(uptime_seconds=0.0)
+    app_double = build_api_runtime()
     app_double.pairing_manager.is_paired = False
     app_double.pairing_manager.api_key = "test-pair-key"
     return TestClient(create_app(app_double)), short_sock_path
@@ -135,7 +135,7 @@ def paired_client(short_sock_path, monkeypatch):
     monkeypatch.setattr(
         route, "VISION_DETECTIONS_SOCK", short_sock_path, raising=False
     )
-    app_double = build_api_runtime(uptime_seconds=0.0)
+    app_double = build_api_runtime()
     app_double.pairing_manager.is_paired = True
     app_double.pairing_manager.api_key = "valid-pair-key"
     app_double.pairing_manager.validate_key = lambda k: k == "valid-pair-key"
@@ -251,7 +251,7 @@ def test_get_latest_returns_empty_detections_when_socket_absent():
         original = route_mod.VISION_DETECTIONS_SOCK
         route_mod.VISION_DETECTIONS_SOCK = absent_sock
         try:
-            app_double = build_api_runtime(uptime_seconds=0.0)
+            app_double = build_api_runtime()
             app_double.pairing_manager.is_paired = False
             client = TestClient(create_app(app_double))
             resp = client.get("/api/vision/detections/latest")

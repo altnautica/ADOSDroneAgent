@@ -2,7 +2,6 @@
 
 Covers:
 * /factory-reset (pair + mesh wipe with fingerprint confirm)
-* /display (HDMI kiosk config)
 
 ``GET /ui``, the three ``PUT /ui/<section>`` writes, the PIC
 claim/release/confirm-token/heartbeat REST routes, the gamepad + Bluetooth
@@ -172,15 +171,3 @@ async def post_factory_reset(
     else:
         result = {"result": result, "mesh": mesh_wipe}
     return result
-
-
-# ---------------------------------------------------------------------------
-# /display
-# ---------------------------------------------------------------------------
-
-
-@router.get("/display")
-async def get_ground_station_display() -> dict:
-    """Return the persisted HDMI kiosk display config."""
-    _gs._require_ground_profile()
-    return _gs._load_display_config()

@@ -301,16 +301,16 @@ mod tests {
         assert!((st.vz - s.vz).abs() < 0.02);
         assert!((st.climb - s.climb).abs() < 0.02);
         // battery from SYS_STATUS (mV / cA), temperature from BATTERY_STATUS.
-        assert_eq!(st.battery_remaining, s.battery_remaining as i64);
-        assert!((st.voltage_battery - s.voltage).abs() < 0.01);
-        assert!((st.current_battery - s.current).abs() < 0.01);
-        assert!((st.battery_temperature - s.battery_temperature).abs() < 0.01);
+        assert_eq!(st.battery_remaining, Some(s.battery_remaining as i64));
+        assert!((st.voltage_battery.unwrap() - s.voltage).abs() < 0.01);
+        assert!((st.current_battery.unwrap() - s.current).abs() < 0.01);
+        assert!((st.battery_temperature.unwrap() - s.battery_temperature).abs() < 0.01);
         // BATTERY_STATUS cells were all sentinel, so the per-cell list is empty.
         assert!(st.battery_voltages.is_empty());
         // RC + throttle.
         assert_eq!(st.rc_channels.len(), 18);
         assert_eq!(st.rc_channels[0], 1500);
-        assert_eq!(st.rc_rssi, 200);
+        assert_eq!(st.rc_rssi, Some(200));
         assert_eq!(st.throttle, s.throttle as i64);
         assert_eq!(st.gps_satellites, 14);
         assert_eq!(st.gps_fix_type, GpsFixType::GPS_FIX_TYPE_3D_FIX as i64);

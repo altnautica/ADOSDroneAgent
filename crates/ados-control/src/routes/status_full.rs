@@ -427,7 +427,7 @@ fn round_int(v: f64) -> i64 {
 /// list.
 async fn build_services_list() -> Value {
     let mut services = systemd_services_fallback().await;
-    attach_service_memory(&mut services);
+    crate::routes::services::attach_service_memory(&mut services).await;
     Value::Array(services)
 }
 
@@ -497,157 +497,6 @@ fn parse_fallback_line(line: &str) -> Option<Value> {
     }))
 }
 
-/// Attach a `memory_mb` field to each service entry, in place.
-///
-/// Resolves each entry's owning systemd unit, sums each distinct unit's grouped PSS
-/// once via a single `/proc` scan, and writes the MiB value back. Entries with no
-/// resolvable unit or a unit with no running process get `0.0` — the same value a live
-/// `/proc` scan reports for an absent unit.
-fn attach_service_memory(services: &mut [Value]) {
-    let unit_by_entry: Vec<Option<String>> = services
-        .iter()
-        .map(|s| {
-            s.as_object()
-                .and_then(|m| m.get("name"))
-                .and_then(Value::as_str)
-                .and_then(unit_for_service)
-        })
-        .collect();
-
-    let pss_by_unit = scan_pss_by_unit();
-
-    for (svc, unit) in services.iter_mut().zip(unit_by_entry.iter()) {
-        let mb = unit
-            .as_ref()
-            .and_then(|u| pss_by_unit.get(u))
-            .copied()
-            .unwrap_or(0.0);
-        if let Some(obj) = svc.as_object_mut() {
-            obj.insert("memory_mb".to_string(), json!(mb));
-        }
-    }
-}
-
-/// Resolve a service entry name to its systemd unit, mirroring the Python
-/// `unit_for_service`. An `ados-*` basename maps to `<name>.service`; a short
-/// in-process label maps through the fixed table; anything else is `None`. The
-/// systemd-fallback entries this route emits all carry `ados-*` basenames, so they
-/// take the first branch; the short-label table is carried for full parity.
-fn unit_for_service(name: &str) -> Option<String> {
-    if name.is_empty() {
-        return None;
-    }
-    if name.starts_with("ados-") {
-        return Some(if name.ends_with(".service") {
-            name.to_string()
-        } else {
-            format!("{name}.service")
-        });
-    }
-    match name {
-        "fc-connection" => Some("ados-mavlink.service".to_string()),
-        "video-pipeline" => Some("ados-video.service".to_string()),
-        "wfb-link" => Some("ados-wfb.service".to_string()),
-        "rest-api" => Some("ados-api.service".to_string()),
-        "health-monitor" => Some("ados-health.service".to_string()),
-        "cloud-command-poll" => Some("ados-cloud.service".to_string()),
-        "agent-heartbeat" => Some("ados-cloud.service".to_string()),
-        "pairing-beacon" => Some("ados-cloud.service".to_string()),
-        "pairing-heartbeat" => Some("ados-cloud.service".to_string()),
-        _ => None,
-    }
-}
-
-/// Sum PSS (MiB, one decimal) per `ados-*.service` unit across all running PIDs,
-/// reading `/proc/<pid>/cgroup` for the owning unit and `/proc/<pid>/smaps_rollup` for
-/// the PSS. Best-effort: an unreadable entry / a PID that exits mid-scan / no
-/// permission contributes nothing. On a non-Linux host there is no `/proc`, so the map
-/// is empty and every unit lands at `0.0`.
-fn scan_pss_by_unit() -> std::collections::BTreeMap<String, f64> {
-    let mut totals_kib: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
-
-    let dir = match std::fs::read_dir("/proc") {
-        Ok(d) => d,
-        Err(_) => return std::collections::BTreeMap::new(),
-    };
-
-    for entry in dir.flatten() {
-        let file_name = entry.file_name();
-        let Some(pid) = file_name.to_str() else {
-            continue;
-        };
-        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        let cgroup = match std::fs::read_to_string(format!("/proc/{pid}/cgroup")) {
-            Ok(text) => text,
-            Err(_) => continue,
-        };
-        let Some(unit) = unit_from_cgroup(&cgroup) else {
-            continue;
-        };
-        let rollup = match std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")) {
-            Ok(text) => text,
-            Err(_) => continue,
-        };
-        let pss = pss_kib_from_rollup(&rollup);
-        if pss > 0 {
-            *totals_kib.entry(unit).or_insert(0) += pss;
-        }
-    }
-
-    totals_kib
-        .into_iter()
-        .map(|(unit, kib)| (unit, round1(kib as f64 / 1024.0)))
-        .collect()
-}
-
-/// Extract the `ados-*.service` unit from a `/proc/<pid>/cgroup` body, matching the
-/// Python regex `(ados-[a-z0-9-]+\.service)`: a literal `ados-`, one-or-more
-/// lowercase-alphanumeric-or-dash chars, then `.service`. First match wins.
-fn unit_from_cgroup(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    let needle = b"ados-";
-    let mut i = 0;
-    while i + needle.len() <= bytes.len() {
-        if &bytes[i..i + needle.len()] == needle {
-            let mut j = i + needle.len();
-            let body_start = j;
-            while j < bytes.len() {
-                let c = bytes[j];
-                if c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' {
-                    j += 1;
-                } else {
-                    break;
-                }
-            }
-            if j > body_start && bytes[j..].starts_with(b".service") {
-                let end = j + ".service".len();
-                return Some(String::from_utf8_lossy(&bytes[i..end]).into_owned());
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Parse the `Pss:` line out of a `/proc/<pid>/smaps_rollup` body (KiB), `0` when
-/// absent or unparseable.
-fn pss_kib_from_rollup(text: &str) -> u64 {
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("Pss:") {
-            let mut tokens = rest.split_whitespace();
-            return match tokens.next() {
-                Some(tok) if !tok.is_empty() && tok.bytes().all(|b| b.is_ascii_digit()) => {
-                    tok.parse::<u64>().unwrap_or(0)
-                }
-                _ => 0,
-            };
-        }
-    }
-    0
-}
-
 // ---------------------------------------------------------------------------
 // WFB status view: the same store-first / sidecar-fallback read /api/wfb uses.
 // ---------------------------------------------------------------------------
@@ -678,7 +527,10 @@ async fn wfb_status_view(state: &AppState) -> Option<Map<String, Value>> {
 /// The most-recent full wfb-status snapshot + its emit timestamp, or `None` when the
 /// store is unreachable / holds no such event / the detail is empty.
 async fn latest_wfb_status(state: &AppState) -> Option<(Map<String, Value>, i64)> {
-    let rows = logd_query_events(state, "link.wfb_status", 1).await?;
+    let rows = state
+        .logd
+        .rows("events", 1, Some("link.wfb_status"))
+        .await?;
     let row = rows.first()?.as_object()?;
     let detail = row.get("detail")?.as_object()?;
     if detail.is_empty() {
@@ -1171,7 +1023,7 @@ async fn http_get_local(url: &str) -> std::io::Result<(u16, Vec<u8>)> {
             }
             raw.extend_from_slice(&buf[..n]);
         }
-        parse_http_response(&raw)
+        crate::ipc::logd_client::parse_http_response(&raw)
     };
 
     match timeout(PROBE_TIMEOUT, fut).await {
@@ -1805,101 +1657,6 @@ fn read_linked_peers_in(path: &Path, now: f64) -> Vec<(String, Value)> {
 // logd query seam + shared helpers.
 // ---------------------------------------------------------------------------
 
-/// Query the store for the newest `events` rows of one `event_kind`, returning the
-/// `data` array or `None`. Reuses the app-state logd client's socket so a test
-/// redirects it.
-async fn logd_query_events(state: &AppState, event_kind: &str, limit: i64) -> Option<Vec<Value>> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
-
-    let query = format!("/v1/query?kind=events&limit={limit}&event_kind={event_kind}");
-    let socket = state.logd.socket_path();
-    let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
-    let head = format!("GET {query} HTTP/1.1\r\nHost: logd\r\nConnection: close\r\n\r\n");
-    stream.write_all(head.as_bytes()).await.ok()?;
-    stream.flush().await.ok()?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await.ok()?;
-        if n == 0 {
-            break;
-        }
-        if raw.len() + n > MAX_READ_BYTES {
-            return None;
-        }
-        raw.extend_from_slice(&buf[..n]);
-    }
-    let (status, body) = parse_http_response(&raw).ok()?;
-    if status >= 400 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_slice(&body).ok()?;
-    parsed
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|a| a.to_vec())
-}
-
-/// Split a raw HTTP/1.1 response into the status code + decoded body, de-chunking
-/// a `Transfer-Encoding: chunked` body. Shared by the logd + mediamtx reads.
-fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
-    let sep = b"\r\n\r\n";
-    let split = raw
-        .windows(sep.len())
-        .position(|w| w == sep)
-        .ok_or_else(|| std::io::Error::other("malformed http response (no header terminator)"))?;
-    let head = &raw[..split];
-    let body = &raw[split + sep.len()..];
-
-    let head_str = String::from_utf8_lossy(head);
-    let status = head_str
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| std::io::Error::other("malformed http status line"))?;
-
-    let chunked = head_str
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked");
-    let body = if chunked {
-        de_chunk(body)
-    } else {
-        body.to_vec()
-    };
-    Ok((status, body))
-}
-
-/// De-chunk a `Transfer-Encoding: chunked` body: `<hexlen>\r\n<data>\r\n` repeated
-/// until a zero-length chunk.
-fn de_chunk(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    while let Some(crlf) = rest.windows(2).position(|w| w == b"\r\n") {
-        let len_line = &rest[..crlf];
-        let len = usize::from_str_radix(String::from_utf8_lossy(len_line).trim(), 16).unwrap_or(0);
-        if len == 0 {
-            break;
-        }
-        let data_start = crlf + 2;
-        if rest.len() < data_start + len {
-            out.extend_from_slice(&rest[data_start..]);
-            break;
-        }
-        out.extend_from_slice(&rest[data_start..data_start + len]);
-        let next = data_start + len;
-        rest = if rest.len() >= next + 2 {
-            &rest[next + 2..]
-        } else {
-            &[]
-        };
-    }
-    out
-}
-
 /// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the root the sidecars
 /// resolve under.
 pub(crate) fn run_dir() -> PathBuf {
@@ -2145,7 +1902,7 @@ mod tests {
             vec![
                 parse_fallback_line("ados-video.service loaded active running ADOS Video").unwrap(),
             ];
-        attach_service_memory(&mut entry);
+        crate::routes::services::apply_service_memory(&mut entry, &Default::default());
         let obj = entry[0].as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
         keys.sort_unstable();
@@ -2153,25 +1910,8 @@ mod tests {
             keys,
             ["memory_mb", "name", "state", "sub_state", "task_done"]
         );
-        assert!(obj["memory_mb"].is_number());
-    }
-
-    #[test]
-    fn unit_from_cgroup_extracts_the_ados_unit() {
-        let body = "0::/system.slice/ados.slice/ados-video.service\n";
-        assert_eq!(
-            unit_from_cgroup(body),
-            Some("ados-video.service".to_string())
-        );
-        assert_eq!(unit_from_cgroup("0::/system.slice/sshd.service"), None);
-        assert_eq!(unit_from_cgroup("ados-.service"), None);
-    }
-
-    #[test]
-    fn pss_kib_from_rollup_reads_the_first_pss_line() {
-        let body = "Rss:  12345 kB\nPss:  6789 kB\n";
-        assert_eq!(pss_kib_from_rollup(body), 6789);
-        assert_eq!(pss_kib_from_rollup("Rss:  100 kB\n"), 0);
+        // Nothing measured this unit, so its memory is unknown, not zero.
+        assert!(obj["memory_mb"].is_null());
     }
 
     // -------- radio --------

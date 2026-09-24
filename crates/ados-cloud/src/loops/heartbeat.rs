@@ -296,9 +296,7 @@ fn read_radio_sidecar_from(
         return None;
     }
 
-    let config_path =
-        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
-    let cfg = ados_protocol::wfb_status::WfbStatusConfig::load(std::path::Path::new(&config_path));
+    let cfg = ados_protocol::wfb_status::WfbStatusConfig::load(&crate::config::config_path());
     let status = ados_protocol::wfb_status::build_status_from_stats_file_at(&cfg, path);
     let status_map = status.as_object()?;
     let block = ados_protocol::wfb_status::build_radio_block(Some(status_map));
@@ -681,17 +679,17 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         memory_percent: None,
         disk_percent: None,
         temperature: None,
-        memory_used_mb: 0,
-        memory_total_mb: 0,
-        disk_used_gb: 0.0,
-        disk_total_gb: 0.0,
-        cpu_cores: 0,
-        board_ram_mb: 0,
-        cpu_history: vec![],
-        memory_history: vec![],
+        memory_used_mb: None,
+        memory_total_mb: None,
+        disk_used_gb: None,
+        disk_total_gb: None,
+        cpu_cores: None,
+        board_ram_mb: None,
+        cpu_history: None,
+        memory_history: None,
         fc_connected: None,
-        fc_port: String::new(),
-        fc_baud: 0,
+        fc_port: None,
+        fc_baud: None,
         // The FC link gated-truth detail is the enrichment producer's to lift from
         // the state snapshot; the native base leaves it absent (honest "unknown").
         transport_open: None,
@@ -722,8 +720,8 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         api_url: None,
         agent_version: base.version.clone(),
         video_state: None,
-        video_whep_port: 0,
-        mavlink_ws_port: 0,
+        video_whep_port: None,
+        mavlink_ws_port: None,
         mavlink_ws_url: None,
         video_whep_url: None,
         mission_control_url: None,
@@ -779,15 +777,23 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
     }
 }
 
-/// POST one heartbeat to `{convex}/agent/status` with `X-ADOS-Key`. Best-effort:
-/// a transport error or non-200 is logged, never fatal. Mirrors the Python
-/// loop's POST (header auth, not URL).
+/// What one `/agent/status` POST got back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeartbeatOutcome {
+    /// Answered, with this HTTP status (2xx or not).
+    Answered(u16),
+    /// No answer: the transport error.
+    Unanswered(String),
+}
+
+/// POST one heartbeat to `{convex}/agent/status` with `X-ADOS-Key`. Never
+/// fatal: the outcome is logged and returned for the cloud-link sidecar.
 pub async fn post_heartbeat(
     client: &reqwest::Client,
     convex_url: &str,
     api_key: &str,
     body: &serde_json::Value,
-) {
+) -> HeartbeatOutcome {
     let url = format!("{}/agent/status", convex_url.trim_end_matches('/'));
     match client
         .post(&url)
@@ -796,14 +802,65 @@ pub async fn post_heartbeat(
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => {
-            tracing::debug!("cloud status sent");
-        }
         Ok(resp) => {
-            tracing::warn!(status = resp.status().as_u16(), "cloud status rejected");
+            let status = resp.status().as_u16();
+            if resp.status().is_success() {
+                tracing::debug!("cloud status sent");
+            } else {
+                tracing::warn!(status, "cloud status rejected");
+            }
+            HeartbeatOutcome::Answered(status)
         }
         Err(e) => {
             tracing::debug!(error = %e, "cloud heartbeat failed");
+            HeartbeatOutcome::Unanswered(e.to_string())
+        }
+    }
+}
+
+/// Folds heartbeat outcomes into the cloud-link sidecar record.
+#[derive(Debug, Default)]
+pub struct CloudLinkTracker {
+    last_ok_ms: Option<i64>,
+    last_status: Option<u16>,
+    last_error: Option<String>,
+}
+
+impl CloudLinkTracker {
+    /// Record one POST outcome observed at `now_ms`.
+    pub fn record(&mut self, outcome: &HeartbeatOutcome, now_ms: i64) {
+        match outcome {
+            HeartbeatOutcome::Answered(status) => {
+                self.last_status = Some(*status);
+                self.last_error = None;
+                if (200..300).contains(status) {
+                    self.last_ok_ms = Some(now_ms);
+                }
+            }
+            HeartbeatOutcome::Unanswered(e) => {
+                self.last_status = None;
+                self.last_error = Some(e.clone());
+            }
+        }
+    }
+
+    /// The sidecar record for this tick.
+    pub fn link(
+        &self,
+        paired: bool,
+        cloud_url_set: bool,
+        broker_connected: Option<bool>,
+        now_ms: i64,
+    ) -> ados_protocol::cloud_link::CloudLink {
+        ados_protocol::cloud_link::CloudLink {
+            version: ados_protocol::cloud_link::CLOUD_LINK_SIDECAR_VERSION,
+            generated_at_ms: Some(now_ms),
+            paired,
+            cloud_url_set,
+            broker_connected,
+            last_heartbeat_ok_ms: self.last_ok_ms,
+            last_heartbeat_status: self.last_status,
+            last_heartbeat_error: self.last_error.clone(),
         }
     }
 }
@@ -811,6 +868,82 @@ pub async fn post_heartbeat(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serve exactly one HTTP request on loopback, answering `body` as JSON,
+    /// and hand back the raw request head the client sent.
+    async fn capture_one_request(
+        body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            let _ = tx.send(String::from_utf8_lossy(&head).into_owned());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    #[tokio::test]
+    async fn the_heartbeat_key_rides_the_header_never_the_url() {
+        let (base, head) = capture_one_request("{}").await;
+        let client = reqwest::Client::builder()
+            .use_preconfigured_tls(crate::tls::client_config())
+            .build()
+            .unwrap();
+        post_heartbeat(
+            &client,
+            &base,
+            "k-secret",
+            &serde_json::json!({"deviceId": "d1"}),
+        )
+        .await;
+        let head = head.await.unwrap();
+        let request_line = head.lines().next().unwrap();
+        assert!(
+            request_line.starts_with("POST /agent/status "),
+            "{request_line}"
+        );
+        assert!(
+            !request_line.contains("k-secret"),
+            "the key leaked into the URL"
+        );
+        assert!(
+            head.to_ascii_lowercase().contains("x-ados-key: k-secret"),
+            "{head}"
+        );
+    }
+
+    #[test]
+    fn a_rejected_or_lost_post_never_refreshes_the_last_good_heartbeat() {
+        let mut t = CloudLinkTracker::default();
+        t.record(&HeartbeatOutcome::Answered(200), 1_000);
+        t.record(&HeartbeatOutcome::Answered(401), 6_000);
+        let link = t.link(true, true, Some(true), 6_000);
+        assert_eq!(link.last_heartbeat_ok_ms, Some(1_000));
+        assert_eq!(link.last_heartbeat_status, Some(401));
+
+        t.record(&HeartbeatOutcome::Unanswered("timed out".into()), 11_000);
+        let link = t.link(true, true, Some(false), 11_000);
+        assert_eq!(link.last_heartbeat_ok_ms, Some(1_000));
+        assert_eq!(link.last_heartbeat_status, None);
+        assert_eq!(link.last_heartbeat_error.as_deref(), Some("timed out"));
+    }
 
     fn base() -> HeartbeatBase {
         HeartbeatBase {

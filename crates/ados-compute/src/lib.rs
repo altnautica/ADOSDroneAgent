@@ -20,6 +20,7 @@ mod auth;
 mod backends;
 mod client;
 mod cluster;
+mod credential_api;
 mod engine;
 /// Host-GPU reporting for the workstation profile (identity + live utilisation).
 /// Public so the daemon's heartbeat loop can sample it: `ados_compute::gpu::sample`.
@@ -28,11 +29,13 @@ mod heartbeat_sidecar;
 mod ingest;
 mod jobs_sidecar;
 mod keyframe_persister;
+mod lanes;
 /// mDNS advertise (the compute node) + resolve (a drone-side caller browsing for
 /// a `profile=workstation` node). Public so a consumer crate can reach
 /// `ados_compute::mdns::resolve_compute` directly, mirroring
 /// `ados_groundlink::mdns`.
 pub mod mdns;
+mod node_credentials;
 mod offload;
 mod offload_bridge;
 mod offload_client;
@@ -56,7 +59,10 @@ pub use api::{build_router, build_router_with_base, ApiState, CancelResponse, Su
 pub use artifacts::{
     artifact_router, derive_public_base, resolve_under_root, rewrite_output_to_artifact_url,
 };
-pub use auth::{require_pairing, ComputeAuth, PairingGate, RateLimiter, DEFAULT_PAIRING_PATH};
+pub use auth::{
+    job_api_lane, require_job_api, require_lane, ComputeAuth, PairingGate, RateLimiter,
+    DEFAULT_PAIRING_PATH,
+};
 pub use backends::{
     file_uri_to_path, is_apple_silicon, is_tool_available, parse_gaussian_count, path_to_file_uri,
     select_reconstructor, CliReconstructor, ReconstructCommand, ReconstructorKind,
@@ -76,7 +82,12 @@ pub use jobs_sidecar::{
     AtlasJobsSidecar, COMPUTE_JOBS_SIDECAR, COMPUTE_JOBS_SIDECAR_VERSION,
 };
 pub use keyframe_persister::{dataset_id_for, KeyframePersister};
+pub use lanes::{lane_router, AtlasLanes, LaneRoutes};
 pub use mdns::{advertise_compute, resolve_compute, ComputeAdvert, ResolvedComputeNode};
+pub use node_credentials::{
+    CredentialError, IssuedCredential, MintedCredential, NodeCredentialStore,
+    DEFAULT_NODE_CREDENTIALS_PATH,
+};
 #[cfg(feature = "onnx")]
 pub use offload::OnnxDetector;
 pub use offload::{Detection, Detector, FrameRef, MockDetector};

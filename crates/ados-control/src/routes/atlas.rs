@@ -179,16 +179,11 @@ fn capture_state_str(state: CaptureState) -> &'static str {
 /// Read the forwarder handoff at `path` if it exists AND was written within
 /// [`FORWARD_STALE`] of `now`. A stale file (a dead forwarder whose tmpfs file
 /// persists) is treated as absent so the readiness surface never reports a compute
-/// node that is gone. A future/unreadable mtime counts as
-/// fresh. Best-effort: any I/O or parse error yields `None`.
+/// node that is gone. A future mtime is an unprovable age and reads as absent.
+/// Best-effort: any I/O or parse error yields `None`.
 fn read_fresh_forward_status(path: &Path, now: SystemTime) -> Option<AtlasForwardStatus> {
-    let meta = std::fs::metadata(path).ok()?;
-    if let Ok(mtime) = meta.modified() {
-        if let Ok(age) = now.duration_since(mtime) {
-            if age > FORWARD_STALE {
-                return None;
-            }
-        }
+    if !crate::freshness::is_fresh(path, now, FORWARD_STALE) {
+        return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
     let status = serde_json::from_str::<AtlasForwardStatus>(&text).ok()?;
@@ -210,11 +205,39 @@ fn read_fresh_forward_status(path: &Path, now: SystemTime) -> Option<AtlasForwar
 /// projection is testable with an explicit config path, an injected status, and an
 /// explicit sidecar path — no env and no live socket.
 pub async fn get_atlas_readiness() -> Response {
-    // The live session state comes from the capture service's control socket. If
-    // it is unreachable, the service is not running (atlas disabled, or no
-    // cameras), so the session is idle.
-    let live = AtlasControlClient::default_socket().status().await.ok();
+    let live = LiveCapture::from(AtlasControlClient::default_socket().status().await);
     build_atlas_readiness(&config_yaml_path(), live, Path::new(ATLAS_FORWARD_SIDECAR))
+}
+
+/// What the capture service's control socket said about the live session.
+#[derive(Debug)]
+enum LiveCapture {
+    /// The service answered with its status.
+    Running(CaptureStatus),
+    /// Nothing is listening on the socket: the service is not running (atlas
+    /// disabled, or no cameras), so there is no session.
+    NotRunning,
+    /// The service is there but did not answer usefully (a timeout, a broken
+    /// exchange, an unparseable reply). A busy capturing service can look like
+    /// this, so nothing about the session is known.
+    Unknown,
+}
+
+impl From<Result<CaptureStatus, AtlasControlError>> for LiveCapture {
+    fn from(r: Result<CaptureStatus, AtlasControlError>) -> Self {
+        match r {
+            Ok(s) => Self::Running(s),
+            Err(AtlasControlError::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                Self::NotRunning
+            }
+            Err(_) => Self::Unknown,
+        }
+    }
 }
 
 /// The pure core of [`get_atlas_readiness`]: project the drone-local `atlas:`
@@ -224,23 +247,46 @@ pub async fn get_atlas_readiness() -> Response {
 /// or standing up a control socket.
 fn build_atlas_readiness(
     config_path: &Path,
-    live: Option<CaptureStatus>,
+    live: LiveCapture,
     forward_sidecar_path: &Path,
 ) -> Response {
     let view = read_atlas_config_view(config_path);
 
     let (service_running, capturing, state, session_id, camera_count, keyframes, ingest_rate_hz) =
         match &live {
-            Some(s) => (
-                true,
-                matches!(s.state, CaptureState::Capturing | CaptureState::Paused),
-                capture_state_str(s.state),
-                (!s.session_id.is_empty()).then(|| s.session_id.clone()),
-                s.camera_count,
-                s.keyframes,
-                s.ingest_rate_hz,
+            LiveCapture::Running(s) => (
+                json!(true),
+                json!(matches!(
+                    s.state,
+                    CaptureState::Capturing | CaptureState::Paused
+                )),
+                json!(capture_state_str(s.state)),
+                json!((!s.session_id.is_empty()).then(|| s.session_id.clone())),
+                json!(s.camera_count),
+                json!(s.keyframes),
+                json!(s.ingest_rate_hz),
             ),
-            None => (false, false, "idle", None, view.cameras_configured, 0, 0.0),
+            // No service, no session: idle and not capturing, but no live
+            // counters either; the configured camera count is its own field.
+            LiveCapture::NotRunning => (
+                json!(false),
+                json!(false),
+                json!("idle"),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ),
+            // The service did not answer: every live field is unknown.
+            LiveCapture::Unknown => (
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ),
         };
 
     // The compute node the egress forwarder is actively streaming to is known only
@@ -398,15 +444,22 @@ fn write_atlas_block(config_path: &Path, body: &AtlasConfigBody) -> Result<bool,
     .map_err(|e| e.to_string())
 }
 
-/// Forward a capture command to the control socket and shape the reply. An
-/// unreachable / non-replying socket (the service not running) is a 503 so the
-/// action is never silently dropped, matching the plugin-config write posture.
+/// Forward a capture command to the control socket and shape the reply. The
+/// reply is the post-command status, so the caller reads the resulting state.
+/// Nothing listening is a 503 (the service is not running, the command did not
+/// apply). A command that was written but not answered in time is a 504 that
+/// says it may still apply, because a slow stop (finalize + bag) is exactly
+/// the case that runs long; an unreadable answer is a 502.
 async fn forward_capture(result: Result<CaptureStatus, AtlasControlError>) -> Response {
-    match result {
-        Ok(status) => Json(status).into_response(),
-        Err(e) => detail(
+    match LiveCapture::from(result) {
+        LiveCapture::Running(status) => Json(status).into_response(),
+        LiveCapture::NotRunning => detail(
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("atlas capture service unavailable: {e}"),
+            "atlas capture service is not running",
+        ),
+        LiveCapture::Unknown => detail(
+            StatusCode::GATEWAY_TIMEOUT,
+            "atlas capture service did not confirm the command in time; it may still apply",
         ),
     }
 }
@@ -687,11 +740,11 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_reports_idle_when_the_service_is_down() {
-        // A `None` live status is the "control socket unreachable → service not
-        // running" case; the route must degrade to a not-running / idle reading,
-        // never fail. The config path, the live status, and the forwarder sidecar
-        // path are threaded in explicitly (no env mutation, no live socket), so the
-        // reading is deterministic and this test cannot race any other test.
+        // A socket with nothing listening is the service not running; the route
+        // degrades to a not-running / idle reading, never fails. The config path,
+        // the live status, and the forwarder sidecar path are threaded in
+        // explicitly (no env mutation, no live socket), so the reading is
+        // deterministic and this test cannot race any other test.
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         std::fs::write(
@@ -701,7 +754,11 @@ mod tests {
         .unwrap();
 
         // No forwarder handoff on disk → compute_node_id is null.
-        let resp = build_atlas_readiness(&cfg, None, &dir.path().join("atlas-forward.json"));
+        let resp = build_atlas_readiness(
+            &cfg,
+            LiveCapture::NotRunning,
+            &dir.path().join("atlas-forward.json"),
+        );
         let body = readiness_body(resp).await;
         assert_eq!(body["enabled"], json!(true));
         assert_eq!(body["cameras_configured"], json!(1));
@@ -710,6 +767,52 @@ mod tests {
         assert_eq!(body["state"], json!("idle"));
         assert!(body["session_id"].is_null());
         assert!(body["compute_node_id"].is_null());
+        // No service means no live counters, not zero of them.
+        assert!(body["keyframes"].is_null());
+        assert!(body["camera_count"].is_null());
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_capture_command_is_not_reported_as_a_dead_service() {
+        let resp = forward_capture(Err(AtlasControlError::Timeout)).await;
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        let refused = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let resp = forward_capture(Err(AtlasControlError::Io(refused))).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn a_service_that_does_not_answer_leaves_the_session_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "atlas:\n  enabled: true\n").unwrap();
+        let live = LiveCapture::from(Err(AtlasControlError::Timeout));
+        let body = readiness_body(build_atlas_readiness(
+            &cfg,
+            live,
+            &dir.path().join("atlas-forward.json"),
+        ))
+        .await;
+        for key in [
+            "service_running",
+            "capturing",
+            "state",
+            "keyframes",
+            "ingest_rate_hz",
+            "camera_count",
+        ] {
+            assert!(
+                body[key].is_null(),
+                "{key} must be unknown, was {}",
+                body[key]
+            );
+        }
+        // Nothing listening is a known "not running", distinct from unknown.
+        let refused = std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
+        assert!(matches!(
+            LiveCapture::from(Err(AtlasControlError::Io(refused))),
+            LiveCapture::NotRunning
+        ));
     }
 
     #[tokio::test]
@@ -731,7 +834,7 @@ mod tests {
         };
         std::fs::write(&fwd_path, serde_json::to_vec(&forward).unwrap()).unwrap();
 
-        let resp = build_atlas_readiness(&cfg, None, &fwd_path);
+        let resp = build_atlas_readiness(&cfg, LiveCapture::NotRunning, &fwd_path);
         let body = readiness_body(resp).await;
         assert_eq!(body["compute_node_id"], json!("workstation-01"));
     }

@@ -127,6 +127,9 @@ async def _seed_profile_conf_if_unset(config, log) -> None:
                         attempt=attempt,
                         path=str(PROFILE_CONF),
                     )
+                    # The runtime badge is profile-scoped and was computed at
+                    # startup against the pre-seed default; recompute it now.
+                    await asyncio.to_thread(_persist_runtime_mode, config, log)
                 return
             log.info(
                 "profile_seed_tied_retrying",
@@ -178,7 +181,7 @@ def _persist_runtime_mode(config, log) -> None:
             pass
 
 
-async def main() -> None:
+async def main() -> int:
     config = load_config()
     configure_logging(config.logging.level)
     log = structlog.get_logger()
@@ -211,7 +214,7 @@ async def main() -> None:
     # heartbeat reports. Without a one-shot detection here, profile.conf
     # only gets written when a setup-webapp client polls /api/setup/status.
     # Fire-and-forget so a slow probe never blocks API startup.
-    asyncio.create_task(
+    profile_seed = asyncio.create_task(
         _seed_profile_conf_if_unset(config, log),
         name="profile-seed",
     )
@@ -232,18 +235,28 @@ async def main() -> None:
     )
     server = uvicorn.Server(uvi_config)
 
+    serve_task = asyncio.create_task(server.serve(sockets=sockets), name="uvicorn")
     tasks = [
-        asyncio.create_task(server.serve(sockets=sockets), name="uvicorn"),
+        serve_task,
         asyncio.create_task(
             _state_ipc_reader(state_client, shutdown, log),
             name="state-reader",
         ),
+        profile_seed,
     ]
 
     log.info("api_service_ready", host=api_config.host, port=api_config.port)
 
-    # Wait for shutdown signal
-    await shutdown.wait()
+    # Wait for a shutdown signal, or for the HTTP server to die on its own (a
+    # bind failure, an unhandled startup error). A process left running with
+    # no listener would read active to systemd and never be restarted.
+    shutdown_wait = asyncio.create_task(shutdown.wait(), name="shutdown-wait")
+    await asyncio.wait({shutdown_wait, serve_task}, return_when=asyncio.FIRST_COMPLETED)
+    server_died = not shutdown.is_set()
+    if server_died:
+        exc = None if serve_task.cancelled() else serve_task.exception()
+        log.error("api_server_exited", error=str(exc) if exc else None)
+    shutdown_wait.cancel()
 
     log.info("api_service_stopping")
     server.should_exit = True
@@ -252,11 +265,11 @@ async def main() -> None:
     await asyncio.gather(*tasks, return_exceptions=True)
     await state_client.disconnect()
     log.info("api_service_stopped")
+    return 1 if server_died else 0
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        sys.exit(asyncio.run(main()))
     except KeyboardInterrupt:
-        pass
-    sys.exit(0)
+        sys.exit(0)

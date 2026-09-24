@@ -14,10 +14,29 @@ from __future__ import annotations
 
 import importlib
 import json
-import os
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
+
+
+@pytest.fixture(autouse=True)
+def _restore_reloaded_modules(monkeypatch):
+    """Reloading `ados.core.paths` mutates process-wide state.
+
+    Each test here reloads it under a monkeypatched platform and environment.
+    After the test, undo those patches first and then reload the real modules,
+    so no later test inherits a macOS view of the filesystem whatever order the
+    suite runs in.
+    """
+    yield
+    monkeypatch.undo()
+    import ados.core.paths as paths
+
+    importlib.reload(paths)
+    import ados.cli.main as cli_main
+
+    importlib.reload(cli_main)
 
 
 def _reload_paths(monkeypatch, *, macos: bool, home: Path):
@@ -102,20 +121,3 @@ def test_env_overrides_win_on_either_platform(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("ADOS_INSTALL_RESULT", str(tmp_path / "elsewhere.json"))
     paths = importlib.reload(paths)
     assert paths.INSTALL_RESULT == tmp_path / "elsewhere.json"
-
-
-def test_modules_are_restored_for_the_rest_of_the_suite() -> None:
-    """Reloading `ados.core.paths` mutates process-wide state.
-
-    Every test above reloads it under a monkeypatched platform; this restores the
-    real modules so a later test in the same session does not inherit a macOS
-    view of the filesystem on a Linux CI runner.
-    """
-    for var in ("ADOS_LIB_DIR", "ADOS_INSTALL_RESULT", "ADOS_INSTALL_CHECKPOINT_DIR"):
-        os.environ.pop(var, None)
-    import ados.core.paths as paths
-
-    importlib.reload(paths)
-    import ados.cli.main as cli_main
-
-    importlib.reload(cli_main)

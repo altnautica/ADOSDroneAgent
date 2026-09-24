@@ -124,8 +124,8 @@ async def test_a_client_cannot_claim_on_box_privilege_over_tcp(
 async def test_a_standalone_run_still_serves_tcp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # `ados demo` and any dev run bind TCP with no front in front of them.
-    # Refusing that would break the no-hardware path this repo requires.
+    # A dev run binds TCP with no front in front of it; refusing that would
+    # break running the residual API on its own.
     monkeypatch.delenv("ADOS_API_INTERNAL_SOCKET", raising=False)
     async with _DualListener(_build_app()) as srv:
         assert (await srv.over_tcp()).status_code == 200

@@ -20,9 +20,9 @@ Lifecycle:
    - When no desktop is present (the appliance case), launch under `cage`,
      a Wayland single-app compositor that owns the display itself.
    The Chromium binary is resolved at runtime (its name varies by distro).
-4. Supervise the child. On exit, backoff-restart. Five crashes in 60
-   seconds flips to ERROR and we stop restarting so systemd can apply
-   its own service-level retry.
+4. Supervise the child. On exit, retry on a fixed short interval. Five
+   crashes in 60 seconds either downgrades a GPU launch to software or ends
+   the service with a non-zero code so systemd restarts it (RestartSec=3).
 5. On SIGTERM: send SIGTERM to the child, wait 10 s for graceful exit,
    SIGKILL if it is still up. Under cage we also sweep orphaned cage /
    chromium processes; inside a running desktop we do NOT broad-sweep
@@ -121,11 +121,14 @@ _GPU_FAILURE_MARKERS = (
     "wlr_renderer",
 )
 
-# Crash-loop guard.
+# Crash-loop guard: this many exits inside the window marks the child as
+# crash-looping (the trigger for the GPU->software downgrade).
 _CRASH_WINDOW_SECONDS = 60.0
 _CRASH_LIMIT = 5
-_BACKOFF_START_SECONDS = 3.0
-_BACKOFF_MAX_SECONDS = 30.0
+# Fixed retry between child restarts. A recovery loop that backs off leaves
+# the panel black for longer the longer the fault lasts; retry at a steady
+# short interval instead.
+_RETRY_SECONDS = 3.0
 
 # Graceful shutdown allowance for the cage child.
 _SHUTDOWN_GRACE_SECONDS = 10.0
@@ -828,16 +831,16 @@ async def _resolve_desktop_session() -> DesktopSession | None:
     its socket has not come up yet (the boot race). Returns None on a genuinely
     headless / CLI box (no session and no display manager) so the caller owns
     the display via cage."""
-    session = _detect_ready_session()
+    session = await asyncio.to_thread(_detect_ready_session)
     if session is not None:
         return session
-    if not _display_manager_active():
+    if not await asyncio.to_thread(_display_manager_active):
         return None
     log.info("kiosk_waiting_for_desktop_session", timeout_s=_SESSION_WAIT_SECONDS)
     deadline = time.monotonic() + _SESSION_WAIT_SECONDS
     while time.monotonic() < deadline:
         await asyncio.sleep(_SESSION_POLL_SECONDS)
-        session = _detect_ready_session()
+        session = await asyncio.to_thread(_detect_ready_session)
         if session is not None:
             return session
     log.warning(
@@ -1104,13 +1107,12 @@ class KioskSupervisor:
         while True:
             if proc.returncode is not None:
                 return  # the compositor went first; the normal path handles it
-            if not _browser_running():
+            if not await asyncio.to_thread(_browser_running):
                 return
             await asyncio.sleep(_BROWSER_POLL_SECONDS)
 
     async def run(self) -> int:
         """Supervise loop. Returns process exit code or 0 on clean stop."""
-        backoff = _BACKOFF_START_SECONDS
         while not self._stop.is_set():
             try:
                 self._proc = await self._spawn()
@@ -1123,7 +1125,6 @@ class KioskSupervisor:
 
             proc = self._proc
             log.info("kiosk_child_running", pid=proc.pid)
-            backoff = _BACKOFF_START_SECONDS
 
             wait_task = asyncio.create_task(proc.wait(), name="kiosk_child_wait")
             stop_task = asyncio.create_task(self._stop.wait(), name="kiosk_stop_wait")
@@ -1150,7 +1151,7 @@ class KioskSupervisor:
             )
             if browser_task in done and wait_task not in done and stop_task not in done:
                 # The compositor is still alive but has nothing to show. Treat it
-                # as a crash so the existing backoff + GPU-downgrade machinery
+                # as a crash so the existing retry + GPU-downgrade machinery
                 # handles it, rather than leaving a black screen reading healthy.
                 log.error(
                     "kiosk_browser_vanished",
@@ -1162,8 +1163,7 @@ class KioskSupervisor:
                 drain_task.cancel()
                 await self._graceful_kill(proc)
                 self._record_crash_and_check()
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, _BACKOFF_MAX_SECONDS)
+                await asyncio.sleep(_RETRY_SECONDS)
                 continue
             drain_task.cancel()
 
@@ -1203,45 +1203,48 @@ class KioskSupervisor:
                     msg="5 crashes in 60s, stopping restart loop",
                     last_rc=rc,
                 )
-                return rc if rc >= 0 else 5
+                # Never 0: the unit's RestartPreventExitStatus=0 would treat a
+                # child that keeps exiting cleanly as "nothing to do" and leave
+                # the panel black until a reboot.
+                return rc if rc > 0 else 5
 
-            # Exponential backoff, capped.
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=backoff)
-                # If stop fires during backoff, exit cleanly.
+                await asyncio.wait_for(self._stop.wait(), timeout=_RETRY_SECONDS)
+                # If stop fires during the retry wait, exit cleanly.
                 return 0
             except TimeoutError:
                 pass
-            backoff = min(backoff * 2, _BACKOFF_MAX_SECONDS)
 
         return 0
 
 
 def _browser_running() -> bool:
-    """True when any of the known browser binaries has a live process.
+    """True when a process whose executable is a known browser binary is live.
 
-    Deliberately a name probe rather than a PID: the browser is the
-    compositor's grandchild and re-execs into several processes, so there is no
-    single stable pid to hold. `pgrep -f` against the resolved binary names is
-    the same mechanism the orphan sweep already uses.
+    Matched on each process's argv[0] basename, never on the whole command
+    line: the compositor is launched as ``cage -- /usr/bin/chromium ...``, so a
+    full-command-line match (``pgrep -f chromium``) finds cage itself and
+    reports a live browser for as long as the compositor lives.
 
-    Errs toward TRUE on any uncertainty (pgrep missing, permission denied): a
-    false "the browser is gone" would restart a working kiosk, which is worse
-    than missing one failure.
+    Errs toward TRUE on any uncertainty (ps missing or failing): a false "the
+    browser is gone" would restart a working kiosk, which is worse than missing
+    one failure.
     """
-    for name in _BROWSER_CANDIDATES:
-        try:
-            res = subprocess.run(  # noqa: S603
-                ["pgrep", "-f", name],
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return True
-        if res.returncode == 0 and res.stdout.strip():
-            return True
-        if res.returncode not in (0, 1):
+    try:
+        res = subprocess.run(  # noqa: S603
+            ["ps", "-A", "-o", "args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    if res.returncode != 0:
+        return True
+    for line in res.stdout.splitlines():
+        argv0 = line.strip().split(" ", 1)[0]
+        if os.path.basename(argv0) in _BROWSER_CANDIDATES:
             return True
     return False
 

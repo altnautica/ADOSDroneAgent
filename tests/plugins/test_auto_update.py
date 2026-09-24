@@ -1,14 +1,11 @@
-"""Tests for the plugin auto-update daily poll.
+"""Tests for the on-demand plugin update check.
 
-Covers the decision tree (silent install, notify, skipped, failed),
-the daily-loop scaffolding (jitter sleep, shutdown handling, state
-persistence), and the failure paths that record the last attempt on
-the install record.
+Covers the decision tree (silent install, notify, skipped, failed) and
+the failure paths that record the last attempt on the install record.
 """
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,14 +16,11 @@ from ados.plugins import auto_update as au
 from ados.plugins.auto_update import (
     AutoUpdateOutcome,
     check_one_plugin,
-    latest_check_timestamp_ms,
-    run_daily_loop,
 )
 from ados.plugins.errors import SignatureError, SupervisorError
 from ados.plugins.state import (
     PermissionGrant,
     PluginInstall,
-    load_state,
     save_state,
 )
 
@@ -552,115 +546,6 @@ async def test_permission_swapped_triggers_notify(isolated_state):
         )
     assert outcome is AutoUpdateOutcome.NOTIFY
     assert pub.call_args[0][1]["new_permissions"] == ["hardware.spi"]
-
-
-# ---------------------------------------------------------------------
-# Daily loop scaffolding
-# ---------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_daily_loop_iterates_and_records_checks(isolated_state):
-    """A single cycle must stamp last_update_check_at on every install."""
-    install = _make_install()
-    save_state([install])
-
-    ctx = MagicMock()
-    ctx.config.agent.device_id = "dev-1"
-    ctx.convex_url = "https://example.convex.cloud"
-    ctx.pairing.is_paired = True
-    ctx.pairing.api_key = "key"
-    ctx.board.name = "rpi4b"
-    shutdown = asyncio.Event()
-    ctx.shutdown = shutdown
-
-    # First sleep returns immediately; second sleep fires shutdown.
-    sleep_calls = []
-
-    async def _stub_sleep(seconds, evt):
-        sleep_calls.append(seconds)
-        if len(sleep_calls) >= 2:
-            evt.set()
-            return True
-        return False
-
-    fake_outcome = AutoUpdateOutcome.SKIPPED
-
-    async def _fake_check(**kwargs):
-        return fake_outcome
-
-    # Patch the supervisor constructor so discover() doesn't try to
-    # touch a real systemd / filesystem.
-    sup = _make_supervisor(install)
-    with patch.object(au, "PluginSupervisor", return_value=sup), patch.object(
-        au, "_sleep_with_shutdown", side_effect=_stub_sleep
-    ), patch.object(au, "check_one_plugin", side_effect=_fake_check):
-        await run_daily_loop(ctx)
-
-    # The loop slept twice: 60 s preroll + the daily jittered interval.
-    assert len(sleep_calls) == 2
-    assert sleep_calls[0] == 60.0
-    # Last-check timestamp should be on the persisted install.
-    persisted = load_state()
-    assert len(persisted) == 1
-    assert persisted[0].last_update_check_at is not None
-
-
-@pytest.mark.asyncio
-async def test_run_daily_loop_skips_unpaired(isolated_state):
-    """When unpaired the loop sleeps but does not call the registry."""
-    install = _make_install()
-    save_state([install])
-
-    ctx = MagicMock()
-    ctx.config.agent.device_id = "dev-1"
-    ctx.convex_url = ""
-    ctx.pairing.is_paired = False
-    ctx.pairing.api_key = None
-    ctx.board.name = "rpi4b"
-    shutdown = asyncio.Event()
-    ctx.shutdown = shutdown
-
-    call_count = {"n": 0}
-
-    async def _stub_sleep(seconds, evt):
-        call_count["n"] += 1
-        if call_count["n"] >= 2:
-            evt.set()
-            return True
-        return False
-
-    with patch.object(au, "PluginSupervisor", return_value=_make_supervisor(install)), patch.object(
-        au, "_sleep_with_shutdown", side_effect=_stub_sleep
-    ), patch.object(au, "check_one_plugin") as check:
-        await run_daily_loop(ctx)
-
-    check.assert_not_called()
-
-
-def test_next_sleep_seconds_jitter_range():
-    """Daily sleep stays within +/- one hour of the canonical 24 h."""
-    for _ in range(50):
-        s = au._next_sleep_seconds()
-        assert 23 * 3600 <= s <= 25 * 3600
-
-
-def test_latest_check_timestamp_ms_aggregates_max(isolated_state):
-    a = _make_install(plugin_id="com.example.a")
-    a.last_update_check_at = 100
-    b = _make_install(plugin_id="com.example.b")
-    b.last_update_check_at = 500
-    c = _make_install(plugin_id="com.example.c")
-    c.last_update_check_at = None
-    save_state([a, b, c])
-
-    assert latest_check_timestamp_ms() == 500
-
-
-def test_latest_check_timestamp_ms_returns_none_when_empty(isolated_state):
-    install = _make_install()
-    save_state([install])
-    assert latest_check_timestamp_ms() is None
 
 
 # ---------------------------------------------------------------------

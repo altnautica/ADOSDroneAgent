@@ -71,7 +71,7 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
   } else if (t.linkState === "error") {
     header = (
       <span className="text-destructive">
-        MSP link error{t.error ? `: ${t.error}` : ""}
+        MSP link error{t.error ? `: ${t.error}` : ""} — retrying…
       </span>
     );
   } else if (t.linkState === "closed") {
@@ -125,9 +125,12 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
 
         {/* GPS */}
         <Panel title="GPS">
-          <Field label="fix" value={t?.gps ? gpsFixLabel(t.gps.fixType) : "—"} />
+          <Field label="fix" value={t?.gps ? gpsFixLabel(t.gps.fixType, firmware) : "—"} />
           <Field label="sats" value={t?.gps ? String(t.gps.numSat) : "—"} />
-          <Field label="hdop" value={t?.gps?.hdop != null ? fmtNum(t.gps.hdop, 2) : "—"} />
+          <Field
+            label={t?.gps?.dopKind ?? (firmware === "betaflight" ? "pdop" : "hdop")}
+            value={t?.gps?.dop != null ? fmtNum(t.gps.dop, 2) : "—"}
+          />
           <Field
             label="position"
             value={
@@ -142,7 +145,10 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
         {/* Altitude */}
         <Panel title="Altitude">
           <Field label="altitude" value={t?.altitude ? `${fmtNum(t.altitude.altitude, 1)} m` : "—"} />
-          <Field label="vario" value={t?.altitude ? `${fmtNum(t.altitude.vario / 100, 1)} m/s` : "—"} />
+          <Field
+            label="vario"
+            value={t?.altitude?.vario != null ? `${fmtNum(t.altitude.vario / 100, 1)} m/s` : "—"}
+          />
         </Panel>
 
         {/* FC status */}

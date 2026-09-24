@@ -2,12 +2,10 @@
 //
 // A paired agent requires the key on its data routes (a forgeable Origin is no
 // longer trusted), so the dashboard sends the stored key on every request. The
-// key is captured one of three ways:
-//   1. The operator pastes it in Settings → Cloud and clicks Apply.
-//   2. A one-shot URL parameter (?ados_key=…) is consumed on first load
-//      and immediately removed from the address bar (tunnel links).
-//   3. The in-band prompt apiFetch raises on a 401 (a direct LAN visit with no
-//      stored key), where the operator pastes the value `ados status` prints.
+// key is captured from a one-shot URL parameter (?ados_key=…), consumed on
+// first load and immediately removed from the address bar (the Mission Control
+// deep link and tunnel links). A browser without a key unlocks with the
+// dashboard PIN instead (lib/session).
 
 const STORAGE_KEY = "ados-api-key";
 const URL_PARAM = "ados_key";

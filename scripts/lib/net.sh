@@ -22,12 +22,15 @@ command -v warn >/dev/null 2>&1 || warn() { printf '[WARN]  %s\n' "$*" >&2; }
 
 ados_fetch() {
     local url="$1" outfile="${2:-}" timeout_secs="${3:-30}"
+    # TIMEOUT_SECS bounds a STALL (under 1 KB/s for that long), not the whole
+    # transfer: a flat ceiling kills a slow but healthy download of a multi-MB
+    # module. A file download resumes across curl's retries.
     if command -v curl >/dev/null 2>&1; then
         if [ -n "${outfile}" ]; then
-            curl -fsSL --connect-timeout 10 --max-time "${timeout_secs}" \
-                --retry 3 --retry-delay 2 -o "${outfile}" "${url}"
+            curl -fsSL --connect-timeout 10 --speed-time "${timeout_secs}" --speed-limit 1024 \
+                --retry 3 --retry-delay 2 --continue-at - -o "${outfile}" "${url}"
         else
-            curl -fsSL --connect-timeout 10 --max-time "${timeout_secs}" \
+            curl -fsSL --connect-timeout 10 --speed-time "${timeout_secs}" --speed-limit 1024 \
                 --retry 3 --retry-delay 2 "${url}"
         fi
     elif command -v wget >/dev/null 2>&1; then

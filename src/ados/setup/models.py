@@ -112,17 +112,6 @@ class NetworkStatus(BaseModel):
     ip_addresses: dict[str, str] = Field(default_factory=dict)
 
 
-class ServiceState(BaseModel):
-    """Light-weight service summary surfaced through the setup facade.
-
-    The full per-service shape lives at /api/services. This model is the
-    minimum the universal webapp and Mission Control's setup card need.
-    """
-
-    name: str
-    state: str = "unknown"
-
-
 class CloudChoiceStatus(BaseModel):
     """Cloud posture chosen during the onboarding wizard.
 
@@ -353,8 +342,6 @@ class SetupStatus(BaseModel):
     mavlink: MavlinkAccess
     video: VideoAccess
     remote_access: RemoteAccessStatus
-    services: list[ServiceState] = Field(default_factory=list)
-    telemetry: dict[str, object] = Field(default_factory=dict)
     cloud_choice: CloudChoiceStatus = Field(default_factory=CloudChoiceStatus)
     profile_suggestion: ProfileSuggestion = Field(default_factory=ProfileSuggestion)
     hardware_check: HardwareCheckStatus | None = None

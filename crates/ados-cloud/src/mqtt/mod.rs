@@ -4,15 +4,15 @@
 //! Topics + QoS:
 //! * `ados/{id}/mavlink/tx` q0 (relay publishes FC->GCS frames)
 //! * `ados/{id}/mavlink/rx` q0 (relay subscribes GCS->FC frames)
+//! * `ados/{id}/msp/{tx,rx}` q0 (the MSP byte plane, same shape)
 //! * `ados/{id}/webrtc/offer`  q1 (signaling subscribes browser offers)
 //! * `ados/{id}/webrtc/answer` q1 (signaling publishes the SDP answer)
 //!
-//! Telemetry and status (`ados/{id}/telemetry`, `ados/{id}/status`) are
-//! published by the Python gateway, which authenticates as the bare
-//! `device_id`.
-//!
-//! The broker is `mqtt.altnautica.com:443` over WSS (`/mqtt`), TLS via the
-//! shared ring-backed rustls config. The relays authenticate as
+//! The broker is chosen by the server posture (see
+//! [`crate::config::CloudConfig::relay_transport`]): the managed broker
+//! (`mqtt.altnautica.com:443` over WSS on `/mqtt`) in `cloud` mode, the
+//! operator's own broker in `self_hosted` mode, none in `local` mode. TLS is
+//! the shared ring-backed rustls config. Every lane authenticates as
 //! `ados-{device_id}`.
 //!
 //! ## One ClientID per lane, never per device
@@ -20,8 +20,8 @@
 //! MQTT requires a broker to DISCONNECT the existing session when a second
 //! client presents the same ClientID, so every process/lane that dials the
 //! broker for one device must carry its own id: `ados-{id}` (MAVLink relay),
-//! `ados-{id}-msp` (MSP byte plane), `ados-{id}-atlas`, `ados-{id}-vision`,
-//! `ados-{id}-gw` (the Python telemetry gateway). Two lanes sharing an id do not
+//! `ados-{id}-msp` (MSP byte plane), `ados-{id}-webrtc` (SDP signaling),
+//! `ados-{id}-atlas`, `ados-{id}-vision`. Two lanes sharing an id do not
 //! degrade — they evict each other in a sub-second loop forever, which reads as
 //! a flapping `mqttConnected` with no cloud telemetry and no cloud command
 //! authority.
@@ -34,9 +34,10 @@ pub mod webrtc_signaling;
 pub use mavlink_relay::{BoundedPublishQueue, MavlinkMqttRelay, INFLIGHT_LIMIT, QUEUE_MAXSIZE};
 pub use msp_relay::MspMqttRelay;
 pub use transport::{
-    IncomingMessage, MqttQos, MqttTransport, RumqttcTransport, TransportConfig, TransportError,
+    BrokerWire, IncomingMessage, MqttQos, MqttTransport, RumqttcTransport, TransportConfig,
+    TransportError,
 };
-pub use webrtc_signaling::WebrtcSignalingRelay;
+pub use webrtc_signaling::{run_webrtc_signaling, WebrtcSignalingRelay};
 
 /// The MQTT broker host the cloud relay dials. Mirrors the Python
 /// `CloudConfig.mqtt_broker` default.
@@ -77,6 +78,12 @@ pub fn topic_webrtc_offer(device_id: &str) -> String {
 pub fn topic_webrtc_answer(device_id: &str) -> String {
     format!("ados/{device_id}/webrtc/answer")
 }
+/// The plugin auto-update notice topic the GCS subscribes to (q1): an update
+/// the daily check will not apply on its own (major bump, permission change,
+/// board dropped, pinned).
+pub fn topic_plugin_update_available(device_id: &str) -> String {
+    format!("ados/{device_id}/plugin/update_available")
+}
 /// Map an Atlas event topic to its cloud topic under `ados/{id}/atlas/...`.
 /// The `plugin.atlas.` / `atlas.` prefix is dropped and dots become slashes, so
 /// `atlas.keyframe`->`ados/{id}/atlas/keyframe`, `atlas.pose.offload`->
@@ -104,6 +111,10 @@ pub fn msp_client_id(device_id: &str) -> String {
     format!("ados-{device_id}-msp")
 }
 
+/// The WebRTC signaling lane's MQTT ClientID suffix (`ados-{device_id}-webrtc`),
+/// its own broker principal beside the MAVLink relay's `ados-{device_id}`.
+pub const WEBRTC_LANE: &str = "webrtc";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +138,7 @@ mod tests {
         let ids = [
             relay_username("dev1"),
             msp_client_id("dev1"),
+            format!("ados-{}-{WEBRTC_LANE}", "dev1"),
             format!("ados-{}-atlas", "dev1"),
             format!("ados-{}-vision", "dev1"),
         ];

@@ -39,6 +39,8 @@
 //! so it falls through to the reverse proxy.
 
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Map, Value};
 
@@ -54,11 +56,17 @@ use crate::state::AppState;
 /// cached count; `cached` is how many parameters have landed; `progress.got` is
 /// the cached count and `progress.expected` the advertised total. An absent
 /// snapshot or an absent cache file degrades every field to its empty/zero/false
-/// default rather than failing — guaranteed-200, never 500.
-pub async fn get_all_params(State(state): State<AppState>) -> Json<Value> {
+/// default. A cache file that exists but cannot be read or parsed is a 503
+/// `{"detail"}`: a broken cache is never presented as a verified empty set.
+pub async fn get_all_params(State(state): State<AppState>) -> Response {
     let snapshot = state.state.snapshot();
-    let params = crate::param_store::read_param_blob(&state.params_path);
-    Json(build_params_body(snapshot.as_ref(), params))
+    match crate::param_store::read_param_blob(&state.params_path) {
+        Ok(params) => Json(build_params_body(snapshot.as_ref(), params)).into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "parameter cache read failed");
+            crate::routes::detail(StatusCode::SERVICE_UNAVAILABLE, e.to_string())
+        }
+    }
 }
 
 /// Build the parameter-list body from the cached map plus a state-IPC snapshot,
@@ -388,7 +396,7 @@ mod tests {
             "param_expected_count": 700,
         }));
 
-        let Json(body) = get_all_params(State(state)).await;
+        let body = body_of(get_all_params(State(state)).await).await;
         assert_eq!(body["params"]["WPNAV_SPEED"], json!(500.0));
         assert_eq!(body["params"]["ATC_RAT_RLL_P"], json!(0.135));
         assert_eq!(body["cached"], json!(2));
@@ -406,7 +414,7 @@ mod tests {
             .state
             .set_snapshot_for_test(json!({ "param_cached_count": 0 }));
 
-        let Json(body) = get_all_params(State(state)).await;
+        let body = body_of(get_all_params(State(state)).await).await;
         assert_eq!(body["params"], json!({}));
         assert_eq!(body["count"], json!(0));
         assert_eq!(body["priming"], json!(false));
@@ -425,7 +433,29 @@ mod tests {
             "param_cached_count": 1,
         }));
 
-        let Json(body) = get_all_params(State(state)).await;
+        let body = body_of(get_all_params(State(state)).await).await;
         assert_eq!(body["params"], json!({}));
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_cache_file_is_a_503_not_an_empty_list() {
+        // A truncated cache must not read as "the FC has no parameters".
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        std::fs::write(dir.path().join("params.json"), b"{\"WPNAV_SPEED\": {\"va").unwrap();
+        state
+            .state
+            .set_snapshot_for_test(json!({ "param_cached_count": 700 }));
+
+        let resp = get_all_params(State(state)).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    async fn body_of(resp: Response) -> Value {
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
     }
 }

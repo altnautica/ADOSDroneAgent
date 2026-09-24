@@ -249,6 +249,72 @@ async def test_close_is_safe_before_and_after_connect(short_sock_dir: Path) -> N
     await client.close()  # and again
 
 
+@pytest.mark.asyncio
+async def test_a_callback_can_make_a_request_without_stalling_the_reader(host) -> None:
+    """A delivery callback that calls back into the host must get its answer.
+
+    Plugins routinely react to an event by publishing or sending. If the reader
+    awaited the callback itself, the callback's request would wait for a
+    response frame only that blocked reader could read: a five-second stall and
+    a TimeoutError on every such call.
+    """
+    h, client = await _connected(host)
+    answered = asyncio.Event()
+    try:
+        h.replies["event.subscribe"] = {"ok": True}
+        h.replies["ping"] = {"pong": True}
+
+        async def _react(_payload: dict) -> None:
+            if await client.ping() == {"pong": True}:
+                answered.set()
+
+        await client.event_subscribe("plugin.p.topic", _react)
+        await h.push_event(
+            "event.deliver", {"topic": "plugin.p.topic", "payload": {"n": 1}}
+        )
+        await asyncio.wait_for(answered.wait(), timeout=1.0)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_host_closing_the_connection_is_observable_and_fails_calls_fast(
+    host,
+) -> None:
+    """The runner restarts on a dropped bridge only if the drop is visible.
+
+    A plugin host restart closes every plugin socket. The client must flag the
+    loss and refuse further calls at once rather than letting each one sit out
+    its timeout on a connection that can never answer.
+    """
+    h, client = await _connected(host)
+    try:
+        assert not client.disconnected.is_set()
+        await h.stop()
+        await asyncio.wait_for(client.disconnected.wait(), timeout=1.0)
+        with pytest.raises(Exception, match="not connected"):
+            await asyncio.wait_for(client.ping(), timeout=1.0)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_ctx_msp_sends_on_the_msp_write_capability(host) -> None:
+    """A Python plugin reaches the MSP byte plane through the public context."""
+    from ados.plugins.ipc_client import PluginContext
+
+    h, client = await _connected(host)
+    try:
+        ctx = PluginContext(plugin_id="p", plugin_version="1.0.0", config={}, ipc=client)
+        await ctx.msp.send(b"$M<\x00\x64\x64")
+        sent = [e for e in h.requests if e.method == "msp.send"]
+        assert len(sent) == 1
+        assert sent[0].capability == "msp.write"
+        assert sent[0].args["msg_bytes"] == b"$M<\x00\x64\x64"
+    finally:
+        await client.close()
+
+
 def test_an_unparseable_token_grants_no_capabilities() -> None:
     """Fail closed on a token the client cannot read.
 

@@ -1,7 +1,7 @@
 """Capability catalog + grant-helper tests.
 
 Covers ``ados.plugins.capabilities`` against supervisor state
-(``get_granted_caps``, ``has_capability``, ``require_capability``) and pins the
+(``get_granted_caps``) and pins the
 generated catalog so a codegen change surfaces in review.
 
 The per-method dispatch gate is NOT covered here any more. That gate lives in
@@ -13,17 +13,12 @@ table rather than restating it.
 
 from __future__ import annotations
 
-import pytest
-
 from ados.plugins.capabilities import (
     AGENT_CAPABILITIES,
     ENFORCED_AGENT_CAPABILITIES,
     get_granted_caps,
-    has_capability,
     is_known_agent_capability,
-    require_capability,
 )
-from ados.plugins.errors import CapabilityDenied
 from ados.plugins.state import PermissionGrant, PluginInstall
 
 PLUGIN_ID = "com.example.gated"
@@ -182,17 +177,5 @@ def test_get_granted_caps_unknown_plugin_returns_empty() -> None:
     assert get_granted_caps(sup, "no.such.plugin") == set()
 
 
-def test_has_capability_true_when_granted() -> None:
-    sup = _StubSupervisor(
-        [_install_with_perms(PLUGIN_ID, **{"mission.read": True})]
-    )
-    assert has_capability(sup, PLUGIN_ID, "mission.read")
-    assert not has_capability(sup, PLUGIN_ID, "mission.write")
 
 
-def test_require_capability_raises_on_missing() -> None:
-    sup = _StubSupervisor([_install_with_perms(PLUGIN_ID)])
-    with pytest.raises(CapabilityDenied) as excinfo:
-        require_capability(sup, PLUGIN_ID, "hardware.i2c")
-    assert excinfo.value.plugin_id == PLUGIN_ID
-    assert excinfo.value.capability == "hardware.i2c"

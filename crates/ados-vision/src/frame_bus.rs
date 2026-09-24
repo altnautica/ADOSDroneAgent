@@ -57,7 +57,7 @@ pub fn encode_descriptor_frame(desc: &FrameDescriptor) -> anyhow::Result<Vec<u8>
 pub async fn serve(
     engine: Arc<VisionEngine>,
     socket_path: &str,
-    cancel: Arc<tokio::sync::Notify>,
+    cancel: ados_protocol::shutdown::Shutdown,
 ) -> anyhow::Result<()> {
     // keep_last = true so a consumer that connects mid-stream gets the latest
     // descriptor immediately. inbound = None: broadcast only.
@@ -80,7 +80,7 @@ pub async fn serve(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
         }
     }
     // Dropping `server` unbinds the socket and aborts client tasks.
@@ -94,7 +94,6 @@ mod tests {
     use ados_protocol::framebus::{FrameFormat, FRAMEBUS_DESCRIPTOR_VERSION};
     use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
     use std::time::Duration;
-    use tokio::sync::Notify;
 
     fn sample_descriptor() -> FrameDescriptor {
         FrameDescriptor {
@@ -125,7 +124,7 @@ mod tests {
     #[tokio::test]
     async fn published_frame_reaches_a_socket_subscriber() {
         let engine = crate::engine::VisionEngine::new(Box::new(crate::backend::MockBackend), 4);
-        let cancel = Arc::new(Notify::new());
+        let cancel = ados_protocol::shutdown::Shutdown::new();
 
         let dir = tempfile::tempdir().unwrap();
         let sock = dir
@@ -164,7 +163,7 @@ mod tests {
         assert_eq!(got.shm_name, desc.shm_name);
         assert_eq!(got.seq, desc.seq);
 
-        cancel.notify_waiters();
+        cancel.trigger();
         let _ = server.await;
     }
 }

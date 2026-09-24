@@ -53,14 +53,15 @@ const ANY: &[&str] = &["drone", "ground_station", "workstation"];
 ///
 /// Gate rationale: the agent cannot do its job without the orchestrator
 /// (`ados-supervisor`), the MAVLink router (`ados-mavlink-router`), the video
-/// pipeline (`ados-video`), the cloud-relay transport (`ados-cloud`), or the
-/// vision host (`ados-vision`), so those are `Hard`. The router is the sole
-/// command-and-control path to the flight controller — the packaged Python
-/// MAVLink service it replaced is gone, so a missing router leaves the Core
-/// MAVLink unit crash-looping with no FC telemetry, arming, or GCS link. A
-/// fetch miss must therefore FAIL the install rather than report it healthy.
-/// Everything else degrades to best-effort: the agent still comes up and
-/// reports the missing capability via the install result.
+/// pipeline (`ados-video`), the cloud-relay transport (`ados-cloud`), the
+/// vision host (`ados-vision`), or the LAN front (`ados-control`), so those are
+/// `Hard`. The router is the sole command-and-control path to the flight
+/// controller — the packaged Python MAVLink service it replaced is gone, so a
+/// missing router leaves the Core MAVLink unit crash-looping with no FC
+/// telemetry, arming, or GCS link. A fetch miss must therefore FAIL the install
+/// rather than report it healthy. Everything else degrades to best-effort: the
+/// agent still comes up and reports the missing capability via the install
+/// result.
 pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-tui",
@@ -252,16 +253,19 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: ANY,
     },
-    // The native HTTP control surface. Best-effort and opt-in: it ships disabled
-    // (the GCS uses the FastAPI surface), so a missing binary degrades nothing.
-    // It is fetched and placed so `ados rust enable control` works on demand; the
-    // unit stays disabled until the operator turns it on.
+    // The native HTTP control surface: the LAN front on `:8080` (pairing, status,
+    // every migrated REST route), on every profile. The installer writes the
+    // front marker on every install and the front drop-in moves the residual
+    // Python API onto an internal socket behind it, so without this binary
+    // nothing answers on `:8080` and the node cannot be paired or reached. Hard:
+    // a fetch miss must fail here, naming the binary, not surface later as an
+    // unreachable REST port.
     PrebuiltBinary {
         service: "ados-control",
         asset: "ados-control-aarch64",
         release_tag: "prebuilt-control",
         dest: "/opt/ados/bin/ados-control",
-        gate: Gate::BestEffort,
+        gate: Gate::Hard,
         profiles: ANY,
     },
     // The GPIO-output service (status buzzer / LED). Best-effort and opt-in: it
@@ -922,19 +926,20 @@ mod tests {
     }
 
     #[test]
-    fn exactly_five_hard_and_they_are_the_right_ones() {
+    fn exactly_six_hard_and_they_are_the_right_ones() {
         let hard: Vec<&str> = PREBUILT
             .iter()
             .filter(|b| b.gate == Gate::Hard)
             .map(|b| b.service)
             .collect();
-        assert_eq!(hard.len(), 5, "hard gates: {hard:?}");
+        assert_eq!(hard.len(), 6, "hard gates: {hard:?}");
         for svc in [
             "ados-supervisor",
             "ados-mavlink-router",
             "ados-video",
             "ados-cloud",
             "ados-vision",
+            "ados-control",
         ] {
             assert!(hard.contains(&svc), "{svc} must be a Hard gate");
         }
@@ -978,14 +983,15 @@ mod tests {
     }
 
     #[test]
-    fn control_is_best_effort_on_both_profiles() {
+    fn control_is_hard_on_every_profile() {
         let control = PREBUILT
             .iter()
             .find(|b| b.service == "ados-control")
             .expect("ados-control must be in the catalog");
-        // The control surface ships disabled (the GCS uses the FastAPI surface),
-        // so a missing binary degrades nothing and must never abort the install.
-        assert_eq!(control.gate, Gate::BestEffort);
+        // The control surface is the LAN front on :8080 (the residual Python
+        // API sits behind it on an internal socket), so a node without it cannot
+        // be paired or reached: a fetch miss must fail the install.
+        assert_eq!(control.gate, Gate::Hard);
         assert_eq!(control.release_tag, "prebuilt-control");
         // Cross-profile: it serves both the drone and ground-station agents.
         assert!(for_profile("drone")

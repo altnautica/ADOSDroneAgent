@@ -13,8 +13,6 @@ import { cn } from "@/lib/utils";
 interface Props {
   firmware: MspFirmware;
   firmwareVersion?: string;
-  /** Block writes while the vehicle is armed. */
-  armed?: boolean;
 }
 
 /** The label for a setting's current (or drafted) send-string. */
@@ -27,9 +25,10 @@ function labelFor(s: MspSetting, send: string): string {
  * Settings viewer/editor for MSP flight controllers (Betaflight, iNav). Reads
  * the FC directly over the agent's transparent MSP proxy — Betaflight over the
  * CLI, iNav over the name-indexed MSP2_COMMON_SETTING protocol — and writes
- * changes back, persisting to EEPROM/flash on save.
+ * changes back, persisting to EEPROM/flash on save. The client reads the FC's
+ * own armed flag before every write and refuses unless it reports disarmed.
  */
-export function MspSettingsTab({ firmware, firmwareVersion, armed = false }: Props) {
+export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
   const { settings, loading, error, saving, refresh, apply } = useMspSettings(
     firmware,
     firmwareVersion,
@@ -72,7 +71,6 @@ export function MspSettingsTab({ firmware, firmwareVersion, armed = false }: Pro
   });
 
   async function save() {
-    if (armed) return;
     const changes = [...drafts.entries()].map(([name, value]) => ({ name, value }));
     if (changes.length === 0) return;
     const res = await apply(changes);
@@ -143,17 +141,11 @@ export function MspSettingsTab({ firmware, firmwareVersion, armed = false }: Pro
             <RotateCcw className="h-3.5 w-3.5" />
             Discard
           </Button>
-          <Button size="sm" disabled={dirtyCount === 0 || saving || armed} onClick={save}>
+          <Button size="sm" disabled={dirtyCount === 0 || saving} onClick={save}>
             <Save className="h-3.5 w-3.5" />
             {saving ? "Saving…" : `Save ${dirtyCount || ""}`}
           </Button>
         </div>
-
-        {armed && (
-          <p className="text-xs text-warn">
-            Vehicle is armed — settings writes are blocked. Disarm to save changes.
-          </p>
-        )}
 
         {loading && (
           <p className="text-sm text-muted-foreground">

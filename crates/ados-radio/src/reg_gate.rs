@@ -15,10 +15,12 @@ use ados_radio::adapter;
 /// `unpaired` so the panel shows the regulatory conflict in one glance.
 pub(crate) const STATE_REG_BLOCKED: &str = "reg_blocked";
 
-/// Backoff (seconds) between regulatory-gate retries while blocked. Bounded and
-/// short so a transient domain glitch self-heals quickly, but slow enough not to
-/// spin `iw reg set` in a tight loop.
-pub(crate) const REG_BLOCKED_RETRY_SECS: u64 = 10;
+/// Fixed retry (seconds) for every bring-up park: regulatory-blocked, no
+/// injection adapter, channel or PHY that did not land, spawn failure. Fixed
+/// and uncapped so a recoverable fault self-heals within seconds; the set call
+/// itself carries its own bounded verify retry, so this never spins `iw reg set`
+/// in a tight loop.
+pub(crate) const BRINGUP_RETRY_SECS: u64 = 5;
 
 /// A pure decision over a regulatory-gate `Result` plus the strict-mode flag.
 /// Extracted so the gate's branching (proceed / block / proceed-anyway under the

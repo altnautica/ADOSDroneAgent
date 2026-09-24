@@ -18,15 +18,17 @@
 //! owned here.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use ados_protocol::shutdown::Shutdown;
 use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::gs_config::GroundStationConfig;
 use crate::mesh_events;
-use crate::process_spawn::GsWfbProcess;
+use crate::process_spawn::{GsWfbProcess, Stdout};
 
 /// Per-relay liveness grace before a silent relay is aged out of the map.
 /// Mirrors the Python `_RELAY_GRACE_MS = 4000`.
@@ -35,6 +37,13 @@ const RELAY_GRACE_MS: i64 = 4000;
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Aggregator graceful-shutdown grace before SIGKILL.
 const AGGREGATOR_GRACE: Duration = Duration::from_secs(3);
+/// Fixed retry between aggregator bring-up attempts (spawn failure, exit,
+/// stall). No cap: a receiver keeps trying for as long as the unit runs.
+const RESPAWN_INTERVAL: Duration = Duration::from_secs(5);
+/// How long the aggregator may go without printing a stats line before it is
+/// judged wedged. `wfb_rx` prints one every second whether or not anything
+/// arrives, so a flat line count with a live process is a stopped loop.
+const STATS_SILENCE_WINDOW: Duration = Duration::from_secs(30);
 
 /// The receiver's published state (the `wfb-receiver.json` shape, byte-identical
 /// to the Python `_write_state`). Relays are flattened to a list on write.
@@ -159,8 +168,13 @@ pub fn aggregate_args(
     args
 }
 
+/// The aggregator's stderr log. Its stats go to stdout (read below); stderr
+/// carries only diagnostics, and a file never fills the way an unread pipe does.
+const AGGREGATOR_LOG: &str = "/run/ados/wfb-gs-aggregator.log";
+
 /// Spawn the FEC-combine aggregator in its own process group (setsid/killpg).
-/// stderr is piped so the stats tail can read the combined counters.
+/// stdout is piped: `wfb_rx` prints its per-interval `PKT` stats line there
+/// (`vendor/wfb-ng/src/rx.cpp` `Aggregator::dump_stats`, `IPC_MSG` = stdout).
 pub async fn spawn_aggregator(
     drone_iface: &str,
     listen_port: u16,
@@ -168,30 +182,47 @@ pub async fn spawn_aggregator(
 ) -> std::io::Result<GsWfbProcess> {
     let rx_key = Path::new(ados_radio::paths::WFB_RX_KEY);
     let args = aggregate_args(drone_iface, listen_port, accept_local_nic, rx_key);
-    GsWfbProcess::spawn_stderr_piped("wfb_rx", &args).await
+    GsWfbProcess::spawn("wfb_rx", &args, Stdout::Piped, Some(AGGREGATOR_LOG)).await
 }
 
-/// Parse one aggregator stderr line for the combined counters. A line containing
-/// `n_out:` carries the post-dedup count, `fec_rec:` the repaired count,
-/// `bitrate_kbps:` the output rate. Returns `(after_dedup, fec_repaired, output_kbps)`
-/// updates when present.
-pub fn parse_receiver_stats_line(line: &str) -> (Option<i64>, Option<i64>, Option<i64>) {
-    if !line.contains("n_out:") {
-        return (None, None, None);
+/// The per-interval counters the receiver surfaces, off one aggregator stats
+/// line: `<ts>\tPKT\t<p_all>:<b_all>:<dec_err>:<sess>:<data>:<uniq>:<fec_rec>:<lost>:<bad>:<out>:<b_out>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AggregatorPkt {
+    /// Unique fragments after cross-source dedup this interval.
+    pub unique: i64,
+    /// Fragments FEC repaired this interval.
+    pub fec_recovered: i64,
+    /// Bytes emitted on the decoded output this interval.
+    pub bytes_out: i64,
+}
+
+/// Parse one aggregator stdout line, or `None` when it is not an 11-field `PKT`
+/// stats line (the `RX_ANT` lines and anything else are ignored).
+pub fn parse_receiver_stats_line(line: &str) -> Option<AggregatorPkt> {
+    let mut cols = line.trim_end().split('\t');
+    let _ts = cols.next()?;
+    if cols.next()? != "PKT" {
+        return None;
     }
-    let mut after_dedup = None;
-    let mut fec_repaired = None;
-    let mut output_kbps = None;
-    for tok in line.split_whitespace() {
-        if let Some(v) = tok.strip_prefix("n_out:") {
-            after_dedup = v.parse::<i64>().ok();
-        } else if let Some(v) = tok.strip_prefix("fec_rec:") {
-            fec_repaired = v.parse::<i64>().ok();
-        } else if let Some(v) = tok.strip_prefix("bitrate_kbps:") {
-            output_kbps = v.parse::<i64>().ok();
-        }
+    let f: Vec<&str> = cols.next()?.split(':').collect();
+    if f.len() != 11 {
+        return None;
     }
-    (after_dedup, fec_repaired, output_kbps)
+    Some(AggregatorPkt {
+        unique: f[5].parse().ok()?,
+        fec_recovered: f[6].parse().ok()?,
+        bytes_out: f[10].parse().ok()?,
+    })
+}
+
+/// Fold one stats line into the published state: the fragment and FEC totals
+/// accumulate (the wire counts reset every interval), the output rate is this
+/// interval's (stats interval = 1 s).
+fn fold_aggregator_pkt(state: &mut ReceiverState, pkt: AggregatorPkt) {
+    state.fragments_after_dedup = state.fragments_after_dedup.saturating_add(pkt.unique);
+    state.fec_repaired = state.fec_repaired.saturating_add(pkt.fec_recovered);
+    state.output_kbps = pkt.bytes_out * 8 / 1000;
 }
 
 /// Upsert the relays seen this poll (by batman-neighbor MAC) into `state`, refreshing
@@ -230,27 +261,20 @@ fn age_out_relays(state: &mut ReceiverState, now_ms: i64) -> Vec<String> {
     removed
 }
 
-/// Tail the aggregator's stderr, folding combined counters into shared state. Returns
-/// when the stderr pipe closes.
+/// Tail the aggregator's stdout, folding its stats into shared state and
+/// counting stats lines (the delta counter the stall window checks). Returns
+/// when the pipe closes.
 async fn tail_aggregator_stats(
-    stderr: tokio::process::ChildStderr,
+    stdout: tokio::process::ChildStdout,
     state: Arc<Mutex<ReceiverState>>,
+    lines_seen: Arc<AtomicU64>,
 ) {
     use tokio::io::{AsyncBufReadExt, BufReader};
-    let mut lines = BufReader::new(stderr).lines();
+    let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        let (dedup, fec, kbps) = parse_receiver_stats_line(&line);
-        if dedup.is_some() || fec.is_some() || kbps.is_some() {
-            let mut s = state.lock().await;
-            if let Some(v) = dedup {
-                s.fragments_after_dedup = v;
-            }
-            if let Some(v) = fec {
-                s.fec_repaired = v;
-            }
-            if let Some(v) = kbps {
-                s.output_kbps = v;
-            }
+        if let Some(pkt) = parse_receiver_stats_line(&line) {
+            lines_seen.fetch_add(1, Ordering::Relaxed);
+            fold_aggregator_pkt(&mut *state.lock().await, pkt);
         }
     }
 }
@@ -322,7 +346,7 @@ async fn watch_relay_churn(state: Arc<Mutex<ReceiverState>>, mesh_iface: String)
 /// aggregator is terminated gracefully, the mDNS record is unregistered, and
 /// `up=false` is persisted.
 pub async fn run(
-    shutdown: Arc<tokio::sync::Notify>,
+    shutdown: Shutdown,
     ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
     progress: ados_supervisor::sdnotify::MonitorProgress,
 ) {
@@ -339,42 +363,6 @@ pub async fn run(
         ..Default::default()
     }));
 
-    // Detect the local monitor adapter when local-NIC aggregation is enabled.
-    let mut drone_iface = String::new();
-    if accept_local_nic {
-        match ados_radio::adapter::select_interface("").await {
-            Some(sel) if sel.injection_ok => drone_iface = sel.ifname,
-            Some(sel) => {
-                tracing::warn!(iface = %sel.ifname, "wfb_receiver_monitor_mode_failed");
-                mesh_events::emit(
-                    mesh_events::KIND_WFB_ADAPTER_MISSING,
-                    json!({
-                        "side": "receiver",
-                        "reason": "monitor_mode_failed",
-                        "detail": format!("Could not put {} into monitor mode.", sel.ifname),
-                    }),
-                );
-            }
-            None => {
-                // Local aggregation requested but no adapter: the receiver still
-                // serves relay forwards, but the operator must know local
-                // reception is gone.
-                mesh_events::emit(
-                    mesh_events::KIND_WFB_ADAPTER_MISSING,
-                    json!({
-                        "side": "receiver",
-                        "reason": "adapter_not_found",
-                        "detail": "No monitor-capable WFB adapter detected for local reception.",
-                    }),
-                );
-            }
-        }
-    }
-    {
-        let mut s = state.lock().await;
-        s.drone_iface = drone_iface.clone();
-    }
-
     if !Path::new(ados_radio::paths::WFB_RX_KEY).exists() {
         tracing::warn!("wfb_receiver_keys_missing");
     }
@@ -383,31 +371,6 @@ pub async fn run(
     // lifetime; dropped (unregister + shutdown) on exit.
     let advert = crate::mdns::advertise_receiver(&service_type, &mesh_iface, listen_port);
 
-    // Spawn the aggregator once. With no local adapter the receiver trusts only
-    // relay forwards (the iface arg is dropped by `aggregate_args`).
-    let use_local = accept_local_nic && !drone_iface.is_empty();
-    let mut aggregator = match spawn_aggregator(&drone_iface, listen_port, use_local).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!(error = %e, "wfb_receiver_aggregator_spawn_failed");
-            if let Some(a) = &advert {
-                a.shutdown();
-            }
-            let mut s = state.lock().await;
-            s.up = false;
-            let _ = s.write_and_emit(ingest.as_ref());
-            return;
-        }
-    };
-    {
-        let mut s = state.lock().await;
-        s.up = true;
-    }
-    let _ = state.lock().await.write_and_emit(ingest.as_ref());
-
-    let tail_task = aggregator
-        .take_stderr()
-        .map(|stderr| tokio::spawn(tail_aggregator_stats(stderr, state.clone())));
     let churn_task = tokio::spawn(watch_relay_churn(state.clone(), mesh_iface.clone()));
     let writer_task = {
         let state = state.clone();
@@ -424,35 +387,71 @@ pub async fn run(
                     tracing::debug!(error = %e, "receiver_state_write_failed");
                 }
                 tokio::select! {
-                    _ = shutdown.notified() => break,
+                    _ = shutdown.wait() => break,
                     _ = tokio::time::sleep(POLL_INTERVAL) => {}
                 }
             }
         })
     };
 
-    // The role ends when shutdown fires or the aggregator exits.
-    tokio::select! {
-        _ = shutdown.notified() => {}
-        _ = wait_aggregator_exit(&mut aggregator) => {
-            tracing::warn!("wfb_receiver_aggregator_exited");
+    // Supervise the aggregator: bring it up, watch it, and on an exit or a
+    // stalled stats stream tear it down and bring it up again on a fixed
+    // interval. The local adapter is re-detected on every attempt that has none,
+    // so an adapter plugged in after boot joins the aggregation.
+    let mut drone_iface = String::new();
+    loop {
+        if accept_local_nic && drone_iface.is_empty() {
+            drone_iface = detect_local_adapter().await.unwrap_or_default();
+            state.lock().await.drone_iface = drone_iface.clone();
+        }
+        // With no local adapter the receiver trusts only relay forwards (the
+        // iface arg is dropped by `aggregate_args`).
+        let use_local = accept_local_nic && !drone_iface.is_empty();
+        match spawn_aggregator(&drone_iface, listen_port, use_local).await {
+            Ok(mut aggregator) => {
+                state.lock().await.up = true;
+                let lines_seen = Arc::new(AtomicU64::new(0));
+                let tail_task = aggregator.take_stdout().map(|out| {
+                    tokio::spawn(tail_aggregator_stats(
+                        out,
+                        state.clone(),
+                        lines_seen.clone(),
+                    ))
+                });
+                let stopped = tokio::select! {
+                    _ = shutdown.wait() => true,
+                    reason = watch_aggregator(&mut aggregator, &lines_seen) => {
+                        tracing::warn!(reason, "wfb_receiver_aggregator_down_respawning");
+                        false
+                    }
+                };
+                if let Some(t) = tail_task {
+                    t.abort();
+                }
+                aggregator.terminate_then_kill(AGGREGATOR_GRACE).await;
+                state.lock().await.up = false;
+                if stopped {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "wfb_receiver_aggregator_spawn_failed");
+                state.lock().await.up = false;
+            }
+        }
+        tokio::select! {
+            _ = shutdown.wait() => break,
+            _ = tokio::time::sleep(RESPAWN_INTERVAL) => {}
         }
     }
 
     tracing::info!("wfb_receiver_stopping");
-    if let Some(t) = tail_task {
-        t.abort();
-    }
     churn_task.abort();
     writer_task.abort();
-    aggregator.terminate_then_kill(AGGREGATOR_GRACE).await;
     if let Some(a) = &advert {
         a.shutdown();
     }
-    {
-        let mut s = state.lock().await;
-        s.up = false;
-    }
+    state.lock().await.up = false;
     let _ = state.lock().await.write_and_emit(ingest.as_ref());
     // Restore the local monitor adapter to managed mode when one was resolved
     // (only with local-NIC aggregation). Empty when the receiver trusts relay
@@ -465,13 +464,59 @@ pub async fn run(
     tracing::info!("wfb_receiver_stopped");
 }
 
-/// Poll the aggregator until it exits. One arm of the completion select.
-async fn wait_aggregator_exit(proc: &mut GsWfbProcess) {
-    loop {
-        if !proc.is_running() {
-            return;
+/// Select + monitor-mode the local adapter for aggregation, emitting the
+/// adapter-missing event on failure. `None` leaves the receiver on relay
+/// forwards alone until the next attempt.
+async fn detect_local_adapter() -> Option<String> {
+    match ados_radio::adapter::select_interface("").await {
+        Some(sel) if sel.injection_ok => Some(sel.ifname),
+        Some(sel) => {
+            tracing::warn!(iface = %sel.ifname, "wfb_receiver_monitor_mode_failed");
+            mesh_events::emit(
+                mesh_events::KIND_WFB_ADAPTER_MISSING,
+                json!({
+                    "side": "receiver",
+                    "reason": "monitor_mode_failed",
+                    "detail": format!("Could not put {} into monitor mode.", sel.ifname),
+                }),
+            );
+            None
         }
+        None => {
+            // Local aggregation requested but no adapter: the receiver still
+            // serves relay forwards, but the operator must know local
+            // reception is gone.
+            mesh_events::emit(
+                mesh_events::KIND_WFB_ADAPTER_MISSING,
+                json!({
+                    "side": "receiver",
+                    "reason": "adapter_not_found",
+                    "detail": "No monitor-capable WFB adapter detected for local reception.",
+                }),
+            );
+            None
+        }
+    }
+}
+
+/// Resolve when the aggregator has exited or its stats stream has stayed flat
+/// for [`STATS_SILENCE_WINDOW`]; returns the reason. One arm of the
+/// supervision select.
+async fn watch_aggregator(proc: &mut GsWfbProcess, lines_seen: &AtomicU64) -> &'static str {
+    let mut last = lines_seen.load(Ordering::Relaxed);
+    let mut last_advance = Instant::now();
+    loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
+        if !proc.is_running() {
+            return "exited";
+        }
+        let now_lines = lines_seen.load(Ordering::Relaxed);
+        if now_lines > last {
+            last = now_lines;
+            last_advance = Instant::now();
+        } else if last_advance.elapsed() >= STATS_SILENCE_WINDOW {
+            return "stats_silent";
+        }
     }
 }
 
@@ -510,19 +555,28 @@ mod tests {
         assert_eq!(a[ai + 1], "5800");
     }
 
+    /// The aggregator's stats line is `wfb_rx`'s own eleven-field `PKT` line on
+    /// stdout (`vendor/wfb-ng/src/rx.cpp:501`); nothing else carries counters.
     #[test]
-    fn parse_aggregator_stats_pulls_three_counters() {
-        let line = "999 PKT n_out:1500 fec_rec:12 bitrate_kbps:4200";
-        let (dedup, fec, kbps) = parse_receiver_stats_line(line);
-        assert_eq!(dedup, Some(1500));
-        assert_eq!(fec, Some(12));
-        assert_eq!(kbps, Some(4200));
-    }
-
-    #[test]
-    fn non_aggregator_line_ignored() {
-        let (d, f, k) = parse_receiver_stats_line("starting up");
-        assert!(d.is_none() && f.is_none() && k.is_none());
+    fn the_aggregator_stats_line_yields_dedup_fec_and_output() {
+        assert_eq!(
+            parse_receiver_stats_line(
+                "1750000000000\tPKT\t120:180000:0:1:110:100:4:0:0:100:125000"
+            ),
+            Some(AggregatorPkt {
+                unique: 100,
+                fec_recovered: 4,
+                bytes_out: 125_000,
+            })
+        );
+        assert_eq!(
+            parse_receiver_stats_line("999 PKT n_out:1500 fec_rec:12"),
+            None
+        );
+        assert_eq!(
+            parse_receiver_stats_line("1\tRX_ANT\t5745:1:20\t0\t1:-50:-49:-48:20:21:22"),
+            None
+        );
     }
 
     #[test]
@@ -626,29 +680,26 @@ mod tests {
         assert_eq!(newly, vec!["r1".to_string()]);
     }
 
+    /// Stats lines accumulate: the fragment and FEC totals sum the per-interval
+    /// counts, the output rate is the latest interval's, and every stats line
+    /// advances the line counter the stall window watches.
     #[tokio::test]
     async fn tail_folds_aggregator_counters() {
-        #[cfg(target_os = "linux")]
-        {
-            let state = Arc::new(Mutex::new(ReceiverState::default()));
-            let script = "printf 'X PKT n_out:1500 fec_rec:12 bitrate_kbps:4200\\n' 1>&2";
-            let mut proc =
-                GsWfbProcess::spawn_stderr_piped("sh", &["-c".to_string(), script.to_string()])
-                    .await
-                    .expect("spawn sh");
-            let stderr = proc.take_stderr().expect("stderr piped");
-            tail_aggregator_stats(stderr, state.clone()).await;
-            let s = state.lock().await;
-            assert_eq!(s.fragments_after_dedup, 1500);
-            assert_eq!(s.fec_repaired, 12);
-            assert_eq!(s.output_kbps, 4200);
-            proc.kill().await;
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let mut s = ReceiverState::default();
-            let _ = upsert_relays(&mut s, &[], 0);
-        }
+        let state = Arc::new(Mutex::new(ReceiverState::default()));
+        let lines = Arc::new(AtomicU64::new(0));
+        let script = "printf '1\\tPKT\\t10:0:0:0:10:8:1:0:0:8:1000\\n2\\tPKT\\t10:0:0:0:10:7:2:0:0:7:2000\\n'";
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", script])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sh");
+        tail_aggregator_stats(child.stdout.take().unwrap(), state.clone(), lines.clone()).await;
+        let _ = child.wait().await;
+        let s = state.lock().await;
+        assert_eq!(s.fragments_after_dedup, 15);
+        assert_eq!(s.fec_repaired, 3);
+        assert_eq!(s.output_kbps, 16);
+        assert_eq!(lines.load(Ordering::Relaxed), 2);
     }
 
     #[test]

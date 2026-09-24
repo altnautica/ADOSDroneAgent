@@ -20,8 +20,8 @@
 use std::collections::{HashMap, HashSet};
 
 use ados_protocol::atlas::{
-    AtlasEvent, CaptureState, CaptureStatus, KeyframeBudget, KeyframeEnvelope,
-    ATLAS_CAPTURE_STATE_TOPIC, ATLAS_KEYFRAME_TOPIC,
+    AtlasEvent, CaptureState, CaptureStatus, KeyframeBudget, KeyframeEnvelope, PoseSource,
+    VioHealth, ATLAS_CAPTURE_STATE_TOPIC, ATLAS_KEYFRAME_TOPIC,
 };
 use ados_protocol::compute::{ComputeJobKind, ComputeJobState};
 
@@ -52,6 +52,20 @@ fn default_train_iters() -> u64 {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_TRAIN_ITERS)
+}
+
+/// A session silent this long with no `Bagged` frame is finalized as-is.
+pub const SESSION_IDLE_MS: i64 = 10 * 60 * 1000;
+
+/// One capture session's reconstruction-input accounting.
+#[derive(Debug, Clone, Default)]
+struct SessionAccount {
+    seen: u64,
+    rejected: u64,
+    undisciplined_clock: u64,
+    persisted: u64,
+    cameras: HashSet<String>,
+    last_event_ms: i64,
 }
 
 /// Per-session live-reconstruction state: the cadence driver plus the in-flight
@@ -114,6 +128,11 @@ pub struct AtlasIngest {
     /// carried an id (a pre-attribution capture), and the job then omits it rather
     /// than asserting a wrong one.
     session_devices: HashMap<String, String>,
+    /// Per-session reconstruction-input accounting and last activity, keyed by
+    /// session id. A dataset carries ITS session's numbers, never the node-wide
+    /// totals that mix in other sessions and other drones; the last-event time
+    /// lets a session whose `Bagged` frame never arrived be finalized anyway.
+    accounts: HashMap<String, SessionAccount>,
     /// The training length stamped onto every reconstruct job's `steps` param, so
     /// the backend trains for a configurable number of iterations instead of the
     /// hardcoded default. Resolved once from [`default_train_iters`].
@@ -145,6 +164,7 @@ impl AtlasIngest {
             live_config,
             sessions: HashMap::new(),
             session_devices: HashMap::new(),
+            accounts: HashMap::new(),
             train_iters: default_train_iters(),
         }
     }
@@ -193,6 +213,9 @@ impl AtlasIngest {
                 match KeyframeEnvelope::from_msgpack(&event.payload) {
                     Ok(kf) => {
                         self.note_device(&kf.session_id, event.device_id.as_deref());
+                        let acct = self.accounts.entry(kf.session_id.clone()).or_default();
+                        acct.seen += 1;
+                        acct.last_event_ms = now_ms;
                         // Refuse a frame the reconstructor cannot trust BEFORE it
                         // reaches disk. A frame with no position-prior sigma
                         // destabilises the bundle adjustment, one whose pose was
@@ -202,6 +225,9 @@ impl AtlasIngest {
                         // from every other frame in the same session.
                         if let Err(reason) = kf.validate_with(&self.budget) {
                             self.keyframes_rejected += 1;
+                            if let Some(acct) = self.accounts.get_mut(&kf.session_id) {
+                                acct.rejected += 1;
+                            }
                             tracing::warn!(
                                 session = %kf.session_id,
                                 kf_id = kf.kf_id,
@@ -214,9 +240,18 @@ impl AtlasIngest {
                         }
                         if !kf.clock_is_disciplined() {
                             self.keyframes_undisciplined_clock += 1;
+                            if let Some(acct) = self.accounts.get_mut(&kf.session_id) {
+                                acct.undisciplined_clock += 1;
+                            }
                         }
                         match self.persister.persist(&kf) {
-                            Ok(()) => self.note_persisted(&kf, now_ms),
+                            Ok(()) => {
+                                if let Some(acct) = self.accounts.get_mut(&kf.session_id) {
+                                    acct.persisted += 1;
+                                    acct.cameras.insert(kf.camera_id.clone());
+                                }
+                                self.note_persisted(&kf, now_ms)
+                            }
                             Err(e) => tracing::warn!(error = %e, "atlas_keyframe_persist_failed"),
                         }
                     }
@@ -234,12 +269,15 @@ impl AtlasIngest {
                     // whether a job was produced. Any periodic cycle still running
                     // finishes on its own in the worker; the final bag reconstruct is
                     // the authoritative full-set output.
-                    self.sessions.remove(&status.session_id);
-                    self.session_devices.remove(&status.session_id);
+                    self.forget_session(&status.session_id);
                     Ok(result)
                 }
                 Ok(status) => {
                     self.note_device(&status.session_id, event.device_id.as_deref());
+                    self.accounts
+                        .entry(status.session_id.clone())
+                        .or_default()
+                        .last_event_ms = now_ms;
                     Ok(None)
                 }
                 Err(e) => {
@@ -255,6 +293,52 @@ impl AtlasIngest {
     /// `device_id`. A no-op for an absent or empty id, so a session is never
     /// attributed to an empty drone (the job then omits `device_id` rather than
     /// asserting a wrong one).
+    /// Drop every piece of per-session state once the session is over.
+    fn forget_session(&mut self, session_id: &str) {
+        self.sessions.remove(session_id);
+        self.session_devices.remove(session_id);
+        self.accounts.remove(session_id);
+    }
+
+    /// Finalize every session that has persisted keyframes but has been silent
+    /// for [`SESSION_IDLE_MS`]: its `Bagged` frame was lost (power-off, link loss
+    /// at landing), so without this the capture would never be reconstructed and
+    /// its state would stay in memory for the life of the node. Returns the
+    /// dataset + reconstruct job for each, exactly as a received bag would.
+    pub fn idle_bags(&mut self, now_ms: i64) -> std::io::Result<Vec<(Dataset, JobRecord)>> {
+        let idle: Vec<String> = self
+            .accounts
+            .iter()
+            .filter(|(_, a)| now_ms.saturating_sub(a.last_event_ms) >= SESSION_IDLE_MS)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for session_id in idle {
+            let (keyframes, cameras) = self
+                .accounts
+                .get(&session_id)
+                .map(|a| (a.persisted, a.cameras.len() as u32))
+                .unwrap_or((0, 0));
+            tracing::info!(session = %session_id, keyframes, "atlas session idle without a bag; finalizing");
+            let status = CaptureStatus {
+                session_id: session_id.clone(),
+                state: CaptureState::Bagged,
+                keyframes,
+                vio_health: VioHealth::Lost,
+                camera_count: cameras,
+                ingest_rate_hz: 0.0,
+                capped: false,
+                anchored: true,
+                pose_tier: PoseSource::LocalVio,
+                dropped_keyframes: 0,
+            };
+            let result = self.bag(&status, now_ms)?;
+            self.forget_session(&session_id);
+            out.extend(result);
+        }
+        Ok(out)
+    }
+
     fn note_device(&mut self, session_id: &str, device_id: Option<&str>) {
         if let Some(dev) = device_id {
             if !dev.is_empty() {
@@ -422,6 +506,11 @@ impl AtlasIngest {
             return Ok(None);
         }
         let device_id = self.session_devices.get(&status.session_id).cloned();
+        let acct = self
+            .accounts
+            .get(&status.session_id)
+            .cloned()
+            .unwrap_or_default();
         // The final bag is the generation AFTER every periodic cycle, so a viewer
         // holding cycle N-1 sees the full-set artifact as strictly newer.
         let generation = self
@@ -433,13 +522,13 @@ impl AtlasIngest {
         let mut meta = serde_json::json!({
             "keyframes": status.keyframes,
             "cameras": status.camera_count,
-            "received_keyframes": self.keyframes_seen,
+            "received_keyframes": acct.seen,
             // Honest reconstruction-input accounting: how many frames were
             // refused, and how many were accepted from an undisciplined clock.
             // Both are properties of the dataset a quality gate must weigh, and
             // neither is visible from the keyframe count alone.
-            "rejected_keyframes": self.keyframes_rejected,
-            "undisciplined_clock_keyframes": self.keyframes_undisciplined_clock,
+            "rejected_keyframes": acct.rejected,
+            "undisciplined_clock_keyframes": acct.undisciplined_clock,
         });
         if let Some(path) = &input_path {
             meta["input_path"] = serde_json::Value::String(path.to_string_lossy().into_owned());
@@ -594,6 +683,44 @@ mod tests {
         let mut ev = capture_state(session, state, keyframes);
         ev.device_id = Some(device.to_string());
         ev
+    }
+
+    #[test]
+    fn each_dataset_carries_its_own_sessions_accounting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ingest = AtlasIngest::new(dir.path());
+        for kf in 0..3 {
+            ingest.step(&real_keyframe_event("sA", kf), 1_000).unwrap();
+        }
+        ingest.step(&real_keyframe_event("sB", 0), 1_000).unwrap();
+        let (dataset, _) = ingest
+            .step(&capture_state("sB", CaptureState::Bagged, 1), 2_000)
+            .unwrap()
+            .expect("sB bags");
+        // sA's three keyframes must not leak into sB's dataset.
+        assert_eq!(dataset.meta["received_keyframes"], 1);
+    }
+
+    #[test]
+    fn a_session_whose_bag_never_arrives_is_finalized_after_the_idle_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ingest = AtlasIngest::new(dir.path());
+        ingest
+            .step(&real_keyframe_event("sLost", 0), 1_000)
+            .unwrap();
+        ingest
+            .step(&real_keyframe_event("sLost", 1), 1_100)
+            .unwrap();
+        assert!(ingest
+            .idle_bags(1_100 + SESSION_IDLE_MS - 1)
+            .unwrap()
+            .is_empty());
+        let bags = ingest.idle_bags(1_100 + SESSION_IDLE_MS).unwrap();
+        assert_eq!(bags.len(), 1);
+        assert_eq!(bags[0].1.id, "recon-sLost");
+        assert_eq!(bags[0].0.meta["keyframes"], 2);
+        // The session is released: a second sweep yields nothing.
+        assert!(ingest.idle_bags(i64::MAX).unwrap().is_empty());
     }
 
     #[test]

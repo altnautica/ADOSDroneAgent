@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -14,13 +13,10 @@ from ados import __version__
 from ados.api.deps import set_agent_app
 from ados.api.onbox_origin import OnboxOriginMiddleware
 from ados.api.routes import (
-    config,
     dashboard,
     display,
     ground_station,
-    logs,
     network,
-    observability,
     pairing,
     peripherals,
     peripherals_v1,
@@ -29,7 +25,6 @@ from ados.api.routes import (
     video,
     vision_detections,
     vision_models,
-    wfb,
     whep,
 )
 from ados.api.runtime import ensure_api_runtime
@@ -80,31 +75,12 @@ def create_app(agent: Any) -> FastAPI:
     # here is one bucket shared by every client. The front charges each caller's
     # own budget before it forwards a request.
 
-    # Close the logging-store proxy clients on shutdown so the shared
-    # connections do not leak across an app teardown. The /api/logs surface and
-    # the /api/v2/observability proxy both read the store's query API over its
-    # trusted local socket; there is no in-process buffer to install.
-    @app.on_event("shutdown")
-    async def _close_observability_clients() -> None:
-        from ados.api import telemetry_source
-
-        await logs.aclose_clients()
-        await observability.aclose_client()
-        await telemetry_source.aclose()
-
     # /healthz and /api/version are served by the native control front; the
     # residual registers neither (the front owns the LAN port, answers the
     # liveness probe, and reports the capability contract).
 
     # Mount routes
-    app.include_router(config.router, prefix="/api")
-    app.include_router(logs.router, prefix="/api")
-    # Reverse-proxy bridge to the local logging and telemetry store's query
-    # API. Lets a client that can only reach :8080 still read the store, over
-    # the store's trusted local socket. Inherits the agent's own auth.
-    app.include_router(observability.router, prefix="/api")
     app.include_router(video.router, prefix="/api")
-    app.include_router(wfb.router, prefix="/api")
     app.include_router(pairing.router, prefix="/api")
     app.include_router(setup.router, prefix="/api")
     app.include_router(dashboard.router, prefix="/api")
@@ -282,22 +258,3 @@ def create_app(agent: Any) -> FastAPI:
     )
 
     return app
-
-
-async def create_api_task(agent: Any) -> None:
-    """Create and run the API server as an asyncio task."""
-    api_runtime = ensure_api_runtime(agent)
-    app = create_app(api_runtime)
-    api_config = api_runtime.config.api.rest
-
-    # ADOS_API_INTERNAL_SOCKET redirects this to a single Unix socket behind the
-    # native front when it owns the LAN port; otherwise the dual-stack TCP pair.
-    from ados.api.dual_bind import make_listen_sockets
-    sockets = make_listen_sockets(api_config.host, api_config.port)
-    config = uvicorn.Config(
-        app,
-        log_level="warning",
-        access_log=False,
-    )
-    server = uvicorn.Server(config)
-    await server.serve(sockets=sockets)

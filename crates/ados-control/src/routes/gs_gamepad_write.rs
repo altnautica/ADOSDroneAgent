@@ -47,7 +47,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::state::AppState;
 
@@ -109,49 +108,24 @@ fn hid_cmd_sock() -> PathBuf {
 /// unparseably / replied `ok:false` (a transport-level failure the front maps to
 /// the FastAPI `E_GAMEPAD_PRIMARY_FAILED` 500).
 async fn set_primary_cmd(socket: &Path, device_id: &str) -> Option<Value> {
-    /// A primary-selection reply is a few hundred bytes; bound the read.
-    const MAX_REPLY_BYTES: usize = 64 * 1024;
-
     let request = json!({"op": "set_primary", "device_id": device_id});
-    let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
-    let line = format!("{}\n", serde_json::to_string(&request).ok()?);
-    stream.write_all(line.as_bytes()).await.ok()?;
-    stream.flush().await.ok()?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 8 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await.ok()?;
-        if n == 0 {
-            break; // EOF: the server replies once then closes.
-        }
-        if raw.len() + n > MAX_REPLY_BYTES {
-            return None;
-        }
-        raw.extend_from_slice(&buf[..n]);
-        if raw.contains(&b'\n') {
-            break;
-        }
-    }
-    let text = String::from_utf8(raw).ok()?;
-    let reply_line = text.lines().next()?;
-    let parsed: Value = serde_json::from_str(reply_line).ok()?;
-    let obj = parsed.as_object()?;
+    let obj = crate::ipc::cmd::roundtrip_object(socket, &request, crate::ipc::cmd::QUICK)
+        .await
+        .ok()?;
     // A transport-level failure (`ok:false`, e.g. a missing-device-id reply the
     // front never sends, or an encode fault) is treated as unavailable — the
     // apply did not succeed, which maps to the FastAPI 500 error path.
     if obj.get("ok") == Some(&Value::Bool(false)) {
         return None;
     }
-    Some(parsed)
+    Some(Value::Object(obj))
 }
 
 // ---------------------------------------------------------------------------
 // PUT /api/v1/ground-station/gamepads/primary
 // ---------------------------------------------------------------------------
 
-/// The `gamepads/primary` request body. Mirrors the FastAPI
-/// `GamepadPrimaryUpdate`: a required `device_id` (the Pydantic model carries
+/// The `gamepads/primary` request body: a required `device_id` (the Pydantic model carries
 /// `min_length=1`).
 #[derive(Debug, Deserialize)]
 pub struct GamepadPrimaryUpdate {
@@ -194,6 +168,7 @@ pub async fn put_gamepad_primary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
 
     /// Read a response body as JSON.

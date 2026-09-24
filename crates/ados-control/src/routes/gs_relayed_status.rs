@@ -52,6 +52,11 @@ const SIDECAR_STALE_AFTER_S: f64 = 20.0;
 /// compatibility path for a sidecar written by an older receive process.
 const DEFAULT_STATUS_STALE_AFTER_S: f64 = 15.0;
 
+/// How far in the future a writer's stamp may sit before its age counts as
+/// unprovable. Both processes read the same host clock, so anything past a second
+/// is a clock step, not jitter.
+const MAX_FUTURE_SKEW_S: f64 = 1.0;
+
 fn run_dir() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
 }
@@ -117,7 +122,10 @@ fn read_status(path: &Path, now: f64) -> Response {
         .get("wall_time_unix")
         .and_then(Value::as_f64)
         .unwrap_or(0.0);
-    if written_at <= 0.0 || now - written_at > SIDECAR_STALE_AFTER_S {
+    // A stamp from the future (the clock stepped backwards) is an unprovable age,
+    // not a fresh one; a second of cross-process jitter is tolerated.
+    let written_age = now - written_at;
+    if written_at <= 0.0 || !(-MAX_FUTURE_SKEW_S..=SIDECAR_STALE_AFTER_S).contains(&written_age) {
         return not_running();
     }
 
@@ -191,7 +199,7 @@ fn refresh_peer(peer: &Value, now: f64, stale_after: f64) -> Option<Value> {
         Some(at) => {
             out.insert("status_at_unix".into(), json!(at));
             out.insert("status_age_s".into(), json!(round2(now - at)));
-            now - at <= stale_after
+            (-MAX_FUTURE_SKEW_S..=stale_after).contains(&(now - at))
         }
         None => false,
     };
@@ -286,6 +294,24 @@ mod tests {
         // The node is still known, and its age is reported honestly.
         assert_eq!(p["device_id"], "drone-a");
         assert_eq!(p["status_age_s"], 60.0);
+    }
+
+    #[tokio::test]
+    async fn a_future_stamped_sidecar_is_not_served_as_current() {
+        // The clock stepped backwards after the write: the ages are unprovable,
+        // so neither the writer nor the peer status reads as fresh.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SIDECAR_FILE);
+        let now = 1_700_000_000.0;
+        std::fs::write(&path, sidecar(now, -120.0, 2.0).to_string()).unwrap();
+        let (status, _) = body_of(read_status(&path, now)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        std::fs::write(&path, sidecar(now, 1.0, -120.0).to_string()).unwrap();
+        let (status, body) = body_of(read_status(&path, now)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["peers"][0]["status_fresh"], false);
+        assert!(body["peers"][0].get("status").is_none());
     }
 
     #[tokio::test]

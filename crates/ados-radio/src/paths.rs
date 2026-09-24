@@ -20,8 +20,6 @@ pub const WFB_STATS_SIDECAR_VERSION: u16 = 1;
 /// drone hop supervisor and the ground-station hop-follow persister, so both
 /// reference this one const. Bump on an incompatible field-set change.
 pub const HOP_SUPERVISOR_SIDECAR_VERSION: u16 = 1;
-/// In-memory channel hint (no file, but this is the path if we ever write one).
-pub const WFB_LOCKED_CHANNEL: &str = "/run/ados/wfb-locked-channel";
 
 /// Persistent WFB key directory.
 pub const WFB_KEY_DIR: &str = "/etc/ados/wfb";

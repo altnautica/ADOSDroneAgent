@@ -23,10 +23,6 @@ use crate::mediamtx::MAIN_PATH;
 use crate::orchestrator::VideoOrchestrator;
 use crate::process::{kill_orphans, kill_publisher_orphans, ManagedProcess};
 use crate::tap::{self, spawn_vision_tap};
-
-/// Give up respawning a local secondary encoder after this many attempts, so a
-/// permanently-broken camera does not respawn forever every tick.
-const MAX_SECONDARY_RESPAWNS: u32 = 5;
 use crate::wfb_tee::{drain_wfb_tee_stderr, orphan_pattern, spawn_wfb_tee, ProgressTracker};
 
 impl VideoOrchestrator {
@@ -288,9 +284,6 @@ impl VideoOrchestrator {
         self.inbound_bytes_value = -1;
         self.inbound_bytes_changed_at = now;
         self.video_inbound_bytes_per_s = 0.0;
-        // Arm the healthy-window sentinel: the first healthy tick stamps it,
-        // matching the Python pipeline (start_stream does not touch it).
-        self.last_healthy_at = None;
         self.last_start_error = StartError::None;
         tracing::info!(encoder = ?kind, "pipeline_started");
         self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming)
@@ -714,16 +707,6 @@ impl VideoOrchestrator {
             {
                 continue;
             }
-            // Skip a leg that has exhausted its respawn budget (given up on).
-            if self
-                .secondary_respawn_attempts
-                .get(&leg.id)
-                .copied()
-                .unwrap_or(0)
-                > MAX_SECONDARY_RESPAWNS
-            {
-                continue;
-            }
             let camera_type = Self::secondary_camera_type(&leg.source);
             let Some(kind) = detect_encoder_for_camera(
                 camera_type,
@@ -773,13 +756,7 @@ impl VideoOrchestrator {
                             "secondary_encoder",
                         ));
                     }
-                    // Replace any dead slot for this leg, else push.
-                    self.secondary_encoders.retain(|(id, _)| id != &leg.id);
-                    self.secondary_encoders.push((leg.id.clone(), proc));
-                    // Stamp the (re)start so a leg that survives a healthy window
-                    // clears its respawn count (consecutive-failure semantics).
-                    self.secondary_started_at
-                        .insert(leg.id.clone(), Instant::now());
+                    self.note_secondary_spawned(&leg.id, proc);
                     tracing::info!(id = %leg.id, encoder = ?kind, "secondary_encoder_started");
                 }
                 Err(e) => {
@@ -789,44 +766,49 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Terminate every owned secondary-leg encoder.
-    pub async fn stop_secondary_encoders(&mut self) {
-        for (id, mut proc) in std::mem::take(&mut self.secondary_encoders) {
-            let _ = id;
-            proc.terminate(Duration::from_secs(5)).await;
-        }
-        // Clear the per-leg circuit-breaker state so a reconfigure / pipeline
-        // restart starts each leg fresh rather than inheriting a stale count.
-        self.secondary_respawn_attempts.clear();
-        self.secondary_started_at.clear();
+    /// Adopt a freshly spawned secondary encoder for `id`, replacing any dead
+    /// slot, and start its liveness window over.
+    ///
+    /// The new encoder is a new publisher on the leg's mediamtx path, whose byte
+    /// counter restarts with it. Carrying the previous encoder's flat-since stamp
+    /// and `live: false` across the respawn read the fresh encoder as mute the
+    /// moment it was born, so the next tick killed it again before it could
+    /// publish a frame.
+    pub(crate) fn note_secondary_spawned(&mut self, id: &str, proc: ManagedProcess) {
+        self.secondary_encoders.retain(|(leg, _)| leg != id);
+        self.secondary_encoders.push((id.to_string(), proc));
+        self.leg_inbound.remove(id);
+        self.leg_live.remove(id);
     }
 
-    /// Best-effort respawn of any DEAD secondary-leg encoder. Isolated from the
-    /// primary restart ladder — a secondary is a LAN-WHEP-only extra, so a plain
-    /// liveness respawn (no backoff ladder / circuit breaker) is sufficient.
-    /// Called at the end of the running tick.
+    /// Terminate every owned secondary-leg encoder.
+    pub async fn stop_secondary_encoders(&mut self) {
+        for (_, mut proc) in std::mem::take(&mut self.secondary_encoders) {
+            proc.terminate(Duration::from_secs(5)).await;
+        }
+    }
+
+    /// Best-effort respawn of any DEAD or MUTE secondary-leg encoder. Isolated
+    /// from the primary restart ladder; a leg that stays broken is retried on
+    /// every health tick, forever, like every other ladder. Called at the end of
+    /// the running tick.
     pub async fn supervise_secondary_encoders(&mut self) {
         if self.state != PipelineState::Running {
             return;
         }
-        // One pass splits the encoders into still-running and dead (is_running
-        // polls the child, so it needs &mut and cannot run inside a closure that
-        // also borrows the counter maps).
-        //
-        // "Dead" is NOT just "exited". `sample_leg_liveness` already derives a
-        // per-leg `live` flag from each leg's mediamtx inbound-byte counter and
-        // stamps it on the sidecar — and that was the whole of it: a secondary
-        // encoder that is alive and MUTE was reported dead to the operator and
-        // then left running forever, because respawn was exit-only. Process
+        // "Dead" is NOT just "exited". `sample_leg_liveness` derives a per-leg
+        // `live` flag from each leg's mediamtx inbound-byte counter; process
         // liveness is never proof of work, so a leg the byte counter says is not
-        // live is fed into the same respawn ladder that handles an exit.
+        // live is fed into the same respawn path that handles an exit.
         //
         // Only an explicit `Some(false)` counts. A leg absent from `leg_live` is
         // UNKNOWN (a `sourceOnDemand` network pull with no reader attached is
         // legitimately flat and is deliberately recorded as unknown rather than
-        // degraded), and a network-pull leg owns no process here anyway.
-        let now = Instant::now();
-        // Snapshot the mute set before the `iter_mut` borrow of the encoders.
+        // degraded, and a freshly respawned encoder has not been sampled yet),
+        // and a network-pull leg owns no process here anyway.
+        //
+        // One pass over the encoders (is_running polls the child, so it needs
+        // `&mut` and cannot run inside a closure that also borrows `leg_live`).
         let mute: std::collections::HashSet<String> = self
             .leg_live
             .iter()
@@ -834,7 +816,6 @@ impl VideoOrchestrator {
             .map(|(id, _)| id.clone())
             .collect();
         let mut dead_ids: Vec<String> = Vec::new();
-        let mut running_ids: Vec<String> = Vec::new();
         for (id, p) in self.secondary_encoders.iter_mut() {
             if !p.is_running() {
                 dead_ids.push(id.clone());
@@ -844,56 +825,14 @@ impl VideoOrchestrator {
                     "secondary_encoder_mute: alive but inbound bytes flat; respawning"
                 );
                 dead_ids.push(id.clone());
-            } else {
-                running_ids.push(id.clone());
             }
         }
-        // Clear the respawn count for any leg that has run healthy (process alive)
-        // for a full window since its last (re)start — the secondary analog of the
-        // primary's `note_healthy_tick`, so the budget counts CONSECUTIVE failures
-        // and a flaky-but-recoverable camera is never permanently abandoned.
-        for id in &running_ids {
-            let over_budget = self
-                .secondary_respawn_attempts
-                .get(id)
-                .copied()
-                .unwrap_or(0)
-                > 0;
-            let window_elapsed = self
-                .secondary_started_at
-                .get(id)
-                .is_some_and(|since| crate::health::healthy_window_elapsed(*since, now));
-            if over_budget && window_elapsed {
-                tracing::info!(
-                    leg = %id, window_s = crate::health::HEALTHY_RESET_WINDOW.as_secs(),
-                    "secondary_encoder_respawn_counter_reset: healthy window reached"
-                );
-                self.secondary_respawn_attempts.remove(id);
-            }
-        }
-        if !dead_ids.is_empty() {
-            self.secondary_encoders
-                .retain(|(id, _)| !dead_ids.contains(id));
-            // Count a respawn per dead leg, so a permanently-broken local camera
-            // is given up on (a bounded circuit breaker) rather than respawned
-            // forever every tick.
-            for id in &dead_ids {
-                let n = self
-                    .secondary_respawn_attempts
-                    .entry(id.clone())
-                    .or_insert(0);
-                *n += 1;
-                if *n > MAX_SECONDARY_RESPAWNS {
-                    tracing::warn!(
-                        leg = %id, attempts = *n,
-                        "secondary_encoder_giving_up: too many respawns"
-                    );
-                }
-            }
-            // Re-run the spawn pass; it only starts legs not already running and
-            // skips legs past the respawn cap.
-            self.start_secondary_encoders().await;
-        }
+        self.secondary_encoders
+            .retain(|(id, _)| !dead_ids.contains(id));
+        // Re-run the spawn pass every tick: it starts every local leg that is
+        // not running — a leg just reaped above, and a leg whose earlier spawn
+        // failed — and leaves running legs alone.
+        self.start_secondary_encoders().await;
     }
 
     /// Stop the decoupled vision frame tap. Parallels

@@ -59,8 +59,6 @@ from ._net_helpers import (
 from ._service_inspection import (
     _cloudflared_running,
     _remote_status,
-    _service_state,
-    _services,
 )
 from ._status import build_setup_status
 
@@ -84,8 +82,6 @@ __all__ = [
     "_build_known_hosts",
     "_safe_host_for",
     # service inspection
-    "_services",
-    "_service_state",
     "_remote_status",
     "_cloudflared_running",
     # access urls + video

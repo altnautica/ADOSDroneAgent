@@ -29,7 +29,6 @@ use ados_vision::source::{
     discover_cameras_default, AnySource, CaptureSource, FrameSource, TapSource,
 };
 use ados_vision::visionsock;
-use tokio::sync::Notify;
 
 /// Canonical agent config file.
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
@@ -240,7 +239,7 @@ async fn main() {
     };
     tracing::info!(models = paces.len(), "perception schedule built");
 
-    let cancel = Arc::new(Notify::new());
+    let cancel = ados_protocol::shutdown::Shutdown::new();
 
     // Resolve the camera set: an explicit config list wins; otherwise HAL
     // discovery enumerates the engine cameras (each tapped by default).
@@ -305,7 +304,7 @@ async fn main() {
     tracing::info!("ados-vision ready");
     wait_for_shutdown().await;
     tracing::info!("ados-vision stopping");
-    cancel.notify_waiters();
+    cancel.trigger();
     for t in tasks {
         let _ = t.await;
     }
@@ -383,7 +382,7 @@ async fn run_camera(
     cam: ResolvedCamera,
     _downscale: (u32, u32),
     paces: Vec<ModelPace>,
-    cancel: Arc<Notify>,
+    cancel: ados_protocol::shutdown::Shutdown,
 ) {
     let mut frame_id: u64 = 0;
     // The per-camera schedule: each camera paces its models independently.
@@ -454,7 +453,7 @@ async fn run_camera(
                                             let due = scheduler.take_due(now_ms() as u64);
                                             if !due.is_empty() {
                                                 let eng = engine.clone();
-                                                let data = raw.data.clone();
+                                                let data = raw.data;
                                                 tokio::spawn(async move {
                                                     let _permit = permit;
                                                     for det in due {
@@ -483,7 +482,7 @@ async fn run_camera(
                         }
                     }
                 }
-                _ = cancel.notified() => return,
+                _ = cancel.wait() => return,
             }
         }
         if backoff(&cancel).await {
@@ -495,10 +494,10 @@ async fn run_camera(
 /// A short backoff that also wakes on shutdown. Returns `true` when shutdown
 /// fired during the wait (the caller should stop), `false` when the full
 /// backoff elapsed (the caller should reopen its source).
-async fn backoff(cancel: &Arc<Notify>) -> bool {
+async fn backoff(cancel: &ados_protocol::shutdown::Shutdown) -> bool {
     tokio::select! {
         _ = tokio::time::sleep(Duration::from_millis(500)) => false,
-        _ = cancel.notified() => true,
+        _ = cancel.wait() => true,
     }
 }
 

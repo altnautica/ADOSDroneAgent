@@ -185,7 +185,7 @@ export class MspTelemetryClient {
         break;
       }
       case MSP_CMD.MSP_RAW_GPS: {
-        const g = decodeRawGps(payload);
+        const g = decodeRawGps(payload, this.firmware);
         if (g) this.snap.gps = g;
         break;
       }

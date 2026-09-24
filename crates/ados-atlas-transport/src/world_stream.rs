@@ -49,6 +49,7 @@ use axum::{
 use tokio::sync::broadcast;
 
 use ados_protocol::atlas::AtlasEvent;
+use ados_protocol::ws_ticket::WS_TICKET_SUBPROTOCOL;
 
 /// The WebSocket route a world-model consumer connects to, one path per device.
 pub const WORLD_WS_ROUTE: &str = "/ws/atlas/:device_id";
@@ -94,7 +95,8 @@ impl WorldBroadcaster {
 }
 
 /// The axum router the compute node mounts to serve the per-device world-model
-/// descriptor stream.
+/// descriptor stream. The route carries no auth of its own: the node mounts it
+/// behind its world-stream lane gate.
 pub fn world_ws_router(broadcaster: Arc<WorldBroadcaster>) -> Router {
     Router::new()
         .route(WORLD_WS_ROUTE, get(world_ws))
@@ -109,7 +111,8 @@ async fn world_ws(
     // Subscribe BEFORE the upgrade completes so a descriptor published in the
     // connect window is not missed by a freshly-connected consumer.
     let rx = b.subscribe();
-    ws.on_upgrade(move |socket| forward_descriptors(socket, device_id, rx))
+    ws.protocols([WS_TICKET_SUBPROTOCOL])
+        .on_upgrade(move |socket| forward_descriptors(socket, device_id, rx))
 }
 
 async fn forward_descriptors(

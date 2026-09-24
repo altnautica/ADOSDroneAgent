@@ -6,20 +6,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { useSnapshot } from "@/hooks/use-snapshot";
 import { useStatus } from "@/hooks/use-status";
 import { fmtRssi } from "@/lib/format";
 
 export function NetworkPanel() {
-  const snap = useSnapshot();
   const status = useStatus();
 
-  const ips = snap.data?.network?.ip ?? status.data?.network?.ip_addresses ?? {};
-  const uplink = snap.data?.network?.uplink ?? status.data?.network?.uplink_kind;
-  const rssi =
-    typeof snap.data?.network?.rssi_dbm === "number"
-      ? snap.data?.network?.rssi_dbm
-      : (status.data?.network?.rssi_dbm ?? null);
+  const ips = status.data?.network?.ip_addresses ?? {};
+  const uplink = status.data?.network?.uplink_kind;
+  const rssi = status.data?.network?.rssi_dbm ?? null;
   const interfaces = Object.entries(ips);
 
   return (

@@ -18,8 +18,8 @@ pub(super) struct OffloadStreamHandle {
     pub(super) task: JoinHandle<()>,
     /// The compute node's job-API base URL the session runs against (for health).
     pub(super) node_base_url: String,
-    /// The pairing key sent to the node off-box (`None` on-box / unpaired).
-    pub(super) api_key: Option<String>,
+    /// The credential the node issued this drone (`None` when none is installed).
+    pub(super) credential: Option<String>,
 }
 
 /// The RTSP port the drone's encoder publishes its primary feed on, and the
@@ -77,7 +77,7 @@ pub(super) struct OffloadLane {
     pub(super) target_budget_ms: i64,
     pub(super) model_id: Option<String>,
     pub(super) base_url: String,
-    pub(super) api_key: Option<String>,
+    pub(super) credential: Option<String>,
 }
 
 /// Run a plugin offload session until its handle is aborted: the orchestrator
@@ -98,9 +98,9 @@ pub(super) async fn supervise_offload_lane(lane: OffloadLane, cancel: Arc<Notify
         if let Some(m) = &lane.model_id {
             cfg.model_id = m.clone();
         }
-        let endpoint = NodeEndpoint::Direct {
+        let endpoint = NodeEndpoint {
             base_url: lane.base_url.clone(),
-            api_key: lane.api_key.clone(),
+            credential: lane.credential.clone(),
         };
         match run_offload_orchestrator(cfg, endpoint, cancel.clone()).await {
             Ok(()) => {
@@ -137,13 +137,17 @@ pub(super) async fn local_ip_towards(node_addr: &str) -> Option<std::net::IpAddr
     sock.local_addr().ok().map(|a| a.ip())
 }
 
-/// The pairing key to present off-box, from a `pairing.json`. `None` when the
-/// agent is unpaired (open) — matching the reconciler, which sends the drone's
-/// own pairing key on the off-box leg — or when the file cannot be read, in
-/// which case no key is presented and a paired node refuses the session.
-pub(super) fn pairing_key(path: &std::path::Path) -> Option<String> {
-    match load_pairing(path) {
-        Pairing::Paired(key) => Some(key),
-        Pairing::Unpaired | Pairing::Unreadable => None,
-    }
+/// The credential to present to the offload node: the one the node named by
+/// `node_id` (the offload link's advertised node id) issued this drone, or, for
+/// a node with no advertised id, the sole installed credential. `None` when none
+/// fits, in which case a paired node refuses the session. Never the drone's own
+/// pairing key, which is full authority over the drone and means nothing to the
+/// node.
+pub(super) fn workstation_credential(
+    path: &std::path::Path,
+    node_id: Option<&str>,
+) -> Option<String> {
+    WorkstationCredentials::load_or_empty(path)
+        .for_node(node_id)
+        .map(|c| c.credential.clone())
 }

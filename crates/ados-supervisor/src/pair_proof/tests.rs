@@ -321,34 +321,29 @@ fn the_cooldown_survives_a_reboot() {
 }
 
 #[test]
-fn the_episode_budget_is_bounded_and_persists_across_reboots() {
+fn a_key_that_never_works_keeps_being_rearmed_across_reboots() {
+    // The failure this replaces: five episodes per key, persisted, then a
+    // permanent `exhausted` that survived every reboot. A drone holding a key
+    // from a peer that was reflashed stopped trying after a couple of hours
+    // and needed someone on site. Recovery never stops now; the cooldown is the
+    // only pacing.
     let mut rig = Rig::new(BindRole::Drone);
-    let max = rig.cfg.max_episodes;
     let cooldown = rig.cfg.cooldown_s;
     let hold = rig.cfg.confirm_hold.as_secs();
 
+    let rounds = 12u32;
     let mut total_arms = 0usize;
     let mut t = 0u64;
-    // Far more chances than the budget allows, each after a reboot and a full
-    // cooldown, so nothing but the budget itself can be what stops it.
-    for _ in 0..(max + 5) {
+    for _ in 0..rounds {
         rig.reboot(BindRole::Drone);
         total_arms += arms(&rig.serve_hold(t));
         t += hold + cooldown + 120;
     }
-    assert_eq!(total_arms, max as usize);
-    assert_eq!(rig.stored().unwrap().rearm_episodes, max);
-
-    // And it parks loudly, once.
-    rig.reboot(BindRole::Drone);
-    let out = rig.serve_hold(t);
-    let last = out.last().unwrap();
-    assert_eq!(last.step, RearmStep::Exhausted);
-    let exhausted_events = out
-        .iter()
-        .filter(|o| matches!(o.event, Some(RearmEvent::Exhausted { .. })))
-        .count();
-    assert_eq!(exhausted_events, 1, "exhausted is a level, announced once");
+    assert_eq!(
+        total_arms, rounds as usize,
+        "one episode per cooldown, every time"
+    );
+    assert_eq!(rig.stored().unwrap().rearm_episodes, rounds);
 }
 
 // ── things that must not be read as a verdict ────────────────────────────────
@@ -513,7 +508,7 @@ fn force_arms_once_then_self_clears() {
     let mut rig = Rig::new(BindRole::Drone);
     let mut seed = PairProof::fresh("drone", FP);
     seed.mark_proven(rig.unix0 - 100); // proven: normally never re-armed
-    seed.rearm_episodes = rig.cfg.max_episodes + 2; // and out of budget
+    seed.rearm_episodes = 7;
     seed.force_rearm = true;
     write_pair_proof_to(&rig.path, &seed).unwrap();
 
@@ -523,7 +518,7 @@ fn force_arms_once_then_self_clears() {
     assert_eq!(
         out.event,
         Some(RearmEvent::Armed {
-            episode: rig.cfg.max_episodes + 3,
+            episode: 8,
             forced: true
         })
     );
@@ -551,21 +546,17 @@ fn an_absent_or_malformed_config_leaves_the_latch_enabled() {
         let cfg = read_config_from(text);
         assert!(cfg.enabled, "{text:?} disabled the latch");
         assert_eq!(cfg.confirm_hold, REARM_CONFIRM_HOLD);
-        assert_eq!(cfg.max_episodes, DEFAULT_MAX_REARM_EPISODES);
         assert_eq!(cfg.cooldown_s, DEFAULT_REARM_COOLDOWN_S);
     }
 }
 
 #[test]
-fn the_config_tunables_are_honored_and_floored() {
+fn the_config_tunables_are_honored() {
     let cfg = read_config_from(
-        "video:\n  wfb:\n    pair_rearm:\n      confirm_hold_s: 120\n      max_episodes: 0\n      cooldown_s: 60\n      stats_fresh_ceiling_s: 5\n",
+        "video:\n  wfb:\n    pair_rearm:\n      confirm_hold_s: 120\n      cooldown_s: 60\n      stats_fresh_ceiling_s: 5\n",
     );
     assert!(cfg.enabled);
     assert_eq!(cfg.confirm_hold, Duration::from_secs(120));
-    // Zero episodes would mean "never recover"; `enabled: false` is how you turn
-    // it off, so the floor is one.
-    assert_eq!(cfg.max_episodes, 1);
     assert_eq!(cfg.cooldown_s, 60);
     assert_eq!(cfg.stats_fresh_ceiling, Duration::from_secs(5));
 }
@@ -595,16 +586,14 @@ fn the_event_detail_is_bland_and_carries_the_episode() {
         },
         "drone",
         FP,
-        5,
     );
     assert_eq!(d.get("state").and_then(|v| v.as_str()), Some("armed"));
     assert_eq!(d.get("role").and_then(|v| v.as_str()), Some("drone"));
     assert_eq!(d.get("episode").and_then(|v| v.as_u64()), Some(2));
-    assert_eq!(d.get("max_episodes").and_then(|v| v.as_u64()), Some(5));
     assert_eq!(d.get("forced").and_then(|v| v.as_bool()), Some(false));
 
-    // Opening a bind window on a rig that believed it was paired, and giving up
-    // on one, are both things an operator should see.
+    // Opening a bind window on a rig that believed it was paired is something
+    // an operator should see.
     assert_eq!(
         RearmEvent::Armed {
             episode: 1,
@@ -613,7 +602,6 @@ fn the_event_detail_is_bland_and_carries_the_episode() {
         .level(),
         Level::Warn
     );
-    assert_eq!(RearmEvent::Exhausted { episodes: 5 }.level(), Level::Warn);
     assert_eq!(RearmEvent::Proven.level(), Level::Info);
     assert_eq!(RearmEvent::Cleared.level(), Level::Info);
     assert_eq!(RearmEvent::Cleared.state(), "cleared");

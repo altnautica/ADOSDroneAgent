@@ -18,9 +18,11 @@
 //! against a real airframe, and an autopilot reboot is not a thing to discover
 //! the edges of in the field.
 //!
-//! What ships enabled is the OBSERVATION — the decision is evaluated and
-//! reported on every tick whether or not the write is allowed, so an operator
-//! can see what would happen before letting it happen.
+//! Nothing calls this module yet (it is recorded as deliberately uncalled in the
+//! route-module wiring test), so neither the decision nor the write runs. Once a
+//! reconciler is wired, the decision is meant to be evaluated and reported on
+//! every tick whether or not the write is allowed, so an operator can see what
+//! would happen before letting it happen.
 //!
 //! ## Why it never reboots the autopilot itself
 //!

@@ -13,65 +13,6 @@ router = APIRouter(tags=["pairing"])
 log = get_logger("pairing_api")
 
 
-class ClaimRequest(BaseModel):
-    user_id: str
-
-
-class ClaimResponse(BaseModel):
-    api_key: str
-    device_id: str
-    name: str
-    mdns_host: str
-
-
-class PairingInfo(BaseModel):
-    device_id: str
-    name: str
-    version: str
-    board: str
-    # `paired` is cloud-pair status: the agent has been claimed by a
-    # Mission Control account via the Convex API-key flow. Distinct
-    # from `radio_paired` below — the two are completely independent
-    # and the operator can be in any of the four combinations.
-    paired: bool
-    # `radio_paired` is radio-pair status: the wfb-ng key handshake
-    # with the peer drone or GS has completed, the key files are on
-    # disk, and the WFB radio link is authenticated. Surfaces here
-    # alongside `paired` so Mission Control can render both states
-    # with unambiguous labels.
-    radio_paired: bool = False
-    # Truncated device-id of the radio-paired peer (16 ASCII chars).
-    # Populated from the persisted pair state once the bind tunnel
-    # writes it OR a WFB-radio PresenceBeacon back-fills it.
-    radio_peer_device_id: str | None = None
-    pairing_code: str | None = None
-    owner_id: str | None = None
-    paired_at: float | None = None
-    mdns_host: str
-    profile: str
-    role: str | None = None
-    # Native-vs-packaged aggregate for the node ("native" | "hybrid" |
-    # "packaged"), scoped to the profile above. Lets the LAN pairing
-    # probe carry the same per-node runtime badge the cloud heartbeat
-    # does. Defaults to "packaged" on a pre-cutover agent.
-    runtime_mode: str = "packaged"
-    # Folded WFB bind-session snapshot read from the cross-process bind
-    # sentinel. Null when no bind has run since boot. Lets Mission Control
-    # render "binding…" / "bind failed: <error>" during/after a radio pair.
-    bind_state: dict | None = None
-    # Folded radio link snapshot {state, rssi_dbm, packets_received}. Null
-    # from this process today (the radio manager lives in ados-wfb); reserved
-    # for a future in-process reader. The GCS falls back to radio_paired.
-    radio: dict | None = None
-    # Whether a flight controller is connected and talking to this agent. Lets
-    # Mission Control tie the agent node to its FC and show FC presence on the
-    # single canonical fleet card. Best-effort; False on a partially-configured
-    # agent. fc_port/fc_baud are the live serial link parameters.
-    fc_connected: bool = False
-    fc_port: str | None = None
-    fc_baud: int | None = None
-
-
 class AcceptCodeRequest(BaseModel):
     code: str
 

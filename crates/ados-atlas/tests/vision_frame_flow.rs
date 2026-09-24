@@ -28,7 +28,6 @@ use ados_vision::backend::MockBackend;
 use ados_vision::engine::VisionEngine;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
-use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 /// Unique per-call ids so concurrent test binaries never collide on a shared
@@ -58,7 +57,7 @@ fn rgb24_pattern(seed: u8) -> Vec<u8> {
 struct Bus {
     engine: Arc<VisionEngine>,
     sock: String,
-    cancel: Arc<Notify>,
+    cancel: ados_protocol::shutdown::Shutdown,
     server: JoinHandle<()>,
     _dir: TempDir,
 }
@@ -73,7 +72,7 @@ impl Bus {
             .to_string_lossy()
             .to_string();
         let engine = VisionEngine::new(Box::new(MockBackend), slot_count);
-        let cancel = Arc::new(Notify::new());
+        let cancel = ados_protocol::shutdown::Shutdown::new();
         let server = {
             let engine = engine.clone();
             let cancel = cancel.clone();
@@ -94,7 +93,7 @@ impl Bus {
     }
 
     async fn shutdown(self) {
-        self.cancel.notify_waiters();
+        self.cancel.trigger();
         let _ = self.server.await;
     }
 }
@@ -194,9 +193,10 @@ async fn atlas_reader_surfaces_the_published_pixels() {
     assert_eq!(frame.width, 8);
     assert_eq!(frame.height, 8);
     assert_eq!(frame.format, FrameFormat::Rgb24);
-    assert_eq!(frame.bytes.len(), published.byte_len as usize);
+    let bytes = frame.pixels.into_bytes().expect("ring slot readable");
+    assert_eq!(bytes.len(), published.byte_len as usize);
     assert_eq!(
-        frame.bytes, pixels,
+        bytes, pixels,
         "atlas must read the exact pixels vision published, byte for byte"
     );
 
@@ -240,7 +240,7 @@ async fn atlas_reader_filters_a_disabled_camera() {
         .expect("prime frame timed out")
         .expect("no prime frame");
     assert_eq!(primed.camera_id, enabled_cam);
-    assert_eq!(primed.bytes, prime);
+    assert_eq!(primed.pixels.into_bytes().expect("prime pixels"), prime);
 
     // Now the reader is live. Publish a DISABLED-camera frame, then the wanted
     // ENABLED-camera frame, in that order. The reader must skip the first.
@@ -272,12 +272,13 @@ async fn atlas_reader_filters_a_disabled_camera() {
         "the disabled camera's descriptor must be filtered out"
     );
     assert_eq!(got.ts_ms, 300);
+    let got_px = got.pixels.into_bytes().expect("wanted pixels");
     assert_eq!(
-        got.bytes, wanted_px,
+        got_px, wanted_px,
         "the enabled camera's pixels surface, never the disabled camera's"
     );
     assert_ne!(
-        got.bytes, disabled_px,
+        got_px, disabled_px,
         "the disabled camera's pixels must never surface"
     );
 

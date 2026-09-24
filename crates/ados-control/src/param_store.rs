@@ -42,32 +42,55 @@ pub fn default_params_path() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_PARAMS_PATH))
 }
 
+/// Why the parameter cache could not be read. An absent file is not an error (no
+/// router has persisted anything yet, so there are genuinely no parameters); an
+/// unreadable or malformed file is, and a route must not present it as a verified
+/// empty set.
+#[derive(Debug)]
+pub enum ParamCacheError {
+    /// The file exists but could not be read (permissions, I/O error).
+    Unreadable(std::io::Error),
+    /// The file was read but is not a JSON object (truncated, malformed, wrong
+    /// root type).
+    Malformed,
+}
+
+impl std::fmt::Display for ParamCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreadable(e) => write!(f, "parameter cache unreadable: {e}"),
+            Self::Malformed => f.write_str("parameter cache malformed"),
+        }
+    }
+}
+
 /// The cached parameters as the flattened `{name: value}` object every parameter
 /// route projects.
 ///
-/// Degrades to an empty map on every failure — an absent file (no router has run
-/// yet, or the FC has never answered a `PARAM_REQUEST_LIST`), an unreadable file,
-/// a truncated or malformed document, or a document whose root is not an object.
-/// That is the same empty shape these routes returned for an absent state
-/// snapshot, so a missing cache stays a 200 with `params: {}` and never a 500.
+/// An absent file (no router has run yet, or the FC has never answered a
+/// `PARAM_REQUEST_LIST`) is an empty map: nothing is cached. An unreadable file,
+/// or a truncated / malformed document / non-object root, is an error so the
+/// caller can report the cache as broken rather than as empty.
 ///
 /// Entries whose `value` is absent or non-numeric are skipped individually,
 /// matching the router's own loader: one corrupt entry must not discard the other
 /// 699.
-pub fn read_param_blob(path: &Path) -> Map<String, Value> {
-    let Ok(body) = std::fs::read(path) else {
-        return Map::new();
+pub fn read_param_blob(path: &Path) -> Result<Map<String, Value>, ParamCacheError> {
+    let body = match std::fs::read(path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(e) => return Err(ParamCacheError::Unreadable(e)),
     };
     let Ok(Value::Object(parsed)) = serde_json::from_slice::<Value>(&body) else {
-        return Map::new();
+        return Err(ParamCacheError::Malformed);
     };
-    parsed
+    Ok(parsed
         .into_iter()
         .filter_map(|(name, entry)| {
             let value = entry.get("value")?;
             value.as_f64().map(|_| (name, value.clone()))
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -91,7 +114,7 @@ mod tests {
                 "ATC_RAT_RLL_P": { "value": 0.135, "param_type": 9, "last_updated": 2.0 },
             }),
         );
-        let blob = read_param_blob(&path);
+        let blob = read_param_blob(&path).unwrap();
         assert_eq!(blob.len(), 2);
         assert_eq!(blob.get("WPNAV_SPEED"), Some(&json!(500.0)));
         assert_eq!(blob.get("ATC_RAT_RLL_P"), Some(&json!(0.135)));
@@ -105,6 +128,7 @@ mod tests {
         let path = dir.path().join("params.json");
         write_cache(&path, &json!({ "SYSID_THISMAV": { "value": 1 } }));
         let value = read_param_blob(&path)
+            .unwrap()
             .get("SYSID_THISMAV")
             .cloned()
             .unwrap();
@@ -115,22 +139,24 @@ mod tests {
     #[test]
     fn a_missing_file_is_an_empty_map_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read_param_blob(&dir.path().join("nope.json")).is_empty());
+        assert!(read_param_blob(&dir.path().join("nope.json"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
-    fn an_unparseable_or_non_object_document_is_an_empty_map() {
+    fn an_unparseable_or_non_object_document_is_an_error_not_an_empty_map() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("params.json");
         std::fs::write(&path, b"{ this is not json").unwrap();
-        assert!(read_param_blob(&path).is_empty());
+        assert!(matches!(
+            read_param_blob(&path),
+            Err(ParamCacheError::Malformed)
+        ));
         // A valid document whose root is the wrong type is equally unusable.
         for body in [json!([1, 2, 3]), json!("nope"), json!(null)] {
             write_cache(&path, &body);
-            assert!(
-                read_param_blob(&path).is_empty(),
-                "root {body} is not a map"
-            );
+            assert!(read_param_blob(&path).is_err(), "root {body} is not a map");
         }
     }
 
@@ -147,7 +173,7 @@ mod tests {
                 "NOT_AN_ENTRY": 7,
             }),
         );
-        let blob = read_param_blob(&path);
+        let blob = read_param_blob(&path).unwrap();
         assert_eq!(blob.len(), 1, "only the well-formed entry survives");
         assert_eq!(blob.get("GOOD"), Some(&json!(1.5)));
     }

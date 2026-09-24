@@ -97,8 +97,6 @@ flight_log_dir: \"/var/ados/logs/flights\"\n\
 \n\
 server:\n  \
 mode: \"{server_mode}\"\n  \
-telemetry_rate: 2\n  \
-heartbeat_interval: 5\n  \
 mqtt_transport: \"websockets\"\n  \
 mqtt_username: \"\"\n  \
 mqtt_password: \"\"\n\

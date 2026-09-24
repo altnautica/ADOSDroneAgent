@@ -9,11 +9,14 @@
 //! as "the fixtures are stale" — the receiver is the party that has to agree,
 //! and it is not in this repository.
 //!
-//! One deliberate change since the capture: `wfbAdapterChipset` and
+//! Deliberate changes since the capture: `wfbAdapterChipset` and
 //! `wfbAdapterInjectionOk` now ride as explicit JSON nulls on a rig with no
 //! radio view instead of being omitted. The receiver declares both as
 //! `v.optional(v.union(T, v.null()))` — it agrees, and it needs the null to
-//! clear a previous tick's verdict. The stripped fixture carries them.
+//! clear a previous tick's verdict. The stripped fixture carries them. And the
+//! unmeasured `fcPort` / `fcBaud` / `videoWhepPort` / `mavlinkWsPort` are
+//! omitted instead of asserted as `""` / `0`: the receiver declares each
+//! optional, and a fabricated zero reads as a real port.
 //!
 //! This builds the same logical input in Rust and asserts the Rust
 //! serialization equals the fixture as a `serde_json::Value` — comparing as
@@ -49,17 +52,17 @@ fn base_payload() -> HeartbeatPayload {
         memory_percent: Some(12.0),
         disk_percent: Some(3.0),
         temperature: None,
-        memory_used_mb: 256,
-        memory_total_mb: 4096,
-        disk_used_gb: 2.0,
-        disk_total_gb: 64.0,
-        cpu_cores: 4,
-        board_ram_mb: 4096,
-        cpu_history: vec![1.5],
-        memory_history: vec![12.0],
+        memory_used_mb: Some(256),
+        memory_total_mb: Some(4096),
+        disk_used_gb: Some(2.0),
+        disk_total_gb: Some(64.0),
+        cpu_cores: Some(4),
+        board_ram_mb: Some(4096),
+        cpu_history: Some(vec![1.5]),
+        memory_history: Some(vec![12.0]),
         fc_connected: Some(false),
-        fc_port: String::new(),
-        fc_baud: 0,
+        fc_port: None,
+        fc_baud: None,
         transport_open: None,
         mavlink_alive: None,
         heartbeat_age_s: None,
@@ -77,8 +80,8 @@ fn base_payload() -> HeartbeatPayload {
         api_url: Some("http://127.0.0.1:8080/api".to_string()),
         agent_version: VERSION.to_string(),
         video_state: Some("stopped".to_string()),
-        video_whep_port: 0,
-        mavlink_ws_port: 0,
+        video_whep_port: None,
+        mavlink_ws_port: None,
         mavlink_ws_url: None,
         video_whep_url: None,
         mission_control_url: None,

@@ -15,8 +15,6 @@ pub enum BearerKind {
     Loopback,
     /// Direct LAN/WiFi HTTP — the first-class production path.
     DirectLan,
-    /// Post-flight bulk upload over the LAN.
-    PostFlightBulk,
     /// Relayed WFB<->LAN by the ground agent (field / outdoor).
     WfbRelay,
     /// MQTT/Convex cloud relay (off-LAN, opt-in).
@@ -30,9 +28,8 @@ impl BearerKind {
         match self {
             Self::Loopback => 0,
             Self::DirectLan => 1,
-            Self::PostFlightBulk => 2,
-            Self::WfbRelay => 3,
-            Self::Cloud => 4,
+            Self::WfbRelay => 2,
+            Self::Cloud => 3,
         }
     }
 }

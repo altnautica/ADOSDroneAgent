@@ -14,13 +14,15 @@ a wire contract changes; CI builds the Rust crate against the committed file.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from pathlib import Path
 
 import msgpack
 
 from ados.core.contracts import contract_version
-from ados.plugins.rpc import CapabilityToken, Envelope, TokenIssuer, encode_frame
+from ados.plugins.rpc import CapabilityToken, Envelope, encode_frame
 
 # Fixed inputs so the output is deterministic and reproducible.
 SECRET = b"interop-secret-0123456789abcdef!"  # 32 bytes
@@ -32,9 +34,18 @@ EXPIRES_AT = ISSUED_AT + TTL
 GRANTED = {"mavlink.read", "event.publish", "telemetry.read"}
 
 
+def _sign(plugin_id: str, session_id: str, issued: int, expires: int, caps: frozenset) -> str:
+    # The token signature: HMAC-SHA256 over the pipe-joined
+    # plugin|session|issued|expires|<sorted caps, comma-joined>, hex-encoded.
+    # The agent no longer mints tokens in Python (the host does), so the
+    # signature is computed here from that definition; the Python side still
+    # owns the token string form, which CapabilityToken renders below.
+    payload = "|".join([plugin_id, session_id, str(issued), str(expires), ",".join(sorted(caps))])
+    return hmac.new(SECRET, payload.encode(), hashlib.sha256).hexdigest()
+
+
 def token_fixture() -> dict:
-    issuer = TokenIssuer(secret=SECRET)
-    sig = issuer._sign(PLUGIN_ID, SESSION_ID, ISSUED_AT, EXPIRES_AT, frozenset(GRANTED))
+    sig = _sign(PLUGIN_ID, SESSION_ID, ISSUED_AT, EXPIRES_AT, frozenset(GRANTED))
     token = CapabilityToken(
         plugin_id=PLUGIN_ID,
         session_id=SESSION_ID,

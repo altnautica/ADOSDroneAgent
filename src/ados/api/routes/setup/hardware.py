@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 
 from ados.api.deps import get_agent_app
@@ -43,7 +45,10 @@ async def get_hardware_check() -> HardwareCheckStatus:
     """Return the per-component hardware readiness snapshot for the active profile."""
     runtime = get_agent_app()
     profile, role = _resolve_profile(runtime.config)
-    return run_hardware_check(runtime, profile=profile, ground_role=role)
+    # The sweep probes USB, V4L2, radios and the FC link; run it off the loop.
+    return await asyncio.to_thread(
+        run_hardware_check, runtime, profile=profile, ground_role=role
+    )
 
 
 @router.post("/hardware-check/refresh", response_model=HardwareCheckStatus)
@@ -56,6 +61,9 @@ async def refresh_hardware_check() -> HardwareCheckStatus:
     """
     runtime = get_agent_app()
     profile, role = _resolve_profile(runtime.config)
-    fresh = run_hardware_check_fresh(runtime, profile=profile, ground_role=role)
-    hardware_state.write(fresh)
-    return fresh
+    def _sweep() -> HardwareCheckStatus:
+        fresh = run_hardware_check_fresh(runtime, profile=profile, ground_role=role)
+        hardware_state.write(fresh)
+        return fresh
+
+    return await asyncio.to_thread(_sweep)

@@ -220,9 +220,16 @@ pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipa
         _ => return detail(StatusCode::BAD_REQUEST, "missing or empty file part"),
     };
 
-    match store_upload(&dir, &meta, staged) {
-        Ok(entry) => (StatusCode::OK, Json(entry)).into_response(),
-        Err(msg) => detail(StatusCode::INTERNAL_SERVER_ERROR, msg),
+    // The finalize does blocking renames, reads and an fsync, and holds the
+    // catalog lock across them: run it on the blocking pool.
+    let finalize = tokio::task::spawn_blocking(move || store_upload(&dir, &meta, staged)).await;
+    match finalize {
+        Ok(Ok(entry)) => (StatusCode::OK, Json(entry)).into_response(),
+        Ok(Err(msg)) => detail(StatusCode::INTERNAL_SERVER_ERROR, msg),
+        Err(e) => detail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("model finalize failed: {e}"),
+        ),
     }
 }
 
@@ -311,20 +318,46 @@ fn random_token() -> String {
     hex::encode(buf)
 }
 
+/// Serializes every finalize (model rename + catalog read-modify-write), so two
+/// concurrent uploads cannot both read the old catalog and have the second
+/// rename drop the first one's entry.
+static CATALOG_WRITE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Finalize a staged upload: rename the tmp file to its id-derived name and upsert
 /// the catalog entry. Returns the success body `{status, id, filename, sha256,
 /// size_bytes}`. The id was validated by the handler before this runs, so the
 /// derived path is guaranteed to stay inside `dir` (a single file directly in it),
 /// and the tmp already lives in `dir`, so the rename is a same-dir atomic move.
+///
+/// The model file and its catalog entry change together or not at all: a model
+/// already at the target name is set aside first, and if the catalog write fails
+/// the new file is removed and the previous one put back, so the catalog never
+/// describes bytes that are not on disk.
 fn store_upload(dir: &Path, meta: &UploadMeta, staged: StagedFile) -> Result<Value, String> {
+    let _write = CATALOG_WRITE.lock();
     let id = meta.id.trim();
     let filename = format!("{id}{}", suffix_for_runtime(&meta.runtime));
     let model_path = dir.join(&filename);
+
+    // Set aside a model already at the target name, so a failed catalog write can
+    // restore it.
+    let backup = dir.join(format!(".{filename}.prev-{}", random_token()));
+    let had_previous = match std::fs::rename(&model_path, &backup) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(format!("model write failed: {e}")),
+    };
+    let restore_previous = || {
+        if had_previous {
+            let _ = std::fs::rename(&backup, &model_path);
+        }
+    };
 
     // Move the streamed tmp into place atomically. On the error path `staged`'s
     // Drop removes the tmp; on success ManuallyDrop disarms that cleanup so the
     // just-renamed file is not raced away.
     if let Err(e) = std::fs::rename(&staged.tmp_path, &model_path) {
+        restore_previous();
         return Err(format!("model write failed: {e}"));
     }
     let staged = std::mem::ManuallyDrop::new(staged);
@@ -332,7 +365,14 @@ fn store_upload(dir: &Path, meta: &UploadMeta, staged: StagedFile) -> Result<Val
     let sha256 = staged.sha256.clone();
     let size_bytes = staged.size_bytes;
 
-    upsert_catalog(dir, meta, &filename, &sha256, size_bytes)?;
+    if let Err(e) = upsert_catalog(dir, meta, &filename, &sha256, size_bytes) {
+        let _ = std::fs::remove_file(&model_path);
+        restore_previous();
+        return Err(format!("catalog write failed: {e}"));
+    }
+    if had_previous {
+        let _ = std::fs::remove_file(&backup);
+    }
 
     Ok(json!({
         "status": "ok",
@@ -399,12 +439,12 @@ fn upsert_catalog(
     write_catalog(&catalog_path, &body)
 }
 
-/// Replace the catalog atomically: a temp sibling, fsynced, renamed over the
-/// target, so the engine never reads a half-written list.
+/// Replace the catalog atomically: a uniquely named temp sibling, fsynced,
+/// renamed over the target, so the engine never reads a half-written list.
 fn write_catalog(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.tmp", random_token()));
     let tmp = PathBuf::from(tmp);
     let written = (|| -> std::io::Result<()> {
         let mut f = std::fs::File::create(&tmp)?;
@@ -643,6 +683,30 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("final.onnx")).unwrap(),
             b"payload"
+        );
+    }
+
+    #[test]
+    fn a_failed_catalog_write_restores_the_previous_model() {
+        // A re-upload whose catalog write fails must leave the previous model
+        // bytes in place: the catalog still describes them.
+        let dir = tempfile::tempdir().unwrap();
+        store_upload(dir.path(), &meta("det", "onnx"), stage(dir.path(), b"v1")).unwrap();
+        // A directory where the catalog file should be makes the rename fail.
+        std::fs::remove_file(dir.path().join(CUSTOM_CATALOG)).unwrap();
+        std::fs::create_dir(dir.path().join(CUSTOM_CATALOG)).unwrap();
+
+        let err = store_upload(dir.path(), &meta("det", "onnx"), stage(dir.path(), b"v2"));
+        assert!(err.is_err());
+        assert_eq!(std::fs::read(dir.path().join("det.onnx")).unwrap(), b"v1");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names.len(),
+            2,
+            "only the model and the catalog remain: {names:?}"
         );
     }
 

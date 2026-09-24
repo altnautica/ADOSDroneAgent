@@ -779,9 +779,8 @@ async def test_supervisor_crash_loop_guard_stops_after_5_in_60s(
         # Each child exits with rc=2 immediately.
         return _FakeProc(wait_result=2, wait_delay=0.0)
 
-    # Zero out the backoff so the loop runs at test speed.
-    monkeypatch.setattr(ks, "_BACKOFF_START_SECONDS", 0.0)
-    monkeypatch.setattr(ks, "_BACKOFF_MAX_SECONDS", 0.0)
+    # Zero out the retry wait so the loop runs at test speed.
+    monkeypatch.setattr(ks, "_RETRY_SECONDS", 0.0)
 
     sup = KioskSupervisor(["cage", "--"])
     with patch("asyncio.create_subprocess_exec", _fake_exec):
@@ -1240,8 +1239,7 @@ async def test_crash_loop_sets_crash_looped_flag(monkeypatch: pytest.MonkeyPatch
     async def _fake_exec(*_args: Any, **_kwargs: Any) -> _FakeProc:
         return _FakeProc(wait_result=2, wait_delay=0.0)
 
-    monkeypatch.setattr(ks, "_BACKOFF_START_SECONDS", 0.0)
-    monkeypatch.setattr(ks, "_BACKOFF_MAX_SECONDS", 0.0)
+    monkeypatch.setattr(ks, "_RETRY_SECONDS", 0.0)
     sup = KioskSupervisor(["cage", "--"])
     with patch("asyncio.create_subprocess_exec", _fake_exec):
         await sup.run()
@@ -1313,26 +1311,75 @@ async def _async_noop() -> None:
 def test_browser_probe_errs_toward_running_when_it_cannot_tell() -> None:
     """A false 'the browser is gone' restarts a WORKING kiosk, which is worse
     than missing one failure. Any uncertainty must read as running."""
-    with patch.object(ks.subprocess, "run", side_effect=OSError("no pgrep")):
+    with patch.object(ks.subprocess, "run", side_effect=OSError("no ps")):
         assert ks._browser_running() is True
 
-    # A pgrep that fails for a reason other than "no match" is uncertainty too.
     with patch.object(
-        ks.subprocess, "run", return_value=SimpleNamespace(returncode=2, stdout=b"")
+        ks.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="")
     ):
         assert ks._browser_running() is True
 
 
-def test_browser_probe_reports_gone_only_on_a_clean_no_match() -> None:
+def test_browser_probe_matches_the_executable_not_the_command_line() -> None:
+    """cage's own command line names the browser; only a browser process
+    counts as a live browser."""
+    only_cage = "/usr/bin/cage -- /usr/bin/chromium --kiosk http://localhost:8080/\n"
     with patch.object(
-        ks.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout=b"")
+        ks.subprocess,
+        "run",
+        return_value=SimpleNamespace(returncode=0, stdout=only_cage),
     ):
         assert ks._browser_running() is False
 
+    with_browser = only_cage + "/usr/lib/chromium/chromium --type=renderer\n"
     with patch.object(
-        ks.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout=b"4242\n")
+        ks.subprocess,
+        "run",
+        return_value=SimpleNamespace(returncode=0, stdout=with_browser),
     ):
         assert ks._browser_running() is True
+
+
+def test_a_compositor_whose_arguments_name_the_browser_is_not_a_browser() -> None:
+    """Against the real process table: a live process launched like
+    ``cage -- /usr/bin/chromium ...`` must not read as a running browser."""
+    import subprocess
+    import sys
+
+    fake_cage = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            "cage",
+            "--",
+            "/usr/bin/chromium",
+            "--kiosk",
+        ]
+    )
+    try:
+        assert ks._browser_running() is False
+    finally:
+        fake_cage.kill()
+        fake_cage.wait()
+
+
+@pytest.mark.asyncio
+async def test_crash_loop_of_clean_exits_ends_with_a_restartable_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unit's RestartPreventExitStatus=0 means a 0 from the crash-loop
+    guard would leave the panel dark for good; the guard must exit non-zero."""
+
+    async def _fake_exec(*_args: Any, **_kwargs: Any) -> _FakeProc:
+        return _FakeProc(wait_result=0, wait_delay=0.0)
+
+    monkeypatch.setattr(ks, "_RETRY_SECONDS", 0.0)
+    sup = KioskSupervisor(["cage", "--"])
+    with patch("asyncio.create_subprocess_exec", _fake_exec):
+        rc = await sup.run()
+    assert sup.crash_looped is True
+    assert rc != 0
 
 
 @pytest.mark.asyncio

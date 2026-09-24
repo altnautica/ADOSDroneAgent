@@ -87,8 +87,12 @@ class TestGpioControllerMockMode:
         assert val == 0
 
     def test_write_unconfigured_pin(self):
+        # A write to a pin nobody set up must not conjure one: no entry is
+        # created and a read still sees the unconfigured 0.
         ctrl = GpioController()
-        ctrl.write(99, 1)  # Should not raise
+        ctrl.write(99, 1)
+        assert 99 not in ctrl.pins
+        assert ctrl.read(99) == 0
 
     def test_write_to_input_pin_ignored(self):
         ctrl = GpioController()

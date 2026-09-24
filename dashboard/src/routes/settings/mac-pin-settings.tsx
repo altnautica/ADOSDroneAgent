@@ -1,12 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
+import { ConfigToggle } from "@/components/settings/config-fields";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Switch } from "@/components/ui/switch";
 import { useConfig } from "@/hooks/use-config";
-import { putConfigChecked } from "@/lib/apply-actions";
 import { getMacAdapters, pinMac, unpinMac, type MacAdapter } from "@/lib/mac-pin";
 import { toast, toastFromError } from "@/lib/toast";
 
@@ -103,53 +102,6 @@ function AdapterCard({
         )}
       </CardContent>
     </Card>
-  );
-}
-
-/** One config toggle seeded from live config, written with read-back. */
-function ConfigToggle({
-  configKey,
-  label,
-  hint,
-  value,
-}: {
-  configKey: string;
-  label: string;
-  hint: string;
-  value: boolean | undefined;
-}) {
-  const config = useConfig();
-  const [checked, setChecked] = useState(value ?? false);
-
-  useEffect(() => {
-    setChecked(value ?? false);
-  }, [value]);
-
-  async function apply(next: boolean) {
-    const previous = checked;
-    setChecked(next);
-    try {
-      await putConfigChecked(configKey, String(next));
-      toast.ok("Saved.");
-      config.refetch();
-    } catch (err) {
-      setChecked(previous);
-      toastFromError(err, "Could not save the change.");
-    }
-  }
-
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <div className="space-y-1 min-w-0">
-        <div className="text-sm font-medium">{label}</div>
-        <p className="text-xs text-muted-foreground leading-relaxed">{hint}</p>
-      </div>
-      <Switch
-        checked={checked}
-        onCheckedChange={(v) => void apply(v)}
-        aria-label={label}
-      />
-    </div>
   );
 }
 

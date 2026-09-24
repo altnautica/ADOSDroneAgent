@@ -41,7 +41,7 @@ export function SparklinesRow() {
   const battery = useTimeSeries(snap.data?.fc?.battery?.voltage, (v) =>
     typeof v === "number" ? v : null,
   );
-  const link = useTimeSeries(snap.data?.fc?.link_quality, (v) =>
+  const rc = useTimeSeries(snap.data?.fc?.rc, (v) =>
     typeof v === "number" ? v : null,
   );
   const bitrate = useTimeSeries(snap.data?.video?.bitrate_kbps, (v) =>
@@ -51,10 +51,14 @@ export function SparklinesRow() {
     typeof v === "number" ? v : null,
   );
 
-  const lastBat = battery[battery.length - 1]?.value;
-  const lastLink = link[link.length - 1]?.value;
-  const lastBitrate = bitrate[bitrate.length - 1]?.value;
-  const lastCpu = cpu[cpu.length - 1]?.value;
+  // The headline is the source's CURRENT value, dashed when the source has gone
+  // away; the ring only feeds the chart, so a dropped FC or stream never leaves
+  // its last reading on screen as if it were live.
+  const current = (v: number | null | undefined) => (typeof v === "number" ? v : null);
+  const lastBat = current(snap.data?.fc?.battery?.voltage);
+  const lastRc = current(snap.data?.fc?.rc);
+  const lastBitrate = current(snap.data?.video?.bitrate_kbps);
+  const lastCpu = current(heartbeat.data?.health?.cpu_percent);
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -63,13 +67,13 @@ export function SparklinesRow() {
         unit="V"
         value={lastBat != null ? lastBat.toFixed(2) : "—"}
         data={battery}
-        tone={lastBat != null && lastBat < 14 ? "amber" : "emerald"}
+        tone="emerald"
       />
       <MiniCard
-        label="Link"
+        label="RC RSSI"
         unit="%"
-        value={lastLink != null ? Math.round(lastLink).toString() : "—"}
-        data={link}
+        value={lastRc != null ? Math.round(lastRc).toString() : "—"}
+        data={rc}
         tone="primary"
       />
       <MiniCard

@@ -128,7 +128,10 @@ pub async fn engine_status(State(state): State<AppState>) -> Response {
         .and_then(|s| s.get("npu.load_pct").and_then(|v| v.as_f64()));
     match client.list_models().await {
         Ok(resp) => {
-            let models = decode_models(&resp);
+            let models = match decode_models(&resp) {
+                Ok(m) => m,
+                Err(msg) => return detail(StatusCode::BAD_GATEWAY, msg),
+            };
             let model_count = models.len();
             (
                 StatusCode::OK,
@@ -149,16 +152,18 @@ pub async fn engine_status(State(state): State<AppState>) -> Response {
 
 /// Decode the engine's `list_models` reply (`{models: Binary(msgpack)}`) into
 /// the model set. Shared by the status + capabilities reads.
-fn decode_models(resp: &Value) -> Vec<ModelInfo> {
-    let map = resp.as_map().map(|m| m.to_vec()).unwrap_or_default();
-    let bytes = map
-        .iter()
-        .find(|(k, _)| k.as_str() == Some("models"))
-        .and_then(|(_, v)| v.as_slice());
-    match bytes {
-        Some(b) => rmp_serde::from_slice(b).unwrap_or_default(),
-        None => Vec::new(),
-    }
+///
+/// A reply that does not carry a decodable `models` list is an error, not an
+/// empty set: an engine with no models and an answer nobody can read must not
+/// look the same to the GCS.
+fn decode_models(resp: &Value) -> Result<Vec<ModelInfo>, String> {
+    let bytes = resp
+        .as_map()
+        .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("models")))
+        .and_then(|(_, v)| v.as_slice())
+        .ok_or_else(|| "the vision engine reply carried no model list".to_string())?;
+    rmp_serde::from_slice(bytes)
+        .map_err(|e| format!("the vision engine model list did not decode: {e}"))
 }
 
 /// The model kinds in a fixed display order, so the grouped read-back is
@@ -285,7 +290,10 @@ pub async fn engine_capabilities(
 ) -> Response {
     let client = VisionIpcClient::default_socket();
     let models = match client.list_models().await {
-        Ok(resp) => decode_models(&resp),
+        Ok(resp) => match decode_models(&resp) {
+            Ok(m) => m,
+            Err(msg) => return detail(StatusCode::BAD_GATEWAY, msg),
+        },
         Err(e) => {
             return detail(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -303,6 +311,17 @@ pub async fn engine_capabilities(
 mod tests {
     use super::*;
     use ados_protocol::framebus::ModelExecution;
+
+    #[test]
+    fn a_reply_without_a_readable_model_list_is_an_error_not_an_empty_set() {
+        let no_key = Value::Map(vec![(Value::from("ok"), Value::Boolean(true))]);
+        assert!(decode_models(&no_key).is_err());
+        let garbage = Value::Map(vec![(Value::from("models"), Value::Binary(vec![0xc1]))]);
+        assert!(decode_models(&garbage).is_err());
+        let empty = rmp_serde::to_vec(&Vec::<ModelInfo>::new()).unwrap();
+        let ok = Value::Map(vec![(Value::from("models"), Value::Binary(empty))]);
+        assert_eq!(decode_models(&ok).unwrap().len(), 0);
+    }
 
     fn mi(id: &str, kind: ModelKind, classes: &[&str], capable: bool) -> ModelInfo {
         ModelInfo {

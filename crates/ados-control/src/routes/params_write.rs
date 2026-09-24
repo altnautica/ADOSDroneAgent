@@ -263,7 +263,8 @@ pub async fn set_param(
 /// "not known", mirroring the FastAPI route's refusal to write a param it has never
 /// seen.
 fn param_known(state: &AppState, name: &str) -> bool {
-    crate::param_store::read_param_blob(&state.params_path).contains_key(name)
+    crate::param_store::read_param_blob(&state.params_path)
+        .is_ok_and(|params| params.contains_key(name))
 }
 
 /// Build the `PARAM_SET` message for a known param + a finite value.
@@ -321,6 +322,7 @@ async fn poll_for_ack(state: &AppState, name: &str, target: f64) -> (bool, Optio
 /// route reading the cached value back.
 fn cached_param_value(state: &AppState, name: &str) -> Option<f64> {
     crate::param_store::read_param_blob(&state.params_path)
+        .ok()?
         .get(name)
         .and_then(Value::as_f64)
 }

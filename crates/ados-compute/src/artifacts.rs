@@ -75,17 +75,48 @@ fn content_type_for(path: &Path) -> &'static str {
     }
 }
 
+/// Read size for one streamed artifact chunk.
+const ARTIFACT_CHUNK: usize = 64 * 1024;
+
+/// Serve one artifact, streamed in [`ARTIFACT_CHUNK`] reads with its
+/// `Content-Length`. A splat or recording runs to hundreds of MB; buffering the
+/// whole file per request would hold a full copy in RAM for every viewer.
 async fn serve_artifact(
     State(work_root): State<Arc<PathBuf>>,
     AxumPath(rel): AxumPath<String>,
 ) -> Response {
+    use tokio::io::AsyncReadExt;
+
     let Some(path) = resolve_under_root(&work_root, &rel) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => ([(header::CONTENT_TYPE, content_type_for(&path))], bytes).into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
+    let Ok(file) = tokio::fs::File::open(&path).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Ok(meta) = file.metadata().await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let stream = futures_util::stream::unfold(Some(file), |state| async move {
+        let mut file = state?;
+        let mut buf = vec![0u8; ARTIFACT_CHUNK];
+        match file.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok(axum::body::Bytes::from(buf)), Some(file)))
+            }
+            // Surface the read error once, then end the stream.
+            Err(e) => Some((Err(e), None)),
+        }
+    });
+    (
+        [
+            (header::CONTENT_TYPE, content_type_for(&path).to_string()),
+            (header::CONTENT_LENGTH, meta.len().to_string()),
+        ],
+        axum::body::Body::from_stream(stream),
+    )
+        .into_response()
 }
 
 /// Percent-encode the few characters that break a URL path, joining the

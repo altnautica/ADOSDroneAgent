@@ -32,11 +32,6 @@ function Cell({
   );
 }
 
-/** Battery percent, treating the MAVLink "unknown" sentinel (-1) as no reading. */
-function batteryPct(remaining: number | null | undefined): number | null {
-  return remaining != null && remaining >= 0 ? remaining : null;
-}
-
 /** Build the battery readout: percent, plus voltage and current, showing only
  *  the parts the vehicle actually supplies (never a fabricated value).
  *
@@ -85,7 +80,7 @@ export function FeedTelemetryStrip() {
   const fix = telemetry?.gps?.fix_type ?? null;
   const sats = telemetry?.gps?.satellites ?? drone?.gps_sats ?? null;
   const dist = telemetry?.home_distance ?? null;
-  const batt = batteryPct(telemetry?.battery?.remaining) ?? drone?.battery_pct ?? null;
+  const batt = telemetry?.battery?.remaining ?? drone?.battery_pct ?? null;
   const battAccent = batt == null ? undefined : batt <= 15 ? "text-err" : batt <= 30 ? "text-warn" : undefined;
 
   return (

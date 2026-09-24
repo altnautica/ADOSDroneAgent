@@ -40,7 +40,6 @@ purely additive enrichment.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import queue
 import socket
@@ -52,7 +51,7 @@ from typing import Any
 
 import msgpack
 
-from ados.core.logging import _REDACT_PREFIX, _SECRET_SUFFIXES
+from ados.core.logging import redact_value
 from ados.core.paths import LOGD_INGEST_SOCK
 
 # --- wire constants (must match the native ingest contract) ----------------
@@ -121,9 +120,10 @@ _STD_RECORD_ATTRS = frozenset(
 #: drop policy engages, without unbounded memory growth.
 _QUEUE_MAXSIZE = 1024
 
-#: Reconnect backoff schedule, seconds. The shipper advances through these on
-#: repeated connect failures and resets to the first on a successful connect.
-_BACKOFF_SCHEDULE = (1.0, 5.0, 30.0)
+#: Reconnect pace, seconds: a fixed retry with no cap, the recovery rule every
+#: local-socket client follows. The store restarting is the common case, and a
+#: growing backoff only widens the window of records that never reach it.
+_RECONNECT_DELAY_S = 2.0
 
 #: How long the shipper parks waiting for the next record before re-checking
 #: its connection. Bounded so a backoff window cannot exceed the schedule step
@@ -140,23 +140,6 @@ _SEND_TIMEOUT_S = 2.0
 #: would spam stderr once per backoff. Emitted with ``print`` to stderr, never
 #: through ``logging``, so it cannot recurse into this handler.
 _CONNECT_WARN_INTERVAL_S = 300.0
-
-
-def _redact_value(key: str, value: str) -> str:
-    """Redact one string value for ``key``, byte-identical to the structlog
-    ``redact_secrets`` processor.
-
-    Idempotent: an empty value, a non-secret key, or a value already carrying
-    the ``redacted:`` sentinel passes through unchanged.
-    """
-    if not value or value.startswith(_REDACT_PREFIX):
-        return value
-    kl = key.lower()
-    if not any(kl.endswith(s) or kl == s for s in _SECRET_SUFFIXES):
-        return value
-    head = value[:4]
-    digest = hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:8]
-    return f"{_REDACT_PREFIX}{head}...{digest}"
 
 
 def _level_token(levelno: int) -> str:
@@ -194,7 +177,7 @@ def _extract_fields(record: logging.LogRecord) -> dict[str, Any]:
         if k in _STD_RECORD_ATTRS or k.startswith("_"):
             continue
         if isinstance(v, str):
-            fields[k] = _redact_value(k, v)
+            fields[k] = redact_value(k, v)
         elif isinstance(v, (int, float, bool)) or v is None:
             fields[k] = v
         else:
@@ -202,7 +185,7 @@ def _extract_fields(record: logging.LogRecord) -> dict[str, Any]:
             # stringified value is run through the same redaction so a non-str
             # object whose ``str()`` reveals a secret under a secret-bearing key
             # cannot leak to the wire.
-            fields[k] = _redact_value(k, str(v))
+            fields[k] = redact_value(k, str(v))
     return fields
 
 
@@ -316,7 +299,6 @@ class LogdShipper(threading.Thread):
         # Named to avoid clashing with ``threading.Thread`` internals
         # (``_stop`` and ``_handle`` are reserved on the base class).
         self._stop_event = threading.Event()
-        self._backoff_idx = 0
         self._next_connect_at = 0.0
         self._last_connect_warn = 0.0
         # Set once at least one frame has been shipped successfully; lets a test
@@ -390,22 +372,18 @@ class LogdShipper(threading.Thread):
             return False
         self._sock = s
         self._connected = True
-        self._backoff_idx = 0
         self._next_connect_at = 0.0
         return True
 
     def _on_connect_failure(self, exc: OSError) -> None:
-        """Advance the backoff and emit at most one rate-limited breadcrumb.
+        """Schedule the next attempt and emit at most one rate-limited breadcrumb.
 
         An absent socket (the store not installed) is the common case and is
         not an error condition, so the breadcrumb is sparse and goes to stderr
         directly, never through ``logging`` (which would recurse).
         """
         self._connected = False
-        delay = _BACKOFF_SCHEDULE[min(self._backoff_idx, len(_BACKOFF_SCHEDULE) - 1)]
-        self._next_connect_at = time.monotonic() + delay
-        if self._backoff_idx < len(_BACKOFF_SCHEDULE) - 1:
-            self._backoff_idx += 1
+        self._next_connect_at = time.monotonic() + _RECONNECT_DELAY_S
         now = time.monotonic()
         if now - self._last_connect_warn >= _CONNECT_WARN_INTERVAL_S:
             self._last_connect_warn = now

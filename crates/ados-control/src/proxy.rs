@@ -121,9 +121,33 @@ async fn proxy_plain_within(
     request: Request,
     head_timeout: std::time::Duration,
 ) -> Response {
+    let permanent = routing::is_permanent_python_path(request.uri().path());
+    forward_within(socket, request, head_timeout, move || {
+        absent_reply(permanent)
+    })
+    .await
+}
+
+/// Forward a plain request to another local HTTP-over-Unix-socket service with
+/// the same streaming and head deadline as the residual proxy, answering
+/// `on_absent()` when nothing serves the socket or the exchange breaks.
+pub(crate) async fn forward_plain(
+    socket: &Path,
+    request: Request,
+    on_absent: impl FnOnce() -> Response,
+) -> Response {
+    forward_within(socket, request, UPSTREAM_HEAD_TIMEOUT, on_absent).await
+}
+
+async fn forward_within(
+    socket: &Path,
+    request: Request,
+    head_timeout: std::time::Duration,
+    on_absent: impl FnOnce() -> Response,
+) -> Response {
     let stream = match UnixStream::connect(socket).await {
         Ok(s) => s,
-        Err(_) => return upstream_absent(request.uri().path()),
+        Err(_) => return on_absent(),
     };
 
     // Drive the upstream connection on its own task. `handshake` returns a sender
@@ -131,7 +155,7 @@ async fn proxy_plain_within(
     let (mut sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await
     {
         Ok(pair) => pair,
-        Err(_) => return upstream_absent(request.uri().path()),
+        Err(_) => return on_absent(),
     };
     let conn_task = tokio::spawn(async move {
         // The connection ends when the response body is fully read or the peer
@@ -163,7 +187,7 @@ async fn proxy_plain_within(
         // The upstream accepted the connection but the exchange failed (it closed
         // mid-request, or sent a malformed reply). Degrade rather than 500 — to
         // the downstream client the route simply is not there right now.
-        Err(_) => upstream_absent_path_only(socket),
+        Err(_) => on_absent(),
     }
 }
 
@@ -231,19 +255,28 @@ pub(crate) fn is_websocket_upgrade(headers: &http::HeaderMap) -> bool {
 /// `copy_bidirectional`. Both legs register an `on_upgrade` callback; once the
 /// `101` is in flight in both directions the upgraded streams carry the WebSocket
 /// frames verbatim. The front does not parse the frames — it is a byte pipe.
-async fn proxy_upgrade(socket: &Path, mut request: Request) -> Response {
+async fn proxy_upgrade(socket: &Path, request: Request) -> Response {
+    proxy_upgrade_within(socket, request, UPSTREAM_HEAD_TIMEOUT).await
+}
+
+async fn proxy_upgrade_within(
+    socket: &Path,
+    mut request: Request,
+    head_timeout: std::time::Duration,
+) -> Response {
+    let permanent = routing::is_permanent_python_path(request.uri().path());
     let stream = match UnixStream::connect(socket).await {
         Ok(s) => s,
-        Err(_) => return upstream_absent(request.uri().path()),
+        Err(_) => return absent_reply(permanent),
     };
     let (mut sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await
     {
         Ok(pair) => pair,
-        Err(_) => return upstream_absent(request.uri().path()),
+        Err(_) => return absent_reply(permanent),
     };
     // The upgrade-bearing connection must keep being driven AFTER the response so
     // hyper can surface the upgraded IO; `with_upgrades` exposes it.
-    tokio::spawn(async move {
+    let conn_task = tokio::spawn(async move {
         let _ = conn.with_upgrades().await;
     });
 
@@ -253,9 +286,19 @@ async fn proxy_upgrade(socket: &Path, mut request: Request) -> Response {
     // forward to the upstream verbatim.
     let downstream_on_upgrade = hyper::upgrade::on(&mut request);
 
-    let upstream = match sender.send_request(request).await {
-        Ok(resp) => resp,
-        Err(_) => return upstream_absent_path_only(socket),
+    // The handshake answer is bounded like a plain request's head: a residual
+    // handler that never answers the upgrade must not hold this connection, the
+    // upstream socket and the driver task forever.
+    let upstream = match tokio::time::timeout(head_timeout, sender.send_request(request)).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(_)) => return absent_reply(permanent),
+        Err(_) => {
+            conn_task.abort();
+            return detail(
+                StatusCode::GATEWAY_TIMEOUT,
+                "the residual API did not answer the upgrade in time",
+            );
+        }
     };
 
     // A non-101 upstream reply (it declined the upgrade) is relayed as-is.
@@ -297,23 +340,14 @@ async fn proxy_upgrade(socket: &Path, mut request: Request) -> Response {
     switching
 }
 
-/// The graceful-degradation reply when the residual upstream is absent or
-/// unconnectable: a FastAPI-shaped `{"detail": "Not Found"}`. A path under a
-/// known permanent-Python prefix gets `501` (the feature is absent on this
-/// profile); anything else gets `404`. Never a `500`.
-fn upstream_absent(path: &str) -> Response {
-    if routing::is_permanent_python_path(path) {
+/// The graceful-degradation reply when the residual upstream is absent,
+/// unconnectable, or breaks the exchange: a FastAPI-shaped `{"detail": "Not
+/// Found"}`. A path under a known permanent-Python prefix gets `501` (the feature
+/// is absent on this profile); anything else gets `404`. Never a `500`.
+fn absent_reply(permanent: bool) -> Response {
+    if permanent {
         return detail(StatusCode::NOT_IMPLEMENTED, "Not Found");
     }
-    detail(StatusCode::NOT_FOUND, "Not Found")
-}
-
-/// A degradation reply for the case where we already consumed the request and so
-/// only have the socket path, not the request path. We still answer `404` (we
-/// cannot tell whether it was a permanent prefix without the path); this is only
-/// reached when the upstream accepted the connection then failed the exchange,
-/// which is rarer than a plain absent socket.
-fn upstream_absent_path_only(_socket: &Path) -> Response {
     detail(StatusCode::NOT_FOUND, "Not Found")
 }
 
@@ -465,6 +499,32 @@ mod tests {
         )
         .await
         .expect("the proxy must not wait on a wedged upstream");
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn a_wedged_upgrade_handshake_is_a_504_not_a_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-internal.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let _wedged = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = conn.read(&mut buf).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let request = http::Request::builder()
+            .uri("/api/plugins/jobs/abc")
+            .header(http::header::CONNECTION, "upgrade")
+            .header(http::header::UPGRADE, "websocket")
+            .body(Body::empty())
+            .unwrap();
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            proxy_upgrade_within(&path, request, std::time::Duration::from_millis(200)),
+        )
+        .await
+        .expect("the proxy must not wait on a wedged upgrade");
         assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
     }
 

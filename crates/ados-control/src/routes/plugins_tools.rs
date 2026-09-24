@@ -105,6 +105,10 @@ pub async fn invoke_plugin_tool(
                 .into_response()
         }
         Err(PluginControlError::Rpc(msg)) => detail(status_for_rpc(&msg), msg),
+        Err(PluginControlError::Timeout) => detail(
+            StatusCode::GATEWAY_TIMEOUT,
+            "plugin host did not answer in time",
+        ),
         Err(e) => detail(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("plugin host unavailable: {e}"),

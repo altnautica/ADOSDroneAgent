@@ -106,31 +106,121 @@ pub fn current_hostname() -> Option<String> {
     }
 }
 
-/// The device's routable LAN IPv4 addresses (from `ip -o -4 addr show`),
-/// excluding loopback and the hotspot AP gateway (192.168.4.1). Used to show a
-/// reach IP alongside the `.local` name — the IP works everywhere, including a
-/// hosted GCS, while `.local` (mDNS) needs a desktop/localhost app.
+/// The box's routable LAN IPv4 addresses: the one probe both the wizard's
+/// "reachable now at" line and the closing card's reach block read, so neither
+/// can hand the operator an address the other would have filtered out.
+///
+/// Prefers `ip -o -4 addr show` (per-interface, so bridge/container/VPN NICs
+/// are filtered by name) and falls back to `hostname -I`. Both are parsed by the
+/// pure helpers below; the returned list preserves discovery order and is
+/// de-duplicated. Empty when the box has no routable IPv4 (the card then leads
+/// with the `<host>.local` mDNS name alone).
 pub fn lan_ips() -> Vec<String> {
+    // The hotspot AP gateway is not a real LAN reach — drop it so it never shows
+    // as a reach IP (the agent gates its hotspot URL the same way).
+    const HOTSPOT_AP_IP: &str = "192.168.4.1";
     let res = crate::exec::run("ip", &["-o", "-4", "addr", "show"]);
-    if !res.success() {
-        return Vec::new();
+    if res.success() {
+        let ips: Vec<String> = parse_ip_o_4(&res.stdout)
+            .into_iter()
+            .filter(|ip| ip != HOTSPOT_AP_IP)
+            .collect();
+        if !ips.is_empty() {
+            return ips;
+        }
     }
-    let mut out: Vec<String> = Vec::new();
-    for line in res.stdout.lines() {
-        let mut it = line.split_whitespace();
-        while let Some(tok) = it.next() {
+    let res = crate::exec::run("hostname", &["-I"]);
+    if res.success() {
+        return parse_hostname_i(&res.stdout)
+            .into_iter()
+            .filter(|ip| ip != HOTSPOT_AP_IP)
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Parse `ip -o -4 addr show` output into a de-duplicated list of routable
+/// IPv4 addresses, skipping loopback and virtual (bridge/container/VPN)
+/// interfaces by name. Each line looks like:
+/// `2: eth0    inet 192.168.1.42/24 brd ... scope global eth0\ ...`.
+fn parse_ip_o_4(output: &str) -> Vec<String> {
+    let mut ips = Vec::new();
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        // fields: <idx:> <iface> ... inet <ip/cidr> ...
+        let _idx = fields.next();
+        let iface = match fields.next() {
+            Some(i) => i,
+            None => continue,
+        };
+        if is_virtual_iface(iface) {
+            continue;
+        }
+        // Find the `inet` token, take the following `ip/cidr`.
+        let mut rest = fields;
+        while let Some(tok) = rest.next() {
             if tok == "inet" {
-                if let Some(cidr) = it.next() {
-                    let ip = cidr.split('/').next().unwrap_or(cidr).to_string();
-                    if !ip.starts_with("127.") && ip != "192.168.4.1" && !out.contains(&ip) {
-                        out.push(ip);
-                    }
+                if let Some(cidr) = rest.next() {
+                    let ip = cidr.split('/').next().unwrap_or("");
+                    push_routable_ipv4(&mut ips, ip);
                 }
                 break;
             }
         }
     }
-    out
+    ips
+}
+
+/// Parse `hostname -I` output (a space-separated address list, IPv4 + IPv6)
+/// into a de-duplicated list of routable IPv4 addresses. No interface names are
+/// available here, so filtering is by address form only.
+fn parse_hostname_i(output: &str) -> Vec<String> {
+    let mut ips = Vec::new();
+    for tok in output.split_whitespace() {
+        push_routable_ipv4(&mut ips, tok);
+    }
+    ips
+}
+
+/// Push `ip` onto `ips` when it is a routable (non-loopback, non-empty) IPv4
+/// dotted-quad and not already present.
+fn push_routable_ipv4(ips: &mut Vec<String>, ip: &str) {
+    if is_routable_ipv4(ip) && !ips.iter().any(|existing| existing == ip) {
+        ips.push(ip.to_string());
+    }
+}
+
+/// True for a dotted-quad IPv4 that is neither empty nor loopback (`127.x`).
+fn is_routable_ipv4(ip: &str) -> bool {
+    if ip.is_empty() || ip.starts_with("127.") {
+        return false;
+    }
+    let octets: Vec<&str> = ip.split('.').collect();
+    octets.len() == 4
+        && octets
+            .iter()
+            .all(|o| !o.is_empty() && o.len() <= 3 && o.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// True for interface names that are loopback or virtual (bridge, container,
+/// VPN, mesh) and should not appear in the operator's reach block.
+fn is_virtual_iface(iface: &str) -> bool {
+    const VIRTUAL_PREFIXES: &[&str] = &[
+        "lo",
+        "docker",
+        "br-",
+        "veth",
+        "virbr",
+        "tailscale",
+        "zt",
+        "cni",
+        "flannel",
+        "kube",
+        "podman",
+        "cali",
+        "wg",
+    ];
+    VIRTUAL_PREFIXES.iter().any(|p| iface.starts_with(p))
 }
 
 /// The on-disk markers that, taken together, mean "the agent is already
@@ -537,6 +627,53 @@ mod tests {
         assert_eq!(e.arch, arch());
         assert_eq!(e.supported_arch, is_supported_arch());
         assert_eq!(e.os, std::env::consts::OS);
+    }
+
+    #[test]
+    fn parse_ip_o_4_keeps_lan_and_drops_loopback_and_virtual() {
+        let out = "\
+1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+2: end0    inet 192.168.1.42/24 brd 192.168.1.255 scope global end0\\       valid_lft forever
+3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever
+4: wlan1    inet 10.0.0.7/24 brd 10.0.0.255 scope global wlan1\\       valid_lft forever
+";
+        let ips = parse_ip_o_4(out);
+        assert_eq!(
+            ips,
+            vec!["192.168.1.42".to_string(), "10.0.0.7".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_hostname_i_keeps_ipv4_and_drops_ipv6_and_loopback() {
+        // `hostname -I` yields a space-separated mix of v4 + v6; keep only the
+        // routable dotted-quads, de-duplicated in order.
+        let ips = parse_hostname_i("192.168.1.42 fe80::1 10.0.0.7 192.168.1.42 127.0.0.1\n");
+        assert_eq!(
+            ips,
+            vec!["192.168.1.42".to_string(), "10.0.0.7".to_string()]
+        );
+    }
+
+    #[test]
+    fn is_routable_ipv4_rejects_loopback_and_non_dotted_quads() {
+        assert!(is_routable_ipv4("192.168.0.1"));
+        assert!(!is_routable_ipv4("127.0.0.1"));
+        assert!(!is_routable_ipv4(""));
+        assert!(!is_routable_ipv4("fe80::1"));
+        assert!(!is_routable_ipv4("192.168.0"));
+        assert!(!is_routable_ipv4("1.2.3.4.5"));
+    }
+
+    #[test]
+    fn is_virtual_iface_flags_bridge_and_container_nics() {
+        assert!(is_virtual_iface("lo"));
+        assert!(is_virtual_iface("docker0"));
+        assert!(is_virtual_iface("br-abc123"));
+        assert!(is_virtual_iface("veth9f2"));
+        assert!(!is_virtual_iface("eth0"));
+        assert!(!is_virtual_iface("end0"));
+        assert!(!is_virtual_iface("wlan1"));
     }
 
     #[test]

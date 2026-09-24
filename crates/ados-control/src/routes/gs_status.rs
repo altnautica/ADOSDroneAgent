@@ -36,7 +36,7 @@
 //! separate requests), so the recording legs read that singleton directly.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -164,11 +164,10 @@ fn profile_conf_path() -> PathBuf {
 /// own literal). Sibling surfaces with independently-maintained staleness
 /// thresholds drift apart, and then two blocks of the same `/status` response
 /// disagree about whether the node is stale.
-const SNAPSHOT_FRESH_S: f64 = 10.0;
+pub(crate) const SNAPSHOT_FRESH_S: f64 = 10.0;
 
-/// Read a JSON object sidecar, returning the empty map on absence / a read
-/// error / a parse error / a non-object body. Mirrors the Python
-/// `_read_json_or_empty`.
+/// Read a JSON object sidecar, returning the empty map on absence / a read error / a parse error /
+/// a non-object body.
 ///
 /// Carries NO freshness judgement — use [`read_fresh_json`] for anything a client
 /// reads as a current measurement.
@@ -214,8 +213,7 @@ fn read_fresh_json(path: &Path, now: SystemTime) -> Option<Map<String, Value>> {
 /// unprovable, and an unprovable age must not read as a fresh measurement. Same
 /// rule `pic_view` applies to the PIC sidecar.
 fn file_age_s(path: &Path, now: SystemTime) -> Option<f64> {
-    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
-    now.duration_since(modified).ok().map(|d| d.as_secs_f64())
+    crate::freshness::file_age(path, now).map(|d| d.as_secs_f64())
 }
 
 // ---------------------------------------------------------------------------
@@ -470,9 +468,10 @@ fn link_view_from(path: &Path) -> Value {
     base.insert("mcs_index".to_string(), Value::Null);
     base.insert("mcs_ladder_cap".to_string(), Value::Null);
 
-    let age_s = match std::fs::metadata(path).and_then(|m| m.modified()) {
-        Ok(mtime) => mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0),
-        Err(_) => return Value::Object(base),
+    // A future mtime is an unprovable age, not age zero: same rule as
+    // [`file_age_s`].
+    let Some(age_s) = file_age_s(path, SystemTime::now()) else {
+        return Value::Object(base);
     };
     let payload = match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
@@ -1196,155 +1195,10 @@ impl WfbViewConfig {
 /// "nothing current", and the caller's stale branch says so explicitly rather
 /// than falling through to a number.
 async fn latest_event_detail(state: &AppState, event_kind: &str) -> Option<Map<String, Value>> {
-    let rows = logd_query_events(state, event_kind, 1).await?;
-    let row = rows.first()?.as_object()?;
-    if !row_is_fresh(row, unix_now_us()?) {
-        return None;
-    }
-    let detail = row.get("detail")?.as_object()?;
-    if detail.is_empty() {
-        return None;
-    }
-    Some(detail.clone())
-}
-
-/// Whether a store row's `ts_us` (microsecond epoch, the column every `/v1/query`
-/// row carries) is within the freshness window of `now_us`.
-///
-/// A row with no parseable `ts_us` is NOT fresh: an unstamped row cannot be shown
-/// to be current, and this gate exists precisely so an unprovable reading is not
-/// served as a measurement.
-fn row_is_fresh(row: &Map<String, Value>, now_us: i64) -> bool {
-    let Some(ts_us) = row.get("ts_us").and_then(Value::as_i64) else {
-        return false;
-    };
-    let age_s = (now_us - ts_us) as f64 / 1_000_000.0;
-    // A row stamped slightly in the future (a clock step, or a producer whose
-    // clock runs marginally ahead) is fresh, not stale — both processes read the
-    // same host clock, so the skew is jitter, not an unprovable age.
-    age_s <= SNAPSHOT_FRESH_S
-}
-
-/// Wall-clock microseconds since the epoch, or `None` if the clock is before it
-/// (which makes every age unprovable, so the caller treats the reading as stale).
-fn unix_now_us() -> Option<i64> {
-    SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_micros() as i64)
-}
-
-/// Query the store for the newest `events` rows of one `event_kind`. Returns the
-/// `data` array, or `None` when the store is unreachable / the response is an error
-/// / does not parse. Mirrors the Python `query_rows("events", limit,
-/// event_kind=...)`.
-async fn logd_query_events(state: &AppState, event_kind: &str, limit: i64) -> Option<Vec<Value>> {
-    let params = [
-        ("kind", "events".to_string()),
-        ("limit", limit.to_string()),
-        ("event_kind", event_kind.to_string()),
-    ];
-    let query = encode_query(&params);
-    let path = format!("/v1/query?{query}");
-    let (status, body) = logd_get(state, &path).await.ok()?;
-    if status >= 400 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_slice(&body).ok()?;
-    parsed
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|a| a.to_vec())
-}
-
-/// A minimal HTTP/1.1 `GET` over the logging-store query Unix socket, returning the
-/// status code + the decoded body. The socket path comes from the app state's logd
-/// client so a test redirects it. `Connection: close` reads the body to EOF; a
-/// chunked body is de-chunked. Bounded so a runaway response cannot exhaust memory.
-async fn logd_get(state: &AppState, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A hard ceiling on the response read; a normal events page is a few KiB, so
-    /// this only guards a runaway body.
-    const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
-
-    let socket = state.logd.socket_path();
-    let mut stream = tokio::net::UnixStream::connect(socket).await?;
-    let head = format!("GET {path} HTTP/1.1\r\nHost: logd\r\nConnection: close\r\n\r\n");
-    stream.write_all(head.as_bytes()).await?;
-    stream.flush().await?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            break; // EOF (Connection: close).
-        }
-        if raw.len() + n > MAX_READ_BYTES {
-            return Err(std::io::Error::other("logd response too large"));
-        }
-        raw.extend_from_slice(&buf[..n]);
-    }
-    parse_http_response(&raw)
-}
-
-/// Split a raw HTTP/1.1 response into the status code + decoded body. De-chunks a
-/// `Transfer-Encoding: chunked` body; otherwise returns the body after the header
-/// terminator as-is.
-fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
-    let sep = b"\r\n\r\n";
-    let split = raw
-        .windows(sep.len())
-        .position(|w| w == sep)
-        .ok_or_else(|| std::io::Error::other("malformed http response (no header terminator)"))?;
-    let head = &raw[..split];
-    let body = &raw[split + sep.len()..];
-
-    let head_str = String::from_utf8_lossy(head);
-    let status = head_str
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| std::io::Error::other("malformed http status line"))?;
-
-    let chunked = head_str
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked");
-    let body = if chunked {
-        de_chunk(body)
-    } else {
-        body.to_vec()
-    };
-    Ok((status, body))
-}
-
-/// De-chunk a `Transfer-Encoding: chunked` body: `<hexlen>\r\n<data>\r\n` repeated
-/// until a zero-length chunk.
-fn de_chunk(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    while let Some(crlf) = rest.windows(2).position(|w| w == b"\r\n") {
-        let len_line = &rest[..crlf];
-        let len = usize::from_str_radix(String::from_utf8_lossy(len_line).trim(), 16).unwrap_or(0);
-        if len == 0 {
-            break;
-        }
-        let data_start = crlf + 2;
-        if rest.len() < data_start + len {
-            out.extend_from_slice(&rest[data_start..]);
-            break;
-        }
-        out.extend_from_slice(&rest[data_start..data_start + len]);
-        let next = data_start + len;
-        rest = if rest.len() >= next + 2 {
-            &rest[next + 2..]
-        } else {
-            &[]
-        };
-    }
-    out
+    state
+        .logd
+        .fresh_event_detail(event_kind, Duration::from_secs_f64(SNAPSHOT_FRESH_S))
+        .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,31 +1243,6 @@ fn json_truthy(v: &Value) -> bool {
 /// `bitrate_mbps` derivation in `_link_view` uses.
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
-}
-
-/// Percent-encode a query-parameter list into a `key=value&...` string. Only the
-/// characters the store's query values use (`-`, digits, letters, `.`) appear, so a
-/// conservative reserved-character escape is sufficient.
-fn encode_query(params: &[(&str, String)]) -> String {
-    params
-        .iter()
-        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Conservative percent-encoding for the query helper: pass through the unreserved
-/// set (`A-Za-z0-9-._~`) verbatim and percent-encode every other byte.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1845,36 +1674,6 @@ mod tests {
         assert_eq!(stale["fragments_out"], Value::Null);
     }
 
-    /// A store row older than the window is rejected, so the route falls through
-    /// to its stale branch instead of serving a day-old event as live.
-    #[test]
-    fn a_store_row_is_fresh_only_inside_the_window() {
-        let now_us: i64 = 1_700_000_000_000_000;
-        let row = |ts_us: i64| -> Map<String, Value> {
-            json!({"ts_us": ts_us, "detail": {"up": true}})
-                .as_object()
-                .unwrap()
-                .clone()
-        };
-        assert!(
-            row_is_fresh(&row(now_us), now_us),
-            "a row stamped now is fresh"
-        );
-        assert!(
-            row_is_fresh(&row(now_us - 5_000_000), now_us),
-            "5 s old is inside the 10 s window"
-        );
-        assert!(
-            !row_is_fresh(&row(now_us - 60_000_000), now_us),
-            "a minute-old row must not be served as the current state"
-        );
-        // An unstamped row cannot be shown to be current, so it is not fresh.
-        assert!(!row_is_fresh(
-            json!({"detail": {"up": true}}).as_object().unwrap(),
-            now_us
-        ));
-    }
-
     #[test]
     fn receiver_relays_slice_stamps_fresh_and_defaults_to_empty_list() {
         let empty: Map<String, Value> = Map::new();
@@ -2059,20 +1858,6 @@ mod tests {
         assert!(!json_truthy(&json!("")));
         assert!(json_truthy(&json!("x")));
         assert!(!json_truthy(&json!([])));
-    }
-
-    #[test]
-    fn de_chunk_reassembles_a_chunked_body() {
-        let chunked = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        assert_eq!(de_chunk(chunked), b"hello world");
-    }
-
-    #[test]
-    fn parse_http_response_reads_status_and_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
-        let (status, body) = parse_http_response(raw).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, b"{}");
     }
 
     /// The radio-learned peer id must land on the key THIS route reads.

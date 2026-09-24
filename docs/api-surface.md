@@ -32,9 +32,14 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/atlas/config` |  |
 | GET | `/api/atlas/readiness` |  |
 | POST | `/api/can/passthrough` |  |
+| GET | `/api/cloud/link` |  |
 | POST | `/api/command` |  |
 | GET | `/api/commands` |  |
 | GET | `/api/compute/status` |  |
+| GET | `/api/compute/workstation-credential` |  |
+| POST | `/api/compute/workstation-credential` |  |
+| GET | `/api/config` |  |
+| PUT | `/api/config` |  |
 | GET | `/api/config/schema` |  |
 | POST | `/api/dashboard/pin/clear` | relay-forbidden |
 | POST | `/api/dashboard/pin/set` | unauthenticated by design; relay-forbidden |
@@ -44,7 +49,9 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/diag/video` |  |
 | GET | `/api/fleet/enrollment` |  |
 | GET | `/api/fleet/peers` |  |
+| GET | `/api/logs` |  |
 | POST | `/api/logs/push` |  |
+| GET | `/api/logs/stream` |  |
 | GET | `/api/mavlink/ports` |  |
 | GET | `/api/mavlink/signing/capability` |  |
 | GET | `/api/mavlink/signing/counters` |  |
@@ -109,7 +116,12 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/v1/ground-station/network/priority` |  |
 | PUT | `/api/v1/ground-station/network/priority` |  |
 | PUT | `/api/v1/ground-station/network/share_uplink` |  |
+| POST | `/api/v1/ground-station/pair/accept` |  |
+| POST | `/api/v1/ground-station/pair/approve/{device_id}` |  |
+| POST | `/api/v1/ground-station/pair/close` |  |
+| POST | `/api/v1/ground-station/pair/join` |  |
 | GET | `/api/v1/ground-station/pair/pending` |  |
+| POST | `/api/v1/ground-station/pair/revoke/{device_id}` |  |
 | GET | `/api/v1/ground-station/pic` |  |
 | POST | `/api/v1/ground-station/pic/claim` |  |
 | POST | `/api/v1/ground-station/pic/confirm-token` |  |
@@ -158,10 +170,13 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/network/mac/pin` |  |
 | DELETE | `/api/v1/network/mac/{iface}` |  |
 | POST | `/api/v1/system/restart-supervisor` | relay-forbidden |
+| GET | `/api/v2/observability/{*upstream_path}` |  |
 | GET | `/api/version` | unauthenticated by design |
 | GET | `/api/video/config` |  |
 | GET | `/api/video/latency` |  |
 | POST | `/api/video/profile` |  |
+| POST | `/api/video/record/start` |  |
+| POST | `/api/video/record/stop` |  |
 | GET | `/api/video/roster` |  |
 | PUT | `/api/video/roster` |  |
 | GET | `/api/vision/capabilities` |  |
@@ -176,10 +191,13 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/wfb/pair` |  |
 | PUT | `/api/wfb/pair/auto-pair` |  |
 | GET | `/api/wfb/pair/failover-status` |  |
+| GET | `/api/wfb/pair/local-bind` | relay-forbidden |
+| POST | `/api/wfb/pair/local-bind` | relay-forbidden |
+| POST | `/api/wfb/pair/unpair` | relay-forbidden |
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-154 native routes.
+172 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 
@@ -190,10 +208,6 @@ absent (a known feature, not on this profile) rather than `404`.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/config` |  |
-| PUT | `/api/config` |  |
-| GET | `/api/logs` |  |
-| GET | `/api/logs/stream` |  |
 | POST | `/api/pairing/accept` | relay-forbidden |
 | GET | `/api/peripherals` |  |
 | POST | `/api/peripherals/scan` |  |
@@ -213,21 +227,12 @@ absent (a known feature, not on this profile) rather than `404`.
 | DELETE | `/api/plugins/{plugin_id}/perms/{permission_id}` |  |
 | GET | `/api/plugins/{plugin_id}/readiness` |  |
 | GET | `/api/v1/dashboard/snapshot` |  |
-| POST | `/api/v1/display/calibrate/sample` |  |
-| POST | `/api/v1/display/calibrate/save` |  |
-| POST | `/api/v1/display/calibrate/skip` |  |
 | POST | `/api/v1/display/calibrate/start` |  |
 | GET | `/api/v1/display/calibrate/status` |  |
 | GET | `/api/v1/display/page` |  |
 | POST | `/api/v1/display/page` |  |
 | GET | `/api/v1/display/snapshot` |  |
-| GET | `/api/v1/display/touches` |  |
 | POST | `/api/v1/ground-station/factory-reset` | relay-forbidden |
-| POST | `/api/v1/ground-station/pair/accept` |  |
-| POST | `/api/v1/ground-station/pair/approve/{device_id}` |  |
-| POST | `/api/v1/ground-station/pair/close` |  |
-| POST | `/api/v1/ground-station/pair/join` |  |
-| POST | `/api/v1/ground-station/pair/revoke/{device_id}` |  |
 | GET | `/api/v1/network/client/scan` |  |
 | GET | `/api/v1/peripherals` |  |
 | GET | `/api/v1/peripherals/{peripheral_id}` |  |
@@ -254,13 +259,10 @@ absent (a known feature, not on this profile) rather than `404`.
 | POST | `/api/v1/setup/skip` |  |
 | GET | `/api/v1/setup/status` |  |
 | POST | `/api/v1/setup/step/{step_id}/skip` |  |
-| GET | `/api/v2/observability/{*upstream_path}` |  |
 | GET | `/api/video` |  |
 | POST | `/api/video/camera/switch` |  |
 | GET | `/api/video/cameras` |  |
 | POST | `/api/video/config` |  |
-| POST | `/api/video/record/start` |  |
-| POST | `/api/video/record/stop` |  |
 | POST | `/api/video/snapshot` |  |
 | GET | `/api/video/snapshot.jpg` |  |
 | GET | `/api/vision/detections/latest` |  |
@@ -268,15 +270,12 @@ absent (a known feature, not on this profile) rather than `404`.
 | GET | `/api/vision/models` |  |
 | POST | `/api/vision/models/{model_id}/download` |  |
 | GET | `/api/vision/models/{model_id}/status` |  |
-| GET | `/api/wfb/pair/local-bind` | relay-forbidden |
-| POST | `/api/wfb/pair/local-bind` | relay-forbidden |
-| POST | `/api/wfb/pair/unpair` | relay-forbidden |
 | GET | `/hls/{*path}` |  |
 | POST | `/whep` |  |
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-85 residual routes.
+66 residual routes.
 
 ## Logging store — `ados-logd` on :8090
 

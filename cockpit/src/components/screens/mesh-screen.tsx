@@ -14,19 +14,14 @@ import { Dot, EmptyNote, Row, SectionHeader, StaleBadge, Tile, TileGrid, type To
 import { useResource } from "@/hooks/use-resource";
 import { useTelemetryContext } from "@/hooks/telemetry-context";
 import { apiFetch } from "@/lib/api";
-import { DASH, fmtInt } from "@/lib/format";
+import { DASH, fmtInt, fmtTq } from "@/lib/format";
 
+/** One `mesh-state` neighbour (crates/ados-groundlink mesh/state.rs). */
 interface MeshNeighbor {
-  orig?: string;
   mac?: string;
-  address?: string;
-  name?: string;
+  iface?: string;
   tq?: number;
-  quality?: number;
-  link_quality?: number;
-  last_seen?: number;
-  last_seen_msecs?: number;
-  [k: string]: unknown;
+  last_seen_ms?: number;
 }
 interface MeshGateway {
   orig?: string;
@@ -52,12 +47,6 @@ function identity(n: { orig?: string; mac?: string; address?: string; name?: str
   return n.orig ?? n.mac ?? n.address ?? n.name ?? DASH;
 }
 
-/** batman-adv transmit quality is 0..255; render it as a percentage. */
-function quality(n: MeshNeighbor): string {
-  const q = n.tq ?? n.quality ?? n.link_quality;
-  if (q == null || !Number.isFinite(q)) return DASH;
-  return q > 100 ? `${Math.round((q / 255) * 100)}%` : `${Math.round(q)}%`;
-}
 
 export function MeshScreen() {
   const { status } = useTelemetryContext();
@@ -133,7 +122,7 @@ export function MeshScreen() {
               <EmptyNote>Not participating in a mesh.</EmptyNote>
             ) : neighbors.length ? (
               neighbors.map((n, i) => (
-                <Row key={identity(n) + i} label={identity(n)} value={quality(n)} hint="link quality" />
+                <Row key={identity(n) + i} label={identity(n)} value={fmtTq(n.tq)} hint="link quality" />
               ))
             ) : (
               <EmptyNote>No mesh neighbours discovered yet.</EmptyNote>

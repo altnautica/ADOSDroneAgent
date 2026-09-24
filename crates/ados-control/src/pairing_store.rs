@@ -305,7 +305,10 @@ pub(crate) fn atomic_write_0600(path: &Path, body: &[u8]) -> std::io::Result<()>
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -348,7 +351,10 @@ pub(crate) fn atomic_write_0600(path: &Path, body: &[u8]) -> std::io::Result<()>
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    Ok(())
+    // The rename is only durable once the directory entry is: without this a
+    // power cut right after a claim or unpair answered can bring the old record
+    // back on the next boot.
+    std::fs::File::open(parent)?.sync_all()
 }
 
 #[cfg(test)]

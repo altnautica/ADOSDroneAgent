@@ -2,10 +2,10 @@
 //!
 //! Ports the `gs` legs of `pair_manager.py`: install a 64-byte rx-side wfb-ng
 //! key, persist the pair state, drop the setup-complete sentinel, restart the
-//! receive unit; and the unpair path that wipes both key files and clears the
-//! persisted pair state. The drone legs stay where they are (the drone profile
-//! does not run this service); this module is the receive-side half the native
-//! front forwards to over the command socket.
+//! node role's WFB plane; and the unpair path that wipes both key files and
+//! clears the persisted pair state. The drone legs stay where they are (the
+//! drone profile does not run this service); this module is the receive-side
+//! half the native front forwards to over the command socket.
 //!
 //! The wire format wfb-ng requires is the 64-byte libsodium crypto_box keypair
 //! file (`gs.key` from `wfb_keygen`); the GS persists those bytes at
@@ -13,6 +13,7 @@
 //! digest_size=8)` rendered as 16 lowercase hex chars, byte-identical to the
 //! radio manager's `read_public_fingerprint`.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -28,10 +29,6 @@ const WFB_KEY_FILE_BYTES: usize = 64;
 /// The offset of the peer-public half within a 64-byte key file. Mirrors
 /// `key_mgr.WFB_PUBLIC_HALF_OFFSET`.
 const WFB_PUBLIC_HALF_OFFSET: usize = 32;
-
-/// The GS receive systemd unit restarted on a key change. Mirrors the Python
-/// `pair_manager._WFB_GS_UNIT`.
-const WFB_GS_UNIT: &str = "ados-wfb-rx.service";
 
 /// A pair-key install failure, mapped to the FastAPI error codes by the caller.
 #[derive(Debug)]
@@ -207,11 +204,9 @@ async fn apply_keypair_gs_at(
     }
 
     // restart over reload: a unit restart is the prompt path to a fresh spawn
-    // cycle that picks up the freshly written key.
-    let pm = select();
-    if !pm.restart(WFB_GS_UNIT).await {
-        tracing::info!(unit = WFB_GS_UNIT, "wfb_unit_restart_skipped");
-    }
+    // cycle that picks up the freshly written key. Deferred past the reply:
+    // see `schedule_role_plane_restart`.
+    schedule_role_plane_restart();
 
     Ok(json!({
         "paired": true,
@@ -241,10 +236,42 @@ async fn unpair_gs_at(paths: &PairPaths) -> Result<Value, String> {
         }
     }
     persist_pair_state_at(&paths.config, None, None, Some(false))?;
-    let pm = select();
-    let _ = pm.restart(WFB_GS_UNIT).await;
+    schedule_role_plane_restart();
     tracing::warn!(role = "gs", "unpair_complete");
     Ok(json!({"paired": false, "role": "gs"}))
+}
+
+/// How long a deferred restart waits for the reply to reach the socket.
+const REPLY_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Restart the WFB plane of the node's current role, the one unit whose
+/// receive chain reads the key: `ados-wfb-rx` on a direct node, the relay or
+/// receiver plane otherwise.
+///
+/// That plane is the unit hosting this command socket, so restarting it
+/// inline stops this process before it answers and the caller reads a dropped
+/// connection as a failed pair. The restart is scheduled after the reply
+/// instead: once the reply is written the peer can read it even after this
+/// process exits, and systemd keeps the queued restart job when it stops the
+/// unit's cgroup.
+fn schedule_role_plane_restart() {
+    defer_after_reply(REPLY_GRACE, async {
+        let unit = ados_supervisor::role::role_plane(&crate::mesh::get_current_role());
+        if !select().restart(unit).await {
+            tracing::info!(unit, "wfb_unit_restart_skipped");
+        }
+    });
+}
+
+/// Run `action` on its own task once `grace` has passed, returning at once.
+fn defer_after_reply<F>(grace: std::time::Duration, action: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::time::sleep(grace).await;
+        action.await;
+    });
 }
 
 /// Merge the persisted pair fields under `video.wfb` (canonical) and mirror onto
@@ -355,6 +382,21 @@ fn write_config_atomic(path: &Path, data: &serde_norway::Value) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_deferred_restart_runs_only_after_the_reply_grace() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fired = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = fired.clone();
+        defer_after_reply(REPLY_GRACE, async move {
+            flag.store(true, Ordering::SeqCst);
+        });
+        // The handler returns (and the reply is written) before the restart.
+        tokio::task::yield_now().await;
+        assert!(!fired.load(Ordering::SeqCst));
+        tokio::time::sleep(REPLY_GRACE * 2).await;
+        assert!(fired.load(Ordering::SeqCst));
+    }
     use std::os::unix::fs::PermissionsExt;
 
     /// A tempdir wired as a [`PairPaths`] pointing the config + key-dir + sentinel

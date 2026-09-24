@@ -54,15 +54,13 @@ const SYSTEMD_FALLBACK_GLOB: &str = "ados-*.service";
 /// Reads the live `ados-*.service` unit list from systemd, attaches each unit's
 /// grouped PSS, and reports the serving process's own metrics. Guaranteed-200:
 /// an absent `systemctl` degrades to an empty list with `systemd_available:false`
-/// and an unreadable `/proc` degrades each unit's memory to `0.0`.
+/// and a unit whose memory the `/proc` scan could not measure reports `null`.
 pub async fn list_services() -> Json<Value> {
     let (mut services, systemd_available) = systemd_inventory().await;
 
-    // Resolve each entry's owning unit once, dedupe via the scan, write the
-    // per-unit PSS back onto every entry. Entries whose unit has no running
-    // process (or whose /proc is unreadable) land at 0.0 — the same value the
-    // FastAPI live-scan fallback reports for an absent unit.
-    attach_service_memory(&mut services);
+    // Resolve each entry's owning unit, write the per-unit PSS back onto every
+    // entry; a unit the scan measured nothing for is null.
+    attach_service_memory(&mut services).await;
 
     let process = process_metrics();
 
@@ -185,29 +183,31 @@ pub(crate) fn parse_unit_line(line: &str) -> Option<Value> {
 /// process, get `0.0` — the same value the FastAPI live `/proc` scan reports for
 /// an absent unit. A single scan serves every entry (units sharing a process are
 /// summed once).
-fn attach_service_memory(services: &mut [Value]) {
-    // The unit each entry maps to (None for an unrecognised name).
-    let unit_by_entry: Vec<Option<String>> = services
-        .iter()
-        .map(|s| {
-            s.as_object()
-                .and_then(|m| m.get("name"))
-                .and_then(Value::as_str)
-                .and_then(unit_for_service)
-        })
-        .collect();
-
+pub(crate) async fn attach_service_memory(services: &mut [Value]) {
     // One /proc PSS scan groups every running ados-* process by its cgroup unit.
-    let pss_by_unit = scan_pss_by_unit();
+    // It reads two files per PID, so it runs on the blocking pool rather than on
+    // the worker every other request shares.
+    let pss_by_unit = crate::probe::offload(scan_pss_by_unit)
+        .await
+        .unwrap_or_default();
+    apply_service_memory(services, &pss_by_unit);
+}
 
-    for (svc, unit) in services.iter_mut().zip(unit_by_entry.iter()) {
-        let mb = unit
-            .as_ref()
-            .and_then(|u| pss_by_unit.get(u))
-            .copied()
-            .unwrap_or(0.0);
+/// Write each entry's `memory_mb` from a scan: the unit's summed PSS, or `null`
+/// when the scan measured nothing for it (no running process, an unreadable
+/// rollup, no `/proc`). A `0.0` would read as a measured empty unit.
+pub(crate) fn apply_service_memory(services: &mut [Value], pss_by_unit: &BTreeMap<String, f64>) {
+    for svc in services.iter_mut() {
+        let mb = svc
+            .get("name")
+            .and_then(Value::as_str)
+            .and_then(unit_for_service)
+            .and_then(|u| pss_by_unit.get(&u).copied());
         if let Some(obj) = svc.as_object_mut() {
-            obj.insert("memory_mb".to_string(), json!(mb));
+            obj.insert(
+                "memory_mb".to_string(),
+                mb.map(Value::from).unwrap_or(Value::Null),
+            );
         }
     }
 }
@@ -525,19 +525,16 @@ mod tests {
     }
 
     #[test]
-    fn attach_service_memory_writes_zero_when_no_proc_match() {
-        // On a dev host the /proc scan finds no running ados unit, so every entry
-        // gets 0.0 — the same value the Python live-scan fallback reports for an
-        // absent unit. The field is always present.
+    fn an_unmeasured_unit_reports_null_memory_not_zero() {
         let mut services = vec![
             json!({"name": "ados-video", "active": true, "state": "active"}),
             json!({"name": "ados-discovery", "active": false, "state": "inactive"}),
         ];
-        attach_service_memory(&mut services);
-        for svc in &services {
-            assert!(svc.as_object().unwrap().contains_key("memory_mb"));
-            assert!(svc["memory_mb"].is_number());
-        }
+        let mut scan = BTreeMap::new();
+        scan.insert("ados-video.service".to_string(), 42.5);
+        apply_service_memory(&mut services, &scan);
+        assert_eq!(services[0]["memory_mb"], json!(42.5));
+        assert!(services[1]["memory_mb"].is_null());
     }
 
     #[test]
@@ -611,7 +608,7 @@ mod tests {
                 parse_unit_line("ados-mavlink.service loaded active running ADOS MAVLink router")
                     .expect("a parseable row"),
             ];
-        attach_service_memory(&mut entry);
+        apply_service_memory(&mut entry, &BTreeMap::new());
         let golden = entry[0].as_object().unwrap();
         let mut ekeys: Vec<&str> = golden.keys().map(String::as_str).collect();
         ekeys.sort_unstable();
@@ -633,6 +630,7 @@ mod tests {
         assert_eq!(golden["sub_state"], json!("running"));
         assert_eq!(golden["load_state"], json!("loaded"));
         assert_eq!(golden["pid"], Value::Null);
-        assert!(golden["memory_mb"].is_number());
+        // No scan measured it, so the memory is unknown.
+        assert!(golden["memory_mb"].is_null());
     }
 }

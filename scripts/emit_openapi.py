@@ -30,16 +30,13 @@ from fastapi import FastAPI  # noqa: E402
 
 from ados import __version__  # noqa: E402
 from ados.api.routes import (  # noqa: E402
-    config,
     ground_station,
-    logs,
     pairing,
     peripherals,
     peripherals_v1,
     plugins,
     video,
     vision_models,
-    wfb,
 )
 
 
@@ -55,10 +52,7 @@ def build_spec_app() -> FastAPI:
     # Mirror the route registration order from src/ados/api/server.py.
     # Middlewares are intentionally left off; they do not affect the
     # OpenAPI surface.
-    app.include_router(config.router, prefix="/api")
-    app.include_router(logs.router, prefix="/api")
     app.include_router(video.router, prefix="/api")
-    app.include_router(wfb.router, prefix="/api")
     app.include_router(pairing.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
     app.include_router(peripherals_v1.router, prefix="/api")

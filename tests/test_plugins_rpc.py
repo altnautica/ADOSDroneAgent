@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from ados.plugins.rpc import (
@@ -12,7 +10,6 @@ from ados.plugins.rpc import (
     Envelope,
     FrameError,
     TokenError,
-    TokenIssuer,
     encode_frame,
     read_frame,
 )
@@ -129,58 +126,20 @@ async def test_truncated_header_raises() -> None:
 # ---------------------------------------------------------------------
 
 
-def test_token_mint_and_verify_round_trip() -> None:
-    issuer = TokenIssuer()
-    token = issuer.mint(
-        plugin_id="com.example.x",
-        granted_caps={"event.publish", "event.subscribe"},
+def _token(plugin_id: str, caps: set[str]) -> CapabilityToken:
+    return CapabilityToken(
+        plugin_id=plugin_id,
+        session_id="0123456789abcdef",
+        granted_caps=frozenset(caps),
+        issued_at=1_700_000_000,
+        expires_at=1_700_000_600,
+        signature="ab" * 32,
     )
-    assert token.plugin_id == "com.example.x"
-    assert token.granted_caps == frozenset({"event.publish", "event.subscribe"})
-    assert not token.is_expired()
-    issuer.verify(token)  # does not raise
 
 
 def test_token_string_round_trip() -> None:
-    issuer = TokenIssuer()
-    token = issuer.mint(
-        plugin_id="com.example.x",
-        granted_caps={"event.publish"},
-    )
-    encoded = token.to_string()
-    decoded = CapabilityToken.from_string(encoded)
-    assert decoded == token
-    issuer.verify(decoded)
-
-
-def test_token_tampered_caps_rejected() -> None:
-    issuer = TokenIssuer()
-    token = issuer.mint(plugin_id="com.example.x", granted_caps={"event.publish"})
-    tampered = CapabilityToken(
-        plugin_id=token.plugin_id,
-        session_id=token.session_id,
-        granted_caps=frozenset({"event.publish", "event.subscribe"}),  # added scope
-        issued_at=token.issued_at,
-        expires_at=token.expires_at,
-        signature=token.signature,
-    )
-    with pytest.raises(TokenError):
-        issuer.verify(tampered)
-
-
-def test_token_expired_rejected() -> None:
-    issuer = TokenIssuer()
-    token = issuer.mint(plugin_id="com.example.x", granted_caps={"event.publish"})
-    expired = CapabilityToken(
-        plugin_id=token.plugin_id,
-        session_id=token.session_id,
-        granted_caps=token.granted_caps,
-        issued_at=token.issued_at - 10000,
-        expires_at=int(time.time()) - 1,
-        signature=token.signature,
-    )
-    with pytest.raises(TokenError):
-        issuer.verify(expired)
+    token = _token("com.example.x", {"event.publish"})
+    assert CapabilityToken.from_string(token.to_string()) == token
 
 
 def test_token_from_malformed_string_raises() -> None:
@@ -194,19 +153,7 @@ def test_token_from_malformed_string_raises() -> None:
 
 def test_token_round_trip_with_dotted_plugin_id() -> None:
     """Plugin ids contain dots; the token format must survive that."""
-    issuer = TokenIssuer()
-    token = issuer.mint(
-        plugin_id="com.example.deeply.nested.id",
-        granted_caps={"event.publish", "event.subscribe"},
-    )
+    token = _token("com.example.deeply.nested.id", {"event.publish", "event.subscribe"})
     decoded = CapabilityToken.from_string(token.to_string())
     assert decoded == token
-    issuer.verify(decoded)
-
-
-def test_two_issuers_with_different_secrets_reject_each_others_tokens() -> None:
-    a = TokenIssuer()
-    b = TokenIssuer()
-    token_from_a = a.mint(plugin_id="com.example.x", granted_caps={"event.publish"})
-    with pytest.raises(TokenError):
-        b.verify(token_from_a)
+    assert decoded.granted_caps == frozenset({"event.publish", "event.subscribe"})

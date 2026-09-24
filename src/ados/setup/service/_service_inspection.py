@@ -7,33 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Literal
 
-from ados.setup.models import RemoteAccessStatus, ServiceState
-
-
-def _services(runtime: Any) -> list[ServiceState]:
-    tracker = runtime.service_tracker
-    data = tracker.to_dict() if tracker else {}
-    rows: dict[str, ServiceState] = {}
-    for name, info in data.items():
-        raw_state = info.get("state")
-        state = getattr(raw_state, "value", raw_state) or "unknown"
-        rows[name] = ServiceState(name=name, state=str(state))
-    for task in runtime.service_tasks():
-        name = task.get_name()
-        if name in rows:
-            continue
-        rows[name] = ServiceState(
-            name=name,
-            state="running" if not task.done() else "stopped",
-        )
-    return sorted(rows.values(), key=lambda svc: svc.name)
-
-
-def _service_state(services: list[ServiceState], name: str) -> str:
-    for service in services:
-        if service.name == name:
-            return service.state
-    return ""
+from ados.setup.models import RemoteAccessStatus
 
 
 def _cloudflared_running(service_name: str) -> bool:
@@ -81,8 +55,6 @@ def _remote_status(config: Any) -> RemoteAccessStatus:
 
 
 __all__ = [
-    "_services",
-    "_service_state",
     "_cloudflared_running",
     "_remote_status",
 ]

@@ -7,7 +7,8 @@
 //! COMMAND_ACK lands on the MAVLink WS bridge, not here).
 //!
 //! - **`POST /api/v1/ground-station/camera/switch`** — `{camera_id}`.
-//!   Returns `{camera_id, accepted, reason}` on a multi-camera drone; a
+//!   Returns `{camera_id, sent, accepted: null, reason}` on a multi-camera drone
+//!   (the ACK is not observed here, so acceptance is unknown); a
 //!   single-camera drone, or one whose camera count this station cannot
 //!   establish, is a `501` naming which of those it is; a malformed/out-of-range
 //!   id is a `400`; an unreachable MAVLink IPC bus is a `503`.
@@ -178,9 +179,15 @@ pub async fn post_camera_switch(
         camera_count = count,
         "camera switch dispatched"
     );
-    // The CameraSwitchResponse: accepted, no reason.
-    Json(json!({"camera_id": req.camera_id, "accepted": true, "reason": Value::Null}))
-        .into_response()
+    // The frame reached the MAVLink socket; the autopilot's COMMAND_ACK is not
+    // observed on this path, so acceptance is unknown rather than claimed.
+    Json(json!({
+        "camera_id": req.camera_id,
+        "sent": true,
+        "accepted": Value::Null,
+        "reason": "sent to the flight controller; its acknowledgement is not observed",
+    }))
+    .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -224,33 +231,37 @@ fn camera_count_from_sidecar(text: &str, now: f64) -> CameraCount {
             "the relayed-drone status is stale, so the camera count is unknown",
         );
     }
-    let peers = doc.get("peers").and_then(Value::as_array);
-    let counts: Vec<u32> = peers
-        .map(|list| {
-            list.iter()
-                .filter_map(|p| {
-                    // `peers_payload` omits the status block entirely once it
-                    // goes stale, so a count found here is a current one.
-                    p.get("status")?
-                        .get("video_stream_count")?
-                        .as_u64()
-                        .and_then(|n| u32::try_from(n).ok())
-                })
-                .collect()
-        })
+    let peers: &[Value] = doc
+        .get("peers")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
         .unwrap_or_default();
+    // The guard counts drones, not reports: `peers_payload` keeps a peer whose
+    // status went stale but drops its status block, so counting reports alone
+    // would read two relayed drones as one whenever one of them is quiet.
+    if peers.len() > 1 {
+        return CameraCount::Unknown(
+            "more than one drone is relayed and this request names none, so the camera count is unknown",
+        );
+    }
+    let counts: Vec<u32> = peers
+        .iter()
+        .filter_map(|p| {
+            // `peers_payload` omits the status block entirely once it
+            // goes stale, so a count found here is a current one.
+            p.get("status")?
+                .get("video_stream_count")?
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+        })
+        .collect();
 
     match counts.len() {
         0 => CameraCount::Unknown(
             "the relayed drone has not reported how many cameras it serves, so the camera count is unknown",
         ),
-        1 => CameraCount::Known(counts[0]),
-        // The request names no drone and the command targets one autopilot, so
-        // with several relayed there is no way to tell which one it means.
-        // Guessing would switch the wrong aircraft's camera.
-        _ => CameraCount::Unknown(
-            "more than one drone is relayed and this request names none, so the camera count is unknown",
-        ),
+        // At most one peer is listed, so there is at most one count.
+        _ => CameraCount::Known(counts[0]),
     }
 }
 
@@ -575,6 +586,24 @@ mod tests {
         let empty = json!({"wall_time_unix": 1000.0, "peers": []}).to_string();
         assert!(matches!(
             camera_count_from_sidecar(&empty, 1000.0),
+            CameraCount::Unknown(_)
+        ));
+    }
+
+    #[test]
+    fn a_quiet_second_drone_still_blocks_the_guess() {
+        // The second drone's status went stale, so its status block is gone,
+        // but it is still relayed: one report is not one drone.
+        let two = json!({
+            "wall_time_unix": 1000.0,
+            "peers": [
+                {"device_id": "a", "status": {"video_stream_count": 2}},
+                {"device_id": "b", "status_fresh": false},
+            ],
+        })
+        .to_string();
+        assert!(matches!(
+            camera_count_from_sidecar(&two, 1000.0),
             CameraCount::Unknown(_)
         ));
     }

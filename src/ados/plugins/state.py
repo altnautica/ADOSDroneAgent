@@ -162,6 +162,21 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def state_file_key(path: Path | None = None) -> tuple[int, int, int] | None:
+    """Identity of the state file's current contents, or None when absent.
+
+    ``save_state`` replaces the file by rename, so any write by any process
+    changes the inode as well as the mtime; a holder of an in-memory copy
+    compares this key to know when to re-read.
+    """
+    target = Path(path) if path is not None else PLUGIN_STATE_PATH
+    try:
+        st = target.stat()
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
+
 def load_state(path: Path | None = None) -> list[PluginInstall]:
     target = Path(path) if path is not None else PLUGIN_STATE_PATH
     if not target.exists():

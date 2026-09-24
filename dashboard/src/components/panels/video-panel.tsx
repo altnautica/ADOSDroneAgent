@@ -8,6 +8,7 @@ import { useStatus } from "@/hooks/use-status";
 import { useWfb } from "@/hooks/use-wfb";
 import { fmtBitrate, fmtNum } from "@/lib/format";
 import { startHls, type HlsSession } from "@/lib/hls";
+import { fetchSnapshot } from "@/lib/snapshot";
 import { startWhep, type WhepSession } from "@/lib/whep";
 import { cn } from "@/lib/utils";
 
@@ -59,6 +60,9 @@ export function VideoPanel() {
   // can still fail to bootstrap if no IDR with SPS/PPS arrives.
   const [framesArrived, setFramesArrived] = useState(false);
   const [noFramesWarning, setNoFramesWarning] = useState(false);
+  // Object URL of the last still frame, fetched with the credential when every
+  // live transport failed.
+  const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
 
   const whepUrl = status.data?.video?.whep_url ?? "";
   const hlsUrl = status.data?.video?.hls_url ?? "";
@@ -198,6 +202,30 @@ export function VideoPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canStream, whepUrl, hlsUrl, retryToken, preferredTransport]);
 
+  // The still-frame fallback. Fetched (not an <img src>) so it carries the
+  // dashboard's credential; a failure is the final error state.
+  useEffect(() => {
+    if (state !== "snapshot") return;
+    const ac = new AbortController();
+    let url: string | null = null;
+    fetchSnapshot(ac.signal).then(
+      (blob) => {
+        url = URL.createObjectURL(blob);
+        setSnapshotUrl(url);
+      },
+      () => {
+        if (ac.signal.aborted) return;
+        setState("final-error");
+        setError((prev) => prev || "Snapshot also unavailable.");
+      },
+    );
+    return () => {
+      ac.abort();
+      if (url) URL.revokeObjectURL(url);
+      setSnapshotUrl(null);
+    };
+  }, [state, retryToken]);
+
   // Truth signal: bind to the video element's decode lifecycle so
   // the LIVE badge cannot lie. loadeddata fires when the first
   // decoded frame is ready; metadata can be present without
@@ -309,15 +337,11 @@ export function VideoPanel() {
             autoPlay
             playsInline
           />
-          {showSnapshot && (
+          {showSnapshot && snapshotUrl && (
             <img
-              src={`/api/video/snapshot.jpg?t=${retryToken}`}
+              src={snapshotUrl}
               alt="Last snapshot"
               className="absolute inset-0 h-full w-full object-contain"
-              onError={() => {
-                setState("final-error");
-                setError(error || "Snapshot also unavailable.");
-              }}
             />
           )}
           {(showOverlay || state === "snapshot") && (
@@ -328,13 +352,11 @@ export function VideoPanel() {
                   <div>
                     {waitingForWfb
                       ? "Waiting for WFB stream from drone."
-                      : pipelineState === "error"
-                        ? "Pipeline error."
-                        : pipelineState === "starting"
-                          ? "Pipeline starting…"
-                          : !haveAnyUrl
-                            ? "No camera detected."
-                            : "Pipeline idle."}
+                      : pipelineState === "no_camera"
+                        ? "No camera detected."
+                        : !haveAnyUrl
+                          ? "No stream published."
+                          : "Pipeline idle."}
                   </div>
                   <div className="text-[10px] max-w-xs text-center">
                     {waitingForWfb

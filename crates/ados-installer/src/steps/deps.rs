@@ -139,14 +139,58 @@ pub fn required_packages(profile: &str) -> Vec<&'static str> {
 /// pane (no `-qq`, so the real fetch/unpack/configure activity is visible).
 /// `apt-get` args follow.
 fn apt(args: &[&str], sink: &ProgressSink) -> exec::CmdResult {
-    let mut argv: Vec<&str> = vec!["DEBIAN_FRONTEND=noninteractive", "apt-get"];
-    argv.extend_from_slice(args);
+    let argv = apt_argv(args);
     exec::run_streamed("env", &argv, |line| {
         sink.sub_log("deps", line);
         if let Some(a) = activity::apt_activity(line) {
             sink.activity("deps", a);
         }
     })
+}
+
+/// dpkg options that answer a conffile question without asking: keep a file
+/// the operator (or this installer) changed, take the maintainer's version of
+/// one nobody touched. `DEBIAN_FRONTEND=noninteractive` silences debconf only;
+/// a conffile conflict is dpkg's own prompt, and it waits on the terminal the
+/// install is running in, forever.
+const DPKG_NO_PROMPT: [&str; 2] = ["--force-confdef", "--force-confold"];
+
+/// The full `env … apt-get …` argv for `args` (pure).
+fn apt_argv<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut argv: Vec<&str> = vec![
+        "DEBIAN_FRONTEND=noninteractive",
+        "apt-get",
+        "-o",
+        "Dpkg::Options::=--force-confdef",
+        "-o",
+        "Dpkg::Options::=--force-confold",
+    ];
+    argv.extend_from_slice(args);
+    argv
+}
+
+/// Whether apt refused because a previous dpkg run was interrupted (a power
+/// cut during first-boot unattended-upgrades, or during an earlier install).
+/// apt's own advice is a manual `dpkg --configure -a`; the installer runs it.
+fn is_dpkg_interrupted(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("dpkg was interrupted")
+}
+
+/// Finish the interrupted dpkg run, non-interactively.
+fn repair_interrupted_dpkg(sink: &ProgressSink) {
+    sink.activity(
+        "deps",
+        "finishing an interrupted package install".to_string(),
+    );
+    let mut argv = vec![
+        "DEBIAN_FRONTEND=noninteractive",
+        "dpkg",
+        "--configure",
+        "-a",
+    ];
+    argv.extend_from_slice(&DPKG_NO_PROMPT);
+    let res = exec::run_streamed("env", &argv, |line| sink.sub_log("deps", line));
+    tracing::info!(code = ?res.code, "dpkg --configure -a after an interrupted run");
 }
 
 /// How long to wait for another package manager to release the dpkg lock.
@@ -174,17 +218,27 @@ fn is_lock_contention(stderr: &str) -> bool {
         || (s.contains("is held by process") && s.contains("lock"))
 }
 
-/// Run an apt invocation, waiting out a contended dpkg lock.
+/// Run an apt invocation, waiting out a contended dpkg lock and finishing an
+/// interrupted dpkg run once.
 ///
-/// Only lock contention is retried. A broken index, an unknown package or a
-/// failing post-install script returns immediately, because those do not get
-/// better by trying again and a silent retry loop would only delay the report.
+/// Only those two are retried. A broken index, an unknown package or a failing
+/// post-install script returns immediately, because those do not get better by
+/// trying again and a silent retry loop would only delay the report.
 fn apt_waiting_for_lock(argv: &[&str], sink: &ProgressSink) -> crate::exec::CmdResult {
     let deadline = Instant::now() + APT_LOCK_WAIT;
     let mut announced = false;
+    let mut repaired = false;
     loop {
         let res = apt(argv, sink);
-        if res.success() || !res.spawned || !is_lock_contention(&res.stderr) {
+        if res.success() || !res.spawned {
+            return res;
+        }
+        if !repaired && is_dpkg_interrupted(&res.stderr) {
+            repaired = true;
+            repair_interrupted_dpkg(sink);
+            continue;
+        }
+        if !is_lock_contention(&res.stderr) {
             return res;
         }
         if Instant::now() >= deadline {
@@ -588,6 +642,26 @@ mod lock_tests {
             "dpkg: error processing package foo (--configure)"
         ));
         assert!(!is_lock_contention(""));
+    }
+
+    #[test]
+    fn apt_never_stops_to_ask_about_a_conffile() {
+        // debconf is silenced by the frontend variable; the conffile question
+        // is dpkg's own, and it would wait on the install's terminal forever.
+        let argv = apt_argv(&["install", "-y", "curl"]);
+        let joined = argv.join(" ");
+        assert!(joined.contains("DEBIAN_FRONTEND=noninteractive"));
+        assert!(joined.contains("-o Dpkg::Options::=--force-confdef"));
+        assert!(joined.contains("-o Dpkg::Options::=--force-confold"));
+        assert_eq!(&argv[argv.len() - 3..], &["install", "-y", "curl"]);
+    }
+
+    #[test]
+    fn an_interrupted_dpkg_is_recognised_and_is_not_lock_contention() {
+        let msg = "E: dpkg was interrupted, you must manually run 'sudo dpkg --configure -a' to correct the problem.";
+        assert!(is_dpkg_interrupted(msg));
+        assert!(!is_lock_contention(msg));
+        assert!(!is_dpkg_interrupted("E: Unable to locate package foo"));
     }
 
     #[test]

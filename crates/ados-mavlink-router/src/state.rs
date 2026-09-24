@@ -11,7 +11,7 @@
 //! vehicle-derived fields so it stays I/O-free and unit-testable.
 
 use ados_protocol::flight_modes::{ArduPilotFirmware, MAV_AUTOPILOT_PX4};
-use ados_protocol::mavlink::ardupilotmega::MavMessage;
+use ados_protocol::mavlink::ardupilotmega::{MavAutopilot, MavMessage};
 use serde_json::{json, Map, Value};
 
 /// PX4 `(main_mode, sub_mode)` -> mode name. PX4 packs the mode into
@@ -106,6 +106,50 @@ pub fn firmware_family(
     }
 }
 
+/// Which component on a MAVLink link is the vehicle, and whether a frame
+/// describes it.
+///
+/// A flight controller forwards broadcast traffic from every other component on
+/// its links to this one: a ground station's HEARTBEAT arriving on a telemetry
+/// radio, a gimbal's, another companion computer's. None of those is the
+/// vehicle. Taking any HEARTBEAT as the vehicle's let a ground station's
+/// (`MAV_TYPE_GCS`, base mode 0) overwrite armed, mode and type once a second
+/// and re-point every request at the ground station's system id.
+///
+/// The vehicle is the component whose HEARTBEAT names an autopilot. Its
+/// `(system_id, component_id)` is latched from that HEARTBEAT, and every other
+/// frame is admitted only when it comes from the same component, so a PARAM_VALUE
+/// from a gimbal or a status message from another companion never lands in the
+/// vehicle's state or parameter cache. Nothing is admitted before the first
+/// autopilot HEARTBEAT.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct VehicleSource {
+    vehicle: Option<(u8, u8)>,
+}
+
+impl VehicleSource {
+    /// Whether a frame from `(system_id, component_id)` carrying `msg` comes
+    /// from the vehicle. An autopilot HEARTBEAT re-latches the vehicle identity,
+    /// so a flight controller whose system id is changed is followed.
+    pub fn admit(&mut self, system_id: u8, component_id: u8, msg: &MavMessage) -> bool {
+        match msg {
+            MavMessage::HEARTBEAT(hb) => {
+                if hb.autopilot == MavAutopilot::MAV_AUTOPILOT_INVALID {
+                    return false;
+                }
+                self.vehicle = Some((system_id, component_id));
+                true
+            }
+            _ => self.vehicle == Some((system_id, component_id)),
+        }
+    }
+
+    /// The latched vehicle system id, `None` until an autopilot HEARTBEAT.
+    pub fn system_id(&self) -> Option<u8> {
+        self.vehicle.map(|(sys, _)| sys)
+    }
+}
+
 /// The unified vehicle state. Field set and defaults mirror the Python
 /// dataclass; only the fields the wire snapshot needs are surfaced by
 /// [`VehicleState::to_wire`].
@@ -139,29 +183,34 @@ pub struct VehicleState {
     pub rollspeed: f64,
     pub pitchspeed: f64,
     pub yawspeed: f64,
-    // SYS_STATUS
-    pub voltage_battery: f64,
-    pub current_battery: f64,
-    pub battery_remaining: i64,
+    // SYS_STATUS. Every reading MAVLink lets an autopilot mark "not measured"
+    // is an `Option`: the sentinel (UINT16_MAX mV, -1 cA, -1 %) decodes to
+    // `None` and is published as `null`, never as a value a surface would show.
+    pub voltage_battery: Option<f64>,
+    pub current_battery: Option<f64>,
+    pub battery_remaining: Option<i64>,
     pub sensors_health: i64,
     // GPS_RAW_INT
     pub gps_fix_type: i64,
     pub gps_satellites: i64,
-    pub gps_eph: f64,
-    pub gps_epv: f64,
+    /// `None` when the receiver reports UINT16_MAX (unknown).
+    pub gps_eph: Option<f64>,
+    pub gps_epv: Option<f64>,
     // VFR_HUD
     pub airspeed: f64,
     pub groundspeed: f64,
     pub climb: f64,
     pub throttle: i64,
     // BATTERY_STATUS
-    pub battery_temperature: f64,
+    /// `None` when BATTERY_STATUS reports INT16_MAX (not measured).
+    pub battery_temperature: Option<f64>,
     pub battery_voltages: Vec<f64>,
     pub battery_current_consumed: i64,
     pub battery_energy_consumed: i64,
     // RC_CHANNELS
     pub rc_channels: Vec<i64>,
-    pub rc_rssi: i64,
+    /// `None` when RC_CHANNELS reports UINT8_MAX (invalid/unknown).
+    pub rc_rssi: Option<i64>,
     // Timestamps (ISO-8601 UTC strings, supplied by the caller)
     pub last_heartbeat: String,
     pub last_update: String,
@@ -213,24 +262,24 @@ impl Default for VehicleState {
             rollspeed: 0.0,
             pitchspeed: 0.0,
             yawspeed: 0.0,
-            voltage_battery: 0.0,
-            current_battery: 0.0,
-            battery_remaining: -1,
+            voltage_battery: None,
+            current_battery: None,
+            battery_remaining: None,
             sensors_health: 0,
             gps_fix_type: 0,
             gps_satellites: 0,
-            gps_eph: 0.0,
-            gps_epv: 0.0,
+            gps_eph: None,
+            gps_epv: None,
             airspeed: 0.0,
             groundspeed: 0.0,
             climb: 0.0,
             throttle: 0,
-            battery_temperature: 0.0,
+            battery_temperature: None,
             battery_voltages: Vec::new(),
             battery_current_consumed: 0,
             battery_energy_consumed: 0,
             rc_channels: vec![0; 18],
-            rc_rssi: 0,
+            rc_rssi: None,
             last_heartbeat: String::new(),
             last_update: String::new(),
             // No position has been seen yet, which a consumer must treat as
@@ -318,17 +367,20 @@ impl VehicleState {
                 None
             }
             MavMessage::SYS_STATUS(m) => {
-                self.voltage_battery = m.voltage_battery as f64 / 1000.0;
-                self.current_battery = m.current_battery as f64 / 100.0;
-                self.battery_remaining = m.battery_remaining as i64;
+                self.voltage_battery =
+                    (m.voltage_battery != u16::MAX).then(|| m.voltage_battery as f64 / 1000.0);
+                self.current_battery =
+                    (m.current_battery != -1).then(|| m.current_battery as f64 / 100.0);
+                self.battery_remaining =
+                    (m.battery_remaining != -1).then_some(m.battery_remaining as i64);
                 self.sensors_health = m.onboard_control_sensors_health.bits() as i64;
                 None
             }
             MavMessage::GPS_RAW_INT(m) => {
                 self.gps_fix_type = m.fix_type as i64;
                 self.gps_satellites = m.satellites_visible as i64;
-                self.gps_eph = m.eph as f64 / 100.0;
-                self.gps_epv = m.epv as f64 / 100.0;
+                self.gps_eph = (m.eph != u16::MAX).then(|| m.eph as f64 / 100.0);
+                self.gps_epv = (m.epv != u16::MAX).then(|| m.epv as f64 / 100.0);
                 None
             }
             MavMessage::VFR_HUD(m) => {
@@ -339,11 +391,8 @@ impl VehicleState {
                 None
             }
             MavMessage::BATTERY_STATUS(m) => {
-                self.battery_temperature = if m.temperature != 0x7FFF {
-                    m.temperature as f64 / 100.0
-                } else {
-                    0.0
-                };
+                self.battery_temperature =
+                    (m.temperature != i16::MAX).then(|| m.temperature as f64 / 100.0);
                 self.battery_voltages = m
                     .voltages
                     .iter()
@@ -375,7 +424,7 @@ impl VehicleState {
                     m.chan17_raw as i64,
                     m.chan18_raw as i64,
                 ];
-                self.rc_rssi = m.rssi as i64;
+                self.rc_rssi = (m.rssi != u8::MAX).then_some(m.rssi as i64);
                 None
             }
             MavMessage::PARAM_VALUE(m) => {
@@ -784,7 +833,7 @@ mod tests {
             TS,
         );
         assert_eq!(s.battery_voltages, vec![4.2, 4.18]);
-        assert_eq!(s.battery_temperature, 0.0);
+        assert_eq!(s.battery_temperature, None);
         assert_eq!(s.battery_current_consumed, 1500);
     }
 
@@ -879,9 +928,9 @@ mod tests {
             }),
             TS,
         );
-        assert!((s.voltage_battery - 16.4).abs() < 1e-9);
-        assert!((s.current_battery - 2.5).abs() < 1e-9);
-        assert_eq!(s.battery_remaining, 87);
+        assert!((s.voltage_battery.unwrap() - 16.4).abs() < 1e-9);
+        assert!((s.current_battery.unwrap() - 2.5).abs() < 1e-9);
+        assert_eq!(s.battery_remaining, Some(87));
 
         s.update_from_message(
             &MavMessage::GPS_RAW_INT(GPS_RAW_INT_DATA {
@@ -899,7 +948,7 @@ mod tests {
             TS,
         );
         assert_eq!(s.gps_satellites, 14);
-        assert!((s.gps_eph - 1.5).abs() < 1e-9);
+        assert!((s.gps_eph.unwrap() - 1.5).abs() < 1e-9);
         assert_eq!(s.gps_fix_type, GpsFixType::GPS_FIX_TYPE_3D_FIX as i64);
 
         s.update_from_message(
@@ -949,7 +998,7 @@ mod tests {
         assert_eq!(s.rc_channels.len(), 18);
         assert_eq!(s.rc_channels[0], 1500);
         assert_eq!(s.rc_channels[17], 14);
-        assert_eq!(s.rc_rssi, 200);
+        assert_eq!(s.rc_rssi, Some(200));
     }
 
     #[test]
@@ -968,5 +1017,145 @@ mod tests {
         // descriptor, both stay honest.
         assert_eq!(firmware_family(None, true, 0), "unknown");
         assert_eq!(firmware_family(Some("cleanflight"), false, 0), "unknown");
+    }
+
+    /// A ground station's HEARTBEAT as a flight controller forwards it: its own
+    /// system id, `MAV_TYPE_GCS`, no autopilot, base mode 0.
+    fn gcs_heartbeat() -> MavMessage {
+        MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode: 0,
+            mavtype: MavType::MAV_TYPE_GCS,
+            autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
+            base_mode: MavModeFlag::empty(),
+            system_status: MavState::MAV_STATE_ACTIVE,
+            mavlink_version: 3,
+        })
+    }
+
+    #[test]
+    fn only_an_autopilot_heartbeat_identifies_the_vehicle() {
+        let mut src = VehicleSource::default();
+        let position = MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {
+            time_boot_ms: 0,
+            lat: 1,
+            lon: 1,
+            alt: 0,
+            relative_alt: 0,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            hdg: 0,
+        });
+        // Nothing is the vehicle before its HEARTBEAT.
+        assert!(!src.admit(1, 1, &position));
+        // A forwarded ground station, and a companion sharing the vehicle's
+        // system id, are not the vehicle.
+        assert!(!src.admit(255, 190, &gcs_heartbeat()));
+        assert!(!src.admit(1, 191, &gcs_heartbeat()));
+        assert_eq!(src.system_id(), None);
+
+        assert!(src.admit(1, 1, &heartbeat(MavType::MAV_TYPE_QUADROTOR, 4, true)));
+        assert_eq!(src.system_id(), Some(1));
+        assert!(src.admit(1, 1, &position));
+        // Telemetry from another system, or another component of the same
+        // system, never feeds the vehicle's state.
+        assert!(!src.admit(255, 190, &position));
+        assert!(!src.admit(1, 154, &position));
+        // A later ground-station HEARTBEAT does not move the latch.
+        assert!(!src.admit(255, 190, &gcs_heartbeat()));
+        assert_eq!(src.system_id(), Some(1));
+    }
+
+    /// Every MAVLink "not measured" sentinel is published as `null`, never as a
+    /// reading: no current sensor is not -0.01 A, an unknown temperature is not
+    /// 0 C, an unknown accuracy is not 655 m.
+    #[test]
+    fn not_reported_sentinels_are_published_as_null() {
+        let mut s = VehicleState::default();
+        s.update_from_message(
+            &MavMessage::SYS_STATUS(SYS_STATUS_DATA {
+                onboard_control_sensors_present: MavSysStatusSensor::empty(),
+                onboard_control_sensors_enabled: MavSysStatusSensor::empty(),
+                onboard_control_sensors_health: MavSysStatusSensor::empty(),
+                load: 0,
+                voltage_battery: u16::MAX,
+                current_battery: -1,
+                drop_rate_comm: 0,
+                errors_comm: 0,
+                errors_count1: 0,
+                errors_count2: 0,
+                errors_count3: 0,
+                errors_count4: 0,
+                battery_remaining: -1,
+            }),
+            TS,
+        );
+        s.update_from_message(
+            &MavMessage::GPS_RAW_INT(GPS_RAW_INT_DATA {
+                time_usec: 0,
+                lat: 0,
+                lon: 0,
+                alt: 0,
+                eph: u16::MAX,
+                epv: u16::MAX,
+                vel: 0,
+                cog: 0,
+                fix_type: GpsFixType::GPS_FIX_TYPE_NO_FIX,
+                satellites_visible: 0,
+            }),
+            TS,
+        );
+        s.update_from_message(
+            &MavMessage::BATTERY_STATUS(BATTERY_STATUS_DATA {
+                current_consumed: -1,
+                energy_consumed: -1,
+                temperature: i16::MAX,
+                voltages: [u16::MAX; 10],
+                current_battery: -1,
+                id: 0,
+                battery_function: MavBatteryFunction::MAV_BATTERY_FUNCTION_ALL,
+                mavtype: MavBatteryType::MAV_BATTERY_TYPE_LIPO,
+                battery_remaining: -1,
+            }),
+            TS,
+        );
+        s.update_from_message(
+            &MavMessage::RC_CHANNELS(RC_CHANNELS_DATA {
+                time_boot_ms: 0,
+                chan1_raw: 1500,
+                chan2_raw: 0,
+                chan3_raw: 0,
+                chan4_raw: 0,
+                chan5_raw: 0,
+                chan6_raw: 0,
+                chan7_raw: 0,
+                chan8_raw: 0,
+                chan9_raw: 0,
+                chan10_raw: 0,
+                chan11_raw: 0,
+                chan12_raw: 0,
+                chan13_raw: 0,
+                chan14_raw: 0,
+                chan15_raw: 0,
+                chan16_raw: 0,
+                chan17_raw: 0,
+                chan18_raw: 0,
+                chancount: 1,
+                rssi: u8::MAX,
+            }),
+            TS,
+        );
+        let wire = s.to_wire();
+        for (group, key) in [
+            ("battery", "voltage"),
+            ("battery", "current"),
+            ("battery", "remaining"),
+            ("battery", "temperature"),
+            ("gps", "eph"),
+            ("gps", "epv"),
+            ("rc", "rssi"),
+        ] {
+            assert_eq!(wire[group][key], Value::Null, "{group}.{key}");
+        }
     }
 }

@@ -78,7 +78,6 @@ fn str_array(args: &serde_json::Value, key: &str) -> Vec<String> {
 }
 
 /// Whether a command name is a plugin lifecycle command this receiver handles.
-/// Mirrors `is_plugin_command`.
 pub fn is_plugin_command(command: &str) -> bool {
     matches!(
         command,

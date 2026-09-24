@@ -15,12 +15,9 @@
   "diskPercent": 3.0,
   "diskTotalGb": 64.0,
   "diskUsedGb": 2.0,
-  "fcBaud": 0,
   "fcConnected": false,
-  "fcPort": "",
   "hasAccelerator": false,
   "lastIp": "127.0.0.1",
-  "mavlinkWsPort": 0,
   "mdnsHost": "",
   "memoryHistory": [
     12.0
@@ -79,7 +76,6 @@
   "uptimeSeconds": 10,
   "version": "0.49.3",
   "videoState": "stopped",
-  "videoWhepPort": 0,
   "wfbAdapterChipset": null,
   "wfbAdapterInjectionOk": null
 }

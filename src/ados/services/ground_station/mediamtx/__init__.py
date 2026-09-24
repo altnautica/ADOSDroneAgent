@@ -4,7 +4,8 @@ The implementation now lives in per-concern files alongside this barrel:
 
 * ``manager.py`` — :class:`MediamtxGsManager` (process lifecycle,
   config generation, ffmpeg ingest spawn / restart, graceful shutdown)
-  plus the ``main()`` service entry point.
+  plus the ``main()`` service entry point ``__main__`` runs
+  (``python -m ados.services.ground_station.mediamtx``).
 * ``rtsp_config.py`` — SDP body construction and on-disk writeback,
   H.264 Annex-B NAL parsing, sprop probe coroutine, wire constants
   (UDP ingest port, RTSP path, WHEP path, payload type).
@@ -13,10 +14,6 @@ The implementation now lives in per-concern files alongside this barrel:
 * ``tx_watchdog.py`` — TX-liveness supervisor loop that reaps and
   restarts a wedged ffmpeg sidecar before mediamtx's broken-pipe
   cascade fires.
-
-Existing callers (``from ados.services.ground_station.mediamtx_manager
-import MediamtxGsManager``) keep working unchanged via the legacy
-import path that re-exports the same names.
 """
 
 from __future__ import annotations

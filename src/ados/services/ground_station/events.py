@@ -1,23 +1,11 @@
-"""Mesh and pairing event buses for the ground-station profile.
+"""Ground-station event shapes: the in-process pairing bus.
 
-Follows the bounded-queue event-bus pattern used across the agent, scoped
-to distributed receive concerns: role transitions, batman-adv neighbor
-churn, gateway election changes, and field pairing lifecycle.
-
-Both buses are pure asyncio with per-subscriber queues so slow consumers
-do not block the publisher. Used by:
-
-- `role_manager` publishes role transitions.
-- `mesh_manager` publishes neighbor join/leave, partition detected, and
-  gateway election changes.
-- `pairing_manager` publishes pair window open/close, request received,
-  approval applied, and revocation applied.
-- The REST `/api/v1/ground-station/mesh/events` WebSocket fans events out
-  to GCS clients.
-- OLED `screens/mesh/*` subscribes to refresh state without polling.
-
-Consumers should treat the bus as "best-effort telemetry." Dropped events
-are acceptable; authoritative state always lives in the managers.
+The GCS mesh-events WebSocket is served natively. It tails two newline-JSON
+journals under ``/run/ados``: ``mesh-events.jsonl`` (written by the native
+groundlink data plane and the supervisor's role transitions) and
+``pair-events.jsonl`` (mirrored by :mod:`pair_journal`). An in-process bus
+reaches only subscribers in the same process, so mesh events are journaled,
+never published on a bus.
 """
 
 from __future__ import annotations
@@ -28,41 +16,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 __all__ = [
-    "MeshEvent",
-    "MeshEventBus",
     "PairingEvent",
     "PairingEventBus",
 ]
-
-
-# Mesh event kinds:
-# - role_changed: ground_station.role transitioned to a new value
-# - neighbor_join: batman-adv saw a new peer on bat0
-# - neighbor_leave: peer dropped past the dead-neighbor timeout
-# - partition_detected: our node is in a partition missing known peers
-# - partition_healed: mesh merged back with previously missing peers
-# - gateway_changed: batctl gw_mode client picked a different gateway
-# - relay_connected: receiver confirmed a relay is forwarding fragments
-# - relay_disconnected: receiver stopped seeing fragments from a relay
-# - receiver_unreachable: relay lost its receiver (mDNS timeout)
-_MESH_EVENT_KINDS = Literal[
-    "role_changed",
-    "neighbor_join",
-    "neighbor_leave",
-    "partition_detected",
-    "partition_healed",
-    "gateway_changed",
-    "relay_connected",
-    "relay_disconnected",
-    "receiver_unreachable",
-]
-
-
-@dataclass(frozen=True)
-class MeshEvent:
-    kind: _MESH_EVENT_KINDS
-    timestamp_ms: int
-    payload: dict[str, Any] = field(default_factory=dict)
 
 
 _PAIRING_EVENT_KINDS = Literal[
@@ -86,7 +42,7 @@ class PairingEvent:
 
 
 class _FanoutBus:
-    """Shared fanout implementation for MeshEventBus and PairingEventBus."""
+    """Bounded per-subscriber fanout: a slow consumer never blocks the publisher."""
 
     _SENTINEL: object = object()
 
@@ -140,16 +96,6 @@ class _FanoutBus:
                     pass
 
 
-class MeshEventBus(_FanoutBus):
-    async def publish(self, event: MeshEvent) -> None:
-        await self._publish(event)
-
-    async def subscribe(self) -> AsyncIterator[MeshEvent]:
-        async for item in self._subscribe():
-            assert isinstance(item, MeshEvent)
-            yield item
-
-
 class PairingEventBus(_FanoutBus):
     async def publish(self, event: PairingEvent) -> None:
         await self._publish(event)
@@ -160,18 +106,8 @@ class PairingEventBus(_FanoutBus):
             yield item
 
 
-# Process-local singletons. The API router, mesh_manager, role_manager,
-# pairing_manager, and OLED screens all import these. Tests can replace
-# the module attributes directly.
-_mesh_bus: MeshEventBus | None = None
+# Process-local singleton. Tests can replace the module attribute directly.
 _pairing_bus: PairingEventBus | None = None
-
-
-def get_mesh_event_bus() -> MeshEventBus:
-    global _mesh_bus
-    if _mesh_bus is None:
-        _mesh_bus = MeshEventBus()
-    return _mesh_bus
 
 
 def get_pairing_event_bus() -> PairingEventBus:

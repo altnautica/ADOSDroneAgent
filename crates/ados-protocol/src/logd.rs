@@ -14,14 +14,14 @@
 //! other sockets use ([`crate::frame`]); this module reuses that codec and does
 //! not duplicate it.
 //!
-//! Redaction ([`redact`]) hashes any field whose key looks secret-bearing. It
+//! Redaction ([`redact`]) replaces any field whose key looks secret-bearing
+//! with its length only. It
 //! mirrors the agent's structured-logging redaction so no value is ever written
 //! to the store in the clear, regardless of which producer emitted it.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::frame;
@@ -463,12 +463,14 @@ pub fn is_secret_key(key: &str) -> bool {
 /// - if the value is empty, it is returned unchanged;
 /// - if the value already carries the [`REDACT_PREFIX`] sentinel, it is returned
 ///   unchanged (idempotent — a value that traverses the chain twice is not
-///   double-hashed);
-/// - otherwise the value is replaced with `redacted:<first 4 chars>...<first 8
-///   hex chars of the SHA-256 digest>`.
+///   redacted again);
+/// - otherwise the value is replaced with `redacted:len=<N>`, `N` its length in
+///   Unicode characters (Python's `len(v)`).
 ///
-/// The head is the first four Unicode characters (not bytes), matching Python's
-/// `v[:4]` slice; the digest is over the UTF-8 bytes.
+/// Nothing computed from the content survives. A plaintext head plus an unkeyed
+/// digest, which this used to emit, lets anyone who can read the store recover
+/// a short secret (a six-digit pairing code has two unknown digits left) by
+/// hashing candidates.
 pub fn redact(key: &str, value: &str) -> String {
     if value.is_empty() || value.starts_with(REDACT_PREFIX) {
         return value.to_string();
@@ -476,11 +478,7 @@ pub fn redact(key: &str, value: &str) -> String {
     if !is_secret_key(key) {
         return value.to_string();
     }
-    let head: String = value.chars().take(4).collect();
-    let digest = Sha256::digest(value.as_bytes());
-    let hex = hex::encode(digest);
-    let short = &hex[..8];
-    format!("{REDACT_PREFIX}{head}...{short}")
+    format!("{REDACT_PREFIX}len={}", value.chars().count())
 }
 
 /// Redact every secret-bearing string field of an open map in place. Non-string
@@ -718,26 +716,18 @@ mod tests {
         assert_eq!(redact("api_key", &once), once);
     }
 
-    /// Byte-for-byte parity with the agent's structured-logging redaction. The
-    /// expected values were computed from the reference implementation; the
-    /// digest fragment is the first 8 hex chars of SHA-256 over the UTF-8 value.
+    /// Byte-for-byte parity with the agent's structured-logging redaction (the
+    /// Python tests carry the same vectors). Nothing of the value survives but
+    /// its length, so none of these can be reversed by hashing candidates.
     #[test]
     fn redact_parity_vectors() {
         let vectors: &[(&str, &str, &str)] = &[
-            (
-                "api_key",
-                "ABCDEFGHIJ1234567890",
-                "redacted:ABCD...bb2a0cee",
-            ),
-            ("pairing_code", "999888", "redacted:9998...685f188e"),
-            ("token", "tok_supersecretvalue", "redacted:tok_...160e465f"),
-            ("password", "hunter2", "redacted:hunt...f52fbd32"),
-            ("secret", "s", "redacted:s...043a7187"),
-            (
-                "device_secret",
-                "0xDEADBEEFCAFE",
-                "redacted:0xDE...c19821b8",
-            ),
+            ("api_key", "ABCDEFGHIJ1234567890", "redacted:len=20"),
+            ("pairing_code", "999888", "redacted:len=6"),
+            ("token", "tok_supersecretvalue", "redacted:len=20"),
+            ("password", "hunter2", "redacted:len=7"),
+            ("secret", "s", "redacted:len=1"),
+            ("device_secret", "0xDEADBEEFCAFE", "redacted:len=14"),
         ];
         for (key, value, expected) in vectors {
             assert_eq!(&redact(key, value), expected, "key={key} value={value}");
@@ -754,7 +744,7 @@ mod tests {
         assert!(changed, "redaction changed the secret field");
         assert_eq!(
             fields.get("api_key").and_then(|v| v.as_str()),
-            Some("redacted:ABCD...bb2a0cee")
+            Some("redacted:len=20")
         );
         assert_eq!(
             fields.get("device_id").and_then(|v| v.as_str()),
@@ -767,15 +757,12 @@ mod tests {
     fn redact_map_reports_no_change_when_nothing_is_secret() {
         // A map with only non-secret and already-redacted values reports no
         // change, so a caller can record an accurate redaction flag on the row.
-        let mut fields = mk_fields(&[
-            ("device_id", "abc123"),
-            ("api_key", "redacted:ABCD...bb2a0cee"),
-        ]);
+        let mut fields = mk_fields(&[("device_id", "abc123"), ("api_key", "redacted:len=20")]);
         let changed = redact_map(&mut fields);
         assert!(!changed, "no value should change");
         assert_eq!(
             fields.get("api_key").and_then(|v| v.as_str()),
-            Some("redacted:ABCD...bb2a0cee")
+            Some("redacted:len=20")
         );
     }
 
@@ -791,7 +778,7 @@ mod tests {
         if let IngestFrame::Log(l) = &frame {
             assert_eq!(
                 l.fields.get("session_token").and_then(|v| v.as_str()),
-                Some("redacted:tok_...160e465f")
+                Some("redacted:len=20")
             );
         } else {
             panic!("expected log frame");

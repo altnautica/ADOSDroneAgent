@@ -51,15 +51,9 @@ pub async fn get_compute_status() -> Response {
 /// The read logic against an explicit path + a reference "now", so a test can
 /// point it at a temp file and drive the staleness check deterministically.
 fn read_compute_status(path: &std::path::Path, now: SystemTime) -> Response {
-    let Ok(meta) = std::fs::metadata(path) else {
+    // Absent, stale, or future-dated (an unprovable age) all read as no status.
+    if !crate::freshness::is_fresh(path, now, STALE_AFTER) {
         return not_found();
-    };
-    if let Ok(modified) = meta.modified() {
-        if let Ok(age) = now.duration_since(modified) {
-            if age > STALE_AFTER {
-                return not_found();
-            }
-        }
     }
     let Ok(text) = std::fs::read_to_string(path) else {
         return not_found();

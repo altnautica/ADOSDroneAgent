@@ -33,8 +33,6 @@ fi
 
 # Stop service(s)
 systemctl stop ados-supervisor 2>/dev/null || true
-systemctl stop ados-agent 2>/dev/null || true
-systemctl stop ados.service 2>/dev/null || true
 
 # Wipe. This list is mirrored by FACTORY_RESET_FILES / FACTORY_RESET_DIRS in
 # `src/ados/core/paths.py`, and a test asserts the two agree — the reset paths

@@ -9,13 +9,15 @@
 //! - **`GET /api/v1/ground-station/role`** — the current mesh role (read from the
 //!   on-disk role sentinel, defaulting to `direct`), the role configured in the
 //!   agent config, the supported-role list, the systemd units the current role
-//!   owns, and the full mesh-unit set. Always 200 on a ground station.
+//!   owns, and every role-owned unit (the supervisor's role table, the one the
+//!   transition drives). Always 200 on a ground station.
 //! - **`GET /api/v1/ground-station/mesh`** — a snapshot of batman-adv state. 404
 //!   with `E_NOT_IN_MESH` on a `direct` node. Reads the durable store's most-recent
 //!   `mesh.state` event first (the relay/receiver poll loop ships the same body it
 //!   writes to the sidecar), falling back to the `/run/ados/mesh-state.json`
-//!   sidecar when the store is unreachable, so a losable store degrades to the old
-//!   behavior, never to a 500.
+//!   sidecar when the store has nothing current. Both reads are age-gated to the
+//!   `/status` snapshot window, so a dead poll loop reads as the empty object
+//!   rather than as its last mesh; never a 500.
 //! - **`GET /api/v1/ground-station/mesh/neighbors`** — the `{neighbors}` slice of
 //!   that snapshot.
 //! - **`GET /api/v1/ground-station/mesh/routes`** — the `{routes}` slice (routes
@@ -40,38 +42,15 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use ados_supervisor::config::VALID_ROLES;
+use ados_supervisor::role::{role_units, ALL_ROLE_UNITS};
+
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // Profile + role gating (mirrors the FastAPI `_require_ground_profile` +
 // `role_manager.get_current_role`).
 // ---------------------------------------------------------------------------
-
-/// The valid mesh roles, in advertised order. Mirrors the Python
-/// `role_manager.VALID_ROLES`.
-const VALID_ROLES: [&str; 3] = ["direct", "relay", "receiver"];
-
-/// The systemd units each role owns, in start order. Mirrors the Python
-/// `role_manager._ROLE_UNITS` (direct owns none; relay and receiver both bring up
-/// `ados-batman` before their wfb unit). The order is load-bearing for the `units`
-/// field the role route returns.
-fn role_units(role: &str) -> Vec<&'static str> {
-    match role {
-        "relay" => vec!["ados-batman.service", "ados-wfb-relay.service"],
-        "receiver" => vec!["ados-batman.service", "ados-wfb-receiver.service"],
-        // direct (and any unknown value) owns no mesh units.
-        _ => vec![],
-    }
-}
-
-/// The full mesh-unit set, in the Python `role_manager._ALL_MESH_UNITS` order.
-fn all_mesh_units() -> Vec<&'static str> {
-    vec![
-        "ados-batman.service",
-        "ados-wfb-relay.service",
-        "ados-wfb-receiver.service",
-    ]
-}
 
 /// Resolve the wire profile off explicit config + profile.conf + role-sentinel
 /// paths. The native surface resolves the profile the same way the heartbeat does
@@ -298,13 +277,9 @@ fn mesh_state_path() -> PathBuf {
     run_dir().join("mesh-state.json")
 }
 
-/// Read a JSON sidecar into an object map, returning the empty object on any
-/// failure or a falsy / non-object body. Mirrors the Python
-/// `_read_json_or_empty`, which returns `json.loads(text) or {}` (a falsy parse
-/// — null/false/0/""/[]/{} — collapses to `{}`); a non-object truthy body is not a
-/// realistic mesh sidecar, so it also reads as the empty object here rather than
-/// risking a `.get` failure on the slice routes (strictly safer than the Python
-/// path, and byte-identical for every real dict/empty input).
+/// Read a JSON sidecar into an object map, returning the empty object on any failure or a falsy /
+/// non-object body. A falsy parse (null/false/0/""/[]/{}) and a non-object body both read as the
+/// empty object, so the slice routes never index into a non-map.
 fn read_json_object_or_empty(path: &Path) -> Map<String, Value> {
     match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
@@ -326,21 +301,36 @@ fn read_json_object_or_empty(path: &Path) -> Map<String, Value> {
     }
 }
 
-/// The most-recent full mesh-state body from the durable store, or `None`.
-///
-/// Queries the store for the newest `mesh.state` event the relay/receiver poll loop
-/// shipped and returns its non-empty `detail` map (the same body written to
-/// `mesh-state.json`). `None` when the store is unreachable, holds no such event, or
-/// the `detail` is absent / non-object / empty, so the caller falls back to the sidecar
-/// file.
-async fn latest_mesh_snapshot(state: &AppState) -> Option<Map<String, Value>> {
-    let rows = logd_query_events(state, "mesh.state", 1).await?;
-    let row = rows.first()?.as_object()?;
-    let detail = row.get("detail")?.as_object()?;
-    if detail.is_empty() {
-        return None;
+/// How fresh a mesh snapshot must be to be served as the current mesh: the same
+/// window the `/status` mesh block applies to the same `mesh.state` rows and
+/// sidecar, so the two surfaces never disagree about a dead poll loop.
+fn mesh_fresh_window() -> std::time::Duration {
+    std::time::Duration::from_secs_f64(crate::routes::gs_status::SNAPSHOT_FRESH_S)
+}
+
+/// The current mesh-state body: the store's newest `mesh.state` event the
+/// relay/receiver poll loop shipped (the same body written to `mesh-state.json`),
+/// else the sidecar itself, each only when written inside [`mesh_fresh_window`].
+/// The empty object when neither is current: the poll loop writes at ~1 Hz, so an
+/// older snapshot is the last thing a dead loop wrote, not the mesh.
+async fn current_mesh_snapshot(state: &AppState) -> Map<String, Value> {
+    if let Some(detail) = state
+        .logd
+        .fresh_event_detail("mesh.state", mesh_fresh_window())
+        .await
+    {
+        return detail;
     }
-    Some(detail.clone())
+    fresh_mesh_sidecar(&mesh_state_path(), std::time::SystemTime::now())
+}
+
+/// The mesh-state sidecar when its mtime is inside [`mesh_fresh_window`] of
+/// `now`, else the empty object.
+fn fresh_mesh_sidecar(path: &Path, now: std::time::SystemTime) -> Map<String, Value> {
+    if !crate::freshness::is_fresh(path, now, mesh_fresh_window()) {
+        return Map::new();
+    }
+    read_json_object_or_empty(path)
 }
 
 /// Project the `/mesh/neighbors` shape from a snapshot body: `{"neighbors": ...}`,
@@ -373,7 +363,7 @@ fn slice_gateways(detail: &Map<String, Value>) -> Value {
 /// 404 with `E_PROFILE_MISMATCH` off a ground station. Otherwise always 200 with
 /// `{role, configured, supported, units, all_mesh_units}`: `role` from the on-disk
 /// sentinel, `configured` from the agent config (default `direct`), the supported list,
-/// the units the current role owns, and the full mesh-unit set.
+/// the units the current role owns, and every role-owned unit.
 pub async fn get_role() -> Response {
     use axum::response::IntoResponse;
     if !is_ground_station() {
@@ -381,14 +371,19 @@ pub async fn get_role() -> Response {
     }
     let cfg = MeshRouteConfig::load();
     let current = current_role();
-    Json(json!({
+    Json(role_body(&current, &cfg.ground_station.role)).into_response()
+}
+
+/// The role read's body for the sentinel's `current` role and the config's
+/// `configured` one.
+fn role_body(current: &str, configured: &str) -> Value {
+    json!({
         "role": current,
-        "configured": cfg.ground_station.role,
+        "configured": configured,
         "supported": VALID_ROLES,
-        "units": role_units(&current),
-        "all_mesh_units": all_mesh_units(),
-    }))
-    .into_response()
+        "units": role_units(current),
+        "all_mesh_units": ALL_ROLE_UNITS,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -408,10 +403,7 @@ pub async fn get_mesh_health(State(state): State<AppState>) -> Response {
     if current_role() == "direct" {
         return not_in_mesh();
     }
-    if let Some(detail) = latest_mesh_snapshot(&state).await {
-        return Json(Value::Object(detail)).into_response();
-    }
-    Json(Value::Object(read_json_object_or_empty(&mesh_state_path()))).into_response()
+    Json(Value::Object(current_mesh_snapshot(&state).await)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -428,11 +420,7 @@ pub async fn get_mesh_neighbors(State(state): State<AppState>) -> Response {
     if current_role() == "direct" {
         return not_in_mesh();
     }
-    if let Some(detail) = latest_mesh_snapshot(&state).await {
-        return Json(slice_neighbors(&detail)).into_response();
-    }
-    let snap = read_json_object_or_empty(&mesh_state_path());
-    Json(slice_neighbors(&snap)).into_response()
+    Json(slice_neighbors(&current_mesh_snapshot(&state).await)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -449,11 +437,7 @@ pub async fn get_mesh_routes(State(state): State<AppState>) -> Response {
     if current_role() == "direct" {
         return not_in_mesh();
     }
-    if let Some(detail) = latest_mesh_snapshot(&state).await {
-        return Json(slice_routes(&detail)).into_response();
-    }
-    let snap = read_json_object_or_empty(&mesh_state_path());
-    Json(slice_routes(&snap)).into_response()
+    Json(slice_routes(&current_mesh_snapshot(&state).await)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -470,11 +454,7 @@ pub async fn get_mesh_gateways(State(state): State<AppState>) -> Response {
     if current_role() == "direct" {
         return not_in_mesh();
     }
-    if let Some(detail) = latest_mesh_snapshot(&state).await {
-        return Json(slice_gateways(&detail)).into_response();
-    }
-    let snap = read_json_object_or_empty(&mesh_state_path());
-    Json(slice_gateways(&snap)).into_response()
+    Json(slice_gateways(&current_mesh_snapshot(&state).await)).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -499,146 +479,6 @@ pub async fn get_mesh_config() -> Response {
         "interface_override": mesh.interface_override,
     }))
     .into_response()
-}
-
-// ---------------------------------------------------------------------------
-// logd query seam: HTTP-over-UDS reads of the store's /v1 API.
-// ---------------------------------------------------------------------------
-
-/// Query the store for the newest `events` rows of one `event_kind`. Returns the
-/// `data` array, or `None` when the store is unreachable / the response is an
-/// error / does not parse. Mirrors the Python `query_rows("events", limit,
-/// event_kind=...)`.
-async fn logd_query_events(state: &AppState, event_kind: &str, limit: i64) -> Option<Vec<Value>> {
-    let params = [
-        ("kind", "events".to_string()),
-        ("limit", limit.to_string()),
-        ("event_kind", event_kind.to_string()),
-    ];
-    let query = encode_query(&params);
-    let path = format!("/v1/query?{query}");
-    let (status, body) = logd_get(state, &path).await.ok()?;
-    if status >= 400 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_slice(&body).ok()?;
-    parsed
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|a| a.to_vec())
-}
-
-/// A minimal HTTP/1.1 `GET` over the logging-store query Unix socket, returning the
-/// status code + the decoded body. The socket path comes from the app state's logd
-/// client so a test redirects it. `Connection: close` reads the body to EOF; a
-/// chunked body is de-chunked. Bounded so a runaway response cannot exhaust memory.
-async fn logd_get(state: &AppState, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A hard ceiling on the response read; a normal events page is a few KiB, so
-    /// this only guards a runaway body.
-    const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
-
-    let socket = state.logd.socket_path();
-    let mut stream = tokio::net::UnixStream::connect(socket).await?;
-    let head = format!("GET {path} HTTP/1.1\r\nHost: logd\r\nConnection: close\r\n\r\n");
-    stream.write_all(head.as_bytes()).await?;
-    stream.flush().await?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            break; // EOF (Connection: close).
-        }
-        if raw.len() + n > MAX_READ_BYTES {
-            return Err(std::io::Error::other("logd response too large"));
-        }
-        raw.extend_from_slice(&buf[..n]);
-    }
-    parse_http_response(&raw)
-}
-
-/// Split a raw HTTP/1.1 response into the status code + decoded body. De-chunks a
-/// `Transfer-Encoding: chunked` body; otherwise returns the body after the header
-/// terminator as-is.
-fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
-    let sep = b"\r\n\r\n";
-    let split = raw
-        .windows(sep.len())
-        .position(|w| w == sep)
-        .ok_or_else(|| std::io::Error::other("malformed http response (no header terminator)"))?;
-    let head = &raw[..split];
-    let body = &raw[split + sep.len()..];
-
-    let head_str = String::from_utf8_lossy(head);
-    let status = head_str
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| std::io::Error::other("malformed http status line"))?;
-
-    let chunked = head_str
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked");
-    let body = if chunked {
-        de_chunk(body)
-    } else {
-        body.to_vec()
-    };
-    Ok((status, body))
-}
-
-/// De-chunk a `Transfer-Encoding: chunked` body: `<hexlen>\r\n<data>\r\n` repeated
-/// until a zero-length chunk.
-fn de_chunk(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    while let Some(crlf) = rest.windows(2).position(|w| w == b"\r\n") {
-        let len_line = &rest[..crlf];
-        let len = usize::from_str_radix(String::from_utf8_lossy(len_line).trim(), 16).unwrap_or(0);
-        if len == 0 {
-            break;
-        }
-        let data_start = crlf + 2;
-        if rest.len() < data_start + len {
-            out.extend_from_slice(&rest[data_start..]);
-            break;
-        }
-        out.extend_from_slice(&rest[data_start..data_start + len]);
-        let next = data_start + len;
-        rest = if rest.len() >= next + 2 {
-            &rest[next + 2..]
-        } else {
-            &[]
-        };
-    }
-    out
-}
-
-/// Percent-encode a query-parameter list into a `key=value&...` string.
-fn encode_query(params: &[(&str, String)]) -> String {
-    params
-        .iter()
-        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Conservative percent-encoding: pass through the unreserved set
-/// (`A-Za-z0-9-._~`) verbatim and percent-encode every other byte.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -676,33 +516,6 @@ mod tests {
     }
 
     #[test]
-    fn role_units_match_the_python_mapping() {
-        assert_eq!(role_units("direct"), Vec::<&str>::new());
-        assert_eq!(
-            role_units("relay"),
-            vec!["ados-batman.service", "ados-wfb-relay.service"]
-        );
-        assert_eq!(
-            role_units("receiver"),
-            vec!["ados-batman.service", "ados-wfb-receiver.service"]
-        );
-        // An unknown role owns no units (matches the dict `.get(role, [])`).
-        assert_eq!(role_units("bogus"), Vec::<&str>::new());
-    }
-
-    #[test]
-    fn all_mesh_units_is_the_full_set_in_order() {
-        assert_eq!(
-            all_mesh_units(),
-            vec![
-                "ados-batman.service",
-                "ados-wfb-relay.service",
-                "ados-wfb-receiver.service",
-            ]
-        );
-    }
-
-    #[test]
     fn drone_profile_does_not_pass_the_gate() {
         let env = with_env(None, "agent:\n  profile: drone\n");
         assert!(!is_ground_station_at(
@@ -731,31 +544,30 @@ mod tests {
         assert_eq!(current_role_at(&absent), "direct");
     }
 
-    /// The golden role body the GCS reads on a relay-role ground station with an
-    /// explicit relay config role.
+    /// The golden role body the GCS reads on a relay-role and a direct-role
+    /// ground station: the direct role owns the single-node receive plane.
     #[test]
-    fn role_body_is_the_golden_shape_on_a_relay_node() {
-        let configured_role = "relay";
-        let current = "relay";
-        let body = json!({
-            "role": current,
-            "configured": configured_role,
-            "supported": VALID_ROLES,
-            "units": role_units(current),
-            "all_mesh_units": all_mesh_units(),
-        });
-        let want = json!({
-            "role": "relay",
-            "configured": "relay",
-            "supported": ["direct", "relay", "receiver"],
-            "units": ["ados-batman.service", "ados-wfb-relay.service"],
-            "all_mesh_units": [
-                "ados-batman.service",
-                "ados-wfb-relay.service",
-                "ados-wfb-receiver.service",
-            ],
-        });
-        assert_eq!(body, want);
+    fn role_body_is_the_golden_shape() {
+        let all = json!([
+            "ados-wfb-rx.service",
+            "ados-batman.service",
+            "ados-wfb-relay.service",
+            "ados-wfb-receiver.service",
+        ]);
+        assert_eq!(
+            role_body("relay", "relay"),
+            json!({
+                "role": "relay",
+                "configured": "relay",
+                "supported": ["direct", "relay", "receiver"],
+                "units": ["ados-batman.service", "ados-wfb-relay.service"],
+                "all_mesh_units": all,
+            })
+        );
+        assert_eq!(
+            role_body("direct", "direct")["units"],
+            json!(["ados-wfb-rx.service"])
+        );
     }
 
     #[test]
@@ -862,33 +674,21 @@ mod tests {
     }
 
     #[test]
-    fn nested_error_detail_shapes_match_the_fastapi_codes() {
-        let mismatch = json!({ "detail": { "error": { "code": "E_PROFILE_MISMATCH" } } });
-        assert_eq!(
-            mismatch["detail"]["error"]["code"],
-            json!("E_PROFILE_MISMATCH")
-        );
-        let not_in = json!({ "detail": { "error": { "code": "E_NOT_IN_MESH" } } });
-        assert_eq!(not_in["detail"]["error"]["code"], json!("E_NOT_IN_MESH"));
+    fn a_mesh_sidecar_a_dead_poll_loop_left_behind_reads_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mesh-state.json");
+        std::fs::write(&path, r#"{"up":true,"neighbors":[{"id":"a"}]}"#).unwrap();
+        let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let live = fresh_mesh_sidecar(&path, written + std::time::Duration::from_secs(1));
+        assert_eq!(live["up"], json!(true));
+        let dead = fresh_mesh_sidecar(&path, written + mesh_fresh_window() * 2);
+        assert_eq!(dead, Map::new());
+        assert_eq!(slice_neighbors(&dead), json!({"neighbors": []}));
     }
 
     #[test]
     fn error_responses_are_404() {
         assert_eq!(profile_mismatch().status(), StatusCode::NOT_FOUND);
         assert_eq!(not_in_mesh().status(), StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn de_chunk_reassembles_a_chunked_body() {
-        let chunked = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        assert_eq!(de_chunk(chunked), b"hello world");
-    }
-
-    #[test]
-    fn parse_http_response_reads_status_and_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
-        let (status, body) = parse_http_response(raw).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, b"{}");
     }
 }

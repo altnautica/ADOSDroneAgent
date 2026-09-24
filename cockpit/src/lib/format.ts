@@ -16,6 +16,13 @@ export function fmtPct(v: number | null | undefined): string {
   return v == null ? DASH : `${Math.round(v)}%`;
 }
 
+/** A batman-adv transmit quality, which is always 0..255 (`batctl n` TQ), as a
+ *  percentage of 255: a TQ of 90 is 35 %, not 90 %. */
+export function fmtTq(tq: number | null | undefined): string {
+  if (tq == null || !Number.isFinite(tq)) return DASH;
+  return `${Math.round((Math.min(Math.max(tq, 0), 255) / 255) * 100)}%`;
+}
+
 export function fmtChannel(v: number | null | undefined): string {
   return v == null || v === 0 ? DASH : `ch${v}`;
 }

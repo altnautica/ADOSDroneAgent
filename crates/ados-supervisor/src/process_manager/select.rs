@@ -39,10 +39,15 @@ impl ProcessManager for NullManager {
         false
     }
 
+    async fn try_restart(&self, _unit: &str) -> bool {
+        false
+    }
+
     async fn reset_failed(&self, _unit: &str) {}
 
-    async fn is_active(&self, _unit: &str) -> bool {
-        false
+    /// No manager, so no verdict.
+    async fn is_active(&self, _unit: &str) -> Option<bool> {
+        None
     }
 
     async fn mask(&self, _unit: &str) {}

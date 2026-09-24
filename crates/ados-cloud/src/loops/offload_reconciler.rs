@@ -12,9 +12,10 @@
 //! `none` (never a fabricated paired node).
 //!
 //! Local-first: the node is discovered over mDNS (or pinned by config),
-//! reached by its LAN job-API address; no cloud round-trip. The RTSP URL handed
-//! to the node is the drone's LAN-reachable egress IP (never `localhost` — the
-//! node pulls the feed).
+//! reached by its LAN job-API address; no cloud round-trip. The drone presents
+//! the credential that node issued it (installed by the ground station); discovery
+//! prefers a workstation that issued one. The RTSP URL handed to the node is the
+//! drone's LAN-reachable egress IP (never `localhost` — the node pulls the feed).
 //!
 //! INERT by default off a drone: it early-returns on a non-drone profile or when
 //! `perception.offload.enabled = off`, so a workstation / ground station / an
@@ -28,13 +29,13 @@ use std::time::{Duration, Instant};
 use ados_compute::{
     resolve_compute, run_offload_orchestrator, DetectionTee, NodeEndpoint, OrchestratorConfig,
 };
+use ados_protocol::node_credential::WorkstationCredentials;
 use ados_protocol::offload_link::{write_offload_link, OffloadLink};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
 use crate::config::{perception_offload_addr, CloudConfig};
-use crate::mqtt::transport::{RumqttcTransport, TransportConfig};
-use crate::mqtt::WS_PATH;
+use crate::mqtt::transport::RumqttcTransport;
 use crate::pairing::PairingState;
 use crate::vision_bearer::CloudDetectionPublisher;
 
@@ -61,10 +62,6 @@ const TARGET_BUDGET_MS: i64 = 700;
 const BOARD_JSON: &str = "/run/ados/board.json";
 /// The camera pipeline readiness sidecar.
 const CAMERA_STATE_JSON: &str = "/run/ados/camera-state.json";
-/// The in-flight ceiling for the dedicated cloud detection session (mirrors the
-/// MAVLink relay's Rule-37 high ceiling — the publish path is the limit).
-const CLOUD_INFLIGHT: u16 = 1000;
-const CLOUD_KEEP_ALIVE: Duration = Duration::from_secs(30);
 
 /// The drone's live offload-session state the reconciler owns.
 struct RunningSession {
@@ -85,6 +82,8 @@ enum Decision {
         base_url: String,
         target: String,
         node_device_id: Option<String>,
+        /// The credential the node issued this drone, if one is installed.
+        credential: Option<String>,
         rtsp_url: String,
         width: u32,
         height: u32,
@@ -172,14 +171,22 @@ fn now_ms() -> i64 {
 }
 
 /// Resolve the target node: a pinned `perception.offload.compute_node_addr` (skip
-/// mDNS), else browse mDNS for a `profile=workstation` node. Returns
-/// `(host, port, device_id?)`.
-async fn resolve_node(config: &CloudConfig) -> Option<(String, u16, Option<String>)> {
+/// mDNS), else browse mDNS for a `profile=workstation` node, preferring one that
+/// issued this drone a credential. Returns `(host, port, device_id?)`.
+async fn resolve_node(
+    config: &CloudConfig,
+    credentials: &WorkstationCredentials,
+) -> Option<(String, u16, Option<String>)> {
     if let Some(pinned) = perception_offload_addr(config) {
         let (h, p) = split_host_port(&pinned, DEFAULT_JOB_API_PORT)?;
         return Some((h, p, None));
     }
-    let node = resolve_compute(RESOLVE_TIMEOUT).await?;
+    let issuers: Vec<String> = credentials
+        .workstations
+        .iter()
+        .map(|c| c.workstation_node_id.clone())
+        .collect();
+    let node = resolve_compute(RESOLVE_TIMEOUT, &issuers).await?;
     Some((node.host, node.job_api_port, Some(node.device_id)))
 }
 
@@ -189,7 +196,7 @@ async fn resolve_node(config: &CloudConfig) -> Option<(String, u16, Option<Strin
 /// transient mDNS miss can never tear down a healthy offload.
 fn keep_offloading(config: &CloudConfig) -> bool {
     should_attempt(
-        &config.agent.profile,
+        config.wire_profile(),
         config.perception.offload.is_off(),
         config.perception.offload.is_forced_on(),
         board_npu_tops(),
@@ -203,16 +210,28 @@ async fn decide(config: &CloudConfig) -> Decision {
     if !keep_offloading(config) {
         return Decision::Idle;
     }
-    let Some((node_host, node_port, node_device_id)) = resolve_node(config).await else {
+    let credentials =
+        WorkstationCredentials::load_or_empty(&WorkstationCredentials::default_path());
+    let Some((node_host, node_port, node_device_id)) = resolve_node(config, &credentials).await
+    else {
         return Decision::Idle;
     };
     let Some(local_ip) = local_ip_towards(&node_host, node_port) else {
         return Decision::Idle;
     };
+    // The credential THIS node issued (by its advertised id), or the sole one
+    // installed for a pinned address. Never the drone's own pairing key.
+    let credential = credentials
+        .for_node(node_device_id.as_deref())
+        .map(|c| c.credential.clone());
+    if credential.is_none() {
+        tracing::info!(node = %format!("{node_host}:{node_port}"), "offload reconciler: no credential from this workstation; a paired workstation will refuse the session");
+    }
     Decision::Offload {
         base_url: format!("http://{node_host}:{node_port}"),
         target: format!("{node_host}:{node_port}"),
         node_device_id,
+        credential,
         rtsp_url: format!("rtsp://{local_ip}:{RTSP_PORT}/{RTSP_PATH}"),
         width: config.video.camera.width,
         height: config.video.camera.height,
@@ -259,18 +278,15 @@ fn cloud_detection_tee(
     }
     if slot.is_none() {
         let api_key = PairingState::load().api_key()?.to_string();
-        let cfg = TransportConfig {
-            client_id: format!("ados-{}-vision", config.agent.device_id),
-            host: config.server.cloud.mqtt_broker.clone(),
-            port: config.server.cloud.mqtt_port,
-            ws_path: WS_PATH.to_string(),
-            username: format!("ados-{}", config.agent.device_id),
-            password: api_key,
-            inflight: CLOUD_INFLIGHT,
-            keep_alive: CLOUD_KEEP_ALIVE,
-        };
+        let cfg = config.relay_transport(Some("vision"), &api_key)?;
         tracing::info!("offload reconciler cloud detection lane connecting");
-        let transport = RumqttcTransport::connect(&cfg);
+        let transport = match RumqttcTransport::connect(&cfg) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error = %e, "offload reconciler cloud detection lane not built");
+                return None;
+            }
+        };
         *slot = Some(Arc::new(CloudDetectionPublisher::new(
             &config.agent.device_id,
             transport,
@@ -283,7 +299,7 @@ fn cloud_detection_tee(
 pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) {
     // Cheap inert gate (config is loaded once at daemon start, changed via a
     // restart): a non-drone or an opted-out drone does no offload work.
-    if config.agent.profile != "drone" || config.perception.offload.is_off() {
+    if config.wire_profile() != "drone" || config.perception.offload.is_off() {
         return;
     }
     tracing::info!(
@@ -339,7 +355,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                     let due = last_search.is_none_or(|t| t.elapsed() >= SEARCH_BACKOFF);
                     if due {
                         last_search = Some(Instant::now());
-                        if let Decision::Offload { base_url, target, node_device_id, rtsp_url, width, height } =
+                        if let Decision::Offload { base_url, target, node_device_id, credential, rtsp_url, width, height } =
                             decide(&config).await
                         {
                             let cancel = Arc::new(Notify::new());
@@ -351,8 +367,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
                                 session_id(&config), CAMERA_ID, rtsp_url, width, height, TARGET_BUDGET_MS,
                             )
                             .with_detection_tee(tee);
-                            let api_key = PairingState::load().api_key().map(str::to_string);
-                            let endpoint = NodeEndpoint::Direct { base_url, api_key };
+                            let endpoint = NodeEndpoint { base_url, credential };
                             let cancel_task = cancel.clone();
                             tracing::info!(target = %target, "offload reconciler: starting a session");
                             let handle = tokio::spawn(async move {

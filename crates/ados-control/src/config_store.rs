@@ -102,11 +102,26 @@ pub fn lock_path_for(config_path: &Path) -> PathBuf {
 ///
 /// `mutate` edits the mapping in place and may add, change or remove keys. An
 /// `Err` from it aborts the write. See the module docs for the full contract.
+///
+/// The write can wait up to [`WRITE_LOCK_TIMEOUT`] on another writer's lock and
+/// then fsyncs, all synchronously. Every route handler calls this from an async
+/// task, so on the daemon's multi-thread runtime the wait is declared blocking
+/// (the scheduler moves this worker's other tasks elsewhere) rather than freezing
+/// a worker the other handlers share. Outside a runtime, or on a current-thread
+/// one (tests), it simply runs.
 pub fn update_config<T>(
     config_path: &Path,
     mutate: impl FnOnce(&mut Mapping) -> Result<T, String>,
 ) -> Result<ConfigWrite<T>, ConfigWriteError> {
-    update_config_with_timeout(config_path, WRITE_LOCK_TIMEOUT, mutate)
+    let on_multi_thread = tokio::runtime::Handle::try_current()
+        .is_ok_and(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+    if on_multi_thread {
+        tokio::task::block_in_place(|| {
+            update_config_with_timeout(config_path, WRITE_LOCK_TIMEOUT, mutate)
+        })
+    } else {
+        update_config_with_timeout(config_path, WRITE_LOCK_TIMEOUT, mutate)
+    }
 }
 
 fn update_config_with_timeout<T>(

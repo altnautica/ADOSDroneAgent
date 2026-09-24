@@ -36,9 +36,19 @@ pub const DEFAULT_TTL_SECONDS: i64 = 30;
 /// Hard cap on a requested ticket lifetime.
 pub const MAX_TTL_SECONDS: i64 = 120;
 
+/// The WebSocket subprotocol marker a browser offers ahead of its ticket
+/// (`["ados-ws-ticket", "<ticket>"]`); the server echoes it on the accepted
+/// handshake, as RFC 6455 requires.
+pub const WS_TICKET_SUBPROTOCOL: &str = "ados-ws-ticket";
+
 /// The MAVLink WebSocket proxy scope: a ticket minted for this scope authorizes
 /// the raw `:8765` MAVLink WS for an off-box paired caller.
 pub const SCOPE_MAVLINK_WS: &str = "gs.mavlink_ws";
+
+/// The world-model descriptor stream scope: a ticket minted by a workstation
+/// for this scope authorizes its `/ws/atlas/<device_id>` stream for a browser,
+/// which cannot set a header on the handshake.
+pub const SCOPE_ATLAS_WORLD_WS: &str = "compute.atlas_world";
 
 /// The RC channel-injection scope for one named client.
 ///

@@ -543,7 +543,7 @@ mod tests {
                 );
                 assert_eq!(
                     evt.detail.get("session_token").and_then(|v| v.as_str()),
-                    Some("redacted:tok_...160e465f")
+                    Some("redacted:len=20")
                 );
             }
             other => panic!("expected an event frame, got {other:?}"),
@@ -684,7 +684,7 @@ mod tests {
                 assert_eq!(evt.severity, Level::Warn);
                 assert_eq!(
                     evt.detail.get("session_token").and_then(|v| v.as_str()),
-                    Some("redacted:tok_...160e465f")
+                    Some("redacted:len=20")
                 );
             }
             other => panic!("expected an event frame, got {other:?}"),

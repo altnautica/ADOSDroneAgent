@@ -326,9 +326,8 @@ async fn remove_link_file(dir: &Path, iface: &str) -> Result<bool, String> {
 // POST /api/v1/network/mac/pin
 // ---------------------------------------------------------------------------
 
-/// The `POST /api/v1/network/mac/pin` request body. Mirrors the Python
-/// `MacPinRequest`: a required interface, an optional explicit MAC, and an
-/// optional live-apply flag (default false).
+/// The `POST /api/v1/network/mac/pin` request body: a required interface, an optional explicit
+/// MAC, and an optional live-apply flag (default false).
 #[derive(Debug, Deserialize)]
 pub struct MacPinRequest {
     pub iface: String,
@@ -498,11 +497,10 @@ async fn apply_now_outcome(
 const NOTE_UNPIN: &str =
     "a known no-efuse adapter is re-pinned automatically unless network.mac_pin.enabled is false";
 
-/// `DELETE /api/v1/network/mac/{iface}` → unpin: clear the override + remove the
-/// `.link`. Always a `200` with `{status, iface, removedOverride, removedLinkFile,
-/// note}` — an absent override / absent `.link` are reported as `false`. A
-/// config the store refuses adds `persist_error`; a `.link` that exists but could
-/// not be removed adds `link_error`. Mirrors the Python `delete_mac_pin`.
+/// `DELETE /api/v1/network/mac/{iface}` → unpin: clear the override + remove the `.link`. Always a
+/// `200` with `{status, iface, removedOverride, removedLinkFile, note}` — an absent override /
+/// absent `.link` are reported as `false`. A config the store refuses adds `persist_error`; a
+/// `.link` that exists but could not be removed adds `link_error`.
 pub async fn delete_mac_pin(
     State(state): State<AppState>,
     AxumPath(iface): AxumPath<String>,
@@ -534,8 +532,11 @@ async fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str)
         }
     };
 
+    // The top-level status is the body-level failure convention other consumers
+    // (the cloud dispatcher) read: a pin still in force is not an ok unpin.
+    let failed = persist_error.is_some() || link_error.is_some();
     let mut body = json!({
-        "status": "ok",
+        "status": if failed { "error" } else { "ok" },
         "iface": iface,
         "removedOverride": removed_override,
         "removedLinkFile": removed_link,
@@ -546,6 +547,9 @@ async fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str)
     }
     if let Some(e) = link_error {
         body["link_error"] = json!(e);
+    }
+    if failed {
+        body["message"] = json!("the adapter is still pinned for the next boot");
     }
     Json(body).into_response()
 }

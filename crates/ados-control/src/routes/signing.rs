@@ -56,7 +56,9 @@ pub async fn capability(State(state): State<AppState>) -> Json<Value> {
     let snapshot = state.state.snapshot();
     let connected = fc_connected_from_snapshot(snapshot.as_ref());
     let autopilot = autopilot_from_snapshot(snapshot.as_ref());
-    let params = crate::param_store::read_param_blob(&state.params_path);
+    // `signing_params_present` is informational; an unreadable cache reads as
+    // "no SIGNING_* names seen", which never changes `supported`.
+    let params = crate::param_store::read_param_blob(&state.params_path).unwrap_or_default();
     Json(detect_capability(
         connected,
         autopilot,

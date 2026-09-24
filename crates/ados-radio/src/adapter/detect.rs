@@ -246,56 +246,23 @@ impl SelectionOutcome {
 }
 
 /// Detect adapters and return the best verified RTL injection adapter, plus the
-/// full detected list. The override iface (when set) is honoured verbatim. The
-/// candidate set is the compatible+monitor adapters, ranked RTL-family-first so
-/// bus order never decides, and each is proven by setting + reading back
-/// monitor mode; the first that verifies wins. This is the full contract the
-/// radio service uses (it needs the detected list for the adapters sidecar and
-/// the scan counts for the no-injection diagnostic). Callers that only need the
-/// selected iface use `select_interface`.
+/// full detected list. The candidate set is the compatible+monitor adapters,
+/// ranked RTL-family-first so bus order never decides, and each is proven by
+/// setting + reading back monitor mode; the first that verifies wins. This is
+/// the full contract the radio service uses (it needs the detected list for the
+/// adapters sidecar and the scan counts for the no-injection diagnostic).
+/// Callers that only need the selected iface use `select_interface`.
+///
+/// An operator-pinned `override_iface` is preferred only when it names a
+/// detected adapter that passes the same gate (not management WiFi, WFB
+/// compatible, monitor capable). Interface names are not identities — they can
+/// swap between reboots — so a pin that now names the onboard WiFi or a missing
+/// device is logged and ignored rather than put into monitor mode.
 #[cfg(target_os = "linux")]
 pub async fn detect_and_select(override_iface: &str) -> SelectionOutcome {
     let adapters = detect_wfb_adapters().await;
 
-    if !override_iface.is_empty() {
-        // Operator-specified interface: skip discovery ranking, still validate.
-        let chipset = adapters
-            .iter()
-            .find(|a| a.interface_name == override_iface)
-            .map(|a| a.chipset.clone())
-            .unwrap_or_else(|| chipset_for_iface(override_iface));
-        let ok = super::monitor::set_monitor_mode_verified(override_iface, 4).await;
-        let speed = adapters
-            .iter()
-            .find(|a| a.interface_name == override_iface)
-            .and_then(|a| a.usb_speed_mbps);
-        let usb_degraded = usb_speed_degraded(speed);
-        if usb_degraded {
-            tracing::warn!(
-                interface = %override_iface,
-                usb_speed_mbps = ?speed,
-                "wfb_adapter_usb_degraded: adapter on a slow USB link (needs 480 Mbps); RF may not transmit"
-            );
-        }
-        return SelectionOutcome {
-            adapters,
-            selected: Some(SelectedAdapter {
-                ifname: override_iface.to_string(),
-                chipset,
-                injection_ok: ok,
-                usb_speed_mbps: speed,
-                usb_degraded,
-            }),
-        };
-    }
-
-    // Candidates = compatible + monitor-capable, ranked RTL-family-first.
-    let mut candidates: Vec<&WifiAdapterInfo> = adapters
-        .iter()
-        .filter(|a| a.is_wfb_compatible && a.supports_monitor)
-        .collect();
-    candidates.sort_by_key(|a| injection_rank(a));
-
+    let candidates = injection_candidates(&adapters, override_iface);
     let mut selected = None;
     for adapter in candidates {
         tracing::info!(
@@ -438,12 +405,38 @@ fn driver_is_wfb_compatible(driver: &str) -> bool {
     WFB_COMPATIBLE_DRIVERS.contains(&d.as_str())
 }
 
-#[allow(dead_code)]
-fn chipset_for_iface(_iface: &str) -> String {
-    // For operator-specified overrides we skip the async classify call and
-    // return a placeholder; the caller updates this from the heartbeat once
-    // the interface is confirmed.
-    "override".to_string()
+/// The adapters eligible for injection, in the order selection tries them:
+/// compatible + monitor-capable only (the deny gate already cleared management
+/// WiFi's compatibility flag), ranked RTL-family-first, with an operator pin
+/// moved to the front only when it names one of those. A pin that names
+/// anything else is logged and ignored. Pure so the "a pin never bypasses the
+/// gate" rule is testable off a real SBC.
+#[cfg(any(target_os = "linux", test))]
+fn injection_candidates<'a>(
+    adapters: &'a [WifiAdapterInfo],
+    override_iface: &str,
+) -> Vec<&'a WifiAdapterInfo> {
+    let mut candidates: Vec<&WifiAdapterInfo> = adapters
+        .iter()
+        .filter(|a| a.is_wfb_compatible && a.supports_monitor)
+        .collect();
+    candidates.sort_by_key(|a| injection_rank(a));
+    if !override_iface.is_empty() {
+        match candidates
+            .iter()
+            .position(|a| a.interface_name == override_iface)
+        {
+            Some(idx) => {
+                let pinned = candidates.remove(idx);
+                candidates.insert(0, pinned);
+            }
+            None => tracing::warn!(
+                interface = %override_iface,
+                "wfb_interface_override_ignored: not a detected WFB-compatible monitor-capable adapter"
+            ),
+        }
+    }
+    candidates
 }
 
 #[cfg(target_os = "linux")]
@@ -612,6 +605,48 @@ fn parse_supported_modes(info: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn monitor_adapter(name: &str, driver: &str) -> WifiAdapterInfo {
+        build_adapter_info(
+            name.to_string(),
+            driver.to_string(),
+            None,
+            "phy0".to_string(),
+            vec!["managed".to_string(), "monitor".to_string()],
+            true,
+            Some("managed".to_string()),
+        )
+    }
+
+    /// An interface pin can reorder the gated candidates but never add to them:
+    /// a name that now points at the onboard management WiFi (names swap between
+    /// reboots) is ignored, and selection falls back to the RTL adapter.
+    #[test]
+    fn an_interface_pin_never_bypasses_the_injection_gate() {
+        let adapters = vec![
+            monitor_adapter("wlan0", "brcmfmac"),
+            monitor_adapter("wlan1", "rtl88x2eu"),
+            monitor_adapter("wlan2", "rtl8812au"),
+        ];
+        let names = |c: Vec<&WifiAdapterInfo>| -> Vec<String> {
+            c.into_iter().map(|a| a.interface_name.clone()).collect()
+        };
+        // A pin on the management WiFi never makes it a candidate.
+        assert_eq!(
+            names(injection_candidates(&adapters, "wlan0")),
+            vec!["wlan1", "wlan2"]
+        );
+        // A pin on a missing device is ignored the same way.
+        assert_eq!(
+            names(injection_candidates(&adapters, "wlan9")),
+            vec!["wlan1", "wlan2"]
+        );
+        // A pin on a gated adapter moves it to the front.
+        assert_eq!(
+            names(injection_candidates(&adapters, "wlan2")),
+            vec!["wlan2", "wlan1"]
+        );
+    }
 
     #[test]
     fn deny_aic8800_by_driver() {

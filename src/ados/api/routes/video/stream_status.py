@@ -1,28 +1,19 @@
 """GET /video — composite stream status route.
 
-Returns the camera list, recorder state, mediamtx state, and the
-derived WHEP URL. Two execution paths exist depending on whether the
-VideoPipeline lives in this process (single-process / bench dev) or
-in the dedicated ``ados-video`` service (production multi-process).
-
-The payload is irreducibly live: a fresh HAL camera discovery, a mediamtx HTTP
-probe, a binary-dependency filesystem check, the request-Host URLs, and
-in-process recorder state. Nothing here is served from the logging store.
+Returns the camera list, mediamtx state, the binary dependencies and the
+derived WHEP/HLS URLs. The encoder and its recorder run in the native video
+service, so this route reports only what it can observe: what is plugged in,
+whether mediamtx has a live publisher, and which tools are installed. It does
+not report a recording state it cannot see.
 """
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 
-from ados.api.deps import get_agent_app
-
-from ._common import (
-    _empty_recording_block,
-    _get_video_pipeline,
-    _probe_mediamtx,
-    _probe_mediamtx_via_whep,
-    _recording_block,
-)
+from ._common import _probe_mediamtx, _probe_mediamtx_via_whep
 
 router = APIRouter()
 
@@ -30,13 +21,9 @@ router = APIRouter()
 def _discover_cameras_for_api() -> dict:
     """Run a fresh HAL camera discovery for the API response.
 
-    The live camera_mgr assignment lives in the ados-video process and
-    is not directly readable from the API process. Re-running the HAL
-    discovery is cheap (~150ms) and gives the operator the same view
-    the wizard's hardware-check step shows so the Video step's
-    "Detected cameras" panel is not silently empty when a camera IS
-    plugged in. Returns the same shape camera_mgr.to_dict() returns
-    with assignments left empty (we cannot infer those without IPC).
+    The live role assignment lives in the video service and is not readable
+    from here, so ``assignments`` is left empty. The discovery shells out to
+    the V4L2 tools; the caller runs it off the event loop.
     """
     try:
         from ados.hal.camera import discover_cameras
@@ -50,79 +37,44 @@ def _discover_cameras_for_api() -> dict:
         return {"cameras": [], "assignments": {}}
 
 
-@router.get("/video")
-async def get_video_status():
-    """Video pipeline status: cameras, streams, recording, mediamtx, WHEP URL."""
+def _dependencies() -> dict:
     from ados.core.deps import check_video_dependencies
 
-    deps = check_video_dependencies()
-    deps_dict = {d.name: {"found": d.found, "path": d.path} for d in deps}
+    return {
+        d.name: {"found": d.found, "path": d.path}
+        for d in check_video_dependencies()
+    }
 
-    pipeline = _get_video_pipeline()
 
-    # Multi-process mode: pipeline is None because ados-video owns it.
-    # Probe mediamtx directly to determine video state. The camera list
-    # comes from a fresh HAL discovery so the operator sees what the
-    # agent thinks is plugged in even though the live camera_mgr
-    # assignments live in the ados-video process and are not directly
-    # readable from here without IPC.
-    if pipeline is None:
-        cameras_payload = _discover_cameras_for_api()
-        mtx = await _probe_mediamtx()
-        if mtx is None or not mtx.get("ready"):
-            # Ground-station-profile MediaMTX puts auth on the management
-            # API; the WHEP probe doesn't depend on it. Fall through so
-            # the REST surface reports running when the WHEP endpoint is
-            # actually serving frames.
-            mtx = await _probe_mediamtx_via_whep() or mtx
-        recording_block = _empty_recording_block()
-        if mtx and mtx.get("ready"):
-            whep_url = "/whep"
-            hls_url = "/hls/main/index.m3u8"
-            return {
-                "state": "running",
-                "cameras": cameras_payload,
-                "recorder": {"recording": False, "current_path": "", "recordings_dir": ""},
-                "mediamtx": mtx,
-                "whep_url": whep_url,
-                "hls_url": hls_url,
-                "dependencies": deps_dict,
-                **recording_block,
-            }
+@router.get("/video")
+async def get_video_status():
+    """Video pipeline status: cameras, mediamtx, dependencies, WHEP/HLS URLs."""
+    cameras_payload, deps_dict = await asyncio.gather(
+        asyncio.to_thread(_discover_cameras_for_api),
+        asyncio.to_thread(_dependencies),
+    )
+    mtx = await _probe_mediamtx()
+    if mtx is None or not mtx.get("ready"):
+        # Ground-station-profile MediaMTX puts auth on the management
+        # API; the WHEP probe doesn't depend on it.
+        mtx = await _probe_mediamtx_via_whep() or mtx
+    if mtx and mtx.get("ready"):
         return {
-            "state": "not_initialized",
+            "state": "running",
             "cameras": cameras_payload,
-            "recorder": {"recording": False, "current_path": "", "recordings_dir": ""},
-            "mediamtx": {"running": False},
-            "whep_url": None,
-            "hls_url": None,
+            "mediamtx": mtx,
+            "whep_url": "/whep",
+            "hls_url": "/hls/main/index.m3u8",
             "dependencies": deps_dict,
-            **recording_block,
         }
-
-    status = pipeline.get_status()
-
-    # Construct WHEP + HLS URLs from mediamtx state. The dashboard
-    # picks between them based on profile; ground prefers HLS to
-    # avoid the Chrome WebRTC decoder-sync freeze on the WFB ingest
-    # path, drone prefers WHEP for the local-camera low-latency
-    # path.
-    if status.get("mediamtx", {}).get("running"):
-        status["whep_url"] = "/whep"
-        status["hls_url"] = "/hls/main/index.m3u8"
-    else:
-        status["whep_url"] = None
-        status["hls_url"] = None
-
-    status["dependencies"] = deps_dict
-    # Surface the recording state at the top level so the LCD video page
-    # and the GCS can read it without re-implementing the recorder
-    # serializer.
-    status.update(_recording_block(pipeline))
-    return status
+    return {
+        "state": "not_initialized",
+        "cameras": cameras_payload,
+        "mediamtx": {"running": bool(mtx and mtx.get("running"))},
+        "whep_url": None,
+        "hls_url": None,
+        "dependencies": deps_dict,
+    }
 
 
 __all__ = ["router", "_discover_cameras_for_api", "get_video_status"]
-# Re-export for the convenience of any caller that historically pulled
-# the get_agent_app symbol from the route module's namespace.
-get_agent_app = get_agent_app

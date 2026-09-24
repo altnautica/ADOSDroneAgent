@@ -21,6 +21,14 @@ export interface NodeIdentity {
 
 const JSON_HEADERS = { Accept: "application/json" } as const;
 
+/** The agent's PIN rule (crates/ados-control dashboard_pin): 4-12 ASCII digits. */
+export const PIN_MIN_LENGTH = 4;
+export const PIN_MAX_LENGTH = 12;
+
+export function isValidPin(pin: string): boolean {
+  return pin.length >= PIN_MIN_LENGTH && pin.length <= PIN_MAX_LENGTH && /^\d+$/.test(pin);
+}
+
 /** `GET /api/dashboard/pin/status` — public; picks the splash mode. */
 export async function fetchPinStatus(signal?: AbortSignal): Promise<PinStatus> {
   const res = await fetch("/api/dashboard/pin/status", {

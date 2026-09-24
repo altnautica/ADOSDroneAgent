@@ -492,6 +492,30 @@ impl<H: HostServices> Connection<H> {
         let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel::<CapabilityToken>(4);
         self.refresh.register(&self.plugin_id, refresh_tx.clone());
 
+        // Requests arrive through a dedicated reader task that owns the read
+        // half. `read_envelope` is two `read_exact` calls, which are not
+        // cancel-safe: polled directly as a `select!` branch, a delivery that
+        // won the race while a request frame was only partly buffered dropped
+        // the bytes already read and desynchronised the stream for the rest of
+        // the session. The channel receive below is cancel-safe.
+        let (frame_tx, mut frame_rx) = mpsc::channel::<Result<Envelope, ServerError>>(8);
+        let reader = tokio::spawn(async move {
+            loop {
+                match read_envelope(&mut read_half).await {
+                    Ok(Some(env)) => {
+                        if frame_tx.send(Ok(env)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => return,
+                    Err(e) => {
+                        let _ = frame_tx.send(Err(e)).await;
+                        return;
+                    }
+                }
+            }
+        });
+
         // ---- dispatch loop --------------------------------------------
         let result = loop {
             // Race the inbound request against an outgoing event or MAVLink frame
@@ -499,11 +523,11 @@ impl<H: HostServices> Connection<H> {
             // receives pushes on the one connection (the Python server uses
             // coroutines; one select loop is the single-task equivalent).
             tokio::select! {
-                frame = read_envelope(&mut read_half) => {
+                frame = frame_rx.recv() => {
                     let env = match frame {
-                        Ok(Some(env)) => env,
-                        Ok(None) => break Ok(()),
-                        Err(e) => break Err(e),
+                        Some(Ok(env)) => env,
+                        None => break Ok(()),
+                        Some(Err(e)) => break Err(e),
                     };
                     // A response frame is the plugin's reply to a host-issued
                     // tool.invoke: resolve the waiter, do NOT route it as a request.
@@ -749,10 +773,12 @@ impl<H: HostServices> Connection<H> {
         // plugin reads when it reconnects.
         self.refresh.unregister_if(&self.plugin_id, &refresh_tx);
 
-        // Stop the per-subscription forwarder tasks so none survive the session.
+        // Stop the per-subscription forwarder tasks and the request reader so
+        // none survive the session.
         for f in forwarders {
             f.abort();
         }
+        reader.abort();
         result
     }
 
@@ -1917,6 +1943,100 @@ mod tests {
         );
 
         runner.abort();
+        accept.abort();
+        server.stop_plugin(plugin_id);
+    }
+
+    /// A delivery that becomes ready while a request frame is only partly
+    /// written must not cost the request. The plugin below subscribes to a
+    /// vehicle event, writes half of a `ping` frame, the host publishes the
+    /// event, then the plugin writes the rest: both the event and the ping's
+    /// response must arrive, and the session must stay in frame.
+    #[tokio::test]
+    async fn a_delivery_racing_a_partly_written_request_does_not_desync_the_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let issuer = Arc::new(TokenIssuer::new(b"race-secret".to_vec()));
+        let bus = Arc::new(EventBus::new());
+        let server =
+            PluginIpcServer::new(dir.path(), issuer.clone(), bus.clone(), Arc::new(NoopHost));
+        let plugin_id = "com.example.demo";
+        let (path, accept) = server.serve_plugin(plugin_id).expect("serve");
+        let mut stream = None;
+        for _ in 0..50 {
+            if let Ok(s) = UnixStream::connect(&path).await {
+                stream = Some(s);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (mut rd, mut wr) = stream.expect("connect").into_split();
+        let token = issuer
+            .mint(
+                plugin_id,
+                &std::collections::BTreeSet::from(["event.subscribe".to_string()]),
+                600,
+            )
+            .to_token_string();
+        let request = |method: &str, id: &str, args: Value| Envelope {
+            version: PROTOCOL_VERSION,
+            kind: "request".to_string(),
+            method: method.to_string(),
+            capability: String::new(),
+            args,
+            request_id: id.to_string(),
+            token: token.clone(),
+            error: None,
+        };
+        write_frame(&mut wr, &request("hello", "h1", Value::Map(vec![])))
+            .await
+            .unwrap();
+        read_envelope(&mut rd).await.unwrap().expect("ready");
+        write_frame(
+            &mut wr,
+            &request(
+                "event.subscribe",
+                "s1",
+                Value::Map(vec![(Value::from("topic"), Value::from("vehicle.armed"))]),
+            ),
+        )
+        .await
+        .unwrap();
+        let subscribed = read_envelope(&mut rd).await.unwrap().expect("subscribed");
+        assert!(subscribed.error.is_none(), "{:?}", subscribed.error);
+
+        let ping = request("ping", "p1", Value::Map(vec![]))
+            .encode_frame()
+            .unwrap();
+        let (head, tail) = ping.split_at(ping.len() / 2);
+        wr.write_all(head).await.unwrap();
+        wr.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        bus.publish(Event {
+            topic: "vehicle.armed".to_string(),
+            timestamp_ms: now_ms(),
+            publisher_plugin_id: crate::vehicle_events::HOST_PUBLISHER.to_string(),
+            payload: Value::Map(vec![]),
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        wr.write_all(tail).await.unwrap();
+        wr.flush().await.unwrap();
+
+        let mut got_event = false;
+        let mut got_pong = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !(got_event && got_pong) {
+            let env = tokio::time::timeout_at(deadline, read_envelope(&mut rd))
+                .await
+                .expect("the ping response never arrived: the session lost its framing")
+                .expect("a well-formed frame")
+                .expect("the session stayed open");
+            if env.kind == "event" {
+                got_event = true;
+            } else if env.request_id == "p1" {
+                assert!(env.error.is_none(), "{:?}", env.error);
+                got_pong = true;
+            }
+        }
         accept.abort();
         server.stop_plugin(plugin_id);
     }

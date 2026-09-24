@@ -35,16 +35,23 @@ const ADOS_VIDEO_UNIT: &str = "ados-video.service";
 /// unbounded. A camera list is small; 64 KiB is generous.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
-/// Serve the video-source command socket until `shutdown` fires or the listener
-/// bind fails. Best-effort: a bind failure logs and returns (the feature is
-/// simply unavailable on this host), never aborts the supervisor.
+/// Serve the video-source command socket until `shutdown` fires. A bind that
+/// fails is retried on the fixed [`bind::control::SOCKET_BIND_RETRY`] interval
+/// until it succeeds (or the supervisor shuts down): a socket given up on at
+/// boot would leave every camera-driver plugin unable to configure its feeds
+/// until someone restarted the supervisor.
 pub async fn run(mut shutdown: watch::Receiver<bool>) {
     let pm = process_manager::select();
-    let listener = match bind_command_socket(VIDEO_CMD_SOCK, 0o660) {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::warn!(error = %e, "video command socket bind failed");
-            return;
+    let listener = loop {
+        match bind_command_socket(VIDEO_CMD_SOCK, 0o660) {
+            Ok(l) => break l,
+            Err(e) => {
+                tracing::warn!(error = %e, "video command socket bind failed; retrying");
+                tokio::select! {
+                    _ = shutdown.changed() => return,
+                    _ = tokio::time::sleep(bind::control::SOCKET_BIND_RETRY) => {}
+                }
+            }
         }
     };
     // The shared helper applied 0o660, group-owned the socket to `ados-operator`
@@ -206,9 +213,13 @@ mod tests {
             self.restarted.lock().unwrap().push(unit.to_string());
             true
         }
-        async fn reset_failed(&self, _unit: &str) {}
-        async fn is_active(&self, _unit: &str) -> bool {
+        async fn try_restart(&self, unit: &str) -> bool {
+            self.restarted.lock().unwrap().push(unit.to_string());
             true
+        }
+        async fn reset_failed(&self, _unit: &str) {}
+        async fn is_active(&self, _unit: &str) -> Option<bool> {
+            Some(true)
         }
         async fn mask(&self, _unit: &str) {}
         async fn unmask(&self, _unit: &str) {}

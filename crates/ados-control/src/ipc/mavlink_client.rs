@@ -2,10 +2,9 @@
 //!
 //! The MAVLink service owns `/run/ados/mavlink.sock`. It broadcasts every FC
 //! frame to connected clients and forwards any frame a client writes back to the
-//! FC. This client is the write side of that seam: it connects, holds the
-//! connection behind a mutex, and writes a length-prefixed raw MAVLink frame the
-//! router then forwards to the serial link. It is the command route's only path
-//! to the FC.
+//! FC. This client is the write side of that seam: it writes a length-prefixed
+//! raw MAVLink frame the router then forwards to the serial link. It is the
+//! command routes' only path to the FC.
 //!
 //! The frame contract is the same `ados.core.ipc` framing the Python
 //! `MavlinkIPCClient.send` uses: a 4-byte big-endian length prefix followed by
@@ -13,23 +12,27 @@
 //! The router reads the prefix, then the payload, and forwards the payload
 //! verbatim to the FC.
 //!
-//! Connection lifecycle: the connection is established lazily on the first send
-//! and held for reuse. On a write failure the held connection is dropped and the
-//! next send reconnects, so a brief MAVLink-service restart self-heals without
-//! the route holding a dead socket. When the socket is absent (an idle agent, or
-//! the MAVLink service not yet up) the connect fails and the send returns an
-//! error, which the command route maps to the same 503 the FastAPI route returns
-//! when there is no FC link — so a command is never silently dropped.
+//! Connection lifecycle: a fire-and-forget send opens a connection, writes the
+//! frame and closes it, all within [`SEND_TIMEOUT`]. Holding one connection open
+//! between sends would make this client a broadcast subscriber that never reads:
+//! the router would fill its queue with FC frames, evict it as a slow consumer
+//! (counting a false eviction on the health counter) and the next send would hit
+//! a dead socket. When the socket is absent (an idle agent, or the MAVLink
+//! service not yet up) the connect fails and the send returns an error, which
+//! the routes map to a 503 — so a command is never silently dropped.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use ados_protocol::frame::{decode_len, encode_frame, HEADER_SIZE, MAVLINK_MAX_FRAME};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
+
+/// The deadline for writing one command frame to the router. The router drains
+/// inbound frames continuously, so a write that cannot complete in this window
+/// means the router is wedged.
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// The MAVLink socket file name under the runtime dir.
 pub const MAVLINK_SOCKET_NAME: &str = "mavlink.sock";
@@ -61,27 +64,17 @@ pub enum SendError {
 
 /// Connects to the MAVLink socket and writes length-prefixed command frames.
 ///
-/// Cheap to clone (the held connection is behind an `Arc<Mutex>`); the route
-/// surface holds one in the app state. The connection is established lazily on
-/// the first send and reused; a write failure drops it so the next send
-/// reconnects.
+/// Cheap to clone (just the socket path); the route surface holds one in the
+/// app state.
 #[derive(Clone)]
 pub struct MavlinkIpcClient {
     socket_path: PathBuf,
-    /// The lazily-established, reused connection. `None` until the first send
-    /// connects, and reset to `None` after a write failure so the next send
-    /// reconnects.
-    conn: Arc<Mutex<Option<UnixStream>>>,
 }
 
 impl MavlinkIpcClient {
-    /// Build a client for the given socket path with no connection yet. The first
-    /// [`send`](Self::send) connects.
+    /// Build a client for the given socket path.
     pub fn new(socket_path: PathBuf) -> Self {
-        Self {
-            socket_path,
-            conn: Arc::new(Mutex::new(None)),
-        }
+        Self { socket_path }
     }
 
     /// Build a client at the default MAVLink socket path (`ADOS_RUN_DIR`-aware).
@@ -95,46 +88,13 @@ impl MavlinkIpcClient {
     }
 
     /// Write one raw MAVLink v2 frame to the socket, framed with the 4-byte
-    /// big-endian length prefix the router reads. Connects lazily on the first
-    /// call and reuses the connection; on a write failure the connection is
-    /// dropped and a single reconnect is attempted so a brief MAVLink-service
-    /// blip self-heals. An absent socket (no MAVLink service) returns
-    /// [`SendError::Io`], which the route maps to a 503 (no FC link) — the
-    /// command is never silently dropped.
+    /// big-endian length prefix the router reads, on a connection opened for this
+    /// frame and closed after it. Bounded by [`SEND_TIMEOUT`]. An absent socket or
+    /// a stalled write returns [`SendError::Io`], which the routes map to a 503.
     pub async fn send(&self, frame: &[u8]) -> Result<(), SendError> {
-        // Frame the payload up front: 4-byte big-endian length prefix + the raw
-        // MAVLink bytes, the exact `ados.core.ipc` contract. A command frame is
-        // far under the cap, so this only fails on a programmer error.
         let wire = encode_frame(frame, MAVLINK_MAX_FRAME)?;
-
-        let mut guard = self.conn.lock().await;
-
-        // First attempt on the held (or freshly-connected) stream.
-        match self.write_on(&mut guard, &wire).await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                // The held connection is dead (broken pipe / reset). Drop it and
-                // try once more with a fresh connect, so a MAVLink-service
-                // restart between commands recovers transparently.
-                tracing::debug!(error = %e, "mavlink send failed on held connection; reconnecting once");
-                *guard = None;
-            }
-        }
-
-        // Second attempt: forced reconnect.
-        self.write_on(&mut guard, &wire).await
-    }
-
-    /// Ensure a live connection in `guard`, then write the framed bytes. On any
-    /// I/O error the connection is cleared so the caller's retry (or the next
-    /// send) reconnects.
-    async fn write_on(
-        &self,
-        guard: &mut tokio::sync::MutexGuard<'_, Option<UnixStream>>,
-        wire: &[u8],
-    ) -> Result<(), SendError> {
-        if guard.is_none() {
-            let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+        let exchange = async {
+            let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
                 tracing::debug!(
                     path = %self.socket_path.display(),
                     error = %e,
@@ -142,19 +102,17 @@ impl MavlinkIpcClient {
                 );
                 e
             })?;
-            **guard = Some(stream);
+            stream.write_all(&wire).await?;
+            stream.flush().await?;
+            Ok::<(), std::io::Error>(())
+        };
+        match tokio::time::timeout(SEND_TIMEOUT, exchange).await {
+            Ok(r) => r.map_err(SendError::Io),
+            Err(_) => Err(SendError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the MAVLink router did not take the frame in time",
+            ))),
         }
-        // Safe: just ensured Some above.
-        let stream = guard.as_mut().expect("connection is present");
-        if let Err(e) = stream.write_all(wire).await {
-            **guard = None;
-            return Err(SendError::Io(e));
-        }
-        if let Err(e) = stream.flush().await {
-            **guard = None;
-            return Err(SendError::Io(e));
-        }
-        Ok(())
     }
 
     /// Open a fresh, dedicated connection for a correlated command exchange.
@@ -252,9 +210,21 @@ impl AckStream {
             )));
         }
         let wire = encode_frame(frame, MAVLINK_MAX_FRAME)?;
-        self.stream.write_all(&wire).await?;
-        self.stream.flush().await?;
-        Ok(())
+        let write = async {
+            self.stream.write_all(&wire).await?;
+            self.stream.flush().await
+        };
+        match tokio::time::timeout(SEND_TIMEOUT, write).await {
+            Ok(r) => r.map_err(SendError::Io),
+            Err(_) => {
+                // A cancelled write leaves the stream at an unknown offset.
+                self.desynced = true;
+                Err(SendError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the MAVLink router did not take the frame in time",
+                )))
+            }
+        }
     }
 
     /// Read the next raw MAVLink frame from the broadcast stream, bounded by
@@ -360,50 +330,31 @@ mod tests {
         assert_eq!(got, payload, "the server reads back the exact raw frame");
     }
 
-    /// The client reconnects after the server drops the connection: a second send
-    /// succeeds against a fresh accept.
+    /// Each send uses its own connection and closes it, so the client is never
+    /// left attached to the broadcast as a consumer that does not read.
     #[tokio::test]
-    async fn send_reconnects_after_the_peer_drops() {
+    async fn each_send_closes_its_connection() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mavlink.sock");
         let listener = UnixListener::bind(&path).unwrap();
         let client = MavlinkIpcClient::new(path.clone());
 
-        let payload = b"\xfd\x00\x05".to_vec();
-
-        // First round: accept, read one frame, then drop the connection.
-        let p1 = payload.clone();
-        let server1 = tokio::spawn(async move {
-            let (mut conn, _addr) = listener.accept().await.unwrap();
-            let mut header = [0u8; HEADER_SIZE];
-            conn.read_exact(&mut header).await.unwrap();
-            let len = decode_len(header, MAVLINK_MAX_FRAME, false).unwrap();
-            let mut body = vec![0u8; len];
-            conn.read_exact(&mut body).await.unwrap();
-            assert_eq!(body, p1);
-            // Drop conn → the client's held connection becomes dead.
-            drop(conn);
-            // Re-accept for the second send.
-            let (mut conn2, _addr) = listener.accept().await.unwrap();
-            let mut header2 = [0u8; HEADER_SIZE];
-            conn2.read_exact(&mut header2).await.unwrap();
-            let len2 = decode_len(header2, MAVLINK_MAX_FRAME, false).unwrap();
-            let mut body2 = vec![0u8; len2];
-            conn2.read_exact(&mut body2).await.unwrap();
-            body2
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut conn, _addr) = listener.accept().await.unwrap();
+                let mut header = [0u8; HEADER_SIZE];
+                conn.read_exact(&mut header).await.unwrap();
+                let len = decode_len(header, MAVLINK_MAX_FRAME, false).unwrap();
+                let mut body = vec![0u8; len];
+                conn.read_exact(&mut body).await.unwrap();
+                // The client closed after its frame: the next read is EOF.
+                let mut rest = [0u8; 1];
+                assert_eq!(conn.read(&mut rest).await.unwrap(), 0);
+            }
         });
-
-        client.send(&payload).await.expect("first send succeeds");
-        // Give the server a moment to drop the first connection.
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        // Second send: the held connection is now dead; the client reconnects.
-        client
-            .send(&payload)
-            .await
-            .expect("second send reconnects and succeeds");
-
-        let got2 = server1.await.unwrap();
-        assert_eq!(got2, payload, "the second frame arrives over the reconnect");
+        client.send(b"\xfd\x00\x05").await.expect("first send");
+        client.send(b"\xfd\x00\x06").await.expect("second send");
+        server.await.unwrap();
     }
 
     #[test]

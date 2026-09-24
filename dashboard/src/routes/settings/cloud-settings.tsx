@@ -9,7 +9,6 @@ import { Label } from "@/components/ui/label";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useStatus } from "@/hooks/use-status";
-import { setApiKey as persistApiKey } from "@/lib/api-key";
 import { toast, toastFromError } from "@/lib/toast";
 import { cloudSectionSchema, postApply } from "@/lib/apply-actions";
 
@@ -54,14 +53,13 @@ export function CloudSettings() {
   const [busy, setBusy] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
 
+  // Re-seed only when the agent's values change, never on an unrelated poll.
   useEffect(() => {
-    if (status.data) {
-      setMode((status.data.cloud_choice?.mode as CloudMode) ?? "local");
-      setUrl(status.data.cloud_choice?.backend_url ?? "");
-      setBroker(status.data.cloud_choice?.mqtt_broker ?? "");
-      setPort(String(status.data.cloud_choice?.mqtt_port ?? 8883));
-    }
-  }, [status.data]);
+    setMode(initialMode);
+    setUrl(initialUrl);
+    setBroker(initialBroker);
+    setPort(String(initialPort));
+  }, [initialMode, initialUrl, initialBroker, initialPort]);
 
   const dirty =
     mode !== initialMode ||
@@ -114,12 +112,6 @@ export function CloudSettings() {
       });
       const section = res.sections.cloud;
       if (res.overall && section?.ok) {
-        // Mirror the key into browser storage so cross-origin / tunnel
-        // sessions can authenticate the dashboard's own /api calls.
-        // Same-origin LAN access stays untouched by this.
-        if (mode === "self_hosted" && apiKey.trim()) {
-          persistApiKey(apiKey.trim());
-        }
         toast.ok(section.message || "Cloud posture saved.");
         setApiKey("");
       } else {

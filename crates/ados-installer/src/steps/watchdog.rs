@@ -87,7 +87,7 @@ fn safe_runtime_secs(hw_ceiling: Option<u32>) -> u32 {
 }
 
 /// The `config.yaml` slice this step reads. Everything optional so a config with
-/// no `network.watchdog` block resolves to the default-on posture.
+/// no `network.watchdog` block resolves to the default-off posture.
 #[derive(Debug, Deserialize, Default)]
 struct RootView {
     #[serde(default)]

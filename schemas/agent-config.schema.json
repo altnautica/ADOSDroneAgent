@@ -276,16 +276,6 @@
           "title": "Codec",
           "type": "string"
         },
-        "codec_preference": {
-          "default": "auto",
-          "enum": [
-            "h264",
-            "h265",
-            "auto"
-          ],
-          "title": "Codec Preference",
-          "type": "string"
-        },
         "encoder": {
           "default": "auto",
           "enum": [
@@ -1607,11 +1597,6 @@
             "url": "https://convex-site.altnautica.com"
           }
         },
-        "heartbeat_interval": {
-          "default": 5,
-          "title": "Heartbeat Interval",
-          "type": "integer"
-        },
         "mode": {
           "default": "local",
           "enum": [
@@ -1651,11 +1636,6 @@
             "mqtt_port": 8883,
             "url": ""
           }
-        },
-        "telemetry_rate": {
-          "default": 2,
-          "title": "Telemetry Rate",
-          "type": "integer"
         }
       },
       "title": "ServerConfig",
@@ -1923,7 +1903,6 @@
           "default": {
             "bitrate_kbps": 4000,
             "codec": "h264",
-            "codec_preference": "auto",
             "encoder": "auto",
             "expected": "auto",
             "fps": 30,
@@ -1953,11 +1932,6 @@
           "default": "",
           "title": "Cloud Relay Url",
           "type": "string"
-        },
-        "cloud_rtp_port": {
-          "default": 8000,
-          "title": "Cloud Rtp Port",
-          "type": "integer"
         },
         "lcd_fps_cap": {
           "default": 15,
@@ -2570,7 +2544,6 @@
           "mqtt_port": 443,
           "url": "https://convex-site.altnautica.com"
         },
-        "heartbeat_interval": 5,
         "mode": "local",
         "mqtt_password": "",
         "mqtt_plaintext_dev": false,
@@ -2581,8 +2554,7 @@
           "mqtt_broker": "",
           "mqtt_port": 8883,
           "url": ""
-        },
-        "telemetry_rate": 2
+        }
       }
     },
     "swarm": {
@@ -2624,7 +2596,6 @@
         "camera": {
           "bitrate_kbps": 4000,
           "codec": "h264",
-          "codec_preference": "auto",
           "encoder": "auto",
           "expected": "auto",
           "fps": 30,
@@ -2644,7 +2615,6 @@
         },
         "cameras": [],
         "cloud_relay_url": "",
-        "cloud_rtp_port": 8000,
         "lcd_fps_cap": 15,
         "mode": "wfb",
         "prefer_hw_encoder": true,

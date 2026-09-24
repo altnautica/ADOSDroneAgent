@@ -8,9 +8,9 @@
 
 use std::path::Path;
 
+use ados_protocol::shutdown::Shutdown;
 use ados_video::config::{AgentVideoConfig, CameraConfig};
 use ados_video::orchestrator::VideoOrchestrator;
-use ados_video::shutdown::Shutdown;
 
 /// Canonical agent config file.
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";

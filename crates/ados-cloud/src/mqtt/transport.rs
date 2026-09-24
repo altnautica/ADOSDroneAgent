@@ -23,7 +23,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rumqttc::{
-    AsyncClient, ConnectReturnCode, Event, Incoming, MqttOptions, QoS as RumqttcQoS,
+    AsyncClient, Broker, ConnectReturnCode, Event, Incoming, MqttOptions, QoS as RumqttcQoS,
     TlsConfiguration, Transport,
 };
 use tokio::sync::mpsc;
@@ -219,6 +219,23 @@ pub trait MqttTransport: Send + Sync {
     async fn subscribe(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError>;
 }
 
+/// How a [`RumqttcTransport`] reaches the broker: MQTT over a TLS WebSocket (the
+/// managed broker's tunnel) or MQTT over TLS on a plain TCP port (a self-hosted
+/// broker on 8883). Both carry the shared ring-backed rustls config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerWire {
+    /// `wss://host:port<ws_path>`.
+    Wss,
+    /// MQTT over TLS straight on `host:port`.
+    Tls,
+}
+
+/// Fixed delay before the event loop re-dials a broker that refused or dropped
+/// the session. A recovery loop retries on a fixed 2-5 s cadence with no cap;
+/// every attempt is a full DNS + TCP + TLS (+ WebSocket) handshake, so a tighter
+/// loop only burns a metered uplink against a broker that is down.
+const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+
 /// How a [`RumqttcTransport`] dials the broker. Carries the resolved
 /// host/port/path/credentials; TLS is the shared ring-backed rustls config.
 #[derive(Debug, Clone)]
@@ -226,28 +243,45 @@ pub struct TransportConfig {
     pub client_id: String,
     pub host: String,
     pub port: u16,
+    pub wire: BrokerWire,
+    /// The WebSocket path the broker serves MQTT on (`Wss` only).
     pub ws_path: String,
     pub username: String,
     pub password: String,
-    /// MQTT in-flight ceiling. The relays set this high so a telemetry burst is
-    /// not dropped at the client, matching the Python gateway's
-    /// `max_inflight_messages_set(1000)`.
+    /// MQTT in-flight ceiling for at-least-once publishes. The relays set this
+    /// high so a telemetry burst is not throttled by the client.
     pub inflight: u16,
     pub keep_alive: Duration,
 }
 
 impl TransportConfig {
-    /// Build the rumqttc options for this config: WSS transport carrying the
-    /// shared rustls config, credentials, keep-alive, and the inflight ceiling.
-    fn build_options(&self) -> MqttOptions {
-        // Broker host carries the ws path so the WSS handshake targets `/mqtt`.
-        let url = format!("ws://{}:{}{}", self.host, self.port, self.ws_path);
-        let mut opts = MqttOptions::new(self.client_id.clone(), url);
+    /// Build the rumqttc options for this config: the broker target for the
+    /// wire, TLS carrying the shared rustls config, credentials, keep-alive, and
+    /// the inflight ceiling.
+    ///
+    /// The WSS target must be built with [`Broker::websocket`]: handing rumqttc a
+    /// URL string makes a plain TCP broker whose host is the whole URL, and a WSS
+    /// transport over a TCP broker refuses every dial.
+    fn build_options(&self) -> Result<MqttOptions, TransportError> {
+        let tls = TlsConfiguration::Rustls(crate::tls::client_config_arc());
+        let (broker, transport) = match self.wire {
+            BrokerWire::Wss => {
+                let url = format!("ws://{}:{}{}", self.host, self.port, self.ws_path);
+                let broker = Broker::websocket(url.clone())
+                    .map_err(|e| TransportError::Client(format!("broker url {url}: {e}")))?;
+                (broker, Transport::Wss(tls))
+            }
+            BrokerWire::Tls => (
+                Broker::tcp(self.host.clone(), self.port),
+                Transport::Tls(tls),
+            ),
+        };
+        let mut opts = MqttOptions::new(self.client_id.clone(), broker);
         opts.set_credentials(self.username.clone(), self.password.clone().into_bytes());
         opts.set_keep_alive(self.keep_alive.as_secs() as u16);
-        let tls = TlsConfiguration::Rustls(crate::tls::client_config_arc());
-        opts.set_transport(Transport::Wss(tls));
-        opts
+        opts.set_outgoing_inflight_upper_limit(self.inflight);
+        opts.set_transport(transport);
+        Ok(opts)
     }
 }
 
@@ -274,9 +308,10 @@ pub struct RumqttcTransport {
 impl RumqttcTransport {
     /// Connect (lazily — rumqttc connects on the first event-loop poll) and
     /// spawn the event-loop task. Incoming publishes land on the channel
-    /// returned by [`incoming`](Self::incoming).
-    pub fn connect(config: &TransportConfig) -> Arc<Self> {
-        let opts = config.build_options();
+    /// returned by [`incoming`](Self::incoming). Fails only when the dial config
+    /// cannot describe a broker at all (an unparseable host).
+    pub fn connect(config: &TransportConfig) -> Result<Arc<Self>, TransportError> {
+        let opts = config.build_options()?;
         let (client, mut eventloop) = AsyncClient::builder(opts).build();
         let (tx, rx) = mpsc::channel::<IncomingMessage>(256);
         let connected = Arc::new(AtomicBool::new(false));
@@ -292,11 +327,11 @@ impl RumqttcTransport {
                     Ok(event) => classify_event(&event),
                     // A connection error is transient; rumqttc reconnects on the
                     // next poll. The session is down until the next ConnAck, so
-                    // clear the flag. Back off briefly so a hard-down broker does
-                    // not spin the loop.
+                    // clear the flag and wait the fixed recovery interval before
+                    // the next dial.
                     Err(e) => {
                         tracing::debug!(error = %e, "mqtt event loop poll error");
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        tokio::time::sleep(RECONNECT_DELAY).await;
                         SessionEvent::SessionDown
                     }
                 };
@@ -309,13 +344,13 @@ impl RumqttcTransport {
             // The loop has ended (consumer dropped): the link is no longer live.
             connected_task.store(false, Ordering::Release);
         });
-        Arc::new(RumqttcTransport {
+        Ok(Arc::new(RumqttcTransport {
             client,
             incoming: tokio::sync::Mutex::new(Some(rx)),
             connected,
             subs,
             _eventloop: eventloop,
-        })
+        }))
     }
 
     /// Whether the broker session is currently CONFIRMED up (a successful
@@ -380,6 +415,33 @@ impl MqttTransport for RumqttcTransport {
         // topic is lost even though the caller saw an Ok.
         self.subs.record(topic, qos);
         self.client.issue(topic, qos).await
+    }
+}
+
+/// A shared transport is a transport: a lane that owns an `Arc` of the session
+/// (the signaling relay) routes through it unchanged.
+#[async_trait]
+impl<T: MqttTransport + ?Sized> MqttTransport for Arc<T> {
+    async fn publish(
+        &self,
+        topic: &str,
+        qos: MqttQos,
+        payload: Vec<u8>,
+    ) -> Result<(), TransportError> {
+        (**self).publish(topic, qos, payload).await
+    }
+
+    fn try_publish(
+        &self,
+        topic: &str,
+        qos: MqttQos,
+        payload: Vec<u8>,
+    ) -> Result<(), TransportError> {
+        (**self).try_publish(topic, qos, payload)
+    }
+
+    async fn subscribe(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
+        (**self).subscribe(topic, qos).await
     }
 }
 
@@ -449,6 +511,51 @@ mod tests {
         );
     }
 
+    fn test_config(host: &str, port: u16, wire: BrokerWire) -> TransportConfig {
+        TransportConfig {
+            client_id: "ados-test".to_string(),
+            host: host.to_string(),
+            port,
+            wire,
+            ws_path: "/mqtt".to_string(),
+            username: "ados-test".to_string(),
+            password: "k".to_string(),
+            inflight: 1000,
+            keep_alive: Duration::from_secs(30),
+        }
+    }
+
+    /// The dial must actually reach the configured broker address. A broker
+    /// target built from a URL string is a TCP broker whose host is the whole
+    /// URL, and rumqttc refuses a WSS transport over it before opening a socket.
+    async fn assert_dial_reaches_listener(wire: BrokerWire) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let opts = test_config("127.0.0.1", port, wire)
+            .build_options()
+            .expect("a well-formed broker target");
+        let (_client, mut eventloop) = AsyncClient::builder(opts).build();
+        let dial = tokio::spawn(async move {
+            let _ = eventloop.poll().await;
+        });
+        let accepted = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+        dial.abort();
+        assert!(
+            matches!(accepted, Ok(Ok(_))),
+            "the {wire:?} dial never opened a connection to the broker port"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wss_dial_reaches_the_configured_broker_port() {
+        assert_dial_reaches_listener(BrokerWire::Wss).await;
+    }
+
+    #[tokio::test]
+    async fn a_tls_dial_reaches_the_configured_broker_port() {
+        assert_dial_reaches_listener(BrokerWire::Tls).await;
+    }
+
     #[tokio::test]
     async fn fresh_transport_is_not_connected_until_the_broker_acks() {
         // rumqttc dials lazily and retries a down broker forever, so a freshly
@@ -456,18 +563,9 @@ mod tests {
         // connected() == false. This is the truth the GS bridge relies on to
         // avoid the connect-lie: the existence of the transport (and its
         // event-loop task) is NOT proof of a broker session.
-        let cfg = TransportConfig {
-            client_id: "ados-test".to_string(),
-            // An unroutable host so no ConnAck can ever arrive in the test.
-            host: "127.0.0.1".to_string(),
-            port: 1, // nothing listens here
-            ws_path: "/mqtt".to_string(),
-            username: "ados-test".to_string(),
-            password: "k".to_string(),
-            inflight: 1000,
-            keep_alive: Duration::from_secs(30),
-        };
-        let transport = RumqttcTransport::connect(&cfg);
+        // Port 1: nothing listens there, so no ConnAck can ever arrive.
+        let transport =
+            RumqttcTransport::connect(&test_config("127.0.0.1", 1, BrokerWire::Wss)).unwrap();
         // Immediately after connect there can be no ConnAck.
         assert!(!transport.connected());
         // The shared handle observes the same state, and after a brief spin the

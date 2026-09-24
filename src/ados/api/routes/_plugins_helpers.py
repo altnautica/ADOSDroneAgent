@@ -1,16 +1,11 @@
-"""Shared helpers for the plugin REST and remote-install surfaces.
+"""Shared helpers for the plugin REST surface.
 
-Three concerns live here so the route module stays under the soft
-500-LOC cap and the cloud-relay receiver can reuse the same code paths:
+Two concerns live here so the route module stays under the soft 500-LOC cap:
 
 * ``mint_agent_capability_token`` — HKDF-derived per-pairing HMAC token
   for the LAN-direct install path. The agent issues these on demand at
   ``POST /api/plugins/capability-token`` so the GCS does not need a
   Convex round-trip when it has a direct line to the rig.
-* ``write_granted_permissions_yaml`` — per-(operator, drone, plugin)
-  grant file at ``/var/lib/ados/plugins/<plugin_id>/granted-permissions.yaml``.
-  Mirrors the permission-model module's audit-log layout so the cloud
-  state and the on-disk state agree.
 * ``write_sidecar`` / ``read_sidecar`` — in-flight install-job state at
   ``/run/ados/plugin_install_<jobId>.json``. Survives a WebSocket
   disconnect so the GCS can re-subscribe and see the current stage.
@@ -87,38 +82,6 @@ async def authenticate_job_websocket(websocket: Any, job_id: str) -> str | None:
     )
 
 
-async def authenticate_websocket(websocket: Any) -> bool:
-    """Back-compat header-only wrapper for routes without a ticket flow.
-
-    New routes should call
-    :func:`ados.api.middleware.ws_auth.authenticate_websocket` with an
-    explicit ``scope``. Returns ``True`` on success, ``False`` on
-    failure (in which case the socket has been closed with ``4401``).
-    """
-    from ados.api.deps import get_agent_app
-
-    app = get_agent_app()
-    pm = getattr(app, "pairing_manager", None)
-
-    if pm is None or not getattr(pm, "is_paired", False):
-        return True
-
-    configured_key: str | None = None
-    try:
-        configured_key = app.config.security.api.api_key
-    except AttributeError:
-        configured_key = None
-
-    api_key = websocket.headers.get("X-ADOS-Key")
-    if api_key:
-        if configured_key and api_key == configured_key:
-            return True
-        if pm.validate_key(api_key):
-            return True
-
-    await websocket.close(code=4401, reason="auth required")
-    return False
-
 # HKDF salt is fixed by spec so a paired GCS and the agent derive the
 # same secret independently. Version suffix lets us rotate without
 # coordination if we ever change the derivation.
@@ -132,11 +95,6 @@ TOKEN_TTL_SECONDS_DEFAULT = 600
 # layout deliberately so operators recognise the pattern.
 SIDECAR_DIR = Path("/run/ados")
 
-# Granted-permissions audit log lives under /var/lib so it survives a
-# reboot. One file per plugin id; the grant rows inside it are keyed
-# by (operator_id, agent_id) so a single agent can support multiple
-# operators (a rare case today but cheap to model).
-GRANTS_DIR = Path("/var/lib/ados/plugins")
 
 
 # ---------------------------------------------------------------------
@@ -276,107 +234,6 @@ def verify_agent_token_signature(
 
 
 # ---------------------------------------------------------------------
-# Granted-permissions audit log
-# ---------------------------------------------------------------------
-
-
-def grant_file_path(plugin_id: str, *, root: Path | None = None) -> Path:
-    """Filesystem location of the granted-permissions audit row."""
-    base = root if root is not None else GRANTS_DIR
-    return base / plugin_id / "granted-permissions.yaml"
-
-
-def write_granted_permissions_yaml(
-    *,
-    plugin_id: str,
-    operator_id: str,
-    agent_id: str,
-    granted: list[str],
-    granted_at_ms: int | None = None,
-    root: Path | None = None,
-) -> Path:
-    """Write the per-(operator, drone, plugin) grant record.
-
-    YAML is hand-rolled to avoid a runtime ``yaml`` import inside the
-    install hot path. The output is still valid YAML 1.2 / JSON-superset
-    so any consumer (audit log reader, debug dump) parses it cleanly.
-    """
-    base = root if root is not None else GRANTS_DIR
-    target = base / plugin_id
-    target.mkdir(parents=True, exist_ok=True)
-    grant_path = target / "granted-permissions.yaml"
-    ts = int(granted_at_ms if granted_at_ms is not None else time.time() * 1000)
-    # Cheap YAML emitter — list of strings as a JSON-compatible flow
-    # sequence so a downstream JSON-only reader still parses it.
-    granted_str = (
-        "[" + ", ".join(json.dumps(p) for p in sorted(set(granted))) + "]"
-    )
-    body = (
-        f"operator_id: {json.dumps(operator_id)}\n"
-        f"agent_id: {json.dumps(agent_id)}\n"
-        f"plugin_id: {json.dumps(plugin_id)}\n"
-        f"granted: {granted_str}\n"
-        f"granted_at_ms: {ts}\n"
-    )
-    _atomic_write_text(grant_path, body)
-    try:
-        os.chmod(grant_path, 0o640)
-    except OSError as exc:
-        log.warning("granted_perms_chmod_failed", path=str(grant_path), error=str(exc))
-    # The audit trail: granting a capability to a plugin is a standing decision,
-    # and the grant file itself is per-plugin — the trail is where an operator
-    # sees the sequence across every plugin on the box.
-    from ados.core import audit
-
-    audit.record(
-        audit.PLUGIN_PERMISSIONS_GRANTED,
-        audit.ACTOR_OPERATOR,
-        {
-            "plugin_id": plugin_id,
-            "operator_id": operator_id,
-            "agent_id": agent_id,
-            "granted": sorted(set(granted)),
-        },
-    )
-    return grant_path
-
-
-def read_granted_permissions_yaml(
-    plugin_id: str, *, root: Path | None = None
-) -> dict[str, Any] | None:
-    """Inverse of :func:`write_granted_permissions_yaml`.
-
-    Returns the parsed record or ``None`` if no grant file exists.
-    Tolerant of the JSON-compatible flow form used by the writer; this
-    is a thin emitter, not a real YAML library.
-    """
-    grant_path = grant_file_path(plugin_id, root=root)
-    if not grant_path.exists():
-        return None
-    try:
-        text = grant_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        log.warning(
-            "granted_perms_read_failed", path=str(grant_path), error=str(exc)
-        )
-        return None
-    out: dict[str, Any] = {}
-    for line in text.splitlines():
-        line = line.rstrip()
-        if not line or line.startswith("#"):
-            continue
-        if ":" not in line:
-            continue
-        key, _, raw = line.partition(":")
-        raw = raw.strip()
-        try:
-            out[key.strip()] = json.loads(raw) if raw else None
-        except json.JSONDecodeError:
-            out[key.strip()] = raw.strip('"')
-    return out
-
-
-# ---------------------------------------------------------------------
 # Sidecar JSON for in-flight install jobs
 # ---------------------------------------------------------------------
 
@@ -445,14 +302,6 @@ def read_sidecar_snapshot(
     return payload, mtime
 
 
-def clear_sidecar(job_id: str, *, root: Path | None = None) -> None:
-    path = sidecar_path(job_id, root=root)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        log.warning("sidecar_clear_failed", path=str(path), error=str(exc))
-
-
 def _atomic_write_text(path: Path, body: str) -> None:
     """Write text atomically — tmp file in the same directory + rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -468,10 +317,6 @@ def _atomic_write_text(path: Path, body: str) -> None:
 
 
 TERMINAL_STAGES = frozenset({"completed", "failed", "cancelled"})
-
-
-def is_terminal_stage(stage: str | None) -> bool:
-    return bool(stage) and stage in TERMINAL_STAGES
 
 
 # ---------------------------------------------------------------------
@@ -521,7 +366,7 @@ async def run_job_progress_stream(
                 last_mtime = mtime
                 idle_since = time.monotonic()
                 await websocket.send_json(payload)
-                if is_terminal_stage(payload.get("stage")):
+                if payload.get("stage") in TERMINAL_STAGES:
                     return
         if time.monotonic() - idle_since > idle_timeout:
             await websocket.send_json(
@@ -536,27 +381,14 @@ async def run_job_progress_stream(
 # ---------------------------------------------------------------------
 
 
-def compute_granted_caps_for_token(
-    *,
-    plugin_id: str,
-    in_memory_permissions: dict[str, Any],
-    grants_root: Path | None = None,
-) -> tuple[list[str], dict[str, Any] | None]:
-    """Resolve the granted-capability list for the mint endpoint.
+def compute_granted_caps_for_token(in_memory_permissions: dict[str, Any]) -> list[str]:
+    """The capabilities granted right now, from the supervisor's install record.
 
-    Audit file wins when present so a refreshed install picks up the
-    latest grant immediately. Falls back to the supervisor's in-memory
-    grant map for tests and for the brief window between install and
-    the first audit-log flush.
+    Every grant and revoke (LAN or cloud) lands in that record, so the token
+    carries exactly the current grant set.
     """
-    audit = read_granted_permissions_yaml(plugin_id, root=grants_root)
-    granted: list[str] = []
-    if audit and isinstance(audit.get("granted"), list):
-        granted = [str(p) for p in audit["granted"]]
-    if not granted:
-        granted = sorted(
-            pid
-            for pid, grant in in_memory_permissions.items()
-            if getattr(grant, "granted", False)
-        )
-    return granted, audit
+    return sorted(
+        pid
+        for pid, grant in in_memory_permissions.items()
+        if getattr(grant, "granted", False)
+    )

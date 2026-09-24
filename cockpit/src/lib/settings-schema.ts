@@ -106,7 +106,6 @@ export function prettyTrail(dotpath: string): string {
 export const ENUM_OPTIONS: Record<string, string[]> = {
   "agent.profile": ["auto", "drone", "ground_station", "workstation", "compute"],
   "mavlink.source": ["auto", "serial", "udp", "tcp"],
-  "video.camera.codec_preference": ["h264", "h265", "auto"],
   "video.camera.rotation": ["0", "90", "180", "270"],
   "video.camera.expected": ["auto", "true", "false"],
   "video.wfb.topology": ["host_vbus", "powered_hub", "external_5v"],
@@ -154,7 +153,6 @@ export const NUMBER_BOUNDS: Record<string, NumberBound> = {
   "video.camera.height": { min: 120, max: 2160, int: true },
   "video.camera.fps": { min: 1, max: 120, int: true },
   "video.camera.bitrate_kbps": { min: 250, max: 50000, int: true },
-  "video.cloud_rtp_port": { min: 1, max: 65535, int: true },
   "api.rest.port": { min: 1, max: 65535, int: true },
   "mavlink.baud_rate": { min: 1200, max: 2000000, int: true },
   "mavlink.system_id": { min: 1, max: 255, int: true },
@@ -167,8 +165,6 @@ export const NUMBER_BOUNDS: Record<string, NumberBound> = {
   "logging.keep_count": { min: 1, max: 100, int: true },
   "pairing.beacon_interval": { min: 5, max: 3600, int: true },
   "pairing.heartbeat_interval": { min: 5, max: 3600, int: true },
-  "server.telemetry_rate": { min: 1, max: 50, int: true },
-  "server.heartbeat_interval": { min: 1, max: 3600, int: true },
 };
 
 // ── reboot-required paths (a service reads them only at startup) ─────────────
@@ -380,7 +376,6 @@ export const CURATED_GROUPS: CuratedGroup[] = [
       "video.camera.height",
       "video.camera.fps",
       "video.camera.bitrate_kbps",
-      "video.camera.codec_preference",
       "video.camera.rotation",
       "video.camera.hflip",
       "video.camera.vflip",

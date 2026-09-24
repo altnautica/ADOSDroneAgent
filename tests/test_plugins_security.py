@@ -135,7 +135,28 @@ def test_entrypoint_with_a_control_character_rejected(entrypoint: str) -> None:
     carry one."""
     bad = _good()
     bad["agent"]["entrypoint"] = entrypoint
-    with pytest.raises(ManifestError, match="control characters"):
+    with pytest.raises(ManifestError, match="entrypoint"):
+        PluginManifest.from_yaml_text(yaml.safe_dump(bad))
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    [
+        "agent/bin/p --flag",
+        "agent/bin/p%h",
+        "agent/bin/$HOME",
+        "agent//bin/p",
+        "pkg-mod:Class",
+        "pkg.mod:Class()",
+    ],
+)
+def test_entrypoint_outside_the_unit_safe_grammar_rejected(entrypoint: str) -> None:
+    """A rust entrypoint is interpolated into ExecStart, where a space adds an
+    argv word and ``%``/``$`` expand; the LAN validator must refuse what the
+    cloud-relay (Rust) parser refuses."""
+    bad = _good()
+    bad["agent"]["entrypoint"] = entrypoint
+    with pytest.raises(ManifestError, match="entrypoint"):
         PluginManifest.from_yaml_text(yaml.safe_dump(bad))
 
 

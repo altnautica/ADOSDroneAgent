@@ -242,6 +242,13 @@ pub struct CloudRelayBridge {
     // down with it (both share the MAVLink relay's shutdown watch; this handle is
     // the belt-and-braces abort for a wedged publisher). `None` while no relay is up.
     msp_relay_task: Option<tokio::task::JoinHandle<()>>,
+    // The WebRTC signaling lane, spawned and torn down with the MAVLink relay.
+    // `None` while no relay is up.
+    signaling_task: Option<tokio::task::JoinHandle<()>>,
+    // Whether the data cap currently lets the signaling lane open a video
+    // stream. Refreshed from the throttle level on every poll tick; an offer
+    // arriving while it is false is refused rather than streamed.
+    video_allowed: Arc<AtomicBool>,
     // When this bridge was constructed, the source of the heartbeat's
     // `uptimeSeconds` (the status mutation requires it, the same as a drone).
     started: std::time::Instant,
@@ -274,6 +281,8 @@ impl CloudRelayBridge {
             relay_started_at: None,
             relay_retry_at: None,
             msp_relay_task: None,
+            signaling_task: None,
+            video_allowed: Arc::new(AtomicBool::new(true)),
             started: std::time::Instant::now(),
         }
     }
@@ -542,6 +551,9 @@ impl CloudRelayBridge {
                     // transport has confirmed a ConnAck (and drops it on a
                     // disconnect the relay's own loop has not yet reaped).
                     self.refresh_mqtt_connected();
+                    // The signaling lane reads the live data-cap verdict per offer.
+                    self.video_allowed
+                        .store(self.throttle.forward_video(), Ordering::Release);
                 }
                 _ = heartbeat.tick() => {
                     // Read the live connection state at publish time so the
@@ -607,9 +619,29 @@ impl CloudRelayBridge {
                 warn!(error = %e, "cloud_relay.msp_relay_exited");
             }
         });
+        // The WebRTC signaling lane rides the same broker on its own ClientID and
+        // answers offers only while the data cap allows video.
+        let signaling_shutdown = tx.subscribe();
+        let signaling_cfg = self.relay_transport.clone();
+        let signaling_id = self.device_id.clone();
+        let video_allowed = self.video_allowed.clone();
+        video_allowed.store(self.throttle.forward_video(), Ordering::Release);
+        let signaling_handle = tokio::spawn(async move {
+            if let Err(e) = crate::mqtt::run_webrtc_signaling(
+                &signaling_id,
+                &signaling_cfg,
+                video_allowed,
+                signaling_shutdown,
+            )
+            .await
+            {
+                warn!(error = %e, "cloud_relay.webrtc_signaling_exited");
+            }
+        });
         *relay_task = Some(handle);
         *relay_shutdown = Some(tx);
         self.msp_relay_task = Some(msp_handle);
+        self.signaling_task = Some(signaling_handle);
         // The relay is starting but the broker is NOT confirmed connected yet;
         // mqtt_connected stays false until the transport reports a ConnAck (read
         // each poll tick from the connection flag).
@@ -649,6 +681,9 @@ impl CloudRelayBridge {
         self.relay_connected_flag = None;
         self.relay_conn_rx = None;
         if let Some(handle) = self.msp_relay_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.signaling_task.take() {
             handle.abort();
         }
     }
@@ -695,23 +730,29 @@ async fn teardown_relay(
 }
 
 /// Fold a raw vehicle-state JSON snapshot into the heartbeat telemetry block.
-/// Picks the small set of fields the contract forwards; unknown shapes pass
-/// through as the raw object so a schema change does not drop data.
+/// The router publishes a nested snapshot (`position.*`, `battery.*`), so each
+/// field is read from where the producer puts it; a missing field is `null`
+/// ("not reported"), never a default.
 fn fold_telemetry(state: serde_json::Value) -> serde_json::Value {
-    let obj = match state.as_object() {
-        Some(o) => o,
-        None => return serde_json::json!({}),
+    let Some(obj) = state.as_object() else {
+        return serde_json::json!({});
     };
-    let pick = |k: &str| obj.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let pick = |path: &[&str]| -> serde_json::Value {
+        let mut cur = obj.get(path[0]);
+        for key in &path[1..] {
+            cur = cur.and_then(|v| v.get(*key));
+        }
+        cur.cloned().unwrap_or(serde_json::Value::Null)
+    };
     serde_json::json!({
-        "armed": pick("armed"),
-        "mode": pick("mode"),
-        "lat": pick("lat"),
-        "lon": pick("lon"),
-        "alt_rel": pick("alt_rel"),
-        "battery_voltage": pick("voltage_battery"),
-        "battery_remaining": pick("battery_remaining"),
-        "last_heartbeat": pick("last_heartbeat"),
+        "armed": pick(&["armed"]),
+        "mode": pick(&["mode"]),
+        "lat": pick(&["position", "lat"]),
+        "lon": pick(&["position", "lon"]),
+        "alt_rel": pick(&["position", "alt_rel"]),
+        "battery_voltage": pick(&["battery", "voltage"]),
+        "battery_remaining": pick(&["battery", "remaining"]),
+        "last_heartbeat": pick(&["last_heartbeat"]),
     })
 }
 
@@ -758,13 +799,23 @@ impl StateIpcReader {
                                                 *g = Some(v);
                                             }
                                         }
-                                        // Clean EOF at a frame boundary → reconnect.
-                                        Ok(None) => break,
-                                        // Unrecoverable framing/IO error → reconnect.
-                                        Err(_) => break,
+                                        // Clean EOF, or an unrecoverable
+                                        // framing/IO error → reconnect.
+                                        Ok(None) | Err(_) => break,
                                     }
                                 }
                             }
+                        }
+                        // The router is gone: there is no current vehicle
+                        // state, so the last snapshot must not keep being
+                        // reported as live.
+                        if let Ok(mut g) = store.lock() {
+                            *g = None;
+                        }
+                        // A fixed pause so an accept-then-close flap cannot spin.
+                        tokio::select! {
+                            _ = shutdown.changed() => { if *shutdown.borrow() { return; } }
+                            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                         }
                     }
                     Err(_) => {
@@ -796,6 +847,7 @@ mod tests {
             client_id: "ados-dev1".to_string(),
             host: "mqtt.example".to_string(),
             port: 443,
+            wire: crate::mqtt::BrokerWire::Wss,
             ws_path: "/mqtt".to_string(),
             username: "ados-dev1".to_string(),
             password: "k".to_string(),
@@ -1099,9 +1151,11 @@ mod tests {
 
     #[test]
     fn heartbeat_folds_live_telemetry_when_a_state_source_is_wired() {
+        // The router's real nested wire shape.
         let state = serde_json::json!({
-            "armed": true, "mode": "GUIDED", "lat": 12.97, "lon": 77.59,
-            "alt_rel": 30.0, "voltage_battery": 16.2, "battery_remaining": 88,
+            "armed": true, "mode": "GUIDED",
+            "position": {"lat": 12.97, "lon": 77.59, "alt_msl": 930.0, "alt_rel": 30.0},
+            "battery": {"voltage": 16.2, "current": 3.1, "remaining": 88},
             "last_heartbeat": 1700000000.0
         });
         let mut br = bridge().with_state_source(std::sync::Arc::new(FixedState(state)));
@@ -1115,6 +1169,9 @@ mod tests {
         let t = hb.telemetry.unwrap();
         assert_eq!(t["armed"], true);
         assert_eq!(t["mode"], "GUIDED");
+        assert_eq!(t["lat"], 12.97);
+        assert_eq!(t["lon"], 77.59);
+        assert_eq!(t["alt_rel"], 30.0);
         assert_eq!(t["battery_voltage"], 16.2);
         assert_eq!(t["battery_remaining"], 88);
     }

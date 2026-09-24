@@ -171,7 +171,9 @@ pub struct WfbRxManager {
 
 impl WfbRxManager {
     pub fn new(config: WfbConfig) -> Self {
-        let channel = config.channel;
+        // Tune the channel the regulatory gate verifies: the rendezvous channel
+        // (the operator's home, or the optional pin). The drone tunes the same.
+        let channel = config.rendezvous_channel();
         let interface = config.interface.clone();
         Self {
             config,
@@ -452,7 +454,7 @@ impl WfbRxManager {
         // actually reached the radio. Nothing read it before, so a silently
         // dead transmitter took down HopAck / presence (here) or the whole
         // uplink (below) while every surface still read `active`. See
-        // [`crate::tx_liveness`]. The caller MUST drain it — an unread 64 KiB
+        // [`ados_radio::tx_liveness`]. The caller MUST drain it — an unread 64 KiB
         // pipe blocks the transmitter in `fprintf(stdout)`.
         let tx_control = GsWfbProcess::spawn(
             "wfb_tx",
@@ -606,7 +608,7 @@ impl WfbRxManager {
         ValidPacketWatchdog::new(
             &self.interface,
             self.channel,
-            self.config.channel, // immutable home
+            self.config.rendezvous_channel(), // immutable home
             clock,
             rx,
             Arc::new(presence),
@@ -631,6 +633,24 @@ mod tests {
         // reads empty as "do not restrict").
         let m = WfbRxManager::new(WfbConfig::default());
         assert!(m.enabled_channels().is_empty());
+    }
+
+    /// The receiver tunes the channel the regulatory gate verified: a rendezvous
+    /// pin wins over the home channel, exactly as on the drone, so both rigs
+    /// meet where the gate looked.
+    #[test]
+    fn the_receiver_tunes_the_rendezvous_channel() {
+        let pinned = WfbConfig {
+            channel: 149,
+            rendezvous_channel: Some(153),
+            ..WfbConfig::default()
+        };
+        assert_eq!(WfbRxManager::new(pinned).channel(), 153);
+        let unpinned = WfbConfig {
+            channel: 157,
+            ..WfbConfig::default()
+        };
+        assert_eq!(WfbRxManager::new(unpinned).channel(), 157);
     }
 
     #[test]

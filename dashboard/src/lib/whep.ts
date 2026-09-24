@@ -1,4 +1,4 @@
-import { mediaAuthHeaders } from "./media-auth";
+import { credentialHeaders } from "./api";
 // Minimal WHEP client — POSTs an SDP offer, applies the SDP answer,
 // returns a session handle the caller can close on unmount.
 //
@@ -61,7 +61,7 @@ export async function startWhep(
       try {
         await fetch(resourceUrl, {
           method: "DELETE",
-          headers: mediaAuthHeaders(),
+          headers: credentialHeaders(),
           signal: deleteAc.signal,
         });
       } catch {
@@ -70,7 +70,14 @@ export async function startWhep(
         clearTimeout(t);
       }
     }
-    pc.getSenders().forEach((s) => s.track?.stop());
+    // Receivers, not senders: the only transceiver is recvonly, so there are no
+    // sending tracks, and stopping senders left every inbound track alive after
+    // close. Stop both the receiver tracks and the copies on the element stream.
+    pc.getReceivers().forEach((r) => r.track?.stop());
+    stream.getTracks().forEach((t) => {
+      t.stop();
+      stream.removeTrack(t);
+    });
     pc.close();
     if (videoEl.srcObject === stream) {
       videoEl.srcObject = null;
@@ -78,10 +85,9 @@ export async function startWhep(
   };
 
   try {
-    const offer = await pc.createOffer({
-      offerToReceiveVideo: true,
-      offerToReceiveAudio: true,
-    });
+    // The recvonly video transceiver above is the whole offer. The legacy
+    // offerToReceive* options would add an audio transceiver back.
+    const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
     // Wait briefly for ICE candidates so the answer can address them
@@ -98,7 +104,7 @@ export async function startWhep(
 
     const res = await fetch(whepUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/sdp", ...mediaAuthHeaders() },
+      headers: { "Content-Type": "application/sdp", ...credentialHeaders() },
       body: localDesc.sdp,
       signal,
     });

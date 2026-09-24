@@ -145,25 +145,34 @@ pub struct ResolvedComputeNode {
     pub device_id: String,
 }
 
-/// Browse `_ados._tcp` for up to `timeout` and resolve the first **compute
-/// node** — a service whose TXT carries `profile=workstation` — returning where
-/// to reach its job API (`http://host:job_api_port`) plus its `device_id` (so a
-/// caller can attribute the stream to the node).
+/// Browse `_ados._tcp` for up to `timeout` and resolve a **compute node** — a
+/// service whose TXT carries `profile=workstation` — returning where to reach
+/// its job API (`http://host:job_api_port`) plus its `device_id` (so a caller
+/// can attribute the stream to the node and pick the credential it issued).
+///
+/// A node whose id is in `preferred` (the workstations that issued this drone a
+/// credential) wins the moment it answers. Otherwise the first workstation seen
+/// is returned when the window closes, so with nothing preferred the first
+/// answer returns at once and with a preferred node absent the browse costs the
+/// full window.
 ///
 /// The job-API port rides the `jobApi` TXT key, NOT the SRV port: the SRV port
 /// is the `:8080` pairing front (where `/api/pairing/*` lives), while the job
 /// API serves on its own port. The device id rides the `deviceId` TXT key. An
 /// IPv4 address is preferred for the host (a reqwest client dials it directly,
 /// with no second mDNS hostname lookup); the advertised hostname is the fallback.
-/// Returns `None` on timeout, when mDNS is unavailable, or when no workstation
-/// answers — the caller treats that as "no compute node on the LAN yet" and
+/// Returns `None` on timeout with no workstation seen, or when mDNS is
+/// unavailable — the caller treats that as "no compute node on the LAN yet" and
 /// retries.
 ///
 /// Mirrors `ados_groundlink::mdns::resolve_receiver` (same `mdns-sd` browse +
 /// `ServiceResolved` loop + bounded `tokio::time::timeout`); the difference is
 /// the accept predicate — a TXT `profile` match here vs a mesh-subnet match
 /// there — and that the returned port comes from a TXT key, not the SRV record.
-pub async fn resolve_compute(timeout: Duration) -> Option<ResolvedComputeNode> {
+pub async fn resolve_compute(
+    timeout: Duration,
+    preferred: &[String],
+) -> Option<ResolvedComputeNode> {
     let daemon = ServiceDaemon::new().ok()?;
     let rx = match daemon.browse(PAIRING_SERVICE) {
         Ok(rx) => rx,
@@ -174,54 +183,62 @@ pub async fn resolve_compute(timeout: Duration) -> Option<ResolvedComputeNode> {
         }
     };
 
-    let result = tokio::time::timeout(timeout, async {
+    let mut first: Option<ResolvedComputeNode> = None;
+    let _ = tokio::time::timeout(timeout, async {
         while let Ok(event) = rx.recv_async().await {
-            if let ServiceEvent::ServiceResolved(info) = event {
-                // Only a compute node — skip a drone / ground-station advert that
-                // shares `_ados._tcp` on the same LAN.
-                if info.get_property_val_str("profile") != Some(WORKSTATION_PROFILE) {
-                    continue;
-                }
-                // The job API rides the `jobApi` TXT key (the SRV port is the
-                // pairing front). A missing / zero / unparseable port is skipped.
-                let Some(port) = info
-                    .get_property_val_str("jobApi")
-                    .and_then(|p| p.parse::<u16>().ok())
-                    .filter(|p| *p != 0)
-                else {
-                    continue;
-                };
-                // The node's own device id (attribution). Empty when unadvertised.
-                let device_id = info
-                    .get_property_val_str("deviceId")
-                    .unwrap_or_default()
-                    .to_string();
-                // Prefer a concrete IPv4 (dial it directly); else the hostname.
-                if let Some(v4) = info.get_addresses_v4().into_iter().next() {
-                    return Some(ResolvedComputeNode {
-                        host: v4.to_string(),
-                        job_api_port: port,
-                        device_id,
-                    });
-                }
-                let host = info.get_hostname().trim_end_matches('.').to_string();
-                if !host.is_empty() {
-                    return Some(ResolvedComputeNode {
-                        host,
-                        job_api_port: port,
-                        device_id,
-                    });
+            let ServiceEvent::ServiceResolved(info) = event else {
+                continue;
+            };
+            let Some(node) = compute_node_of(&info) else {
+                continue;
+            };
+            if preferred.contains(&node.device_id) {
+                first = Some(node);
+                return;
+            }
+            if first.is_none() {
+                first = Some(node);
+                if preferred.is_empty() {
+                    return;
                 }
             }
         }
-        None
     })
-    .await
-    .ok()
-    .flatten();
+    .await;
 
     let _ = daemon.shutdown();
-    result
+    first
+}
+
+/// The compute node a resolved advert describes, or `None` when it is not a
+/// workstation or carries no usable job-API port or host.
+fn compute_node_of(info: &mdns_sd::ServiceInfo) -> Option<ResolvedComputeNode> {
+    // Only a compute node — skip a drone / ground-station advert that shares
+    // `_ados._tcp` on the same LAN.
+    if info.get_property_val_str("profile") != Some(WORKSTATION_PROFILE) {
+        return None;
+    }
+    // The job API rides the `jobApi` TXT key (the SRV port is the pairing
+    // front). A missing / zero / unparseable port is skipped.
+    let port = info
+        .get_property_val_str("jobApi")
+        .and_then(|p| p.parse::<u16>().ok())
+        .filter(|p| *p != 0)?;
+    // The node's own device id (attribution). Empty when unadvertised.
+    let device_id = info
+        .get_property_val_str("deviceId")
+        .unwrap_or_default()
+        .to_string();
+    // Prefer a concrete IPv4 (dial it directly); else the hostname.
+    let host = match info.get_addresses_v4().into_iter().next() {
+        Some(v4) => v4.to_string(),
+        None => info.get_hostname().trim_end_matches('.').to_string(),
+    };
+    (!host.is_empty()).then_some(ResolvedComputeNode {
+        host,
+        job_api_port: port,
+        device_id,
+    })
 }
 
 #[cfg(test)]
@@ -252,7 +269,7 @@ mod tests {
         // function must return — not hang — within the timeout.
         let got = tokio::time::timeout(
             Duration::from_secs(5),
-            resolve_compute(Duration::from_millis(300)),
+            resolve_compute(Duration::from_millis(300), &[]),
         )
         .await
         .expect("resolve_compute must honour its own timeout and not hang");

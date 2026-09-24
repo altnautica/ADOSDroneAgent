@@ -22,8 +22,10 @@
 pub mod atlas;
 pub mod camera_config;
 pub mod can;
+pub mod cloud_link;
 pub mod command;
 pub mod compute_status;
+pub mod config_rw;
 pub mod config_schema;
 pub mod dashboard_pin;
 pub mod diag_storage;
@@ -56,6 +58,7 @@ pub mod gs_ui_write;
 pub mod gs_wfb_pair;
 pub mod gs_wfb_write;
 pub mod gs_ws;
+pub mod logs;
 pub mod logs_write;
 pub mod mac_adapters;
 pub mod mac_pin;
@@ -63,6 +66,7 @@ pub mod mavlink_ports;
 pub mod mcp;
 pub mod network_client_read;
 pub mod network_write;
+pub mod observability;
 pub mod pairing;
 pub mod params;
 pub mod params_single;
@@ -88,8 +92,10 @@ pub mod vision;
 pub mod vision_detector;
 pub mod vision_upload;
 pub mod wfb;
+pub mod wfb_local_bind;
 pub mod wfb_pair_write;
 pub mod wfb_write;
+pub mod workstation_credential;
 pub mod ws_ticket;
 
 use axum::extract::DefaultBodyLimit;
@@ -139,6 +145,17 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // schema-driven settings UI renders without hand-typed forms. Shape
         // only, no live values; the values read stays on /api/config.
         .route("/api/config/schema", get(config_schema::get_config_schema))
+        // The logging store query API forwarded over its local socket.
+        .route(
+            "/api/v2/observability/*upstream_path",
+            get(observability::observability_proxy),
+        )
+        // The agent config itself: the effective values (secrets redacted) and
+        // the one-key write, both served from the schema above.
+        .route(
+            "/api/config",
+            get(config_rw::get_config).put(config_rw::put_config),
+        )
         // Pairing: the node-identity probe + the local pairing handshake. info /
         // code / claim are public (the auth-exempt set); unpair requires the key.
         .route("/api/pairing/info", get(pairing::get_pairing_info))
@@ -220,6 +237,19 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route(
             "/api/compute/status",
             get(compute_status::get_compute_status),
+        )
+        // Whether the cloud relay is talking to the cloud: broker session and
+        // last status POST, from the relay's own sidecar.
+        .route("/api/cloud/link", get(cloud_link::get_cloud_link))
+        // Recent log entries and their live SSE tail, from the durable store.
+        .route("/api/logs", get(logs::get_logs))
+        .route("/api/logs/stream", get(logs::get_logs_stream))
+        // The credentials workstations issued this node for their lanes: the
+        // ground station installs one, the lanes present it (never listed back).
+        .route(
+            "/api/compute/workstation-credential",
+            get(workstation_credential::get_workstation_credentials)
+                .post(workstation_credential::install_workstation_credential),
         )
         // ADOS Atlas per-drone world-model capture: readiness (drone-local facts
         // + live session state), the per-drone enable/config write, and the live
@@ -305,6 +335,13 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route("/api/wfb", get(wfb::get_wfb_status))
         .route("/api/wfb/history", get(wfb::get_wfb_history))
         .route("/api/wfb/pair", get(wfb::get_wfb_pair_status))
+        // The operator local-radio bind (through the supervisor socket) and the
+        // unpair.
+        .route(
+            "/api/wfb/pair/local-bind",
+            get(wfb_local_bind::get_local_bind).post(wfb_local_bind::post_local_bind),
+        )
+        .route("/api/wfb/pair/unpair", post(wfb_local_bind::post_unpair))
         .route(
             "/api/wfb/pair/failover-status",
             get(wfb::get_failover_status),
@@ -370,6 +407,16 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route(
             "/api/video/profile",
             post(video_profile::post_video_profile),
+        )
+        // Node-local recording on any profile, over the same recorder the
+        // ground-station routes drive.
+        .route(
+            "/api/video/record/start",
+            post(gs_recording::post_video_record_start),
+        )
+        .route(
+            "/api/video/record/stop",
+            post(gs_recording::post_video_record_stop),
         )
         // Ground-station profile reads (404 off a drone): the status snapshot, the
         // stored radio config, and the three distributed-receive role reads.
@@ -449,6 +496,27 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route(
             "/api/v1/ground-station/pair/pending",
             get(gs_pairing::get_pair_pending),
+        )
+        // The Accept-window writes, forwarded to the pairing daemon.
+        .route(
+            "/api/v1/ground-station/pair/accept",
+            post(gs_pairing::post_pair_accept),
+        )
+        .route(
+            "/api/v1/ground-station/pair/close",
+            post(gs_pairing::post_pair_close),
+        )
+        .route(
+            "/api/v1/ground-station/pair/approve/:device_id",
+            post(gs_pairing::post_pair_approve),
+        )
+        .route(
+            "/api/v1/ground-station/pair/revoke/:device_id",
+            post(gs_pairing::post_pair_revoke),
+        )
+        .route(
+            "/api/v1/ground-station/pair/join",
+            post(gs_pairing::post_pair_join),
         )
         .route("/api/v1/ground-station/pic", get(gs_pic::get_pic_state))
         .route(

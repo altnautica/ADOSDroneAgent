@@ -4,8 +4,10 @@ Subscribes to every public lifecycle topic and emits a structured log
 line per event. The output is designed for journald and operator-side
 dashboards that tail agent logs and surface a unified event feed.
 
-The plugin ships its manifest in code (it is a built-in entry-point,
-not a packed ``.adosplug`` archive). The same lifecycle hooks
+The plugin ships with the agent package: its manifest lives in code and
+``PluginSupervisor.install_builtin`` materialises it as an installed
+subprocess plugin that the plugin host serves through the shared runner,
+exactly like a third-party plugin. The same lifecycle hooks
 third-party plugins implement run here too, which doubles this
 module as a worked example of an event-only subscriber plugin.
 """
@@ -53,16 +55,10 @@ def get_manifest() -> PluginManifest:
         compatibility=Compatibility(ados_version=">=0.9.0"),
         agent=AgentBlock(
             entrypoint="ados.plugins.builtin.telemetry_logger:TelemetryLoggerPlugin",
-            isolation="inprocess",
             permissions=["event.subscribe"],
         ),
     )
 
-
-# Loader probes ``manifest`` on the loaded entry-point object before falling
-# back to ``get_manifest()``. Expose the manifest as a module-level attribute
-# so either path works.
-manifest = get_manifest()
 
 
 class TelemetryLoggerPlugin:

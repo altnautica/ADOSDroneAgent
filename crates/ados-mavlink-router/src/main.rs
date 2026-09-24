@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 
 use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
 use ados_protocol::ipc::IpcBroadcast;
+use ados_protocol::shutdown::Shutdown;
 use ados_protocol::state::encode_v2;
 use serde_json::{json, Map, Value};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 
 use ados_mavlink_router::aux_rpc_dedupe::RequestDedupe;
 use ados_mavlink_router::aux_tee::{self, TeeCounters};
@@ -184,7 +185,7 @@ async fn main() {
     let params = Arc::new(Mutex::new(pc));
 
     let fc = FcConnection::new(cfg.clone(), state.clone(), params.clone());
-    let cancel = Arc::new(Notify::new());
+    let cancel = Shutdown::new();
 
     let dir = run_dir();
     let mavlink_sock = format!("{dir}/mavlink.sock");
@@ -324,7 +325,7 @@ async fn main() {
                             tags,
                         );
                     }
-                    _ = cancel.notified() => break,
+                    _ = cancel.wait() => break,
                 }
             }
         }));
@@ -350,7 +351,7 @@ async fn main() {
                         fc.send_heartbeat().await;
                         fc.tick_tx_watchdog().await;
                     }
-                    _ = cancel.notified() => break,
+                    _ = cancel.wait() => break,
                 }
             }
         }));
@@ -368,7 +369,7 @@ async fn main() {
                         fc.tick_streams().await;
                         fc.tick_param_sweep().await;
                     }
-                    _ = cancel.notified() => break,
+                    _ = cancel.wait() => break,
                 }
             }
         }));
@@ -393,7 +394,7 @@ async fn main() {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
-                    _ = cancel.notified() => break,
+                    _ = cancel.wait() => break,
                 }
             }
         }));
@@ -567,7 +568,7 @@ async fn main() {
                         }
                         None => break,
                     },
-                    _ = cancel.notified() => break,
+                    _ = cancel.wait() => break,
                 }
             }
         }));
@@ -594,7 +595,7 @@ async fn main() {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
-                    _ = cancel.notified() => break,
+                    _ = cancel.wait() => break,
                 }
             }
         }));
@@ -616,7 +617,7 @@ async fn main() {
                         }
                         None => break,
                     },
-                    _ = cancel.notified() => break,
+                    _ = cancel.wait() => break,
                 }
             }
         }));
@@ -749,7 +750,7 @@ async fn main() {
                             Err(e) => tracing::warn!(error = %e, "state_encode_failed"),
                         }
                     }
-                    _ = cancel.notified() => break,
+                    _ = cancel.wait() => break,
                 }
             }
         }));
@@ -802,7 +803,7 @@ async fn main() {
     tracing::info!("mavlink_router_ready");
     wait_for_shutdown().await;
     tracing::info!("mavlink_router_stopping");
-    cancel.notify_waiters();
+    cancel.trigger();
     for t in tasks {
         let _ = t.await;
     }
@@ -1169,7 +1170,10 @@ mod extras_key_set_tests {
     /// vehicle fields up in place of the withheld local ones. So it appears here
     /// but in neither classification list, which is correct rather than an
     /// omission.
-    const EXPECTED_EXTRAS_KEYS: [&str; 30] = [
+    const EXPECTED_EXTRAS_KEYS: [&str; 33] = [
+        "attitude_freshness_suppressions",
+        "attitude_setpoints_emitted",
+        "attitude_ticks_suppressed",
         "attitude_verdict",
         "aux_mavlink_tee",
         "aux_rpc",
@@ -1211,7 +1215,8 @@ mod extras_key_set_tests {
 
         // Every optional counter present at once. No single profile does this
         // (tee + rpc are drone-only, ingest is ground-station-only), but the pin
-        // is about the key SET, not about one profile's subset of it.
+        // is about the key SET, not about one profile's subset of it. The
+        // attitude rung is present because `main` always runs it.
         //
         // The relayed projection is POPULATED rather than default: an untouched
         // one has never seen a frame, so `to_wire` returns `None` and the key is
@@ -1230,7 +1235,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
             Some(&Arc::new(SwarmSetpointStatus::default())),
-            None,
+            Some(&Arc::new(AttitudeSetpointStatus::default())),
             Some(&relayed),
             &proxy_posture(&MavlinkConfig::default()),
         )

@@ -4,16 +4,9 @@ import { getSession } from "./session";
 /**
  * The data-plane credential headers for a media request.
  *
- * The video paths (`/whep`, `/hls`) sit outside `/api/`, and the agent's proxy
- * currently exempts everything outside `/api/` from its credential check — so a
- * PAIRED node serves its live video to any peer on the LAN with no credential
- * at all. That exemption is load-bearing precisely because these clients have
- * never sent one: closing it without wiring them first would black out the
- * ground station's own video.
- *
- * So these headers are sent BEFORE the gate narrows. They are inert until then
- * — the agent ignores an unrecognised header — which is what makes the eventual
- * flip a one-line change with nothing left to discover.
+ * The video paths (`/whep`, `/hls`) are credential-gated: off-box, the agent's
+ * front admits them only on the pairing key or a dashboard session, and the
+ * media server behind it binds loopback so there is no other way in.
  *
  * Same two credentials `apiFetch` already sends: the dashboard session minted by
  * the PIN gate, and the stored API key from the Mission Control deep link.

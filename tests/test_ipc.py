@@ -107,12 +107,15 @@ async def test_reader_decodes_a_v1_frame_after_a_v2_frame():
 
 
 @pytest.mark.asyncio
-async def test_reader_skips_an_oversized_v2_length():
-    """A v2 header past the frame cap is a skipped frame, not a huge read."""
+async def test_reader_drops_the_link_on_an_out_of_range_v2_length():
+    """An out-of-range length leaves its body unread, so the next bytes are not
+    a frame boundary: the reader must force a reconnect rather than parse the
+    body as the following frames."""
     reader = asyncio.StreamReader()
-    reader.feed_data(struct.pack("!I", ipc_mod.STATE_MAX_FRAME_SIZE + 1))
+    reader.feed_data(struct.pack("!I", ipc_mod.STATE_MAX_FRAME_SIZE + 1) + b"\x00" * 16)
     reader.feed_eof()
-    assert await ipc_mod._read_state_frame(reader) is None
+    with pytest.raises(ConnectionError):
+        await ipc_mod._read_state_frame(reader)
 
 
 def test_decode_state_v2_body_skips_a_version_mismatch():

@@ -16,8 +16,8 @@ use std::time::Duration;
 use ados_compute::{
     build_router, offload_ws_path, offload_ws_router, pump_to_broadcaster,
     run_offload_orchestrator, run_offload_session, stream_offload_detections, Cluster, ComputeAuth,
-    DetectionBroadcaster, Engine, JobStore, MockDetector, MockReconstructor, NodeEndpoint,
-    OffloadReturnBridge, OrchestratorConfig, Scheduler, SessionProgress, SessionSpec,
+    DetectionBroadcaster, Engine, JobStore, MockDetector, MockReconstructor, NodeCredentialStore,
+    NodeEndpoint, OffloadReturnBridge, OrchestratorConfig, Scheduler, SessionProgress, SessionSpec,
     VecFrameStream, VisionSockPublisher,
 };
 use ados_offload::OffloadMode;
@@ -47,10 +47,12 @@ async fn spawn_ws_server(broadcaster: Arc<DetectionBroadcaster>) -> std::net::So
 
 /// Spin a real `vision.sock` server backed by a `VisionEngine`, and return the
 /// engine (so the test subscribes to its detection bus) + the socket path.
-async fn spawn_vision_sock(dir: &std::path::Path) -> (Arc<VisionEngine>, String, Arc<Notify>) {
+async fn spawn_vision_sock(
+    dir: &std::path::Path,
+) -> (Arc<VisionEngine>, String, ados_protocol::shutdown::Shutdown) {
     let engine = VisionEngine::new(Box::new(MockBackend), 4);
     let sock = dir.join("vision.sock").to_string_lossy().to_string();
-    let cancel = Arc::new(Notify::new());
+    let cancel = ados_protocol::shutdown::Shutdown::new();
     let se = engine.clone();
     let ss = sock.clone();
     let sc = cancel.clone();
@@ -83,7 +85,7 @@ async fn offload_frames_reach_the_drone_vision_bus_end_to_end() {
     let sub_cancel = Arc::new(Notify::new());
     let sc = sub_cancel.clone();
     let subscriber = tokio::spawn(async move {
-        stream_offload_detections(&ws_url, det_tx, sc)
+        stream_offload_detections(&ws_url, None, det_tx, sc)
             .await
             .unwrap();
     });
@@ -170,7 +172,7 @@ async fn offload_frames_reach_the_drone_vision_bus_end_to_end() {
     session.await.unwrap();
     sub_cancel.notify_waiters();
     let _ = subscriber.await;
-    vision_cancel.notify_waiters();
+    vision_cancel.trigger();
     let _ = session_cancel; // (kept for symmetry; the vec stream ends on its own)
 }
 
@@ -194,6 +196,10 @@ async fn spawn_mock_node(
     // LAN node serves under, so the loopback submit needs no key.
     let auth = Arc::new(ComputeAuth::new(
         "/nonexistent/ados-orchestrator-sitl-pairing.json".into(),
+        NodeCredentialStore::open(
+            "/nonexistent/ados-orchestrator-sitl-creds.json".into(),
+            "mock-node",
+        ),
     ));
     let app = build_router(engine.clone(), auth).merge(offload_ws_router(broadcaster));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -235,11 +241,11 @@ async fn the_orchestrator_drives_the_offload_loop_end_to_end() {
         vision_sock: sock_path,
         detection_tee: None,
     };
-    // Discovery is injected (Direct): the SITL seam skips mDNS and points the
-    // orchestrator at the mock node's base URL. Submit + WS + bridge are real.
-    let node = NodeEndpoint::Direct {
+    // The node is resolved up front (the SITL seam skips mDNS and points the
+    // orchestrator at the mock node's base URL). Submit + WS + bridge are real.
+    let node = NodeEndpoint {
         base_url: format!("http://{node_addr}"),
-        api_key: None,
+        credential: None,
     };
     let orch_cancel = cancel.clone();
     let orchestrator = tokio::spawn(async move {
@@ -334,5 +340,5 @@ async fn the_orchestrator_drives_the_offload_loop_end_to_end() {
     let _ = tokio::time::timeout(Duration::from_secs(5), orchestrator)
         .await
         .expect("the orchestrator returns on cancel");
-    vision_cancel.notify_waiters();
+    vision_cancel.trigger();
 }

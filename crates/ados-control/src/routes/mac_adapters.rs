@@ -48,6 +48,7 @@
 
 use std::path::{Path, PathBuf};
 
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
@@ -64,18 +65,31 @@ pub(crate) fn state_file_path() -> PathBuf {
 /// `GET /api/v1/network/mac/adapters` → the per-adapter stable-MAC verdicts.
 ///
 /// Reads the on-disk state file and maps each adapter entry to the camelCase
-/// shape the GCS reads, returning `{"version": N, "adapters": [...]}`. An absent /
-/// malformed state file yields `{"version": 1, "adapters": []}`. A pure read — no
-/// live enumeration, no command, no mutation.
-pub async fn get_mac_adapters() -> Json<Value> {
-    get_mac_adapters_at(&state_file_path())
+/// shape the GCS reads, returning `{"version": N, "adapters": [...]}`. An absent
+/// state file (nothing tracked yet) yields `{"version": 1, "adapters": []}`; a
+/// present but unreadable or malformed one is a `503`. A pure read — no live
+/// enumeration, no command, no mutation.
+pub async fn get_mac_adapters() -> Response {
+    match adapters_view(&state_file_path()) {
+        Some(view) => Json(view).into_response(),
+        None => crate::routes::detail(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "the MAC-pin state file could not be read",
+        ),
+    }
 }
 
 /// The adapter-read logic against an explicit state-file path. The public handler
 /// resolves the path from the env / default; this takes it directly so a test can
 /// point it at a temp file without mutating process-global env.
-fn get_mac_adapters_at(state_path: &Path) -> Json<Value> {
+fn adapters_view(state_path: &Path) -> Option<Value> {
     let raw = read_state(state_path);
+    // No state file is the fresh-node fact "nothing tracked yet"; a file that
+    // exists but cannot be read or parsed is not, and an empty list would hide
+    // every pinned adapter.
+    if raw.is_none() && state_path.exists() {
+        return None;
+    }
     // `version` defaults to 1 (the Python `raw.get("version", 1)`); an absent /
     // malformed document is treated as an empty `{}` for both the version default
     // and the empty adapter list.
@@ -85,7 +99,7 @@ fn get_mac_adapters_at(state_path: &Path) -> Json<Value> {
         .cloned()
         .unwrap_or(Value::from(1));
     let adapters: Vec<Value> = state_json_to_camel(raw.as_ref());
-    Json(json!({ "version": version, "adapters": adapters }))
+    Some(json!({ "version": version, "adapters": adapters }))
 }
 
 #[cfg(test)]
@@ -93,26 +107,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Drive a `Json<Value>` body into a plain `Value` for assertions.
-    fn body(j: Json<Value>) -> Value {
-        j.0
+    /// The served view for a readable state file.
+    fn body(view: Option<Value>) -> Value {
+        view.expect("a readable state file yields a view")
     }
 
     #[test]
     fn an_absent_state_file_is_version_one_and_an_empty_list() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("absent.state");
-        let out = body(get_mac_adapters_at(&state));
+        let out = body(adapters_view(&state));
         assert_eq!(out, json!({ "version": 1, "adapters": [] }));
     }
 
     #[test]
-    fn a_malformed_state_file_is_version_one_and_an_empty_list() {
+    fn a_malformed_state_file_is_unreadable_not_empty() {
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("bad.state");
         std::fs::write(&state, "{not json").unwrap();
-        let out = body(get_mac_adapters_at(&state));
-        assert_eq!(out, json!({ "version": 1, "adapters": [] }));
+        assert_eq!(adapters_view(&state), None);
     }
 
     #[test]
@@ -124,7 +137,7 @@ mod tests {
             serde_json::to_string(&json!({"version": 3, "adapters": []})).unwrap(),
         )
         .unwrap();
-        let out = body(get_mac_adapters_at(&state));
+        let out = body(adapters_view(&state));
         assert_eq!(out, json!({ "version": 3, "adapters": [] }));
     }
 
@@ -152,7 +165,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let out = body(get_mac_adapters_at(&state));
+        let out = body(adapters_view(&state));
         assert_eq!(
             out,
             json!({
@@ -193,7 +206,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let out = body(get_mac_adapters_at(&state));
+        let out = body(adapters_view(&state));
         let adapters = out["adapters"].as_array().unwrap();
         assert_eq!(adapters.len(), 1);
         let a = adapters[0].as_object().unwrap();
@@ -242,7 +255,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let out = body(get_mac_adapters_at(&state));
+        let out = body(adapters_view(&state));
         let a = out["adapters"][0].as_object().unwrap();
         assert!(!a.contains_key("pinnedMac"), "a null optional is omitted");
         // An empty-string source is non-null, so it is emitted verbatim.
@@ -266,7 +279,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let out = body(get_mac_adapters_at(&state));
+        let out = body(adapters_view(&state));
         let adapters = out["adapters"].as_array().unwrap();
         // Only the one dict survives the isinstance(a, dict) filter.
         assert_eq!(adapters.len(), 1);

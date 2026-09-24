@@ -7,7 +7,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { useConfig } from "@/hooks/use-config";
-import { putConfigValue } from "@/lib/apply-actions";
+import { useStatus } from "@/hooks/use-status";
+import { putConfigChecked } from "@/lib/apply-actions";
 import { toast, toastFromError } from "@/lib/toast";
 
 type Mode = "auto" | "on" | "off";
@@ -73,8 +74,9 @@ function DroneOffload() {
     const previous = mode;
     setMode(next);
     try {
-      await putConfigValue("perception.offload.enabled", next);
+      await putConfigChecked("perception.offload.enabled", next);
       toast.ok(`Offload set to ${next}.`);
+      config.refetch();
     } catch (err) {
       setMode(previous);
       toastFromError(err, "Could not update the offload mode.");
@@ -84,7 +86,7 @@ function DroneOffload() {
   async function applyAddr() {
     setAddrBusy(true);
     try {
-      await putConfigValue("perception.offload.compute_node_addr", addr.trim());
+      await putConfigChecked("perception.offload.compute_node_addr", addr.trim());
       toast.ok(addr.trim() ? "Workstation pinned." : "Auto-discover restored.");
       config.refetch();
     } catch (err) {
@@ -161,8 +163,9 @@ function WorkstationServing() {
     const previous = mode;
     setMode(next);
     try {
-      await putConfigValue("perception.serving.enabled", next);
+      await putConfigChecked("perception.serving.enabled", next);
       toast.ok(`Serving set to ${next}.`);
+      config.refetch();
     } catch (err) {
       setMode(previous);
       toastFromError(err, "Could not update the serving mode.");
@@ -172,7 +175,7 @@ function WorkstationServing() {
   async function applyModel() {
     setModelBusy(true);
     try {
-      await putConfigValue("perception.serving.detector_model", model.trim());
+      await putConfigChecked("perception.serving.detector_model", model.trim());
       toast.ok(model.trim() ? "Detector model set." : "Default detector restored.");
       config.refetch();
     } catch (err) {
@@ -229,8 +232,10 @@ function WorkstationServing() {
 }
 
 export function OffloadSettings() {
-  const config = useConfig();
-  const profile = config.data?.agent?.profile;
+  // The resolved profile the agent reports; the raw config value defaults to
+  // "auto", which reads an as-yet-uncommitted ground station as a drone.
+  const status = useStatus();
+  const profile = status.data?.profile as string | undefined;
   const isWorkstation = profile === "workstation" || profile === "compute";
   const isGroundStation = profile === "ground_station";
 

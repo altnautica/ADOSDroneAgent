@@ -1,12 +1,12 @@
-// Two-stage plugin install dialog.
+// Two-stage plugin install dialog, for an uploaded archive or a catalog entry.
 //
 //   Stage 1: pre-install summary (orientation, no grants).
 //   Stage 2: permission approval (grants happen here).
 //
-// On Stage 2 approve we POST the file to /api/plugins/install, then
-// iterate /grant per declared permission. Failures roll back via
-// disable. The plugins-route owns the file and onFinished callback;
-// this component is purely the dialog.
+// On Stage 2 approve the install carries the approved permission ids and the
+// agent grants them in the same call. A required permission that did not land
+// leaves the plugin disabled. The plugins-route owns the source and the
+// onFinished callback; this component is purely the dialog.
 
 import {
   CheckCircle2,
@@ -33,19 +33,20 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "@/lib/toast";
 import {
+  disablePlugin,
   groupPermissions,
   installPlugin,
-  grantPermissions,
-  permissionLabel,
+  missingGrants,
+  requiresCoolOff,
   type PluginManifestSummary,
-  type PluginErrorEnvelope,
+  type PluginSource,
 } from "@/lib/plugin-install";
 
 type Stage = "summary" | "permissions" | "installing";
 
 interface InstallDialogProps {
   open: boolean;
-  file: File | null;
+  source: PluginSource | null;
   manifest: PluginManifestSummary | null;
   onOpenChange: (open: boolean) => void;
   onFinished: () => void;
@@ -55,7 +56,7 @@ const COOL_OFF_SECONDS = 3;
 
 export function PluginInstallDialog({
   open,
-  file,
+  source,
   manifest,
   onOpenChange,
   onFinished,
@@ -64,15 +65,9 @@ export function PluginInstallDialog({
   const [understood, setUnderstood] = useState(false);
   const [coolOff, setCoolOff] = useState(0);
 
+  // Graded by the agent's own capability catalog, per permission.
   const hasCritical = useMemo(
-    () =>
-      manifest?.permissions.some(
-        (p) =>
-          p.id === "vehicle.command" ||
-          p.id === "vehicle.payload.actuate" ||
-          p.id === "filesystem.host" ||
-          p.id === "mavlink.command.send",
-      ) ?? false,
+    () => (manifest ? requiresCoolOff(manifest) : false),
     [manifest],
   );
 
@@ -100,7 +95,7 @@ export function PluginInstallDialog({
 
   if (!manifest) return null;
 
-  const groups = groupPermissions(manifest.permissions);
+  const groups = groupPermissions(manifest);
 
   const canApprove =
     stage === "permissions" &&
@@ -108,32 +103,33 @@ export function PluginInstallDialog({
     (!hasHighOrAbove || understood);
 
   async function doInstall() {
-    if (!file || !manifest) return;
+    if (!source || !manifest) return;
     setStage("installing");
     try {
-      const res = (await installPlugin(file)) as
-        | PluginManifestSummary
-        | PluginErrorEnvelope;
-      if (!("ok" in res) || res.ok !== true) {
-        const err = res as PluginErrorEnvelope;
-        toast.err(`Install failed: ${err.detail || err.kind}`);
+      const required = manifest.permissions
+        .filter((p) => p.required)
+        .map((p) => p.id);
+      const res = await installPlugin(source, required);
+      if (!res.ok) {
+        toast.err(`Install failed: ${res.detail || res.kind}`);
         setStage("permissions");
         return;
       }
 
-      const required = manifest.permissions
-        .filter((p) => p.required)
-        .map((p) => p.id);
-      if (required.length > 0) {
-        const grants = await grantPermissions(manifest.plugin_id, required);
-        if (!grants.ok) {
-          toast.err(
-            `Plugin installed but a permission grant failed (${grants.error}). Plugin disabled.`,
-          );
-          onOpenChange(false);
-          onFinished();
-          return;
-        }
+      const missing = missingGrants(required, res.granted);
+      if (missing.length > 0) {
+        // Never leave a plugin running without a permission it requires.
+        const disabled = await disablePlugin(res.plugin_id).then(
+          () => true,
+          () => false,
+        );
+        toast.err(
+          `Plugin installed but not granted: ${missing.join(", ")}.`,
+          disabled ? "The plugin is disabled." : "Disable it from the Plugins list.",
+        );
+        onOpenChange(false);
+        onFinished();
+        return;
       }
 
       toast.ok(`${manifest.name} installed.`);
@@ -343,9 +339,17 @@ function PermissionsStage({
                         </span>
                       )}
                     </div>
-                    <p className="text-sm mt-0.5">
-                      {permissionLabel(row.id)}
-                    </p>
+                    <p className="text-sm mt-0.5">{row.label ?? row.id}</p>
+                    {row.description && (
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {row.description}
+                      </p>
+                    )}
+                    {row.risk_reason && (
+                      <p className="text-[11px] text-muted-foreground/80 mt-0.5">
+                        {row.risk_reason}
+                      </p>
+                    )}
                   </div>
                 </li>
               ))}

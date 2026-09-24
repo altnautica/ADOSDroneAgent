@@ -781,6 +781,49 @@ fn gcs_mirror_manifest(targets: &[Target], monorepo: &Path) -> String {
     out
 }
 
+/// Referential checks the generated tables rely on, run before anything is
+/// emitted: ids unique within each section, every `[[method]]` `required_cap`
+/// naming a declared agent capability, and no method both inline-gated and
+/// dispatch-gated. A violation would otherwise generate a dispatch row no
+/// plugin can ever be granted, with `--check` reporting clean.
+fn validate_catalog(cat: &Catalog) -> Result<(), Vec<String>> {
+    use std::collections::HashSet;
+    let mut problems = Vec::new();
+    let mut dupes = |section: &str, ids: &mut dyn Iterator<Item = &str>| {
+        let mut seen = HashSet::new();
+        for id in ids {
+            if !seen.insert(id) {
+                problems.push(format!("duplicate {section} id `{id}`"));
+            }
+        }
+    };
+    dupes("agent", &mut cat.agent.iter().map(|c| c.id.as_str()));
+    dupes("gcs", &mut cat.gcs.iter().map(|c| c.id.as_str()));
+    dupes("method", &mut cat.method.iter().map(|m| m.id.as_str()));
+    let agent: HashSet<&str> = cat.agent.iter().map(|c| c.id.as_str()).collect();
+    for m in &cat.method {
+        if let Some(cap) = &m.required_cap {
+            if !agent.contains(cap.as_str()) {
+                problems.push(format!(
+                    "method `{}` requires unknown capability `{cap}`",
+                    m.id
+                ));
+            }
+            if m.inline {
+                problems.push(format!(
+                    "method `{}` is both inline-gated and dispatch-gated",
+                    m.id
+                ));
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
 fn main() -> ExitCode {
     let check = std::env::args().any(|a| a == "--check");
 
@@ -794,6 +837,12 @@ fn main() -> ExitCode {
     let raw = std::fs::read_to_string(&toml_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", toml_path.display()));
     let cat: Catalog = toml::from_str(&raw).expect("parse capabilities.toml");
+    if let Err(problems) = validate_catalog(&cat) {
+        for p in &problems {
+            eprintln!("INVALID capabilities.toml: {p}");
+        }
+        return ExitCode::FAILURE;
+    }
 
     let wfb_toml_path = workspace.join("ados-protocol/wfb-adapters.toml");
     let wfb_raw = std::fs::read_to_string(&wfb_toml_path)
@@ -1012,6 +1061,30 @@ mod tests {
     #[test]
     fn escaping_handles_quotes_and_backslashes() {
         assert_eq!(esc(r#"a "b" \c"#), r#"a \"b\" \\c"#);
+    }
+
+    #[test]
+    fn validation_refuses_a_dangling_required_cap_and_a_duplicate_id() {
+        assert!(validate_catalog(&sample()).is_ok());
+        let mut cat = sample();
+        cat.method = vec![MethodRow {
+            id: "mission.read".into(),
+            required_cap: Some("mission.raed".into()),
+            inline: false,
+        }];
+        let problems = validate_catalog(&cat).unwrap_err();
+        assert!(problems[0].contains("unknown capability `mission.raed`"));
+        let mut cat = sample();
+        cat.agent.push(Cap {
+            id: "event.publish".into(),
+            label: "Dup".into(),
+            description: "d".into(),
+            category: "data_network".into(),
+            risk: "low".into(),
+            risk_reason: "r".into(),
+            enforced: false,
+        });
+        assert!(validate_catalog(&cat).unwrap_err()[0].contains("duplicate agent id"));
     }
 
     fn sample_methods() -> Vec<MethodRow> {

@@ -19,12 +19,13 @@ use std::time::{Duration, Instant};
 use ados_protocol::pairing_posture::{
     classify_caller, data_plane_access, load_pairing, Access, CallerClass, Pairing,
 };
+use ados_protocol::shutdown::Shutdown;
 use ados_protocol::ws_ticket::{now_unix, WsTicketIssuer, SCOPE_MAVLINK_WS};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
 };
@@ -408,7 +409,7 @@ pub async fn run_tcp_proxy(
     bind_addr: &str,
     port: u16,
     auth: ProxyAuth,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     let listener = match TcpListener::bind((bind_addr, port)).await {
         Ok(l) => l,
@@ -438,7 +439,7 @@ pub async fn run_tcp_proxy(
                     tokio::spawn(handle_tcp_client(fc.clone(), stream, origin));
                 }
             }
-            _ = cancel.notified() => return,
+            _ = cancel.wait() => return,
         }
     }
 }
@@ -495,7 +496,7 @@ pub async fn run_udp_proxy(
     bind_addr: &str,
     port: u16,
     auth: ProxyAuth,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     let sock = match UdpSocket::bind((bind_addr, port)).await {
         Ok(s) => Arc::new(s),
@@ -578,7 +579,7 @@ pub async fn run_udp_proxy(
                     fc.send_client_bytes(&buf[..n], origin, None).await;
                 }
             }
-            _ = cancel.notified() => {
+            _ = cancel.wait() => {
                 sender.abort();
                 return;
             }
@@ -620,7 +621,7 @@ pub async fn run_ws_proxy(
     bind_addr: &str,
     port: u16,
     auth: WsProxyAuth,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     let listener = match TcpListener::bind((bind_addr, port)).await {
         Ok(l) => l,
@@ -642,7 +643,7 @@ pub async fn run_ws_proxy(
                     tokio::spawn(handle_ws_client(fc.clone(), stream, addr, auth.clone()));
                 }
             }
-            _ = cancel.notified() => return,
+            _ = cancel.wait() => return,
         }
     }
 }

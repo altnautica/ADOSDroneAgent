@@ -1,4 +1,4 @@
-"""Profile gate + agent-config save helpers.
+"""Profile gate for the ground-station routes.
 
 The gate ensures only ground-station-profile agents reach the routes;
 drone-profile callers get 404 with a stable error code so the GCS can
@@ -46,21 +46,4 @@ def is_ground_station(app: Any) -> bool:
     return profile == "ground-station"
 
 
-def _save_config(app: Any) -> None:
-    """Best-effort persist agent config to disk."""
-    saver = getattr(app, "save_config", None)
-    if callable(saver):
-        try:
-            saver()
-            return
-        except Exception:
-            pass
-    cfg_save = getattr(app.config, "save", None)
-    if callable(cfg_save):
-        try:
-            cfg_save()
-        except Exception:
-            pass
-
-
-__all__ = ["_require_ground_profile", "is_ground_station", "_save_config"]
+__all__ = ["_require_ground_profile", "is_ground_station"]

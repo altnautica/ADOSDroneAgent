@@ -1,18 +1,25 @@
-// Plugin install orchestration. Two-stage flow:
-//   1. parsePlugin(file)        - non-committing manifest preview
-//   2. installPlugin(file)      - actual install
-//   3. grantPermissions(...)    - sequential POST per permission
+// Plugin install orchestration. Two-stage flow, the same for an uploaded
+// `.adosplug` and a first-party catalog entry:
+//   1. parsePlugin(source)                - non-committing manifest preview
+//   2. installPlugin(source, permissions) - install + grant the approved set
 //
-// On partial-grant failure (step N of M), we call disablePlugin() so
-// the plugin is left in a safe, opted-out state instead of running
-// with a half-granted permission set. Spec: 17-ux-install-and-permissions
-// section 2 + 7.
+// Every call goes through `apiFetch`, so a paired node reached off-box gets the
+// same credential the rest of the dashboard sends. If a required permission
+// did not land, the caller disables the plugin so it never runs half-granted.
 
-import { ApiError } from "@/lib/api";
+import { ApiError, apiFetch } from "@/lib/api";
 
+export type RiskLevel = "low" | "medium" | "high" | "critical";
+
+/** One declared permission, as the agent enriches it from its capability
+ *  catalog (`label`, `description`, `risk`, `risk_reason`). */
 export interface PluginPermission {
   id: string;
   required: boolean;
+  label?: string;
+  description?: string;
+  risk?: RiskLevel;
+  risk_reason?: string;
 }
 
 export interface PluginManifestSummary {
@@ -37,152 +44,125 @@ export interface PluginErrorEnvelope {
   detail: string;
 }
 
-export type RiskLevel = "low" | "medium" | "high" | "critical";
+/** Where an install comes from: an uploaded archive, or a catalog entry the
+ *  agent downloads itself (always SHA-pinned). */
+export type PluginSource =
+  | { kind: "file"; file: File }
+  | { kind: "catalog"; url: string; sha256: string | null };
 
-async function postFile(
-  path: string,
-  file: File,
-): Promise<PluginManifestSummary | PluginErrorEnvelope> {
+export interface PluginInstallResult {
+  ok: true;
+  plugin_id: string;
+  granted: string[];
+}
+
+function isEnvelope(body: unknown): body is PluginErrorEnvelope {
+  return (
+    !!body &&
+    typeof body === "object" &&
+    (body as { ok?: unknown }).ok === false &&
+    typeof (body as { kind?: unknown }).kind === "string"
+  );
+}
+
+/** The agent answers a refused install with an error envelope on a non-2xx
+ *  status; hand that envelope back as a value so the dialog can show it. */
+async function withEnvelope<T>(request: Promise<T>): Promise<T | PluginErrorEnvelope> {
+  try {
+    return await request;
+  } catch (err) {
+    if (err instanceof ApiError && isEnvelope(err.body)) return err.body;
+    throw err;
+  }
+}
+
+function archiveForm(file: File): FormData {
   const fd = new FormData();
   fd.append("file", file);
-  const res = await fetch(path, { method: "POST", body: fd });
-  // The agent always returns JSON (success or error envelope).
-  const text = await res.text();
-  let body: unknown = null;
-  if (text) {
-    try {
-      body = JSON.parse(text);
-    } catch {
-      throw new ApiError(`${res.status} ${res.statusText}`, res.status, text);
-    }
+  return fd;
+}
+
+export function parsePlugin(
+  source: PluginSource,
+): Promise<PluginManifestSummary | PluginErrorEnvelope> {
+  if (source.kind === "file") {
+    return withEnvelope(
+      apiFetch<PluginManifestSummary>("/api/plugins/parse", {
+        method: "POST",
+        body: archiveForm(source.file),
+      }),
+    );
   }
-  return body as PluginManifestSummary | PluginErrorEnvelope;
+  return withEnvelope(
+    apiFetch<PluginManifestSummary>("/api/plugins/parse_from_url", {
+      method: "POST",
+      body: { url: source.url, expected_sha256: source.sha256 ?? undefined },
+    }),
+  );
 }
 
-export async function parsePlugin(
-  file: File,
-): Promise<PluginManifestSummary | PluginErrorEnvelope> {
-  return postFile("/api/plugins/parse", file);
-}
-
-export async function installPlugin(
-  file: File,
-): Promise<PluginManifestSummary | PluginErrorEnvelope> {
-  return postFile("/api/plugins/install", file);
-}
-
-export interface GrantOutcome {
-  permission: string;
-  ok: boolean;
-  error?: string;
-}
-
-// Grant permissions sequentially. Stops on first failure and disables
-// the plugin so the operator is left with a safe, opted-out install
-// rather than a partially-granted plugin running in the background.
-export async function grantPermissions(
-  pluginId: string,
+/** Install and grant `permissions` in one call. The agent grants each id it
+ *  can and reports the ones that landed in `granted`. */
+export function installPlugin(
+  source: PluginSource,
   permissions: string[],
-): Promise<{ ok: boolean; results: GrantOutcome[]; error?: string }> {
-  const results: GrantOutcome[] = [];
-  for (const pid of permissions) {
-    try {
-      const res = await fetch(
-        `/api/plugins/${encodeURIComponent(pluginId)}/grant`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ permission_id: pid }),
-        },
-      );
-      if (res.ok) {
-        results.push({ permission: pid, ok: true });
-        continue;
-      }
-      const body = await res.json().catch(() => null);
-      const err =
-        body && typeof body === "object" && "detail" in body
-          ? String((body as { detail: unknown }).detail)
-          : `${res.status} ${res.statusText}`;
-      results.push({ permission: pid, ok: false, error: err });
-      // Roll back: leave the plugin disabled so an unfinished grant
-      // set never runs.
-      await disablePlugin(pluginId).catch(() => undefined);
-      return { ok: false, results, error: err };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      results.push({ permission: pid, ok: false, error: msg });
-      await disablePlugin(pluginId).catch(() => undefined);
-      return { ok: false, results, error: msg };
-    }
+): Promise<PluginInstallResult | PluginErrorEnvelope> {
+  if (source.kind === "file") {
+    const query = permissions.length
+      ? `?requested_permissions=${encodeURIComponent(permissions.join(","))}`
+      : "";
+    return withEnvelope(
+      apiFetch<PluginInstallResult>(`/api/plugins/install${query}`, {
+        method: "POST",
+        body: archiveForm(source.file),
+      }),
+    );
   }
-  return { ok: true, results };
-}
-
-export async function enablePlugin(pluginId: string): Promise<void> {
-  const res = await fetch(
-    `/api/plugins/${encodeURIComponent(pluginId)}/enable`,
-    { method: "POST" },
+  return withEnvelope(
+    apiFetch<PluginInstallResult>("/api/plugins/install_from_url", {
+      method: "POST",
+      body: {
+        url: source.url,
+        expected_sha256: source.sha256 ?? undefined,
+        from_catalog: true,
+        requested_permissions: permissions,
+      },
+    }),
   );
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    const detail =
-      body && typeof body === "object" && "detail" in body
-        ? String((body as { detail: unknown }).detail)
-        : `${res.status} ${res.statusText}`;
-    throw new ApiError(detail, res.status, body);
-  }
 }
 
-export async function disablePlugin(pluginId: string): Promise<void> {
-  const res = await fetch(
-    `/api/plugins/${encodeURIComponent(pluginId)}/disable`,
-    { method: "POST" },
+/** The required permissions the agent did not grant. */
+export function missingGrants(required: string[], granted: string[] | undefined): string[] {
+  const have = new Set(granted ?? []);
+  return required.filter((id) => !have.has(id));
+}
+
+export function disablePlugin(pluginId: string): Promise<unknown> {
+  return apiFetch(`/api/plugins/${encodeURIComponent(pluginId)}/disable`, {
+    method: "POST",
+  });
+}
+
+/** A permission's risk as the agent graded it; the manifest's overall risk
+ *  stands in only if the agent sent none for this row. */
+export function permissionRisk(p: PluginPermission, manifestRisk: RiskLevel): RiskLevel {
+  return p.risk ?? manifestRisk;
+}
+
+/** Whether approval waits out the cool-off: any critical permission, or a
+ *  critical plugin overall. */
+export function requiresCoolOff(manifest: PluginManifestSummary): boolean {
+  return (
+    manifest.risk === "critical" ||
+    manifest.permissions.some((p) => permissionRisk(p, manifest.risk) === "critical")
   );
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    const detail =
-      body && typeof body === "object" && "detail" in body
-        ? String((body as { detail: unknown }).detail)
-        : `${res.status} ${res.statusText}`;
-    throw new ApiError(detail, res.status, body);
-  }
 }
 
-// Per-capability risk classifier. Mirrors the lint.py
-// `high_risk_caps` set on the agent. Anything not listed is MEDIUM
-// (sensible default for a hardware/MAVLink-touching plugin).
-const CRITICAL_CAPS = new Set([
-  "vehicle.command",
-  "vehicle.payload.actuate",
-  "filesystem.host",
-  "mavlink.command.send",
-]);
-
-const HIGH_CAPS = new Set([
-  "mavlink.write",
-  "recording.write",
-  "mission.write",
-  "hardware.usb.uvc",
-  "mavlink.component.register",
-  "network.outbound",
-]);
-
-const LOW_CAP_PREFIXES = ["ui.slot.", "ui.theme.", "telemetry.subscribe."];
-
-export function classifyPermission(id: string): RiskLevel {
-  if (CRITICAL_CAPS.has(id)) return "critical";
-  if (HIGH_CAPS.has(id)) return "high";
-  if (LOW_CAP_PREFIXES.some((p) => id.startsWith(p))) return "low";
-  return "medium";
-}
-
-// Group permissions by their leading namespace ("hardware", "mavlink",
-// "ui", "recording", ...). Within each group we sort by risk descending
-// so the strongest grants are at the top per spec section 2.
+// Group permissions by their leading namespace ("hardware", "mavlink", "ui",
+// ...), strongest grants first within each group.
 export interface PermissionGroup {
   group: string;
-  rows: { id: string; required: boolean; risk: RiskLevel }[];
+  rows: (PluginPermission & { risk: RiskLevel })[];
 }
 
 const RISK_ORDER: Record<RiskLevel, number> = {
@@ -192,64 +172,15 @@ const RISK_ORDER: Record<RiskLevel, number> = {
   low: 0,
 };
 
-export function groupPermissions(
-  perms: PluginPermission[],
-): PermissionGroup[] {
+export function groupPermissions(manifest: PluginManifestSummary): PermissionGroup[] {
   const groups = new Map<string, PermissionGroup>();
-  for (const p of perms) {
+  for (const p of manifest.permissions) {
     const ns = p.id.split(".")[0] ?? "other";
     if (!groups.has(ns)) groups.set(ns, { group: ns, rows: [] });
-    groups.get(ns)!.rows.push({
-      id: p.id,
-      required: p.required,
-      risk: classifyPermission(p.id),
-    });
+    groups.get(ns)!.rows.push({ ...p, risk: permissionRisk(p, manifest.risk) });
   }
   for (const g of groups.values()) {
     g.rows.sort((a, b) => RISK_ORDER[b.risk] - RISK_ORDER[a.risk]);
   }
-  return Array.from(groups.values()).sort((a, b) =>
-    a.group.localeCompare(b.group),
-  );
-}
-
-// Plain-language description for a capability. Matches spec section 9
-// ("plain language, front-load the consequence"). Falls back to the
-// raw capability id for plugins that declare unknown caps.
-const PERM_COPY: Record<string, string> = {
-  "vehicle.command":
-    "Send commands to your aircraft (arm, takeoff, RTL, mode change).",
-  "vehicle.payload.actuate":
-    "Actuate payloads on your aircraft (gimbal, gripper, drop).",
-  "mavlink.command.send":
-    "Send arbitrary MAVLink commands on the bus.",
-  "mavlink.write":
-    "Inject MAVLink messages onto the bus that other components see.",
-  "mavlink.component.register":
-    "Register on the MAVLink bus as a new component.",
-  "filesystem.host":
-    "Read and write files anywhere on the host.",
-  "recording.write":
-    "Write to the recording subsystem (logs, video, frames).",
-  "mission.write":
-    "Modify the mission queue (add, remove, edit waypoints).",
-  "telemetry.subscribe.attitude":
-    "Read live attitude (roll, pitch, yaw).",
-  "telemetry.subscribe.gps":
-    "Read live GPS position.",
-  "telemetry.subscribe.battery":
-    "Read live battery voltage and current.",
-  "hardware.spi": "Read and write to the SPI controller.",
-  "hardware.i2c": "Read and write to the I2C controller.",
-  "hardware.uart": "Read and write to the serial port.",
-  "hardware.gpio": "Read and toggle GPIO lines.",
-  "hardware.usb.uvc": "Access USB UVC class video devices.",
-  "network.outbound": "Make outbound network requests.",
-  "ui.slot.fc-tab": "Add a tab to the flight-controller panels.",
-  "ui.slot.video-overlay": "Add an overlay to the live video pane.",
-  "ui.slot.mission-template": "Add a mission template.",
-};
-
-export function permissionLabel(id: string): string {
-  return PERM_COPY[id] ?? id;
+  return Array.from(groups.values()).sort((a, b) => a.group.localeCompare(b.group));
 }

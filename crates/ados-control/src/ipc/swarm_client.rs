@@ -155,9 +155,14 @@ async fn read_loop(socket_path: PathBuf, published: Published, stop: oneshot::Re
             connected = UnixStream::connect(&socket_path) => {
                 match connected {
                     Ok(stream) => {
-
                         tracing::debug!(path = %socket_path.display(), "swarm socket connected");
                         process_stream(BufReader::new(stream), &published, &mut stop).await;
+                        // The stream ended. Pace the reconnect so a peer that
+                        // accepts and closes at once cannot spin this loop.
+                        tokio::select! {
+                            _ = &mut stop => return,
+                            _ = tokio::time::sleep(RECONNECT_PACE.wait()) => {}
+                        }
                     }
                     Err(e) => {
                         tracing::debug!(

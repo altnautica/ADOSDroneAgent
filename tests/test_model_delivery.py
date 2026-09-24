@@ -71,6 +71,49 @@ def test_resolve_cache_hit(tmp_path) -> None:
     assert res.ok and res.state == ResolutionState.RESOLVED and res.path == str(cached)
 
 
+def test_verifying_the_cache_does_not_block_the_loop(tmp_path, monkeypatch) -> None:
+    """Hashing a cached model is seconds of work on an SBC; the API loop has to
+    keep serving while it runs."""
+    import time
+
+    import ados.services.vision.model_manager as mm
+
+    content = b"a-real-model-blob"
+    (tmp_path / "coco-detector-rk3588.rknn").write_bytes(content)
+    digest = hashlib.sha256(content).hexdigest()
+    advanced: list[int] = []
+    ticks = 0
+
+    def _slow_sha(path):
+        start = ticks
+        time.sleep(0.1)
+        advanced.append(ticks - start)
+        return digest
+
+    monkeypatch.setattr(mm, "sha256_file", _slow_sha)
+    ref = _ref(runtime="rknn", board_match="rk3588", sha256=digest)
+
+    async def _run() -> ModelResolution:
+        nonlocal ticks
+        done = asyncio.Event()
+
+        async def _ticker() -> None:
+            nonlocal ticks
+            while not done.is_set():
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        t = asyncio.create_task(_ticker())
+        try:
+            return await _mgr(tmp_path).resolve_model_ref([ref], "rk3588s2")
+        finally:
+            done.set()
+            await t
+
+    assert asyncio.run(_run()).ok
+    assert advanced and min(advanced) >= 3, advanced
+
+
 def test_resolve_needs_model_when_absent_and_no_source(tmp_path) -> None:
     mgr = _mgr(tmp_path)
     ref = _ref(runtime="rknn", board_match="rk3588", sha256="deadbeef")  # nothing cached, no source

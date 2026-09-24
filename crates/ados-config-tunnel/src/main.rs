@@ -30,6 +30,9 @@ const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const PROFILE_CONF: &str = "/etc/ados/profile.conf";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// Fixed retry cadence after a failed ingress bind (the recovery-loop rule:
+/// fixed 2-5 s, no cap).
+const BIND_RETRY: Duration = Duration::from_secs(3);
 
 #[tokio::main]
 async fn main() {
@@ -82,6 +85,8 @@ async fn main() {
 enum RunExit {
     Shutdown,
     Reload,
+    /// The bind failed; run the pass again (config re-read included).
+    Retry,
 }
 
 async fn run_until_shutdown(
@@ -99,6 +104,7 @@ async fn run_until_shutdown(
         match run_service(&cfg, &profile, shutdown.clone(), reload.clone()).await {
             RunExit::Shutdown => return,
             RunExit::Reload => tracing::info!("tunnel_config_reloaded"),
+            RunExit::Retry => {}
         }
     }
 }
@@ -153,6 +159,34 @@ async fn idle_disabled(mut shutdown: watch::Receiver<bool>, reload: Arc<Notify>)
     }
 }
 
+/// The channel is enabled but its ingress could not be bound (a restart race
+/// holding the loopback port, a port clash). Report that honestly — the real
+/// enabled flag and a `bind_failed` state, never `disabled` — and retry after
+/// [`BIND_RETRY`], or sooner on a reload.
+async fn bind_failed(
+    cfg: &TunnelChannelConfig,
+    tx_port: Option<u16>,
+    mut shutdown: watch::Receiver<bool>,
+    reload: Arc<Notify>,
+) -> RunExit {
+    write_current_sidecar(&SidecarInputs {
+        state: ChannelState::BindFailed,
+        enabled: cfg.enabled,
+        command_enabled: cfg.command_enabled,
+        rx_port: Some(cfg.rx_port),
+        tx_port,
+        counters: Counters::default().snapshot(),
+    });
+    tokio::select! {
+        biased;
+        _ = shutdown.changed() => {
+            if *shutdown.borrow() { RunExit::Shutdown } else { RunExit::Retry }
+        }
+        _ = reload.notified() => RunExit::Reload,
+        _ = tokio::time::sleep(BIND_RETRY) => RunExit::Retry,
+    }
+}
+
 async fn run_drone(
     cfg: &TunnelChannelConfig,
     shutdown: watch::Receiver<bool>,
@@ -165,8 +199,8 @@ async fn run_drone(
     let transport = match AuxTunnelTransport::on_drone(&aux_cmd_sock, cfg.rx_port).await {
         Ok(t) => Arc::new(t),
         Err(e) => {
-            tracing::warn!(error = %e, rx_port = cfg.rx_port, "tunnel_config_bind_failed_idle");
-            return idle_disabled(shutdown, reload).await;
+            tracing::warn!(error = %e, rx_port = cfg.rx_port, "tunnel_config_bind_failed_retrying");
+            return bind_failed(cfg, None, shutdown, reload).await;
         }
     };
     let client = Arc::new(HttpConfigClient::new(LOCAL_CONFIG_BASE_URL));
@@ -244,9 +278,9 @@ async fn run_ground_station(
                 error = %e,
                 rx_port = cfg.rx_port,
                 aux_tx_port,
-                "tunnel_config_bind_failed_idle"
+                "tunnel_config_bind_failed_retrying"
             );
-            return idle_disabled(shutdown, reload).await;
+            return bind_failed(cfg, Some(aux_tx_port), shutdown, reload).await;
         }
     };
     let counters = Arc::new(Counters::default());

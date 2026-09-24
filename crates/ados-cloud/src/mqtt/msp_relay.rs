@@ -20,7 +20,7 @@ use std::sync::Arc;
 use ados_plugin_host::frame_link::FrameLink;
 use tokio::sync::{mpsc, watch};
 
-use super::mavlink_relay::{BoundedPublishQueue, RelayMetrics, QUEUE_MAXSIZE};
+use super::mavlink_relay::{drain_publish_queue, BoundedPublishQueue, RelayMetrics, QUEUE_MAXSIZE};
 use super::transport::{MqttQos, MqttTransport, RumqttcTransport};
 use super::{msp_client_id, relay_username, topic_msp_rx, topic_msp_tx};
 use crate::mqtt::transport::TransportConfig;
@@ -95,7 +95,7 @@ impl MspMqttRelay {
         shutdown: tokio::sync::watch::Receiver<bool>,
         connected_out: Option<&watch::Sender<Option<Arc<AtomicBool>>>>,
     ) -> anyhow::Result<()> {
-        let transport = RumqttcTransport::connect(&self.transport_config);
+        let transport = RumqttcTransport::connect(&self.transport_config)?;
         // Hand the supervisor the live connection flag (set on ConnAck, cleared
         // on Disconnect/error). Until ConnAck the flag reads false, so the
         // supervisor never reports a connection the broker has not granted.
@@ -152,6 +152,7 @@ impl MspMqttRelay {
         let mut metrics = RelayMetrics::default();
         let mut shutdown = shutdown;
         let client = transport.client().clone();
+        let connected = transport.connected_handle();
 
         loop {
             tokio::select! {
@@ -181,31 +182,20 @@ impl MspMqttRelay {
                             }
                         }
                         Some(_) => {}
-                        None => {}
+                        // The transport's event loop is gone: end the run so the
+                        // supervisor respawns a fresh one.
+                        None => break,
                     }
                 }
             }
 
-            // Drain the queue under the in-flight gate. q0 publishes are
-            // fire-and-forget, so a send that returns is treated as acked
-            // immediately (the in-flight gate still bounds a slow client because a
-            // blocked send holds the slot until it returns).
-            while let Some(frame) = queue.try_take() {
-                queue.on_publish_started();
-                let r = client
-                    .publish(
-                        self.topic_tx.clone(),
-                        rumqttc::QoS::AtMostOnce,
-                        false,
-                        frame,
-                    )
-                    .await;
-                queue.on_publish_acked();
-                match r {
-                    Ok(()) => metrics.frames_published += 1,
-                    Err(_) => metrics.publish_errors += 1,
-                }
-            }
+            drain_publish_queue(
+                &mut queue,
+                &mut metrics,
+                &client,
+                &connected,
+                &self.topic_tx,
+            );
         }
 
         reader.abort();
@@ -213,6 +203,7 @@ impl MspMqttRelay {
             frames_in = metrics.frames_in,
             frames_published = metrics.frames_published,
             frames_dropped_queue_full = metrics.frames_dropped_queue_full,
+            frames_dropped_not_connected = metrics.frames_dropped_not_connected,
             "msp relay stopped"
         );
         Ok(())
@@ -233,6 +224,7 @@ mod tests {
             client_id: "ados-dev1".to_string(),
             host: "mqtt.example".to_string(),
             port: 443,
+            wire: crate::mqtt::BrokerWire::Wss,
             ws_path: "/mqtt".to_string(),
             username: "ados-dev1".to_string(),
             password: "k".to_string(),

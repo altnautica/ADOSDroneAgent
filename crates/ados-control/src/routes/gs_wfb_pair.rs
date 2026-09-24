@@ -186,18 +186,23 @@ pub struct PairRequest {
 /// from.
 const SHARED_KEY_PATH: &str = "/etc/drone.key";
 
-/// Persist the shared half so the presence beacon can be parsed.
-///
-/// Written only when the caller supplies it and only when it is exactly the
-/// expected size, because a short or truncated key would derive a wrong HMAC
-/// and reproduce the silent beacon-drop this exists to prevent -- and a wrong
-/// key is harder to notice than a missing one, since the resolver at least
-/// warns about missing.
-///
-/// A write failure is reported and not fatal: the pair itself has succeeded by
-/// this point, and refusing it would leave the caller with no radio at all
-/// rather than a radio whose hop supervisor is degraded.
-fn install_shared_key(b64: &str) -> Result<(), String> {
+/// Serializes every load-modify-persist of the fleet registry in this process:
+/// the pair route, the slot release and the enrolment reconciler all allocate or
+/// release against `fleet.json`, and two unlocked read-modify-writes would hand
+/// one slot to two drones or drop a release. Held only around the synchronous
+/// load/mutate/persist, never across an await.
+pub(crate) static FLEET_REGISTRY_WRITE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Take the registry write lock.
+pub(crate) fn fleet_registry_write() -> parking_lot::MutexGuard<'static, ()> {
+    FLEET_REGISTRY_WRITE.lock()
+}
+
+/// Decode and size-check the supplied shared half before anything is changed,
+/// because a short or truncated key would derive a wrong HMAC and reproduce the
+/// silent beacon-drop this exists to prevent -- and a wrong key is harder to
+/// notice than a missing one, since the resolver at least warns about missing.
+fn decode_shared_key(b64: &str) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(b64.as_bytes())
@@ -208,11 +213,48 @@ fn install_shared_key(b64: &str) -> Result<(), String> {
             bytes.len()
         ));
     }
-    let path = std::path::Path::new(SHARED_KEY_PATH);
+    Ok(bytes)
+}
+
+/// What became of a supplied shared half, reported on the pair reply so the
+/// caller sees whether the beacon key is in place.
+fn install_shared_key(path: &std::path::Path, bytes: &[u8], joining: bool) -> &'static str {
+    match std::fs::read(path) {
+        Ok(existing) if existing == bytes => return "unchanged",
+        // A fleet join proved it holds the installed fleet key; a different
+        // shared half would re-key every member's beacon, so it is refused
+        // rather than overwritten. A fresh install is a new fleet and replaces it.
+        Ok(_) if joining => return "mismatch",
+        _ => {}
+    }
+    match write_secret_0600(path, bytes) {
+        Ok(()) => {
+            tracing::info!("wfb_shared_key_installed");
+            "installed"
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "wfb_shared_key_install_failed");
+            "write_failed"
+        }
+    }
+}
+
+/// Write a key file atomically, created 0600 so no other local account can
+/// read the beacon key (the default umask would leave it world-readable).
+fn write_secret_0600(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
     let tmp = path.with_extension("key.tmp");
-    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
-    Ok(())
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&tmp, path)
 }
 
 /// `POST .../wfb/pair` →
@@ -303,88 +345,114 @@ pub async fn post_wfb_pair(
         }
     };
 
+    // The optional shared half is validated before anything changes, so a
+    // malformed key is a clean 400 rather than a pair that silently stays deaf.
+    let shared_key = match req.shared_key_b64.as_deref().map(decode_shared_key) {
+        None => None,
+        Some(Ok(bytes)) => Some(bytes),
+        Some(Err(message)) => {
+            return nested_detail(
+                StatusCode::BAD_REQUEST,
+                json!({"code": "E_SHARED_KEY_INVALID", "message": message}),
+            )
+        }
+    };
+
     // Fleet-key gate. `installed` is the on-disk fleet key, if any.
     let status = gs_pair_status();
     let installed = status
         .paired
         .then(|| std::fs::read(rx_key_path()).ok())
         .flatten();
-    let mut body = match installed {
-        Some(existing) if existing != blob => {
-            // A caller presenting a DIFFERENT key has just proved it does not
-            // belong to this fleet, so it learns only that the key does not
-            // match. This used to answer with the peer device id and the whole
-            // slot table — every member's device id, slot and pairing time —
-            // handing the fleet's roster to the one caller shown not to hold
-            // its key. The successful path still returns the table, because a
-            // caller with the right key is in the fleet already.
+    let joining = installed.is_some();
+    if installed.as_ref().is_some_and(|existing| *existing != blob) {
+        // A caller presenting a DIFFERENT key has just proved it does not
+        // belong to this fleet, so it learns only that the key does not
+        // match. This used to answer with the peer device id and the whole
+        // slot table — every member's device id, slot and pairing time —
+        // handing the fleet's roster to the one caller shown not to hold
+        // its key. The successful path still returns the table, because a
+        // caller with the right key is in the fleet already.
+        return nested_detail(
+            StatusCode::CONFLICT,
+            json!({
+                "code": "E_FLEET_KEY_MISMATCH",
+                "message": "this ground station already holds a different fleet key; unpair before pairing a different fleet",
+            }),
+        );
+    }
+
+    // Issue the slot BEFORE installing anything. Idempotent by device id, so a
+    // re-pair returns the slot the drone already holds and never renumbers one
+    // that may be airborne. Reserving first means a full fleet or a registry
+    // that cannot be persisted refuses the pair with nothing installed, rather
+    // than leaving a key on the station behind an error reply.
+    let (slot, newly_reserved) = {
+        let _write = fleet_registry_write();
+        let mut registry = load_registry();
+        let newly_reserved = registry.slot_of(&device_id).is_none();
+        let Some(slot) = registry.allocate(&device_id) else {
             return nested_detail(
                 StatusCode::CONFLICT,
                 json!({
-                    "code": "E_FLEET_KEY_MISMATCH",
-                    "message": "this ground station already holds a different fleet key; unpair before pairing a different fleet",
+                    "code": "E_FLEET_FULL",
+                    "message": format!("all {FLEET_MAX_SLOTS} fleet slots are taken; release one before pairing another drone"),
+                    "slots": slot_table(&registry),
+                }),
+            );
+        };
+        if let Err(e) = registry.persist(std::path::Path::new(FLEET_REGISTRY_PATH)) {
+            // The slot exists only in memory now, so the next pair would re-issue
+            // it to a different drone and put two transmitters on one
+            // channel_id. Refuse rather than return an assignment the ground
+            // station will not honour.
+            tracing::error!(error = %e, device_id = %device_id, slot, "fleet_registry_persist_failed");
+            return nested_detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({
+                    "code": "E_FLEET_PERSIST_FAILED",
+                    "message": e.to_string(),
                 }),
             );
         }
+        (slot, newly_reserved)
+    };
+
+    let mut body = if joining {
         // Byte-identical: the fleet key is already installed. Skip the install.
-        Some(_) => Map::new(),
-        None => {
-            // Forward the install. The socket's pair_keypair op decodes +
-            // validates the blob, writes rx.key + the pair state, drops the
-            // sentinel, and restarts the receive unit; its reply carries the
-            // install body the FastAPI route returned.
-            let request = json!({
-                "op": "pair_keypair",
-                "blob_b64": blob_b64,
-                "peer_device_id": device_id,
-            });
-            let reply = match groundlink_cmd_roundtrip(&request).await {
-                Some(r) => r,
-                None => return socket_unavailable("E_PAIR_FAILED"),
-            };
-            match split_reply(reply) {
-                Ok(b) => b,
-                Err(err) => return map_pair_error(err),
+        Map::new()
+    } else {
+        // Forward the install. The socket's pair_keypair op decodes +
+        // validates the blob, writes rx.key + the pair state, drops the
+        // sentinel, and restarts the receive unit; its reply carries the
+        // install body the FastAPI route returned.
+        let request = json!({
+            "op": "pair_keypair",
+            "blob_b64": blob_b64,
+            "peer_device_id": device_id,
+        });
+        let outcome = match groundlink_cmd_roundtrip(&request).await {
+            Some(reply) => split_reply(reply).map_err(map_pair_error),
+            None => Err(socket_unavailable("E_PAIR_FAILED")),
+        };
+        match outcome {
+            Ok(b) => b,
+            Err(resp) => {
+                // Nothing was installed, so the slot reserved for this attempt
+                // must not outlive it.
+                if newly_reserved {
+                    release_reserved_slot(&device_id);
+                }
+                return resp;
             }
         }
     };
 
-    // Issue the slot. Idempotent by device id, so a re-pair returns the slot the
-    // drone already holds and never renumbers one that may be airborne.
-    // Persist the shared half before the slot is issued, so a caller that
-    // supplies it gets a ground station whose hop supervisor can actually parse
-    // a beacon rather than one that pairs and then stays deaf.
-    if let Some(shared) = req.shared_key_b64.as_deref() {
-        match install_shared_key(shared) {
-            Ok(()) => tracing::info!("wfb_shared_key_installed"),
-            Err(e) => tracing::warn!(error = %e, "wfb_shared_key_install_failed"),
-        }
-    }
-
-    let mut registry = load_registry();
-    let Some(slot) = registry.allocate(&device_id) else {
-        return nested_detail(
-            StatusCode::CONFLICT,
-            json!({
-                "code": "E_FLEET_FULL",
-                "message": format!("all {FLEET_MAX_SLOTS} fleet slots are taken; release one before pairing another drone"),
-                "slots": slot_table(&registry),
-            }),
-        );
-    };
-    if let Err(e) = registry.persist(std::path::Path::new(FLEET_REGISTRY_PATH)) {
-        // The slot exists only in memory now, so the next pair would re-issue it
-        // to a different drone and put two transmitters on one channel_id. Refuse
-        // rather than return an assignment the ground station will not honour.
-        tracing::error!(error = %e, device_id = %device_id, slot, "fleet_registry_persist_failed");
-        return nested_detail(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            json!({
-                "code": "E_FLEET_PERSIST_FAILED",
-                "message": e.to_string(),
-            }),
-        );
-    }
+    // Persist the shared half before the reply, so a caller that supplies it
+    // gets a ground station whose hop supervisor can actually parse a beacon
+    // rather than one that pairs and then stays deaf.
+    let shared_key_outcome = shared_key
+        .map(|bytes| install_shared_key(std::path::Path::new(SHARED_KEY_PATH), &bytes, joining));
 
     // The fleet fields ride on top of the install body so an existing consumer of
     // `{paired, paired_with_device_id, paired_at, fingerprint, role}` is unchanged.
@@ -399,9 +467,31 @@ pub async fn post_wfb_pair(
         );
         body.insert("paired_at".to_string(), Value::Null);
     }
+    // Re-read the roster: a concurrent pair may have landed while the install
+    // was in flight.
+    let registry = {
+        let _write = fleet_registry_write();
+        load_registry()
+    };
     body.insert("fleet_slot".to_string(), json!(slot));
     body.insert("slots".to_string(), json!(slot_table(&registry)));
+    if let Some(outcome) = shared_key_outcome {
+        body.insert("shared_key".to_string(), json!(outcome));
+    }
     Json(Value::Object(body)).into_response()
+}
+
+/// Release a slot reserved by a pair attempt whose key install then failed. A
+/// persist failure here is logged: the slot stays held by a device that never
+/// paired, which `DELETE .../wfb/pair/{device_id}` clears.
+fn release_reserved_slot(device_id: &str) {
+    let _write = fleet_registry_write();
+    let mut registry = load_registry();
+    if registry.release(device_id) {
+        if let Err(e) = registry.persist(std::path::Path::new(FLEET_REGISTRY_PATH)) {
+            tracing::error!(error = %e, device_id = %device_id, "fleet_slot_rollback_persist_failed");
+        }
+    }
 }
 
 /// Map a `pair_keypair` failure reply to the FastAPI status + body. The op returns
@@ -484,6 +574,7 @@ pub async fn delete_fleet_slot(
         );
     }
 
+    let _write = fleet_registry_write();
     let mut registry = load_registry();
     let released = registry.release(&device_id);
     if !released {
@@ -847,31 +938,42 @@ mod tests {
     }
 
     #[test]
-    fn the_key_gate_accepts_an_identical_blob_and_rejects_a_different_one() {
-        // The whole fleet model rests on this: one keypair per fleet, with
-        // `channel_id` separating the drones. A second drone presenting the SAME
-        // key is a join; a DIFFERENT key would deafen every drone already paired,
-        // so byte-identity — not mere presence — is the gate.
-        let installed = vec![3u8; 64];
-        let same = vec![3u8; 64];
-        let different = vec![4u8; 64];
-        assert_eq!(installed, same, "an identical blob must pass the gate");
-        assert_ne!(installed, different, "a different blob must be refused");
-    }
-
-    #[test]
     fn a_shared_key_of_the_wrong_size_is_refused_rather_than_written() {
         // A truncated key derives a WRONG beacon HMAC, which drops every beacon
         // silently -- harder to notice than a missing key, because the resolver
         // at least warns when nothing is there.
         use base64::Engine as _;
         let short = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
-        assert!(install_shared_key(&short).is_err());
+        assert!(decode_shared_key(&short).is_err());
     }
 
     #[test]
     fn a_shared_key_that_is_not_base64_is_refused() {
-        assert!(install_shared_key("not base64!!").is_err());
+        assert!(decode_shared_key("not base64!!").is_err());
+    }
+
+    #[test]
+    fn the_shared_key_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drone.key");
+        assert_eq!(install_shared_key(&path, &[7u8; 64], false), "installed");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), vec![7u8; 64]);
+    }
+
+    #[test]
+    fn a_join_never_rekeys_an_installed_shared_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drone.key");
+        std::fs::write(&path, [1u8; 64]).unwrap();
+        assert_eq!(install_shared_key(&path, &[1u8; 64], true), "unchanged");
+        assert_eq!(install_shared_key(&path, &[2u8; 64], true), "mismatch");
+        assert_eq!(std::fs::read(&path).unwrap(), vec![1u8; 64]);
+        // A fresh install is a new fleet: it replaces the old shared half.
+        assert_eq!(install_shared_key(&path, &[2u8; 64], false), "installed");
+        assert_eq!(std::fs::read(&path).unwrap(), vec![2u8; 64]);
     }
 
     #[test]

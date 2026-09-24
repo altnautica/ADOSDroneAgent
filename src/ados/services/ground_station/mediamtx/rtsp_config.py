@@ -1,9 +1,8 @@
 """RTSP / SDP configuration helpers for the ground-side mediamtx.
 
-Pure data + filesystem helpers extracted from the original
-``mediamtx_manager.py``. Nothing here owns a process or a long-lived
-asyncio task; ``manager.py`` consumes these helpers when it spins up
-the mediamtx subprocess and the ffmpeg ingest sidecar.
+Pure data + filesystem helpers. Nothing here owns a process or a long-lived
+asyncio task; ``manager.py`` consumes these helpers when it spins up the
+mediamtx subprocess and the ffmpeg ingest sidecar.
 
 Three concerns live in this module:
 

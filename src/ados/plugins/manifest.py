@@ -36,7 +36,7 @@ from ados.plugins.capabilities import (
     is_known_gcs_capability,
 )
 from ados.plugins.errors import ManifestError
-from ados.plugins.ready_check import has_control_char, parse_ready_check
+from ados.plugins.ready_check import parse_ready_check
 
 log = get_logger("plugins.manifest")
 
@@ -259,28 +259,35 @@ class AgentContributes(_StrictModel):
         return list(self.services)
 
 
-def _validate_entrypoint(value: str) -> str:
-    """Reject path-traversal, absolute paths, or control characters in
-    entrypoint fields.
+_ENTRYPOINT_PATH = re.compile(r"[A-Za-z0-9._/-]+")
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-    Module-id form (``module:Class``) passes through. Path form must
-    be relative and contain no ``..`` segments. Neither form may carry a
-    control character: an entrypoint is interpolated into a generated
-    unit file, where a newline starts a new directive.
+
+def _validate_entrypoint(value: str) -> str:
+    """Accept exactly what the Rust manifest parser accepts.
+
+    Either ``module.path:Class`` (every segment a Python identifier), or a
+    relative posix path over ``[A-Za-z0-9._/-]`` with no empty segment and no
+    segment starting with ``..``. The value is interpolated into a generated
+    unit's ``ExecStart=`` for a rust plugin, so a space, ``%`` or ``$`` would
+    add argv words or expand as a systemd specifier; and the two lifecycle
+    paths (LAN and cloud relay) must refuse the same manifests.
     """
-    if has_control_char(value):
-        raise ManifestError(
-            f"entrypoint must not contain control characters, got {value!r}"
+    module, sep, klass = value.partition(":")
+    if sep:
+        ok = bool(_IDENTIFIER.fullmatch(klass)) and all(
+            _IDENTIFIER.fullmatch(part) for part in module.split(".")
         )
-    if ":" in value:
-        return value
-    if value.startswith("/") or value.startswith("\\") or "\\" in value:
-        raise ManifestError(f"entrypoint must be a relative posix path, got {value!r}")
-    parts = value.split("/")
-    if any(p == ".." or p.startswith("..") for p in parts):
-        raise ManifestError(f"entrypoint must not contain .. segments, got {value!r}")
-    if not value.strip():
-        raise ManifestError("entrypoint must not be empty")
+    else:
+        ok = bool(_ENTRYPOINT_PATH.fullmatch(value)) and all(
+            part and not part.startswith("..") for part in value.split("/")
+        )
+    if not ok:
+        raise ManifestError(
+            f"entrypoint {value!r} must be a relative posix path over "
+            "[A-Za-z0-9._/-] with no empty or '..' segment, or a module:Class "
+            "reference"
+        )
     return value
 
 

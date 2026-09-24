@@ -9,9 +9,10 @@
 //!    peer's credentials. This path keeps working even if the Python API is
 //!    down (the diagnostics tool must not share a failure domain with the thing
 //!    it diagnoses).
-//! 2. **TCP `:8090`** — the LAN edge. The auth layer mirrors the agent's HTTP
-//!    posture exactly: unpaired ⇒ open, paired ⇒ `X-ADOS-Key` required and an
-//!    exact match. A token-bucket rate limit guards the edge.
+//! 2. **TCP `:8090`** — the LAN edge. The auth layer follows the agent's
+//!    data-plane posture (see [`auth`]): unpaired ⇒ first-boot reach only,
+//!    paired ⇒ `X-ADOS-Key` required and an exact match, an unreadable pairing
+//!    file ⇒ refused. A token-bucket rate limit guards the edge.
 //!
 //! Auth and rate limiting are a per-edge middleware: a no-op on the Unix
 //! listener, enforcing on the TCP listener. The two public endpoints
@@ -55,6 +56,7 @@ use tower::Service;
 
 use ados_protocol::ipc::OperatorListener;
 use ados_protocol::logd::IngestFrame;
+use ados_protocol::pairing_posture::{classify_caller, CallerClass};
 
 use crate::writer::ControlMsg;
 
@@ -73,6 +75,15 @@ pub const SYNCED_PATH: &str = "/v1/synced";
 struct EdgeAuth {
     pairing: Arc<PairingState>,
     rate: Arc<RateLimiter>,
+}
+
+/// Where a LAN-edge request came from: the TCP peer and the local address it
+/// reached. Attached to every request on the TCP listener so the auth layer can
+/// classify the caller; the Unix listener attaches none.
+#[derive(Clone, Copy, Debug)]
+struct TcpPeer {
+    peer: std::net::IpAddr,
+    local: Option<std::net::IpAddr>,
 }
 
 /// Build the `/v1` Router for a given app state. The same Router is served on
@@ -135,9 +146,18 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) ->
         .get("X-ADOS-Key")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    if !edge.pairing.authorize(&path, presented.as_deref()) {
+    // Who is calling, from the accepted socket and the forwarding headers. A
+    // request with no recorded peer cannot be placed and is treated as remote.
+    let caller = match request.extensions().get::<TcpPeer>() {
+        Some(p) => classify_caller(Some(p.peer), p.local, |h| request.headers().contains_key(h)),
+        None => CallerClass::Remote,
+    };
+    if !edge.pairing.authorize(&path, caller, presented.as_deref()) {
         let body = serde_json::json!({
-            "error": { "code": "unauthorized", "message": "missing or invalid X-ADOS-Key" }
+            "error": {
+                "code": "unauthorized",
+                "message": "missing or invalid X-ADOS-Key, or a caller an unpaired node does not serve"
+            }
         });
         return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
     }
@@ -173,20 +193,23 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let pairing = Arc::new(PairingState::with_path(pairing_path));
+    // The structural check runs in the background on a fixed cadence, never on
+    // a request; the handlers report its latest verdict.
+    let integrity = self::stats::IntegrityVerdict::new();
     // The shared pool of warm read-only connections the handlers check out from.
     // The export path opens its own connection on its dedicated thread, so it
     // does not draw from (or starve) this pool.
     let pool = self::pool::ConnPool::new(db_path.clone(), self::pool::DEFAULT_MAX_IDLE);
     let state = AppState {
-        db_path,
+        db_path: db_path.clone(),
         pool,
         broadcast,
         ingest,
         tail_slots: Arc::new(TailSlots::default()),
         export_slots: Arc::new(ExportSlots::default()),
-        pairing: Arc::clone(&pairing),
         mark_synced,
         writer_health,
+        integrity: integrity.clone(),
     };
 
     // The Unix edge: the bare Router, no auth.
@@ -228,6 +251,7 @@ where
         tcp_port = tcp_listener.as_ref().map(|_| tcp_port),
         "query API listening"
     );
+    let integrity_task = tokio::spawn(self::stats::run_integrity_refresh(db_path, integrity));
 
     // Two graceful-shutdown signals fan out from the single shutdown future.
     let (unix_stop_tx, unix_stop_rx) = oneshot::channel::<()>();
@@ -247,6 +271,7 @@ where
     if let Some(tcp) = tcp {
         let _ = tcp.await;
     }
+    integrity_task.abort();
 
     // tmpfs cleanup: a stale socket path confuses a probing reader on restart.
     let _ = std::fs::remove_file(&query_socket);
@@ -273,7 +298,7 @@ async fn serve_unix(listener: OperatorListener, app: Router, stop: oneshot::Rece
                 match accepted {
                     Ok((stream, _addr)) => {
                         let app = app.clone();
-                        tokio::spawn(serve_conn(TokioIo::new(stream), app));
+                        tokio::spawn(serve_conn(TokioIo::new(stream), app, None));
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "query unix accept failed");
@@ -285,9 +310,9 @@ async fn serve_unix(listener: OperatorListener, app: Router, stop: oneshot::Rece
     }
 }
 
-/// Serve the Router on the TCP listener, mirroring the unix accept loop. The
-/// auth gate is the `X-ADOS-Key`, not the peer address, so no per-peer state is
-/// carried on the connection.
+/// Serve the Router on the TCP listener, mirroring the unix accept loop. Each
+/// request carries the accepted peer and local address, which the edge auth
+/// classifies the caller from alongside the forwarding headers.
 async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiver<()>) {
     tokio::pin!(stop);
     loop {
@@ -295,9 +320,13 @@ async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiver<(
             _ = &mut stop => break,
             accepted = listener.accept() => {
                 match accepted {
-                    Ok((stream, _peer)) => {
+                    Ok((stream, peer)) => {
                         let app = app.clone();
-                        tokio::spawn(serve_conn(TokioIo::new(stream), app));
+                        let tcp_peer = TcpPeer {
+                            peer: peer.ip(),
+                            local: stream.local_addr().ok().map(|a| a.ip()),
+                        };
+                        tokio::spawn(serve_conn(TokioIo::new(stream), app, Some(tcp_peer)));
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "query tcp accept failed");
@@ -310,8 +339,9 @@ async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiver<(
 }
 
 /// Drive one accepted connection through hyper with the axum service. Generic
-/// over the IO so the same code serves a Unix stream and a TCP stream.
-async fn serve_conn<I>(io: TokioIo<I>, app: Router)
+/// over the IO so the same code serves a Unix stream and a TCP stream; a TCP
+/// connection's peer is attached to each of its requests.
+async fn serve_conn<I>(io: TokioIo<I>, app: Router, tcp_peer: Option<TcpPeer>)
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -320,7 +350,10 @@ where
     let svc = hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
         let mut app = app.clone();
         async move {
-            let req = req.map(Body::new);
+            let mut req = req.map(Body::new);
+            if let Some(p) = tcp_peer {
+                req.extensions_mut().insert(p);
+            }
             // Router implements Service<Request<Body>>; readiness is immediate.
             let response = app.call(req).await?;
             Ok::<_, Infallible>(response)
@@ -758,12 +791,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tcp_is_open_when_unpaired() {
+    async fn tcp_serves_the_local_operator_when_unpaired() {
         let dir = tempfile::tempdir().unwrap();
-        // No pairing file → unpaired → open on TCP with no key.
+        // No pairing file → unpaired → a loopback caller is the local operator.
         let h = start(dir.path(), None).await;
         let (status, _b) = tcp_get(h.port, "/v1/query?limit=1", None).await;
         assert!(status.contains("200"), "status {status}");
+        h.stop().await;
+    }
+
+    /// A tunnel or reverse proxy terminating on this host delivers internet
+    /// callers from 127.0.0.1 with a forwarding header. On an unpaired node
+    /// that caller must not read the store.
+    #[tokio::test]
+    async fn tcp_refuses_a_relayed_caller_when_unpaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = start(dir.path(), None).await;
+        let (status, _b) = tcp_get(
+            h.port,
+            "/v1/query?limit=1",
+            Some(("X-Forwarded-For", "203.0.113.7")),
+        )
+        .await;
+        assert!(status.contains("401"), "status {status}");
+        h.stop().await;
+    }
+
+    /// A pairing file that exists but cannot be parsed fails closed on the LAN
+    /// edge instead of reading as unpaired.
+    #[tokio::test]
+    async fn tcp_refuses_every_caller_when_the_pairing_file_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = start(dir.path(), Some("{ truncated")).await;
+        let (status, _b) = tcp_get(h.port, "/v1/query?limit=1", None).await;
+        assert!(status.contains("401"), "status {status}");
         h.stop().await;
     }
 

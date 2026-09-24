@@ -43,6 +43,7 @@
 //! router's own published counter is the next link in that chain, and a
 //! connected client is the one after it.
 
+use ados_protocol::shutdown::Shutdown;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -55,7 +56,6 @@ use ados_protocol::node_status::{NodeIdentity, NodeStatus};
 use crate::aux_peers::AuxPeerCache;
 use serde::Serialize;
 use tokio::net::UdpSocket;
-use tokio::sync::Notify;
 
 /// Largest datagram read in one go.
 ///
@@ -837,7 +837,7 @@ pub async fn run_aux_consumer(
     sinks: AuxSinksOwned,
     counters: AuxCounters,
     peers: AuxPeerCache,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) -> std::io::Result<()> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, listen_port));
     let sock = UdpSocket::bind(addr).await?;
@@ -866,7 +866,7 @@ pub async fn run_aux_consumer(
     loop {
         tokio::select! {
             biased;
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
             _ = report_tick.tick() => {
                 last_report = report(&counters, last_report);
             }
@@ -911,7 +911,7 @@ pub async fn supervise_aux_consumer(
     sinks: AuxSinksOwned,
     counters: AuxCounters,
     peers: AuxPeerCache,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     // No `backoff` state: every re-bind waits exactly BIND_RETRY_INTERVAL.
     loop {
@@ -938,7 +938,7 @@ pub async fn supervise_aux_consumer(
             }
         }
         tokio::select! {
-            _ = cancel.notified() => return,
+            _ = cancel.wait() => return,
             _ = tokio::time::sleep(BIND_RETRY_INTERVAL) => {}
         }
     }
@@ -1549,7 +1549,7 @@ mod tests {
         drop(probe);
 
         let counters = AuxCounters::new();
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let task = tokio::spawn(run_aux_consumer(
             TEST_SLOT,
             port,
@@ -1585,7 +1585,7 @@ mod tests {
             frame
         );
 
-        cancel.notify_waiters();
+        cancel.trigger();
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("cancellation must stop the consumer")
@@ -1607,7 +1607,7 @@ mod tests {
         let port = held.local_addr().unwrap().port();
 
         let counters = AuxCounters::new();
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let ingest = Arc::new(MavlinkIngest::with_timeout(
             "/nonexistent/mavlink-ingest.sock",
             Duration::from_millis(20),

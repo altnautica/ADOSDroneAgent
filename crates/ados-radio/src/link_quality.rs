@@ -106,6 +106,14 @@ impl LinkStats {
     pub fn is_measured(&self) -> bool {
         self.packets_received > 0
     }
+
+    /// Valid decoded packets per second. `packets_received` is the count for
+    /// ONE stats interval — `wfb_rx` zeroes its PKT counters after every dump
+    /// (`vendor/wfb-ng/src/rx.cpp` `Aggregator::dump_stats`) — so the rate is
+    /// that count over the interval, never a difference between two readings.
+    pub fn valid_packets_per_s(&self) -> f64 {
+        self.packets_received.max(0) as f64 / STATS_INTERVAL_S
+    }
 }
 
 impl Default for LinkStats {

@@ -28,7 +28,7 @@ What it asserts, and why each is the honest form of the check:
   can only be a spoof.
 
 When the app is NOT behind the front (``ADOS_API_INTERNAL_SOCKET`` unset, i.e.
-a standalone dev run or `ados demo`), the transport assertion is skipped: there
+a standalone dev run), the transport assertion is skipped: there
 is no front, TCP is the intended way in, and refusing it would break the
 no-hardware path the repo requires to keep working. The header spoof check
 still applies, because nothing legitimate sets it in that posture either.

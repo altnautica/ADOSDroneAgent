@@ -1011,30 +1011,38 @@ fn set_executable(_dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Global commands the install once linked whose target no longer exists. An
+/// upgraded box would otherwise keep a dangling command on PATH, so each is
+/// removed on every install, the same way `RETIRED_UNITS` prunes unit files.
+const RETIRED_GLOBAL_LINKS: &[&str] = &["/usr/local/bin/ados-agent"];
+
 /// Install the global `/usr/local/bin/ados*` symlinks (the genuine "symlinks"
-/// part). `ados` + `ados-agent` point into the venv's console scripts;
-/// `ados-supervisor` points at the Rust binary under `/opt/ados/bin` so the
-/// operator command is on PATH. This set mirrors the uninstall removal list so
-/// the two surfaces never drift. Best-effort: a symlink failure does not abort
-/// the install (the binaries are already on disk), but it is logged.
+/// part). `ados` points into the venv's console script; `ados-supervisor`
+/// points at the Rust binary under `/opt/ados/bin` so the operator command is
+/// on PATH. This set mirrors the uninstall removal list so the two surfaces
+/// never drift. Best-effort: a symlink failure does not abort the install (the
+/// binaries are already on disk), but it is logged.
 fn install_global_symlinks() {
-    let pairs = [
-        (format!("{}/bin/ados", env::VENV_DIR), "/usr/local/bin/ados"),
-        (
-            format!("{}/bin/ados-agent", env::VENV_DIR),
-            "/usr/local/bin/ados-agent",
-        ),
-        (
-            format!("{}/ados-supervisor", env::BIN_DIR),
-            "/usr/local/bin/ados-supervisor",
-        ),
-    ];
-    for (target, link) in pairs {
+    for link in RETIRED_GLOBAL_LINKS {
+        let _ = std::fs::remove_file(link);
+    }
+    for (target, link) in global_symlinks() {
         // `ln -sf` overwrites an existing link idempotently.
         if !crate::exec::run_ok("ln", &["-sf", &target, link]) {
             tracing::warn!(target = %target, link, "global symlink install failed");
         }
     }
+}
+
+/// The `(target, link)` pairs [`install_global_symlinks`] creates.
+pub(crate) fn global_symlinks() -> [(String, &'static str); 2] {
+    [
+        (format!("{}/bin/ados", env::VENV_DIR), "/usr/local/bin/ados"),
+        (
+            format!("{}/ados-supervisor", env::BIN_DIR),
+            "/usr/local/bin/ados-supervisor",
+        ),
+    ]
 }
 
 /// Prebuilt-binary fetch + global symlink install.

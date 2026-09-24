@@ -15,7 +15,13 @@ use ados_protocol::atlas::{
     KeyframeFlags, KeyframeImage, KeyframeTier, Pose, PoseDescriptor, PoseSource, TimeAlignment,
     VioHealth,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
+
+/// How many recent accepted frames the ingest rate is measured over.
+const INGEST_WINDOW: usize = 64;
+/// No accepted frame for this long reads as a 0 Hz ingest.
+const INGEST_STALE: Duration = Duration::from_secs(2);
 
 /// One camera frame handed to the session, already pose-tagged. The pose may
 /// have come from on-board VIO or an offloaded SLAM return (`pose_source`); the
@@ -69,10 +75,11 @@ pub struct CaptureSession {
     kf_count: u64,
     vio_health: VioHealth,
     // Ingest-rate measurement over the frames actually accepted (enabled camera
-    // + capturing). The rate is derived from real frame timestamps, not assumed.
-    frame_count: u64,
-    first_frame_ms: Option<i64>,
-    last_frame_ms: Option<i64>,
+    // + capturing): the timestamps of the most recent INGEST_WINDOW frames plus
+    // the local instant the last one was accepted. A lifetime average would keep
+    // reporting a healthy rate long after the camera died.
+    recent_frames_ms: VecDeque<i64>,
+    last_accept: Option<Instant>,
     // Honesty state surfaced on `status()`.
     anchored: bool,
     pose_tier: PoseSource,
@@ -101,9 +108,8 @@ impl CaptureSession {
             session_id: String::new(),
             kf_count: 0,
             vio_health: VioHealth::Good,
-            frame_count: 0,
-            first_frame_ms: None,
-            last_frame_ms: None,
+            recent_frames_ms: VecDeque::with_capacity(INGEST_WINDOW),
+            last_accept: None,
             anchored: false,
             pose_tier: PoseSource::LocalVio,
             dropped_keyframes: 0,
@@ -119,9 +125,8 @@ impl CaptureSession {
         self.session_id = session_id;
         self.state = CaptureState::Capturing;
         self.kf_count = 0;
-        self.frame_count = 0;
-        self.first_frame_ms = None;
-        self.last_frame_ms = None;
+        self.recent_frames_ms.clear();
+        self.last_accept = None;
         self.selectors.clear();
         self.dropped_keyframes = 0;
         self.last_pose_pub_ms = None;
@@ -313,9 +318,11 @@ impl CaptureSession {
         }
         // Record the ingest for the rate measurement (every accepted frame, not
         // only keyframes — the rate is the camera feed rate).
-        self.frame_count += 1;
-        self.first_frame_ms.get_or_insert(ts_ms);
-        self.last_frame_ms = Some(ts_ms);
+        if self.recent_frames_ms.len() == INGEST_WINDOW {
+            self.recent_frames_ms.pop_front();
+        }
+        self.recent_frames_ms.push_back(ts_ms);
+        self.last_accept = Some(Instant::now());
         true
     }
 
@@ -413,14 +420,22 @@ impl CaptureSession {
         Some(CaptureOutput { pose, keyframe })
     }
 
-    /// Measured ingest rate (Hz) over the accepted frames, derived from the span
-    /// between the first and last accepted frame timestamps. Zero until at least
-    /// two frames over a positive span have been seen.
+    /// Measured ingest rate (Hz) over the last [`INGEST_WINDOW`] accepted frames,
+    /// from the span of their timestamps. Zero until two frames over a positive
+    /// span have been seen, and zero once no frame has been accepted for
+    /// [`INGEST_STALE`] — a camera that stopped delivering reads 0 Hz, not its
+    /// last healthy rate.
     fn ingest_rate_hz(&self) -> f32 {
-        match (self.first_frame_ms, self.last_frame_ms) {
-            (Some(first), Some(last)) if self.frame_count >= 2 && last > first => {
+        if self
+            .last_accept
+            .is_none_or(|at| at.elapsed() > INGEST_STALE)
+        {
+            return 0.0;
+        }
+        match (self.recent_frames_ms.front(), self.recent_frames_ms.back()) {
+            (Some(&first), Some(&last)) if self.recent_frames_ms.len() >= 2 && last > first => {
                 let span_s = (last - first) as f64 / 1000.0;
-                ((self.frame_count - 1) as f64 / span_s) as f32
+                ((self.recent_frames_ms.len() - 1) as f64 / span_s) as f32
             }
             _ => 0.0,
         }
@@ -865,6 +880,24 @@ mod tests {
             three_cam >= 7,
             "the cadence must still run at roughly the documented rate, got {three_cam}"
         );
+    }
+
+    #[test]
+    fn a_camera_that_stops_delivering_reads_zero_hz_not_its_last_rate() {
+        let mut s = started(
+            config(vec![cam("front", CameraRole::Primary, true)]),
+            "sess-stale",
+        );
+        for i in 0..10i64 {
+            s.on_pose_only("front", pose_at([0.0, 0.0, 0.0]), i * 100);
+        }
+        assert!(
+            s.status().ingest_rate_hz > 5.0,
+            "a live feed reads its rate"
+        );
+        // The last accepted frame is now older than the staleness window.
+        s.last_accept = Some(Instant::now() - INGEST_STALE - Duration::from_millis(100));
+        assert_eq!(s.status().ingest_rate_hz, 0.0);
     }
 
     #[test]

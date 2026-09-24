@@ -3,11 +3,11 @@
 //! Dispatches on the mesh role: `direct` runs the standalone WFB receive
 //! manager (this file's `receive_loop`); `relay` forwards drone fragments to a
 //! receiver over batman-adv; `receiver` aggregates the local NIC + remote relay
-//! forwards and republishes the combined FEC stream. The role comes from the
-//! `--role` argument when present, else the `/etc/ados/mesh/role` sentinel
-//! (`role_manager` owns that file). The relay/receiver roles run as their own
-//! systemd units (`ados-wfb-relay` / `ados-wfb-receiver`), each invoking this
-//! binary with the matching `--role`.
+//! forwards and republishes the combined FEC stream. Each role runs as its own
+//! systemd unit (`ados-wfb-rx` / `ados-wfb-relay` / `ados-wfb-receiver`), which
+//! passes its role on `--role`. The supervisor decides which unit runs; a unit
+//! started while the `/etc/ados/mesh/role` sentinel names another role exits
+//! cleanly without touching the adapter.
 //!
 //! Direct-role detail: per generation it spawns the data RX + both control
 //! planes, starts the video fan-out and the presence emit/listen loops as
@@ -22,13 +22,14 @@
 //! forwarder/aggregator. The rx-key pairing gate and regulatory-domain/tx-power
 //! application stay where they were.
 
+use ados_protocol::shutdown::Shutdown;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 
 use ados_radio::config::WfbConfig;
 use ados_radio::link_quality::LinkStats;
@@ -96,37 +97,40 @@ impl Role {
     }
 }
 
-/// Resolve the run role: an explicit `--role <value>` argument wins, else the
-/// on-disk sentinel. Unknown values fall back to `direct`.
-fn resolve_role() -> Role {
+/// The role this process runs, from its `--role <value>` / `--role=<value>`
+/// argument. The unit decides the role, not the sentinel: a unit that ran
+/// whatever role the sentinel named put a second plane on the adapter after a
+/// reboot into another role. A missing or unknown value is a unit-file error,
+/// so it fails loud instead of guessing.
+fn resolve_role() -> Result<Role, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let sentinel = mesh::get_current_role();
-    resolve_role_from(&args, Some(sentinel.as_str()))
+    resolve_role_from(&args)
 }
 
-/// Pure role-resolution core (test seam, mirroring the `emit`/`emit_to` split in
-/// the mesh-event module). An explicit `--role <value>` / `--role=<value>`
-/// argument wins; an unknown explicit value is warned and the resolution falls
-/// through to the sentinel; with no argument the on-disk sentinel decides; with
-/// neither a usable argument nor a usable sentinel the role is `direct`.
-fn resolve_role_from(args: &[String], sentinel: Option<&str>) -> Role {
+/// Pure role-resolution core (test seam).
+fn resolve_role_from(args: &[String]) -> Result<Role, String> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
-        if arg == "--role" {
-            if let Some(v) = it.next() {
-                if let Some(role) = Role::from_token(v) {
-                    return role;
-                }
-                tracing::warn!(value = %v, "unknown_role_arg_falling_back");
-            }
-        } else if let Some(v) = arg.strip_prefix("--role=") {
-            if let Some(role) = Role::from_token(v) {
-                return role;
-            }
-            tracing::warn!(value = %v, "unknown_role_arg_falling_back");
+        let value = if arg == "--role" {
+            it.next().map(String::as_str)
+        } else {
+            arg.strip_prefix("--role=")
+        };
+        if let Some(v) = value {
+            return Role::from_token(v).ok_or_else(|| {
+                format!("unknown --role {v:?}; expected direct, relay or receiver")
+            });
         }
     }
-    sentinel.and_then(Role::from_token).unwrap_or(Role::Direct)
+    Err("--role is required: direct, relay or receiver".to_string())
+}
+
+/// Whether the role sentinel names this unit's role. A role unit started while
+/// the node runs another role (pulled up with the supervisor at boot, kicked by
+/// the installer, a stray `systemctl start`) must not touch the adapter the
+/// other role's plane drives.
+fn sentinel_admits(unit_role: Role, sentinel: &str) -> bool {
+    Role::from_token(sentinel) == Some(unit_role)
 }
 
 fn init_logging() {
@@ -255,6 +259,26 @@ async fn main() -> Result<()> {
 
     init_logging();
 
+    // Resolved before readiness: a unit started without a usable role must fail
+    // its start, never report ready and run a guessed role on the adapter.
+    let role = match resolve_role() {
+        Ok(role) => role,
+        Err(e) => {
+            tracing::error!(error = %e, "ground-station data-plane has no role");
+            anyhow::bail!(e);
+        }
+    };
+
+    // Not this node's role: report ready (a notify unit that exits before READY
+    // is a failed start) and exit 0, the status each role unit's
+    // `RestartPreventExitStatus=0` never restarts.
+    let sentinel = mesh::get_current_role();
+    if !sentinel_admits(role, &sentinel) {
+        tracing::info!(?role, sentinel = %sentinel, "role unit does not match the node role; exiting");
+        ados_supervisor::sdnotify::ready();
+        return Ok(());
+    }
+
     // Publish this service's config-status sidecar so a malformed `ground_station:`
     // config block surfaces on the remote Health view, not just in the log. Read
     // once at startup; the role loops re-read the (unchanged) file as they consume
@@ -274,10 +298,10 @@ async fn main() -> Result<()> {
     let mut sigint = signal(SignalKind::interrupt())?;
 
     // The operator command socket runs for the whole service lifetime in every
-    // role: role transitions, gateway-preference, and WFB pair-key install /
-    // unpair are operator on-demand actions the native front forwards here (it
-    // has no in-process Python pair/role manager to call). Spawned before the
-    // role dispatch so it is reachable regardless of which role loop runs below.
+    // role: gateway-preference and WFB pair-key install / unpair are operator
+    // on-demand actions the native front forwards here (it has no in-process
+    // Python pair manager to call). Spawned before the role dispatch so it is
+    // reachable regardless of which role loop runs below.
     tokio::spawn(async {
         // Honour ADOS_RUN_DIR so a redirected runtime layout (a non-root dev host
         // or a test) places the socket alongside the other run-dir sockets.
@@ -287,7 +311,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    let role = resolve_role();
     match role {
         Role::Relay => {
             tracing::info!("ground-station relay role starting");
@@ -308,14 +331,14 @@ async fn main() -> Result<()> {
 
 /// Run the relay (`is_relay`) or receiver loop until a shutdown signal. The
 /// chosen loop owns its own adapter detect + monitor-mode + mDNS + state file;
-/// a SIGTERM/SIGINT fires the shared `Notify` so the loop tears down cleanly.
+/// a SIGTERM/SIGINT fires the shared latching `Shutdown` so the loop tears down cleanly.
 async fn run_relay_or_receiver(
     is_relay: bool,
     progress: ados_supervisor::sdnotify::MonitorProgress,
     sigterm: &mut tokio::signal::unix::Signal,
     sigint: &mut tokio::signal::unix::Signal,
 ) {
-    let shutdown = Arc::new(Notify::new());
+    let shutdown = Shutdown::new();
 
     // Telemetry emitter for the relay/receiver branch: ships the mesh snapshot
     // and the relay/receiver state to the logging daemon as the durable read
@@ -334,7 +357,7 @@ async fn run_relay_or_receiver(
 
     // Atlas world-model aux-lane relay (off the WFB aux stream onto the LAN). Inert
     // unless this node is the relay role AND `ground_station.atlas.enabled` with a
-    // configured compute base URL. It shares the role shutdown `Notify`, so a
+    // configured compute base URL. It shares the role `Shutdown`, so a
     // SIGTERM/SIGINT tears it down with the rest of the relay. A non-Atlas ground
     // station spawns nothing here and is byte-unchanged.
     let atlas_task = maybe_spawn_atlas_relay(is_relay, shutdown.clone(), Some(ingest.clone()));
@@ -354,15 +377,15 @@ async fn run_relay_or_receiver(
         _ = role_task => {}
         _ = sigterm.recv() => {
             tracing::info!("received SIGTERM");
-            shutdown.notify_waiters();
+            shutdown.trigger();
         }
         _ = sigint.recv() => {
             tracing::info!("received SIGINT");
-            shutdown.notify_waiters();
+            shutdown.trigger();
         }
     }
     // Give the loop a moment to flush its down-state on signal-triggered exit. The
-    // Atlas relay self-stops on the shared `Notify`; the abort is a no-op if it
+    // Atlas relay self-stops on the shared `Shutdown`; the abort is a no-op if it
     // already returned, and reaps it on the role-task-exit path (no signal fired).
     tokio::time::sleep(Duration::from_millis(200)).await;
     if let Some(t) = atlas_task {
@@ -385,7 +408,7 @@ async fn run_relay_or_receiver(
 /// reaches the same receiver the direct-LAN bearer uses.
 fn maybe_spawn_atlas_relay(
     is_relay: bool,
-    shutdown: Arc<Notify>,
+    shutdown: Shutdown,
     ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !is_relay {
@@ -401,7 +424,7 @@ fn maybe_spawn_atlas_relay(
     Some(tokio::spawn(async move {
         // Use the configured compute base URL, or auto-resolve the workstation
         // node over mDNS so a field relay needs no hand-configured URL. The
-        // resolve loop self-stops on the shared shutdown Notify.
+        // resolve loop self-stops on the shared `Shutdown`.
         let compute_url = match configured_url {
             Some(url) => url,
             None => {
@@ -417,7 +440,7 @@ fn maybe_spawn_atlas_relay(
                         break url;
                     }
                     tokio::select! {
-                        _ = shutdown.notified() => return,
+                        _ = shutdown.wait() => return,
                         _ = tokio::time::sleep(Duration::from_secs(10)) => {}
                     }
                 }
@@ -529,7 +552,7 @@ async fn run_direct(
     // direct. Anything that later wants both on one node has to demultiplex the
     // lane once and fan out in-process, not bind the port twice.
     let aux_counters = ados_groundlink::AuxCounters::new();
-    let aux_shutdown = Arc::new(Notify::new());
+    let aux_shutdown = Shutdown::new();
     // The relayed-node cache: status and identity frames the linked drone pushes
     // over the lane, held per device id with the age of each. Its sidecar is what
     // lets this node describe what it relays to an operator who is paired only
@@ -672,7 +695,7 @@ async fn run_direct(
     // The consumers self-stop on the shared signal; the aborts are no-ops for
     // any that already returned, and reap the ones on the path where no signal
     // fired.
-    aux_shutdown.notify_waiters();
+    aux_shutdown.trigger();
     tokio::time::sleep(Duration::from_millis(100)).await;
     // Stop the reconciler before reaping, so it cannot spawn a fresh consumer
     // into the map while the shutdown path is draining it.
@@ -680,9 +703,8 @@ async fn run_direct(
     for t in aux_tasks.lock().await.values() {
         t.abort();
     }
-    // The persister waits on the same signal, but `notify_waiters` only wakes a
-    // task already parked on it, so the abort is what reliably reaps it if the
-    // signal landed while it was mid-write.
+    // The persister waits on the same latching signal and stops on its own;
+    // the abort just reaps it without waiting out a write in progress.
     aux_peers_task.abort();
 
     // Restore the resolved injection adapter to managed mode on the way out.
@@ -1152,19 +1174,19 @@ async fn receive_loop(
         // process's own plumbing fault, and restarting the radio on it would be
         // a fabricated verdict about the transmitter.
         let mut tx_control_watch = tx_control_stats.map(|out| {
-            tokio::spawn(ados_groundlink::watch_tx_liveness(
+            tokio::spawn(ados_radio::tx_liveness::watch_tx_liveness(
                 "tx_control",
                 out,
-                ados_groundlink::TX_POLL_INTERVAL,
-                ados_groundlink::TX_SILENCE_WINDOW,
+                ados_radio::tx_liveness::TX_POLL_INTERVAL,
+                ados_radio::tx_liveness::TX_SILENCE_WINDOW,
             ))
         });
         let mut aux_tx_watch = aux_tx_stats.map(|out| {
-            tokio::spawn(ados_groundlink::watch_tx_liveness(
+            tokio::spawn(ados_radio::tx_liveness::watch_tx_liveness(
                 "aux_tx",
                 out,
-                ados_groundlink::TX_POLL_INTERVAL,
-                ados_groundlink::TX_SILENCE_WINDOW,
+                ados_radio::tx_liveness::TX_POLL_INTERVAL,
+                ados_radio::tx_liveness::TX_SILENCE_WINDOW,
             ))
         });
         if tx_control_watch.is_none() || aux_tx_watch.is_none() {
@@ -1336,7 +1358,9 @@ async fn wait_for_exit(rx: Arc<DataRxHandle>) {
 /// a missing pipe as a stall — would restart the radio on this process's own
 /// plumbing fault and report it as a transmitter failure. The other arms still
 /// end the generation, and the missing handle is logged where it happens.
-async fn wait_tx_stall(watch: &mut Option<tokio::task::JoinHandle<ados_groundlink::TxVerdict>>) {
+async fn wait_tx_stall(
+    watch: &mut Option<tokio::task::JoinHandle<ados_radio::tx_liveness::TxVerdict>>,
+) {
     match watch {
         Some(handle) => {
             let _ = handle.await;
@@ -1385,45 +1409,39 @@ mod tests {
     }
 
     #[test]
-    fn explicit_role_relay_wins() {
-        let role = resolve_role_from(&args(&["--role", "relay"]), Some("direct"));
-        assert_eq!(role, Role::Relay);
+    fn the_role_comes_from_the_unit_argument() {
+        assert_eq!(
+            resolve_role_from(&args(&["--role", "relay"])),
+            Ok(Role::Relay)
+        );
+        assert_eq!(
+            resolve_role_from(&args(&["--role=receiver"])),
+            Ok(Role::Receiver)
+        );
+        assert_eq!(
+            resolve_role_from(&args(&["--role", "direct"])),
+            Ok(Role::Direct)
+        );
     }
 
     #[test]
-    fn explicit_role_eq_form_receiver() {
-        let role = resolve_role_from(&args(&["--role=receiver"]), Some("direct"));
-        assert_eq!(role, Role::Receiver);
+    fn a_missing_or_unknown_role_is_an_error_not_a_guess() {
+        assert!(resolve_role_from(&[]).is_err());
+        assert!(resolve_role_from(&args(&["--role", "bogus"])).is_err());
+        assert!(resolve_role_from(&args(&["--role"])).is_err());
     }
 
     #[test]
-    fn sentinel_decides_with_no_argument() {
-        let role = resolve_role_from(&[], Some("relay"));
-        assert_eq!(role, Role::Relay);
-    }
-
-    #[test]
-    fn unknown_explicit_value_falls_through_to_direct() {
-        let role = resolve_role_from(&args(&["--role", "bogus"]), None);
-        assert_eq!(role, Role::Direct);
-    }
-
-    #[test]
-    fn unknown_explicit_value_falls_through_to_sentinel() {
-        // An unknown explicit arg is warned but does not strand the resolution:
-        // it falls through to the sentinel, which here selects receiver.
-        let role = resolve_role_from(&args(&["--role", "bogus"]), Some("receiver"));
-        assert_eq!(role, Role::Receiver);
-    }
-
-    #[test]
-    fn no_argument_and_no_sentinel_is_direct() {
-        assert_eq!(resolve_role_from(&[], None), Role::Direct);
-    }
-
-    #[test]
-    fn unknown_sentinel_is_direct() {
-        assert_eq!(resolve_role_from(&[], Some("bogus")), Role::Direct);
+    fn a_role_unit_runs_only_under_its_own_role() {
+        // After a reboot into relay the direct receive unit must stand down, or
+        // it drives the adapter beside the relay plane.
+        assert!(!sentinel_admits(Role::Direct, "relay"));
+        assert!(!sentinel_admits(Role::Direct, "receiver"));
+        assert!(sentinel_admits(Role::Direct, "direct"));
+        assert!(sentinel_admits(Role::Relay, "relay"));
+        assert!(!sentinel_admits(Role::Relay, "direct"));
+        assert!(sentinel_admits(Role::Receiver, "receiver"));
+        assert!(!sentinel_admits(Role::Receiver, "relay"));
     }
 
     #[tokio::test]

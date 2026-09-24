@@ -11,6 +11,9 @@
 
 import { useEffect, useState } from "react";
 
+/** Fixed pause before a dropped or failed MSP session is redialled. */
+const MSP_RECONNECT_MS = 3000;
+
 import type { MspVariant } from "@/lib/fc-firmware";
 import {
   MspTelemetryClient,
@@ -19,6 +22,8 @@ import {
 
 export function useMspTelemetry(firmware: MspVariant | null): MspTelemetrySnapshot | null {
   const [snap, setSnap] = useState<MspTelemetrySnapshot | null>(null);
+  // Bumped to redial after the session closes or fails to open.
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!firmware) {
@@ -26,28 +31,38 @@ export function useMspTelemetry(firmware: MspVariant | null): MspTelemetrySnapsh
       return;
     }
     let cancelled = false;
+    let redial: ReturnType<typeof setTimeout> | null = null;
     const ac = new AbortController();
     const client = new MspTelemetryClient(firmware);
-    setSnap(null);
 
     void client.connect(ac.signal).catch(() => {
       // A connect failure is recorded in the client snapshot (linkState/error)
-      // and surfaces on the next flush; nothing to do here.
+      // and surfaces on the next flush, which schedules the redial.
     });
 
     // Decode runs faster than we want to re-render; flush the rolling snapshot
-    // to React at ~5 Hz so the UI stays smooth without thrashing.
+    // to React at ~5 Hz so the UI stays smooth without thrashing. A closed or
+    // failed session is redialled on a fixed cadence with no cap — the view
+    // says "reconnecting", so it must actually reconnect.
     const flush = setInterval(() => {
-      if (!cancelled) setSnap(client.snapshot());
+      if (cancelled) return;
+      const s = client.snapshot();
+      setSnap(s);
+      if ((s.linkState === "closed" || s.linkState === "error") && redial === null) {
+        redial = setTimeout(() => {
+          if (!cancelled) setAttempt((n) => n + 1);
+        }, MSP_RECONNECT_MS);
+      }
     }, 200);
 
     return () => {
       cancelled = true;
       clearInterval(flush);
+      if (redial !== null) clearTimeout(redial);
       ac.abort();
       void client.disconnect();
     };
-  }, [firmware]);
+  }, [firmware, attempt]);
 
   return snap;
 }

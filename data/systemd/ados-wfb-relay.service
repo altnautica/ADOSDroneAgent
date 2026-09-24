@@ -3,7 +3,9 @@ Description=ADOS WFB-ng relay (mesh relay role)
 After=ados-batman.service
 Wants=ados-batman.service
 PartOf=ados-supervisor.service
-# Only runs when the role sentinel reads `relay`. role_manager owns this file.
+# Runs only while the role sentinel reads `relay`: under any other role the
+# binary reports ready and exits 0, which is never restarted. The supervisor
+# writes the sentinel and starts this unit on a transition into the role.
 ConditionPathExists=/etc/ados/mesh/role
 StartLimitIntervalSec=0
 
@@ -24,6 +26,7 @@ User=root
 # `--role` argument.
 ExecStart=/opt/ados/bin/ados-groundlink --role relay
 Restart=always
+RestartPreventExitStatus=0
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env

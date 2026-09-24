@@ -5,9 +5,8 @@ property on :class:`PluginContext` is a thin facade backed by an IPC
 call to the supervisor. Capability checks happen on the supervisor
 side; the facades just shape arguments and decode responses.
 
-Separated from :mod:`ados.plugins.ipc_client` to keep that module's
-size budget reasonable. ``ipc_client`` imports from here and
-re-exports the public names so existing imports keep working.
+Separated from :mod:`ados.plugins.ipc_client` so that module stays
+the wire-level client; it re-exports :class:`PluginContext`.
 """
 
 from __future__ import annotations
@@ -50,15 +49,9 @@ class _EventsClient:
 
 
 class _MAVLinkClient:
-    """``ctx.mavlink`` facade.
-
-    Wraps the supervisor's MAVLink router through the IPC bridge. The
-    v1.0 hand-injected ``RouterHandle`` pattern (used by the gimbal
-    plugin to send CommandLong / CommandInt directly) is retired in
-    favor of ``ctx.mavlink.send``; the runner exposes a back-compat
-    shim that adapts the old shape into this surface so existing
-    plugins keep working without source changes.
-    """
+    """``ctx.mavlink`` facade: MAVLink read and write through the host's
+    router, gated by ``mavlink.read`` / ``mavlink.write`` and the component
+    reservations."""
 
     def __init__(self, ipc: PluginIpcClient) -> None:
         self._ipc = ipc
@@ -79,6 +72,28 @@ class _MAVLinkClient:
 
     async def register_component(self, comp_id: int, kind: str) -> dict:
         return await self._ipc.mavlink_register_component(comp_id, kind)
+
+
+class _MspClient:
+    """``ctx.msp`` facade: the raw MSP byte plane to a Betaflight / iNav /
+    KISS flight controller.
+
+    Frames are built and parsed with :mod:`ados.plugins.msp`; the host moves
+    bytes only. ``send`` is gated by ``msp.write`` and ``subscribe`` by
+    ``msp.read``. A subscription callback receives ``{bytes, timestamp_ms}``
+    for every chunk the FC sends (MSP has no per-message topic).
+    """
+
+    def __init__(self, ipc: PluginIpcClient) -> None:
+        self._ipc = ipc
+
+    async def send(self, msg_bytes: bytes) -> dict:
+        return await self._ipc.msp_send(msg_bytes)
+
+    async def subscribe(
+        self, callback: Callable[[dict], Awaitable[None] | None]
+    ) -> None:
+        await self._ipc.msp_subscribe(callback)
 
 
 def _driver_ref(driver: Any) -> str:
@@ -139,18 +154,6 @@ class _PeripheralManagerClient:
 
     async def unregister(self, handle_id: str) -> dict:
         return await self._ipc.peripheral_unregister_driver(handle_id)
-
-    async def unregister_camera_driver(self, driver: Any) -> None:
-        # Legacy synchronous-looking shape used by v1.0 thermal-camera
-        # plugin. The handle id is not returned because v1.0 callers
-        # do not retain one; we tag by driver_ref so the host can find
-        # the matching install. The supervisor records the absence as
-        # a best-effort release on the plugin's next disconnect.
-        ref = _driver_ref(driver)
-        # No-op on the supervisor side until v1.1 GCS exposes
-        # explicit handle ids. The release_plugin path on disconnect
-        # cleans up regardless.
-        _ = ref
 
     async def claim_camera(
         self, device_path: str, exclusive: bool = True
@@ -500,12 +503,6 @@ class PluginContext:
     v1.1 fills the SDK: every host-facing surface is a
     capability-gated facade on this class. Plugins program against
     the typed interface; the IPC client is an implementation detail.
-
-    Backward-compat aliases:
-
-    * ``ctx.peripherals`` is an alias for ``ctx.peripheral_manager``.
-    * ``_BarePluginContext`` (in :mod:`ados.plugins.ipc_client`) is a
-      strict subclass for v1.0 lifecycle hooks that did not connect.
     """
 
     def __init__(
@@ -531,9 +528,7 @@ class PluginContext:
         self.events = _EventsClient(ipc)
         self.mavlink = _MAVLinkClient(ipc)
         self.peripheral_manager = _PeripheralManagerClient(ipc)
-        # Legacy alias kept so v1.0 plugins (e.g., the thermal camera)
-        # keep working without changes to their on_start body.
-        self.peripherals = self.peripheral_manager
+        self.msp = _MspClient(ipc)
         self.camera = _CameraClient(ipc)
         # Video-source facade: a camera / pod driver declares the pipeline's
         # stream sources (the host forwards to the supervisor, which persists the
@@ -580,6 +575,7 @@ __all__ = [
     "VisionClient",
     "_EventsClient",
     "_MAVLinkClient",
+    "_MspClient",
     "_PeripheralManagerClient",
     "_VideoClient",
     "_FlightClient",

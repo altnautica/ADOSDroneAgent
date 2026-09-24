@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -496,7 +497,9 @@ class ModelManager:
         # model. A variant with no declared sha256 skips the check (best effort).
         want = variant.get("sha256")
         if isinstance(want, str) and want:
-            got = sha256_file(final_file)
+            # Hashing a model is seconds of CPU and disk on an SBC; keep it
+            # off the API loop.
+            got = await asyncio.to_thread(sha256_file, final_file)
             if got != want.lower():
                 Path(final_file).unlink(missing_ok=True)
                 progress.state = DownloadState.FAILED
@@ -609,7 +612,8 @@ class ModelManager:
         if ref.path and not ref.source:
             return ModelResolution(ResolutionState.RESOLVED, ref.id, ref.runtime, ref.path)
         # verified cache hit
-        cached = self.cached_ref_path(ref)
+        # cached_ref_path hashes every candidate file; off the loop.
+        cached = await asyncio.to_thread(self.cached_ref_path, ref)
         if cached is not None:
             return ModelResolution(ResolutionState.RESOLVED, ref.id, ref.runtime, str(cached))
         # not cached → fetch if allowed + source present, else needs_model(reason)
@@ -624,7 +628,7 @@ class ModelManager:
         except (httpx.HTTPError, OSError, ValueError) as exc:
             return ModelResolution(ResolutionState.NEEDS_MODEL, ref.id, ref.runtime,
                                    reason=f"fetch failed: {exc}")
-        if ref.sha256 and sha256_file(path) != ref.sha256.lower():
+        if ref.sha256 and await asyncio.to_thread(sha256_file, path) != ref.sha256.lower():
             Path(path).unlink(missing_ok=True)
             return ModelResolution(ResolutionState.VERIFY_FAILED, ref.id, ref.runtime,
                                    reason="fetched model sha256 does not match the pinned digest")

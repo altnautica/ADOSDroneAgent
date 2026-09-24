@@ -1180,7 +1180,10 @@ impl HostServices for RealHost {
                 )
             })?;
         let base_url = format!("http://{target}");
-        let api_key = pairing_key(&self.pairing_path);
+        let credential = workstation_credential(
+            &self.workstation_credentials_path,
+            link.as_ref().and_then(|l| l.device_id.as_deref()),
+        );
 
         // The node pulls the drone's RTSP feed on the drone's LAN-reachable egress
         // IP toward the node (never localhost — the node is a different machine).
@@ -1246,7 +1249,7 @@ impl HostServices for RealHost {
                 target_budget_ms,
                 model_id,
                 base_url: base_url.clone(),
-                api_key: api_key.clone(),
+                credential: credential.clone(),
             },
             cancel.clone(),
         ));
@@ -1257,7 +1260,7 @@ impl HostServices for RealHost {
                 cancel,
                 task,
                 node_base_url: base_url.clone(),
-                api_key,
+                credential,
             },
         );
         drop(streams);
@@ -1324,9 +1327,9 @@ impl HostServices for RealHost {
             streams
                 .get(session_id)
                 .filter(|h| h.plugin_id == plugin_id)
-                .map(|h| (h.node_base_url.clone(), h.api_key.clone()))
+                .map(|h| (h.node_base_url.clone(), h.credential.clone()))
         };
-        let Some((base_url, api_key)) = reach else {
+        let Some((base_url, credential)) = reach else {
             return Ok(json_to_mpv(&serde_json::json!({
                 "session_id": session_id,
                 "state": "closed",
@@ -1335,7 +1338,7 @@ impl HostServices for RealHost {
         };
         // Read the node's live session registry and find this session. A session
         // absent from the node's list has been reaped ⇒ closed.
-        let client = ComputeClient::new(base_url, api_key);
+        let client = ComputeClient::new(base_url, credential);
         let sessions = client
             .sessions()
             .await

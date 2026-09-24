@@ -56,12 +56,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ados_protocol::ipc::{connect_with_retry, read_newline_line};
 use ados_protocol::mavlink::{GuidedSetpoint, SetpointKind as WireSetpointKind};
+use ados_protocol::shutdown::Shutdown;
 use ados_swarm_control::{
     fixes_from_payload, ControlOutcome, ModePrecedence, NeighborFix, OwnState, Setpoint,
     SwarmControlConfig, SwarmController, CONTROL_PERIOD,
 };
 use serde_json::Value;
-use tokio::sync::{watch, Mutex, Notify};
+use tokio::sync::{watch, Mutex};
 
 use super::FcConnection;
 use crate::state::VehicleState;
@@ -276,14 +277,14 @@ pub async fn run(
     swarm_sock: String,
     config_path: String,
     status: Arc<SwarmSetpointStatus>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     let mut source = SwarmConfigSource::new(PathBuf::from(config_path));
     let mut cfg = source.poll().unwrap_or_default();
     loop {
         while !eligible(&cfg) {
             tokio::select! {
-                _ = cancel.notified() => return,
+                _ = cancel.wait() => return,
                 _ = tokio::time::sleep(CONFIG_POLL) => {}
             }
             if let Some(next) = source.poll() {
@@ -331,18 +332,18 @@ pub async fn run(
 async fn read_swarm_socket(
     path: String,
     tx: watch::Sender<Option<(Value, Instant)>>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     loop {
         let Ok(mut stream) = connect_with_retry(&path, 1, SWARM_RECONNECT).await else {
             tokio::select! {
-                _ = cancel.notified() => return,
+                _ = cancel.wait() => return,
                 _ = tokio::time::sleep(SWARM_RECONNECT) => continue,
             }
         };
         loop {
             let line = tokio::select! {
-                _ = cancel.notified() => return,
+                _ = cancel.wait() => return,
                 r = read_newline_line(&mut stream, MAX_SWARM_LINE) => r,
             };
             match line {
@@ -364,7 +365,7 @@ async fn read_swarm_socket(
             }
         }
         tokio::select! {
-            _ = cancel.notified() => return,
+            _ = cancel.wait() => return,
             _ = tokio::time::sleep(SWARM_RECONNECT) => {}
         }
     }
@@ -379,7 +380,7 @@ async fn control_loop(
     source: &mut SwarmConfigSource,
     rx: watch::Receiver<Option<(Value, Instant)>>,
     status: Arc<SwarmSetpointStatus>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) -> LoopExit {
     let mut fixes: Vec<NeighborFix> = Vec::new();
     let mut tick = tokio::time::interval(CONTROL_PERIOD);
@@ -389,7 +390,7 @@ async fn control_loop(
 
     loop {
         tokio::select! {
-            _ = cancel.notified() => return LoopExit::Cancelled,
+            _ = cancel.wait() => return LoopExit::Cancelled,
             _ = reload.tick() => {
                 if let Some(cfg) = source.poll() {
                     if !eligible(&cfg) {

@@ -60,7 +60,8 @@ fn normalized_command() -> AttitudeSetpoint {
         COMMANDED_PITCH_RATE,
         COMMANDED_YAW_RATE,
         0.6,
-    );
+    )
+    .expect("finite command");
     AttitudeSetpoint {
         type_mask: 128, // ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
         q: [1.0, 0.0, 0.0, 0.0],

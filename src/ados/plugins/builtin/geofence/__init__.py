@@ -5,8 +5,10 @@ republishes a structured alert under its own ``plugin.<id>.alert``
 namespace so other plugins, the GCS, and operator-facing log streams
 have one canonical alert shape to render.
 
-The plugin ships its manifest in code (it is a built-in entry-point,
-not a packed ``.adosplug`` archive). The same lifecycle hooks
+The plugin ships with the agent package: its manifest lives in code and
+``PluginSupervisor.install_builtin`` materialises it as an installed
+subprocess plugin that the plugin host serves through the shared runner,
+exactly like a third-party plugin. The same lifecycle hooks
 third-party plugins implement run here too, which doubles this
 module as the simplest worked example for the SDK.
 """
@@ -44,16 +46,10 @@ def get_manifest() -> PluginManifest:
         compatibility=Compatibility(ados_version=">=0.9.0"),
         agent=AgentBlock(
             entrypoint="ados.plugins.builtin.geofence:GeofencePlugin",
-            isolation="inprocess",
             permissions=["event.subscribe", "event.publish"],
         ),
     )
 
-
-# Loader probes ``manifest`` on the loaded entry-point object before falling
-# back to ``get_manifest()``. Expose the manifest as a module-level attribute
-# so either path works.
-manifest = get_manifest()
 
 
 class GeofencePlugin:

@@ -1,24 +1,10 @@
-import { getApiKey } from "./api-key";
 import { getSession } from "./session";
 
-/**
- * The data-plane credential headers for a media request.
- *
- * The video paths (`/whep`, `/hls`) are credential-gated on a paired node: the
- * agent's front admits them only on the pairing key or a dashboard session, and
- * the media server behind it binds loopback so there is no other way in.
- *
- * Same two credentials `apiFetch` already sends: the dashboard session minted by
- * the PIN gate, and the stored API key from the Mission Control deep link.
- */
-export function mediaAuthHeaders(): Record<string, string> {
-  const headers: Record<string, string> = {};
-  const session = getSession();
-  if (session) headers["X-ADOS-Dashboard-Session"] = session;
-  const key = getApiKey();
-  if (key) headers["X-ADOS-Key"] = key;
-  return headers;
-}
+// The video paths (`/whep`, `/hls`) are credential-gated on a paired node: the
+// agent's front admits them only on the pairing key or a dashboard session, and
+// the media server behind it binds loopback so there is no other way in. Code
+// that fetches them itself sends `credentialHeaders()` (lib/api); this module
+// covers the one case that cannot carry a header.
 
 /** The query parameter the agent accepts a session under, media plane only. */
 const SESSION_QUERY_KEY = "ados_session";

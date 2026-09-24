@@ -24,10 +24,12 @@
 //! fail. The client only ever reads; the state wire model stays frozen.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use ados_protocol::retry::RetryPace;
 use ados_protocol::state::read_state_value;
+use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::net::UnixStream;
@@ -59,10 +61,16 @@ pub fn default_state_socket() -> PathBuf {
 /// gives up.
 const RECONNECT_PACE: RetryPace = ados_protocol::retry::LOCAL_SOCKET;
 
-/// The shared, latest vehicle-state snapshot. `None` until the first frame
-/// decodes (and after a reconnect window where no frame has arrived yet). A route
-/// reads it, clones the inner `Value`, and projects the fields it needs.
-type Snapshot = Arc<Mutex<Option<Value>>>;
+/// How old the held snapshot may be before readers treat it as absent. The
+/// producer publishes at ~10 Hz whether or not an FC is attached, so a snapshot
+/// older than this means the state hub stopped (crashed, restarting, or wedged)
+/// and its last armed/mode/battery values are no longer the vehicle's.
+pub const STATE_STALE_AFTER: Duration = Duration::from_secs(3);
+
+/// The shared, latest vehicle-state snapshot and when it arrived. `None` until
+/// the first frame decodes. A route reads it through [`StateIpcClient::snapshot`],
+/// which drops a snapshot older than [`STATE_STALE_AFTER`].
+type Snapshot = Arc<Mutex<Option<(Instant, Value)>>>;
 
 /// Reads the state socket and holds the latest snapshot.
 ///
@@ -121,20 +129,32 @@ impl StateIpcClient {
         )
     }
 
-    /// The latest snapshot, cloned. `None` until the first frame decodes; a route
-    /// maps that to its empty-degraded shape.
+    /// The latest snapshot, cloned. `None` until the first frame decodes and
+    /// whenever the newest frame is older than [`STATE_STALE_AFTER`]; a route
+    /// maps that to its empty-degraded shape rather than serving the last
+    /// values of a state hub that has stopped publishing.
     pub fn snapshot(&self) -> Option<Value> {
-        self.snapshot
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        let held = self.snapshot.lock();
+        match held.as_ref() {
+            Some((at, value)) if at.elapsed() <= STATE_STALE_AFTER => Some(value.clone()),
+            _ => None,
+        }
     }
 
     /// Overwrite the held snapshot directly. Test-only seam: a test can prime the
     /// cell without a live socket. Not used on the production read path.
     #[cfg(test)]
     pub fn set_snapshot_for_test(&self, value: Value) {
-        *self.snapshot.lock().unwrap_or_else(|p| p.into_inner()) = Some(value);
+        *self.snapshot.lock() = Some((Instant::now(), value));
+    }
+
+    /// Prime the cell with a snapshot that arrived `age` ago (test-only).
+    #[cfg(test)]
+    pub fn set_aged_snapshot_for_test(&self, value: Value, age: Duration) {
+        let at = Instant::now()
+            .checked_sub(age)
+            .expect("age within the monotonic clock");
+        *self.snapshot.lock() = Some((at, value));
     }
 }
 
@@ -159,7 +179,12 @@ async fn read_loop(socket_path: PathBuf, snapshot: Snapshot, stop: oneshot::Rece
                     Ok(stream) => {
                         tracing::debug!(path = %socket_path.display(), "state socket connected");
                         process_stream(BufReader::new(stream), &snapshot, &mut stop).await;
-                        // The stream ended (EOF or error). Loop to reconnect.
+                        // The stream ended (EOF or error). Pace the reconnect so a
+                        // peer that accepts and closes at once cannot spin this loop.
+                        tokio::select! {
+                            _ = &mut stop => return,
+                            _ = tokio::time::sleep(RECONNECT_PACE.wait()) => {}
+                        }
                     }
                     Err(e) => {
                         tracing::debug!(
@@ -198,7 +223,7 @@ async fn process_stream<R>(
         };
         match frame {
             Ok(Some(value)) => {
-                *snapshot.lock().unwrap_or_else(|p| p.into_inner()) = Some(value);
+                *snapshot.lock() = Some((Instant::now(), value));
             }
             Ok(None) | Err(_) => return,
         }
@@ -232,8 +257,19 @@ mod tests {
         tokio::pin!(rx);
         let reader = Cursor::new(bytes);
         process_stream(reader, &snapshot, &mut rx.as_mut()).await;
-        let held = snapshot.lock().unwrap().clone();
-        held
+        let held = snapshot.lock().clone();
+        held.map(|(_, value)| value)
+    }
+
+    #[test]
+    fn a_snapshot_older_than_the_stale_window_reads_as_absent() {
+        // The producer publishes at ~10 Hz; a snapshot that stopped arriving is a
+        // stopped state hub, and its last armed/mode values must not be served.
+        let client = StateIpcClient::disconnected();
+        client.set_aged_snapshot_for_test(sample(), STATE_STALE_AFTER + Duration::from_secs(1));
+        assert!(client.snapshot().is_none());
+        client.set_aged_snapshot_for_test(sample(), Duration::from_millis(100));
+        assert_eq!(client.snapshot(), Some(sample()));
     }
 
     #[tokio::test]

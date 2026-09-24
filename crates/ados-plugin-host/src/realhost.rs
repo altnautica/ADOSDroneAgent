@@ -41,10 +41,9 @@ use tokio::task::JoinHandle;
 
 use ados_compute::{
     run_offload_orchestrator, ComputeClient, ComputeJobKind, NodeEndpoint, OrchestratorConfig,
-    DEFAULT_PAIRING_PATH,
 };
+use ados_protocol::node_credential::WorkstationCredentials;
 use ados_protocol::offload_link::{read_offload_link_from, OFFLOAD_LINK_SIDECAR};
-use ados_protocol::pairing_posture::{load_pairing, Pairing};
 
 use crate::button_client::RECONNECT_INTERVAL;
 use crate::frame_link::{FrameLink, SendError};
@@ -170,9 +169,10 @@ pub struct RealHost {
     offload_streams: Mutex<HashMap<String, OffloadStreamHandle>>,
     /// Monotonic counter minting a unique session id when the plugin omits one.
     offload_session_seq: AtomicU64,
-    /// The `pairing.json` the off-box pairing key is read from (canonical
-    /// `/etc/ados/pairing.json`; a builder overrides it in tests).
-    pairing_path: PathBuf,
+    /// The store of credentials workstations issued this drone, from which an
+    /// offload session presents the one its node issued (the canonical
+    /// `/etc/ados/workstation-credentials.json`; a builder overrides it in tests).
+    workstation_credentials_path: PathBuf,
     /// The offload-link sidecar the perception-tier decision is read from (the
     /// canonical `/run/ados/offload-link.json`; a builder overrides it in tests).
     /// Reusing the sidecar keeps the tier decision one source of truth,
@@ -215,7 +215,7 @@ impl RealHost {
             aux_reader: std::sync::OnceLock::new(),
             offload_streams: Mutex::new(HashMap::new()),
             offload_session_seq: AtomicU64::new(0),
-            pairing_path: PathBuf::from(DEFAULT_PAIRING_PATH),
+            workstation_credentials_path: WorkstationCredentials::default_path(),
             offload_link_path: PathBuf::from(OFFLOAD_LINK_SIDECAR),
             state_path: PathBuf::from(crate::state::PLUGIN_STATE_PATH),
             fc_identity: Arc::new(FcIdentity::default()),
@@ -229,10 +229,10 @@ impl RealHost {
         self
     }
 
-    /// Override the `pairing.json` path (builder style, tests). Production uses
-    /// the canonical `/etc/ados/pairing.json` from [`Self::new`].
-    pub fn with_pairing_path(mut self, path: PathBuf) -> Self {
-        self.pairing_path = path;
+    /// Override the workstation-credential store path (builder style, tests).
+    /// Production uses the canonical path from [`Self::new`].
+    pub fn with_workstation_credentials_path(mut self, path: PathBuf) -> Self {
+        self.workstation_credentials_path = path;
         self
     }
 

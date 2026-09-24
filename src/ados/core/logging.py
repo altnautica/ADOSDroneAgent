@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import sys
@@ -13,22 +12,35 @@ _SECRET_SUFFIXES = ("key", "code", "token", "password", "secret")
 _REDACT_PREFIX = "redacted:"  # idempotency sentinel
 
 
-def redact_secrets(_logger, _method, event_dict):
-    """structlog processor: hash any field whose key looks secret-bearing.
+def redact_value(key: str, value: str) -> str:
+    """Redact one string value for ``key``.
 
-    Skips ints/bools/None. Idempotent: already-redacted values pass through
-    unchanged so a value that traverses the chain twice does not double-hash.
+    A secret-bearing key (one ending in, or equal to, a ``_SECRET_SUFFIXES``
+    entry, case-insensitively) has its value replaced with
+    ``redacted:len=<N>``, N its character count. Nothing computed from the
+    content survives: a plaintext head plus an unkeyed digest let a reader of
+    the logs recover a short secret by hashing candidates. An empty value, a
+    non-secret key, or a value already carrying the ``redacted:`` sentinel
+    passes through unchanged. The native store's redactor
+    (``ados_protocol::logd::redact``) is byte-identical.
+    """
+    if not value or value.startswith(_REDACT_PREFIX):
+        return value
+    kl = key.lower()
+    if not any(kl.endswith(s) or kl == s for s in _SECRET_SUFFIXES):
+        return value
+    return f"{_REDACT_PREFIX}len={len(value)}"
+
+
+def redact_secrets(_logger, _method, event_dict):
+    """structlog processor: redact any field whose key looks secret-bearing.
+
+    Skips non-strings. Idempotent: already-redacted values pass through
+    unchanged so a value that traverses the chain twice is not redacted again.
     """
     for k, v in list(event_dict.items()):
-        if not isinstance(v, str) or not v:
-            continue
-        if v.startswith(_REDACT_PREFIX):
-            continue
-        kl = k.lower()
-        if any(kl.endswith(s) or kl == s for s in _SECRET_SUFFIXES):
-            head = v[:4]
-            digest = hashlib.sha256(v.encode("utf-8", errors="replace")).hexdigest()[:8]
-            event_dict[k] = f"{_REDACT_PREFIX}{head}...{digest}"
+        if isinstance(v, str):
+            event_dict[k] = redact_value(k, v)
     return event_dict
 
 

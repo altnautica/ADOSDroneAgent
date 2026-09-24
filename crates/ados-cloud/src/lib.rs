@@ -41,6 +41,7 @@ pub mod log_push;
 pub mod loops;
 pub mod mqtt;
 pub mod pairing;
+pub mod plugin_update;
 pub mod tls;
 pub mod vision_bearer;
 

@@ -22,6 +22,7 @@ import { BfCliSettings } from "./bf-cli-settings";
 import { MspParser } from "./parser";
 import { MspSerialQueue } from "./serial-queue";
 import { SettingsClient, type SettingInfo } from "./settings-client";
+import { MSP_CMD, decodeInavStatus, decodeStatusEx } from "./telemetry-decoders";
 import { WebSocketTransport, mavlinkWsUrl } from "./transport";
 import { WS_TICKET_PROTOCOL, mintMavlinkWsTicket } from "./ws-ticket";
 import type { CliSettingChange } from "./types";
@@ -29,6 +30,35 @@ import type { CliSettingChange } from "./types";
 /** MSP_EEPROM_WRITE — persist the RAM settings to EEPROM (no payload). */
 const MSP_EEPROM_WRITE = 250;
 const CONNECT_TIMEOUT_MS = 4000;
+
+/**
+ * Why a settings write must not go out, or null when it may. Only a vehicle the
+ * FC itself reports as disarmed is written to: an armed one is refused, and so
+ * is one whose state could not be read, because "unknown" is not "disarmed".
+ */
+export function armedWriteRefusal(armed: boolean | null): string | null {
+  if (armed === false) return null;
+  return armed
+    ? "The vehicle is armed. Disarm it to save settings."
+    : "Could not read the armed state from the flight controller, so nothing was written.";
+}
+
+/**
+ * The outcome of an iNav save: every `set` must have landed AND the EEPROM
+ * write must have succeeded. iNav answers MSP_EEPROM_WRITE with an error while
+ * armed, and a RAM-only change is lost at the next power cycle, so a refused
+ * EEPROM write is a failed save, never "saved".
+ */
+export function inavSaveOutcome(
+  rejected: string[],
+  eepromError: string | null,
+): { ok: boolean; message: string } {
+  if (rejected.length) return { ok: false, message: `Rejected: ${rejected.join(", ")}` };
+  if (eepromError) {
+    return { ok: false, message: `Applied to RAM only; the EEPROM write failed: ${eepromError}` };
+  }
+  return { ok: true, message: "Saved to EEPROM" };
+}
 
 /** One selectable enum option: what the operator sees and what gets written. */
 export interface MspOption {
@@ -155,6 +185,8 @@ export class MspFcClient {
    */
   async apply(changes: CliSettingChange[]): Promise<{ ok: boolean; message: string }> {
     if (changes.length === 0) return { ok: true, message: "No changes" };
+    const refusal = armedWriteRefusal(await this.readArmed());
+    if (refusal) return { ok: false, message: refusal };
     if (this.firmware === "inav") {
       if (!this.queue) throw new Error("not connected");
       const client = new SettingsClient(this.queue);
@@ -166,18 +198,33 @@ export class MspFcClient {
           failed.push(c.name);
         }
       }
-      try {
-        await this.queue.send(MSP_EEPROM_WRITE);
-      } catch {
-        // EEPROM write may not echo on every build; the RAM sets already landed.
+      let eepromError: string | null = null;
+      if (failed.length === 0) {
+        try {
+          await this.queue.send(MSP_EEPROM_WRITE);
+        } catch (err) {
+          eepromError = err instanceof Error ? err.message : String(err);
+        }
       }
-      return failed.length
-        ? { ok: false, message: `Rejected: ${failed.join(", ")}` }
-        : { ok: true, message: "Saved to EEPROM" };
+      return inavSaveOutcome(failed, eepromError);
     }
     if (!this.bfSettings) throw new Error("not connected");
     const res = await this.bfSettings.applySettings(changes, { persist: true });
     return { ok: res.success, message: res.message };
+  }
+
+  /** The FC's own armed flag over MSP (MSP_STATUS_EX on Betaflight,
+   *  MSP2_INAV_STATUS on iNav), or null when it could not be read. */
+  private async readArmed(): Promise<boolean | null> {
+    if (!this.queue) return null;
+    const inav = this.firmware === "inav";
+    try {
+      const frame = await this.queue.send(inav ? MSP_CMD.MSP2_INAV_STATUS : MSP_CMD.MSP_STATUS_EX);
+      const status = inav ? decodeInavStatus(frame.payload) : decodeStatusEx(frame.payload);
+      return status ? status.armed : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Tear down the WS and flush the queue. Idempotent. */

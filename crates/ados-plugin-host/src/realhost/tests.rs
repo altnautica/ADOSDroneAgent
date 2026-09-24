@@ -2726,6 +2726,10 @@ async fn compute_offload_routes_a_job_through_the_host_to_the_node() {
     )));
     let auth = Arc::new(ComputeAuth::new(
         "/nonexistent/ados-plugin-host-compute-test.json".into(),
+        ados_compute::NodeCredentialStore::open(
+            "/nonexistent/ados-plugin-host-compute-creds.json".into(),
+            "node-a",
+        ),
     ));
     let app = build_router(engine.clone(), auth);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2915,8 +2919,8 @@ async fn open_stream_offload_starts_a_session_and_close_stops_it() {
 
     let host = RealHost::new()
         .with_offload_link_path(sidecar.clone())
-        // Unpaired pairing ⇒ no key needed off-box (the LAN presence gate).
-        .with_pairing_path(temp_sidecar("no-pairing"));
+        // No credential installed: the loopback node is unpaired (open).
+        .with_workstation_credentials_path(temp_sidecar("no-credentials"));
 
     let open = host
         .compute_stream_open(
@@ -3010,7 +3014,7 @@ fn offload_host(tag: &str, target: &str) -> (RealHost, PathBuf) {
     write_offload_link_to(&sidecar, &link).unwrap();
     let host = RealHost::new()
         .with_offload_link_path(sidecar.clone())
-        .with_pairing_path(temp_sidecar(&format!("{tag}-no-pairing")));
+        .with_workstation_credentials_path(temp_sidecar(&format!("{tag}-no-credentials")));
     (host, sidecar)
 }
 

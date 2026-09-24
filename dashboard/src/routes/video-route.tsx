@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
 import { fmtBitrate, fmtNum } from "@/lib/format";
+import { fetchSnapshot } from "@/lib/snapshot";
 
 interface VideoCamerasResponse {
   cameras: Array<{
@@ -75,11 +76,7 @@ export function VideoRoute() {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/video/snapshot.jpg", {
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error(`snapshot http ${res.status}`);
-      const blob = await res.blob();
+      const blob = await fetchSnapshot();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;

@@ -555,7 +555,7 @@ mod tests {
                 // The secret was redacted at the source.
                 assert_eq!(
                     log.fields.get("api_key").and_then(|v| v.as_str()),
-                    Some("redacted:ABCD...bb2a0cee")
+                    Some("redacted:len=20")
                 );
             }
             other => panic!("expected a log frame, got {other:?}"),

@@ -5,8 +5,10 @@ battery percent, last event timestamp) and republishes a snapshot
 under its own ``plugin.<id>.snapshot`` namespace so diagnostic UIs
 have a single canonical state object to render.
 
-The plugin ships its manifest in code (it is a built-in entry-point,
-not a packed ``.adosplug`` archive). The same lifecycle hooks
+The plugin ships with the agent package: its manifest lives in code and
+``PluginSupervisor.install_builtin`` materialises it as an installed
+subprocess plugin that the plugin host serves through the shared runner,
+exactly like a third-party plugin. The same lifecycle hooks
 third-party plugins implement run here too, which doubles this
 module as a worked example of an aggregator plugin that combines
 ``event.subscribe`` and ``event.publish``.
@@ -54,16 +56,10 @@ def get_manifest() -> PluginManifest:
         compatibility=Compatibility(ados_version=">=0.9.0"),
         agent=AgentBlock(
             entrypoint="ados.plugins.builtin.mavlink_inspector:MavlinkInspectorPlugin",
-            isolation="inprocess",
             permissions=["event.subscribe", "event.publish"],
         ),
     )
 
-
-# Loader probes ``manifest`` on the loaded entry-point object before falling
-# back to ``get_manifest()``. Expose the manifest as a module-level attribute
-# so either path works.
-manifest = get_manifest()
 
 
 class MavlinkInspectorPlugin:

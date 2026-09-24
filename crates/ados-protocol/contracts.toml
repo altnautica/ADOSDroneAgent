@@ -118,7 +118,7 @@ description = "Compute-offload job submit and read contract."
 
 [[contract]]
 id = "state.v2"
-version = 3
+version = 4
 wire = "msgpack"
 transport = "unix-stream"
 status = "active"
@@ -135,7 +135,7 @@ status = "active"
 # The id names the FRAMING generation (length-prefixed msgpack, superseding the
 # newline-JSON state.v1); the integer is the registry version of the body shape
 # and moves independently of it.
-description = "Length-prefixed msgpack vehicle-state frame (the current state-socket format). v3 adds position_age_ms: how long since the flight controller's last decoded POSITION, which the swarm beacon's suppression gate reads — without it a consumer cannot tell a live fix from a frozen one under a producer that is still publishing."
+description = "Length-prefixed msgpack vehicle-state frame (the current state-socket format). v3 added position_age_ms (how long since the flight controller's last decoded POSITION, read by the swarm beacon's suppression gate). v4 publishes a not-reported reading (battery voltage/current/remaining/temperature, GPS eph/epv, RC rssi) as null instead of the MAVLink sentinel."
 
 [[contract]]
 id = "frame"
@@ -244,6 +244,13 @@ version = 1
 path = "/run/ados/compute-heartbeat.json"
 rust_const = "ados_compute::heartbeat_sidecar::COMPUTE_HEARTBEAT_SIDECAR"
 description = "Compute-node heartbeat folded into the agent heartbeat."
+
+[[sidecar]]
+id = "cloud-link"
+version = 1
+path = "/run/ados/cloud-link.json"
+rust_const = "ados_protocol::cloud_link::CLOUD_LINK_SIDECAR"
+description = "Cloud relay link state: broker session confirmed up, and the outcome of the last agent status POST."
 
 [[sidecar]]
 id = "offload-link"

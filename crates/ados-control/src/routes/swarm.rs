@@ -61,13 +61,39 @@ fn table(state: &AppState) -> Table {
 /// `GET /api/swarm/neighbors` → the fleet's neighbour table.
 pub async fn get_neighbors(State(state): State<AppState>) -> Json<Value> {
     let (mut body, table_state, age) = match table(&state) {
-        Table::Fresh(value, age) => (normalise_payload(Some(&value)), "fresh", Some(age)),
+        Table::Fresh(value, age) => (aged_payload(&value, age), "fresh", Some(age)),
         Table::Stale(age) => (normalise_payload(None), "stale", Some(age)),
         Table::Absent => (normalise_payload(None), "absent", None),
     };
     body["table_state"] = json!(table_state);
     body["table_age_ms"] = json!(age.map(|a| a.as_millis() as u64));
     Json(body)
+}
+
+/// The normalised table with every row's `age_ms` advanced by how long ago the
+/// table arrived. Each row's age is frozen at publish time, so a table held for
+/// 1.5 s would otherwise show a neighbour heard 420 ms ago as 420 ms old. A row
+/// whose true age now exceeds the bus's own neighbour-stale bound is dropped, and
+/// `counters.neighbors_now` is recounted to match the rows served.
+fn aged_payload(value: &Value, table_age: Duration) -> Value {
+    let mut body = normalise_payload(Some(value));
+    let elapsed = table_age.as_millis() as u64;
+    let stale_ms = ados_swarmbus::NEIGHBOR_STALE.as_millis() as u64;
+    if let Some(rows) = body.get_mut("neighbors").and_then(Value::as_array_mut) {
+        rows.retain_mut(|row| {
+            let Some(published) = row.get("age_ms").and_then(Value::as_u64) else {
+                return true;
+            };
+            let now = published.saturating_add(elapsed);
+            row["age_ms"] = json!(now);
+            now <= stale_ms
+        });
+        let served = rows.len();
+        if let Some(counters) = body.get_mut("counters").and_then(Value::as_object_mut) {
+            counters.insert("neighbors_now".to_string(), json!(served));
+        }
+    }
+    body
 }
 
 /// The `neighbors` array for `/api/status/full`, or `None` when the swarm bus has
@@ -81,7 +107,7 @@ pub async fn get_neighbors(State(state): State<AppState>) -> Json<Value> {
 /// the degraded shape explicitly reads the dedicated route, which is guaranteed 200.
 pub fn neighbors_for_full_status(state: &AppState) -> Option<Value> {
     match table(state) {
-        Table::Fresh(value, _) => Some(normalise_payload(Some(&value))["neighbors"].clone()),
+        Table::Fresh(value, age) => Some(aged_payload(&value, age)["neighbors"].clone()),
         Table::Stale(_) | Table::Absent => None,
     }
 }
@@ -184,6 +210,11 @@ mod tests {
         let obj = got.as_object_mut().unwrap();
         obj.remove("table_state");
         obj.remove("table_age_ms");
+        // The row's age advances by however long the table was held (a few ms
+        // here); everything else is served as published.
+        let row_age = got["neighbors"][0]["age_ms"].as_u64().unwrap();
+        assert!((420..1420).contains(&row_age));
+        got["neighbors"][0]["age_ms"] = json!(420);
         assert_eq!(got, published());
         // Every contract key is present on the row and in the counters.
         for k in NEIGHBOR_KEYS {
@@ -239,8 +270,40 @@ mod tests {
 
         state.swarm.set_for_test(published());
         let block = neighbors_for_full_status(&state).expect("a published table folds in");
-        assert_eq!(block, published()["neighbors"]);
         assert_eq!(block.as_array().unwrap().len(), 1);
+        assert_eq!(
+            block[0]["device_id"],
+            published()["neighbors"][0]["device_id"]
+        );
+    }
+
+    /// A row's `age_ms` is frozen at publish time. Served from a table held for a
+    /// while, it must include that hold, and a row that has aged past the bus's
+    /// neighbour-stale bound must not be served as a live neighbour.
+    #[tokio::test]
+    async fn row_ages_include_the_time_the_table_was_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let mut table = published();
+        let stale_ms = ados_swarmbus::NEIGHBOR_STALE.as_millis() as u64;
+        let mut old_row = table["neighbors"][0].clone();
+        old_row["slot"] = json!(7);
+        old_row["age_ms"] = json!(stale_ms - 100);
+        table["neighbors"].as_array_mut().unwrap().push(old_row);
+        table["counters"]["neighbors_now"] = json!(2);
+        let held = Duration::from_millis(500);
+        state.swarm.set_for_test_aged(table, held);
+
+        let Json(got) = get_neighbors(State(state)).await;
+        assert_eq!(got["table_state"], json!("fresh"));
+        let rows = got["neighbors"].as_array().unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the row aged past the stale bound is dropped"
+        );
+        assert!(rows[0]["age_ms"].as_u64().unwrap() >= 920);
+        assert_eq!(got["counters"]["neighbors_now"], json!(1));
     }
 
     /// A genuinely empty table from a RUNNING bus is `[]`, which is a real answer and

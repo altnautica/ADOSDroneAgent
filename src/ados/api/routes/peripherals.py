@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 
 from ados.core.logging import get_logger
@@ -13,14 +15,18 @@ router = APIRouter()
 
 @router.get("/peripherals")
 async def list_peripherals():
-    """List detected peripherals (USB devices, cameras, modems)."""
-    return _scan_all()
+    """List detected peripherals (USB devices, cameras, modems).
+
+    The scan shells out to the USB, V4L2 and modem tools, so it runs off the
+    event loop.
+    """
+    return await asyncio.to_thread(_scan_all)
 
 
 @router.post("/peripherals/scan")
 async def scan_peripherals():
     """Re-scan for connected peripherals."""
-    return _scan_all()
+    return await asyncio.to_thread(_scan_all)
 
 
 def _scan_all() -> list[dict]:

@@ -21,19 +21,14 @@
 //!   merged config into `ground_station.kiosk` of the agent config, and echo the
 //!   display config.
 //!
-//! ## Two persistence targets, mirroring the FastAPI handlers
+//! ## One source of truth
 //!
-//! The three `/ui/*` writes persist their section into the YAML-backed agent
-//! config under `ground_station.ui.<section>` (the authoritative path the live
-//! services read), while the RESPONSE body is the legacy side-file UI blob
-//! (`/etc/ados/ground-station-ui.json`) merged over the built-in defaults — with
-//! the just-mutated section overlaid in memory. That split exactly mirrors the
-//! FastAPI handlers, which mutate the in-memory `_load_ui_config()` dict (sourced
-//! from the side-file), call `_persist_gs_ui_section(...)` (which writes the YAML
-//! config), and return the mutated in-memory dict. The front reproduces both legs:
-//! the YAML-config merge (through the shared config store every native config
-//! write uses) for the persist, and the side-file read + in-memory section
-//! overlay for the response body.
+//! The three `/ui/*` writes seed from, and persist into, `ground_station.ui.<section>`
+//! of the YAML agent config (the path the live services read, and the one the
+//! `/ui` read serves), with each section merged over the built-in defaults, and
+//! echo the full `{oled, buttons, screens}` blob. The legacy side-file is migrated
+//! into that section when the config loads and nothing writes it any more, so
+//! seeding from it would reset every earlier write on the next one.
 //!
 //! The `/display` write is the single-source-of-truth path: it seeds from, and
 //! persists into, `ground_station.kiosk` of the YAML config — the same section the
@@ -83,6 +78,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::config_store::{section_path, update_config};
+use crate::routes::gs_ui_read::read_gs_section;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -221,21 +217,8 @@ fn check_screen_cycle(v: Option<i64>) -> Option<Response> {
 }
 
 // ---------------------------------------------------------------------------
-// On-disk seams: the legacy side-file + the agent config.
+// On-disk seam: the agent config.
 // ---------------------------------------------------------------------------
-
-/// The persisted UI config side-file (`/etc/ados/ground-station-ui.json`, the
-/// `GS_UI_JSON` path), resolved as a sibling of the agent config so the write
-/// shares the config-path injection the rest of the ground-station routes use, the
-/// same resolution the read module performs.
-fn ui_config_path(state: &AppState) -> PathBuf {
-    state
-        .pairing_paths
-        .config
-        .parent()
-        .map(|dir| dir.join("ground-station-ui.json"))
-        .unwrap_or_else(|| PathBuf::from("/etc/ados/ground-station-ui.json"))
-}
 
 /// The agent config path (`/etc/ados/config.yaml` on a real box), the YAML store
 /// the `/ui/*` sections persist into under `ground_station.ui.<section>`.
@@ -247,21 +230,8 @@ fn config_yaml_path(state: &AppState) -> PathBuf {
 // Side-file read + the defaults-merged UI/display blob (mirrors the read module).
 // ---------------------------------------------------------------------------
 
-/// Read the side-file into an object map, returning the empty map on absence / a
-/// read error / a parse error / a falsy or non-object body. Mirrors the Python
-/// `json.loads(...) or {}` guarded by `except (OSError, ValueError)`.
-fn read_ui_blob(path: &Path) -> Map<String, Value> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => map,
-            _ => Map::new(),
-        },
-        Err(_) => Map::new(),
-    }
-}
-
-/// Merge a side-file section over a defaults map: start from the defaults, then
-/// overlay every key the side-file section carries. Mirrors the Python
+/// Merge a persisted section over a defaults map: start from the defaults, then
+/// overlay every key the persisted section carries. Mirrors the Python
 /// `{**_DEFAULT_X, **(data.get("x") or {})}` spread.
 fn merge_over_defaults(
     defaults: Map<String, Value>,
@@ -325,7 +295,7 @@ fn json_object(value: Value) -> Map<String, Value> {
     }
 }
 
-/// The defaults-merged UI config blob `{oled, buttons, screens}` from a side-file
+/// The defaults-merged UI config blob `{oled, buttons, screens}` from a persisted
 /// blob, byte-identical to the Python `_load_ui_config`. The base for the in-memory
 /// section overlay the response body returns.
 fn load_ui_config(blob: &Map<String, Value>) -> Map<String, Value> {
@@ -599,7 +569,7 @@ pub struct OledUpdate {
 /// `PUT .../ui/oled` → the full UI config blob with the OLED section mutated.
 ///
 /// `404` off a ground-station node; `422` on an out-of-range bound (the GCS never
-/// sends those). Applies the supplied OLED fields over the side-file value,
+/// sends those). Applies the supplied OLED fields over the persisted value,
 /// persists the merged section into the YAML config, signals the OLED service to
 /// reload, and echoes the full UI config blob. A persist fault is a
 /// `500 E_UI_SAVE_FAILED`.
@@ -620,19 +590,19 @@ pub async fn put_ui_oled(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    let resp = put_ui_oled_at(&config_yaml_path(&state), &ui_config_path(&state), &update);
+    let resp = put_ui_oled_at(&config_yaml_path(&state), &update);
     if resp.status().is_success() {
         signal_oled_reload().await;
     }
     resp
 }
 
-/// The OLED-write logic against explicit config + side-file paths. The public
+/// The OLED-write logic against an explicit config path. The public
 /// handler resolves both from the app state; this takes them directly so a test can
 /// point them at temp paths.
-fn put_ui_oled_at(config_path: &Path, ui_path: &Path, update: &OledUpdate) -> Response {
-    let mut data = load_ui_config(&read_ui_blob(ui_path));
-    // The mutated section starts from the loaded `oled` block (defaults⊕side-file).
+fn put_ui_oled_at(config_path: &Path, update: &OledUpdate) -> Response {
+    let mut data = load_ui_config(&read_gs_section(config_path, "ui"));
+    // The mutated section starts from the loaded `oled` block (defaults⊕persisted).
     let mut oled = match data.get("oled") {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),
@@ -682,16 +652,16 @@ pub async fn put_ui_buttons(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    let resp = put_ui_buttons_at(&config_yaml_path(&state), &ui_config_path(&state), &update);
+    let resp = put_ui_buttons_at(&config_yaml_path(&state), &update);
     if resp.status().is_success() {
         signal_buttons_reload().await;
     }
     resp
 }
 
-/// The button-write logic against explicit config + side-file paths.
-fn put_ui_buttons_at(config_path: &Path, ui_path: &Path, update: &ButtonsUpdate) -> Response {
-    let mut data = load_ui_config(&read_ui_blob(ui_path));
+/// The button-write logic against an explicit config path.
+fn put_ui_buttons_at(config_path: &Path, update: &ButtonsUpdate) -> Response {
+    let mut data = load_ui_config(&read_gs_section(config_path, "ui"));
     if let Some(mapping) = &update.mapping {
         // Wholesale replace: the FastAPI handler sets
         // `data["buttons"] = {"mapping": dict(update.mapping)}`. The mapping is a
@@ -745,16 +715,16 @@ pub async fn put_ui_screens(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    let resp = put_ui_screens_at(&config_yaml_path(&state), &ui_config_path(&state), &update);
+    let resp = put_ui_screens_at(&config_yaml_path(&state), &update);
     if resp.status().is_success() {
         signal_oled_reload().await;
     }
     resp
 }
 
-/// The screen-write logic against explicit config + side-file paths.
-fn put_ui_screens_at(config_path: &Path, ui_path: &Path, update: &ScreensUpdate) -> Response {
-    let mut data = load_ui_config(&read_ui_blob(ui_path));
+/// The screen-write logic against an explicit config path.
+fn put_ui_screens_at(config_path: &Path, update: &ScreensUpdate) -> Response {
+    let mut data = load_ui_config(&read_gs_section(config_path, "ui"));
     let mut screens = match data.get("screens") {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),
@@ -981,7 +951,6 @@ mod tests {
     async fn put_oled_applies_fields_persists_and_echoes_full_blob() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
-        let ui = dir.path().join("ground-station-ui.json");
         std::fs::write(&cfg, "agent:\n  name: gs-1\n").unwrap();
 
         let update = OledUpdate {
@@ -989,7 +958,7 @@ mod tests {
             auto_dim_enabled: Some(false),
             screen_cycle_seconds: None,
         };
-        let resp = put_ui_oled_at(&cfg, &ui, &update);
+        let resp = put_ui_oled_at(&cfg, &update);
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         // The full UI blob, with the oled section mutated. brightness + auto_dim
@@ -1040,15 +1009,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_oled_overlays_an_existing_side_file_section() {
-        // A stored oled brightness in the side-file is the base; the request
+    async fn put_oled_overlays_the_persisted_section() {
+        // The stored oled section in the config is the base; the request
         // overrides only the supplied field; the rest of the stored value stands.
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
-        let ui = dir.path().join("ground-station-ui.json");
         std::fs::write(
-            &ui,
-            r#"{"oled":{"brightness":40,"screen_cycle_seconds":9}}"#,
+            &cfg,
+            "ground_station:\n  ui:\n    oled:\n      brightness: 40\n      screen_cycle_seconds: 9\n",
         )
         .unwrap();
 
@@ -1057,13 +1025,35 @@ mod tests {
             auto_dim_enabled: Some(true),
             screen_cycle_seconds: None,
         };
-        let resp = put_ui_oled_at(&cfg, &ui, &update);
+        let resp = put_ui_oled_at(&cfg, &update);
         let body = body_json(resp).await;
-        // brightness keeps the side-file value (40); screen_cycle keeps 9;
+        // brightness keeps the persisted value (40); screen_cycle keeps 9;
         // auto_dim takes the request.
         assert_eq!(body["oled"]["brightness"], json!(40));
         assert_eq!(body["oled"]["screen_cycle_seconds"], json!(9));
         assert_eq!(body["oled"]["auto_dim_enabled"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn a_second_write_keeps_what_the_first_one_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, "agent:\n  name: gs-1\n").unwrap();
+        let first = OledUpdate {
+            brightness: Some(90),
+            ..Default::default()
+        };
+        assert_eq!(put_ui_oled_at(&cfg, &first).status(), StatusCode::OK);
+        let second = OledUpdate {
+            auto_dim_enabled: Some(false),
+            ..Default::default()
+        };
+        let body = body_json(put_ui_oled_at(&cfg, &second)).await;
+        assert_eq!(body["oled"]["brightness"], json!(90));
+        assert_eq!(body["oled"]["auto_dim_enabled"], json!(false));
+        // The read route serves the same persisted section.
+        let read = crate::routes::gs_ui_read::read_gs_section(&cfg, "ui");
+        assert_eq!(read["oled"]["brightness"], json!(90));
     }
 
     #[tokio::test]
@@ -1074,11 +1064,9 @@ mod tests {
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"x").unwrap();
         let cfg = blocker.join("config.yaml"); // parent "blocker" is a file
-        let ui = dir.path().join("ground-station-ui.json");
 
         let resp = put_ui_oled_at(
             &cfg,
-            &ui,
             &OledUpdate {
                 brightness: Some(50),
                 ..Default::default()
@@ -1096,7 +1084,6 @@ mod tests {
     async fn put_buttons_replaces_the_mapping_wholesale() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
-        let ui = dir.path().join("ground-station-ui.json");
 
         let mut mapping = std::collections::BTreeMap::new();
         mapping.insert("B1_short".to_string(), "show_qr".to_string());
@@ -1104,7 +1091,7 @@ mod tests {
         let update = ButtonsUpdate {
             mapping: Some(mapping),
         };
-        let resp = put_ui_buttons_at(&cfg, &ui, &update);
+        let resp = put_ui_buttons_at(&cfg, &update);
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         // The whole buttons section is now exactly {"mapping": <supplied>}, NOT a
@@ -1135,9 +1122,8 @@ mod tests {
         // six-action mapping), still persisted + echoed.
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
-        let ui = dir.path().join("ground-station-ui.json");
 
-        let resp = put_ui_buttons_at(&cfg, &ui, &ButtonsUpdate::default());
+        let resp = put_ui_buttons_at(&cfg, &ButtonsUpdate::default());
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(
@@ -1152,13 +1138,12 @@ mod tests {
     async fn put_screens_applies_order_and_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
-        let ui = dir.path().join("ground-station-ui.json");
 
         let update = ScreensUpdate {
             order: Some(vec!["home".to_string(), "link".to_string()]),
             enabled: Some(vec!["home".to_string()]),
         };
-        let resp = put_ui_screens_at(&cfg, &ui, &update);
+        let resp = put_ui_screens_at(&cfg, &update);
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
         assert_eq!(body["screens"]["order"], json!(["home", "link"]));
@@ -1183,12 +1168,11 @@ mod tests {
     async fn put_screens_with_only_order_keeps_default_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
-        let ui = dir.path().join("ground-station-ui.json");
         let update = ScreensUpdate {
             order: Some(vec!["home".to_string()]),
             enabled: None,
         };
-        let resp = put_ui_screens_at(&cfg, &ui, &update);
+        let resp = put_ui_screens_at(&cfg, &update);
         let body = body_json(resp).await;
         assert_eq!(body["screens"]["order"], json!(["home"]));
         // enabled keeps the full default list.

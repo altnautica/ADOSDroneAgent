@@ -5,7 +5,8 @@
 //! in its own integration binary — a separate process from the crate's unit
 //! tests and from every other integration binary — so the mutation cannot race
 //! any other test thread. The unit-test sidecars all thread an explicit path
-//! (the `write_to` / `emit_to` seams) and never touch the env.
+//! (the `write_to` seams, the mesh journal's path argument) and never touch the
+//! env.
 
 use ados_groundlink::paths::run_path;
 

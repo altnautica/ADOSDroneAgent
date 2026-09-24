@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, HTTPException
 
 from ados.core.paths import DISPLAY_CONF_PATH
@@ -160,31 +158,21 @@ async def get_display_install_job(job_id: str) -> DisplayJob:
 
 @router.post("/display/calibrate/start", response_model=SetupActionResult)
 async def start_display_calibration() -> SetupActionResult:
-    """Trigger an LCD touch-calibration cycle on next agent restart.
+    """Launch the touch-calibration wizard on the panel.
 
-    Writes a one-shot flag at ``/run/ados/recalibrate.flag`` that the
-    OLED service consumes during framebuffer probe. The actual wizard
-    UI runs there; the route just creates the marker so a bench
-    operator can re-run calibration without an SSH session.
-
-    The agent does not auto-restart on this call. The next time the
-    OLED service starts (operator-initiated reboot or a service
-    restart) it picks the marker up, runs the wizard, and unlinks the
-    file on success.
+    Drops the one-shot recalibrate flag the native display service consumes
+    on its ~1 Hz loop; the wizard then runs on the panel with no restart.
     """
-    flag = Path("/run/ados/recalibrate.flag")
-    try:
-        flag.parent.mkdir(parents=True, exist_ok=True)
-        flag.write_text("1\n")
-    except OSError as exc:
+    from ados.api.routes.display import RECALIBRATE_FLAG_PATH, arm_touch_recalibration
+
+    error = arm_touch_recalibration()
+    if error is not None:
         return SetupActionResult(
             ok=False,
-            message=f"Could not arm calibration flag: {exc}",
+            message=f"Could not request touch calibration: {error}",
         )
     return SetupActionResult(
         ok=True,
-        message=(
-            "Touch calibration scheduled. Restart the agent to launch the wizard."
-        ),
-        data={"flag_path": str(flag)},
+        message="Touch calibration requested. The wizard appears on the panel within a few seconds.",
+        data={"flag_path": str(RECALIBRATE_FLAG_PATH)},
     )

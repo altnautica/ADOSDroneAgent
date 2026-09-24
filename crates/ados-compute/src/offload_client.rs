@@ -6,23 +6,37 @@
 //! [`OffloadDetectionBatch`], and hands it to a channel the return bridge drains.
 //! Local-first: the node is reached at its LAN address.
 
+use ados_protocol::node_credential::NODE_CREDENTIAL_HEADER;
 use ados_protocol::offload::OffloadDetectionBatch;
 use anyhow::{anyhow, Result};
 use futures_util::StreamExt;
 use std::sync::Arc;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Connect to a node's detection return stream at `ws_url` (e.g.
-/// `ws://compute.local:8092/ws/offload/<session>`) and forward each decoded batch
-/// onto `sink`. Returns when the stream closes, `cancel` is notified, the sink is
-/// dropped, or the connection fails. A batch that fails to decode (a version this
-/// build does not speak) is logged and skipped, not fatal.
+/// `ws://compute.local:8092/ws/offload/<session>`), presenting the node-issued
+/// `credential` on the handshake, and forward each decoded batch onto `sink`.
+/// Returns when the stream closes, `cancel` is notified, the sink is dropped,
+/// or the connection fails (a paired node refuses the upgrade without a valid
+/// credential). A batch that fails to decode (a version this build does not
+/// speak) is logged and skipped, not fatal.
 pub async fn stream_offload_detections(
     ws_url: &str,
+    credential: Option<&str>,
     sink: tokio::sync::mpsc::Sender<OffloadDetectionBatch>,
     cancel: Arc<tokio::sync::Notify>,
 ) -> Result<()> {
-    let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_url)
+    let mut request = ws_url
+        .into_client_request()
+        .map_err(|e| anyhow!("bad offload stream url {ws_url}: {e}"))?;
+    if let Some(c) = credential {
+        let value = HeaderValue::from_str(c)
+            .map_err(|_| anyhow!("node credential is not a header value"))?;
+        request.headers_mut().insert(NODE_CREDENTIAL_HEADER, value);
+    }
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(|e| anyhow!("connect {ws_url}: {e}"))?;
     tracing::info!(url = ws_url, "offload detection stream connected");

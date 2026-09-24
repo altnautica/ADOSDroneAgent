@@ -2,17 +2,24 @@
 //!
 //! The same Router is served on two edges. The trusted local Unix socket
 //! carries no auth and no rate limit: anything on-box that can open the socket
-//! is already inside the trust boundary. The LAN TCP edge mirrors the agent's
-//! HTTP auth posture exactly:
+//! is already inside the trust boundary. The LAN TCP edge follows the agent's
+//! data-plane posture, built from the shared primitives in
+//! [`ados_protocol::pairing_posture`] so the two edges cannot drift:
 //!
-//! - **Unpaired ⇒ all routes open.** A fresh agent has no key; being on the LAN
-//!   is the gate, the same stance the pairing-claim flow takes.
+//! - **Unpaired ⇒ first-boot reach only.** The local operator (a loopback peer
+//!   that carries no forwarding header) and the first-boot lifelines are
+//!   served. An operator-LAN caller is not: the agent's HTTP edge serves it data
+//!   only behind a dashboard PIN session, which this surface does not take, and
+//!   a remote caller (a public-WAN host, anything relayed by a proxy or tunnel)
+//!   never reaches an unclaimed node's history.
 //! - **Paired ⇒ `X-ADOS-Key` required** and must equal the stored pairing key.
+//! - **Unreadable `pairing.json` ⇒ refused.** A file that exists but cannot be
+//!   read or parsed may be a paired node's record on a failing card; reading it
+//!   as unpaired would open the store to anyone.
 //!
-//! The pairing state is the agent's `pairing.json` (`{ "paired": bool,
-//! "api_key": "..." }`). It is read fresh on each request through a short-TTL
-//! cache so a pair/unpair that happens while the daemon runs is honoured without
-//! a restart, while a burst of requests does not stat the file every time.
+//! The pairing state is read fresh through a short-TTL cache so a pair/unpair
+//! that happens while the daemon runs is honoured without a restart, while a
+//! burst of requests does not stat the file every time.
 //!
 //! Two public endpoints (`/v1/healthz`, `/v1/openapi.json`) are open on both
 //! edges so discovery and liveness probes always work.
@@ -24,6 +31,8 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use ados_protocol::pairing_posture::{constant_time_eq, load_pairing, CallerClass, Pairing};
+
 /// Default pairing-state path: the agent's `pairing.json`.
 pub const DEFAULT_PAIRING_PATH: &str = "/etc/ados/pairing.json";
 
@@ -31,15 +40,6 @@ pub const DEFAULT_PAIRING_PATH: &str = "/etc/ados/pairing.json";
 /// enough that a pair/unpair is honoured within a few requests, long enough that
 /// a request burst does not stat the file every time.
 const PAIRING_TTL: Duration = Duration::from_secs(2);
-
-/// The resolved pairing posture for the current request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Pairing {
-    /// No pairing on file: all routes are open on the LAN edge.
-    Unpaired,
-    /// Paired with this exact key required in `X-ADOS-Key`.
-    Paired(String),
-}
 
 /// Reads `pairing.json` and answers the auth question, with a short-TTL cache so
 /// the file is not stat-ed on every request. Cheap to clone (it is held behind
@@ -86,39 +86,22 @@ impl PairingState {
         fresh
     }
 
-    /// Decide a request: `true` to pass, `false` to reject with 401. A public
-    /// path is always allowed; an unpaired agent allows everything; a paired
-    /// agent requires the exact key.
-    pub fn authorize(&self, path: &str, presented_key: Option<&str>) -> bool {
+    /// Decide a TCP-edge request: `true` to pass, `false` to reject with 401. A
+    /// public path is always allowed; an unpaired agent serves only first-boot
+    /// reach; a paired agent requires the exact key; an unreadable pairing file
+    /// serves nobody on this edge.
+    pub fn authorize(&self, path: &str, caller: CallerClass, presented_key: Option<&str>) -> bool {
         if is_public(path) {
             return true;
         }
         match self.current() {
-            Pairing::Unpaired => true,
-            Pairing::Paired(expected) => match presented_key {
-                Some(presented) => constant_time_eq(presented.as_bytes(), expected.as_bytes()),
-                None => false,
-            },
+            Pairing::Unpaired => caller.is_first_boot_reach(),
+            Pairing::Paired(expected) => presented_key.is_some_and(|presented| {
+                constant_time_eq(presented.as_bytes(), expected.as_bytes())
+            }),
+            Pairing::Unreadable => false,
         }
     }
-}
-
-/// Compare two byte slices in time independent of where they first differ, so
-/// the bearer-secret check on the LAN edge leaks no timing signal about a
-/// partial match. A length mismatch is rejected up front (the length of the
-/// stored key is not itself a secret); equal-length slices are then folded
-/// together with a running difference accumulator that always visits every
-/// byte. The compiler is told via `std::hint::black_box` not to short-circuit
-/// the loop once a difference is seen.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    std::hint::black_box(diff) == 0
 }
 
 impl Default for PairingState {
@@ -131,28 +114,6 @@ impl Default for PairingState {
 /// TCP) so liveness and discovery probes always answer.
 pub fn is_public(path: &str) -> bool {
     path == "/v1/healthz" || path == "/v1/openapi.json"
-}
-
-/// Load the pairing posture from a `pairing.json`. An absent file, an
-/// unreadable file, or a state that is not `paired:true` with an `api_key` is
-/// treated as unpaired (open), matching the agent: when not paired, access is
-/// open.
-fn load_pairing(path: &std::path::Path) -> Pairing {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Pairing::Unpaired;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return Pairing::Unpaired;
-    };
-    let paired = value
-        .get("paired")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let key = value.get("api_key").and_then(|v| v.as_str());
-    match (paired, key) {
-        (true, Some(k)) if !k.is_empty() => Pairing::Paired(k.to_string()),
-        _ => Pairing::Unpaired,
-    }
 }
 
 /// A fixed-window token-bucket rate limiter for the TCP edge. Each refill
@@ -220,24 +181,37 @@ mod tests {
     }
 
     #[test]
-    fn unpaired_opens_every_route() {
+    fn unpaired_serves_first_boot_reach_only() {
         let dir = tempfile::tempdir().unwrap();
         // No pairing file at all → unpaired.
         let state = PairingState::with_path(dir.path().join("absent.json"));
         assert_eq!(state.current(), Pairing::Unpaired);
-        assert!(state.authorize("/v1/query", None));
-        assert!(state.authorize("/v1/query", Some("anything")));
+        assert!(state.authorize("/v1/query", CallerClass::OnBox, None));
+        assert!(state.authorize("/v1/query", CallerClass::Lifeline, None));
+        // The history of an unclaimed node is not served to the wider LAN
+        // (the agent's HTTP edge wants a PIN session there) or to anything
+        // remote, key or not.
+        assert!(!state.authorize("/v1/query", CallerClass::OperatorLan, None));
+        assert!(!state.authorize("/v1/query", CallerClass::Remote, Some("anything")));
     }
 
     #[test]
-    fn paired_requires_the_exact_key() {
+    fn paired_requires_the_exact_key_from_every_caller() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_pairing(dir.path(), r#"{"paired": true, "api_key": "ados_secret"}"#);
         let state = PairingState::with_path(path);
         assert_eq!(state.current(), Pairing::Paired("ados_secret".to_string()));
-        assert!(state.authorize("/v1/query", Some("ados_secret")));
-        assert!(!state.authorize("/v1/query", Some("wrong")));
-        assert!(!state.authorize("/v1/query", None));
+        for caller in [
+            CallerClass::OnBox,
+            CallerClass::Lifeline,
+            CallerClass::OperatorLan,
+            CallerClass::Remote,
+        ] {
+            assert!(state.authorize("/v1/query", caller, Some("ados_secret")));
+            assert!(!state.authorize("/v1/query", caller, Some("ados_secre1")));
+            assert!(!state.authorize("/v1/query", caller, Some("ados")));
+            assert!(!state.authorize("/v1/query", caller, None));
+        }
     }
 
     #[test]
@@ -245,54 +219,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_pairing(dir.path(), r#"{"paired": true, "api_key": "k"}"#);
         let state = PairingState::with_path(path);
-        assert!(state.authorize("/v1/healthz", None));
-        assert!(state.authorize("/v1/openapi.json", None));
+        assert!(state.authorize("/v1/healthz", CallerClass::Remote, None));
+        assert!(state.authorize("/v1/openapi.json", CallerClass::Remote, None));
     }
 
+    /// A pairing file that exists but cannot be trusted may be a paired node's
+    /// record on a failing card. Reading it as unpaired would open the store.
     #[test]
-    fn a_paired_state_without_a_key_reads_as_unpaired() {
-        let dir = tempfile::tempdir().unwrap();
-        // paired:true but no api_key, or empty → open (matches the agent's
-        // "no key on file means open" stance).
-        let path = write_pairing(dir.path(), r#"{"paired": true, "api_key": ""}"#);
-        let state = PairingState::with_path(path);
-        assert_eq!(state.current(), Pairing::Unpaired);
-    }
-
-    #[test]
-    fn malformed_pairing_file_reads_as_unpaired() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_pairing(dir.path(), "this is not json");
-        let state = PairingState::with_path(path);
-        assert_eq!(state.current(), Pairing::Unpaired);
-    }
-
-    #[test]
-    fn constant_time_eq_matches_byte_equality() {
-        // Equal slices compare equal; any single-byte or length difference is
-        // rejected, exactly as `==` would, only without the early exit.
-        assert!(constant_time_eq(b"ados_secret", b"ados_secret"));
-        assert!(!constant_time_eq(b"ados_secret", b"ados_secre1"));
-        assert!(!constant_time_eq(b"ados_secret", b"xdos_secret"));
-        assert!(!constant_time_eq(b"ados_secret", b"ados_secret_longer"));
-        assert!(!constant_time_eq(b"ados_secret", b"short"));
-        assert!(constant_time_eq(b"", b""));
-        assert!(!constant_time_eq(b"", b"x"));
-    }
-
-    #[test]
-    fn paired_key_check_is_a_constant_time_comparison() {
-        // The authorize() Paired branch goes through the constant-time compare:
-        // the exact key passes, a same-length wrong key and a prefix match both
-        // fail, and an absent key fails.
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_pairing(dir.path(), r#"{"paired": true, "api_key": "ados_secret"}"#);
-        let state = PairingState::with_path(path);
-        assert!(state.authorize("/v1/query", Some("ados_secret")));
-        assert!(!state.authorize("/v1/query", Some("ados_secre1")));
-        assert!(!state.authorize("/v1/query", Some("ados_secret_with_more")));
-        assert!(!state.authorize("/v1/query", Some("ados")));
-        assert!(!state.authorize("/v1/query", None));
+    fn an_unreadable_pairing_file_fails_closed() {
+        for body in ["this is not json", r#"{"paired": true, "api_key": ""}"#] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write_pairing(dir.path(), body);
+            let state = PairingState::with_path(path);
+            assert_eq!(state.current(), Pairing::Unreadable, "{body}");
+            assert!(!state.authorize("/v1/query", CallerClass::OnBox, None));
+            assert!(!state.authorize("/v1/query", CallerClass::Lifeline, Some("k")));
+        }
     }
 
     #[test]

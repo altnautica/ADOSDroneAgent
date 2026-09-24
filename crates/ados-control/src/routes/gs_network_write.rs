@@ -149,53 +149,16 @@ async fn net_cmd(request: &Value) -> NetCmd {
 /// against a temp socket without mutating the process-global `ADOS_RUN_DIR`, the
 /// same convention [`crate::routes::network_write::wifi_cmd`] already follows.
 async fn net_cmd_at(sock: &std::path::Path, request: &Value) -> NetCmd {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A manager reply is a few hundred bytes; bound the read to guard a runaway.
-    const MAX_REPLY_BYTES: usize = 64 * 1024;
-
-    let mut stream = match tokio::net::UnixStream::connect(sock).await {
-        Ok(s) => s,
-        Err(_) => return NetCmd::Unavailable,
-    };
-    let mut line = match serde_json::to_vec(request) {
-        Ok(b) => b,
-        Err(_) => return NetCmd::Unavailable,
-    };
-    line.push(b'\n');
-    if stream.write_all(&line).await.is_err() || stream.flush().await.is_err() {
-        return NetCmd::Unavailable;
+    match crate::ipc::cmd::roundtrip_line(
+        sock,
+        request,
+        crate::routes::network_write::WIFI_CMD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(first) => classify_reply(&first),
+        Err(_) => NetCmd::Unavailable,
     }
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 8 * 1024];
-    loop {
-        let n = match stream.read(&mut buf).await {
-            Ok(n) => n,
-            Err(_) => return NetCmd::Unavailable,
-        };
-        if n == 0 {
-            break; // EOF: the server replies once then closes.
-        }
-        if raw.len() + n > MAX_REPLY_BYTES {
-            return NetCmd::Unavailable;
-        }
-        raw.extend_from_slice(&buf[..n]);
-        if raw.contains(&b'\n') {
-            break;
-        }
-    }
-    if raw.is_empty() {
-        return NetCmd::Unavailable;
-    }
-    let text = match String::from_utf8(raw) {
-        Ok(t) => t,
-        Err(_) => return NetCmd::Unavailable,
-    };
-    let Some(first) = text.lines().next() else {
-        return NetCmd::Unavailable;
-    };
-    classify_reply(first)
 }
 
 /// Branch a raw reply line on its transport `ok` flag (`ok is False` →

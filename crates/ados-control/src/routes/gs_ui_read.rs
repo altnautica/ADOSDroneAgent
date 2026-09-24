@@ -8,10 +8,10 @@
 //! gate raises, so the GCS distinguishes "wrong profile" from "endpoint missing".
 //!
 //! - **`GET /api/v1/ground-station/ui`** — the full persisted UI config blob:
-//!   `{oled, buttons, screens}`, each section the on-disk side-file value merged
-//!   over the built-in defaults (`oled.brightness 204` / `auto_dim_enabled true` /
+//!   `{oled, buttons, screens}`, each section the persisted `ground_station.ui`
+//!   value merged over the built-in defaults (`oled.brightness 204` / `auto_dim_enabled true` /
 //!   `screen_cycle_seconds 5`, the six-action button mapping, the six-screen
-//!   order/enabled lists). An absent / unreadable / unparseable side-file degrades
+//!   order/enabled lists). An absent / unreadable / unparseable config degrades
 //!   to the all-defaults shape, never a 500.
 //! - **`GET /api/v1/ground-station/display`** — the persisted HDMI kiosk display
 //!   config: `{resolution, kiosk_enabled, kiosk_target_url}`, the
@@ -19,12 +19,12 @@
 //!   (`resolution "auto"`, `kiosk_enabled false`, `kiosk_target_url null`). Same
 //!   fault-tolerant read.
 //!
-//! The `/ui` read sources from the legacy UI side-file (`/etc/ados/ground-station-ui.json`,
-//! the `GS_UI_JSON` path, resolved here as a sibling of the agent config) exactly as
-//! the Python `_load_ui_config` does. The `/display` read sources from
-//! `ground_station.kiosk` of the YAML config — the single source of truth the kiosk
-//! service reads and the display write route persists — mapping the config fields
-//! (`resolution` / `enabled` / `target_url`) onto the wire shape.
+//! Both reads source the YAML agent config, the single source of truth the
+//! services read and the write routes persist: `/ui` reads `ground_station.ui`
+//! (the legacy UI side-file is migrated into it when the config loads, and
+//! nothing writes the side-file any more), `/display` reads `ground_station.kiosk`,
+//! mapping the config fields (`resolution` / `enabled` / `target_url`) onto the
+//! wire shape.
 
 use std::path::{Path, PathBuf};
 
@@ -63,22 +63,8 @@ fn profile_mismatch() -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// On-disk seam: the legacy ground-station UI side-file.
+// On-disk seam: the agent config.
 // ---------------------------------------------------------------------------
-
-/// The persisted UI config side-file (`/etc/ados/ground-station-ui.json`, the
-/// `GS_UI_JSON` path), resolved as a sibling of the agent config so the read shares
-/// the config-path injection the rest of the ground-station routes use. On a real
-/// box the config is `/etc/ados/config.yaml`, so the sibling is exactly
-/// `/etc/ados/ground-station-ui.json`.
-fn ui_config_path(state: &AppState) -> PathBuf {
-    state
-        .pairing_paths
-        .config
-        .parent()
-        .map(|dir| dir.join("ground-station-ui.json"))
-        .unwrap_or_else(|| PathBuf::from("/etc/ados/ground-station-ui.json"))
-}
 
 /// The agent config path (`/etc/ados/config.yaml` on a real box), the YAML store the
 /// `/display` read sources `ground_station.kiosk` from.
@@ -87,10 +73,15 @@ fn config_yaml_path(state: &AppState) -> PathBuf {
 }
 
 /// Read the persisted `ground_station.kiosk` mapping from the YAML config as a JSON
-/// object map. An absent / unreadable / non-mapping config, or an absent kiosk
-/// section, yields the empty map (so `/display` degrades to the all-defaults shape,
-/// never a 500). The kiosk service reads the same section.
+/// object map. The kiosk service reads the same section.
 fn read_gs_kiosk_section(config_path: &Path) -> Map<String, Value> {
+    read_gs_section(config_path, "kiosk")
+}
+
+/// Read one `ground_station.<key>` mapping from the YAML config as a JSON object
+/// map. An absent / unreadable / non-mapping config, or an absent section, yields
+/// the empty map (so a read degrades to the all-defaults shape, never a 500).
+pub(crate) fn read_gs_section(config_path: &Path, key: &str) -> Map<String, Value> {
     let text = match std::fs::read_to_string(config_path) {
         Ok(t) => t,
         Err(_) => return Map::new(),
@@ -101,7 +92,7 @@ fn read_gs_kiosk_section(config_path: &Path) -> Map<String, Value> {
     };
     match yaml
         .get("ground_station")
-        .and_then(|g| g.get("kiosk"))
+        .and_then(|g| g.get(key))
         .map(yaml_to_json)
     {
         Some(Value::Object(map)) => map,
@@ -147,28 +138,11 @@ fn yaml_to_json(value: &serde_norway::Value) -> Value {
     }
 }
 
-/// Read the side-file into an object map, returning the empty map on absence / a
-/// read error / a parse error / a falsy or non-object body. Mirrors the Python
-/// `json.loads(...) or {}` guarded by `except (OSError, ValueError)`: a falsy parse
-/// (`null`/`false`/`0`/`""`/`[]`/`{}`) collapses to `{}`, and a truthy non-object
-/// body is not a realistic UI blob so it also reads as the empty map (strictly
-/// safer than the Python `.get` and byte-identical for every real dict / empty
-/// input).
-fn read_ui_blob(path: &Path) -> Map<String, Value> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => map,
-            _ => Map::new(),
-        },
-        Err(_) => Map::new(),
-    }
-}
-
-/// Merge a side-file section over a defaults map: start from the defaults, then
-/// overlay every key the side-file section carries. Mirrors the Python
+/// Merge a persisted section over a defaults map: start from the defaults, then
+/// overlay every key the persisted section carries. Mirrors the Python
 /// `{**_DEFAULT_X, **(data.get("x") or {})}` spread: a falsy / non-object section
 /// contributes nothing (the defaults stand), and present keys win. The defaults
-/// supply the key set and the fallbacks; the side-file supplies overrides.
+/// supply the key set and the fallbacks; the persisted section supplies overrides.
 fn merge_over_defaults(defaults: Map<String, Value>, section: Option<&Value>) -> Value {
     let mut out = defaults;
     if let Some(Value::Object(overrides)) = section {
@@ -241,19 +215,18 @@ fn json_object(value: Value) -> Map<String, Value> {
 
 /// `GET /api/v1/ground-station/ui` → `{oled, buttons, screens}`.
 ///
-/// `404` `E_PROFILE_MISMATCH` off a ground-station node. Otherwise the side-file
-/// blob with each section merged over its built-in defaults, byte-identical to the
-/// Python `_load_ui_config`. An absent / unreadable side-file yields the all-defaults
-/// shape, never a 500.
+/// `404` `E_PROFILE_MISMATCH` off a ground-station node. Otherwise the persisted
+/// `ground_station.ui` section with each part merged over its built-in defaults.
+/// An absent / unreadable config yields the all-defaults shape, never a 500.
 pub async fn get_ui(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    let blob = read_ui_blob(&ui_config_path(&state));
+    let blob = read_gs_section(&config_yaml_path(&state), "ui");
     Json(build_ui_config(&blob)).into_response()
 }
 
-/// Compose the `/ui` body from a side-file blob: each section the defaults merged
+/// Compose the `/ui` body from the persisted `ground_station.ui` map: each section the defaults merged
 /// with the blob's matching section. Split out so the merge + the default key set
 /// are unit-tested without filesystem IO.
 fn build_ui_config(blob: &Map<String, Value>) -> Value {
@@ -451,63 +424,6 @@ mod tests {
         assert_eq!(
             build_display_config(&read_gs_kiosk_section(&cfg)),
             json!({"resolution": "auto", "kiosk_enabled": false, "kiosk_target_url": null})
-        );
-    }
-
-    #[test]
-    fn read_ui_blob_handles_absent_and_non_object_bodies() {
-        let dir = tempfile::tempdir().unwrap();
-        // Absent file → empty map.
-        assert_eq!(read_ui_blob(&dir.path().join("absent.json")), Map::new());
-        // A non-object body (a JSON list) → empty map (Python `or {}` collapses a
-        // falsy / unusable parse; a truthy non-dict is not a real UI blob).
-        let list = dir.path().join("list.json");
-        std::fs::write(&list, "[1,2,3]").unwrap();
-        assert_eq!(read_ui_blob(&list), Map::new());
-        // A falsy object body (empty object) → empty map.
-        let empty_obj = dir.path().join("empty.json");
-        std::fs::write(&empty_obj, "{}").unwrap();
-        assert_eq!(read_ui_blob(&empty_obj), Map::new());
-        // A non-JSON body → empty map.
-        let garbage = dir.path().join("garbage.json");
-        std::fs::write(&garbage, "not json").unwrap();
-        assert_eq!(read_ui_blob(&garbage), Map::new());
-        // A real object body round-trips.
-        let obj = dir.path().join("obj.json");
-        std::fs::write(&obj, r#"{"oled":{"brightness":10}}"#).unwrap();
-        let got = read_ui_blob(&obj);
-        assert_eq!(got.get("oled").unwrap()["brightness"], json!(10));
-    }
-
-    #[test]
-    fn read_ui_blob_reads_a_full_blob_from_disk() {
-        // A side-file with a partial oled section round-trips; the ui builder
-        // projects the three UI sections off the blob, defaults filling the gaps.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ground-station-ui.json");
-        std::fs::write(&path, r#"{"oled":{"brightness":50}}"#).unwrap();
-        let blob = read_ui_blob(&path);
-        assert_eq!(build_ui_config(&blob)["oled"]["brightness"], json!(50));
-        // The screen_cycle default still stands under the partial oled override.
-        assert_eq!(
-            build_ui_config(&blob)["oled"]["screen_cycle_seconds"],
-            json!(5)
-        );
-        // The untouched buttons section is the full default.
-        assert_eq!(
-            build_ui_config(&blob)["buttons"]["mapping"]["B1_short"],
-            json!("cycle_screen")
-        );
-    }
-
-    #[test]
-    fn ui_config_path_is_the_config_sibling() {
-        // The side-file resolves as a sibling of the agent config, so on a real box
-        // (config = /etc/ados/config.yaml) it is /etc/ados/ground-station-ui.json.
-        let p = Path::new("/etc/ados/config.yaml");
-        assert_eq!(
-            p.parent().unwrap().join("ground-station-ui.json"),
-            Path::new("/etc/ados/ground-station-ui.json")
         );
     }
 }

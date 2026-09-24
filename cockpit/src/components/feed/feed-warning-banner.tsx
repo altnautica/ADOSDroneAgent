@@ -54,7 +54,7 @@ function computeWarning(status: GsStatus | null, telemetry: VehicleState | null)
   // 3) Low battery — the vehicle's own percentage, else the paired-drone block.
   //
   // Only when the reading is CORROBORATED by a plausible pack voltage. A flight
-  // controller with no battery monitor reports 0% at 0.0V, and `remaining >= 0`
+  // controller with no battery monitor reports 0% at 0.0V, and a bare reading
   // accepted that as an empty pack: every bench session without a battery
   // attached raised a red "Battery low — 0% remaining" over the video. A real
   // pack at 0% still has voltage; 0.0V means nobody is measuring.
@@ -65,7 +65,7 @@ function computeWarning(status: GsStatus | null, telemetry: VehicleState | null)
   const remaining = telemetry?.battery?.remaining;
   const measured = batteryIsMeasured(telemetry?.battery?.voltage);
   const pct =
-    typeof remaining === "number" && remaining >= 0 && measured
+    remaining != null && measured
       ? remaining
       : (status?.paired_drone?.battery_pct ?? null);
   if (pct != null && pct <= 20) {

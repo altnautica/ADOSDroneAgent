@@ -57,8 +57,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use ados_protocol::shutdown::Shutdown;
 use serde::Serialize;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 
 use ados_protocol::ipc::InboundCommand;
 
@@ -210,7 +211,7 @@ pub async fn run(
     fc: Arc<FcConnection>,
     counters: Arc<IngestCounters>,
     relayed: Arc<Mutex<RelayedVehicle>>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     let mut last_report = IngestCountersSnapshot::default();
     let mut report_tick = tokio::time::interval_at(
@@ -226,7 +227,7 @@ pub async fn run(
     loop {
         tokio::select! {
             biased;
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
             _ = report_tick.tick() => {
                 last_report = report(&counters, last_report);
             }
@@ -462,7 +463,7 @@ mod tests {
     async fn the_loop_forwards_from_the_socket_channel_and_stops_on_cancel() {
         let fc = connection();
         let counters = Arc::new(IngestCounters::default());
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let (tx, rx) = mpsc::channel(8);
         let mut consumer = fc.subscribe();
 
@@ -476,10 +477,29 @@ mod tests {
         tx.send(ingested(heartbeat())).await.unwrap();
         assert_eq!(consumer.recv().await.unwrap(), heartbeat());
 
-        cancel.notify_waiters();
+        cancel.trigger();
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("cancellation must stop the loop")
+            .unwrap();
+    }
+
+    /// A stop that lands while a loop is busy elsewhere (here: before it has
+    /// first parked on its select) must still end it. The router's shutdown
+    /// joins every task, so a loop that misses the signal holds the stop until
+    /// the service manager kills the process.
+    #[tokio::test]
+    async fn a_stop_fired_before_the_loop_parks_still_ends_it() {
+        let fc = connection();
+        let counters = Arc::new(IngestCounters::default());
+        let cancel = Shutdown::new();
+        let (_tx, rx) = mpsc::channel::<InboundCommand>(8);
+        cancel.trigger();
+
+        let task = tokio::spawn(run(rx, fc, counters, relayed(), cancel));
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("a stop fired before the loop parked must still end it")
             .unwrap();
     }
 
@@ -487,7 +507,7 @@ mod tests {
     async fn the_loop_ends_when_the_socket_channel_closes() {
         let fc = connection();
         let counters = Arc::new(IngestCounters::default());
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let (tx, rx) = mpsc::channel::<InboundCommand>(8);
 
         let task = tokio::spawn(run(rx, fc, counters, relayed(), cancel));

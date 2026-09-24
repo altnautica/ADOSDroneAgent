@@ -25,7 +25,7 @@ from tests.api_runtime_utils import build_api_runtime
 
 @pytest.fixture
 def agent_app():
-    return build_api_runtime(uptime_seconds=0.0)
+    return build_api_runtime()
 
 
 @pytest.fixture
@@ -219,6 +219,27 @@ def test_install_rejects_non_adosplug(client, supervisor, tmp_path: Path):
     body = resp.json()
     assert body["code"] == 2
     assert body["kind"] == "usage_error"
+
+
+def test_install_error_marks_the_job_failed(client, supervisor, tmp_path, monkeypatch):
+    """A rejected upload must end the progress stream with the real reason.
+
+    Once a job sidecar exists the install-progress WebSocket streams it until
+    a terminal stage; an error that leaves it on "verifying" makes the dialog
+    wait out the idle timeout instead.
+    """
+    from ados.api.routes import _plugins_helpers as helpers
+
+    monkeypatch.setattr(helpers, "SIDECAR_DIR", tmp_path / "run", raising=False)
+    resp = client.post(
+        "/api/plugins/install?job_id=job-bad",
+        files={"file": ("broken.adosplug", b"not a zip archive", "application/zip")},
+    )
+    assert resp.status_code == 400
+    sidecar = helpers.read_sidecar("job-bad")
+    assert sidecar is not None
+    assert sidecar["stage"] == "failed"
+    assert sidecar["detail"] == resp.json()["detail"]
 
 
 def test_grant_unknown_permission_returns_permission_deny(

@@ -48,6 +48,26 @@ interface PinResponse {
 /** Minimum PIN length, mirroring the agent's dashboard_pin MIN_PIN_LEN. */
 const MIN_PIN = 4;
 
+/** What to tell the operator when the PIN route refuses. The verify route
+ *  answers a wrong PIN with 401 `{remaining_attempts}`, a lockout with 429
+ *  `{locked_until}` (unix seconds), and a refused set with a `{detail}`. */
+function pinRefusalMessage(e: unknown): string {
+  if (!(e instanceof ApiError)) return "Access setup failed.";
+  const body = (e.body && typeof e.body === "object" ? e.body : {}) as Record<string, unknown>;
+  if (e.status === 401) {
+    const left = typeof body.remaining_attempts === "number" ? body.remaining_attempts : null;
+    return left != null && left > 0
+      ? `Incorrect PIN. ${left} attempt${left === 1 ? "" : "s"} left.`
+      : "Incorrect PIN.";
+  }
+  if (e.status === 429) {
+    const until = typeof body.locked_until === "number" ? body.locked_until : null;
+    const secs = until != null ? Math.max(0, Math.ceil(until - Date.now() / 1000)) : null;
+    return secs ? `Too many attempts. Try again in ${secs} s.` : "Too many attempts. Try again shortly.";
+  }
+  return typeof body.detail === "string" && body.detail ? body.detail : e.message;
+}
+
 export function SetUpAccess() {
   const [mode, setMode] = useState<"idle" | "set" | "enter">("idle");
   const [pin, setPin] = useState("");
@@ -92,8 +112,7 @@ export function SetUpAccess() {
       setPin("");
       setMode("idle");
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : "Access setup failed.";
-      setError(msg);
+      setError(pinRefusalMessage(e));
     } finally {
       setBusy(false);
     }
@@ -122,7 +141,7 @@ export function SetUpAccess() {
           <span className="text-[0.78rem] text-muted-foreground">
             {mode === "set"
               ? "No access PIN is set yet. Choose a 4–12 digit PIN:"
-              : "Enter this node&apos;s dashboard PIN to unlock its data:"}
+              : "Enter this node’s dashboard PIN to unlock its data:"}
           </span>
           <div className="flex w-full max-w-[20rem] items-center gap-[0.4rem]">
             <input

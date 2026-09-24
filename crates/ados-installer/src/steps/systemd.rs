@@ -79,14 +79,17 @@ const UNIVERSAL_UNITS: &[&str] = &[
 
 /// Ground-station units enable-linked here (the START half is the `start` step's job).
 ///
-/// `ados-usb-gadget.service` is deliberately NOT here. The native `ados-net`
-/// daemon composes the OTG gadget in-process (`UsbGadgetManager::setup`), so
-/// enabling the packaged unit puts a second composer on the same UDC; it is
-/// stopped + disabled on every GS install by `reconcile_rust_cutover_units`.
+/// No OTG gadget unit is here: the native `ados-net` daemon composes the gadget
+/// in-process (`UsbGadgetManager::setup`), and the packaged unit is retired.
 /// Enabling and then immediately subsuming it was the contradiction this list
 /// used to encode.
-const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
+pub(crate) const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-wfb-rx.service",
+    // The pairing daemon: every REST pair accept / close / approve / revoke
+    // reaches it over /run/ados/pairing.sock, so a ground station without it
+    // answers every pairing call with "daemon unavailable". Role-independent:
+    // a receiver can open a pairing window before its receive unit is up.
+    "ados-mesh-pairing.service",
     "ados-mediamtx-gs.service",
     "ados-oled.service",
     "ados-oled-i2c.service",
@@ -97,10 +100,10 @@ const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-input.service",
     "ados-pic.service",
     "ados-uplink-router.service",
-    // ados-wifi-client.service is deliberately absent, for the same reason as
-    // ados-usb-gadget.service: ados-net owns the station in-process, and both
-    // names are in ALWAYS_SUBSUMED_UNITS, so enable-linking either one here
-    // means an install enables a unit it disables again in the same run.
+    // ados-wifi-client.service is deliberately absent: ados-net owns the
+    // station in-process and the name is in ALWAYS_SUBSUMED_UNITS, so
+    // enable-linking it here means an install enables a unit it disables again
+    // in the same run.
 ];
 
 /// Units the agent shipped in a prior release but has since deleted. The
@@ -135,6 +138,10 @@ const RETIRED_UNITS: &[&str] = &[
     // builds the gadget tree itself, so a second composer on the same UDC was
     // never a path worth keeping. Left on disk its ExecStart points at nothing.
     "ados-usb-gadget-setup.service",
+    // The packaged OTG gadget composer. The module its ExecStart named was
+    // deleted; ados-net composes the gadget in-process, so the unit selects
+    // nothing and is pruned rather than stopped and disabled on every install.
+    "ados-usb-gadget.service",
 ];
 
 /// Udev rules retired with the units they triggered. Same reasoning as
@@ -184,8 +191,6 @@ fn other_profile_units(profile: &str) -> &'static [&'static str] {
         _ => &[
             "ados-wfb-rx.service",
             "ados-mediamtx-gs.service",
-            "ados-usb-gadget.service",
-            "ados-usb-gadget-setup.service",
             "ados-oled.service",
             "ados-oled-i2c.service",
             "ados-hostapd.service",
@@ -870,15 +875,13 @@ fn mask_conflicting_standalone_services() {
 /// The packaged units a native daemon always owns instead. Module-level so the
 /// enable/start lists can be pinned against it: a name here must never also be
 /// enable-linked, or an install enables a unit it then disables in the same run.
-pub(crate) const ALWAYS_SUBSUMED_UNITS: &[&str] =
-    &["ados-wifi-client.service", "ados-usb-gadget.service"];
+pub(crate) const ALWAYS_SUBSUMED_UNITS: &[&str] = &["ados-wifi-client.service"];
 
 /// Reconcile the packaged units a native consolidator daemon subsumes
-/// (`reconcile_rust_cutover_units`). GROUND-STATION ONLY. Net and hid are both
-/// native-only now (the packaged uplink entrypoints + the PIC arbiter / input
-/// manager were deleted), so the native daemons always own
-/// ethernet/wifi-client/usb-gadget/modem and the front-panel buttons in-process
-/// — their packaged units are ALWAYS torn down.
+/// (`reconcile_rust_cutover_units`). GROUND-STATION ONLY. The native net daemon
+/// always owns the WiFi station in-process, so its packaged unit is ALWAYS torn
+/// down. (Ethernet, modem and the OTG gadget went further: their packaged
+/// units are retired and pruned outright.)
 fn reconcile_rust_cutover_units() {
     // ados-ethernet + ados-modem moved to RETIRED_UNITS (their Python
     // entrypoints were deleted), so the prune removes them outright rather than
@@ -1445,7 +1448,8 @@ fn install_power_hardening(source: Option<&Path>) {
     // The unit file (data/systemd/ados-power.service) is deployed by
     // deploy_units; here we install the helper script it execs and enable+start
     // the unit. The script lives at scripts/ados-power-reassert.sh in the source
-    // tree (kept; not part of the removed install.d set).
+    // tree, which this step requires; there is deliberately no second inline
+    // copy to drift from it.
     let bin_dir = format!("{INSTALL_DIR}/bin");
     let _ = std::fs::create_dir_all(&bin_dir);
     let reassert_dst = format!("{bin_dir}/ados-power-reassert.sh");
@@ -1455,14 +1459,17 @@ fn install_power_hardening(source: Option<&Path>) {
         .filter(|p| p.is_file())
         .map(|p| std::fs::copy(p, &reassert_dst).is_ok())
         .unwrap_or(false);
-    if !copied {
-        // Inline fallback so the oneshot still works on a tree missing the helper.
-        let _ = std::fs::write(&reassert_dst, REASSERT_INLINE_FALLBACK);
+    if copied {
+        set_mode(Path::new(&reassert_dst), 0o755);
+        let _ = exec::run("systemctl", &["enable", "ados-power.service"]);
+        // Run it now so the knobs are asserted on the current boot too.
+        let _ = exec::run("systemctl", &["start", "ados-power.service"]);
+    } else {
+        tracing::warn!(
+            src = ?reassert_src,
+            "power re-assert helper missing from the source tree; boot re-assert not installed"
+        );
     }
-    set_mode(Path::new(&reassert_dst), 0o755);
-    let _ = exec::run("systemctl", &["enable", "ados-power.service"]);
-    // Run it now so the knobs are asserted on the current boot too.
-    let _ = exec::run("systemctl", &["start", "ados-power.service"]);
 
     // ── 6. Kernel freeze resilience. The hardware watchdog (steps/watchdog.rs)
     // catches a total lockup; these catch the cases it cannot — a hung kernel
@@ -1504,30 +1511,6 @@ fn install_power_hardening(source: Option<&Path>) {
          on-disk log retention set)"
     );
 }
-
-/// Inline `ados-power-reassert.sh` body used only when the source tree does not
-/// ship the helper (it normally does). Mirrors the script at
-/// scripts/ados-power-reassert.sh; the def-route interface is skipped for EEE so
-/// the management link is never renegotiated.
-const REASSERT_INLINE_FALLBACK: &str = "#!/bin/sh\n\
-# ADOS: re-assert power knobs at boot. Forgiving by design.\n\
-for _ifdir in /sys/class/net/wlan*; do\n\
-    [ -e \"${_ifdir}\" ] || continue\n\
-    _if=\"$(basename \"${_ifdir}\")\"\n\
-    iw dev \"${_if}\" set power_save off 2>/dev/null || true\n\
-done\n\
-for _ctl in /sys/bus/usb/devices/*/power/control; do\n\
-    [ -w \"${_ctl}\" ] || continue\n\
-    echo on > \"${_ctl}\" 2>/dev/null || true\n\
-done\n\
-_def_if=\"$(ip route show default 2>/dev/null | awk '{print $5; exit}')\"\n\
-for _ed in /sys/class/net/eth* /sys/class/net/end* /sys/class/net/enP* /sys/class/net/enx*; do\n\
-    [ -e \"${_ed}\" ] || continue\n\
-    _eif=\"$(basename \"${_ed}\")\"\n\
-    [ \"${_eif}\" = \"${_def_if}\" ] && continue\n\
-    ethtool --set-eee \"${_eif}\" eee off 2>/dev/null || true\n\
-done\n\
-exit 0\n";
 
 /// Quiet the Rockchip BSP ISP 3A daemon (`rkaiq_3A.service`) on UVC-camera rigs.
 /// Self-gating: a no-op on non-Rockchip boards (unit absent) and on boards where
@@ -1856,9 +1839,10 @@ impl Step for Systemd {
         //     `ados rust enable control`.
         reconcile_control_unit();
 
-        // 5b-ter. The LAN-front cutover is off by default. When pinned on, the
+        // 5b-ter. The LAN-front cutover is on by default (ensured above). The
         //     drop-ins bind the native surface to the LAN port and move FastAPI
-        //     onto the internal socket behind it; absent, FastAPI owns the port.
+        //     onto the internal socket behind it; with the marker removed for a
+        //     debug session, FastAPI owns the port until the next install.
         reconcile_front_unit();
 
         // 5c. Drop marker files retired by a default sense flip (the plugin
@@ -2905,16 +2889,6 @@ mod tests {
         assert!(
             extlinux_append_with("LABEL x\n  KERNEL /boot/Image\n", USB_AUTOSUSPEND_ARG).is_none()
         );
-    }
-
-    #[test]
-    fn reassert_inline_fallback_skips_default_route_iface() {
-        // The inline fallback must contain the def-route skip so it never
-        // renegotiates the management NIC's PHY (the wired-link-bounce hazard).
-        assert!(REASSERT_INLINE_FALLBACK.contains("ip route show default"));
-        assert!(REASSERT_INLINE_FALLBACK.contains("[ \"${_eif}\" = \"${_def_if}\" ] && continue"));
-        assert!(REASSERT_INLINE_FALLBACK.starts_with("#!/bin/sh"));
-        assert!(REASSERT_INLINE_FALLBACK.ends_with("exit 0\n"));
     }
 
     #[test]

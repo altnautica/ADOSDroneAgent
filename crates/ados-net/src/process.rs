@@ -22,15 +22,16 @@ pub struct ManagedProcess {
 }
 
 impl ManagedProcess {
-    /// Spawn `program` with `args` as a process-group leader. stdout is
-    /// discarded; stderr is piped so the caller may drain it. The child is
-    /// `setsid`'d so [`kill`](Self::kill) can `killpg` the whole group.
+    /// Spawn `program` with `args` as a process-group leader. stdout and stderr
+    /// are discarded: nothing reads them, and an unread pipe fills and blocks the
+    /// child (dnsmasq logs to syslog). The child is `setsid`'d so
+    /// [`kill`](Self::kill) can `killpg` the whole group.
     pub fn spawn(program: &str, args: &[&str]) -> std::io::Result<Self> {
         let mut cmd = tokio::process::Command::new(program);
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::null());
 
         // Move the child into its own session so killpg later kills it cleanly.
         // `pre_exec` is an inherent method on tokio's unix Command.

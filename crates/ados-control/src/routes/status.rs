@@ -48,12 +48,10 @@ use serde_json::{json, Map, Value};
 use crate::ipc::VisionIpcClient;
 use crate::state::AppState;
 
-/// The runtime-only keys the state snapshot carries alongside the vehicle state.
-/// `/api/telemetry` strips them so it surfaces only the vehicle fields the GCS
-/// expects; `/api/status` reads them as the FC connection triple + the service
-/// uptime + the FC-liveness detail (transport_open / mavlink_alive /
-/// heartbeat_age_s / fc_source / fc_link_hint). Mirrors the Python
-/// `_ipc_only_keys` set.
+/// The runtime-only keys the state snapshot carries alongside the vehicle state. `/api/telemetry`
+/// strips them so it surfaces only the vehicle fields the GCS expects; `/api/status` reads them as
+/// the FC connection triple + the service uptime + the FC-liveness detail (transport_open /
+/// mavlink_alive / heartbeat_age_s / fc_source / fc_link_hint). set.
 const IPC_ONLY_KEYS: [&str; 12] = [
     "fc_connected",
     "fc_port",
@@ -118,8 +116,17 @@ const IPC_ONLY_KEYS: [&str; 12] = [
 /// a blank is indistinguishable from `hold`, which would read as "nothing has
 /// intervened" at exactly the moment something has.
 ///
+/// The `attitude_*` keys are the attitude-rate rung's own verdict and counters
+/// (setpoints it emitted, ticks and freshness checks it suppressed): what the
+/// agent's control lane did, not a reading off the vehicle, and exactly what an
+/// operator needs to see while the FC link is down.
+///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 17] = [
+const AGENT_DIAGNOSTIC_KEYS: [&str; 21] = [
+    "attitude_freshness_suppressions",
+    "attitude_setpoints_emitted",
+    "attitude_ticks_suppressed",
+    "attitude_verdict",
     "aux_mavlink_tee",
     "aux_rpc",
     "fc_reachable",
@@ -1270,6 +1277,25 @@ mod tests {
         assert_eq!(obj["armed"], json!(true));
         assert_eq!(obj["aux_rpc"], json!({"rpc_requests": 3}));
         assert!(!obj.contains_key("mavlink_alive"));
+    }
+
+    #[test]
+    fn the_attitude_rung_diagnostics_survive_a_down_link() {
+        let snapshot = json!({
+            "armed": true,
+            "mavlink_alive": false,
+            "attitude_verdict": "no-command",
+            "attitude_setpoints_emitted": 0,
+            "attitude_ticks_suppressed": 4,
+            "attitude_freshness_suppressions": 2,
+        });
+        let tel = project_telemetry(Some(snapshot));
+        let obj = tel.as_object().unwrap();
+        assert!(!obj.contains_key("armed"));
+        assert_eq!(obj["attitude_verdict"], json!("no-command"));
+        assert_eq!(obj["attitude_ticks_suppressed"], json!(4));
+        assert_eq!(obj["attitude_freshness_suppressions"], json!(2));
+        assert_eq!(obj["attitude_setpoints_emitted"], json!(0));
     }
 
     #[test]

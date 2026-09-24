@@ -72,9 +72,8 @@ pub fn load(path: &Path) -> BTreeMap<String, i64> {
     out
 }
 
-/// Atomic write of the seen-jobs map with a size cap. When over cap, drop the
-/// oldest ~10% of entries (by timestamp) to keep churn low. Mirrors
-/// `_save_seen_jobs`.
+/// Atomic write of the seen-jobs map with a size cap. When over cap, drop the oldest ~10% of
+/// entries (by timestamp) to keep churn low.
 pub fn save(seen: &BTreeMap<String, i64>, path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

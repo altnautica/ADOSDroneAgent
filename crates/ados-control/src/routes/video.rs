@@ -663,20 +663,18 @@ impl VideoConfig {
 // logd query seam: HTTP-over-UDS reads of the store's /v1 metrics + events.
 // ---------------------------------------------------------------------------
 
-/// The newest value (as a JSON value) per named metric from a recent `metrics`
-/// page, newest-wins, dropping any sample older than `max_age_s`. Returns `None`
-/// when the store is unreachable OR when none of the named metrics has a FRESH
-/// sample in the page; a name not seen is simply absent from a non-empty map.
-/// Mirrors the Python `latest_metrics`, whose `return out or None` collapses an
-/// empty result to `None` — the latency route relies on that `None` to fall
-/// through to its live file read rather than reporting a snapshot of nulls, or a
-/// frozen last-known reading, as a real measurement.
+/// The newest value (as a JSON value) per named metric from a recent `metrics` page, newest-wins,
+/// dropping any sample older than `max_age_s`. Returns `None` when the store is unreachable OR when
+/// none of the named metrics has a FRESH sample in the page; a name not seen is simply absent from
+/// a non-empty map. An empty result is `None`: the latency
+/// route relies on that `None` to fall through to its live file read rather than reporting a
+/// snapshot of nulls, or a frozen last-known reading, as a real measurement.
 async fn latest_metrics(
     state: &AppState,
     names: &[&str],
     max_age_s: f64,
 ) -> Option<Map<String, Value>> {
-    let rows = logd_query_rows(state, "metrics", 200, None).await?;
+    let rows = state.logd.rows("metrics", 200, None).await?;
     // `out or None`: an empty map reads as "no data", matching the Python helper.
     collapse_empty_metrics(fresh_metric_values(&rows, names, now_micros(), max_age_s))
 }
@@ -760,7 +758,7 @@ fn metric_value(metrics: Option<&Map<String, Value>>, name: &str) -> Option<f64>
 
 /// The `detail` object of the newest events row whose `kind` matches, or `None`.
 async fn latest_event_detail(state: &AppState, kind: &str) -> Option<Map<String, Value>> {
-    let rows = logd_query_rows(state, "events", 50, Some(kind)).await?;
+    let rows = state.logd.rows("events", 50, Some(kind)).await?;
     for row in rows {
         let Some(obj) = row.as_object() else { continue };
         if obj.get("kind").and_then(Value::as_str) == Some(kind) {
@@ -778,153 +776,6 @@ async fn latest_event_detail(state: &AppState, kind: &str) -> Option<Map<String,
 async fn latest_event_field(state: &AppState, kind: &str, field: &str) -> Option<Value> {
     let detail = latest_event_detail(state, kind).await?;
     detail.get(field).cloned()
-}
-
-/// Page the store's `/v1/query` for one row kind, returning the `data` array, or
-/// `None` when the store is unreachable / the response is an error / does not
-/// parse. An optional `event_kind` filters the events table server-side. Mirrors
-/// the read side of the Python `query_rows`.
-async fn logd_query_rows(
-    state: &AppState,
-    kind: &str,
-    limit: i64,
-    event_kind: Option<&str>,
-) -> Option<Vec<Value>> {
-    let mut params: Vec<(&str, String)> =
-        vec![("kind", kind.to_string()), ("limit", limit.to_string())];
-    if let Some(ek) = event_kind {
-        params.push(("event_kind", ek.to_string()));
-    }
-    let query = encode_query(&params);
-    let path = format!("/v1/query?{query}");
-    let (status, body) = logd_get(state, &path).await.ok()?;
-    if status >= 400 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_slice(&body).ok()?;
-    parsed
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|a| a.to_vec())
-}
-
-/// A minimal HTTP/1.1 `GET` over the logging-store query Unix socket, returning the
-/// status code + the decoded body. The socket path comes from the app state's logd
-/// client so a test redirects it. `Connection: close` reads the body to EOF; a
-/// chunked body is de-chunked. Bounded so a runaway response cannot exhaust memory.
-async fn logd_get(state: &AppState, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A hard ceiling on the response read; a normal metrics/events page is a few
-    /// KiB, so this only guards a runaway body.
-    const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
-
-    let socket = state.logd.socket_path();
-    let mut stream = tokio::net::UnixStream::connect(socket).await?;
-    let head = format!("GET {path} HTTP/1.1\r\nHost: logd\r\nConnection: close\r\n\r\n");
-    stream.write_all(head.as_bytes()).await?;
-    stream.flush().await?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            break; // EOF (Connection: close).
-        }
-        if raw.len() + n > MAX_READ_BYTES {
-            return Err(std::io::Error::other("logd response too large"));
-        }
-        raw.extend_from_slice(&buf[..n]);
-    }
-    parse_http_response(&raw)
-}
-
-/// Split a raw HTTP/1.1 response into the status code + decoded body. De-chunks a
-/// `Transfer-Encoding: chunked` body; otherwise returns the body after the header
-/// terminator as-is.
-fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
-    let sep = b"\r\n\r\n";
-    let split = raw
-        .windows(sep.len())
-        .position(|w| w == sep)
-        .ok_or_else(|| std::io::Error::other("malformed http response (no header terminator)"))?;
-    let head = &raw[..split];
-    let body = &raw[split + sep.len()..];
-
-    let head_str = String::from_utf8_lossy(head);
-    let status = head_str
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| std::io::Error::other("malformed http status line"))?;
-
-    let chunked = head_str
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked");
-    let body = if chunked {
-        de_chunk(body)
-    } else {
-        body.to_vec()
-    };
-    Ok((status, body))
-}
-
-/// De-chunk a `Transfer-Encoding: chunked` body: `<hexlen>\r\n<data>\r\n` repeated
-/// until a zero-length chunk.
-fn de_chunk(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    while let Some(crlf) = rest.windows(2).position(|w| w == b"\r\n") {
-        let len_line = &rest[..crlf];
-        let len = usize::from_str_radix(String::from_utf8_lossy(len_line).trim(), 16).unwrap_or(0);
-        if len == 0 {
-            break;
-        }
-        let data_start = crlf + 2;
-        if rest.len() < data_start + len {
-            out.extend_from_slice(&rest[data_start..]);
-            break;
-        }
-        out.extend_from_slice(&rest[data_start..data_start + len]);
-        let next = data_start + len;
-        rest = if rest.len() >= next + 2 {
-            &rest[next + 2..]
-        } else {
-            &[]
-        };
-    }
-    out
-}
-
-// ---------------------------------------------------------------------------
-// Small shared helpers.
-// ---------------------------------------------------------------------------
-
-/// Percent-encode a query-parameter list into a `key=value&...` string. Only the
-/// characters the store's query values use appear, so a conservative
-/// reserved-character escape is sufficient.
-fn encode_query(params: &[(&str, String)]) -> String {
-    params
-        .iter()
-        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Conservative percent-encoding: pass through the unreserved set
-/// (`A-Za-z0-9-._~`) verbatim and percent-encode every other byte.
-fn percent_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -1538,30 +1389,6 @@ mod tests {
         assert_eq!(metric_value(Some(&m), "c"), None); // string excluded
         assert_eq!(metric_value(Some(&m), "absent"), None);
         assert_eq!(metric_value(None, "a"), None);
-    }
-
-    #[test]
-    fn percent_encode_escapes_reserved_chars() {
-        assert_eq!(
-            percent_encode("video.latency.glass_ms"),
-            "video.latency.glass_ms"
-        );
-        assert_eq!(percent_encode("metrics"), "metrics");
-        assert_eq!(percent_encode("a b"), "a%20b");
-    }
-
-    #[test]
-    fn de_chunk_reassembles_a_chunked_body() {
-        let chunked = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        assert_eq!(de_chunk(chunked), b"hello world");
-    }
-
-    #[test]
-    fn parse_http_response_reads_status_and_body() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
-        let (status, body) = parse_http_response(raw).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, b"{}");
     }
 
     #[test]

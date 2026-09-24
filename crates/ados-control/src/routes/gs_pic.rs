@@ -147,65 +147,14 @@ async fn pic_request(request: &Value) -> PicReply {
 /// control-socket path. Threaded so a test drives the socket seam against a
 /// tempdir without mutating the process-global `ADOS_RUN_DIR`.
 async fn pic_request_at(sock: &std::path::Path, request: &Value) -> PicReply {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// An arbiter reply is a few hundred bytes; bound the read to guard a runaway.
-    const MAX_REPLY_BYTES: usize = 64 * 1024;
-
-    let mut stream = match tokio::net::UnixStream::connect(sock).await {
-        Ok(s) => s,
-        Err(_) => return PicReply::Unavailable,
-    };
-    let mut line = match serde_json::to_vec(request) {
-        Ok(b) => b,
-        Err(_) => return PicReply::Unavailable,
-    };
-    line.push(b'\n');
-    if stream.write_all(&line).await.is_err() || stream.flush().await.is_err() {
-        return PicReply::Unavailable;
-    }
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 8 * 1024];
-    loop {
-        let n = match stream.read(&mut buf).await {
-            Ok(n) => n,
-            Err(_) => return PicReply::Unavailable,
-        };
-        if n == 0 {
-            break; // EOF: the server replies once then closes.
-        }
-        if raw.len() + n > MAX_REPLY_BYTES {
-            return PicReply::Unavailable;
-        }
-        raw.extend_from_slice(&buf[..n]);
-        if raw.contains(&b'\n') {
-            break;
-        }
-    }
-    if raw.is_empty() {
-        return PicReply::Unavailable;
-    }
-    let text = match String::from_utf8(raw) {
-        Ok(t) => t,
-        Err(_) => return PicReply::Unavailable,
-    };
-    let Some(first) = text.lines().next() else {
-        return PicReply::Unavailable;
-    };
-    match serde_json::from_str::<Value>(first) {
-        Ok(Value::Object(m)) => {
-            // A transport-level `ok:false` (a malformed-request / unknown-op error
-            // from the daemon's dispatch) is not a normal arbiter outcome; treat
-            // it as the unavailable arm so the route surfaces the 500 rather than
-            // a partial body. The arbiter outcomes always carry `ok:true`.
-            if m.get("ok") == Some(&Value::Bool(false)) {
-                PicReply::Unavailable
-            } else {
-                PicReply::Obj(m)
-            }
-        }
-        _ => PicReply::Unavailable,
+    match crate::ipc::cmd::roundtrip_object(sock, request, crate::ipc::cmd::QUICK).await {
+        // A transport-level `ok:false` (a malformed-request / unknown-op error
+        // from the daemon's dispatch) is not a normal arbiter outcome; treat it as
+        // the unavailable arm so the route surfaces the 500 rather than a partial
+        // body. The arbiter outcomes always carry `ok:true`.
+        Ok(m) if m.get("ok") == Some(&Value::Bool(false)) => PicReply::Unavailable,
+        Ok(m) => PicReply::Obj(m),
+        Err(_) => PicReply::Unavailable,
     }
 }
 
@@ -282,9 +231,8 @@ fn pic_state_body(reply: &Map<String, Value>) -> Value {
 // POST /api/v1/ground-station/pic/claim
 // ---------------------------------------------------------------------------
 
-/// The `pic/claim` request body. Mirrors the FastAPI `PicClaimRequest`: a
-/// required `client_id`, an optional `confirm_token`, and an optional `force`
-/// flag (defaulting false, matching the Pydantic `bool | None = False`).
+/// The `pic/claim` request body: a required `client_id`, an optional `confirm_token`, and an
+/// optional `force` flag (defaulting false, matching the Pydantic `bool | None = False`).
 #[derive(Debug, Deserialize)]
 pub struct PicClaimRequest {
     pub client_id: String,
@@ -317,13 +265,27 @@ pub async fn post_pic_claim(
         "force": req.force.unwrap_or(false),
     });
     match pic_request(&request).await {
-        PicReply::Obj(reply) => Json(claim_body(&reply)).into_response(),
+        PicReply::Obj(reply) if has_outcome(&reply, "claimed") => {
+            Json(claim_body(&reply)).into_response()
+        }
+        PicReply::Obj(_) => pic_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "E_PIC_CLAIM_FAILED",
+            "the PIC arbiter reply carried no claim outcome",
+        ),
         PicReply::Unavailable => pic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "E_PIC_CLAIM_FAILED",
             "PIC control socket unavailable",
         ),
     }
+}
+
+/// Whether an arbiter reply carries its outcome flag as a boolean. A reply
+/// without one decided nothing, so it must not be read as a refusal (another
+/// pilot holds PIC) or as a grant.
+fn has_outcome(reply: &Map<String, Value>, flag: &str) -> bool {
+    reply.get(flag).is_some_and(Value::is_boolean)
 }
 
 /// Translate the daemon's `claim` reply into the byte-exact Python arbiter dict.
@@ -398,8 +360,7 @@ fn claim_body(reply: &Map<String, Value>) -> Value {
 // POST /api/v1/ground-station/pic/release
 // ---------------------------------------------------------------------------
 
-/// The `pic/release` request body. Mirrors the FastAPI `PicReleaseRequest`: a
-/// required `client_id`.
+/// The `pic/release` request body: a required `client_id`.
 #[derive(Debug, Deserialize)]
 pub struct PicReleaseRequest {
     pub client_id: String,
@@ -422,7 +383,14 @@ pub async fn post_pic_release(
     }
     let request = json!({"op": "release", "client_id": req.client_id});
     match pic_request(&request).await {
-        PicReply::Obj(reply) => Json(release_body(&reply)).into_response(),
+        PicReply::Obj(reply) if has_outcome(&reply, "released") => {
+            Json(release_body(&reply)).into_response()
+        }
+        PicReply::Obj(_) => pic_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "E_PIC_RELEASE_FAILED",
+            "the PIC arbiter reply carried no release outcome",
+        ),
         PicReply::Unavailable => pic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "E_PIC_RELEASE_FAILED",
@@ -459,8 +427,7 @@ fn release_body(reply: &Map<String, Value>) -> Value {
 // POST /api/v1/ground-station/pic/confirm-token
 // ---------------------------------------------------------------------------
 
-/// The `pic/confirm-token` request body. Mirrors the FastAPI
-/// `PicConfirmTokenRequest`: a required `client_id`.
+/// The `pic/confirm-token` request body: a required `client_id`.
 #[derive(Debug, Deserialize)]
 pub struct PicConfirmTokenRequest {
     pub client_id: String,
@@ -482,17 +449,18 @@ pub async fn post_pic_confirm_token(
     }
     let request = json!({"op": "confirm_token", "client_id": req.client_id});
     match pic_request(&request).await {
-        PicReply::Obj(reply) => {
-            let token = reply
-                .get("token")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string();
-            // The FastAPI route hard-codes ttl_seconds=2 for the string-token path
-            // (the arbiter's create_confirm_token returns a plain string, so the
-            // `isinstance(token, dict)` branch never fires).
-            Json(json!({"token": token, "ttl_seconds": 2})).into_response()
-        }
+        PicReply::Obj(reply) => match reply.get("token").and_then(Value::as_str) {
+            // The arbiter's confirm token lives two seconds.
+            Some(token) if !token.is_empty() => {
+                Json(json!({"token": token, "ttl_seconds": 2})).into_response()
+            }
+            // No token was minted: an empty token would read as a usable one.
+            _ => pic_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "E_PIC_TOKEN_FAILED",
+                "the PIC arbiter did not mint a token",
+            ),
+        },
         PicReply::Unavailable => pic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "E_PIC_TOKEN_FAILED",
@@ -505,8 +473,7 @@ pub async fn post_pic_confirm_token(
 // POST /api/v1/ground-station/pic/heartbeat
 // ---------------------------------------------------------------------------
 
-/// The `pic/heartbeat` request body. Mirrors the FastAPI `PicHeartbeatRequest`: a
-/// required `client_id`.
+/// The `pic/heartbeat` request body: a required `client_id`.
 #[derive(Debug, Deserialize)]
 pub struct PicHeartbeatRequest {
     pub client_id: String,
@@ -726,6 +693,22 @@ mod tests {
     }
 
     // ── release_body translation ─────────────────────────────────────────────
+
+    #[test]
+    fn a_reply_without_an_outcome_decides_nothing() {
+        let no_flag = json!({"ok": true}).as_object().unwrap().clone();
+        assert!(!has_outcome(&no_flag, "claimed"));
+        let odd = json!({"ok": true, "claimed": "yes"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(!has_outcome(&odd, "claimed"));
+        let refused = json!({"ok": true, "claimed": false})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(has_outcome(&refused, "claimed"));
+    }
 
     #[test]
     fn release_body_success_and_reject() {

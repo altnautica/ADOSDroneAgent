@@ -59,7 +59,7 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> Json<Value> {
         "system": collect_system(signals.as_ref()),
         "network": collect_network(),
         "device": collect_device(&state.pairing_paths.config),
-        "logs": { "agent": collect_logs() },
+        "logs": { "agent": collect_logs(&state.logd).await },
     }))
 }
 
@@ -74,10 +74,9 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> Json<Value> {
 ///
 /// The process metrics come from `/proc/self`: RSS from `/proc/self/statm`,
 /// reported in MB rounded to one decimal like the Python `memory_info().rss / MiB`
-/// read. `process_cpu_percent` matches the Python `psutil cpu_percent(interval=0)`
-/// first-call convention (`0.0`) — a single-shot read has no prior sample to diff,
-/// and the field is masked in the conformance diff. A read miss degrades each
-/// metric to `null`, the same `None` the Python `except` arm sets.
+/// read. `process_cpu_percent` is `null`: a single-shot read has no prior sample
+/// to diff, and a fixed `0.0` would read as an idle process. A read miss degrades
+/// the memory metric to `null`.
 fn collect_agent(state: &AppState) -> Value {
     let (cpu, mem) = process_metrics();
     json!({
@@ -91,11 +90,11 @@ fn collect_agent(state: &AppState) -> Value {
 /// This daemon's `(process_cpu_percent, process_memory_mb)`. RSS is read from
 /// `/proc/self/statm` (the resident set in pages × the page size, converted to MB
 /// and rounded to one decimal), matching the Python `proc.memory_info().rss`
-/// conversion. CPU is the `0.0` first-call value the Python `cpu_percent(0.0)`
-/// returns. A `statm` read miss degrades the memory metric to `null` (the Python
-/// `None`); the field is masked in the conformance diff.
+/// conversion. CPU is `null`: a utilisation needs two samples over an interval
+/// and this one-shot read takes none, so a fixed `0.0` would be a fabricated
+/// reading. A `statm` read miss degrades the memory metric to `null`.
 fn process_metrics() -> (Value, Value) {
-    let cpu = json!(0.0);
+    let cpu = Value::Null;
     let mem = read_self_rss_mb().map(Value::from).unwrap_or(Value::Null);
     (cpu, mem)
 }
@@ -404,19 +403,34 @@ fn read_device_id_file() -> Option<String> {
 // logs — the last few ados-agent log lines.
 // ---------------------------------------------------------------------------
 
-/// The last few `ados-agent` log lines, mirroring the FastAPI
-/// `_collect_logs("ados-agent", count=10)`.
-///
-/// The FastAPI route shells out to `journalctl -u ados-agent -o cat`; the native
-/// front has no journal-tail seam on the logging-store query client (which exposes
-/// only the hardware-snapshot read), so this section degrades to an empty list.
-/// The log lines + their timestamps are volatile and are masked in the conformance
-/// diff, so the stable contract is the `{logs: {agent: [...]}}` shape, which an
-/// empty list satisfies. NOTE for the integrator: when the logging-store client
-/// grows a `kind=logs` query method this should query the store for the most
-/// recent `ados-agent` lines instead of returning empty.
-fn collect_logs() -> Value {
-    json!([])
+/// How many recent log lines the triage snapshot carries.
+const DIAG_LOG_LINES: i64 = 10;
+
+/// The most recent agent log lines from the logging store, oldest first, each
+/// `"<source> <LEVEL>: <message>"`. `null` when the store cannot be read, so an
+/// unreadable store is not shown as a quiet log.
+async fn collect_logs(logd: &crate::ipc::LogdQueryClient) -> Value {
+    match logd.rows("logs", DIAG_LOG_LINES, None).await {
+        Some(rows) => Value::Array(log_lines(&rows)),
+        None => Value::Null,
+    }
+}
+
+/// Render store log rows (newest first, as the query returns them) as display
+/// lines in chronological order.
+fn log_lines(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .rev()
+        .filter_map(|r| {
+            let msg = r.get("msg")?.as_str()?;
+            let source = r.get("source").and_then(Value::as_str).unwrap_or("?");
+            let level = r.get("level").and_then(Value::as_str).unwrap_or("?");
+            Some(json!(format!(
+                "{source} {}: {msg}",
+                level.to_ascii_uppercase()
+            )))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -775,8 +789,9 @@ fn gs_hops(s0: &VideoSample, s1: &VideoSample) -> Vec<HopFinding> {
                 "WHEP not serving".to_string()
             },
             // A serving WHEP endpoint proves mediamtx is up, not that frames are
-            // flowing into it — a weaker signal, surfaced honestly.
-            flowing: Some(s1.mtx_serving),
+            // flowing into it: serving reads `unknown`, and only a WHEP endpoint
+            // that is not serving at all proves the hop stalled.
+            flowing: (!s1.mtx_serving).then_some(false),
             detail: Some("ingest byte counter unavailable; WHEP liveness only".to_string()),
         },
     };
@@ -1070,10 +1085,26 @@ Local:
     }
 
     #[test]
-    fn logs_agent_is_an_empty_list() {
-        // No journal-tail seam on the logging-store client yet; the section
-        // degrades to an empty list (the log lines are masked in conformance).
-        assert_eq!(collect_logs(), json!([]));
+    fn log_lines_render_the_store_rows_oldest_first() {
+        let rows = vec![
+            json!({"source": "ados-radio", "level": "warn", "msg": "second"}),
+            json!({"source": "ados-control", "level": "info", "msg": "first"}),
+            json!({"source": "x", "level": "info"}),
+        ];
+        assert_eq!(
+            log_lines(&rows),
+            vec![
+                json!("ados-control INFO: first"),
+                json!("ados-radio WARN: second")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_store_is_unknown_not_a_quiet_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let logd = crate::ipc::LogdQueryClient::new(dir.path().join("absent.sock"));
+        assert_eq!(collect_logs(&logd).await, Value::Null);
     }
 
     #[test]
@@ -1347,10 +1378,10 @@ Local:
     }
 
     #[test]
-    fn gs_served_hop_falls_back_to_whep_liveness_when_ingest_bytes_unreadable() {
+    fn gs_served_hop_is_unknown_on_whep_liveness_alone() {
         // The ground mediamtx management API is auth-gated (mtx_bytes None), so the
-        // served hop uses the WHEP-serving liveness. Decode + fan-out flowing +
-        // WHEP serving → the served hop flows on the weaker (honest) signal.
+        // served hop only knows whether WHEP is serving. Serving proves mediamtx is
+        // up, not that frames move, so the verdict must be unknown, never flowing.
         let s0 = sample(
             None,
             true,
@@ -1368,11 +1399,24 @@ Local:
             ],
         );
         let (hops, _dies) = resolve_hops(gs_hops(&s0, &s1));
-        assert_eq!(hops[2]["verdict"], json!("flowing"));
+        assert_eq!(hops[2]["verdict"], json!("unknown"));
         assert_eq!(
             hops[2]["method"],
             json!("WHEP endpoint serving (mediamtx API auth-gated)")
         );
+
+        // A WHEP endpoint that is not serving at all is a proven stall.
+        let s1 = sample(
+            None,
+            false,
+            &[
+                ("packets_received", json!(550)),
+                ("fanout_forwarded", json!(12000)),
+            ],
+        );
+        let (hops, dies) = resolve_hops(gs_hops(&s0, &s1));
+        assert_eq!(hops[2]["verdict"], json!("stalled"));
+        assert_eq!(dies, json!("fanout_to_served"));
     }
 }
 

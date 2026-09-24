@@ -132,6 +132,8 @@ dependencies = [
  "anyhow",
  "axum",
  "futures-util",
+ "hex",
+ "hmac",
  "mdns-sd",
  "reqwest",
  "rerun",
@@ -141,6 +143,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
@@ -194,6 +197,7 @@ dependencies = [
  "ados-net",
  "ados-offload",
  "ados-protocol",
+ "ados-supervisor",
  "ados-swarmbus",
  "ados-video",
  "anyhow",
@@ -624,6 +628,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "nix 0.29.0",
+ "parking_lot",
  "sd-notify",
  "serde",
  "serde_json",
@@ -2847,6 +2852,7 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

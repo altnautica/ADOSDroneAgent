@@ -146,6 +146,27 @@ pub async fn deliver(
     }
 }
 
+/// What a delivered secret offer settled.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SecretOutcome {
+    /// The drone took it, or already held this one.
+    Held,
+    /// The drone holds a DIFFERENT secret: it is paired to another ground
+    /// station, or was and never unpaired. Retrying cannot fix it, so it is
+    /// settled (reported once) rather than re-offered every tick.
+    Conflict,
+}
+
+/// Map the drone's answer to an offer. Any other status is a transient refusal
+/// the next tick retries.
+fn secret_outcome(status: u16) -> Result<SecretOutcome, String> {
+    match status {
+        200..=299 => Ok(SecretOutcome::Held),
+        409 => Ok(SecretOutcome::Conflict),
+        other => Err(format!("drone answered HTTP {other}")),
+    }
+}
+
 /// Mint a relay ticket for `device_id` from the secret `slots` holds for it.
 ///
 /// Every ground-station-to-drone call except the secret delivery itself goes
@@ -193,7 +214,7 @@ fn now_unix_secs() -> i64 {
 pub async fn deliver_secret(
     proxy: &Arc<AuxRpcProxy>,
     delivery: &SecretDelivery,
-) -> Result<(), String> {
+) -> Result<SecretOutcome, String> {
     let body = json!({ "secret": delivery.secret }).to_string();
     match proxy
         .call(
@@ -205,15 +226,8 @@ pub async fn deliver_secret(
         .await
     {
         // 200 covers both "accepted" and "already held" -- the drone treats a
-        // restatement as a no-op, and so does this.
-        Ok(resp) if (200..300).contains(&resp.status) => Ok(()),
-        // 409 means the drone holds a DIFFERENT secret: it is paired to another
-        // ground station, or was and never unpaired. Retrying cannot fix it, so
-        // it is reported as settled rather than chased forever.
-        Ok(resp) if resp.status == 409 => {
-            Err("drone already holds a different relay secret; unpair it to re-key".to_string())
-        }
-        Ok(resp) => Err(format!("drone answered HTTP {}", resp.status)),
+        // restatement as a no-op, and so does this; 409 is a settled conflict.
+        Ok(resp) => secret_outcome(resp.status),
         Err(e) => Err(format!("{e}")),
     }
 }
@@ -248,8 +262,16 @@ pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
         secret_acked.retain(|device_id| present_ids.contains(device_id.as_str()));
         for delivery in decide_secret_tick(&slots, &secret_acked) {
             match deliver_secret(&proxy, &delivery).await {
-                Ok(()) => {
+                Ok(SecretOutcome::Held) => {
                     tracing::info!(device_id = %delivery.device_id, "relay_secret_delivered");
+                    secret_acked.insert(delivery.device_id);
+                }
+                Ok(SecretOutcome::Conflict) => {
+                    tracing::warn!(
+                        device_id = %delivery.device_id,
+                        "relay_secret_conflict: the drone holds a different relay secret; unpair it to re-key"
+                    );
+                    // Settled: no further offers until it leaves the fleet.
                     secret_acked.insert(delivery.device_id);
                 }
                 Err(e) => {
@@ -413,6 +435,13 @@ pub(crate) mod test_drone {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_conflicting_secret_is_settled_not_retried() {
+        assert_eq!(secret_outcome(409), Ok(SecretOutcome::Conflict));
+        assert_eq!(secret_outcome(200), Ok(SecretOutcome::Held));
+        assert!(secret_outcome(503).is_err());
+    }
 
     fn slot(device_id: &str, slot: u8) -> FleetSlot {
         FleetSlot {

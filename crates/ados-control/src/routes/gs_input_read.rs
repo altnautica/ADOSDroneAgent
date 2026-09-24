@@ -75,16 +75,40 @@ fn profile_mismatch() -> Response {
 /// `404` `E_PROFILE_MISMATCH` off a ground-station node. Otherwise `{devices,
 /// primary_id}`: `devices` is the live evdev enumeration (empty when evdev is
 /// unavailable, the same fault-tolerant shape the Python route falls back to),
-/// `primary_id` is the persisted primary device id or null. Guaranteed 200 on a ground
-/// station.
+/// `primary_id` is the persisted primary device id or null.
+///
+/// The enumeration opens and ioctls every `/dev/input/event*` node and the
+/// sidecar read is a blocking file read, so both run on the blocking pool under
+/// [`ENUMERATION_TIMEOUT`]; a wedged input node answers `503` instead of parking
+/// an async worker.
 pub async fn get_gamepads(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    let devices = enumerate_gamepad_records();
-    let primary_id = primary_device_id(&gs_input_json_path(&state));
-    Json(json!({ "devices": devices, "primary_id": primary_id })).into_response()
+    let sidecar = gs_input_json_path(&state);
+    let work = tokio::task::spawn_blocking(move || {
+        (enumerate_gamepad_records(), primary_device_id(&sidecar))
+    });
+    match tokio::time::timeout(ENUMERATION_TIMEOUT, work).await {
+        Ok(Ok((devices, primary_id))) => {
+            Json(json!({ "devices": devices, "primary_id": primary_id })).into_response()
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "gamepad enumeration task failed");
+            crate::routes::detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "gamepad enumeration failed",
+            )
+        }
+        Err(_) => crate::routes::detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "gamepad enumeration timed out",
+        ),
+    }
 }
+
+/// Upper bound on one evdev enumeration + sidecar read.
+const ENUMERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The live evdev enumeration rendered as the Python `list_gamepads` record set.
 ///
@@ -182,18 +206,39 @@ async fn paired_bluetooth_records() -> Vec<Value> {
         Some(out) => out,
         None => return Vec::new(),
     };
-    parse_bt_device_lines(&stdout)
-        .into_iter()
-        .map(|(mac, name)| {
-            json!({
-                "device_id": device_id_for_bt(&mac),
-                "mac": mac,
-                "name": name,
-                "type": "bluetooth",
-                "connected": true,
-            })
-        })
-        .collect()
+    let mut records = Vec::new();
+    for (mac, name) in parse_bt_device_lines(&stdout) {
+        // `paired-devices` lists every bonded device whether or not it is in
+        // range, so the link state is asked per device; no answer is unknown.
+        let info =
+            crate::probe::capture("bluetoothctl", &["info", &mac], crate::probe::PROBE_TIMEOUT)
+                .await;
+        let connected = info
+            .is_ok()
+            .then(|| bt_info_connected(info.text()))
+            .flatten();
+        records.push(json!({
+            "device_id": device_id_for_bt(&mac),
+            "mac": mac,
+            "name": name,
+            "type": "bluetooth",
+            "connected": connected,
+        }));
+    }
+    records
+}
+
+/// The `Connected:` line of a `bluetoothctl info <mac>` answer, or `None` when
+/// the answer carries none.
+fn bt_info_connected(info: &str) -> Option<bool> {
+    info.lines().find_map(|l| {
+        let v = l.trim().strip_prefix("Connected:")?.trim();
+        match v {
+            "yes" => Some(true),
+            "no" => Some(false),
+            _ => None,
+        }
+    })
 }
 
 /// The stdout of `bluetoothctl paired-devices`, or `None` when the command could
@@ -287,6 +332,15 @@ fn device_id_for_bt(mac: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paired_device_out_of_range_is_not_connected() {
+        let info =
+            "Device AA:BB:CC:DD:EE:FF (public)\n\tName: Pad\n\tPaired: yes\n\tConnected: no\n";
+        assert_eq!(bt_info_connected(info), Some(false));
+        assert_eq!(bt_info_connected("\tConnected: yes\n"), Some(true));
+        assert_eq!(bt_info_connected("Device not available\n"), None);
+    }
 
     #[test]
     fn profile_mismatch_is_the_fastapi_404_shape() {

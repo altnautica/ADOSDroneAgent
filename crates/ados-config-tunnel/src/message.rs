@@ -6,7 +6,8 @@
 //! become a general command proxy over the radio:
 //!
 //! ```text
-//!   {"op":"get","ticket":"<relay ticket>"}                → GET  /api/config
+//!   {"op":"get","key":"<dot.path>"?,"ticket":"<relay ticket>"}
+//!                                                         → GET  /api/config, narrowed to `key`
 //!   {"op":"put","key":"<dot.path>","value":"<s>","ticket":"…"}
 //!                                                         → PUT  /api/config {key,value}
 //! ```
@@ -33,8 +34,11 @@ pub const MAX_CONFIG_RESPONSE_BYTES: usize = 4 * 1024;
 /// A parsed, validated config operation, restricted to `/api/config`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigOp {
-    /// `GET /api/config` — read the (redacted) config.
-    Get,
+    /// `GET /api/config` — read the (redacted) config, narrowed to the
+    /// dot-path `key` subtree when one is given. The whole config is several KB,
+    /// over the radio-link limit, so a read over the radio names the subtree it
+    /// wants (`radio`, `video.wfb`, …).
+    Get { key: Option<String> },
     /// `PUT /api/config` — write one dot-path key. Gated behind
     /// `radio.tunnel.command_enabled`.
     Put { key: String, value: String },
@@ -65,7 +69,12 @@ pub fn parse_request(body: &[u8]) -> Result<TunnelRequest, Vec<u8>> {
     let req: RawRequest =
         serde_json::from_slice(body).map_err(|e| error_body("E_BAD_REQUEST", &e.to_string()))?;
     let op = match req.op.as_str() {
-        "get" => ConfigOp::Get,
+        "get" => ConfigOp::Get {
+            key: req
+                .key
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty()),
+        },
         "put" => {
             let Some(key) = req.key.filter(|k| !k.trim().is_empty()) else {
                 return Err(error_body("E_BAD_REQUEST", "put requires a non-empty key"));
@@ -118,7 +127,18 @@ mod tests {
 
     #[test]
     fn parses_get_and_put() {
-        assert_eq!(parse_request(br#"{"op":"get"}"#).unwrap().op, ConfigOp::Get);
+        assert_eq!(
+            parse_request(br#"{"op":"get"}"#).unwrap().op,
+            ConfigOp::Get { key: None }
+        );
+        assert_eq!(
+            parse_request(br#"{"op":"get","key":"video.wfb"}"#)
+                .unwrap()
+                .op,
+            ConfigOp::Get {
+                key: Some("video.wfb".to_string())
+            }
+        );
         assert_eq!(
             parse_request(br#"{"op":"put","key":"radio.tunnel.enabled","value":"true"}"#)
                 .unwrap()

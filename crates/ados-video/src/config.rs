@@ -26,9 +26,6 @@ fn default_fps() -> u32 {
 fn default_bitrate_kbps() -> u32 {
     4000
 }
-fn default_codec_preference() -> String {
-    "auto".to_string()
-}
 fn default_true() -> bool {
     true
 }
@@ -118,9 +115,6 @@ pub struct CameraConfig {
     pub fps: u32,
     #[serde(default = "default_bitrate_kbps")]
     pub bitrate_kbps: u32,
-    /// Operator wire-codec preference: "h264" | "h265" | "auto".
-    #[serde(default = "default_codec_preference")]
-    pub codec_preference: String,
     /// The non-hero encoder profile (`video.camera.thumbnail:`). The fields
     /// above ARE the hero profile; this is what the drone falls back to while
     /// the operator's attention is on a different aircraft.
@@ -160,7 +154,6 @@ impl Default for CameraConfig {
             height: default_height(),
             fps: default_fps(),
             bitrate_kbps: default_bitrate_kbps(),
-            codec_preference: default_codec_preference(),
             thumbnail: CameraProfile::default(),
             rotation: default_rotation(),
             hflip: default_flip(),
@@ -288,8 +281,10 @@ pub struct CameraLeg {
     /// a purpose; a leg may serve several.
     #[serde(default)]
     pub purpose: Vec<String>,
-    /// Whether the operator has this leg enabled. Metadata in v1 (the pipeline
-    /// does not gate on it yet); default `true` so existing legs are unchanged.
+    /// Whether the operator has this leg enabled. A disabled secondary leg is
+    /// dropped by [`AgentVideoConfig::resolve_legs`]: no encoder, no mediamtx
+    /// path, not advertised. The primary always streams (it carries the radio
+    /// leg). Default `true` so existing legs are unchanged.
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Who declared this leg: `"operator"` for an operator-managed leg, or a
@@ -373,10 +368,9 @@ pub struct ResolvedLeg {
 
 impl ResolvedLeg {
     /// A [`CameraConfig`] view of this leg, so a secondary local-encode leg can
-    /// reuse the same encoder command builder as the primary. `codec_preference`
-    /// defaults to `"auto"` (the leg carries only the concrete `codec`), and the
-    /// `thumbnail` attention profile is the default and unread: only the PRIMARY
-    /// leg rides the shared radio channel, so only it is attention-switched. The
+    /// reuse the same encoder command builder as the primary. The `thumbnail`
+    /// attention profile is the default and unread: only the PRIMARY leg rides
+    /// the shared radio channel, so only it is attention-switched. The
     /// encode-plane keys (rotation/hflip/vflip/encoder/keyframe_interval) carry
     /// through so a per-leg orientation/encoder override reaches the builder.
     pub fn to_camera_config(&self) -> CameraConfig {
@@ -387,7 +381,6 @@ impl ResolvedLeg {
             height: self.height,
             fps: self.fps,
             bitrate_kbps: self.bitrate_kbps,
-            codec_preference: "auto".to_string(),
             thumbnail: CameraProfile::default(),
             rotation: self.rotation,
             hflip: self.hflip,
@@ -404,13 +397,10 @@ impl ResolvedLeg {
     }
 }
 
-// --- agent-level video config (the orchestrator's gates + cloud + GST flags) -
+// --- agent-level video config (the orchestrator's gates + cloud flags) -------
 
 fn default_video_mode() -> String {
     "wfb".to_string()
-}
-fn default_cloud_rtp_port() -> u16 {
-    8000
 }
 
 // --- vision frame-tap sub-block ----------------------------------------------
@@ -584,10 +574,10 @@ impl RecordingConfig {
 }
 
 /// The agent-level video config the orchestrator gates on: the `video:` block
-/// (mode / cloud relay / GST flag / wfb sub-block) plus the resolved agent
-/// `profile`. Every field is `#[serde(default)]` so a partial / malformed
-/// config never blocks the pipeline — a missing `video:` block yields the
-/// defaults (mode "wfb", no cloud relay, legacy bash path).
+/// (mode / cloud relay / wfb sub-block / vision / cameras / recording) plus the
+/// resolved agent `profile`. Every field is `#[serde(default)]` so a partial /
+/// malformed config never blocks the pipeline — a missing `video:` block yields
+/// the defaults (mode "wfb", no cloud relay).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentVideoConfig {
     /// `video.mode`: "wfb" (default) | "cloud" | "disabled" | ...
@@ -602,10 +592,6 @@ pub struct AgentVideoConfig {
     /// local-only, no cloud push.
     #[serde(default)]
     pub cloud_relay_url: Option<String>,
-    /// UDP port the GST pipeline emits a second RTP copy to when cloud relay is
-    /// on (`video.cloud_rtp_port`).
-    #[serde(default = "default_cloud_rtp_port")]
-    pub cloud_rtp_port: u16,
     /// The `video.wfb:` sub-block (only `sei_latency` is read here).
     #[serde(default)]
     pub wfb: WfbVideoConfig,
@@ -629,7 +615,6 @@ impl Default for AgentVideoConfig {
             mode: default_video_mode(),
             profile: None,
             cloud_relay_url: None,
-            cloud_rtp_port: default_cloud_rtp_port(),
             wfb: WfbVideoConfig::default(),
             vision: VisionTapConfig::default(),
             cameras: Vec::new(),
@@ -665,8 +650,6 @@ impl AgentVideoConfig {
             profile: Option<String>,
             #[serde(default)]
             cloud_relay_url: Option<String>,
-            #[serde(default = "default_cloud_rtp_port")]
-            cloud_rtp_port: u16,
             #[serde(default)]
             wfb: WfbVideoConfig,
             #[serde(default)]
@@ -682,7 +665,6 @@ impl AgentVideoConfig {
                     mode: default_video_mode(),
                     profile: None,
                     cloud_relay_url: None,
-                    cloud_rtp_port: default_cloud_rtp_port(),
                     wfb: WfbVideoConfig::default(),
                     vision: VisionTapConfig::default(),
                     cameras: Vec::new(),
@@ -707,11 +689,52 @@ impl AgentVideoConfig {
             mode: raw.video.mode,
             profile,
             cloud_relay_url: raw.video.cloud_relay_url,
-            cloud_rtp_port: raw.video.cloud_rtp_port,
             wfb: raw.video.wfb,
             vision: raw.video.vision,
             cameras: raw.video.cameras,
             recording: raw.video.recording,
+        }
+    }
+
+    /// The index of the primary leg in `video.cameras`: the leg whose role is
+    /// `"primary"`, else the first. `None` when no legs are declared.
+    fn primary_index(&self) -> Option<usize> {
+        if self.cameras.is_empty() {
+            return None;
+        }
+        Some(
+            self.cameras
+                .iter()
+                .position(|c| c.role.as_deref() == Some("primary"))
+                .unwrap_or(0),
+        )
+    }
+
+    /// The capture/encode settings the PRIMARY encoder runs from.
+    ///
+    /// With no `video.cameras` declared that is the legacy `video.camera` block,
+    /// unchanged. With legs declared, the primary leg's source and encode-plane
+    /// keys (codec, geometry, fps, bitrate, orientation, encoder override,
+    /// keyframe interval) replace the block's, so an edit to the primary leg
+    /// reaches the primary encoder. The block's `thumbnail` profile stays: the
+    /// non-hero attention profile is a node setting, not a per-leg one.
+    pub fn primary_camera_config(&self, camera: CameraConfig) -> CameraConfig {
+        let Some(leg) = self.primary_index().map(|i| &self.cameras[i]) else {
+            return camera;
+        };
+        CameraConfig {
+            source: leg.source.clone(),
+            codec: leg.codec.clone(),
+            width: leg.width,
+            height: leg.height,
+            fps: leg.fps,
+            bitrate_kbps: leg.bitrate_kbps,
+            thumbnail: camera.thumbnail,
+            rotation: leg.rotation,
+            hflip: leg.hflip,
+            vflip: leg.vflip,
+            encoder: leg.encoder.clone(),
+            keyframe_interval: leg.keyframe_interval,
         }
     }
 
@@ -722,7 +745,8 @@ impl AgentVideoConfig {
     /// byte-identical to the single-stream path. Otherwise the leg whose role is
     /// `"primary"` (else the first) is the primary — always an owned encoder, so
     /// a network-primary keeps its ffmpeg bridge — and every other leg with a
-    /// network source becomes a mediamtx `sourceOnDemand` pull.
+    /// network source becomes a mediamtx `sourceOnDemand` pull. A secondary leg
+    /// the operator disabled is dropped entirely; the primary always streams.
     ///
     /// The primary leg is always served at the fixed path/id `"main"` — the WFB
     /// radio, cloud relay, and vision tap all key on `main`. Secondary legs keep
@@ -730,7 +754,7 @@ impl AgentVideoConfig {
     /// (`eo` / `eo_wide` / `ir`) carry the labels, so a primary named `main`
     /// still reads as "EO Zoom" on the GCS.
     pub fn resolve_legs(&self, camera: &CameraConfig) -> Vec<ResolvedLeg> {
-        if self.cameras.is_empty() {
+        let Some(primary_idx) = self.primary_index() else {
             return vec![ResolvedLeg {
                 id: "main".to_string(),
                 source: camera.source.clone(),
@@ -748,15 +772,11 @@ impl AgentVideoConfig {
                 encoder: camera.encoder.clone(),
                 keyframe_interval: camera.keyframe_interval,
             }];
-        }
-        let primary_idx = self
-            .cameras
-            .iter()
-            .position(|c| c.role.as_deref() == Some("primary"))
-            .unwrap_or(0);
+        };
         self.cameras
             .iter()
             .enumerate()
+            .filter(|(i, c)| *i == primary_idx || c.enabled)
             .map(|(i, c)| {
                 let is_primary = i == primary_idx;
                 let is_network_pull = !is_primary && c.network_source().is_some();
@@ -906,7 +926,6 @@ mod tests {
         assert_eq!(c.height, 720);
         assert_eq!(c.fps, 30);
         assert_eq!(c.bitrate_kbps, 4000);
-        assert_eq!(c.codec_preference, "auto");
         // Encode-plane keys: image transform off, encoder auto (probe), and the
         // keyframe interval 0 meaning the encoder picks a short low-latency GOP.
         assert_eq!(c.rotation, 0);
@@ -981,7 +1000,6 @@ mod tests {
         assert_eq!(c.mode, "wfb");
         assert!(c.profile.is_none());
         assert!(c.cloud_relay_url.is_none());
-        assert_eq!(c.cloud_rtp_port, 8000);
         assert!(!c.wfb.sei_latency);
         assert!(!c.is_ground_station());
         assert!(!c.is_disabled());
@@ -1054,7 +1072,6 @@ agent:
 video:
   mode: cloud
   cloud_relay_url: rtsp://relay.example.com:8554
-  cloud_rtp_port: 8100
   wfb:
     sei_latency: true
 ";
@@ -1066,7 +1083,6 @@ video:
             c.cloud_relay_url.as_deref(),
             Some("rtsp://relay.example.com:8554")
         );
-        assert_eq!(c.cloud_rtp_port, 8100);
         assert!(c.wfb.sei_latency);
         assert!(c.cloud_enabled());
         assert!(!c.is_disabled());
@@ -1081,7 +1097,6 @@ video:
         let c = AgentVideoConfig::load_from(&path);
         assert_eq!(c.mode, "disabled");
         assert!(c.is_disabled());
-        assert_eq!(c.cloud_rtp_port, 8000);
         assert!(c.profile.is_none());
     }
 
@@ -1217,6 +1232,74 @@ video:
         let primary = legs.iter().find(|l| l.is_primary).unwrap();
         assert_eq!(primary.id, "main"); // served at the fixed main path
         assert_eq!(primary.role, "eo"); // but keeps the EO label
+    }
+
+    #[test]
+    fn a_disabled_secondary_leg_is_not_served_but_the_primary_always_is() {
+        let yaml = "\
+video:
+  cameras:
+    - { id: eo, source: /dev/video0, role: primary, enabled: false }
+    - { id: belly, source: /dev/video2, enabled: false }
+    - { id: ir, source: rtsp://192.168.144.25:8554/ir }
+";
+        let (_dir, path) = write_tmp(yaml);
+        let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
+        let ids: Vec<&str> = legs.iter().map(|l| l.id.as_str()).collect();
+        // The switched-off secondary gets no encoder, no mediamtx path and no
+        // switcher entry; the primary carries the radio leg and always streams.
+        assert_eq!(ids, vec!["main", "ir"]);
+    }
+
+    #[test]
+    fn the_primary_leg_drives_the_primary_encoder_settings() {
+        let yaml = "\
+video:
+  camera:
+    source: csi
+    width: 1280
+    height: 720
+    rotation: 0
+    thumbnail: { width: 160, height: 90, fps: 1, bitrate_kbps: 30 }
+  cameras:
+    - { id: ir, source: rtsp://192.168.144.25:8554/ir, role: ir }
+    - id: eo
+      source: rtsp://192.168.144.25:8554/main
+      role: primary
+      width: 1920
+      height: 1080
+      fps: 25
+      bitrate_kbps: 2500
+      rotation: 180
+      hflip: true
+      encoder: software
+      keyframe_interval: 12
+";
+        let (_dir, path) = write_tmp(yaml);
+        let cfg = AgentVideoConfig::load_from(&path);
+        let cam = cfg.primary_camera_config(CameraConfig::load_from(&path));
+        assert_eq!(cam.source, "rtsp://192.168.144.25:8554/main");
+        assert_eq!((cam.width, cam.height, cam.fps), (1920, 1080, 25));
+        assert_eq!(cam.bitrate_kbps, 2500);
+        assert_eq!(cam.rotation, 180);
+        assert!(cam.hflip);
+        assert_eq!(cam.encoder, "software");
+        assert_eq!(cam.keyframe_interval, 12);
+        // The attention thumbnail is a node setting and survives the overlay.
+        assert_eq!(cam.thumbnail.width, 160);
+    }
+
+    #[test]
+    fn without_declared_legs_the_camera_block_is_used_verbatim() {
+        let cam = CameraConfig {
+            rotation: 90,
+            bitrate_kbps: 1800,
+            ..CameraConfig::default()
+        };
+        let out = AgentVideoConfig::default().primary_camera_config(cam.clone());
+        assert_eq!(out.rotation, 90);
+        assert_eq!(out.bitrate_kbps, 1800);
+        assert_eq!(out.source, cam.source);
     }
 
     #[test]

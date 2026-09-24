@@ -120,6 +120,9 @@ fn is_already_registered(candidate: &str, registered: &[&str]) -> bool {
 /// leave the registered drones alone — evicting one to make room would retune a
 /// transmitter that may be airborne.
 fn enrol_into(registry_path: &Path, peers: &[(String, String)]) -> Vec<(String, u8)> {
+    // One writer at a time with the pair route and the slot release, which
+    // allocate and release against the same file from request handlers.
+    let _write = crate::routes::gs_wfb_pair::fleet_registry_write();
     let pending = {
         let registry = FleetRegistry::load(registry_path);
         decide_enrollments(peers, &registry)

@@ -83,7 +83,7 @@ async fn g0_single_camera_capture_reconstructs_to_a_splat_end_to_end() {
     });
 
     // The drone forwards keyframes + a bagged state over the LAN bearer.
-    let bearer = LanHttpBearer::new(format!("http://{addr}"));
+    let bearer = LanHttpBearer::new(format!("http://{addr}"), None);
     const N: usize = 5;
     for i in 0..N {
         bearer.send(&keyframe(i)).await.unwrap();

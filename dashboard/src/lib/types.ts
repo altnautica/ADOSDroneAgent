@@ -172,32 +172,25 @@ export interface SetupAccessUrl {
   codec?: string;
 }
 
-// /api/v1/dashboard/snapshot
+// /api/v1/dashboard/snapshot (api/routes/dashboard.py). Only these slices are
+// sent; everything the snapshot does not measure lives on its own route.
 export interface DashboardSnapshot {
   video: VideoSnapshot;
   fc: FcSnapshot;
-  mavlink_rates: Record<string, number>;
-  camera: CameraSnapshot;
-  sensors: SensorEntry[];
-  plugins: PluginEntry[];
   cloud: CloudSnapshot;
-  network: NetworkSnapshot;
-  wfb_rx: WfbRxSnapshot;
-  mesh: MeshSnapshot;
-  sources: SourcesSnapshot;
-  display: Record<string, unknown>;
-  oled: Record<string, unknown>;
-  buttons: ButtonsSnapshot;
-  joystick: Record<string, unknown>;
 }
 
 export interface VideoSnapshot {
-  codec: string;
-  width: number;
-  height: number;
-  fps: number;
-  bitrate_kbps: number;
-  state: string;
+  // Configured encoder settings (0 when unset).
+  codec?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  target_bitrate_kbps?: number | null;
+  state: "running" | "ready" | "no_camera";
+  /** Measured off the media server's byte counter; null until two readings of
+   *  a live stream exist, never the configured target. */
+  bitrate_kbps: number | null;
   glass_to_glass_ms: number | null;
 }
 
@@ -207,90 +200,23 @@ export interface FcSnapshot {
   firmware: string | null;
   firmware_id?: number | null;
   mode: string | null;
-  armed: boolean;
+  /** Only what the heartbeat said: null until the FC has reported it. */
+  armed: boolean | null;
   gps: { fix_type: number | null; satellites_visible: number | null; hdop: number | null };
   battery: { voltage: number | null; remaining: number | null };
-  link_quality: number | null;
   rc: number | null;
-  prearm: string | null;
-  fc_port: string;
-  fc_baud: number;
+  fc_port: string | null;
+  fc_baud: number | null;
   connected: boolean;
   last_heartbeat: string | null;
 }
 
-export interface CameraSnapshot {
-  device: string;
-  codec: string;
-  width: number;
-  height: number;
-  fps: number;
-  bitrate_kbps: number;
-  encoder_api: string;
-  state: string;
-  dropped_frames: number | null;
-  encoder_cpu_pct: number | null;
-}
-
-export interface SensorEntry {
-  id: string;
-  name?: string;
-  state?: string;
-  value?: unknown;
-}
-
-export interface PluginEntry {
-  id: string;
-  name?: string;
-  enabled?: boolean;
-  state?: string;
-}
-
+/** The cloud posture from config plus the live pairing code. The relay's own
+ *  link state is not part of the snapshot. */
 export interface CloudSnapshot {
-  mode?: string;
-  mqtt_state: string;
-  http_state: string;
-  rtt_ms: number | null;
+  mode: string | null;
   drone_id: string;
   pairing_code: string;
-}
-
-export interface NetworkSnapshot {
-  uplink?: string;
-  rssi_dbm?: number | null;
-  ip?: Record<string, string>;
-}
-
-export interface WfbRxSnapshot {
-  adapter: string;
-  channel: number;
-  freq_mhz: number | null;
-  rssi_dbm: number | null;
-  packet_loss_pct: number | null;
-  fec_recovered: number | null;
-  fec_failed: number | null;
-  bitrate_kbps: number | null;
-  streams: unknown[];
-}
-
-export interface MeshSnapshot {
-  role: string;
-  batman_peers: unknown[];
-  gateway_node: string | null;
-  partition_state: string | null;
-  mesh_addr: string | null;
-}
-
-export interface SourcesSnapshot {
-  aggregated_kbps: number | null;
-  frames_combined: number | null;
-  frames_dedup: number | null;
-  per_source: unknown[];
-}
-
-export interface ButtonsSnapshot {
-  mapping: Record<string, string>;
-  last_event: string | null;
 }
 
 // /api/status (lightweight heartbeat used by the placeholder + sanity)

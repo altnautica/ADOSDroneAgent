@@ -435,7 +435,7 @@ def pack_directory(src: Path, manifest: PluginManifest, output: Path) -> Path:
     packed: set[str] = {MANIFEST_FILENAME}
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
         # Always write the manifest first, deterministically.
-        zf.writestr(MANIFEST_FILENAME, _serialize_manifest(manifest))
+        zf.writestr(MANIFEST_FILENAME, serialize_manifest(manifest))
         for path in sorted(src.rglob("*")):
             if not path.is_file():
                 continue
@@ -461,7 +461,8 @@ def pack_directory(src: Path, manifest: PluginManifest, output: Path) -> Path:
     return output
 
 
-def _serialize_manifest(manifest: PluginManifest) -> bytes:
+def serialize_manifest(manifest: PluginManifest) -> bytes:
+    """The canonical ``manifest.yaml`` bytes for ``manifest``."""
     import yaml
 
     payload = manifest.model_dump(mode="json", exclude_none=True)

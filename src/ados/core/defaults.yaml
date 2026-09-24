@@ -55,8 +55,6 @@ network:
 
 server:
   mode: "local"
-  telemetry_rate: 2
-  heartbeat_interval: 5
   mqtt_transport: "websockets"
   mqtt_username: ""
   mqtt_password: ""

@@ -97,21 +97,19 @@ struct Presence {
     elrs: bool,
 }
 
-/// RTL8812-family PIDs the hot-plug path treats as the WFB radio (the wider
-/// set the Python hot-plug router matched, a superset of the boot-detect set).
-/// MUST include every PID the boot-detect set (`hardware::WFB_IDS`) and the
-/// bootstrap probe (`profile_detect.PY`) match, or a hot-plug edge on an adapter
-/// the agent otherwise recognizes silently does nothing. `0xA81A` is the
-/// production RTL8812EU (the `0bda:a81a` shipped on the dev rigs); it was the
-/// missing one — present in `WFB_IDS` but dropped here, so unplug/replug of the
-/// primary adapter never triggered recovery.
-const RTL_PIDS: [u16; 6] = [0xA81A, 0x8812, 0x881A, 0x881B, 0x881C, 0xB812];
-const REALTEK_VID: u16 = 0x0BDA;
-
+/// Whether a WFB radio is on the bus, by the same generated adapter table the
+/// boot detection uses ([`hardware::is_wfb_adapter_id`]). One table: a second,
+/// hand-kept PID list here once left every TP-Link adapter the rest of the
+/// stack supports invisible to hot-plug recovery.
 fn radio_present() -> bool {
-    hardware::enumerate_usb_ids()
+    radio_in(&hardware::enumerate_usb_ids())
+}
+
+/// [`radio_present`] over an explicit USB inventory. Pure for testing.
+fn radio_in(usb_ids: &[(u16, u16)]) -> bool {
+    usb_ids
         .iter()
-        .any(|&(v, p)| v == REALTEK_VID && RTL_PIDS.contains(&p))
+        .any(|&(vid, pid)| hardware::is_wfb_adapter_id(vid, pid))
 }
 
 /// The `radio.crsf` claim from the agent config: the pinned RC-module device
@@ -335,18 +333,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rtl_pids_include_every_boot_detect_pid() {
-        // The hot-plug radio match must be a SUPERSET of the boot-detect set
-        // (hardware::has_wfb_adapter's WFB_IDS) and the bootstrap probe, or an
-        // adapter the agent recognizes at boot is invisible to hot-plug
-        // recovery. 0xA81A is the production RTL8812EU (0bda:a81a) that was the
-        // dropped one. Pin the whole boot-detect PID set here.
-        for pid in [0xA81A, 0x8812, 0x881A] {
+    fn every_supported_adapter_counts_as_a_radio_for_hot_plug() {
+        // Every adapter the boot detection accepts must also be one whose
+        // replug triggers recovery — including the TP-Link rebadges, which do
+        // not carry the Realtek vendor id.
+        for (vid, pid, label) in ados_protocol::wfb_tables::WFB_COMPATIBLE {
             assert!(
-                RTL_PIDS.contains(&pid),
-                "RTL_PIDS must contain boot-detect PID {pid:#06x}"
+                radio_in(&[(0x1D6B, 0x0002), (*vid, *pid)]),
+                "{label} ({vid:#06x}:{pid:#06x}) must count as a radio"
             );
         }
+        assert!(radio_in(&[(0x2357, 0x0120)]));
+        // A management-WiFi chip and an empty bus are not radios.
+        assert!(!radio_in(&[(0xA69C, 0x8801)]));
+        assert!(!radio_in(&[]));
     }
 
     /// Node names for the classification tests. CP2102 / CH340 / Espressif are

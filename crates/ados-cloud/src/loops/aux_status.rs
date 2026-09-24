@@ -361,7 +361,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
     let identity = NodeIdentity::build(
         &device_id,
         Some(&config.agent.name),
-        Some(&config.agent.profile),
+        Some(config.wire_profile()),
         Some(&version),
         &plugins,
     );

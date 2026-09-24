@@ -15,9 +15,8 @@ use serde_json::{json, Value};
 
 use crate::state::AppState;
 
-/// Wire-protocol contract version. Bump when the request/response shape of any
-/// `/api/*` endpoint changes in a way the GCS must adapt to. The GCS reads this
-/// and picks compatible code paths. Mirrors the Python `API_VERSION`.
+/// Wire-protocol contract version. Bump when the request/response shape of any `/api/*` endpoint
+/// changes in a way the GCS must adapt to. The GCS reads this and picks compatible code paths.
 pub const API_VERSION: &str = "1";
 
 /// Capability flags. Add a new flag whenever a new endpoint or behaviour ships
@@ -95,10 +94,14 @@ pub async fn healthz(State(state): State<AppState>) -> Json<Value> {
 /// reads, so the values change per call; the contract is the shape + types +
 /// the `ntp_synced` semantics. This route is NOT in the auth-exempt set.
 pub async fn get_time() -> Json<Value> {
+    // The sync probe spawns processes; it runs first so the clock stamps are
+    // taken just before the reply leaves, keeping the one-way delay the offset
+    // estimate assumes symmetric as short as it can be.
+    let synced = ntp_synced().await;
     Json(json!({
         "time_ns": wall_clock_ns(),
         "monotonic_ns": monotonic_ns(),
-        "ntp_synced": ntp_synced().await,
+        "ntp_synced": synced,
     }))
 }
 
@@ -181,11 +184,12 @@ fn monotonic_ns() -> u128 {
 async fn ntp_synced() -> bool {
     use std::path::Path;
 
-    // chrony (preferred): a successful `chronyc -c tracking` with a non-empty row
-    // means chrony has a reference.
+    // chrony (preferred): the tracking row must name a reference and not report
+    // the unsynchronised leap status. chronyc prints a full row, and exits zero,
+    // even with no source at all.
     let chrony =
         crate::probe::capture("chronyc", &["-c", "tracking"], crate::probe::PROBE_TIMEOUT).await;
-    if chrony.is_ok() && !chrony.text().trim().is_empty() {
+    if chrony.is_ok() && chrony_tracking_synced(chrony.text()) {
         return true;
     }
 
@@ -216,6 +220,20 @@ async fn ntp_synced() -> bool {
     false
 }
 
+/// Whether a `chronyc -c tracking` CSV row shows a synchronised clock: a
+/// reference id other than `00000000` and a leap status (the last field) other
+/// than `Not synchronised`. An empty or short row is not synchronised.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn chrony_tracking_synced(row: &str) -> bool {
+    let fields: Vec<&str> = row.trim().split(',').collect();
+    if fields.len() < 2 {
+        return false;
+    }
+    let ref_id = fields[0].trim();
+    let leap = fields[fields.len() - 1].trim();
+    !ref_id.is_empty() && ref_id != "00000000" && !leap.eq_ignore_ascii_case("not synchronised")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +256,43 @@ mod tests {
             "POST /api/can/passthrough answers 501, so `can.passthrough` must not \
              appear in the advertised capability list"
         );
+    }
+
+    /// The GCS keeps the same list as `AGENT_CAPABILITIES_FROZEN` in its
+    /// cross-repo contract test (`tests/contract/agent-version-contract.test.ts`
+    /// in Mission Control). A flag added, removed or reordered here must change
+    /// there in the same release, so the served list is pinned whole.
+    #[test]
+    fn served_capabilities_match_the_gcs_contract() {
+        const AGENT_CAPABILITIES_FROZEN: [&str; 14] = [
+            "status.full",
+            "version.endpoint",
+            "services.control",
+            "video.pipeline",
+            "wfb.link",
+            "scripts.runtime",
+            "pairing.mnemonic",
+            "pairing.bind_state",
+            "peripherals.registry",
+            "fleet.roster",
+            "features.catalog",
+            "ground_station.profile",
+            "signing.mavlink",
+            "webrtc.signaling.last_error",
+        ];
+        assert_eq!(
+            CAPABILITIES, AGENT_CAPABILITIES_FROZEN,
+            "agent contract drift: update AGENT_CAPABILITIES_FROZEN on both sides"
+        );
+    }
+
+    #[test]
+    fn chrony_with_no_reference_is_not_synchronised() {
+        let unsynced = "00000000,,0,0.000000000,0.000000000,0.000000000,0.000000000,0.000,0.000,0.000,1.000000000,1.000000000,0.0,Not synchronised";
+        assert!(!chrony_tracking_synced(unsynced));
+        let synced = "A29FC87B,time.example.com,3,1700000000.123456789,-0.000012345,0.000001234,0.000045678,-12.345,0.001,0.012,0.012345678,0.001234567,1024.5,Normal";
+        assert!(chrony_tracking_synced(synced));
+        assert!(!chrony_tracking_synced(""));
     }
 
     #[test]

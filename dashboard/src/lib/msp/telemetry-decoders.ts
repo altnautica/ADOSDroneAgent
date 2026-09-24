@@ -56,6 +56,8 @@ export interface MspAnalog {
 }
 
 export interface MspRawGps {
+  /** Raw byte 0. Betaflight sends a has-fix flag (0/1); iNav sends its fix type
+   *  (0 none, 1 2D, 2 3D). Read it through `gpsFixLabel` with the firmware. */
   fixType: number;
   numSat: number;
   lat: number;
@@ -63,13 +65,16 @@ export interface MspRawGps {
   /** meters */ alt: number;
   /** cm/s */ speed: number;
   /** degrees */ groundCourse: number;
-  /** dimensionless (÷100 of the wire value); undefined when the FC omits it. */
-  hdop?: number;
+  /** Dilution of precision (÷100 of the wire value); undefined when the FC
+   *  omits it. Which DOP it is depends on the firmware: see `dopKind`. */
+  dop?: number;
+  /** Betaflight appends PDOP, iNav appends HDOP. */
+  dopKind: "pdop" | "hdop";
 }
 
 export interface MspAltitude {
   /** meters */ altitude: number;
-  /** cm/s */ vario: number;
+  /** cm/s; null when the FC sent no vario field. */ vario: number | null;
 }
 
 /** Extended status shared by Betaflight (MSP_STATUS_EX) and iNav (MSP2_INAV_STATUS). */
@@ -114,10 +119,13 @@ export function decodeAnalog(payload: Uint8Array): MspAnalog | null {
 }
 
 /**
- * MSP_RAW_GPS (106): U8 fixType, U8 numSat, S32 lat÷1e7, S32 lon÷1e7,
- * U16 alt (m), U16 speed (cm/s), U16 groundCourse÷10, [U16 hdop÷100].
+ * MSP_RAW_GPS (106): U8 fix, U8 numSat, S32 lat÷1e7, S32 lon÷1e7, U16 alt (m),
+ * U16 speed (cm/s), U16 groundCourse÷10, [U16 dop÷100].
+ *
+ * The trailing DOP differs by firmware: Betaflight writes `gpsSol.dop.pdop`
+ * (msp.c, MSP_RAW_GPS), iNav writes `gpsSol.hdop` (fc_msp.c, MSP_RAW_GPS).
  */
-export function decodeRawGps(payload: Uint8Array): MspRawGps | null {
+export function decodeRawGps(payload: Uint8Array, firmware: MspVariant): MspRawGps | null {
   if (payload.length < 16) return null;
   const dv = view(payload);
   return {
@@ -128,8 +136,9 @@ export function decodeRawGps(payload: Uint8Array): MspRawGps | null {
     alt: u16(dv, 10),
     speed: u16(dv, 12),
     groundCourse: u16(dv, 14) / 10,
-    // hdop is appended by newer Betaflight/iNav; absent → left undefined (shown "—").
-    hdop: payload.length >= 18 ? u16(dv, 16) / 100 : undefined,
+    // Appended by newer firmware; absent → left undefined (shown "—").
+    dop: payload.length >= 18 ? u16(dv, 16) / 100 : undefined,
+    dopKind: firmware === "betaflight" ? "pdop" : "hdop",
   };
 }
 
@@ -139,7 +148,7 @@ export function decodeAltitude(payload: Uint8Array): MspAltitude | null {
   const dv = view(payload);
   return {
     altitude: s32(dv, 0) / 100,
-    vario: payload.length >= 6 ? s16(dv, 4) : 0,
+    vario: payload.length >= 6 ? s16(dv, 4) : null,
   };
 }
 
@@ -177,20 +186,20 @@ export function decodeStatusEx(payload: Uint8Array): MspStatus | null {
 }
 
 /**
- * MSP2_INAV_STATUS (0x2000) — iNav:
- *   U16 cycleTime, U16 i2cErrors, U16 sensors, U16 reserved, U32 modeFlags,
- *   U8 currentProfile, U16 cpuLoad, U8 profileCount, U8 rateProfile,
- *   U32 armingFlags, …
- * Armed is bit 2 of armingFlags; hardware-fault is sensors bit 15.
+ * MSP2_INAV_STATUS (0x2000) — iNav (fc_msp.c, MSP2_INAV_STATUS):
+ *   U16 cycleTime, U16 i2cErrors, U16 sensors, U16 averageSystemLoadPercent,
+ *   U8 (batteryProfile << 4 | configProfile), U32 armingFlags,
+ *   boxModeFlags (bitmask), U8 mixerProfile.
+ * Armed is bit 2 of armingFlags (`ARMED`); hardware-fault is sensors bit 15.
  */
 export function decodeInavStatus(payload: Uint8Array): MspStatus | null {
-  if (payload.length < 21) return null;
+  if (payload.length < 13) return null;
   const dv = view(payload);
   const cycleTime = u16(dv, 0);
   const i2cErrors = u16(dv, 2);
   const sensors = u16(dv, 4);
-  const cpuLoad = u16(dv, 13);
-  const armingFlags = u32(dv, 17);
+  const cpuLoad = u16(dv, 6);
+  const armingFlags = u32(dv, 9);
   return {
     cycleTime,
     i2cErrors,
@@ -231,8 +240,13 @@ export function decodeSensorFlags(sensors: number, firmware: MspVariant): Sensor
   ];
 }
 
-/** MSP GPS fixType → short human label. */
-export function gpsFixLabel(fixType: number): string {
+/**
+ * Short human label for MSP_RAW_GPS byte 0. Betaflight sends only whether it
+ * holds a fix (`STATE(GPS_FIX)`), so it never claims a dimension; iNav sends
+ * its fix type.
+ */
+export function gpsFixLabel(fixType: number, firmware: MspVariant): string {
+  if (firmware === "betaflight") return fixType ? "fix" : "no fix";
   switch (fixType) {
     case 0:
       return "no fix";

@@ -3,8 +3,8 @@
 //! The supervisor orchestrates systemd and never spawns a service process
 //! itself, so every lifecycle action funnels through here. A missing
 //! `systemctl` (e.g. a non-Linux dev host) or a timeout is treated as a soft
-//! failure: the wrapper returns `false`/`None` and the caller logs and
-//! proceeds, matching the Python wrapper's behavior under pytest.
+//! failure: an action returns `false`, and a probe returns no verdict (`None`)
+//! rather than a fabricated "inactive".
 
 use std::time::Duration;
 
@@ -18,10 +18,28 @@ const ACT_TIMEOUT: Duration = Duration::from_secs(30);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn run(args: &[&str], dur: Duration) -> Option<std::process::Output> {
-    match timeout(dur, Command::new("systemctl").args(args).output()).await {
+    // `kill_on_drop`: a `systemctl` blocked past the ceiling (a start job queued
+    // behind a slow unit) is reaped on the timeout path instead of surviving as
+    // one leaked process per retry.
+    let child = Command::new("systemctl")
+        .args(args)
+        .kill_on_drop(true)
+        .output();
+    match timeout(dur, child).await {
         Ok(Ok(out)) => Some(out),
         Ok(Err(_)) => None, // spawn error (systemctl missing)
         Err(_) => None,     // timed out
+    }
+}
+
+/// Map `systemctl is-active` output to a verdict. `active` is running; any
+/// other state word (`inactive`, `failed`, `activating`, …) is a definite
+/// not-running answer; empty output is no answer at all. Pure for testing.
+fn is_active_verdict(stdout: &str) -> Option<bool> {
+    match stdout.trim() {
+        "" => None,
+        "active" => Some(true),
+        _ => Some(false),
     }
 }
 
@@ -50,18 +68,23 @@ impl ProcessManager for SystemdManager {
         ok(&run(&["restart", unit], ACT_TIMEOUT).await)
     }
 
+    /// `systemctl try-restart <unit>` — restarts a running unit, leaves a
+    /// stopped one stopped (exit 0 either way).
+    async fn try_restart(&self, unit: &str) -> bool {
+        ok(&run(&["try-restart", unit], ACT_TIMEOUT).await)
+    }
+
     /// `systemctl reset-failed <unit>` — clears a `failed (start-limit-hit)`
     /// state + the burst counter so a following `start` is not a no-op.
     async fn reset_failed(&self, unit: &str) {
         let _ = run(&["reset-failed", unit], PROBE_TIMEOUT).await;
     }
 
-    /// True only when `systemctl is-active <unit>` prints exactly `active`.
-    async fn is_active(&self, unit: &str) -> bool {
-        match run(&["is-active", unit], PROBE_TIMEOUT).await {
-            Some(out) => String::from_utf8_lossy(&out.stdout).trim() == "active",
-            None => false,
-        }
+    /// `systemctl is-active <unit>`: `Some(true)` only for exactly `active`,
+    /// `None` when the probe timed out or could not be spawned.
+    async fn is_active(&self, unit: &str) -> Option<bool> {
+        let out = run(&["is-active", unit], PROBE_TIMEOUT).await?;
+        is_active_verdict(&String::from_utf8_lossy(&out.stdout))
     }
 
     /// `systemctl show -p MainPID` then `/proc/<pid>/io`, summing `rchar` and
@@ -104,5 +127,20 @@ impl ProcessManager for SystemdManager {
     /// `systemctl unmask <unit>` (idempotent).
     async fn unmask(&self, unit: &str) {
         let _ = run(&["unmask", unit], PROBE_TIMEOUT).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_reported_state_is_a_verdict() {
+        assert_eq!(is_active_verdict("active\n"), Some(true));
+        assert_eq!(is_active_verdict("inactive\n"), Some(false));
+        assert_eq!(is_active_verdict("failed"), Some(false));
+        assert_eq!(is_active_verdict("activating"), Some(false));
+        assert_eq!(is_active_verdict(""), None);
+        assert_eq!(is_active_verdict("  \n"), None);
     }
 }

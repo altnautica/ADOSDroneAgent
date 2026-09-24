@@ -670,8 +670,7 @@ profile: \"{profile}\"\n  \
 tier: \"auto\"\n\
 \n\
 server:\n  \
-mode: \"local\"\n  \
-heartbeat_interval: 5\n\
+mode: \"local\"\n\
 \n\
 # The world-model reconstruction surface. Enabled so the compute engine serves\n\
 # the Atlas job API; the drone/GCS submits reconstruction + offload work to it.\n\

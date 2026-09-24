@@ -262,6 +262,13 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
     let freshness = body.as_object_mut().unwrap();
     freshness.remove("table_state");
     freshness.remove("table_age_ms");
+    // A row's age advances by how long the table was held before the read (a few
+    // milliseconds here, seconds on a loaded runner); it is checked, then pinned.
+    for row in body["neighbors"].as_array_mut().unwrap() {
+        let row_age = row["age_ms"].as_u64().unwrap();
+        assert!((420..10_420).contains(&row_age), "{row_age}");
+        row["age_ms"] = json!(420);
+    }
 
     // The full contract, value for value. This is the body Mission Control's beacon
     // store is typed against.
@@ -340,7 +347,14 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
     // The consolidated route carries the same rows.
     let (status, raw) = get(&socket, "/api/status/full").await;
     assert!(status.contains("200"), "{status}");
-    let full: Value = serde_json::from_str(&raw).unwrap();
+    let mut full: Value = serde_json::from_str(&raw).unwrap();
+    // The later read held the table longer, so its ages are checked the same way
+    // and pinned before the rows are compared.
+    for row in full["neighbors"].as_array_mut().unwrap() {
+        let row_age = row["age_ms"].as_u64().unwrap();
+        assert!((420..10_420).contains(&row_age), "{row_age}");
+        row["age_ms"] = json!(420);
+    }
     assert_eq!(
         full["neighbors"], body["neighbors"],
         "/api/status/full must fold in the same rows"

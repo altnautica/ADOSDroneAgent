@@ -195,33 +195,24 @@ pub async fn get_pairing_code(
     let code = match doc.pairing_code.clone() {
         Some(code) if !code.is_empty() => code,
         // No code on file yet: mint + persist one, matching the
-        // `get_or_create_code` generate-and-save branch.
+        // `get_or_create_code` generate-and-save branch. A code that could not be
+        // persisted is refused: an in-memory one is not what the device holds and
+        // would change on every call.
         _ => match pairing_store::write_new_code(&paths.pairing_json, now_unix_seconds()) {
             Ok(code) => code,
             Err(e) => {
                 tracing::warn!(error = %e, "pairing code persist failed");
-                // Fall back to an in-memory code so the route still answers; the
-                // FastAPI route persists, but a 200 with a usable code beats a
-                // 500 on this probe-adjacent route. A getrandom failure here fails
-                // closed to a 500 rather than a predictable code.
-                match pairing_store::generate_code() {
-                    Ok(code) => code,
-                    Err(gen_err) => {
-                        tracing::error!(error = %gen_err, "pairing code mint failed");
-                        return detail(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "Failed to mint pairing code",
-                        );
-                    }
-                }
+                return detail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Failed to persist a pairing code",
+                );
             }
         },
     };
     (StatusCode::OK, Json(json!({ "code": code }))).into_response()
 }
 
-/// The `POST /api/pairing/claim` request body. Mirrors the FastAPI
-/// `ClaimRequest`: a single `user_id` string.
+/// The `POST /api/pairing/claim` request body: a single `user_id` string.
 #[derive(serde::Deserialize)]
 pub struct ClaimRequest {
     pub user_id: String,
@@ -531,6 +522,38 @@ mod tests {
         let bs = read_bind_state(&paths);
         assert_eq!(bs["active"], json!(false));
         assert_eq!(bs["phase"], Value::Null);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_code_that_cannot_be_persisted_is_refused_not_served() {
+        // No code on file and the pairing directory is read-only: the route must
+        // not hand the operator a code the device does not hold.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let ro = dir.path().join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let state = AppState::new(
+            std::sync::Arc::new(crate::auth::PairingState::with_path(
+                ro.join("pairing.json"),
+            )),
+            crate::ipc::StateIpcClient::disconnected(),
+            crate::ipc::MavlinkIpcClient::new(dir.path().join("absent-mavlink.sock")),
+            crate::ipc::LogdQueryClient::new(dir.path().join("absent-logd.sock")),
+            dir.path().join("board.json"),
+            test_paths(&ro),
+            std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.path().join("dashboard-pin.json"),
+            )),
+            std::sync::Arc::new(crate::mcp::McpTokenStore::with_path(
+                dir.path().join("mcp-token.json"),
+            )),
+        );
+        let resp = get_pairing_code(State(state), Some(Extension(CallerClass::OnBox))).await;
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!ro.join("pairing.json").exists());
     }
 
     fn test_paths(dir: &std::path::Path) -> PairingPaths {

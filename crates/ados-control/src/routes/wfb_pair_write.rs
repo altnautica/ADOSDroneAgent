@@ -34,9 +34,9 @@
 //!   may predate a bind that completes while the request is in flight. Arming an
 //!   unpaired rig also
 //!   drops the local-retry request (`ados_protocol::pair_proof`) the supervisor's
-//!   auto-pair loop consumes: a loop that spent its local attempts and parked on
-//!   the cloud relay holds that verdict in memory, and a config flag that was
-//!   already `true` would never reach it.
+//!   auto-pair loop consumes: the request resets the loop's failover signal to
+//!   local and restarts its attempt count, which a config flag that was already
+//!   `true` would never do.
 //!
 //! The native front holds no in-process pair manager — the supervisor reads the
 //! same on-disk YAML this route writes on its own cadence, plus the proof record
@@ -135,8 +135,8 @@ pub struct AutoPairToggleRequest {
 /// the supervisor will never see, is a `500` naming what failed.
 ///
 /// Arming an unpaired rig also drops the local-retry request the supervisor's
-/// auto-pair loop consumes, which is what brings a loop that parked on the cloud
-/// relay back to binding locally (`retry_requested: true`).
+/// auto-pair loop consumes, which resets its failover signal to local and
+/// restarts its attempt count (`retry_requested: true`).
 ///
 /// With `force`, a re-arm on a paired rig is granted instead of refused: the
 /// one-shot flag is recorded against the key's own fingerprint in the pair-proof
@@ -165,9 +165,14 @@ pub async fn put_auto_pair(
 /// firing at whatever key happens to be there. The rest of the record — the
 /// proof, the spent episodes — is loaded and preserved, because forcing one
 /// window is not a reason to forget everything else known about the key.
-fn record_force_rearm(proof_path: &Path, role: &str, fingerprint: &str) -> std::io::Result<()> {
+fn record_force_rearm(
+    proof_path: &Path,
+    role: &str,
+    fingerprint: &str,
+    armed: bool,
+) -> std::io::Result<()> {
     let mut proof = ados_protocol::pair_proof::load_for(proof_path, role, fingerprint).proof;
-    proof.force_rearm = true;
+    proof.force_rearm = armed;
     ados_protocol::pair_proof::write_pair_proof_to(proof_path, &proof)
 }
 
@@ -223,26 +228,40 @@ fn put_auto_pair_at(
             .into_response();
     }
 
-    if let Err(e) = persist_auto_pair_flag(config_path, enabled) {
-        tracing::warn!(error = %e, "auto_pair_flag_persist_failed");
-        return not_applied("config_write_failed", e.to_string());
-    }
-
-    if forced {
-        // The forced re-arm: record the one-shot and never touch the key. Only
-        // meaningful on a paired rig; a forced request on an unpaired one is just
-        // an ordinary arm, which the retry request below already covers. A paired
-        // status always carries the fingerprint it was proven with.
+    // The forced re-arm records its one-shot BEFORE the arm flag is persisted, so
+    // a failure on either write leaves the rig as it was: a recording failure
+    // writes nothing, and a flag failure withdraws the one-shot it just recorded.
+    // The re-arm never touches the key. It is only meaningful on a paired rig; a
+    // forced request on an unpaired one is just an ordinary arm, which the retry
+    // request below already covers. A paired status always carries the
+    // fingerprint it was proven with.
+    let rearm_fp = if forced {
         let Some(fp) = status.fingerprint.as_str() else {
             return not_applied(
                 "rearm_record_failed",
                 "the paired key has no readable fingerprint".to_string(),
             );
         };
-        if let Err(e) = record_force_rearm(proof_path, role, fp) {
+        if let Err(e) = record_force_rearm(proof_path, role, fp, true) {
             tracing::warn!(error = %e, "force_rearm_record_failed");
             return not_applied("rearm_record_failed", e.to_string());
         }
+        Some(fp)
+    } else {
+        None
+    };
+
+    if let Err(e) = persist_auto_pair_flag(config_path, enabled) {
+        tracing::warn!(error = %e, "auto_pair_flag_persist_failed");
+        if let Some(fp) = rearm_fp {
+            if let Err(e) = record_force_rearm(proof_path, role, fp, false) {
+                tracing::warn!(error = %e, "force_rearm_withdraw_failed");
+            }
+        }
+        return not_applied("config_write_failed", e.to_string());
+    }
+
+    if rearm_fp.is_some() {
         body["rearm_blocked"] = json!(false);
         body["forced"] = json!(true);
     } else if enabled {
@@ -346,8 +365,8 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["auto_pair_enabled"], json!(true));
         assert!(body.get("rearm_blocked").is_none());
-        // Arming an unpaired rig asks the supervisor to retry the local bind, so a
-        // loop parked on the cloud relay actually comes back.
+        // Arming an unpaired rig asks the supervisor to retry the local bind:
+        // its failover signal returns to local and its attempt count restarts.
         assert_eq!(body["retry_requested"], json!(true));
         assert_eq!(body["applied"], json!(true));
         assert!(retry.exists());
@@ -659,6 +678,30 @@ mod tests {
                 "{role}: no legacy mirror is written by the toggle"
             );
         }
+    }
+
+    /// A forced re-arm whose one-shot cannot be recorded must not leave the rig
+    /// armed: the caller is told the change did not land, so nothing may have.
+    #[tokio::test]
+    async fn a_forced_rearm_that_cannot_record_its_one_shot_leaves_the_flag_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let keys = dir.path().join("wfb");
+        std::fs::write(dir.path().join("blocker"), b"x").unwrap();
+        let proof = dir.path().join("blocker").join("pair-proof.json");
+        let retry = dir.path().join("auto-pair-retry.request");
+        std::fs::create_dir_all(&keys).unwrap();
+        write_key(&keys, "tx.key");
+        let original = "agent:\n  profile: drone\nvideo:\n  wfb:\n    paired_with_device_id: peer-xyz\n    auto_pair_enabled: false\n";
+        std::fs::write(&cfg, original).unwrap();
+
+        let resp = put_auto_pair_at(&cfg, &keys, &proof, &retry, "drone", true, true);
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            body_json(resp).await["detail"]["error"],
+            json!("rearm_record_failed")
+        );
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original);
     }
 
     /// A forced re-arm with the latch switched off is refused and records

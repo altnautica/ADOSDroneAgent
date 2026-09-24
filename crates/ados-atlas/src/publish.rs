@@ -3,19 +3,12 @@
 //! [`AtlasEvent`] tagged with its topic so a subscriber demultiplexes one
 //! connection. Heavy keyframe images (JPEG) ride the same bus; the frame cap is
 //! the plugin-envelope ceiling (4 MiB), generous for a compressed keyframe.
-//!
-//! The bus also carries the shared-data world-model descriptors
-//! (`plugin.atlas.{pointcloud,occupancy,splat,mesh}`) back onto the drone once a
-//! compute node has produced a generation, so an on-board consumer reads the
-//! world model as data instead of the operator reading it as a picture.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use ados_protocol::atlas::{
-    AtlasEvent, CaptureStatus, Generation, KeyframeEnvelope, MeshDescriptor, OccupancyDescriptor,
-    PointCloudDescriptor, PoseDescriptor, SplatDescriptor, ATLAS_CAPTURE_STATE_TOPIC,
-    ATLAS_KEYFRAME_TOPIC, PLUGIN_ATLAS_MESH_TOPIC, PLUGIN_ATLAS_OCCUPANCY_TOPIC,
-    PLUGIN_ATLAS_POINTCLOUD_TOPIC, PLUGIN_ATLAS_POSE_TOPIC, PLUGIN_ATLAS_SPLAT_TOPIC,
+    AtlasEvent, CaptureStatus, KeyframeEnvelope, PoseDescriptor, ATLAS_CAPTURE_STATE_TOPIC,
+    ATLAS_KEYFRAME_TOPIC, PLUGIN_ATLAS_POSE_TOPIC,
 };
 use ados_protocol::frame::{encode_frame, FrameError, PLUGIN_MAX_FRAME};
 use ados_protocol::ipc::IpcBroadcast;
@@ -110,11 +103,6 @@ impl AtlasPublisher {
         0
     }
 
-    /// Total keyframes this publisher has emitted with no subscriber attached.
-    pub fn undelivered_keyframes(&self) -> u64 {
-        self.undelivered_keyframes.load(Ordering::Relaxed)
-    }
-
     /// Publish the live pose descriptor (~10 Hz shared-data pose).
     pub async fn publish_pose(&self, pose: &PoseDescriptor) {
         match pose.to_msgpack() {
@@ -131,47 +119,6 @@ impl AtlasPublisher {
         match status.to_msgpack() {
             Ok(body) => self.publish(ATLAS_CAPTURE_STATE_TOPIC, body).await,
             Err(e) => tracing::warn!(error = %e, "atlas_state_encode_failed"),
-        }
-    }
-
-    /// Publish a world-model point-cloud descriptor as shared plugin data.
-    pub async fn publish_pointcloud(&self, d: &PointCloudDescriptor) {
-        self.publish_descriptor(PLUGIN_ATLAS_POINTCLOUD_TOPIC, d.to_msgpack(), d.generation)
-            .await;
-    }
-
-    /// Publish a world-model occupancy / ESDF descriptor as shared plugin data.
-    /// This is the planning input: a consumer reads the buffer the descriptor
-    /// names and plans against it.
-    pub async fn publish_occupancy(&self, d: &OccupancyDescriptor) {
-        self.publish_descriptor(PLUGIN_ATLAS_OCCUPANCY_TOPIC, d.to_msgpack(), d.generation)
-            .await;
-    }
-
-    /// Publish a world-model splat descriptor as shared plugin data.
-    pub async fn publish_splat(&self, d: &SplatDescriptor) {
-        self.publish_descriptor(PLUGIN_ATLAS_SPLAT_TOPIC, d.to_msgpack(), d.generation)
-            .await;
-    }
-
-    /// Publish a world-model mesh descriptor as shared plugin data.
-    pub async fn publish_mesh(&self, d: &MeshDescriptor) {
-        self.publish_descriptor(PLUGIN_ATLAS_MESH_TOPIC, d.to_msgpack(), d.generation)
-            .await;
-    }
-
-    async fn publish_descriptor(
-        &self,
-        topic: &'static str,
-        encoded: Result<Vec<u8>, rmp_serde::encode::Error>,
-        generation: Generation,
-    ) {
-        match encoded {
-            Ok(body) => {
-                tracing::debug!(topic, generation, "atlas_world_descriptor_published");
-                self.publish(topic, body).await;
-            }
-            Err(e) => tracing::warn!(topic, error = %e, "atlas_world_descriptor_encode_failed"),
         }
     }
 }

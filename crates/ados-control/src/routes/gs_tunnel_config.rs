@@ -39,7 +39,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::routes::detail;
 use crate::state::AppState;
@@ -51,8 +50,6 @@ const CMD_SOCK_FILE: &str = "tunnel-config-cmd.sock";
 /// How stale the sidecar may be before it reads as absent (the service
 /// rewrites it ~1 Hz running / ~5 s idling).
 const STALE_AFTER: Duration = Duration::from_secs(30);
-/// A relayed reply is bounded (a config op, not a bulk transfer).
-const MAX_REPLY_BYTES: usize = 64 * 1024;
 
 fn run_dir() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
@@ -210,35 +207,13 @@ fn map_cmd_reply(reply: &Value) -> Response {
 /// newline-JSON reply. `None` on any transport failure so the caller takes its
 /// 503 no-link posture.
 async fn cmd_roundtrip(request: &Value) -> Option<Value> {
-    let sock = run_dir().join(CMD_SOCK_FILE);
-    let mut stream = tokio::net::UnixStream::connect(&sock).await.ok()?;
-    let mut line = serde_json::to_vec(request).ok()?;
-    line.push(b'\n');
-    if stream.write_all(&line).await.is_err() || stream.flush().await.is_err() {
-        return None;
-    }
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 8 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await.ok()?;
-        if n == 0 {
-            break;
-        }
-        if raw.len() + n > MAX_REPLY_BYTES {
-            return None;
-        }
-        raw.extend_from_slice(&buf[..n]);
-        if raw.contains(&b'\n') {
-            break;
-        }
-    }
-    if raw.is_empty() {
-        return None;
-    }
-    let text = String::from_utf8(raw).ok()?;
-    let first = text.lines().next()?;
-    let parsed: Value = serde_json::from_str(first).ok()?;
-    parsed.is_object().then_some(parsed)
+    /// The injector bounds the radio round trip at 30 s at most, then replies;
+    /// the front waits a little longer so it hears that reply.
+    const TUNNEL_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
+    crate::ipc::cmd::roundtrip_object(&run_dir().join(CMD_SOCK_FILE), request, TUNNEL_CMD_TIMEOUT)
+        .await
+        .ok()
+        .map(Value::Object)
 }
 
 #[cfg(test)]

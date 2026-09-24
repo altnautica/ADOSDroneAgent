@@ -13,12 +13,11 @@
 //! actually decodes proves the RF lane carried it.
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use ados_atlas_transport::{AtlasBearer, AtlasEvent, LanHttpBearer};
+use ados_protocol::shutdown::Shutdown;
 use tokio::net::UdpSocket;
-use tokio::sync::Notify;
 
 const BUF_SIZE: usize = 65536;
 
@@ -140,7 +139,9 @@ async fn forward_datagram(bearer: &LanHttpBearer, buf: &[u8], stats: &mut AtlasR
 
 /// Run the relay until `cancel` is notified. Binds `127.0.0.1:listen_port` (where
 /// `wfb_rx -p 2` decodes the aux stream) and forwards each datagram to
-/// `compute_base_url` (the compute node's `atlas_event_router`). Publishes the
+/// `compute_base_url` (the compute node's `atlas_event_router`), presenting the
+/// credential that node issued this ground station (the sole one installed: the
+/// relay knows the node only by its URL). Publishes the
 /// live counters to the `atlas-relay.json` Contract-E sidecar and the logging
 /// store on a fixed cadence and after each forward, so the GS Atlas relay card
 /// reads a current, truthful view; a final `up=false` snapshot is persisted on
@@ -148,12 +149,13 @@ async fn forward_datagram(bearer: &LanHttpBearer, buf: &[u8], stats: &mut AtlasR
 pub async fn run_atlas_relay(
     listen_port: u16,
     compute_base_url: String,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
     ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
 ) -> std::io::Result<AtlasRelayStats> {
     let in_sock = UdpSocket::bind(("127.0.0.1", listen_port)).await?;
     let compute_url = compute_base_url.clone();
-    let bearer = LanHttpBearer::new(compute_base_url);
+    let mut credential = ados_protocol::node_credential::credential_for(None);
+    let mut bearer = LanHttpBearer::new(compute_base_url, credential.clone());
     let mut buf = vec![0u8; BUF_SIZE];
     let mut stats = AtlasRelayStats::default();
     // Consecutive recv errors with no intervening successful read. A transient
@@ -167,8 +169,16 @@ pub async fn run_atlas_relay(
     tracing::info!(listen_port, "atlas_relay_started");
     loop {
         tokio::select! {
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
             _ = publish.tick() => {
+                // Pick up a credential installed (or rotated) after the relay
+                // started, without a restart.
+                let fresh = ados_protocol::node_credential::credential_for(None);
+                if fresh != credential {
+                    tracing::info!("atlas_relay_credential_changed");
+                    credential = fresh;
+                    bearer = LanHttpBearer::new(compute_url.clone(), credential.clone());
+                }
                 AtlasRelaySidecar::snapshot(&stats, &compute_url, listen_port, true)
                     .write_and_emit(ingest.as_ref());
             }
@@ -223,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn a_decoded_datagram_is_forwarded_to_the_compute_receiver() {
         let (base, mut rx) = spawn_receiver().await;
-        let bearer = LanHttpBearer::new(base);
+        let bearer = LanHttpBearer::new(base, None);
         let mut stats = AtlasRelayStats::default();
 
         let ev = event("atlas.occupancy", vec![1, 2, 3]);
@@ -239,7 +249,7 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_datagram_is_dropped_and_counted_not_forwarded() {
         let (base, mut rx) = spawn_receiver().await;
-        let bearer = LanHttpBearer::new(base);
+        let bearer = LanHttpBearer::new(base, None);
         let mut stats = AtlasRelayStats::default();
 
         forward_datagram(&bearer, b"not msgpack at all \xff\xff", &mut stats).await;
@@ -254,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn the_relay_loop_forwards_a_datagram_then_stops_on_cancel() {
         let (base, mut rx) = spawn_receiver().await;
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         // Bind the relay on an ephemeral port by asking the OS, then reuse it.
         let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let listen_port = probe.local_addr().unwrap().port();
@@ -273,7 +283,7 @@ mod tests {
         let got = rx.recv().await.unwrap();
         assert_eq!(got, ev);
 
-        cancel.notify_one();
+        cancel.trigger();
         let stats = handle.await.unwrap().unwrap();
         assert_eq!(stats.forwarded, 1);
     }

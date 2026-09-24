@@ -166,12 +166,9 @@ def test_plugin_context_exposes_the_v11_facades() -> None:
     restored a test that cannot fail.
 
     Read via ``dis`` filtered to ``STORE_ATTR`` rather than ``co_names``, which
-    is every name the code object touches — reads included. ``co_names`` carries
-    a concrete false pass here: ``self.peripherals = self.peripheral_manager``
-    means deleting the ``peripheral_manager`` assignment leaves the name in the
-    pool through the surviving ``LOAD_ATTR``, so the facade could disappear with
-    this test still green. It also carries fourteen imported class names that are
-    not attributes at all. ``STORE_ATTR`` is exactly "was assigned".
+    is every name the code object touches — reads included — plus the imported
+    class names, which are not attributes at all. ``STORE_ATTR`` is exactly
+    "was assigned".
     """
     import dis
 
@@ -193,7 +190,7 @@ def test_plugin_context_exposes_the_v11_facades() -> None:
             "events",
             "mavlink",
             "peripheral_manager",
-            "peripherals",
+            "msp",
             "telemetry",
             "config_kv",
             "process",

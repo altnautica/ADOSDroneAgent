@@ -200,25 +200,39 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
         .into_response()
 }
 
+/// The optional `POST .../disable-on-fc` body: the same target an enrolment names,
+/// so an FC enrolled at a system id other than 1 is the one that gets cleared.
+#[derive(Debug, Deserialize)]
+pub struct DisableRequest {
+    #[serde(default = "default_target_system")]
+    pub target_system: i64,
+    #[serde(default = "default_target_component")]
+    pub target_component: i64,
+}
+
 /// `POST /api/mavlink/signing/disable-on-fc` → clear the FC's signing store.
 ///
-/// Gates on the FC being connected (`503` when not), then sends `SETUP_SIGNING`
+/// Takes an optional `{target_system, target_component}` body (default 1/1, the
+/// same defaults and bounds enrolment uses). Gates on the FC being connected
+/// (`503` when not), then sends `SETUP_SIGNING`
 /// with an all-zero key + a zero timestamp (ArduPilot reads this as "disable
 /// signing") and returns `{success: true}`. A socket failure is the Python `503
 /// "MAVLink command link unavailable"`; any other failure is the Python `500
 /// "disable failed"`.
-pub async fn disable_on_fc(State(state): State<AppState>) -> Response {
+pub async fn disable_on_fc(
+    State(state): State<AppState>,
+    body: Option<Json<DisableRequest>>,
+) -> Response {
     if !state.fc_connected() {
         return detail(StatusCode::SERVICE_UNAVAILABLE, "FC not connected");
     }
+    let (target_system, target_component) = match disable_target(body.map(|Json(b)| b)) {
+        Ok(t) => t,
+        Err(msg) => return detail(StatusCode::BAD_REQUEST, msg),
+    };
 
     let zero_key = [0u8; SIGNING_KEY_LEN];
-    let frame = match build_setup_signing_frame(
-        DEFAULT_TARGET_SYSTEM,
-        DEFAULT_TARGET_COMPONENT,
-        &zero_key,
-        0,
-    ) {
+    let frame = match build_setup_signing_frame(target_system, target_component, &zero_key, 0) {
         Ok(bytes) => bytes,
         Err(()) => {
             tracing::error!("signing disable frame serialize failed");
@@ -234,11 +248,20 @@ pub async fn disable_on_fc(State(state): State<AppState>) -> Response {
         );
     }
 
-    tracing::info!(
-        target_system = DEFAULT_TARGET_SYSTEM,
-        "signing disabled on fc"
-    );
+    tracing::info!(target_system, target_component, "signing disabled on fc");
     (StatusCode::OK, Json(json!({ "success": true }))).into_response()
+}
+
+/// The disable target: the body's system/component (bounded like enrolment), or
+/// 1/1 when no body is sent.
+fn disable_target(body: Option<DisableRequest>) -> Result<(u8, u8), &'static str> {
+    let Some(b) = body else {
+        return Ok((DEFAULT_TARGET_SYSTEM, DEFAULT_TARGET_COMPONENT));
+    };
+    let system = bounded_u8(b.target_system, 1, 255).map_err(|()| "target_system out of range")?;
+    let component =
+        bounded_u8(b.target_component, 0, 255).map_err(|()| "target_component out of range")?;
+    Ok((system, component))
 }
 
 /// Parse a 64-char lowercase-hex string into a 32-byte key, mirroring the Python
@@ -381,6 +404,24 @@ fn iso8601_seconds_utc(dt: OffsetDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disable_clears_the_fc_the_caller_names() {
+        let named = DisableRequest {
+            target_system: 7,
+            target_component: 1,
+        };
+        assert_eq!(disable_target(Some(named)), Ok((7, 1)));
+        assert_eq!(
+            disable_target(None),
+            Ok((DEFAULT_TARGET_SYSTEM, DEFAULT_TARGET_COMPONENT))
+        );
+        let bad = DisableRequest {
+            target_system: 0,
+            target_component: 1,
+        };
+        assert!(disable_target(Some(bad)).is_err());
+    }
     use serde_json::Value;
     use tokio::io::AsyncReadExt;
     use tokio::net::UnixListener;
@@ -570,15 +611,14 @@ mod tests {
         })
     }
 
-    /// Spawn a one-shot Unix listener that accepts one connection and reads `n`
-    /// length-prefixed frames on that single connection, returning each frame's
-    /// raw bytes. The MAVLink client reuses one held connection for back-to-back
-    /// sends, so both enroll frames arrive on the same stream.
+    /// Spawn a Unix listener that reads `n` length-prefixed frames, returning
+    /// each frame's raw bytes. The MAVLink client opens one connection per
+    /// fire-and-forget frame, so each frame arrives on its own accepted stream.
     fn accept_n_frames(listener: UnixListener, n: usize) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
         tokio::spawn(async move {
-            let (mut conn, _addr) = listener.accept().await.unwrap();
             let mut frames = Vec::with_capacity(n);
             for _ in 0..n {
+                let (mut conn, _addr) = listener.accept().await.unwrap();
                 frames.push(read_framed(&mut conn).await);
             }
             frames
@@ -602,8 +642,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("mavlink.sock");
         let listener = UnixListener::bind(&sock).unwrap();
-        // The enroll sends the SAME frame twice on the one held connection, for
-        // radio resilience. The server reads both off the single stream.
+        // The enroll sends the SAME frame twice, for radio resilience.
         let server = accept_n_frames(listener, 2);
 
         let key_hex = (0u8..32).map(|b| format!("{b:02x}")).collect::<String>();
@@ -715,7 +754,7 @@ mod tests {
         let server = accept_one_frame(listener);
 
         let state = state_with_mavlink(sock, true);
-        let resp = disable_on_fc(State(state)).await;
+        let resp = disable_on_fc(State(state), None).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let value = body_json(resp).await;
         assert_eq!(value, json!({ "success": true }));
@@ -736,7 +775,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("mavlink.sock");
         let state = state_with_mavlink(sock, false);
-        let resp = disable_on_fc(State(state)).await;
+        let resp = disable_on_fc(State(state), None).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             body_json(resp).await,
@@ -749,7 +788,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("absent.sock");
         let state = state_with_mavlink(sock, true);
-        let resp = disable_on_fc(State(state)).await;
+        let resp = disable_on_fc(State(state), None).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             body_json(resp).await,

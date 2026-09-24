@@ -1,17 +1,18 @@
-//! The compute-offload client: the agent-side caller of a paired compute node's
-//! job API.
+//! The compute-offload client: the agent-side caller of a compute node's job
+//! API.
 //!
-//! A plugin's offload submits a reconstruction or a perception / SLAM-offload job
-//! through this client, uploads its dataset, and reads the status + result. It is
-//! the drone/GCS half of the `compute.job.submit` / `compute.job.read` /
-//! `compute.dataset.write` capability contract — the plugin host gates a plugin
-//! on those caps, then routes the call here. Local-first: `base_url` is the paired
-//! node's LAN address, the pairing key rides `X-ADOS-Key` for the off-box leg.
+//! A drone's offload submits a perception-offload session through this client
+//! and reads its health. Local-first: `base_url` is the node's LAN address, and
+//! the drone presents the credential that node issued it (installed by the
+//! owner) in the node-credential header. It never sends its own pairing key:
+//! that key is full authority over the drone and means nothing to the node.
 
 use std::time::Duration;
 
 use reqwest::Client;
 use serde::Serialize;
+
+use ados_protocol::node_credential::NODE_CREDENTIAL_HEADER;
 
 use crate::api::{CancelResponse, SubmitResponse};
 use crate::{ComputeHeartbeat, ComputeJobKind, Dataset, JobRecord, Output};
@@ -71,15 +72,17 @@ fn encode_segment(s: &str) -> String {
 pub struct ComputeClient {
     http: Client,
     base_url: String,
-    api_key: Option<String>,
+    credential: Option<String>,
 }
 
 impl ComputeClient {
-    /// A client targeting `base_url` (e.g. `http://compute.local:8092`). `api_key`
-    /// is the pairing key, sent as `X-ADOS-Key` for the off-box leg; pass `None`
-    /// on-box / when unpaired. The client carries connect + request timeouts so a
-    /// hung node fails the call rather than parking the caller.
-    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+    /// A client targeting `base_url` (e.g. `http://compute.local:8092`).
+    /// `credential` is the one this node issued the caller, sent in the
+    /// node-credential header; `None` when none is installed (an unpaired node
+    /// or an on-box caller is served without one). The client carries connect +
+    /// request timeouts so a hung node fails the call rather than parking the
+    /// caller.
+    pub fn new(base_url: impl Into<String>, credential: Option<String>) -> Self {
         // The workspace's reqwest is unified onto the no-provider rustls path, so
         // building a Client tries to construct a default TLS config that needs a
         // process-default crypto provider; install it first or build() panics
@@ -97,7 +100,7 @@ impl ComputeClient {
         Self {
             http,
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            api_key,
+            credential,
         }
     }
 
@@ -106,8 +109,8 @@ impl ComputeClient {
     }
 
     fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.api_key {
-            Some(key) => rb.header("X-ADOS-Key", key),
+        match &self.credential {
+            Some(c) => rb.header(NODE_CREDENTIAL_HEADER, c),
             None => rb,
         }
     }
@@ -256,6 +259,10 @@ mod tests {
     fn unpaired_auth() -> Arc<ComputeAuth> {
         Arc::new(ComputeAuth::new(
             "/nonexistent/ados-compute-client-test.json".into(),
+            crate::NodeCredentialStore::open(
+                "/nonexistent/ados-compute-client-creds.json".into(),
+                "node-a",
+            ),
         ))
     }
 
@@ -392,19 +399,5 @@ mod tests {
             Err(ClientError::Http(404, _)) => {}
             other => panic!("expected Http(404), got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn the_pairing_key_round_trips_against_a_paired_node() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pairing.json");
-        std::fs::write(&path, r#"{"paired": true, "api_key": "ados_secret"}"#).unwrap();
-        let (addr, _engine) = spawn(Arc::new(ComputeAuth::new(path))).await;
-        // A loopback connect is on-box (open even when paired); the X-ADOS-Key
-        // header is still sent and accepted. The off-box rejection path is
-        // covered by the auth-gate unit tests, which can synthesize an off-box
-        // peer; a real loopback client cannot.
-        let client = ComputeClient::new(format!("http://{addr}"), Some("ados_secret".into()));
-        assert!(client.status().await.is_ok());
     }
 }

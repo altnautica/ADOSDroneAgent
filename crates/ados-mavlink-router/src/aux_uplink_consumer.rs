@@ -31,9 +31,9 @@ use std::time::Duration;
 
 use ados_protocol::aux_egress::AuxEgress;
 use ados_protocol::aux_mux::{self, AuxChannel, AuxDecodeError};
+use ados_protocol::shutdown::Shutdown;
 use serde::Serialize;
 use tokio::net::UdpSocket;
-use tokio::sync::Notify;
 
 use crate::aux_rpc_dedupe::RequestDedupe;
 use crate::connection::{ClientOrigin, FcConnection};
@@ -284,7 +284,7 @@ pub async fn run(
     port: u16,
     deps: UplinkDeps,
     counters: AuxUplinkConsumerCounters,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
     let sock = match UdpSocket::bind(addr).await {
@@ -301,7 +301,7 @@ pub async fn run(
     loop {
         tokio::select! {
             biased;
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
             recvd = sock.recv(&mut buf) => {
                 match recvd {
                     Ok(n) => {

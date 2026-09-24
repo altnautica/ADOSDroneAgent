@@ -121,13 +121,7 @@ Issues = "https://github.com/altnautica/ADOSDroneAgent/issues"
 
 [project.scripts]
 ados = "ados.cli.main:cli"
-ados-agent = "ados.core.main:main"
 ados-plugin-runner = "ados.plugins.runner:main"
-
-[project.entry-points."ados.plugins"]
-geofence = "ados.plugins.builtin.geofence"
-telemetry-logger = "ados.plugins.builtin.telemetry_logger"
-mavlink-inspector = "ados.plugins.builtin.mavlink_inspector"
 
 # Peripheral Manager plugin group. External OEM partners contribute
 # manifests via entry points or filesystem drop-in.

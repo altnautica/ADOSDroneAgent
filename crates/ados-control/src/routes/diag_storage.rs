@@ -201,7 +201,8 @@ async fn sample_write_window(path: &Path, window: Duration) -> Option<(String, S
 /// Lines that are too short to carry the counter are skipped rather than
 /// treated as zero: a truncated or unfamiliar line is missing data, and
 /// pretending it means "no writes" is the failure mode this whole surface
-/// exists to avoid.
+/// exists to avoid. RAM-backed devices are skipped too (see
+/// [`is_ram_backed_device`]).
 pub fn parse_diskstats(text: &str) -> std::collections::BTreeMap<String, u64> {
     let mut out = std::collections::BTreeMap::new();
     for line in text.lines() {
@@ -210,6 +211,9 @@ pub fn parse_diskstats(text: &str) -> std::collections::BTreeMap<String, u64> {
         let (Some(_), Some(_), Some(name)) = (fields.next(), fields.next(), fields.next()) else {
             continue;
         };
+        if is_ram_backed_device(name) {
+            continue;
+        }
         let counters: Vec<&str> = fields.collect();
         let Some(raw) = counters.get(DISKSTATS_WR_SECTORS_FIELD) else {
             continue;
@@ -220,6 +224,16 @@ pub fn parse_diskstats(text: &str) -> std::collections::BTreeMap<String, u64> {
         out.insert(name.to_string(), sectors);
     }
     out
+}
+
+/// Whether a block device never touches storage: compressed-RAM swap (`zram*`),
+/// RAM disks (`ram*`) and loop devices (`loop*`, whose writes land on a backing
+/// file already counted on the real disk). Swap on zram can easily be the busiest
+/// writer on an SBC, and counting it would report RAM traffic as card wear.
+fn is_ram_backed_device(name: &str) -> bool {
+    ["zram", "ram", "loop"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }
 
 /// The write rate this process measured itself, from two `/proc/diskstats`
@@ -356,7 +370,7 @@ fn device_names(rows: &[HwRow]) -> Vec<String> {
         .filter_map(|k| {
             let rest = k.strip_prefix("disk.")?;
             let name = rest.strip_suffix(".wr_sectors")?;
-            (!name.is_empty()).then(|| name.to_string())
+            (!name.is_empty() && !is_ram_backed_device(name)).then(|| name.to_string())
         })
         .collect();
     names.sort();
@@ -874,6 +888,32 @@ mod tests {
         );
         let m = live_write_rate(&a, &b, 5.0).unwrap();
         assert_eq!(m.device.as_deref(), Some("sda"));
+    }
+
+    #[test]
+    fn zram_swap_traffic_is_never_reported_as_card_wear() {
+        // zram0 is swap in RAM; on a memory-tight SBC it can out-write the card.
+        let a = format!(
+            "{}{}{}",
+            diskstats("mmcblk0", 1_000_000),
+            diskstats("zram0", 10),
+            diskstats("loop0", 10)
+        );
+        let b = format!(
+            "{}{}{}",
+            diskstats("mmcblk0", 1_000_050),
+            diskstats("zram0", 900_010),
+            diskstats("loop0", 900_010)
+        );
+        let m = live_write_rate(&a, &b, 5.0).unwrap();
+        assert_eq!(m.device.as_deref(), Some("mmcblk0"));
+
+        let mut rows = rows_with_counter(120, 2.0, "mmcblk0");
+        for (i, row) in rows.iter_mut().enumerate() {
+            row.signals
+                .insert("disk.zram0.wr_sectors".into(), json!(9_000.0 * i as f64));
+        }
+        assert_eq!(busiest_device(&rows).as_deref(), Some("mmcblk0"));
     }
 
     #[test]

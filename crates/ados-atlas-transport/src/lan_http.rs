@@ -4,9 +4,10 @@
 //! compute node's atlas-event endpoint; the receiver ([`atlas_event_router`]) is
 //! the axum router the compute node mounts to decode events onto a bounded
 //! channel its ingest loop drains. Plain HTTP on the LAN (no TLS); reach is
-//! local-first (mDNS + LAN-pair). The sender carries explicit connect + request
-//! timeouts so a hung-but-reachable node fails the send (and the ladder fails
-//! over) instead of parking forever.
+//! local-first (mDNS + LAN-pair). The sender presents the credential the compute
+//! node issued this node, and carries explicit connect + request timeouts so a
+//! hung-but-reachable node fails the send (and the ladder fails over) instead
+//! of parking forever.
 
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use reqwest::Client;
 use tokio::sync::mpsc::{error::TrySendError, Sender};
 
 use ados_protocol::atlas::AtlasEvent;
+use ados_protocol::node_credential::NODE_CREDENTIAL_HEADER;
 
 use crate::{AtlasBearer, BearerKind, TransportError};
 
@@ -44,12 +46,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct LanHttpBearer {
     client: Client,
     base_url: String,
+    credential: Option<String>,
 }
 
 impl LanHttpBearer {
-    /// A bearer targeting `base_url` (e.g. `http://compute.local:8092`), with a
-    /// client that has connect + request timeouts so a hung peer fails the send.
-    pub fn new(base_url: impl Into<String>) -> Self {
+    /// A bearer targeting `base_url` (e.g. `http://compute.local:8092`),
+    /// presenting `credential` (the one that node issued this node; `None` when
+    /// none is installed, which only an unpaired node accepts), with a client
+    /// that has connect + request timeouts so a hung peer fails the send.
+    pub fn new(base_url: impl Into<String>, credential: Option<String>) -> Self {
         // Install the process-default crypto provider first, or build() can
         // panic "No provider set" under the workspace's no-provider rustls path.
         ados_protocol::crypto::ensure_crypto_provider();
@@ -61,16 +66,17 @@ impl LanHttpBearer {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("build atlas lan-http client");
-        Self::with_client(client, base_url)
-    }
-
-    /// A bearer reusing an existing client (share one pool + timeout config
-    /// across bearers). The caller is responsible for setting timeouts.
-    pub fn with_client(client: Client, base_url: impl Into<String>) -> Self {
-        let base = base_url.into().trim_end_matches('/').to_string();
         Self {
             client,
-            base_url: base,
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            credential,
+        }
+    }
+
+    fn authed(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.credential {
+            Some(c) => rb.header(NODE_CREDENTIAL_HEADER, c),
+            None => rb,
         }
     }
 
@@ -79,8 +85,7 @@ impl LanHttpBearer {
     /// so the ladder does not pay a network round-trip before every send — a send
     /// failure (now bounded by the request timeout) is the failover signal.
     pub async fn probe(&self) -> bool {
-        self.client
-            .get(format!("{}{HEALTH_PATH}", self.base_url))
+        self.authed(self.client.get(format!("{}{HEALTH_PATH}", self.base_url)))
             .timeout(PROBE_TIMEOUT)
             .send()
             .await
@@ -105,10 +110,12 @@ impl AtlasBearer for LanHttpBearer {
     async fn send(&self, event: &AtlasEvent) -> Result<(), TransportError> {
         let body = event.encode()?;
         let resp = self
-            .client
-            .post(format!("{}{EVENT_PATH}", self.base_url))
-            .header("content-type", "application/msgpack")
-            .body(body)
+            .authed(
+                self.client
+                    .post(format!("{}{EVENT_PATH}", self.base_url))
+                    .header("content-type", "application/msgpack")
+                    .body(body),
+            )
             .send()
             .await
             .map_err(|e| TransportError::Request(e.to_string()))?;
@@ -124,7 +131,8 @@ impl AtlasBearer for LanHttpBearer {
 /// event is forwarded on the bounded `sink`; the ingest loop drains the receiver.
 /// A malformed body is a `400`, a full or gone ingest channel a `503`
 /// (backpressure — the sender's ladder retries or drops), an over-limit body a
-/// `413`, never a panic or an unbounded queue.
+/// `413`, never a panic or an unbounded queue. The routes carry no auth of their
+/// own: the node mounts them behind its ingest lane gate.
 pub fn atlas_event_router(sink: Sender<AtlasEvent>) -> Router {
     Router::new()
         .route(EVENT_PATH, post(receive_event))
@@ -175,7 +183,7 @@ mod tests {
     #[tokio::test]
     async fn a_sent_event_is_received_over_lan_http() {
         let (addr, mut rx) = spawn_server().await;
-        let bearer = LanHttpBearer::new(format!("http://{addr}"));
+        let bearer = LanHttpBearer::new(format!("http://{addr}"), None);
         assert!(bearer.probe().await);
         bearer.send(&keyframe_event()).await.unwrap();
         let got = rx.recv().await.unwrap();
@@ -188,7 +196,7 @@ mod tests {
         // A Full-tier keyframe (full-resolution image bytes) exceeds axum's
         // default 2 MB limit; the raised limit must accept it on the primary path.
         let (addr, mut rx) = spawn_server().await;
-        let bearer = LanHttpBearer::new(format!("http://{addr}"));
+        let bearer = LanHttpBearer::new(format!("http://{addr}"), None);
         let big = AtlasEvent::new("atlas.keyframe", None, vec![0xAB; 5 * 1024 * 1024]); // 5 MB
         bearer.send(&big).await.unwrap(); // Ok(()) means a 2xx, not a 413
         let got = rx.recv().await.unwrap();
@@ -198,7 +206,7 @@ mod tests {
     #[tokio::test]
     async fn probe_is_false_when_nothing_is_listening() {
         // Port 1 is privileged and unbound; the connect fails fast.
-        let bearer = LanHttpBearer::new("http://127.0.0.1:1");
+        let bearer = LanHttpBearer::new("http://127.0.0.1:1", None);
         assert!(!bearer.probe().await);
         // is_available stays optimistic; send is what fails + triggers failover.
         assert!(bearer.is_available().await);
@@ -218,7 +226,7 @@ mod tests {
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let bearer = LanHttpBearer::new(format!("http://{addr}"));
+        let bearer = LanHttpBearer::new(format!("http://{addr}"), None);
         match bearer.send(&keyframe_event()).await {
             Err(TransportError::Http(500)) => {}
             other => panic!("expected Http(500), got {other:?}"),

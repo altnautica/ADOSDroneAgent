@@ -8,6 +8,8 @@ unreachable / auth-blocked, and a 405 there is degraded, never ready.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -26,20 +28,19 @@ class _FakeResponse:
 
 
 class _FakeClient:
-    """Stand-in for ``httpx.Client`` that answers the paths-list URL with a
-    canned response and raises on anything else (so a test that hits the WHEP
-    fallback URL must register it explicitly)."""
+    """Stand-in for ``httpx.AsyncClient`` that answers the paths-list URL with
+    a canned response and raises on anything else."""
 
     def __init__(self, responses: dict[str, _FakeResponse]) -> None:
         self._responses = responses
 
-    def __enter__(self) -> _FakeClient:
+    async def __aenter__(self) -> _FakeClient:
         return self
 
-    def __exit__(self, *exc) -> None:
+    async def __aexit__(self, *exc) -> None:
         return None
 
-    def get(self, url: str) -> _FakeResponse:
+    async def get(self, url: str) -> _FakeResponse:
         for needle, resp in self._responses.items():
             if needle in url:
                 return resp
@@ -50,7 +51,7 @@ class _FakeClient:
 def patch_client(monkeypatch):
     def _install(responses: dict[str, _FakeResponse]) -> None:
         monkeypatch.setattr(
-            _common.httpx, "Client", lambda *a, **k: _FakeClient(responses)
+            _common.httpx, "AsyncClient", lambda *a, **k: _FakeClient(responses)
         )
 
     return _install
@@ -75,7 +76,7 @@ def test_ready_when_paths_list_reports_a_ready_source(patch_client) -> None:
             )
         }
     )
-    ready, track = _common.mediamtx_ready_sync()
+    ready, track = asyncio.run(_common.mediamtx_ready())
     assert ready is True
     assert track is not None and track.get("codec") == "H264"
 
@@ -90,13 +91,13 @@ def test_not_ready_when_paths_list_has_a_ready_path_with_no_source(patch_client)
             )
         }
     )
-    ready, _track = _common.mediamtx_ready_sync()
+    ready, _track = asyncio.run(_common.mediamtx_ready())
     assert ready is False
 
 
 def test_not_ready_when_no_paths_yet(patch_client) -> None:
     patch_client({"/v3/paths/list": _FakeResponse(200, {"items": []})})
-    ready, track = _common.mediamtx_ready_sync()
+    ready, track = asyncio.run(_common.mediamtx_ready())
     assert ready is False
     assert track is None
 
@@ -105,7 +106,7 @@ def test_not_ready_when_paths_list_unreachable(patch_client) -> None:
     # :9997 raises (auth-blocked / down). The WHEP fallback proves only that the
     # endpoint is bound, never that frames flow → degraded, not ready.
     patch_client({})  # every URL raises ConnectError
-    ready, track = _common.mediamtx_ready_sync()
+    ready, track = asyncio.run(_common.mediamtx_ready())
     assert ready is False
     assert track is None
 
@@ -113,8 +114,6 @@ def test_not_ready_when_paths_list_unreachable(patch_client) -> None:
 def test_whep_probe_405_is_bound_not_ready() -> None:
     # A 405 means the WHEP endpoint exists (bound), NOT that a publisher streams.
     # The async probe must report running:true but ready:false.
-    import asyncio
-
     class _R:
         status_code = 405
 

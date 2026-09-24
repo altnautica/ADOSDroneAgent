@@ -195,11 +195,12 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     def("ados-compute", Core, Some("workstation|compute"), None),
     // On-demand.
     def("ados-discovery", OnDemand, None, None),
-    // The native HTTP control surface. Cross-profile and on-demand: it ships
-    // disabled (the GCS uses the FastAPI surface) and only runs when the operator
-    // enables it, so the supervisor never auto-starts it on boot. In the KEEP set
-    // because the lean headless profile binds it on `:8080` in place of FastAPI;
-    // the headless gate must permit it while blocking the rest.
+    // The native HTTP control surface: the LAN front on `:8080` on every
+    // profile. The installer enables it (it writes the front marker on every
+    // install) and systemd starts it with the supervisor, so this row is
+    // OnDemand — the supervisor never starts it itself — and the adoption sweep
+    // brings it under death detection. In the KEEP set because the lean headless
+    // profile runs it as its only HTTP surface.
     def_keep("ados-control", OnDemand, None, None),
     // Peripheral Manager registry. Cross-profile.
     def("ados-peripherals", Hardware, None, None),
@@ -241,10 +242,6 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
         Some("direct"),
     ),
     def("ados-mediamtx-gs", Hardware, Some("ground_station"), None),
-    // No ados-usb-gadget row: the native ados-net daemon composes the OTG
-    // gadget in-process and the installer always tears the packaged unit down,
-    // so registering it here made the supervisor report a deliberately-dead
-    // service as a managed hardware unit forever.
     // Physical UI + AP + first-boot captive portal.
     def("ados-oled", Hardware, Some("ground_station"), None),
     // Optional I2C status OLED, coexists with the HDMI cockpit (self-skips

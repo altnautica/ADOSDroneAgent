@@ -21,10 +21,10 @@
 //! Timing uses the async runtime's clock so the stall window is testable
 //! under a paused clock.
 
+use ados_protocol::shutdown::Shutdown;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tokio::sync::Notify;
 use tokio::time::{Duration, Instant};
 
 use crate::transport::WireCounters;
@@ -53,16 +53,13 @@ pub enum WatchdogFired {
 /// [`WatchdogFired::Cancelled`] on the cancel notify. The caller respawns the
 /// whole transport on a stall — a fresh bring-up re-arms a fresh watchdog, so
 /// recovery is re-verified rather than assumed.
-pub async fn tx_liveness_watchdog(
-    counters: Arc<WireCounters>,
-    cancel: Arc<Notify>,
-) -> WatchdogFired {
+pub async fn tx_liveness_watchdog(counters: Arc<WireCounters>, cancel: Shutdown) -> WatchdogFired {
     let mut prev = counters.tx_frames.load(Ordering::Relaxed);
     let mut last_progress = Instant::now();
     loop {
         tokio::select! {
             biased;
-            _ = cancel.notified() => return WatchdogFired::Cancelled,
+            _ = cancel.wait() => return WatchdogFired::Cancelled,
             _ = tokio::time::sleep(POLL_INTERVAL) => {}
         }
         let current = counters.tx_frames.load(Ordering::Relaxed);
@@ -93,7 +90,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn flat_tx_fires_the_stall() {
         let c = counters();
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let fired = tokio::time::timeout(
             TX_SILENCE_THRESHOLD + POLL_INTERVAL * 3,
             tx_liveness_watchdog(c, cancel),
@@ -108,7 +105,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn advancing_tx_never_fires() {
         let c = counters();
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let watchdog = tokio::spawn(tx_liveness_watchdog(c.clone(), cancel.clone()));
         // Advance the counter every poll for several full silence windows.
         for _ in 0..20 {
@@ -116,7 +113,7 @@ mod tests {
             tokio::time::sleep(POLL_INTERVAL).await;
             assert!(!watchdog.is_finished(), "no fire while TX advances");
         }
-        cancel.notify_waiters();
+        cancel.trigger();
         assert_eq!(watchdog.await.unwrap(), WatchdogFired::Cancelled);
     }
 
@@ -126,7 +123,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_fresh_watchdog_after_a_stall_re_verifies() {
         let c = counters();
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         // First transport wedges: flat counter → stall.
         let fired = tx_liveness_watchdog(c.clone(), cancel.clone()).await;
         assert_eq!(fired, WatchdogFired::TxStalled);
@@ -139,7 +136,7 @@ mod tests {
             tokio::time::sleep(POLL_INTERVAL).await;
             assert!(!watchdog.is_finished(), "recovered transport is healthy");
         }
-        cancel.notify_waiters();
+        cancel.trigger();
         assert_eq!(watchdog.await.unwrap(), WatchdogFired::Cancelled);
     }
 
@@ -148,7 +145,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn stall_window_counts_from_last_progress() {
         let c = counters();
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let watchdog = tokio::spawn(tx_liveness_watchdog(c.clone(), cancel.clone()));
         // Healthy for three windows' worth of ticks.
         for _ in 0..15 {
@@ -168,8 +165,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cancel_wins_promptly() {
         let c = counters();
-        let cancel = Arc::new(Notify::new());
-        cancel.notify_one();
+        let cancel = Shutdown::new();
+        cancel.trigger();
         assert_eq!(
             tx_liveness_watchdog(c, cancel).await,
             WatchdogFired::Cancelled

@@ -41,7 +41,7 @@ def quick_ws(monkeypatch):
 
 @pytest.fixture
 def paired_client(monkeypatch):
-    app_double = build_api_runtime(uptime_seconds=0.0)
+    app_double = build_api_runtime()
     app_double.pairing_manager.is_paired = True
     app_double.pairing_manager.api_key = PAIR_KEY
     app_double.pairing_manager.validate_key = lambda k: k == PAIR_KEY

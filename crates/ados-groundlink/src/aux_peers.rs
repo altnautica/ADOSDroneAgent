@@ -41,6 +41,7 @@
 //! (and so restarted its sequence) is accepted, because by then the held record
 //! has aged past the stale window.
 
+use ados_protocol::shutdown::Shutdown;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -353,7 +354,7 @@ fn expand_status(s: &NodeStatus) -> Value {
 pub async fn persist_loop(
     cache: AuxPeerCache,
     presence: Option<crate::presence::GsPresenceCache>,
-    cancel: Arc<tokio::sync::Notify>,
+    cancel: Shutdown,
 ) {
     let path = std::path::PathBuf::from(crate::paths::run_path(AUX_PEERS_SIDECAR));
     loop {
@@ -370,7 +371,7 @@ pub async fn persist_loop(
             p.set_aux_identities(cache.fresh_identities(now));
         }
         tokio::select! {
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
             _ = tokio::time::sleep(PERSIST_CADENCE) => {}
         }
     }

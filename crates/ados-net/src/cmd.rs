@@ -69,6 +69,10 @@ impl CmdRunner for TokioCmdRunner {
         let mut cmd = tokio::process::Command::new(program);
         cmd.args(args);
         cmd.stdin(std::process::Stdio::null());
+        // `kill_on_drop` makes the timeout a real bound: dropping the future at
+        // the deadline otherwise leaves a wedged nmcli / systemctl running, one
+        // more per timed-out call.
+        cmd.kill_on_drop(true);
         let fut = cmd.output();
         match tokio::time::timeout(timeout, fut).await {
             Ok(Ok(out)) => CmdOut {
@@ -93,6 +97,7 @@ impl CmdRunner for TokioCmdRunner {
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        cmd.kill_on_drop(true);
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -201,5 +206,41 @@ pub mod testing {
         ) -> CmdOut {
             self.record(argv, stdin_data)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A command that outlives its timeout is killed, not left running: the
+    /// timeout is a bound on the work, not only on the wait.
+    #[tokio::test]
+    async fn a_timed_out_command_does_not_outlive_its_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("pid");
+        let script = format!("echo $$ > {}; exec sleep 30", pidfile.display());
+        let out = TokioCmdRunner
+            .run(&["sh", "-c", &script], Duration::from_millis(300))
+            .await;
+        assert_eq!(out.rc, 124);
+        let pid = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .to_string();
+        // Give the kill a moment to land, then the pid must be gone.
+        let mut alive = true;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            alive = std::process::Command::new("kill")
+                .args(["-0", &pid])
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                break;
+            }
+        }
+        assert!(!alive, "the timed-out child {pid} is still running");
     }
 }

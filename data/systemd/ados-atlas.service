@@ -21,6 +21,10 @@ Type=simple
 # replaces the shell image so the chosen binary owns the cgroup + restart track.
 ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-atlas ]; then exec /opt/ados/bin/ados-atlas; else echo "ados-atlas binary missing; reinstall to fetch it" >&2; exit 1; fi'
 Restart=always
+# Exit 0 means this node has nothing for the unit to run (atlas off, a ground
+# station, or no capture config); it must not respawn every RestartSec. A real
+# startup failure exits non-zero and restarts forever (no start limit).
+RestartPreventExitStatus=0
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env

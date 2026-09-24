@@ -60,9 +60,10 @@ use std::time::{Duration, Instant};
 
 use ados_protocol::aux_egress::{AuxEgress, AuxEgressError};
 use ados_protocol::aux_mux::{AuxChannel, AUX_HEADER_LEN, AUX_MAX_PAYLOAD};
+use ados_protocol::shutdown::Shutdown;
 use serde::Serialize;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, Notify};
 
 /// MAVLink v2 start-of-frame magic.
 const STX_V2: u8 = 0xFD;
@@ -433,7 +434,7 @@ pub async fn run(
     egress: AuxEgress,
     counters: Arc<TeeCounters>,
     shaper_config: ShaperConfig,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     let mut shaper = RateShaper::new(shaper_config);
     let mut gate = LaneGate::default();
@@ -460,7 +461,7 @@ pub async fn run(
         let flush_at = batch_deadline.unwrap_or_else(|| Instant::now() + BATCH_WINDOW);
         let frame = tokio::select! {
             biased;
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
             _ = report_tick.tick() => {
                 last_report = report(&counters, last_report);
                 continue;
@@ -793,7 +794,7 @@ mod tests {
             AuxEgress::with_timeout(&sock_path, Duration::from_millis(200)),
             counters.clone(),
             shaper,
-            Arc::new(Notify::new()),
+            Shutdown::new(),
         ));
 
         for frame in frames_to_send {
@@ -1014,7 +1015,7 @@ mod tests {
             AuxEgress::with_timeout(&missing, Duration::from_millis(50)),
             counters.clone(),
             ShaperConfig::default(),
-            Arc::new(Notify::new()),
+            Shutdown::new(),
         ));
         for _ in 0..8 {
             tx.send(v2_frame(0, 9).into()).unwrap();
@@ -1036,7 +1037,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("absent.sock");
         let (_tx, rx) = broadcast::channel::<bytes::Bytes>(8);
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let handle = tokio::spawn(run(
             rx,
             AuxEgress::with_timeout(&missing, Duration::from_millis(50)),
@@ -1046,7 +1047,7 @@ mod tests {
         ));
         // Let the task reach its select before notifying.
         tokio::time::sleep(Duration::from_millis(20)).await;
-        cancel.notify_waiters();
+        cancel.trigger();
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await
             .expect("the tee shuts down promptly")

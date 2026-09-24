@@ -48,10 +48,10 @@ struct MetricMap {
     key: &'static str,
 }
 
-/// The numeric telemetry lifted from each snapshot. Only the paths present in a
-/// given snapshot are emitted; an absent field produces no row. The set covers
-/// the fields the state contract documents plus common extensions (altitude and
-/// speed) so they are captured durably when the autopilot reports them.
+/// The numeric telemetry read from each snapshot, at the paths the MAVLink
+/// router actually publishes (`VehicleState::to_wire`). Only the paths present
+/// in a given snapshot are emitted; an absent or `null` field produces no row.
+/// Link quality is not on this snapshot: the radio sidecar tap records it.
 const METRICS: &[MetricMap] = &[
     MetricMap {
         path: "attitude.roll",
@@ -66,19 +66,19 @@ const METRICS: &[MetricMap] = &[
         key: "attitude.yaw",
     },
     MetricMap {
-        path: "altitude.agl",
-        key: "altitude.agl_m",
+        path: "position.alt_rel",
+        key: "altitude.rel_m",
     },
     MetricMap {
-        path: "altitude.msl",
+        path: "position.alt_msl",
         key: "altitude.msl_m",
     },
     MetricMap {
-        path: "groundspeed",
+        path: "velocity.groundspeed",
         key: "groundspeed.ms",
     },
     MetricMap {
-        path: "airspeed",
+        path: "velocity.airspeed",
         key: "airspeed.ms",
     },
     MetricMap {
@@ -94,32 +94,20 @@ const METRICS: &[MetricMap] = &[
         key: "battery.remaining.pct",
     },
     MetricMap {
-        path: "gps.fix",
+        path: "gps.fix_type",
         key: "gps.fix",
     },
     MetricMap {
-        path: "gps.sats",
+        path: "gps.satellites",
         key: "gps.sats",
     },
     MetricMap {
-        path: "gps.lat",
+        path: "position.lat",
         key: "gps.lat",
     },
     MetricMap {
-        path: "gps.lon",
+        path: "position.lon",
         key: "gps.lon",
-    },
-    MetricMap {
-        path: "link.rssi_dbm",
-        key: "link.rssi.dbm",
-    },
-    MetricMap {
-        path: "link.snr_db",
-        key: "link.snr.db",
-    },
-    MetricMap {
-        path: "link.valid_rx_packets_per_s",
-        key: "link.valid_rx_pkt_per_s",
     },
 ];
 
@@ -443,44 +431,41 @@ mod tests {
             .collect()
     }
 
+    /// The snapshot shape the MAVLink router publishes. This test used to feed a
+    /// hand-written shape (`gps.fix`, `gps.sats`, top-level `groundspeed`, a
+    /// `link` block) that the producer never emits, so the tap looked right
+    /// while recording no GPS, altitude or speed at all on a real node.
     #[tokio::test]
     async fn snapshot_emits_the_documented_scalar_metrics() {
         let line = serde_json::to_string(&json!({
             "armed": false,
             "mode": "STABILIZE",
-            "battery": {"voltage": 16.4, "current": 12.1, "remaining": 87},
-            "gps": {"fix": 3, "sats": 14, "lat": 12.9716, "lon": 77.5946},
-            "attitude": {"roll": 0.01, "pitch": -0.02, "yaw": 1.57},
-            "link": {"rssi_dbm": -48, "snr_db": 22, "valid_rx_packets_per_s": 630}
+            "position": {"lat": 12.9716, "lon": 77.5946, "alt_msl": 920.5, "alt_rel": 30.2, "heading": 90.0},
+            "velocity": {"vx": 1.0, "vy": 0.0, "vz": 0.0, "groundspeed": 5.5, "airspeed": 6.0, "climb": 0.1},
+            "battery": {"voltage": 16.4, "current": 12.1, "remaining": 87, "temperature": null, "cell_voltages": []},
+            "gps": {"fix_type": 3, "satellites": 14, "eph": 0.9, "epv": null},
+            "attitude": {"roll": 0.01, "pitch": -0.02, "yaw": 1.57}
         }))
         .unwrap();
         let frames = run_against(&format!("{line}\n")).await;
 
         // Every mapped, present field becomes a metric with the dotted key.
-        assert_eq!(
-            metric(&frames, "battery.voltage.v").map(|m| m.value),
-            Some(16.4)
-        );
-        assert_eq!(
-            metric(&frames, "battery.current.a").map(|m| m.value),
-            Some(12.1)
-        );
-        assert_eq!(
-            metric(&frames, "battery.remaining.pct").map(|m| m.value),
-            Some(87.0)
-        );
-        assert_eq!(metric(&frames, "gps.fix").map(|m| m.value), Some(3.0));
-        assert_eq!(metric(&frames, "gps.sats").map(|m| m.value), Some(14.0));
-        assert_eq!(metric(&frames, "attitude.yaw").map(|m| m.value), Some(1.57));
-        assert_eq!(
-            metric(&frames, "link.rssi.dbm").map(|m| m.value),
-            Some(-48.0)
-        );
-        assert_eq!(metric(&frames, "link.snr.db").map(|m| m.value), Some(22.0));
-        assert_eq!(
-            metric(&frames, "link.valid_rx_pkt_per_s").map(|m| m.value),
-            Some(630.0)
-        );
+        for (key, want) in [
+            ("battery.voltage.v", 16.4),
+            ("battery.current.a", 12.1),
+            ("battery.remaining.pct", 87.0),
+            ("gps.fix", 3.0),
+            ("gps.sats", 14.0),
+            ("gps.lat", 12.9716),
+            ("gps.lon", 77.5946),
+            ("altitude.msl_m", 920.5),
+            ("altitude.rel_m", 30.2),
+            ("groundspeed.ms", 5.5),
+            ("airspeed.ms", 6.0),
+            ("attitude.yaw", 1.57),
+        ] {
+            assert_eq!(metric(&frames, key).map(|m| m.value), Some(want), "{key}");
+        }
         // The sample tag is set so the read edge can tell state-tap rows apart.
         assert_eq!(
             metric(&frames, "battery.voltage.v")

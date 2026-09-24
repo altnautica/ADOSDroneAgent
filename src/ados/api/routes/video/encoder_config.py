@@ -77,22 +77,9 @@ def _bitrate_controller_snapshot(app: Any) -> dict[str, Any] | None:
     ``adaptive`` block was permanently just ``{"available": <config flag>}``
     while the real controller state sat unread in the sidecar next to it.
 
-    The in-process accessor is tried first for the single-process bench path,
-    where an app object may still carry a live controller.
-
     Returns None when the sidecar is absent or carries none of these keys, so
     the caller keeps its config-seeded stub.
     """
-    getter = getattr(app, "bitrate_controller", None)
-    if callable(getter):
-        ctrl = getter()
-        if ctrl is not None:
-            snap_fn = getattr(ctrl, "snapshot", None)
-            if callable(snap_fn):
-                try:
-                    return snap_fn()
-                except Exception:  # noqa: BLE001
-                    pass
     from ados.core.paths import WFB_STATS_JSON
 
     # Gated on the same freshness ceiling the `link` block applies to this same
@@ -180,25 +167,13 @@ def _link_snapshot(app: Any, wfb_cfg: Any) -> dict[str, Any]:
     # merged verbatim, so it is seeded outside the loop below.
     link["rf_unverified"] = None
 
-    status: dict[str, Any] | None = None
-    # An in-process manager IS the live producer, so its reading is fresh by
-    # construction; only the cross-process file can go stale under us.
-    fresh = True
-    wfb_mgr = app.wfb_manager() if hasattr(app, "wfb_manager") else None
-    if wfb_mgr is not None and hasattr(wfb_mgr, "get_status"):
-        try:
-            status = wfb_mgr.get_status()
-        except Exception:  # noqa: BLE001
-            status = None
-    if status is None:
-        # Ground-station path (and any other profile where the manager
-        # lives in a sibling process): the radio manager mirrors its
-        # snapshot to the shared stats file once per stats interval.
-        from ados.core.paths import WFB_STATS_JSON
+    # The radio mirrors its snapshot to the shared stats file once per stats
+    # interval; only a fresh file describes the link now.
+    from ados.core.paths import WFB_STATS_JSON
 
-        status = _read_state_file(str(WFB_STATS_JSON))
-        age_s = _stats_age_seconds(str(WFB_STATS_JSON))
-        fresh = age_s is not None and age_s <= _LINK_STALE_AFTER_S
+    status = _read_state_file(str(WFB_STATS_JSON))
+    age_s = _stats_age_seconds(str(WFB_STATS_JSON))
+    fresh = age_s is not None and age_s <= _LINK_STALE_AFTER_S
 
     if isinstance(status, dict):
         for key in fields:
@@ -220,16 +195,6 @@ def _hop_supervisor_snapshot(app: Any) -> dict[str, Any] | None:
     the in-process accessor, fall back to the state file at
     /run/ados/hop-supervisor.json.
     """
-    getter = getattr(app, "hop_supervisor", None)
-    if callable(getter):
-        sup = getter()
-        if sup is not None:
-            snap_fn = getattr(sup, "snapshot", None)
-            if callable(snap_fn):
-                try:
-                    return snap_fn()
-                except Exception:  # noqa: BLE001
-                    pass
     from ados.core.paths import HOP_SUPERVISOR_JSON
 
     return _read_state_file(str(HOP_SUPERVISOR_JSON))
@@ -310,80 +275,59 @@ async def get_video_config() -> dict[str, Any]:
 async def set_video_config(body: VideoConfigBody) -> dict[str, Any]:
     """Apply zero or more video / radio tuning knobs.
 
-    Each field is optional and applied independently. Returns the
-    same shape as GET /video/config so the GCS can refresh its
-    local state from a single response. Fields that the agent
-    couldn't apply (e.g. wfb_manager is None in this process)
-    surface in ``warnings`` so a partial success is visible.
+    Each field is optional and applied independently. Returns the same shape
+    as GET /video/config so the GCS can refresh its local state from a single
+    response. The FEC / MCS / preset / link-tier knobs go to the native
+    radio's command socket; a knob that could not be applied is named in
+    ``warnings`` so a partial success is visible.
     """
     app = get_agent_app()
-    wfb_mgr = app.wfb_manager() if hasattr(app, "wfb_manager") else None
-    pipeline = app.video_pipeline() if hasattr(app, "video_pipeline") else None
-    ctrl_getter = getattr(app, "bitrate_controller", None)
-    ctrl = ctrl_getter() if callable(ctrl_getter) else None
-
-    # When the native transmit plane owns the radio there is no in-process
-    # Python wfb manager / bitrate controller, so the FEC / MCS / link-tier
-    # knobs route to the radio command socket instead. The bitrate (encoder)
-    # knob always stays on the video pipeline, which is Python regardless.
-    native_radio = _native_radio_running()
-
     warnings: list[str] = []
     # Operator tuning is persisted to /etc/ados/config.yaml so it survives a
     # service restart (the live apply is best-effort; persistence captures
     # intent, mirroring the tx-power route). Only valid values are persisted.
     persist: dict[str, Any] = {}
 
-    # Bitrate: pipeline-side restart. Skip if pipeline not in process.
+    # The encoder runs in the native video service, which takes its bitrate
+    # from the attention profile and the adaptive controller, not from here.
     if body.bitrate_kbps is not None:
-        if pipeline is not None and hasattr(pipeline, "set_video_bitrate"):
-            ok = await pipeline.set_video_bitrate(body.bitrate_kbps)
-            if not ok:
-                warnings.append("set_video_bitrate_failed")
-        else:
-            warnings.append("video_pipeline_not_in_process")
+        warnings.append("bitrate_not_settable_on_this_surface")
 
-    # FEC: stop-then-start wfb_tx (native: over the command socket).
     if body.fec_k is not None or body.fec_n is not None:
         cfg = app.config.video.wfb
         new_k = body.fec_k if body.fec_k is not None else cfg.fec_k
         new_n = body.fec_n if body.fec_n is not None else cfg.fec_n
-        await _apply_fec(native_radio, wfb_mgr, new_k, new_n, warnings)
-        # Persist only a valid ratio (n > k >= 1), the same invariant the
-        # radio setter enforces, so a rejected ratio never reaches config.
-        if new_k >= 1 and new_n > new_k:
-            persist["fec_k"] = int(new_k)
-            persist["fec_n"] = int(new_n)
+        if await _radio_call("set_fec", warnings, new_k, new_n):
+            # Persist only a valid ratio (n > k >= 1), the same invariant the
+            # radio setter enforces, so a rejected ratio never reaches config.
+            if new_k >= 1 and new_n > new_k:
+                persist["fec_k"] = int(new_k)
+                persist["fec_n"] = int(new_n)
 
-    # MCS (native: over the command socket).
     if body.mcs is not None:
-        await _apply_mcs(native_radio, wfb_mgr, body.mcs, warnings)
-        persist["mcs_index"] = int(body.mcs)
+        if await _radio_call("set_mcs", warnings, body.mcs):
+            persist["mcs_index"] = int(body.mcs)
 
-    # Link preset: resolve + pin the trio (adaptive left as-is).
     if body.preset is not None:
-        trio = await _apply_preset(native_radio, wfb_mgr, body.preset, warnings)
-        persist["wfb_link_preset"] = body.preset
+        trio = await _apply_preset(body.preset, warnings)
         if trio is not None:
             # Persist the resolved trio too, so a runtime preset survives a
             # restart even for "conservative" (whose boot apply is a no-op).
+            persist["wfb_link_preset"] = body.preset
             persist["mcs_index"], persist["fec_k"], persist["fec_n"] = trio
 
-    # Link-tier toggles (native: over the command socket; packaged: the
-    # in-process bitrate controller).
     if body.auto is not None or body.tier_idx is not None:
-        await _apply_tier(native_radio, ctrl, app, body, warnings)
-        if body.tier_idx is not None:
-            # A pinned rung implies adaptive off; persist the rung's FEC too.
-            persist["adaptive_bitrate_enabled"] = False
-            from ados.services.video.bitrate_controller import DEFAULT_TIERS
+        if await _apply_tier(app, body, warnings):
+            if body.tier_idx is not None:
+                # A pinned rung implies adaptive off; persist the rung's FEC too.
+                from ados.services.video.bitrate_controller import DEFAULT_TIERS
 
-            if 0 <= body.tier_idx < len(DEFAULT_TIERS):
                 rung = DEFAULT_TIERS[body.tier_idx]
+                persist["adaptive_bitrate_enabled"] = False
                 persist["fec_k"] = int(rung.fec_k)
                 persist["fec_n"] = int(rung.fec_n)
-        elif body.auto is not None:
-            persist["adaptive_bitrate_enabled"] = bool(body.auto)
+            elif body.auto is not None:
+                persist["adaptive_bitrate_enabled"] = bool(body.auto)
 
     if persist:
         from ados.api.routes.wfb import _persist_wfb_fields
@@ -397,72 +341,29 @@ async def set_video_config(body: VideoConfigBody) -> dict[str, Any]:
     return response
 
 
-def _native_radio_running() -> bool:
-    """True when the native transmit plane (``ados-radio``) owns the radio,
-    so the FEC / MCS / tier knobs route to its command socket. Total + cheap
-    (it only stats files); safe to call on the request path."""
-    from ados.core.runtime_mode import is_service_native
+async def _radio_call(op: str, warnings: list[str], *args: Any) -> bool:
+    """Send one tuning op to the native radio's command socket.
 
-    return is_service_native("radio")
+    Returns True when the radio applied it. A refusal is named
+    ``<op>_failed``; an absent socket (the radio is not running) is named
+    ``radio_unavailable`` so the two are never confused.
+    """
+    from ados.services.wfb import cmd_client
 
-
-async def _apply_fec(
-    native_radio: bool,
-    wfb_mgr: Any,
-    fec_k: int,
-    fec_n: int,
-    warnings: list[str],
-) -> None:
-    """Apply a Reed-Solomon ratio: command socket when native, else the
-    in-process packaged manager. An unreachable native socket falls back to
-    the manager (the native binary may not be up yet)."""
-    if native_radio:
-        from ados.services.wfb import cmd_client
-
-        try:
-            await cmd_client.set_fec(fec_k, fec_n)
-            return
-        except cmd_client.RadioCmdError:
-            warnings.append("set_fec_failed")
-            return
-        except cmd_client.RadioCmdUnavailableError:
-            pass  # fall through to the packaged manager
-    if wfb_mgr is not None and hasattr(wfb_mgr, "set_fec"):
-        if not await wfb_mgr.set_fec(fec_k, fec_n):
-            warnings.append("set_fec_failed")
-    else:
-        warnings.append("wfb_manager_not_in_process")
-
-
-async def _apply_mcs(
-    native_radio: bool,
-    wfb_mgr: Any,
-    mcs: int,
-    warnings: list[str],
-) -> None:
-    """Apply an MCS index: command socket when native, else the in-process
-    packaged manager."""
-    if native_radio:
-        from ados.services.wfb import cmd_client
-
-        try:
-            await cmd_client.set_mcs(mcs)
-            return
-        except cmd_client.RadioCmdError:
-            warnings.append("set_mcs_failed")
-            return
-        except cmd_client.RadioCmdUnavailableError:
-            pass
-    if wfb_mgr is not None and hasattr(wfb_mgr, "set_mcs"):
-        if not await wfb_mgr.set_mcs(mcs):
-            warnings.append("set_mcs_failed")
-    else:
-        warnings.append("wfb_manager_not_in_process")
+    try:
+        await getattr(cmd_client, op)(*args)
+    except cmd_client.RadioCmdError:
+        warnings.append(f"{op}_failed")
+        return False
+    except cmd_client.RadioCmdUnavailableError:
+        warnings.append("radio_unavailable")
+        return False
+    return True
 
 
 # Link preset -> (mcs, fec_k, fec_n). Mirrors the Rust link_preset_trio table
-# (crates/ados-radio/src/config.rs). Used for the packaged fallback path and to
-# persist the resolved trio when the native radio echo omits it.
+# (crates/ados-radio/src/config.rs); used to persist the resolved trio when
+# the radio's echo omits it.
 _PRESET_TRIOS: dict[str, tuple[int, int, int]] = {
     "conservative": (1, 8, 12),
     "balanced": (3, 8, 12),
@@ -470,46 +371,27 @@ _PRESET_TRIOS: dict[str, tuple[int, int, int]] = {
 }
 
 
-async def _apply_preset(
-    native_radio: bool,
-    wfb_mgr: Any,
-    preset: str,
-    warnings: list[str],
-) -> tuple[int, int, int] | None:
-    """Apply a named link preset's (mcs, fec_k, fec_n) trio to the data plane.
+async def _apply_preset(preset: str, warnings: list[str]) -> tuple[int, int, int] | None:
+    """Apply a named link preset through the radio, which resolves and pins
+    the trio and echoes it back (the adaptive controller stays armed).
+    Returns the applied trio, or None when the apply failed."""
+    from ados.services.wfb import cmd_client
 
-    Native: the radio resolves + pins the trio over the command socket and
-    echoes it back (the adaptive controller is left armed). Packaged: resolve
-    the trio locally and set MCS + FEC on the in-process manager. Returns the
-    applied trio (for persistence), or None when the apply failed.
-    """
     trio = _PRESET_TRIOS.get(preset)
     if trio is None:
         warnings.append("set_preset_failed")
         return None
-    if native_radio:
-        from ados.services.wfb import cmd_client
-
-        try:
-            resp = await cmd_client.set_preset(preset)
-            mcs, k, n = resp.get("mcs_index"), resp.get("fec_k"), resp.get("fec_n")
-            if all(isinstance(v, int) for v in (mcs, k, n)):
-                return (int(mcs), int(k), int(n))
-            return trio
-        except cmd_client.RadioCmdError:
-            warnings.append("set_preset_failed")
-            return None
-        except cmd_client.RadioCmdUnavailableError:
-            pass  # fall through to the packaged manager
-    if wfb_mgr is None or not hasattr(wfb_mgr, "set_fec"):
-        warnings.append("wfb_manager_not_in_process")
-        return None
-    mcs, k, n = trio
-    ok_mcs = await wfb_mgr.set_mcs(mcs) if hasattr(wfb_mgr, "set_mcs") else True
-    ok_fec = await wfb_mgr.set_fec(k, n)
-    if not (ok_mcs and ok_fec):
+    try:
+        resp = await cmd_client.set_preset(preset)
+    except cmd_client.RadioCmdError:
         warnings.append("set_preset_failed")
         return None
+    except cmd_client.RadioCmdUnavailableError:
+        warnings.append("radio_unavailable")
+        return None
+    mcs, k, n = resp.get("mcs_index"), resp.get("fec_k"), resp.get("fec_n")
+    if all(isinstance(v, int) for v in (mcs, k, n)):
+        return (int(mcs), int(k), int(n))
     return trio
 
 
@@ -530,69 +412,32 @@ def _mirror_wfb_config(app: Any, updates: dict[str, Any]) -> None:
                 pass
 
 
-async def _apply_tier(
-    native_radio: bool,
-    ctrl: Any,
-    app: Any,
-    body: VideoConfigBody,
-    warnings: list[str],
-) -> None:
-    """Apply the auto/manual link-tier toggle.
+async def _apply_tier(app: Any, body: VideoConfigBody, warnings: list[str]) -> bool:
+    """Apply the auto/manual link-tier toggle through the radio.
 
-    Native: ``auto`` arms the controller over the command socket; a pinned
-    ``tier_idx`` (or an explicit ``auto=False``) maps the default FEC ladder
-    rung to a manual ``(mcs, fec_k, fec_n)`` trio (the rung sets the FEC, the
-    configured MCS stands, matching what the in-process controller pins).
-
-    Packaged: drives the in-process bitrate controller's ``set_auto`` /
-    ``set_manual_tier`` directly.
+    ``auto`` arms the controller. A pinned ``tier_idx`` (or an explicit
+    ``auto=False``) maps the default FEC ladder rung to a manual
+    ``(mcs, fec_k, fec_n)`` trio: the rung sets the FEC and the configured MCS
+    stands. ``auto=False`` with no rung holds the configured FEC/MCS so the
+    controller stops stepping without forcing a different rung.
     """
-    if native_radio:
-        from ados.services.video.bitrate_controller import DEFAULT_TIERS
-        from ados.services.wfb import cmd_client
+    from ados.services.video.bitrate_controller import DEFAULT_TIERS
 
-        try:
-            # A pinned tier (or an explicit manual request) takes precedence:
-            # the controller treats tier_idx as implicitly auto=False.
-            if body.tier_idx is not None:
-                if 0 <= body.tier_idx < len(DEFAULT_TIERS):
-                    rung = DEFAULT_TIERS[body.tier_idx]
-                    mcs = int(getattr(app.config.video.wfb, "mcs_index", 1) or 1)
-                    await cmd_client.set_tier_manual(mcs, rung.fec_k, rung.fec_n)
-                else:
-                    warnings.append("set_manual_tier_failed")
-            elif body.auto is True:
-                await cmd_client.set_tier_auto()
-            elif body.auto is False:
-                # auto=False with no pinned tier: hold the current rung by
-                # pinning the configured FEC/MCS so the controller stops
-                # stepping without forcing a different rung.
-                cfg = app.config.video.wfb
-                mcs = int(getattr(cfg, "mcs_index", 1) or 1)
-                k = int(getattr(cfg, "fec_k", 8) or 8)
-                n = int(getattr(cfg, "fec_n", 12) or 12)
-                await cmd_client.set_tier_manual(mcs, k, n)
-            return
-        except cmd_client.RadioCmdError as exc:
-            warnings.append(f"set_manual_tier_failed:{exc}")
-            return
-        except cmd_client.RadioCmdUnavailableError:
-            pass  # fall through to the in-process controller
-
-    if ctrl is not None:
-        if body.auto is not None:
-            try:
-                ctrl.set_auto(body.auto)
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(f"set_auto_failed:{exc}")
-        if body.tier_idx is not None:
-            try:
-                if not await ctrl.set_manual_tier(body.tier_idx):
-                    warnings.append("set_manual_tier_failed")
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(f"set_manual_tier_failed:{exc}")
-    else:
-        warnings.append("bitrate_controller_not_in_process")
+    cfg = app.config.video.wfb
+    mcs = int(getattr(cfg, "mcs_index", 1) or 1)
+    if body.tier_idx is not None:
+        if not 0 <= body.tier_idx < len(DEFAULT_TIERS):
+            warnings.append("set_manual_tier_failed")
+            return False
+        rung = DEFAULT_TIERS[body.tier_idx]
+        return await _radio_call(
+            "set_tier_manual", warnings, mcs, rung.fec_k, rung.fec_n
+        )
+    if body.auto is True:
+        return await _radio_call("set_tier_auto", warnings)
+    k = int(getattr(cfg, "fec_k", 8) or 8)
+    n = int(getattr(cfg, "fec_n", 12) or 12)
+    return await _radio_call("set_tier_manual", warnings, mcs, k, n)
 
 
 __all__ = [

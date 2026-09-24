@@ -44,8 +44,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ados_hid::pic_view::{self, resolve_authority, Authority, ChannelSourceMode, PicView};
 use ados_protocol::mavlink::{serialize_v2, AttitudeSetpoint, MavHeader};
+use ados_protocol::shutdown::Shutdown;
 use ados_rate_control::AttitudeCommand;
-use tokio::sync::{watch, Mutex, Notify};
+use tokio::sync::{watch, Mutex};
 
 use super::FcConnection;
 use crate::state::VehicleState;
@@ -228,7 +229,7 @@ pub async fn run(
     pic_path: String,
     rate_rx: watch::Receiver<Option<(AttitudeCommand, String, Instant)>>,
     status: Arc<AttitudeSetpointStatus>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     if !enabled {
         tracing::debug!("attitude_setpoint_disabled");
@@ -247,7 +248,7 @@ async fn control_loop(
     pic_path: String,
     mut rate_rx: watch::Receiver<Option<(AttitudeCommand, String, Instant)>>,
     status: Arc<AttitudeSetpointStatus>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     let mut counters = ados_rate_control::AttitudeControlCounters::default();
     let mut tick = tokio::time::interval(RATE_PERIOD);
@@ -255,7 +256,7 @@ async fn control_loop(
 
     loop {
         tokio::select! {
-            _ = cancel.notified() => return,
+            _ = cancel.wait() => return,
             _ = tick.tick() => {}
         }
         let now = Instant::now();

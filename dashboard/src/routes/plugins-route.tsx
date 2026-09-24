@@ -17,8 +17,8 @@ import { useResource } from "@/hooks/use-resource";
 import { apiFetch } from "@/lib/api";
 import {
   parsePlugin,
-  type PluginErrorEnvelope,
   type PluginManifestSummary,
+  type PluginSource,
 } from "@/lib/plugin-install";
 import { toast, toastFromError } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -47,7 +47,7 @@ export function PluginsRoute() {
   } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [installFile, setInstallFile] = useState<File | null>(null);
+  const [installSource, setInstallSource] = useState<PluginSource | null>(null);
   const [installManifest, setInstallManifest] =
     useState<PluginManifestSummary | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
@@ -67,24 +67,23 @@ export function PluginsRoute() {
     }
   }
 
+  // Both install paths — an uploaded archive and a catalog entry — preview the
+  // manifest first and then run the same permission dialog.
   const beginInstall = useCallback(
-    async (file: File) => {
-      if (!file.name.endsWith(".adosplug")) {
+    async (source: PluginSource) => {
+      if (source.kind === "file" && !source.file.name.endsWith(".adosplug")) {
         toast.err("Plugin files must end in .adosplug");
         return;
       }
       setParsing(true);
       try {
-        const res = (await parsePlugin(file)) as
-          | PluginManifestSummary
-          | PluginErrorEnvelope;
-        if (!("ok" in res) || res.ok !== true) {
-          const err = res as PluginErrorEnvelope;
-          toast.err(`Plugin parse failed: ${err.detail || err.kind}`);
+        const res = await parsePlugin(source);
+        if (!res.ok) {
+          toast.err(`Plugin parse failed: ${res.detail || res.kind}`);
           return;
         }
-        setInstallFile(file);
-        setInstallManifest(res as PluginManifestSummary);
+        setInstallSource(source);
+        setInstallManifest(res);
         setInstallOpen(true);
       } catch (err) {
         toastFromError(err, "Plugin parse failed.");
@@ -102,7 +101,7 @@ export function PluginsRoute() {
   function onFileChosen(e: ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     e.target.value = "";
-    if (f) void beginInstall(f);
+    if (f) void beginInstall({ kind: "file", file: f });
   }
 
   // Window-level drag-drop. Lets the operator drop a .adosplug
@@ -122,7 +121,7 @@ export function PluginsRoute() {
       e.preventDefault();
       setDragOver(false);
       const f = e.dataTransfer.files[0];
-      if (f) void beginInstall(f);
+      if (f) void beginInstall({ kind: "file", file: f });
     };
     window.addEventListener("dragover", onDragOver);
     window.addEventListener("dragleave", onDragLeave);
@@ -245,7 +244,14 @@ export function PluginsRoute() {
 
       <RegistryGrid
         installedIds={installedIds}
-        onInstalled={() => list.refetch()}
+        busy={parsing}
+        onInstall={(entry) =>
+          void beginInstall({
+            kind: "catalog",
+            url: entry.download_url,
+            sha256: entry.archive_sha256 ?? null,
+          })
+        }
       />
 
       <ConfirmDialog
@@ -272,12 +278,12 @@ export function PluginsRoute() {
 
       <PluginInstallDialog
         open={installOpen}
-        file={installFile}
+        source={installSource}
         manifest={installManifest}
         onOpenChange={(open) => {
           setInstallOpen(open);
           if (!open) {
-            setInstallFile(null);
+            setInstallSource(null);
             setInstallManifest(null);
           }
         }}

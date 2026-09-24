@@ -97,10 +97,12 @@ async def _read_state_frame(reader: asyncio.StreamReader) -> dict | None:
     first byte is ``{``. Sniffing that first byte keeps the reader compatible
     with a stray v1 frame even though the producer only ever emits v2.
 
-    Returns the decoded snapshot dict, or None when the frame could not be
-    decoded (bad length, or an undecodable body) so the caller can skip a
-    single malformed frame. Propagates ``asyncio.IncompleteReadError`` /
-    ``OSError`` on EOF or a transport error so the caller can reconnect.
+    Returns the decoded snapshot dict, or None when a well-framed body could
+    not be decoded, so the caller can skip that one frame. An out-of-range
+    length prefix raises ``ConnectionError``: its body is unread, so the next
+    bytes are not a frame boundary and the only recovery is a reconnect.
+    Propagates ``asyncio.IncompleteReadError`` / ``OSError`` on EOF or a
+    transport error so the caller can reconnect.
     """
     first = await reader.readexactly(1)
     if first == STATE_FRAME_V2_MARKER:
@@ -108,7 +110,7 @@ async def _read_state_frame(reader: asyncio.StreamReader) -> dict | None:
         (length,) = struct.unpack("!I", first + rest)
         if length == 0 or length > STATE_MAX_FRAME_SIZE:
             log.warning("state_ipc_bad_frame_length", length=length)
-            return None
+            raise ConnectionError(f"state frame length {length} out of range")
         body = await reader.readexactly(length)
         return _decode_state_v2_body(body)
     # v1: newline-terminated JSON; ``first`` is the opening byte.

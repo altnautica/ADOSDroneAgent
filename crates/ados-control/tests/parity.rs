@@ -805,10 +805,15 @@ async fn status_sources_health_and_board_from_the_store_and_sidecar() {
         r#"{"name":"rpi4b","soc":"BCM2711","arch":"aarch64","ram_mb":4096}"#,
     )
     .unwrap();
-    // A mock store returning one hardware snapshot with the health-spine signals.
+    // A mock store returning one current hardware snapshot with the health-spine
+    // signals (a row older than the freshness window is not a current reading).
+    let now_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as i64;
     let hw = serde_json::json!({
         "data": [{
-            "id": 1, "ts_us": 1000, "signals": {
+            "id": 1, "ts_us": now_us, "signals": {
                 "cpu.util.all": 23.4,
                 "mem.total_bytes": 4_000_000_000.0_f64,
                 "mem.avail_bytes": 1_000_000_000.0_f64,
@@ -1634,7 +1639,10 @@ async fn command_arm_writes_a_component_arm_disarm_frame() {
     let (status, body) = post_command(&h.socket, r#"{"cmd":"arm"}"#).await;
     assert!(status.contains("200"), "arm must be 200, was {status}");
     let got: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(got["status"], serde_json::json!("ok"));
+    // The mock FC never acknowledges, so the frame went out but nothing confirmed
+    // it: the body says so rather than reporting the arm as done.
+    assert_eq!(got["status"], serde_json::json!("error"));
+    assert_eq!(got["ack"]["observed"], serde_json::json!(false));
     assert_eq!(got["cmd"], serde_json::json!("arm"));
 
     let d = mav_mock.await_command().await;

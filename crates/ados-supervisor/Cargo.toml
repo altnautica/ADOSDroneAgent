@@ -50,6 +50,7 @@ nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+parking_lot = { workspace = true }
 # Paused-clock harness for the watchdog-coupling tests, which must not spend a
 # real 75 s stall budget. Dev-only: resolver 2 keeps test-util out of the
 # shipped binary's features.

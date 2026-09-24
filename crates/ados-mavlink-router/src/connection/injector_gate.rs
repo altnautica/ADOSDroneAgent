@@ -61,6 +61,13 @@ fn default_pairing_path() -> PathBuf {
 /// How long a PIC read is reused before the sidecar is re-read on the hot path.
 const PIC_CACHE_TTL: Duration = Duration::from_millis(50);
 
+/// How long a claim's verification is reused before it is checked again. The
+/// ticket carries an expiry and the pairing key can be rotated or cleared, so a
+/// verification cached for the life of the connection kept authority the
+/// ticket no longer grants. Re-verifying once a few seconds costs one file read
+/// and one HMAC, not one per command.
+const VERIFY_CACHE_TTL: Duration = Duration::from_secs(5);
+
 /// The hot-path injector gate: the PIC arbiter's decision
 /// ([`injector_refused`]) with its two blocking costs cached off the async
 /// router loop.
@@ -83,9 +90,8 @@ const PIC_CACHE_TTL: Duration = Duration::from_millis(50);
 pub struct InjectorGateCache {
     pairing_path: PathBuf,
     pic_state_path: PathBuf,
-    /// The last claim verified and its attested id (the injector ticket is
-    /// per-connection, so this is sticky for the life of the lane).
-    verify_cache: Option<(InjectorClaim, Option<String>)>,
+    /// The last claim verified, its attested id, and when it was verified.
+    verify_cache: Option<(InjectorClaim, Option<String>, Instant)>,
     /// The last PIC read and the instant it was taken.
     pic_cache: Option<(Instant, Option<PicView>)>,
 }
@@ -119,8 +125,8 @@ impl InjectorGateCache {
     }
 
     /// Is this declared injector's command REFUSED right now? Caches the verify
-    /// per sticky claim and the PIC read on a short TTL; the verdict itself is the
-    /// shared pure [`injector_refused`].
+    /// per claim for [`VERIFY_CACHE_TTL`] and the PIC read on a short TTL; the
+    /// verdict itself is the shared pure [`injector_refused`].
     pub fn refused(&mut self, claim: &InjectorClaim) -> bool {
         self.refused_at(claim, Instant::now(), SystemTime::now())
     }
@@ -129,10 +135,14 @@ impl InjectorGateCache {
     /// unit-testable without sleeping.
     fn refused_at(&mut self, claim: &InjectorClaim, now: Instant, wall: SystemTime) -> bool {
         let verified = match &self.verify_cache {
-            Some((cached, id)) if cached == claim => id.clone(),
+            Some((cached, id, at))
+                if cached == claim && now.duration_since(*at) < VERIFY_CACHE_TTL =>
+            {
+                id.clone()
+            }
             _ => {
                 let id = verify_injector(&self.pairing_path, claim);
-                self.verify_cache = Some((claim.clone(), id.clone()));
+                self.verify_cache = Some((claim.clone(), id.clone(), now));
                 id
             }
         };
@@ -293,5 +303,33 @@ mod tests {
         // A DIFFERENT claim re-runs the verify (still no ticket → still refused),
         // proving the cache keys on the claim rather than latching the first id.
         assert!(cache.refused_at(&claim("other", None), now, SystemTime::now()));
+    }
+
+    /// A verification is not kept for the life of the lane: once the node is
+    /// paired (or its key rotated) after the injector connected, the same claim
+    /// must be checked against the new key and lose the lane it can no longer
+    /// prove.
+    #[test]
+    fn a_cached_verification_expires_and_is_rechecked() {
+        let (dir, mut cache) = unpaired_cache();
+        write_pic(dir.path(), Some("ai-mission"));
+        let c = claim("ai-mission", None);
+        let t0 = Instant::now();
+        // Unpaired: the asserted id is accepted and holds the lane.
+        assert!(!cache.refused_at(&c, t0, SystemTime::now()));
+        // The node is paired; the claim carries no ticket for the new key.
+        std::fs::write(
+            dir.path().join("pairing.json"),
+            r#"{"paired": true, "api_key": "k-secret"}"#,
+        )
+        .unwrap();
+        assert!(
+            cache.refused_at(
+                &c,
+                t0 + VERIFY_CACHE_TTL + Duration::from_millis(1),
+                SystemTime::now()
+            ),
+            "an expired verification must be rechecked against the current key"
+        );
     }
 }

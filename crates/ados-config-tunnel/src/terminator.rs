@@ -115,7 +115,7 @@ pub async fn handle_request(
         };
     }
     match request.op {
-        ConfigOp::Get => relay(client.get().await),
+        ConfigOp::Get { key } => relay_get(client.get().await, key.as_deref()),
         ConfigOp::Put { key, value } => {
             if !command_enabled {
                 return HandledResponse {
@@ -139,6 +139,37 @@ pub async fn handle_request(
             }
             relay(client.put(&key, &value).await)
         }
+    }
+}
+
+/// Relay a config read, narrowed to the dot-path `key` subtree when one is
+/// given. The narrowing runs before the radio-link size cap, so a subtree read
+/// fits where the whole config does not; an unknown key is an honest
+/// `E_KEY_NOT_FOUND`, never an empty value.
+fn relay_get(result: Result<ConfigResponse, Unreachable>, key: Option<&str>) -> HandledResponse {
+    let Some(key) = key else {
+        return relay(result);
+    };
+    match result {
+        Ok(resp) if (200..300).contains(&resp.status) => {
+            let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&resp.body) else {
+                return HandledResponse {
+                    body: error_body("E_CONFIG_STATUS", "config surface returned non-JSON"),
+                    is_error: true,
+                };
+            };
+            match key.split('.').try_fold(&doc, |v, part| v.get(part)) {
+                Some(sub) => relay(Ok(ConfigResponse {
+                    status: resp.status,
+                    body: serde_json::to_vec(sub).unwrap_or_default(),
+                })),
+                None => HandledResponse {
+                    body: error_body("E_KEY_NOT_FOUND", key),
+                    is_error: true,
+                },
+            }
+        }
+        other => relay(other),
     }
 }
 
@@ -459,6 +490,39 @@ mod tests {
         let out = handle_request(&req, false, &auth, NOW, &client).await;
         assert!(out.is_error);
         assert_eq!(err_code(&out.body), "E_RESPONSE_TOO_LARGE");
+    }
+
+    #[tokio::test]
+    async fn a_keyed_get_returns_the_subtree_so_it_fits_the_radio_link() {
+        let (_d, auth, ticket) = paired();
+        // A whole config over the radio-link cap, with a small radio subtree.
+        let full = serde_json::json!({
+            "radio": {"channel": 149},
+            "blob": "x".repeat(MAX_CONFIG_RESPONSE_BYTES),
+        });
+        let client = MockClient {
+            get: ok(200, &serde_json::to_vec(&full).unwrap()),
+            put: ok(200, b"{}"),
+        };
+        let whole = handle_request(
+            &with_ticket(r#"{"op":"get"}"#, &ticket),
+            false,
+            &auth,
+            NOW,
+            &client,
+        )
+        .await;
+        assert_eq!(err_code(&whole.body), "E_RESPONSE_TOO_LARGE");
+        let req = with_ticket(r#"{"op":"get","key":"radio"}"#, &ticket);
+        let out = handle_request(&req, false, &auth, NOW, &client).await;
+        assert!(!out.is_error);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&out.body).unwrap(),
+            serde_json::json!({"channel": 149})
+        );
+        let req = with_ticket(r#"{"op":"get","key":"radio.nope"}"#, &ticket);
+        let out = handle_request(&req, false, &auth, NOW, &client).await;
+        assert_eq!(err_code(&out.body), "E_KEY_NOT_FOUND");
     }
 
     #[tokio::test]

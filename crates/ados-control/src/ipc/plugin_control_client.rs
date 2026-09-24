@@ -62,7 +62,26 @@ pub enum PluginControlError {
     /// key). The route surfaces it as a 400.
     #[error("{0}")]
     Rpc(String),
+    /// The daemon accepted the request but did not answer within the deadline.
+    /// The route maps it to a 504.
+    #[error("plugin host did not answer in time")]
+    Timeout,
 }
+
+/// The deadline for a config read or write, which the host answers from memory.
+const CONFIG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The longest tool run the front forwards; a longer request is clamped so the
+/// host never works on an invocation the front has already given up on.
+const MAX_TOOL_TIMEOUT_MS: u64 = 120_000;
+
+/// The tool timeout the host applies when none is given (its
+/// `DEFAULT_INVOKE_TIMEOUT`).
+const DEFAULT_TOOL_TIMEOUT_MS: u64 = 5_000;
+
+/// Headroom over the host's own tool deadline, so the front hears the host's
+/// `tool_timeout` answer rather than timing out first.
+const TOOL_REPLY_MARGIN_MS: u64 = 5_000;
 
 /// Connects to the plugin-host control socket and runs a single request/response.
 #[derive(Clone)]
@@ -104,14 +123,17 @@ impl PluginControlClient {
         if let Some(scope) = scope.filter(|s| !s.is_empty()) {
             args.push((Value::from("scope"), Value::from(scope)));
         }
-        self.request(METHOD_CONFIG_SET, Value::Map(args)).await
+        self.request(METHOD_CONFIG_SET, Value::Map(args), CONFIG_TIMEOUT)
+            .await
     }
 
     /// Read a plugin's effective per-drone config from the live daemon: the map
     /// the plugin itself reads on this drone.
     pub async fn config_get(&self, plugin_id: &str) -> Result<Value, PluginControlError> {
         let args = Value::Map(vec![(Value::from("plugin_id"), Value::from(plugin_id))]);
-        let resp = self.request(METHOD_CONFIG_GET, args).await?;
+        let resp = self
+            .request(METHOD_CONFIG_GET, args, CONFIG_TIMEOUT)
+            .await?;
         Ok(match resp {
             Value::Map(m) => m
                 .into_iter()
@@ -140,14 +162,23 @@ impl PluginControlClient {
             (Value::from("tool"), Value::from(tool)),
             (Value::from("arguments"), arguments),
         ];
-        if let Some(ms) = timeout_ms {
-            args.push((Value::from("timeout_ms"), Value::from(ms)));
-        }
-        self.request(METHOD_TOOL_INVOKE, Value::Map(args)).await
+        let tool_ms = timeout_ms
+            .unwrap_or(DEFAULT_TOOL_TIMEOUT_MS)
+            .min(MAX_TOOL_TIMEOUT_MS);
+        args.push((Value::from("timeout_ms"), Value::from(tool_ms)));
+        let bound = std::time::Duration::from_millis(tool_ms + TOOL_REPLY_MARGIN_MS);
+        self.request(METHOD_TOOL_INVOKE, Value::Map(args), bound)
+            .await
     }
 
-    /// One fresh-connection request/response against the control socket.
-    async fn request(&self, method: &str, args: Value) -> Result<Value, PluginControlError> {
+    /// One fresh-connection request/response against the control socket,
+    /// bounded end to end by `bound`.
+    async fn request(
+        &self,
+        method: &str,
+        args: Value,
+        bound: std::time::Duration,
+    ) -> Result<Value, PluginControlError> {
         let env = Envelope {
             version: PROTOCOL_VERSION,
             kind: "request".to_string(),
@@ -162,16 +193,22 @@ impl PluginControlClient {
             .encode_frame()
             .map_err(|e| PluginControlError::Frame(format!("encode envelope: {e}")))?;
 
-        let mut stream = UnixStream::connect(&self.socket_path).await?;
-        stream.write_all(&frame).await?;
-        stream.flush().await?;
+        let exchange = async {
+            let mut stream = UnixStream::connect(&self.socket_path).await?;
+            stream.write_all(&frame).await?;
+            stream.flush().await?;
 
-        let mut header = [0u8; HEADER_SIZE];
-        stream.read_exact(&mut header).await?;
-        let len = decode_len(header, PLUGIN_MAX_FRAME, false)
-            .map_err(|e| PluginControlError::Frame(format!("response length: {e}")))?;
-        let mut body = vec![0u8; len];
-        stream.read_exact(&mut body).await?;
+            let mut header = [0u8; HEADER_SIZE];
+            stream.read_exact(&mut header).await?;
+            let len = decode_len(header, PLUGIN_MAX_FRAME, false)
+                .map_err(|e| PluginControlError::Frame(format!("response length: {e}")))?;
+            let mut body = vec![0u8; len];
+            stream.read_exact(&mut body).await?;
+            Ok::<_, PluginControlError>(body)
+        };
+        let body = tokio::time::timeout(bound, exchange)
+            .await
+            .map_err(|_| PluginControlError::Timeout)??;
         let resp = Envelope::from_msgpack(&body)
             .map_err(|e| PluginControlError::Frame(format!("decode envelope: {e}")))?;
         if let Some(err) = resp.error {
@@ -215,5 +252,21 @@ mod tests {
             matches!(err, PluginControlError::Io(_)),
             "expected Io: {err:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_host_that_accepts_and_stalls_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            drop(conn);
+        });
+        let client = PluginControlClient::new(path);
+        let err = client.config_get("p").await.unwrap_err();
+        assert!(matches!(err, PluginControlError::Timeout), "{err:?}");
+        server.abort();
     }
 }

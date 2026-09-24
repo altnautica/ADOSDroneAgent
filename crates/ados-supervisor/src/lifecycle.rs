@@ -16,12 +16,17 @@ use crate::process_manager::{select, ProcessManager};
 use crate::registry::{build_specs, Category, ServiceSpec, ServiceState, PARKED_RETRY_COOLDOWN};
 use crate::sdnotify::MonitorProgress;
 
-/// Units whose auto-restart the monitor skips while a bind handshake owns the
-/// radio adapter. The bind FSM now lives in this supervisor process, so the
-/// gate reads the orchestrator's in-process liveness directly. (The Python
-/// check read an in-process global that the separate supervisor never saw, so
-/// it was inert in production; hosting the FSM here makes the gate real.)
-const BIND_GATED_UNITS: [&str; 2] = ["ados-wfb", "ados-wfb-rx"];
+/// The radio units the supervisor itself starts and restarts, in gate order:
+/// the drone TX plane and the ground station's direct receive plane. Their
+/// profile and role gates are mutually exclusive, so at most one is allowed on
+/// any node. (A relay or receiver ground station's WFB plane is a role unit:
+/// the boot hardware pass and the role transition start it, and its own loop
+/// re-detects the adapter, so it is not cycled on a radio replug.)
+///
+/// Auto-restart of these is also held while a bind handshake owns the radio
+/// adapter. The bind FSM lives in this supervisor process, so that gate reads
+/// the orchestrator's in-process liveness directly.
+const RADIO_UNITS: [&str; 2] = ["ados-wfb", "ados-wfb-rx"];
 
 /// The durable logging + telemetry store's unit. Behind one config key
 /// (`logging.store.enabled`) because it is by far the largest writer on the
@@ -255,6 +260,16 @@ impl Supervisor {
         self.progress.clone()
     }
 
+    /// The process-manager backend, for the role transition's mask/unmask.
+    pub(crate) fn process_manager(&self) -> Arc<dyn ProcessManager> {
+        self.pm.clone()
+    }
+
+    /// Whether a bind handshake owns the radio adapter right now.
+    pub(crate) fn bind_session_active(&self) -> bool {
+        self.bind.session_active()
+    }
+
     fn index_of(&self, name: &str) -> Option<usize> {
         self.services.iter().position(|s| s.name == name)
     }
@@ -360,9 +375,10 @@ impl Supervisor {
         self.start_service(name).await
     }
 
-    /// Block until none of `names` report `is-active`, polling at 100ms up to
-    /// `timeout`. Returns even if some remain up (logged), so a wedged unit
-    /// cannot stall the rest of shutdown.
+    /// Block until none of `names` is confirmed `active`, polling at 100ms up to
+    /// `timeout`. A unit whose state cannot be read counts as still up (not
+    /// confirmed stopped). Returns even if some remain up (logged), so a wedged
+    /// unit cannot stall the rest of shutdown.
     async fn wait_for_stop(&self, names: &[&str], timeout: Duration) {
         if names.is_empty() {
             return;
@@ -371,7 +387,7 @@ impl Supervisor {
         loop {
             let mut still_up = Vec::new();
             for n in names {
-                if self.pm.is_active(n).await {
+                if self.pm.is_active(n).await != Some(false) {
                     still_up.push(*n);
                 }
             }
@@ -393,16 +409,15 @@ impl Supervisor {
         // On a ground station, apply the configured mesh role so the sentinel,
         // systemd masks, and role-gate checks all agree before the hardware
         // pass tries to start role-gated units. No-op on a drone. Gated on the
-        // RAW config profile (not the resolved one) to match the Python
-        // supervisor exactly; see AgentConfig::raw_is_ground_station.
-        if self.config.raw_is_ground_station() {
+        // RESOLVED profile, so a config that says `auto` (profile.conf decides)
+        // or the hyphen spelling applies its role exactly like the literal one.
+        if self.config.is_ground_station() {
             let role = self.config.configured_gs_role.clone();
-            crate::role::apply_role_on_boot(
-                self.pm.as_ref(),
-                &role,
-                &crate::config::mesh_role_path(),
-            )
-            .await;
+            // The sentinel the gate re-reads (`mesh_role_path`, which honours
+            // the `ADOS_MESH_ROLE` override), so the writer and the reader can
+            // never name two different files.
+            let role_path = self.config.mesh_role_path.clone();
+            crate::role::apply_role_on_boot(self.pm.as_ref(), &role, &role_path).await;
         }
 
         // Start core units. They are independent of one another (hardware and
@@ -537,37 +552,67 @@ impl Supervisor {
             }
         }
 
-        // Start the right side of the radio pair for our profile. Gated on the
-        // RAW config profile to match the Python supervisor: a ground station
-        // starts ados-wfb-rx, anything else starts the drone-side ados-wfb.
-        if crate::hardware::has_wfb_adapter() {
-            if self.config.raw_is_ground_station() {
-                if self.index_of("ados-wfb-rx").is_some() {
-                    self.start_service("ados-wfb-rx").await;
+        // A relay / receiver ground station's units (batman, then its WFB
+        // plane) are enabled by nothing, so after a reboot they only run if this
+        // pass starts them. The direct role's receive plane is this node's radio
+        // unit and starts below, behind the adapter check.
+        if self.config.is_ground_station() {
+            let role = self.config.live_role();
+            for unit in crate::role::role_units(&role) {
+                let name = crate::role::service_name(unit);
+                if RADIO_UNITS.contains(&name) || self.index_of(name).is_none() {
+                    continue;
                 }
-            } else if self.index_of("ados-wfb").is_some() {
-                self.start_service("ados-wfb").await;
+                self.start_service(name).await;
+            }
+        }
+
+        // Start the radio unit this node owns: the drone TX plane, or a direct
+        // ground station's receive plane.
+        if crate::hardware::has_wfb_adapter() {
+            if let Some(unit) = self.radio_unit() {
+                self.start_service(unit).await;
             }
         }
     }
 
-    /// Restart the service that owns a hot-plugged device class. Radio routes
-    /// to `ados-wfb` to match the Python hot-plug router exactly; the
-    /// `start_service` gate is the backstop (on a ground station the drone-side
-    /// `ados-wfb` gates off, so radio hot-plug is a no-op there — a faithfully
-    /// ported Python behavior; routing it to `ados-wfb-rx` on a GS is a
-    /// separate gated improvement).
+    /// The radio unit this process starts and restarts for this node's profile
+    /// and live role, or `None` when it owns none (workstation, compute, or a
+    /// relay / receiver ground station). Resolved through the same gate every
+    /// start goes through, so it cannot disagree with it.
+    fn radio_unit(&self) -> Option<&'static str> {
+        RADIO_UNITS.iter().copied().find(|name| {
+            self.index_of(name)
+                .is_some_and(|i| gate_allows(&self.services[i], &self.config))
+        })
+    }
+
+    /// Restart the service that owns a hot-plugged device class. A radio edge
+    /// goes to the node's own radio unit ([`Self::radio_unit`]), and is held
+    /// off while a bind session owns the adapter, exactly like the monitor's
+    /// auto-restart.
     pub async fn handle_hotplug(&mut self, kind: crate::hotplug::DevKind) {
         use crate::hotplug::DevKind;
         let name = match kind {
             DevKind::Camera => "ados-video",
             DevKind::Fc => "ados-mavlink",
-            DevKind::Radio => "ados-wfb",
+            DevKind::Radio => match self.radio_unit() {
+                Some(unit) => unit,
+                None => return,
+            },
             // The CRSF lane service. Kept separate from Fc so an RC-module
             // replug never restarts the FC link.
             DevKind::Elrs => "ados-crsf",
         };
         if self.index_of(name).is_none() {
+            return;
+        }
+        if self.restart_blocked_by_bind(name).await {
+            tracing::info!(
+                service = name,
+                ?kind,
+                "hot-plug restart held: a bind owns the radio"
+            );
             return;
         }
         // Coalesce re-enumeration storms: a device that drops and re-appears
@@ -593,7 +638,7 @@ impl Supervisor {
         // is stopped + the injection iface re-prepared there, and a monitor pass
         // landing in that window would otherwise see the unit inactive-but-tracked-
         // Running and auto-restart it, re-claiming the adapter mid-bind.
-        BIND_GATED_UNITS.contains(&name) && self.bind.session_active()
+        RADIO_UNITS.contains(&name) && self.bind.session_active()
     }
 
     /// Names of every parked service whose retry is due at `now`.
@@ -639,7 +684,9 @@ impl Supervisor {
             .map(|spec| spec.name)
             .collect();
         for name in candidates {
-            let active = self.pm.is_active(name).await;
+            // Only a confirmed-active unit is adopted; an unreadable one is
+            // left for the next sweep.
+            let active = self.pm.is_active(name).await == Some(true);
             self.progress.mark();
             if !active {
                 continue;
@@ -710,9 +757,17 @@ impl Supervisor {
 
         // Liveness check + auto-restart for running services.
         for name in to_restart {
-            let active = self.pm.is_active(name).await;
+            let verdict = self.pm.is_active(name).await;
             self.progress.mark();
             let Some(i) = self.index_of(name) else {
+                continue;
+            };
+            // No verdict is not a death. A probe that timed out or could not
+            // be spawned (a busy service manager, fork failing under memory
+            // pressure) says nothing about the unit, and reading it as dead
+            // would restart every healthy unit on the node at once.
+            let Some(active) = verdict else {
+                tracing::debug!(service = name, "liveness probe gave no verdict");
                 continue;
             };
             if !active && self.services[i].state == ServiceState::Running {
@@ -893,11 +948,14 @@ mod tests {
             atlas_enabled: false,
             cloud_relay_enabled: false,
             configured_gs_role: "direct".to_string(),
-            raw_agent_profile: Some(profile_wire.replace('-', "_")),
             headless_mode: false,
             // The store ships off; the tests that care turn it on explicitly.
             log_store_enabled: false,
             mesh_role_path: role_path.to_path_buf(),
+            run_dir: role_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
         }
     }
 
@@ -1082,6 +1140,9 @@ mod tests {
         work_counter_known: std::sync::atomic::AtomicBool,
         /// When set, every unit reports inactive — a whole-stack death.
         all_inactive: std::sync::atomic::AtomicBool,
+        /// When set, every liveness probe returns no verdict — a busy service
+        /// manager, or fork failing under memory pressure.
+        probes_fail: std::sync::atomic::AtomicBool,
     }
 
     impl MockProcessManager {
@@ -1092,6 +1153,7 @@ mod tests {
                 work_counter: std::sync::atomic::AtomicU64::new(0),
                 work_counter_known: std::sync::atomic::AtomicBool::new(false),
                 all_inactive: std::sync::atomic::AtomicBool::new(false),
+                probes_fail: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn record(&self, verb: &str, unit: &str) {
@@ -1120,6 +1182,10 @@ mod tests {
             self.all_inactive
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        fn fail_probes(&self) {
+            self.probes_fail
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     #[async_trait::async_trait]
@@ -1136,12 +1202,19 @@ mod tests {
             self.record("restart", unit);
             true
         }
+        async fn try_restart(&self, unit: &str) -> bool {
+            self.record("try_restart", unit);
+            true
+        }
         async fn reset_failed(&self, unit: &str) {
             self.record("reset_failed", unit);
         }
-        async fn is_active(&self, unit: &str) -> bool {
+        async fn is_active(&self, unit: &str) -> Option<bool> {
             self.record("is_active", unit);
-            !self.all_inactive.load(std::sync::atomic::Ordering::Relaxed)
+            if self.probes_fail.load(std::sync::atomic::Ordering::Relaxed) {
+                return None;
+            }
+            Some(!self.all_inactive.load(std::sync::atomic::Ordering::Relaxed))
         }
         async fn work_counter(&self, unit: &str) -> Option<u64> {
             self.record("work_counter", unit);
@@ -1180,6 +1253,140 @@ mod tests {
                 "reset_failed:ados-mavlink",
                 "start:ados-mavlink",
             ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_liveness_probe_with_no_verdict_is_not_a_death() {
+        // A timed-out or unspawnable `systemctl is-active` says nothing about
+        // the unit. Read as "inactive" it restarts every healthy unit on the
+        // node at once — the flight-controller link included — exactly when
+        // the box is already short of memory or its service manager is busy.
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, mock.clone());
+        assert!(sup.start_service("ados-mavlink").await);
+        let i = sup.index_of("ados-mavlink").unwrap();
+        let starts_before = mock
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("start:"))
+            .count();
+
+        mock.fail_probes();
+        for _ in 0..3 {
+            sup.reconcile_services().await;
+            tokio::time::advance(Duration::from_secs(5)).await;
+        }
+
+        assert_eq!(sup.services[i].state, ServiceState::Running);
+        assert!(
+            sup.services[i].failure_times.is_empty(),
+            "an unanswered probe must not be counted as a failure"
+        );
+        let starts_after = mock
+            .calls()
+            .iter()
+            .filter(|c| c.starts_with("start:"))
+            .count();
+        assert_eq!(
+            starts_after,
+            starts_before,
+            "nothing may be restarted on an unanswered probe: {:?}",
+            mock.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_radio_replug_restarts_the_radio_unit_this_node_owns() {
+        // Drone: the TX plane.
+        let mock = Arc::new(MockProcessManager::new());
+        let mut sup = Supervisor::with_process_manager(
+            cfg("drone"),
+            Arc::new(BindOrchestrator::new()),
+            mock.clone(),
+        );
+        sup.handle_hotplug(crate::hotplug::DevKind::Radio).await;
+        assert!(
+            mock.calls().iter().any(|c| c == "start:ados-wfb"),
+            "{:?}",
+            mock.calls()
+        );
+
+        // Ground station on the direct role: the receive plane. The drone TX
+        // unit is gated off there, which used to make every ground-station
+        // radio replug a no-op.
+        let dir = tempfile::tempdir().unwrap();
+        let role = dir.path().join("mesh/role");
+        write_role(&role, "direct");
+        let mock = Arc::new(MockProcessManager::new());
+        let mut sup = Supervisor::with_process_manager(
+            cfg_with_role_path("ground-station", &role),
+            Arc::new(BindOrchestrator::new()),
+            mock.clone(),
+        );
+        sup.handle_hotplug(crate::hotplug::DevKind::Radio).await;
+        assert!(
+            mock.calls().iter().any(|c| c == "start:ados-wfb-rx"),
+            "{:?}",
+            mock.calls()
+        );
+        assert!(!mock.calls().iter().any(|c| c.ends_with(":ados-wfb")));
+
+        // Relay role: the relay plane re-detects its adapter in its own loop,
+        // so a replug cycles nothing rather than a unit that would fight it for
+        // the adapter.
+        write_role(&role, "relay");
+        let mock = Arc::new(MockProcessManager::new());
+        let mut sup = Supervisor::with_process_manager(
+            cfg_with_role_path("ground-station", &role),
+            Arc::new(BindOrchestrator::new()),
+            mock.clone(),
+        );
+        sup.handle_hotplug(crate::hotplug::DevKind::Radio).await;
+        assert!(mock.calls().is_empty(), "{:?}", mock.calls());
+    }
+
+    #[tokio::test]
+    async fn a_radio_replug_during_a_bind_leaves_the_radio_to_the_bind() {
+        let bind = Arc::new(BindOrchestrator::new());
+        let mock = Arc::new(MockProcessManager::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind.clone(), mock.clone());
+        bind.enter_idle_setup_window_for_test().await;
+        sup.handle_hotplug(crate::hotplug::DevKind::Radio).await;
+        assert!(
+            mock.calls().is_empty(),
+            "a bind owns the adapter; no radio unit may be cycled under it: {:?}",
+            mock.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relay_ground_station_starts_its_role_units_at_boot() {
+        // Nothing enables the relay role's units, so after a reboot the relay
+        // plane only runs if the hardware pass starts it: batman first (the WFB
+        // side binds to its interface), then the relay plane, and never the
+        // direct receive plane beside it on the same adapter.
+        let dir = tempfile::tempdir().unwrap();
+        let role = dir.path().join("mesh/role");
+        write_role(&role, "relay");
+        let mock = Arc::new(MockProcessManager::new());
+        let mut sup = Supervisor::with_process_manager(
+            cfg_with_role_path("ground-station", &role),
+            Arc::new(BindOrchestrator::new()),
+            mock.clone(),
+        );
+        sup.detect_and_start_hardware().await;
+        let role_starts: Vec<String> = mock
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("start:ados-batman") || c.starts_with("start:ados-wfb"))
+            .collect();
+        assert_eq!(
+            role_starts,
+            vec!["start:ados-batman", "start:ados-wfb-relay"],
+            "{:?}",
+            mock.calls()
         );
     }
 

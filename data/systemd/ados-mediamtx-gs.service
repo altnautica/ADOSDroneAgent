@@ -9,7 +9,7 @@ StartLimitIntervalSec=0
 # observable per unit (the slice sets MemoryAccounting=yes).
 Slice=ados.slice
 Type=simple
-ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.mediamtx_manager
+ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.mediamtx
 Restart=always
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

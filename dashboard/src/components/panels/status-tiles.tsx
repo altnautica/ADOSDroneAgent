@@ -40,9 +40,9 @@ function tiles(
   // heartbeat), so `fc.connected` is false while the agent has identified it —
   // read the variant off the heartbeat and show it as linked (live values
   // arrive on the Sensors tab via the browser MSP poller).
-  const fcConnected = s?.fc.connected ?? false;
+  const fcConnected = s?.fc?.connected ?? false;
   const variant = mspVariant(heartbeat.data?.fcVariant);
-  const sats = s?.fc.gps.satellites_visible ?? null;
+  const sats = s?.fc?.gps?.satellites_visible ?? null;
   let mav: Tile;
   if (!fcConnected && variant) {
     mav = {
@@ -99,8 +99,8 @@ function tiles(
   };
 
   // VID
-  const vState = s?.video.state ?? "unknown";
-  const vBitrate = s?.video.bitrate_kbps ?? 0;
+  const vState = s?.video?.state ?? "unknown";
+  const vBitrate = s?.video?.bitrate_kbps ?? 0;
   const vid: Tile = {
     label: "VID",
     icon: Video,
@@ -110,11 +110,8 @@ function tiles(
   };
 
   // NET
-  const uplink = s?.network?.uplink ?? cfg?.network?.uplink_kind ?? "—";
-  const rssi =
-    typeof s?.network?.rssi_dbm === "number"
-      ? s?.network?.rssi_dbm
-      : (cfg?.network?.rssi_dbm ?? null);
+  const uplink = cfg?.network?.uplink_kind ?? "—";
+  const rssi = cfg?.network?.rssi_dbm ?? null;
   const net: Tile = {
     label: "NET",
     icon: Wifi,
@@ -123,40 +120,22 @@ function tiles(
     severity: uplink && uplink !== "—" ? "ok" : "idle",
   };
 
-  // CLD — primary value is the operator's chosen cloud posture;
-  // mqtt / http details only appear when a relay is supposed to be
-  // dialing out. Local-mode rigs render as "local" rather than the
-  // stale "unknown" of the runtime probe.
-  const cloudMode = s?.cloud.mode ?? cfg?.cloud_choice?.mode ?? "local";
-  const mqtt = s?.cloud.mqtt_state ?? "unknown";
-  const http = s?.cloud.http_state ?? "unknown";
-  let cldSub: string;
-  let cldSeverity: Severity;
-  if (cloudMode === "local") {
-    cldSub = "no relay";
-    cldSeverity = "idle";
-  } else if (mqtt === "connected" || mqtt === "online") {
-    cldSub = http !== "unknown" ? `http ${http}` : "online";
-    cldSeverity = "ok";
-  } else if (mqtt === "unknown") {
-    cldSub = "connecting";
-    cldSeverity = "idle";
-  } else {
-    cldSub = `mqtt ${mqtt}`;
-    cldSeverity = "warn";
-  }
+  // CLD — the operator's chosen cloud posture. The relay's live link state is
+  // not reported to this dashboard, so the tile states the posture and nothing
+  // it cannot see.
+  const cloudMode = s?.cloud?.mode ?? cfg?.cloud_choice?.mode ?? null;
   const cld: Tile = {
     label: "CLD",
     icon: Cloud,
-    value: cloudMode,
-    sub: cldSub,
-    severity: cldSeverity,
+    value: cloudMode ?? "—",
+    sub: cloudMode === "local" ? "no relay" : cloudMode ? "relay configured" : "—",
+    severity: "idle",
   };
 
   // PAIR — in local mode there's nothing to pair with; the tile reads
   // "n/a · local mode" instead of inheriting the historical paired
   // state from setup-status.
-  const code = s?.cloud.pairing_code ?? "";
+  const code = s?.cloud?.pairing_code ?? "";
   const finalized = cfg?.setup_finalized ?? false;
   let pair: Tile;
   if (cloudMode === "local") {

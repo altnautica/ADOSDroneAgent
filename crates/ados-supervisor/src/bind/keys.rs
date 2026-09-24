@@ -563,7 +563,9 @@ async fn apply_keypair_inner(
     let _ = pm.stop(unit).await;
     let mut confirmed_inactive = false;
     for _ in 0..10 {
-        if !pm.is_active(unit).await {
+        // Only a definite answer confirms the stop; an unanswered probe is not
+        // evidence the old process is gone.
+        if pm.is_active(unit).await == Some(false) {
             confirmed_inactive = true;
             break;
         }
@@ -615,15 +617,17 @@ async fn apply_keypair_inner(
     // freshly restarted wfb_tx on its own — it recovers only via its slow
     // backoff FSM, so video can be silent for many seconds after a bind. Restart
     // it too so the feed re-establishes promptly without a drone reboot.
-    if role == BindRole::Drone && !pm.restart("ados-video.service").await {
-        tracing::info!("ados_video_restart_skipped (not active / no video pipeline)");
+    // `try_restart`: only a pipeline that is running is cycled; one the
+    // supervisor never started (video off, no camera) stays stopped.
+    if role == BindRole::Drone && !pm.try_restart("ados-video.service").await {
+        tracing::info!("ados_video_restart_failed");
     }
     // The swarm bus derives its beacon key from the shared key file this bind
     // just delivered, on both roles. It also re-reads that file on its own
     // cadence; the restart makes the new key take effect now rather than within
     // the next poll, and re-attaches it to the freshly re-brought-up adapter.
-    if !pm.restart(super::ADOS_SWARMBUS_UNIT).await {
-        tracing::info!("ados_swarmbus_restart_skipped (unit not installed)");
+    if !pm.try_restart(super::ADOS_SWARMBUS_UNIT).await {
+        tracing::info!("ados_swarmbus_restart_failed");
     }
 
     Ok(PairResult {

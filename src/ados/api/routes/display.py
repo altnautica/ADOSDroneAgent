@@ -1,40 +1,31 @@
 """Display REST surface consumed by the Mission Control GCS.
 
-The Display sub-view in the GCS lets a remote operator drive the same
-SPI LCD that the operator on the bench is looking at: it polls
-``/snapshot`` for a downsampled PNG of the current panel, ``/page`` to
-read which page is open, ``POST /page`` to switch pages, and the
-``/calibrate/*`` quintet to drive the 5-point touch wizard from the
-browser. ``/touches`` returns a tail of recent touch events so the
-remote operator can see which corner just got tapped.
+The Display sub-view in the GCS lets a remote operator see and drive the
+panel the operator on the bench is looking at: it polls ``/snapshot`` for a
+PNG of the current frame, ``/page`` to read which page is open, ``POST /page``
+to switch pages, and ``/calibrate/{start,status}`` to launch the touch
+calibration wizard.
 
 Implementation notes:
 
-* The calibration session is held in
-  :mod:`ados.services.ui.touch.session`. Both the REST routes here and
-  the on-LCD wizard mutate the same singleton — a remote ``/start``
-  arms the wizard on the panel; a tap on the panel mirrors into the
-  shared step counter so the GCS poll sees live progress.
-* The snapshot endpoint serves the PNG the native display writer
-  (``ados-display``) drops at ``/run/ados/lcd-snapshot.png`` after each
-  render — the exact frame on the panel. When that file is missing or
-  stale (the writer has not rendered yet, or the legacy fallback UI is
-  running) the endpoint reads the kernel framebuffer directly and
-  encodes a PNG with the standard library only (``zlib`` + ``struct``),
-  so the API process never depends on Pillow. The result is cached for
-  ~800 ms so a half-second of concurrent polls collapses into one read.
-* ``POST /page`` writes the requested page id to a JSON request file
-  the OLED service watches. The handshake is one-way and idempotent:
-  the OLED service unlinks the file after applying the request so a
-  stale entry can never reapply on a future tick.
-
-All routes are read- or session-scoped — none mutate config — so they
-sit under the standard ``/api/v1`` prefix without elevated auth
-beyond the usual API key middleware.
+* The panel UI, including the calibration wizard, is the native display
+  service (``ados-display``). ``POST /calibrate/start`` drops the one-shot
+  ``/run/ados/recalibrate.flag`` it consumes on its ~1 Hz loop; the wizard
+  then runs on the panel, where the operator taps the crosshairs. The fit is
+  written to ``/etc/ados/touch.calib``, which ``/calibrate/status`` reads.
+* The snapshot endpoint serves the PNG ``ados-display`` drops at
+  ``/run/ados/lcd-snapshot.png`` after each render — the exact frame on the
+  panel. Only when that file is missing or stale does it read the kernel
+  framebuffer directly and encode a PNG with the standard library. The result
+  is cached for ~800 ms so a half-second of concurrent polls collapses into
+  one read.
+* ``POST /page`` writes the requested page id to a JSON request file the
+  display service consumes and unlinks.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -49,21 +40,12 @@ from ados.api.routes._lcd_png import render_framebuffer_png
 from ados.core.atomic import atomic_write_json
 from ados.core.logging import get_logger
 from ados.core.paths import (
+    ADOS_RUN_DIR,
     DISPLAY_CONF_PATH,
     LCD_PAGE_REQUEST_PATH,
     LCD_SNAPSHOT_PATH,
     LCD_STATE_PATH,
     TOUCH_CALIB_PATH,
-)
-from ados.services.ui.display_conf import read_rotation
-from ados.services.ui.touch.libinput_calibration import (
-    regenerate_from_calibration as regenerate_hdmi_touch_calibration,
-)
-from ados.services.ui.touch.recent import recent_touches
-from ados.services.ui.touch.session import (
-    STEP_COUNT,
-    TARGETS,
-    get_session_registry,
 )
 from ados.services.ui.touch.transform import load as load_calib
 
@@ -146,11 +128,6 @@ def _resolve_fb_path(conf: dict[str, str]) -> str | None:
     return None
 
 
-def _lcd_is_bound() -> bool:
-    """Best-effort check: is an SPI LCD framebuffer present?"""
-    return _resolve_fb_path(_read_display_conf()) is not None
-
-
 def _load_lcd_state_blob() -> dict[str, Any] | None:
     """Read ``/run/ados/lcd-state.json`` with one retry on partial writes.
 
@@ -179,13 +156,19 @@ def _load_lcd_state_blob() -> dict[str, Any] | None:
 
 
 def _read_lcd_state() -> dict[str, Any]:
-    """The active page id and modal stack the navigator persisted,
-    defaulting to the dashboard when the file is absent or malformed."""
+    """The active page id and modal stack the navigator persisted.
+
+    ``available`` is false and ``active_page`` null when no display service
+    has published state: an absent panel has no active page, and reporting
+    the dashboard there would show a page nothing is rendering.
+    """
     blob = _load_lcd_state_blob()
     if blob is None:
-        return {"active_page": "dashboard", "modal_stack": []}
+        return {"available": False, "active_page": None, "modal_stack": []}
+    active = blob.get("active_page_id")
     return {
-        "active_page": str(blob.get("active_page_id") or "dashboard"),
+        "available": True,
+        "active_page": str(active) if active else None,
         "modal_stack": [
             str(x) for x in (blob.get("modal_stack") or [])
         ],
@@ -236,14 +219,13 @@ def _read_rust_snapshot() -> bytes | None:
 
 
 def _render_snapshot_png(width: int, height: int) -> bytes | None:
-    """Return a PNG of the live LCD, or ``None`` when no panel is bound.
+    """Return a PNG of the live panel, or ``None`` when there is none to show.
 
-    Prefers the native writer's fresh snapshot (the exact panel frame).
-    Falls back to reading the kernel framebuffer and encoding a PNG with
-    the standard library (no Pillow) when the writer has not produced a
-    recent frame. ``width`` / ``height`` are advisory — the panel is small
-    and the GCS scales the image client-side, so the full-resolution PNG
-    is returned without a resize dependency.
+    Prefers the native writer's fresh snapshot (the exact panel frame), whatever
+    kind of display it drives. Falls back to reading the SPI framebuffer and
+    encoding a PNG with the standard library (no Pillow) only when the writer
+    has not produced a recent frame. ``width`` / ``height`` are advisory — the
+    panel is small and the GCS scales the image client-side.
     """
     rust = _read_rust_snapshot()
     if rust is not None:
@@ -274,14 +256,6 @@ def _cached_snapshot(width: int, height: int) -> bytes | None:
 # ── request models ──────────────────────────────────────────────────
 
 
-class CalibrateSampleBody(BaseModel):
-    """Body of ``POST /calibrate/sample``."""
-
-    step: int = Field(..., ge=0, le=STEP_COUNT - 1)
-    x_raw: int = Field(..., ge=0, le=4095)
-    y_raw: int = Field(..., ge=0, le=4095)
-
-
 class PageSetBody(BaseModel):
     """Body of ``POST /page``."""
 
@@ -290,109 +264,54 @@ class PageSetBody(BaseModel):
 
 # ── routes: calibrate ───────────────────────────────────────────────
 
+#: The one-shot request the native display service consumes on its ~1 Hz loop
+#: to launch the on-panel calibration wizard, calibrated or not.
+RECALIBRATE_FLAG_PATH = ADOS_RUN_DIR / "recalibrate.flag"
+
+#: The crosshair count of the native wizard (a 3x3 grid).
+CALIBRATION_TARGET_COUNT = 9
+
+
+def arm_touch_recalibration() -> str | None:
+    """Drop the recalibrate flag. Returns an error string, or None on success."""
+    try:
+        RECALIBRATE_FLAG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        RECALIBRATE_FLAG_PATH.write_text("1\n")
+    except OSError as exc:
+        return str(exc)
+    return None
+
 
 @router.post("/calibrate/start")
 async def post_calibrate_start() -> dict[str, Any]:
-    """Arm the wizard. Returns the target list and step counter.
+    """Ask the panel to launch its calibration wizard.
 
-    The OLED service watches the session generation counter on every
-    render tick; the next tick after this call will see ``in_progress``
-    True with a fresh generation and engage calibrate mode on the
-    panel.
+    The wizard runs on the panel, where the operator taps the crosshairs; this
+    only queues the request. There is no remote step counter: the result shows
+    up in ``/calibrate/status`` as ``calibrated`` once the fit is saved.
     """
-    registry = get_session_registry()
-    snap = registry.start()
-    job_id = f"cal-{int((snap.started_at or 0) * 1000)}-{snap.generation}"
-    return {
-        "job_id": job_id,
-        "target_count": STEP_COUNT,
-        "current_step": snap.current_step,
-        "targets": [
-            {"idx": i, "x": tx, "y": ty}
-            for i, (tx, ty) in enumerate(TARGETS)
-        ],
-    }
-
-
-@router.post("/calibrate/sample")
-async def post_calibrate_sample(body: CalibrateSampleBody) -> dict[str, Any]:
-    """Record a sample for the wizard."""
-    registry = get_session_registry()
-    accepted, next_step, complete = registry.submit_sample(
-        body.step, body.x_raw, body.y_raw,
-    )
-    return {
-        "accepted": accepted,
-        "next_step": next_step,
-        "complete": complete,
-    }
-
-
-@router.post("/calibrate/save")
-async def post_calibrate_save() -> dict[str, Any]:
-    """Solve the affine and persist. Reports the residual on success.
-
-    On rejection (RMS over the limit) the file is left alone so the
-    operator can re-tap the same five targets without restarting the
-    wizard from scratch — the GCS surfaces the residual + an explicit
-    "Retry" button that maps to a fresh ``/start``.
-    """
-    registry = get_session_registry()
-    rotation = read_rotation()
-    ok, rms, error = registry.save(rotation=rotation)
-    if not ok:
-        # Per-error-shape message for the GCS dialog. Distinguish
-        # "the operator must re-tap" from "we never had enough samples
-        # to fit at all".
-        return {
-            "ok": False,
-            "rms_residual_px": rms,
-            "error": error or "save_failed",
-        }
-    # An HDMI touch display is consumed by cage/libinput, not the SPI-LCD
-    # framebuffer reader, so a fresh fit must be pushed into the libinput
-    # calibration matrix too. This is a no-op on an SPI-LCD panel (the
-    # framebuffer reader picks up touch.calib directly). Best-effort: a udev
-    # write failure never fails the calibration the operator just completed.
-    try:
-        regenerate_hdmi_touch_calibration()
-    except Exception as exc:  # noqa: BLE001 - never fail a good calibration
-        log.warning("hdmi_touch_calibration_regen_failed", error=str(exc))
-    return {"ok": True, "rms_residual_px": rms}
-
-
-@router.post("/calibrate/skip")
-async def post_calibrate_skip() -> dict[str, Any]:
-    """Persist the skip marker so the wizard does not auto-launch."""
-    registry = get_session_registry()
-    ok = registry.skip()
-    return {"ok": ok}
+    error = arm_touch_recalibration()
+    if error is not None:
+        log.warning("recalibrate_flag_write_failed", error=error)
+        raise HTTPException(status_code=500, detail="calibration_request_failed")
+    return {"requested": True, "target_count": CALIBRATION_TARGET_COUNT}
 
 
 @router.get("/calibrate/status")
 async def get_calibrate_status() -> dict[str, Any]:
-    """Live calibration state for the GCS dialog poll.
+    """Calibration state for the GCS dialog poll.
 
-    ``calibrated`` reflects the on-disk state (after ``save()`` flips
-    in_progress to False). ``in_progress`` reflects the live wizard
-    session. ``current_step`` and ``rms_residual_px`` are surfaced for
-    the GCS progress card.
+    ``calibrated`` is the on-disk fit. ``requested`` is true while a start
+    request is queued and the display service has not consumed it yet (it
+    stays true when no display service is running to consume it).
     """
-    registry = get_session_registry()
-    snap = registry.snapshot()
-    on_disk = load_calib(TOUCH_CALIB_PATH)
-    payload: dict[str, Any] = {
-        "calibrated": on_disk is not None,
-        "in_progress": snap.in_progress,
+    return {
+        "calibrated": load_calib(TOUCH_CALIB_PATH) is not None,
+        "requested": RECALIBRATE_FLAG_PATH.exists(),
     }
-    if snap.in_progress:
-        payload["current_step"] = snap.current_step
-    if snap.rms_residual_px is not None:
-        payload["rms_residual_px"] = snap.rms_residual_px
-    return payload
 
 
-# ── routes: snapshot / page / touches ───────────────────────────────
+# ── routes: snapshot / page ───────────────────────────────
 
 
 @router.get("/snapshot")
@@ -409,17 +328,10 @@ async def get_snapshot(
     max-age=1`` so the browser also collapses near-duplicate requests
     on the network layer.
     """
-    if not _lcd_is_bound():
-        raise HTTPException(
-            status_code=404,
-            detail="no_lcd_bound",
-        )
-    payload = _cached_snapshot(width, height)
+    payload = await asyncio.to_thread(_cached_snapshot, width, height)
     if payload is None:
-        raise HTTPException(
-            status_code=503,
-            detail="framebuffer_unreadable",
-        )
+        # Neither a fresh native frame nor a readable SPI framebuffer.
+        raise HTTPException(status_code=404, detail="no_lcd_bound")
     return Response(
         content=payload,
         media_type="image/png",
@@ -481,20 +393,6 @@ async def post_page(body: PageSetBody) -> dict[str, Any]:
             detail="page_request_persist_failed",
         ) from exc
     return {"ok": True, "active_page": page_id}
-
-
-@router.get("/touches")
-async def get_touches(
-    since_ms: int = Query(0, ge=0),
-) -> dict[str, Any]:
-    """Return the tail of recent touch events.
-
-    The ring buffer holds the last 32 events. ``since_ms`` is the
-    millisecond timestamp the GCS last saw; the route returns only
-    events newer than that so a 1 Hz poll never re-renders the same
-    event twice.
-    """
-    return {"events": recent_touches(since_ms=since_ms)}
 
 
 # Re-exports kept here so `from ados.api.routes import display` works

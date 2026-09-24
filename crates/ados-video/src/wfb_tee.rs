@@ -40,7 +40,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStderr;
 use tokio::sync::Mutex;
 
@@ -429,13 +428,13 @@ pub fn wfb_tee_output_is_stalled(
 /// noise); only real ffmpeg diagnostics reach the warn log, and only up to the
 /// rate limit, with a suppressed-count summary at the end of each window.
 pub async fn drain_wfb_tee_stderr(stderr: ChildStderr, tracker: ProgressTracker) {
-    let mut lines = BufReader::new(stderr).lines();
+    let mut lines = crate::stderr_drain::BoundedLines::new(stderr);
     let mut window_start = Instant::now();
     let mut logged: u32 = 0;
     let mut suppressed: u32 = 0;
     let mut last_suppressed_line = String::new();
 
-    while let Ok(Some(raw)) = lines.next_line().await {
+    while let Some(raw) = lines.next_line().await {
         let text = raw.trim_end();
         if text.is_empty() {
             continue;

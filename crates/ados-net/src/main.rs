@@ -348,6 +348,8 @@ async fn main() -> Result<()> {
                 // this asks the radio and restarts hostapd when the phy is not
                 // serving the BSS. A probe that cannot be made never acts.
                 hostapd.lock().await.supervise().await;
+                // Keep the tethered host's DHCP server alive on usb0.
+                usb_gadget.supervise().await;
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("uplink router stopping (SIGINT)");

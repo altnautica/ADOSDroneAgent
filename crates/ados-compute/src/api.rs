@@ -1,10 +1,10 @@
 //! The compute node's REST job API (native Rust, axum over tokio). A drone or
 //! GCS submits reconstruction and offload jobs here and reads their status and
 //! results. Handlers lock the engine (a single-writer SQLite store) briefly per
-//! request. This is the local-first control surface, gated by the pairing
-//! posture (see [`crate::auth`]): unpaired ⇒ open, paired + on-box ⇒ open,
-//! paired + off-box ⇒ `X-ADOS-Key`, with an off-box rate limiter. mDNS discovery
-//! wraps it later.
+//! request. This is the local-first control surface, gated by
+//! [`crate::auth::require_job_api`]: unpaired ⇒ open, paired + on-box ⇒ open,
+//! paired + off-box ⇒ the owner's `X-ADOS-Key`, or a node credential for the
+//! offload calls a drone makes, with an off-box rate limiter.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::artifacts::rewrite_artifact_host;
-use crate::auth::{require_pairing, ComputeAuth};
+use crate::auth::{require_job_api, ComputeAuth};
+use crate::credential_api;
 use crate::session_registry::{SessionRegistry, SessionStateCounts};
 use crate::{
     ComputeError, ComputeHeartbeat, ComputeJobKind, ComputeJobState, Dataset, Engine, JobRecord,
@@ -29,12 +30,11 @@ use crate::{
 /// shared by the API handlers and the worker loop.
 pub type ApiState = Arc<Mutex<Engine>>;
 
-/// Build the job-API router over a shared engine, gated by the pairing posture.
+/// Build the job-API router over a shared engine, gated by
+/// [`require_job_api`]. The peer address the gate reads comes from
+/// `ConnectInfo`, so the daemon serves the router with
+/// `into_make_service_with_connect_info::<SocketAddr>()`.
 ///
-/// Every route passes through [`require_pairing`]: unpaired ⇒ open, paired +
-/// on-box ⇒ open, paired + off-box ⇒ `X-ADOS-Key` required, with an off-box rate
-/// limiter. The peer address the gate reads comes from `ConnectInfo`, so the
-/// daemon serves the router with `into_make_service_with_connect_info::<SocketAddr>()`.
 /// Build the router with a default public base (loopback) and an empty session
 /// registry (`/api/compute/sessions` reads `[]`). The daemon uses
 /// [`build_router_with_base`] with its live base + the live registry; this
@@ -65,7 +65,26 @@ pub fn build_router_with_base(
         // The live streaming perception-offload sessions (state / throughput /
         // reconnect + restart history), read from the registry, not the job store.
         .route("/api/compute/sessions", get(list_sessions))
-        .layer(axum::middleware::from_fn_with_state(auth, require_pairing))
+        // Issuing credentials to other nodes and the browser's world-stream
+        // ticket: owner-only (no node lane reaches them).
+        .route(
+            "/api/compute/node-credentials",
+            get(credential_api::list).post(credential_api::mint),
+        )
+        .route(
+            "/api/compute/node-credentials/:id/revoke",
+            post(credential_api::revoke),
+        )
+        .route(
+            "/api/compute/ws-ticket",
+            post(credential_api::mint_ws_ticket),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            auth.clone(),
+            require_job_api,
+        ))
+        // The credential handlers read the pairing state + the issued store.
+        .layer(Extension(auth))
         // The live public base rewrites each stored artifact URL's host on read,
         // so a URL frozen at an earlier (drifting) hostname stays reachable.
         .layer(Extension(public_base))
@@ -314,6 +333,10 @@ mod tests {
     fn unpaired_auth() -> Arc<ComputeAuth> {
         Arc::new(ComputeAuth::new(
             "/nonexistent/ados-compute-test-pairing.json".into(),
+            crate::NodeCredentialStore::open(
+                "/nonexistent/ados-compute-test-creds.json".into(),
+                "node-a",
+            ),
         ))
     }
 
@@ -321,7 +344,209 @@ mod tests {
     fn paired_auth(dir: &std::path::Path) -> Arc<ComputeAuth> {
         let path = dir.join("pairing.json");
         std::fs::write(&path, r#"{"paired": true, "api_key": "ados_secret"}"#).unwrap();
-        Arc::new(ComputeAuth::new(path))
+        Arc::new(ComputeAuth::new(
+            path,
+            crate::NodeCredentialStore::open(dir.join("creds.json"), "node-a"),
+        ))
+    }
+
+    /// One off-box request with optional owner key / node credential headers.
+    async fn send_as(
+        router: &Router,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json");
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        let mut req = builder
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo::<std::net::SocketAddr>(
+                OFFBOX.parse().unwrap(),
+            ));
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn an_owner_issued_drone_credential_submits_offload_but_reaches_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(test_state(), paired_auth(dir.path()));
+        let owner = [("x-ados-key", "ados_secret")];
+
+        // Issuing needs the owner.
+        let (st, _) = send_as(
+            &router,
+            "POST",
+            "/api/compute/node-credentials",
+            &[],
+            serde_json::json!({ "peer_device_id": "drone-1" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+        let (st, minted) = send_as(
+            &router,
+            "POST",
+            "/api/compute/node-credentials",
+            &owner,
+            serde_json::json!({ "peer_device_id": "drone-1" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+        assert_eq!(minted["workstation_node_id"], "node-a");
+        let cred = minted["credential"].as_str().unwrap().to_string();
+        let as_drone = [("x-ados-node-credential", cred.as_str())];
+
+        // The drone's offload submit and session health are admitted.
+        let submit = serde_json::json!({ "kind": "perception_offload",
+            "params": { "session": { "id": "s1", "rtsp_url": "rtsp://d:8554/main", "camera_id": "front" } } });
+        let (st, _) = send_as(
+            &router,
+            "POST",
+            "/api/compute/jobs",
+            &as_drone,
+            submit.clone(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CREATED);
+        let (st, _) = send_as(
+            &router,
+            "GET",
+            "/api/compute/sessions",
+            &as_drone,
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // The drone's OWN pairing key is nothing to this node.
+        let (st, _) = send_as(
+            &router,
+            "POST",
+            "/api/compute/jobs",
+            &[("x-ados-key", "drone-own-key")],
+            submit,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+
+        // Owner-only routes refuse it: listing jobs, issuing more, minting tickets.
+        for (m, p, b) in [
+            ("GET", "/api/compute/jobs", serde_json::Value::Null),
+            (
+                "GET",
+                "/api/compute/node-credentials",
+                serde_json::Value::Null,
+            ),
+            (
+                "POST",
+                "/api/compute/node-credentials",
+                serde_json::json!({ "peer_device_id": "x" }),
+            ),
+            (
+                "POST",
+                "/api/compute/ws-ticket",
+                serde_json::json!({ "scope": "compute.atlas_world" }),
+            ),
+        ] {
+            let (st, _) = send_as(&router, m, p, &as_drone, b).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{m} {p}");
+        }
+
+        // The owner lists and revokes it; the revoked credential stops working.
+        let (_, listed) = send_as(
+            &router,
+            "GET",
+            "/api/compute/node-credentials",
+            &owner,
+            serde_json::Value::Null,
+        )
+        .await;
+        let id = listed["credentials"][0]["id"].as_str().unwrap().to_string();
+        assert_eq!(listed["credentials"][0]["peer_device_id"], "drone-1");
+        assert!(listed["credentials"][0].get("credential").is_none());
+        let (st, revoked) = send_as(
+            &router,
+            "POST",
+            &format!("/api/compute/node-credentials/{id}/revoke"),
+            &owner,
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(revoked["revoked"], true);
+        let (st, _) = send_as(
+            &router,
+            "GET",
+            "/api/compute/sessions",
+            &as_drone,
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn issuing_on_an_unpaired_node_is_refused() {
+        let router = build_router(test_state(), unpaired_auth());
+        let (st, _) = send_as(
+            &router,
+            "POST",
+            "/api/compute/node-credentials",
+            &[],
+            serde_json::json!({ "peer_device_id": "drone-1" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn the_owner_mints_a_world_ticket_for_the_world_scope_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(test_state(), paired_auth(dir.path()));
+        let owner = [("x-ados-key", "ados_secret")];
+        let (st, t) = send_as(
+            &router,
+            "POST",
+            "/api/compute/ws-ticket",
+            &owner,
+            serde_json::json!({ "scope": "compute.atlas_world" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let ticket = t["ticket"].as_str().unwrap();
+        assert!(
+            ados_protocol::ws_ticket::WsTicketIssuer::from_api_key("ados_secret")
+                .verify(
+                    ticket,
+                    "compute.atlas_world",
+                    ados_protocol::ws_ticket::now_unix()
+                )
+                .is_ok()
+        );
+        let (st, _) = send_as(
+            &router,
+            "POST",
+            "/api/compute/ws-ticket",
+            &owner,
+            serde_json::json!({ "scope": "gs.mavlink_ws" }),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     const OFFBOX: &str = "192.168.1.50:55000";

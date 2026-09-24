@@ -249,6 +249,13 @@ fn validate_cameras(cameras: &[Value]) -> Result<(), String> {
         if i != primary_idx && id == "main" {
             return Err("a non-primary camera cannot use the reserved id \"main\"".to_string());
         }
+        // The pipeline always streams the primary leg (it carries the radio
+        // stream), so a disabled primary would be saved and then ignored.
+        if i == primary_idx && obj.get("enabled") == Some(&Value::Bool(false)) {
+            return Err(
+                "the primary camera cannot be disabled; it carries the radio stream".to_string(),
+            );
+        }
         if let Some(orientation) = obj.get("orientation").and_then(Value::as_str) {
             if !orientation.is_empty() && !ORIENTATIONS.contains(&orientation) {
                 return Err(format!("unknown orientation {orientation:?}"));
@@ -300,49 +307,12 @@ enum VideoCmd {
 /// Send one newline-terminated JSON request to the video command socket and read one
 /// newline-terminated JSON reply. `sock` is injectable so a test points it at a stub.
 async fn video_cmd(request: &Value, sock: &Path) -> VideoCmd {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A reply is a few small fields; bound the read to guard a runaway.
-    const MAX_REPLY_BYTES: usize = 64 * 1024;
-
-    let mut stream = match tokio::net::UnixStream::connect(sock).await {
-        Ok(s) => s,
-        Err(_) => return VideoCmd::Unavailable,
-    };
-    let mut line = match serde_json::to_vec(request) {
-        Ok(b) => b,
-        Err(_) => return VideoCmd::Unavailable,
-    };
-    line.push(b'\n');
-    if stream.write_all(&line).await.is_err() || stream.flush().await.is_err() {
-        return VideoCmd::Unavailable;
-    }
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 8 * 1024];
-    loop {
-        let n = match stream.read(&mut buf).await {
-            Ok(n) => n,
-            Err(_) => return VideoCmd::Unavailable,
-        };
-        if n == 0 {
-            break; // EOF: the server replies once then closes.
-        }
-        if raw.len() + n > MAX_REPLY_BYTES {
-            return VideoCmd::Unavailable;
-        }
-        raw.extend_from_slice(&buf[..n]);
-        if raw.contains(&b'\n') {
-            break;
-        }
-    }
-    let text = match String::from_utf8(raw) {
-        Ok(t) => t,
-        Err(_) => return VideoCmd::Unavailable,
-    };
-    match text.lines().next().map(serde_json::from_str::<Value>) {
-        Some(Ok(Value::Object(map))) => VideoCmd::Reply(map),
-        _ => VideoCmd::Unavailable,
+    /// The supervisor persists the leg list and restarts the pipeline before it
+    /// replies, so the deadline covers a pipeline restart.
+    const VIDEO_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+    match crate::ipc::cmd::roundtrip_object(sock, request, VIDEO_CMD_TIMEOUT).await {
+        Ok(map) => VideoCmd::Reply(map),
+        Err(_) => VideoCmd::Unavailable,
     }
 }
 
@@ -371,9 +341,22 @@ fn classify_video_reply(reply: Map<String, Value>) -> Response {
             StatusCode::INTERNAL_SERVER_ERROR,
             "camera config write failed",
         ),
-        _ => detail(
+        // "Saved" only when the supervisor says it persisted the list; any other
+        // unrecognised failure says nothing about the config, so none is claimed.
+        _ if reply.get("persisted") == Some(&Value::Bool(true)) => detail(
             StatusCode::BAD_GATEWAY,
             "camera config saved but the video pipeline restart failed",
+        ),
+        other => detail(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "the video supervisor refused the camera config ({})",
+                if other.is_empty() {
+                    "no error code"
+                } else {
+                    other
+                }
+            ),
         ),
     }
 }
@@ -1134,6 +1117,25 @@ mod tests {
     }
 
     #[test]
+    fn the_primary_leg_cannot_be_disabled_but_a_secondary_can() {
+        let off_primary = [
+            json!({"id": "main", "source": "/dev/video0", "role": "primary", "enabled": false}),
+            json!({"id": "thermal", "source": "/dev/video2"}),
+        ];
+        assert!(validate_cameras(&off_primary)
+            .unwrap_err()
+            .contains("primary camera cannot be disabled"));
+        // With no role, the first leg is the primary.
+        let off_first = [json!({"id": "eo", "source": "/dev/video0", "enabled": false})];
+        assert!(validate_cameras(&off_first).is_err());
+        let off_secondary = [
+            json!({"id": "main", "source": "/dev/video0", "role": "primary"}),
+            json!({"id": "thermal", "source": "/dev/video2", "enabled": false}),
+        ];
+        assert!(validate_cameras(&off_secondary).is_ok());
+    }
+
+    #[test]
     fn validate_cameras_rejects_bad_lists() {
         // Empty.
         assert!(validate_cameras(&[]).is_err());
@@ -1209,6 +1211,24 @@ mod tests {
                 .clone(),
         );
         assert_eq!(restart.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_failure_with_nothing_persisted_is_not_reported_saved() {
+        let unknown = classify_video_reply(
+            json!({"ok": false, "error": "E_BUSY", "persisted": false})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert_eq!(unknown.status(), StatusCode::BAD_GATEWAY);
+        let bytes = axum::body::to_bytes(unknown.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let msg = body["detail"].as_str().unwrap();
+        assert!(!msg.contains("saved"), "{msg}");
+        assert!(msg.contains("E_BUSY"), "{msg}");
     }
 
     #[tokio::test]

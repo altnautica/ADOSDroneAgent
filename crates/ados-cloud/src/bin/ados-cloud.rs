@@ -12,6 +12,7 @@
 //! `/etc/ados/pairing.json`) and the effective convex URL (empty when
 //! `server.mode == "local"`, which keeps a LAN-only agent off the cloud relay).
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,9 +31,8 @@ use ados_cloud::loops::{
     atlas_forwarder, atlas_jobs, aux_status, beacon, command_poll, enrichment, heartbeat,
     offload_reconciler,
 };
-use ados_cloud::mqtt::transport::TransportConfig;
-use ados_cloud::mqtt::{MavlinkMqttRelay, MspMqttRelay, WS_PATH};
-use ados_cloud::{dispatch, pairing::PairingState};
+use ados_cloud::mqtt::{run_webrtc_signaling, MavlinkMqttRelay, MspMqttRelay};
+use ados_cloud::{dispatch, pairing::PairingState, plugin_update};
 
 /// The shared, single-instance plugin supervisor handle. Its lifecycle methods
 /// are synchronous and take `&mut self` (filesystem + `systemctl`), so a `std`
@@ -83,34 +83,10 @@ fn sd_ready() {
 #[cfg(not(target_os = "linux"))]
 fn sd_ready() {}
 
-/// The agent profile in the WIRE form the receiver's fleet view discriminates
-/// on (`drone` | `ground-station` | `workstation` | `compute`).
-///
-/// The config field is the INTERNAL form and may be `ground_station`
-/// (underscore) or `auto`; the heartbeat used to post it verbatim, so a default
-/// install told the cloud its profile was `auto` and an explicit ground station
-/// told it `ground_station` — neither of which the fleet view classifies, so a
-/// ground-station row rendered as neither a drone nor a ground station.
-///
-/// `auto`, empty, and anything unrecognized resolve to `drone`: the resolved
-/// profile lives in `/etc/ados/profile.conf` on a real rig, and a node that
-/// means to be a ground station sets its profile. This is the ONE profile
-/// discrimination in this binary — [`auto_pair_role`] derives from it — so the
-/// bind role and the advertised profile can never disagree about what this node
-/// is.
-fn wire_profile(config: &CloudConfig) -> &'static str {
-    match config.agent.profile.as_str() {
-        "ground_station" | "ground-station" => "ground-station",
-        "workstation" => "workstation",
-        "compute" => "compute",
-        _ => "drone",
-    }
-}
-
-/// The auto-pair bind role (`drone` | `gs`), derived from the one profile
-/// discrimination above.
+/// The auto-pair bind role (`drone` | `gs`), read from the relay's one
+/// profile discrimination ([`CloudConfig::wire_profile`]).
 fn auto_pair_role(config: &CloudConfig) -> String {
-    if wire_profile(config) == "ground-station" {
+    if config.wire_profile() == "ground-station" {
         "gs".to_string()
     } else {
         "drone".to_string()
@@ -191,6 +167,10 @@ async fn main() -> Result<()> {
     // relay one. Stays `None` forever on a drone, so the drone payload is
     // unchanged.
     let (relay_state_tx, relay_state_rx) = watch::channel::<Option<gs_bridge::GsHeartbeat>>(None);
+    // The drone relay's confirmed broker-session flag, published once its
+    // transport is dialed and cleared when the relay returns, so the
+    // heartbeat's cloud-link sidecar reports the session, not the task.
+    let (drone_link_tx, drone_link_rx) = watch::channel::<Option<Arc<AtomicBool>>>(None);
 
     // Spawn the relay tasks into one runtime. Each gates on the paired state
     // and the effective convex URL; the auto-pair supervisor is hosted here for
@@ -202,6 +182,7 @@ async fn main() -> Result<()> {
             http.clone(),
             convex_url.clone(),
             relay_state_rx,
+            drone_link_rx,
             shutdown_rx.clone(),
         ),
         // ── Command-poll loop ──────────────────────────────────
@@ -267,6 +248,17 @@ async fn main() -> Result<()> {
             convex_url.clone(),
             shutdown_rx.clone(),
         ),
+        // ── Plugin auto-update ─────────────────────────────────
+        // The daily registry check over the installed plugins: silent patch or
+        // minor updates through the signed-archive install, an
+        // `update_available` notice for anything the operator must decide.
+        // Skips every cycle while unpaired or with no cloud URL.
+        spawn_plugin_auto_update(
+            config.clone(),
+            convex_url.clone(),
+            supervisor.clone(),
+            shutdown_rx.clone(),
+        ),
     ];
 
     // Relay supervision. The MAVLink-over-MQTT relay runs a real
@@ -287,7 +279,11 @@ async fn main() -> Result<()> {
             shutdown_rx.clone(),
         ));
     } else {
-        tasks.push(spawn_drone_relay(config.clone(), shutdown_rx.clone()));
+        tasks.push(spawn_drone_relay(
+            config.clone(),
+            drone_link_tx,
+            shutdown_rx.clone(),
+        ));
     }
 
     sd_ready();
@@ -307,6 +303,30 @@ async fn main() -> Result<()> {
     }
     tracing::info!("cloud relay stopped");
     Ok(())
+}
+
+/// Spawn the plugin auto-update engine and its notice publisher. Returns the
+/// engine's handle; the publisher ends with the same shutdown signal.
+fn spawn_plugin_auto_update(
+    config: Arc<CloudConfig>,
+    convex_url: String,
+    supervisor: SharedSupervisor,
+    shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    let (source, notices) = plugin_update::CloudUpdateSource::new(convex_url);
+    tokio::spawn(plugin_update::run_notice_publisher(
+        config,
+        notices,
+        shutdown.clone(),
+    ));
+    let (board_name, ..) = board_base();
+    let board = (board_name != "unknown").then_some(board_name);
+    tokio::spawn(ados_plugin_host::auto_update::run_daily_loop(
+        supervisor,
+        Arc::new(source),
+        board,
+        shutdown,
+    ))
 }
 
 /// The HAL board sidecar the API process persists once per boot. Read here so the
@@ -377,6 +397,7 @@ fn spawn_heartbeat(
     http: Arc<reqwest::Client>,
     convex_url: String,
     relay_state: watch::Receiver<Option<gs_bridge::GsHeartbeat>>,
+    drone_link: watch::Receiver<Option<Arc<AtomicBool>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     let started = std::time::Instant::now();
@@ -386,6 +407,7 @@ fn spawn_heartbeat(
         // enrichment producer reports a true inter-tick CPU delta (omitted on the
         // first tick, which has no prior sample to delta against).
         let mut prev_cpu: Option<enrichment::CpuSample> = None;
+        let mut link = heartbeat::CloudLinkTracker::default();
         loop {
             tokio::select! {
                 _ = shutdown.changed() => {
@@ -395,6 +417,7 @@ fn spawn_heartbeat(
                     let pairing = PairingState::load();
                     let api_key = pairing.api_key();
                     if !should_emit(api_key, &convex_url) {
+                        write_cloud_link(&link, api_key.is_some(), &convex_url, None);
                         continue;
                     }
                     let api_key = api_key.expect("should_emit gates on api_key being Some");
@@ -412,7 +435,7 @@ fn spawn_heartbeat(
                     let base = heartbeat::HeartbeatBase {
                         device_id: config.agent.device_id.clone(),
                         version: env!("CARGO_PKG_VERSION").to_string(),
-                        profile: Some(wire_profile(&config).to_string()),
+                        profile: Some(config.wire_profile().to_string()),
                         role: None,
                         uptime_seconds: started.elapsed().as_secs() as i64,
                         board_name,
@@ -444,11 +467,43 @@ fn spawn_heartbeat(
                     // re-asserted from the base by `build_payload`, so the fold
                     // cannot divert the row's identity.
                     fold_relay_state(&mut body, relay_state.borrow().as_ref());
-                    heartbeat::post_heartbeat(&http, &convex_url, api_key, &body).await;
+                    let outcome = heartbeat::post_heartbeat(&http, &convex_url, api_key, &body).await;
+                    link.record(&outcome, now_epoch_ms());
+                    // A GS reports its bridge's session; a drone its relay's.
+                    let broker = relay_state
+                        .borrow()
+                        .as_ref()
+                        .map(|r| r.mqtt_connected)
+                        .or_else(|| {
+                            drone_link
+                                .borrow()
+                                .as_ref()
+                                .map(|f| f.load(std::sync::atomic::Ordering::Acquire))
+                        });
+                    write_cloud_link(&link, true, &convex_url, broker);
                 }
             }
         }
     })
+}
+
+/// Rewrite the cloud-link sidecar for this tick. Best-effort: a tmpfs write
+/// failure is logged and the next tick tries again.
+fn write_cloud_link(
+    link: &heartbeat::CloudLinkTracker,
+    paired: bool,
+    convex_url: &str,
+    broker_connected: Option<bool>,
+) {
+    let record = link.link(
+        paired,
+        !convex_url.is_empty(),
+        broker_connected,
+        now_epoch_ms(),
+    );
+    if let Err(e) = ados_protocol::cloud_link::write_cloud_link(&record) {
+        tracing::debug!(error = %e, "cloud_link_sidecar_write_failed");
+    }
 }
 
 /// Fold the ground-station relay block onto the heartbeat body in place.
@@ -475,7 +530,7 @@ fn fold_relay_state(body: &mut serde_json::Value, relay: Option<&gs_bridge::GsHe
     }
 }
 
-/// Local epoch ms for the compute-jobs sidecar staleness gate.
+/// Epoch milliseconds from the system clock.
 fn now_epoch_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -746,7 +801,8 @@ async fn poll_commands_once(
         let name = command_poll::command_name(&cmd).to_string();
         tracing::info!(command = %name, id = %cmd_id, "cloud command executing");
 
-        let result = dispatch_command(http, &name, &cmd, supervisor, download).await;
+        let seen = dispatch::seen_jobs::default_path();
+        let result = dispatch_command(http, &name, &cmd, supervisor, download, &seen).await;
 
         if result.status == dispatch::CommandStatus::Failed {
             tracing::warn!(
@@ -782,6 +838,7 @@ async fn dispatch_command(
     cmd: &serde_json::Value,
     supervisor: &SharedSupervisor,
     download: &SharedDownload,
+    seen: &std::path::Path,
 ) -> dispatch::CommandResult {
     use dispatch::{loopback, plugin_commands};
 
@@ -794,8 +851,9 @@ async fn dispatch_command(
         let cmd = cmd.clone();
         let supervisor = supervisor.clone();
         let download = download.clone();
+        let seen = seen.to_path_buf();
         let outcome = tokio::task::spawn_blocking(move || {
-            dispatch_plugin_blocking(&name, &cmd, &supervisor, download.as_ref())
+            dispatch_plugin_blocking(&name, &cmd, &supervisor, download.as_ref(), &seen)
         })
         .await;
         return match outcome {
@@ -821,10 +879,10 @@ fn dispatch_plugin_blocking(
     cmd: &serde_json::Value,
     supervisor: &SharedSupervisor,
     download: &dyn DownloadSource,
+    seen: &std::path::Path,
 ) -> dispatch::CommandResult {
     use dispatch::{install, plugin_commands};
 
-    let seen = dispatch::seen_jobs::default_path();
     let mut sup = match supervisor.lock() {
         Ok(g) => g,
         // A poisoned lock means a prior dispatch panicked mid-op; recover the
@@ -833,38 +891,22 @@ fn dispatch_plugin_blocking(
     };
     if name == "plugin.install" {
         let install_cmd = install::InstallCommand::from_row(cmd);
-        return install::handle_install(&mut sup, &install_cmd, download, &seen);
+        return install::handle_install(&mut sup, &install_cmd, download, seen);
     }
     match plugin_commands::PluginCommand::from_row(cmd) {
-        Some(pc) => plugin_commands::dispatch(&mut sup, &pc, &seen),
+        Some(pc) => plugin_commands::dispatch(&mut sup, &pc, seen),
         None => dispatch::CommandResult::failed(format!("malformed plugin command: {name}")),
     }
 }
 
-/// Build the MAVLink-relay broker dial config from the agent config + the live
-/// pairing api key. The relay authenticates as `ados-{device_id}` with the api
-/// key as the password (the broker ACL pattern). Returns `None` while unpaired
-/// (no api key to authenticate the relay).
-fn build_relay_transport(config: &CloudConfig, api_key: &str) -> TransportConfig {
-    TransportConfig {
-        client_id: format!("ados-{}", config.agent.device_id),
-        host: config.server.cloud.mqtt_broker.clone(),
-        port: config.server.cloud.mqtt_port,
-        ws_path: WS_PATH.to_string(),
-        username: format!("ados-{}", config.agent.device_id),
-        password: api_key.to_string(),
-        // The Rule-37 high in-flight ceiling: the publish path is the limit, not
-        // the client's internal queue.
-        inflight: 1000,
-        keep_alive: Duration::from_secs(30),
-    }
-}
-
-/// Spawn the drone-side MAVLink relay supervisor: while paired, keep the relay
-/// connected over MQTT; on exit, restart it after a short delay. The relay
-/// itself owns the bounded-queue + in-flight gate on the hot publish path.
+/// Spawn the drone-side relay supervisor: while paired and a broker is
+/// configured for this posture, keep the MAVLink relay, the MSP byte plane and
+/// the WebRTC signaling lane connected over MQTT; on exit, restart them after a
+/// short fixed delay. The relays own the bounded-queue + in-flight gate on the
+/// hot publish path.
 fn spawn_drone_relay(
     config: Arc<CloudConfig>,
+    link: watch::Sender<Option<Arc<AtomicBool>>>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
@@ -873,29 +915,56 @@ fn spawn_drone_relay(
                 break;
             }
             let pairing = PairingState::load();
-            // Unpaired: nothing to relay; the loop polls for a pair transition.
-            if let Some(api_key) = pairing.api_key() {
-                let transport = build_relay_transport(&config, api_key);
-                // The MSP byte plane runs alongside the MAVLink frame plane so a
-                // cloud GCS reaches an MSP FC (Betaflight/iNav) too; both bridge the
-                // same broker. It shares the loop's shutdown watch and is stopped
-                // when the MAVLink relay returns so each iteration spawns a clean pair.
-                let msp_relay =
-                    MspMqttRelay::new(config.agent.device_id.clone(), transport.clone());
+            // Unpaired, or a posture with no broker: nothing to relay; the loop
+            // polls for a pair transition.
+            if let Some(transport) = pairing
+                .api_key()
+                .and_then(|key| config.relay_transport(None, key))
+            {
+                let device_id = config.agent.device_id.clone();
+                // The MSP byte plane and the WebRTC signaling lane run alongside
+                // the MAVLink frame plane on the same broker, each on its own
+                // ClientID. They share the loop's shutdown watch and are stopped
+                // when the MAVLink relay returns so each iteration spawns a clean
+                // set.
+                let msp_relay = MspMqttRelay::new(device_id.clone(), transport.clone());
                 let msp_shutdown = shutdown.clone();
                 let msp_task = tokio::spawn(async move {
                     if let Err(e) = msp_relay.run(gs_bridge::MSP_SOCK, msp_shutdown).await {
                         tracing::warn!(error = %e, "drone msp relay exited");
                     }
                 });
-                let relay = MavlinkMqttRelay::new(config.agent.device_id.clone(), transport);
+                let signaling_cfg = transport.clone();
+                let signaling_id = device_id.clone();
+                let signaling_shutdown = shutdown.clone();
+                let signaling_task = tokio::spawn(async move {
+                    // A drone has no data cap: every offer is served.
+                    let video_allowed = Arc::new(AtomicBool::new(true));
+                    if let Err(e) = run_webrtc_signaling(
+                        &signaling_id,
+                        &signaling_cfg,
+                        video_allowed,
+                        signaling_shutdown,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "drone webrtc signaling exited");
+                    }
+                });
+                let relay = MavlinkMqttRelay::new(device_id, transport);
                 tracing::info!("drone mavlink relay connecting");
-                if let Err(e) = relay.run(gs_bridge::MAVLINK_SOCK, shutdown.clone()).await {
+                if let Err(e) = relay
+                    .run_observed(gs_bridge::MAVLINK_SOCK, shutdown.clone(), Some(&link))
+                    .await
+                {
                     tracing::warn!(error = %e, "drone mavlink relay exited");
                 }
-                // The MAVLink relay returned (shutdown or exit): stop the MSP relay
-                // too so a fresh loop iteration spawns a clean pair.
+                // The MAVLink relay returned (shutdown or exit): stop the sibling
+                // lanes too so a fresh loop iteration spawns a clean set.
                 msp_task.abort();
+                signaling_task.abort();
+                // The session ended with the relay; report no session.
+                let _ = link.send(None);
             }
             // Restart / re-poll after a short settle, unless shutting down.
             tokio::select! {
@@ -932,8 +1001,10 @@ fn spawn_gs_bridge(
             }
             let pairing = PairingState::load();
             // Unpaired: idle; re-poll for a pair transition between runs.
-            if let Some(api_key) = pairing.api_key() {
-                let transport = build_relay_transport(&config, api_key);
+            if let Some(transport) = pairing
+                .api_key()
+                .and_then(|key| config.relay_transport(None, key))
+            {
                 let mut bridge = CloudRelayBridge::new(
                     config.agent.device_id.clone(),
                     pairing.owner_id.clone(),
@@ -956,7 +1027,6 @@ mod tests {
     use super::*;
     use ados_cloud::dispatch::loopback;
     use ados_cloud::dispatch::{install::DownloadSource, CommandStatus};
-    use std::path::Path;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -973,6 +1043,13 @@ mod tests {
 
     fn no_source() -> SharedDownload {
         Arc::new(NoSource)
+    }
+
+    /// A per-test seen-jobs ring under a temp dir, never the node's real one.
+    fn seen_path() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("_seen_jobs.json");
+        (dir, path)
     }
 
     /// An HTTP client on the crate's preconfigured rustls path (the same one the
@@ -1059,14 +1136,74 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Serve exactly one HTTP request on loopback, answering `body` as JSON,
+    /// and hand back the raw request head the client sent.
+    async fn capture_one_request(
+        body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            let _ = tx.send(String::from_utf8_lossy(&head).into_owned());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    #[tokio::test]
+    async fn the_command_poll_sends_the_key_as_a_header_and_only_the_device_id_as_a_query() {
+        let (base, head) = capture_one_request(r#"{"commands":[]}"#).await;
+        let http = test_client();
+        poll_commands_once(
+            &http,
+            &base,
+            "k-secret",
+            "dev-7",
+            &supervisor(),
+            &no_source(),
+        )
+        .await;
+        let head = head.await.unwrap();
+        let request_line = head.lines().next().unwrap();
+        assert!(
+            request_line.starts_with("GET /agent/commands?deviceId=dev-7 "),
+            "{request_line}"
+        );
+        assert!(
+            !request_line.contains("k-secret"),
+            "the key leaked into the URL"
+        );
+        assert!(
+            head.to_ascii_lowercase().contains("x-ados-key: k-secret"),
+            "{head}"
+        );
+    }
+
     #[tokio::test]
     async fn unknown_command_acks_failed_not_completed() {
         // The catch-all must never fabricate success for a command with no
         // handler. No HTTP is issued on this path (route_for returns None).
         let http = test_client();
         let sup = supervisor();
+        let (_dir, seen) = seen_path();
         let cmd = serde_json::json!({"_id": "c1", "command": "totally_unknown"});
-        let r = dispatch_command(&http, "totally_unknown", &cmd, &sup, &no_source()).await;
+        let r = dispatch_command(&http, "totally_unknown", &cmd, &sup, &no_source(), &seen).await;
         assert_eq!(r.status, CommandStatus::Failed);
         assert_eq!(r.result["message"], "not implemented: totally_unknown");
     }
@@ -1125,8 +1262,9 @@ mod tests {
         // it honestly rather than POST to a malformed path.
         let http = test_client();
         let sup = supervisor();
+        let (_dir, seen) = seen_path();
         let cmd = serde_json::json!({"_id": "c2", "command": "restart_service", "args": {}});
-        let r = dispatch_command(&http, "restart_service", &cmd, &sup, &no_source()).await;
+        let r = dispatch_command(&http, "restart_service", &cmd, &sup, &no_source(), &seen).await;
         assert_eq!(r.status, CommandStatus::Failed);
         assert_eq!(r.result["message"], "not implemented: restart_service");
     }
@@ -1138,14 +1276,14 @@ mod tests {
         // a fabricated success.
         let http = test_client();
         let sup = supervisor();
+        let (_dir, seen) = seen_path();
         let cmd = serde_json::json!({
             "_id": "c3",
             "command": "plugin.enable",
             "args": {"pluginId": "com.example.never-installed", "jobId": "j-unknown"}
         });
-        let r = dispatch_command(&http, "plugin.enable", &cmd, &sup, &no_source()).await;
+        let r = dispatch_command(&http, "plugin.enable", &cmd, &sup, &no_source(), &seen).await;
         assert_eq!(r.status, CommandStatus::Failed);
-        let _ = std::fs::remove_dir_all(Path::new("/var/lib/ados/plugins/.jobs"));
     }
 
     #[test]
@@ -1170,23 +1308,23 @@ mod tests {
         // advertised `auto` and a ground station advertised `ground_station` —
         // neither of which the fleet view classifies.
         assert_eq!(
-            wire_profile(&config_with_profile("ground_station")),
+            config_with_profile("ground_station").wire_profile(),
             "ground-station"
         );
         assert_eq!(
-            wire_profile(&config_with_profile("ground-station")),
+            config_with_profile("ground-station").wire_profile(),
             "ground-station"
         );
-        assert_eq!(wire_profile(&config_with_profile("drone")), "drone");
+        assert_eq!(config_with_profile("drone").wire_profile(), "drone");
         assert_eq!(
-            wire_profile(&config_with_profile("workstation")),
+            config_with_profile("workstation").wire_profile(),
             "workstation"
         );
-        assert_eq!(wire_profile(&config_with_profile("compute")), "compute");
+        assert_eq!(config_with_profile("compute").wire_profile(), "compute");
         // `auto` / empty / unknown resolve to the drone form, which is also the
         // bind role's safe default — one discrimination, so the two agree.
         for raw in ["auto", "", "nonsense"] {
-            assert_eq!(wire_profile(&config_with_profile(raw)), "drone");
+            assert_eq!(config_with_profile(raw).wire_profile(), "drone");
         }
         for raw in ["ground_station", "ground-station"] {
             assert_eq!(auto_pair_role(&config_with_profile(raw)), "gs");

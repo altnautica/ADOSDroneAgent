@@ -1,20 +1,11 @@
-"""Out-of-process pairing daemon.
+"""Pairing daemon: the single owner of mesh pairing state.
 
-Today `PairingManager` lives inside `ados-api.service` as a module-level
-singleton. The UDP 5801 listener is bound by that process. An agent
-restart (upgrades, crash, code reload) tears down the listener, so any
-relay that sends a join request during the restart window gets no
-response.
-
-This daemon factors the UDP-owning half of the pairing lifecycle into
-its own `ados-mesh-pairing.service` systemd unit. REST routes and OLED
-can either:
-  (a) keep calling `get_pairing_manager()` in-process (current default),
-      in which case this daemon stays stopped; or
-  (b) set `ADOS_PAIRING_VIA_DAEMON=1` in `/etc/ados/env` so the REST
-      process proxies to this daemon over a Unix socket
-      (`/run/ados/pairing.sock`). In that mode the UDP bind survives
-      REST restarts.
+Runs as ``ados-mesh-pairing.service`` on ground stations. It holds the
+Accept window, the pending join list and the UDP 5801 listener, so the
+listener survives REST restarts and every surface (the REST routes, the
+native pending view, the OLED) reads the same window. REST handlers reach it
+through :class:`ados.services.ground_station.pairing_client_rpc.PairingDaemonProxy`
+over ``/run/ados/pairing.sock``.
 
 The wire protocol on the Unix socket is deliberately tiny:
 
@@ -36,9 +27,8 @@ Supported ops:
   - `approve(device_id: str)` -> `{approved: bool, ...}`
   - `revoke(device_id: str)` -> `{revoked: bool}`
 
-Every op is routed to the single in-process `get_pairing_manager()`
-singleton so state (key pair, pending list, revocations) remains
-consistent whichever path the caller used.
+Every op is routed to this process's `get_pairing_manager()` singleton,
+so state (key pair, pending list, revocations) has one home.
 """
 
 from __future__ import annotations
@@ -159,6 +149,31 @@ async def _handle_op(op: str, args: dict[str, Any]) -> dict[str, Any]:
                 return {"ok": False, "error": "device_id required"}
             revoke_device(device_id)
             return {"ok": True, "result": {"revoked": True}}
+        if op == "join":
+            # Relay side: ECDH over UDP, invite decrypt under the receiver's
+            # window code, mesh identity persisted. Runs here, the single owner
+            # of pairing state, so the native front only forwards.
+            from ados.services.ground_station.pairing_client import request_join
+
+            port = args.get("receiver_port")
+            result = await request_join(
+                code=str(args.get("code", "")),
+                receiver_host=args.get("receiver_host") or None,
+                receiver_port=int(port) if port else None,
+            )
+            if not result.ok:
+                return {
+                    "ok": False,
+                    "error": result.error_message or "join failed",
+                    "error_code": result.error_code or "E_JOIN_FAILED",
+                }
+            return {
+                "ok": True,
+                "result": {
+                    "mesh_id": result.mesh_id,
+                    "receiver_host": result.receiver_host,
+                },
+            }
         return {"ok": False, "error": f"unknown op: {op}"}
     except Exception as exc:  # noqa: BLE001 — any failure returns as error
         log.exception("pairing_daemon_op_failed", op=op)

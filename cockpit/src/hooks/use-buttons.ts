@@ -17,8 +17,9 @@ import { WS_TICKET_PROTOCOL, mintWsTicket } from "@/lib/ws-ticket";
  *  `SCOPE_BUTTON_EVENTS` in crates/ados-control). */
 const BUTTON_SCOPE = "gs.button_events";
 
-const RECONNECT_MIN_MS = 1000;
-const RECONNECT_MAX_MS = 10_000;
+/** Fixed pause before redialling a dropped button stream (no backoff, no cap):
+ *  the panel buttons are an input path, and a growing delay is dead input. */
+const RECONNECT_MS = 3000;
 
 /** Default binding from a raw button identity to a folded command. The panel
  *  owns this table; on-rig the exact identity strings the `ados-pic` reader
@@ -81,7 +82,6 @@ export function useButtons(): ButtonsState {
   useEffect(() => {
     let closed = false;
     let socket: WebSocket | null = null;
-    let reconnectMs = RECONNECT_MIN_MS;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
 
@@ -99,8 +99,7 @@ export function useButtons(): ButtonsState {
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         void connect();
-      }, reconnectMs);
-      reconnectMs = Math.min(reconnectMs * 2, RECONNECT_MAX_MS);
+      }, RECONNECT_MS);
     };
 
     const connect = async () => {
@@ -125,7 +124,6 @@ export function useButtons(): ButtonsState {
       }
 
       socket.onopen = () => {
-        reconnectMs = RECONNECT_MIN_MS;
         setConnected(true);
       };
 

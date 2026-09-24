@@ -41,7 +41,9 @@ pub use session::{CaptureOutput, CaptureSession, FrameInput, PoseInput};
 
 pub use control::{serve_control, AtlasControlCmd};
 pub use encode::encode_keyframe_jpeg;
-pub use frame_source::{AtlasFrameSource, CapturedFrame, SyntheticFrameSource, VisionFrameSource};
+pub use frame_source::{
+    AtlasFrameSource, CapturedFrame, FramePixels, SyntheticFrameSource, VisionFrameSource,
+};
 pub use pose_source::{
     build_pose_provider, clock_offset_ns, diagonal_cov, euler_to_rotation, geodetic_to_enu,
     mono_ms, mono_ns, HybridPose, OffloadPose, PoseProvider, PoseSample, ReplayPose, StateSockPose,

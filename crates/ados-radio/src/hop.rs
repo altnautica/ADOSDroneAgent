@@ -293,7 +293,8 @@ impl HopState {
         &self.history[n.saturating_sub(32)..]
     }
 
-    /// Test/back-compat shim: record a peer beacon with no decoded payload.
+    /// Record a peer beacon with no decoded payload (test fixture only).
+    #[cfg(test)]
     pub fn on_peer_seen(&mut self) {
         self.was_linked = true;
         self.peer_last_seen = Some(Instant::now());
@@ -353,11 +354,6 @@ impl HopState {
             Some(t) => t.elapsed().as_secs() >= 30,
             None => true,
         }
-    }
-
-    /// Record that a hop was executed, appending a history entry.
-    pub fn on_hop(&mut self, new_channel: u8) {
-        self.record_hop(new_channel, "periodic", true);
     }
 
     /// Record a hop with an explicit trigger label + outcome (for the history

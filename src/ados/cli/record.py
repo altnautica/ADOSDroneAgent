@@ -129,7 +129,7 @@ def _request(
             except httpx.ConnectError:
                 continue  # this port refused; try the next candidate
         raise click.ClickException(
-            "Agent is not running. Start the supervisor or run `ados demo`."
+            "Agent is not running. Start it with: sudo systemctl start ados-supervisor"
         )
     except httpx.HTTPError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -162,7 +162,7 @@ def _download(path: str, dest: Path) -> int:
             except httpx.ConnectError:
                 continue  # this port refused; try the next candidate
         raise click.ClickException(
-            "Agent is not running. Start the supervisor or run `ados demo`."
+            "Agent is not running. Start it with: sudo systemctl start ados-supervisor"
         )
     except httpx.HTTPError as exc:
         raise click.ClickException(str(exc)) from exc

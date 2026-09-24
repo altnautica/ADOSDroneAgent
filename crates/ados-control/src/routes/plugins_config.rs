@@ -89,6 +89,10 @@ pub async fn put_plugin_config(
         // unreachable daemon (plugin host not up) is a 503 — a config write is
         // never silently dropped.
         Err(PluginControlError::Rpc(msg)) => detail(StatusCode::BAD_REQUEST, msg),
+        Err(PluginControlError::Timeout) => detail(
+            StatusCode::GATEWAY_TIMEOUT,
+            "plugin host did not answer in time",
+        ),
         Err(e) => detail(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("plugin host unavailable: {e}"),
@@ -113,6 +117,10 @@ pub async fn get_plugin_config(
                 .into_response()
         }
         Err(PluginControlError::Rpc(msg)) => detail(StatusCode::BAD_REQUEST, msg),
+        Err(PluginControlError::Timeout) => detail(
+            StatusCode::GATEWAY_TIMEOUT,
+            "plugin host did not answer in time",
+        ),
         Err(e) => detail(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("plugin host unavailable: {e}"),

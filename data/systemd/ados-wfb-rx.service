@@ -1,5 +1,5 @@
 [Unit]
-Description=ADOS WFB-ng RX (ground-station profile)
+Description=ADOS WFB-ng RX (ground-station direct role)
 # After= the network and the mavlink unit, NOT the supervisor itself.
 # An earlier revision had After=ados-supervisor.service which deadlocked
 # the supervisor's own startup: when the supervisor's start_service
@@ -27,14 +27,17 @@ Slice=ados.slice
 Type=notify
 WatchdogSec=30
 User=root
-# The native ground-station receive plane (direct role). The install verifies
-# the binary is present before this unit starts, so a normal boot runs it
-# directly. There is no packaged fallback — the Python direct-role receive
-# plane was removed; a missing or broken binary fails loud. (The mesh
-# relay/receiver roles are native-only too; their packaged modules were
-# deleted, so no role keeps a Python fallback.)
-ExecStart=/opt/ados/bin/ados-groundlink
+# The native ground-station receive plane, for the direct role only. The unit
+# names its role on --role and the supervisor starts and stops it on role
+# transitions. Started while the role sentinel names relay or receiver (pulled
+# up with the supervisor at boot, an installer start, a stray start) the binary
+# reports ready and exits 0 without touching the adapter, and exit 0 is the one
+# status never restarted, so no second plane ever lands on the adapter. The
+# install verifies the binary is present before this unit starts; there is no
+# packaged fallback, so a missing or broken binary fails loud.
+ExecStart=/opt/ados/bin/ados-groundlink --role direct
 Restart=always
+RestartPreventExitStatus=0
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env

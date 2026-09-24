@@ -5,7 +5,7 @@ served back to clients as MP4 files. The recorder taps the local
 mediamtx RTSP source (`rtsp://127.0.0.1:8554/main`) rather than
 reaching for the upstream UDP payload directly. mediamtx is the
 canonical local source on the ground side: ffmpeg already does the
-UDP-to-RTSP muxing in `mediamtx_manager.py`, so this recorder only
+UDP-to-RTSP muxing in the `mediamtx` package, so this recorder only
 needs to consume RTSP and remux to MP4 with `-c copy` (no transcode).
 
 Lifecycle mirrors the air-side recorder pattern:
@@ -39,7 +39,7 @@ from ados.core.paths import RECORDINGS_DIR
 
 log = get_logger("ground_station.recorder")
 
-# Local RTSP source published by mediamtx_manager. Kept in sync with
+# Local RTSP source published by the mediamtx package. Kept in sync with
 # `GROUND_RTSP_PATH` and the rtsp_port constant there.
 _DEFAULT_RTSP_URL = "rtsp://127.0.0.1:8554/main"
 

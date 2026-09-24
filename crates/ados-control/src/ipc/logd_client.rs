@@ -36,6 +36,16 @@ const MERGE_ROWS: u32 = 20;
 /// read.
 const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
 
+/// End-to-end bound on one query exchange (connect, request, read to EOF). The
+/// store answers a page in milliseconds; a store that accepts and then stalls
+/// must degrade the calling route, not hang it.
+pub const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How old a hardware row may be and still count as a current reading. The
+/// collector samples every couple of seconds; a row older than this is the last
+/// thing a stopped collector wrote.
+pub const HW_SIGNAL_MAX_AGE_US: i64 = 30_000_000;
+
 /// The default query socket path, honouring the `ADOS_RUN_DIR` override the
 /// sibling crates resolve the runtime root with, so a test points it at a tempdir
 /// and a dev rig can move the whole `/run/ados` tree. Defaults to
@@ -73,17 +83,21 @@ impl LogdQueryClient {
 
     /// Merge the most-recent hardware snapshots into one signal map (newest wins).
     ///
+    /// Only rows sampled within [`HW_SIGNAL_MAX_AGE_US`] count: the collector
+    /// can stop while the query API stays up, and its last rows must not be
+    /// served as the node's current readings.
+    ///
     /// Returns `None` when the store is unreachable, the response does not parse,
-    /// or there are no hardware rows — so the caller falls back to its own default
-    /// rather than to a half-populated reply.
+    /// or there are no fresh hardware rows — so the caller falls back to its own
+    /// default rather than to a half-populated or stale reply.
     pub async fn latest_hw_signals(&self) -> Option<Map<String, Value>> {
-        let path = format!("/v1/query?kind=hw&limit={MERGE_ROWS}");
-        let (status, body) = self.uds_get(&path).await.ok()?;
-        if status >= 400 {
-            return None;
-        }
-        let parsed: Value = serde_json::from_slice(&body).ok()?;
-        merge_hw_signals(&parsed)
+        let parsed = self
+            .query_json(
+                "/v1/query",
+                &[("kind", "hw".into()), ("limit", MERGE_ROWS.to_string())],
+            )
+            .await?;
+        merge_hw_signals(&parsed, unix_now_us())
     }
 
     /// Read recent hardware snapshots with their timestamps, newest first.
@@ -97,41 +111,158 @@ impl LogdQueryClient {
     /// parse, so the caller reports "cannot measure" rather than inventing a rate
     /// from a half-read page.
     pub async fn hw_rows(&self, limit: u32) -> Option<Vec<HwRow>> {
-        let path = format!("/v1/query?kind=hw&limit={limit}");
-        let (status, body) = self.uds_get(&path).await.ok()?;
+        let parsed = self
+            .query_json(
+                "/v1/query",
+                &[("kind", "hw".into()), ("limit", limit.to_string())],
+            )
+            .await?;
+        parse_hw_rows(&parsed)
+    }
+
+    /// The newest `limit` rows of one table (`kind`), optionally narrowed to one
+    /// `event_kind`: the query response's `data` array, or `None` when the store
+    /// is unreachable, answers an error, or the body does not parse.
+    pub async fn rows(
+        &self,
+        kind: &str,
+        limit: i64,
+        event_kind: Option<&str>,
+    ) -> Option<Vec<Value>> {
+        let mut params: Vec<(&str, String)> =
+            vec![("kind", kind.to_string()), ("limit", limit.to_string())];
+        if let Some(ek) = event_kind {
+            params.push(("event_kind", ek.to_string()));
+        }
+        let parsed = self.query_json("/v1/query", &params).await?;
+        parsed.get("data").and_then(Value::as_array).cloned()
+    }
+
+    /// The `detail` body of the newest event of one `event_kind`, or `None` when
+    /// the store is unreachable, holds no such event, or the detail is absent,
+    /// not an object, or empty. Carries no age judgement: for events emitted only
+    /// on change, where the newest row stays the current state however old it is.
+    pub async fn latest_event_detail(&self, event_kind: &str) -> Option<Map<String, Value>> {
+        let rows = self.rows("events", 1, Some(event_kind)).await?;
+        let detail = rows.first()?.as_object()?.get("detail")?.as_object()?;
+        (!detail.is_empty()).then(|| detail.clone())
+    }
+
+    /// [`latest_event_detail`](Self::latest_event_detail), but only when the
+    /// row was stamped within `max_age`. For events a poll loop writes on a fixed
+    /// cadence: the store keeps rows for days, so once the producer dies its last
+    /// row would otherwise be served as the current state. A row with no `ts_us`
+    /// cannot be shown to be current and is refused; a row stamped slightly in the
+    /// future is same-host jitter and counts as fresh.
+    pub async fn fresh_event_detail(
+        &self,
+        event_kind: &str,
+        max_age: std::time::Duration,
+    ) -> Option<Map<String, Value>> {
+        let rows = self.rows("events", 1, Some(event_kind)).await?;
+        let row = rows.first()?.as_object()?;
+        if !row_is_fresh(row, unix_now_us(), max_age) {
+            return None;
+        }
+        let detail = row.get("detail")?.as_object()?;
+        (!detail.is_empty()).then(|| detail.clone())
+    }
+
+    /// `GET <endpoint>?<params>` against the query API, decoded as JSON. `None`
+    /// on an unreachable store, a 4xx/5xx, a timeout, or an unparseable body.
+    pub async fn query_json(&self, endpoint: &str, params: &[(&str, String)]) -> Option<Value> {
+        let path = format!("{endpoint}?{}", encode_query(params));
+        let (status, body) = self.get(&path).await.ok()?;
         if status >= 400 {
             return None;
         }
-        let parsed: Value = serde_json::from_slice(&body).ok()?;
-        parse_hw_rows(&parsed)
+        serde_json::from_slice(&body).ok()
     }
 
     /// A minimal HTTP/1.1 `GET` over the query Unix socket. Returns the status code
     /// and the response body bytes. `Connection: close` lets the body be read to
     /// EOF; a chunked body is de-chunked. Bounded by [`MAX_READ_BYTES`] so a
-    /// runaway response cannot exhaust memory.
-    async fn uds_get(&self, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
+    /// runaway response cannot exhaust memory, and by [`QUERY_TIMEOUT`] end to
+    /// end so a store that accepts and then stalls cannot hang the route.
+    pub async fn get(&self, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let mut stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
-        let head = format!("GET {path} HTTP/1.1\r\nHost: logd\r\nConnection: close\r\n\r\n");
-        stream.write_all(head.as_bytes()).await?;
-        stream.flush().await?;
+        let exchange = async {
+            let mut stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
+            let head = format!("GET {path} HTTP/1.1\r\nHost: logd\r\nConnection: close\r\n\r\n");
+            stream.write_all(head.as_bytes()).await?;
+            stream.flush().await?;
 
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = stream.read(&mut buf).await?;
-            if n == 0 {
-                break; // EOF (Connection: close).
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = stream.read(&mut buf).await?;
+                if n == 0 {
+                    break; // EOF (Connection: close).
+                }
+                if raw.len() + n > MAX_READ_BYTES {
+                    return Err(std::io::Error::other("logd response too large"));
+                }
+                raw.extend_from_slice(&buf[..n]);
             }
-            if raw.len() + n > MAX_READ_BYTES {
-                return Err(std::io::Error::other("logd response too large"));
-            }
-            raw.extend_from_slice(&buf[..n]);
-        }
-        parse_http_response(&raw)
+            parse_http_response(&raw)
+        };
+        tokio::time::timeout(QUERY_TIMEOUT, exchange)
+            .await
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "logd query did not answer in time",
+                ))
+            })
     }
+}
+
+/// Whether a store row's `ts_us` is within `max_age` of `now_us`. A row with no
+/// parseable `ts_us` is NOT fresh: an unstamped row cannot be shown to be
+/// current. A row stamped slightly in the future is same-host jitter, not an
+/// unprovable age, and counts as fresh.
+pub(crate) fn row_is_fresh(
+    row: &Map<String, Value>,
+    now_us: i64,
+    max_age: std::time::Duration,
+) -> bool {
+    let Some(ts_us) = row.get("ts_us").and_then(Value::as_i64) else {
+        return false;
+    };
+    now_us.saturating_sub(ts_us) <= max_age.as_micros() as i64
+}
+
+/// Wall-clock microseconds since the epoch, the unit the store stamps rows in.
+fn unix_now_us() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as i64)
+        .unwrap_or(0)
+}
+
+/// Percent-encode a query-parameter list into a `key=value&...` string.
+pub(crate) fn encode_query(params: &[(&str, String)]) -> String {
+    params
+        .iter()
+        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Conservative percent-encoding: pass through the unreserved set
+/// (`A-Za-z0-9-._~`) verbatim and percent-encode every other byte.
+pub(crate) fn percent_encode(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
 }
 
 /// One hardware snapshot as stored: when it was taken, and what it carried.
@@ -174,12 +305,21 @@ fn parse_hw_rows(body: &Value) -> Option<Vec<HwRow>> {
 
 /// Merge the `data` rows of a `/v1/query?kind=hw` response into one signal map,
 /// newest value winning. Rows are newest-first, so the first time a signal key is
-/// seen is its freshest value (a plain "insert if absent" keeps it). Returns
-/// `None` when the envelope has no usable rows or no signals at all.
-fn merge_hw_signals(body: &Value) -> Option<Map<String, Value>> {
+/// seen is its freshest value (a plain "insert if absent" keeps it). A row with
+/// no timestamp, or one older than [`HW_SIGNAL_MAX_AGE_US`] at `now_us`, is not
+/// a current reading and is skipped. Returns `None` when no fresh row carries
+/// any signal.
+fn merge_hw_signals(body: &Value, now_us: i64) -> Option<Map<String, Value>> {
     let rows = body.get("data")?.as_array()?;
     let mut merged: Map<String, Value> = Map::new();
     for row in rows {
+        let fresh = row
+            .get("ts_us")
+            .and_then(Value::as_i64)
+            .is_some_and(|ts| now_us.saturating_sub(ts) <= HW_SIGNAL_MAX_AGE_US);
+        if !fresh {
+            continue;
+        }
         let Some(signals) = row.get("signals").and_then(Value::as_object) else {
             continue;
         };
@@ -197,7 +337,7 @@ fn merge_hw_signals(body: &Value) -> Option<Map<String, Value>> {
 /// Split a raw HTTP/1.1 response into the status code and the decoded body bytes.
 /// De-chunks a `Transfer-Encoding: chunked` body; otherwise returns the body
 /// after the header terminator as-is.
-fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
+pub(crate) fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
     let sep = b"\r\n\r\n";
     let split = raw
         .windows(sep.len())
@@ -290,10 +430,11 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         // Newest-first: row 0 (newest) has cpu; row 1 (older) has cpu + mem; the
         // newest cpu must win, mem fills from the older row.
+        let now = unix_now_us();
         let body = json!({
             "data": [
-                {"id": 2, "ts_us": 200, "signals": {"cpu.util.all": 12.5}},
-                {"id": 1, "ts_us": 100, "signals": {"cpu.util.all": 99.0, "mem.total_bytes": 4096}},
+                {"id": 2, "ts_us": now, "signals": {"cpu.util.all": 12.5}},
+                {"id": 1, "ts_us": now - 1_000_000, "signals": {"cpu.util.all": 99.0, "mem.total_bytes": 4096}},
             ]
         })
         .to_string();
@@ -346,10 +487,34 @@ mod tests {
     }
 
     #[test]
-    fn merge_handles_a_chunked_envelope() {
-        let body = json!({"data": [{"signals": {"thermal.primary_c": 47.0}}]});
-        let merged = merge_hw_signals(&body).unwrap();
+    fn rows_the_collector_wrote_long_ago_are_not_current_readings() {
+        let now = 1_700_000_000_000_000;
+        let body = json!({"data": [
+            {"ts_us": now - HW_SIGNAL_MAX_AGE_US - 1, "signals": {"thermal.primary_c": 47.0}},
+            {"signals": {"cpu.util.all": 5.0}},
+        ]});
+        assert!(merge_hw_signals(&body, now).is_none());
+        let fresh =
+            json!({"data": [{"ts_us": now - 1_000_000, "signals": {"thermal.primary_c": 47.0}}]});
+        let merged = merge_hw_signals(&fresh, now).unwrap();
         assert_eq!(merged.get("thermal.primary_c"), Some(&json!(47.0)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_store_that_accepts_and_stalls_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logd-query.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        // Accept and hold the connection open without ever answering.
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(QUERY_TIMEOUT * 10).await;
+            drop(conn);
+        });
+        let client = LogdQueryClient::new(path);
+        let err = client.get("/v1/query?kind=hw").await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        server.abort();
     }
 
     #[test]

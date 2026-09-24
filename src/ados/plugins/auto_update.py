@@ -1,8 +1,8 @@
-"""Daily auto-update poll for installed third-party plugins.
+"""On-demand plugin update check (`ados plugin check-updates`).
 
-Once per day (with jitter to prevent fleet-wide thundering herd) the
-cloud service iterates every enabled install record and asks the
-registry for the latest published version. The decision tree:
+The daily check runs in ados-cloud (Rust, ``ados_plugin_host::auto_update``).
+This module keeps the operator's on-demand check for one plugin, with the
+same decision tree:
 
     silent install     ⇐ patch or minor bump AND permissions
                           unchanged AND board still supported AND
@@ -42,12 +42,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import random
 import tempfile
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Any
 
 import httpx
 
@@ -67,7 +65,6 @@ from ados.plugins.remote_install_download import (
 )
 from ados.plugins.state import (
     PluginInstall,
-    load_state,
     save_state,
     state_lock,
 )
@@ -75,13 +72,6 @@ from ados.plugins.supervisor import PluginSupervisor
 
 log = get_logger("plugins.auto_update")
 
-
-# Daily cadence with +/- one hour of jitter so a fleet of devices on
-# the same install timestamp does not stampede the registry every
-# 24 hours. The jitter range is hard-capped so a misconfigured clock
-# cannot push the next poll into next week.
-DAILY_SLEEP_SECONDS = 24 * 3600
-JITTER_RANGE_SECONDS = 3600
 
 # Default HTTP timeout for registry calls. Same posture as the
 # heartbeat loop's 10 s budget.
@@ -155,7 +145,7 @@ async def _registry_get_plugin(
     served by ``pluginRegistryHttp.ts`` on the convex-site domain and
     returns the raw ``{plugin, versions}`` JSON shape on success. A
     404 means no published row exists for that id; treated as ``None``
-    so the daily loop can move on. Any other non-200 status raises so
+    so the caller can move on. Any other non-200 status raises so
     the caller can record the failure on the install record.
     """
     url = f"{convex_url.rstrip('/')}/v1/plugins/{plugin_id}"
@@ -271,7 +261,7 @@ async def check_one_plugin(
     """Evaluate one plugin against the registry and act.
 
     See module docstring for the full decision tree. Always returns
-    an outcome — never raises — so the daily loop can iterate the
+    an outcome — never raises — so a caller can iterate the
     full set even when one plugin's poll fails.
     """
     plugin_id = install.plugin_id
@@ -647,161 +637,3 @@ def _record_attempt(
             "error": error,
         }
         save_state(supervisor.installs())
-
-
-# ---------------------------------------------------------------------
-# Daily loop
-# ---------------------------------------------------------------------
-
-
-def _next_sleep_seconds() -> float:
-    """Daily interval +/- one hour of jitter."""
-    return DAILY_SLEEP_SECONDS + random.randint(
-        -JITTER_RANGE_SECONDS, JITTER_RANGE_SECONDS
-    )
-
-
-async def _sleep_with_shutdown(
-    seconds: float, shutdown: asyncio.Event
-) -> bool:
-    """Sleep up to ``seconds`` or until shutdown fires. Returns True on shutdown."""
-    try:
-        await asyncio.wait_for(shutdown.wait(), timeout=seconds)
-    except TimeoutError:
-        return False
-    return True
-
-
-async def run_daily_loop(ctx: Any) -> None:
-    """Iterate enabled installs once per day and act per the decision tree.
-
-    The loop never raises; every per-plugin failure is captured and
-    logged. The outer ``while`` exits cleanly on shutdown.
-    """
-    config = ctx.config
-    convex_url = ctx.convex_url
-    pairing = ctx.pairing
-    shutdown = ctx.shutdown
-    board = ctx.board
-    device_id = config.agent.device_id
-    current_board_id = board.name if board else None
-    current_board_tier = board.tier if board else None
-
-    log.info("auto_update_loop_started")
-
-    supervisor = PluginSupervisor(
-        current_board_id=current_board_id,
-        current_board_tier=current_board_tier,
-    )
-    try:
-        supervisor.discover()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("auto_update_supervisor_discover_failed", error=str(exc))
-        return
-
-    while not shutdown.is_set():
-        # Defer first-run polling by a short delay so we are not
-        # racing the rest of cloud boot.
-        if await _sleep_with_shutdown(60.0, shutdown):
-            break
-
-        if not (pairing.is_paired and convex_url):
-            # Without pairing we have no credentials for the registry.
-            # Skip this cycle, recheck again after the daily sleep.
-            log.debug("auto_update_skip_unpaired")
-        else:
-            await _run_one_cycle(
-                supervisor=supervisor,
-                convex_url=convex_url,
-                api_key=pairing.api_key,
-                device_id=device_id,
-                current_board_id=current_board_id,
-            )
-
-        if await _sleep_with_shutdown(_next_sleep_seconds(), shutdown):
-            break
-
-    log.info("auto_update_loop_stopped")
-
-
-async def _run_one_cycle(
-    *,
-    supervisor: PluginSupervisor,
-    convex_url: str,
-    api_key: str | None,
-    device_id: str,
-    current_board_id: str | None,
-) -> None:
-    """One pass over every enabled install."""
-    installs = [
-        i
-        for i in supervisor.installs()
-        if i.status in ("enabled", "running")
-    ]
-    if not installs:
-        log.debug("auto_update_no_enabled_installs")
-        return
-
-    async with httpx.AsyncClient(timeout=REGISTRY_TIMEOUT_SECONDS) as client:
-        for install in installs:
-            try:
-                outcome = await check_one_plugin(
-                    install=install,
-                    supervisor=supervisor,
-                    http_client=client,
-                    convex_url=convex_url,
-                    api_key=api_key,
-                    device_id=device_id,
-                    current_board_id=current_board_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # Defense-in-depth: check_one_plugin is supposed to
-                # never raise, but if a future edit breaks that we
-                # still want the loop to keep going.
-                log.warning(
-                    "auto_update_plugin_check_crashed",
-                    plugin_id=install.plugin_id,
-                    error=str(exc),
-                )
-                outcome = AutoUpdateOutcome.FAILED
-
-            # Always stamp the last_check timestamp on the live install
-            # record so the GCS sees the loop is alive even when the
-            # outcome was a no-op.
-            with state_lock():
-                live = supervisor.find_install(install.plugin_id)
-                if live is not None:
-                    live.last_update_check_at = _now_ms()
-                    save_state(supervisor.installs())
-            log.debug(
-                "auto_update_plugin_checked",
-                plugin_id=install.plugin_id,
-                outcome=outcome.value,
-            )
-
-
-def latest_check_timestamp_ms() -> int | None:
-    """Return the most recent ``last_update_check_at`` across all installs.
-
-    Used by the heartbeat composer to surface a fleet-wide freshness
-    indicator. Returns ``None`` when no install has ever been checked
-    (fresh agent or auto-update never ran).
-    """
-    try:
-        installs = load_state()
-    except Exception:  # noqa: BLE001
-        return None
-    timestamps = [
-        i.last_update_check_at for i in installs if i.last_update_check_at
-    ]
-    if not timestamps:
-        return None
-    return max(timestamps)
-
-
-__all__ = [
-    "AutoUpdateOutcome",
-    "check_one_plugin",
-    "latest_check_timestamp_ms",
-    "run_daily_loop",
-]

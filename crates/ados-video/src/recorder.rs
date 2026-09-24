@@ -243,7 +243,7 @@ impl GroundStationRecorder {
             output_path.to_string_lossy().to_string(),
         ];
 
-        let process = match ManagedProcess::spawn("gs-recorder", "ffmpeg", &args) {
+        let mut process = match ManagedProcess::spawn("gs-recorder", "ffmpeg", &args) {
             Ok(p) => p,
             Err(e) => {
                 return Err(RecorderError::new(
@@ -252,6 +252,13 @@ impl GroundStationRecorder {
                 ));
             }
         };
+        // ffmpeg writes its stats report and every timestamp / packet-loss
+        // warning to stderr for the whole capture. A pipe nobody reads fills at
+        // 64 KB and blocks the muxer's next write: the file stops growing while
+        // the recorder still reports a capture in flight.
+        if let Some(stderr) = process.take_stderr() {
+            tokio::spawn(crate::stderr_drain::drain_plain(stderr, "gs-recorder"));
+        }
 
         inner.process = Some(process);
         inner.current_path = Some(output_path.clone());
@@ -579,6 +586,61 @@ mod tests {
         assert!(stopped["stopped_at"].as_str().unwrap().ends_with("+00:00"));
         assert!(stopped["duration_seconds"].as_f64().unwrap() >= 0.0);
         assert_eq!(stopped["size_bytes"].as_u64().unwrap(), 4); // "data"
+    }
+
+    /// A capture whose ffmpeg is chatty on stderr must keep writing.
+    ///
+    /// The fake writes far more than a pipe buffer holds to stderr BEFORE it
+    /// touches the output file. With stderr piped and never read, the write
+    /// blocks once the pipe fills and the output never appears — exactly the
+    /// recording that silently stops growing mid-flight.
+    #[tokio::test]
+    async fn a_chatty_ffmpeg_keeps_recording() {
+        let _guard = PATH_LOCK.lock().await;
+        let bindir = tempfile::tempdir().unwrap();
+        let fake = bindir.path().join("ffmpeg");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nfor out; do :; done\n\
+             i=0; while [ $i -lt 4000 ]; do echo \"frame=$i fps=30 q=23.0 size=512kB time=00:00:01 bitrate=4000kbits/s speed=1x\" >&2; i=$((i+1)); done\n\
+             printf 'data' > \"$out\"\nsleep 30\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let recdir = tempfile::tempdir().unwrap();
+        let rec = GroundStationRecorder::new(recdir.path(), DEFAULT_RTSP_URL);
+        let path_save = std::env::var("PATH").ok();
+        let combined = match &path_save {
+            Some(orig) => format!("{}:{}", bindir.path().display(), orig),
+            None => bindir.path().display().to_string(),
+        };
+        std::env::set_var("PATH", &combined);
+
+        let started = rec.start(Some("chatty")).await.expect("start succeeds");
+        let out_path = std::path::PathBuf::from(started["path"].as_str().unwrap());
+        let mut written = false;
+        for _ in 0..100 {
+            if std::fs::read(&out_path).is_ok_and(|b| b == b"data") {
+                written = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let _ = rec.stop().await;
+        if let Some(p) = path_save {
+            std::env::set_var("PATH", p);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        assert!(
+            written,
+            "the capture blocked on a full stderr pipe and never wrote its output"
+        );
     }
 
     /// The recorder's muxer flags are a data-integrity contract, not tuning.

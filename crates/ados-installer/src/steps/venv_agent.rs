@@ -134,17 +134,38 @@ pub fn release_asset_url(version: &str, name: &str) -> String {
     )
 }
 
+/// Global options that make a networked git command abandon a transfer moving
+/// under 1 KB/s for 60 s, instead of waiting on it forever. git has no stall
+/// bound of its own, so without these a clone that stops mid-transfer on a
+/// flaky link parks the whole install; it is the same stall bound every curl
+/// fetch in the installer carries (`net::STALL_WINDOW_SECS`).
+const GIT_STALL_BOUND: [&str; 4] = [
+    "-c",
+    "http.lowSpeedLimit=1024",
+    "-c",
+    "http.lowSpeedTime=60",
+];
+
+/// A networked git invocation: the stall bound, then `args`.
+fn stall_bounded(args: &[&str]) -> Vec<String> {
+    GIT_STALL_BOUND
+        .iter()
+        .chain(args)
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// Build the `git clone` args for the edge channel (pure). Honors an optional
 /// branch; shallow + submodules, matching `git_clone_retry`.
 pub fn git_clone_args(dest: &str, branch: Option<&str>) -> Vec<String> {
-    let mut args = vec![
-        "clone".to_string(),
-        "--depth".to_string(),
-        "1".to_string(),
-        "--recurse-submodules".to_string(),
-        "--shallow-submodules".to_string(),
-        "--progress".to_string(),
-    ];
+    let mut args = stall_bounded(&[
+        "clone",
+        "--depth",
+        "1",
+        "--recurse-submodules",
+        "--shallow-submodules",
+        "--progress",
+    ]);
     if let Some(b) = branch {
         args.push("--branch".to_string());
         args.push(b.to_string());
@@ -168,25 +189,13 @@ const REV_DEEPEN_DEPTH: &str = "500";
 /// takes a branch or a tag and never a commit SHA, which is why the pinned path
 /// is a clone followed by a fetch rather than a different clone.
 pub fn git_fetch_rev_args(rev: &str) -> Vec<String> {
-    vec![
-        "fetch".to_string(),
-        "--depth".to_string(),
-        "1".to_string(),
-        "origin".to_string(),
-        rev.to_string(),
-    ]
+    stall_bounded(&["fetch", "--depth", "1", "origin", rev])
 }
 
 /// Build the `git fetch` args that deepen `branch` enough to expand an
 /// abbreviated commit locally (pure).
 pub fn git_deepen_args(branch: &str) -> Vec<String> {
-    vec![
-        "fetch".to_string(),
-        "--depth".to_string(),
-        REV_DEEPEN_DEPTH.to_string(),
-        "origin".to_string(),
-        branch.to_string(),
-    ]
+    stall_bounded(&["fetch", "--depth", REV_DEEPEN_DEPTH, "origin", branch])
 }
 
 /// Build the args that expand a possibly-abbreviated revision to its full object
@@ -219,14 +228,14 @@ pub fn git_checkout_detached_args(object: &str) -> Vec<String> {
 /// pinned superproject beside submodules from a different revision — the same
 /// mixed-revision install `--ref` exists to prevent.
 pub fn git_submodule_sync_args() -> Vec<String> {
-    vec![
-        "submodule".to_string(),
-        "update".to_string(),
-        "--init".to_string(),
-        "--recursive".to_string(),
-        "--depth".to_string(),
-        "1".to_string(),
-    ]
+    stall_bounded(&[
+        "submodule",
+        "update",
+        "--init",
+        "--recursive",
+        "--depth",
+        "1",
+    ])
 }
 
 /// Whether `rev` is an ABBREVIATED commit hex prefix (pure): hex, non-empty, and
@@ -999,9 +1008,46 @@ mod tests {
         );
         // The pinned path's own fetch asks for the object by name instead.
         assert_eq!(
-            git_fetch_rev_args(sha),
+            git_command(&git_fetch_rev_args(sha)),
             vec!["fetch", "--depth", "1", "origin", sha]
         );
+    }
+
+    /// The subcommand and its arguments after the stall-bound prefix, which
+    /// must be present on every networked git command.
+    fn git_command(args: &[String]) -> Vec<&str> {
+        assert_eq!(
+            &args[..GIT_STALL_BOUND.len()],
+            GIT_STALL_BOUND,
+            "missing the stall bound: {args:?}"
+        );
+        args[GIT_STALL_BOUND.len()..]
+            .iter()
+            .map(String::as_str)
+            .collect()
+    }
+
+    #[test]
+    fn every_networked_git_command_abandons_a_stalled_transfer() {
+        // git has no stall bound of its own: a clone whose transfer stops mid-way
+        // on a flaky link otherwise blocks the install step forever.
+        for args in [
+            git_clone_args("/tmp/repo", None),
+            git_clone_args("/tmp/repo", Some("main")),
+            git_fetch_rev_args("3b4b8dee"),
+            git_deepen_args("main"),
+            git_submodule_sync_args(),
+        ] {
+            let pos = |needle: &str| args.iter().position(|a| a == needle);
+            let limit = pos("http.lowSpeedLimit=1024").expect("a low-speed floor");
+            let time = pos("http.lowSpeedTime=60").expect("a stall window");
+            // Global options: they only apply before the subcommand.
+            let sub = args
+                .iter()
+                .position(|a| ["clone", "fetch", "submodule"].contains(&a.as_str()))
+                .unwrap();
+            assert!(limit < sub && time < sub, "{args:?}");
+        }
     }
 
     #[test]
@@ -1025,7 +1071,7 @@ mod tests {
     #[test]
     fn the_deepen_and_checkout_args_pin_rather_than_follow() {
         assert_eq!(
-            git_deepen_args("main"),
+            git_command(&git_deepen_args("main")),
             vec!["fetch", "--depth", "500", "origin", "main"]
         );
         assert_eq!(
@@ -1039,7 +1085,7 @@ mod tests {
         assert_eq!(co.last().unwrap(), "FETCH_HEAD");
         // Submodules follow the superproject or the tree is mixed-revision.
         assert_eq!(
-            git_submodule_sync_args(),
+            git_command(&git_submodule_sync_args()),
             vec![
                 "submodule",
                 "update",

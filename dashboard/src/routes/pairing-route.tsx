@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link2, Unlink, Plus } from "lucide-react";
 
+import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -71,110 +72,107 @@ export function PairingRoute() {
   const info = usePairingInfo();
   const unpair = useUnpair();
   const status = useStatus();
+  const [confirmUnpair, setConfirmUnpair] = useState(false);
   const profile = status.data?.profile;
   const subject = profile === "ground_station" ? "ground station" : "drone";
+  const paired = info.data?.paired === true;
 
   return (
     <div className="space-y-6 max-w-3xl">
       <header>
         <h1 className="text-xl font-semibold tracking-tight">Pairing</h1>
         <p className="text-sm text-muted-foreground">
-          Link this {subject} to one or more Mission Control instances. Codes
-          rotate automatically; new codes are generated on agent restart and
-          when a pairing succeeds.
+          Link this {subject} to its Mission Control owner. An unpaired node
+          publishes a code here; pairing binds it to one owner until it is
+          unpaired.
         </p>
       </header>
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Link2 className="h-3.5 w-3.5" />
-            Current code
+          <CardTitle className="flex items-center justify-between">
+            <span className="flex items-center gap-2">
+              <Link2 className="h-3.5 w-3.5" />
+              Pairing
+            </span>
+            {paired && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmUnpair(true)}
+                disabled={unpair.isPending}
+              >
+                <Unlink className="h-3.5 w-3.5" />
+                Unpair
+              </Button>
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent>
           {info.isLoading && !info.data && (
             <p className="text-xs text-muted-foreground">loading…</p>
           )}
-          {info.data && (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                {info.data.paired ? (
-                  <Badge variant="ok">paired</Badge>
+          {info.isError && !info.data && (
+            <p className="text-xs text-destructive">Could not read the pairing state.</p>
+          )}
+          {info.data &&
+            (paired ? (
+              <div className="space-y-2">
+                <Badge variant="ok">paired</Badge>
+                <div className="grid grid-cols-[110px_1fr] gap-y-1 text-sm">
+                  <span className="text-xs text-muted-foreground">owner</span>
+                  <span className="font-mono truncate">{info.data.owner_id ?? "—"}</span>
+                  <span className="text-xs text-muted-foreground">paired</span>
+                  <span className="font-mono">
+                    {info.data.paired_at != null
+                      ? new Date(info.data.paired_at * 1000).toLocaleString()
+                      : "—"}
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <Badge variant="info">awaiting pair</Badge>
+                {info.data.pairing_code ? (
+                  <MaskedCode code={info.data.pairing_code} />
                 ) : (
-                  <Badge variant="info">awaiting pair</Badge>
-                )}
-                {info.data.beacon_state && (
-                  <Badge variant="outline">beacon: {info.data.beacon_state}</Badge>
+                  <p className="text-sm text-muted-foreground">
+                    The code is shown only on this node's own networks. Open the
+                    dashboard from the node's LAN, hotspot or USB link to read it.
+                  </p>
                 )}
               </div>
-              {info.data.pairing_code ? (
-                <MaskedCode code={info.data.pairing_code} />
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  no code published — restart the agent or unpair to refresh
-                </p>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Accept from Mission Control</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <AcceptCodeForm />
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center justify-between">
-            <span>Paired devices</span>
-            {info.data?.paired_with && info.data.paired_with.length > 0 && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => unpair.mutate()}
-                disabled={unpair.isPending}
-              >
-                <Unlink className="h-3.5 w-3.5" />
-                Unpair all
-              </Button>
-            )}
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {!info.data?.paired_with || info.data.paired_with.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No devices paired yet. Codes are visible above.
+            ))}
+          {unpair.isError && (
+            <p className="pt-2 text-xs text-destructive">
+              {unpair.error instanceof Error ? unpair.error.message : "unpair failed"}
             </p>
-          ) : (
-            <ul className="divide-y divide-border/50">
-              {info.data.paired_with.map((d) => (
-                <li
-                  key={d.client_id}
-                  className="py-2.5 flex items-center justify-between gap-3 first:pt-0 last:pb-0"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium truncate">
-                      {d.display_name ?? d.client_id}
-                    </div>
-                    <div className="text-xs text-muted-foreground font-mono truncate">
-                      {d.client_id}
-                    </div>
-                  </div>
-                  <div className="text-xs text-muted-foreground whitespace-nowrap">
-                    paired {new Date(d.paired_at).toLocaleString()}
-                  </div>
-                </li>
-              ))}
-            </ul>
           )}
         </CardContent>
       </Card>
+
+      {!paired && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Accept from Mission Control</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <AcceptCodeForm />
+          </CardContent>
+        </Card>
+      )}
+
+      <ConfirmDialog
+        open={confirmUnpair}
+        onOpenChange={setConfirmUnpair}
+        title={`Unpair this ${subject}?`}
+        description="Mission Control loses access until the node is paired again, and this dashboard asks for its PIN again."
+        confirmLabel="Unpair"
+        destructive
+        onConfirm={async () => {
+          await unpair.mutateAsync().catch(() => undefined);
+        }}
+      />
     </div>
   );
 }

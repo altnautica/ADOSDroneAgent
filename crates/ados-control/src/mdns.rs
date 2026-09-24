@@ -38,7 +38,6 @@
 //! be able to block on an mDNS daemon.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use mdns_sd::{ServiceDaemon, ServiceInfo};
@@ -60,14 +59,14 @@ const TXT_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 pub struct NodeAdvert {
     daemon: ServiceDaemon,
     fullname: String,
-    refresh_cancel: Arc<tokio::sync::Notify>,
+    refresh_cancel: ados_protocol::shutdown::Shutdown,
 }
 
 impl NodeAdvert {
     /// Unregister and shut down. Also runs on `Drop`, so a panicking daemon
     /// still withdraws the record.
     pub fn shutdown(&self) {
-        self.refresh_cancel.notify_waiters();
+        self.refresh_cancel.trigger();
         let _ = self.daemon.unregister(&self.fullname);
         let _ = self.daemon.shutdown();
     }
@@ -75,7 +74,7 @@ impl NodeAdvert {
 
 impl Drop for NodeAdvert {
     fn drop(&mut self) {
-        self.refresh_cancel.notify_waiters();
+        self.refresh_cancel.trigger();
         let _ = self.daemon.unregister(&self.fullname);
         let _ = self.daemon.shutdown();
     }
@@ -275,9 +274,9 @@ pub fn advertise(paths: &PairingPaths, board_path: PathBuf, port: u16) -> Option
     // fullname replaces the record in place (mdns-sd documents this as the
     // update path), so the GCS sees `paired=true` and the code disappear
     // without the record ever going away.
-    let refresh_cancel = Arc::new(tokio::sync::Notify::new());
+    let refresh_cancel = ados_protocol::shutdown::Shutdown::new();
     {
-        let cancel = Arc::clone(&refresh_cancel);
+        let cancel = refresh_cancel.clone();
         let daemon = daemon.clone();
         let pairing_json = paths.pairing_json.clone();
         let id = id.clone();
@@ -285,19 +284,24 @@ pub fn advertise(paths: &PairingPaths, board_path: PathBuf, port: u16) -> Option
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = cancel.notified() => return,
+                    _ = cancel.wait() => return,
                     _ = tokio::time::sleep(TXT_REFRESH_INTERVAL) => {}
                 }
                 let next = read_pairing(&pairing_json);
                 if next == pairing {
                     continue;
                 }
-                pairing = next;
-                let Some(info) = build_info(&server, &id, &pairing, port) else {
+                // The published half only advances once the record is actually
+                // re-registered, so a failed refresh is retried next tick rather
+                // than leaving a stale paired flag or pairing code on the LAN.
+                let Some(info) = build_info(&server, &id, &next, port) else {
                     continue;
                 };
                 match daemon.register(info) {
-                    Ok(()) => tracing::info!(paired = pairing.paired, "mdns_txt_refreshed"),
+                    Ok(()) => {
+                        pairing = next;
+                        tracing::info!(paired = pairing.paired, "mdns_txt_refreshed");
+                    }
                     Err(e) => tracing::warn!(error = %e, "mdns_txt_refresh_failed"),
                 }
             }

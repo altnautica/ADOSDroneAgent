@@ -228,15 +228,16 @@ async fn perform_restart(svc_name: &str, aliased_from: Option<&str>) -> Value {
 
 /// Poll for the unit's restart signal after a `systemctl restart` returned 0.
 ///
-/// For simple/notify/dbus/exec units a fresh, non-zero `MainPID` that differs
-/// from `pid_before` is the signal; for every other unit type (forking, oneshot,
-/// idle — whose MainPID is transient or zero) a changed `ActiveEnterTimestamp` is
-/// the signal. Polls up to [`CONFIRM_ITERATIONS`] × [`CONFIRM_SLEEP`]. A confirmed
-/// signal yields the `status:ok` body (with the type-appropriate before/after
-/// fields); exhausting the poll yields the "did not show a restart signal" error
-/// body. Mirrors the FastAPI confirmation loop exactly. The inter-poll wait is
-/// `tokio::time::sleep`, not a thread sleep: the loop can occupy the full ~5 s
-/// window, which a thread sleep would take out of a reactor worker.
+/// For simple/notify/dbus/exec units the signal is a fresh, non-zero `MainPID`
+/// that differs from `pid_before`, with `ActiveState=active`, held unchanged for
+/// [`PID_SETTLE_SAMPLES`] consecutive polls (see [`PidSettle`]); for every other
+/// unit type (forking, oneshot, idle — whose MainPID is transient or zero) a
+/// changed `ActiveEnterTimestamp` is the signal. Polls up to
+/// [`CONFIRM_ITERATIONS`] × [`CONFIRM_SLEEP`]. A confirmed signal yields the
+/// `status:ok` body (with the type-appropriate before/after fields); exhausting
+/// the poll yields the "did not show a restart signal" error body. The inter-poll
+/// wait is `tokio::time::sleep`, not a thread sleep: the loop can occupy the full
+/// ~5 s window, which a thread sleep would take out of a reactor worker.
 async fn confirm_restart(
     svc_name: &str,
     aliased_from: Option<&str>,
@@ -245,14 +246,15 @@ async fn confirm_restart(
     ts_before: &str,
 ) -> Value {
     let pid_based = matches!(unit_type, "simple" | "notify" | "dbus" | "exec");
+    let mut settle = PidSettle::new(pid_before);
 
     for _ in 0..CONFIRM_ITERATIONS {
         tokio::time::sleep(CONFIRM_SLEEP).await;
-        let ts_after = active_enter_ts(svc_name).await;
-        let pid_after = main_pid(svc_name).await;
 
         if pid_based {
-            if pid_after != 0 && pid_after != pid_before {
+            let pid_after = main_pid(svc_name).await;
+            let active_state = show_value(svc_name, "ActiveState").await;
+            if settle.observe(pid_after, &active_state) {
                 return json!({
                     "status": "ok",
                     "message": format!("Restarted {svc_name}"),
@@ -262,7 +264,10 @@ async fn confirm_restart(
                     "pid_after": pid_after,
                 });
             }
-        } else if !ts_after.is_empty() && ts_after != ts_before {
+            continue;
+        }
+        let ts_after = active_enter_ts(svc_name).await;
+        if !ts_after.is_empty() && ts_after != ts_before {
             return json!({
                 "status": "ok",
                 "message": format!("Restarted {svc_name}"),
@@ -279,13 +284,55 @@ async fn confirm_restart(
         "message": format!(
             "systemctl returned 0 but {svc_name} did not show a restart signal \
              within {window}s (type={unit_type}, pid_before={pid_before}). \
-             Likely a polkit/permission issue, or the unit takes longer than \
-             the polling window to spawn.",
+             Likely a polkit/permission issue, a unit that crashes on start, or \
+             one that takes longer than the polling window to spawn.",
             window = CONFIRM_ITERATIONS / 10
         ),
         "unit": svc_name,
         "aliased_from": aliased_from,
     })
+}
+
+/// How many consecutive polls a new `MainPID` must hold, active, before a restart
+/// counts as confirmed. A unit with `Restart=always` that crashes on start gets a
+/// fresh PID on every attempt, so a single sighting proves nothing; three polls
+/// ([`CONFIRM_SLEEP`] apart) outlast systemd's default 100 ms restart delay.
+const PID_SETTLE_SAMPLES: u32 = 3;
+
+/// The PID-based restart confirmation, one poll at a time. Pure, so the
+/// crash-loop case is testable without systemd.
+struct PidSettle {
+    pid_before: i64,
+    candidate: i64,
+    seen: u32,
+}
+
+impl PidSettle {
+    fn new(pid_before: i64) -> Self {
+        Self {
+            pid_before,
+            candidate: 0,
+            seen: 0,
+        }
+    }
+
+    /// Feed one poll; `true` once the same fresh PID has been seen active for
+    /// [`PID_SETTLE_SAMPLES`] polls in a row.
+    fn observe(&mut self, pid_after: i64, active_state: &str) -> bool {
+        let fresh = pid_after != 0 && pid_after != self.pid_before && active_state == "active";
+        if !fresh {
+            self.candidate = 0;
+            self.seen = 0;
+            return false;
+        }
+        if pid_after == self.candidate {
+            self.seen += 1;
+        } else {
+            self.candidate = pid_after;
+            self.seen = 1;
+        }
+        self.seen >= PID_SETTLE_SAMPLES
+    }
 }
 
 /// Read one `systemctl show <unit> -p <prop> --value` property, trimmed. An empty
@@ -550,6 +597,39 @@ mod tests {
         assert_eq!(body["aliased_from"], Value::Null);
         assert_eq!(body["status"], json!("error"));
         assert_eq!(body["unit"], json!("ados-api"));
+    }
+
+    #[test]
+    fn a_crash_looping_unit_is_never_confirmed_restarted() {
+        // Restart=always + crash on start: every attempt shows a fresh PID,
+        // briefly active, then auto-restart with MainPID 0.
+        let mut settle = PidSettle::new(100);
+        let crash_loop = [
+            (201, "active"),
+            (0, "activating"),
+            (202, "active"),
+            (0, "activating"),
+            (203, "active"),
+            (204, "active"),
+            (0, "activating"),
+        ];
+        for (pid, state) in crash_loop {
+            assert!(
+                !settle.observe(pid, state),
+                "pid {pid} ({state}) is not a restart"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fresh_pid_held_active_confirms_the_restart() {
+        let mut settle = PidSettle::new(100);
+        // The old PID and an activating unit do not count.
+        assert!(!settle.observe(100, "active"));
+        assert!(!settle.observe(300, "activating"));
+        assert!(!settle.observe(300, "active"));
+        assert!(!settle.observe(300, "active"));
+        assert!(settle.observe(300, "active"));
     }
 
     #[test]

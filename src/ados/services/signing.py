@@ -1,54 +1,19 @@
-"""Generic detached-signature and file-hash verification primitives.
+"""Ed25519 detached-signature verification.
 
-Ed25519 detached-signature verification plus streaming SHA-256 file hashing.
-Self-contained (base64 + hashlib + ``cryptography``), with no dependency on any
-particular consumer. The plugin signing layer (:mod:`ados.plugins.signing`)
-verifies plugin-archive signatures with these helpers.
+Self-contained (base64 + ``cryptography``). The plugin signing layer
+(:mod:`ados.plugins.signing`) verifies archive signatures and signed grants
+with it.
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
-from pathlib import Path
 
 from ados.core.logging import get_logger
 
 log = get_logger("signing-verifier")
 
 HASH_CHUNK_SIZE = 65536
-
-
-def verify_sha256(filepath: str, expected_hash: str) -> bool:
-    """Compute streaming SHA-256 of a file and compare to expected hex digest."""
-    h = hashlib.sha256()
-    path = Path(filepath)
-
-    if not path.exists():
-        log.error("verify_sha256_file_missing", path=filepath)
-        return False
-
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(HASH_CHUNK_SIZE)
-            if not chunk:
-                break
-            h.update(chunk)
-
-    actual = h.hexdigest()
-    match = actual == expected_hash.lower()
-
-    if match:
-        log.info("sha256_verified", path=filepath)
-    else:
-        log.error(
-            "sha256_mismatch",
-            path=filepath,
-            expected=expected_hash,
-            actual=actual,
-        )
-
-    return match
 
 
 def verify_signature(
@@ -75,11 +40,3 @@ def verify_signature(
     except Exception as exc:
         log.error("signature_verification_failed", error=str(exc))
         return False
-
-
-def load_update_public_key(path: str) -> bytes:
-    """Load a PEM public key file. Raises FileNotFoundError if missing."""
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Public key not found: {path}")
-    return p.read_bytes()

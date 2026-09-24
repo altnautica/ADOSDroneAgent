@@ -15,6 +15,38 @@ export type AgentProfile = "drone" | "ground_station" | "workstation" | "compute
 /** Module-level cache so the probe runs once per page load, not per component. */
 let cached: AgentProfile | null = null;
 
+/** Fixed pause between probes while the agent has not answered yet (the kiosk
+ *  can load before the API is up). */
+export const PROFILE_RETRY_MS = 3000;
+
+/** One shared probe: every hook instance waits on the same request, and it is
+ *  retried on a fixed cadence until the agent answers. */
+let inFlight: Promise<AgentProfile> | null = null;
+
+export function probeProfile(): Promise<AgentProfile> {
+  if (cached !== null) return Promise.resolve(cached);
+  if (inFlight) return inFlight;
+  inFlight = (async () => {
+    for (;;) {
+      try {
+        const info = await apiFetch<PairingInfoLite>("/api/pairing/info");
+        const p = normalizeProfile(info.profile);
+        cached = p;
+        // Stash the code alongside the profile. A node that refuses every other
+        // call still answers this one, so this is where the operator's way out
+        // comes from.
+        useReachStore.getState().setPairingCode(info.pairing_code ?? null);
+        return p;
+      } catch {
+        // Not answering yet (booting agent, link down). Never fabricate a
+        // profile; wait and ask again.
+        await new Promise((r) => setTimeout(r, PROFILE_RETRY_MS));
+      }
+    }
+  })();
+  return inFlight;
+}
+
 interface PairingInfoLite {
   profile?: string | null;
   /** Present on every profile; carried here because this probe is the ONE call
@@ -42,29 +74,19 @@ export function normalizeProfile(raw: string | null | undefined): AgentProfile {
   }
 }
 
-/** The resolved agent profile, or `null` until the first probe returns. A failed
- *  probe leaves it `null`; callers treat `null` as "not yet known" and fall back
- *  to the ground-station shape (the historical default) until it resolves. */
+/** The resolved agent profile, or `null` until the agent first answers. The
+ *  probe retries on a fixed cadence until it does, so a panel that loaded
+ *  before the API was up still learns its profile; callers treat `null` as
+ *  "not yet known". */
 export function useProfile(): AgentProfile | null {
   const [profile, setProfile] = useState<AgentProfile | null>(cached);
 
   useEffect(() => {
     if (cached !== null) return;
     let cancelled = false;
-    apiFetch<PairingInfoLite>("/api/pairing/info")
-      .then((info) => {
-        const p = normalizeProfile(info.profile);
-        cached = p;
-        // Stash the code alongside the profile. A node that refuses every other
-        // call still answers this one, so this is where the operator's way out
-        // comes from.
-        useReachStore.getState().setPairingCode(info.pairing_code ?? null);
-        if (!cancelled) setProfile(p);
-      })
-      .catch(() => {
-        // Leave null; the shell keeps the default shape until a later mount
-        // retries. Never fabricate a profile.
-      });
+    void probeProfile().then((p) => {
+      if (!cancelled) setProfile(p);
+    });
     return () => {
       cancelled = true;
     };

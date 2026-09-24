@@ -2,29 +2,31 @@
 //!
 //! Ports `wfb_relay.py`'s FEC supervision. The drone-facing RTL8812 adapter
 //! runs `wfb_rx -p 0 -f <receiver_ip>:<port>` to forward video fragments to the
-//! receiver; the stderr `PKT` stats line drives the `fragments_seen` /
-//! `fragments_forwarded` counters; `wfb-relay.json` is written atomically.
+//! receiver; `wfb-relay.json` is written atomically. In forwarder mode `wfb_rx`
+//! prints no stats (`vendor/wfb-ng/src/rx.hpp`: `Forwarder::dump_stats` is
+//! empty), so the fragment counters are published as `null` — unmeasured, never
+//! a fabricated zero; the receiver's combined counters are the measurement.
 //!
 //! Discovery is Rust-native: the relay browses `_ados-receiver._tcp` on `bat0`
 //! each poll via [`crate::mdns::resolve_receiver`] and forwards to the resolved
 //! `(ip, port)`, filtering to the mesh `/24` so it never picks a receiver on the
 //! shared LAN. On a receiver change the old forwarder is terminated (SIGTERM,
-//! 3s grace, SIGKILL) and a fresh one spawned; a receiver-loss grace window
-//! marks the link down, emits `receiver_unreachable` across the cross-process
-//! event seam, and tears the forwarder down. The FEC subprocess lifecycle, the
-//! stats tail, the state file, and the event emit are all owned here.
+//! 3s grace, SIGKILL) and a fresh one spawned; a forwarder that exits on its own
+//! is respawned on the next pass; a receiver-loss grace window marks the link
+//! down, emits `receiver_unreachable` across the cross-process event seam, and
+//! tears the forwarder down.
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_radio::config::WfbConfig;
+use ados_protocol::shutdown::Shutdown;
 use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::gs_config::GroundStationConfig;
 use crate::mesh_events;
-use crate::process_spawn::GsWfbProcess;
+use crate::process_spawn::{GsWfbProcess, Stdout};
 
 /// Receiver-loss grace window: how long the relay tolerates the receiver
 /// dropping off mDNS before it marks the link down. Mirrors the Python
@@ -38,6 +40,12 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Forwarder graceful-shutdown grace before SIGKILL. Mirrors the Python
 /// `wait_for(proc.wait(), timeout=3.0)` between terminate and kill.
 const FORWARDER_GRACE: Duration = Duration::from_secs(3);
+/// Fixed retry for drone-facing adapter detection while none is usable. No cap:
+/// an adapter plugged in after boot is picked up within one interval.
+const ADAPTER_RETRY: Duration = Duration::from_secs(5);
+/// The forwarder's stderr log (diagnostics only; a file never fills the way an
+/// unread pipe does).
+const FORWARDER_LOG: &str = "/run/ados/wfb-gs-forwarder.log";
 
 /// The relay's published state (the `wfb-relay.json` shape, byte-identical to
 /// the Python `_write_state`). `Deserialize` round-trips the on-disk file shape
@@ -49,8 +57,10 @@ pub struct RelayState {
     pub receiver_ip: Option<String>,
     pub receiver_port: i64,
     pub receiver_last_seen_ms: i64,
-    pub fragments_seen: i64,
-    pub fragments_forwarded: i64,
+    /// Fragments captured off-air. `None`: the forwarder reports no counters.
+    pub fragments_seen: Option<i64>,
+    /// Fragments forwarded to the receiver. `None`: unmeasured, as above.
+    pub fragments_forwarded: Option<i64>,
     pub up: bool,
     pub mesh_iface: String,
 }
@@ -63,8 +73,8 @@ impl Default for RelayState {
             receiver_ip: None,
             receiver_port: 5800,
             receiver_last_seen_ms: 0,
-            fragments_seen: 0,
-            fragments_forwarded: 0,
+            fragments_seen: None,
+            fragments_forwarded: None,
             up: false,
             mesh_iface: "bat0".to_string(),
         }
@@ -140,8 +150,8 @@ pub fn forward_args(
 }
 
 /// Spawn the FEC forwarder for `(receiver_ip, receiver_port)` on the
-/// drone-facing adapter, in its own process group (setsid/killpg). stderr is
-/// piped so the stats tail can read the `PKT` counters.
+/// drone-facing adapter, in its own process group (setsid/killpg). The
+/// forwarder prints no stats; stderr goes to its log file.
 pub async fn spawn_forwarder(
     drone_iface: &str,
     receiver_ip: &str,
@@ -149,34 +159,7 @@ pub async fn spawn_forwarder(
 ) -> std::io::Result<GsWfbProcess> {
     let rx_key = Path::new(ados_radio::paths::WFB_RX_KEY);
     let args = forward_args(drone_iface, receiver_ip, receiver_port, rx_key);
-    // stderr piped (the PKT stats land there); stdout discarded.
-    GsWfbProcess::spawn_stderr_piped("wfb_rx", &args).await
-}
-
-/// Parse one `wfb_rx` stderr line for the relay fragment counters. A `PKT` line carries
-/// `n_all:<seen>` and `n_out:<forwarded>`. Returns `(seen, forwarded)` updates when
-/// present.
-pub fn parse_relay_stats_line(line: &str) -> (Option<i64>, Option<i64>) {
-    if !line.contains("PKT") {
-        return (None, None);
-    }
-    let mut seen = None;
-    let mut forwarded = None;
-    for tok in line.split_whitespace() {
-        if let Some(v) = tok.strip_prefix("n_all:") {
-            seen = v.parse::<i64>().ok();
-        } else if let Some(v) = tok.strip_prefix("n_out:") {
-            forwarded = v.parse::<i64>().ok();
-        }
-    }
-    (seen, forwarded)
-}
-
-/// The relay receiver port default (`ground_station.wfb_relay.receiver_port`).
-/// Kept as a helper so the call site is explicit; the live value comes from
-/// [`GroundStationConfig`].
-pub fn default_receiver_port(_cfg: &WfbConfig) -> u16 {
-    5800
+    GsWfbProcess::spawn("wfb_rx", &args, Stdout::Null, Some(FORWARDER_LOG)).await
 }
 
 /// True when the receiver should be treated as lost: a previously-seen
@@ -186,23 +169,10 @@ fn receiver_is_stale(last_seen_ms: i64, was_up: bool, now_ms: i64) -> bool {
     last_seen_ms > 0 && was_up && (now_ms - last_seen_ms) > RECEIVER_LOST_GRACE_MS
 }
 
-/// Tail a forwarder's stderr, folding each `PKT` line into the shared state's fragment
-/// counters. Returns when the stderr pipe closes (the forwarder exited).
-async fn tail_forwarder_stats(stderr: tokio::process::ChildStderr, state: Arc<Mutex<RelayState>>) {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        let (seen, forwarded) = parse_relay_stats_line(&line);
-        if seen.is_some() || forwarded.is_some() {
-            let mut s = state.lock().await;
-            if let Some(v) = seen {
-                s.fragments_seen = v;
-            }
-            if let Some(v) = forwarded {
-                s.fragments_forwarded = v;
-            }
-        }
-    }
+/// True when a held forwarder has exited on its own, so the pass must forget it
+/// and let the receiver reconcile spawn a fresh one. Pure over the observation.
+fn forwarder_needs_respawn(held: bool, running: bool) -> bool {
+    held && !running
 }
 
 /// Run the relay role to completion (until `shutdown` fires).
@@ -214,7 +184,7 @@ async fn tail_forwarder_stats(stderr: tokio::process::ChildStderr, state: Arc<Mu
 /// down and emit `receiver_unreachable`; write `wfb-relay.json` every poll. On
 /// shutdown the forwarder is terminated gracefully and `up=false` is persisted.
 pub async fn run(
-    shutdown: Arc<tokio::sync::Notify>,
+    shutdown: Shutdown,
     ingest: Option<ados_protocol::logd::emitter::IngestEmitter>,
     progress: ados_supervisor::sdnotify::MonitorProgress,
 ) {
@@ -230,70 +200,61 @@ pub async fn run(
 
     // Detect the drone-facing adapter and put it into monitor mode (the shared
     // selector denies the control iface + AIC8800 and verifies the readback).
-    let drone_iface = match resolve_drone_iface().await {
-        Some(iface) => iface,
-        None => {
+    // With none usable, publish the down state and retry on a fixed interval,
+    // stamping progress so a correctly parked relay is not restarted by the
+    // systemd watchdog; an adapter plugged in later is picked up.
+    let mut reported_missing = false;
+    let drone_iface = loop {
+        progress.mark();
+        if let Some(iface) = resolve_drone_iface(!reported_missing).await {
+            break iface;
+        }
+        if !reported_missing {
             tracing::error!("wfb_relay_no_adapter");
-            mesh_events::emit(
-                mesh_events::KIND_WFB_ADAPTER_MISSING,
-                json!({
-                    "side": "relay",
-                    "reason": "adapter_not_found",
-                    "detail": "No monitor-capable WFB adapter detected on the relay node.",
-                }),
-            );
-            // Persist a down state so the UI shows the fault, then idle until
-            // shutdown rather than crash-loop the unit.
-            {
-                let mut s = state.lock().await;
-                s.up = false;
-            }
-            let _ = state.lock().await.write_and_emit(ingest.as_ref());
-            // Correctly parked is not wedged. The systemd watchdog is fed off a
-            // progress marker, so this arm has to keep stamping or a relay with
-            // no adapter would be restarted on a fixed period — which is exactly
-            // the crash-loop the comment above says it exists to avoid.
-            loop {
-                progress.mark();
-                tokio::select! {
-                    _ = shutdown.notified() => return,
-                    _ = tokio::time::sleep(POLL_INTERVAL) => {}
-                }
-            }
+            reported_missing = true;
+        }
+        state.lock().await.up = false;
+        let _ = state.lock().await.write_and_emit(ingest.as_ref());
+        tokio::select! {
+            _ = shutdown.wait() => return,
+            _ = tokio::time::sleep(ADAPTER_RETRY) => {}
         }
     };
-    {
-        let mut s = state.lock().await;
-        s.drone_iface = drone_iface.clone();
-    }
+    state.lock().await.drone_iface = drone_iface.clone();
 
     if !Path::new(ados_radio::paths::WFB_RX_KEY).exists() {
         tracing::warn!("wfb_relay_keys_missing");
     }
 
     let mut forwarder: Option<GsWfbProcess> = None;
-    let mut tail_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut current_receiver: Option<(String, u16)> = None;
 
     loop {
         // One stamp per pass: mDNS resolve, forwarder reconcile, state write.
         progress.mark();
+        // A forwarder that exited on its own is forgotten here, so the
+        // receiver reconcile below spawns a fresh one on this same pass.
+        let running = match forwarder.as_mut() {
+            Some(p) => p.is_running(),
+            None => false,
+        };
+        if forwarder_needs_respawn(forwarder.is_some(), running) {
+            tracing::warn!("wfb_relay_forwarder_exited_respawning");
+            forwarder = None;
+            current_receiver = None;
+            state.lock().await.up = false;
+        }
         let resolved =
             crate::mdns::resolve_receiver(&service_type, &mesh_iface, RESOLVE_TIMEOUT).await;
         let now = mesh_events::now_ms();
 
         if let Some((ip, port)) = resolved {
-            {
-                let mut s = state.lock().await;
-                s.receiver_last_seen_ms = now;
-            }
+            state.lock().await.receiver_last_seen_ms = now;
             if current_receiver.as_ref() != Some(&(ip.clone(), port)) {
-                // Receiver changed: tear down the old forwarder, spawn fresh.
+                // Receiver changed (or the forwarder died): tear down the old
+                // forwarder, spawn fresh.
                 if let Some(mut old) = forwarder.take() {
                     old.terminate_then_kill(FORWARDER_GRACE).await;
-                }
-                if let Some(t) = tail_task.take() {
-                    t.abort();
                 }
                 {
                     let mut s = state.lock().await;
@@ -301,16 +262,9 @@ pub async fn run(
                     s.receiver_port = port as i64;
                 }
                 match spawn_forwarder(&drone_iface, &ip, port).await {
-                    Ok(mut proc) => {
-                        if let Some(stderr) = proc.take_stderr() {
-                            tail_task =
-                                Some(tokio::spawn(tail_forwarder_stats(stderr, state.clone())));
-                        }
+                    Ok(proc) => {
                         forwarder = Some(proc);
-                        {
-                            let mut s = state.lock().await;
-                            s.up = true;
-                        }
+                        state.lock().await.up = true;
                         current_receiver = Some((ip.clone(), port));
                         mesh_events::emit(
                             mesh_events::KIND_RELAY_CONNECTED,
@@ -320,8 +274,7 @@ pub async fn run(
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "wfb_relay_spawn_failed");
-                        let mut s = state.lock().await;
-                        s.up = false;
+                        state.lock().await.up = false;
                     }
                 }
             }
@@ -334,19 +287,13 @@ pub async fn run(
             };
             if receiver_is_stale(last_seen, was_up, now) {
                 let stale = now - last_seen;
-                {
-                    let mut s = state.lock().await;
-                    s.up = false;
-                }
+                state.lock().await.up = false;
                 mesh_events::emit(
                     mesh_events::KIND_RECEIVER_UNREACHABLE,
                     json!({ "last_receiver": last_ip, "stale_ms": stale }),
                 );
                 if let Some(mut old) = forwarder.take() {
                     old.terminate_then_kill(FORWARDER_GRACE).await;
-                }
-                if let Some(t) = tail_task.take() {
-                    t.abort();
                 }
                 current_receiver = None;
                 tracing::warn!(stale_ms = stale, "wfb_relay_receiver_unreachable");
@@ -358,15 +305,12 @@ pub async fn run(
         }
 
         tokio::select! {
-            _ = shutdown.notified() => break,
+            _ = shutdown.wait() => break,
             _ = tokio::time::sleep(POLL_INTERVAL) => {}
         }
     }
 
     // Clean shutdown: terminate the forwarder and persist the down state.
-    if let Some(t) = tail_task.take() {
-        t.abort();
-    }
     if let Some(mut proc) = forwarder.take() {
         proc.terminate_then_kill(FORWARDER_GRACE).await;
     }
@@ -386,19 +330,31 @@ pub async fn run(
 /// Detect and monitor-mode the drone-facing adapter via the shared radio
 /// selector. Returns the interface name on success. The selector denies the
 /// control iface + AIC8800 and verifies the monitor-mode readback (4× retry).
-async fn resolve_drone_iface() -> Option<String> {
-    let selected = ados_radio::adapter::select_interface("").await?;
+/// `report` emits the adapter-missing event (the first failure only, so a
+/// fixed-interval retry does not flood the event log).
+async fn resolve_drone_iface(report: bool) -> Option<String> {
+    let emit = |reason: &str, detail: String| {
+        if report {
+            mesh_events::emit(
+                mesh_events::KIND_WFB_ADAPTER_MISSING,
+                json!({ "side": "relay", "reason": reason, "detail": detail }),
+            );
+        }
+    };
+    let Some(selected) = ados_radio::adapter::select_interface("").await else {
+        emit(
+            "adapter_not_found",
+            "No monitor-capable WFB adapter detected on the relay node.".to_string(),
+        );
+        return None;
+    };
     if selected.injection_ok {
         Some(selected.ifname)
     } else {
         tracing::warn!(iface = %selected.ifname, "wfb_relay_monitor_mode_failed");
-        mesh_events::emit(
-            mesh_events::KIND_WFB_ADAPTER_MISSING,
-            json!({
-                "side": "relay",
-                "reason": "monitor_mode_failed",
-                "detail": format!("Could not put {} into monitor mode.", selected.ifname),
-            }),
+        emit(
+            "monitor_mode_failed",
+            format!("Could not put {} into monitor mode.", selected.ifname),
         );
         None
     }
@@ -426,19 +382,22 @@ mod tests {
         );
     }
 
+    /// A forwarder that exited on its own is respawned; a live one, or no
+    /// forwarder at all, is left alone.
     #[test]
-    fn parse_pkt_line_pulls_n_all_and_n_out() {
-        let line = "12345 PKT n_all:1000 n_out:980 fec_rec:5";
-        let (seen, fwd) = parse_relay_stats_line(line);
-        assert_eq!(seen, Some(1000));
-        assert_eq!(fwd, Some(980));
+    fn an_exited_forwarder_is_respawned() {
+        assert!(forwarder_needs_respawn(true, false));
+        assert!(!forwarder_needs_respawn(true, true));
+        assert!(!forwarder_needs_respawn(false, false));
     }
 
+    /// The forwarder reports no counters, so a fresh relay state publishes
+    /// them as null rather than a zero it never measured.
     #[test]
-    fn non_pkt_line_is_ignored() {
-        let (seen, fwd) = parse_relay_stats_line("some random wfb_rx log");
-        assert!(seen.is_none());
-        assert!(fwd.is_none());
+    fn fragment_counters_are_null_not_zero() {
+        let v = serde_json::to_value(RelayState::default()).unwrap();
+        assert!(v["fragments_seen"].is_null());
+        assert!(v["fragments_forwarded"].is_null());
     }
 
     #[test]
@@ -487,36 +446,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn tail_folds_pkt_lines_into_shared_state() {
-        // Drive a child whose stderr emits two PKT lines, then prove the tail
-        // task folded the counters into the shared RelayState.
-        #[cfg(target_os = "linux")]
-        {
-            use std::sync::Arc;
-            use tokio::sync::Mutex;
-
-            let state = Arc::new(Mutex::new(RelayState::default()));
-            // `sh -c 'printf ... 1>&2'` writes the PKT stats to stderr.
-            let script = "printf 'X PKT n_all:100 n_out:90\\nX PKT n_all:200 n_out:185\\n' 1>&2";
-            let mut proc =
-                GsWfbProcess::spawn_stderr_piped("sh", &["-c".to_string(), script.to_string()])
-                    .await
-                    .expect("spawn sh");
-            let stderr = proc.take_stderr().expect("stderr piped");
-            tail_forwarder_stats(stderr, state.clone()).await;
-
-            let s = state.lock().await;
-            assert_eq!(s.fragments_seen, 200);
-            assert_eq!(s.fragments_forwarded, 185);
-            proc.kill().await;
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = receiver_is_stale(0, false, 0);
-        }
-    }
-
     #[test]
     fn relay_fixture_round_trips_with_python_shape() {
         // The exact JSON the Python `_write_state` produced for a relay forwarding
@@ -539,8 +468,8 @@ mod tests {
         assert_eq!(s.receiver_ip.as_deref(), Some("10.42.0.5"));
         assert_eq!(s.receiver_port, 5800);
         assert_eq!(s.receiver_last_seen_ms, 1_717_000_000_000);
-        assert_eq!(s.fragments_seen, 12345);
-        assert_eq!(s.fragments_forwarded, 12000);
+        assert_eq!(s.fragments_seen, Some(12345));
+        assert_eq!(s.fragments_forwarded, Some(12000));
         assert!(s.up);
         assert_eq!(s.mesh_iface, "bat0");
 

@@ -9,29 +9,20 @@
 
 use std::time::{Duration, Instant};
 
-// --- tunables (mirror constants.py + pipeline.py) ----------------------------
+// --- tunables ------------------------------------------------------------------
 
-/// Health-tick cadence (`_HEALTH_CHECK_INTERVAL`).
+/// Health-tick cadence, and with it the recovery cadence: every recovery ladder
+/// (the pipeline cold start, the wfb tap, the vision tap, the cloud push, the
+/// secondary-leg encoders) retries on the next tick, forever. There is no
+/// backoff and no attempt ceiling: a camera that comes back, a mediamtx that
+/// recovers or a relay that reappears is picked up within one tick, and an
+/// operator's hero switch is never queued behind a long in-tick sleep.
 pub const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// Max startup grace before a publisher-less pipeline is declared dead
 /// (`_STARTUP_GRACE_MAX_SECS`).
 pub const STARTUP_GRACE_MAX: Duration = Duration::from_secs(30);
 /// Inbound-byte stall window (`_INBOUND_FLOW_STALL_SECONDS`).
 pub const INBOUND_FLOW_STALL: Duration = Duration::from_secs(12);
-/// Base restart delay (`_base_restart_delay`).
-pub const BASE_RESTART_DELAY: Duration = Duration::from_secs(5);
-/// Cap on the exponential restart backoff for a real wedge (`_max_restart_delay`).
-pub const MAX_RESTART_DELAY: Duration = Duration::from_secs(300);
-/// Tighter cap when the failure is "no primary camera" — a USB hotplug
-/// condition that resolves in seconds (`_max_restart_delay_no_camera`).
-pub const MAX_RESTART_DELAY_NO_CAMERA: Duration = Duration::from_secs(30);
-/// Consecutive-healthy window that clears the restart counter
-/// (`_healthy_reset_window_secs`).
-pub const HEALTHY_RESET_WINDOW: Duration = Duration::from_secs(60);
-/// Ceiling on the wfb-tee restart backoff (the Python `min(..., 5.0)`).
-pub const WFB_TEE_RESTART_CEILING: Duration = Duration::from_secs(5);
-/// Consecutive-failure count that trips the 5-minute circuit-breaker park.
-pub const CIRCUIT_BREAKER_ATTEMPTS: u32 = 10;
 
 /// Wall-clock ceiling on ONE `--once` SEI-tap session.
 ///
@@ -63,11 +54,12 @@ pub enum PipelineState {
     Error,
 }
 
-/// The tagged cause of the most recent `start_stream` failure, so the retry
-/// loop can pick the right backoff cap (`_last_start_error`).
+/// The tagged cause of the most recent `start_stream` failure, stamped on the
+/// camera-state sidecar so the operator sees why the pipeline is down
+/// (`_last_start_error`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartError {
-    /// No camera won the auto-assign — transient USB hotplug; 30 s cap.
+    /// No camera won the auto-assign (transient USB hotplug, or no camera).
     NoPrimaryCamera,
     /// No encoder backend available for the camera.
     NoEncoder,
@@ -81,7 +73,7 @@ pub enum StartError {
     EncoderSpawnFailed,
     /// mediamtx failed to start.
     MediamtxFailed,
-    /// The last start succeeded or the cause is unknown — 5-minute cap.
+    /// The last start succeeded or the cause is unknown.
     None,
 }
 
@@ -118,41 +110,11 @@ impl StartError {
 
 // --- pure health-decision functions (testable without subprocesses) ----------
 
-/// Exponential backoff with a cap, in the Python `min(base * 2^(n-1), cap)`
-/// shape. `attempt` is 1-based.
-pub fn backoff_delay(attempt: u32, base: Duration, cap: Duration) -> Duration {
-    if attempt == 0 {
-        return Duration::ZERO;
-    }
-    // 2^(attempt-1), saturating so a large attempt count cannot overflow.
-    let shift = attempt - 1;
-    let factor: u64 = 1u64.checked_shl(shift.min(63)).unwrap_or(u64::MAX);
-    let scaled = base
-        .as_secs_f64()
-        .mul_add(factor as f64, 0.0)
-        .min(cap.as_secs_f64());
-    Duration::from_secs_f64(scaled)
-}
-
-/// Pick the backoff cap for the error-state retry: the no-camera cap when the
-/// last failure was a missing primary, otherwise the full 5-minute cap.
-pub fn retry_cap(last_error: StartError) -> Duration {
-    match last_error {
-        StartError::NoPrimaryCamera => MAX_RESTART_DELAY_NO_CAMERA,
-        _ => MAX_RESTART_DELAY,
-    }
-}
-
-/// Should the circuit breaker trip (park for 5 minutes and reset the counter)?
-pub fn circuit_breaker_tripped(restart_count: u32) -> bool {
-    restart_count >= CIRCUIT_BREAKER_ATTEMPTS
-}
-
 /// Consecutive cold-start attempts that never produced a first packet before the
 /// orchestrator abandons the current (hardware / GStreamer) encoder for the
 /// always-available software (ffmpeg libx264) path. Small so a wedged HW encoder
-/// recovers to working video within a few restart cycles instead of crash-looping
-/// until the 5-minute circuit breaker.
+/// recovers to working video within a few restart cycles instead of
+/// crash-looping on an encoder that cannot stream on this box.
 pub const ENCODER_FALLBACK_ATTEMPTS: u32 = 3;
 
 /// Whether the run loop should abandon the current encoder for the software
@@ -162,13 +124,6 @@ pub const ENCODER_FALLBACK_ATTEMPTS: u32 = 3;
 /// next process start (a reboot / service restart), never latched to disk.
 pub fn should_fallback_to_software(no_first_packet_failures: u32, already_software: bool) -> bool {
     !already_software && no_first_packet_failures >= ENCODER_FALLBACK_ATTEMPTS
-}
-
-/// Should a sustained-healthy run clear the restart counter? True once the
-/// pipeline has been continuously healthy for strictly longer than
-/// [`HEALTHY_RESET_WINDOW`] (the Python `> window` comparison).
-pub fn healthy_window_elapsed(healthy_since: Instant, now: Instant) -> bool {
-    now.saturating_duration_since(healthy_since) > HEALTHY_RESET_WINDOW
 }
 
 /// The decision the startup-grace branch of the health check makes, given the
@@ -266,133 +221,6 @@ mod tests {
         let now = Instant::now();
         let started = now - (SEI_TAP_SESSION_MAX + Duration::from_secs(1));
         assert!(sei_tap_session_wedged(Some(started), now));
-    }
-    #[test]
-    fn backoff_ladder_matches_python_shape() {
-        // base 5s, cap 300s → 5,10,20,40,80,160,300(capped),300,...
-        assert_eq!(
-            backoff_delay(1, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            backoff_delay(2, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(10)
-        );
-        assert_eq!(
-            backoff_delay(3, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(20)
-        );
-        assert_eq!(
-            backoff_delay(4, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(40)
-        );
-        assert_eq!(
-            backoff_delay(5, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(80)
-        );
-        assert_eq!(
-            backoff_delay(6, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(160)
-        );
-        // 7 → 320 capped to 300.
-        assert_eq!(
-            backoff_delay(7, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(300)
-        );
-        assert_eq!(
-            backoff_delay(20, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::from_secs(300)
-        );
-        // attempt 0 is a no-op (defensive).
-        assert_eq!(
-            backoff_delay(0, BASE_RESTART_DELAY, MAX_RESTART_DELAY),
-            Duration::ZERO
-        );
-    }
-
-    #[test]
-    fn no_camera_cap_is_30s() {
-        // base 5s, cap 30s → 5,10,20,30(capped),30,...
-        assert_eq!(
-            backoff_delay(1, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            backoff_delay(2, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(10)
-        );
-        assert_eq!(
-            backoff_delay(3, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(20)
-        );
-        // 4 → 40 capped to 30.
-        assert_eq!(
-            backoff_delay(4, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            backoff_delay(10, BASE_RESTART_DELAY, MAX_RESTART_DELAY_NO_CAMERA),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[test]
-    fn wfb_tee_ceiling_is_5s() {
-        // wfb tee backoff caps at 5s regardless of attempt.
-        assert_eq!(
-            backoff_delay(1, BASE_RESTART_DELAY, WFB_TEE_RESTART_CEILING),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            backoff_delay(2, BASE_RESTART_DELAY, WFB_TEE_RESTART_CEILING),
-            Duration::from_secs(5)
-        );
-        assert_eq!(
-            backoff_delay(5, BASE_RESTART_DELAY, WFB_TEE_RESTART_CEILING),
-            Duration::from_secs(5)
-        );
-    }
-
-    #[test]
-    fn retry_cap_picks_by_error_class() {
-        assert_eq!(
-            retry_cap(StartError::NoPrimaryCamera),
-            MAX_RESTART_DELAY_NO_CAMERA
-        );
-        assert_eq!(retry_cap(StartError::NoEncoder), MAX_RESTART_DELAY);
-        assert_eq!(retry_cap(StartError::EncoderSpawnFailed), MAX_RESTART_DELAY);
-        assert_eq!(retry_cap(StartError::MediamtxFailed), MAX_RESTART_DELAY);
-        assert_eq!(retry_cap(StartError::None), MAX_RESTART_DELAY);
-    }
-
-    #[test]
-    fn circuit_breaker_trips_at_ten() {
-        assert!(!circuit_breaker_tripped(9));
-        assert!(circuit_breaker_tripped(10));
-        assert!(circuit_breaker_tripped(11));
-    }
-
-    #[test]
-    fn healthy_window_boundary_at_60s() {
-        let base = Instant::now();
-        // Strict `>` (the Python `now - last > window`): exactly 60s is NOT
-        // elapsed; just past 60s is.
-        assert!(!healthy_window_elapsed(
-            base,
-            base + Duration::from_millis(59_999)
-        ));
-        assert!(!healthy_window_elapsed(
-            base,
-            base + Duration::from_secs(60)
-        ));
-        assert!(healthy_window_elapsed(
-            base,
-            base + Duration::from_millis(60_001)
-        ));
-        assert!(healthy_window_elapsed(
-            base,
-            base + Duration::from_secs(120)
-        ));
     }
 
     #[test]

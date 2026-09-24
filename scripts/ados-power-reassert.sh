@@ -47,6 +47,10 @@ for _ed in /sys/class/net/eth* /sys/class/net/end* /sys/class/net/enP* /sys/clas
     [ -e "${_ed}" ] || continue
     _eif="$(basename "${_ed}")"
     [ "${_eif}" = "${_def_if}" ] && continue
+    # A wired port that holds an IPv4 address is a management path even with
+    # no default route (a gateway-less LAN, or DHCP slower than the wait
+    # above); renegotiating its PHY could take it down.
+    ip -o -4 addr show dev "${_eif}" 2>/dev/null | grep -q ' inet ' && continue
     ethtool --set-eee "${_eif}" eee off 2>/dev/null || true
 done
 

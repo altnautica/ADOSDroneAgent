@@ -7,6 +7,7 @@ check, persisted state, runtime managers) and composes the
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from ados import __version__
@@ -35,13 +36,27 @@ from ._net_helpers import (
     _probe_wifi_ssid,
     _safe_host_for,
 )
-from ._service_inspection import _remote_status, _services
+from ._service_inspection import _remote_status
 
 
-async def build_setup_status(  # noqa: C901
+async def build_setup_status(
     runtime: Any, host_header: str | None = None,
 ) -> SetupStatus:
-    """Build a complete setup status document from the API runtime facade."""
+    """Build a complete setup status document from the API runtime facade.
+
+    The route is polled by the setup webapp and is reachable without
+    credentials. Everything past the video probe shells out (nmcli, mmcli,
+    iwgetid, iw, systemctl, the hardware sweep) or writes the setup state, so
+    that part runs on a worker thread and the residual API keeps serving.
+    """
+    video = await _video_access(runtime, runtime.config)
+    return await asyncio.to_thread(_assemble_status, runtime, host_header, video)
+
+
+def _assemble_status(  # noqa: C901
+    runtime: Any, host_header: str | None, video: Any
+) -> SetupStatus:
+    """The blocking half of :func:`build_setup_status`."""
     config = runtime.config
     port = int(getattr(config.api.rest, "port", 8080))
     local_ips = _local_ips()
@@ -81,7 +96,6 @@ async def build_setup_status(  # noqa: C901
         f"tcp://{lan_host}:{mavlink_tcp_port}" if mavlink_tcp_port else None
     )
 
-    video = await _video_access(runtime, config)
     remote = _remote_status(config)
     uplink_kind = _probe_active_uplink_kind()
     wifi_ssid = _probe_wifi_ssid() if uplink_kind == "wifi" else None
@@ -114,7 +128,6 @@ async def build_setup_status(  # noqa: C901
     if video.public_whep_url is None and config.remote_access.cloudflare.video_whep_url:
         video.public_whep_url = config.remote_access.cloudflare.video_whep_url
 
-    services = _services(runtime)
     cloud_choice = _cloud_choice_status(config)
     profile_suggestion = build_profile_suggestion(config)
     profile_for_check = str(config.agent.profile)
@@ -238,8 +251,6 @@ async def build_setup_status(  # noqa: C901
         mavlink=mavlink,
         video=video,
         remote_access=remote,
-        services=services,
-        telemetry=runtime.vehicle_state_dict(),
         cloud_choice=cloud_choice,
         profile_suggestion=profile_suggestion,
         hardware_check=hardware_check,

@@ -41,7 +41,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::routes::detail;
 use crate::state::AppState;
@@ -108,15 +107,9 @@ pub async fn get_crsf_status(State(state): State<AppState>) -> Response {
 /// Absent / stale / unreadable / malformed all read `404` — never a `500`,
 /// and never a stale body served as current.
 fn read_status(path: &Path, now: SystemTime) -> Response {
-    let Ok(meta) = std::fs::metadata(path) else {
+    // Absent, stale, or future-dated (an unprovable age) all read as no status.
+    if !crate::freshness::is_fresh(path, now, STALE_AFTER) {
         return status_not_found();
-    };
-    if let Ok(modified) = meta.modified() {
-        if let Ok(age) = now.duration_since(modified) {
-            if age > STALE_AFTER {
-                return status_not_found();
-            }
-        }
     }
     let Ok(text) = std::fs::read_to_string(path) else {
         return status_not_found();
@@ -152,31 +145,9 @@ fn status_not_found() -> Response {
 /// daemon-side `ok:false` rejection comes back as `Some(reply)` so the route
 /// can report the daemon's error code to the caller as a `400`, not a `503`.
 async fn crsf_cmd(socket: &Path, request: &Value) -> Option<Value> {
-    /// A lane reply is a few hundred bytes; bound the read.
-    const MAX_REPLY_BYTES: usize = 64 * 1024;
-
-    let mut stream = tokio::net::UnixStream::connect(socket).await.ok()?;
-    let line = format!("{}\n", serde_json::to_string(request).ok()?);
-    stream.write_all(line.as_bytes()).await.ok()?;
-    stream.flush().await.ok()?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 8 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await.ok()?;
-        if n == 0 {
-            break; // EOF: the server replies once then closes.
-        }
-        if raw.len() + n > MAX_REPLY_BYTES {
-            return None;
-        }
-        raw.extend_from_slice(&buf[..n]);
-        if raw.contains(&b'\n') {
-            break;
-        }
-    }
-    let text = String::from_utf8(raw).ok()?;
-    serde_json::from_str(text.lines().next()?).ok()
+    crate::ipc::cmd::roundtrip(socket, request, crate::ipc::cmd::QUICK)
+        .await
+        .ok()
 }
 
 /// Map a command round-trip outcome onto the HTTP reply: transport failure →
@@ -301,6 +272,7 @@ pub async fn post_crsf_param_write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
 
     async fn body_json(resp: Response) -> Value {

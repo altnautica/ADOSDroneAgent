@@ -197,27 +197,6 @@ class PairingManager:
         log.info("pairing_api_key_generated")
         return key
 
-    def set_code(self, code: str) -> None:
-        """Set a pre-generated pairing code (from install --pair flag)."""
-        self._state["pairing_code"] = code.upper()
-        self._state["code_created_at"] = time.time()
-        self._save_state()
-        log.info("pairing_code_set", code=code.upper())
-
-    def code_expires_at(self) -> int | None:
-        """Epoch seconds when the current pairing code stops being valid.
-
-        Returns ``None`` when no code is currently active (already
-        paired, or no `code_created_at` recorded). Surfaced on the
-        pairing beacon so the GCS can render a countdown clock and
-        stop showing a stale code.
-        """
-        self._maybe_reload()
-        created_at = self._state.get("code_created_at")
-        if not created_at:
-            return None
-        return int(created_at) + CODE_TTL
-
     def claim(self, user_id: str, api_key: str | None = None) -> str:
         """Claim this agent for a user. Returns API key.
 

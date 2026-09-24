@@ -1,4 +1,5 @@
-import { mediaAuthHeaders, withMediaAuth } from "./media-auth";
+import { credentialHeaders } from "./api";
+import { withMediaAuth } from "./media-auth";
 // Lazy HLS player. iOS / macOS Safari can play HLS natively via the
 // `<video>` element's `src` attribute. Chrome / Firefox / Edge need
 // hls.js as a Media Source Extensions adapter. We dynamic-import
@@ -77,7 +78,7 @@ export async function startHls(
     // this hook there is no place for it at all, which is why the video paths
     // could not be gated before now.
     xhrSetup: (xhr: XMLHttpRequest) => {
-      for (const [k, v] of Object.entries(mediaAuthHeaders())) {
+      for (const [k, v] of Object.entries(credentialHeaders())) {
         xhr.setRequestHeader(k, v);
       }
     },
@@ -91,6 +92,7 @@ export async function startHls(
 
   return new Promise<HlsResult>((resolve) => {
     let resolved = false;
+    let manifestTimer: ReturnType<typeof setTimeout> | null = null;
     const cleanup = () => {
       try {
         hls.destroy();
@@ -100,6 +102,8 @@ export async function startHls(
       videoEl.removeAttribute("src");
     };
     const settle = (result: HlsResult) => {
+      if (manifestTimer) clearTimeout(manifestTimer);
+      manifestTimer = null;
       if (!resolved) {
         resolved = true;
         resolve(result);
@@ -152,9 +156,13 @@ export async function startHls(
     hls.attachMedia(videoEl);
     hls.loadSource(hlsUrl);
 
-    // Safety net: 8s without a manifest = give up so the panel can
-    // try the snapshot fallback.
-    setTimeout(() => {
+    // Safety net: 8s without a manifest = give up so the panel can try the
+    // next transport. Tear the player down first: a live hls.js left behind
+    // keeps fetching segments and claims the <video> the next leg plays into.
+    manifestTimer = setTimeout(() => {
+      manifestTimer = null;
+      if (resolved) return;
+      cleanup();
       settle({ ok: false, error: "HLS manifest timeout (8s)." });
     }, 8000);
   });

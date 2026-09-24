@@ -54,27 +54,32 @@ pub async fn get_plugin_state(AxumPath(plugin_id): AxumPath<String>) -> Response
     read_plugin_state(&plugin_socket_dir(), &plugin_id, SystemTime::now())
 }
 
+/// Whether `id` can name a state sidecar: a plugin id (`com.example.follow`) or a
+/// first-party feature id (`atlas`). Lowercase alphanumeric first, then lowercase
+/// alphanumeric, `.` or `-`, with no `..`. The id is joined into a filesystem path,
+/// and axum percent-decodes the segment, so anything that could carry a `/` or a
+/// parent step must be refused before the join.
+fn is_state_id(id: &str) -> bool {
+    let mut bytes = id.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+        && !id.contains("..")
+}
+
 /// The read logic against an explicit socket dir + a reference "now", so a test
 /// can point it at a temp dir and drive the staleness check deterministically.
 fn read_plugin_state(socket_dir: &std::path::Path, plugin_id: &str, now: SystemTime) -> Response {
+    if !is_state_id(plugin_id) {
+        return not_found(plugin_id);
+    }
     let path = socket_dir.join(format!("{plugin_id}-state.json"));
 
-    // Absent / unreadable metadata → 404 (the plugin has published nothing, or
-    // is not running). A metadata error is the absent case, not a server fault.
-    let Ok(meta) = std::fs::metadata(&path) else {
+    // Absent (the plugin has published nothing, or is not running), stale (it
+    // stopped reporting), or future-dated (an unprovable age) all read as absent.
+    if !crate::freshness::is_fresh(&path, now, STALE_AFTER) {
         return not_found(plugin_id);
-    };
-
-    // Staleness gate: if the file has not been written within the window, the
-    // plugin is no longer reporting; treat the state as absent. A clock that
-    // cannot resolve the mtime (or an mtime in the future) is treated as fresh
-    // rather than spuriously stale.
-    if let Ok(modified) = meta.modified() {
-        if let Ok(age) = now.duration_since(modified) {
-            if age > STALE_AFTER {
-                return not_found(plugin_id);
-            }
-        }
     }
 
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -197,5 +202,26 @@ mod tests {
         std::fs::write(dir.path().join("com.example.arr-state.json"), b"[1, 2, 3]").unwrap();
         let resp = read_plugin_state(dir.path(), "com.example.arr", SystemTime::now());
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_id_that_leaves_the_plugin_dir_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let plugins = root.path().join("plugins");
+        std::fs::create_dir(&plugins).unwrap();
+        // A readable state-shaped file one level above the plugin dir.
+        write_sidecar(
+            root.path(),
+            "secret",
+            &json!({ "k": { "payload": 1, "ts_ms": 1 } }),
+        );
+        for id in ["../secret", "..", "/etc/secret", "Com.Example"] {
+            let resp = read_plugin_state(&plugins, id, SystemTime::now());
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{id}");
+        }
+        // A first-party single-segment id still resolves.
+        write_sidecar(&plugins, "atlas", &json!({ "state": "idle" }));
+        let resp = read_plugin_state(&plugins, "atlas", SystemTime::now());
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use std::sync::Arc;
 
 use ados_supervisor::{
-    auto_pair, bind, config::AgentConfig, hotplug, lifecycle::Supervisor, mac_pin, sdnotify,
+    auto_pair, bind, config::AgentConfig, hotplug, lifecycle::Supervisor, mac_pin, role, sdnotify,
     service_memory, video_cmd,
 };
 
@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
     // (auto-pair).
     let auto_pair_role = bind::BindRole::parse(&config.profile_wire);
     let cloud_relay_enabled = config.cloud_relay_enabled;
+    let control_sock = config.run_dir.join(bind::control::SUPERVISOR_SOCK_NAME);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // The bind orchestrator is shared between the monitor (which gates radio
@@ -105,25 +106,17 @@ async fn main() -> Result<()> {
     // with death-detection, auto-restart and hot-plug handling all dead.
     sdnotify::spawn_watchdog_pinger(supervisor.progress(), MONITOR_INTERVAL);
 
-    // Cross-process bind trigger seam: the FastAPI pairing route + the cloud
-    // auto-pair supervisor forward start/cancel/status here over the control
-    // socket. Always served (cheap); the Python side connects when it wants a
-    // bind.
+    // Cross-process trigger seam: the REST front and the FastAPI routes forward
+    // bind start/cancel/status and ground-station role changes here over the
+    // control socket. Always served (cheap). The socket lives under the run dir,
+    // honouring `ADOS_RUN_DIR` (the same override the sibling daemons read) so a
+    // rootless per-user install lands it under `$HOME/.ados/run` instead of the
+    // root-owned `/run/ados`. Role changes come back to this loop on
+    // `role_rx`: the loop owns the service table a transition drives.
+    let (role_tx, mut role_rx) = mpsc::channel::<role::RoleRequest>(4);
     {
         let bind_orch = bind_orch.clone();
-        // The control socket lives under the run dir, honouring `ADOS_RUN_DIR`
-        // (the same override the sibling daemons read) so a rootless per-user
-        // install lands it under `$HOME/.ados/run` instead of the root-owned
-        // `/run/ados`. Unset (the SBC default) → the canonical path, unchanged.
-        let sock_path = match std::env::var_os("ADOS_RUN_DIR") {
-            Some(dir) => std::path::PathBuf::from(dir).join("supervisor.sock"),
-            None => std::path::PathBuf::from(bind::control::SUPERVISOR_SOCK),
-        };
-        tokio::spawn(async move {
-            if let Err(e) = bind::control::serve(bind_orch, &sock_path).await {
-                tracing::error!(error = %e, "bind control socket exited");
-            }
-        });
+        tokio::spawn(async move { bind::control::serve(bind_orch, role_tx, &control_sock).await });
     }
 
     // Video-source command socket: the plugin host forwards `video.source.set`
@@ -174,6 +167,10 @@ async fn main() -> Result<()> {
             }
             Some(kind) = rx.recv() => {
                 supervisor.handle_hotplug(kind).await;
+            }
+            Some(req) = role_rx.recv() => {
+                let outcome = supervisor.apply_role(&req.target, &req.reason).await;
+                let _ = req.reply.send(role::role_reply(outcome));
             }
             _ = sigterm.recv() => {
                 tracing::info!("received SIGTERM");

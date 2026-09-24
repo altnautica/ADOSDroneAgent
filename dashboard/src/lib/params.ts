@@ -55,6 +55,18 @@ export function filterRows(rows: ParamRow[], filter: FilterState): ParamRow[] {
   });
 }
 
+/**
+ * Why a parameter write is blocked, or null when it may go out. Only an FC that
+ * reports disarmed is written to: `null`/absent means its heartbeat has not
+ * reported the armed state yet, and unknown is not disarmed.
+ */
+export function paramWriteBlock(armed: boolean | null | undefined): string | null {
+  if (armed === false) return null;
+  return armed
+    ? "Vehicle is armed — parameter writes are blocked. Disarm to save changes."
+    : "Armed state not reported yet — parameter writes are blocked until the flight controller reports it disarmed.";
+}
+
 export function formatParamValue(v: number): string {
   if (Number.isInteger(v)) return v.toString();
   // Show up to 4 decimals, trim trailing zeros

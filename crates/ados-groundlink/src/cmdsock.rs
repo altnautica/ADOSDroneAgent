@@ -1,20 +1,20 @@
 //! Operator command socket for the ground-station data-plane.
 //!
-//! Role transitions and WFB pair-key install / unpair are operator on-demand
-//! actions the REST layer drives. When the native front owns the LAN port it has
-//! no in-process Python pair/role manager to call, so it forwards each action to
-//! this socket; the running `ados-groundlink` service applies it (it owns the
-//! receive plane, masks/unmasks the role units, and restarts its own
-//! `ados-wfb-rx` unit to pick up a fresh key).
+//! The gateway preference and the WFB pair-key install / unpair are operator
+//! on-demand actions the REST layer drives. The native front has no in-process
+//! Python pair manager to call, so it forwards each action to this socket; the
+//! running `ados-groundlink` service applies it (it owns the receive plane and
+//! restarts the role's WFB plane to pick up a fresh key).
+//!
+//! Role transitions are not served here. A transition stops the role's units,
+//! and this socket lives inside one of them, so the supervisor executes them
+//! (its control socket's `set_role` op).
 //!
 //! Wire protocol (mirrors the radio + Wi-Fi command sockets): one
 //! newline-terminated JSON request, one newline-terminated JSON reply per
 //! connection, then close.
 //!
 //! ```text
-//! {"op":"set_role","role":"relay","reason":"rest"}
-//!     -> {"ok":true,"role":"relay","previous":"direct","units_started":[...],
-//!         "units_stopped":[...],"ts_ms":1234,"noop":false}
 //! {"op":"set_gateway_preference","mode":"pinned","pinned_mac":"aa:bb:..."}
 //!     -> {"ok":true,"mode":"pinned","pinned_mac":"aa:bb:...","persisted":true}
 //!     -> {"ok":false,"error":"E_BATCTL_UNAVAILABLE"}   (batctl missing)
@@ -27,9 +27,9 @@
 //! ```
 //!
 //! `ok:false` carries the apply-time error code so the REST layer can map it to a
-//! 4xx/5xx. A parse / encode failure yields a transport `ok:false`. The role + the
-//! gateway preference are stateless file+systemctl operations, so the socket
-//! holds no manager instances; it dispatches each op directly.
+//! 4xx/5xx. A parse / encode failure yields a transport `ok:false`. The gateway
+//! preference is a stateless file+batctl operation, so the socket holds no
+//! manager instances; it dispatches each op directly.
 
 use std::path::Path;
 
@@ -37,7 +37,6 @@ use ados_protocol::ipc::{bind_command_socket, serve_rpc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::mesh::role_apply;
 use crate::pair_state;
 
 /// Cap on a single request line so a malformed client can't grow the buffer.
@@ -46,10 +45,6 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 #[derive(Debug, Deserialize)]
 struct Request {
     op: String,
-    #[serde(default)]
-    role: Option<String>,
-    #[serde(default)]
-    reason: Option<String>,
     #[serde(default)]
     mode: Option<String>,
     #[serde(default)]
@@ -83,10 +78,6 @@ pub async fn serve(sock_path: &Path) -> std::io::Result<()> {
 /// side effect.
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
-    SetRole {
-        role: String,
-        reason: String,
-    },
     SetGatewayPreference {
         mode: String,
         pinned_mac: Option<String>,
@@ -115,13 +106,6 @@ fn parse_command(line: &[u8]) -> Parsed {
         }
     };
     match req.op.as_str() {
-        "set_role" => match req.role {
-            Some(role) if !role.is_empty() => Parsed::Cmd(Command::SetRole {
-                role,
-                reason: req.reason.unwrap_or_else(|| "rest".to_string()),
-            }),
-            _ => Parsed::Reply(json!({"ok": false, "error": "E_MISSING_ROLE"})),
-        },
         "set_gateway_preference" => match req.mode {
             Some(mode) if matches!(mode.as_str(), "auto" | "pinned" | "off") => {
                 Parsed::Cmd(Command::SetGatewayPreference {
@@ -158,23 +142,6 @@ async fn dispatch(line: &[u8]) -> Value {
 /// projects, so the front strips the `ok` flag and returns the rest verbatim.
 async fn apply(cmd: Command) -> Value {
     match cmd {
-        Command::SetRole { role, reason } => match role_apply::apply_role(&role, &reason).await {
-            Ok(res) => json!({
-                "ok": true,
-                "role": res.role,
-                "previous": res.previous,
-                "units_started": res.units_started,
-                "units_stopped": res.units_stopped,
-                "ts_ms": res.ts_ms,
-                "noop": res.noop,
-            }),
-            // The role gate (capability / paired) is enforced in the route before
-            // the forward; the only failure here is an unknown role, which the
-            // route also pre-validates — so this is a belt-and-suspenders 400.
-            Err(bad) => {
-                json!({"ok": false, "error": "E_INVALID_ROLE", "message": format!("unknown role: {bad}")})
-            }
-        },
         Command::SetGatewayPreference { mode, pinned_mac } => {
             apply_gateway_preference(&mode, pinned_mac.as_deref()).await
         }
@@ -318,26 +285,6 @@ mod tests {
         let v = reply(br#"{"op":"frob"}"#);
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().starts_with("E_UNKNOWN_OP"));
-    }
-
-    #[test]
-    fn set_role_requires_a_role() {
-        assert_eq!(reply(br#"{"op":"set_role"}"#)["error"], "E_MISSING_ROLE");
-        assert_eq!(
-            cmd(br#"{"op":"set_role","role":"relay"}"#),
-            Command::SetRole {
-                role: "relay".to_string(),
-                reason: "rest".to_string(),
-            }
-        );
-        // An explicit reason is carried through.
-        assert_eq!(
-            cmd(br#"{"op":"set_role","role":"direct","reason":"factory_reset"}"#),
-            Command::SetRole {
-                role: "direct".to_string(),
-                reason: "factory_reset".to_string(),
-            }
-        );
     }
 
     #[test]

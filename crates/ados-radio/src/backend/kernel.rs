@@ -88,9 +88,8 @@ pub(crate) fn kernel_availability(is_linux: bool) -> BackendAvailability {
 }
 
 /// Read a `<sysfs_root>/class/net/<iface>/statistics/<counter>` value, or `None`
-/// when unreadable. Mirrors the path `txrate::read_tx_bytes` builds (the
-/// cross-backend liveness counter source); `sysfs_root` is `/sys` in production
-/// and a tempfile tree in tests.
+/// when unreadable. `sysfs_root` is `/sys` in production and a tempfile tree in
+/// tests.
 async fn read_net_counter(sysfs_root: &Path, iface: &str, counter: &str) -> Option<u64> {
     let path = sysfs_root
         .join("class")
@@ -307,18 +306,6 @@ mod tests {
             kernel_availability(false),
             BackendAvailability::Impossible(_)
         ));
-    }
-
-    #[tokio::test]
-    async fn read_net_counter_matches_txrate_read_tx_bytes_on_default_root() {
-        // For the production `/sys` root the backend's counter read and the
-        // txrate helper resolve the IDENTICAL path, so they return the same value
-        // — here both `None` for a nonexistent iface, proving the path contract
-        // matches without a real SBC.
-        let iface = "ados-test-nonexistent-iface";
-        let a = read_net_counter(Path::new("/sys"), iface, "tx_bytes").await;
-        let b = crate::txrate::read_tx_bytes(iface).await;
-        assert_eq!(a, b);
     }
 
     #[tokio::test]

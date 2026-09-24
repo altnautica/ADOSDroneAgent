@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use ados_atlas::{
     diagonal_cov, mono_ns, run_capture_loop, AtlasFrameSource, AtlasPublisher, AtlasRuntimeConfig,
-    CameraConfig, CaptureConfig, CaptureProfile, CaptureSession, CapturedFrame, KeyframeBudget,
-    PoseProvider, PoseSample, ReplayPose, SelectionParams, SyntheticFrameSource,
+    CameraConfig, CaptureConfig, CaptureProfile, CaptureSession, CapturedFrame, FramePixels,
+    KeyframeBudget, PoseProvider, PoseSample, ReplayPose, SelectionParams, SyntheticFrameSource,
 };
 use ados_protocol::atlas::{
     AtlasEvent, CameraRole, CaptureStatus, GlobalAnchor, ImageEncoding, KeyframeEnvelope, Pose,
@@ -19,7 +19,7 @@ use ados_protocol::atlas::{
 use ados_protocol::frame::PLUGIN_MAX_FRAME;
 use ados_protocol::framebus::FrameFormat;
 use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
-use tokio::sync::Notify;
+use ados_protocol::shutdown::Shutdown;
 
 /// A pose sample whose ANCHOR is latched, so the capture path has a world frame
 /// and will select keyframes, and whose arrival is stamped on the local
@@ -96,7 +96,7 @@ async fn sitl_capture_emits_keyframes_pose_and_state_end_to_end() {
         ..AtlasRuntimeConfig::default()
     };
     let session = CaptureSession::new(config);
-    let cancel = Arc::new(Notify::new());
+    let cancel = Shutdown::new();
 
     // No control commands in this run; the sender stays alive so the control
     // channel remains open (the loop simply never receives a command).
@@ -147,7 +147,7 @@ async fn sitl_capture_emits_keyframes_pose_and_state_end_to_end() {
         }
     })
     .await;
-    cancel.notify_waiters();
+    cancel.trigger();
     let _ = handle.await;
 
     assert!(collect.is_ok(), "timed out collecting atlas events");
@@ -204,7 +204,7 @@ async fn sitl_capture_recovers_from_a_malformed_keyframe_frame() {
         width: 8,
         height: 8,
         format: FrameFormat::Rgb24,
-        bytes: vec![0u8; 8 * 8 * 3],
+        pixels: FramePixels::Owned(vec![0u8; 8 * 8 * 3]),
     };
     let frames = AtlasFrameSource::Synthetic(SyntheticFrameSource::new(vec![
         good(0),
@@ -215,7 +215,7 @@ async fn sitl_capture_recovers_from_a_malformed_keyframe_frame() {
             width: 8,
             height: 8,
             format: FrameFormat::Rgb24,
-            bytes: vec![0u8; 4],
+            pixels: FramePixels::Owned(vec![0u8; 4]),
         },
         good(200),
     ]));
@@ -245,7 +245,7 @@ async fn sitl_capture_recovers_from_a_malformed_keyframe_frame() {
         ..AtlasRuntimeConfig::default()
     };
     let session = CaptureSession::new(config);
-    let cancel = Arc::new(Notify::new());
+    let cancel = Shutdown::new();
     let (_control_tx, control_rx) = tokio::sync::mpsc::channel(1);
     let loop_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
@@ -282,7 +282,7 @@ async fn sitl_capture_recovers_from_a_malformed_keyframe_frame() {
         }
     })
     .await;
-    cancel.notify_waiters();
+    cancel.trigger();
     let _ = handle.await;
 
     assert!(
@@ -353,7 +353,7 @@ async fn run_and_collect(
         ..AtlasRuntimeConfig::default()
     };
     let session = CaptureSession::new(config);
-    let cancel = Arc::new(Notify::new());
+    let cancel = Shutdown::new();
     let (_control_tx, control_rx) = tokio::sync::mpsc::channel(1);
     let loop_cancel = cancel.clone();
     let handle = tokio::spawn(async move {
@@ -392,7 +392,7 @@ async fn run_and_collect(
         }
     })
     .await;
-    cancel.notify_waiters();
+    cancel.trigger();
     let _ = handle.await;
     (keyframes, states)
 }

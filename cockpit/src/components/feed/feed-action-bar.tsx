@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
+import { useProfile } from "@/hooks/use-profile";
 import { useTelemetryContext } from "@/hooks/telemetry-context";
 import { startRecording, stopRecording } from "@/lib/api";
 import { useFeedStore } from "@/stores/feed-store";
@@ -64,6 +65,9 @@ export function FeedActionBar() {
   const goTab = useNavStore((s) => s.goTab);
   const reconnectStream = useFeedStore((s) => s.reconnectStream);
   const { status } = useTelemetryContext();
+  // The recorder is the ground station's (`/api/v1/ground-station/recording/*`);
+  // a drone has no recording route, so the button is not offered there.
+  const hasRecorder = useProfile() === "ground_station";
   const [recordBusy, setRecordBusy] = useState(false);
 
   const recording =
@@ -92,13 +96,15 @@ export function FeedActionBar() {
           label="Menu"
           onClick={() => command("quick-menu")}
         />
-        <ActionButton
-          icon={recording ? Square : Circle}
-          label={recording ? "Stop" : "Record"}
-          onClick={toggleRecord}
-          active={recording}
-          disabled={recordBusy}
-        />
+        {hasRecorder ? (
+          <ActionButton
+            icon={recording ? Square : Circle}
+            label={recording ? "Stop" : "Record"}
+            onClick={toggleRecord}
+            active={recording}
+            disabled={recordBusy}
+          />
+        ) : null}
         <ActionButton
           icon={RefreshCw}
           label="Stream"

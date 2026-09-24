@@ -5,13 +5,14 @@
 //! [`crate::process::RadioProcesses`], publishing the encoder bitrate ceiling to
 //! `ados-video`, and refreshing the heartbeat snapshot.
 
+use ados_protocol::shutdown::Shutdown;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ados_video::profile::{EncoderState, VIDEO_ENCODER_SOCK, VIDEO_PROFILE_SIDECAR};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Mutex;
 
 use crate::link_quality::LinkStats;
 use crate::mcs_ladder::{self, McsLadder};
@@ -42,9 +43,10 @@ pub struct BitrateController {
     encoder_sidecar: PathBuf,
 }
 
-/// Shortest and longest gap between retries of a failed encoder-ceiling publish.
-const CEILING_RETRY_MIN: Duration = Duration::from_secs(2);
-const CEILING_RETRY_MAX: Duration = Duration::from_secs(60);
+/// Gap between retries of a failed encoder-ceiling publish. Fixed and uncapped:
+/// an encoder that comes back after an outage gets its ceiling within one gap,
+/// however long it was down.
+const CEILING_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 /// One warning per this many consecutive failures, after the first.
 ///
@@ -64,22 +66,21 @@ const CEILING_LOG_EVERY: u32 = 30;
 /// became a warning every second for as long as the node ran.
 ///
 /// The answer is not to stop trying. An encoder that starts late, or comes back
-/// after a crash, has to get its ceiling. So the attempt itself backs off
-/// exponentially to a minute, and the log decays with it rather than the fault
-/// going silent: loud on the first failure, then one line per
-/// [`CEILING_LOG_EVERY`] failures carrying the running total, so an operator
-/// reading the log an hour later still learns that this has been failing the
-/// whole time and how many times.
+/// after a crash, has to get its ceiling promptly. So the attempt repeats on a
+/// fixed [`CEILING_RETRY_INTERVAL`], and the log decays instead of the retry:
+/// loud on the first failure, then one line per [`CEILING_LOG_EVERY`] failures
+/// carrying the running total, so an operator reading the log an hour later
+/// still learns that this has been failing the whole time and how many times.
 ///
 /// A change of intent — a rung step, or the ladder being disarmed — clears the
-/// backoff. That is new information the encoder has not been told yet, and it
+/// wait. That is new information the encoder has not been told yet, and it
 /// preserves the original contract of one attempt per rung change.
 #[derive(Debug, Default)]
 struct CeilingRetry {
     /// Consecutive failed attempts since the last success. Not reset by a
     /// change of intent: it is the count of how long this has been broken.
     failures: u32,
-    /// Earliest instant the next attempt may run, while backing off.
+    /// Earliest instant the next attempt may run after a failure.
     next_attempt: Option<Instant>,
     /// The ceiling the last attempt tried to publish, so a change of intent can
     /// be told from a repeat of the same one.
@@ -96,19 +97,11 @@ impl CeilingRetry {
         self.next_attempt.map(|at| now >= at).unwrap_or(true)
     }
 
-    /// Record a failed attempt and schedule the next one.
+    /// Record a failed attempt and schedule the next one a fixed interval out.
     fn record_failure(&mut self, want: Option<u32>, now: Instant) {
         self.failures = self.failures.saturating_add(1);
         self.attempted = Some(want);
-        // Exponential from CEILING_RETRY_MIN, capped. `saturating_mul` keeps a
-        // long-running failure from overflowing the shift.
-        let factor = 1u32
-            .checked_shl(self.failures.saturating_sub(1))
-            .unwrap_or(u32::MAX);
-        let gap = CEILING_RETRY_MIN
-            .saturating_mul(factor)
-            .min(CEILING_RETRY_MAX);
-        self.next_attempt = Some(now + gap);
+        self.next_attempt = Some(now + CEILING_RETRY_INTERVAL);
     }
 
     /// Record a successful attempt, returning how many failures it ended.
@@ -309,7 +302,7 @@ impl BitrateController {
         proc: Arc<Mutex<RadioProcesses>>,
         snapshot: SnapshotHandle,
         counters: crate::watchdog::CounterHandle,
-        cancel: Arc<Notify>,
+        cancel: Shutdown,
     ) {
         tracing::info!(
             enabled = self.enabled.load(Ordering::Relaxed),
@@ -323,7 +316,7 @@ impl BitrateController {
                 _ = tokio::time::sleep(self.tick_interval) => {
                     self.tick(&link, &proc, &snapshot, &counters).await;
                 }
-                _ = cancel.notified() => {
+                _ = cancel.wait() => {
                     tracing::info!("bitrate_controller_stopped");
                     return;
                 }
@@ -758,9 +751,10 @@ mod tests {
     }
 
     #[test]
-    fn a_node_with_no_encoder_does_not_attempt_once_a_second_forever() {
+    fn a_node_with_no_encoder_retries_on_a_fixed_cadence_not_every_tick() {
         // Five minutes of 1 Hz ticks against an encoder that never answers.
-        // Before the backoff this was 300 attempts and 300 warnings.
+        // Unthrottled this was 300 attempts and 300 warnings; on the fixed
+        // cadence it is one attempt per retry interval, never tapering off.
         let mut retry = CeilingRetry::default();
         let t0 = Instant::now();
         let mut attempts = 0u32;
@@ -771,15 +765,10 @@ mod tests {
                 retry.record_failure(Some(4000), now);
             }
         }
-        assert!(
-            attempts <= 15,
-            "backed-off retries over five minutes should be a handful, got {attempts}"
-        );
-        // But it must NOT give up: an encoder that starts late still has to be
-        // told the ceiling, so the retries keep coming at the capped rate.
-        assert!(
-            attempts >= 5,
-            "the controller must keep trying, got only {attempts}"
+        assert_eq!(
+            attempts,
+            (300 / CEILING_RETRY_INTERVAL.as_secs()) as u32,
+            "one attempt per fixed retry interval"
         );
     }
 
@@ -835,17 +824,15 @@ mod tests {
     }
 
     #[test]
-    fn the_retry_gap_grows_but_stays_bounded() {
-        // Bounded so a late encoder is picked up within a minute, not hours.
+    fn the_retry_gap_stays_fixed_however_long_the_outage() {
+        // A long outage must not stretch the gap: an encoder that comes back
+        // after forty failures gets its ceiling one interval later, not minutes.
         let mut retry = CeilingRetry::default();
         let t0 = Instant::now();
         for _ in 0..40 {
             retry.record_failure(Some(4000), t0);
         }
-        assert!(
-            retry.should_attempt(Some(4000), t0 + CEILING_RETRY_MAX),
-            "the gap must cap, not grow without bound"
-        );
+        assert!(retry.should_attempt(Some(4000), t0 + CEILING_RETRY_INTERVAL));
         assert!(!retry.should_attempt(Some(4000), t0 + Duration::from_secs(1)));
     }
 

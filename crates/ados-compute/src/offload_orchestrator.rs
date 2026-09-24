@@ -4,8 +4,9 @@
 //! board with a paired workstation node — see `ados_offload::pick_tier`), this
 //! orchestrator wires the whole lane in one call:
 //!
-//! 1. **discover** the paired compute node (mDNS `profile=workstation`), or use an
-//!    injected node URL (a node reached by a known IP, and the test seam);
+//! 1. **reach** the compute node at the base URL the caller resolved (mDNS
+//!    `profile=workstation`, a pinned address, or the test seam), presenting
+//!    the credential that node issued this drone;
 //! 2. **submit** a streaming perception-offload session job to the node
 //!    ([`ComputeClient::submit_job`]) naming the drone's live RTSP feed — the node
 //!    starts the session (see [`crate::offload_session_manager`]);
@@ -61,20 +62,15 @@ pub trait DetectionTee: Send + Sync {
     fn publish(&self, batch: &DetectionBatch);
 }
 
-/// Where to reach the compute node.
-pub enum NodeEndpoint {
-    /// Discover a paired `profile=workstation` node over mDNS (production). The
-    /// `api_key` rides `X-ADOS-Key` for the off-box leg (`None` on-box/unpaired).
-    Discover {
-        timeout: Duration,
-        api_key: Option<String>,
-    },
-    /// A pre-resolved node — reached by a known base URL (`http://host:8092`). The
-    /// production path for a node added by IP, and the SITL seam (skip discovery).
-    Direct {
-        base_url: String,
-        api_key: Option<String>,
-    },
+/// Where to reach the compute node, and the credential it issued this drone.
+/// The caller resolves the node first so it can pick the credential issued by
+/// THAT node: a credential is never offered to a node that did not issue it.
+pub struct NodeEndpoint {
+    /// The node's job-API base URL (`http://host:8092`).
+    pub base_url: String,
+    /// The node-issued credential, sent in the node-credential header on the
+    /// submit and the detection WebSocket; `None` when none is installed.
+    pub credential: Option<String>,
 }
 
 /// The orchestrator's configuration: the session identity, the drone's live feed,
@@ -145,23 +141,6 @@ impl OrchestratorConfig {
     }
 }
 
-/// Derive the node's base URL (and off-box key) from a [`NodeEndpoint`], resolving
-/// mDNS when asked. Fails when discovery finds no paired workstation node.
-async fn resolve_node(node: NodeEndpoint) -> Result<(String, Option<String>)> {
-    match node {
-        NodeEndpoint::Direct { base_url, api_key } => Ok((base_url, api_key)),
-        NodeEndpoint::Discover { timeout, api_key } => {
-            let resolved = crate::mdns::resolve_compute(timeout)
-                .await
-                .ok_or_else(|| anyhow!("no paired compute node discovered on the LAN"))?;
-            Ok((
-                format!("http://{}:{}", resolved.host, resolved.job_api_port),
-                api_key,
-            ))
-        }
-    }
-}
-
 /// Build the per-session detection WS URL from the node's base URL: the WS router
 /// is mounted on the node's job-API listener, so `http(s)://host:port` →
 /// `ws(s)://host:port/ws/offload/<session>`.
@@ -194,10 +173,13 @@ pub async fn run_offload_orchestrator(
     node: NodeEndpoint,
     cancel: Arc<Notify>,
 ) -> Result<()> {
-    let (base_url, api_key) = resolve_node(node).await?;
+    let NodeEndpoint {
+        base_url,
+        credential,
+    } = node;
 
     // 1 + 2: submit the streaming-session job so the node starts the session.
-    let client = ComputeClient::new(base_url.clone(), api_key);
+    let client = ComputeClient::new(base_url.clone(), credential.clone());
     let params = serde_json::json!({
         "session": {
             "id": cfg.session_id,
@@ -231,7 +213,9 @@ pub async fn run_offload_orchestrator(
     let stream_cancel = cancel.clone();
     let ws = ws_url.clone();
     let subscriber = tokio::spawn(async move {
-        if let Err(e) = stream_offload_detections(&ws, det_tx, stream_cancel).await {
+        if let Err(e) =
+            stream_offload_detections(&ws, credential.as_deref(), det_tx, stream_cancel).await
+        {
             tracing::warn!(url = %ws, error = %e, "offload detection stream error");
         }
     });
@@ -332,18 +316,6 @@ mod tests {
             ws_url_from_base("node.local:8092", "s2"),
             "node.local:8092/ws/offload/s2"
         );
-    }
-
-    #[tokio::test]
-    async fn direct_endpoint_resolves_to_its_base_url() {
-        let (base, key) = resolve_node(NodeEndpoint::Direct {
-            base_url: "http://10.0.0.5:8092".into(),
-            api_key: Some("k".into()),
-        })
-        .await
-        .unwrap();
-        assert_eq!(base, "http://10.0.0.5:8092");
-        assert_eq!(key.as_deref(), Some("k"));
     }
 
     #[test]

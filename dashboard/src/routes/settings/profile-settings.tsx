@@ -60,15 +60,16 @@ export function ProfileSettings() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    if (status.data) {
-      setProfile(profileFromStatus(status.data.profile));
-      setRole(groundRoleFromStatus(status.data.ground_role));
-    }
-  }, [status.data]);
-
   const initialProfile = profileFromStatus(status.data?.profile);
   const initialRole = groundRoleFromStatus(status.data?.ground_role);
+
+  // Re-seed the draft only when the agent's value itself changes. Keyed on the
+  // whole status object this ran on every 8 s poll that moved any field, and
+  // threw away the operator's unsaved selection.
+  useEffect(() => {
+    setProfile(initialProfile);
+    setRole(initialRole);
+  }, [initialProfile, initialRole]);
   const dirty =
     profile !== initialProfile ||
     (profile === "ground_station" && role !== initialRole);

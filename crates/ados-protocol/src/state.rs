@@ -40,9 +40,11 @@ pub const STATE_V2_MAX_FRAME: usize = 1024 * 1024;
 /// silent version is a permanent ambiguity.
 ///
 /// The constant tracks the BODY shape, not the framing generation the contract
-/// id is named for: 3 is the body that carries `position_age_ms`, still inside
-/// the length-prefixed-msgpack framing that `state.v2` names.
-pub const STATE_WIRE_VERSION: u16 = 3;
+/// id is named for: 4 is the body whose not-reported readings (battery voltage,
+/// current, remaining and temperature, GPS eph/epv, RC rssi) are `null` rather
+/// than the MAVLink sentinel, still inside the length-prefixed-msgpack framing
+/// that `state.v2` names.
+pub const STATE_WIRE_VERSION: u16 = 4;
 
 #[derive(Debug, Error)]
 pub enum StateError {

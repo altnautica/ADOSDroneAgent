@@ -47,11 +47,11 @@ pub const WFB_RECEIVER_JSON: &str = "/run/ados/wfb-receiver.json";
 pub const ATLAS_RELAY_JSON: &str = "/run/ados/atlas-relay.json";
 
 /// Cross-process mesh-event journal: a newline-delimited JSON stream the
-/// relay/receiver loops append to and the REST/OLED layer tails. Each line is
-/// one event object (`{"bus","kind","timestamp_ms","payload"}`) matching the
-/// in-process `MeshEvent` shape, so the tailer can republish it onto the
-/// process-local asyncio bus the WebSocket + OLED already consume. Append-only,
-/// best-effort; a reader seeks to end on start and follows new lines.
+/// relay/receiver loops and the supervisor's role transition append to and the
+/// REST layer tails. Each line is one event object
+/// (`{"bus","kind","timestamp_ms","payload"}`); the writer is
+/// `ados_supervisor::mesh_journal`. Append-only, best-effort; a reader seeks to
+/// end on start and follows new lines.
 pub const MESH_EVENTS_JSONL: &str = "/run/ados/mesh-events.jsonl";
 
 /// Cross-process field-pairing event journal: the sibling of
@@ -73,11 +73,12 @@ pub const PAIR_EVENTS_JSONL: &str = "/run/ados/pair-events.jsonl";
 pub const WFB_LOCKED_CHANNEL_HINT: &str = "/run/ados/wfb-locked-channel";
 
 /// The ground-station data-plane operator command socket. The native front has
-/// no in-process Python pair/role manager to call, so it forwards a
-/// newline-JSON `{"op":...}` request here and the running `ados-groundlink`
-/// service applies it (role transition, gateway preference, pair-key install /
-/// unpair). Mirrors the radio + Wi-Fi command sockets' framing: one
-/// newline-terminated JSON request, one newline-terminated JSON reply, close.
+/// no in-process Python pair manager to call, so it forwards a newline-JSON
+/// `{"op":...}` request here and the running `ados-groundlink` service applies
+/// it (gateway preference, pair-key install / unpair). Role transitions go to
+/// the supervisor instead: this socket lives inside a unit a transition stops.
+/// Mirrors the radio + Wi-Fi command sockets' framing: one newline-terminated
+/// JSON request, one newline-terminated JSON reply, close.
 pub const GROUNDLINK_CMD_SOCK: &str = "/run/ados/groundlink-cmd.sock";
 
 /// The setup-complete sentinel. Dropped on a successful pair so the captive DNS

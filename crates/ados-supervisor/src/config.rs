@@ -13,7 +13,10 @@ use serde::Deserialize;
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 pub const PROFILE_CONF: &str = "/etc/ados/profile.conf";
 pub const MESH_ROLE_PATH: &str = "/etc/ados/mesh/role";
+pub const RUN_DIR: &str = "/run/ados";
 
+/// The ground-station mesh roles, in advertised order. The one definition every
+/// role consumer reads (the transition, the boot apply, the REST role routes).
 pub const VALID_ROLES: [&str; 3] = ["direct", "relay", "receiver"];
 
 /// Only the fields the supervisor reads. serde ignores everything else in
@@ -135,11 +138,6 @@ pub struct AgentConfig {
     pub cloud_relay_enabled: bool,
     /// `ground_station.role` from config (default `direct`); the role to apply on boot.
     pub configured_gs_role: String,
-    /// The raw, unresolved `config.agent.profile` literal (or `None`). The
-    /// boot role-apply and hardware-detect gate on this raw value, not the
-    /// resolved one, to match the Python supervisor exactly. See
-    /// `raw_is_ground_station`.
-    pub raw_agent_profile: Option<String>,
     /// `agent.headless` is true: boot only the lean headless KEEP set. The
     /// service gate blocks every non-KEEP unit when this is set, so a zero-Python
     /// flight node runs just the Rust core (MAVLink / camera / radio / HTTP
@@ -161,6 +159,10 @@ pub struct AgentConfig {
     /// self-healing immediately. Defaults to `MESH_ROLE_PATH`; overridable in
     /// tests.
     pub mesh_role_path: PathBuf,
+    /// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`): the control
+    /// socket, the per-role state files a role transition clears, and the
+    /// mesh-event journal it appends to.
+    pub run_dir: PathBuf,
 }
 
 impl AgentConfig {
@@ -180,10 +182,12 @@ impl AgentConfig {
             std::env::var("ADOS_PROFILE_CONF").unwrap_or_else(|_| PROFILE_CONF.to_string());
         let mesh_role =
             std::env::var("ADOS_MESH_ROLE").unwrap_or_else(|_| MESH_ROLE_PATH.to_string());
+        let run_dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| RUN_DIR.to_string());
         Self::load_from_inner(
             Path::new(&config_yaml),
             Path::new(&profile_conf),
             Path::new(&mesh_role),
+            Path::new(&run_dir),
             true,
         )
     }
@@ -192,7 +196,13 @@ impl AgentConfig {
     /// sidecar — only the real [`load`](Self::load) startup path does, so tests
     /// never write to the run dir.
     pub fn load_from(config_yaml: &Path, profile_conf: &Path, mesh_role: &Path) -> Self {
-        Self::load_from_inner(config_yaml, profile_conf, mesh_role, false)
+        Self::load_from_inner(
+            config_yaml,
+            profile_conf,
+            mesh_role,
+            Path::new(RUN_DIR),
+            false,
+        )
     }
 
     /// Shared resolver. When `publish` is set (the real startup path) the parse
@@ -201,6 +211,7 @@ impl AgentConfig {
         config_yaml: &Path,
         profile_conf: &Path,
         mesh_role: &Path,
+        run_dir: &Path,
         publish: bool,
     ) -> Self {
         let (raw, config_error) = read_raw_config(config_yaml);
@@ -208,8 +219,7 @@ impl AgentConfig {
             ados_config::write_config_status("supervisor", config_error.as_deref());
         }
 
-        let raw_agent_profile = raw.agent.profile.clone();
-        let profile_wire = resolve_profile(raw_agent_profile.as_deref(), profile_conf);
+        let profile_wire = resolve_profile(raw.agent.profile.as_deref(), profile_conf);
 
         let role = if profile_wire == "ground-station" {
             Some(read_current_role(mesh_role))
@@ -258,9 +268,9 @@ impl AgentConfig {
             atlas_enabled,
             cloud_relay_enabled,
             configured_gs_role,
-            raw_agent_profile,
             headless_mode,
             mesh_role_path: mesh_role.to_path_buf(),
+            run_dir: run_dir.to_path_buf(),
             log_store_enabled: log_store_wanted(config_yaml),
         }
     }
@@ -279,16 +289,12 @@ impl AgentConfig {
         self.profile_wire.replace('-', "_")
     }
 
-    /// True only when the *raw* `config.agent.profile` is explicitly
-    /// `ground_station`. The boot role-apply and hardware-detect use this
-    /// (not the resolved profile) to match the Python supervisor's direct
-    /// `config.agent.profile` reads. Follow-up: an `auto`-config rig whose
-    /// `profile.conf` says ground_station resolves to ground-station for
-    /// gating but returns false here, so the mesh role + RX are not
-    /// auto-applied until `config.yaml` is explicit — a faithfully-ported
-    /// Python quirk whose fix is a separate gated change.
-    pub fn raw_is_ground_station(&self) -> bool {
-        self.raw_agent_profile.as_deref() == Some("ground_station")
+    /// True when the resolved profile is the ground station. The boot role
+    /// apply and the hardware pass key off this, so a config that leaves the
+    /// profile to `profile.conf` (`auto`) or uses the hyphen spelling boots its
+    /// ground-station role exactly like one that names it literally.
+    pub fn is_ground_station(&self) -> bool {
+        self.profile_wire == "ground-station"
     }
 }
 
@@ -389,11 +395,6 @@ pub fn read_current_role(path: &Path) -> String {
     }
 }
 
-/// Canonical role-sentinel path as an owned buffer (for the role writer).
-pub fn mesh_role_path() -> PathBuf {
-    PathBuf::from(MESH_ROLE_PATH)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,8 +424,7 @@ mod tests {
         assert_eq!(ac.role.as_deref(), Some("relay"));
         assert!(ac.video_enabled);
         assert_eq!(ac.profile_gate(), "ground_station");
-        // Explicit config profile → raw gate also true (boot helpers fire).
-        assert!(ac.raw_is_ground_station());
+        assert!(ac.is_ground_station());
     }
 
     #[test]
@@ -507,10 +507,9 @@ mod tests {
         assert_eq!(ac.role.as_deref(), Some("direct"));
         // video.mode disabled → not enabled
         assert!(!ac.video_enabled);
-        // Parity quirk: gating resolves to ground-station, but the RAW config
-        // profile is "auto", so the boot role-apply + RX-start helpers (which
-        // read the raw value, like the Python supervisor) do NOT fire here.
-        assert!(!ac.raw_is_ground_station());
+        // The boot role-apply and receive-plane start key off the RESOLVED
+        // profile, so an `auto` config on a ground station boots its role.
+        assert!(ac.is_ground_station());
     }
 
     #[test]

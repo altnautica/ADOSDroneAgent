@@ -10,13 +10,12 @@ def _run(event_dict):
     return redact_secrets(None, "info", dict(event_dict))
 
 
-def test_secret_field_is_hashed():
+def test_secret_field_keeps_only_its_length():
     out = _run({"code": "ABCDEF"})
-    assert out["code"].startswith(f"{_REDACT_PREFIX}ABCD...")
-    # Format: "redacted:ABCD..." + 8 hex chars
-    suffix = out["code"][len(f"{_REDACT_PREFIX}ABCD...") :]
-    assert len(suffix) == 8
-    int(suffix, 16)  # raises if not hex
+    assert out["code"] == f"{_REDACT_PREFIX}len=6"
+    # Nothing of the content survives: no head, no digest a reader could
+    # brute-force a short secret against.
+    assert "ABC" not in out["code"]
 
 
 def test_redaction_is_idempotent():
@@ -41,10 +40,9 @@ def test_empty_string_untouched():
     assert out["code"] == ""
 
 
-def test_distinct_values_distinguishable():
-    a = _run({"code": "ABCDEF"})
-    b = _run({"code": "ABCXYZ"})
-    assert a["code"] != b["code"]
-    # Both share the 4-char head plus the prefix, but the trailing hash differs.
-    assert a["code"].startswith(f"{_REDACT_PREFIX}ABCD...")
-    assert b["code"].startswith(f"{_REDACT_PREFIX}ABCX...")
+def test_same_length_secrets_are_indistinguishable():
+    # A short secret must not be recoverable, so two different values of the
+    # same length redact identically.
+    a = _run({"code": "999888"})
+    b = _run({"code": "123456"})
+    assert a["code"] == b["code"] == f"{_REDACT_PREFIX}len=6"

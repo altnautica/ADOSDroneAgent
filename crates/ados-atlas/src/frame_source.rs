@@ -4,14 +4,17 @@
 //! the vision engine's own `AnySource`):
 //!
 //! - [`VisionFrameSource`] is the real path. It subscribes to the vision
-//!   engine's `vision-frames.sock` descriptor broadcast, maps the `/dev/shm`
-//!   ring each descriptor names, and reads the slot — only the small descriptor
-//!   crosses the socket; the pixels are copied straight out of shared memory.
+//!   engine's `vision-frames.sock` descriptor broadcast and maps the `/dev/shm`
+//!   ring each descriptor names. Only the small descriptor crosses the socket,
+//!   and the pixels stay in shared memory: a frame carries a reference to its
+//!   slot and is copied out ([`FramePixels::into_bytes`]) only when the capture
+//!   loop actually selects it as a keyframe.
 //! - [`SyntheticFrameSource`] emits deterministic frames with no hardware, for
 //!   the SITL harness and demo runs.
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ados_protocol::framebus::{
@@ -22,7 +25,7 @@ use ados_protocol::state::STATE_V2_MAX_FRAME;
 use memmap2::Mmap;
 use tokio::net::UnixStream;
 
-/// One frame pulled from a source: the raw pixels plus what they are.
+/// One frame pulled from a source: where its pixels are plus what they are.
 #[derive(Debug, Clone)]
 pub struct CapturedFrame {
     pub camera_id: String,
@@ -30,7 +33,49 @@ pub struct CapturedFrame {
     pub width: u32,
     pub height: u32,
     pub format: FrameFormat,
-    pub bytes: Vec<u8>,
+    pub pixels: FramePixels,
+}
+
+/// A frame's pixels: already in memory, or still in the vision engine's
+/// shared-memory ring slot the descriptor named.
+///
+/// Most frames only feed the pose stream and never need their pixels, so a ring
+/// frame is not copied until [`into_bytes`](Self::into_bytes) — at full HD and
+/// 30 fps that is the difference between ~90 MB/s of copies and a few frames a
+/// second.
+#[derive(Clone)]
+pub enum FramePixels {
+    Owned(Vec<u8>),
+    Ring {
+        mmap: Arc<Mmap>,
+        slot: u32,
+        seq: u64,
+    },
+}
+
+impl std::fmt::Debug for FramePixels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Owned(b) => write!(f, "Owned({} bytes)", b.len()),
+            Self::Ring { slot, seq, .. } => write!(f, "Ring {{ slot: {slot}, seq: {seq} }}"),
+        }
+    }
+}
+
+impl FramePixels {
+    /// The pixel bytes. A ring slot is copied out under its seqlock; `None`
+    /// when the writer has recycled the slot since the descriptor was sent (or
+    /// the ring was recreated at a new size), so the frame is simply dropped.
+    pub fn into_bytes(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Owned(bytes) => Some(bytes),
+            Self::Ring { mmap, slot, seq } => {
+                let region: &[u8] = &mmap[..];
+                let layout = RingLayout::read_header(region)?;
+                read_slot(region, &layout, slot, seq).ok().flatten()
+            }
+        }
+    }
 }
 
 /// The frame source the daemon runs with.
@@ -61,8 +106,9 @@ pub struct VisionFrameSource {
     /// One mapping per ring, opened lazily and cached: `shm_name` → (mmap, dev,
     /// ino). The device+inode identity lets a vision restart (same deterministic
     /// ring name, new inode) or a ring recreate be detected so the dead mapping
-    /// is dropped instead of frozen forever.
-    mmaps: HashMap<String, (Mmap, u64, u64)>,
+    /// is dropped instead of frozen forever. Shared with the frames that
+    /// reference it, so a frame stays readable after a remap.
+    mmaps: HashMap<String, (Arc<Mmap>, u64, u64)>,
     /// Camera ids we have already warned about dropping, so a persistent
     /// vision↔atlas id mismatch is logged once per id, not on every frame.
     warned_unmatched: HashSet<String>,
@@ -101,11 +147,10 @@ impl VisionFrameSource {
         }
     }
 
-    /// Copy a frame's pixels out of the ring the descriptor names. `None` when
-    /// the ring is unmapped, the header is unreadable, or the slot was recycled
-    /// mid-read (the seqlock check failed) — the frame is dropped and the next
-    /// descriptor is awaited.
-    fn read_frame_from_ring(&mut self, desc: &FrameDescriptor) -> Option<Vec<u8>> {
+    /// The mapping of the ring a descriptor names, for a lazy slot read. `None`
+    /// when the ring is gone or its header is unreadable (the mapping is then
+    /// dropped so the next frame re-maps it).
+    fn ring_for(&mut self, desc: &FrameDescriptor) -> Option<Arc<Mmap>> {
         let path = format!("/dev/shm/{}", desc.shm_name);
         // Re-stat the ring file so a vision restart (same deterministic name, new
         // inode) or a ring recreate is detected: a cached mmap of an unlinked
@@ -127,40 +172,14 @@ impl VisionFrameSource {
         if !self.mmaps.contains_key(&desc.shm_name) {
             let file = std::fs::File::open(&path).ok()?;
             // SAFETY: the ring is a fixed-size, single-writer shared mapping; the
-            // seqlock in `read_slot` detects any write that races this read, so a
+            // seqlock in `read_slot` detects any write that races a read, so a
             // read-only view is sound.
             let mmap = unsafe { Mmap::map(&file) }.ok()?;
+            RingLayout::read_header(&mmap[..])?;
             self.mmaps
-                .insert(desc.shm_name.clone(), (mmap, ident.0, ident.1));
+                .insert(desc.shm_name.clone(), (Arc::new(mmap), ident.0, ident.1));
         }
-
-        enum Outcome {
-            Frame(Vec<u8>),
-            Skip,
-            Stale,
-        }
-        let outcome = {
-            let (mmap, _, _) = self.mmaps.get(&desc.shm_name).expect("just inserted");
-            let region: &[u8] = &mmap[..];
-            match RingLayout::read_header(region) {
-                Some(layout) => match read_slot(region, &layout, desc.slot, desc.seq) {
-                    Ok(Some(bytes)) => Outcome::Frame(bytes),
-                    Ok(None) => Outcome::Skip,
-                    // A layout mismatch means the ring was recreated at a new size;
-                    // drop the stale mapping so the next frame re-maps it.
-                    Err(_) => Outcome::Stale,
-                },
-                None => Outcome::Stale,
-            }
-        };
-        match outcome {
-            Outcome::Frame(b) => Some(b),
-            Outcome::Skip => None,
-            Outcome::Stale => {
-                self.mmaps.remove(&desc.shm_name);
-                None
-            }
-        }
+        self.mmaps.get(&desc.shm_name).map(|(m, _, _)| m.clone())
     }
 
     pub async fn next(&mut self) -> Option<CapturedFrame> {
@@ -214,17 +233,21 @@ impl VisionFrameSource {
                 }
                 continue;
             }
-            if let Some(bytes) = self.read_frame_from_ring(&desc) {
+            if let Some(mmap) = self.ring_for(&desc) {
                 return Some(CapturedFrame {
                     camera_id: desc.camera_id,
                     ts_ms: desc.ts_ms,
                     width: desc.width,
                     height: desc.height,
                     format: desc.format,
-                    bytes,
+                    pixels: FramePixels::Ring {
+                        mmap,
+                        slot: desc.slot,
+                        seq: desc.seq,
+                    },
                 });
             }
-            // A torn/stale slot: keep reading for the next descriptor.
+            // An unmapped ring: keep reading for the next descriptor.
         }
     }
 }
@@ -262,7 +285,7 @@ impl SyntheticFrameSource {
                 width,
                 height,
                 format: FrameFormat::Rgb24,
-                bytes: vec![(i % 256) as u8; (width * height * 3) as usize],
+                pixels: FramePixels::Owned(vec![(i % 256) as u8; (width * height * 3) as usize]),
             })
             .collect();
         Self::new(frames)

@@ -53,7 +53,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::state::AppState;
@@ -198,14 +197,16 @@ fn device_id_for_bt(mac: &str) -> String {
 // POST /api/v1/ground-station/bluetooth/scan
 // ---------------------------------------------------------------------------
 
-/// The `bluetooth/scan` request body. Mirrors the FastAPI `BluetoothScanRequest`:
-/// an optional `duration_s` (the Pydantic model constrains it to 1..=60 and the
-/// route defaults a missing value to 10).
+/// The `bluetooth/scan` request body: an optional `duration_s` (the Pydantic model constrains it
+/// to 1..=60 and the route defaults a missing value to 10).
 #[derive(Debug, Deserialize)]
 pub struct BluetoothScanRequest {
     #[serde(default)]
     pub duration_s: Option<i64>,
 }
+
+/// The longest discovery scan a request may hold the radio (and the request) for.
+const MAX_SCAN_SECONDS: i64 = 60;
 
 /// `POST /api/v1/ground-station/bluetooth/scan` → `{"devices": [...]}`.
 ///
@@ -221,7 +222,14 @@ pub async fn post_bluetooth_scan(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    let devices = scan_bluetooth(req.duration_s.unwrap_or(10)).await;
+    let duration_s = req.duration_s.unwrap_or(10);
+    if !(1..=MAX_SCAN_SECONDS).contains(&duration_s) {
+        return crate::routes::detail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("duration_s must be between 1 and {MAX_SCAN_SECONDS}"),
+        );
+    }
+    let devices = scan_bluetooth(duration_s).await;
     Json(json!({ "devices": devices })).into_response()
 }
 
@@ -251,8 +259,8 @@ async fn scan_bluetooth(duration_s: i64) -> Vec<Value> {
 // POST /api/v1/ground-station/bluetooth/pair
 // ---------------------------------------------------------------------------
 
-/// The `bluetooth/pair` request body. Mirrors the FastAPI `BluetoothPairRequest`:
-/// a required `mac` (the Pydantic model carries `min_length=1`).
+/// The `bluetooth/pair` request body: a required `mac` (the Pydantic model carries
+/// `min_length=1`).
 #[derive(Debug, Deserialize)]
 pub struct BluetoothPairRequest {
     pub mac: String,
@@ -387,18 +395,13 @@ async fn clear_primary_if_matches_at(
 /// path, draining the one-line reply. Best-effort: any IO error is swallowed (the
 /// caller treats it as a no-op). The socket path is threaded in (the caller
 /// resolves `hid_cmd_sock()` once) so a test drives it against a tempdir.
-async fn forward_hid_cmd_to(sock: &std::path::Path, request: &Value) -> std::io::Result<()> {
-    use tokio::io::AsyncReadExt;
-
-    let mut stream = tokio::net::UnixStream::connect(sock).await?;
-    let mut line = serde_json::to_vec(request)?;
-    line.push(b'\n');
-    stream.write_all(&line).await?;
-    stream.flush().await?;
-    // Drain the one-line reply so the daemon's write completes before we drop.
-    let mut buf = [0u8; 1024];
-    let _ = stream.read(&mut buf).await;
-    Ok(())
+async fn forward_hid_cmd_to(
+    sock: &std::path::Path,
+    request: &Value,
+) -> Result<(), crate::ipc::cmd::CmdFailure> {
+    crate::ipc::cmd::roundtrip_line(sock, request, crate::ipc::cmd::QUICK)
+        .await
+        .map(|_| ())
 }
 
 /// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`).

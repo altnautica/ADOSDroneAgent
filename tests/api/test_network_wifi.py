@@ -19,7 +19,7 @@ from tests.api_runtime_utils import build_api_runtime
 
 @pytest.fixture
 def client() -> TestClient:
-    runtime = build_api_runtime(uptime_seconds=0.0)
+    runtime = build_api_runtime()
     return TestClient(create_app(runtime))
 
 

@@ -2,21 +2,21 @@
 //!
 //! The ground-station profile exposes its mesh write surface under
 //! `/api/v1/ground-station/{role,mesh/gateway_preference,mesh/config}`. The
-//! matching reads live in [`crate::routes::gs_mesh`]; this module serves the
-//! three writes the front can reproduce faithfully now that the data-plane
-//! service carries a command socket.
+//! matching reads live in [`crate::routes::gs_mesh`].
 //!
 //! ## What ports here, and how
 //!
 //! - **`PUT /role`** — change the mesh role. The validation gates (profile,
 //!   mesh-capability, relay-must-be-paired, valid role) run here against the same
 //!   on-disk files the FastAPI route reads, then the transition itself
-//!   (stop/start + mask/unmask of the role-gated systemd units, the sentinel
-//!   flip, the `role_changed` event) is forwarded to the data-plane command
-//!   socket's `set_role` op. The socket reply carries the transition metadata the
-//!   FastAPI route returned (`role`/`previous`/`units_started`/`units_stopped`/
-//!   `ts_ms`/`noop`). A best-effort `ground_station.role` config persist follows,
-//!   mirroring the FastAPI route's post-apply save.
+//!   (stop/start + mask/unmask of the role units, the sentinel flip, the
+//!   `role_changed` event) is forwarded to the supervisor control socket's
+//!   `set_role` op. The supervisor executes it because it is the one process no
+//!   transition stops; the data plane's own socket lives inside a role unit. The
+//!   reply carries the transition metadata (`role`/`previous`/`units_started`/
+//!   `units_stopped`/`ts_ms`/`noop`). A best-effort `ground_station.role` config
+//!   persist follows, so the configured role the supervisor applies at boot
+//!   matches.
 //! - **`PUT /mesh/gateway_preference`** — pin a gateway / let batman auto-pick /
 //!   disable client mode. Forwarded to the `set_gateway_preference` op, which
 //!   persists `/etc/ados/mesh/gateway.json` and drives `batctl`. The route gates
@@ -50,17 +50,21 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use ados_supervisor::config::VALID_ROLES;
+
 use crate::config_store::{section, section_path, update_config};
 use crate::routes::gs_cmd::groundlink_cmd_roundtrip;
 use crate::state::AppState;
+
+/// How long the role write waits for the supervisor's reply: the transition
+/// stops and starts up to four systemd units, each bounded by the supervisor's
+/// own `systemctl` ceiling, and it waits behind an in-flight monitor pass.
+const ROLE_TRANSITION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Profile + role gating (mirrors the FastAPI `_require_ground_profile` +
 // `role_manager.get_current_role`, byte-identical to the read module).
 // ---------------------------------------------------------------------------
-
-/// The valid mesh roles, in advertised order. Mirrors `role_manager.VALID_ROLES`.
-const VALID_ROLES: [&str; 3] = ["direct", "relay", "receiver"];
 
 /// The carrier-config default, matching the Python `MeshConfig.carrier` default.
 const DEFAULT_CARRIER: &str = "802.11s";
@@ -156,13 +160,11 @@ fn has_persisted_identity() -> bool {
 // PUT /api/v1/ground-station/role — change the mesh role.
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../role` request body. Mirrors the FastAPI `RoleChangeRequest`:
-/// `role` plus an optional `confirm_token` (currently unused by the handler, but
-/// accepted so an old client's body still deserializes). The FastAPI model types
-/// `role` as a `Literal["direct","relay","receiver"]`, so an out-of-range value
-/// is a 422 there; the front has no such pre-validation, so an unknown role
-/// reaches the handler and is rejected with the FastAPI 400 `E_INVALID_ROLE` the
-/// in-process `apply_role`'s `ValueError` would surface.
+/// The `PUT .../role` request body: `role` plus an optional `confirm_token` (currently unused by the
+/// handler, but accepted so an old client's body still deserializes). The FastAPI model types
+/// `role` as a `Literal["direct","relay","receiver"]`, so an out-of-range value is a 422 there; the
+/// front has no such pre-validation, so an unknown role reaches the handler and is rejected with
+/// the FastAPI 400 `E_INVALID_ROLE` the in-process `apply_role`'s `ValueError` would surface.
 #[derive(Debug, Default, Deserialize)]
 pub struct RoleChangeRequest {
     #[serde(default)]
@@ -226,20 +228,20 @@ pub async fn put_role(
         );
     }
 
-    // Forward the transition to the data-plane command socket. The socket owns the
-    // systemctl orchestration + the sentinel flip + the role event; its reply
-    // carries the transition metadata the FastAPI route returned.
+    // Forward the transition to the supervisor. It owns the systemctl
+    // orchestration + the sentinel flip + the role event; its reply carries the
+    // transition metadata.
     let request = json!({"op": "set_role", "role": role, "reason": "rest"});
-    let reply = match groundlink_cmd_roundtrip(&request).await {
+    let reply = match supervisor_roundtrip(&request).await {
         Some(r) => r,
-        None => return socket_unavailable(),
+        None => return supervisor_unavailable(),
     };
     let result = match strip_ok(reply) {
         Ok(body) => body,
         Err(err) => {
-            // The socket reported a failure. The only failure the apply can return
-            // is an unknown role, which the route already pre-validated, so this is
-            // a belt-and-suspenders 400 with the socket's error code/message.
+            // The supervisor refused the transition: an unknown role (which the
+            // route pre-validated), a node that is not a ground station, or a
+            // bind that owns the radio adapter.
             return socket_error_to_response(err);
         }
     };
@@ -266,13 +268,11 @@ pub async fn put_role(
 // PUT /api/v1/ground-station/mesh/gateway_preference — gateway pin / auto / off.
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../mesh/gateway_preference` body. Mirrors the FastAPI
-/// `MeshGatewayPreferenceUpdate`: a required `mode` (`auto`/`pinned`/`off`) and an
-/// optional `pinned_mac`. The Pydantic `Literal` rejects an out-of-range mode with
-/// a 422; the front validates the mode here (the socket op rejects it too) and
-/// surfaces a 422-equivalent 400 only via the command-socket's own validation,
-/// which is not reachable for a typed-good mode. An unknown mode is forwarded and
-/// the socket's `E_INVALID_MODE` maps to a 400.
+/// The `PUT .../mesh/gateway_preference` body: a required `mode` (`auto`/`pinned`/`off`) and an
+/// optional `pinned_mac`. The Pydantic `Literal` rejects an out-of-range mode with a 422; the front
+/// validates the mode here (the socket op rejects it too) and surfaces a 422-equivalent 400 only
+/// via the command-socket's own validation, which is not reachable for a typed-good mode. An
+/// unknown mode is forwarded and the socket's `E_INVALID_MODE` maps to a 400.
 #[derive(Debug, Default, Deserialize)]
 pub struct MeshGatewayPreferenceUpdate {
     #[serde(default)]
@@ -342,12 +342,9 @@ pub async fn put_gateway_preference(
 // PUT /api/v1/ground-station/mesh/config — set the configured mesh transport.
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../mesh/config` body. Mirrors the FastAPI `MeshConfigUpdate`: three
-/// optional fields, each applied only when present. `carrier` is a
-/// `Literal["802.11s","ibss"]` on the FastAPI side and `channel` is `ge=1,le=13`;
-/// the front mirrors the valid path byte-for-byte and leaves the out-of-range
-/// rejection to the residual surface (a value outside those ranges is rare from
-/// the GCS, which sends only the typed values).
+/// The `PUT .../mesh/config` body: three optional fields, each applied only when present.
+/// [`validate_mesh_config`] holds `carrier` to `802.11s`/`ibss`, `channel` to 1..=13 and `mesh_id`
+/// to a 1..=32-byte printable name before anything is written.
 #[derive(Debug, Default, Deserialize)]
 pub struct MeshConfigUpdate {
     #[serde(default)]
@@ -378,8 +375,15 @@ pub async fn put_mesh_config(
 
 /// The merge logic against an explicit config path (a test points it at a temp
 /// file). The response mirrors the FastAPI handler, which echoes the post-mutation
-/// `mesh.{mesh_id,carrier,channel}` model values + `applied`.
+/// `mesh.{mesh_id,carrier,channel}` model values + `applied`. An out-of-range
+/// field is a 422 `E_INVALID_MESH_CONFIG` and nothing is written.
 fn put_mesh_config_at(config_path: &Path, update: &MeshConfigUpdate) -> Response {
+    if let Err(message) = validate_mesh_config(update) {
+        return nested_detail(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({"code": "E_INVALID_MESH_CONFIG", "message": message}),
+        );
+    }
     match merge_mesh_config(config_path, update) {
         Ok((mesh_id, carrier, channel, applied)) => Json(json!({
             "mesh_id": mesh_id,
@@ -394,6 +398,44 @@ fn put_mesh_config_at(config_path: &Path, update: &MeshConfigUpdate) -> Response
         )
             .into_response(),
     }
+}
+
+/// The mesh carriers the mesh manager can bring up.
+const MESH_CARRIERS: [&str; 2] = ["802.11s", "ibss"];
+
+/// The 2.4 GHz channels a mesh may use.
+const MESH_CHANNELS: std::ops::RangeInclusive<i64> = 1..=13;
+
+/// The longest mesh id 802.11s carries (the Mesh ID element, like an SSID).
+const MESH_ID_MAX_BYTES: usize = 32;
+
+/// Check every supplied field against what the mesh manager can apply. A value
+/// outside these bounds would be persisted and then fail at the next mesh
+/// bring-up, far from the request that wrote it.
+fn validate_mesh_config(update: &MeshConfigUpdate) -> Result<(), String> {
+    if let Some(carrier) = &update.carrier {
+        if !MESH_CARRIERS.contains(&carrier.as_str()) {
+            return Err(format!("carrier must be one of {MESH_CARRIERS:?}"));
+        }
+    }
+    if let Some(channel) = update.channel {
+        if !MESH_CHANNELS.contains(&channel) {
+            return Err(format!(
+                "channel must be between {} and {}",
+                MESH_CHANNELS.start(),
+                MESH_CHANNELS.end()
+            ));
+        }
+    }
+    if let Some(id) = &update.mesh_id {
+        let printable = id.bytes().all(|b| b.is_ascii_graphic());
+        if id.is_empty() || id.len() > MESH_ID_MAX_BYTES || !printable {
+            return Err(format!(
+                "mesh_id must be 1 to {MESH_ID_MAX_BYTES} printable ASCII characters with no spaces"
+            ));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -582,16 +624,31 @@ fn socket_error_to_response(err: SocketError) -> Response {
     nested_detail(StatusCode::BAD_REQUEST, Value::Object(error))
 }
 
-/// The front's no-link 503 when the data-plane command socket is unreachable. The
-/// FastAPI route runs the role transition in-process; the front cannot (it owns no
-/// systemd lifecycle), so an absent socket degrades to a 503 rather than a 500 —
-/// the same no-link posture the sibling write surfaces take on an absent seam.
-fn socket_unavailable() -> Response {
+/// The supervisor control socket under the run dir (`ADOS_RUN_DIR`, default
+/// `/run/ados`), the same resolution the supervisor binds it under.
+pub(crate) fn supervisor_sock() -> PathBuf {
+    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
+        .join(ados_supervisor::bind::control::SUPERVISOR_SOCK_NAME)
+}
+
+/// One `set_role` exchange with the supervisor control socket: the parsed object
+/// reply (its `ok` flag intact), or `None` when no object reply arrived within
+/// [`ROLE_TRANSITION_TIMEOUT`].
+async fn supervisor_roundtrip(request: &Value) -> Option<Value> {
+    crate::ipc::cmd::roundtrip_object(&supervisor_sock(), request, ROLE_TRANSITION_TIMEOUT)
+        .await
+        .ok()
+        .map(Value::Object)
+}
+
+/// The 503 when the supervisor control socket is unreachable: the front owns no
+/// systemd lifecycle, so it cannot run the transition itself.
+fn supervisor_unavailable() -> Response {
     nested_detail(
         StatusCode::SERVICE_UNAVAILABLE,
         json!({
-            "code": "E_GROUNDLINK_UNAVAILABLE",
-            "message": "ground-station command socket unavailable",
+            "code": "E_SUPERVISOR_UNAVAILABLE",
+            "message": "supervisor control socket unavailable",
         }),
     )
 }
@@ -681,11 +738,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socket_unavailable_is_a_503() {
-        let resp = socket_unavailable();
+    async fn supervisor_unavailable_is_a_503() {
+        let resp = supervisor_unavailable();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = body_json(resp).await;
-        assert_eq!(body["detail"]["error"]["code"], "E_GROUNDLINK_UNAVAILABLE");
+        assert_eq!(body["detail"]["error"]["code"], "E_SUPERVISOR_UNAVAILABLE");
     }
 
     // ── mesh/config merge ─────────────────────────────────────────────────────
@@ -801,6 +858,54 @@ mod tests {
         assert_eq!(mesh.get("channel").and_then(norway_to_i64), Some(6));
         assert!(mesh.get("mesh_id").is_none());
         assert!(mesh.get("carrier").is_none());
+    }
+
+    #[tokio::test]
+    async fn mesh_config_rejects_out_of_range_fields_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let original = "ground_station:\n  mesh:\n    carrier: 802.11s\n    channel: 6\n";
+        std::fs::write(&cfg, original).unwrap();
+        let bad = [
+            MeshConfigUpdate {
+                carrier: Some("wds".into()),
+                ..Default::default()
+            },
+            MeshConfigUpdate {
+                channel: Some(0),
+                ..Default::default()
+            },
+            MeshConfigUpdate {
+                channel: Some(14),
+                ..Default::default()
+            },
+            MeshConfigUpdate {
+                mesh_id: Some(String::new()),
+                ..Default::default()
+            },
+            MeshConfigUpdate {
+                mesh_id: Some("a".repeat(33)),
+                ..Default::default()
+            },
+            MeshConfigUpdate {
+                mesh_id: Some("site b".into()),
+                ..Default::default()
+            },
+        ];
+        for update in &bad {
+            let resp = put_mesh_config_at(&cfg, update);
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{update:?}"
+            );
+            let body = body_json(resp).await;
+            assert_eq!(
+                body["detail"]["error"]["code"],
+                json!("E_INVALID_MESH_CONFIG")
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), original);
     }
 
     // ── ground_station.role best-effort persist ───────────────────────────────

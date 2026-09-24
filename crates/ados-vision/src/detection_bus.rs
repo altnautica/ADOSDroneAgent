@@ -57,7 +57,7 @@ pub fn encode_batch_frame(batch: &DetectionBatch) -> anyhow::Result<Vec<u8>> {
 pub async fn serve(
     engine: Arc<VisionEngine>,
     socket_path: &str,
-    cancel: Arc<tokio::sync::Notify>,
+    cancel: ados_protocol::shutdown::Shutdown,
 ) -> anyhow::Result<()> {
     // keep_last = true so a browser that connects after a detection still
     // gets the latest box set immediately. inbound = None: broadcast only.
@@ -84,7 +84,7 @@ pub async fn serve(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
         }
     }
     // Dropping `server` unbinds the socket and aborts client tasks.
@@ -98,7 +98,6 @@ mod tests {
     use ados_protocol::framebus::{BoundingBox, Detection, VISION_DETECTION_VERSION};
     use ados_protocol::ipc::{connect_with_retry, read_length_prefixed};
     use std::time::Duration;
-    use tokio::sync::Notify;
 
     fn sample_batch() -> DetectionBatch {
         DetectionBatch {
@@ -144,7 +143,7 @@ mod tests {
     #[tokio::test]
     async fn published_detection_reaches_a_socket_subscriber() {
         let engine = crate::engine::VisionEngine::new(Box::new(crate::backend::MockBackend), 4);
-        let cancel = Arc::new(Notify::new());
+        let cancel = ados_protocol::shutdown::Shutdown::new();
 
         let dir = tempfile::tempdir().unwrap();
         let sock = dir
@@ -179,14 +178,31 @@ mod tests {
         let got = DetectionBatch::from_msgpack(&payload).unwrap();
         assert_eq!(got, batch);
 
-        cancel.notify_waiters();
+        cancel.trigger();
         let _ = server.await;
+    }
+
+    /// A stop that lands while the server is busy (here: before it ever
+    /// reaches its wait) must still end it. The service stops by firing the
+    /// signal once and joining every task, so a signal that only wakes current
+    /// waiters left a busy loop running until the service manager killed it.
+    #[tokio::test]
+    async fn a_stop_fired_before_the_server_waits_still_ends_it() {
+        let engine = crate::engine::VisionEngine::new(Box::new(crate::backend::MockBackend), 4);
+        let cancel = ados_protocol::shutdown::Shutdown::new();
+        cancel.trigger();
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("d.sock").to_string_lossy().to_string();
+        tokio::time::timeout(Duration::from_secs(2), serve(engine, &sock, cancel))
+            .await
+            .expect("serve must return on an already-fired stop")
+            .unwrap();
     }
 
     #[tokio::test]
     async fn late_subscriber_gets_the_last_batch_replayed() {
         let engine = crate::engine::VisionEngine::new(Box::new(crate::backend::MockBackend), 4);
-        let cancel = Arc::new(Notify::new());
+        let cancel = ados_protocol::shutdown::Shutdown::new();
 
         let dir = tempfile::tempdir().unwrap();
         let sock = dir
@@ -227,7 +243,7 @@ mod tests {
         let got = DetectionBatch::from_msgpack(&payload).unwrap();
         assert_eq!(got, batch);
 
-        cancel.notify_waiters();
+        cancel.trigger();
         let _ = server.await;
     }
 }

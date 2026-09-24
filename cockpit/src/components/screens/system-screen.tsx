@@ -23,6 +23,7 @@ import {
   TileGrid,
   type Tone,
 } from "@/components/ui/data";
+import { useProfile } from "@/hooks/use-profile";
 import { useResource } from "@/hooks/use-resource";
 import { useTelemetryContext } from "@/hooks/telemetry-context";
 import { apiFetch, startRecording, stopRecording } from "@/lib/api";
@@ -86,6 +87,8 @@ function shortName(name: string): string {
 
 export function SystemScreen() {
   const { status } = useTelemetryContext();
+  // The recorder and its file list exist only on a ground station.
+  const hasRecorder = useProfile() === "ground_station";
   const sys = useResource<SystemResources>(
     useCallback((s) => apiFetch<SystemResources>("/api/system", { signal: s }), []),
     2000,
@@ -98,8 +101,14 @@ export function SystemScreen() {
     useCallback((s) => apiFetch<ServicesResponse>("/api/services", { signal: s }), []),
     3000,
   );
-  const recording = useResource<RecordingList>(
-    useCallback((s) => apiFetch<RecordingList>("/api/v1/ground-station/recording/list", { signal: s }), []),
+  const recording = useResource<RecordingList | null>(
+    useCallback(
+      (s) =>
+        hasRecorder
+          ? apiFetch<RecordingList>("/api/v1/ground-station/recording/list", { signal: s })
+          : Promise.resolve(null),
+      [hasRecorder],
+    ),
     3000,
   );
 
@@ -188,31 +197,35 @@ export function SystemScreen() {
         {board?.name ? <Row label="Board" value={board.name} hint={[board.soc, board.arch].filter(Boolean).join(" · ") || undefined} /> : null}
         {board?.ram_total_mb ? <Row label="RAM installed" value={fmtMb(board.ram_total_mb)} /> : null}
 
-        <SectionHeader>Recording</SectionHeader>
-        <div className="flex items-center gap-[0.5rem]">
-          <Dot tone={isRecording ? "err" : "muted"} />
-          <span className="flex-1 truncate text-[0.85rem] text-surface-foreground">
-            {isRecording ? recording.data?.current_filename ?? "recording…" : "idle"}
-          </span>
-          <ActionButton
-            label={isRecording ? "Stop" : "Record"}
-            icon={isRecording ? Square : Circle}
-            onClick={toggleRecord}
-            variant={isRecording ? "danger" : "default"}
-            busy={recordBusy}
-          />
-        </div>
-        {recording.data?.items?.length ? (
-          <div className="mt-[0.2rem] flex flex-col gap-[0.15rem]">
-            {recording.data.items.slice(0, 4).map((it, i) => (
-              <Row
-                key={(it.filename ?? "") + i}
-                label={it.filename ?? DASH}
-                hint={fmtClock(it.mtime)}
-                value={fmtBytes(it.size_bytes)}
+        {hasRecorder ? (
+          <>
+            <SectionHeader>Recording</SectionHeader>
+            <div className="flex items-center gap-[0.5rem]">
+              <Dot tone={isRecording ? "err" : "muted"} />
+              <span className="flex-1 truncate text-[0.85rem] text-surface-foreground">
+                {isRecording ? recording.data?.current_filename ?? "recording…" : "idle"}
+              </span>
+              <ActionButton
+                label={isRecording ? "Stop" : "Record"}
+                icon={isRecording ? Square : Circle}
+                onClick={toggleRecord}
+                variant={isRecording ? "danger" : "default"}
+                busy={recordBusy}
               />
-            ))}
-          </div>
+            </div>
+            {recording.data?.items?.length ? (
+              <div className="mt-[0.2rem] flex flex-col gap-[0.15rem]">
+                {recording.data.items.slice(0, 4).map((it, i) => (
+                  <Row
+                    key={(it.filename ?? "") + i}
+                    label={it.filename ?? DASH}
+                    hint={fmtClock(it.mtime)}
+                    value={fmtBytes(it.size_bytes)}
+                  />
+                ))}
+              </div>
+            ) : null}
+          </>
         ) : null}
 
         <SectionHeader>

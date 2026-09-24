@@ -26,38 +26,37 @@ interface NavItem {
   to: string;
   label: string;
   icon: LucideIcon;
-  enabled: boolean;
 }
 
-const COMMON_TOP: NavItem[] = [{ to: "/", label: "Home", icon: Home, enabled: true }];
+const COMMON_TOP: NavItem[] = [{ to: "/", label: "Home", icon: Home }];
 
 const COMMON_BOTTOM: NavItem[] = [
-  { to: "/pairing", label: "Pairing", icon: Link2, enabled: true },
-  { to: "/plugins", label: "Plugins", icon: Plug, enabled: true },
-  { to: "/peripherals", label: "Peripherals", icon: Cpu, enabled: true },
-  { to: "/logs", label: "Logs", icon: ScrollText, enabled: true },
-  { to: "/diagnostics", label: "Diagnostics", icon: Wrench, enabled: true },
-  { to: "/settings", label: "Settings", icon: SettingsIcon, enabled: true },
+  { to: "/pairing", label: "Pairing", icon: Link2 },
+  { to: "/plugins", label: "Plugins", icon: Plug },
+  { to: "/peripherals", label: "Peripherals", icon: Cpu },
+  { to: "/logs", label: "Logs", icon: ScrollText },
+  { to: "/diagnostics", label: "Diagnostics", icon: Wrench },
+  { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];
 
 function droneItems(): NavItem[] {
   return [
-    { to: "/telemetry", label: "Telemetry", icon: Radio, enabled: true },
-    { to: "/video", label: "Video", icon: Video, enabled: true },
-    { to: "/transmit", label: "WFB Transmit", icon: Antenna, enabled: true },
+    { to: "/telemetry", label: "Telemetry", icon: Radio },
+    { to: "/video", label: "Video", icon: Video },
+    { to: "/transmit", label: "WFB Transmit", icon: Antenna },
   ];
 }
 
 function groundItems(role: GroundRole): NavItem[] {
   const items: NavItem[] = [
-    { to: "/receive", label: "WFB Receive", icon: Antenna, enabled: true },
-    { to: "/io", label: "Display & Joystick", icon: Gamepad2, enabled: true },
+    { to: "/receive", label: "WFB Receive", icon: Antenna },
+    { to: "/io", label: "Display & Joystick", icon: Gamepad2 },
   ];
   if (role === "relay" || role === "receiver") {
-    items.push({ to: "/mesh", label: "Mesh", icon: Network, enabled: true });
+    items.push({ to: "/mesh", label: "Mesh", icon: Network });
   }
   if (role === "receiver") {
-    items.push({ to: "/sources", label: "Sources", icon: Layers, enabled: true });
+    items.push({ to: "/sources", label: "Sources", icon: Layers });
   }
   return items;
 }
@@ -75,28 +74,6 @@ interface SidebarLinkProps {
 
 function SidebarLink({ item, collapsed }: SidebarLinkProps) {
   const Icon = item.icon;
-
-  if (!item.enabled) {
-    return (
-      <div
-        className={cn(
-          "flex items-center gap-3 px-3 py-2 text-sm rounded-md",
-          "text-muted-foreground/50 cursor-not-allowed select-none",
-        )}
-        title={collapsed ? `${item.label} — coming soon` : "coming soon"}
-      >
-        <Icon className="h-4 w-4 shrink-0" />
-        {!collapsed && (
-          <>
-            <span className="flex-1">{item.label}</span>
-            <span className="text-[9px] uppercase tracking-wider opacity-60">
-              soon
-            </span>
-          </>
-        )}
-      </div>
-    );
-  }
 
   return (
     <NavLink
@@ -128,8 +105,7 @@ export function Sidebar() {
 
   const profileItems = itemsForProfile(profile, role);
 
-  // Auto-close the mobile drawer on navigation (NavLink click).
-  // Implementation: every SidebarLink calls closeMobileNav on click.
+  // The mobile drawer closes on any click inside its nav (see navList).
 
   const navList = (mobileMode: boolean) => (
     <nav

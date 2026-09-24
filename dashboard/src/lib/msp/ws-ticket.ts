@@ -12,8 +12,7 @@
  * @license GPL-3.0-only
  */
 
-import { getApiKey } from "@/lib/api-key";
-import { getSession } from "@/lib/session";
+import { credentialHeaders } from "@/lib/api";
 
 /** Subprotocol marker the agent expects before a presented ticket. */
 export const WS_TICKET_PROTOCOL = "ados-ws-ticket";
@@ -21,11 +20,10 @@ export const WS_TICKET_PROTOCOL = "ados-ws-ticket";
 /** Mint a `gs.mavlink_ws` ticket, or null when none can be minted (unpaired /
  *  open posture / mint failure) so the caller dials bare. */
 export async function mintMavlinkWsTicket(signal?: AbortSignal): Promise<string | null> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const session = getSession();
-  if (session) headers["X-ADOS-Dashboard-Session"] = session;
-  const key = getApiKey();
-  if (key) headers["X-ADOS-Key"] = key;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...credentialHeaders(),
+  };
 
   try {
     const res = await fetch("/api/_ws/ticket", {

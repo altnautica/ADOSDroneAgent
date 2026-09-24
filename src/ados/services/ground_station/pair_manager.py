@@ -352,7 +352,7 @@ class PairManager:
         # until keys appear, but it samples key existence on its own
         # backoff cadence. A unit restart is the prompt path to a new
         # spawn cycle that picks up the freshly written file.
-        if not _systemctl("restart", unit):
+        if not await asyncio.to_thread(_systemctl, "restart", unit):
             log.info(
                 "wfb_unit_restart_skipped",
                 unit=unit,
@@ -404,7 +404,7 @@ class PairManager:
         )
 
         unit = self._wfb_unit_for_role(role)
-        _systemctl("restart", unit)
+        await asyncio.to_thread(_systemctl, "restart", unit)
 
         log.warning("unpair_complete", role=role)
 

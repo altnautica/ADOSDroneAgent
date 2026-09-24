@@ -17,8 +17,11 @@
 //! [`logd_client`] is the read side of the hardware-store seam: the status route
 //! reads the most-recent CPU / memory / disk / temperature snapshots back from
 //! the logging store's query socket (the continuous collector samples them), so
-//! the surface never probes the host itself. A missing store degrades the route
-//! to its zero-valued health default rather than failing it.
+//! the surface never probes the host itself. A missing store falls back to a
+//! direct host read, and any field neither source measured is served as `null`.
+//!
+//! [`cmd`] is the one bounded exchange with the sibling daemons' newline-JSON
+//! command sockets.
 //!
 //! [`swarm_client`] is the read side of the swarm-bus seam: `ados-swarmbus` owns
 //! `/run/ados/swarm.sock` and publishes the fleet's neighbour table there at 2 Hz.
@@ -26,6 +29,7 @@
 //! degrades to a structurally-complete empty table rather than failing.
 
 pub mod atlas_control_client;
+pub mod cmd;
 pub mod logd_client;
 pub mod mavlink_client;
 pub mod plugin_control_client;

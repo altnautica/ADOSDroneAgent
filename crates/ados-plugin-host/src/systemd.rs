@@ -199,6 +199,7 @@ pub fn render_unit(
     // fixed hardening; these lines change with the operator's grants, which is
     // why a grant or revoke re-renders the unit.
     let sandbox = sandbox_directives(granted, loopback_guard_active).join("\n");
+    let hardening = HARDENING_DIRECTIVES.join("\n");
     Ok(Some(format!(
         "\
 [Unit]
@@ -225,18 +226,7 @@ StandardOutput=append:{log_path}
 StandardError=append:{log_path}
 User=ados
 Group=ados
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-LockPersonality=yes
-RestrictRealtime=yes
-RestrictSUIDSGID=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-ProtectProc=invisible
-RestrictNamespaces=yes
-SystemCallArchitectures=native
+{hardening}
 # ---- capability sandbox (re-rendered on every grant/revoke) ----
 {sandbox}
 
@@ -253,8 +243,36 @@ WantedBy=ados-supervisor.service
         max_cpu_percent = res.max_cpu_percent,
         max_pids = res.max_pids,
         log_path = log_path,
+        hardening = hardening,
         sandbox = sandbox,
     )))
+}
+
+/// The fixed hardening every plugin-authored process runs under: the main
+/// runner unit, each declared service unit, and each readiness probe.
+pub const HARDENING_DIRECTIVES: &[&str] = &[
+    "NoNewPrivileges=yes",
+    "PrivateTmp=yes",
+    "ProtectSystem=strict",
+    "LockPersonality=yes",
+    "RestrictRealtime=yes",
+    "RestrictSUIDSGID=yes",
+    "ProtectKernelTunables=yes",
+    "ProtectKernelModules=yes",
+    "ProtectControlGroups=yes",
+    "ProtectProc=invisible",
+    "RestrictNamespaces=yes",
+    "SystemCallArchitectures=native",
+];
+
+/// The append-log path for one declared service, in the same directory and
+/// with the same suffix the janitor bounds.
+pub(crate) fn service_log_path_for(plugin_id: &str, service_name: &str) -> String {
+    format!(
+        "{PLUGIN_LOG_DIR}/{}-{}{PLUGIN_LOG_SUFFIX}",
+        sanitize_unit_name(plugin_id),
+        sanitize_unit_name(service_name)
+    )
 }
 
 /// Refuse a value that is not a single unit-file token (see [`render_unit`]).

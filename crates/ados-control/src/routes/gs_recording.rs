@@ -13,6 +13,9 @@
 //!   capture (`SIGTERM` → wait → `SIGKILL`) and returns
 //!   `{filename, stopped_at, duration_seconds, size_bytes}`. No active capture
 //!   is a `409`.
+//! - **`POST /api/video/record/{start,stop}`** — the same two legs on any
+//!   profile, with no ground-station gate: the recorder taps this node's own
+//!   mediamtx `main` path, which on a drone is its own camera.
 //!
 //! ## Why the recorder is held in-process here (the working write path)
 //!
@@ -169,8 +172,7 @@ fn recorder_error(err: &RecorderError) -> Response {
 // POST /api/v1/ground-station/recording/start
 // ---------------------------------------------------------------------------
 
-/// The `POST .../recording/start` request body. Mirrors the FastAPI
-/// `RecordingStartRequest`: an optional `filename_hint` (the recorder sanitises
+/// The `POST .../recording/start` request body: an optional `filename_hint` (the recorder sanitises
 /// + truncates it). Absent → `None`, recording with a bare timestamp name.
 #[derive(Debug, Deserialize)]
 pub struct RecordingStartRequest {
@@ -187,12 +189,19 @@ pub struct RecordingStartRequest {
 /// error-object detail body.
 pub async fn post_recording_start(
     State(state): State<AppState>,
-    Json(req): Json<RecordingStartRequest>,
+    req: Option<Json<RecordingStartRequest>>,
 ) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    match recorder().start(req.filename_hint.as_deref()).await {
+    start_recording(req).await
+}
+
+/// The start leg both recording surfaces share. The body is optional: a bare
+/// `POST` (no `filename_hint`) records under a timestamp name.
+async fn start_recording(req: Option<Json<RecordingStartRequest>>) -> Response {
+    let hint = req.and_then(|Json(r)| r.filename_hint);
+    match recorder().start(hint.as_deref()).await {
         Ok(body) => json_ok(body),
         Err(err) => {
             tracing::warn!(code = %err.code, message = %err.message, "recording start rejected");
@@ -215,6 +224,11 @@ pub async fn post_recording_stop(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
+    stop_recording().await
+}
+
+/// The stop leg both recording surfaces share.
+async fn stop_recording() -> Response {
     match recorder().stop().await {
         Ok(body) => json_ok(body),
         Err(err) => {
@@ -222,6 +236,26 @@ pub async fn post_recording_stop(State(state): State<AppState>) -> Response {
             recorder_error(&err)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/video/record/{start,stop} — the node-local recorder on any profile.
+// ---------------------------------------------------------------------------
+
+/// `POST /api/video/record/start` → `{filename, started_at, path}`.
+///
+/// The same recorder the ground-station routes drive, on any profile: it taps
+/// this node's own mediamtx `main` path, which on a drone is its camera and on a
+/// ground station the relayed drone. Same error mapping as the ground-station
+/// start. The body is optional (`{filename_hint}`).
+pub async fn post_video_record_start(req: Option<Json<RecordingStartRequest>>) -> Response {
+    start_recording(req).await
+}
+
+/// `POST /api/video/record/stop` → `{filename, stopped_at, duration_seconds,
+/// size_bytes}`; `409 E_RECORDING_NOT_ACTIVE` when nothing is recording.
+pub async fn post_video_record_stop() -> Response {
+    stop_recording().await
 }
 
 /// A `200` JSON body. The recorder returns the body as a `serde_json::Value`
@@ -285,6 +319,18 @@ mod tests {
                 "code": "E_RECORDING_ACTIVE",
                 "message": "a recording is already in progress",
             }}})
+        );
+    }
+
+    #[tokio::test]
+    async fn the_node_local_stop_answers_without_a_profile_gate() {
+        // Nothing is recording, so the honest answer is the 409 not-active body,
+        // never the ground-station profile 404 or a fabricated success.
+        let resp = post_video_record_stop().await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(resp).await["detail"]["error"]["code"],
+            json!("E_RECORDING_NOT_ACTIVE")
         );
     }
 

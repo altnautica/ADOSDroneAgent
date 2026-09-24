@@ -20,14 +20,6 @@ transport defenses that run before the supervisor sees the bytes:
 * Total body capped at :data:`MAX_PLUGIN_ARCHIVE_SIZE`.
 * Optional SHA-256 pin compared against the streamed bytes — the
   registry publishes the hash so the GCS can pass it through.
-
-NOTE: there is intentional overlap between this module and
-``ados.plugins.remote_install._download_with_refresh``. The cloud-relay
-path adds a signed-URL refresh ladder and the Convex host allowlist;
-this REST path is a one-shot download from a public release asset.
-A future cleanup pass can dedupe both into one streaming downloader
-that takes a host policy. Keeping the two paths distinct for now to
-avoid coupling the REST shape to the cloud-relay command-queue shape.
 """
 
 from __future__ import annotations

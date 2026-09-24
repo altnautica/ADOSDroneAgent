@@ -1,15 +1,18 @@
 // L0 — the full-bleed video layer. Owns one playback session against the
 // agent's :8080 proxy and paints it edge-to-edge behind the HUD.
 //
-// Transport cascade (ported from the dashboard's VideoPanel):
+// Transport cascade (the same order the dashboard's video panel uses):
 //   WHEP first  — low latency (~100-300 ms) on the local / same-origin path.
-//   HLS fallback — ~3-5 s latency but Robut: WebRTC ICE will not traverse
+//   HLS fallback — ~3-5 s latency but robust: WebRTC ICE will not traverse
 //     Tailscale / remote hops (mediamtx answers with LAN candidates), so a
 //     remote viewer that sticks to WHEP-only sees "No video source". On WHEP
 //     failure we fall back to the relative HLS endpoint instead of giving up.
 //
-// On every-transport failure it retries with backoff and surfaces an honest
-// connecting/no-feed state rather than a frozen black frame. The Feed re-points
+// On every-transport failure it retries on a fixed cadence and surfaces an
+// honest connecting/no-feed state rather than a frozen black frame. "Live" means
+// a frame has decoded (`loadeddata`), not that a handshake finished: a
+// negotiated session over a black frame still reads "connecting". An HLS
+// session that dies later is reported and retried. The Feed re-points
 // it (a different `whepUrl`/`hlsUrl` for another camera, or a bumped
 // `reconnectKey` for a manual refresh) by changing its props.
 
@@ -19,8 +22,8 @@ import { useFeedStore } from "@/stores/feed-store";
 import { startWhep, type WhepSession } from "@/lib/whep";
 import { startHls, type HlsSession } from "@/lib/hls";
 
-const RETRY_MIN_MS = 1500;
-const RETRY_MAX_MS = 8000;
+/** Fixed pause before a failed feed is retried (no backoff, no cap). */
+const RETRY_MS = 3000;
 
 type FeedState = "connecting" | "live" | "error";
 type Transport = "whep" | "hls";
@@ -49,7 +52,6 @@ export function VideoLayer({
     let cancelled = false;
     let whep: WhepSession | null = null;
     let hls: HlsSession | null = null;
-    let retryMs = RETRY_MIN_MS;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
 
@@ -70,13 +72,25 @@ export function VideoLayer({
       else setVideoStatus(s, null, null);
     };
 
+    // A transport that negotiated is only a candidate; the feed is live once
+    // the element decodes a frame.
+    let negotiated = false;
+    const onFrame = () => {
+      if (negotiated && !cancelled) setBoth("live");
+    };
+    const onResize = () => {
+      if (negotiated && !cancelled) publishLive();
+    };
+
     const el = videoRef.current;
     if (el) {
-      el.addEventListener("loadedmetadata", publishLive);
-      el.addEventListener("resize", publishLive);
+      el.addEventListener("loadeddata", onFrame);
+      el.addEventListener("loadedmetadata", onResize);
+      el.addEventListener("resize", onResize);
     }
 
     const teardown = () => {
+      negotiated = false;
       const w = whep;
       whep = null;
       if (w) w.close().catch(() => undefined);
@@ -99,9 +113,10 @@ export function VideoLayer({
         }
         if (result.ok && result.session) {
           whep = result.session;
-          retryMs = RETRY_MIN_MS;
+          negotiated = true;
+          // A frame may already have decoded before the handshake resolved.
+          if (target.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) onFrame();
           setTransport("whep");
-          setBoth("live");
           result.session.pc.addEventListener("connectionstatechange", () => {
             const cs = result.session?.pc.connectionState;
             // A session that was live but drops (radio fade / RTP stall over
@@ -116,13 +131,14 @@ export function VideoLayer({
 
       // WHEP gave up (typically ICE not traversing a remote hop). Fall back to HLS.
       if (hlsUrl) {
-        const result = await startHls(hlsUrl, target);
+        const result = await startHls(hlsUrl, target, onHlsLost);
         if (cancelled) return;
         if (result.ok && result.session) {
           hls = result.session;
-          retryMs = RETRY_MIN_MS;
+          negotiated = true;
+          // A frame may already have decoded before the handshake resolved.
+          if (target.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) onFrame();
           setTransport("hls");
-          setBoth("live");
           return;
         }
       }
@@ -144,18 +160,27 @@ export function VideoLayer({
       const w = whep;
       whep = null;
       if (w) w.close().catch(() => undefined);
-      const result = await startHls(hlsUrl, target);
+      const result = await startHls(hlsUrl, target, onHlsLost);
       if (cancelled) return;
       if (result.ok && result.session) {
         hls = result.session;
-        retryMs = RETRY_MIN_MS;
+        negotiated = true;
+        if (target.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) onFrame();
         setTransport("hls");
-        setBoth("live");
         return;
       }
       setBoth("error");
       scheduleRetry();
     };
+
+    // An established HLS session died beyond hls.js's own recovery.
+    function onHlsLost() {
+      if (cancelled) return;
+      hls = null;
+      negotiated = false;
+      setBoth("error");
+      scheduleRetry();
+    }
 
     const scheduleRetry = () => {
       if (cancelled || retryTimer) return;
@@ -163,8 +188,7 @@ export function VideoLayer({
         retryTimer = null;
         teardown();
         void attemptCascade();
-      }, retryMs);
-      retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
+      }, RETRY_MS);
     };
 
     void attemptCascade();
@@ -174,8 +198,9 @@ export function VideoLayer({
       controller.abort();
       if (retryTimer) clearTimeout(retryTimer);
       if (el) {
-        el.removeEventListener("loadedmetadata", publishLive);
-        el.removeEventListener("resize", publishLive);
+        el.removeEventListener("loadeddata", onFrame);
+        el.removeEventListener("loadedmetadata", onResize);
+        el.removeEventListener("resize", onResize);
       }
       // Reset the shared state so a stale "live" never lingers after the feed
       // unmounts (leaving the Feed screen).

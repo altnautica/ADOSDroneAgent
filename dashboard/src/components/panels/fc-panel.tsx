@@ -67,7 +67,7 @@ export function FcPanel() {
           <Row label="firmware" value={mspVariantLabel(variant)} mono={false} />
           <Row label="telemetry" value="via MSP" mono={false} />
           {fc?.fc_port ? (
-            <Row label="port" value={`${fc.fc_port} @ ${fc.fc_baud}`} />
+            <Row label="port" value={`${fc.fc_port} @ ${fc.fc_baud ?? "—"}`} />
           ) : null}
         </CardContent>
       </Card>
@@ -120,10 +120,12 @@ export function FcPanel() {
           value={
             <span className="uppercase">
               {fc.mode || "—"}
-              {fc.armed ? (
+              {fc.armed === true ? (
                 <span className="ml-2 text-warn">ARMED</span>
-              ) : (
+              ) : fc.armed === false ? (
                 <span className="ml-2 text-muted-foreground">disarmed</span>
+              ) : (
+                <span className="ml-2 text-muted-foreground">arm state —</span>
               )}
             </span>
           }
@@ -145,9 +147,8 @@ export function FcPanel() {
               : "—"
           }
         />
-        <Row label="link" value={fmtPercent(fc.link_quality)} />
         <Row label="rc" value={fmtPercent(fc.rc)} />
-        <Row label="port" value={`${fc.fc_port} @ ${fc.fc_baud}`} />
+        <Row label="port" value={fc.fc_port ? `${fc.fc_port} @ ${fc.fc_baud ?? "—"}` : "—"} />
       </CardContent>
     </Card>
   );

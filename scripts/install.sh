@@ -310,11 +310,14 @@ fetch() {
     url="$1"; dest="$2"; force4="${3:-}"
     # --continue-at - resumes a partial transfer so a mid-download drop on a
     # flaky link continues from the last byte instead of restarting from zero.
+    # The transfer is bounded on a STALL (under 1 KB/s for 60 s), not on total
+    # time: a flat ceiling kills a slow but healthy link mid-download, which is
+    # the same lesson the installer's own fetcher encodes.
     if command -v curl >/dev/null 2>&1; then
         if [ -n "$force4" ]; then
-            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 2 --continue-at - -4 "$url" -o "$dest"
+            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --speed-time 60 --speed-limit 1024 --retry 3 --retry-delay 2 --continue-at - -4 "$url" -o "$dest"
         else
-            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 2 --continue-at - "$url" -o "$dest"
+            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --speed-time 60 --speed-limit 1024 --retry 3 --retry-delay 2 --continue-at - "$url" -o "$dest"
         fi
     elif command -v wget >/dev/null 2>&1; then
         wget --inet4-only --header='Cache-Control: no-cache' --header='Pragma: no-cache' -q -O "$dest" "$url"

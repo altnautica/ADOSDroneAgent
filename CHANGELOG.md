@@ -4,6 +4,77 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.99.380] - 2026-09-24
+
+### Security
+
+- A workstation issues scoped credentials to the drones it is paired with,
+  and its Atlas ingest, world stream, offload stream, artifact and job routes
+  refuse any off-box caller without one. Mission Control provisions the
+  credential when it holds both nodes; the drone installs it through a new
+  native route and presents it on every workstation lane.
+- The plugin state read refuses an id that leaves the plugin directory.
+- The relay HMAC gate verifies the signature before it records the nonce, and
+  refuses a non-finite timestamp.
+- The ground-station beacon shared key is written owner-only and a fleet join
+  never re-keys an installed key.
+- The Black Box LAN query edge refuses relayed callers while unpaired, and
+  ingest no longer trusts a producer's self-declared source.
+- Log redaction keeps only a secret's length, in both the Rust and Python
+  producers.
+
+### Fixed
+
+- Ground-station role transitions run in the supervisor, so switching a
+  node from direct to relay can no longer stop the process doing the switch.
+  `ados-wfb-rx` belongs to the direct role only, so a relay or receiver never
+  runs two WFB planes on one adapter.
+- A ground-station key install or unpair answers before its receive plane
+  restarts.
+- WFB transmit watchdogs judge each plane from its own injected-packet
+  counters. Receiver and relay statistics parse the format `wfb_rx` actually
+  prints, and an exited relay forwarder is respawned.
+- MAVLink "not reported" sentinels are published as null on the state socket
+  (state wire version 4) instead of as readings.
+- The vehicle-state snapshot, mesh state, hardware rows and five sidecar
+  readers stop serving values after their producer goes quiet, and treat a
+  future-dated file as stale.
+- Command sockets, logd queries and supervisor `systemctl` calls are bounded
+  by timeouts.
+- A TX-power write is persisted only once the radio confirms it.
+- Recovery loops across the radio, video, installer and cloud paths retry on a
+  fixed interval with no attempt cap.
+- The installer enables and starts the mesh pairing daemon on ground
+  stations, and apt never stops to ask about a changed config file.
+- The video pipeline keeps retrying a failing encoder, drains ffmpeg's stderr
+  so recording does not stall, and applies the primary leg's settings to the
+  primary encoder.
+- Plugin reinstalls stop the running plugin before swapping files and keep the
+  working install when the new archive is refused.
+- The dashboard snapshot no longer reports the configured bitrate as live and
+  reads the router's real vehicle-state keys.
+
+### Changed
+
+- The daily plugin auto-update check runs in `ados-cloud` (Rust). `ados plugin
+  check-updates` keeps the on-demand check.
+- The built-in geofence, telemetry-logger and MAVLink-inspector plugins ship
+  as subprocess plugins.
+- Native routes: `GET/PUT /api/config`, `GET /api/logs`, `GET /api/logs/stream`,
+  `GET/POST /api/wfb/pair/local-bind`, `POST /api/wfb/pair/unpair`,
+  `POST /api/v1/ground-station/pair/{accept,close,approve,revoke,join}`,
+  `POST /api/video/record/{start,stop}` and the observability proxy. The relay
+  mesh join runs in the pairing daemon.
+- New `GET /api/cloud/link` reports the broker session and the last cloud
+  status POST; the dashboard's cloud panel shows both.
+
+### Removed
+
+- `ados demo` and the `ados-agent` entry point. The hardware-free path is the
+  sim bench.
+- `ados-usb-gadget.service` and the Python modules only the demo runtime and
+  the retired in-process routes used.
+
 ## [0.99.379] - 2026-09-24
 
 ### Fixed

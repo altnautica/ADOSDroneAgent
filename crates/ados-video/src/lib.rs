@@ -26,7 +26,6 @@ pub mod orchestrator;
 pub mod process;
 pub mod profile;
 pub mod recorder;
-pub mod shutdown;
 pub mod stderr_drain;
 pub mod tap;
 pub mod video_streams;

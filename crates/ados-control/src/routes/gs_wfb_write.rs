@@ -177,10 +177,14 @@ fn put_wfb_at(config_path: &Path, update: &WfbUpdate) -> Response {
 /// it could not read or parse. `persist_error` is `None` on a clean write and
 /// `Some(message)` on any fault (a refused document, the EPERM a non-root front
 /// gets on the 0600 config), flagged as `persisted: false`.
+///
+/// When the write fails, the stored values are read back separately so an
+/// unsupplied field still reports what is on disk; a field whose stored value
+/// cannot be read at all is `None` (JSON null), never a substituted default.
 fn merge_wfb_fields(
     config_path: &Path,
     update: &WfbUpdate,
-) -> (i64, String, String, Option<String>) {
+) -> (Option<i64>, Option<String>, Option<String>, Option<String>) {
     use serde_norway::Value as Yaml;
 
     let outcome = update_config(config_path, |root| {
@@ -203,11 +207,20 @@ fn merge_wfb_fields(
         Ok(existing)
     });
     let (existing, persist_error) = match outcome {
-        Ok(w) => (w.value, None),
-        Err(e) => (ExistingWfb::default(), Some(e.to_string())),
+        Ok(w) => (Some(w.value), None),
+        Err(e) => (read_existing_wfb(config_path), Some(e.to_string())),
     };
 
-    // The resolved view values: request → existing → Python default.
+    // The resolved view values: request → existing → Python default. With the
+    // stored document unreadable, an unsupplied field is unknown.
+    let Some(existing) = existing else {
+        return (
+            update.channel,
+            update.bitrate_profile.clone(),
+            update.fec.clone(),
+            persist_error,
+        );
+    };
     let channel = update.channel.or(existing.channel).unwrap_or(0);
     let bitrate_profile = update
         .bitrate_profile
@@ -220,7 +233,36 @@ fn merge_wfb_fields(
         .or(existing.fec)
         .unwrap_or_else(|| "8/12".to_string());
 
-    (channel, bitrate_profile, fec, persist_error)
+    (
+        Some(channel),
+        Some(bitrate_profile),
+        Some(fec),
+        persist_error,
+    )
+}
+
+/// Read the stored `video.wfb` fields without writing. An absent file (or one
+/// whose parent is not a directory, so it cannot exist) is the empty set (the
+/// Python defaults apply); an unreadable or unparseable one is `None`.
+fn read_existing_wfb(config_path: &Path) -> Option<ExistingWfb> {
+    let text = match std::fs::read_to_string(config_path) {
+        Ok(text) => text,
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Some(ExistingWfb::default())
+        }
+        Err(_) => return None,
+    };
+    if text.trim().is_empty() {
+        return Some(ExistingWfb::default());
+    }
+    serde_norway::from_str::<serde_norway::Mapping>(&text)
+        .ok()
+        .map(|root| existing_wfb(&root))
 }
 
 /// The three `video.wfb` view fields already on disk, each `None` when absent /
@@ -424,6 +466,37 @@ mod tests {
         assert_eq!(body["fec"], json!("8/12"));
         assert_eq!(body["persisted"], json!(false));
         assert!(body["persist_error"].as_str().is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_write_fault_over_a_readable_config_reports_the_stored_values() {
+        // The config is readable but its directory is not writable, so the
+        // atomic write fails. Fields the request omitted must report what is
+        // stored (fec 4/8, profile low), never the defaults.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().join("etc");
+        std::fs::create_dir(&etc).unwrap();
+        let cfg = etc.join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "video:\n  wfb:\n    channel: 149\n    bitrate_profile: low\n    fec: 4/8\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let update = WfbUpdate {
+            channel: Some(157),
+            bitrate_profile: None,
+            fec: None,
+        };
+        let body = body_json(put_wfb_at(&cfg, &update)).await;
+        std::fs::set_permissions(&etc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(body["persisted"], json!(false));
+        assert_eq!(body["channel"], json!(157));
+        assert_eq!(body["bitrate_profile"], json!("low"));
+        assert_eq!(body["fec"], json!("4/8"));
     }
 
     // ── existing_wfb projection ───────────────────────────────────────────────

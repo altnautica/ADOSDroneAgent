@@ -23,6 +23,9 @@ pub enum ChannelState {
     Terminator,
     /// The ground-side injector is running (emits requests + awaits replies).
     Injector,
+    /// The channel is enabled but its loopback ingress could not be bound; the
+    /// service retries on a fixed interval.
+    BindFailed,
 }
 
 impl ChannelState {
@@ -32,6 +35,7 @@ impl ChannelState {
             Self::Disabled => "disabled",
             Self::Terminator => "terminator",
             Self::Injector => "injector",
+            Self::BindFailed => "bind_failed",
         }
     }
 }
@@ -106,6 +110,20 @@ mod tests {
         assert_eq!(body["bearer"], "aux");
         assert_eq!(body["last_rx_ms"], Value::Null);
         assert_eq!(body["v"], TUNNEL_CONFIG_SIDECAR_VERSION);
+    }
+
+    #[test]
+    fn a_failed_bind_reports_enabled_and_bind_failed_not_disabled() {
+        let body = build_sidecar(&SidecarInputs {
+            state: ChannelState::BindFailed,
+            enabled: true,
+            command_enabled: false,
+            rx_port: Some(5820),
+            tx_port: None,
+            counters: CountersSnapshot::default(),
+        });
+        assert_eq!(body["state"], "bind_failed");
+        assert_eq!(body["enabled"], true);
     }
 
     #[test]

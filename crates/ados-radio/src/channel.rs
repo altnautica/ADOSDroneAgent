@@ -84,19 +84,32 @@ pub fn rank_channels(detected: &[(u32, i32)]) -> Vec<(u8, u32)> {
     ranked
 }
 
+/// Ceiling on one `iw scan`. A scan dwells on every channel, so it gets longer
+/// than the per-command adapter bound; a driver that never finishes it must
+/// still hand the hop loop back.
+const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Run `iw <iface> scan` and rank the standard channels. On any failure (e.g.
 /// monitor mode rejects the scan, `iw` missing, timeout) returns every channel
 /// at zero interference — the caller decides what to do with a flat ranking.
 pub async fn scan_channels(iface: &str) -> Vec<(u8, u32)> {
     let zero: Vec<(u8, u32)> = standard_channels().iter().map(|&(c, _)| (c, 0)).collect();
-    let out = tokio::process::Command::new("iw")
-        .args([iface, "scan"])
-        .output()
-        .await;
+    let out = tokio::time::timeout(
+        SCAN_TIMEOUT,
+        tokio::process::Command::new("iw")
+            .args([iface, "scan"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
     match out {
-        Ok(o) if o.status.success() => {
+        Ok(Ok(o)) if o.status.success() => {
             let detected = parse_scan_results(&String::from_utf8_lossy(&o.stdout));
             rank_channels(&detected)
+        }
+        Err(_) => {
+            tracing::warn!(iface, "iw_scan_timeout");
+            zero
         }
         _ => zero,
     }

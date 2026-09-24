@@ -16,7 +16,8 @@ use std::time::Duration;
 
 use ados_offload::{FreshnessGate, GateState};
 use ados_protocol::atlas::{CaptureState, ImageEncoding, KeyframeImage, TimeAlignment, VioHealth};
-use tokio::sync::{mpsc, Notify};
+use ados_protocol::shutdown::Shutdown;
+use tokio::sync::mpsc;
 
 use crate::control::AtlasControlCmd;
 use crate::encode::encode_keyframe_jpeg;
@@ -110,13 +111,20 @@ struct StateKey {
     dropped_keyframes: u64,
 }
 
-/// One iteration's selected work: an operator control command, or the next
-/// frame. `biased` selection checks shutdown, then control, then a frame, so a
-/// pending control command is never starved by a busy frame source.
+/// One iteration's selected work: an operator control command, a sidecar
+/// refresh, or the next frame. `biased` selection checks shutdown, then
+/// control, then the refresh, then a frame, so neither a control command nor
+/// the state refresh is starved by a busy frame source.
 enum LoopStep {
     Control(Option<AtlasControlCmd>),
-    Frame(Option<CapturedFrame>),
+    Refresh,
+    Frame(CapturedFrame),
 }
+
+/// How often the capture-state sidecar is rewritten while the loop runs. The
+/// readers treat a sidecar older than 10 s as absent, so a paused, capped or
+/// bagged session — whose state no longer changes — must keep re-stamping it.
+const STATE_REFRESH: Duration = Duration::from_secs(2);
 
 /// Finalize + bag a live session so the compute node's reconstruct trigger
 /// (which fires only on [`CaptureState::Bagged`]) sees the session end.
@@ -162,7 +170,7 @@ pub async fn run_capture_loop(
     runtime: AtlasRuntimeConfig,
     session_id: String,
     mut control_rx: mpsc::Receiver<AtlasControlCmd>,
-    cancel: Arc<Notify>,
+    cancel: Shutdown,
 ) {
     session.start(session_id);
     let mut last_key = state_key(&session);
@@ -183,12 +191,47 @@ pub async fn run_capture_loop(
     // spin: the loop keeps serving frames with no control input.
     let mut control_open = true;
 
+    // Frames are pulled on their own task and handed over a channel, so the
+    // loop can select on control commands and the refresh tick without ever
+    // cancelling a half-read descriptor off the frame socket (which would
+    // desync the stream).
+    let (frame_tx, mut frame_rx) = mpsc::channel::<CapturedFrame>(1);
+    let reader_cancel = cancel.clone();
+    let reader = tokio::spawn(async move {
+        loop {
+            let next = tokio::select! {
+                _ = reader_cancel.wait() => return,
+                f = frames.next() => f,
+            };
+            match next {
+                Some(f) => {
+                    if frame_tx.send(f).await.is_err() {
+                        return;
+                    }
+                }
+                // The source needs a moment (a real source reconnecting, or an
+                // exhausted synthetic sequence). Back off, but wake on shutdown.
+                None => tokio::select! {
+                    _ = reader_cancel.wait() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+                },
+            }
+        }
+    });
+    let mut refresh = tokio::time::interval(STATE_REFRESH);
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         let step = tokio::select! {
             biased;
-            _ = cancel.notified() => break,
+            _ = cancel.wait() => break,
             cmd = control_rx.recv(), if control_open => LoopStep::Control(cmd),
-            f = frames.next() => LoopStep::Frame(f),
+            _ = refresh.tick() => LoopStep::Refresh,
+            f = frame_rx.recv() => match f {
+                Some(f) => LoopStep::Frame(f),
+                // The reader only ends on shutdown.
+                None => break,
+            },
         };
 
         match step {
@@ -208,15 +251,10 @@ pub async fn run_capture_loop(
                 // frames.
                 control_open = false;
             }
-            LoopStep::Frame(None) => {
-                // The source needs a moment (a real source reconnecting, or an
-                // exhausted synthetic sequence). Back off, but wake on shutdown.
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(200)) => {}
-                    _ = cancel.notified() => break,
-                }
+            LoopStep::Refresh => {
+                crate::state_sidecar::write_atlas_state_sidecar(&session.status());
             }
-            LoopStep::Frame(Some(f)) => {
+            LoopStep::Frame(f) => {
                 process_frame(
                     &mut session,
                     &publisher,
@@ -230,6 +268,7 @@ pub async fn run_capture_loop(
             }
         }
     }
+    reader.abort();
 
     // Shutdown: if the session was still live, finalize AND bag so the compute
     // node's reconstruct trigger (Bagged-only) fires — finalize() alone would
@@ -362,13 +401,19 @@ async fn process_frame(
     // once the first 3D fix lands and every later sample carries it.
     session.set_anchored(ps.anchor.is_some());
 
-    // Encode the JPEG only when this frame will actually become a keyframe, and
-    // off the reactor: the per-pixel YUV->RGB + JPEG pass is tens of ms on a
-    // companion-class CPU and must not block a worker thread.
+    // Copy the pixels out of the ring and encode the JPEG only when this frame
+    // will actually become a keyframe, and off the reactor: the copy plus the
+    // per-pixel YUV->RGB + JPEG pass is tens of ms on a companion-class CPU and
+    // must not block a worker thread.
     if session.would_select(&f.camera_id, &ps.pose, f.ts_ms) {
-        let (w, h, fmt, bytes) = (f.width, f.height, f.format, f.bytes);
-        let encoded =
-            tokio::task::spawn_blocking(move || encode_keyframe_jpeg(w, h, fmt, &bytes)).await;
+        let (w, h, fmt, pixels) = (f.width, f.height, f.format, f.pixels);
+        let encoded = tokio::task::spawn_blocking(move || {
+            let bytes = pixels
+                .into_bytes()
+                .ok_or_else(|| anyhow::anyhow!("frame slot recycled before the keyframe copy"))?;
+            encode_keyframe_jpeg(w, h, fmt, &bytes)
+        })
+        .await;
         let jpeg = match encoded {
             Ok(Ok(jpeg)) => jpeg,
             Ok(Err(e)) => {
@@ -607,7 +652,7 @@ mod tests {
     /// (kept alive for the socket).
     async fn spawn_loop() -> (
         mpsc::Sender<AtlasControlCmd>,
-        Arc<Notify>,
+        Shutdown,
         UnixStream,
         tokio::task::JoinHandle<()>,
         tempfile::TempDir,
@@ -623,7 +668,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let (tx, rx) = mpsc::channel(16);
-        let cancel = Arc::new(Notify::new());
+        let cancel = Shutdown::new();
         let loop_cancel = cancel.clone();
         let handle = tokio::spawn(async move {
             run_capture_loop(
@@ -659,7 +704,7 @@ mod tests {
             CaptureState::Bagged
         );
 
-        cancel.notify_waiters();
+        cancel.trigger();
         handle.await.unwrap();
     }
 
@@ -683,7 +728,7 @@ mod tests {
             CaptureState::Capturing
         );
 
-        cancel.notify_waiters();
+        cancel.trigger();
         handle.await.unwrap();
     }
 
@@ -697,7 +742,7 @@ mod tests {
 
         // A shutdown with a live session must publish the final Bagged state, not
         // leave it stranded — the fix this loop exists to prove.
-        cancel.notify_waiters();
+        cancel.trigger();
         assert_eq!(
             next_capture_state(&mut sub).await.state,
             CaptureState::Bagged
@@ -725,7 +770,7 @@ mod tests {
         assert_eq!(st.state, CaptureState::Capturing);
         assert_eq!(st.keyframes, 0);
 
-        cancel.notify_waiters();
+        cancel.trigger();
         handle.await.unwrap();
     }
 }

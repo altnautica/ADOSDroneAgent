@@ -905,12 +905,16 @@ impl MediamtxManager {
             self.process = None;
         }
         let config = self.config_path.to_string_lossy().to_string();
-        let mut p = ManagedProcess::spawn("mediamtx", "mediamtx", &[config])?;
-        // Drain stderr in the background to prevent the 64KB pipe buffer from
-        // filling and blocking mediamtx's next write (which freezes the whole
-        // video pipeline while the process still looks alive).
+        let mut p = ManagedProcess::spawn_capturing_stdout("mediamtx", "mediamtx", &[config])?;
+        // Drain both pipes in the background: mediamtx writes its log to
+        // stdout, and a pipe nobody reads fills at 64 KB and blocks mediamtx's
+        // next write (freezing the whole video pipeline while the process
+        // still looks alive).
+        if let Some(stdout) = p.take_stdout() {
+            tokio::spawn(drain_mediamtx_log(stdout));
+        }
         if let Some(stderr) = p.take_stderr() {
-            tokio::spawn(drain_mediamtx_stderr(stderr));
+            tokio::spawn(drain_mediamtx_log(stderr));
         }
         self.process = Some(p);
 
@@ -984,18 +988,18 @@ impl MediamtxManager {
     }
 }
 
-/// Drain mediamtx stderr to prevent a pipe-buffer deadlock. mediamtx logs
-/// WebRTC connection events + RTSP sessions here; an undrained pipe fills at
-/// 64KB and blocks mediamtx's next write, freezing the pipeline while the
-/// process still looks alive. Logged at debug — mediamtx is configured
-/// `logLevel: warn`, so this is low-volume.
-async fn drain_mediamtx_stderr(stderr: tokio::process::ChildStderr) {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+/// Drain one of mediamtx's output pipes (it logs to stdout; stderr carries
+/// startup failures) so neither 64 KB pipe can fill and block mediamtx's next
+/// write, which would freeze the pipeline while the process still looks alive.
+/// mediamtx runs at `logLevel: warn`, so every line it emits is a warning or an
+/// error worth seeing (a slow reader discarding frames, a refused publisher)
+/// and the volume is low; they are logged at warn.
+async fn drain_mediamtx_log<R: tokio::io::AsyncRead + Unpin>(stream: R) {
+    let mut lines = crate::stderr_drain::BoundedLines::new(stream);
+    while let Some(line) = lines.next_line().await {
         let text = line.trim_end();
         if !text.is_empty() {
-            tracing::debug!(line = %text, "mediamtx_stderr");
+            tracing::warn!(line = %text, "mediamtx_log");
         }
     }
 }

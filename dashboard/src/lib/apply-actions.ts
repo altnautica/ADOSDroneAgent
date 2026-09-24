@@ -93,25 +93,19 @@ export interface ConfigWriteResult {
   ok?: boolean;
 }
 
-// A single dot-path config write (the same PUT /api/config the GCS uses). Used
-// by the Offload settings page, whose keys are additive perception.* fields with
-// no batch-apply section — a per-key write is simpler and mirrors the GCS.
-export function putConfigValue(key: string, value: string) {
-  return apiFetch<ConfigWriteResult>("/api/config", {
-    method: "PUT",
-    body: { key, value },
-  });
-}
-
-// putConfigValue that surfaces the agent's soft-error bodies as real failures so
-// a page can toast + roll back instead of silently swallowing them. The write
-// is a string; the agent coerces it to the leaf's live type (a bool key accepts
+// A single dot-path config write (the same PUT /api/config the GCS uses) that
+// surfaces the agent's soft-error bodies as real failures, so a page can toast
+// and roll back instead of reporting a refused write as saved. The write is a
+// string; the agent coerces it to the leaf's live type (a bool key accepts
 // "true"/"false", an int key a numeric string, etc.).
 export async function putConfigChecked(
   key: string,
   value: string,
 ): Promise<ConfigWriteResult> {
-  const res = await putConfigValue(key, value);
+  const res = await apiFetch<ConfigWriteResult>("/api/config", {
+    method: "PUT",
+    body: { key, value },
+  });
   if (res.error) throw new Error(res.error);
   if (res.persisted === false) {
     throw new Error(res.persist_error || "The change was not saved to disk.");

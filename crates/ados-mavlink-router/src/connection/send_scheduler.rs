@@ -191,12 +191,13 @@ impl FcConnection {
     }
 
     /// Write raw bytes to the FC (a client command). No-op when disconnected.
+    /// Returns whether the frame was written in full.
     ///
     /// Bounded by [`FC_WRITE_BUDGET`], so no caller can hold the writer mutex —
     /// and therefore block the companion heartbeat — for an unbounded time.
     /// There is deliberately no unbounded write path left on this type.
-    pub async fn send_bytes(&self, data: &[u8]) {
-        self.send_bytes_bounded(data, FC_WRITE_BUDGET).await;
+    pub async fn send_bytes(&self, data: &[u8]) -> bool {
+        self.send_bytes_bounded(data, FC_WRITE_BUDGET).await
     }
 
     /// Write raw bytes with a wall bound, treating a timeout as a broken link.
@@ -432,10 +433,7 @@ impl FcConnection {
                 // future in a timeout, because cancelling it can leave a partial
                 // frame on the serial line.
                 Some(budget) => self.send_bytes_bounded(data, budget).await,
-                None => {
-                    self.send_bytes(data).await;
-                    true
-                }
+                None => self.send_bytes(data).await,
             };
         }
         if let Some(uplink) = self.aux_uplink.lock().await.as_ref() {
@@ -513,15 +511,15 @@ impl FcConnection {
                 "msp_command_from_non_local_source"
             );
         }
-        self.send_bytes(data).await;
+        let _ = self.send_bytes(data).await;
     }
 
+    /// Serialise `msg` with this node's identity and write it to the FC.
+    /// Returns whether it reached the flight controller: `false` for a frame
+    /// that could not be serialised, no installed writer, or a failed write.
     pub(super) async fn send_msg(&self, msg: &MavMessage) -> bool {
         match mavlink::serialize_v2(self.our_header(), msg) {
-            Ok(bytes) => {
-                self.send_bytes(&bytes).await;
-                true
-            }
+            Ok(bytes) => self.send_bytes(&bytes).await,
             Err(_) => false,
         }
     }

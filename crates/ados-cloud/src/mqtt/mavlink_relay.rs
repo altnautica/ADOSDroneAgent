@@ -17,7 +17,7 @@
 //! ([`BoundedPublishQueue`]); they are the parity crown jewel.
 
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use ados_plugin_host::frame_link::FrameLink;
@@ -205,7 +205,7 @@ impl MavlinkMqttRelay {
         shutdown: tokio::sync::watch::Receiver<bool>,
         connected_out: Option<&watch::Sender<Option<Arc<AtomicBool>>>>,
     ) -> anyhow::Result<()> {
-        let transport = RumqttcTransport::connect(&self.transport_config);
+        let transport = RumqttcTransport::connect(&self.transport_config)?;
         // Hand the supervisor the live connection flag (set on ConnAck, cleared
         // on Disconnect/error). Until ConnAck the flag reads false, so the
         // supervisor never reports a connection the broker has not granted.
@@ -267,6 +267,7 @@ impl MavlinkMqttRelay {
         let mut metrics = RelayMetrics::default();
         let mut shutdown = shutdown;
         let client = transport.client().clone();
+        let connected = transport.connected_handle();
 
         loop {
             tokio::select! {
@@ -296,31 +297,21 @@ impl MavlinkMqttRelay {
                             }
                         }
                         Some(_) => {}
-                        None => {}
+                        // The transport's event loop is gone: there is no broker
+                        // session left to relay over. End the run so the
+                        // supervisor respawns a fresh one.
+                        None => break,
                     }
                 }
             }
 
-            // Drain the queue under the in-flight gate. q0 publishes are
-            // fire-and-forget, so a send that returns is treated as acked
-            // immediately (the in-flight gate still bounds a slow client because
-            // a blocked send holds the slot until it returns).
-            while let Some(frame) = queue.try_take() {
-                queue.on_publish_started();
-                let r = client
-                    .publish(
-                        self.topic_tx.clone(),
-                        rumqttc::QoS::AtMostOnce,
-                        false,
-                        frame,
-                    )
-                    .await;
-                queue.on_publish_acked();
-                match r {
-                    Ok(()) => metrics.frames_published += 1,
-                    Err(_) => metrics.publish_errors += 1,
-                }
-            }
+            drain_publish_queue(
+                &mut queue,
+                &mut metrics,
+                &client,
+                &connected,
+                &self.topic_tx,
+            );
         }
 
         reader.abort();
@@ -328,15 +319,90 @@ impl MavlinkMqttRelay {
             frames_in = metrics.frames_in,
             frames_published = metrics.frames_published,
             frames_dropped_queue_full = metrics.frames_dropped_queue_full,
+            frames_dropped_not_connected = metrics.frames_dropped_not_connected,
+            publish_errors = metrics.publish_errors,
             "mavlink relay stopped"
         );
         Ok(())
     }
 }
 
+/// Drain the bounded queue onto `topic` at q0 under the in-flight gate, without
+/// ever blocking the relay loop.
+///
+/// Frames taken while the broker session is not confirmed up are dropped and
+/// counted: q0 telemetry queued inside the client during an outage would be
+/// delivered minutes late on reconnect as if it were live, and an awaited
+/// publish into a full client queue would stall the loop that serves shutdown
+/// and GCS commands. A full client queue drops the frame the same way
+/// (recency beats completeness). Shared by the MAVLink and MSP relays.
+pub(crate) fn drain_publish_queue(
+    queue: &mut BoundedPublishQueue,
+    metrics: &mut RelayMetrics,
+    client: &rumqttc::AsyncClient,
+    connected: &AtomicBool,
+    topic: &str,
+) {
+    while let Some(frame) = queue.try_take() {
+        if !connected.load(Ordering::Acquire) {
+            metrics.frames_dropped_not_connected += 1;
+            continue;
+        }
+        queue.on_publish_started();
+        let r = client.try_publish(topic.to_string(), rumqttc::QoS::AtMostOnce, false, frame);
+        queue.on_publish_acked();
+        match r {
+            Ok(()) => metrics.frames_published += 1,
+            Err(_) => metrics.publish_errors += 1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A client whose event loop is never polled: publishes only enqueue.
+    fn idle_client() -> rumqttc::AsyncClient {
+        let opts = rumqttc::MqttOptions::new("ados-test", ("127.0.0.1", 1));
+        let (client, _eventloop) = rumqttc::AsyncClient::builder(opts).build();
+        client
+    }
+
+    #[tokio::test]
+    async fn frames_taken_while_the_broker_is_down_are_dropped_not_queued() {
+        // During an outage the relay must not hand telemetry to the client: it
+        // would sit in the request queue and reach the GCS minutes late, as if
+        // live, once the session came back.
+        let client = idle_client();
+        let mut queue = BoundedPublishQueue::with_bounds(10, 10);
+        for i in 0..3u8 {
+            queue.push(vec![i]);
+        }
+        let mut metrics = RelayMetrics::default();
+        let down = AtomicBool::new(false);
+        drain_publish_queue(
+            &mut queue,
+            &mut metrics,
+            &client,
+            &down,
+            "ados/d/mavlink/tx",
+        );
+        assert_eq!(metrics.frames_dropped_not_connected, 3);
+        assert_eq!(metrics.frames_published + metrics.publish_errors, 0);
+        assert!(queue.is_empty());
+        assert_eq!(queue.inflight(), 0);
+        // With the session up the same frames are handed to the client (an
+        // unpolled client may refuse some as a full queue), none dropped as
+        // not-connected.
+        for i in 0..3u8 {
+            queue.push(vec![i]);
+        }
+        let up = AtomicBool::new(true);
+        drain_publish_queue(&mut queue, &mut metrics, &client, &up, "ados/d/mavlink/tx");
+        assert_eq!(metrics.frames_dropped_not_connected, 3);
+        assert_eq!(metrics.frames_published + metrics.publish_errors, 3);
+    }
 
     // ---- the parity crown jewel: drop-oldest at QUEUE_MAXSIZE ----
 

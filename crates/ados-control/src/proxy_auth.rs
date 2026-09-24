@@ -431,26 +431,22 @@ impl ProxiedAuth {
                 messages::MISSING_SECURITY_HEADERS,
             );
         };
-        // Parse the timestamp as f64; a bad value → 401.
-        let Ok(timestamp) = ts_str.parse::<f64>() else {
-            return reject(
-                StatusCode::UNAUTHORIZED,
-                BodyField::Error,
-                messages::BAD_TIMESTAMP,
-            );
+        // Parse the timestamp as f64; a bad or non-finite value → 401. A NaN
+        // timestamp would compare false against the freshness window and pass it.
+        let timestamp = match ts_str.parse::<f64>() {
+            Ok(t) if t.is_finite() => t,
+            _ => {
+                return reject(
+                    StatusCode::UNAUTHORIZED,
+                    BodyField::Error,
+                    messages::BAD_TIMESTAMP,
+                )
+            }
         };
-        // A non-finite timestamp (NaN/inf) is not a usable value either — Python
-        // `float("nan")` parses but then `abs(now - nan)` is NaN and `NaN > w` is
-        // False, so the Python would NOT reject it at the replay step. Mirror
-        // that: only reject here on a parse failure, leave finiteness to the
-        // replay window check (NaN age compares false, so it would pass the
-        // window; the nonce store still de-dups). Keep behavior identical by not
-        // adding a finiteness guard the Python lacks.
-        // Replay / freshness (window + nonce de-dup) → 403.
-        if !self.replay.check(timestamp, nonce) {
-            return reject(StatusCode::FORBIDDEN, BodyField::Error, messages::REPLAY);
-        }
         // Verify the signature over the whole request identity → 401 on mismatch.
+        // Checked BEFORE the replay store records the nonce, so a caller without
+        // the secret can neither grow the store nor burn a nonce a signed request
+        // will later present.
         let signed = SignedRequest {
             method: method.as_str(),
             path,
@@ -465,6 +461,10 @@ impl ProxiedAuth {
                 BodyField::Error,
                 messages::INVALID_SIGNATURE,
             );
+        }
+        // Replay / freshness (window + nonce de-dup) → 403.
+        if !self.replay.check(timestamp, nonce) {
+            return reject(StatusCode::FORBIDDEN, BodyField::Error, messages::REPLAY);
         }
         Decision::Accept
     }
@@ -1495,6 +1495,61 @@ mod tests {
             auth.decide_hmac(&Method::POST, "/api/command", None, &headers, body),
             Decision::Accept
         );
+    }
+
+    #[test]
+    fn a_forged_signature_does_not_burn_the_nonce() {
+        let secret = "a-long-enough-secret-key";
+        let auth = hmac_auth(secret);
+        let ts = unix_now();
+        let body = b"{\"cmd\":\"land\"}";
+        let forged = RequestHeaders {
+            x_timestamp: Some(format!("{ts}")),
+            x_nonce: Some("n-shared".to_string()),
+            x_hmac_signature: Some("00".repeat(32)),
+            ..Default::default()
+        };
+        assert_eq!(
+            auth.decide_hmac(&Method::POST, "/api/command", None, &forged, body),
+            reject(
+                StatusCode::UNAUTHORIZED,
+                BodyField::Error,
+                messages::INVALID_SIGNATURE
+            ),
+        );
+        // The genuinely signed request carrying the same nonce still passes.
+        let signed = RequestHeaders {
+            x_hmac_signature: Some(sign(secret, "n-shared", ts, body)),
+            ..forged
+        };
+        assert_eq!(
+            auth.decide_hmac(&Method::POST, "/api/command", None, &signed, body),
+            Decision::Accept
+        );
+    }
+
+    #[test]
+    fn a_non_finite_timestamp_is_refused_even_when_signed() {
+        let secret = "a-long-enough-secret-key";
+        let auth = hmac_auth(secret);
+        let body = b"{}";
+        for (raw, ts) in [("NaN", f64::NAN), ("inf", f64::INFINITY)] {
+            let headers = RequestHeaders {
+                x_timestamp: Some(raw.to_string()),
+                x_nonce: Some(format!("n-{raw}")),
+                x_hmac_signature: Some(sign(secret, &format!("n-{raw}"), ts, body)),
+                ..Default::default()
+            };
+            assert_eq!(
+                auth.decide_hmac(&Method::POST, "/api/command", None, &headers, body),
+                reject(
+                    StatusCode::UNAUTHORIZED,
+                    BodyField::Error,
+                    messages::BAD_TIMESTAMP
+                ),
+                "{raw}"
+            );
+        }
     }
 
     #[test]

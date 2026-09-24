@@ -29,6 +29,7 @@ JSON envelope. Code numbers match ``ados.cli.plugin``.
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from pathlib import Path
 
@@ -41,7 +42,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ados.api.deps import get_agent_app
 from ados.api.routes._plugins_helpers import (
@@ -102,6 +103,47 @@ def _set_supervisor_for_tests(sup: PluginSupervisor | None) -> None:
     _supervisor = sup
 
 
+# The supervisor's install / enable / grant work is blocking (archive unpack,
+# signature verify, systemctl, pip). It runs on a worker thread so the residual
+# API keeps serving, and one lock keeps those mutations in the same order the
+# event loop used to impose, so two requests never interleave on the state file.
+_SUPERVISOR_LOCK = asyncio.Lock()
+
+
+async def _supervisor_call(fn, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+    """Run one blocking supervisor operation off the event loop, serialized."""
+    async with _SUPERVISOR_LOCK:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+def _install_archive_bytes(sup: PluginSupervisor, raw: bytes):  # noqa: ANN202
+    """Stage an uploaded archive in a temp file and install it (blocking)."""
+    with tempfile.NamedTemporaryFile(suffix=".adosplug", delete=False) as tmp:
+        tmp.write(raw)
+        tmp_path = Path(tmp.name)
+    try:
+        return sup.install_archive(tmp_path)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("plugin_install_temp_cleanup", error=str(exc))
+
+
+def _grant_requested(
+    sup: PluginSupervisor, plugin_id: str, wanted: list[str], skip_event: str
+) -> list[str]:
+    """Grant each requested permission; a refused one is logged and skipped."""
+    granted: list[str] = []
+    for perm in wanted:
+        try:
+            sup.grant_permission(plugin_id, perm)
+            granted.append(perm)
+        except SupervisorError as exc:
+            log.warning(skip_event, permission=perm, error=str(exc))
+    return granted
+
+
 # ---------------------------------------------------------------------
 # Error envelope
 # ---------------------------------------------------------------------
@@ -112,6 +154,20 @@ def _err(code: int, kind: str, detail: str, status: int = 400) -> JSONResponse:
         {"ok": False, "code": code, "kind": kind, "detail": detail},
         status_code=status,
     )
+
+
+def _job_err(
+    job_id: str | None, code: int, kind: str, detail: str, status: int = 400
+) -> JSONResponse:
+    """Mark an install job failed with the error detail, then return the error.
+
+    Once a job sidecar exists the progress WebSocket streams it until a terminal
+    stage, so every error return after that point must write one; otherwise the
+    dialog waits out the idle timeout instead of showing the real reason.
+    """
+    if job_id:
+        write_sidecar(job_id, {"stage": "failed", "detail": detail, "kind": kind})
+    return _err(code, kind, detail, status)
 
 
 # ---------------------------------------------------------------------
@@ -394,7 +450,7 @@ async def parse_plugin_archive(file: UploadFile = File(...)):
     if not raw:
         return _err(2, "usage_error", "empty upload", 400)
     try:
-        return _archive_to_summary(raw)
+        return await asyncio.to_thread(_archive_to_summary, raw)
     except SignatureError as exc:
         return _err(10, f"signature_{exc.kind}", str(exc), 400)
     except (ManifestError, ArchiveError) as exc:
@@ -451,10 +507,10 @@ async def parse_plugin_from_url(body: ParseFromUrlRequest):
             return _err(12, "sha256_mismatch", "archive sha256 did not match pin", 400)
         except (ArchiveDownloadError, httpx.HTTPError) as exc:
             return _err(20, "download_failed", str(exc), 502)
-        raw = archive_path.read_bytes()
+        raw = await asyncio.to_thread(archive_path.read_bytes)
         archive_sha = outcome.sha256_hex
     try:
-        summary = _archive_to_summary(raw)
+        summary = await asyncio.to_thread(_archive_to_summary, raw)
     except SignatureError as exc:
         return _err(10, f"signature_{exc.kind}", str(exc), 400)
     except (ManifestError, ArchiveError) as exc:
@@ -507,73 +563,41 @@ async def install_plugin(
     # leaves no on-disk residue.
     try:
         from ados.plugins.archive import parse_archive_bytes
-        preview = parse_archive_bytes(raw)
-        unknown = _unknown_capabilities(
-            sorted(preview.manifest.declared_agent_permissions())
-        )
-        if unknown:
-            return _err(
-                12,
-                "manifest_invalid",
-                "Unknown capability: " + ", ".join(unknown),
-                400,
-            )
+
+        preview = await asyncio.to_thread(parse_archive_bytes, raw)
     except SignatureError as exc:
-        return _err(10, f"signature_{exc.kind}", str(exc), 400)
+        return _job_err(job_id, 10, f"signature_{exc.kind}", str(exc), 400)
     except ManifestError as exc:
-        return _err(12, "manifest_invalid", str(exc), 400)
+        return _job_err(job_id, 12, "manifest_invalid", str(exc), 400)
     except ArchiveError as exc:
-        return _err(12, "archive_invalid", str(exc), 400)
-    with tempfile.NamedTemporaryFile(
-        suffix=".adosplug", delete=False
-    ) as tmp:
-        tmp.write(raw)
-        tmp_path = Path(tmp.name)
+        return _job_err(job_id, 12, "archive_invalid", str(exc), 400)
+    unknown = _unknown_capabilities(
+        sorted(preview.manifest.declared_agent_permissions())
+    )
+    if unknown:
+        return _job_err(
+            job_id, 12, "manifest_invalid", "Unknown capability: " + ", ".join(unknown)
+        )
+    if job_id:
+        write_sidecar(job_id, {"stage": "installing"})
     try:
-        if job_id:
-            write_sidecar(job_id, {"stage": "installing"})
-        result = sup.install_archive(tmp_path)
+        result = await _supervisor_call(_install_archive_bytes, sup, raw)
     except SignatureError as exc:
-        kind_to_code = {
-            "missing": 10,
-            "invalid": 10,
-            "revoked": 10,
-            "unknown_signer": 10,
-        }
-        return _err(
-            kind_to_code.get(exc.kind, 10),
-            f"signature_{exc.kind}",
-            str(exc),
-            400,
-        )
+        return _job_err(job_id, 10, f"signature_{exc.kind}", str(exc), 400)
     except ManifestError as exc:
-        return _err(12, "manifest_invalid", str(exc), 400)
+        return _job_err(job_id, 12, "manifest_invalid", str(exc), 400)
     except ArchiveError as exc:
-        return _err(12, "archive_invalid", str(exc), 400)
+        return _job_err(job_id, 12, "archive_invalid", str(exc), 400)
     except SupervisorError as exc:
         msg = str(exc)
         if "ADOS version" in msg:
-            return _err(17, "ados_version_skew", msg, 409)
-        return _err(20, "host_io_error", msg, 500)
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError as exc:
-            log.warning("plugin_install_temp_cleanup", error=str(exc))
+            return _job_err(job_id, 17, "ados_version_skew", msg, 409)
+        return _job_err(job_id, 20, "host_io_error", msg, 500)
 
-    granted_ids: list[str] = []
-    if requested_permissions:
-        wanted = [p.strip() for p in requested_permissions.split(",") if p.strip()]
-        for perm in wanted:
-            try:
-                sup.grant_permission(result.plugin_id, perm)
-                granted_ids.append(perm)
-            except SupervisorError as exc:
-                log.warning(
-                    "plugin_install_grant_skip",
-                    permission=perm,
-                    error=str(exc),
-                )
+    wanted = [p.strip() for p in (requested_permissions or "").split(",") if p.strip()]
+    granted_ids = await _supervisor_call(
+        _grant_requested, sup, result.plugin_id, wanted, "plugin_install_grant_skip"
+    )
 
     if job_id:
         write_sidecar(
@@ -684,9 +708,7 @@ async def install_plugin_from_url(body: InstallFromUrlRequest):
                     expected_sha256=expected_sha,
                 )
         except ArchiveTooLargeError as exc:
-            if job_id:
-                write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})
-            return _err(13, "archive_too_large", str(exc), 413)
+            return _job_err(job_id, 13, "archive_too_large", str(exc), 413)
         except Sha256MismatchError as exc:
             # Log the computed digest at DEBUG (operator can pull it
             # from the journal with full agent log access) but DO NOT
@@ -695,25 +717,11 @@ async def install_plugin_from_url(body: InstallFromUrlRequest):
             # the URL served is an oracle they should not get from
             # the API surface.
             log.debug("plugin sha256 mismatch", detail=str(exc))
-            if job_id:
-                write_sidecar(
-                    job_id,
-                    {"stage": "failed", "detail": "archive sha256 did not match pin"},
-                )
-            return _err(
-                12,
-                "sha256_mismatch",
-                "archive sha256 did not match pin",
-                400,
+            return _job_err(
+                job_id, 12, "sha256_mismatch", "archive sha256 did not match pin", 400
             )
-        except ArchiveDownloadError as exc:
-            if job_id:
-                write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})
-            return _err(20, "download_failed", str(exc), 502)
-        except httpx.HTTPError as exc:
-            if job_id:
-                write_sidecar(job_id, {"stage": "failed", "detail": str(exc)})
-            return _err(20, "download_failed", str(exc), 502)
+        except (ArchiveDownloadError, httpx.HTTPError) as exc:
+            return _job_err(job_id, 20, "download_failed", str(exc), 502)
 
         if job_id:
             write_sidecar(job_id, {"stage": "verifying"})
@@ -723,68 +731,50 @@ async def install_plugin_from_url(body: InstallFromUrlRequest):
         # manifest declares a capability the host does not recognise.
         try:
             from ados.plugins.archive import parse_archive_bytes
-            raw = archive_path.read_bytes()
-            preview = parse_archive_bytes(raw)
-            unknown = _unknown_capabilities(
-                sorted(preview.manifest.declared_agent_permissions())
-            )
-            if unknown:
-                if job_id:
-                    write_sidecar(
-                        job_id,
-                        {
-                            "stage": "failed",
-                            "detail": "unknown capability",
-                        },
-                    )
-                return _err(
-                    12,
-                    "manifest_invalid",
-                    "Unknown capability: " + ", ".join(unknown),
-                    400,
-                )
+
+            raw = await asyncio.to_thread(archive_path.read_bytes)
+            preview = await asyncio.to_thread(parse_archive_bytes, raw)
         except SignatureError as exc:
-            return _err(10, f"signature_{exc.kind}", str(exc), 400)
+            return _job_err(job_id, 10, f"signature_{exc.kind}", str(exc), 400)
         except ManifestError as exc:
-            return _err(12, "manifest_invalid", str(exc), 400)
+            return _job_err(job_id, 12, "manifest_invalid", str(exc), 400)
         except ArchiveError as exc:
-            return _err(12, "archive_invalid", str(exc), 400)
+            return _job_err(job_id, 12, "archive_invalid", str(exc), 400)
+        unknown = _unknown_capabilities(
+            sorted(preview.manifest.declared_agent_permissions())
+        )
+        if unknown:
+            return _job_err(
+                job_id,
+                12,
+                "manifest_invalid",
+                "Unknown capability: " + ", ".join(unknown),
+            )
 
         if job_id:
             write_sidecar(job_id, {"stage": "installing"})
         try:
-            result = sup.install_archive(archive_path)
+            result = await _supervisor_call(sup.install_archive, archive_path)
         except SignatureError as exc:
-            return _err(
-                10,
-                f"signature_{exc.kind}",
-                str(exc),
-                400,
-            )
+            return _job_err(job_id, 10, f"signature_{exc.kind}", str(exc), 400)
         except ManifestError as exc:
-            return _err(12, "manifest_invalid", str(exc), 400)
+            return _job_err(job_id, 12, "manifest_invalid", str(exc), 400)
         except ArchiveError as exc:
-            return _err(12, "archive_invalid", str(exc), 400)
+            return _job_err(job_id, 12, "archive_invalid", str(exc), 400)
         except SupervisorError as exc:
             msg = str(exc)
             if "ADOS version" in msg:
-                return _err(17, "ados_version_skew", msg, 409)
-            return _err(20, "host_io_error", msg, 500)
+                return _job_err(job_id, 17, "ados_version_skew", msg, 409)
+            return _job_err(job_id, 20, "host_io_error", msg, 500)
 
-    granted_ids: list[str] = []
-    for perm in requested:
-        perm = (perm or "").strip()
-        if not perm:
-            continue
-        try:
-            sup.grant_permission(result.plugin_id, perm)
-            granted_ids.append(perm)
-        except SupervisorError as exc:
-            log.warning(
-                "plugin_install_from_url_grant_skip",
-                permission=perm,
-                error=str(exc),
-            )
+    wanted = [p.strip() for p in requested if p and p.strip()]
+    granted_ids = await _supervisor_call(
+        _grant_requested,
+        sup,
+        result.plugin_id,
+        wanted,
+        "plugin_install_from_url_grant_skip",
+    )
 
     if job_id:
         write_sidecar(
@@ -826,7 +816,7 @@ class GrantRequest(BaseModel):
 async def grant_permission(plugin_id: str, body: GrantRequest):
     sup = _get_supervisor()
     try:
-        sup.grant_permission(plugin_id, body.permission_id)
+        await _supervisor_call(sup.grant_permission, plugin_id, body.permission_id)
     except SupervisorError as exc:
         msg = str(exc)
         if "did not declare" in msg or "not declared" in msg:
@@ -890,7 +880,7 @@ async def _deliver_plugin_models(sup: PluginSupervisor, plugin_id: str) -> None:
 async def enable_plugin(plugin_id: str):
     sup = _get_supervisor()
     try:
-        sup.enable(plugin_id)
+        await _supervisor_call(sup.enable, plugin_id)
     except SupervisorError as exc:
         if "not installed" in str(exc):
             return _err(14, "not_found", str(exc), 404)
@@ -906,7 +896,7 @@ async def enable_plugin(plugin_id: str):
 async def disable_plugin(plugin_id: str):
     sup = _get_supervisor()
     try:
-        sup.disable(plugin_id)
+        await _supervisor_call(sup.disable, plugin_id)
     except SupervisorError as exc:
         if "not installed" in str(exc):
             return _err(14, "not_found", str(exc), 404)
@@ -918,7 +908,7 @@ async def disable_plugin(plugin_id: str):
 async def remove_plugin(plugin_id: str, keep_data: bool = False):
     sup = _get_supervisor()
     try:
-        sup.remove(plugin_id, keep_data=keep_data)
+        await _supervisor_call(sup.remove, plugin_id, keep_data=keep_data)
     except SupervisorError as exc:
         if "not installed" in str(exc):
             return _err(14, "not_found", str(exc), 404)
@@ -930,7 +920,7 @@ async def remove_plugin(plugin_id: str, keep_data: bool = False):
 async def revoke_plugin_permission(plugin_id: str, permission_id: str):
     sup = _get_supervisor()
     try:
-        sup.revoke_permission(plugin_id, permission_id)
+        await _supervisor_call(sup.revoke_permission, plugin_id, permission_id)
     except SupervisorError as exc:
         if "not installed" in str(exc):
             return _err(14, "not_found", str(exc), 404)
@@ -963,7 +953,7 @@ async def get_plugin_readiness(plugin_id: str):
     if sup.find_install(plugin_id) is None:
         return _err(14, "not_found", f"plugin {plugin_id} not installed", 404)
     try:
-        services = sup.readiness_for(plugin_id)
+        services = await asyncio.to_thread(sup.readiness_for, plugin_id)
     except SupervisorError as exc:
         if "not installed" in str(exc):
             return _err(14, "not_found", str(exc), 404)
@@ -1013,7 +1003,9 @@ async def stream_install_job(websocket: WebSocket, job_id: str) -> None:
 class CapabilityTokenRequest(BaseModel):
     plugin_id: str
     operator_id: str | None = None
-    ttl_seconds: int | None = None
+    # Bounded to the 10-minute window the token design relies on; a caller
+    # cannot mint a long-lived bearer for a plugin's GCS half.
+    ttl_seconds: int | None = Field(default=None, ge=1, le=TOKEN_TTL_SECONDS_DEFAULT)
 
 
 @router.post("/plugins/capability-token")
@@ -1039,14 +1031,8 @@ async def mint_capability_token(body: CapabilityTokenRequest):
     if install is None:
         return _err(14, "not_found", f"plugin {body.plugin_id} not installed", 404)
 
-    granted, audit = compute_granted_caps_for_token(
-        plugin_id=body.plugin_id,
-        in_memory_permissions=install.permissions,
-    )
-
-    operator_id = (
-        body.operator_id or (audit or {}).get("operator_id") or "unknown"
-    )
+    granted = compute_granted_caps_for_token(install.permissions)
+    operator_id = body.operator_id or "unknown"
     token, claims = mint_agent_capability_token(
         plugin_id=body.plugin_id,
         agent_id=app.config.agent.device_id,

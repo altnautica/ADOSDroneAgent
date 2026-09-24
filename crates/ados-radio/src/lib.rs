@@ -27,4 +27,5 @@ pub mod reg_event;
 pub mod reg_reassert;
 pub mod rf_unverified;
 pub mod tx_cmd;
+pub mod tx_liveness;
 pub mod watchdog;

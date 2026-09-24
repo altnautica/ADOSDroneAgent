@@ -189,7 +189,7 @@ pub async fn stats_reader_loop(
             // Per-interval valid-decode count feeds the cumulative counter the
             // watchdog/acquirer poll.
             counter.add(snap.packets_received);
-            let valid_pps = snap.packets_received as f64; // stats interval = 1 s
+            let valid_pps = snap.valid_packets_per_s();
             let video_bps = snap.bitrate_kbps as f64 * 1000.0 / 8.0;
             // Lock-state surface: decoding valid video on the current channel ==
             // locked even when no sweep ran. This is the GS received-side proof.

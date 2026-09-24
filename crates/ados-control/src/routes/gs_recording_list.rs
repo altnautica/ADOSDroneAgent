@@ -344,12 +344,16 @@ async fn playback_get(
         .await
         .ok()?
         .ok()?;
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-        .await
-        .ok()?;
+    let (mut sender, conn) = tokio::time::timeout(
+        PLAYBACK_HEAD_TIMEOUT,
+        hyper::client::conn::http1::handshake(TokioIo::new(stream)),
+    )
+    .await
+    .ok()?
+    .ok()?;
     // The connection future must be polled for the exchange to progress. It ends
     // when the body is fully read or the peer closes, neither of which is a fault.
-    tokio::spawn(async move {
+    let conn_task = tokio::spawn(async move {
         let _ = conn.await;
     });
     let request = http::Request::builder()
@@ -358,8 +362,20 @@ async fn playback_get(
         .header(http::header::HOST, format!("127.0.0.1:{port}"))
         .body(Empty::<Bytes>::new())
         .ok()?;
-    sender.send_request(request).await.ok()
+    // The response HEAD is bounded; the clip body that follows streams for as
+    // long as it takes. A server that accepts and never answers is unavailable.
+    match tokio::time::timeout(PLAYBACK_HEAD_TIMEOUT, sender.send_request(request)).await {
+        Ok(r) => r.ok(),
+        Err(_) => {
+            conn_task.abort();
+            None
+        }
+    }
 }
+
+/// How long the playback server has to send a response head. A segment list or
+/// the start of a clip is served from local disk in milliseconds.
+const PLAYBACK_HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/ground-station/recording/segments

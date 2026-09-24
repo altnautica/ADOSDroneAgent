@@ -1,32 +1,36 @@
-//! Rule-37 TX liveness watchdogs for `wfb_tx`.
+//! Rule-37 liveness watchdogs for the drone's `wfb_tx` planes.
 //!
-//! Two independent watchers mirror `manager.py:1141-1424`:
+//! Every judgement here reads a transmitter's OWN per-second stats line (the
+//! [`TxPlaneCounters`] its `WfbProcess` folds its stdout into). The kernel does
+//! not see this work: `wfb_tx` reads its UDP ingress with `recvmsg` and injects
+//! with `sendmsg`, neither on the vfs path `/proc/<pid>/io` accounts, and the RTL
+//! monitor netdev's byte counters are not a reliable primary signal.
 //!
-//! 1. **TX health watchdog**: polls `/sys/class/net/<iface>/statistics/tx_bytes`
-//!    every 5s. If the counter is flat for 30s while ingress IS feeding
-//!    (confirmed via `/proc/<pid>/io rchar` or `/proc/net/udp` rx_queue),
-//!    `wfb_tx` has silently stalled — kill it so the manager respawns it.
-//!    If ingress is also flat, the video encoder is idle; log once per 5min
-//!    but do not kill.
+//! 1. **TX health watchdog**: the data plane must keep printing stats lines, and
+//!    bytes offered on its ingress must reach the radio, inside a rolling 30 s
+//!    window. A silent loop, or ingress with no injection, is a stall; if the
+//!    PHY reads back muted the caller runs a PHY recovery instead of a kill. No
+//!    ingress at all is an idle encoder — logged, never killed.
 //!
 //! 2. **Video receive-queue watchdog**: reads the UDP 5600 kernel rx_queue
-//!    from `/proc/net/udp` every 5s. If the queue exceeds 256 KiB continuously
-//!    for 15s AND `wfb_tx` is making no read progress (`/proc/<pid>/io rchar`
-//!    flat), it is wedged reading from the socket — kill it. A deep queue that
-//!    IS being drained is backpressure, not a wedge: the encoder is offering
-//!    more than the link can carry, and a kill neither drains it nor slows the
-//!    encoder, so that case is logged and left alone.
+//!    depth from `/proc/net/udp` every 5s. If the queue exceeds 256 KiB
+//!    continuously for 15s AND `wfb_tx` is reading nothing (its ingress byte
+//!    total flat), it is wedged reading from the socket — kill it. A deep queue
+//!    that IS being drained is backpressure, not a wedge: the encoder is
+//!    offering more than the link can carry, and a kill neither drains it nor
+//!    slows the encoder, so that case is logged and left alone.
 //!
-//! Both watchdogs therefore hold the same contract: one counter alone never
-//! justifies a kill. Flat TX needs confirmed ingress; a deep queue needs
-//! confirmed non-drain.
+//! Both hold the same contract: one counter alone never justifies a kill.
 
+use ados_protocol::shutdown::Shutdown;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
-use crate::process::RadioProcesses;
+use crate::process::{RadioProcesses, TxPlaneCounters, TxPlaneTotals};
+use crate::tx_liveness::{TxLivenessWindow, TxPkt, TxVerdict};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 const TX_SILENCE_THRESHOLD: Duration = Duration::from_secs(30);
@@ -39,14 +43,6 @@ const UPSTREAM_SILENT_LOG_INTERVAL: Duration = Duration::from_secs(300);
 /// (lower the encoder ceiling, or raise the modulation rate) rather than merely
 /// informational, but still slow enough not to flood the log store.
 const BACKPRESSURE_LOG_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Snapshot used to detect counter progress.
-#[derive(Debug, Default, Clone)]
-struct TxSnapshot {
-    tx_bytes: u64,
-    rchar: u64,
-    udp_rx_queue: u64,
-}
 
 /// Watchdog kill/stall counters surfaced on `wfb-stats.json`. The heartbeat
 /// reads a shared handle to these on its 2 s cadence, so the GCS panel sees the
@@ -83,86 +79,76 @@ pub fn new_counters() -> CounterHandle {
     Arc::new(Mutex::new(WatchdogCounters::default()))
 }
 
-/// Resolves the **currently-running** data-plane `wfb_tx` PID.
-///
-/// The data-tx process is killed and respawned (with a NEW PID) whenever an
-/// FEC/MCS/manual-tier change or the adaptive controller retunes the radio. If
-/// the watchdog kept reading `/proc/<old_pid>/io` it would either read `None`
-/// on a dead PID (freezing the `rchar` ingress signal) or, worse, read garbage
-/// from an unrelated process that the OS recycled the old PID onto. Resolving
-/// the live PID each poll keeps the ingress signal pinned to the live process.
-pub trait LivePid: Send + Sync {
-    /// The live data-tx PID, or `None` when it cannot be determined (the process
-    /// has exited and not yet respawned). The watchdog treats `None`/`0` as
-    /// "skip the `rchar` read this tick" rather than freezing the previous value.
-    fn data_tx_pid(&self) -> impl std::future::Future<Output = Option<u32>> + Send;
+/// Folds a transmit plane's cumulative stats totals into the tested
+/// [`TxLivenessWindow`]: each poll's delta becomes one observation, taken only
+/// when the plane printed at least one new stats line (a flat line count is the
+/// silent-loop case the window detects on its own). Pure over `(now, totals)`.
+#[derive(Debug)]
+pub struct TxPlaneTracker {
+    prev: TxPlaneTotals,
+    window: TxLivenessWindow,
 }
 
-impl LivePid for Arc<Mutex<RadioProcesses>> {
-    async fn data_tx_pid(&self) -> Option<u32> {
-        self.lock().await.data_tx_pid()
+impl TxPlaneTracker {
+    pub fn new(now: tokio::time::Instant, totals: TxPlaneTotals, silence: Duration) -> Self {
+        Self {
+            prev: totals,
+            window: TxLivenessWindow::new(now, silence),
+        }
+    }
+
+    /// Fold one poll and judge the window (`None` while it is still filling).
+    pub fn observe(
+        &mut self,
+        now: tokio::time::Instant,
+        totals: TxPlaneTotals,
+    ) -> Option<TxVerdict> {
+        if totals.lines > self.prev.lines {
+            self.window.observe(
+                TxPkt {
+                    bytes_in: totals.bytes_in.saturating_sub(self.prev.bytes_in),
+                    bytes_injected: totals
+                        .bytes_injected
+                        .saturating_sub(self.prev.bytes_injected),
+                    packets_dropped: 0,
+                },
+                now,
+            );
+        }
+        self.prev = totals;
+        self.window.evaluate(now)
     }
 }
 
-/// Watch `wfb_tx` TX liveness. Returns when `wfb_tx` should be killed (the
-/// caller then kills it via `WfbTxProcess::kill()` and respawns).
-/// Also returns when `cancel` is notified.
-///
-/// `pid_source` resolves the **live** data-tx PID each poll rather than a
-/// captured constant: the data plane is respawned with a new PID on every
-/// FEC/MCS/tier change, so a one-shot PID would aim the `rchar` ingress read at
-/// a dead (or OS-recycled) process. The dual-check contract is unchanged — an
-/// advancing iface `tx_bytes` (the TX side) is necessary but never sufficient;
-/// the `rchar`/UDP receive-queue ingress signal stays the independent
-/// confirmation that the encoder is actually feeding `wfb_tx`.
-pub async fn tx_health_watchdog<P: LivePid>(
+/// Watch the data-plane `wfb_tx`'s own stats counters. Returns when it should
+/// be killed ([`WatchdogFired::TxStalled`]), when its PHY is muted
+/// ([`WatchdogFired::PhyMuted`], a recovery rather than a kill), or on
+/// `cancel`. `stats` is the data plane's process-lifetime counter handle, so a
+/// retune respawn keeps feeding the same window.
+pub async fn tx_health_watchdog(
     iface: &str,
-    pid_source: P,
+    stats: Arc<TxPlaneCounters>,
     counters: CounterHandle,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
+    cancel: Shutdown,
 ) -> WatchdogFired {
-    let mut last_progress = Instant::now();
+    let mut tracker = TxPlaneTracker::new(
+        tokio::time::Instant::now(),
+        stats.totals(),
+        TX_SILENCE_THRESHOLD,
+    );
     let mut last_upstream_silent_log = Instant::now() - UPSTREAM_SILENT_LOG_INTERVAL;
-    let mut prev = TxSnapshot::default();
 
     loop {
         tokio::select! {
             _ = tokio::time::sleep(POLL_INTERVAL) => {}
-            _ = cancel.notified() => return WatchdogFired::Cancelled,
+            _ = cancel.wait() => return WatchdogFired::Cancelled,
         }
-
-        // Resolve the live data-tx PID for THIS tick. A respawn (FEC/MCS/tier/
-        // adaptive) hands the data plane a new PID; reading the old one would
-        // freeze `rchar` (dead PID → `None`) or read an unrelated recycled
-        // process. A `None`/`0` PID (data plane exited, not yet respawned)
-        // means we skip the `rchar` read entirely and carry the previous value
-        // forward unchanged, so the PID-recycle window can never inject garbage
-        // into the ingress signal.
-        let pid = pid_source.data_tx_pid().await.unwrap_or(0);
-
-        let tx_bytes = read_tx_bytes(iface).await.unwrap_or(prev.tx_bytes);
-        let live_rchar = if pid == 0 {
-            None
-        } else {
-            read_rchar(pid).await
-        };
-        let rchar = select_rchar(live_rchar, prev.rchar);
-        let udp_rx = read_udp_recvq(5600).await.unwrap_or(prev.udp_rx_queue);
-
-        let tx_advancing = tx_bytes > prev.tx_bytes;
-        let ingress_advancing = rchar > prev.rchar || udp_rx > prev.udp_rx_queue;
-
-        if tx_advancing {
-            last_progress = Instant::now();
-        } else if last_progress.elapsed() >= TX_SILENCE_THRESHOLD {
-            if ingress_advancing {
-                // A flat TX while ingress feeds is a stall — but if the PHY
-                // itself is muted (txpower pinned at the not-permitted floor; the
-                // RTL8812EU `set type monitor` mute), killing + respawning wfb_tx
-                // can NEVER un-mute it: the fault is in the driver/PHY, not the
-                // process, so the kill-respawn loops forever with zero effect.
-                // Signal PhyMuted so the caller runs a PHY-recovery (re-cycle
-                // monitor + channel + txpower) instead of another pointless kill.
+        match tracker.observe(tokio::time::Instant::now(), stats.totals()) {
+            Some(TxVerdict::StalledNotInjecting) => {
+                // Ingress arrives but nothing reaches the radio. If the PHY is
+                // pinned at the muted not-permitted floor (the RTL8812EU `set
+                // type monitor` mute), killing wfb_tx can never un-mute it: the
+                // fault is in the driver/PHY, so route to a PHY recovery.
                 let muted = crate::adapter::read_tx_power(iface)
                     .await
                     .map(|dbm| dbm <= crate::adapter::MUTED_TX_POWER_DBM)
@@ -170,77 +156,68 @@ pub async fn tx_health_watchdog<P: LivePid>(
                 if muted {
                     tracing::warn!(
                         iface,
-                        pid,
-                        elapsed_s = last_progress.elapsed().as_secs(),
                         "wfb_tx_stalled_phy_muted: routing to PHY-recovery, not a kill"
                     );
                     return WatchdogFired::PhyMuted;
                 }
-                tracing::warn!(
-                    iface,
-                    pid,
-                    elapsed_s = last_progress.elapsed().as_secs(),
-                    "wfb_tx_stalled_kill"
-                );
-                // A real TX stall while ingress feeds: count it before the
-                // caller respawns the radio group.
+                tracing::warn!(iface, "wfb_tx_stalled_kill: ingress with no injection");
                 counters.lock().await.tx_zombie_kills += 1;
                 return WatchdogFired::TxStalled;
-            } else {
-                // Upstream (video encoder) is silent — don't kill; just log.
+            }
+            Some(TxVerdict::StalledSilent) => {
+                tracing::warn!(
+                    iface,
+                    "wfb_tx_stalled_kill: no stats line for the whole window"
+                );
+                counters.lock().await.tx_zombie_kills += 1;
+                return WatchdogFired::TxStalled;
+            }
+            Some(TxVerdict::Idle) => {
+                // Upstream (the video encoder) offered nothing — not a fault.
                 if last_upstream_silent_log.elapsed() >= UPSTREAM_SILENT_LOG_INTERVAL {
                     tracing::info!(iface, "wfb_tx_upstream_silent");
                     last_upstream_silent_log = Instant::now();
                 }
             }
+            Some(TxVerdict::Healthy) | None => {}
         }
-
-        prev = TxSnapshot {
-            tx_bytes,
-            rchar,
-            udp_rx_queue: udp_rx,
-        };
     }
 }
 
 /// Everything the receive-queue watchdog observes about the world outside its
-/// own state machine: the two kernel counters it cross-checks, the monotonic
-/// clock its sustained-window arithmetic runs on, and the wait between polls.
-///
-/// The counters live at fixed `/proc` paths, and the clock and the wait came
-/// straight from the ambient runtime. That left the loop exercisable only on a
-/// board with a real radio attached — nothing could put a deep queue in front of
-/// it, hold the read counter flat, and assert on what it concluded, which is
-/// precisely the judgement the watchdog exists to make. Behind this seam a
-/// scenario is a list of values. [`ProcSignals`] is the production
-/// implementation: the same paths, the same cadence, the same clock.
+/// own state machine: the kernel queue depth and the data plane's ingress total
+/// it cross-checks, the monotonic clock its sustained-window arithmetic runs on,
+/// and the wait between polls. Behind this seam a scenario is a list of values;
+/// [`ProcSignals`] is the production implementation.
 pub trait RecvqSignals: Send + Sync {
-    /// Cumulative bytes read by `pid` — the evidence that the data plane is
-    /// actually emptying the socket rather than merely still being alive.
-    /// `None` when the read fails, which must never be mistaken for progress.
-    fn rchar(&self, pid: u32) -> impl std::future::Future<Output = Option<u64>> + Send;
+    /// Cumulative bytes the data plane has read off its UDP ingress — the
+    /// evidence that it is actually emptying the socket rather than merely
+    /// still being alive.
+    fn ingress_bytes(&self) -> u64;
 
     /// Kernel receive-queue depth in bytes for `port`.
-    fn udp_recvq(&self, port: u16) -> impl std::future::Future<Output = Option<u64>> + Send;
+    fn udp_recvq(&self, port: u16) -> impl Future<Output = Option<u64>> + Send;
 
     /// Wait one poll interval. Raced against the cancel notification by the
     /// caller, so an implementation that never completes simply parks the
     /// watchdog until it is cancelled.
-    fn wait(&self, interval: Duration) -> impl std::future::Future<Output = ()> + Send;
+    fn wait(&self, interval: Duration) -> impl Future<Output = ()> + Send;
 
     /// Read the monotonic clock. Called once per poll; every window in the loop
     /// is measured against that single reading.
     fn now(&self) -> Instant;
 }
 
-/// The production [`RecvqSignals`]: the real `/proc` counters, the real tokio
-/// timer, the real monotonic clock.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ProcSignals;
+/// The production [`RecvqSignals`]: the data plane's own stats totals, the real
+/// `/proc/net/udp` depth, the real tokio timer, the real monotonic clock.
+#[derive(Debug, Clone)]
+pub struct ProcSignals {
+    stats: Arc<TxPlaneCounters>,
+}
 
 impl RecvqSignals for ProcSignals {
-    async fn rchar(&self, pid: u32) -> Option<u64> {
-        read_rchar(pid).await
+    fn ingress_bytes(&self) -> u64 {
+        self.stats.totals().bytes_in
     }
 
     async fn udp_recvq(&self, port: u16) -> Option<u64> {
@@ -261,73 +238,50 @@ impl RecvqSignals for ProcSignals {
 /// Updates the shared counters with the live `tx_video_stalled` flag, the last
 /// observed queue depth, and the stall-kill count on fire.
 ///
-/// A deep queue on its own is not evidence of a wedge, and treating it as such
-/// is the Rule-37 error in reverse: process liveness is not proof of work, but
-/// neither is a backlog proof of death. Two very different conditions produce
-/// the same queue depth:
+/// A deep queue on its own is not evidence of a wedge. Two very different
+/// conditions produce the same queue depth:
 ///
-/// - **Wedged**: `wfb_tx` has stopped reading the socket. `rchar` is flat.
-///   Killing it is the correct and only recovery.
+/// - **Wedged**: `wfb_tx` has stopped reading the socket; its ingress total is
+///   flat. Killing it is the correct and only recovery.
 /// - **Backpressured**: `wfb_tx` is reading as fast as the air allows, but the
-///   encoder is offering more than the current MCS and FEC can carry. `rchar`
-///   advances. The process is healthy and killing it fixes nothing — it drops
-///   the link for the duration of a full radio-group respawn, resets the
-///   adaptive bitrate controller to its configured starting rung, and leaves
-///   the encoder still over-feeding, so the queue refills and the kill repeats
-///   on a fixed period. Observed on a bench rig as 26 consecutive kills at 23s
-///   intervals, each costing about 3s of video and taking the auxiliary lane
-///   down with it.
-///
-/// So the ingress signal (`/proc/<pid>/io` `rchar`) is the required second
-/// check, exactly as [`tx_health_watchdog`] uses it. Backpressure is logged
-/// periodically instead, because the answer to it is to lower the encoder
-/// ceiling or raise the modulation rate, not to restart anything.
-pub async fn video_recvq_watchdog<P: LivePid>(
-    pid_source: P,
+///   encoder is offering more than the current MCS and FEC can carry; its
+///   ingress total advances. Killing it drops the link for a full radio-group
+///   respawn, resets the adaptive bitrate controller, and leaves the encoder
+///   still over-feeding, so the queue refills and the kill repeats on a fixed
+///   period (observed on a bench rig as 26 consecutive kills at 23 s
+///   intervals). Backpressure is logged periodically instead.
+pub async fn video_recvq_watchdog(
+    stats: Arc<TxPlaneCounters>,
     counters: CounterHandle,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
+    cancel: Shutdown,
 ) -> WatchdogFired {
-    video_recvq_watchdog_with(pid_source, ProcSignals, counters, cancel).await
+    video_recvq_watchdog_with(ProcSignals { stats }, counters, cancel).await
 }
 
-/// [`video_recvq_watchdog`] with its view of the outside world supplied rather
-/// than read from `/proc` and the ambient clock. The public entry point above is
-/// this function with [`ProcSignals`]; tests drive it with a scripted one.
-pub async fn video_recvq_watchdog_with<P: LivePid, S: RecvqSignals>(
-    pid_source: P,
+/// [`video_recvq_watchdog`] with its view of the outside world supplied. The
+/// public entry point above is this function with [`ProcSignals`]; tests drive
+/// it with a scripted one.
+pub async fn video_recvq_watchdog_with<S: RecvqSignals>(
     signals: S,
     counters: CounterHandle,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
+    cancel: Shutdown,
 ) -> WatchdogFired {
     let mut high_since: Option<Instant> = None;
-    let mut prev_rchar: u64 = 0;
+    let mut prev_ingress: u64 = 0;
     let mut last_backpressure_log = signals.now() - BACKPRESSURE_LOG_INTERVAL;
 
     loop {
         tokio::select! {
             _ = signals.wait(POLL_INTERVAL) => {}
-            _ = cancel.notified() => return WatchdogFired::Cancelled,
+            _ = cancel.wait() => return WatchdogFired::Cancelled,
         }
         // One clock reading per poll, so every window below is measured against
         // the same instant and a slow tick cannot make two of them disagree.
         let now = signals.now();
         let q = signals.udp_recvq(5600).await.unwrap_or(0);
-
-        // Resolve the live data-tx PID per tick for the same reason
-        // `tx_health_watchdog` does: a respawn hands the data plane a new PID,
-        // and reading a dead or OS-recycled one would poison the signal. A
-        // missing PID carries the previous value forward, which reads as "not
-        // draining" — correct, since a data plane that is not running is
-        // certainly not emptying the socket.
-        let pid = pid_source.data_tx_pid().await.unwrap_or(0);
-        let live_rchar = if pid == 0 {
-            None
-        } else {
-            signals.rchar(pid).await
-        };
-        let rchar = select_rchar(live_rchar, prev_rchar);
-        let draining = rchar > prev_rchar;
-        prev_rchar = rchar;
+        let ingress = signals.ingress_bytes();
+        let draining = ingress > prev_ingress;
+        prev_ingress = ingress;
 
         let tick = recvq_tick_decision(q, draining);
         {
@@ -346,7 +300,6 @@ pub async fn video_recvq_watchdog_with<P: LivePid, S: RecvqSignals>(
                 if now.saturating_duration_since(since) >= RECVQ_SUSTAINED_THRESHOLD {
                     tracing::warn!(
                         queue_bytes = q,
-                        pid,
                         "wfb_tx_video_recvq_kill: queue sustained with no drain progress"
                     );
                     counters.lock().await.tx_video_stall_kills += 1;
@@ -362,7 +315,6 @@ pub async fn video_recvq_watchdog_with<P: LivePid, S: RecvqSignals>(
                 {
                     tracing::warn!(
                         queue_bytes = q,
-                        pid,
                         "wfb_tx_video_backpressured: draining, offered rate exceeds link capacity"
                     );
                     last_backpressure_log = now;
@@ -387,7 +339,7 @@ enum RecvqTick {
     Wedged,
 }
 
-/// Classify one poll. `draining` is whether the data plane's `rchar` advanced
+/// Classify one poll. `draining` is whether the data plane's ingress total advanced
 /// since the previous poll, i.e. whether it read anything at all.
 fn recvq_tick_decision(queue_bytes: u64, draining: bool) -> RecvqTick {
     if queue_bytes <= RECVQ_BACKLOG_THRESHOLD_BYTES {
@@ -407,7 +359,105 @@ pub enum WatchdogFired {
     /// the not-permitted floor). The caller must run a PHY-recovery, not kill
     /// wfb_tx — respawning the process cannot un-mute a driver/PHY-level mute.
     PhyMuted,
+    /// A control-plane process (the HopAnnounce/beacon transmitter or the
+    /// HopAck/link-stats receiver) is alive but its own stats counter stayed
+    /// flat for the whole silence window. The caller respawns the group.
+    ControlStalled,
     Cancelled,
+}
+
+/// Flat-counter window before a control plane counts as silently stalled. Same
+/// 30 s window as the data-plane TX watchdog.
+const CONTROL_SILENCE_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// Which control plane stopped doing work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlPlane {
+    /// The tx-control `wfb_tx`: the ingress bytes its own stats report stopped
+    /// advancing even though the presence-beacon emitter feeds it every 10 s.
+    TxControl,
+    /// The rx-control `wfb_rx`: it stopped printing its per-second stats line.
+    RxControl,
+}
+
+impl ControlPlane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ControlPlane::TxControl => "tx_control",
+            ControlPlane::RxControl => "rx_control",
+        }
+    }
+}
+
+/// Delta-counter judgement over the control planes' cumulative stats counters
+/// `(tx-control ingress bytes, rx-control stats lines)`. Each counter must advance inside a rolling
+/// [`CONTROL_SILENCE_THRESHOLD`] window; a live process whose counter stays flat
+/// is doing no work. Pure over `(now, counters)` so the rule is testable without
+/// processes or a clock.
+#[derive(Debug)]
+pub struct ControlStallTracker {
+    last: (u64, u64),
+    tx_progress_at: Instant,
+    rx_progress_at: Instant,
+}
+
+impl ControlStallTracker {
+    /// Start a window at `now` from the counters' current values.
+    pub fn new(now: Instant, counters: (u64, u64)) -> Self {
+        Self {
+            last: counters,
+            tx_progress_at: now,
+            rx_progress_at: now,
+        }
+    }
+
+    /// Fold one poll. Returns the plane whose counter has been flat for the
+    /// whole window, or `None` while both are advancing.
+    pub fn observe(&mut self, now: Instant, counters: (u64, u64)) -> Option<ControlPlane> {
+        if counters.0 > self.last.0 {
+            self.tx_progress_at = now;
+        }
+        if counters.1 > self.last.1 {
+            self.rx_progress_at = now;
+        }
+        self.last = counters;
+        if now.saturating_duration_since(self.rx_progress_at) >= CONTROL_SILENCE_THRESHOLD {
+            Some(ControlPlane::RxControl)
+        } else if now.saturating_duration_since(self.tx_progress_at) >= CONTROL_SILENCE_THRESHOLD {
+            Some(ControlPlane::TxControl)
+        } else {
+            None
+        }
+    }
+}
+
+/// Watch the two control planes' own stats counters and return
+/// [`WatchdogFired::ControlStalled`] when either stays flat for the silence
+/// window, so the caller respawns the group. Process liveness is never proof of
+/// work: a `wfb_rx` blocked on a full pipe or a `wfb_tx` wedged in the driver is
+/// still a live PID. Returns [`WatchdogFired::Cancelled`] on `cancel`.
+pub async fn control_plane_watchdog(
+    proc: Arc<Mutex<RadioProcesses>>,
+    cancel: Shutdown,
+) -> WatchdogFired {
+    let control_counters = |(tx, rx): (crate::process::TxPlaneTotals, u64)| (tx.bytes_in, rx);
+    let start = control_counters(proc.lock().await.control_progress());
+    let mut tracker = ControlStallTracker::new(Instant::now(), start);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(POLL_INTERVAL) => {}
+            _ = cancel.wait() => return WatchdogFired::Cancelled,
+        }
+        let counters = control_counters(proc.lock().await.control_progress());
+        if let Some(plane) = tracker.observe(Instant::now(), counters) {
+            tracing::warn!(
+                plane = plane.as_str(),
+                window_s = CONTROL_SILENCE_THRESHOLD.as_secs(),
+                "wfb_control_plane_stalled_respawning"
+            );
+            return WatchdogFired::ControlStalled;
+        }
+    }
 }
 
 /// How often the auxiliary-stream liveness watchdog polls.
@@ -421,109 +471,153 @@ const AUX_SILENCE_THRESHOLD: Duration = Duration::from_secs(30);
 /// respawn select.
 ///
 /// This mirrors the data-plane delta-counter contract — process-liveness alone is
-/// never proof of work, so the watchdog asserts that the aux tx process's ingress
-/// counter (the `rchar` it reads from its UDP ingress, i.e. the application frames
-/// a plugin feeds it) advances. It differs from the data-plane watchdog in ONE
-/// deliberate way: it owns its own recovery. A stalled aux pair must NOT trigger a
-/// whole-group respawn (that would interrupt the data + control planes, breaking
-/// the additive-aux invariant), so on a stall the watchdog calls
+/// never proof of work — over the aux transmitter's own stats totals: its stats
+/// line count (the loop is turning; `wfb_tx` prints one every second whether or
+/// not traffic moved) and its ingress bytes (the application frames a plugin
+/// feeds it). It differs from the data-plane watchdog in ONE deliberate way: it
+/// owns its own recovery. A stalled aux pair must NOT trigger a whole-group
+/// respawn (that would interrupt the data + control planes, breaking the
+/// additive-aux invariant), so on a stall the watchdog calls
 /// [`RadioProcesses::restart_aux_stream`] directly and keeps watching. It returns
-/// only when cancelled (a whole-group respawn / shutdown aborts it like the other
-/// sibling tasks).
+/// only when cancelled.
 ///
-/// SAFE while the aux stream is closed: the aux tx PID resolves `None`, so the
-/// watchdog idles (resetting its progress clock) and never restarts anything. It
-/// can run for the entire radio bring-up regardless of whether a plugin has ever
-/// opened the stream.
+/// SAFE while the aux stream is closed: the watchdog idles (resetting its
+/// windows) and never restarts anything.
 ///
 /// IDLE IS NOT A STALL. A low-rate aux channel legitimately sends nothing for
-/// long stretches, so a flat ingress counter on its own is NOT evidence of a
-/// wedged transmitter — restarting an idle-but-healthy stream every 30 s is
-/// churn, not recovery. The watchdog therefore fires ONLY on a *post-activity*
-/// stall: the counter must have advanced at least once (the plugin really did
-/// feed the pipe) and THEN gone flat for the silence window. A stream that has
-/// never been fed since it was opened (or has gone quiescent and stayed there)
-/// is left running. That keeps the only fire path the same orphaned-`wfb_tx`
-/// failure class the data plane guards — a transmitter that WAS carrying frames
-/// and silently died — without ever penalising a healthy idle channel.
-///
-/// The RF-confirmation half of the dual-check (an independent received-side or
-/// PHY-speed signal proving the energy reaches a peer) is bench-gated for the aux
-/// pair; this guards the process-liveness + ingress-advance half so a wedged aux
-/// transmitter is recovered in the field.
-pub async fn aux_liveness_watchdog(
-    proc: std::sync::Arc<Mutex<RadioProcesses>>,
-    cancel: std::sync::Arc<tokio::sync::Notify>,
-) {
+/// long stretches, so flat ingress on its own is not evidence of a wedge. Two
+/// things fire: the stats lines stopping for the whole window (a loop that is
+/// no longer turning), or ingress that advanced at least once and then went
+/// flat for the window (a transmitter that WAS carrying frames and died).
+pub async fn aux_liveness_watchdog(proc: std::sync::Arc<Mutex<RadioProcesses>>, cancel: Shutdown) {
     let mut last_progress = Instant::now();
-    let mut prev_rchar: Option<u64> = None;
-    // Whether the counter has advanced at least once since the stream was opened.
-    // A never-fed (idle) stream keeps this false, so it is never restarted; only
-    // a stream that DID feed and then went silent is a genuine stall.
+    let mut last_line = Instant::now();
+    let mut prev: Option<TxPlaneTotals> = None;
+    // Whether ingress has advanced at least once since the stream was opened.
+    // A never-fed (idle) stream keeps this false, so flat ingress alone never
+    // restarts it.
     let mut had_activity = false;
 
     loop {
         tokio::select! {
             _ = tokio::time::sleep(AUX_POLL_INTERVAL) => {}
-            _ = cancel.notified() => return,
+            _ = cancel.wait() => return,
         }
 
-        // Resolve the live aux tx PID for THIS tick. `None` means the stream is
-        // closed (or mid-restart) — reset the progress clock, the prev counter,
-        // and the activity flag so a fresh open starts from a clean window and the
-        // watchdog never fires on a stream that was simply never opened.
-        let pid = { proc.lock().await.aux_tx_pid() };
-        let Some(pid) = pid else {
+        // Resolve this tick's pair state under one lock. An exited half, or a
+        // stream a plugin still wants whose pair is down (a failed restart),
+        // is restarted now and retried every poll until it comes back; the
+        // retry is the fixed poll interval with no cap.
+        let (action, totals) = {
+            let mut p = proc.lock().await;
+            let action = aux_pair_action(p.aux_wanted(), p.aux_tx_pid().is_some(), p.aux_exited());
+            (action, p.aux_totals())
+        };
+        let reset = |last_progress: &mut Instant,
+                     last_line: &mut Instant,
+                     prev: &mut Option<TxPlaneTotals>,
+                     had_activity: &mut bool| {
+            *last_progress = Instant::now();
+            *last_line = Instant::now();
+            *prev = None;
+            *had_activity = false;
+        };
+        match action {
+            AuxPairAction::Idle => {
+                reset(
+                    &mut last_progress,
+                    &mut last_line,
+                    &mut prev,
+                    &mut had_activity,
+                );
+                continue;
+            }
+            AuxPairAction::Restart => {
+                tracing::warn!("aux_pair_down_restarting");
+                let _ = proc.lock().await.restart_aux_stream().await;
+                reset(
+                    &mut last_progress,
+                    &mut last_line,
+                    &mut prev,
+                    &mut had_activity,
+                );
+                continue;
+            }
+            AuxPairAction::Watch => {}
+        }
+
+        let Some(before) = prev else {
+            // First reading of a freshly-opened stream: seed the baseline.
+            prev = Some(totals);
             last_progress = Instant::now();
-            prev_rchar = None;
-            had_activity = false;
+            last_line = Instant::now();
             continue;
         };
-
-        let rchar = read_rchar(pid).await;
-        match (prev_rchar, rchar) {
-            // First reading of a freshly-opened stream: seed the baseline, don't
-            // judge progress yet.
-            (None, Some(cur)) => {
-                prev_rchar = Some(cur);
+        if totals.lines > before.lines {
+            last_line = Instant::now();
+        }
+        let window_elapsed = last_progress.elapsed() >= AUX_SILENCE_THRESHOLD;
+        let silent = last_line.elapsed() >= AUX_SILENCE_THRESHOLD;
+        let tick = if silent {
+            AuxTick::Restart
+        } else {
+            aux_tick_decision(
+                before.bytes_in,
+                totals.bytes_in,
+                had_activity,
+                window_elapsed,
+            )
+        };
+        match tick {
+            AuxTick::Progress => {
+                // The plugin fed the pipe: real activity. From here a later
+                // sustained-flat window is a genuine stall.
+                had_activity = true;
                 last_progress = Instant::now();
             }
-            (Some(prev), Some(cur)) => {
-                let window_elapsed = last_progress.elapsed() >= AUX_SILENCE_THRESHOLD;
-                match aux_tick_decision(prev, cur, had_activity, window_elapsed) {
-                    AuxTick::Progress => {
-                        // The plugin fed the pipe: real activity. From here a later
-                        // sustained-flat window is a genuine stall.
-                        had_activity = true;
-                        last_progress = Instant::now();
-                        prev_rchar = Some(cur);
-                    }
-                    AuxTick::Restart => {
-                        tracing::warn!(
-                            pid,
-                            elapsed_s = last_progress.elapsed().as_secs(),
-                            "aux_tx_stalled_restarting"
-                        );
-                        // ADDITIVE recovery: restart ONLY the aux pair, in place.
-                        // The data + control planes are untouched. Reset the
-                        // baseline + the activity flag so the new pair starts from
-                        // a clean window.
-                        let _ = proc.lock().await.restart_aux_stream().await;
-                        last_progress = Instant::now();
-                        prev_rchar = None;
-                        had_activity = false;
-                    }
-                    AuxTick::Hold => {
-                        // Flat counter on an idle stream (never fed, or within the
-                        // window) — leave it running. Carry the baseline forward.
-                        prev_rchar = Some(cur);
-                    }
-                }
+            AuxTick::Restart => {
+                tracing::warn!(
+                    silent,
+                    elapsed_s = last_progress.elapsed().as_secs(),
+                    "aux_tx_stalled_restarting"
+                );
+                // ADDITIVE recovery: restart ONLY the aux pair, in place.
+                let _ = proc.lock().await.restart_aux_stream().await;
+                reset(
+                    &mut last_progress,
+                    &mut last_line,
+                    &mut prev,
+                    &mut had_activity,
+                );
+                continue;
             }
-            // The `/proc/<pid>/io` read failed (a recycle window): carry the
-            // previous baseline forward, never manufacture progress.
-            (_, None) => {}
+            AuxTick::Hold => {}
         }
+        prev = Some(totals);
+    }
+}
+
+/// What the aux watchdog does with the pair this tick, before any counter is
+/// read. `wanted` is whether the stream is open (settings retained), `spawned`
+/// whether an aux tx process is held, `exited` whether either held half has
+/// exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuxPairAction {
+    /// Closed: nothing to watch.
+    Idle,
+    /// Wanted but a half has exited or the pair is down: restart it.
+    Restart,
+    /// Running: judge its ingress counter.
+    Watch,
+}
+
+fn aux_pair_action(wanted: bool, spawned: bool, exited: bool) -> AuxPairAction {
+    if !wanted {
+        AuxPairAction::Idle
+    } else if exited || !spawned {
+        AuxPairAction::Restart
+    } else {
+        AuxPairAction::Watch
     }
 }
 
@@ -555,38 +649,6 @@ fn aux_tick_decision(prev: u64, cur: u64, had_activity: bool, window_elapsed: bo
     }
 }
 
-/// Read `/sys/class/net/<iface>/statistics/tx_bytes`.
-async fn read_tx_bytes(iface: &str) -> Option<u64> {
-    let path = format!("/sys/class/net/{}/statistics/tx_bytes", iface);
-    let raw = tokio::fs::read_to_string(&path).await.ok()?;
-    raw.trim().parse().ok()
-}
-
-/// Pick the `rchar` value to carry into this tick's snapshot.
-///
-/// `live` is `Some` only when the live data-tx PID was known AND its
-/// `/proc/<pid>/io` read succeeded. When the PID is unknown/recycling-risk
-/// (the data plane just respawned and we resolved `None`/`0`) or the read
-/// failed, fall back to the previous value rather than treating a missing read
-/// as ingress progress — this keeps the recycle window from injecting garbage
-/// and never *manufactures* an advancing ingress signal.
-fn select_rchar(live: Option<u64>, prev: u64) -> u64 {
-    live.unwrap_or(prev)
-}
-
-/// Read the `rchar` field from `/proc/<pid>/io` (cumulative bytes read by the
-/// process — the primary signal that the video encoder is feeding `wfb_tx`).
-async fn read_rchar(pid: u32) -> Option<u64> {
-    let path = format!("/proc/{}/io", pid);
-    let raw = tokio::fs::read_to_string(&path).await.ok()?;
-    for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix("rchar:") {
-            return rest.trim().parse().ok();
-        }
-    }
-    None
-}
-
 /// Read the UDP receive-queue depth for a given port from `/proc/net/udp`.
 /// Returns the queue depth in bytes (hex `rx_queue` field from the kernel).
 async fn read_udp_recvq(port: u16) -> Option<u64> {
@@ -613,6 +675,44 @@ async fn read_udp_recvq(port: u16) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each control plane's own stats counter must advance inside the 30 s
+    /// window. A counter that keeps moving never fires; one that goes flat for
+    /// the whole window names its plane, whichever of the two it is.
+    #[test]
+    fn a_flat_control_plane_counter_fires_after_the_window() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+
+        // Both advancing every 5 s poll: never fires.
+        let mut live = ControlStallTracker::new(t0, (0, 0));
+        for poll in 1..=20u64 {
+            assert_eq!(live.observe(at(poll * 5), (poll, poll * 5)), None);
+        }
+
+        // The receiver stops printing stats at t=10: fires at t=40, not before.
+        let mut rx = ControlStallTracker::new(t0, (0, 0));
+        assert_eq!(rx.observe(at(5), (1, 5)), None);
+        assert_eq!(rx.observe(at(10), (2, 10)), None);
+        assert_eq!(rx.observe(at(35), (7, 10)), None);
+        assert_eq!(rx.observe(at(40), (8, 10)), Some(ControlPlane::RxControl));
+
+        // The transmitter stops reading beacons while its stats keep flowing.
+        let mut tx = ControlStallTracker::new(t0, (0, 0));
+        assert_eq!(tx.observe(at(10), (1, 10)), None);
+        assert_eq!(tx.observe(at(30), (1, 30)), None);
+        assert_eq!(tx.observe(at(40), (1, 40)), Some(ControlPlane::TxControl));
+    }
+
+    /// A wanted aux pair whose process exited, or whose restart failed and
+    /// left it down, is restarted; only a closed stream is left alone.
+    #[test]
+    fn a_wanted_aux_pair_that_is_down_is_restarted() {
+        assert_eq!(aux_pair_action(false, false, false), AuxPairAction::Idle);
+        assert_eq!(aux_pair_action(true, true, false), AuxPairAction::Watch);
+        assert_eq!(aux_pair_action(true, true, true), AuxPairAction::Restart);
+        assert_eq!(aux_pair_action(true, false, false), AuxPairAction::Restart);
+    }
 
     #[test]
     fn recvq_threshold_is_256kib() {
@@ -652,68 +752,6 @@ mod tests {
         let c = *counters.lock().await;
         assert_eq!(c.tx_zombie_kills, 1);
         assert!(c.tx_video_stalled);
-    }
-
-    #[test]
-    fn select_rchar_carries_prev_when_pid_unknown() {
-        // A respawn (or a recycle-risk) resolves `None` for the live read: the
-        // watchdog must carry the previous value forward, NOT treat a missing
-        // read as zero or as progress.
-        assert_eq!(select_rchar(None, 42), 42);
-        assert_eq!(select_rchar(None, 0), 0);
-    }
-
-    #[test]
-    fn select_rchar_uses_live_read_when_available() {
-        // A successful read of the live PID overrides the previous snapshot,
-        // including a higher value (real ingress progress).
-        assert_eq!(select_rchar(Some(100), 42), 100);
-        // A live read lower than prev (a respawn reset the per-process counter)
-        // is taken as-is — the advancing check (`rchar > prev.rchar`) then sees
-        // no progress this tick, which is correct: the new process has not yet
-        // read anything, so ingress is genuinely not advancing on its `rchar`.
-        assert_eq!(select_rchar(Some(5), 42), 5);
-    }
-
-    /// A `LivePid` whose value can change mid-run, simulating a data-tx respawn
-    /// handing the data plane a new PID under the watchdog.
-    struct FakePid {
-        pid: std::sync::atomic::AtomicU32,
-    }
-
-    impl FakePid {
-        fn new(pid: u32) -> Self {
-            Self {
-                pid: std::sync::atomic::AtomicU32::new(pid),
-            }
-        }
-        fn respawn_to(&self, pid: u32) {
-            self.pid.store(pid, std::sync::atomic::Ordering::SeqCst);
-        }
-    }
-
-    impl LivePid for std::sync::Arc<FakePid> {
-        async fn data_tx_pid(&self) -> Option<u32> {
-            match self.pid.load(std::sync::atomic::Ordering::SeqCst) {
-                0 => None,
-                p => Some(p),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn live_pid_reflects_a_respawn() {
-        // The watchdog resolves the PID per poll through this trait, so a
-        // respawn that changes the underlying PID is picked up on the next tick
-        // instead of the watchdog being stuck on the original (now dead) PID.
-        let src = std::sync::Arc::new(FakePid::new(1234));
-        assert_eq!(LivePid::data_tx_pid(&src).await, Some(1234));
-        src.respawn_to(5678);
-        assert_eq!(LivePid::data_tx_pid(&src).await, Some(5678));
-        // A respawn-in-progress window (no live process yet) resolves None, which
-        // the watchdog maps to the rchar-skip path via select_rchar.
-        src.respawn_to(0);
-        assert_eq!(LivePid::data_tx_pid(&src).await, None);
     }
 
     #[test]
@@ -834,7 +872,7 @@ mod tests {
     /// kill.
     struct FakeSignals {
         queue: std::sync::Mutex<Scripted>,
-        rchar: std::sync::Mutex<Scripted>,
+        ingress: std::sync::Mutex<Scripted>,
         clock: std::sync::Mutex<Instant>,
         polls: std::sync::atomic::AtomicUsize,
         budget: usize,
@@ -843,10 +881,10 @@ mod tests {
     }
 
     impl FakeSignals {
-        fn new(queue: Vec<Option<u64>>, rchar: Vec<Option<u64>>, budget: usize) -> Arc<Self> {
+        fn new(queue: Vec<Option<u64>>, ingress: Vec<Option<u64>>, budget: usize) -> Arc<Self> {
             Arc::new(Self {
                 queue: std::sync::Mutex::new(Scripted::new(queue)),
-                rchar: std::sync::Mutex::new(Scripted::new(rchar)),
+                ingress: std::sync::Mutex::new(Scripted::new(ingress)),
                 // Start the virtual clock an hour in so the loop's initial
                 // `now() - BACKPRESSURE_LOG_INTERVAL` cannot underflow the
                 // monotonic clock on a freshly booted machine.
@@ -862,18 +900,14 @@ mod tests {
             self.polls.load(std::sync::atomic::Ordering::SeqCst)
         }
 
-        fn rchar_reads(&self) -> usize {
-            self.rchar.lock().unwrap().reads
-        }
-
         fn last_port(&self) -> u32 {
             self.last_port.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
     impl RecvqSignals for Arc<FakeSignals> {
-        async fn rchar(&self, _pid: u32) -> Option<u64> {
-            self.rchar.lock().unwrap().sample()
+        fn ingress_bytes(&self) -> u64 {
+            self.ingress.lock().unwrap().sample().unwrap_or(0)
         }
 
         async fn udp_recvq(&self, port: u16) -> Option<u64> {
@@ -905,19 +939,10 @@ mod tests {
     /// Run a scenario that is expected NOT to kill: drive it until its poll
     /// budget is spent, hand the counters to the caller to assert on, then cancel
     /// and confirm the watchdog left by the cancel arm rather than by a kill.
-    async fn run_until_spent(
-        signals: Arc<FakeSignals>,
-        pid: std::sync::Arc<FakePid>,
-        counters: CounterHandle,
-    ) -> WatchdogFired {
-        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    async fn run_until_spent(signals: Arc<FakeSignals>, counters: CounterHandle) -> WatchdogFired {
+        let cancel = Shutdown::new();
         let spent = signals.spent.clone();
-        let mut handle = tokio::spawn(video_recvq_watchdog_with(
-            pid,
-            signals,
-            counters,
-            cancel.clone(),
-        ));
+        let mut handle = tokio::spawn(video_recvq_watchdog_with(signals, counters, cancel.clone()));
         tokio::select! {
             // The watchdog left before the scenario ran out of polls, which for
             // these scenarios means it killed. Hand that verdict back so the
@@ -926,7 +951,7 @@ mod tests {
             verdict = &mut handle => return verdict.expect("watchdog task panicked"),
             _ = spent.notified() => {}
         }
-        cancel.notify_one();
+        cancel.trigger();
         handle.await.expect("watchdog task panicked")
     }
 
@@ -937,15 +962,9 @@ mod tests {
         // only the ingress counter does, and it is flat.
         let signals = FakeSignals::new(flat(DEEP_QUEUE), flat(500), 50);
         let counters = new_counters();
-        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        let cancel = Shutdown::new();
 
-        let fired = video_recvq_watchdog_with(
-            std::sync::Arc::new(FakePid::new(4242)),
-            signals.clone(),
-            counters.clone(),
-            cancel,
-        )
-        .await;
+        let fired = video_recvq_watchdog_with(signals.clone(), counters.clone(), cancel).await;
 
         assert_eq!(fired, WatchdogFired::RecvqBacklog);
         let c = *counters.lock().await;
@@ -960,7 +979,7 @@ mod tests {
         );
 
         // Five polls, and the count is the point: the first poll only seeds the
-        // ingress baseline (`prev_rchar` starts at 0, so any reading looks like
+        // ingress baseline (the ingress baseline starts at 0, so any reading looks like
         // progress), the second is the first poll that can be called wedged, and
         // the kill lands three polls later — a full uninterrupted 15 s window at
         // the 5 s cadence. A kill any sooner would mean the window shrank.
@@ -977,12 +996,7 @@ mod tests {
         let counters = new_counters();
 
         // Thirty polls is 150 s of virtual time, ten times the sustained window.
-        let fired = run_until_spent(
-            signals.clone(),
-            std::sync::Arc::new(FakePid::new(4242)),
-            counters.clone(),
-        )
-        .await;
+        let fired = run_until_spent(signals.clone(), counters.clone()).await;
 
         assert_eq!(fired, WatchdogFired::Cancelled);
         let c = *counters.lock().await;
@@ -1001,12 +1015,7 @@ mod tests {
         let signals = FakeSignals::new(flat(shallow), ramp(500, 40_000, 20), 12);
         let counters = new_counters();
 
-        let fired = run_until_spent(
-            signals,
-            std::sync::Arc::new(FakePid::new(4242)),
-            counters.clone(),
-        )
-        .await;
+        let fired = run_until_spent(signals, counters.clone()).await;
 
         assert_eq!(fired, WatchdogFired::Cancelled);
         let c = *counters.lock().await;
@@ -1042,66 +1051,10 @@ mod tests {
         );
         let counters = new_counters();
 
-        let fired = run_until_spent(
-            signals,
-            std::sync::Arc::new(FakePid::new(4242)),
-            counters.clone(),
-        )
-        .await;
+        let fired = run_until_spent(signals, counters.clone()).await;
 
         assert_eq!(fired, WatchdogFired::Cancelled);
         assert_eq!(counters.lock().await.tx_video_stall_kills, 0);
-    }
-
-    #[tokio::test]
-    async fn a_data_plane_that_is_not_running_reads_as_not_draining() {
-        // No live PID means no ingress read at all, and the previous value is
-        // carried forward rather than a missing read being taken as progress. A
-        // data plane that is not running is certainly not emptying the socket.
-        let signals = FakeSignals::new(flat(DEEP_QUEUE), ramp(500, 40_000, 40), 50);
-        let counters = new_counters();
-        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
-
-        let fired = video_recvq_watchdog_with(
-            std::sync::Arc::new(FakePid::new(0)),
-            signals.clone(),
-            counters.clone(),
-            cancel,
-        )
-        .await;
-
-        assert_eq!(fired, WatchdogFired::RecvqBacklog);
-        assert_eq!(counters.lock().await.tx_video_stall_kills, 1);
-        assert_eq!(
-            signals.rchar_reads(),
-            0,
-            "an ingress counter belonging to no live process must never be read"
-        );
-        // Four polls rather than the five of the live-process case: there is no
-        // baseline-seeding poll, because a carried-forward zero never looks like
-        // progress, so the window opens on the very first poll.
-        assert_eq!(signals.polls(), 4);
-    }
-
-    #[tokio::test]
-    async fn a_failed_ingress_read_is_not_progress() {
-        // `/proc/<pid>/io` can fail to read in the window where the process is
-        // being recycled. Treating that as progress would keep a genuinely wedged
-        // transmitter alive indefinitely.
-        let signals = FakeSignals::new(flat(DEEP_QUEUE), vec![Some(500), None], 50);
-        let counters = new_counters();
-        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
-
-        let fired = video_recvq_watchdog_with(
-            std::sync::Arc::new(FakePid::new(4242)),
-            signals,
-            counters.clone(),
-            cancel,
-        )
-        .await;
-
-        assert_eq!(fired, WatchdogFired::RecvqBacklog);
-        assert_eq!(counters.lock().await.tx_video_stall_kills, 1);
     }
 
     #[tokio::test]
@@ -1113,13 +1066,7 @@ mod tests {
         let counters = new_counters();
 
         let wedged = FakeSignals::new(flat(DEEP_QUEUE), flat(500), 50);
-        let fired = video_recvq_watchdog_with(
-            std::sync::Arc::new(FakePid::new(4242)),
-            wedged,
-            counters.clone(),
-            std::sync::Arc::new(tokio::sync::Notify::new()),
-        )
-        .await;
+        let fired = video_recvq_watchdog_with(wedged, counters.clone(), Shutdown::new()).await;
         assert_eq!(fired, WatchdogFired::RecvqBacklog);
         assert!(counters.lock().await.tx_video_stalled);
 
@@ -1128,13 +1075,7 @@ mod tests {
             ramp(0, 40_000, 20),
             10,
         );
-        let after = run_until_spent(
-            recovered,
-            // A respawn hands the data plane a new PID.
-            std::sync::Arc::new(FakePid::new(9001)),
-            counters.clone(),
-        )
-        .await;
+        let after = run_until_spent(recovered, counters.clone()).await;
 
         assert_eq!(after, WatchdogFired::Cancelled);
         let c = *counters.lock().await;
@@ -1153,24 +1094,71 @@ mod tests {
     #[tokio::test]
     async fn the_production_signals_wait_for_real() {
         // The seam must not have turned the production poll into a hot spin.
-        let signals = ProcSignals;
+        let signals = ProcSignals {
+            stats: Arc::new(TxPlaneCounters::default()),
+        };
         let before = signals.now();
         signals.wait(Duration::from_millis(5)).await;
         assert!(signals.now().saturating_duration_since(before) >= Duration::from_millis(5));
     }
 
+    fn totals(lines: u64, bytes_in: u64, bytes_injected: u64) -> TxPlaneTotals {
+        TxPlaneTotals {
+            lines,
+            bytes_in,
+            bytes_injected,
+        }
+    }
+
+    /// The data plane is judged from its own stats totals: injection keeps it
+    /// healthy, ingress with no injection is a stall, a loop that stops printing
+    /// is a stall, and no ingress at all is an idle encoder that is never killed.
+    #[test]
+    fn the_data_plane_is_judged_from_its_own_stats_totals() {
+        let t0 = tokio::time::Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let window = TX_SILENCE_THRESHOLD;
+
+        let mut healthy = TxPlaneTracker::new(t0, totals(0, 0, 0), window);
+        for poll in 1..=12u64 {
+            let v = healthy.observe(at(poll * 5), totals(poll * 5, poll * 1000, poll * 1100));
+            assert!(!v.is_some_and(|v| v.is_stall()), "poll {poll}: {v:?}");
+        }
+
+        let mut not_injecting = TxPlaneTracker::new(t0, totals(0, 0, 0), window);
+        let mut verdict = None;
+        for poll in 1..=6u64 {
+            verdict = not_injecting.observe(at(poll * 5), totals(poll * 5, poll * 1000, 0));
+        }
+        assert_eq!(verdict, Some(TxVerdict::StalledNotInjecting));
+
+        let mut silent = TxPlaneTracker::new(t0, totals(0, 0, 0), window);
+        assert_eq!(silent.observe(at(5), totals(5, 500, 550)), None);
+        assert_eq!(
+            silent.observe(at(35), totals(5, 500, 550)),
+            Some(TxVerdict::StalledSilent)
+        );
+
+        let mut idle = TxPlaneTracker::new(t0, totals(0, 0, 0), window);
+        let mut verdict = None;
+        for poll in 1..=6u64 {
+            verdict = idle.observe(at(poll * 5), totals(poll * 5, 0, 0));
+        }
+        assert_eq!(verdict, Some(TxVerdict::Idle));
+    }
+
     #[tokio::test]
-    async fn tx_health_watchdog_cancels_promptly_with_live_pid_source() {
-        // Drive the real watchdog with a fake live-PID source and an immediate
-        // cancel: it must honor the cancel arm and return `Cancelled` without
-        // panicking, proving the generic `LivePid` plumbing compiles and runs
-        // end-to-end. (The full stall/kill paths read real /proc + /sys and are
-        // covered on-rig; this guards the wiring + the cancel contract.)
-        let src = std::sync::Arc::new(FakePid::new(1));
+    async fn tx_health_watchdog_cancels_promptly() {
         let counters = new_counters();
-        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
-        cancel.notify_one();
-        let fired = tx_health_watchdog("ados-test-nonexistent-iface", src, counters, cancel).await;
+        let cancel = Shutdown::new();
+        cancel.trigger();
+        let fired = tx_health_watchdog(
+            "ados-test-nonexistent-iface",
+            Arc::new(TxPlaneCounters::default()),
+            counters,
+            cancel,
+        )
+        .await;
         assert_eq!(fired, WatchdogFired::Cancelled);
     }
 }

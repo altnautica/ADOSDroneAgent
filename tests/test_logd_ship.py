@@ -28,11 +28,11 @@ from ados.core.logd_ship import (
     LogdQueueHandler,
     LogdShipper,
     _level_token,
-    _redact_value,
     encode_log_frame,
     install_logd_handler,
     uninstall_logd_handler,
 )
+from ados.core.logging import redact_value
 
 # --- helpers ---------------------------------------------------------------
 
@@ -149,7 +149,7 @@ def test_frame_decodes_with_native_protocol_crate():
 
     rec = _record(level=logging.WARNING, name="ados.api", msg="hello world", attempt=3)
     rec.created = 1_700_000_000.0
-    setattr(rec, "api_key", "redacted:ABCD...bb2a0cee")
+    setattr(rec, "api_key", "redacted:len=20")
     frame = encode_log_frame(rec)
     body_hex = frame[4:].hex()
 
@@ -173,27 +173,27 @@ def test_frame_decodes_with_native_protocol_crate():
 # from both implementations is the contract; any drift fails here and in the
 # native suite.
 _REDACT_VECTORS = [
-    ("api_key", "ABCDEFGHIJ1234567890", "redacted:ABCD...bb2a0cee"),
-    ("pairing_code", "999888", "redacted:9998...685f188e"),
-    ("token", "tok_supersecretvalue", "redacted:tok_...160e465f"),
-    ("password", "hunter2", "redacted:hunt...f52fbd32"),
-    ("secret", "s", "redacted:s...043a7187"),
-    ("device_secret", "0xDEADBEEFCAFE", "redacted:0xDE...c19821b8"),
+    ("api_key", "ABCDEFGHIJ1234567890", "redacted:len=20"),
+    ("pairing_code", "999888", "redacted:len=6"),
+    ("token", "tok_supersecretvalue", "redacted:len=20"),
+    ("password", "hunter2", "redacted:len=7"),
+    ("secret", "s", "redacted:len=1"),
+    ("device_secret", "0xDEADBEEFCAFE", "redacted:len=14"),
 ]
 
 
 @pytest.mark.parametrize("key,value,expected", _REDACT_VECTORS)
 def test_redaction_parity_with_native(key, value, expected):
-    assert _redact_value(key, value) == expected
+    assert redact_value(key, value) == expected
     # Idempotent: feeding the redacted output back yields the same string.
-    assert _redact_value(key, expected) == expected
+    assert redact_value(key, expected) == expected
 
 
 def test_redaction_skips_non_secret_empty_and_sentinel():
-    assert _redact_value("device_id", "abc123") == "abc123"
-    assert _redact_value("api_key", "") == ""
-    once = _redact_value("api_key", "ABCDEFGHIJ1234567890")
-    assert _redact_value("api_key", once) == once
+    assert redact_value("device_id", "abc123") == "abc123"
+    assert redact_value("api_key", "") == ""
+    once = redact_value("api_key", "ABCDEFGHIJ1234567890")
+    assert redact_value("api_key", once) == once
 
 
 def test_secret_field_in_frame_is_shipped_redacted():
@@ -201,7 +201,7 @@ def test_secret_field_in_frame_is_shipped_redacted():
     # redacted by the shipper before it goes on the wire.
     rec = _record(msg="auth", api_key="ABCDEFGHIJ1234567890", device_id="abc123")
     body = _decode_body(encode_log_frame(rec))
-    assert body["f"]["api_key"] == "redacted:ABCD...bb2a0cee"
+    assert body["f"]["api_key"] == "redacted:len=20"
     assert body["f"]["device_id"] == "abc123"  # non-secret passes through
 
 
@@ -214,7 +214,7 @@ def test_non_string_secret_value_is_stringified_then_redacted():
 
     rec = _record(msg="auth", session_token=Tok())
     body = _decode_body(encode_log_frame(rec))
-    assert body["f"]["session_token"] == "redacted:tok_...160e465f"
+    assert body["f"]["session_token"] == "redacted:len=20"
 
 
 # --- non-blocking handler --------------------------------------------------
@@ -392,10 +392,25 @@ def test_shipper_backoff_advances_and_window_blocks_retry():
         path = os.path.join(d, "logd.sock")
         shipper = LogdShipper(q=queue.Queue(), socket_path=path)
         assert shipper._ensure_connected() is False
-        # Inside the backoff window, a second call does not even attempt to
+        # Inside the retry window, a second call does not even attempt to
         # connect and returns False immediately.
         assert shipper._next_connect_at > time.monotonic()
         assert shipper._ensure_connected() is False
+
+
+def test_shipper_retries_at_a_fixed_pace_with_no_cap():
+    """Repeated failures never stretch the wait: a store that restarts after
+    a minute is reconnected to within one fixed interval, not 30 s later."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "logd.sock")
+        shipper = LogdShipper(q=queue.Queue(), socket_path=path)
+        gaps = []
+        for _ in range(6):
+            shipper._next_connect_at = 0.0
+            before = time.monotonic()
+            assert shipper._ensure_connected() is False
+            gaps.append(shipper._next_connect_at - before)
+        assert all(2.0 <= g <= 5.0 for g in gaps), gaps
 
 
 # --- installation wiring ---------------------------------------------------

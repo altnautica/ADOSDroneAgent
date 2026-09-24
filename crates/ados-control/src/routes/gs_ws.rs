@@ -235,8 +235,8 @@ async fn uplink_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
 
     let mut last_sent: Option<Value> = None;
     loop {
-        if let Some(uplink) = latest_event_detail(&state, "net.uplink_active").await {
-            let usage = latest_event_detail(&state, "net.modem_usage").await;
+        if let Some(uplink) = state.logd.latest_event_detail("net.uplink_active").await {
+            let usage = state.logd.latest_event_detail("net.modem_usage").await;
             let payload = uplink_ws_payload(&uplink, usage.as_ref());
             if last_sent.as_ref() != Some(&payload) {
                 let body = match serde_json::to_string(&payload) {
@@ -676,126 +676,6 @@ impl JournalTail {
 // Shared seams.
 // ---------------------------------------------------------------------------
 
-/// Query the store for the newest `events` row of one `event_kind` and return its
-/// `detail` body, or `None` when the store is unreachable / the response is an
-/// error / there is no such event / the detail is absent / non-object / empty.
-/// Mirrors the Python `query_rows("events", 1, event_kind=...)` read and the
-/// sibling `gs_network::latest_event_detail`.
-async fn latest_event_detail(state: &AppState, event_kind: &str) -> Option<Map<String, Value>> {
-    let path = format!(
-        "/v1/query?kind=events&limit=1&event_kind={}",
-        urlencode(event_kind)
-    );
-    let (status, body) = logd_get(state, &path).await.ok()?;
-    if status >= 400 {
-        return None;
-    }
-    let parsed: Value = serde_json::from_slice(&body).ok()?;
-    let rows = parsed.get("data")?.as_array()?;
-    let detail = rows.first()?.as_object()?.get("detail")?.as_object()?;
-    if detail.is_empty() {
-        return None;
-    }
-    Some(detail.clone())
-}
-
-/// Percent-encode the few characters an `event_kind` value could carry that are
-/// unsafe in a query string. The event kinds here are dotted identifiers, so this
-/// is conservative belt-and-braces, not a full URL encoder.
-fn urlencode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
-/// A minimal HTTP/1.1 `GET` over the logging-store query Unix socket, returning
-/// the status code + the decoded body. Mirrors `gs_network::logd_get`.
-async fn logd_get(state: &AppState, path: &str) -> std::io::Result<(u16, Vec<u8>)> {
-    use tokio::io::AsyncReadExt;
-
-    /// A hard ceiling on the response read; an events page is a few KiB.
-    const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
-
-    let socket = state.logd.socket_path();
-    let mut stream = tokio::net::UnixStream::connect(socket).await?;
-    let head = format!("GET {path} HTTP/1.1\r\nHost: logd\r\nConnection: close\r\n\r\n");
-    stream.write_all(head.as_bytes()).await?;
-    stream.flush().await?;
-
-    let mut raw = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            break; // EOF (Connection: close).
-        }
-        if raw.len() + n > MAX_READ_BYTES {
-            return Err(std::io::Error::other("logd response too large"));
-        }
-        raw.extend_from_slice(&buf[..n]);
-    }
-    parse_http_response(&raw)
-}
-
-/// Split a raw HTTP/1.1 response into the status code + decoded body, de-chunking
-/// a chunked body. Mirrors `gs_network::parse_http_response`.
-fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
-    let sep = b"\r\n\r\n";
-    let split = raw
-        .windows(sep.len())
-        .position(|w| w == sep)
-        .ok_or_else(|| std::io::Error::other("malformed http response (no header terminator)"))?;
-    let head = &raw[..split];
-    let body = &raw[split + sep.len()..];
-
-    let head_str = String::from_utf8_lossy(head);
-    let status = head_str
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| std::io::Error::other("malformed http status line"))?;
-
-    let chunked = head_str
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked");
-    let body = if chunked {
-        de_chunk(body)
-    } else {
-        body.to_vec()
-    };
-    Ok((status, body))
-}
-
-/// De-chunk a `Transfer-Encoding: chunked` body.
-fn de_chunk(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut rest = body;
-    while let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") {
-        let size_str = String::from_utf8_lossy(&rest[..eol]);
-        let size = usize::from_str_radix(size_str.trim(), 16).unwrap_or(0);
-        if size == 0 {
-            break;
-        }
-        let data_start = eol + 2;
-        let data_end = data_start + size;
-        if data_end > rest.len() {
-            break;
-        }
-        out.extend_from_slice(&rest[data_start..data_end]);
-        // Skip the trailing CRLF after the chunk data.
-        rest = &rest[(data_end + 2).min(rest.len())..];
-    }
-    out
-}
-
 /// Build a WebSocket close frame with the given code + reason.
 fn close_frame(code: u16, reason: &str) -> axum::extract::ws::CloseFrame<'static> {
     axum::extract::ws::CloseFrame {
@@ -1108,22 +988,6 @@ mod tests {
             decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS),
             WsAuth::Reject
         ));
-    }
-
-    #[test]
-    fn de_chunk_reassembles_a_chunked_body() {
-        // "hello world" split into two chunks: 5 + 6 then a zero-chunk terminator.
-        let raw = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-        assert_eq!(de_chunk(raw), b"hello world");
-    }
-
-    #[test]
-    fn parse_http_response_reads_status_and_body() {
-        let raw =
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"data\":[]}";
-        let (status, body) = parse_http_response(raw).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, br#"{"data":[]}"#);
     }
 
     // -- mesh stream: auth scope + the two-journal fan -------------------

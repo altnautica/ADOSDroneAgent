@@ -24,15 +24,12 @@
   "diskTotalGb": 64.0,
   "diskUsedGb": 2.0,
   "displayType": "lcd",
-  "fcBaud": 0,
   "fcConnected": false,
-  "fcPort": "",
   "hasAccelerator": false,
   "lastIp": "127.0.0.1",
   "last_plugin_update_check_at": 1716940800000,
   "lcdRotation": 90,
   "lcdTouchCalibrated": true,
-  "mavlinkWsPort": 0,
   "mdnsHost": "",
   "memoryHistory": [
     12.0
@@ -115,7 +112,6 @@
   "version": "0.49.3",
   "videoRecording": false,
   "videoState": "stopped",
-  "videoWhepPort": 0,
   "videoWhepUrl": "https://tunnel.example/main/",
   "wfbAdapterChipset": "RTL8812EU",
   "wfbAdapterInjectionOk": true,

@@ -2,20 +2,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { apiFetch } from "@/lib/api";
 
+/** `GET /api/pairing/info`. A node has one owner: `owner_id`/`paired_at` are
+ *  set only while paired, `pairing_code` only while unpaired (and only to a
+ *  caller on the node's own networks). */
 export interface PairingInfo {
-  drone_id: string;
+  device_id: string;
+  name?: string;
   paired: boolean;
-  pairing_code?: string;
-  code_expires_at?: string | null;
-  paired_with?: PairedDevice[];
-  beacon_state?: string;
-}
-
-export interface PairedDevice {
-  client_id: string;
-  paired_at: string;
-  last_seen?: string | null;
-  display_name?: string;
+  pairing_code: string | null;
+  owner_id: string | null;
+  /** Unix seconds. */
+  paired_at: number | null;
 }
 
 export function usePairingInfo() {

@@ -3,18 +3,17 @@ import { Loader2, Lock, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
+  PIN_MAX_LENGTH,
   fetchNodeIdentity,
+  isValidPin,
   setDashboardPin,
   verifyDashboardPin,
   type NodeIdentity,
   type PinStatus,
 } from "@/lib/pin";
 
-const PIN_LENGTH = 4;
-
-/** A row of 4 single-digit cells: numeric keypad on mobile, auto-advance,
- * backspace-to-previous, and paste-fills. `value` is the digit string so far. */
-function PinCells({
+/** One numeric PIN field: 4-12 digits, the agent's own rule (`isValidPin`). */
+function PinField({
   value,
   onChange,
   onEnter,
@@ -29,64 +28,23 @@ function PinCells({
   disabled?: boolean;
   label: string;
 }) {
-  const refs = useRef<Array<HTMLInputElement | null>>([]);
-
-  const setDigit = (i: number, digit: string) => {
-    const next = (value.slice(0, i) + digit + value.slice(i + 1)).slice(0, PIN_LENGTH);
-    onChange(next);
-    if (digit && i < PIN_LENGTH - 1) refs.current[i + 1]?.focus();
-  };
-
   return (
-    <div className="flex justify-center gap-2.5" role="group" aria-label={label}>
-      {Array.from({ length: PIN_LENGTH }, (_, i) => (
-        <input
-          key={i}
-          ref={(el) => {
-            refs.current[i] = el;
-          }}
-          type="password"
-          inputMode="numeric"
-          autoComplete="off"
-          pattern="[0-9]*"
-          maxLength={1}
-          disabled={disabled}
-          autoFocus={autoFocus && i === 0}
-          aria-label={`${label} digit ${i + 1}`}
-          value={value[i] ?? ""}
-          onChange={(e) => {
-            const digit = e.target.value.replace(/\D/g, "").slice(-1);
-            if (digit) setDigit(i, digit);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Backspace") {
-              if (value[i]) {
-                setDigit(i, "");
-              } else if (i > 0) {
-                refs.current[i - 1]?.focus();
-                onChange(value.slice(0, i - 1));
-              }
-              e.preventDefault();
-            } else if (e.key === "ArrowLeft" && i > 0) {
-              refs.current[i - 1]?.focus();
-            } else if (e.key === "ArrowRight" && i < PIN_LENGTH - 1) {
-              refs.current[i + 1]?.focus();
-            } else if (e.key === "Enter" && onEnter) {
-              onEnter();
-            }
-          }}
-          onPaste={(e) => {
-            const digits = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, PIN_LENGTH);
-            if (digits) {
-              e.preventDefault();
-              onChange(digits);
-              refs.current[Math.min(digits.length, PIN_LENGTH - 1)]?.focus();
-            }
-          }}
-          className="h-14 w-12 rounded-md border border-border bg-background text-center font-mono text-2xl caret-primary shadow-sm transition-colors focus-visible:border-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
-        />
-      ))}
-    </div>
+    <input
+      type="password"
+      inputMode="numeric"
+      autoComplete="off"
+      pattern="[0-9]*"
+      maxLength={PIN_MAX_LENGTH}
+      disabled={disabled}
+      autoFocus={autoFocus}
+      aria-label={label}
+      value={value}
+      onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX_LENGTH))}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && onEnter) onEnter();
+      }}
+      className="h-14 w-full rounded-md border border-border bg-background text-center font-mono text-2xl tracking-[0.4em] caret-primary shadow-sm transition-colors focus-visible:border-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+    />
   );
 }
 
@@ -157,8 +115,7 @@ export function PinSplash({
   });
   const locked = lockedUntil != null && remaining > 0;
 
-  const canSubmit =
-    !busy && !locked && pin.length === PIN_LENGTH && (!setMode || confirm.length === PIN_LENGTH);
+  const canSubmit = !busy && !locked && isValidPin(pin) && (!setMode || isValidPin(confirm));
 
   const submit = async () => {
     if (!canSubmit) return;
@@ -234,9 +191,9 @@ export function PinSplash({
             <div className="space-y-4">
               <div className="space-y-2">
                 {setMode && (
-                  <p className="text-center text-xs font-medium text-muted-foreground">Choose a PIN</p>
+                  <p className="text-center text-xs font-medium text-muted-foreground">Choose a 4–12 digit PIN</p>
                 )}
-                <PinCells
+                <PinField
                   label={setMode ? "New PIN" : "PIN"}
                   value={pin}
                   onChange={(v) => {
@@ -252,7 +209,7 @@ export function PinSplash({
               {setMode && (
                 <div className="space-y-2">
                   <p className="text-center text-xs font-medium text-muted-foreground">Confirm PIN</p>
-                  <PinCells
+                  <PinField
                     label="Confirm PIN"
                     value={confirm}
                     onChange={(v) => {

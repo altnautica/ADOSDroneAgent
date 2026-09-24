@@ -188,7 +188,7 @@ pub struct AppState {
     /// to clone (the snapshot is held behind an `Arc`).
     pub state: StateIpcClient,
     /// The MAVLink command-send client the command route writes frames through.
-    /// Cheap to clone (the held connection is behind an `Arc<Mutex>`); the route
+    /// Cheap to clone (it holds only the socket path); the route
     /// builds a frame and hands it to this client, which length-prefixes it onto
     /// `/run/ados/mavlink.sock` for the router to forward to the FC.
     pub mavlink: MavlinkIpcClient,
@@ -254,8 +254,13 @@ impl AuxResponseListener {
     }
 
     /// Signal the listener to stop and wait for it. Idempotent.
+    ///
+    /// `notify_one`, not `notify_waiters`: the listener is the single waiter, and
+    /// `notify_one` stores a permit when it is not parked at that instant (inside
+    /// its loop body), so its next `notified()` returns at once instead of the
+    /// wakeup being lost and the join below hanging.
     pub async fn shutdown(&self) {
-        self.cancel.notify_waiters();
+        self.cancel.notify_one();
         let task = self.task.lock().ok().and_then(|mut t| t.take());
         if let Some(t) = task {
             let _ = t.await;

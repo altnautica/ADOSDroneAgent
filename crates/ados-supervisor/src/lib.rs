@@ -14,6 +14,7 @@ pub mod hotplug;
 pub mod janitor;
 pub mod lifecycle;
 pub mod mac_pin;
+pub mod mesh_journal;
 pub mod mgmt_failover;
 pub mod mgmt_link_guardian;
 pub mod oscmd;

@@ -4,7 +4,7 @@
 // non-2xx with a useful message.
 
 import { getApiKey } from "./api-key";
-import { clearSession, getSession } from "./session";
+import { getSession } from "./session";
 
 export class ApiError extends Error {
   status: number;
@@ -42,6 +42,7 @@ export function isAuthChallenge(status: number): boolean {
 
 interface FetchOptions {
   method?: "GET" | "POST" | "PUT" | "DELETE";
+  /** JSON-encoded, except a FormData body, which is sent as multipart. */
   body?: unknown;
   signal?: AbortSignal;
   // Set by the access gate's own probe so a 401 there does NOT re-notify the
@@ -50,10 +51,13 @@ interface FetchOptions {
   skipAuthSignal?: boolean;
 }
 
-// The access gate registers a handler here. On a data-plane 401 (a paired agent
-// reached off-box with no/expired/revoked credential) `apiFetch` drops the stale
-// session and notifies the gate, which shows the branded PIN splash instead of a
-// blank dashboard. Replaces the old raw-key `window.prompt`.
+// The access gate registers a handler here. On a 401/403 `apiFetch` asks the
+// gate to re-verify access; the gate's own probe decides whether the stored
+// session is dead (and only then drops it and shows the PIN splash). A 403 is
+// not always about the session — a capability-denied plugin call, a
+// relay-forbidden path or an MCP scope refusal are all 403s from an agent that
+// accepted the credential — so a refusal must never log the operator out by
+// itself.
 type AuthRequiredHandler = () => void;
 let authRequiredHandler: AuthRequiredHandler | null = null;
 
@@ -61,20 +65,29 @@ export function setAuthRequiredHandler(fn: AuthRequiredHandler | null): void {
   authRequiredHandler = fn;
 }
 
-export async function apiFetch<T = unknown>(
-  path: string,
-  opts: FetchOptions = {},
-): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json" };
-
-  // A paired agent requires a data-plane credential off-box. Prefer the
-  // dashboard session (minted by the PIN gate); also send the API key when one
-  // is stored (the Mission Control `?ados_key=` deep-link + Settings → Cloud
-  // path still works untouched).
+/**
+ * The data-plane credential headers every agent request carries: the dashboard
+ * session minted by the PIN gate, and the API key from the Mission Control
+ * deep link. A paired agent requires one of them off-box; on-box neither is
+ * needed and none is sent when none is stored.
+ */
+export function credentialHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
   const session = getSession();
   if (session) headers["X-ADOS-Dashboard-Session"] = session;
   const storedKey = getApiKey();
   if (storedKey) headers["X-ADOS-Key"] = storedKey;
+  return headers;
+}
+
+export async function apiFetch<T = unknown>(
+  path: string,
+  opts: FetchOptions = {},
+): Promise<T> {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+    ...credentialHeaders(),
+  };
 
   const init: RequestInit = {
     method: opts.method ?? "GET",
@@ -82,21 +95,21 @@ export async function apiFetch<T = unknown>(
     signal: opts.signal,
   };
 
-  if (opts.body !== undefined) {
-    (init.headers as Record<string, string>)["Content-Type"] = "application/json";
+  if (opts.body instanceof FormData) {
+    // The browser sets the multipart boundary itself.
+    init.body = opts.body;
+  } else if (opts.body !== undefined) {
+    headers["Content-Type"] = "application/json";
     init.body = JSON.stringify(opts.body);
   }
 
   const res = await fetch(path, init);
 
-  // Direct-visit auth: the agent is telling us we are not authorized yet —
-  // either a paired node missing a credential (401) or an unpaired node asking
-  // for its PIN (403). Drop any stale session and hand the UI to the access
-  // gate (which shows the PIN splash). The gate's own probe passes
-  // `skipAuthSignal` so it resolves the challenge itself without recursing.
-  if (isAuthChallenge(res.status) && !opts.signal?.aborted) {
-    clearSession();
-    if (!opts.skipAuthSignal) authRequiredHandler?.();
+  // The agent refused: hand the question to the access gate, whose probe tells
+  // a dead session (PIN splash) from a refusal of this one request (stay put).
+  // The gate's own probe passes `skipAuthSignal` so it does not recurse.
+  if (isAuthChallenge(res.status) && !opts.signal?.aborted && !opts.skipAuthSignal) {
+    authRequiredHandler?.();
   }
 
   let body: unknown = null;

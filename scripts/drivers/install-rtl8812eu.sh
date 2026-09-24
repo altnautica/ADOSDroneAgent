@@ -183,7 +183,7 @@ if [ -n "${NEED_INSTALL}" ] || [ -n "${HEADERS_PKG}" ]; then
     info "Installing build deps:${NEED_INSTALL} ${HEADERS_PKG}"
     apt-get update -qq
     # shellcheck disable=SC2086
-    apt-get install -y ${NEED_INSTALL} ${HEADERS_PKG} || {
+    DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install -y ${NEED_INSTALL} ${HEADERS_PKG} || {
         error "apt-get install failed."
         exit 1
     }

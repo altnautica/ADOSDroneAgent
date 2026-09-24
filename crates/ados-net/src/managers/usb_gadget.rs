@@ -66,6 +66,9 @@ pub struct UsbGadgetManager {
     dnsmasq_pid_path: PathBuf,
     dnsmasq: Option<ManagedProcess>,
     bound: bool,
+    /// True once `setup` brought usb0 up: the tethered host is owed a DHCP
+    /// server from here on, so `supervise` keeps dnsmasq running.
+    serving: bool,
 }
 
 impl UsbGadgetManager {
@@ -96,6 +99,7 @@ impl UsbGadgetManager {
             dnsmasq_pid_path,
             dnsmasq: None,
             bound: false,
+            serving: false,
         }
     }
 
@@ -103,9 +107,8 @@ impl UsbGadgetManager {
         self.gadget_root.join(GADGET_NAME)
     }
 
-    /// True if the configfs gadget root is present (the dwc2 + configfs-usb
-    /// modules must both be loaded for it to appear). Mirrors
-    /// `configfs_available`.
+    /// True if the configfs gadget root is present (the dwc2 + configfs-usb modules must both be
+    /// loaded for it to appear).
     pub fn configfs_available(&self) -> bool {
         self.gadget_root.is_dir()
     }
@@ -161,7 +164,7 @@ impl UsbGadgetManager {
         Ok(())
     }
 
-    /// First entry in `/sys/class/udc`, alphabetically. Mirrors `_pick_udc`.
+    /// First entry in `/sys/class/udc`, alphabetically.
     fn pick_udc(&self) -> Option<String> {
         let mut names: Vec<String> = std::fs::read_dir(&self.udc_dir)
             .ok()?
@@ -187,14 +190,34 @@ impl UsbGadgetManager {
         if !self.bring_up_interface().await {
             return false;
         }
+        self.serving = true;
         if !self.start_dnsmasq().await {
             warn!("usb_gadget_dnsmasq_failed");
         }
         true
     }
 
-    /// Poll for usb0 (20 × 0.1s), flush, assign 192.168.7.1/24, link up. Mirrors
-    /// `_bring_up_interface`.
+    /// Keep the tethered host's DHCP server alive: once usb0 is serving, a
+    /// dnsmasq that exited (or failed to spawn) is restarted on this call. Run
+    /// on the daemon's fixed health cadence, so recovery retries forever at that
+    /// interval with no cap.
+    pub async fn supervise(&mut self) {
+        let running = match self.dnsmasq.as_mut() {
+            Some(p) => p.is_running(),
+            None => false,
+        };
+        if !dnsmasq_needs_restart(self.serving, running) {
+            return;
+        }
+        warn!("usb_gadget_dnsmasq_down_restarting");
+        // Dropping the old handle killpg's whatever is left of its group.
+        self.dnsmasq = None;
+        if !self.start_dnsmasq().await {
+            warn!("usb_gadget_dnsmasq_failed");
+        }
+    }
+
+    /// Poll for usb0 (20 × 0.1s), flush, assign 192.168.7.1/24, link up.
     async fn bring_up_interface(&self) -> bool {
         let iface_path = self.net_dir.join(USB_INTERFACE);
         let mut appeared = false;
@@ -228,8 +251,7 @@ impl UsbGadgetManager {
         true
     }
 
-    /// Write the conf and fork dnsmasq under a managed process group. Mirrors
-    /// `_start_dnsmasq`.
+    /// Write the conf and fork dnsmasq under a managed process group.
     async fn start_dnsmasq(&mut self) -> bool {
         if let Some(parent) = self.dnsmasq_conf_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -256,6 +278,7 @@ impl UsbGadgetManager {
     /// Tear everything down in order: kill dnsmasq → unbind UDC → remove
     /// symlinks → rmdir config/functions/strings/gadget. Mirrors `teardown`.
     pub async fn teardown(&mut self) {
+        self.serving = false;
         // dnsmasq first so the lease does not linger as the iface disappears.
         if let Some(mut proc) = self.dnsmasq.take() {
             proc.kill().await; // killpg, no orphan
@@ -353,6 +376,13 @@ impl Default for UsbGadgetManager {
     }
 }
 
+/// Whether the usb0 DHCP server must be (re)started: usb0 is serving a tethered
+/// host and no live dnsmasq holds the lease. Pure so the supervision rule is
+/// testable without forking dnsmasq.
+fn dnsmasq_needs_restart(serving: bool, running: bool) -> bool {
+    serving && !running
+}
+
 /// Write `value` to a configfs attribute with NO trailing newline (configfs
 /// rejects a trailing newline on some attributes). Mirrors the Python `_write`.
 fn write_no_newline(path: &Path, value: &str) -> std::io::Result<()> {
@@ -393,6 +423,15 @@ async fn run_ip(args: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Once usb0 serves a tethered host, a dnsmasq that is not running is
+    /// restarted; before setup (or after teardown) nothing is started.
+    #[test]
+    fn a_dead_dnsmasq_on_a_serving_usb0_is_restarted() {
+        assert!(dnsmasq_needs_restart(true, false));
+        assert!(!dnsmasq_needs_restart(true, true));
+        assert!(!dnsmasq_needs_restart(false, false));
+    }
 
     #[test]
     fn dnsmasq_conf_is_byte_exact() {

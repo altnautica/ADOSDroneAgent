@@ -24,13 +24,10 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const UPLINK_ACTIVE_FLAG: &str = "/run/ados/uplink-active";
 
 /// Read the on-disk mesh-role sentinel, falling back to `direct` on a missing,
-/// unreadable, or unknown value. Mirrors `role_manager.get_current_role`.
+/// unreadable, or unknown value.
 ///
-/// The operator-apply path (`role_manager.apply_role`: stop/start units, clear
-/// stale snapshots, publish the event) is NOT ported here. It lives in the
-/// shared `ados-supervisor` crate (`role::apply_role_on_boot` already covers the
-/// boot mask/unmask), and the full operator transition stays in Python for now
-/// to avoid touching a shared crate from this chunk. See the chunk report.
+/// Role transitions (stop/start, the sentinel flip, the `role_changed` event)
+/// execute in the supervisor, never in a role unit; this is only the reader.
 pub fn get_current_role() -> String {
     get_current_role_at(Path::new(MESH_ROLE_PATH))
 }

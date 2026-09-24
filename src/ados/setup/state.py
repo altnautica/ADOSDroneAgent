@@ -17,8 +17,10 @@ created on first write; reads from a missing file return defaults.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 
 from ados.core.paths import SETUP_STATE_DIR, SETUP_STATE_PATH
@@ -57,6 +59,22 @@ class SetupRunState:
             "ever_completed_steps": sorted(self.ever_completed_steps),
             "acked_nudges": sorted(self.acked_nudges),
         }
+
+
+# Every mutator is a read-modify-write of one small file. The setup-status
+# builder runs on a worker thread while the Finish/Skip/Reset routes run on
+# the event loop, so an unserialized pair could drop the operator's Finish
+# (or race on the shared temp file). One process-wide lock serializes them.
+_STATE_LOCK = threading.Lock()
+
+
+def _serialized(fn):  # noqa: ANN001, ANN202 - decorator
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        with _STATE_LOCK:
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def _read_raw() -> dict:
@@ -126,6 +144,7 @@ def read_state() -> SetupRunState:
     )
 
 
+@_serialized
 def ack_nudge(nudge_id: str) -> SetupRunState:
     """Mark ``nudge_id`` as acknowledged so the dashboard suppresses
     it on every future load. Persisting is best-effort: a read-only
@@ -149,6 +168,7 @@ def _write(state: SetupRunState) -> None:
     os.replace(tmp, SETUP_STATE_PATH)
 
 
+@_serialized
 def mark_finalized() -> SetupRunState:
     """Record that the operator clicked Finish in the wizard.
 
@@ -162,6 +182,7 @@ def mark_finalized() -> SetupRunState:
     return state
 
 
+@_serialized
 def mark_setup_skipped() -> SetupRunState:
     """Record that the operator dismissed the wizard via Skip to Home.
 
@@ -175,6 +196,7 @@ def mark_setup_skipped() -> SetupRunState:
     return state
 
 
+@_serialized
 def mark_skipped(step_id: str) -> SetupRunState:
     """Record that the operator chose Skip for ``step_id``."""
     state = read_state()
@@ -183,6 +205,7 @@ def mark_skipped(step_id: str) -> SetupRunState:
     return state
 
 
+@_serialized
 def clear_skipped(step_id: str) -> SetupRunState:
     """Reverse a skip when the operator engages the step again."""
     state = read_state()
@@ -191,6 +214,7 @@ def clear_skipped(step_id: str) -> SetupRunState:
     return state
 
 
+@_serialized
 def reset_state() -> SetupRunState:
     """Forget finalization and skipped steps. Used by Re-run setup."""
     state = SetupRunState()
@@ -198,6 +222,7 @@ def reset_state() -> SetupRunState:
     return state
 
 
+@_serialized
 def record_ever_complete(step_ids: set[str]) -> SetupRunState:
     """Promote any newly-complete step ids to the persisted set.
 

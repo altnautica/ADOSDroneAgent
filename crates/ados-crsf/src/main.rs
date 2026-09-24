@@ -34,6 +34,7 @@
 //! or re-pinning the lane through the config surface applies without
 //! dropping the unit.
 
+use ados_protocol::shutdown::Shutdown;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -371,7 +372,7 @@ async fn run_service_pass(
         // Per-bring-up out-of-band lane: parameter frames queued for a port
         // that dies die with it (a stale write must not fire on a fresh port).
         let oob = Arc::new(ados_crsf::transport::OobQueue::default());
-        let task_cancel = Arc::new(Notify::new());
+        let task_cancel = Shutdown::new();
 
         // Bridge the latched shutdown onto the per-bring-up cancel notify so
         // worker tasks stop on SIGTERM even while mid-await.
@@ -379,7 +380,7 @@ async fn run_service_pass(
         let bridge_cancel = task_cancel.clone();
         let cancel_bridge = tokio::spawn(async move {
             let _ = bridge_shutdown.wait_for(|s| *s).await;
-            bridge_cancel.notify_waiters();
+            bridge_cancel.trigger();
         });
 
         let mut tx_task = tokio::spawn(run_tx(
@@ -418,7 +419,7 @@ async fn run_service_pass(
                         tracing::warn!(error = %e, "crsf command socket failed");
                     }
                 }
-                _ = cmd_cancel.notified() => {}
+                _ = cmd_cancel.wait() => {}
             }
         });
 
@@ -529,7 +530,7 @@ async fn run_service_pass(
         };
 
         // ── Teardown ─────────────────────────────────────────────────────
-        task_cancel.notify_waiters();
+        task_cancel.trigger();
         tx_task.abort();
         rx_task.abort();
         watchdog_task.abort();

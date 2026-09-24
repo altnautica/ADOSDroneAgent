@@ -632,6 +632,25 @@ fn peer_credentials(stream: &UnixStream) -> io::Result<(u32, Vec<u32>)> {
     Ok((cred.uid(), gids))
 }
 
+/// Whether the process on the other end of `stream` is on the operator plane:
+/// root, this process's own uid, or a member of [`OPERATOR_GROUP`] (the same
+/// policy [`OperatorListener`] enforces). For a socket that must also accept
+/// plugin-plane peers (the log ingest sink), this tells the two apart so what a
+/// plugin writes is recorded as the plugin's. Unreadable credentials read as
+/// not-operator, which can only narrow trust, except for the development-host
+/// case [`peer_hung_up_before_accept`] documents.
+pub fn is_operator_peer(stream: &UnixStream) -> bool {
+    match peer_credentials(stream) {
+        Ok((uid, gids)) => operator_peer_allowed(
+            uid,
+            &gids,
+            nix::unistd::geteuid().as_raw(),
+            group_gid(OPERATOR_GROUP),
+        ),
+        Err(err) => peer_hung_up_before_accept(&err),
+    }
+}
+
 /// Linux records `SO_PEERCRED` at `connect()` and answers it even after the
 /// peer has closed. macOS answers `LOCAL_PEERCRED` with `ENOTCONN` once the peer
 /// has hung up, even while its bytes are still queued, so a client that sends

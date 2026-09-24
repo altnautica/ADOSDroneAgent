@@ -44,7 +44,7 @@ use ados_protocol::mavlink::parse_any;
 use serde_json::{json, Value};
 
 use crate::aux_tee::mavlink_message_id;
-use crate::state::VehicleState;
+use crate::state::{VehicleSource, VehicleState};
 
 /// How long a relayed snapshot stays usable after the last frame that fed it.
 ///
@@ -98,8 +98,11 @@ pub struct RelayedVehicle {
     /// first one does, which is what distinguishes "no vehicle has ever been
     /// relayed" from "one was and has gone quiet".
     last_frame_at: Option<Instant>,
-    /// The MAVLink system id of the relayed vehicle, learned from the frames.
-    system_id: Option<u8>,
+    /// Which component in the relayed stream is the vehicle. The drone's tee
+    /// forwards everything its flight controller emits, including other
+    /// components' broadcast traffic (a ground station on the drone's own
+    /// telemetry radio, a gimbal); only the autopilot's frames feed the state.
+    source: VehicleSource,
     /// Frames that fed the state.
     frames_decoded: u64,
     /// Frames whose id said they should have parsed, and did not. Non-zero here
@@ -120,8 +123,13 @@ impl RelayedVehicle {
             self.frames_undecodable = self.frames_undecodable.saturating_add(1);
             return false;
         };
+        if !self
+            .source
+            .admit(header.system_id, header.component_id, &msg)
+        {
+            return false;
+        }
         self.state.update_from_message(&msg, now_iso);
-        self.system_id = Some(header.system_id);
         self.last_frame_at = Some(now);
         self.frames_decoded = self.frames_decoded.saturating_add(1);
         true
@@ -164,7 +172,7 @@ impl RelayedVehicle {
             "fresh": self.is_fresh(now),
             "age_s": age.as_secs_f64(),
             "stale_after_s": RELAYED_STALE_AFTER.as_secs_f64(),
-            "system_id": self.system_id,
+            "system_id": self.source.system_id(),
             "frames_decoded": self.frames_decoded,
             "frames_undecodable": self.frames_undecodable,
             "vehicle": self.state.to_wire(),
@@ -215,6 +223,25 @@ mod tests {
         serialize_v2(header(system_id), &msg).unwrap()
     }
 
+    /// A ground station's HEARTBEAT as the drone's flight controller forwards
+    /// it down the tee: its own system id, no autopilot, base mode 0.
+    fn gcs_heartbeat_frame() -> Vec<u8> {
+        let msg = MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode: 0,
+            mavtype: MavType::MAV_TYPE_GCS,
+            autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
+            base_mode: MavModeFlag::empty(),
+            system_status: MavState::MAV_STATE_ACTIVE,
+            mavlink_version: 3,
+        });
+        let header = MavHeader {
+            system_id: 255,
+            component_id: 190,
+            sequence: 0,
+        };
+        serialize_v2(header, &msg).unwrap()
+    }
+
     #[test]
     fn a_relayed_attitude_frame_becomes_readable_vehicle_state() {
         // The whole point: frames that were previously published and forgotten
@@ -222,19 +249,44 @@ mod tests {
         let mut v = RelayedVehicle::default();
         let now = Instant::now();
 
+        assert!(v.apply_frame(&heartbeat_frame(1), TS, now));
         assert!(v.apply_frame(&attitude_frame(1, 0.25, -0.1), TS, now));
 
         let wire = v.to_wire(now).expect("a relayed vehicle has a snapshot");
         assert_eq!(wire["source"], "relayed");
         assert_eq!(wire["fresh"], true);
         assert_eq!(wire["system_id"], 1);
-        assert_eq!(wire["frames_decoded"], 1);
+        assert_eq!(wire["frames_decoded"], 2);
         let att = &wire["vehicle"]["attitude"];
         assert!((att["roll"].as_f64().unwrap() - 0.25).abs() < 1e-6);
         assert!((att["pitch"].as_f64().unwrap() + 0.1).abs() < 1e-6);
         // The timestamp is this node's, which is what a consumer compares
         // against its own clock.
         assert_eq!(wire["vehicle"]["last_update"], TS);
+    }
+
+    #[test]
+    fn only_the_vehicle_feeds_the_relayed_reading() {
+        // The drone's tee forwards whatever its flight controller emits,
+        // including a ground station's HEARTBEAT arriving on the drone's own
+        // telemetry radio. It must not disarm the relayed vehicle or replace
+        // its system id, and telemetry before the vehicle's HEARTBEAT has no
+        // vehicle to belong to.
+        let mut v = RelayedVehicle::default();
+        let now = Instant::now();
+        assert!(!v.apply_frame(&attitude_frame(1, 0.25, -0.1), TS, now));
+        assert!(v.apply_frame(&heartbeat_frame(7), TS, now));
+        assert!(!v.apply_frame(&gcs_heartbeat_frame(), TS, now));
+        assert!(!v.apply_frame(&attitude_frame(3, 0.9, 0.9), TS, now));
+
+        let wire = v.to_wire(now).unwrap();
+        assert_eq!(wire["system_id"], 7);
+        assert_eq!(wire["frames_decoded"], 1);
+        assert_eq!(
+            wire["vehicle"]["mav_type"],
+            MavType::MAV_TYPE_QUADROTOR as i64
+        );
+        assert_eq!(wire["vehicle"]["attitude"]["roll"], 0.0);
     }
 
     #[test]
@@ -249,6 +301,7 @@ mod tests {
         // this test is the thing that fails instead.
         let mut v = RelayedVehicle::default();
         let now = Instant::now();
+        v.apply_frame(&heartbeat_frame(1), TS, now);
         v.apply_frame(&attitude_frame(1, 0.25, -0.1), TS, now);
         let wire = v.to_wire(now).unwrap();
         let obj = wire.as_object().unwrap();
@@ -291,7 +344,7 @@ mod tests {
     fn a_quiet_lane_goes_stale_rather_than_holding_its_last_reading() {
         let mut v = RelayedVehicle::default();
         let start = Instant::now();
-        v.apply_frame(&attitude_frame(1, 0.25, -0.1), TS, start);
+        v.apply_frame(&heartbeat_frame(1), TS, start);
 
         assert!(v.is_fresh(start + Duration::from_millis(500)));
         let past = start + RELAYED_STALE_AFTER + Duration::from_millis(1);
@@ -339,13 +392,14 @@ mod tests {
         let now = Instant::now();
         let full = attitude_frame(1, 0.1, 0.1);
         let truncated = &full[..full.len() - 3];
+        assert!(v.apply_frame(&heartbeat_frame(1), TS, now));
 
         assert!(!v.apply_frame(truncated, TS, now));
         assert_eq!(v.frames_undecodable(), 1);
-        assert_eq!(v.frames_decoded(), 0);
+        assert_eq!(v.frames_decoded(), 1);
         // One bad frame does not latch the lane shut.
         assert!(v.apply_frame(&full, TS, now));
-        assert_eq!(v.frames_decoded(), 1);
+        assert_eq!(v.frames_decoded(), 2);
     }
 
     #[test]

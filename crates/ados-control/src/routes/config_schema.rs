@@ -19,7 +19,8 @@ use axum::response::{IntoResponse, Response};
 /// The committed schema asset. Included at compile time so the served bytes
 /// are exactly the reviewed file; a malformed asset is caught by the unit
 /// tests below (and by the Python parity guard), never at request time.
-const AGENT_CONFIG_SCHEMA: &str = include_str!("../../../../schemas/agent-config.schema.json");
+pub(crate) const AGENT_CONFIG_SCHEMA: &str =
+    include_str!("../../../../schemas/agent-config.schema.json");
 
 /// Serve the embedded schema verbatim as JSON. Infallible: no state, no I/O.
 pub async fn get_config_schema() -> Response {

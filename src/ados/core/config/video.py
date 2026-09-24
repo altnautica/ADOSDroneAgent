@@ -51,16 +51,6 @@ class CameraConfig(BaseModel):
     height: int = 720
     fps: int = 30
     bitrate_kbps: int = 4000
-    # Operator preference for the wire codec. "auto" picks H.264 by
-    # default for browser-compat with WHEP; on boards whose HAL
-    # advertises h265_enc the encoder will offer libx265 / mpph265enc
-    # / hevc_v4l2m2m, but flipping to H.265 requires the receiver
-    # side to also speak it (LCD decoder + browser MediaCapabilities).
-    # Switching from h264 to h265 trades ~5-15 ms of wire latency
-    # and ~40-50% bitrate against the loss of Firefox / older Chrome
-    # Linux support. Default stays h264 until the full dual-codec
-    # WHEP negotiation lands.
-    codec_preference: Literal["h264", "h265", "auto"] = "auto"
     # Whether a primary camera is expected on this rig, for the supervisor's
     # camera USB-recovery reconciler. "auto" (default) treats a camera as
     # expected once one has enumerated successfully at least once (a persisted
@@ -240,10 +230,3 @@ class VideoConfig(BaseModel):
         le=60,
     )
     prefer_hw_encoder: bool = True
-    # UDP port the GStreamer pipeline emits a second RTP copy to when
-    # cloud relay is enabled. mediamtx-air's udpRead ingest binds the
-    # same port and republishes as RTSP/WHEP for the browser preview.
-    # Only used when ``cloud_relay_url`` is also set; otherwise the
-    # branch is muted at the pipeline's identity-element gate and no
-    # packets leave the loopback interface.
-    cloud_rtp_port: int = 8000

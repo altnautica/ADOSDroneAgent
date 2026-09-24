@@ -38,7 +38,6 @@ from ados.plugins._capabilities_generated import (
     ENFORCED_AGENT_CAPABILITIES,
     GCS_CAPABILITIES,
 )
-from ados.plugins.errors import CapabilityDenied
 
 if TYPE_CHECKING:
     from ados.plugins.supervisor import PluginSupervisor
@@ -54,8 +53,6 @@ __all__ = [
     "get_capability_meta",
     "is_known_capability",
     "get_granted_caps",
-    "has_capability",
-    "require_capability",
 ]
 
 
@@ -147,18 +144,3 @@ def get_granted_caps(
     if install is None:
         return set()
     return {pid for pid, grant in install.permissions.items() if grant.granted}
-
-
-def has_capability(
-    supervisor: PluginSupervisor, plugin_id: str, cap: str
-) -> bool:
-    """Return True if ``cap`` is currently granted to ``plugin_id``."""
-    return cap in get_granted_caps(supervisor, plugin_id)
-
-
-def require_capability(
-    supervisor: PluginSupervisor, plugin_id: str, cap: str
-) -> None:
-    """Raise :class:`CapabilityDenied` if ``cap`` is not granted to ``plugin_id``."""
-    if not has_capability(supervisor, plugin_id, cap):
-        raise CapabilityDenied(plugin_id=plugin_id, capability=cap)

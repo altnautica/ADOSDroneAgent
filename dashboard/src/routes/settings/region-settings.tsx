@@ -57,21 +57,19 @@ export function RegionSettings() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  // Seed the form from the live status once it arrives.
+  // Seed the form from the agent's values, and re-seed only when THEY change
+  // (not on every status poll, which would discard an unsaved choice).
   useEffect(() => {
-    if (!status.data) return;
-    const m = modeFromStatus(status.data.regulatory);
-    const r = regionFromStatus(status.data.regulatory);
-    setMode(m);
-    if (r) {
-      if (COMMON_REGIONS.some((c) => c.code === r)) {
-        setChoice(r);
+    setMode(initialMode);
+    if (initialRegion) {
+      if (COMMON_REGIONS.some((c) => c.code === initialRegion)) {
+        setChoice(initialRegion);
       } else {
         setChoice(OTHER);
-        setOtherCode(r);
+        setOtherCode(initialRegion);
       }
     }
-  }, [status.data]);
+  }, [initialMode, initialRegion]);
 
   const region =
     choice === OTHER ? normalizeRegion(otherCode) : choice;

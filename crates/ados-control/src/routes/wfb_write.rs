@@ -68,6 +68,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::config_store::{section_path, update_config, ConfigWriteError};
+use crate::ipc::cmd::{self, CmdFailure};
 use crate::routes::detail;
 
 // ---------------------------------------------------------------------------
@@ -118,95 +119,35 @@ fn wfb_cmd_sock() -> PathBuf {
 /// so a healthy radio answers well inside this.
 const RADIO_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Why a radio command-socket round trip produced no reply.
-#[derive(Debug, PartialEq, Eq)]
-enum RadioCmdFailure {
-    /// The socket could not be connected: the radio is not running.
-    Unreachable,
-    /// Connected, but no complete reply within [`RADIO_CMD_TIMEOUT`].
-    Timeout,
-    /// A reply arrived but was not one JSON line (or the connection broke).
-    BadReply,
-}
-
-impl RadioCmdFailure {
-    /// The route response for this failure.
-    fn response(&self) -> Response {
-        match self {
-            Self::Unreachable => detail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "WFB-ng service not running",
-            ),
-            Self::Timeout => detail(
-                StatusCode::GATEWAY_TIMEOUT,
-                "the radio command socket did not reply in time",
-            ),
-            Self::BadReply => detail(
-                StatusCode::BAD_GATEWAY,
-                "the radio command socket returned an unreadable reply",
-            ),
-        }
+/// The route response for a radio command-socket exchange that produced no reply.
+fn radio_failure_response(failure: CmdFailure) -> Response {
+    match failure {
+        CmdFailure::Unreachable => detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "WFB-ng service not running",
+        ),
+        CmdFailure::Timeout => detail(
+            StatusCode::GATEWAY_TIMEOUT,
+            "the radio command socket did not reply in time",
+        ),
+        CmdFailure::BadReply => detail(
+            StatusCode::BAD_GATEWAY,
+            "the radio command socket returned an unreadable reply",
+        ),
     }
 }
 
-/// Send one newline-terminated JSON request to a radio command socket and read one
-/// newline-terminated JSON reply, bounded by [`RADIO_CMD_TIMEOUT`]. Mirrors the
-/// framing both radio command sockets use (one newline-terminated JSON each way,
-/// then the server closes).
-async fn radio_cmd_roundtrip(socket: &Path, request: &Value) -> Result<Value, RadioCmdFailure> {
-    radio_cmd_roundtrip_within(socket, request, RADIO_CMD_TIMEOUT).await
-}
-
-async fn radio_cmd_roundtrip_within(
-    socket: &Path,
-    request: &Value,
-    bound: std::time::Duration,
-) -> Result<Value, RadioCmdFailure> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A command reply is a few hundred bytes; bound the read to guard a runaway.
-    const MAX_REPLY_BYTES: usize = 64 * 1024;
-
-    let mut stream = tokio::net::UnixStream::connect(socket)
-        .await
-        .map_err(|_| RadioCmdFailure::Unreachable)?;
-    let exchange = async {
-        let line = format!("{request}\n");
-        stream.write_all(line.as_bytes()).await.ok()?;
-        stream.flush().await.ok()?;
-
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 8 * 1024];
-        loop {
-            let n = stream.read(&mut buf).await.ok()?;
-            if n == 0 {
-                break; // EOF: the server replies once then closes.
-            }
-            if raw.len() + n > MAX_REPLY_BYTES {
-                return None;
-            }
-            raw.extend_from_slice(&buf[..n]);
-            // The reply is one newline-terminated line; stop at the first newline.
-            if raw.contains(&b'\n') {
-                break;
-            }
-        }
-        let text = String::from_utf8(raw).ok()?;
-        serde_json::from_str::<Value>(text.lines().next()?).ok()
-    };
-    match tokio::time::timeout(bound, exchange).await {
-        Err(_) => Err(RadioCmdFailure::Timeout),
-        Ok(None) => Err(RadioCmdFailure::BadReply),
-        Ok(Some(v)) => Ok(v),
-    }
+/// One exchange with a radio command socket (both radio sockets speak the shared
+/// one-line JSON framing), bounded by [`RADIO_CMD_TIMEOUT`].
+async fn radio_cmd_roundtrip(socket: &Path, request: &Value) -> Result<Value, CmdFailure> {
+    cmd::roundtrip(socket, request, RADIO_CMD_TIMEOUT).await
 }
 
 // ---------------------------------------------------------------------------
 // POST /api/wfb/channel — change the WFB channel.
 // ---------------------------------------------------------------------------
 
-/// The `POST /api/wfb/channel` request body. Mirrors the FastAPI `ChannelRequest`:
-/// a single required channel number.
+/// The `POST /api/wfb/channel` request body: a single required channel number.
 #[derive(Debug, Deserialize)]
 pub struct ChannelRequest {
     pub channel: i64,
@@ -249,7 +190,7 @@ async fn set_wfb_channel_at(socket: &Path, channel: i64) -> Response {
     let request = json!({"op": "hop", "channel": channel});
     match radio_cmd_roundtrip(socket, &request).await {
         Ok(reply) => channel_reply_response(&reply, channel, ch.frequency_mhz),
-        Err(failure) => failure.response(),
+        Err(failure) => radio_failure_response(failure),
     }
 }
 
@@ -298,8 +239,7 @@ fn channel_reply_response(reply: &Value, requested_channel: i64, frequency_mhz: 
 // PUT /api/wfb/tx-power — set the runtime TX power.
 // ---------------------------------------------------------------------------
 
-/// The `PUT /api/wfb/tx-power` request body. Mirrors the FastAPI `TxPowerRequest`:
-/// a single required TX power in dBm.
+/// The `PUT /api/wfb/tx-power` request body: a single required TX power in dBm.
 #[derive(Debug, Deserialize)]
 pub struct TxPowerRequest {
     pub tx_power_dbm: i64,
@@ -354,7 +294,7 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
     let effective: Value = match radio_cmd_roundtrip(socket, &request).await {
         Ok(reply) => match tx_power_effective_from_reply(&reply) {
             Ok(eff) => eff,
-            Err(message) => {
+            Err(TxPowerRefusal::Refused(message)) => {
                 // ok: false → the FastAPI `RadioCmdError` 500 apply_failed body.
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -362,8 +302,11 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
                 )
                     .into_response();
             }
+            // Neither ok:true nor ok:false: the apply is unconfirmed, so nothing
+            // is persisted.
+            Err(TxPowerRefusal::Unreadable) => return radio_failure_response(CmdFailure::BadReply),
         },
-        Err(failure) => return failure.response(),
+        Err(failure) => return radio_failure_response(failure),
     };
 
     // 4. Persist the accepted value so it survives a restart, regardless of the
@@ -392,22 +335,32 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// The effective dBm from a `set_tx_power` reply, mirroring the Python
-/// `cmd_client.set_tx_power`: `ok: false` raises (mapped to the 500 apply_failed
-/// body here, carrying the reply's `error` text); otherwise `effective_dbm` is a
-/// number or `null` (the driver rejected every ramp step), so the success body
-/// reports `null` when the field is absent / non-numeric. Returns `Err(message)`
-/// for the `ok: false` case, `Ok(value)` for the success case.
-fn tx_power_effective_from_reply(reply: &Value) -> Result<Value, String> {
-    if reply.get("ok") == Some(&Value::Bool(false)) {
-        // The Python client raises RadioCmdError(resp.get("error") or "unknown
-        // radio command error"); the route maps that to the 500 apply_failed body.
-        let message = reply
-            .get("error")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("unknown radio command error");
-        return Err(message.to_string());
+/// Why a `set_tx_power` reply does not confirm the apply.
+#[derive(Debug, PartialEq)]
+enum TxPowerRefusal {
+    /// `ok: false`, with the radio's error text.
+    Refused(String),
+    /// Neither `ok: true` nor `ok: false`: not a confirmation of anything.
+    Unreadable,
+}
+
+/// The effective dBm from a `set_tx_power` reply. Only `ok: true` confirms the
+/// apply; `ok: false` is a refusal (the 500 apply_failed body, carrying the reply's
+/// `error` text) and any other shape confirms nothing. On success `effective_dbm`
+/// is a number or `null` (the driver rejected every ramp step), so the success
+/// body reports `null` when the field is absent / non-numeric.
+fn tx_power_effective_from_reply(reply: &Value) -> Result<Value, TxPowerRefusal> {
+    match reply.get("ok") {
+        Some(Value::Bool(true)) => {}
+        Some(Value::Bool(false)) => {
+            let message = reply
+                .get("error")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("unknown radio command error");
+            return Err(TxPowerRefusal::Refused(message.to_string()));
+        }
+        _ => return Err(TxPowerRefusal::Unreadable),
     }
     // effective_dbm is `int(eff)` when numeric, else None — the success body
     // carries the integer or JSON null.
@@ -555,50 +508,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_silent_radio_socket_is_a_504_and_a_garbled_one_a_502() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let dir = tempfile::tempdir().unwrap();
-
-        // Accepts, reads the request, never answers.
-        let silent = dir.path().join("silent.sock");
-        let listener = tokio::net::UnixListener::bind(&silent).unwrap();
-        let _hold = tokio::spawn(async move {
-            let (mut conn, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 256];
-            let _ = conn.read(&mut buf).await;
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        });
-        let failure = radio_cmd_roundtrip_within(
-            &silent,
-            &json!({"op": "hop", "channel": 149}),
-            std::time::Duration::from_millis(200),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(failure, RadioCmdFailure::Timeout);
-        assert_eq!(failure.response().status(), StatusCode::GATEWAY_TIMEOUT);
-
-        // Answers with something that is not JSON.
-        let garbled = dir.path().join("garbled.sock");
-        let listener = tokio::net::UnixListener::bind(&garbled).unwrap();
-        tokio::spawn(async move {
-            let (mut conn, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 256];
-            let _ = conn.read(&mut buf).await;
-            let _ = conn.write_all(b"txpower 10 ok\n").await;
-        });
-        let failure = radio_cmd_roundtrip(&garbled, &json!({"op": "set_tx_power"}))
-            .await
-            .unwrap_err();
-        assert_eq!(failure, RadioCmdFailure::BadReply);
-        assert_eq!(failure.response().status(), StatusCode::BAD_GATEWAY);
-
-        // Nothing listening is the radio not running.
-        let absent = dir.path().join("absent.sock");
+    #[test]
+    fn radio_socket_failures_map_to_503_504_and_502() {
         assert_eq!(
-            radio_cmd_roundtrip(&absent, &json!({})).await.unwrap_err(),
-            RadioCmdFailure::Unreachable
+            radio_failure_response(CmdFailure::Unreachable).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            radio_failure_response(CmdFailure::Timeout).status(),
+            StatusCode::GATEWAY_TIMEOUT
+        );
+        assert_eq!(
+            radio_failure_response(CmdFailure::BadReply).status(),
+            StatusCode::BAD_GATEWAY
         );
     }
 
@@ -739,14 +661,42 @@ mod tests {
         let reply = json!({"ok": false, "error": "txpower set failed"});
         assert_eq!(
             tx_power_effective_from_reply(&reply),
-            Err("txpower set failed".to_string())
+            Err(TxPowerRefusal::Refused("txpower set failed".to_string()))
         );
         // ok: false with no error text uses the Python default message.
         let reply = json!({"ok": false});
         assert_eq!(
             tx_power_effective_from_reply(&reply),
-            Err("unknown radio command error".to_string())
+            Err(TxPowerRefusal::Refused(
+                "unknown radio command error".to_string()
+            ))
         );
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_confirms_nothing_is_a_502_and_is_not_persisted() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for reply in [json!({"error": "busy"}), json!({"ok": "yes"}), json!({})] {
+            assert_eq!(
+                tx_power_effective_from_reply(&reply),
+                Err(TxPowerRefusal::Unreadable),
+                "{reply}"
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("wfb-cmd.sock");
+        let cfg = dir.path().join("config.yaml");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).await;
+            let _ = conn.write_all(b"{\"error\":\"busy\"}\n").await;
+        });
+        let resp = set_wfb_tx_power_at(&sock, &cfg, 10).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert!(!cfg.exists(), "an unconfirmed apply must not be persisted");
+        server.await.unwrap();
     }
 
     #[tokio::test]

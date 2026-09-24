@@ -650,7 +650,7 @@ class MediamtxGsManager:
 
 
 async def main() -> None:
-    """Service entry point. Invoked by systemd via ``python -m``."""
+    """Service entry point, run by the package's ``__main__`` for systemd."""
     config = load_config()
     configure_logging(config.logging.level)
     slog = structlog.get_logger()
@@ -684,14 +684,6 @@ async def main() -> None:
         pass
     await manager.stop()
     slog.info("ground_mediamtx_service_stopped")
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
-    sys.exit(0)
 
 
 __all__ = ["MediamtxGsManager", "main"]
