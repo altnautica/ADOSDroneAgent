@@ -82,6 +82,7 @@ pub mod mcp_token;
 pub mod msp;
 pub mod netif;
 pub mod node_credential;
+pub mod node_info;
 pub mod node_status;
 pub mod offload;
 pub mod offload_link;

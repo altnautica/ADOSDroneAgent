@@ -6,8 +6,9 @@
 //! component gate), `facades` (component registrar), `config_store` and
 //! `config_control` (plugin config and its persistence), `forwards`
 //! (command-socket services), `setpoint` (flight request parsing), `offload`
-//! (perception sessions), `display` (the reserved plugin page), `caps` (the
-//! ungrantable capability set) and `args` (msgpack readers). The argument
+//! (perception sessions), `display` (the reserved plugin page), `node_info`
+//! (the node facts), `caps` (the ungrantable capability set) and `args`
+//! (msgpack readers). The argument
 //! validation, the inline capability gates, the error strings and the
 //! success-map shapes are all part of the wire contract a plugin is written
 //! against, so none of them may drift without a matching SDK change.
@@ -62,6 +63,7 @@ mod facades;
 mod forwards;
 mod host_services;
 mod mavlink_gate;
+mod node_info;
 mod offload;
 mod setpoint;
 mod telemetry;
@@ -86,6 +88,7 @@ pub use self::config_store::{
 };
 pub(crate) use self::mavlink_gate::mavlink_msg_id;
 pub use self::mavlink_gate::{POSE_INJECT_MSG_IDS, VIO_COMPONENT_IDS};
+pub use self::node_info::NodeInfoSources;
 
 // ---------------------------------------------------------------------
 // RealHost
@@ -205,6 +208,9 @@ pub struct RealHost {
     /// router link. Commands a plugin sends without a target are addressed to
     /// it.
     fc_identity: Arc<FcIdentity>,
+    /// Where `node.info` reads the node facts from (the production sources
+    /// resolved from the environment; a builder overrides them in tests).
+    node_info_sources: NodeInfoSources,
 }
 
 impl RealHost {
@@ -239,6 +245,7 @@ impl RealHost {
             state_path: PathBuf::from(crate::state::PLUGIN_STATE_PATH),
             cloud_publish_path: ados_protocol::cloud_publish::socket_path(),
             fc_identity: Arc::new(FcIdentity::default()),
+            node_info_sources: NodeInfoSources::from_env(),
         }
     }
 
@@ -273,6 +280,13 @@ impl RealHost {
     /// uses the canonical `/run/ados/offload-link.json` from [`Self::new`].
     pub fn with_offload_link_path(mut self, path: PathBuf) -> Self {
         self.offload_link_path = path;
+        self
+    }
+
+    /// Override where `node.info` reads the node facts (builder style, tests).
+    /// Production resolves them from the environment in [`Self::new`].
+    pub fn with_node_info_sources(mut self, sources: NodeInfoSources) -> Self {
+        self.node_info_sources = sources;
         self
     }
 

@@ -23,6 +23,7 @@
 //! `auto` runs it on every drone (the automatic path).
 
 use std::net::{IpAddr, ToSocketAddrs, UdpSocket};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,9 @@ use ados_compute::{
 };
 use ados_protocol::node_credential::WorkstationCredentials;
 use ados_protocol::offload_link::{write_offload_link, OffloadLink};
+use ados_video::camera_state::{
+    read_effective_state, CameraState, CAMERA_STATE_JSON, CAMERA_STATE_LIVE_S,
+};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 
@@ -60,8 +64,6 @@ const CAMERA_ID: &str = "front";
 const TARGET_BUDGET_MS: i64 = 700;
 /// The board fingerprint sidecar (carries `npu_tops`).
 const BOARD_JSON: &str = "/run/ados/board.json";
-/// The camera pipeline readiness sidecar.
-const CAMERA_STATE_JSON: &str = "/run/ados/camera-state.json";
 
 /// The drone's live offload-session state the reconciler owns.
 struct RunningSession {
@@ -149,18 +151,16 @@ fn board_npu_tops() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Whether the camera pipeline is ready (a live primary camera) — the node can
-/// only pull frames the drone is actually publishing.
+/// Whether the camera pipeline is ready (a live primary camera over a pipeline
+/// that has not failed, from a sidecar its writer is still re-stamping) — the
+/// node can only pull frames the drone is actually publishing.
 fn camera_ready() -> bool {
-    std::fs::read_to_string(CAMERA_STATE_JSON)
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| {
-            v.get("state")
-                .and_then(|s| s.as_str())
-                .map(|s| s == "ready")
-        })
-        .unwrap_or(false)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    read_effective_state(Path::new(CAMERA_STATE_JSON), now, CAMERA_STATE_LIVE_S)
+        == Some(CameraState::Ready)
 }
 
 fn now_ms() -> i64 {

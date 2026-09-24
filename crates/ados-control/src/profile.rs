@@ -6,39 +6,10 @@
 //! same `profile` + `role` discriminators the cloud heartbeat emits.
 //!
 //! `role` is `"direct" | "relay" | "receiver"` for a ground station (read from
-//! the `/etc/ados/mesh/role` sentinel, defaulting to `"direct"`), and `None` for
-//! every other profile.
+//! the `/etc/ados/mesh/role` sentinel through [`ados_config::ground_station_role`],
+//! defaulting to `"direct"`), and `None` for every other profile.
 
-use std::path::{Path, PathBuf};
-
-/// The ground-station role sentinel the role manager writes. Overridable via
-/// `ADOS_MESH_ROLE` for tests.
-pub const MESH_ROLE_PATH: &str = "/etc/ados/mesh/role";
-
-/// The valid ground-station roles, matching the Python `VALID_ROLES`.
-const VALID_ROLES: [&str; 3] = ["direct", "relay", "receiver"];
-
-/// Read the on-disk ground-station role sentinel, defaulting to `"direct"` when
-/// the file is missing, unreadable, or carries an unknown value. Mirrors
-/// `role_manager.get_current_role`.
-fn read_role(path: &Path) -> String {
-    if let Ok(text) = std::fs::read_to_string(path) {
-        let value = text.trim();
-        if VALID_ROLES.contains(&value) {
-            return value.to_string();
-        }
-    }
-    "direct".to_string()
-}
-
-/// The ground-station role sentinel path, honouring `ADOS_MESH_ROLE` for tests.
-/// `pub(crate)` so a profile-gated route can resolve the live path once and hand
-/// it to a path-injectable gate core (a test passes a tempdir path instead).
-pub(crate) fn mesh_role_path() -> PathBuf {
-    std::env::var("ADOS_MESH_ROLE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(MESH_ROLE_PATH))
-}
+use std::path::Path;
 
 /// Resolve `(profile, role)` from the config's `agent.profile` plus the on-disk
 /// sentinels, matching `current_profile_and_role`. `profile` is the hyphen-form
@@ -48,7 +19,7 @@ pub fn current_profile_and_role(config_profile: &str) -> (String, Option<String>
     current_profile_and_role_at(
         config_profile,
         &ados_config::profile_conf_path(),
-        &mesh_role_path(),
+        &ados_config::mesh_role_path(),
     )
 }
 
@@ -60,7 +31,7 @@ pub fn current_profile_and_role_at(
     role_path: &Path,
 ) -> (String, Option<String>) {
     let profile = ados_config::resolve_profile(Some(config_profile), profile_conf);
-    let role = (profile == "ground-station").then(|| read_role(role_path));
+    let role = ados_config::ground_station_role(&profile, role_path);
     (profile, role)
 }
 
@@ -68,6 +39,7 @@ pub fn current_profile_and_role_at(
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::path::PathBuf;
 
     fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);

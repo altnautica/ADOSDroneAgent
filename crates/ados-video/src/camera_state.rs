@@ -7,6 +7,11 @@
 //! and the atomic tmp-sibling + rename. Consumers `json.loads` it, so the
 //! contract is the field names / types / path (compact vs spaced whitespace is
 //! irrelevant), matching how the bind sentinel is written.
+//!
+//! The reading side lives here too: [`read_effective_state`] is the one rule
+//! every consumer applies (freshness, the three discovery states, and a failed
+//! pipeline overriding `ready`), so the status surfaces and the plugin host
+//! cannot disagree about whether the camera is up.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,6 +20,11 @@ use serde::Serialize;
 
 /// Canonical sidecar path (`core/paths.py` `CAMERA_STATE_JSON`).
 pub const CAMERA_STATE_JSON: &str = "/run/ados/camera-state.json";
+
+/// How old a sidecar may be and still describe a LIVE pipeline. The orchestrator
+/// re-stamps it on every 5 s health tick, so six missed ticks means the writer
+/// is gone and its last word is no longer the camera's state.
+pub const CAMERA_STATE_LIVE_S: f64 = 30.0;
 
 /// Schema version of the `camera-state.json` sidecar. Bump on an incompatible
 /// field-set change; a reader compares it best-effort via
@@ -49,6 +59,54 @@ pub enum CameraState {
     Ready,
     Missing,
     Error,
+}
+
+impl CameraState {
+    /// The wire string the sidecar carries (`ready` / `missing` / `error`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CameraState::Ready => "ready",
+            CameraState::Missing => "missing",
+            CameraState::Error => "error",
+        }
+    }
+}
+
+/// The camera state a consumer should act on, from a parsed sidecar document.
+///
+/// `None` when the document carries no positive `updated_at_unix`, is older
+/// than `max_age_s` at `now`, or names a state outside `ready | missing |
+/// error`. A discovered camera whose pipeline failed reads as
+/// [`CameraState::Error`], never `Ready`: discovery alone is not health, and a
+/// `ready` over a dead pipeline is a confident answer about frames nobody is
+/// producing. Discovery stays authoritative for `missing`.
+pub fn effective_state(doc: &serde_json::Value, now: f64, max_age_s: f64) -> Option<CameraState> {
+    let updated = doc.get("updated_at_unix")?.as_f64()?;
+    if updated <= 0.0 || now - updated > max_age_s {
+        return None;
+    }
+    let state = match doc.get("state")?.as_str()? {
+        "ready" => CameraState::Ready,
+        "missing" => CameraState::Missing,
+        "error" => CameraState::Error,
+        _ => return None,
+    };
+    let failed = doc
+        .get("pipeline_state")
+        .and_then(serde_json::Value::as_str)
+        == Some("error");
+    Some(if state == CameraState::Ready && failed {
+        CameraState::Error
+    } else {
+        state
+    })
+}
+
+/// [`effective_state`] of the sidecar at `path`; `None` also when the file is
+/// absent or is not JSON.
+pub fn read_effective_state(path: &Path, now: f64, max_age_s: f64) -> Option<CameraState> {
+    let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    effective_state(&doc, now, max_age_s)
 }
 
 /// The exact `camera-state.json` payload (key names + types match the Python

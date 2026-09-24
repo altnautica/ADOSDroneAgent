@@ -45,39 +45,6 @@ use ados_plugin_host::vision_client::VisionClient;
 use ados_plugin_host::{EventBus, PluginIpcServer, PluginSupervisor};
 use ados_protocol::plugin::TokenIssuer;
 
-/// The board id and compute tier from the HAL board sidecar (`<run>/board.json`,
-/// the same document the pairing route and the offload reconciler read).
-///
-/// The daemon used to pass `None` for both, which left the
-/// `compatibility.supported_boards` and `compatibility.min_tier` gates inert on
-/// the cloud-relay install path: a plugin refused over LAN installed cleanly
-/// when pushed from the cloud, then crash-looped on hardware it was never built
-/// for. Reading the sidecar directly (rather than depending on the probe crate)
-/// keeps this to one small JSON read of a document that is already a published
-/// contract. `(None, None)` when the sidecar is absent, which stays lenient
-/// rather than refusing every install on a node that has not probed yet.
-fn read_board_identity(run_dir: &Path) -> (Option<String>, Option<u8>) {
-    let path = run_dir.join("board.json");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return (None, None);
-    };
-    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        tracing::warn!(path = %path.display(), "board sidecar is not valid JSON");
-        return (None, None);
-    };
-    let id = doc
-        .get("name")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let tier = doc
-        .get("tier")
-        .and_then(|v| v.as_i64())
-        .filter(|t| (1..=4).contains(t))
-        .map(|t| t as u8);
-    (id, tier)
-}
-
 /// The running agent semver, used by the supervisor's compatibility gate. The
 /// `ADOS_AGENT_VERSION` env mirrors the Python `ados.__version__` source; the
 /// crate version is the inert fallback when the env is unset.
@@ -512,7 +479,10 @@ async fn main() -> Result<()> {
     let run = paths.run_dir.clone();
     let version = agent_version();
     let profile = ados_config::node_profile();
-    let (board_id, board_tier) = read_board_identity(&run);
+    // The board id and tier from the HAL board sidecar. The daemon used to pass
+    // `None` for both, which left the compatibility gates inert on the
+    // cloud-relay install path.
+    let (board_id, board_tier) = PluginSupervisor::board_identity(&run.join("board.json"));
 
     tracing::info!(
         install_dir = %paths.install_dir.display(),

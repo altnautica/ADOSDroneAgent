@@ -41,7 +41,7 @@ pub mod vision;
 pub use client::{ClientError, EventCallback, OffloadAdvertisement, PluginIpcClient};
 pub use context::{
     CameraClient, CloudClient, ConfigClient, EventsClient, LifecycleClient, MavlinkClient,
-    PeripheralClient, PluginContext, ProcessClient, TelemetryClient,
+    NodeClient, PeripheralClient, PluginContext, ProcessClient, TelemetryClient,
 };
 pub use lifecycle::{run_plugin, run_plugin_with, Plugin, RunnerArgs, RunnerError};
 pub use vision::{Frame, FrameCallback, Odometry, Pose, VisionClient, VIO_COMPONENT_ID};
@@ -66,4 +66,12 @@ pub fn node_profile() -> String {
 /// source of truth is `crates/ados-protocol/capabilities.toml`.
 pub mod capabilities {
     pub use ados_protocol::capabilities::*;
+}
+
+/// The `node.info` reply types ([`NodeClient::info`]), re-exported from
+/// `ados-protocol`, which the host serializes them from.
+pub mod node_info {
+    pub use ados_protocol::node_info::{
+        BoardInfo, CameraInfo, GroundStationInfo, NodeInfo, StreamGeometry,
+    };
 }

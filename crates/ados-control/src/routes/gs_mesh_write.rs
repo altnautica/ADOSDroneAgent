@@ -111,10 +111,7 @@ fn config_yaml_path() -> PathBuf {
 /// `ADOS_MESH_ROLE` carries the identity/psk sentinels alongside it. In
 /// production this resolves to `/etc/ados/mesh`.
 fn mesh_dir() -> PathBuf {
-    let role_path = std::env::var("ADOS_MESH_ROLE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(crate::profile::MESH_ROLE_PATH));
-    role_path
+    ados_config::mesh_role_path()
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("/etc/ados/mesh"))
@@ -290,7 +287,7 @@ pub async fn put_gateway_preference(
     // The not-in-mesh gate: a `direct` node is not in a mesh, so the FastAPI route
     // 404s with `E_NOT_IN_MESH` before touching batman. Resolved from the role
     // sentinel, the same source the read module uses.
-    if current_role() == "direct" {
+    if ados_config::read_mesh_role(&ados_config::mesh_role_path()) == "direct" {
         return nested_detail(StatusCode::NOT_FOUND, json!({"code": "E_NOT_IN_MESH"}));
     }
 
@@ -430,23 +427,8 @@ fn validate_mesh_config(update: &MeshConfigUpdate) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Role sentinel + config-merge helpers.
+// Config-merge helpers.
 // ---------------------------------------------------------------------------
-
-/// Read the on-disk role sentinel, defaulting to `direct` when the file is
-/// missing/unreadable/unknown. Mirrors `role_manager.get_current_role`.
-fn current_role() -> String {
-    let path = std::env::var("ADOS_MESH_ROLE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(crate::profile::MESH_ROLE_PATH));
-    if let Ok(text) = std::fs::read_to_string(path) {
-        let value = text.trim();
-        if VALID_ROLES.contains(&value) {
-            return value.to_string();
-        }
-    }
-    "direct".to_string()
-}
 
 /// Merge `ground_station.role` into the on-disk config through the shared config
 /// store, preserving every other key.

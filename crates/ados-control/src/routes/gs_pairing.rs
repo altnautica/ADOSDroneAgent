@@ -41,14 +41,14 @@
 
 use std::path::{Path, PathBuf};
 
-use ados_config::profile_conf_path;
+use ados_config::{mesh_role_path, profile_conf_path};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
 use crate::config::PairingConfig;
-use crate::profile::{current_profile_and_role_at, mesh_role_path};
+use crate::profile::current_profile_and_role_at;
 
 /// The pairing daemon's Unix socket basename under the runtime dir. Mirrors the
 /// Python `PAIRING_SOCK` (`ADOS_RUN_DIR / "pairing.sock"`).

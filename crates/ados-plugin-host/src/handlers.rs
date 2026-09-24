@@ -477,6 +477,7 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::CloudPublish => host.cloud_publish(plugin_id, args, granted_caps).await,
         Method::CloudRecordsPut => host.cloud_records_put(plugin_id, args).await,
         Method::OffloadAdvertise => host.offload_advertise(plugin_id, args).await,
+        Method::NodeInfo => host.node_info(plugin_id, args).await,
         // Vision request/response methods proxy to the engine and await its
         // reply. (vision.subscribe_frames is handled in the server, where it
         // arms the frame-descriptor push stream, never reaching here.)

@@ -3403,3 +3403,161 @@ fn offload_advertise_is_gated_on_detection_publish() {
         Gate::Allow(Method::OffloadAdvertise)
     );
 }
+
+// ---- node.info ----------------------------------------------------
+
+fn now_unix() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+}
+
+/// Every node-fact source under `dir`, with its production file name.
+fn node_sources(dir: &std::path::Path) -> NodeInfoSources {
+    NodeInfoSources {
+        config_yaml: dir.join("config.yaml"),
+        profile_conf: dir.join("profile.conf"),
+        mesh_role: dir.join("mesh-role"),
+        board_sidecar: dir.join("board.json"),
+        camera_state: dir.join("camera-state.json"),
+    }
+}
+
+/// A board sidecar as the HAL probe publishes it.
+fn write_board(dir: &std::path::Path, npu_tops: f64, local_inference: &str) {
+    let body = serde_json::json!({
+        "version": 1, "name": "Radxa CM4 (RK3588S2)", "model": "Radxa CM4 IO Board",
+        "tier": 4, "ram_mb": 8192, "cpu_cores": 8, "vendor": "Radxa", "soc": "RK3588S2",
+        "arch": "aarch64", "hw_video_codecs": [], "npu_tops": npu_tops,
+        "has_accelerator": npu_tops > 0.0, "local_inference": local_inference,
+        "has_local_inference": local_inference != "none",
+    });
+    std::fs::write(dir.join("board.json"), body.to_string()).unwrap();
+}
+
+fn write_camera_state(dir: &std::path::Path, state: &str, pipeline: &str, age_s: f64) {
+    let body = serde_json::json!({
+        "version": 2, "state": state, "pipeline_state": pipeline,
+        "updated_at_unix": now_unix() - age_s,
+    });
+    std::fs::write(dir.join("camera-state.json"), body.to_string()).unwrap();
+}
+
+async fn node_info(host: &RealHost) -> ados_protocol::node_info::NodeInfo {
+    let reply = host.node_info("com.example.node", &map(&[])).await.unwrap();
+    rmpv::ext::from_value(reply).expect("the reply decodes as the wire type")
+}
+
+#[tokio::test]
+async fn node_info_reads_each_fact_from_its_source() {
+    use ados_protocol::node_info::*;
+    let dir = tempfile::tempdir().unwrap();
+    // The primary leg of `video.cameras` overrides the legacy block, exactly as
+    // the video service resolves the stream it encodes at `main`.
+    std::fs::write(
+        dir.path().join("config.yaml"),
+        "agent:\n  profile: drone\nvideo:\n  camera: { width: 640, height: 480, fps: 15 }\n  \
+         cameras:\n    - { id: ir, source: rtsp://pod/ir, role: ir, width: 320, height: 256 }\n    \
+         - { id: eo, source: /dev/video0, role: primary, width: 1920, height: 1080, fps: 25 }\n",
+    )
+    .unwrap();
+    write_board(dir.path(), 6.0, "onnx");
+    write_camera_state(dir.path(), "ready", "streaming", 2.0);
+    let host = RealHost::new().with_node_info_sources(node_sources(dir.path()));
+
+    assert_eq!(
+        node_info(&host).await,
+        NodeInfo {
+            profile: "drone".to_string(),
+            board: Some(BoardInfo {
+                id: "Radxa CM4 (RK3588S2)".to_string(),
+                name: "Radxa CM4 IO Board".to_string(),
+                has_npu: true,
+                accelerators: vec!["npu".to_string(), "cpu-onnx".to_string()],
+            }),
+            ground_station: GroundStationInfo { role: None },
+            camera: CameraInfo {
+                ready: true,
+                main: Some(StreamGeometry {
+                    width: 1920,
+                    height: 1080,
+                    fps: 25,
+                }),
+            },
+        }
+    );
+
+    // An NPU-less board: no accelerator, the fact the offload decision keys on.
+    write_board(dir.path(), 0.0, "none");
+    let board = node_info(&host).await.board.unwrap();
+    assert!(!board.has_npu);
+    assert!(board.accelerators.is_empty());
+
+    // A detected camera whose pipeline failed is not ready, and neither is a
+    // report the video service stopped re-stamping.
+    write_camera_state(dir.path(), "ready", "error", 2.0);
+    assert!(!node_info(&host).await.camera.ready);
+    write_camera_state(dir.path(), "ready", "streaming", 120.0);
+    assert!(!node_info(&host).await.camera.ready);
+}
+
+#[tokio::test]
+async fn node_info_on_a_ground_station_reports_its_role_and_no_camera_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("config.yaml"), "agent:\n  profile: auto\n").unwrap();
+    std::fs::write(dir.path().join("profile.conf"), "profile: ground_station\n").unwrap();
+    std::fs::write(dir.path().join("mesh-role"), "relay\n").unwrap();
+    let host = RealHost::new().with_node_info_sources(node_sources(dir.path()));
+
+    let info = node_info(&host).await;
+    assert_eq!(info.profile, "ground-station");
+    assert_eq!(info.ground_station.role.as_deref(), Some("relay"));
+    assert_eq!(info.camera.main, None);
+
+    // No role sentinel: a ground station runs the direct plane.
+    std::fs::remove_file(dir.path().join("mesh-role")).unwrap();
+    assert_eq!(
+        node_info(&host).await.ground_station.role.as_deref(),
+        Some("direct")
+    );
+}
+
+#[tokio::test]
+async fn node_info_maps_every_absent_source_to_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = RealHost::new().with_node_info_sources(node_sources(dir.path()));
+    let reply = ok_map(host.node_info("com.example.node", &map(&[])).await);
+
+    // Nothing on disk: the resolver's drone default, and an explicit nil for
+    // every fact whose source is missing, never a fabricated board or stream.
+    assert_eq!(
+        field(&reply, "profile").and_then(Value::as_str),
+        Some("drone")
+    );
+    assert_eq!(field(&reply, "board"), Some(&Value::Nil));
+    let gs = field(&reply, "ground_station")
+        .and_then(Value::as_map)
+        .unwrap();
+    assert_eq!(field(gs, "role"), Some(&Value::Nil));
+    let camera = field(&reply, "camera").and_then(Value::as_map).unwrap();
+    assert_eq!(field(camera, "ready"), Some(&Value::Boolean(false)));
+    assert_eq!(field(camera, "main"), Some(&Value::Nil));
+
+    // A board sidecar that is not the published contract is no board.
+    std::fs::write(dir.path().join("board.json"), r#"{"name":"x"}"#).unwrap();
+    assert_eq!(node_info(&host).await.board, None);
+}
+
+#[test]
+fn node_info_is_gated_on_its_read_capability() {
+    use crate::dispatch::{gate, Gate, Method};
+    assert_eq!(
+        gate("node.info", false, &caps(&[])),
+        Gate::CapabilityDenied("capability_denied: node.info.read".to_string())
+    );
+    assert_eq!(
+        gate("node.info", false, &caps(&["node.info.read"])),
+        Gate::Allow(Method::NodeInfo)
+    );
+}

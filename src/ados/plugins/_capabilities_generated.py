@@ -64,6 +64,7 @@ AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "network.listen",
         "cloud.publish",
         "cloud.records",
+        "node.info.read",
     }
 )
 
@@ -116,6 +117,7 @@ ENFORCED_AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "network.listen",
         "cloud.publish",
         "cloud.records",
+        "node.info.read",
     }
 )
 
@@ -504,6 +506,13 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
         "category": "data_network",
         "risk": "medium",
         "risk_reason": "Persists plugin data off the aircraft under the device's identity; confined to the plugin's own namespace.",
+    },
+    "node.info.read": {
+        "label": "Read this node's hardware and role facts",
+        "description": "Lets the plugin read what kind of node it runs on: the node profile, the board and whether it has a neural accelerator, the ground-station role, whether the camera pipeline is up, and the main video stream's size and frame rate. Read-only facts; no telemetry, imagery, credentials or configuration values.",
+        "category": "hardware",
+        "risk": "low",
+        "risk_reason": "Read-only node identity facts; no effect on flight, no imagery and no secrets.",
     },
 }
 

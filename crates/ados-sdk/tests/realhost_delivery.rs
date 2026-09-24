@@ -11,7 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use ados_plugin_host::realhost::RealHost;
+use ados_plugin_host::realhost::{NodeInfoSources, RealHost};
 use ados_plugin_host::{EventBus, PluginIpcServer};
 use ados_protocol::cloud_publish::{CloudPublishKind, CloudPublishReply, CloudPublishRequest};
 use ados_protocol::plugin::TokenIssuer;
@@ -54,6 +54,7 @@ struct Harness {
     vehicle_state: std::path::PathBuf,
     offload_link: std::path::PathBuf,
     _accept: tokio::task::JoinHandle<()>,
+    dir: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -67,7 +68,14 @@ async fn harness(granted: &[&str]) -> Harness {
         RealHost::new()
             .with_cloud_publish_path(relay.clone())
             .with_offload_link_path(offload_link.clone())
-            .with_vehicle_state_socket(vehicle_state.clone()),
+            .with_vehicle_state_socket(vehicle_state.clone())
+            .with_node_info_sources(NodeInfoSources {
+                config_yaml: dir.path().join("config.yaml"),
+                profile_conf: dir.path().join("profile.conf"),
+                mesh_role: dir.path().join("mesh-role"),
+                board_sidecar: dir.path().join("board.json"),
+                camera_state: dir.path().join("camera-state.json"),
+            }),
     );
     let server = PluginIpcServer::new(dir.path(), issuer.clone(), Arc::new(EventBus::new()), host);
     let (path, accept) = server.serve_plugin(PLUGIN_ID).expect("bind plugin socket");
@@ -83,6 +91,7 @@ async fn harness(granted: &[&str]) -> Harness {
         vehicle_state,
         offload_link,
         _accept: accept,
+        dir: dir.path().to_path_buf(),
         _dir: dir,
     }
 }
@@ -197,6 +206,43 @@ async fn an_advertised_offload_link_is_what_the_tier_reader_sees() {
     assert_eq!(link.target, None);
 
     h.ipc.close().await;
+}
+
+#[tokio::test]
+async fn node_info_arrives_typed_and_needs_its_capability() {
+    let h = harness(&["node.info.read"]).await;
+    std::fs::write(
+        h.dir.join("config.yaml"),
+        "agent:\n  profile: drone\nvideo:\n  camera: { width: 1280, height: 720, fps: 30 }\n",
+    )
+    .unwrap();
+    let board = serde_json::json!({
+        "version": 1, "name": "Raspberry Pi 4B", "model": "Raspberry Pi 4 Model B Rev 1.4",
+        "tier": 3, "ram_mb": 4096, "cpu_cores": 4, "vendor": "Raspberry Pi", "soc": "BCM2711",
+        "arch": "aarch64", "hw_video_codecs": [], "npu_tops": 0.0, "has_accelerator": false,
+        "local_inference": "none", "has_local_inference": false,
+    });
+    std::fs::write(h.dir.join("board.json"), board.to_string()).unwrap();
+
+    let info = h.ctx.node.info().await.expect("node.info");
+    assert_eq!(info.profile, "drone");
+    let board = info.board.expect("a published board");
+    assert_eq!(board.id, "Raspberry Pi 4B");
+    assert!(!board.has_npu);
+    assert_eq!(info.ground_station.role, None);
+    // No camera-state sidecar: not ready, but the configured stream is known.
+    assert!(!info.camera.ready);
+    let main = info.camera.main.expect("configured main stream");
+    assert_eq!((main.width, main.height, main.fps), (1280, 720, 30));
+    h.ipc.close().await;
+
+    let denied = harness(&[]).await;
+    let err = denied.ctx.node.info().await.unwrap_err();
+    assert!(
+        matches!(&err, ClientError::CapabilityDenied(cap) if cap.contains("node.info.read")),
+        "{err:?}"
+    );
+    denied.ipc.close().await;
 }
 
 /// Serve one connection on `path` the way the MAVLink service's state hub

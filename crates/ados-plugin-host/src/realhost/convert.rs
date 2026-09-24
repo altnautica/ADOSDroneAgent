@@ -30,9 +30,9 @@ pub(super) fn json_to_mpv(value: &serde_json::Value) -> Value {
     }
 }
 
-/// Render a compute-node reply struct (any `Serialize`) as the msgpack response
-/// map the `ctx.compute` facade parses, mapping the typed reply 1:1 through
-/// JSON (the struct's serde field names are the keys the facade reads).
+/// Render a typed reply struct (any `Serialize`: a compute-node reply, the
+/// node facts) as the msgpack response map the SDK facade parses, mapping it
+/// 1:1 through JSON (the struct's serde field names are the keys it reads).
 pub(super) fn compute_reply<T: serde::Serialize>(value: &T) -> Result<HostResult, HostError> {
     let json = serde_json::to_value(value).map_err(|e| HostError::Rpc(e.to_string()))?;
     Ok(json_to_mpv(&json))

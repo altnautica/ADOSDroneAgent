@@ -27,8 +27,9 @@ pub mod log_store;
 mod profile;
 
 pub use profile::{
-    node_profile, node_profile_at, normalize_profile, profile_conf_path, read_profile_conf_value,
-    resolve_profile, PROFILE_CONF,
+    ground_station_role, mesh_role_path, node_profile, node_profile_at, normalize_profile,
+    profile_conf_path, read_mesh_role, read_profile_conf_value, resolve_profile, MESH_ROLE_PATH,
+    PROFILE_CONF,
 };
 
 use std::fmt::Display;

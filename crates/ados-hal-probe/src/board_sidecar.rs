@@ -570,6 +570,14 @@ pub fn write_sidecar(path: &Path, fp: &BoardFingerprint) -> std::io::Result<()> 
     Ok(())
 }
 
+/// Read the published fingerprint back. `None` when the sidecar is absent (a
+/// node that has not probed yet) or does not parse as this contract, so a reader
+/// reports "unknown board" rather than a half-read one.
+pub fn read_sidecar(path: &Path) -> Option<BoardFingerprint> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
 /// Probe the host, resolve the board, and publish the sidecar. The one call a
 /// daemon makes at startup; returns the fingerprint it wrote.
 pub fn publish() -> std::io::Result<BoardFingerprint> {

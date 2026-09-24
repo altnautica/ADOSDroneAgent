@@ -642,6 +642,10 @@ impl HostServices for RealHost {
         self.advertise_offload(args)
     }
 
+    async fn node_info(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        self.read_node_info().await
+    }
+
     async fn cloud_publish(
         &self,
         plugin_id: &str,

@@ -130,11 +130,49 @@ pub const NETWORK_OUTBOUND_CAP: &str = "network.outbound";
 /// The capability that unlocks the host filesystem outside the plugin's tree.
 pub const FILESYSTEM_HOST_CAP: &str = "filesystem.host";
 
-/// Paths a plugin never reaches, granted or not: the HMAC issuer secret it
-/// could mint another plugin's token from, and the trusted-key store it could
-/// enrol its own signer into. File modes already keep `ados` out of both; this
-/// is the second line, and it costs one line of unit text.
-pub const ALWAYS_INACCESSIBLE: &[&str] = &["/etc/ados/secrets", "/etc/ados/plugin-keys"];
+/// Paths a plugin never reaches, granted or not: every credential the agent
+/// keeps under `/etc/ados`.
+///
+/// * `secrets`: the HMAC issuer secret a plugin could mint another plugin's
+///   token from, the relay peer secret and the setup token.
+/// * `plugin-keys`: the trusted-key store a plugin could enrol its own signer
+///   into.
+/// * `pairing.json`: the operator API key, which authorizes the whole control
+///   plane (and derives every MCP token).
+/// * `config.yaml`: carries the cloud and security API keys, the MQTT password
+///   and the Wi-Fi passwords. A plugin reads its own config through the host
+///   and the node facts through `node.info`.
+/// * `mcp-token.json`, `dashboard-pin.json`: the MCP token salt and denylist,
+///   and the dashboard PIN record.
+/// * `wfb`, `mesh`: the radio link keys, and the mesh PSK and id.
+/// * `ap-passphrase`, `hostapd-gs.conf`: the ground-station access point
+///   passphrase, in both places it is written.
+/// * `workstation-credentials.json`: the credentials compute nodes issued this
+///   drone.
+/// * `model-registry-auth.json`: the model registry tokens.
+/// * `plugin-config.json`: every plugin's stored config, which a plugin reads
+///   (its own, only) through the host.
+///
+/// Each file is written root-owned and `0600`, and the plugin runs as `ados`,
+/// so file modes are the first line; this mount-namespace line holds when a
+/// mode is not what it should be (a restored backup, a hand edit, an older
+/// writer), for one line of unit text. Every entry renders with the `-` prefix,
+/// so a node that lacks one is not a unit-start failure.
+pub const ALWAYS_INACCESSIBLE: &[&str] = &[
+    "/etc/ados/secrets",
+    "/etc/ados/plugin-keys",
+    "/etc/ados/pairing.json",
+    "/etc/ados/config.yaml",
+    "/etc/ados/mcp-token.json",
+    "/etc/ados/dashboard-pin.json",
+    "/etc/ados/wfb",
+    "/etc/ados/mesh",
+    "/etc/ados/ap-passphrase",
+    "/etc/ados/hostapd-gs.conf",
+    "/etc/ados/workstation-credentials.json",
+    "/etc/ados/model-registry-auth.json",
+    "/etc/ados/plugin-config.json",
+];
 
 /// The agent's run directory, hidden from every plugin behind an empty
 /// read-only tmpfs. It holds every agent command socket (the control plane,
@@ -349,19 +387,26 @@ mod tests {
             .unwrap();
         assert!(inacc_without.contains("-/mnt"));
         assert!(!inacc_with.contains("-/mnt"));
-        // The issuer secret is off limits in both postures.
-        assert!(inacc_without.contains("-/etc/ados/secrets"));
-        assert!(inacc_with.contains("-/etc/ados/secrets"));
+        // The issuer secret and the operator key are off limits in both
+        // postures: filesystem.host reopens the data roots, never a credential.
+        for secret in ["-/etc/ados/secrets", "-/etc/ados/pairing.json"] {
+            assert!(inacc_without.contains(secret), "{inacc_without}");
+            assert!(inacc_with.contains(secret), "{inacc_with}");
+        }
     }
 
-    /// The no-grant filesystem lines, restated as the literals the Python
-    /// renderer's test also pins, so the two renderers cannot drift.
+    /// The no-grant filesystem lines, restated as literals so a change to what a
+    /// plugin can see is a deliberate edit here, not a side effect.
     const NO_GRANT_FILESYSTEM: &[&str] = &[
         "TemporaryFileSystem=/run/ados:ro",
         "BindReadOnlyPaths=-/run/ados/logd.sock",
         "ReadWritePaths=/var/ados/plugin-data /var/log/ados/plugins",
         "ProtectHome=yes",
-        "InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys -/srv -/mnt -/media -/boot",
+        "InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys -/etc/ados/pairing.json \
+         -/etc/ados/config.yaml -/etc/ados/mcp-token.json -/etc/ados/dashboard-pin.json \
+         -/etc/ados/wfb -/etc/ados/mesh -/etc/ados/ap-passphrase -/etc/ados/hostapd-gs.conf \
+         -/etc/ados/workstation-credentials.json -/etc/ados/model-registry-auth.json \
+         -/etc/ados/plugin-config.json -/srv -/mnt -/media -/boot",
     ];
 
     #[test]

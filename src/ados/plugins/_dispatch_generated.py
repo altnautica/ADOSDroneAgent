@@ -67,6 +67,7 @@ REQUIRED_CAP: dict[str, str | None] = {
     "compute.stream.open": "compute.stream.open",
     "compute.stream.close": "compute.stream.open",
     "compute.stream.health": "compute.stream.open",
+    "node.info": "node.info.read",
 }
 
 # Methods whose cap is decided inline by the handler from the request

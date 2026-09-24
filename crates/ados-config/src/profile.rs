@@ -8,6 +8,10 @@
 //!
 //! The result is the hyphenated wire form: `drone`, `ground-station`,
 //! `workstation`, or `compute`.
+//!
+//! A ground station also carries a role (`direct`, `relay` or `receiver`) in the
+//! `/etc/ados/mesh/role` sentinel the role manager writes; [`ground_station_role`]
+//! reads it for a ground-station profile and answers `None` for every other.
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +29,41 @@ pub fn profile_conf_path() -> PathBuf {
     std::env::var_os("ADOS_PROFILE_CONF")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(PROFILE_CONF))
+}
+
+/// The ground-station role sentinel the role manager writes. Overridable at
+/// runtime through `ADOS_MESH_ROLE` (see [`mesh_role_path`]).
+pub const MESH_ROLE_PATH: &str = "/etc/ados/mesh/role";
+
+/// The valid ground-station roles, matching the Python `VALID_ROLES`.
+const VALID_ROLES: [&str; 3] = ["direct", "relay", "receiver"];
+
+/// The role sentinel path, honouring the `ADOS_MESH_ROLE` override tests set.
+/// Unset: [`MESH_ROLE_PATH`].
+pub fn mesh_role_path() -> PathBuf {
+    std::env::var_os("ADOS_MESH_ROLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(MESH_ROLE_PATH))
+}
+
+/// Read the ground-station role sentinel, defaulting to `"direct"` when the file
+/// is missing, unreadable, or carries an unknown value: a ground station with no
+/// sentinel runs the direct plane. Mirrors `role_manager.get_current_role`.
+pub fn read_mesh_role(path: &Path) -> String {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let value = text.trim();
+        if VALID_ROLES.contains(&value) {
+            return value.to_string();
+        }
+    }
+    "direct".to_string()
+}
+
+/// The ground-station role for a node of wire-form `profile`: the sentinel at
+/// `role_path` on a `ground-station`, `None` on every other profile (a role is
+/// meaningless off a ground station, so none is reported).
+pub fn ground_station_role(profile: &str, role_path: &Path) -> Option<String> {
+    (profile == "ground-station").then(|| read_mesh_role(role_path))
 }
 
 /// Wire-contract profile string from a raw value. `ground_station` and
@@ -211,5 +250,29 @@ mod tests {
         // A malformed config does not panic; it falls through to profile.conf.
         write(&cfg, "agent: [unterminated\n");
         assert_eq!(node_profile_at(&cfg, &pc), "workstation");
+    }
+
+    #[test]
+    fn ground_station_role_reads_the_sentinel_only_on_a_ground_station() {
+        let dir = tempfile::tempdir().unwrap();
+        let role = dir.path().join("role");
+        // A drone has no role, whatever the sentinel says.
+        write(&role, "relay\n");
+        assert_eq!(ground_station_role("drone", &role), None);
+        assert_eq!(
+            ground_station_role("ground-station", &role).as_deref(),
+            Some("relay")
+        );
+        // Absent or unknown: the direct plane.
+        write(&role, "bogus\n");
+        assert_eq!(
+            ground_station_role("ground-station", &role).as_deref(),
+            Some("direct")
+        );
+        let absent = dir.path().join("absent");
+        assert_eq!(
+            ground_station_role("ground-station", &absent).as_deref(),
+            Some("direct")
+        );
     }
 }

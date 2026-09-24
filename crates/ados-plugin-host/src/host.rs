@@ -411,6 +411,19 @@ pub trait HostServices: Send + Sync + 'static {
         std::future::ready(Ok(not_implemented("offload.advertise")))
     }
 
+    /// Read the node facts ([`ados_protocol::node_info::NodeInfo`]): profile,
+    /// board, ground-station role, camera readiness and main-stream geometry.
+    /// Takes no arguments. Gated at the dispatch level on `node.info.read`.
+    /// Async because a real host reads its sources off disk. The default
+    /// returns `not_implemented`.
+    fn node_info(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("node.info")))
+    }
+
     /// Open a connection session for `plugin_id` and return its id. Resources
     /// the plugin acquires from now on are tagged with it, so a reconnect's
     /// new session and the old session's teardown can overlap without the

@@ -1048,7 +1048,7 @@ async fn http_get_local(url: &str) -> std::io::Result<(u16, Vec<u8>)> {
 fn build_mesh_block(config_profile: &str) -> Value {
     build_mesh_block_at(
         config_profile,
-        &mesh_role_path(),
+        &ados_config::mesh_role_path(),
         &ados_config::profile_conf_path(),
         &run_dir().join("mesh-state.json"),
     )
@@ -1068,7 +1068,7 @@ fn build_mesh_block_at(
     }
 
     let mut mesh = Map::new();
-    let role = read_mesh_role_at(role_path);
+    let role = ados_config::read_mesh_role(role_path);
     mesh.insert("role".to_string(), json!(role));
     mesh.insert(
         "mesh_capable".to_string(),
@@ -1106,31 +1106,6 @@ fn build_mesh_block_at(
         }
     }
     Value::Object(mesh)
-}
-
-/// The mesh-role sentinel path (`ADOS_MESH_ROLE` override, default
-/// `/etc/ados/mesh/role`), the same path the crate's profile module resolves.
-fn mesh_role_path() -> PathBuf {
-    std::env::var("ADOS_MESH_ROLE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(crate::profile::MESH_ROLE_PATH))
-}
-
-/// The current ground-station role from the role sentinel, defaulting to `direct`
-/// when the sentinel is absent / unreadable / carries an unknown value — the same
-/// resolution `role_manager.get_current_role` does.
-fn read_mesh_role_at(path: &Path) -> String {
-    match std::fs::read_to_string(path) {
-        Ok(text) => {
-            let value = text.trim();
-            if matches!(value, "direct" | "relay" | "receiver") {
-                value.to_string()
-            } else {
-                "direct".to_string()
-            }
-        }
-        Err(_) => "direct".to_string(),
-    }
 }
 
 /// The `mesh_capable` hint from `profile.conf` (parsed as YAML), defaulting to
@@ -1184,24 +1159,14 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
         if let Some(ours) = ados_protocol::contracts::sidecar_version("camera-state") {
             ados_protocol::sidecar::check_sidecar_version("camera-state", got, ours);
         }
-        if sidecar_fresh(&camera, now, CAMERA_STATE_FRESH_S) {
-            if let Some(state) = camera.get("state").and_then(Value::as_str) {
-                if matches!(state, "ready" | "missing" | "error") {
-                    // Discovery alone is not health. The cockpit raises its
-                    // no-camera overlay only for `missing`, so a node with a
-                    // detected camera and a failed pipeline showed a confident
-                    // camera pill over a dead pane and no warning anywhere.
-                    // Discovery stays authoritative for `missing`.
-                    let failed =
-                        camera.get("pipeline_state").and_then(Value::as_str) == Some("error");
-                    let state = if state == "ready" && failed {
-                        "error"
-                    } else {
-                        state
-                    };
-                    out.push(("cameraState".to_string(), json!(state)));
-                }
-            }
+        // Discovery alone is not health: a detected camera over a failed
+        // pipeline reads as `error`, so the cockpit warns instead of showing a
+        // confident camera pill over a dead pane.
+        let doc = Value::Object(camera);
+        if let Some(state) =
+            ados_video::camera_state::effective_state(&doc, now, CAMERA_STATE_FRESH_S)
+        {
+            out.push(("cameraState".to_string(), json!(state.as_str())));
         }
     }
 

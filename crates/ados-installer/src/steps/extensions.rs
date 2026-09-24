@@ -114,7 +114,7 @@ pub fn install_world_engine(target: NodeTarget) -> Result<ExtensionOutcome, Stri
     std::thread::Builder::new()
         .name("world-engine-install".to_string())
         .spawn(move || {
-            let (board_id, board_tier) = board_identity(&target.board_sidecar);
+            let (board_id, board_tier) = PluginSupervisor::board_identity(&target.board_sidecar);
             let mut supervisor =
                 PluginSupervisor::production(target.paths, board_id, target.agent_version)
                     .with_profile(target.profile)
@@ -246,21 +246,6 @@ fn wait_for_loopback_guard(state: &Path, timeout: Duration) {
     {
         std::thread::sleep(Duration::from_millis(500));
     }
-}
-
-/// The board id and compute tier from the HAL board sidecar, for the
-/// manifest's `supported_boards` and `min_tier` gates. `(None, None)` when the
-/// sidecar is absent or unreadable, which leaves both gates lenient — the same
-/// posture the plugin host takes on a node that has not probed yet.
-fn board_identity(sidecar: &Path) -> (Option<String>, Option<u8>) {
-    let Some(board) = std::fs::read_to_string(sidecar).ok().and_then(|raw| {
-        serde_json::from_str::<ados_hal_probe::board_sidecar::BoardFingerprint>(&raw).ok()
-    }) else {
-        return (None, None);
-    };
-    let id = (!board.name.is_empty() && board.name != "unknown").then_some(board.name);
-    let tier = (1..=4).contains(&board.tier).then_some(board.tier as u8);
-    (id, tier)
 }
 
 /// Map the install's result onto the step outcome, logging what happened. An
@@ -573,31 +558,5 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         let mut ctx = Ctx::for_test(crate::checkpoint::Checkpoint::new());
         ctx.install_world_engine = false;
         assert_eq!(Extensions.run(&mut ctx), StepOutcome::Skipped);
-    }
-
-    #[test]
-    fn board_identity_reads_the_sidecar_and_stays_lenient_without_one() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            board_identity(&dir.path().join("absent.json")),
-            (None, None)
-        );
-        let sidecar = dir.path().join("board.json");
-        std::fs::write(
-            &sidecar,
-            serde_json::json!({
-                "version": 1, "name": "rock-5c-lite", "model": "x", "tier": 3,
-                "ram_mb": 4096, "cpu_cores": 6, "vendor": "radxa", "soc": "rk3582",
-                "arch": "aarch64", "hw_video_codecs": [], "npu_tops": 0.0,
-                "has_accelerator": false, "local_inference": "none",
-                "has_local_inference": false,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        assert_eq!(
-            board_identity(&sidecar),
-            (Some("rock-5c-lite".to_string()), Some(3))
-        );
     }
 }

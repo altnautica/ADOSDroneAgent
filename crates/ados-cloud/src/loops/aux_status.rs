@@ -37,12 +37,14 @@
 //! frames carry a sequence number: the ground station can see loss, and neither
 //! side infers a working link from the fact that a send returned.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ados_protocol::aux_egress::{AuxEgress, AuxEgressError};
 use ados_protocol::aux_mux::AuxChannel;
 use ados_protocol::node_status::{NodeIdentity, NodeStatus};
+use ados_video::camera_state::{read_effective_state, CAMERA_STATE_JSON, CAMERA_STATE_LIVE_S};
 use serde_json::Value;
 use tokio::sync::watch;
 
@@ -72,10 +74,6 @@ const DISABLED_RECHECK: Duration = Duration::from_secs(60);
 
 /// How often the counters are logged, and only when they have moved.
 const REPORT_INTERVAL: Duration = Duration::from_secs(300);
-
-/// The camera-state sidecar, and how stale it may be before it reads as unknown.
-const CAMERA_STATE_SIDECAR: &str = "/run/ados/camera-state.json";
-const CAMERA_STATE_STALE_S: f64 = 30.0;
 
 /// The video-streams sidecar, and its staleness window (4x the ~5 s re-stamp).
 const VIDEO_STREAMS_SIDECAR: &str = "/run/ados/video-streams.json";
@@ -151,31 +149,15 @@ fn summarize_services(services: &[Value]) -> ServiceSummary {
     out
 }
 
-/// Read the current camera state, staleness-gated.
+/// Read the current camera state, staleness-gated through the shared
+/// [`ados_video::camera_state::read_effective_state`] reader.
 ///
 /// A lingering sidecar from a stopped pipeline must not keep advertising a
 /// camera as ready, so an un-refreshed file reads as unknown rather than as its
-/// last value.
-///
-/// A camera that was DISCOVERED but whose pipeline failed is not `ready`
-/// either: the cockpit raises its no-camera overlay only for `missing`, so a
-/// `ready` pill over a failed pipeline is a confident card above a dead pane
-/// with no warning anywhere. Discovery stays authoritative for `missing`.
+/// last value, and a discovered camera over a failed pipeline reads as `error`.
 fn read_camera_state(path: &str, now: f64) -> Option<String> {
-    let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    let updated = doc.get("updated_at_unix").and_then(Value::as_f64)?;
-    if updated <= 0.0 || now - updated > CAMERA_STATE_STALE_S {
-        return None;
-    }
-    let state = doc.get("state").and_then(Value::as_str)?;
-    if !matches!(state, "ready" | "missing" | "error") {
-        return None;
-    }
-    let failed = doc.get("pipeline_state").and_then(Value::as_str) == Some("error");
-    if state == "ready" && failed {
-        return Some("error".to_string());
-    }
-    Some(state.to_string())
+    read_effective_state(Path::new(path), now, CAMERA_STATE_LIVE_S)
+        .map(|state| state.as_str().to_string())
 }
 
 /// Derive a one-word video state from the streams sidecar, staleness-gated.
@@ -266,7 +248,7 @@ struct Sample {
 fn gather(prev_cpu: &mut Option<CpuSample>, with_services: bool, now: f64) -> Sample {
     Sample {
         enrichment: enrichment::build_native_enrichment_with(prev_cpu, with_services),
-        camera: read_camera_state(CAMERA_STATE_SIDECAR, now),
+        camera: read_camera_state(CAMERA_STATE_JSON, now),
         video: read_video_state(VIDEO_STREAMS_SIDECAR, now),
         video_legs: read_video_leg_count(VIDEO_STREAMS_SIDECAR, now),
         board: read_board(BOARD_SIDECAR),

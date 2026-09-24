@@ -209,6 +209,25 @@ impl CloudClient {
     }
 }
 
+/// `ctx.node` — facts about the node the plugin runs on.
+///
+/// The plugin's sandbox hides the agent's sidecars and config, so this is the
+/// sanctioned read of what the agent itself decides on: the profile, the board
+/// and its accelerators, the ground-station role, whether the camera pipeline
+/// is up and the main stream's geometry.
+#[derive(Clone)]
+pub struct NodeClient {
+    ipc: Arc<PluginIpcClient>,
+}
+
+impl NodeClient {
+    /// Read the node facts. Needs `node.info.read`. Each fact whose source is
+    /// absent is `None`. See [`PluginIpcClient::node_info`].
+    pub async fn info(&self) -> Result<ados_protocol::node_info::NodeInfo, ClientError> {
+        self.ipc.node_info().await
+    }
+}
+
 /// `ctx.peripheral_manager` — register driver instances and claim cameras.
 ///
 /// A driver is registered by an opaque reference id; the driver itself keeps
@@ -605,6 +624,8 @@ pub struct PluginContext {
     pub radio: RadioClient,
     /// The plugin's cloud stream and cloud records.
     pub cloud: CloudClient,
+    /// Facts about this node: profile, board, ground-station role, camera.
+    pub node: NodeClient,
     pub process: ProcessClient,
     pub lifecycle: LifecycleClient,
     ipc: Arc<PluginIpcClient>,
@@ -641,6 +662,7 @@ impl PluginContext {
             display: DisplayClient { ipc: ipc.clone() },
             radio: RadioClient { ipc: ipc.clone() },
             cloud: CloudClient { ipc: ipc.clone() },
+            node: NodeClient { ipc: ipc.clone() },
             config: ConfigClient {
                 ipc: ipc.clone(),
                 static_config: Arc::new(static_config),

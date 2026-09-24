@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ados_protocol::frame::{decode_len, FrameError, HEADER_SIZE, PLUGIN_MAX_FRAME};
+use ados_protocol::node_info::NodeInfo;
 use ados_protocol::plugin::{CapabilityToken, Envelope, PROTOCOL_VERSION, TELEMETRY_STATE_TOPIC};
 use rmpv::Value;
 use thiserror::Error;
@@ -994,6 +995,27 @@ impl PluginIpcClient {
             .send_request("offload.advertise", "vision.detection.publish", args)
             .await?
             .args)
+    }
+
+    // ---- Node facts ---------------------------------------------------
+
+    /// Read this node's facts: profile, board (with NPU presence), the
+    /// ground-station role, camera readiness and the main stream's geometry.
+    /// Each absent source is `None`, never a guess. Gated on `node.info.read`.
+    ///
+    /// A host that predates the method answers `not_implemented`, surfaced as
+    /// [`ClientError::Rpc`]`("not_implemented: node.info")`.
+    pub async fn node_info(&self) -> Result<NodeInfo, ClientError> {
+        use ados_protocol::node_info::{CAPABILITY, METHOD};
+        let args = self
+            .send_request(METHOD, CAPABILITY, Value::Map(Vec::new()))
+            .await?
+            .args;
+        if let Some(error) = map_get_str(&args, "error") {
+            return Err(ClientError::Rpc(format!("{error}: {METHOD}")));
+        }
+        rmpv::ext::from_value(args)
+            .map_err(|e| ClientError::Rpc(format!("{METHOD} reply did not decode: {e}")))
     }
 
     // ------------------------------------------------------------------

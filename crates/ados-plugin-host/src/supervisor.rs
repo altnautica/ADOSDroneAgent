@@ -249,6 +249,23 @@ impl PluginSupervisor {
         PluginSupervisor::new(paths, require_signed, current_board_id, agent_version)
     }
 
+    /// The board id and compute tier the `compatibility.supported_boards` and
+    /// `min_tier` gates key on, read from the HAL board sidecar at
+    /// `board_sidecar`. Every daemon that builds a [`production`](Self::production)
+    /// controller passes these, so a plugin refused on one install path is
+    /// refused on all of them. `(None, None)` when the sidecar is absent or
+    /// unreadable, and each half is `None` when it is `unknown` or out of range:
+    /// a node that has not probed yet stays lenient rather than refusing every
+    /// install.
+    pub fn board_identity(board_sidecar: &Path) -> (Option<String>, Option<u8>) {
+        let Some(board) = ados_hal_probe::board_sidecar::read_sidecar(board_sidecar) else {
+            return (None, None);
+        };
+        let id = (!board.name.is_empty() && board.name != "unknown").then_some(board.name);
+        let tier = (1..=4).contains(&board.tier).then_some(board.tier as u8);
+        (id, tier)
+    }
+
     /// Inject the service backend (tests use a [`RecordingBackend`]).
     pub fn with_backend(mut self, backend: Arc<dyn ServiceBackend>) -> Self {
         self.backend = backend;
@@ -2328,6 +2345,32 @@ mod tests {
             .install_contents(contents, Path::new("/tmp/x.adosplug"))
             .unwrap_err();
         assert!(format!("{err}").contains("does not support board"), "{err}");
+    }
+
+    #[test]
+    fn board_identity_reads_the_sidecar_and_stays_lenient_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            PluginSupervisor::board_identity(&dir.path().join("absent.json")),
+            (None, None)
+        );
+        let sidecar = dir.path().join("board.json");
+        std::fs::write(
+            &sidecar,
+            serde_json::json!({
+                "version": 1, "name": "rock-5c-lite", "model": "x", "tier": 3,
+                "ram_mb": 4096, "cpu_cores": 6, "vendor": "radxa", "soc": "rk3582",
+                "arch": "aarch64", "hw_video_codecs": [], "npu_tops": 0.0,
+                "has_accelerator": false, "local_inference": "none",
+                "has_local_inference": false,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            PluginSupervisor::board_identity(&sidecar),
+            (Some("rock-5c-lite".to_string()), Some(3))
+        );
     }
 
     /// Nothing runs an in-process agent half, so it is refused whoever signed

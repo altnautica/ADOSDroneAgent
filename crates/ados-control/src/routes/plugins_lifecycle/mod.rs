@@ -50,7 +50,7 @@ mod token;
 #[cfg(test)]
 mod tests;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -109,7 +109,7 @@ impl PluginLifecycle {
         let run_dir = paths.run_dir.clone();
         Self::new(
             move || {
-                let (board_id, tier) = board_identity(&board_path);
+                let (board_id, tier) = PluginSupervisor::board_identity(&board_path);
                 PluginSupervisor::production(
                     Paths::from_env(),
                     board_id,
@@ -195,27 +195,6 @@ impl PluginLifecycle {
         ados_plugin_host::systemd::plugin_http_dir(&self.run_dir, plugin_id)
             .join(ados_plugin_host::systemd::PLUGIN_HTTP_SOCKET_NAME)
     }
-}
-
-/// The board id and compute tier from the HAL board sidecar, the same source the
-/// cloud relay's supervisor reads. Absent, unreadable or `unknown` leaves the
-/// board gate and the tier floor unenforced.
-fn board_identity(board_path: &Path) -> (Option<String>, Option<u8>) {
-    let parsed: Option<serde_json::Value> = std::fs::read_to_string(board_path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok());
-    let obj = parsed.as_ref().and_then(|v| v.as_object());
-    let name = obj
-        .and_then(|o| o.get("name"))
-        .and_then(|v| v.as_str())
-        .filter(|n| !n.is_empty() && *n != "unknown")
-        .map(str::to_string);
-    let tier = obj
-        .and_then(|o| o.get("tier"))
-        .and_then(serde_json::Value::as_u64)
-        .filter(|t| (1..=4).contains(t))
-        .map(|t| t as u8);
-    (name, tier)
 }
 
 /// One refused request in the lifecycle envelope.

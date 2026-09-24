@@ -34,6 +34,8 @@ ados-compute = { path = "../ados-compute" }
 # carries. The projection lives in the crate that owns the state file so the
 # LAN status body and this heartbeat ship one shape, not two.
 ados-macpin = { path = "../ados-macpin" }
+# The camera-state sidecar reader lives beside its writer in ados-video.
+ados-video = { path = "../ados-video" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # YAML config reader (/etc/ados/config.yaml), the same reader the other crates

@@ -37,6 +37,12 @@ ados-hid = { path = "../ados-hid" }
 # payloads against, resolved from the same config and profile.conf every
 # daemon reads.
 ados-config = { path = "../ados-config" }
+# `node.info` reads each node fact through the reader its owning crate
+# publishes: the HAL board sidecar's, and the video pipeline's camera-state
+# sidecar and primary-stream config resolution. Reading them here rather than
+# re-parsing the files keeps the answer identical to what the agent acts on.
+ados-hal-probe = { path = "../ados-hal-probe" }
+ados-video = { path = "../ados-video" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

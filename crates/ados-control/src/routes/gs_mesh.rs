@@ -70,7 +70,7 @@ fn is_ground_station() -> bool {
     is_ground_station_at(
         &config_path(),
         &ados_config::profile_conf_path(),
-        &crate::profile::mesh_role_path(),
+        &ados_config::mesh_role_path(),
     )
 }
 
@@ -230,38 +230,6 @@ impl MeshRouteConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Role sentinel seam: the on-disk role file the role route reads.
-// ---------------------------------------------------------------------------
-
-/// The ground-station role sentinel (`/etc/ados/mesh/role`), overridable via
-/// `ADOS_MESH_ROLE` for tests — the same override `crate::profile` resolves under.
-fn mesh_role_path() -> PathBuf {
-    std::env::var("ADOS_MESH_ROLE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(crate::profile::MESH_ROLE_PATH))
-}
-
-/// Read the on-disk role sentinel, defaulting to `direct` when the file is
-/// missing, unreadable, or carries an unknown value. Mirrors the Python
-/// `role_manager.get_current_role`.
-fn current_role() -> String {
-    current_role_at(&mesh_role_path())
-}
-
-/// The path-injectable core of [`current_role`]: read the role sentinel at an
-/// explicit path. Threaded so a test drives it against a tempdir without mutating
-/// the process environment.
-fn current_role_at(role_path: &Path) -> String {
-    if let Ok(text) = std::fs::read_to_string(role_path) {
-        let value = text.trim();
-        if VALID_ROLES.contains(&value) {
-            return value.to_string();
-        }
-    }
-    "direct".to_string()
-}
-
-// ---------------------------------------------------------------------------
 // Mesh-state seam: the sidecar file + the durable store's `mesh.state` event.
 // ---------------------------------------------------------------------------
 
@@ -370,7 +338,7 @@ pub async fn get_role() -> Response {
         return profile_mismatch();
     }
     let cfg = MeshRouteConfig::load();
-    let current = current_role();
+    let current = ados_config::read_mesh_role(&ados_config::mesh_role_path());
     Json(role_body(&current, &cfg.ground_station.role)).into_response()
 }
 
@@ -400,7 +368,7 @@ pub async fn get_mesh_health(State(state): State<AppState>) -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    if current_role() == "direct" {
+    if ados_config::read_mesh_role(&ados_config::mesh_role_path()) == "direct" {
         return not_in_mesh();
     }
     Json(Value::Object(current_mesh_snapshot(&state).await)).into_response()
@@ -417,7 +385,7 @@ pub async fn get_mesh_neighbors(State(state): State<AppState>) -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    if current_role() == "direct" {
+    if ados_config::read_mesh_role(&ados_config::mesh_role_path()) == "direct" {
         return not_in_mesh();
     }
     Json(slice_neighbors(&current_mesh_snapshot(&state).await)).into_response()
@@ -434,7 +402,7 @@ pub async fn get_mesh_routes(State(state): State<AppState>) -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    if current_role() == "direct" {
+    if ados_config::read_mesh_role(&ados_config::mesh_role_path()) == "direct" {
         return not_in_mesh();
     }
     Json(slice_routes(&current_mesh_snapshot(&state).await)).into_response()
@@ -451,7 +419,7 @@ pub async fn get_mesh_gateways(State(state): State<AppState>) -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    if current_role() == "direct" {
+    if ados_config::read_mesh_role(&ados_config::mesh_role_path()) == "direct" {
         return not_in_mesh();
     }
     Json(slice_gateways(&current_mesh_snapshot(&state).await)).into_response()
@@ -533,15 +501,6 @@ mod tests {
             &env.profile_conf,
             &env.role_path
         ));
-    }
-
-    #[test]
-    fn current_role_reads_the_sentinel_and_defaults_direct() {
-        let env = with_env(Some("relay"), "agent:\n  profile: ground_station\n");
-        assert_eq!(current_role_at(&env.role_path), "relay");
-        // An absent sentinel defaults to direct.
-        let absent = env.role_path.parent().unwrap().join("nonexistent-role");
-        assert_eq!(current_role_at(&absent), "direct");
     }
 
     /// The golden role body the GCS reads on a relay-role and a direct-role

@@ -31,7 +31,7 @@
 # Edit here, then run codegen. Do not edit the generated files by hand.
 
 # ===========================================================================
-# AGENT capabilities (55)
+# AGENT capabilities (56)
 # ===========================================================================
 
 [[agent]]
@@ -527,6 +527,15 @@ description = "Lets the plugin write small JSON records (at most 64 KiB each) in
 category = "data_network"
 risk = "medium"
 risk_reason = "Persists plugin data off the aircraft under the device's identity; confined to the plugin's own namespace."
+enforced = true
+
+[[agent]]
+id = "node.info.read"
+label = "Read this node's hardware and role facts"
+description = "Lets the plugin read what kind of node it runs on: the node profile, the board and whether it has a neural accelerator, the ground-station role, whether the camera pipeline is up, and the main video stream's size and frame rate. Read-only facts; no telemetry, imagery, credentials or configuration values."
+category = "hardware"
+risk = "low"
+risk_reason = "Read-only node identity facts; no effect on flight, no imagery and no secrets."
 enforced = true
 
 # ===========================================================================
@@ -1063,3 +1072,14 @@ required_cap = "compute.stream.open"
 [[method]]
 id = "compute.stream.health"
 required_cap = "compute.stream.open"
+
+# ---- node facts ----
+# Read the node's profile, board, ground-station role, camera readiness and main
+# stream geometry: the facts the agent's own services decide on, served from
+# their sources so a plugin never reads the sidecars its sandbox hides. Gated at
+# the dispatch level like every other read of host state (telemetry.read,
+# mission.read); only the plugin-scoped surfaces (its own config, the event bus,
+# ping) are ungated.
+[[method]]
+id = "node.info"
+required_cap = "node.info.read"

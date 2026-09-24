@@ -103,22 +103,14 @@ pub fn capability_extras_in(dir: &Path, now: f64) -> Map<String, Value> {
     let mut out = Map::new();
 
     // --- Camera presence + USB recovery ------------------------------------
-    if let Some(cam) = read_object(&dir.join("camera-state.json")) {
-        if fresh(&cam, now, CAMERA_STATE_FRESH_S) {
-            if let Some(state) = cam.get("state").and_then(Value::as_str) {
-                if matches!(state, "ready" | "missing" | "error") {
-                    // Discovery alone is not health: a detected camera behind a
-                    // failed pipeline is an error, not a confident "ready".
-                    let failed = cam.get("pipeline_state").and_then(Value::as_str) == Some("error");
-                    let state = if state == "ready" && failed {
-                        "error"
-                    } else {
-                        state
-                    };
-                    out.insert("cameraState".into(), json!(state));
-                }
-            }
-        }
+    // Discovery alone is not health: a detected camera behind a failed
+    // pipeline is an error, not a confident "ready".
+    if let Some(state) = ados_video::camera_state::read_effective_state(
+        &dir.join("camera-state.json"),
+        now,
+        CAMERA_STATE_FRESH_S,
+    ) {
+        out.insert("cameraState".into(), json!(state.as_str()));
     }
     if let Some(rec) = read_object(&dir.join("camera-usb-recovery.json")) {
         if fresh(&rec, now, CAMERA_RECOVERY_FRESH_S) {

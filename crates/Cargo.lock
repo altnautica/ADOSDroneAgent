@@ -97,6 +97,7 @@ dependencies = [
  "ados-offload",
  "ados-plugin-host",
  "ados-protocol",
+ "ados-video",
  "anyhow",
  "async-trait",
  "hex",
@@ -514,8 +515,10 @@ version = "0.1.0"
 dependencies = [
  "ados-compute",
  "ados-config",
+ "ados-hal-probe",
  "ados-hid",
  "ados-protocol",
+ "ados-video",
  "anyhow",
  "axum",
  "base64",

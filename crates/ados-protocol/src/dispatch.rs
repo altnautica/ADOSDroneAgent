@@ -77,6 +77,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "compute.stream.open", required_cap: Some("compute.stream.open"), inline: false },
     DispatchMethod { method: "compute.stream.close", required_cap: Some("compute.stream.open"), inline: false },
     DispatchMethod { method: "compute.stream.health", required_cap: Some("compute.stream.open"), inline: false },
+    DispatchMethod { method: "node.info", required_cap: Some("node.info.read"), inline: false },
 ];
 
 /// Look up the dispatch-level required capability for a wire method.

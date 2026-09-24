@@ -696,46 +696,10 @@ impl AgentVideoConfig {
         }
     }
 
-    /// The index of the primary leg in `video.cameras`: the leg whose role is
-    /// `"primary"`, else the first. `None` when no legs are declared.
-    fn primary_index(&self) -> Option<usize> {
-        if self.cameras.is_empty() {
-            return None;
-        }
-        Some(
-            self.cameras
-                .iter()
-                .position(|c| c.role.as_deref() == Some("primary"))
-                .unwrap_or(0),
-        )
-    }
-
-    /// The capture/encode settings the PRIMARY encoder runs from.
-    ///
-    /// With no `video.cameras` declared that is the legacy `video.camera` block,
-    /// unchanged. With legs declared, the primary leg's source and encode-plane
-    /// keys (codec, geometry, fps, bitrate, orientation, encoder override,
-    /// keyframe interval) replace the block's, so an edit to the primary leg
-    /// reaches the primary encoder. The block's `thumbnail` profile stays: the
-    /// non-hero attention profile is a node setting, not a per-leg one.
+    /// The capture/encode settings the PRIMARY encoder runs from. See
+    /// [`primary_camera_from`].
     pub fn primary_camera_config(&self, camera: CameraConfig) -> CameraConfig {
-        let Some(leg) = self.primary_index().map(|i| &self.cameras[i]) else {
-            return camera;
-        };
-        CameraConfig {
-            source: leg.source.clone(),
-            codec: leg.codec.clone(),
-            width: leg.width,
-            height: leg.height,
-            fps: leg.fps,
-            bitrate_kbps: leg.bitrate_kbps,
-            thumbnail: camera.thumbnail,
-            rotation: leg.rotation,
-            hflip: leg.hflip,
-            vflip: leg.vflip,
-            encoder: leg.encoder.clone(),
-            keyframe_interval: leg.keyframe_interval,
-        }
+        primary_camera_from(&self.cameras, camera)
     }
 
     /// Resolve the effective video legs the orchestrator drives.
@@ -754,7 +718,7 @@ impl AgentVideoConfig {
     /// (`eo` / `eo_wide` / `ir`) carry the labels, so a primary named `main`
     /// still reads as "EO Zoom" on the GCS.
     pub fn resolve_legs(&self, camera: &CameraConfig) -> Vec<ResolvedLeg> {
-        let Some(primary_idx) = self.primary_index() else {
+        let Some(primary_idx) = primary_leg_index(&self.cameras) else {
             return vec![ResolvedLeg {
                 id: "main".to_string(),
                 source: camera.source.clone(),
@@ -840,6 +804,48 @@ impl AgentVideoConfig {
     }
 }
 
+/// The index of the primary leg in a `video.cameras` list: the leg whose role is
+/// `"primary"`, else the first. `None` when no legs are declared.
+fn primary_leg_index(cameras: &[CameraLeg]) -> Option<usize> {
+    if cameras.is_empty() {
+        return None;
+    }
+    Some(
+        cameras
+            .iter()
+            .position(|c| c.role.as_deref() == Some("primary"))
+            .unwrap_or(0),
+    )
+}
+
+/// The capture/encode settings the PRIMARY encoder runs from.
+///
+/// With no `video.cameras` declared that is the legacy `video.camera` block,
+/// unchanged. With legs declared, the primary leg's source and encode-plane
+/// keys (codec, geometry, fps, bitrate, orientation, encoder override,
+/// keyframe interval) replace the block's, so an edit to the primary leg
+/// reaches the primary encoder. The block's `thumbnail` profile stays: the
+/// non-hero attention profile is a node setting, not a per-leg one.
+fn primary_camera_from(cameras: &[CameraLeg], camera: CameraConfig) -> CameraConfig {
+    let Some(leg) = primary_leg_index(cameras).map(|i| &cameras[i]) else {
+        return camera;
+    };
+    CameraConfig {
+        source: leg.source.clone(),
+        codec: leg.codec.clone(),
+        width: leg.width,
+        height: leg.height,
+        fps: leg.fps,
+        bitrate_kbps: leg.bitrate_kbps,
+        thumbnail: camera.thumbnail,
+        rotation: leg.rotation,
+        hflip: leg.hflip,
+        vflip: leg.vflip,
+        encoder: leg.encoder.clone(),
+        keyframe_interval: leg.keyframe_interval,
+    }
+}
+
 /// The roster-relevant slice of the video config, loaded in ONE quiet pass.
 ///
 /// The camera-roster route reads config, discovery, and live-stream state and
@@ -910,6 +916,14 @@ impl RosterVideoConfig {
             self.profile.as_deref(),
             Some("ground_station") | Some("ground-station")
         )
+    }
+
+    /// The capture/encode settings the primary encoder runs from (the stream
+    /// served at `main`), resolved exactly as the video service resolves them:
+    /// the primary `video.cameras` leg, else the `video.camera` block, else that
+    /// block's defaults.
+    pub fn primary_camera(&self) -> CameraConfig {
+        primary_camera_from(&self.cameras, self.camera.clone().unwrap_or_default())
     }
 }
 
