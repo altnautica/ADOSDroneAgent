@@ -12,8 +12,9 @@
 //!   decided by `npu_tops > 0` (the rule the offload decision and the status
 //!   surfaces key on);
 //! * the ground-station role through [`ados_config::ground_station_role`];
-//! * camera readiness through the camera-state sidecar's shared reader, inside
-//!   the live window the video orchestrator re-stamps within;
+//! * camera readiness through the camera-state sidecar's shared
+//!   main-stream reader: the pipeline is publishing `main` right now, stamped
+//!   within the live window the video orchestrator re-stamps within;
 //! * the main stream's geometry through the video config's own primary-leg
 //!   resolution, the settings the primary encoder actually runs.
 //!
@@ -25,7 +26,7 @@ use ados_hal_probe::board_sidecar::{read_sidecar, BoardFingerprint};
 use ados_protocol::node_info::{
     BoardInfo, CameraInfo, GroundStationInfo, NodeInfo, StreamGeometry,
 };
-use ados_video::camera_state::{read_effective_state, CameraState, CAMERA_STATE_LIVE_S};
+use ados_video::camera_state::{read_main_stream_live, CAMERA_STATE_LIVE_S};
 use ados_video::config::RosterVideoConfig;
 
 use super::*;
@@ -68,8 +69,7 @@ impl NodeInfoSources {
     /// `now_unix` (wall-clock seconds).
     pub fn read(&self, now_unix: f64) -> NodeInfo {
         let profile = ados_config::node_profile_at(&self.config_yaml, &self.profile_conf);
-        let ready = read_effective_state(&self.camera_state, now_unix, CAMERA_STATE_LIVE_S)
-            == Some(CameraState::Ready);
+        let ready = read_main_stream_live(&self.camera_state, now_unix, CAMERA_STATE_LIVE_S);
         NodeInfo {
             board: read_sidecar(&self.board_sidecar).map(board_info),
             ground_station: GroundStationInfo {

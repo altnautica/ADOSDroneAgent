@@ -245,6 +245,73 @@ async fn node_info_arrives_typed_and_needs_its_capability() {
     denied.ipc.close().await;
 }
 
+/// The SDK's mDNS requests arrive whole: the host reads the service type, the
+/// port and the browse window the SDK encoded (each refusal below names the
+/// value it read), and each method needs its own network capability. Nothing
+/// here reaches the network: every call is refused before a record or a
+/// browse would start.
+#[tokio::test]
+async fn mdns_requests_reach_the_host_whole_and_need_their_capabilities() {
+    let h = harness(&["network.listen", "network.outbound"]).await;
+    let txt = BTreeMap::from([("deviceId".to_string(), "compute-1".to_string())]);
+
+    // No declared listen ports for this plugin on this node.
+    let err = h
+        .ctx
+        .mdns
+        .advertise("_ados-compute._tcp", 8092, &txt)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Rpc(m) if m.contains("port 8092 is not a listen port")),
+        "{err:?}"
+    );
+    let err = h
+        .ctx
+        .mdns
+        .advertise("_ados._tcp", 8092, &txt)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Rpc(m) if m.contains("_ados._tcp is published by the agent")),
+        "{err:?}"
+    );
+    let err = h
+        .ctx
+        .mdns
+        .browse("not-a-type", std::time::Duration::from_millis(200))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ClientError::Rpc(m) if m.contains("not-a-type")),
+        "{err:?}"
+    );
+    h.ipc.close().await;
+
+    let denied = harness(&[]).await;
+    let err = denied
+        .ctx
+        .mdns
+        .advertise("_ados-compute._tcp", 8092, &txt)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ClientError::CapabilityDenied(cap) if cap.contains("network.listen")),
+        "{err:?}"
+    );
+    let err = denied
+        .ctx
+        .mdns
+        .browse("_ados-compute._tcp", std::time::Duration::from_millis(200))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ClientError::CapabilityDenied(cap) if cap.contains("network.outbound")),
+        "{err:?}"
+    );
+    denied.ipc.close().await;
+}
+
 /// Serve one connection on `path` the way the MAVLink service's state hub
 /// does: write the given frames, then hold the stream open.
 fn state_hub(path: std::path::PathBuf, frames: Vec<Vec<u8>>) -> tokio::task::JoinHandle<()> {

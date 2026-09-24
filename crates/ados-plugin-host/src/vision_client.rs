@@ -21,21 +21,26 @@
 //!   wedging the reader (drop-on-full), matching the frame transport which is
 //!   latest-wins.
 //!
+//! The connection reconnects forever at a fixed interval, so an engine that
+//! comes up after the host, or restarts under it, heals by itself; requests
+//! made while it is down fail fast with a transient error.
+//!
 //! Both paths reuse the `ados-protocol` framing and envelope primitives; no
 //! wire is re-implemented here.
 
-use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::framebus::methods;
-use ados_protocol::ipc::connect_with_retry;
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
 use rmpv::{Value, ValueRef};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedReadHalf;
-use tokio::sync::{broadcast, Mutex};
+use tokio::net::UnixStream;
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 /// Frame-descriptor fanout depth. A descriptor is tiny (a few dozen bytes); the
@@ -43,6 +48,17 @@ use tokio::task::JoinHandle;
 /// fall behind before it lags to the tail, which is the right policy for a
 /// latest-wins frame stream.
 pub const VISION_FRAME_BROADCAST_DEPTH: usize = 256;
+
+/// Fixed wait between connection attempts to the engine socket. There is no
+/// cap and no give-up state: the engine may start after the host, restart, or
+/// not be installed yet, and the client must come back by itself whenever the
+/// socket does.
+pub const VISION_RECONNECT_INTERVAL: Duration = Duration::from_secs(2);
+
+/// The error a proxied request gets while no engine connection is up. It is a
+/// transient state, not a missing feature: the same call succeeds once the
+/// engine socket is back.
+pub const VISION_ENGINE_UNAVAILABLE: &str = "vision engine unavailable: not connected, retry";
 
 /// A request the host proxies failed at the engine boundary. The body is the
 /// string the host surfaces to the plugin as the response envelope `error`.
@@ -57,31 +73,43 @@ impl std::fmt::Display for VisionRpcError {
 
 impl std::error::Error for VisionRpcError {}
 
-/// A live connection to the vision engine socket.
+/// A self-healing client to the vision engine socket.
 ///
-/// The engine's frame-descriptor pushes (`vision.deliver` event envelopes) fan
-/// out on a broadcast channel, one receiver per subscribed plugin. Plugin
-/// requests (`register_model` / `infer` / `publish_detection`) are written under
-/// a connection mutex and matched to the engine's response by `request_id`.
+/// One task owns the connection and reconnects forever at a fixed interval, so
+/// an engine that starts after the host, or restarts under it, heals without a
+/// host restart. The engine's frame-descriptor pushes (`vision.deliver` event
+/// envelopes) fan out on broadcast channels that outlive any one connection, so
+/// a plugin's receiver keeps receiving across an engine restart. Plugin
+/// requests (`register_model` / `infer` / `publish_detection` /
+/// `designate_track`) are written under a connection mutex and matched to the
+/// engine's in-order response; while disconnected they fail fast with
+/// [`VISION_ENGINE_UNAVAILABLE`].
 pub struct VisionClient {
-    /// Write half of the engine socket, serialized so concurrent requests do not
-    /// interleave frames. The proxy writes a request then awaits its response on
-    /// the shared response channel under this same lock, so requests are
-    /// strictly one-at-a-time on the wire (the engine answers in order).
-    request: Mutex<RequestChannel>,
+    shared: Arc<Shared>,
+    task: JoinHandle<()>,
+}
+
+/// State shared between the client handle and its connection task.
+struct Shared {
+    /// The live connection's request side, `None` while disconnected. The proxy
+    /// writes a request then awaits its response under this lock, so requests
+    /// are strictly one-at-a-time on the wire (the engine answers in order).
+    request: Mutex<Option<RequestChannel>>,
+    connected: AtomicBool,
     /// Frame-descriptor fanout: descriptor bytes pulled from the engine's
     /// `vision.deliver` pushes.
     frames: broadcast::Sender<Vec<u8>>,
     /// Detection-batch fanout: encoded `DetectionBatch` bytes pulled from the
     /// engine's `vision.deliver_detection` pushes.
     detections: broadcast::Sender<Vec<u8>>,
-    /// Whether the ENGINE has been asked to push on this connection. The engine
-    /// starts a per-connection push task only when it receives
+    /// Whether the ENGINE has been asked to push on the current connection.
+    /// The engine starts a per-connection push task only when it receives
     /// `vision.subscribe_frames` / `vision.subscribe_detections`
     /// (`ados-vision/src/visionsock.rs`), so holding a receiver on the fanout
     /// above is not by itself a subscription: without these the fanout is
     /// permanently empty and a subscribing plugin sees silence with no error.
-    /// Armed lazily, once per process, on the first plugin subscribe.
+    /// Armed lazily on the first plugin subscribe, and re-armed on every new
+    /// connection once any plugin has asked.
     ///
     /// A mutex held across the engine round-trip, not an `AtomicBool` tested and
     /// set before it. Two plugins subscribing at host startup is the normal
@@ -94,143 +122,234 @@ pub struct VisionClient {
     /// concurrent second subscriber wait for the first attempt's verdict and
     /// retry it.
     ///
-    /// Lock order: the `request` mutex is acquired INSIDE these two and never
-    /// the other way round. Keep it that way.
-    frames_armed: Mutex<bool>,
-    detections_armed: Mutex<bool>,
-    reader: JoinHandle<()>,
+    /// Lock order: frame push, then detection push, then `request`; never the
+    /// other way round. Keep it that way.
+    frame_push: Mutex<PushState>,
+    detection_push: Mutex<PushState>,
+}
+
+/// One push stream's arming state.
+#[derive(Default)]
+struct PushState {
+    /// A plugin has subscribed at least once, so every new connection re-arms.
+    wanted: bool,
+    /// The engine accepted the subscribe on the current connection.
+    armed: bool,
+}
+
+/// The two engine push streams a plugin subscribe arms.
+#[derive(Clone, Copy)]
+enum Push {
+    Frames,
+    Detections,
+}
+
+impl Push {
+    fn method(self) -> &'static str {
+        match self {
+            Self::Frames => methods::SUBSCRIBE_FRAMES,
+            Self::Detections => methods::SUBSCRIBE_DETECTIONS,
+        }
+    }
+
+    fn capability(self) -> &'static str {
+        match self {
+            Self::Frames => "vision.frame.read",
+            Self::Detections => "vision.detection.subscribe",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Frames => "frame",
+            Self::Detections => "detection",
+        }
+    }
 }
 
 /// The request-side half: the socket writer plus the response receiver the
-/// reader task feeds. Held behind the connection mutex.
+/// reader feeds. Held behind the connection mutex.
 struct RequestChannel {
     write_half: tokio::net::unix::OwnedWriteHalf,
-    responses: tokio::sync::mpsc::Receiver<Result<Value, String>>,
+    responses: mpsc::Receiver<Result<Value, String>>,
 }
 
 impl VisionClient {
-    /// Connect to the engine socket, then spawn the reader that splits inbound
-    /// envelopes into the frame-descriptor fanout (`vision.deliver` events) and
-    /// the response channel (everything else). Mirrors the MAVLink client's
-    /// connection setup: bounded connect-with-retry, then a read loop.
-    pub async fn connect(sock_path: impl AsRef<Path>) -> io::Result<Self> {
-        let stream = connect_with_retry(sock_path, 50, Duration::from_millis(20)).await?;
-        let (read_half, write_half) = stream.into_split();
+    /// Start the connection task for `sock_path`. Never fails: an absent socket
+    /// is retried every [`VISION_RECONNECT_INTERVAL`], and requests report
+    /// [`VISION_ENGINE_UNAVAILABLE`] until a connection is up.
+    pub fn spawn(sock_path: impl AsRef<Path>) -> Self {
+        Self::spawn_with_interval(sock_path.as_ref().to_path_buf(), VISION_RECONNECT_INTERVAL)
+    }
 
+    pub(crate) fn spawn_with_interval(path: PathBuf, interval: Duration) -> Self {
         let (frames, _rx) = broadcast::channel(VISION_FRAME_BROADCAST_DEPTH);
         let (detections, _drx) = broadcast::channel(VISION_FRAME_BROADCAST_DEPTH);
-        let (resp_tx, resp_rx) = tokio::sync::mpsc::channel::<Result<Value, String>>(64);
-        let frames_tx = frames.clone();
-        let detections_tx = detections.clone();
-
-        let reader = tokio::spawn(async move {
-            read_loop(read_half, frames_tx, detections_tx, resp_tx).await;
-        });
-
-        Ok(Self {
-            request: Mutex::new(RequestChannel {
-                write_half,
-                responses: resp_rx,
-            }),
+        let shared = Arc::new(Shared {
+            request: Mutex::new(None),
+            connected: AtomicBool::new(false),
             frames,
             detections,
-            frames_armed: Mutex::new(false),
-            detections_armed: Mutex::new(false),
-            reader,
-        })
+            frame_push: Mutex::new(PushState::default()),
+            detection_push: Mutex::new(PushState::default()),
+        });
+        let task = tokio::spawn(run(Arc::clone(&shared), path, interval));
+        Self { shared, task }
+    }
+
+    /// Whether a connection to the engine is live right now.
+    pub fn is_connected(&self) -> bool {
+        self.shared.connected.load(Ordering::Acquire)
+    }
+
+    /// Wait up to `timeout` for a live connection. Returns whether one is up.
+    pub async fn connected_within(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !self.is_connected() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        true
     }
 
     /// A fresh receiver for the engine's frame-descriptor fanout. Each subscribed
     /// plugin holds its own receiver; a slow consumer lags to the tail rather
-    /// than blocking the reader. Mirrors [`crate::frame_link::FrameLink::subscribe`].
+    /// than blocking the reader. It survives reconnects. Mirrors
+    /// [`crate::frame_link::FrameLink::subscribe`].
     pub fn subscribe_frames(&self) -> broadcast::Receiver<Vec<u8>> {
-        self.frames.subscribe()
+        self.shared.frames.subscribe()
     }
 
-    /// A fresh receiver for the engine's detection-batch fanout. Each subscribed
-    /// plugin holds its own receiver; a slow consumer lags to the tail rather
-    /// than blocking the reader. Mirrors [`Self::subscribe_frames`].
+    /// A fresh receiver for the engine's detection-batch fanout. Same contract
+    /// as [`Self::subscribe_frames`].
     pub fn subscribe_detections(&self) -> broadcast::Receiver<Vec<u8>> {
-        self.detections.subscribe()
+        self.shared.detections.subscribe()
     }
 
-    /// Ask the ENGINE to start pushing frame descriptors on this connection.
-    /// Idempotent: the flag is held across the round-trip and set only once the
-    /// engine has accepted, so a refused attempt is retried by the next
-    /// subscriber instead of leaving it on a dead subscription.
+    /// Ask the ENGINE to push frame descriptors. Idempotent per connection: the
+    /// flag is held across the round-trip and set only once the engine has
+    /// accepted, so a refused attempt is retried by the next subscriber. Called
+    /// while disconnected, it records the want and the push arms as soon as the
+    /// engine connects.
     pub async fn arm_frame_push(&self) {
-        let mut armed = self.frames_armed.lock().await;
-        if *armed {
-            return;
-        }
-        if let Err(e) = self
-            .request(
-                methods::SUBSCRIBE_FRAMES,
-                "vision.frame.read",
-                &Value::Map(vec![]),
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "vision frame push could not be armed");
-        } else {
-            *armed = true;
-            tracing::info!("vision frame push armed on the engine connection");
-        }
+        self.shared.arm(Push::Frames).await;
     }
 
-    /// Ask the ENGINE to start pushing detection batches on this connection.
-    /// Same arming contract as [`Self::arm_frame_push`].
+    /// Ask the ENGINE to push detection batches. Same arming contract as
+    /// [`Self::arm_frame_push`].
     pub async fn arm_detection_push(&self) {
-        let mut armed = self.detections_armed.lock().await;
-        if *armed {
-            return;
-        }
-        if let Err(e) = self
-            .request(
-                methods::SUBSCRIBE_DETECTIONS,
-                "vision.detection.subscribe",
-                &Value::Map(vec![]),
-            )
-            .await
-        {
-            tracing::warn!(error = %e, "vision detection push could not be armed");
-        } else {
-            *armed = true;
-            tracing::info!("vision detection push armed on the engine connection");
-        }
+        self.shared.arm(Push::Detections).await;
     }
 
     /// Proxy a `register_model` request to the engine and return its response
     /// `args`.
     pub async fn register_model(&self, args: &Value) -> Result<Value, VisionRpcError> {
-        self.request(methods::REGISTER_MODEL, "vision.model.register", args)
+        self.shared
+            .request(methods::REGISTER_MODEL, "vision.model.register", args)
             .await
     }
 
     /// Proxy an `infer` request to the engine and return its response `args`.
     pub async fn infer(&self, args: &Value) -> Result<Value, VisionRpcError> {
-        self.request(methods::INFER, "vision.model.register", args)
+        self.shared
+            .request(methods::INFER, "vision.model.register", args)
             .await
     }
 
     /// Proxy a `publish_detection` request to the engine and return its response
     /// `args`.
     pub async fn publish_detection(&self, args: &Value) -> Result<Value, VisionRpcError> {
-        self.request(methods::PUBLISH_DETECTION, "vision.detection.publish", args)
+        self.shared
+            .request(methods::PUBLISH_DETECTION, "vision.detection.publish", args)
             .await
     }
 
     /// Proxy a `designate_track` request to the engine (set the follow target)
     /// and return its response `args`.
     pub async fn designate_track(&self, args: &Value) -> Result<Value, VisionRpcError> {
-        self.request(methods::DESIGNATE_TRACK, "vision.track.designate", args)
+        self.shared
+            .request(methods::DESIGNATE_TRACK, "vision.track.designate", args)
             .await
+    }
+}
+
+impl Drop for VisionClient {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl Shared {
+    fn push_state(&self, push: Push) -> &Mutex<PushState> {
+        match push {
+            Push::Frames => &self.frame_push,
+            Push::Detections => &self.detection_push,
+        }
+    }
+
+    /// A plugin subscribed: record the want and arm the current connection.
+    async fn arm(&self, push: Push) {
+        let mut state = self.push_state(push).lock().await;
+        state.wanted = true;
+        self.arm_locked(push, &mut state).await;
+    }
+
+    /// A new connection is up: re-arm every push a plugin has asked for.
+    async fn rearm(&self, push: Push) {
+        let mut state = self.push_state(push).lock().await;
+        if state.wanted {
+            self.arm_locked(push, &mut state).await;
+        }
+    }
+
+    async fn arm_locked(&self, push: Push, state: &mut PushState) {
+        if state.armed {
+            return;
+        }
+        if !self.connected.load(Ordering::Acquire) {
+            tracing::debug!(
+                push = push.label(),
+                "vision engine not connected; push arms when it connects"
+            );
+            return;
+        }
+        match self
+            .request(push.method(), push.capability(), &Value::Map(vec![]))
+            .await
+        {
+            Ok(_) => {
+                state.armed = true;
+                tracing::info!(
+                    push = push.label(),
+                    "vision push armed on the engine connection"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(push = push.label(), error = %e, "vision push could not be armed");
+            }
+        }
+    }
+
+    /// Install or clear the connection. Holds both push locks (lock order:
+    /// push states, then `request`) so no arm can straddle the swap, and resets
+    /// `armed`: the engine's push subscription is per connection.
+    async fn set_connection(&self, conn: Option<RequestChannel>) {
+        let mut frames = self.frame_push.lock().await;
+        let mut detections = self.detection_push.lock().await;
+        let mut request = self.request.lock().await;
+        self.connected.store(conn.is_some(), Ordering::Release);
+        *request = conn;
+        frames.armed = false;
+        detections.armed = false;
     }
 
     /// Write one request envelope toward the engine and await the response. The
     /// connection mutex serializes the write+await so the engine's in-order
-    /// responses match the requests. A transport failure or an engine `error`
-    /// becomes a [`VisionRpcError`] the host surfaces to the plugin verbatim.
+    /// responses match the requests. No connection, a transport failure, or an
+    /// engine `error` becomes a [`VisionRpcError`] the host surfaces to the
+    /// plugin verbatim.
     async fn request(
         &self,
         method: &str,
@@ -251,7 +370,10 @@ impl VisionClient {
             .encode_frame()
             .map_err(|e| VisionRpcError(format!("encode failed: {e}")))?;
 
-        let mut chan = self.request.lock().await;
+        let mut guard = self.request.lock().await;
+        let Some(chan) = guard.as_mut() else {
+            return Err(VisionRpcError(VISION_ENGINE_UNAVAILABLE.to_string()));
+        };
         chan.write_half
             .write_all(&frame)
             .await
@@ -268,9 +390,63 @@ impl VisionClient {
     }
 }
 
-impl Drop for VisionClient {
-    fn drop(&mut self) {
-        self.reader.abort();
+/// The connection task: connect, serve until the engine goes away, clear the
+/// connection, wait the fixed interval, repeat. Forever.
+async fn run(shared: Arc<Shared>, path: PathBuf, interval: Duration) {
+    // One line per outage, not one per attempt.
+    let mut reported_absent = false;
+    loop {
+        match UnixStream::connect(&path).await {
+            Ok(stream) => {
+                reported_absent = false;
+                let (read_half, write_half) = stream.into_split();
+                let (resp_tx, resp_rx) = mpsc::channel::<Result<Value, String>>(64);
+                shared
+                    .set_connection(Some(RequestChannel {
+                        write_half,
+                        responses: resp_rx,
+                    }))
+                    .await;
+                tracing::info!(path = %path.display(), "vision engine connected");
+
+                // The reader and the re-arm run together: the re-arm's
+                // subscribe requests need the reader to deliver their responses.
+                // The re-arm then parks, so only the reader ends the select.
+                let reader = read_loop(
+                    read_half,
+                    shared.frames.clone(),
+                    shared.detections.clone(),
+                    resp_tx,
+                );
+                let rearm = async {
+                    shared.rearm(Push::Frames).await;
+                    shared.rearm(Push::Detections).await;
+                    std::future::pending::<()>().await
+                };
+                tokio::select! {
+                    () = reader => {}
+                    () = rearm => {}
+                }
+
+                shared.set_connection(None).await;
+                tracing::warn!(
+                    path = %path.display(),
+                    "vision engine connection lost; reconnecting"
+                );
+            }
+            Err(e) if !reported_absent => {
+                reported_absent = true;
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "vision engine socket unavailable; retrying until it appears"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(path = %path.display(), error = %e, "vision engine socket unavailable");
+            }
+        }
+        tokio::time::sleep(interval).await;
     }
 }
 
@@ -278,8 +454,8 @@ impl Drop for VisionClient {
 /// event envelopes carry a frame descriptor whose `descriptor` bytes are fanned
 /// out on `frames`; every other envelope is a response and is forwarded on
 /// `responses`. A clean EOF or a malformed/oversized header stops the loop and
-/// closes both channels, so callers awaiting a response see the close and any
-/// frame subscriber sees the channel end on its next recv.
+/// drops `responses`, so a caller awaiting a response sees the close. The
+/// fanouts stay open: subscribers resume on the next connection.
 ///
 /// A push whose fanout has no receivers is dropped without being decoded; see
 /// [`peek_push_kind`].
@@ -445,6 +621,144 @@ mod tests {
         p
     }
 
+    /// A client on a fast reconnect interval, once its first connection is up.
+    async fn connected_client(path: &Path) -> VisionClient {
+        let client =
+            VisionClient::spawn_with_interval(path.to_path_buf(), Duration::from_millis(50));
+        assert!(client.connected_within(Duration::from_secs(2)).await);
+        client
+    }
+
+    /// A fake engine that answers every host request with an empty success
+    /// response and reports each request's method on the returned channel.
+    fn answering_engine(
+        server: std::sync::Arc<IpcBroadcast>,
+        mut inbound: tokio::sync::mpsc::Receiver<ados_protocol::ipc::InboundCommand>,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) {
+        let (seen_tx, seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = tokio::spawn(async move {
+            while let Some(cmd) = inbound.recv().await {
+                let req = Envelope::from_msgpack(&cmd.payload).expect("a request envelope");
+                let _ = seen_tx.send(req.method.clone());
+                server
+                    .broadcast(response_envelope(Value::Map(vec![])).into())
+                    .await;
+            }
+        });
+        (engine, seen_rx)
+    }
+
+    fn sample_descriptor(frame_id: u64) -> FrameDescriptor {
+        FrameDescriptor {
+            v: FRAMEBUS_DESCRIPTOR_VERSION,
+            camera_id: "uvc-0".into(),
+            frame_id,
+            ts_ms: 1,
+            width: 64,
+            height: 48,
+            format: FrameFormat::Rgb24,
+            shm_name: "ados-vision-uvc-0".into(),
+            slot: 0,
+            seq: frame_id,
+            byte_len: (64 * 48 * 3) as u32,
+        }
+    }
+
+    async fn next_method(seen: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> String {
+        tokio::time::timeout(Duration::from_secs(2), seen.recv())
+            .await
+            .expect("a host request within timeout")
+            .expect("engine task alive")
+    }
+
+    #[tokio::test]
+    async fn an_engine_that_starts_after_the_host_is_picked_up() {
+        let path = temp_sock("late");
+        let client = VisionClient::spawn_with_interval(path.clone(), Duration::from_millis(50));
+        let mut rx = client.subscribe_frames();
+
+        // No engine yet: a request is a transient refusal, and a plugin
+        // subscribe records the want instead of failing it.
+        let err = client
+            .register_model(&Value::Map(vec![]))
+            .await
+            .unwrap_err();
+        assert_eq!(err, VisionRpcError(VISION_ENGINE_UNAVAILABLE.to_string()));
+        client.arm_frame_push().await;
+
+        let (server, inbound) = IpcBroadcast::bind(&path, 256, false, Some(16))
+            .await
+            .unwrap();
+        let server = std::sync::Arc::new(server);
+        let (_engine, mut seen) = answering_engine(server.clone(), inbound.unwrap());
+        assert!(client.connected_within(Duration::from_secs(2)).await);
+
+        // The subscribe made while down is armed on the new connection.
+        assert_eq!(next_method(&mut seen).await, methods::SUBSCRIBE_FRAMES);
+        let descriptor = sample_descriptor(1);
+        server
+            .broadcast(deliver_envelope(&descriptor.to_msgpack().unwrap()).into())
+            .await;
+        let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("descriptor within timeout")
+            .expect("descriptor, not lagged/closed");
+        assert_eq!(FrameDescriptor::from_msgpack(&got).unwrap(), descriptor);
+
+        client.register_model(&Value::Map(vec![])).await.unwrap();
+        assert_eq!(next_method(&mut seen).await, methods::REGISTER_MODEL);
+    }
+
+    #[tokio::test]
+    async fn an_engine_restart_reconnects_and_rearms_the_same_subscriber() {
+        let path = temp_sock("restart");
+        let (first, inbound) = IpcBroadcast::bind(&path, 256, false, Some(16))
+            .await
+            .unwrap();
+        let first = std::sync::Arc::new(first);
+        let (first_engine, mut seen) = answering_engine(first.clone(), inbound.unwrap());
+        let client = connected_client(&path).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut rx = client.subscribe_frames();
+        client.arm_frame_push().await;
+        assert_eq!(next_method(&mut seen).await, methods::SUBSCRIBE_FRAMES);
+
+        // The engine goes away (its answering task holds the other handle).
+        first_engine.abort();
+        let _ = first_engine.await;
+        drop(first);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while client.is_connected() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!client.is_connected(), "the lost engine must be noticed");
+        let err = client.infer(&Value::Map(vec![])).await.unwrap_err();
+        assert_eq!(err, VisionRpcError(VISION_ENGINE_UNAVAILABLE.to_string()));
+
+        // It comes back: the client reconnects and re-arms the push by itself,
+        // and the plugin's original receiver keeps receiving.
+        let (second, inbound) = IpcBroadcast::bind(&path, 256, false, Some(16))
+            .await
+            .unwrap();
+        let second = std::sync::Arc::new(second);
+        let (_engine, mut seen) = answering_engine(second.clone(), inbound.unwrap());
+        assert!(client.connected_within(Duration::from_secs(2)).await);
+        assert_eq!(next_method(&mut seen).await, methods::SUBSCRIBE_FRAMES);
+
+        let descriptor = sample_descriptor(2);
+        second
+            .broadcast(deliver_envelope(&descriptor.to_msgpack().unwrap()).into())
+            .await;
+        let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("descriptor within timeout")
+            .expect("descriptor, not lagged/closed");
+        assert_eq!(FrameDescriptor::from_msgpack(&got).unwrap(), descriptor);
+    }
+
     fn deliver_envelope(descriptor: &[u8]) -> Vec<u8> {
         let env = Envelope {
             version: PROTOCOL_VERSION,
@@ -485,7 +799,7 @@ mod tests {
         // contract rejects zero-length frames, so reject_zero is true.
         let (server, _inbound) = IpcBroadcast::bind(&path, 256, false, None).await.unwrap();
 
-        let client = VisionClient::connect(&path).await.unwrap();
+        let client = connected_client(&path).await;
         let mut rx = client.subscribe_frames();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -533,7 +847,7 @@ mod tests {
         let path = temp_sock("det-fanout");
         let (server, _inbound) = IpcBroadcast::bind(&path, 256, false, None).await.unwrap();
 
-        let client = VisionClient::connect(&path).await.unwrap();
+        let client = connected_client(&path).await;
         let mut rx = client.subscribe_detections();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -564,7 +878,7 @@ mod tests {
         let path = temp_sock("request");
         let (server, _inbound) = IpcBroadcast::bind(&path, 256, false, None).await.unwrap();
 
-        let client = VisionClient::connect(&path).await.unwrap();
+        let client = connected_client(&path).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // The engine answers the next request with a fixed response.
@@ -583,7 +897,7 @@ mod tests {
         let path = temp_sock("error");
         let (server, _inbound) = IpcBroadcast::bind(&path, 256, false, None).await.unwrap();
 
-        let client = VisionClient::connect(&path).await.unwrap();
+        let client = connected_client(&path).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let env = Envelope {
@@ -617,7 +931,7 @@ mod tests {
         let mut inbound = inbound.expect("inbound channel requested");
         let server = std::sync::Arc::new(server);
 
-        let client = VisionClient::connect(&path).await.unwrap();
+        let client = connected_client(&path).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // The engine refuses the first subscribe and accepts the second.
@@ -676,7 +990,7 @@ mod tests {
         let path = temp_sock("idle-fanout");
         let (server, _inbound) = IpcBroadcast::bind(&path, 256, false, None).await.unwrap();
 
-        let client = VisionClient::connect(&path).await.unwrap();
+        let client = connected_client(&path).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // A push arriving while no plugin holds a receiver, then a response.

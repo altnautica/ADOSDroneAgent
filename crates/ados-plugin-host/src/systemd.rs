@@ -37,7 +37,7 @@ use crate::manifest::{bin_reference, host_arch_os, AgentIsolation, AgentRuntime,
 use crate::sandbox::sandbox_directives;
 use crate::server::{plugin_socket_dir, plugin_socket_path};
 use crate::supervisor::Paths;
-use crate::token_secret::token_env_path;
+use crate::token_secret::{plugin_data_dir, token_env_path};
 
 /// Default path of the per-plugin runner binary a Python plugin's unit starts
 /// (`ADOS_PLUGIN_RUNNER` overrides it).
@@ -222,8 +222,10 @@ pub fn build_unit_spec(
 ///
 /// The plugin's own socket directory is the one path under the hidden run dir
 /// bound into the unit (read-only; see [`crate::sandbox`]), so the plugin
-/// reaches its own host socket and no other plugin's. An `agent.http` plugin
-/// also gets its HTTP dir bound read-write.
+/// reaches its own host socket and no other plugin's. Its data dir,
+/// `<data root>/<id>`, is bound read-write and is the only writable path under
+/// the data root; the controller creates it before any unit starts. An
+/// `agent.http` plugin also gets its HTTP dir bound read-write.
 pub(crate) fn runner_context(
     manifest: &PluginManifest,
     paths: &Paths,
@@ -244,7 +246,9 @@ pub(crate) fn runner_context(
             unit_token("node profile", profile)?.to_string(),
         ),
     ];
-    let mut bind_read_write = Vec::new();
+    let data_dir = plugin_data_dir(&paths.data_root, &manifest.id, "");
+    path_token("data dir", &data_dir)?;
+    let mut bind_read_write = vec![data_dir];
     if manifest.agent.as_ref().is_some_and(|a| a.http) {
         let http_dir = plugin_http_dir(&paths.run_dir, &manifest.id);
         env.push((
@@ -360,8 +364,9 @@ mod tests {
     }
 
     /// The whole main unit, pinned: the text a running node's units were
-    /// rendered with, plus the socket-bind deny every plugin unit now carries
-    /// and the credential files under `/etc/ados` every unit hides.
+    /// rendered with, plus the socket-bind deny every plugin unit now carries,
+    /// the credential files under `/etc/ados` every unit hides, and the
+    /// plugin's own data dir as its only writable path under the data root.
     const RUST_UNIT_GOLDEN: &str = "\
 [Unit]
 Description=ADOS plugin com.example.rustplug
@@ -378,6 +383,7 @@ Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.rustplug/host.sock
 Environment=ADOS_NODE_PROFILE=drone
 EnvironmentFile=-/run/ados/plugins/com.example.rustplug.token.env
 BindReadOnlyPaths=/run/ados/plugins/com.example.rustplug
+BindPaths=/var/ados/plugin-data/com.example.rustplug
 ExecStart=/var/ados/plugins/com.example.rustplug/agent/bin/com.example.rustplug com.example.rustplug --socket /run/ados/plugins/com.example.rustplug/host.sock
 Restart=on-failure
 RestartSec=2s
@@ -407,7 +413,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SocketBindDeny=any
 TemporaryFileSystem=/run/ados:ro
 BindReadOnlyPaths=-/run/ados/logd.sock
-ReadWritePaths=/var/ados/plugin-data /var/log/ados/plugins /srv /mnt /media /boot
+ReadWritePaths=/var/log/ados/plugins /srv /mnt /media /boot
 ProtectHome=read-only
 InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys -/etc/ados/pairing.json -/etc/ados/config.yaml -/etc/ados/mcp-token.json -/etc/ados/dashboard-pin.json -/etc/ados/wfb -/etc/ados/mesh -/etc/ados/ap-passphrase -/etc/ados/hostapd-gs.conf -/etc/ados/model-registry-auth.json -/etc/ados/plugin-config.json
 
@@ -510,6 +516,8 @@ WantedBy=ados-supervisor.service
             token_secret: root.join("secrets/plugin-token-secret"),
             runner: root.join("venv/bin/ados-plugin-runner"),
             run_dir: root.join("run"),
+            data_root: root.join("plugin-data"),
+            device_id_file: root.join("device-id"),
         };
         let unit = render(&subprocess_manifest(), &paths, &BTreeSet::new(), false);
         assert!(unit.contains(
@@ -524,6 +532,7 @@ WantedBy=ados-supervisor.service
         assert!(unit.contains(
             "StandardOutput=append:/Users/op/.ados/log/plugins/com-example-thermal-lepton.log"
         ));
+        assert!(unit.contains("BindPaths=/Users/op/.ados/plugin-data/com.example.thermal-lepton\n"));
     }
 
     #[test]
@@ -569,10 +578,11 @@ WantedBy=ados-supervisor.service
     }
 
     #[test]
-    fn a_unit_reaches_its_own_socket_dir_and_no_other_plugins() {
+    fn a_unit_reaches_its_own_socket_and_data_dirs_and_no_other_plugins() {
         // Two plugins on one box. Each unit hides the whole run dir and binds
         // back exactly one plugin directory, its own, which holds the socket
-        // its runner is pointed at.
+        // its runner is pointed at; and of the data root it may write its own
+        // dir only.
         let unit_for = |id: &str| {
             let m = PluginManifest::from_yaml_text(&format!(
                 "id: {id}\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: agent/py/p.py\n"
@@ -592,8 +602,23 @@ WantedBy=ados-supervisor.service
                 .filter(|p| p.contains("/run/ados/plugins"))
                 .collect();
             assert_eq!(binds, vec![format!("/run/ados/plugins/{id}")], "{unit}");
+            let writable: Vec<&str> = unit
+                .lines()
+                .filter_map(|l| {
+                    l.strip_prefix("BindPaths=")
+                        .or_else(|| l.strip_prefix("ReadWritePaths="))
+                })
+                .flat_map(str::split_whitespace)
+                .filter(|p| p.starts_with("/var/ados/plugin-data"))
+                .collect();
+            assert_eq!(
+                writable,
+                vec![format!("/var/ados/plugin-data/{id}")],
+                "{unit}"
+            );
             assert!(
-                !unit.contains(&format!("/run/ados/plugins/{other}")),
+                !unit.contains(&format!("/run/ados/plugins/{other}"))
+                    && !unit.contains(&format!("/var/ados/plugin-data/{other}")),
                 "{unit}"
             );
         }

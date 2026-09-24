@@ -197,6 +197,8 @@ impl Paths {
             token_secret: self.secrets_dir().join("plugin-token-secret"),
             runner: runner.to_path_buf(),
             run_dir: self.run.clone(),
+            data_root: self.ados_home.join("plugin-data"),
+            device_id_file: self.device_id_file.clone(),
         }
     }
 
@@ -772,16 +774,15 @@ fn build_env(
             path(plugins.token_secret),
         ),
         ("ADOS_PLUGIN_RUNNER".into(), path(plugins.runner)),
-        // The plugin host's per-plugin config store and the device id it hands
-        // each plugin, off the root-owned `/etc/ados` defaults.
+        ("ADOS_PLUGIN_DATA_DIR_ROOT".into(), path(plugins.data_root)),
+        // The plugin host's per-plugin config store, off the root-owned
+        // `/etc/ados` default, and the device id it hands each plugin (the
+        // same file as the plugin layout's `device_id_file`).
         (
             "ADOS_PLUGIN_CONFIG_PATH".into(),
             path(paths.plugin_config()),
         ),
-        (
-            "ADOS_DEVICE_ID_PATH".into(),
-            path(paths.device_id_file.clone()),
-        ),
+        ("ADOS_DEVICE_ID_PATH".into(), path(plugins.device_id_file)),
     ]
 }
 
@@ -1571,7 +1572,9 @@ gui/501/co.ados.logd = {
         let env = build_env(&paths, "0011aabbccdd", "1.2.3", runner);
         let keys: Vec<&(String, String)> = env
             .iter()
-            .filter(|(k, _)| k.starts_with("ADOS_PLUGIN_") || k == "ADOS_RUN_DIR")
+            .filter(|(k, _)| {
+                k.starts_with("ADOS_PLUGIN_") || k == "ADOS_RUN_DIR" || k == "ADOS_DEVICE_ID_PATH"
+            })
             .collect();
         // No other test in this crate reads these variables.
         let saved: Vec<(String, Option<std::ffi::OsString>)> = keys

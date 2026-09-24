@@ -70,6 +70,8 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "cloud.records.put", required_cap: Some("cloud.records"), inline: false },
     DispatchMethod { method: "offload.advertise", required_cap: Some("vision.detection.publish"), inline: false },
     DispatchMethod { method: "node.info", required_cap: Some("node.info.read"), inline: false },
+    DispatchMethod { method: "mdns.advertise", required_cap: Some("network.listen"), inline: false },
+    DispatchMethod { method: "mdns.browse", required_cap: Some("network.outbound"), inline: false },
 ];
 
 /// Look up the dispatch-level required capability for a wire method.

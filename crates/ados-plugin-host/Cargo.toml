@@ -77,6 +77,10 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-manual-roots-no-provider",
     "blocking",
 ] }
+# The DNS-SD responder behind `mdns.advertise` / `mdns.browse`: the one a
+# sandboxed plugin cannot run itself. Same crate and version as core's own
+# `_ados._tcp` advert in ados-control, so one responder implementation ships.
+mdns-sd = "0.13"
 
 # Unix edge: the advisory file lock around the state read-modify-write and the
 # socket-dir owner check (Linux and macOS alike, since the plugin host runs on

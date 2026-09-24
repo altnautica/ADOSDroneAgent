@@ -420,10 +420,16 @@ pub fn event_deliver_args(event: &Event) -> Value {
 /// inside the handler, after argument validation, exactly where the Python
 /// handlers apply it. The other methods are fully gated at the dispatch level and
 /// ignore it.
+///
+/// `session` is the calling connection's session (see
+/// [`HostServices::begin_session`]). Only `mdns.advertise` consumes it: the
+/// record belongs to the connection that published it, and one plugin may hold
+/// several connections at once (its main process and each declared service).
 pub async fn route_host_method<H: HostServices + ?Sized>(
     host: &H,
     method: Method,
     plugin_id: &str,
+    session: u64,
     args: &Value,
     granted_caps: &BTreeSet<String>,
 ) -> Result<HostResult, HostError> {
@@ -473,6 +479,8 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::CloudRecordsPut => host.cloud_records_put(plugin_id, args).await,
         Method::OffloadAdvertise => host.offload_advertise(plugin_id, args).await,
         Method::NodeInfo => host.node_info(plugin_id, args).await,
+        Method::MdnsAdvertise => host.mdns_advertise(plugin_id, session, args).await,
+        Method::MdnsBrowse => host.mdns_browse(plugin_id, args).await,
         // Vision request/response methods proxy to the engine and await its
         // reply. (vision.subscribe_frames is handled in the server, where it
         // arms the frame-descriptor push stream, never reaching here.)

@@ -98,7 +98,7 @@ impl Step for WfbNg {
         // ground station whose operator turned the radio off (a LoRa or
         // Wi-Fi-only build) opts out of the whole RTL8812EU WFB stack. WFB runs
         // on the RTL8812EU, so with no radio the userspace build is dead weight.
-        if matches!(ctx.profile.as_str(), "workstation" | "compute") || !ctx.install_rtl8812eu {
+        if !ctx.has_long_range_radio() {
             tracing::info!(
                 profile = %ctx.profile,
                 radio = ctx.install_rtl8812eu,

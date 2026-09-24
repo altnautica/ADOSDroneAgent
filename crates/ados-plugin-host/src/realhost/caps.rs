@@ -151,6 +151,8 @@ pub(super) const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         CloudRecordsPut,
         OffloadAdvertise,
         NodeInfo,
+        MdnsAdvertise,
+        MdnsBrowse,
         VisionSubscribeFrames,
         VisionRegisterModel,
         VisionReadModel,

@@ -212,8 +212,8 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // awareness and onboard separation input, and neither is on the C2 path.
     //
     // A fetch miss is NOT caught anywhere, which this comment previously claimed
-    // it was: the health gate checks Hard-gated binaries plus three named
-    // exceptions, and the swarm bus is none of them. That claim mattered,
+    // it was: the health gate checks Hard-gated binaries plus the named WFB and
+    // display exceptions, and the swarm bus is none of them. That claim mattered,
     // because for a long time no publish job existed for this release at all, so
     // every install on both profiles 404'd here and continued degraded in
     // silence — the unit's ConditionPathExists skipped it, the socket was never

@@ -228,6 +228,41 @@ impl NodeClient {
     }
 }
 
+/// `ctx.mdns` — find and offer services on the local network.
+///
+/// The plugin's sandbox cannot bind the mDNS port, so the host runs the
+/// responder: `advertise` publishes one of the plugin's declared listen ports
+/// under the node's hostname for as long as this connection lives, and
+/// `browse` collects the instances of one service type.
+#[derive(Clone)]
+pub struct MdnsClient {
+    ipc: Arc<PluginIpcClient>,
+}
+
+impl MdnsClient {
+    /// Publish `port` as `service_type` with `txt`. Needs `network.listen`,
+    /// and the port must be a declared listen port of a service that runs on
+    /// this node. See [`PluginIpcClient::mdns_advertise`].
+    pub async fn advertise(
+        &self,
+        service_type: &str,
+        port: u16,
+        txt: &BTreeMap<String, String>,
+    ) -> Result<ados_protocol::plugin_mdns::Advertised, ClientError> {
+        self.ipc.mdns_advertise(service_type, port, txt).await
+    }
+
+    /// Every instance of `service_type` answering within `window`. Needs
+    /// `network.outbound`. See [`PluginIpcClient::mdns_browse`].
+    pub async fn browse(
+        &self,
+        service_type: &str,
+        window: std::time::Duration,
+    ) -> Result<Vec<ados_protocol::plugin_mdns::DiscoveredService>, ClientError> {
+        self.ipc.mdns_browse(service_type, window).await
+    }
+}
+
 /// `ctx.peripheral_manager` — register driver instances and claim cameras.
 ///
 /// A driver is registered by an opaque reference id; the driver itself keeps
@@ -626,6 +661,8 @@ pub struct PluginContext {
     pub cloud: CloudClient,
     /// Facts about this node: profile, board, ground-station role, camera.
     pub node: NodeClient,
+    /// Local-network service discovery through the host's mDNS responder.
+    pub mdns: MdnsClient,
     pub process: ProcessClient,
     pub lifecycle: LifecycleClient,
     ipc: Arc<PluginIpcClient>,
@@ -663,6 +700,7 @@ impl PluginContext {
             radio: RadioClient { ipc: ipc.clone() },
             cloud: CloudClient { ipc: ipc.clone() },
             node: NodeClient { ipc: ipc.clone() },
+            mdns: MdnsClient { ipc: ipc.clone() },
             config: ConfigClient {
                 ipc: ipc.clone(),
                 static_config: Arc::new(static_config),

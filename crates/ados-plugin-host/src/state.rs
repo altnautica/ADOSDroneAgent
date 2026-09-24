@@ -70,6 +70,9 @@ pub struct PluginInstall {
     pub version: String,
     pub source: PluginSource,
     pub source_uri: Option<String>,
+    /// The signer whose Ed25519 signature verified at install; `None` for an
+    /// unsigned archive or one whose signature did not verify. Never the id an
+    /// archive merely declares.
     pub signer_id: Option<String>,
     pub manifest_hash: String,
     pub status: PluginStatus,

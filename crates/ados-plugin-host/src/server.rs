@@ -295,8 +295,12 @@ impl<H: HostServices> PluginIpcServer<H> {
                         continue;
                     }
                 };
+                // Every accepted connection is a new session; its teardown
+                // releases only what it acquired.
+                let session = host.begin_session(&plugin_id);
                 let conn = Connection {
                     plugin_id: plugin_id.clone(),
+                    session,
                     token_issuer: token_issuer.clone(),
                     bus: bus.clone(),
                     host: host.clone(),
@@ -306,9 +310,6 @@ impl<H: HostServices> PluginIpcServer<H> {
                     mint: mint.clone(),
                     shared_topics: shared_topics.clone(),
                 };
-                // Every accepted connection is a new session; its teardown
-                // releases only what it acquired.
-                let session = host.begin_session(&plugin_id);
                 tokio::spawn(async move {
                     if let Err(err) = conn.run(stream).await {
                         tracing::warn!(
@@ -342,6 +343,10 @@ impl<H: HostServices> PluginIpcServer<H> {
 /// One accepted connection from a plugin runner.
 struct Connection<H: HostServices> {
     plugin_id: String,
+    /// This connection's session, from [`HostServices::begin_session`]. The
+    /// host methods that hold per-connection state (an mDNS record) key it on
+    /// this, since one plugin may hold several connections at once.
+    session: u64,
     token_issuer: Arc<TokenIssuer>,
     bus: Arc<EventBus>,
     host: Arc<H>,
@@ -1422,6 +1427,7 @@ impl<H: HostServices> Connection<H> {
                     &*self.host,
                     other,
                     &self.plugin_id,
+                    self.session,
                     &env.args,
                     &token.granted_caps,
                 )
@@ -1457,12 +1463,14 @@ impl<H: HostServices> Connection<H> {
         }
         let host = Arc::clone(&self.host);
         let plugin_id = self.plugin_id.clone();
+        let session = self.session;
         let args = env.args.clone();
         let granted = token.granted_caps.clone();
         let request_id = env.request_id.clone();
         in_flight.spawn(async move {
             let result =
-                handlers::route_host_method(&*host, method, &plugin_id, &args, &granted).await;
+                handlers::route_host_method(&*host, method, &plugin_id, session, &args, &granted)
+                    .await;
             (request_id, result)
         });
         Ok(())
@@ -1891,17 +1899,18 @@ async fn pace_snapshots(
 
 /// Whether a host method runs off the connection's dispatch loop.
 ///
-/// These are the stateless forwards whose reply waits on another process: the
-/// cloud relay (a record write waits out the cloud's own answer, up to fifteen
-/// seconds), the vision engine and the supervisor's video-pipeline restart.
-/// Awaited inline, each would stall every other request and every push on the
-/// connection for its whole round trip.
+/// These are the stateless forwards whose reply waits on another process or
+/// the network: the cloud relay (a record write waits out the cloud's own
+/// answer, up to fifteen seconds), the vision engine, the supervisor's
+/// video-pipeline restart, and an mDNS browse (it collects answers for its
+/// whole window). Awaited inline, each would stall every other request and
+/// every push on the connection for its whole round trip.
 ///
 /// Everything else stays inline, in arrival order: the in-process methods
 /// answer at once, output commands (MAVLink, MSP, GPIO, aux datagrams) must
 /// reach their line in the order sent, and the methods that take or release
-/// session state (the aux stream's ownership) must never land after the
-/// session that made them is released.
+/// session state (the aux stream's ownership, an mDNS record) must never land
+/// after the session that made them is released.
 fn runs_detached(method: Method) -> bool {
     matches!(
         method,
@@ -1912,6 +1921,7 @@ fn runs_detached(method: Method) -> bool {
             | Method::VisionInfer
             | Method::VisionPublishDetection
             | Method::VisionDesignateTrack
+            | Method::MdnsBrowse
     )
 }
 

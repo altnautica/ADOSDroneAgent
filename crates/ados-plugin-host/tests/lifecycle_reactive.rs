@@ -163,6 +163,7 @@ fn harness() -> Harness {
         issuer.clone(),
         state_path.clone(),
         socket_dir.clone(),
+        dir.path().join("plugin-data"),
         String::new(),
     ));
     let server = Arc::new(
@@ -452,6 +453,7 @@ async fn a_shared_topic_follows_its_owners_enable_and_disable() {
         issuer.clone(),
         state_path.clone(),
         socket_dir.clone(),
+        dir.path().join("plugin-data"),
         String::new(),
     ));
     let server = Arc::new(

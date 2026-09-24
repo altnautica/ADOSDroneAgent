@@ -193,18 +193,17 @@ fn ungrantable_caps_are_the_dead_capabilities() {
 
 #[tokio::test]
 async fn vision_methods_are_not_in_the_unimplemented_set() {
-    // The vision request methods return not_implemented only while the engine
-    // socket is down (a runtime availability state, like mavlink.send), so
-    // their caps are NOT permanently ungrantable. Confirm they are absent
-    // from the unimplemented list even though a fresh host (no engine) does
-    // return not_implemented for them.
+    // The vision request methods return not_implemented only on a host with no
+    // vision client wired (a deployment state, like an unwired mavlink.send),
+    // so their caps are NOT permanently ungrantable. Confirm they are absent
+    // from the unimplemented list even though a bare host does return
+    // not_implemented for them.
     use crate::dispatch::Method;
     assert!(!RealHost::UNIMPLEMENTED_HOST_METHODS.contains(&Method::VisionRegisterModel));
     assert!(!RealHost::UNIMPLEMENTED_HOST_METHODS.contains(&Method::VisionInfer));
     assert!(!RealHost::UNIMPLEMENTED_HOST_METHODS.contains(&Method::VisionPublishDetection));
-    // And a fresh host does degrade them to not_implemented (the availability
-    // posture), which is why they must be excluded by availability, not by
-    // capability.
+    // And a bare host does degrade them to not_implemented, which is why they
+    // must be excluded by deployment, not by capability.
     let host = RealHost::new();
     let empty = Value::Map(vec![]);
     assert_eq!(
@@ -1382,9 +1381,10 @@ async fn vision_read_model_returns_the_plugins_resolved_status() {
 
 #[tokio::test]
 async fn vision_methods_proxy_to_a_wired_engine() {
-    // With a vision client wired to a fake engine socket, the three vision
-    // methods proxy to it and return its response instead of the
-    // not_implemented shape; without a client they stay not_implemented.
+    // With a vision client wired to a fake engine socket, the vision methods
+    // proxy to it and return its response instead of the not_implemented
+    // shape; while that engine is down they answer a transient error, and
+    // without a client at all they stay not_implemented.
     use ados_protocol::frame::{encode_frame, PLUGIN_MAX_FRAME};
     use ados_protocol::ipc::IpcBroadcast;
     use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
@@ -1404,13 +1404,29 @@ async fn vision_methods_proxy_to_a_wired_engine() {
         Some("not_implemented")
     );
 
-    // Wired: proxy to a fake engine that answers the next request.
+    // Wired, engine not up yet: a transient error, not not_implemented.
     let mut sock = std::env::temp_dir();
     sock.push(format!("ados-realhost-vis-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&sock);
+    let client = std::sync::Arc::new(VisionClient::spawn_with_interval(
+        sock.clone(),
+        std::time::Duration::from_millis(50),
+    ));
+    let host = RealHost::new().with_vision(client.clone());
+    assert_eq!(
+        host.vision_infer("p", &Value::Map(vec![])).await,
+        Err(HostError::Rpc(
+            crate::vision_client::VISION_ENGINE_UNAVAILABLE.to_string()
+        ))
+    );
+
+    // The engine appears: the same host proxies to it once connected.
     let (server, _inbound) = IpcBroadcast::bind(&sock, 256, false, None).await.unwrap();
-    let client = std::sync::Arc::new(VisionClient::connect(&sock).await.unwrap());
-    let host = RealHost::new().with_vision(client);
+    assert!(
+        client
+            .connected_within(std::time::Duration::from_secs(2))
+            .await
+    );
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let reply = Envelope {
@@ -3032,10 +3048,14 @@ async fn node_info_reads_each_fact_from_its_source() {
     assert!(!board.has_npu);
     assert!(board.accelerators.is_empty());
 
-    // A detected camera whose pipeline failed is not ready, and neither is a
-    // report the video service stopped re-stamping.
-    write_camera_state(dir.path(), "ready", "error", 2.0);
-    assert!(!node_info(&host).await.camera.ready);
+    // Ready means the pipeline is publishing `main`. A detected camera whose
+    // encoder is spawned but has not published yet (a network source still
+    // dialling its URL), a stopped or failed pipeline, and a report the video
+    // service stopped re-stamping are all not ready.
+    for pipeline in ["starting", "stopped", "error"] {
+        write_camera_state(dir.path(), "ready", pipeline, 2.0);
+        assert!(!node_info(&host).await.camera.ready, "{pipeline}");
+    }
     write_camera_state(dir.path(), "ready", "streaming", 120.0);
     assert!(!node_info(&host).await.camera.ready);
 }
@@ -3097,5 +3117,124 @@ fn node_info_is_gated_on_its_read_capability() {
     assert_eq!(
         gate("node.info", false, &caps(&["node.info.read"])),
         Gate::Allow(Method::NodeInfo)
+    );
+}
+
+// ---- mdns.advertise / mdns.browse ------------------------------------
+
+/// A workstation node running a plugin whose `node` service declares 8092 and
+/// only runs on a workstation, plus an `edge` service declaring 9100 that only
+/// runs on a drone.
+fn mdns_host(dir: &std::path::Path) -> RealHost {
+    let plugin_dir = dir.join("com.example.node");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(
+        plugin_dir.join("manifest.yaml"),
+        "id: com.example.node\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\n\
+         agent:\n  entrypoint: agent/py/x.py\n  permissions: [network.outbound, network.listen]\n  \
+         contributes:\n    services:\n      - name: node\n        command: bin/node\n        \
+         listen_ports: [8092]\n        profiles: [workstation]\n      - name: edge\n        \
+         command: bin/edge\n        listen_ports: [9100]\n        profiles: [drone]\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("profile.conf"), "profile: workstation\n").unwrap();
+    RealHost::new()
+        .with_node_info_sources(node_sources(dir))
+        .with_runtime_lookup(Box::new(move |id| {
+            (id == "com.example.node").then(|| (plugin_dir.clone(), BTreeSet::new()))
+        }))
+}
+
+fn advertise_args(service_type: &str, port: u16) -> Value {
+    map(&[
+        ("service_type", Value::from(service_type)),
+        ("port", Value::from(port)),
+        (
+            "txt",
+            Value::Map(vec![(Value::from("deviceId"), Value::from("compute-1"))]),
+        ),
+    ])
+}
+
+/// A plugin advertises only what its sandbox lets it serve on this node: a
+/// port no service declares, and a port declared only for a service that does
+/// not run on this profile, are both refused before anything is published.
+#[tokio::test]
+async fn mdns_advertise_refuses_a_port_the_plugin_does_not_serve_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = mdns_host(dir.path());
+    for port in [9999, 9100] {
+        let err = host
+            .mdns_advertise(
+                "com.example.node",
+                1,
+                &advertise_args("_ados-compute._tcp", port),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, HostError::Rpc(m) if m.contains("not a listen port")),
+            "{port}: {err:?}"
+        );
+    }
+    // A plugin with no manifest the host can find serves nothing.
+    let err = host
+        .mdns_advertise(
+            "com.example.other",
+            1,
+            &advertise_args("_ados-compute._tcp", 8092),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, HostError::Rpc(m) if m.contains("not a listen port")),
+        "{err:?}"
+    );
+}
+
+/// The agent's own records cannot be impersonated, and a malformed request is
+/// refused with a reason.
+#[tokio::test]
+async fn mdns_advertise_refuses_the_agents_own_service_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = mdns_host(dir.path());
+    for ty in ["_ados._tcp", "_ados-receiver._tcp.local."] {
+        let err = host
+            .mdns_advertise("com.example.node", 1, &advertise_args(ty, 8092))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, HostError::Rpc(m) if m.contains("published by the agent")),
+            "{ty}: {err:?}"
+        );
+    }
+    let err = host
+        .mdns_advertise("com.example.node", 1, &map(&[("port", Value::from(8092))]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, HostError::Rpc(m) if m.contains("arguments are invalid")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn mdns_methods_are_gated_on_the_network_capabilities() {
+    use crate::dispatch::{gate, Gate, Method};
+    assert_eq!(
+        gate("mdns.advertise", false, &caps(&["network.outbound"])),
+        Gate::CapabilityDenied("capability_denied: network.listen".to_string())
+    );
+    assert_eq!(
+        gate("mdns.advertise", false, &caps(&["network.listen"])),
+        Gate::Allow(Method::MdnsAdvertise)
+    );
+    assert_eq!(
+        gate("mdns.browse", false, &caps(&["network.listen"])),
+        Gate::CapabilityDenied("capability_denied: network.outbound".to_string())
+    );
+    assert_eq!(
+        gate("mdns.browse", false, &caps(&["network.outbound"])),
+        Gate::Allow(Method::MdnsBrowse)
     );
 }

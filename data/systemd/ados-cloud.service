@@ -42,9 +42,10 @@ ReadWritePaths=/var/ados /var/lib/ados /run/ados /etc/ados /etc /var/log/ados
 # The cloud relay does HTTP + MQTT heartbeat and, on a remote-install
 # command, asks PID 1 to reload/enable units over the system bus (which
 # needs no caller capability). The one capability it keeps is CAP_CHOWN: a
-# remote enable of an HTTP-serving plugin hands the plugin's socket dir
-# under /run/ados/plugin-http to the ados account its sandboxed unit runs
-# as, and root without CAP_CHOWN cannot. The bind orchestrator that
+# remote install or enable hands the plugin's data dir under
+# /var/ados/plugin-data (and an HTTP-serving plugin's socket dir under
+# /run/ados/plugin-http) to the ados account its sandboxed unit runs as, and
+# root without CAP_CHOWN cannot. The bind orchestrator that
 # previously justified CAP_SYS_ADMIN/CAP_NET_ADMIN moved to the supervisor.
 CapabilityBoundingSet=CAP_CHOWN
 

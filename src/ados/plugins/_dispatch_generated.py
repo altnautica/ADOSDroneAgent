@@ -60,6 +60,8 @@ REQUIRED_CAP: dict[str, str | None] = {
     "cloud.records.put": "cloud.records",
     "offload.advertise": "vision.detection.publish",
     "node.info": "node.info.read",
+    "mdns.advertise": "network.listen",
+    "mdns.browse": "network.outbound",
 }
 
 # Methods whose cap is decided inline by the handler from the request

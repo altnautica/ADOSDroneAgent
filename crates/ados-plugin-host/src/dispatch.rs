@@ -25,6 +25,9 @@ use ados_protocol::buttons::SUBSCRIBE as BUTTON_SUBSCRIBE;
 use ados_protocol::dispatch::required_cap_for;
 use ados_protocol::framebus::methods as vision_methods;
 use ados_protocol::node_info::METHOD as NODE_INFO;
+use ados_protocol::plugin_mdns::{
+    ADVERTISE_METHOD as MDNS_ADVERTISE, BROWSE_METHOD as MDNS_BROWSE,
+};
 
 /// One dispatchable method. The variant set is exhaustive over the surfaces the
 /// generated dispatch table covers: event publish/subscribe, ping, telemetry,
@@ -92,6 +95,11 @@ pub enum Method {
     // Node facts: profile, board, ground-station role, camera readiness and
     // main-stream geometry, read from the agent's own sources.
     NodeInfo,
+    // Local-network service discovery: publish one of the plugin's declared
+    // listen ports over mDNS, or browse a service type. The host runs the
+    // responder; a sandboxed plugin cannot bind the multicast port.
+    MdnsAdvertise,
+    MdnsBrowse,
     // Vision: frame-descriptor subscribe, model register, inference, and
     // detection publish. The engine owns the cameras and the inference backend;
     // the host proxies these to it over its socket.
@@ -141,6 +149,12 @@ impl Method {
         }
         if name == NODE_INFO {
             return Some(Self::NodeInfo);
+        }
+        if name == MDNS_ADVERTISE {
+            return Some(Self::MdnsAdvertise);
+        }
+        if name == MDNS_BROWSE {
+            return Some(Self::MdnsBrowse);
         }
         Some(match name {
             "event.publish" => Self::EventPublish,
@@ -226,6 +240,8 @@ impl Method {
             Self::CloudRecordsPut => "cloud.records.put",
             Self::OffloadAdvertise => "offload.advertise",
             Self::NodeInfo => NODE_INFO,
+            Self::MdnsAdvertise => MDNS_ADVERTISE,
+            Self::MdnsBrowse => MDNS_BROWSE,
             Self::VisionSubscribeFrames => vision_methods::SUBSCRIBE_FRAMES,
             Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
             Self::VisionReadModel => vision_methods::READ_MODEL,
@@ -531,6 +547,8 @@ mod tests {
         Method::CloudRecordsPut,
         Method::OffloadAdvertise,
         Method::NodeInfo,
+        Method::MdnsAdvertise,
+        Method::MdnsBrowse,
         Method::VisionSubscribeFrames,
         Method::VisionRegisterModel,
         Method::VisionReadModel,

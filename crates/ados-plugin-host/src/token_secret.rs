@@ -47,15 +47,29 @@ pub const ENV_TOKEN: &str = "ADOS_PLUGIN_TOKEN";
 pub const ENV_AGENT_ID: &str = "ADOS_PLUGIN_AGENT_ID";
 /// The env-var the runner reads for the plugin's per-drone data directory.
 pub const ENV_DATA_DIR: &str = "ADOS_PLUGIN_DATA_DIR";
-/// Base of the persistent plugin data tree. Mirrors the Python `PLUGIN_DATA_DIR`
-/// (`/var/ados/plugin-data`), and the per-plugin unit already lists it under
-/// `ReadWritePaths`.
+/// Default base of the persistent plugin data tree (`ADOS_PLUGIN_DATA_DIR_ROOT`
+/// overrides it, see [`crate::supervisor::Paths`]). Mirrors the Python
+/// `PLUGIN_DATA_DIR`. Each plugin's unit binds only its own `<base>/<id>`
+/// writable.
 pub const PLUGIN_DATA_DIR: &str = "/var/ados/plugin-data";
+/// Default path of this node's device id (`ADOS_DEVICE_ID_PATH` overrides it):
+/// the persistent 12-hex identity the agent writes on first boot.
+pub const DEVICE_ID_PATH: &str = "/etc/ados/device-id";
+
+/// The device id at `path`, trimmed. Empty when the file is absent or
+/// unreadable (an unpaired or pre-first-boot node), which scopes plugin data
+/// and drone-scoped config to the node.
+pub fn read_device_id(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
 
 /// The plugin's data directory, matching the Python `_data_dir_for`: node-scoped
-/// at `<base>/<id>`, or per-drone at `<base>/<id>/drones/<agent_id>` when paired.
-pub fn plugin_data_dir(plugin_id: &str, agent_id: &str) -> PathBuf {
-    let base = Path::new(PLUGIN_DATA_DIR).join(plugin_id);
+/// at `<data_root>/<id>`, or per-drone at `<data_root>/<id>/drones/<agent_id>`
+/// when paired.
+pub fn plugin_data_dir(data_root: &Path, plugin_id: &str, agent_id: &str) -> PathBuf {
+    let base = data_root.join(plugin_id);
     if agent_id.is_empty() {
         base
     } else {
@@ -114,14 +128,16 @@ pub fn shared_issuer(secret_path: &Path) -> std::io::Result<TokenIssuer> {
 /// so a caller (or a test) can assert it verifies against the same issuer.
 ///
 /// `socket_path` is the per-plugin socket the daemon serves; `granted_caps` are
-/// the permissions the install record grants. The token rotates each call
-/// (fresh session id + issued_at), matching the "rotate on every plugin restart
-/// and on every permission change" contract.
+/// the permissions the install record grants; `data_root` and `agent_id` place
+/// the plugin's data dir. The token rotates each call (fresh session id +
+/// issued_at), matching the "rotate on every plugin restart and on every
+/// permission change" contract.
 pub fn write_token_env(
     issuer: &TokenIssuer,
     plugin_id: &str,
     granted_caps: &BTreeSet<String>,
     socket_path: &Path,
+    data_root: &Path,
     agent_id: &str,
     env_dir: Option<&Path>,
 ) -> std::io::Result<CapabilityToken> {
@@ -135,7 +151,7 @@ pub fn write_token_env(
     // this file is already rewritten per start. Without them `ctx.agent_id` was
     // empty and `ctx.data_dir` unavailable for every plugin — so a plugin that
     // wanted its own storage had to hard-code a path and hope.
-    let data_dir = plugin_data_dir(plugin_id, agent_id);
+    let data_dir = plugin_data_dir(data_root, plugin_id, agent_id);
     let body = format!(
         "{ENV_TOKEN}={token}\n\
          {ENV_SOCKET}={socket}\n\
@@ -170,6 +186,7 @@ pub struct TokenMint {
     issuer: Arc<TokenIssuer>,
     state_path: PathBuf,
     socket_dir: PathBuf,
+    data_root: PathBuf,
     device_id: String,
 }
 
@@ -178,12 +195,14 @@ impl TokenMint {
         issuer: Arc<TokenIssuer>,
         state_path: PathBuf,
         socket_dir: PathBuf,
+        data_root: PathBuf,
         device_id: String,
     ) -> Self {
         TokenMint {
             issuer,
             state_path,
             socket_dir,
+            data_root,
             device_id,
         }
     }
@@ -218,6 +237,7 @@ impl TokenMint {
             plugin_id,
             &caps,
             &socket_path,
+            &self.data_root,
             &self.device_id,
             Some(&self.socket_dir),
         ) {
@@ -346,6 +366,7 @@ mod tests {
             "com.example.demo",
             &caps(&["mavlink.read"]),
             &sock,
+            Path::new("/var/ados/plugin-data"),
             "drone-abc",
             Some(&env_dir),
         )
@@ -361,8 +382,7 @@ mod tests {
         // it a plugin has no place of its own to write.
         assert!(body.contains(&format!("{ENV_AGENT_ID}=drone-abc")));
         assert!(body.contains(&format!(
-            "{ENV_DATA_DIR}={}",
-            plugin_data_dir("com.example.demo", "drone-abc").display()
+            "{ENV_DATA_DIR}=/var/ados/plugin-data/com.example.demo/drones/drone-abc"
         )));
     }
 
@@ -380,6 +400,7 @@ mod tests {
             "com.example.x",
             &BTreeSet::new(),
             &sock,
+            dir.path(),
             "",
             Some(&env_dir),
         )
@@ -434,6 +455,7 @@ mod tests {
             "com.example.x",
             &BTreeSet::new(),
             &sock,
+            dir.path(),
             "",
             Some(&env_dir),
         )

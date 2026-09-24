@@ -205,7 +205,7 @@ fn parse_injector_arbitration(yaml: &str) -> bool {
 
 /// Build the real host from a discovered supervisor: the five facades plus the
 /// router links, the runtime lookup (install dir + spawn allowlist from each
-/// plugin's manifest), and the agent-id lookup.
+/// plugin's manifest), and the agent-id lookup bound to `device_id`.
 ///
 /// The MAVLink and MSP links are always wired. Each reconnects on its own, so a
 /// router that is not up yet (or restarts later) heals without a host restart;
@@ -214,6 +214,7 @@ async fn build_host(
     install_dir: PathBuf,
     run_dir: PathBuf,
     state_path: PathBuf,
+    device_id: String,
     bus: &Arc<EventBus>,
 ) -> Arc<RealHost> {
     // The state file `vision.read_model` reads resolved model status from, and
@@ -274,25 +275,12 @@ async fn build_host(
         .with_mavlink(mavlink)
         .with_msp(Arc::new(link("msp.sock")));
 
-    // (b) Vision client: best-effort connect to the engine's socket so the
-    //     three vision request methods proxy to it and the frame-descriptor
-    //     stream arms. When the engine is not up the slot stays None and the
-    //     vision methods return the not_implemented shape, matching the MAVLink
-    //     not_available posture.
-    let vision_sock = run_dir.join("vision.sock");
-    match VisionClient::connect(&vision_sock).await {
-        Ok(client) => {
-            tracing::info!(path = %vision_sock.display(), "vision client connected");
-            host = host.with_vision(Arc::new(client));
-        }
-        Err(e) => {
-            tracing::warn!(
-                path = %vision_sock.display(),
-                error = %e,
-                "vision engine socket unavailable; vision methods will report not_implemented"
-            );
-        }
-    }
+    // (b) Vision client: a self-healing link to the engine's socket, so the
+    //     vision request methods proxy to it and the frame-descriptor stream
+    //     arms whenever the engine is up. It reconnects forever, so an engine
+    //     that starts after the host or restarts under it heals by itself;
+    //     while it is down the request methods answer a transient error.
+    host = host.with_vision(Arc::new(VisionClient::spawn(run_dir.join("vision.sock"))));
 
     // (c) Runtime lookup: plugin_id -> (install_dir, subprocess_spawn allowlist).
     //     The install dir is the unpacked plugin dir; the allowlist is read from
@@ -307,12 +295,10 @@ async fn build_host(
         Some((lookup_install_dir.join(plugin_id), allowlist))
     }));
 
-    // (d) Agent-id lookup: the paired device id read once at startup from
-    //     /etc/ados/device-id (overridable for tests / non-default layouts).
-    //     This isolates a drone-scoped config write per drone instead of
-    //     silently collapsing every drone write to global. The id is the same
-    //     for every plugin on one drone, so it is resolved once and cloned.
-    let device_id = read_device_id();
+    // (d) Agent-id lookup: the paired device id, read once at startup (see
+    //     `Paths::device_id_file`). This isolates a drone-scoped config write
+    //     per drone instead of silently collapsing every drone write to
+    //     global. The id is the same for every plugin on one drone.
     if device_id.is_empty() {
         tracing::warn!(
             "device id not resolved; drone-scoped plugin config will fall back to global"
@@ -327,20 +313,6 @@ async fn build_host(
     host = host.with_config_persistence(config_store_path());
 
     Arc::new(host)
-}
-
-/// The paired device id, read from `/etc/ados/device-id` (the persistent 12-char
-/// hex identity the agent writes on first boot). Overridable via
-/// `ADOS_DEVICE_ID_PATH` for tests / non-default layouts. Returns the empty
-/// string when the file is absent or unreadable (an unpaired / pre-first-boot
-/// drone), which degrades drone-scoped config to global, matching the prior
-/// behaviour without a device id.
-fn read_device_id() -> String {
-    let path =
-        std::env::var("ADOS_DEVICE_ID_PATH").unwrap_or_else(|_| "/etc/ados/device-id".to_string());
-    std::fs::read_to_string(path)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
 }
 
 /// The plugin-config persistence file. Lives under the agent's etc dir so it
@@ -386,15 +358,23 @@ async fn wire(paths: &Paths) -> WiredDaemon<RealHost> {
         }
     });
     let bus = Arc::new(EventBus::new());
-    let host = build_host(install_dir.clone(), run_dir, state_path.clone(), &bus).await;
-
     // The paired device id scopes each plugin's per-drone data dir, written into
-    // the runner's env file by the mint. Empty on an unpaired node (node scope).
-    let device_id = read_device_id();
+    // the runner's env file by the mint, and its drone-scoped config. Empty on
+    // an unpaired node (node scope).
+    let device_id = ados_plugin_host::token_secret::read_device_id(&paths.device_id_file);
+    let host = build_host(
+        install_dir.clone(),
+        run_dir,
+        state_path.clone(),
+        device_id.clone(),
+        &bus,
+    )
+    .await;
     let mint = Arc::new(TokenMint::new(
         issuer.clone(),
         state_path.clone(),
         socket_dir.clone(),
+        paths.data_root.clone(),
         device_id,
     ));
 
@@ -592,6 +572,8 @@ mod tests {
             token_secret: dir.join("secrets/plugin-token-secret"),
             runner: dir.join("bin/ados-plugin-runner"),
             run_dir: dir.join("run"),
+            data_root: dir.join("plugin-data"),
+            device_id_file: dir.join("device-id"),
         }
     }
 
@@ -750,6 +732,7 @@ mod tests {
             install_dir,
             dir.path().join("run"),
             dir.path().join("state/plugin-state.json"),
+            String::new(),
             &Arc::new(EventBus::new()),
         )
         .await;
@@ -833,6 +816,7 @@ mod tests {
                 plugin_id,
                 &caps(&["mavlink.read"]),
                 &sock,
+                &paths.data_root,
                 "test-drone",
                 Some(&socket_dir),
             )

@@ -185,6 +185,15 @@ impl Ctx {
     pub fn for_test(checkpoint: Checkpoint) -> Self {
         Ctx::from_args(Args::default(), EnvInfo::probe(), checkpoint)
     }
+
+    /// Whether this install carries the RTL8812EU WFB radio stack: the operator
+    /// kept the radio on AND the profile has a long-range radio at all. A
+    /// workstation / compute console never does, whatever the flag says. The
+    /// wfb-ng step builds the stack on exactly this, and the health gate
+    /// requires it on exactly this, so the two can never disagree.
+    pub fn has_long_range_radio(&self) -> bool {
+        self.install_rtl8812eu && !matches!(self.profile.as_str(), "workstation" | "compute")
+    }
 }
 
 /// Why a `--ref` pin cannot be honoured on `channel` (pure). `None` when the
@@ -330,6 +339,26 @@ mod tests {
         // An explicit flag wins over the profile default in both directions.
         assert!(!ctx_for("workstation", Some(false)));
         assert!(ctx_for("drone", Some(true)));
+    }
+
+    #[test]
+    fn only_a_radio_profile_with_the_radio_on_carries_the_wfb_stack() {
+        let radio_for = |profile: &str, no_rtl_driver: bool| {
+            let a = Args {
+                profile: Some(profile.to_string()),
+                no_rtl_driver,
+                ..Args::default()
+            };
+            Ctx::from_args(a, EnvInfo::probe(), Checkpoint::new()).has_long_range_radio()
+        };
+        assert!(radio_for("drone", false));
+        assert!(radio_for("ground_station", false));
+        // The operator's radio-off choice wins on a radio profile.
+        assert!(!radio_for("drone", true));
+        // A workstation-class node has no WFB stack even with the flag left at
+        // its default, so neither wfb-ng nor the health gate expects one there.
+        assert!(!radio_for("workstation", false));
+        assert!(!radio_for("compute", false));
     }
 
     #[test]

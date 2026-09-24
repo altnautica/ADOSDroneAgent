@@ -286,7 +286,13 @@ impl VideoOrchestrator {
         self.video_inbound_bytes_per_s = 0.0;
         self.last_start_error = StartError::None;
         tracing::info!(encoder = ?kind, "pipeline_started");
-        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming)
+        // The encoder is spawned, but nothing is published on `main` yet: the
+        // encoder still has to open its source (a network camera's RTSP
+        // handshake, a UVC format negotiation) and reach mediamtx. `streaming`
+        // is stamped by the health tick that first sees the publisher (see
+        // `refresh_camera_state`), so a source that never produces a frame never
+        // reads as a stream.
+        self.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Starting)
             .await;
 
         // Publish the resolved leg list so the status surfaces + the GCS stream

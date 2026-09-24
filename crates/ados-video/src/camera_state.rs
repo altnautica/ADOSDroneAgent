@@ -8,10 +8,12 @@
 //! contract is the field names / types / path (compact vs spaced whitespace is
 //! irrelevant), matching how the bind sentinel is written.
 //!
-//! The reading side lives here too: [`read_effective_state`] is the one rule
-//! every consumer applies (freshness, the three discovery states, and a failed
-//! pipeline overriding `ready`), so the status surfaces and the plugin host
-//! cannot disagree about whether the camera is up.
+//! The reading side lives here too, so the status surfaces and the plugin host
+//! cannot disagree: [`read_effective_state`] is the camera-pill rule every
+//! consumer applies (freshness, the three discovery states, and a failed
+//! pipeline overriding `ready`), and [`read_main_stream_live`] is the stricter
+//! question "is the pipeline publishing `main` right now", which only a
+//! `streaming` stamp answers yes to.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -41,6 +43,11 @@ pub const CAMERA_STATE_SIDECAR_VERSION: u16 = 2;
 
 /// What the streaming pipeline did with the camera that was discovered.
 /// `Unknown` is the honest answer before `start_stream` has resolved.
+/// `Starting` covers a cold start and the window after the encoder is spawned
+/// but before mediamtx holds its publisher on `main`. `Streaming` is stamped
+/// only once the orchestrator has seen that publisher, and is re-stamped on
+/// every health tick that still finds the path ready with its byte counter
+/// advancing, so it means the `main` stream is actually being produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PipelineOutcome {
@@ -107,6 +114,31 @@ pub fn effective_state(doc: &serde_json::Value, now: f64, max_age_s: f64) -> Opt
 pub fn read_effective_state(path: &Path, now: f64, max_age_s: f64) -> Option<CameraState> {
     let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     effective_state(&doc, now, max_age_s)
+}
+
+/// Whether the sidecar says the pipeline is publishing the `main` stream now:
+/// a fresh stamp (within `max_age_s` of `now`), a discovered camera whose
+/// pipeline has not failed, and `pipeline_state: streaming`. A camera that is
+/// discovered but not yet published (`starting`), a stopped or unresolved
+/// pipeline (`stopped`, `unknown`), a legacy sidecar with no outcome at all and
+/// a stale file are all "no stream", whatever discovery says: this is the
+/// readiness a consumer that pulls frames off `main` must gate on.
+pub fn main_stream_live(doc: &serde_json::Value, now: f64, max_age_s: f64) -> bool {
+    effective_state(doc, now, max_age_s) == Some(CameraState::Ready)
+        && doc
+            .get("pipeline_state")
+            .and_then(serde_json::Value::as_str)
+            == Some("streaming")
+}
+
+/// [`main_stream_live`] of the sidecar at `path`; `false` also when the file is
+/// absent or is not JSON.
+pub fn read_main_stream_live(path: &Path, now: f64, max_age_s: f64) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .is_ok_and(|doc| main_stream_live(&doc, now, max_age_s))
 }
 
 /// The exact `camera-state.json` payload (key names + types match the Python
@@ -348,6 +380,66 @@ mod tests {
         assert_eq!(v["pipeline_state"], "streaming");
         assert_eq!(v["encoder"], "ffmpeg-libx264");
         assert_eq!(v["encoder_hw"], false);
+    }
+
+    #[test]
+    fn only_a_fresh_streaming_stamp_on_a_discovered_camera_is_a_live_main_stream() {
+        let now = 1_700_000_000.0;
+        let doc = |state: &str, pipeline: Option<&str>, age: f64| {
+            let mut v = serde_json::json!({"state": state, "updated_at_unix": now - age});
+            if let Some(p) = pipeline {
+                v["pipeline_state"] = serde_json::json!(p);
+            }
+            v
+        };
+        assert!(main_stream_live(
+            &doc("ready", Some("streaming"), 2.0),
+            now,
+            CAMERA_STATE_LIVE_S
+        ));
+        // Spawned but not yet published, stopped, unresolved, failed, or a
+        // legacy writer that names no outcome: none of them is a stream.
+        for pipeline in [
+            Some("starting"),
+            Some("stopped"),
+            Some("unknown"),
+            Some("error"),
+            None,
+        ] {
+            assert!(
+                !main_stream_live(&doc("ready", pipeline, 2.0), now, CAMERA_STATE_LIVE_S),
+                "{pipeline:?}"
+            );
+        }
+        // A streaming stamp over a camera discovery no longer finds.
+        assert!(!main_stream_live(
+            &doc("missing", Some("streaming"), 2.0),
+            now,
+            CAMERA_STATE_LIVE_S
+        ));
+        // The writer stopped re-stamping.
+        assert!(!main_stream_live(
+            &doc("ready", Some("streaming"), CAMERA_STATE_LIVE_S + 1.0),
+            now,
+            CAMERA_STATE_LIVE_S
+        ));
+    }
+
+    #[test]
+    fn an_absent_or_unparseable_sidecar_is_no_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("camera-state.json");
+        assert!(!read_main_stream_live(
+            &path,
+            now_unix(),
+            CAMERA_STATE_LIVE_S
+        ));
+        std::fs::write(&path, "not json").unwrap();
+        assert!(!read_main_stream_live(
+            &path,
+            now_unix(),
+            CAMERA_STATE_LIVE_S
+        ));
     }
 
     #[test]

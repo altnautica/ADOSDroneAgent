@@ -1014,6 +1014,8 @@ mod tests {
             token_secret: dir.join("secrets/plugin-token-secret"),
             runner: dir.join("bin/ados-plugin-runner"),
             run_dir: dir.join("run"),
+            data_root: dir.join("plugin-data"),
+            device_id_file: dir.join("device-id"),
         };
         Arc::new(Mutex::new(PluginSupervisor::new(
             paths, false, None, "1.0.0",
@@ -1048,6 +1050,8 @@ mod tests {
             token_secret: dir.join("secrets/plugin-token-secret"),
             runner: dir.join("bin/ados-plugin-runner"),
             run_dir: dir.join("run"),
+            data_root: dir.join("plugin-data"),
+            device_id_file: dir.join("device-id"),
         };
         let sup = PluginSupervisor::production(paths, None, env!("CARGO_PKG_VERSION"))
             .with_ungrantable_caps(ados_plugin_host::realhost::RealHost::ungrantable_caps());

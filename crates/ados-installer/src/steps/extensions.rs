@@ -361,6 +361,8 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             token_secret: dir.join("secrets/plugin-token-secret"),
             runner: dir.join("bin/ados-plugin-runner"),
             run_dir: dir.join("run"),
+            data_root: dir.join("plugin-data"),
+            device_id_file: dir.join("device-id"),
         }
     }
 

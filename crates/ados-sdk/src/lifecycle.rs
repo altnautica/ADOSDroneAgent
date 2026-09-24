@@ -5,7 +5,9 @@
 //! runner reads `--socket` / `--token` / `--agent-id` (with `ADOS_PLUGIN_*`
 //! env-var fallbacks — the exact contract `runner.py` passes), connects the
 //! [`PluginIpcClient`], builds a [`PluginContext`], and drives the lifecycle
-//! hooks until SIGTERM/SIGINT, then runs the teardown hooks.
+//! hooks until SIGTERM/SIGINT, then runs the teardown hooks. A lost host
+//! session (a plugin-host restart) also ends the run, as an error, so the
+//! binary exits non-zero and its unit restarts it with a fresh session.
 //!
 //! **Entry: function, not proc-macro.** A `#[ados_plugin]` attribute macro
 //! would expand to nothing more than `fn main() { run_plugin::<P>() }` — it
@@ -21,6 +23,7 @@
 //! plugin overrides only what it needs.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -84,6 +87,14 @@ pub enum RunnerError {
     /// The client failed to connect or handshake.
     #[error("ipc connect failed: {0}")]
     Connect(#[from] ClientError),
+    /// The plugin host closed this plugin's session (a plugin-host restart) or
+    /// the stream broke. Nothing reconnects it: the restarted host re-mints the
+    /// socket and token for a fresh process, so the runner stops and the
+    /// binary exits non-zero for its unit's `Restart=` to bring it back.
+    #[error(
+        "plugin host session lost; exiting so the unit restarts with a fresh socket and token"
+    )]
+    SessionLost,
 }
 
 /// The parsed runner arguments. Mirrors the `plugin_id` positional plus the
@@ -176,7 +187,9 @@ impl RunnerArgs {
 /// so the binary stays in control of where it loads config from.
 ///
 /// Returns when the shutdown future resolves (SIGTERM/SIGINT in a real binary)
-/// or a hook errors.
+/// or a hook errors. Returns [`RunnerError::SessionLost`] when the host session
+/// drops while the plugin runs; the binary MUST exit non-zero on any error so
+/// systemd restarts it with a fresh session.
 pub async fn run_plugin<P, S>(
     plugin_version: impl Into<String>,
     static_config: BTreeMap<String, Value>,
@@ -184,7 +197,7 @@ pub async fn run_plugin<P, S>(
 ) -> Result<(), RunnerError>
 where
     P: Plugin,
-    S: std::future::Future<Output = ()>,
+    S: Future<Output = ()>,
 {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = RunnerArgs::parse(&argv, |k| std::env::var(k).ok())?;
@@ -202,7 +215,7 @@ pub async fn run_plugin_with<P, S>(
 ) -> Result<(), RunnerError>
 where
     P: Plugin,
-    S: std::future::Future<Output = ()>,
+    S: Future<Output = ()>,
 {
     let (Some(socket_path), Some(token)) = (args.socket_path.clone(), args.token.clone()) else {
         return Err(RunnerError::NoBridge);
@@ -226,7 +239,14 @@ where
     );
 
     let mut plugin = P::new();
-    let result = drive(&mut plugin, &ctx, &static_config, shutdown).await;
+    let result = drive(
+        &mut plugin,
+        &ctx,
+        &static_config,
+        shutdown,
+        ipc.session_lost(),
+    )
+    .await;
 
     // Always close the client, success or failure.
     ipc.close().await;
@@ -234,12 +254,13 @@ where
 }
 
 /// Create the plugin's data directory so it exists before the plugin writes to
-/// it. The host delivers the path but nothing upstream makes the per-drone leaf
-/// (`.../plugin-data/<id>/drones/<agent_id>`) — only the base is installed — so
-/// without this the plugin's first write under `ctx.data_dir` hits ENOENT. The
-/// path is inside the unit's `ReadWritePaths`, so the plugin (running as `ados`)
-/// may create it. Best-effort: a failure is logged and left to surface as the
-/// plugin's own write error rather than aborting the runner. `None` is a no-op.
+/// it. The host creates the plugin's data dir (`.../plugin-data/<id>`, owned by
+/// the plugin's account and bound writable into its unit) and the per-drone
+/// leaf it points `ctx.data_dir` at when that dir is new; a leaf for a device
+/// id that appeared later, or a run outside the host, is made here, inside the
+/// plugin's own dir. Best-effort: a failure is logged and left to surface as
+/// the plugin's own write error rather than aborting the runner. `None` is a
+/// no-op.
 fn ensure_data_dir(data_dir: Option<&str>) {
     if let Some(dir) = data_dir {
         if let Err(e) = std::fs::create_dir_all(dir) {
@@ -250,15 +271,23 @@ fn ensure_data_dir(data_dir: Option<&str>) {
 
 /// Drive the hook sequence. Separated so the teardown hooks run even when a
 /// startup hook errors. Mirrors the Python runner's try/finally shape.
-async fn drive<P, S>(
+///
+/// The run phase ends on the shutdown signal or on the loss of the host
+/// session, whichever comes first. A lost session still runs the teardown
+/// hooks so the plugin releases its local resources, but their errors are
+/// only logged (their host calls cannot succeed any more) and the result is
+/// [`RunnerError::SessionLost`].
+async fn drive<P, S, L>(
     plugin: &mut P,
     ctx: &PluginContext,
     config: &BTreeMap<String, Value>,
     shutdown: S,
+    session_lost: L,
 ) -> Result<(), RunnerError>
 where
     P: Plugin,
-    S: std::future::Future<Output = ()>,
+    S: Future<Output = ()>,
+    L: Future<Output = ()>,
 {
     plugin.on_install(ctx).await?;
     plugin.on_enable(ctx).await?;
@@ -266,7 +295,26 @@ where
     plugin.on_start(ctx).await?;
 
     tracing::info!(plugin_id = %ctx.plugin_id, "plugin ready");
-    shutdown.await;
+    let lost = tokio::select! {
+        () = shutdown => false,
+        () = session_lost => true,
+    };
+
+    if lost {
+        tracing::error!(
+            plugin_id = %ctx.plugin_id,
+            "plugin host session lost; stopping so the unit restarts with a fresh session"
+        );
+        for (hook, result) in [
+            ("on_stop", plugin.on_stop(ctx).await),
+            ("on_disable", plugin.on_disable(ctx).await),
+        ] {
+            if let Err(e) = result {
+                tracing::debug!(plugin_id = %ctx.plugin_id, hook, error = %e, "teardown hook failed after session loss");
+            }
+        }
+        return Err(RunnerError::SessionLost);
+    }
 
     plugin.on_stop(ctx).await?;
     plugin.on_disable(ctx).await?;
@@ -423,5 +471,67 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, RunnerError::NoBridge));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_host_session_ends_the_runner_with_an_error() {
+        use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A plugin-host restart: the host answers the handshake, then its end
+        // of the session goes away. The runner must stop with an error (the
+        // binary then exits non-zero and systemd restarts it) instead of
+        // running on against a dead socket until an operator intervenes.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock = dir.path().join("p.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).expect("bind");
+        let host = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let len = stream.read_u32().await.expect("hello header") as usize;
+            let mut body = vec![0u8; len];
+            stream.read_exact(&mut body).await.expect("hello body");
+            let hello = Envelope::from_msgpack(&body).expect("hello envelope");
+            let ready = Envelope {
+                version: PROTOCOL_VERSION,
+                kind: "response".to_string(),
+                method: String::new(),
+                capability: String::new(),
+                args: Value::Map(vec![(Value::from("ready"), Value::Boolean(true))]),
+                request_id: hello.request_id,
+                token: String::new(),
+                error: None,
+            };
+            stream
+                .write_all(&ready.encode_frame().unwrap())
+                .await
+                .expect("ready");
+            // The host restarts: this session is gone.
+            drop(stream);
+        });
+
+        let args = RunnerArgs {
+            plugin_id: "com.example.demo".to_string(),
+            socket_path: Some(sock.to_string_lossy().into_owned()),
+            token: Some("tok".to_string()),
+            agent_id: String::new(),
+            data_dir: None,
+        };
+        // No shutdown signal ever arrives; only the session loss can end it.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_plugin_with::<DummyPlugin, _>(
+                args,
+                "1.0.0",
+                BTreeMap::new(),
+                std::future::pending(),
+            ),
+        )
+        .await
+        .expect("the runner must stop once the host session is lost");
+        host.await.expect("fake host");
+        assert!(
+            matches!(result, Err(RunnerError::SessionLost)),
+            "got {result:?}"
+        );
     }
 }

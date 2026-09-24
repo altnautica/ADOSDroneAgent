@@ -41,7 +41,7 @@ pub mod vision;
 pub use client::{ClientError, EventCallback, OffloadAdvertisement, PluginIpcClient};
 pub use context::{
     CameraClient, CloudClient, ConfigClient, EventsClient, LifecycleClient, MavlinkClient,
-    NodeClient, PeripheralClient, PluginContext, ProcessClient, TelemetryClient,
+    MdnsClient, NodeClient, PeripheralClient, PluginContext, ProcessClient, TelemetryClient,
 };
 pub use lifecycle::{run_plugin, run_plugin_with, Plugin, RunnerArgs, RunnerError};
 pub use vision::{Frame, FrameCallback, Odometry, Pose, VisionClient, VIO_COMPONENT_ID};
@@ -74,4 +74,10 @@ pub mod node_info {
     pub use ados_protocol::node_info::{
         BoardInfo, CameraInfo, GroundStationInfo, NodeInfo, StreamGeometry,
     };
+}
+
+/// The `mdns.advertise` / `mdns.browse` types ([`MdnsClient`]), re-exported
+/// from `ados-protocol`, which the host decodes and serializes them with.
+pub mod mdns {
+    pub use ados_protocol::plugin_mdns::{Advertised, DiscoveredService, RESERVED_SERVICE_TYPES};
 }

@@ -646,6 +646,19 @@ impl HostServices for RealHost {
         self.read_node_info().await
     }
 
+    async fn mdns_advertise(
+        &self,
+        plugin_id: &str,
+        session: u64,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        self.advertise_mdns(plugin_id, session, args).await
+    }
+
+    async fn mdns_browse(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        self.browse_mdns(args).await
+    }
+
     async fn cloud_publish(
         &self,
         plugin_id: &str,
@@ -863,6 +876,11 @@ impl HostServices for RealHost {
             .lock()
             .expect("components mutex poisoned")
             .release_session(plugin_id, session);
+        // An mDNS record belongs to the connection that published it, so it is
+        // withdrawn with exactly that session, even while a newer connection of
+        // the same plugin (its other service, or a reconnect) is live: the port
+        // it named is served by the process this connection was.
+        self.mdns.release(plugin_id, session);
         // The aux stream is released only when no newer
         // session of this plugin has begun: a reconnect that overlaps this
         // teardown keeps what it is using.
@@ -914,15 +932,18 @@ impl HostServices for RealHost {
     ) -> Option<broadcast::Receiver<Vec<u8>>> {
         // The engine fans every camera's descriptors out on one broadcast; the
         // per-camera filter is applied plugin-side (the SDK subscribe_frames
-        // callback drops a non-matching camera). When the engine socket is not
-        // up the slot is None and no stream arms, matching the MAVLink posture.
+        // callback drops a non-matching camera). The fanout outlives any one
+        // engine connection, so a subscribe made while the engine is down
+        // starts delivering once it connects. `None` only on a host with no
+        // vision client wired.
         //
         // The engine pushes `vision.deliver` ONLY to a connection that asked for
         // it, so handing back a receiver is not enough: the upstream
         // subscription has to be armed too, or the fanout stays permanently
         // empty and every subscribing plugin sees silence with no error
-        // anywhere. Armed once per process, lazily, so a node whose plugins
-        // never ask for frames never pays for the push.
+        // anywhere. Armed lazily, and re-armed by the client on every new
+        // engine connection, so a node whose plugins never ask for frames never
+        // pays for the push.
         let client = self.vision.as_ref()?.clone();
         let rx = client.subscribe_frames();
         tokio::spawn(async move { client.arm_frame_push().await });
@@ -936,8 +957,7 @@ impl HostServices for RealHost {
     ) -> Option<broadcast::Receiver<Vec<u8>>> {
         // The engine fans every camera's detection batches out on one broadcast;
         // the per-camera filter is applied plugin-side (the SDK callback drops a
-        // non-matching camera). When the engine socket is not up the slot is None
-        // and no stream arms, matching the frame-stream posture.
+        // non-matching camera). Same reconnect posture as the frame stream.
         //
         // Same upstream-arming rule as the frame stream above.
         let client = self.vision.as_ref()?.clone();

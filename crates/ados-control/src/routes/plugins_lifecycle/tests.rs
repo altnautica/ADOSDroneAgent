@@ -47,6 +47,8 @@ fn plugin_paths(root: &Path) -> Paths {
         token_secret: root.join("token-secret"),
         runner: root.join("runner"),
         run_dir: root.join("run"),
+        data_root: root.join("plugin-data"),
+        device_id_file: root.join("device-id"),
     }
 }
 

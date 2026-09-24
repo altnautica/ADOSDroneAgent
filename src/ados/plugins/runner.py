@@ -418,9 +418,11 @@ def _prepare_plugin_dirs(plugin_id: str, agent_id: str) -> tuple[Path, Path, Pat
     ``_data_dir_for`` and the Rust host's ``plugin_data_dir`` derive the identical
     path today, but two hand-synced derivations invite drift; when the env is
     present it wins, and ``_data_dir_for`` is the fallback for a direct (no-host)
-    launch. Nothing upstream makes the per-drone leaf, so a plugin's first write
-    hits ``FileNotFoundError`` without this. A create failure is logged (surfaced
-    as the plugin's own write error later), never a runner crash.
+    launch. The host creates the plugin's own data dir (and the per-drone leaf
+    when that dir is new); a leaf for a later device id, the config dir, or a
+    direct launch's dirs are made here, so a plugin's first write never hits
+    ``FileNotFoundError``. A create failure is logged (surfaced as the plugin's
+    own write error later), never a runner crash.
     """
     env_data_dir = os.environ.get("ADOS_PLUGIN_DATA_DIR")
     data_dir = Path(env_data_dir) if env_data_dir else _data_dir_for(plugin_id, agent_id)

@@ -591,6 +591,9 @@ impl ServiceBackend for LaunchdBackend {
 // recording
 // ---------------------------------------------------------------------------
 
+/// What [`RecordingBackend::on_enable_start`] runs at each start.
+type StartHook = Box<dyn Fn(&str) + Send + Sync>;
+
 /// A backend that touches no service manager: it keeps each installed unit's
 /// rendered systemd text in memory and records every verb as `(verb, name)`.
 /// Lives in the crate (not `#[cfg(test)]`) so dependent crates' tests can use
@@ -599,6 +602,7 @@ pub struct RecordingBackend {
     calls: Mutex<Vec<(String, String)>>,
     units: Mutex<BTreeMap<String, String>>,
     sandbox: bool,
+    on_enable_start: Option<StartHook>,
 }
 
 impl Default for RecordingBackend {
@@ -607,6 +611,7 @@ impl Default for RecordingBackend {
             calls: Mutex::new(Vec::new()),
             units: Mutex::new(BTreeMap::new()),
             sandbox: true,
+            on_enable_start: None,
         }
     }
 }
@@ -618,6 +623,14 @@ impl RecordingBackend {
             sandbox: false,
             ..RecordingBackend::default()
         }
+    }
+
+    /// Run `hook` with the unit name at every `enable_start`, the moment a
+    /// real service manager would exec the unit, so a test can check what
+    /// exists by then.
+    pub fn on_enable_start(mut self, hook: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.on_enable_start = Some(Box::new(hook));
+        self
     }
 
     /// Every `(verb, unit name)` recorded, in order.
@@ -661,6 +674,9 @@ impl ServiceBackend for RecordingBackend {
 
     fn enable_start(&self, name: &str) -> Result<(), SupervisorError> {
         self.record("enable_start", name);
+        if let Some(hook) = &self.on_enable_start {
+            hook(name);
+        }
         Ok(())
     }
 

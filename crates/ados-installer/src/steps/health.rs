@@ -15,19 +15,17 @@
 //!      is executable under `/opt/ados/bin`. The bash gate trusted that
 //!      `fetch_binaries` ran but never re-verified the Hard binaries are still
 //!      on disk by health time; this closes that gap so a vanished/zero-length
-//!      Hard binary is caught here, not at first supervisor exec.
+//!      Hard binary is caught here, not at first supervisor exec. The set is
+//!      read from the same per-profile catalog the fetch step uses, so the
+//!      MAVLink router (the sole C2 path, Hard on a drone and a ground station)
+//!      is required exactly where it is fetched and never on a workstation or
+//!      compute node.
 //!   6. **NEW** — the native WFB binary the profile's units exec by DEFAULT
 //!      (`ados-radio` on a drone, `ados-groundlink` on a ground station) is
 //!      present + executable. The WFB units run the native service on a clean
 //!      boot and keep Python only as a flag-guarded fallback, so a missing
 //!      native binary would crash-loop the unit; its on-disk presence is a
 //!      required precondition even though its prebuilt fetch gate is best-effort.
-//!      Also: the MAVLink router binary the Core MAVLink unit execs on both
-//!      profiles is present + executable. It is the sole C2 path with no
-//!      packaged fallback; its fetch gate is Hard, so this re-verification only
-//!      catches a binary that vanished/was truncated between fetch and health,
-//!      where the unit would crash-loop with no FC link while the install
-//!      otherwise looked healthy.
 //!   7. **NEW** — the native display binaries (`ados-display` +
 //!      `ados-display-probe`) the display units exec by DEFAULT are present +
 //!      executable, but ONLY when a panel was recognized (`display.enabled`
@@ -149,9 +147,12 @@ fn is_executable(path: &Path) -> bool {
 }
 
 /// The names of the Hard-gated prebuilt binaries that are MISSING (not present
-/// or not executable) under `/opt/ados/bin` for the profile. Pure given a
-/// `present` predicate, so a unit test can exercise the gap-detection without
-/// touching the filesystem.
+/// or not executable) under `/opt/ados/bin` for the profile. The set comes from
+/// the same per-profile catalog the fetch step downloads from, so health never
+/// asserts a binary the profile does not ship (the MAVLink router, the sole C2
+/// path on a drone and a ground station, is Hard there and absent on a
+/// workstation or compute node). Pure given a `present` predicate, so a unit
+/// test can exercise the gap-detection without touching the filesystem.
 pub fn missing_hard_binaries<F>(profile: &str, present: F) -> Vec<&'static str>
 where
     F: Fn(&str) -> bool,
@@ -161,28 +162,6 @@ where
         .filter(|b| b.gate == Gate::Hard && !present(b.dest))
         .map(|b| b.service)
         .collect()
-}
-
-/// The MAVLink router binary the Core MAVLink unit execs on both profiles. It
-/// is the sole command-and-control path to the flight controller and has no
-/// packaged fallback, so its on-disk presence is a required precondition: a
-/// missing binary crash-loops the Core unit, leaving the drone with no FC
-/// telemetry, arming, or GCS link. Profile-independent — both a drone and a
-/// ground station run the router.
-const C2_ROUTER_BINARY: &str = "/opt/ados/bin/ados-mavlink-router";
-
-/// The MAVLink router binary if it is MISSING (absent or not executable), else
-/// `None`. Pure given a `present` predicate so a unit test can exercise it
-/// without touching the filesystem.
-pub fn missing_c2_router_binary<F>(present: F) -> Option<&'static str>
-where
-    F: Fn(&str) -> bool,
-{
-    if present(C2_ROUTER_BINARY) {
-        None
-    } else {
-        Some(C2_ROUTER_BINARY)
-    }
 }
 
 /// The native service binary each profile's WFB units now exec by DEFAULT (the
@@ -364,7 +343,10 @@ impl Step for Health {
             misses.push("api-reachable".to_string());
         }
 
-        // 5. NEW: every Hard prebuilt binary is present + executable.
+        // 5. Every Hard prebuilt binary the profile ships is present +
+        // executable. This re-verifies what the fetch step placed (a binary that
+        // vanished or was truncated before health time would otherwise
+        // crash-loop its unit behind a healthy report), from the same catalog.
         for svc in missing_hard_binaries(&ctx.profile, |dest| is_executable(Path::new(dest))) {
             misses.push(format!("binary-missing:{svc}"));
         }
@@ -373,9 +355,10 @@ impl Step for Health {
         // be present + executable, or the unit would crash-loop. Its catalog gate
         // is best-effort for the fetch step, but the cutover makes its on-disk
         // presence a required precondition for a working install. Only asserted
-        // when the long-range radio is installed — a LoRa / Wi-Fi-only rig opts
-        // out of the RTL8812EU WFB stack, so its absence is expected there.
-        if ctx.install_rtl8812eu {
+        // when the long-range radio is installed ([`Ctx::has_long_range_radio`],
+        // the predicate the wfb-ng step builds on) — a LoRa / Wi-Fi-only rig or
+        // a workstation / compute node has no RTL8812EU WFB stack by design.
+        if ctx.has_long_range_radio() {
             if let Some(dest) =
                 missing_default_radio_binary(&ctx.profile, |d| is_executable(Path::new(d)))
             {
@@ -385,21 +368,6 @@ impl Step for Health {
                     .unwrap_or(dest);
                 misses.push(format!("binary-missing:{svc}"));
             }
-        }
-
-        // 6b. The MAVLink router (the sole C2 path, no packaged fallback) must be
-        // present + executable on both profiles. Its fetch gate is Hard so a
-        // fetch miss already aborts the install before this point; re-verifying
-        // its on-disk presence here catches a binary that vanished or was
-        // truncated between fetch and health time, when the Core MAVLink unit
-        // would otherwise crash-loop with no FC link reported as a healthy
-        // install.
-        if let Some(dest) = missing_c2_router_binary(|d| is_executable(Path::new(d))) {
-            let svc = Path::new(dest)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(dest);
-            misses.push(format!("binary-missing:{svc}"));
         }
 
         // 7. The native display binaries the display units now exec by DEFAULT
@@ -421,11 +389,12 @@ impl Step for Health {
 
         // 8. The radio stack is on disk (the wfb-ng binaries, the bind artifacts,
         // the service template): without it a fresh rig cannot auto-pair over the
-        // RTL8812EU WFB link, so each is a required miss — but ONLY when the
-        // operator installed the radio. A LoRa / Wi-Fi-only drone (radio toggle
-        // off) has no RTL8812EU WFB stack by design, so asserting it would fail an
-        // install that is working exactly as chosen.
-        if ctx.install_rtl8812eu {
+        // RTL8812EU WFB link, so each is a required miss — but ONLY where the
+        // wfb-ng step built it ([`Ctx::has_long_range_radio`]). A LoRa /
+        // Wi-Fi-only drone (radio toggle off) or a workstation / compute node has
+        // no RTL8812EU WFB stack by design, so asserting it would fail an install
+        // that is working exactly as chosen.
+        if ctx.has_long_range_radio() {
             misses.extend(missing_radio_stack());
         }
 
@@ -495,9 +464,15 @@ mod tests {
         );
 
         // All Hard gates absent → all of them reported (drone Hard set:
-        // supervisor, video, cloud, vision).
+        // supervisor, MAVLink router, video, cloud, vision).
         let all = missing_hard_binaries("drone", |_| false);
-        for svc in ["ados-supervisor", "ados-video", "ados-cloud", "ados-vision"] {
+        for svc in [
+            "ados-supervisor",
+            "ados-mavlink-router",
+            "ados-video",
+            "ados-cloud",
+            "ados-vision",
+        ] {
             assert!(
                 all.contains(&svc),
                 "{svc} (Hard) must be flagged when absent"
@@ -535,24 +510,6 @@ mod tests {
 
         // An unknown profile has no default WFB unit binary to gate on.
         assert!(missing_default_radio_binary("workstation", |_| false).is_none());
-    }
-
-    #[test]
-    fn c2_router_binary_is_required_on_both_profiles() {
-        // Present → no miss.
-        assert!(missing_c2_router_binary(|_| true).is_none());
-
-        // Absent → the router path is reported (the sole C2 path, no fallback).
-        let missing = missing_c2_router_binary(|dest| dest != "/opt/ados/bin/ados-mavlink-router");
-        assert_eq!(missing, Some("/opt/ados/bin/ados-mavlink-router"));
-
-        // The check is profile-independent: the predicate alone decides it, so
-        // a missing router fails the gate regardless of which profile is being
-        // installed (both a drone and a ground station run the router).
-        assert_eq!(
-            missing_c2_router_binary(|_| false),
-            Some("/opt/ados/bin/ados-mavlink-router")
-        );
     }
 
     #[test]
@@ -608,5 +565,34 @@ mod tests {
         assert!(gs.contains(&"ados-supervisor"));
         assert!(!gs.contains(&"ados-groundlink"));
         assert!(!gs.contains(&"ados-video"));
+    }
+
+    #[test]
+    fn every_profile_is_held_to_exactly_the_hard_binaries_it_fetches() {
+        // Health and fetch share one catalog: with everything absent, each
+        // profile is flagged for its own Hard binaries and nothing else. A
+        // workstation or compute node fetches no MAVLink router, so a missing
+        // one must not fail its install; a drone or ground station runs the
+        // router as its sole C2 path, so a missing one must.
+        for profile in ["drone", "ground_station", "workstation", "compute"] {
+            let missing = missing_hard_binaries(profile, |_| false);
+            let fetched_hard: Vec<&str> = binaries::for_profile(profile)
+                .into_iter()
+                .filter(|b| b.gate == Gate::Hard)
+                .map(|b| b.service)
+                .collect();
+            assert_eq!(missing, fetched_hard, "{profile}");
+            assert!(missing.contains(&"ados-supervisor"), "{profile}");
+            let router = missing.contains(&"ados-mavlink-router");
+            let runs_router = matches!(profile, "drone" | "ground_station");
+            assert_eq!(router, runs_router, "{profile}: router gate");
+        }
+        // Everything a workstation fetches is present → a healthy install,
+        // with no router on disk at all.
+        let ws_dests: Vec<&str> = binaries::for_profile("workstation")
+            .into_iter()
+            .map(|b| b.dest)
+            .collect();
+        assert!(missing_hard_binaries("workstation", |d| ws_dests.contains(&d)).is_empty());
     }
 }

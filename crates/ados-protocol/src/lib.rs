@@ -84,6 +84,7 @@ pub mod pair_proof;
 pub mod pairing_posture;
 pub mod plugin;
 pub mod plugin_loopback_guard;
+pub mod plugin_mdns;
 pub mod reach;
 pub mod relay_ticket;
 pub mod rest;

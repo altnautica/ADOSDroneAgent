@@ -33,9 +33,11 @@ pub const PLUGIN_REVOCATIONS_PATH: &str = "/etc/ados/plugin-revocations.json";
 /// **Security boundary** — this is maintained in code rather than via
 /// filesystem prefix-matching so a malicious actor with write access to
 /// `/etc/ados/plugin-keys/` cannot plant a key file with the right prefix and
-/// impersonate first-party status. First-party status unlocks the `inprocess`
-/// agent isolation level and the `inline` GCS isolation level; third parties
-/// cannot use either even if they declare them in the manifest. Rotate by
+/// impersonate first-party status. First-party status unlocks the `inline` GCS
+/// isolation level, `resources.class: heavy`, and an agent half on a service
+/// backend that enforces no sandbox; third parties get none of them even if
+/// they declare them in the manifest. The supervisor grants it only to an id
+/// whose archive signature verified against that id's enrolled key. Rotate by
 /// adding the new signer id and dropping the retired one in a deliberate code
 /// change.
 pub const FIRST_PARTY_SIGNERS: &[&str] = &["altnautica-2026-A", "altnautica-2026-B"];

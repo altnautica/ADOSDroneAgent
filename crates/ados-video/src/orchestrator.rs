@@ -446,13 +446,24 @@ impl VideoOrchestrator {
     /// It goes through [`Self::persist_pipeline_outcome`] because this runs on
     /// every 5 s health tick: rebuilding the snapshot from discovery alone
     /// yields `pipeline_state: unknown`, which erased the `streaming` stamp
-    /// `start_stream` had just written (and the circuit breaker's reason with
-    /// it) one tick after the pipeline came up — a streaming drone then read as
-    /// `not_initialized`, with no playable endpoint, to every status consumer.
+    /// (and the circuit breaker's reason with it) one tick after the pipeline
+    /// came up — a streaming drone then read as `not_initialized`, with no
+    /// playable endpoint, to every status consumer.
+    ///
+    /// A running pipeline is `streaming` only once the first packet reached
+    /// mediamtx's `main` path (`first_packet_seen`, latched by the health
+    /// check). Before that the encoder exists but publishes nothing: a network
+    /// source that never answers, or a respawned encoder that has not
+    /// reconnected yet, reads `starting`, never as a stream a consumer could
+    /// pull.
     async fn refresh_camera_state(&self) {
         self.persist_pipeline_outcome(match self.state {
-            PipelineState::Running => crate::camera_state::PipelineOutcome::Streaming,
-            PipelineState::Starting => crate::camera_state::PipelineOutcome::Starting,
+            PipelineState::Running if self.first_packet_seen => {
+                crate::camera_state::PipelineOutcome::Streaming
+            }
+            PipelineState::Running | PipelineState::Starting => {
+                crate::camera_state::PipelineOutcome::Starting
+            }
             PipelineState::Error => crate::camera_state::PipelineOutcome::Error,
             PipelineState::Stopped => crate::camera_state::PipelineOutcome::Stopped,
         })
@@ -2026,8 +2037,8 @@ mod tests {
         // whep_url within 5 s of coming up.
         //
         // start_stream itself is not driven here: it spawns mediamtx and a real
-        // encoder. Its observable tail is the Streaming stamp plus the resolved
-        // encoder label, which is what is set up.
+        // encoder. A pipeline past its first packet is its resolved encoder
+        // label, the Running state and the latched first packet.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("camera-state.json");
         let mut o = test_orch();
@@ -2036,6 +2047,7 @@ mod tests {
         o.encoder_type = Some(EncoderKind::Ffmpeg);
         o.encoder_label = Some("ffmpeg-h264_v4l2m2m".to_string());
         o.state = PipelineState::Running;
+        o.first_packet_seen = true;
         o.persist_pipeline_outcome(crate::camera_state::PipelineOutcome::Streaming)
             .await;
 
@@ -2052,6 +2064,81 @@ mod tests {
         assert_eq!(v["encoder"], "ffmpeg-h264_v4l2m2m");
         assert_eq!(v["encoder_hw"], true);
         assert!(v["pipeline_reason"].is_null(), "streaming has no reason");
+    }
+
+    /// `streaming` means `main` is being produced, for every kind of capture
+    /// source: a USB camera, a CSI camera and a network (RTSP) source all read
+    /// as a live main stream only once the health check has seen the publisher
+    /// on `main`, and stop reading as one the moment the pipeline stops or
+    /// fails. The network source is the case that used to lie: discovery
+    /// reports it `ready` unconditionally, and the spawn-time `streaming` stamp
+    /// then called an unreachable URL a stream.
+    #[tokio::test]
+    async fn every_source_kind_reads_as_a_live_main_stream_only_while_main_is_published() {
+        use crate::camera_state::{read_main_stream_live, CAMERA_STATE_LIVE_S};
+        let csi = DiscoveryResult {
+            cameras: vec![crate::discover::DiscoveredCamera {
+                name: "imx219".into(),
+                camera_type: "csi".into(),
+                device_path: "/dev/video10".into(),
+                width: 1920,
+                height: 1080,
+                capabilities: Vec::new(),
+                hardware_role: "primary".into(),
+            }],
+            primary: Some(crate::discover::Primary {
+                device_path: "/dev/video10".into(),
+                name: "imx219".into(),
+            }),
+            total_cameras: 1,
+        };
+        let sources = [
+            ("usb", present_camera_discovery()),
+            ("csi", csi),
+            (
+                "network",
+                DiscoveryResult::for_network_source("rtsp://192.0.2.10:8554/scene"),
+            ),
+        ];
+        for (kind, discovery) in sources {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("camera-state.json");
+            let live = || {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
+                read_main_stream_live(&path, now, CAMERA_STATE_LIVE_S)
+            };
+            let mut o = test_orch();
+            o.last_cameras = discovery;
+            o.camera_state_path = Some(path.clone());
+            o.encoder_label = Some("ffmpeg-libx264".to_string());
+
+            // The encoder is spawned and the grace window is open: nothing has
+            // reached `main` yet.
+            o.state = PipelineState::Running;
+            o.first_packet_seen = false;
+            o.refresh_camera_state().await;
+            assert!(!live(), "{kind}: a spawned encoder is not a stream");
+
+            // The health check saw the publisher on `main`.
+            o.first_packet_seen = true;
+            o.refresh_camera_state().await;
+            assert!(live(), "{kind}: a published main stream is live");
+
+            // The pipeline failed (the health ladder is restarting it).
+            o.state = PipelineState::Error;
+            o.last_start_error = StartError::EncoderCommandFailed;
+            o.refresh_camera_state().await;
+            assert!(!live(), "{kind}: a failed pipeline is not a stream");
+
+            // A deliberate stop.
+            o.state = PipelineState::Stopped;
+            o.last_start_error = StartError::None;
+            o.refresh_camera_state().await;
+            assert!(!live(), "{kind}: a stopped pipeline is not a stream");
+        }
     }
 
     #[tokio::test]

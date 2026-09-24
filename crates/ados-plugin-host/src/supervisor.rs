@@ -18,7 +18,9 @@
 //!   `<arch>-<os>` binary.
 //! * `isolation: inprocess` (agent) is refused: nothing runs an in-process half.
 //! * `isolation: inline` (GCS), `resources.class: heavy`, and any agent half on
-//!   a service backend that enforces no sandbox require a first-party signer.
+//!   a service backend that enforces no sandbox require a first-party signer
+//!   whose Ed25519 signature verified against an enrolled key. The id an
+//!   archive declares is never trusted on its own, even with signing relaxed.
 //!
 //! The service-manager calls and filesystem ops are real, but the crate stays
 //! lib-only: no test invokes a service manager (the [`ServiceBackend`] is
@@ -72,12 +74,14 @@ use crate::manifest::{
     bin_reference, host_arch_os, AgentIsolation, DeclaredCapability, GcsIsolation, PluginManifest,
     ResourceClass, PAYLOAD_MAX_BYTES,
 };
+use crate::server::{plugin_socket_dir, plugin_socket_path};
 use crate::services::{
     build_service_spec, declared_services, probe_spec, service_argv, service_unit_name_for,
     ReadyCheck, ServiceSpec,
 };
 use crate::signing::{
     is_first_party_signer, load_revocation_list, load_trusted_keys, verify_archive_signature,
+    PLUGIN_KEYS_DIR,
 };
 use crate::state::{
     self, filter_permissions_against_manifest, find_install, grant_permission, load_state, now_ms,
@@ -87,6 +91,10 @@ use crate::state::{
 use crate::systemd::{
     build_unit_spec, plugin_http_dir, unit_name_for, PLUGIN_LOG_DIR, PLUGIN_RUNNER_BINARY,
     PLUGIN_UNIT_DIR,
+};
+use crate::token_secret::{
+    plugin_data_dir, read_device_id, shared_issuer, token_env_path, write_token_env,
+    DEVICE_ID_PATH, PLUGIN_DATA_DIR,
 };
 
 /// Default install directory for unpacked third-party archives.
@@ -100,6 +108,8 @@ pub const DEFAULT_RUN_DIR: &str = "/run/ados";
 pub struct InstallResult {
     pub plugin_id: String,
     pub version: String,
+    /// The signer whose signature verified at install; `None` for an unsigned
+    /// archive or one whose signature did not verify.
     pub signer_id: Option<String>,
     pub risk: String,
     pub permissions_requested: Vec<String>,
@@ -136,6 +146,12 @@ pub struct Paths {
     /// The agent run dir (`ADOS_RUN_DIR`), holding each HTTP plugin's socket
     /// dir under `plugin-http/`.
     pub run_dir: PathBuf,
+    /// Each plugin's persistent data dir lives at `<data_root>/<id>`
+    /// (`ADOS_PLUGIN_DATA_DIR_ROOT`).
+    pub data_root: PathBuf,
+    /// This node's device id, which places a plugin's per-drone data dir
+    /// (`ADOS_DEVICE_ID_PATH`).
+    pub device_id_file: PathBuf,
 }
 
 impl Paths {
@@ -163,9 +179,16 @@ impl Paths {
             ),
             runner: env_path("ADOS_PLUGIN_RUNNER", PLUGIN_RUNNER_BINARY),
             run_dir: env_path("ADOS_RUN_DIR", DEFAULT_RUN_DIR),
+            data_root: env_path("ADOS_PLUGIN_DATA_DIR_ROOT", PLUGIN_DATA_DIR),
+            device_id_file: env_path("ADOS_DEVICE_ID_PATH", DEVICE_ID_PATH),
         }
     }
 }
+
+/// Hands a directory a plugin unit writes to (its data dir, its HTTP socket
+/// dir) over to the account the unit runs as. The default chowns it to `ados`
+/// when this process is root; tests inject a recorder.
+pub type DirOwner = Arc<dyn Fn(&Path) -> Result<(), SupervisorError> + Send + Sync>;
 
 /// Plugin lifecycle controller. Constructed once per agent.
 pub struct PluginSupervisor {
@@ -195,6 +218,11 @@ pub struct PluginSupervisor {
     /// caller with a different host (e.g. tests, or a future fully-wired host)
     /// imposes no refusal.
     ungrantable_caps: BTreeSet<String>,
+    /// The enrolled signer keys an archive signature verifies against.
+    trusted_keys_dir: PathBuf,
+    /// Hands a plugin's writable dirs to its unit account on a sandboxing
+    /// backend.
+    dir_owner: DirOwner,
 }
 
 impl PluginSupervisor {
@@ -221,6 +249,8 @@ impl PluginSupervisor {
             download: None,
             installs: Vec::new(),
             ungrantable_caps: BTreeSet::new(),
+            trusted_keys_dir: PathBuf::from(PLUGIN_KEYS_DIR),
+            dir_owner: Arc::new(chown_to_plugin_account),
         }
     }
 
@@ -281,6 +311,20 @@ impl PluginSupervisor {
     /// Inject the payload download transport (tests serve fixed bodies).
     pub fn with_download_source(mut self, source: Arc<dyn DownloadSource>) -> Self {
         self.download = Some(source);
+        self
+    }
+
+    /// Read the enrolled signer keys from `dir` instead of
+    /// [`PLUGIN_KEYS_DIR`] (tests enrol a throwaway key).
+    pub fn with_trusted_keys_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.trusted_keys_dir = dir.into();
+        self
+    }
+
+    /// Inject how a plugin's writable dirs are handed to its unit account
+    /// (tests record the calls instead of chowning).
+    pub fn with_dir_owner(mut self, owner: DirOwner) -> Self {
+        self.dir_owner = owner;
         self
     }
 
@@ -395,7 +439,7 @@ impl PluginSupervisor {
     /// and the digest of every file (see [`crate::attestation`]).
     pub fn attestation(&self, plugin_id: &str) -> Result<Attestation, SupervisorError> {
         self.require_install_ref(plugin_id)?;
-        let dir = plugin_install_target(&self.paths.install_dir, plugin_id)?;
+        let dir = plugin_dir_under(&self.paths.install_dir, plugin_id)?;
         Attestation::read_from(&dir)
     }
 
@@ -559,7 +603,7 @@ impl PluginSupervisor {
     ) -> Result<InstallResult, LifecycleError> {
         let contents = builtin_contents(manifest_yaml)?;
         let source = format!("builtin:{}", contents.manifest.id);
-        self.install_verified(contents, Path::new(&source), false)
+        self.install_verified(contents, None, Path::new(&source), false)
     }
 
     /// Install from parsed contents, choosing whether a version downgrade is
@@ -576,51 +620,78 @@ impl PluginSupervisor {
         source_path: &Path,
         allow_downgrade: bool,
     ) -> Result<InstallResult, LifecycleError> {
-        if self.require_signed {
-            let manifest = &contents.manifest;
-            let (Some(signer_id), Some(sig_b64)) = (
-                contents.signer_id.as_deref(),
-                contents.signature_b64.as_deref(),
-            ) else {
+        let signer = self.verified_signer(&contents)?;
+        self.install_verified(contents, signer, source_path, allow_downgrade)
+    }
+
+    /// The signer whose Ed25519 signature over the archive's payload hash
+    /// verifies against an enrolled key and is not revoked. Every trust
+    /// decision (the first-party gates, the recorded signer) keys on this,
+    /// never on the id the `SIGNATURE` entry declares.
+    ///
+    /// With signing required, an unsigned archive or a signature that does not
+    /// verify is refused. With it relaxed, either installs as unsigned: the
+    /// archive is accepted, but a declared id it cannot prove buys it nothing.
+    fn verified_signer(
+        &self,
+        contents: &ArchiveContents,
+    ) -> Result<Option<String>, SignatureError> {
+        let plugin_id = &contents.manifest.id;
+        let (Some(signer_id), Some(sig_b64)) = (
+            contents.signer_id.as_deref(),
+            contents.signature_b64.as_deref(),
+        ) else {
+            if self.require_signed {
                 return Err(SignatureError::new(
                     SignatureErrorKind::Missing,
-                    format!("plugin {}: archive is unsigned", manifest.id),
-                )
-                .into());
-            };
-            let trusted = load_trusted_keys(None);
-            let revocations = load_revocation_list(None);
-            verify_archive_signature(
-                &contents.payload_hash,
-                sig_b64,
-                signer_id,
-                &trusted,
-                &revocations,
-            )?;
+                    format!("plugin {plugin_id}: archive is unsigned"),
+                ));
+            }
+            return Ok(None);
+        };
+        let trusted = load_trusted_keys(Some(&self.trusted_keys_dir));
+        let revocations = load_revocation_list(None);
+        match verify_archive_signature(
+            &contents.payload_hash,
+            sig_b64,
+            signer_id,
+            &trusted,
+            &revocations,
+        ) {
+            Ok(()) => Ok(Some(signer_id.to_string())),
+            Err(e) if self.require_signed => Err(e),
+            Err(e) => {
+                tracing::warn!(
+                    plugin_id = %plugin_id,
+                    declared_signer = signer_id,
+                    error = %e,
+                    "plugin signature does not verify; installing as unsigned"
+                );
+                Ok(None)
+            }
         }
-        self.install_verified(contents, source_path, allow_downgrade)
     }
 
     /// The install past the signature check: compatibility, the first-party
     /// gates and the service block, the payloads, then the locked unpack, unit
-    /// and record.
+    /// and record. `signer` is the verified signer, `None` when unsigned.
     fn install_verified(
         &mut self,
         contents: ArchiveContents,
+        signer: Option<String>,
         source_path: &Path,
         allow_downgrade: bool,
     ) -> Result<InstallResult, LifecycleError> {
-        let manifest = contents.manifest.clone();
-        self.check_compatibility(&manifest)?;
-        let signer = contents.signer_id.as_deref();
-        self.reject_inline_for_third_party(&manifest, signer)?;
-        self.reject_heavy_for_third_party(&manifest, signer)?;
-        self.reject_unsandboxed_third_party(&manifest, signer)?;
+        let manifest = &contents.manifest;
+        self.check_compatibility(manifest)?;
+        self.reject_inline_for_third_party(manifest, signer.as_deref())?;
+        self.reject_heavy_for_third_party(manifest, signer.as_deref())?;
+        self.reject_unsandboxed_third_party(manifest, signer.as_deref())?;
         // A malformed service block (a foreign slice, an off-box ready_check,
         // an unrenderable command, an undeclared listener) is refused here, as
         // the Python manifest model refuses it at parse, rather than surfacing
         // at enable.
-        for service in declared_services(&manifest)? {
+        for service in declared_services(manifest)? {
             service_argv(&service.command)?;
         }
 
@@ -631,11 +702,11 @@ impl PluginSupervisor {
             now_ms()
         ));
         let result = self
-            .fetch_payloads(&manifest, &payload_dir)
+            .fetch_payloads(manifest, &payload_dir)
             .and_then(|fetched| {
                 self.install_locked(
                     &contents,
-                    &manifest,
+                    signer,
                     source_path,
                     allow_downgrade,
                     &payload_dir,
@@ -646,9 +717,9 @@ impl PluginSupervisor {
         let result = result?;
 
         tracing::info!(
-            plugin_id = %manifest.id,
-            version = %manifest.version,
-            signer_id = ?contents.signer_id,
+            plugin_id = %result.plugin_id,
+            version = %result.version,
+            signer_id = ?result.signer_id,
             "plugin_installed"
         );
         Ok(result)
@@ -701,12 +772,13 @@ impl PluginSupervisor {
     fn install_locked(
         &mut self,
         contents: &ArchiveContents,
-        manifest: &PluginManifest,
+        signer: Option<String>,
         source_path: &Path,
         allow_downgrade: bool,
         payload_dir: &Path,
         fetched: &[(String, String)],
     ) -> Result<InstallResult, LifecycleError> {
+        let manifest = &contents.manifest;
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
         self.reload_installs()?;
         if !allow_downgrade {
@@ -717,7 +789,7 @@ impl PluginSupervisor {
         // Unpack and check into a staging dir beside the target. Every check
         // runs against the staging copy, so a bad archive leaves an existing
         // install exactly as it was; only a validated tree replaces it.
-        let target = plugin_install_target(&self.paths.install_dir, &manifest.id)?;
+        let target = plugin_dir_under(&self.paths.install_dir, &manifest.id)?;
         let staging = self
             .paths
             .install_dir
@@ -750,6 +822,9 @@ impl PluginSupervisor {
                 .write_to(&staging)
                 .map_err(LifecycleError::from)
             });
+        // The plugin's data dir, before anything replaces the old install: the
+        // unit binds it writable, so it must exist before the unit can start.
+        let staged = staged.and_then(|()| self.ensure_data_dir(manifest));
         if let Err(e) = staged {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(e);
@@ -785,7 +860,7 @@ impl PluginSupervisor {
             version: manifest.version.clone(),
             source: PluginSource::LocalFile,
             source_uri: Some(source_path.display().to_string()),
-            signer_id: contents.signer_id.clone(),
+            signer_id: signer.clone(),
             manifest_hash,
             status: PluginStatus::Installed,
             installed_at: now_ms(),
@@ -806,7 +881,7 @@ impl PluginSupervisor {
         Ok(InstallResult {
             plugin_id: manifest.id.clone(),
             version: manifest.version.clone(),
-            signer_id: contents.signer_id.clone(),
+            signer_id: signer,
             risk: manifest.risk.clone(),
             permissions_requested: manifest.declared_permissions().into_iter().collect(),
         })
@@ -927,6 +1002,7 @@ impl PluginSupervisor {
             return Ok(());
         }
         self.ensure_http_dir(manifest)?;
+        self.ensure_data_dir(manifest)?;
         let granted = self
             .find_install(plugin_id)
             .map(state::granted_caps)
@@ -1027,7 +1103,8 @@ impl PluginSupervisor {
     /// Enable a plugin. Idempotent: a running plugin is left running. A plugin
     /// with no agent unit (a GCS-only plugin) only flips state; subprocess
     /// plugins are enabled and started on the service backend, with their
-    /// declared services.
+    /// declared services, once everything their units bind and read is in
+    /// place.
     pub fn enable(&mut self, plugin_id: &str) -> Result<(), LifecycleError> {
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
         self.reload_installs()?;
@@ -1047,7 +1124,29 @@ impl PluginSupervisor {
             return Ok(());
         }
         self.ensure_http_dir(&manifest)?;
-        self.backend.enable_start(&unit_name_for(plugin_id))?;
+        self.ensure_data_dir(&manifest)?;
+        // Enabled before the start: the plugin host serves an enabled plugin,
+        // and its socket and token must be there before the unit runs.
+        let (prior_status, prior_enabled_at) = {
+            let install = self.require_install_mut(plugin_id)?;
+            let prior = (install.status, install.enabled_at);
+            install.status = PluginStatus::Enabled;
+            install.enabled_at = Some(now_ms());
+            prior
+        };
+        save_state(&self.installs, Some(&self.paths.state_path))?;
+        let started = self.prepare_host_files(plugin_id).and_then(|()| {
+            self.backend
+                .enable_start(&unit_name_for(plugin_id))
+                .map_err(LifecycleError::from)
+        });
+        if let Err(e) = started {
+            let install = self.require_install_mut(plugin_id)?;
+            install.status = prior_status;
+            install.enabled_at = prior_enabled_at;
+            save_state(&self.installs, Some(&self.paths.state_path))?;
+            return Err(e);
+        }
         // Each declared service under its own unit, additional to the main
         // runner. A failure on one is surfaced as not-ready with its reason,
         // never as a failed enable: the plugin's main half still runs.
@@ -1091,8 +1190,8 @@ impl PluginSupervisor {
     }
 
     /// Remove a plugin: disable it (if running/enabled), remove the units,
-    /// delete the unpacked dir and (unless `keep_data`) the log, and drop the
-    /// state.
+    /// delete the unpacked dir and (unless `keep_data`) the log and the data
+    /// dir, and drop the state.
     pub fn remove(&mut self, plugin_id: &str, keep_data: bool) -> Result<(), LifecycleError> {
         // disable() takes the lock itself; decide against current state, run it
         // outside the lock below, then re-read under the lock for the removal.
@@ -1121,7 +1220,7 @@ impl PluginSupervisor {
         if http_dir.exists() {
             let _ = std::fs::remove_dir_all(&http_dir);
         }
-        let target = plugin_install_target(&self.paths.install_dir, plugin_id)?;
+        let target = plugin_dir_under(&self.paths.install_dir, plugin_id)?;
         if target.exists() {
             std::fs::remove_dir_all(&target)?;
         }
@@ -1129,6 +1228,19 @@ impl PluginSupervisor {
             let log_file = crate::systemd::log_path_for(&self.paths.log_dir, plugin_id);
             if log_file.exists() {
                 std::fs::remove_file(&log_file)?;
+            }
+            // The files are gone already, so a data dir that will not go is
+            // reported rather than failing a removal that could not be retried.
+            let data = plugin_dir_under(&self.paths.data_root, plugin_id)?;
+            match std::fs::remove_dir_all(&data) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(
+                    plugin_id,
+                    dir = %data.display(),
+                    error = %e,
+                    "plugin data dir could not be removed"
+                ),
             }
         }
         self.installs = remove_install(std::mem::take(&mut self.installs), plugin_id);
@@ -1169,7 +1281,7 @@ impl PluginSupervisor {
     /// `manifest_hash` (tamper detection).
     fn manifest_bytes_checked(&self, plugin_id: &str) -> Result<Vec<u8>, SupervisorError> {
         let manifest_path =
-            plugin_install_target(&self.paths.install_dir, plugin_id)?.join(MANIFEST_FILENAME);
+            plugin_dir_under(&self.paths.install_dir, plugin_id)?.join(MANIFEST_FILENAME);
         if !manifest_path.exists() {
             return Err(SupervisorError(format!(
                 "plugin {plugin_id} manifest missing at {}",
@@ -1442,19 +1554,108 @@ impl PluginSupervisor {
             std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o770))?;
         }
         // A sandboxed unit runs as `ados`; the dir must be its to create the
-        // socket in. Only root can hand it over, and only a sandboxing backend
-        // runs units as another account.
-        if self.backend.enforces_sandbox() && nix::unistd::geteuid().is_root() {
-            let user = nix::unistd::User::from_name("ados").ok().flatten();
-            let group = nix::unistd::Group::from_name("ados").ok().flatten();
-            match (user, group) {
-                (Some(u), Some(g)) => nix::unistd::chown(&dir, Some(u.uid), Some(g.gid))
-                    .map_err(|e| SupervisorError(format!("chown {}: {e}", dir.display())))?,
-                _ => tracing::warn!(
-                    dir = %dir.display(),
-                    "the ados account is absent; the plugin HTTP dir stays root-owned"
-                ),
+        // socket in.
+        self.hand_over(&dir)?;
+        Ok(())
+    }
+
+    /// Create a subprocess plugin's data dir, `<data root>/<id>`: 0700 and
+    /// handed to the account its units run as, which the unit binds writable
+    /// and nothing else under the data root. Run at install, every enable and
+    /// daemon start, like the HTTP dir.
+    ///
+    /// A base created by this call is still the host's, so the per-drone dir
+    /// the runner's `ADOS_PLUGIN_DATA_DIR` names on a paired node is made in it
+    /// too, and the chain is handed over deepest first. An existing base is the
+    /// plugin account's: it is handed over again (a leftover root-owned one is
+    /// fixed) but never entered, so a root process never creates or chowns
+    /// through a path the plugin controls, and one without DAC override (the
+    /// cloud relay) needs no access to it. The runner makes a missing per-drone
+    /// dir under its own base.
+    fn ensure_data_dir(&self, manifest: &PluginManifest) -> Result<(), LifecycleError> {
+        if !manifest.is_subprocess_agent() {
+            return Ok(());
+        }
+        let base = plugin_dir_under(&self.paths.data_root, &manifest.id)?;
+        // The root stays traversable (0755 by the default umask): a unit
+        // reaches its bound dir through it.
+        std::fs::create_dir_all(&self.paths.data_root)?;
+        let mut fresh: Vec<PathBuf> = Vec::new();
+        if create_private_dir(&base)? {
+            let agent_id = read_device_id(&self.paths.device_id_file);
+            if is_one_component(&agent_id) {
+                let leaf = plugin_data_dir(&self.paths.data_root, &manifest.id, &agent_id);
+                for dir in [leaf.parent().map(Path::to_path_buf), Some(leaf)]
+                    .into_iter()
+                    .flatten()
+                {
+                    create_private_dir(&dir)?;
+                    fresh.push(dir);
+                }
+            } else if !agent_id.is_empty() {
+                tracing::warn!(
+                    plugin_id = %manifest.id,
+                    device_id = %agent_id,
+                    "the device id is not a directory name; not creating a per-drone data dir"
+                );
             }
+        }
+        for dir in fresh.iter().rev() {
+            self.hand_over(dir)?;
+        }
+        self.hand_over(&base)?;
+        Ok(())
+    }
+
+    /// Give `dir` to the account plugin units run as. Only a sandboxing
+    /// backend runs units as another account; elsewhere they run as this
+    /// process's user, who already owns it.
+    fn hand_over(&self, dir: &Path) -> Result<(), SupervisorError> {
+        if self.backend.enforces_sandbox() {
+            (self.dir_owner)(dir)?;
+        }
+        Ok(())
+    }
+
+    /// Make sure everything an enabled plugin's units need from the plugin
+    /// host exists before one starts: its socket dir (bound without the
+    /// optional prefix, so a missing one fails the start in namespace setup),
+    /// the host socket in it, and the token env file the runner reads.
+    ///
+    /// The host creates all three when it reconciles the Enabled record just
+    /// saved, so it is asked to, synchronously. A host that cannot be reached
+    /// leaves the socket to its next poll; the dir and a token minted from the
+    /// shared secret are put in place here, so the unit still starts and its
+    /// runner waits for the socket.
+    fn prepare_host_files(&self, plugin_id: &str) -> Result<(), LifecycleError> {
+        if let Err(e) = crate::reconcile_via_control(&self.paths.control_dir) {
+            tracing::warn!(
+                plugin_id,
+                detail = %e,
+                "plugin host control socket unreachable; preparing the plugin's socket dir \
+                 and token here"
+            );
+        }
+        let socket_dir = plugin_socket_dir(&self.paths.socket_dir, plugin_id);
+        if !socket_dir.is_dir() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::create_dir_all(&socket_dir)?;
+            std::fs::set_permissions(&socket_dir, std::fs::Permissions::from_mode(0o755))?;
+        }
+        if !token_env_path(plugin_id, Some(&self.paths.socket_dir)).is_file() {
+            let granted = self
+                .find_install(plugin_id)
+                .map(state::granted_caps)
+                .unwrap_or_default();
+            write_token_env(
+                &shared_issuer(&self.paths.token_secret)?,
+                plugin_id,
+                &granted,
+                &plugin_socket_path(&self.paths.socket_dir, plugin_id),
+                &self.paths.data_root,
+                &read_device_id(&self.paths.device_id_file),
+                Some(&self.paths.socket_dir),
+            )?;
         }
         Ok(())
     }
@@ -1697,22 +1898,76 @@ fn builtin_contents(manifest_yaml: &str) -> Result<ArchiveContents, LifecycleErr
     parse_archive_bytes(raw)
 }
 
-/// The plugin's unpacked dir: a direct child of `install_dir` named by the id.
+/// A plugin's own dir under one of the host's roots (its unpacked tree under
+/// the install dir, its data under the data root): a direct child of `root`
+/// named by the id.
 ///
-/// The install path swaps a freshly unpacked tree into this dir and deletes
-/// the one it replaces, as root, so an id that is absolute, carries a
-/// separator, or walks up with `..` would aim both at an arbitrary host
-/// directory. The manifest parser already refuses such an id; this is the check
-/// at the point of use, so no id that reaches here some other way can widen the
-/// blast radius past one plugin dir.
-fn plugin_install_target(install_dir: &Path, plugin_id: &str) -> Result<PathBuf, SupervisorError> {
-    let mut components = Path::new(plugin_id).components();
-    match (components.next(), components.next()) {
-        (Some(Component::Normal(name)), None) => Ok(install_dir.join(name)),
-        _ => Err(SupervisorError(format!(
+/// The host swaps, deletes and hands these dirs over as root, so an id that
+/// is absolute, carries a separator, or walks up with `..` would aim all of
+/// that at an arbitrary host directory. The manifest parser already refuses
+/// such an id; this is the check at the point of use, so no id that reaches
+/// here some other way can widen the blast radius past one plugin dir.
+fn plugin_dir_under(root: &Path, plugin_id: &str) -> Result<PathBuf, SupervisorError> {
+    if is_one_component(plugin_id) {
+        Ok(root.join(plugin_id))
+    } else {
+        Err(SupervisorError(format!(
             "plugin id {plugin_id:?} does not name a directory under {}",
-            install_dir.display()
-        ))),
+            root.display()
+        )))
+    }
+}
+
+/// Whether `name` is exactly one normal path component: not empty, not
+/// absolute, not `.` or `..`, no separator.
+fn is_one_component(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
+}
+
+/// Create `dir` 0700, returning whether this call created it. An existing
+/// directory is left as it is; anything else there (a symlink included) is an
+/// error.
+fn create_private_dir(dir: &Path) -> Result<bool, LifecycleError> {
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if std::fs::symlink_metadata(dir)?.is_dir() {
+                Ok(false)
+            } else {
+                Err(SupervisorError(format!("{} is not a directory", dir.display())).into())
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The default [`DirOwner`]: `dir` itself (a symlink is never followed) to the
+/// `ados` account sandboxed plugin units run as. Only root can hand a dir
+/// over; any other process leaves it with itself. An absent account is logged
+/// and leaves the dir root's.
+fn chown_to_plugin_account(dir: &Path) -> Result<(), SupervisorError> {
+    if !nix::unistd::geteuid().is_root() {
+        return Ok(());
+    }
+    let user = nix::unistd::User::from_name("ados").ok().flatten();
+    let group = nix::unistd::Group::from_name("ados").ok().flatten();
+    match (user, group) {
+        (Some(u), Some(g)) => {
+            std::os::unix::fs::lchown(dir, Some(u.uid.as_raw()), Some(g.gid.as_raw()))
+                .map_err(|e| SupervisorError(format!("chown {}: {e}", dir.display())))
+        }
+        _ => {
+            tracing::warn!(
+                dir = %dir.display(),
+                "the ados account is absent; the plugin dir stays root-owned"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -1809,6 +2064,8 @@ pub(crate) mod tests_support {
             token_secret: PathBuf::from(crate::token_secret::PLUGIN_TOKEN_SECRET_PATH),
             runner: PathBuf::from(PLUGIN_RUNNER_BINARY),
             run_dir: PathBuf::from(DEFAULT_RUN_DIR),
+            data_root: PathBuf::from(PLUGIN_DATA_DIR),
+            device_id_file: PathBuf::from(DEVICE_ID_PATH),
         }
     }
 
@@ -1825,6 +2082,8 @@ pub(crate) mod tests_support {
             token_secret: dir.join("secrets/plugin-token-secret"),
             runner: dir.join("bin/ados-plugin-runner"),
             run_dir: dir.join("run"),
+            data_root: dir.join("plugin-data"),
+            device_id_file: dir.join("device-id"),
         }
     }
 }
@@ -1932,11 +2191,11 @@ mod tests {
             "",
         ] {
             assert!(
-                plugin_install_target(install_dir, id).is_err(),
+                plugin_dir_under(install_dir, id).is_err(),
                 "id {id:?} must not resolve to an install target"
             );
         }
-        let target = plugin_install_target(install_dir, "com.example.thermal").unwrap();
+        let target = plugin_dir_under(install_dir, "com.example.thermal").unwrap();
         assert_eq!(target, install_dir.join("com.example.thermal"));
         assert_eq!(target.parent(), Some(install_dir));
     }
@@ -2379,34 +2638,110 @@ mod tests {
     #[test]
     fn inprocess_is_refused_even_from_a_first_party_signer() {
         let dir = tempfile::tempdir().unwrap();
+        let key = enrol(&dir.path().join("keys"), FIRST_PARTY);
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
-            .with_backend(Arc::new(RecordingBackend::default()));
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_trusted_keys_dir(dir.path().join("keys"));
         let manifest = "id: com.altnautica.inproc\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: pkg:Class\n  isolation: inprocess\n";
-        for signer in ["altnautica-2026-A", "third-party"] {
-            let mut contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
-            contents.signer_id = Some(signer.to_string());
-            contents.signature_b64 = Some("QUJD".to_string());
-            let err = sup
-                .install_contents(contents, Path::new("/tmp/x.adosplug"))
-                .unwrap_err();
-            assert!(format!("{err}").contains("does not run"), "{signer}: {err}");
-        }
+        let err = sup
+            .install_contents(
+                signed_by(build_unsigned_archive(manifest), FIRST_PARTY, &key),
+                Path::new("/tmp/x.adosplug"),
+            )
+            .unwrap_err();
+        assert!(format!("{err}").contains("does not run"), "{err}");
         assert!(sup.installs().is_empty());
     }
 
+    const INLINE_PANEL: &str = "id: com.example.panel\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\ngcs:\n  entrypoint: gcs/dist/index.js\n  isolation: inline\n";
+
     #[test]
-    fn inline_gcs_from_third_party_is_rejected() {
+    fn inline_gcs_needs_a_verified_first_party_signer() {
         let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let first = enrol(&keys, FIRST_PARTY);
+        let third = enrol(&keys, "third-party");
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
-            .with_backend(Arc::new(RecordingBackend::default()));
-        let manifest = "id: com.evil.panel\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\ngcs:\n  entrypoint: gcs/dist/index.js\n  isolation: inline\n";
-        let mut contents = parse_archive_bytes(build_unsigned_archive(manifest)).unwrap();
-        contents.signer_id = Some("third-party".to_string());
-        contents.signature_b64 = Some("QUJD".to_string());
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_trusted_keys_dir(&keys);
+        let panel = || archive_with(INLINE_PANEL, &[("gcs/dist/index.js", b"x")]);
+        for contents in [
+            parse_archive_bytes(panel()).unwrap(),
+            forged_as(panel(), FIRST_PARTY),
+            signed_by(panel(), "third-party", &third),
+        ] {
+            let err = sup
+                .install_contents(contents, Path::new("/tmp/panel.adosplug"))
+                .unwrap_err();
+            assert!(format!("{err}").contains("inline GCS isolation"), "{err}");
+        }
+        sup.install_contents(
+            signed_by(panel(), FIRST_PARTY, &first),
+            Path::new("/tmp/panel.adosplug"),
+        )
+        .unwrap();
+    }
+
+    /// With signing relaxed an archive still installs, but the signer it
+    /// declares is recorded (and trusted) only when its signature verifies.
+    #[test]
+    fn the_install_record_names_only_a_verified_signer() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = enrol(&dir.path().join("keys"), FIRST_PARTY);
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_trusted_keys_dir(dir.path().join("keys"));
+        let state_path = dir.path().join("state/plugin-state.json");
+        let recorded = || {
+            find_install(&load_state(Some(&state_path)), "com.example.thermal")
+                .unwrap()
+                .signer_id
+                .clone()
+        };
+
+        let forged = sup
+            .install_contents(
+                forged_as(build_unsigned_archive(SUBPROC_MANIFEST), FIRST_PARTY),
+                Path::new("/tmp/x.adosplug"),
+            )
+            .unwrap();
+        assert_eq!(forged.signer_id, None);
+        assert_eq!(recorded(), None);
+
+        let signed = sup
+            .install_contents(
+                signed_by(build_unsigned_archive(SUBPROC_MANIFEST), FIRST_PARTY, &key),
+                Path::new("/tmp/x.adosplug"),
+            )
+            .unwrap();
+        assert_eq!(signed.signer_id.as_deref(), Some(FIRST_PARTY));
+        assert_eq!(recorded().as_deref(), Some(FIRST_PARTY));
+    }
+
+    #[test]
+    fn signing_required_installs_an_enrolled_signature_and_refuses_a_forged_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = enrol(&dir.path().join("keys"), FIRST_PARTY);
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), true, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_trusted_keys_dir(dir.path().join("keys"));
         let err = sup
-            .install_contents(contents, Path::new("/tmp/x.adosplug"))
+            .install_contents(
+                forged_as(build_unsigned_archive(SUBPROC_MANIFEST), FIRST_PARTY),
+                Path::new("/tmp/x.adosplug"),
+            )
             .unwrap_err();
-        assert!(format!("{err}").contains("inline GCS isolation"), "{err}");
+        assert!(
+            matches!(&err, LifecycleError::Signature(e) if e.kind == SignatureErrorKind::Invalid),
+            "{err}"
+        );
+        let installed = sup
+            .install_contents(
+                signed_by(build_unsigned_archive(SUBPROC_MANIFEST), FIRST_PARTY, &key),
+                Path::new("/tmp/x.adosplug"),
+            )
+            .unwrap();
+        assert_eq!(installed.signer_id.as_deref(), Some(FIRST_PARTY));
     }
 
     #[test]
@@ -2561,11 +2896,50 @@ mod tests {
         buf
     }
 
-    fn signed_as(archive: Vec<u8>, signer: &str) -> ArchiveContents {
-        let mut contents = parse_archive_bytes(archive).unwrap();
-        contents.signer_id = Some(signer.to_string());
-        contents.signature_b64 = Some("QUJD".to_string());
-        contents
+    /// A first-party signer id (on [`crate::signing::FIRST_PARTY_SIGNERS`]).
+    const FIRST_PARTY: &str = "altnautica-2026-A";
+
+    /// A throwaway Ed25519 key enrolled as `signer` in `keys_dir`, the store a
+    /// supervisor built `.with_trusted_keys_dir(keys_dir)` verifies against.
+    fn enrol(keys_dir: &Path, signer: &str) -> ed25519_dalek::SigningKey {
+        use ed25519_dalek::pkcs8::{spki::der::pem::LineEnding, EncodePublicKey};
+        let key = ed25519_dalek::SigningKey::from_bytes(&Sha256::digest(signer.as_bytes()).into());
+        std::fs::create_dir_all(keys_dir).unwrap();
+        let pem = key
+            .verifying_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap();
+        std::fs::write(keys_dir.join(format!("{signer}.pem")), pem).unwrap();
+        key
+    }
+
+    /// `archive` with a `SIGNATURE` entry naming `signer` over `signature`.
+    fn with_signature(archive: Vec<u8>, signer: &str, signature: &str) -> ArchiveContents {
+        let mut w = zip::ZipWriter::new_append(std::io::Cursor::new(archive)).unwrap();
+        let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        w.start_file("SIGNATURE", opts).unwrap();
+        w.write_all(format!("{signer}\n{signature}\n").as_bytes())
+            .unwrap();
+        parse_archive_bytes(w.finish().unwrap().into_inner()).unwrap()
+    }
+
+    /// `archive` signed by `signer` with `key` over its canonical payload hash.
+    fn signed_by(
+        archive: Vec<u8>,
+        signer: &str,
+        key: &ed25519_dalek::SigningKey,
+    ) -> ArchiveContents {
+        use base64::Engine;
+        use ed25519_dalek::Signer;
+        let hash = parse_archive_bytes(archive.clone()).unwrap().payload_hash;
+        let signature =
+            base64::engine::general_purpose::STANDARD.encode(key.sign(&hash).to_bytes());
+        with_signature(archive, signer, &signature)
+    }
+
+    /// `archive` declaring `signer` with a signature no key verifies.
+    fn forged_as(archive: Vec<u8>, signer: &str) -> ArchiveContents {
+        with_signature(archive, signer, "QUJD")
     }
 
     const WORKSTATION_ONLY: &str = "id: com.example.ws\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation, compute]\n";
@@ -2612,12 +2986,17 @@ mod tests {
     #[test]
     fn heavy_resources_are_first_party_only() {
         let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let first = enrol(&keys, FIRST_PARTY);
+        let third = enrol(&keys, "third-party");
         let rec = Arc::new(RecordingBackend::default());
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
-            .with_backend(rec.clone());
+            .with_backend(rec.clone())
+            .with_trusted_keys_dir(&keys);
         for contents in [
             parse_archive_bytes(build_unsigned_archive(HEAVY)).unwrap(),
-            signed_as(build_unsigned_archive(HEAVY), "third-party"),
+            signed_by(build_unsigned_archive(HEAVY), "third-party", &third),
+            forged_as(build_unsigned_archive(HEAVY), FIRST_PARTY),
         ] {
             let err = sup
                 .install_contents(contents, Path::new("/tmp/heavy.adosplug"))
@@ -2628,7 +3007,7 @@ mod tests {
             );
         }
         sup.install_contents(
-            signed_as(build_unsigned_archive(HEAVY), "altnautica-2026-A"),
+            signed_by(build_unsigned_archive(HEAVY), FIRST_PARTY, &first),
             Path::new("/tmp/heavy.adosplug"),
         )
         .unwrap();
@@ -2641,11 +3020,23 @@ mod tests {
     #[test]
     fn a_backend_without_a_sandbox_installs_first_party_agents_only() {
         let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let first = enrol(&keys, "altnautica-2026-B");
+        let third = enrol(&keys, "third-party");
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
-            .with_backend(Arc::new(RecordingBackend::without_sandbox()));
+            .with_backend(Arc::new(RecordingBackend::without_sandbox()))
+            .with_trusted_keys_dir(&keys);
         for contents in [
             parse_archive_bytes(build_unsigned_archive(SUBPROC_MANIFEST)).unwrap(),
-            signed_as(build_unsigned_archive(SUBPROC_MANIFEST), "third-party"),
+            signed_by(
+                build_unsigned_archive(SUBPROC_MANIFEST),
+                "third-party",
+                &third,
+            ),
+            forged_as(
+                build_unsigned_archive(SUBPROC_MANIFEST),
+                "altnautica-2026-B",
+            ),
         ] {
             let err = sup
                 .install_contents(contents, Path::new("/tmp/x.adosplug"))
@@ -2667,7 +3058,7 @@ mod tests {
         // a loopback guard the backend has no sandbox to pair with.
         let net = SUBPROC_MANIFEST.replace("hardware.spi", "network.outbound");
         sup.install_contents(
-            signed_as(build_unsigned_archive(&net), "altnautica-2026-B"),
+            signed_by(build_unsigned_archive(&net), "altnautica-2026-B", &first),
             Path::new("/tmp/x.adosplug"),
         )
         .unwrap();
@@ -2877,6 +3268,136 @@ mod tests {
         assert!(http_dir.is_dir());
         sup.remove("com.example.thermal", false).unwrap();
         assert!(!http_dir.exists());
+    }
+
+    /// A [`DirOwner`] that records every dir handed over instead of chowning.
+    fn recording_owner() -> (DirOwner, Arc<parking_lot::Mutex<Vec<PathBuf>>>) {
+        let handed = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink = handed.clone();
+        let owner: DirOwner = Arc::new(move |dir: &Path| {
+            sink.lock().push(dir.to_path_buf());
+            Ok(())
+        });
+        (owner, handed)
+    }
+
+    fn install_thermal(sup: &mut PluginSupervisor) {
+        sup.install_contents(
+            parse_archive_bytes(build_unsigned_archive(SUBPROC_MANIFEST)).unwrap(),
+            Path::new("/tmp/x.adosplug"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn install_makes_the_data_dir_the_runner_is_pointed_at_and_remove_honours_keep_data() {
+        use std::os::unix::fs::PermissionsExt;
+        let id = "com.example.thermal";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("device-id"), "0a1b2c3d4e5f\n").unwrap();
+        let (owner, handed) = recording_owner();
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_dir_owner(owner);
+        install_thermal(&mut sup);
+
+        let base = dir.path().join("plugin-data").join(id);
+        let drones = base.join("drones");
+        let leaf = drones.join("0a1b2c3d4e5f");
+        for d in [&base, &drones, &leaf] {
+            let mode = std::fs::metadata(d).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{}", d.display());
+        }
+        // Deepest first: the chain stays the host's until its base is handed over.
+        assert_eq!(*handed.lock(), [leaf.clone(), drones, base.clone()]);
+
+        // The dir the runner's environment names is the one that exists.
+        sup.enable(id).unwrap();
+        let env =
+            std::fs::read_to_string(token_env_path(id, Some(&dir.path().join("sockets")))).unwrap();
+        assert!(
+            env.contains(&format!("ADOS_PLUGIN_DATA_DIR={}\n", leaf.display())),
+            "{env}"
+        );
+
+        std::fs::write(leaf.join("world.sqlite"), b"x").unwrap();
+        sup.remove(id, true).unwrap();
+        assert!(leaf.join("world.sqlite").exists());
+        install_thermal(&mut sup);
+        sup.remove(id, false).unwrap();
+        assert!(!base.exists());
+    }
+
+    /// An existing data dir is the plugin account's: a later pass hands it
+    /// over again but creates and chowns nothing under it, so a link the
+    /// plugin planted there never aims the host's root writes elsewhere.
+    #[test]
+    fn an_existing_data_dir_is_handed_over_again_but_never_entered() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("device-id"), "0a1b2c3d4e5f\n").unwrap();
+        let (owner, handed) = recording_owner();
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_dir_owner(owner);
+        install_thermal(&mut sup);
+        let base = dir.path().join("plugin-data/com.example.thermal");
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::remove_dir_all(base.join("drones")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, base.join("drones")).unwrap();
+        handed.lock().clear();
+
+        sup.enable("com.example.thermal").unwrap();
+        assert_eq!(*handed.lock(), [base]);
+        assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+    }
+
+    /// A unit binds its socket dir and reads its token env file when it
+    /// starts, so both exist, with its data dir, before the backend starts it:
+    /// on a first enable and on a re-enable after the host dropped the socket
+    /// and token of the disabled plugin. The token is one the host verifies.
+    #[test]
+    fn enable_starts_the_unit_only_once_what_it_binds_and_reads_exists() {
+        let id = "com.example.thermal";
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_in(dir.path());
+        let socket_dir = plugin_socket_dir(&paths.socket_dir, id);
+        let env = token_env_path(id, Some(&paths.socket_dir));
+        let data = paths.data_root.join(id);
+        let secret = paths.token_secret.clone();
+        let at_start = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let rec = {
+            let (at_start, socket_dir, env) = (at_start.clone(), socket_dir.clone(), env.clone());
+            RecordingBackend::default().on_enable_start(move |name| {
+                if name == unit_name_for(id) {
+                    at_start
+                        .lock()
+                        .push((socket_dir.is_dir(), env.is_file(), data.is_dir()));
+                }
+            })
+        };
+        let mut sup =
+            PluginSupervisor::new(paths, false, None, "0.48.11").with_backend(Arc::new(rec));
+        install_thermal(&mut sup);
+
+        sup.enable(id).unwrap();
+        sup.disable(id).unwrap();
+        std::fs::remove_file(&env).unwrap();
+        std::fs::remove_dir_all(&socket_dir).unwrap();
+        sup.enable(id).unwrap();
+        assert_eq!(*at_start.lock(), [(true, true, true); 2]);
+
+        let body = std::fs::read_to_string(&env).unwrap();
+        let token = body
+            .lines()
+            .find_map(|l| l.strip_prefix("ADOS_PLUGIN_TOKEN="))
+            .unwrap();
+        let token = ados_protocol::plugin::CapabilityToken::from_token_string(token).unwrap();
+        assert_eq!(token.plugin_id, id);
+        assert!(shared_issuer(&secret)
+            .unwrap()
+            .verify(&token, token.issued_at + 1)
+            .is_ok());
     }
 
     #[test]

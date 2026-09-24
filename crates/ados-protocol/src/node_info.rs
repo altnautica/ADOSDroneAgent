@@ -61,9 +61,12 @@ pub struct GroundStationInfo {
 /// The camera facts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CameraInfo {
-    /// The video pipeline reports a discovered camera whose pipeline has not
-    /// failed, and has re-stamped that report within the live window. `false`
-    /// when the camera-state sidecar is absent, stale, or says otherwise.
+    /// The video pipeline is publishing the `main` stream: its camera-state
+    /// report says `streaming` (stamped only once mediamtx holds the encoder's
+    /// publisher on `main`) and was re-stamped within the live window. `false`
+    /// while the encoder is still starting, when the pipeline is stopped or
+    /// failed, and when the report is absent or stale, whatever the camera
+    /// source (a local camera or a network stream).
     pub ready: bool,
     /// The geometry the primary encoder (the `main` stream) runs at, or `None`
     /// when the node has no config file or is a ground station (no onboard

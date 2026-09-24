@@ -30,7 +30,7 @@ use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
 /// Default per-request timeout. Mirrors `DEFAULT_REQUEST_TIMEOUT_S = 5.0`.
@@ -142,6 +142,10 @@ pub struct PluginIpcClient {
     /// frame (the plugin's own codec routes by channel).
     aux_callbacks: CallbackMap,
     reader_task: Mutex<Option<JoinHandle<()>>>,
+    /// `true` once the reader loop ended on its own: the host closed the
+    /// session or the stream broke. [`Self::close`] aborts the loop instead, so
+    /// a deliberate close never reads as a loss.
+    session_lost: Arc<watch::Sender<bool>>,
     next_id: AtomicU64,
     request_timeout: Duration,
 }
@@ -172,6 +176,7 @@ impl PluginIpcClient {
             msp_callbacks: Arc::new(Mutex::new(HashMap::new())),
             aux_callbacks: Arc::new(Mutex::new(HashMap::new())),
             reader_task: Mutex::new(None),
+            session_lost: Arc::new(watch::channel(false).0),
             next_id: AtomicU64::new(0),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
@@ -198,6 +203,7 @@ impl PluginIpcClient {
             let mut w = self.writer.lock().await;
             *w = Some(write_half);
         }
+        self.session_lost.send_replace(false);
         let task = self.spawn_reader_loop(read_half);
         {
             let mut slot = self.reader_task.lock().expect("reader_task lock");
@@ -216,6 +222,19 @@ impl PluginIpcClient {
         }
         let mut w = self.writer.lock().await;
         *w = None;
+    }
+
+    /// Resolve once the host session is lost: the host closed the connection
+    /// (a plugin-host restart) or the stream broke. The client never
+    /// reconnects — a restarted host re-mints this plugin's socket and token
+    /// and hands them to a fresh process — so a plugin that sees this should
+    /// exit non-zero and let its unit's `Restart=` bring it back.
+    /// [`crate::run_plugin`] does exactly that. Pending until then, including
+    /// after a deliberate [`Self::close`].
+    pub async fn session_lost(&self) {
+        let mut rx = self.session_lost.subscribe();
+        // The sender lives as long as `self`, so the wait cannot error out.
+        let _ = rx.wait_for(|lost| *lost).await;
     }
 
     // ---- Health -------------------------------------------------------
@@ -1018,6 +1037,71 @@ impl PluginIpcClient {
             .map_err(|e| ClientError::Rpc(format!("{METHOD} reply did not decode: {e}")))
     }
 
+    // ---- Local-network service discovery -------------------------------
+
+    /// Publish one of this plugin's listen ports on the local network over
+    /// mDNS, as `service_type` (`_<name>._tcp`) with `txt`.
+    ///
+    /// The host runs the responder: a sandboxed plugin cannot bind the
+    /// multicast port. `port` must be a listen port the plugin declares for a
+    /// service that runs on this node, and the agent's own service types
+    /// (`_ados._tcp`, `_ados-receiver._tcp`) are refused. The SRV target is the
+    /// system hostname. The record lives as long as this connection: the host
+    /// withdraws it when the connection ends, and calling again with the same
+    /// service type replaces it (a TXT update). Gated on `network.listen`.
+    pub async fn mdns_advertise(
+        &self,
+        service_type: &str,
+        port: u16,
+        txt: &std::collections::BTreeMap<String, String>,
+    ) -> Result<ados_protocol::plugin_mdns::Advertised, ClientError> {
+        use ados_protocol::plugin_mdns::{ADVERTISE_CAPABILITY, ADVERTISE_METHOD};
+        let txt = txt
+            .iter()
+            .map(|(k, v)| (Value::from(k.as_str()), Value::from(v.as_str())))
+            .collect();
+        let args = Value::Map(vec![
+            (Value::from("service_type"), Value::from(service_type)),
+            (Value::from("port"), Value::from(port)),
+            (Value::from("txt"), Value::Map(txt)),
+        ]);
+        let args = self
+            .send_request(ADVERTISE_METHOD, ADVERTISE_CAPABILITY, args)
+            .await?
+            .args;
+        decode_typed_reply(args, ADVERTISE_METHOD)
+    }
+
+    /// Every instance of `service_type` (`_<name>._tcp` or `_<name>._udp`)
+    /// that answers on the local network within `window` (clamped by the host
+    /// to 0.1-5 s). The call returns once the window has closed. Gated on
+    /// `network.outbound`.
+    pub async fn mdns_browse(
+        &self,
+        service_type: &str,
+        window: Duration,
+    ) -> Result<Vec<ados_protocol::plugin_mdns::DiscoveredService>, ClientError> {
+        use ados_protocol::plugin_mdns::{
+            BrowseReply, BROWSE_CAPABILITY, BROWSE_MAX_TIMEOUT_MS, BROWSE_METHOD,
+        };
+        let window_ms = u32::try_from(window.as_millis()).unwrap_or(u32::MAX);
+        let args = Value::Map(vec![
+            (Value::from("service_type"), Value::from(service_type)),
+            (Value::from("timeout_ms"), Value::from(window_ms)),
+        ]);
+        // The host answers after its window, so the wait must outlast the
+        // longest one it will run.
+        let timeout = self.request_timeout.max(
+            Duration::from_millis(u64::from(window_ms.min(BROWSE_MAX_TIMEOUT_MS)))
+                + MDNS_BROWSE_REPLY_SLACK,
+        );
+        let args = self
+            .send_request_within(BROWSE_METHOD, BROWSE_CAPABILITY, args, timeout)
+            .await?
+            .args;
+        decode_typed_reply::<BrowseReply>(args, BROWSE_METHOD).map(|r| r.services)
+    }
+
     // ------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------
@@ -1119,6 +1203,7 @@ impl PluginIpcClient {
         let aux_callbacks = self.aux_callbacks.clone();
         let token = self.token.clone();
         let plugin_id = self.plugin_id.clone();
+        let session_lost = self.session_lost.clone();
         tokio::spawn(async move {
             let mut reader = read_half;
             loop {
@@ -1170,6 +1255,7 @@ impl PluginIpcClient {
             // Drop every parked waiter so in-flight requests fail fast with
             // ConnectionClosed rather than waiting out their timeout.
             pending.lock().expect("pending lock").clear();
+            session_lost.send_replace(true);
         })
     }
 }
@@ -1399,6 +1485,22 @@ fn map_get(args: &Value, key: &str) -> Option<Value> {
             .map(|(_, v)| v.clone()),
         _ => None,
     }
+}
+
+/// Slack on top of a browse window before the client gives up on the reply.
+const MDNS_BROWSE_REPLY_SLACK: Duration = Duration::from_secs(2);
+
+/// A typed host reply, or the host's graceful-degrade `error` (an older host's
+/// `not_implemented`) as [`ClientError::Rpc`].
+fn decode_typed_reply<T: serde::de::DeserializeOwned>(
+    args: Value,
+    method: &str,
+) -> Result<T, ClientError> {
+    if let Some(error) = map_get_str(&args, "error") {
+        return Err(ClientError::Rpc(format!("{error}: {method}")));
+    }
+    rmpv::ext::from_value(args)
+        .map_err(|e| ClientError::Rpc(format!("{method} reply did not decode: {e}")))
 }
 
 fn map_get_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {

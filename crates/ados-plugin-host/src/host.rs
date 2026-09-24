@@ -424,6 +424,33 @@ pub trait HostServices: Send + Sync + 'static {
         std::future::ready(Ok(not_implemented("node.info")))
     }
 
+    /// Publish one of the plugin's declared listen ports over mDNS
+    /// ([`ados_protocol::plugin_mdns::AdvertiseRequest`]). The record belongs
+    /// to `session`, the connection that made the call, and a real host
+    /// withdraws it in [`Self::release_session`]. Gated at the dispatch level
+    /// on `network.listen`; a real host also checks the port against the
+    /// plugin's declared `listen_ports`. The default returns `not_implemented`.
+    fn mdns_advertise(
+        &self,
+        _plugin_id: &str,
+        _session: u64,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("mdns.advertise")))
+    }
+
+    /// Browse the local network for one service type
+    /// ([`ados_protocol::plugin_mdns::BrowseRequest`]) and return every
+    /// instance resolved inside the window. Gated at the dispatch level on
+    /// `network.outbound`. The default returns `not_implemented`.
+    fn mdns_browse(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("mdns.browse")))
+    }
+
     /// Open a connection session for `plugin_id` and return its id. Resources
     /// the plugin acquires from now on are tagged with it, so a reconnect's
     /// new session and the old session's teardown can overlap without the
@@ -482,8 +509,8 @@ pub trait HostServices: Send + Sync + 'static {
     /// live in the shared-memory ring the descriptor names.
     ///
     /// The default returns `None`, keeping [`NoopHost`] unaffected (no push
-    /// stream). A real host returns a receiver when its vision slot is wired and
-    /// `None` when the engine socket has not surfaced yet.
+    /// stream). A real host returns a receiver whenever its vision slot is
+    /// wired, engine connected or not; it starts delivering once it connects.
     fn vision_subscribe_stream(
         &self,
         _plugin_id: &str,
@@ -499,8 +526,8 @@ pub trait HostServices: Send + Sync + 'static {
     /// The bytes are an encoded `ados_protocol::framebus::DetectionBatch`.
     ///
     /// The default returns `None`, keeping [`NoopHost`] unaffected (no push
-    /// stream). A real host returns a receiver when its vision slot is wired and
-    /// `None` when the engine socket has not surfaced yet.
+    /// stream). A real host returns a receiver whenever its vision slot is
+    /// wired, engine connected or not; it starts delivering once it connects.
     fn vision_subscribe_detection_stream(
         &self,
         _plugin_id: &str,

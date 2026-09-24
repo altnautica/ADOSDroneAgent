@@ -307,10 +307,10 @@ enforced = true
 [[agent]]
 id = "network.outbound"
 label = "Open outbound network connections"
-description = "Lets the plugin make outbound TCP, UDP, and HTTP connections from the agent host. Required by plugins that talk to external services."
+description = "Lets the plugin make outbound TCP, UDP, and HTTP connections from the agent host, and find services on the local network over mDNS through the agent. Required by plugins that talk to external services."
 category = "data_network"
 risk = "medium"
-risk_reason = "Exfiltration risk; outbound traffic can carry telemetry off the aircraft. Enforced by the generated unit's socket policy: without this grant the unit carries RestrictAddressFamilies=AF_UNIX and IPAddressDeny=any, so socket(AF_INET) fails with EAFNOSUPPORT."
+risk_reason = "Exfiltration risk; outbound traffic can carry telemetry off the aircraft. Enforced by the generated unit's socket policy: without this grant the unit carries RestrictAddressFamilies=AF_UNIX and IPAddressDeny=any, so socket(AF_INET) fails with EAFNOSUPPORT. The mdns.browse host method is gated on it at dispatch."
 enforced = true
 
 [[agent]]
@@ -469,10 +469,10 @@ enforced = true
 [[agent]]
 id = "network.listen"
 label = "Accept inbound network connections"
-description = "Lets a declared plugin service bind the TCP ports it lists in its manifest (listen_ports) so other nodes on the network can reach it. Every other port stays closed to the plugin, and the plugin's main process never listens."
+description = "Lets a declared plugin service bind the TCP ports it lists in its manifest (listen_ports) so other nodes on the network can reach it, and advertise those ports on the local network over mDNS through the agent. Every other port stays closed to the plugin, and the plugin's main process never listens."
 category = "data_network"
 risk = "high"
-risk_reason = "Opens a network entry point into a plugin process on the agent host. Enforced by the generated unit: every plugin unit carries SocketBindDeny=any, and only a granted service unit gets SocketBindAllow for its declared ports."
+risk_reason = "Opens a network entry point into a plugin process on the agent host. Enforced by the generated unit: every plugin unit carries SocketBindDeny=any, and only a granted service unit gets SocketBindAllow for its declared ports. The mdns.advertise host method is gated on it at dispatch and publishes only a declared port."
 enforced = true
 
 [[agent]]
@@ -699,7 +699,7 @@ risk = "low"
 risk_reason = "Confined to the plugin's own namespace for the signed-in operator."
 
 # ===========================================================================
-# Plugin RPC dispatch table (47): wire method -> dispatch-level required cap.
+# Plugin RPC dispatch table (49): wire method -> dispatch-level required cap.
 #
 # The single source of truth for the gate the native host applies BEFORE routing
 # a request. Codegen emits this into both the Rust host
@@ -1002,3 +1002,19 @@ required_cap = "vision.detection.publish"
 [[method]]
 id = "node.info"
 required_cap = "node.info.read"
+
+# ---- local-network service discovery ----
+# DNS-SD on the LAN, done by the host: a sandboxed plugin cannot bind the
+# multicast port (every plugin unit carries SocketBindDeny=any). Advertise
+# publishes one of the plugin's declared listen_ports under the system hostname
+# and withdraws it when the connection that made it ends; the agent's own
+# service types are refused. Browse collects the instances of one service type
+# for a bounded window. Advertising offers a port to the network, so it is
+# gated like binding one; browsing finds peers to connect out to.
+[[method]]
+id = "mdns.advertise"
+required_cap = "network.listen"
+
+[[method]]
+id = "mdns.browse"
+required_cap = "network.outbound"

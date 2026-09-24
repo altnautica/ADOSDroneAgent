@@ -192,9 +192,10 @@ pub const PLUGIN_REACHABLE_SOCKETS: &[&str] = &["/run/ados/logd.sock"];
 /// is not a unit-start failure.
 pub const HOST_DATA_ROOTS: &[&str] = &["/srv", "/mnt", "/media", "/boot"];
 
-/// The writable surface every plugin gets: its own data dir and its log.
-/// Ordered, so the rendered `ReadWritePaths=` line is stable.
-pub const BASE_READ_WRITE_PATHS: &[&str] = &["/var/ados/plugin-data", "/var/log/ados/plugins"];
+/// The writable surface every plugin gets besides its own data dir (which the
+/// unit binds on its own, see [`crate::systemd`]): its log. Ordered, so the
+/// rendered `ReadWritePaths=` line is stable.
+pub const BASE_READ_WRITE_PATHS: &[&str] = &["/var/log/ados/plugins"];
 
 /// Every capability whose enforcement mechanism is the generated unit.
 ///
@@ -397,7 +398,7 @@ mod tests {
     const NO_GRANT_FILESYSTEM: &[&str] = &[
         "TemporaryFileSystem=/run/ados:ro",
         "BindReadOnlyPaths=-/run/ados/logd.sock",
-        "ReadWritePaths=/var/ados/plugin-data /var/log/ados/plugins",
+        "ReadWritePaths=/var/log/ados/plugins",
         "ProtectHome=yes",
         "InaccessiblePaths=-/etc/ados/secrets -/etc/ados/plugin-keys -/etc/ados/pairing.json \
          -/etc/ados/config.yaml -/etc/ados/mcp-token.json -/etc/ados/dashboard-pin.json \

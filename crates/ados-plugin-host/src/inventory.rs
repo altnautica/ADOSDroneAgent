@@ -161,6 +161,8 @@ agent:
             token_secret: dir.path().join("secrets/plugin-token-secret"),
             runner: dir.path().join("bin/ados-plugin-runner"),
             run_dir: dir.path().join("run"),
+            data_root: dir.path().join("plugin-data"),
+            device_id_file: dir.path().join("device-id"),
         };
         std::fs::create_dir_all(dir.path().join("state")).unwrap();
         std::fs::write(
