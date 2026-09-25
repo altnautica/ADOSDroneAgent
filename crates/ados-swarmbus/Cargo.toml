@@ -42,7 +42,7 @@ anyhow = { workspace = true }
 # ChaCha20-Poly1305 AEAD over the beacon payload, keyed by the fleet's shared
 # secret. Pure-Rust (RustCrypto), no `ring` — the same primitive and crate
 # version the mesh invite bundle uses.
-chacha20poly1305 = "0.10"
+chacha20poly1305 = "0.11"
 # SHA-256 for the domain-separated fleet-key derivation off /etc/drone.key,
 # matching `ados_radio::hop::derive_pair_key`'s construction.
 sha2 = { workspace = true }
