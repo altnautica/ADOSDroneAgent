@@ -81,7 +81,7 @@ futures-core = "0.3"
 # Linux-only deps (systemd notify + journald). Declared here; the consuming
 # crate pulls them in only under `[target.'cfg(target_os = "linux")'.dependencies]`
 # so the pure-logic core still builds and tests on a non-Linux host.
-sd-notify = "0.4"
+sd-notify = "0.5"
 tracing-journald = "0.3"
 # Unix process-group management (setsid + killpg) — the structural fix for
 # the orphaned-wfb_tx bug class. Linux-only; consuming crates target-gate it.
