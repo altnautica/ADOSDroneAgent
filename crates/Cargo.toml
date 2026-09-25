@@ -34,7 +34,7 @@ hmac = "0.12"
 sha2 = "0.10"
 # base64 sig decode: the plugin SIGNATURE blob carries a base64-encoded raw
 # 64-byte Ed25519 signature over the canonical payload hash.
-base64 = "0.22"
+base64 = "0.23"
 # Ed25519 verify over the canonical payload hash. The `pem` feature reads the
 # same PEM/SPKI public-key files the agent ships under /etc/ados/plugin-keys.
 ed25519-dalek = { version = "2", features = ["pem"] }

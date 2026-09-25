@@ -114,7 +114,7 @@ dependencies = [
  "ados-video",
  "anyhow",
  "axum",
- "base64",
+ "base64 0.23.1",
  "blake2",
  "bytes",
  "getrandom 0.2.17",
@@ -221,7 +221,7 @@ dependencies = [
  "ados-supervisor",
  "ados-video",
  "anyhow",
- "base64",
+ "base64 0.23.1",
  "blake2",
  "chacha20poly1305",
  "getrandom 0.2.17",
@@ -320,7 +320,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
- "base64",
+ "base64 0.23.1",
  "bytes",
  "futures",
  "http",
@@ -427,7 +427,7 @@ dependencies = [
  "ados-protocol",
  "ados-video",
  "anyhow",
- "base64",
+ "base64 0.23.1",
  "ed25519-dalek",
  "getrandom 0.2.17",
  "hex",
@@ -458,7 +458,7 @@ dependencies = [
 name = "ados-protocol"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "bytes",
  "getrandom 0.2.17",
  "hex",
@@ -872,7 +872,7 @@ checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
  "axum-core",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-util",
  "http",
@@ -934,6 +934,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -2131,7 +2137,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -2405,7 +2411,7 @@ checksum = "fa0f4bea31643be4c6a678e9aa4ae44f0db9e5609d5ca9dc9083d06eb3e9a27a"
 dependencies = [
  "ahash",
  "anyhow",
- "base64",
+ "base64 0.22.1",
  "bytecount",
  "clap",
  "fancy-regex 0.13.0",
@@ -3736,7 +3742,7 @@ version = "0.12.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -4451,7 +4457,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4676b37242ccbd1aabf56edb093a4827dc49086c0ffd764a5705899e0f35f8f7"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.1",
  "bitflags 2.13.2",
  "fancy-regex 0.11.0",
  "filedescriptor",
@@ -5020,7 +5026,7 @@ version = "2.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "log",
  "once_cell",
  "serde",
@@ -5034,7 +5040,7 @@ version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "der 0.8.0",
  "log",
  "native-tls",
@@ -5052,7 +5058,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "http",
  "httparse",
  "log",
