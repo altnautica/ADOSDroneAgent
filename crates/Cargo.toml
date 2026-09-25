@@ -50,7 +50,7 @@ ed25519-dalek = { version = "2", features = ["pem"] }
 # vulnerable resolve on any host with a cold or pinned registry cache.
 zip = { version = "2.3", default-features = false, features = ["deflate"] }
 # blake2b-8 → the 16-hex WFB key fingerprint (peer-public-half digest).
-blake2 = "0.10"
+blake2 = "0.11"
 hex = "0.4"
 thiserror = "2"
 getrandom = "0.2"
