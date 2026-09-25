@@ -255,7 +255,7 @@ jobs:
             | grep '^{' > "out/row-${{ matrix.flavor }}.json"
           cat "out/row-${{ matrix.flavor }}.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ko-${{ matrix.flavor }}
           path: out/*
