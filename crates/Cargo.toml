@@ -114,7 +114,7 @@ png = "0.17"
 rusqlite = { version = "0.31", features = ["bundled"] }
 # Native HTTP framework for the local query API. Pure Rust over tokio/hyper;
 # the same listener Router is served on a unix socket and a TCP port.
-axum = "0.7"
+axum = "0.8"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 # hyper 1 + the tokio glue serve the same axum Router on the trusted unix
