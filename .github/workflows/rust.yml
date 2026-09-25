@@ -271,7 +271,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -339,7 +339,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -406,7 +406,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -470,7 +470,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -540,7 +540,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -604,7 +604,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -668,7 +668,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -732,7 +732,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -803,7 +803,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -875,7 +875,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -952,7 +952,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -1021,7 +1021,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -1097,7 +1097,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -1164,7 +1164,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -1235,7 +1235,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -1309,7 +1309,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -1378,7 +1378,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -1456,7 +1456,7 @@ jobs:
           ( cd rel && sha256sum libonnxruntime-aarch64.so > libonnxruntime-aarch64.so.sha256 )
 
       - name: Hand the staged artifacts to the signing job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vision-onnx-rel
           path: crates/rel/
@@ -1528,7 +1528,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -1666,7 +1666,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
@@ -1728,7 +1728,7 @@ jobs:
       # this run rather than from the rolling tag, which a slower run for an
       # older commit can overwrite in between.
       - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rel-${{ env.RELEASE_TAG }}
           path: crates/rel/
