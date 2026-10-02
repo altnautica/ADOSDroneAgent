@@ -20,6 +20,9 @@
 //! shared [`PageContext`]. [`blank_panel`] is the starting canvas every page
 //! fills before painting its chrome and surfaces.
 
+use std::cell::Cell;
+use std::time::{Duration, Instant};
+
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
 
@@ -708,6 +711,46 @@ pub enum PanelAction {
     Repaint,
     /// Perform this agent write and show its outcome.
     Agent(AgentRequest),
+}
+
+/// How long a first tap on a destructive control stays armed for the
+/// confirming second tap.
+pub const CONFIRM_WINDOW: Duration = Duration::from_secs(5);
+
+/// Two-tap confirmation for a destructive panel control.
+///
+/// The first tap arms one keyed choice for [`CONFIRM_WINDOW`] (the page then
+/// relabels the control "Tap again to ..."); a second tap on the same key
+/// inside the window confirms. A tap on a different key re-arms that key
+/// instead, and a confirmed action disarms, so the next tap starts over.
+#[derive(Debug, Default)]
+pub struct TwoTapConfirm {
+    armed: Cell<Option<(&'static str, Instant)>>,
+}
+
+impl TwoTapConfirm {
+    /// Whether `key` is armed and still inside the confirm window.
+    pub fn is_armed(&self, key: &str) -> bool {
+        self.armed
+            .get()
+            .is_some_and(|(k, at)| k == key && at.elapsed() < CONFIRM_WINDOW)
+    }
+
+    /// Register a tap on `key`. Returns `true` when this tap confirms an armed
+    /// choice (and disarms it); `false` when it only armed `key`.
+    pub fn tap(&self, key: &'static str) -> bool {
+        if self.is_armed(key) {
+            self.armed.set(None);
+            return true;
+        }
+        self.armed.set(Some((key, Instant::now())));
+        false
+    }
+
+    /// Drop any armed choice.
+    pub fn disarm(&self) {
+        self.armed.set(None);
+    }
 }
 
 /// The contract every LCD page implements.

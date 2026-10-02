@@ -8,8 +8,8 @@
 # try_prebuilt_install MODULE KVER KARCH
 #   1. fetch + verify the manifest (drivers-manifest.json)
 #   2. match (module, kver, arch) in the manifest
-#   3. download + verify the matching .ko (SHA256 mandatory; signature
-#      optional while ADOS_PREBUILT_ALLOW_UNSIGNED=1 — the dev/test default)
+#   3. download + verify the matching .ko (SHA256 and the minisign signature
+#      from the release key are both mandatory)
 #   4. vermagic strict-compare against the running kernel
 #   5. install to /lib/modules/<kver>/updates/, depmod, modprobe, confirm
 #   returns 0 when the module is loaded; non-zero tells the caller to fall
@@ -18,8 +18,6 @@
 # Env:
 #   ADOS_DRIVER_PREBUILT=0          skip the prebuilt path entirely (force DKMS)
 #   ADOS_PREBUILT_BASE_URL=<url>    override the release base URL (testing)
-#   ADOS_PREBUILT_ALLOW_UNSIGNED=1  accept a SHA256-only artifact (dev default);
-#                                   set 0 to require a valid signature (prod)
 #   ADOS_PREBUILT_VERMAGIC_STRICT=1 require an exact vermagic match (default)
 
 _LIBPB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,8 +41,7 @@ ADOS_PREBUILT_BASE_URL="${ADOS_PREBUILT_BASE_URL:-https://github.com/altnautica/
 # minisign public-key STRING (verify.sh passes it to `minisign -P`, so this is
 # the key itself, not a file path). Defaults to the vendored public half of the
 # ADOS_DRIVER_SIGNING_KEY keypair; an operator can override it with their own
-# key, and ADOS_PREBUILT_ALLOW_UNSIGNED=1 forces SHA256-only. When a signed
-# .minisig exists (CI signs once the secret is set) it is verified against this.
+# key. Every .ko and the manifest must carry a .minisig that verifies against it.
 _pb_pubkey() {
     printf '%s\n' "${ADOS_DRIVER_PUBKEY:-RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN}"
 }
@@ -96,15 +93,10 @@ try_prebuilt_install() {
 
     local base="${ADOS_PREBUILT_BASE_URL}"
     # Kernel modules are the highest-value tampering target this installer
-    # fetches, and the published catalog is signed end to end, so the default is
-    # to require a valid signature. A module that cannot be verified is not
+    # fetches, and the published catalog is signed end to end, so a valid
+    # signature is required. A module that cannot be verified is not
     # installed; the caller falls back to building from source, which is slower
     # but is the same path a board with no prebuilt coverage already takes.
-    local allow_unsigned="${ADOS_PREBUILT_ALLOW_UNSIGNED:-0}"
-    # One channel for the manifest and the module: it governs how an
-    # UNVERIFIABLE artifact is treated, and only the development channel
-    # ("edge") tolerates one. Every other value, the default included, is strict.
-    local channel="${ADOS_PREBUILT_CHANNEL:-stable}"
     local pubkey; pubkey="$(_pb_pubkey)"
     local tmp; tmp="$(mktemp -d)" || return 1
 
@@ -117,7 +109,7 @@ try_prebuilt_install() {
         ados_fetch "${base}/drivers-manifest.json.sha256" "${tmp}/drivers-manifest.json.sha256" 15 2>/dev/null || true
         ados_fetch "${base}/drivers-manifest.json.minisig" "${tmp}/drivers-manifest.json.minisig" 15 2>/dev/null || true
         if [ -f "${tmp}/drivers-manifest.json.sha256" ] \
-            && ! ados_verify_artifact "${tmp}/drivers-manifest.json" "${pubkey}" "${channel}" "${allow_unsigned}"; then
+            && ! ados_verify_artifact "${tmp}/drivers-manifest.json" "${pubkey}"; then
             warn "prebuilt manifest failed verification; ignoring it."
         else
             manifest_ok=1
@@ -166,9 +158,8 @@ try_prebuilt_install() {
     fi
     ados_fetch "${base}/${file}.minisig" "${tmp}/${file}.minisig" 15 2>/dev/null || true
 
-    # 4. verify: SHA256 mandatory, signature per the dev/prod posture, on the
-    # same channel the manifest was verified on.
-    if ! ados_verify_artifact "${tmp}/${file}" "${pubkey}" "${channel}" "${allow_unsigned}"; then
+    # 4. verify: SHA256 and signature, both mandatory.
+    if ! ados_verify_artifact "${tmp}/${file}" "${pubkey}"; then
         warn "prebuilt ${file} failed verification; building from source."
         rm -rf "${tmp}"; return 1
     fi

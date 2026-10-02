@@ -41,7 +41,6 @@ setup() {
     ASSET="${MODULE}-${KVER}-${KARCH}.ko"
 
     export ADOS_PREBUILT_BASE_URL="file://${REMOTE}"
-    export ADOS_PREBUILT_ALLOW_UNSIGNED=1
     # The running-kernel vermagic compare needs a live in-tree module to read;
     # there is none in this sandbox, so _pb_running_vermagic returns empty and
     # the compare is skipped. Asset selection is what this suite pins.

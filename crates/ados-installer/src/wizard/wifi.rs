@@ -189,30 +189,22 @@ pub fn scan(iface: &str) -> Vec<Network> {
 /// Join `ssid` on `iface`. `password` is `None` for an open network. `hidden`
 /// adds the not-broadcast flag. Returns `Ok(())` on a successful association or
 /// `Err(reason)` with a trimmed nmcli message.
+///
+/// The passphrase never rides the command line: nmcli runs with `--ask` and
+/// reads it from stdin, so it is not visible in `/proc/<pid>/cmdline` or in
+/// the exec log.
 pub fn connect(
     iface: &str,
     ssid: &str,
     password: Option<&str>,
     hidden: bool,
 ) -> Result<(), String> {
-    let mut args: Vec<String> = vec![
-        "device".into(),
-        "wifi".into(),
-        "connect".into(),
-        ssid.into(),
-    ];
-    if let Some(pw) = password {
-        args.push("password".into());
-        args.push(pw.into());
-    }
-    args.push("ifname".into());
-    args.push(iface.into());
+    let mut args: Vec<&str> = vec!["--ask", "device", "wifi", "connect", ssid, "ifname", iface];
     if hidden {
-        args.push("hidden".into());
-        args.push("yes".into());
+        args.extend(["hidden", "yes"]);
     }
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let res = exec::run("nmcli", &arg_refs);
+    let input = password.map(|pw| format!("{pw}\n")).unwrap_or_default();
+    let res = exec::run_with_stdin("nmcli", &args, input.as_bytes());
     if res.success() {
         Ok(())
     } else {

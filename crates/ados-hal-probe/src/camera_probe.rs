@@ -127,14 +127,17 @@ fn sensor_tokens(sensor: &str) -> Vec<String> {
         .collect()
 }
 
-/// The V4L2 node whose driver-reported name matches the declared `sensor`, or
-/// `None`. Walks `<sys_video4linux>/video*/name`.
-pub fn sensor_node_by_name(sys_video4linux_dir: &Path, sensor: &str) -> Option<String> {
+/// Every V4L2 node whose driver-reported name matches the declared `sensor`,
+/// sorted (deterministic across readdir order). Empty when the sensor yields no
+/// usable tokens. Walks `<sys_video4linux>/video*/name`.
+fn sensor_nodes_by_name(sys_video4linux_dir: &Path, sensor: &str) -> Vec<String> {
     let tokens = sensor_tokens(sensor);
     if tokens.is_empty() {
-        return None;
+        return Vec::new();
     }
-    let entries = std::fs::read_dir(sys_video4linux_dir).ok()?;
+    let Ok(entries) = std::fs::read_dir(sys_video4linux_dir) else {
+        return Vec::new();
+    };
     let mut matched: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         let node = entry.file_name().to_string_lossy().to_string();
@@ -149,38 +152,48 @@ pub fn sensor_node_by_name(sys_video4linux_dir: &Path, sensor: &str) -> Option<S
             matched.push(node);
         }
     }
-    // Deterministic across readdir order.
     matched.sort();
-    matched.into_iter().next()
+    matched
 }
 
-/// Confirm the camera: the expected node exists, else a V4L2 node reports the
-/// declared sensor. Returns the evidence string that proved it.
+/// The first V4L2 node whose driver-reported name matches the declared
+/// `sensor`, or `None`.
+pub fn sensor_node_by_name(sys_video4linux_dir: &Path, sensor: &str) -> Option<String> {
+    sensor_nodes_by_name(sys_video4linux_dir, sensor)
+        .into_iter()
+        .next()
+}
+
+/// Confirm the camera: a V4L2 node reports the declared sensor. Returns the
+/// evidence string that proved it.
 ///
-/// Both halves are needed. The node path from the board profile is the precise
-/// answer but a board can enumerate the sensor on a different index than the
-/// profile's first mode declares; the sysfs name match catches that without
-/// accepting "some camera exists" as proof of THIS camera — an unrelated UVC
-/// webcam reports its own name and does not match the sensor tokens.
+/// The sysfs name match is mandatory. A node merely existing at the expected
+/// index is not proof of THIS camera: a UVC webcam or an SoC codec/ISP node can
+/// enumerate as `video0` on a board whose CSI sensor never bound. The expected
+/// node from the board profile only picks between several matching nodes; a
+/// board that enumerates the sensor on a different index still confirms by
+/// name.
 pub fn camera_present(
     dev_dir: &Path,
     sys_video4linux_dir: &Path,
     expected_node: &str,
     sensor: &str,
 ) -> Option<String> {
+    let matched = sensor_nodes_by_name(sys_video4linux_dir, sensor);
     let expected = expected_node.trim();
-    if !expected.is_empty() {
-        // The marker carries an absolute `/dev/videoN`; resolve its basename
-        // under the injected dev root so a test tree works unchanged.
-        let base = Path::new(expected)
-            .file_name()
-            .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if !base.is_empty() && dev_dir.join(&base).exists() {
-            return Some(expected.to_string());
-        }
+    // The marker carries an absolute `/dev/videoN`; resolve its basename under
+    // the injected dev root so a test tree works unchanged.
+    let base = Path::new(expected)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if !base.is_empty() && matched.contains(&base) && dev_dir.join(&base).exists() {
+        return Some(expected.to_string());
     }
-    sensor_node_by_name(sys_video4linux_dir, sensor).map(|node| format!("{node} ({sensor})"))
+    matched
+        .into_iter()
+        .next()
+        .map(|node| format!("{node} ({sensor})"))
 }
 
 /// Render the `camera.conf` body for a confirmed camera, preserving every key
@@ -237,7 +250,7 @@ pub fn revert(
         if snap_path.is_file() {
             let data = std::fs::read(snap_path)?;
             if data.len() >= MIN_SNAPSHOT_BYTES {
-                std::fs::write(boot_path, &data)?;
+                ados_protocol::sidecar::write_durable(boot_path, &data)?;
                 restored = true;
             } else {
                 tracing::warn!(
@@ -449,8 +462,11 @@ mod tests {
     #[test]
     fn a_bound_sensor_confirms_and_keeps_the_overlay() {
         let t = tree(GOOD_BOOT_CONFIG);
-        // The sensor enumerated this boot.
+        // The sensor enumerated this boot, on the node the profile expects.
         std::fs::write(t.paths.dev_dir.join("video0"), b"").unwrap();
+        let n = t.paths.sys_video4linux_dir.join("video0");
+        std::fs::create_dir_all(&n).unwrap();
+        std::fs::write(n.join("name"), b"sunxi-vin: imx214_mipi\n").unwrap();
 
         let marker = parse_marker(&t.paths.camera_probation);
         let present = camera_present(
@@ -518,6 +534,26 @@ mod tests {
         std::fs::create_dir_all(&n).unwrap();
         std::fs::write(n.join("name"), b"HD Pro Webcam C920\n").unwrap();
         std::fs::write(t.paths.dev_dir.join("video1"), b"").unwrap();
+
+        assert!(camera_present(
+            &t.paths.dev_dir,
+            &t.paths.sys_video4linux_dir,
+            "/dev/video0",
+            "Sony IMX214",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn an_unrelated_device_on_the_expected_node_is_not_proof_of_this_camera() {
+        // A codec or webcam that enumerated as video0 on a board whose CSI
+        // sensor never bound: the node exists at the expected path, but its
+        // driver name is not the sensor, so the overlay must not be confirmed.
+        let t = tree(GOOD_BOOT_CONFIG);
+        std::fs::write(t.paths.dev_dir.join("video0"), b"").unwrap();
+        let n = t.paths.sys_video4linux_dir.join("video0");
+        std::fs::create_dir_all(&n).unwrap();
+        std::fs::write(n.join("name"), b"cedrus\n").unwrap();
 
         assert!(camera_present(
             &t.paths.dev_dir,
@@ -651,6 +687,9 @@ mod tests {
     fn run_confirms_end_to_end_when_the_sensor_is_bound() {
         let t = tree(GOOD_BOOT_CONFIG);
         std::fs::write(t.paths.dev_dir.join("video0"), b"").unwrap();
+        let n = t.paths.sys_video4linux_dir.join("video0");
+        std::fs::create_dir_all(&n).unwrap();
+        std::fs::write(n.join("name"), b"sunxi-vin: imx214_mipi\n").unwrap();
         let outcome = run_with_window(&t.paths, std::time::Duration::ZERO).unwrap();
         assert_eq!(
             outcome,

@@ -72,7 +72,6 @@ def test_help_shows_only_public_commands() -> None:
         "plugin",
         "profile",
         "radio",
-        "rust",
         "install",
         "tui",
         "config",

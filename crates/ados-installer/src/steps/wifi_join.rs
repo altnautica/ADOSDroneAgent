@@ -18,7 +18,7 @@ use crate::ctx::Ctx;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::wizard::wifi;
 
-/// Headless Wi-Fi join (driven by `--wifi-ssid` / `--wifi-pass`).
+/// Headless Wi-Fi join (driven by `--wifi-ssid` / `--wifi-pass-file`).
 pub struct WifiJoin;
 
 impl Step for WifiJoin {
@@ -64,7 +64,14 @@ impl Step for WifiJoin {
             }
         };
 
-        let password = ctx.args.wifi_pass.as_deref().filter(|p| !p.is_empty());
+        let password = match ctx.args.wifi_pass_file.as_deref() {
+            None => None,
+            Some(path) => match read_password_file(std::path::Path::new(path)) {
+                Ok(pw) => pw,
+                Err(e) => return StepOutcome::Failed(e),
+            },
+        };
+        let password = password.as_deref();
 
         if let Err(e) = wifi::connect(&iface, &ssid, password, false) {
             return StepOutcome::Failed(format!("Wi-Fi join failed: {e}"));
@@ -87,6 +94,15 @@ impl Step for WifiJoin {
         tracing::info!(iface = %iface, ssid = %ssid, "headless Wi-Fi join complete");
         StepOutcome::Ok
     }
+}
+
+/// Read the Wi-Fi password from `path`: the first line, without its line
+/// ending. An empty password means an open network (`None`).
+fn read_password_file(path: &std::path::Path) -> Result<Option<String>, String> {
+    let body = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read --wifi-pass-file {}: {e}", path.display()))?;
+    let pw = body.lines().next().unwrap_or("").to_string();
+    Ok((!pw.is_empty()).then_some(pw))
 }
 
 #[cfg(test)]

@@ -2,15 +2,12 @@
 //!
 //! A short list of operator actions that drill into detail pages or run an
 //! agent action: pair drone, diagnostics, restart agent, about. Restart takes
-//! two taps: the first arms it (the row reads "Tap again to restart") for
-//! [`RESTART_CONFIRM_WINDOW`], the second sends
+//! two taps through [`TwoTapConfirm`]: the first arms it (the row reads "Tap
+//! again to restart") for [`CONFIRM_WINDOW`](crate::pages::CONFIRM_WINDOW), the second sends
 //! `POST /api/v1/system/restart-supervisor`. Each
 //! row is a 48 px list row in the shared list styling — a left-aligned label
 //! with a right-pointing chevron — and the four rows fit inside the content
 //! area without a scroll envelope (`4 * 48 = 192` px).
-
-use std::cell::Cell;
-use std::time::{Duration, Instant};
 
 use embedded_graphics::pixelcolor::Rgb888;
 
@@ -18,7 +15,8 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, line, text, Canvas};
 use crate::pages::{
-    blank_panel, AgentRequest, Chrome, HitAction, HitZone, Page, PageContext, PanelAction, PANEL_W,
+    blank_panel, AgentRequest, Chrome, HitAction, HitZone, Page, PageContext, PanelAction,
+    TwoTapConfirm, PANEL_W,
 };
 
 /// Height of one overflow list row.
@@ -29,26 +27,17 @@ const LEFT_PAD: i32 = 12;
 /// Pixel padding from the right edge for the chevron.
 const RIGHT_PAD: i32 = 12;
 
-/// How long a first tap on "Restart agent" stays armed for the confirming tap.
-pub const RESTART_CONFIRM_WINDOW: Duration = Duration::from_secs(5);
-
 /// The restart row's custom key.
 const RESTART_KEY: &str = "more.restart";
 
 /// The overflow menu, registered as `more`.
 #[derive(Default)]
 pub struct MorePage {
-    /// When the restart row was armed by a first tap.
-    restart_armed_at: Cell<Option<Instant>>,
+    /// Two-tap arm state of the restart row.
+    restart_confirm: TwoTapConfirm,
 }
 
 impl MorePage {
-    fn restart_armed(&self) -> bool {
-        self.restart_armed_at
-            .get()
-            .is_some_and(|t| t.elapsed() < RESTART_CONFIRM_WINDOW)
-    }
-
     /// The rows, in display order: `(zone key, operator label, drill-into page
     /// id or action)`. A `None` target marks an agent-action row resolved by
     /// [`Page::on_custom`].
@@ -81,7 +70,7 @@ impl Page for MorePage {
         let mut canvas = blank_panel(palette);
         for (i, (key, label, _target)) in Self::ROWS.iter().enumerate() {
             let row_y = i as i32 * ROW_H;
-            let label = if *key == RESTART_KEY && self.restart_armed() {
+            let label = if *key == RESTART_KEY && self.restart_confirm.is_armed(RESTART_KEY) {
                 "Tap again to restart"
             } else {
                 label
@@ -109,11 +98,9 @@ impl Page for MorePage {
         if key != RESTART_KEY {
             return None;
         }
-        if !self.restart_armed() {
-            self.restart_armed_at.set(Some(Instant::now()));
+        if !self.restart_confirm.tap(RESTART_KEY) {
             return Some(PanelAction::Repaint);
         }
-        self.restart_armed_at.set(None);
         Some(PanelAction::Agent(AgentRequest {
             method: "POST",
             path: "/api/v1/system/restart-supervisor",

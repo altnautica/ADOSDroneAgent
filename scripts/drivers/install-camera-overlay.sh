@@ -324,8 +324,14 @@ enable_managed_list_bsp_disabled() {
     fi
 
     # Brick-safe u-boot-update: snapshot, regen, size-sanity, restore-on-fail.
+    # The camera keeps its OWN snapshot. `<cfg>.ados-bak` is the pristine
+    # pre-install config the display probe restores, and the display installer
+    # runs first; overwriting it here would make a failed panel revert restore a
+    # config that still carries the panel overlay. The camera snapshot holds the
+    # config as it was just before this edit, so a camera revert undoes only
+    # the camera overlay.
     if [ -f "${extlinux}" ]; then
-        local bak="${extlinux}.ados-bak" size_before size_after
+        local bak="${extlinux}.ados-camera.bak" size_before size_after
         size_before=$(wc -c < "${extlinux}" 2>/dev/null || echo 0)
         if ! cp -f "${extlinux}" "${bak}" 2>/dev/null; then
             error "Could not snapshot ${extlinux}; refusing u-boot-update (brick-safety)."

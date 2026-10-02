@@ -102,6 +102,17 @@ impl PairingState {
         self.code_created_at
             .map(|created| ((created + CODE_TTL_SECS) * 1000.0) as i64)
     }
+
+    /// The `(code, pending_api_key)` pair the beacon may register at
+    /// `now_secs`: both present and non-empty, the node unpaired, and the code
+    /// still inside [`CODE_TTL_SECS`]. `None` means the local API must mint or
+    /// roll the code (and its pending key) before the beacon can advertise.
+    pub fn beacon_credentials(&self, now_secs: f64) -> Option<(&str, &str)> {
+        let code = self.pairing_code().filter(|c| !c.is_empty())?;
+        let key = self.pending_api_key().filter(|k| !k.is_empty())?;
+        let created = self.code_created_at.unwrap_or(0.0);
+        (now_secs - created < CODE_TTL_SECS).then_some((code, key))
+    }
 }
 
 /// The default pairing path as a `PathBuf`.
@@ -190,5 +201,35 @@ mod tests {
         // A code with no creation time has no derivable expiry.
         assert_eq!(s.code_expires_at_ms(), None);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The beacon advertises only a live code that travels with a pending key;
+    /// an expired code or a code without a key sends the beacon to the local
+    /// API to mint one.
+    #[test]
+    fn beacon_credentials_need_a_live_code_and_a_pending_key() {
+        let live = PairingState {
+            pairing_code: Some("ABC234".into()),
+            pending_api_key: Some("ados_pending".into()),
+            code_created_at: Some(1000.0),
+            ..PairingState::default()
+        };
+        assert_eq!(
+            live.beacon_credentials(1000.0 + CODE_TTL_SECS - 1.0),
+            Some(("ABC234", "ados_pending"))
+        );
+        assert_eq!(live.beacon_credentials(1000.0 + CODE_TTL_SECS), None);
+
+        let keyless = PairingState {
+            pending_api_key: None,
+            ..live.clone()
+        };
+        assert_eq!(keyless.beacon_credentials(1001.0), None);
+
+        let paired = PairingState {
+            paired: true,
+            ..live
+        };
+        assert_eq!(paired.beacon_credentials(1001.0), None);
     }
 }

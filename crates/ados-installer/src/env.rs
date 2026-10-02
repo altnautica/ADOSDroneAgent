@@ -9,6 +9,9 @@
 pub const INSTALL_DIR: &str = "/opt/ados";
 /// Prebuilt service binaries (one file per Rust service).
 pub const BIN_DIR: &str = "/opt/ados/bin";
+/// The copy of this installer a successful install keeps on the box, so
+/// `ados uninstall` runs the one uninstall path even with no network.
+pub const INSTALLED_INSTALLER: &str = "/opt/ados/bin/ados-installer";
 /// Python virtualenv hosting the agent package + the ecosystem layers.
 pub const VENV_DIR: &str = "/opt/ados/venv";
 /// Portable, self-contained CPython runtime the venv step provisions when the

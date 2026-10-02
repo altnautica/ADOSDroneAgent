@@ -7,32 +7,38 @@
 //! `--world-engine` / `--no-world-engine` flag or the wizard's checkbox, else
 //! the profile default ([`world_engine_default`]). When it is on, the step:
 //!
-//! 1. leaves an extension that is already installed alone (plugin auto-update
-//!    keeps it current, and an operator's own grants stay as they are);
+//! 1. finishes an extension that is already installed but was never switched
+//!    on (an earlier run hit a guard or grant failure): it grants the missing
+//!    required permissions and enables it. One the operator disabled is left
+//!    alone, as are the operator's own grants on an enabled one (plugin
+//!    auto-update keeps it current);
 //! 2. reads the extension's entry from the bundled first-party catalog, the
 //!    same document `/api/v1/plugins/catalog` serves;
 //! 3. downloads the archive through the plugin host's allowlisted transport and
-//!    checks it against the entry's `archive_sha256` pin;
+//!    checks it against the entry's `archive_sha256` pin, retrying a failed
+//!    download;
 //! 4. installs it through [`PluginSupervisor`] (signature, compatibility and
 //!    profile gates, payloads, units), grants every permission the manifest
 //!    marks `required` — the operator consented through the toggle — and
-//!    enables it.
+//!    enables it. A grant that fails while the loopback guard comes up is
+//!    retried after another guard wait.
 //!
 //! A catalog with no entry, or an entry with no published release yet, is not
 //! a failure: the step warns with the manual command and succeeds. Any real
-//! failure degrades the install with the same manual command; it never aborts.
+//! failure that survives the retries degrades the install; a re-run of the
+//! installer picks up where it stopped. It never aborts.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use ados_plugin_host::archive::ARCHIVE_MAX_BYTES;
 use ados_plugin_host::download::{
     fetch_capped, validate_download_url, verify_sha256, DownloadSource, HttpDownloadSource,
-    DOWNLOAD_MAX_BYTES,
 };
 use ados_plugin_host::realhost::RealHost;
 use ados_plugin_host::sandbox::NETWORK_OUTBOUND_CAP;
-use ados_plugin_host::{Paths, PluginSupervisor};
+use ados_plugin_host::{Paths, PluginStatus, PluginSupervisor};
 use serde::Deserialize;
 
 use crate::ctx::Ctx;
@@ -52,6 +58,13 @@ const CATALOG_JSON: &str = include_str!("../../../../src/ados/data/plugin-catalo
 /// granting `network.outbound`. The host installs the guard at daemon start,
 /// which the `start` step kicked off without blocking.
 const GUARD_WAIT: Duration = Duration::from_secs(30);
+
+/// How many times a transient step (the download, a permission grant) is
+/// attempted before the install gives up on it.
+const ATTEMPTS: u32 = 3;
+
+/// The pause between download attempts on a node.
+pub const DOWNLOAD_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// Whether a profile installs the World Engine when no flag or wizard answer
 /// says otherwise: on for the workstation-class nodes that run its heavy half,
@@ -84,8 +97,14 @@ pub enum ExtensionOutcome {
         version: String,
         granted: Vec<String>,
     },
-    /// Already installed; left alone.
+    /// Already installed and switched on; left alone.
     AlreadyInstalled { version: String },
+    /// Already installed but never switched on; this run granted the missing
+    /// required permissions and enabled it.
+    Finished {
+        version: String,
+        granted: Vec<String>,
+    },
     /// The bundled catalog has nothing installable for it yet.
     Unavailable(String),
 }
@@ -105,6 +124,9 @@ pub struct NodeTarget {
     /// grant. Zero where the backend enforces no sandbox (the grant then does
     /// not consult the guard).
     pub guard_wait: Duration,
+    /// The pause between download attempts ([`DOWNLOAD_RETRY_DELAY`] on a
+    /// node).
+    pub retry_delay: Duration,
 }
 
 /// Install the World Engine on this node. Runs on its own OS thread: the
@@ -126,6 +148,7 @@ pub fn install_world_engine(target: NodeTarget) -> Result<ExtensionOutcome, Stri
                 CATALOG_JSON,
                 &HttpDownloadSource::new(),
                 target.guard_wait,
+                target.retry_delay,
             )
         })
         .map_err(|e| format!("could not start the install thread: {e}"))?
@@ -133,23 +156,30 @@ pub fn install_world_engine(target: NodeTarget) -> Result<ExtensionOutcome, Stri
         .map_err(|_| "the install thread panicked".to_string())?
 }
 
-/// Install `plugin_id` from `catalog_json` through `supervisor`: skip an
-/// installed plugin, report an unpublished one, else download (allowlist +
-/// sha256 pin), install, grant the manifest's required permissions, enable.
+/// Install `plugin_id` from `catalog_json` through `supervisor`: finish an
+/// installed plugin that was never switched on, leave any other installed one
+/// alone, report an unpublished one, else download (allowlist + sha256 pin,
+/// retried), install, grant the manifest's required permissions, enable.
 pub fn install_from_catalog(
     supervisor: &mut PluginSupervisor,
     plugin_id: &str,
     catalog_json: &str,
     source: &dyn DownloadSource,
     guard_wait: Duration,
+    retry_delay: Duration,
 ) -> Result<ExtensionOutcome, String> {
     supervisor
         .discover()
         .map_err(|e| format!("reading the installed plugins failed: {e}"))?;
     if let Some(existing) = supervisor.find_install(plugin_id) {
-        return Ok(ExtensionOutcome::AlreadyInstalled {
-            version: existing.version.clone(),
-        });
+        let version = existing.version.clone();
+        // Only an install that never got switched on is unfinished. Disabled
+        // is the operator's choice, and an enabled plugin's grants are theirs.
+        if existing.status != PluginStatus::Installed {
+            return Ok(ExtensionOutcome::AlreadyInstalled { version });
+        }
+        let granted = grant_required_and_enable(supervisor, plugin_id, guard_wait)?;
+        return Ok(ExtensionOutcome::Finished { version, granted });
     }
 
     let catalog: Catalog = serde_json::from_str(catalog_json)
@@ -173,40 +203,111 @@ pub fn install_from_catalog(
 
     let url = entry.download_url.trim();
     validate_download_url(url).map_err(|e| format!("download refused: {e}"))?;
-    let archive = fetch_capped(source, url, DOWNLOAD_MAX_BYTES)
-        .map_err(|e| format!("download failed: {e}"))?;
-    verify_sha256(&archive, entry.archive_sha256.trim())
-        .map_err(|e| format!("download failed: {e}"))?;
+    let archive = download_with_retry(source, url, entry.archive_sha256.trim(), retry_delay)?;
 
-    let staged = std::env::temp_dir().join(format!(
-        ".ados-extension-{plugin_id}-{}.adosplug",
-        std::process::id()
-    ));
+    // A private directory (created exclusively, mode 0700) so nothing another
+    // local user prepared in the temp root can stand in for the verified
+    // archive between the pin check and the install. Removed on drop.
+    let staging_dir = tempfile::Builder::new()
+        .prefix("ados-extension-")
+        .tempdir()
+        .map_err(|e| format!("creating a private staging directory failed: {e}"))?;
+    let staged = staging_dir.path().join("extension.adosplug");
     std::fs::write(&staged, &archive)
         .map_err(|e| format!("staging {} failed: {e}", staged.display()))?;
-    let installed = supervisor.install_archive(&staged);
-    let _ = std::fs::remove_file(&staged);
-    let installed = installed.map_err(|e| format!("install refused: {e}"))?;
+    let installed = supervisor
+        .install_archive(&staged)
+        .map_err(|e| format!("install refused: {e}"))?;
+    drop(staging_dir);
 
-    let required = required_permissions(supervisor, plugin_id)?;
-    if required.contains(NETWORK_OUTBOUND_CAP) {
-        wait_for_loopback_guard(&supervisor.paths().loopback_guard_state, guard_wait);
+    let granted = grant_required_and_enable(supervisor, plugin_id, guard_wait)?;
+    Ok(ExtensionOutcome::Installed {
+        version: installed.version,
+        granted,
+    })
+}
+
+/// Download `url` and check it against `sha256`, retrying a failed fetch or a
+/// mismatched body up to [`ATTEMPTS`] times, `retry_delay` apart.
+fn download_with_retry(
+    source: &dyn DownloadSource,
+    url: &str,
+    sha256: &str,
+    retry_delay: Duration,
+) -> Result<Vec<u8>, String> {
+    let mut last = String::new();
+    for attempt in 1..=ATTEMPTS {
+        let fetched = fetch_capped(source, url, ARCHIVE_MAX_BYTES)
+            .map_err(|e| e.to_string())
+            .and_then(|archive| match verify_sha256(&archive, sha256) {
+                Ok(()) => Ok(archive),
+                Err(e) => Err(e.to_string()),
+            });
+        match fetched {
+            Ok(archive) => return Ok(archive),
+            Err(e) => {
+                tracing::warn!(attempt, error = %e, "extension download failed");
+                last = e;
+            }
+        }
+        if attempt < ATTEMPTS {
+            std::thread::sleep(retry_delay);
+        }
     }
-    let mut granted = Vec::with_capacity(required.len());
-    for permission in &required {
-        supervisor
-            .grant_permission(plugin_id, permission)
-            .map_err(|e| not_enabled(plugin_id, &format!("granting {permission} failed: {e}")))?;
+    Err(format!("download failed: {last}"))
+}
+
+/// Grant every required permission `plugin_id` does not hold yet, then enable
+/// it. A grant is retried up to [`ATTEMPTS`] times; a `network.outbound` grant
+/// waits for the loopback guard before each try. Returns the permissions this
+/// call granted.
+fn grant_required_and_enable(
+    supervisor: &mut PluginSupervisor,
+    plugin_id: &str,
+    guard_wait: Duration,
+) -> Result<Vec<String>, String> {
+    let required = required_permissions(supervisor, plugin_id)?;
+    let held: BTreeSet<String> = supervisor
+        .find_install(plugin_id)
+        .map(|i| {
+            i.permissions
+                .iter()
+                .filter(|(_, g)| g.granted)
+                .map(|(id, _)| id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut granted = Vec::new();
+    for permission in required.difference(&held) {
+        let mut last = String::new();
+        let mut ok = false;
+        for attempt in 1..=ATTEMPTS {
+            if permission == NETWORK_OUTBOUND_CAP {
+                wait_for_loopback_guard(&supervisor.paths().loopback_guard_state, guard_wait);
+            }
+            match supervisor.grant_permission(plugin_id, permission) {
+                Ok(_) => {
+                    ok = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(attempt, %permission, error = %e, "extension grant failed");
+                    last = e.to_string();
+                }
+            }
+        }
+        if !ok {
+            return Err(not_enabled(
+                plugin_id,
+                &format!("granting {permission} failed: {last}"),
+            ));
+        }
         granted.push(permission.clone());
     }
     supervisor
         .enable(plugin_id)
         .map_err(|e| not_enabled(plugin_id, &format!("enable failed: {e}")))?;
-
-    Ok(ExtensionOutcome::Installed {
-        version: installed.version,
-        granted,
-    })
+    Ok(granted)
 }
 
 /// Every permission either half of the installed manifest marks `required`.
@@ -227,12 +328,11 @@ fn required_permissions(
 }
 
 /// The message for a plugin that installed but could not be switched on. A
-/// re-run leaves an installed extension alone, so the operator is pointed at
-/// finishing it rather than at the install command.
+/// re-run of the installer finishes it; the manual path is named too.
 fn not_enabled(plugin_id: &str, why: &str) -> String {
     format!(
-        "{plugin_id} is installed but not enabled ({why}); finish it from Mission Control's \
-         plugin page or with `ados plugin enable {plugin_id}`"
+        "{plugin_id} is installed but not enabled ({why}); re-run the installer to finish it, \
+         or enable it from Mission Control's plugin page or with `ados plugin enable {plugin_id}`"
     )
 }
 
@@ -268,6 +368,15 @@ fn step_outcome(result: Result<ExtensionOutcome, String>) -> StepOutcome {
                 "World Engine extension already installed; left for plugin auto-update"
             );
             StepOutcome::Skipped
+        }
+        Ok(ExtensionOutcome::Finished { version, granted }) => {
+            tracing::info!(
+                plugin = WORLD_ENGINE_ID,
+                %version,
+                granted = ?granted,
+                "World Engine extension finished: required permissions granted and enabled"
+            );
+            StepOutcome::Ok
         }
         Ok(ExtensionOutcome::Unavailable(reason)) => {
             tracing::warn!(
@@ -324,6 +433,7 @@ impl Step for Extensions {
             agent_version,
             board_sidecar: ados_hal_probe::board_sidecar::sidecar_path(),
             guard_wait: GUARD_WAIT,
+            retry_delay: DOWNLOAD_RETRY_DELAY,
         }))
     }
 }
@@ -336,7 +446,6 @@ mod tests {
 
     use ados_plugin_host::backend::RecordingBackend;
     use ados_plugin_host::download::StaticDownloadSource;
-    use ados_plugin_host::PluginStatus;
     use sha2::{Digest, Sha256};
 
     const URL: &str =
@@ -421,6 +530,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             r#"{"schema_version":1,"plugins":[]}"#,
             &StaticDownloadSource::default(),
             Duration::ZERO,
+            Duration::ZERO,
         )
         .unwrap();
         assert!(
@@ -440,6 +550,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             WORLD_ENGINE_ID,
             &catalog_with("", ""),
             &StaticDownloadSource::default(),
+            Duration::ZERO,
             Duration::ZERO,
         )
         .unwrap();
@@ -471,6 +582,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             WORLD_ENGINE_ID,
             &catalog_with(URL, &sha),
             &source,
+            Duration::ZERO,
             Duration::ZERO,
         )
         .unwrap();
@@ -507,6 +619,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             &catalog_with(URL, &sha),
             &StaticDownloadSource::default(),
             Duration::ZERO,
+            Duration::ZERO,
         )
         .unwrap();
         assert_eq!(
@@ -514,6 +627,67 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             ExtensionOutcome::AlreadyInstalled {
                 version: "1.0.0".to_string()
             }
+        );
+    }
+
+    /// An install that stopped before its grants and enable (a guard or grant
+    /// failure on an earlier run) is finished by the next run, without a new
+    /// download; one the operator switched off stays off.
+    #[test]
+    fn a_rerun_finishes_an_install_that_was_never_switched_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sup = supervisor(dir.path());
+        let staged = dir.path().join("we.adosplug");
+        std::fs::write(&staged, archive()).unwrap();
+        sup.install_archive(&staged).unwrap();
+        assert_eq!(
+            sup.find_install(WORLD_ENGINE_ID).unwrap().status,
+            PluginStatus::Installed
+        );
+
+        let outcome = install_from_catalog(
+            &mut sup,
+            WORLD_ENGINE_ID,
+            &catalog_with(URL, &"00".repeat(32)),
+            &StaticDownloadSource::default(),
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            ExtensionOutcome::Finished {
+                version: "1.0.0".to_string(),
+                granted: vec!["hardware.spi".to_string()],
+            }
+        );
+        let install = sup.find_install(WORLD_ENGINE_ID).unwrap();
+        assert!(install.permissions["hardware.spi"].granted);
+        assert!(matches!(
+            install.status,
+            PluginStatus::Enabled | PluginStatus::Running
+        ));
+        assert_eq!(step_outcome(Ok(outcome)), StepOutcome::Ok);
+
+        sup.disable(WORLD_ENGINE_ID).unwrap();
+        let again = install_from_catalog(
+            &mut sup,
+            WORLD_ENGINE_ID,
+            &catalog_with(URL, &"00".repeat(32)),
+            &StaticDownloadSource::default(),
+            Duration::ZERO,
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            again,
+            ExtensionOutcome::AlreadyInstalled {
+                version: "1.0.0".to_string()
+            }
+        );
+        assert_eq!(
+            sup.find_install(WORLD_ENGINE_ID).unwrap().status,
+            PluginStatus::Disabled
         );
     }
 
@@ -527,6 +701,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             WORLD_ENGINE_ID,
             &catalog_with(URL, &"00".repeat(32)),
             &source,
+            Duration::ZERO,
             Duration::ZERO,
         )
         .unwrap_err();
@@ -548,6 +723,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
             WORLD_ENGINE_ID,
             &catalog_with(URL, ""),
             &source,
+            Duration::ZERO,
             Duration::ZERO,
         )
         .unwrap_err();

@@ -1,15 +1,13 @@
 """Extended coverage for the public ``ados`` CLI.
 
-Sibling to ``tests/test_cli.py`` (basic happy paths) and
-``tests/test_cli_uninstall_kill_fallback.py`` (systemctl escalation).
-This file fills the audit-surfaced gaps:
+Sibling to ``tests/test_cli.py`` (basic happy paths). Covers:
 
 * ``ados status --json`` schema contract (required keys propagate through).
 * ``ados update --check-only`` happy path + already-up-to-date path +
   ``--json`` envelope shape + transport error.
-* ``ados uninstall --yes --purge`` dry-run on Linux — verifies the right
-  systemctl + filesystem calls are issued without actually touching
-  ``/etc`` or ``/opt`` (every system call is mocked).
+* ``ados uninstall`` on Linux routes to the installer's ``--uninstall``: the
+  copy kept on the box first (offline), else a fetched install.sh, else a
+  clear error (every process and network call is mocked).
 * CLI error surface: missing systemd, no agent installed, connection
   refused.
 
@@ -224,123 +222,82 @@ def test_update_upgrade_failure_surfaces_as_click_exception() -> None:
 
 
 # ---------------------------------------------------------------------------
-# uninstall --yes --purge — dry-run with every syscall mocked
+# uninstall — the Rust installer's `--uninstall` is the only removal path
 # ---------------------------------------------------------------------------
 
 
-def test_uninstall_linux_purge_dry_run_calls_systemctl_and_cleanup(
+def test_uninstall_linux_runs_the_kept_installer_without_the_network(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Verify the sequence: stop -> disable -> daemon-reload -> rmtree.
-
-    All filesystem and process calls are mocked. The real system is
-    untouched. The test asserts the helper calls the expected
-    subcommands in the documented order.
-    """
+    """With the installer copy on the box, uninstall runs it and never fetches."""
+    local = tmp_path / "ados-installer"
+    local.write_text("#!/bin/sh\n")
+    local.chmod(0o755)
+    monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli_main, "LOCAL_INSTALLER_PATH", local)
+    monkeypatch.setattr(cli_main.os, "geteuid", lambda: 0, raising=False)
     run_calls: list[list[str]] = []
 
     def _fake_run(cmd, **_kwargs):
         run_calls.append(list(cmd))
         return subprocess.CompletedProcess(args=cmd, returncode=0)
 
-    install_paths = {
-        "install": tmp_path / "opt-ados",
-        "config": tmp_path / "etc-ados",
-        "data": tmp_path / "var-ados",
-        "motd": tmp_path / "30-ados",
-    }
-    for key, p in install_paths.items():
-        # motd maps to a file (/etc/update-motd.d/30-ados) that uninstall
-        # unlinks; the rest are directories that get rmtree'd.
-        if key == "motd":
-            p.write_text("")
-        else:
-            p.mkdir()
+    def _no_network(*_a, **_kw):
+        raise AssertionError("the kept installer must not need the network")
 
-    # Units are discovered by globbing /etc/systemd/system for ados-*.service,
-    # so they must live in a directory the glob can see and be named ados-*.
-    systemd_dir = tmp_path / "systemd-system"
-    systemd_dir.mkdir()
-    service_files = [
-        systemd_dir / "ados-supervisor.service",
-        systemd_dir / "ados-agent.service",
-        systemd_dir / "ados-cloud.service",
-    ]
-    for sf in service_files:
-        sf.write_text("[Unit]\n")
-    symlinks = [tmp_path / f"bin-{name}" for name in ("ados", "ados-agent", "ados-supervisor")]
-    for sl in symlinks:
-        sl.write_text("")
-
-    rmtree_calls: list[Path] = []
-
-    def _fake_rmtree(path: Path, *_args, **_kwargs) -> None:
-        rmtree_calls.append(Path(path))
-
-    with patch.object(cli_main.platform, "system", return_value="Linux"), \
-         patch.object(cli_main, "_run_uninstall_via_installer", return_value=False), \
-         patch.object(cli_main.os, "geteuid", return_value=0), \
-         patch.object(cli_main.shutil, "which", return_value="/bin/systemctl"), \
-         patch.object(cli_main.subprocess, "run", side_effect=_fake_run), \
-         patch.object(cli_main.shutil, "rmtree", side_effect=_fake_rmtree), \
-         patch.object(cli_main, "Path") as path_factory:
-
-        def _select_path(arg: str) -> Path:
-            if arg == "/opt/ados":
-                return install_paths["install"]
-            if arg == "/etc/ados":
-                return install_paths["config"]
-            if arg == "/var/ados":
-                return install_paths["data"]
-            if arg == "/etc/update-motd.d/30-ados":
-                return install_paths["motd"]
-            if arg == "/etc/systemd/system":
-                return systemd_dir
-            if arg.startswith("/usr/local/bin/"):
-                name = arg.rsplit("/", 1)[-1]
-                return tmp_path / f"bin-{name}"
-            return Path(arg)
-
-        path_factory.side_effect = _select_path
-
+    with patch.object(cli_main.subprocess, "run", side_effect=_fake_run), \
+         patch.object(cli_main.httpx, "Client", side_effect=_no_network):
         result = runner.invoke(cli, ["uninstall", "--yes", "--purge"])
 
     assert result.exit_code == 0, result.output
-    # Each unit got a stop (via helper) and a disable.
-    stop_calls = [c for c in run_calls if c[:2] == ["systemctl", "stop"]]
-    disable_calls = [c for c in run_calls if c[:2] == ["systemctl", "disable"]]
-    assert len(stop_calls) == 3
-    assert len(disable_calls) == 3
-    # Final daemon-reload.
-    assert ["systemctl", "daemon-reload"] in run_calls
-    # rmtree fired for install + data + config (because --purge).
-    rmtree_strs = {p.name for p in rmtree_calls}
-    assert "opt-ados" in rmtree_strs
-    assert "var-ados" in rmtree_strs
-    assert "etc-ados" in rmtree_strs
+    assert run_calls == [[str(local), "--uninstall", "--force"]]
 
 
-def test_uninstall_linux_prefers_the_full_screen_installer(
-    monkeypatch: pytest.MonkeyPatch,
+def test_uninstall_linux_without_a_kept_installer_runs_install_sh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When the installer-driven uninstall runs, the local teardown is skipped."""
+    """A box without the installer copy fetches install.sh and passes the flags."""
     monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
-    called: dict[str, object] = {}
+    monkeypatch.setattr(cli_main, "LOCAL_INSTALLER_PATH", tmp_path / "absent")
+    monkeypatch.setattr(cli_main.os, "geteuid", lambda: 0, raising=False)
+    run_calls: list[list[str]] = []
 
-    def _delegate(**kwargs: object) -> bool:
-        called.update(kwargs)
-        return True
+    def _fake_run(cmd, **_kwargs):
+        run_calls.append(list(cmd))
+        return subprocess.CompletedProcess(args=cmd, returncode=0)
 
-    monkeypatch.setattr(cli_main, "_run_uninstall_via_installer", _delegate)
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.__exit__.return_value = False
+    client.get.return_value = MagicMock(text="#!/bin/sh\n")
+    with patch.object(cli_main.subprocess, "run", side_effect=_fake_run), \
+         patch.object(cli_main.httpx, "Client", return_value=client):
+        result = runner.invoke(cli, ["uninstall", "--yes"])
 
-    def _boom(**_kw: object) -> None:
-        raise AssertionError("local teardown must not run when delegation succeeds")
-
-    monkeypatch.setattr(cli_main, "_uninstall_linux", _boom)
-
-    result = runner.invoke(cli, ["uninstall", "--yes", "--purge"])
     assert result.exit_code == 0, result.output
-    assert called == {"purge": True, "yes": True}
+    assert len(run_calls) == 1
+    assert run_calls[0][0] == "bash"
+    assert run_calls[0][2:] == ["--uninstall"]
+
+
+def test_uninstall_linux_offline_without_a_kept_installer_says_what_to_do(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No installer copy and no network: a clear error, nothing half-removed."""
+    monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli_main, "LOCAL_INSTALLER_PATH", tmp_path / "absent")
+    monkeypatch.setattr(cli_main.os, "geteuid", lambda: 0, raising=False)
+    client = MagicMock()
+    client.__enter__.return_value = client
+    client.__exit__.return_value = False
+    client.get.side_effect = httpx.ConnectError("offline")
+    with patch.object(cli_main.subprocess, "run") as run, \
+         patch.object(cli_main.httpx, "Client", return_value=client):
+        result = runner.invoke(cli, ["uninstall", "--yes"])
+
+    assert result.exit_code != 0
+    assert "could not be downloaded" in result.output
+    run.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -354,40 +311,6 @@ def test_uninstall_unsupported_platform_raises() -> None:
         result = runner.invoke(cli, ["uninstall", "--yes"])
     assert result.exit_code != 0
     assert "Unsupported platform" in result.output
-
-
-def test_uninstall_linux_requires_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The offline local-teardown fallback without root must refuse cleanly."""
-    monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
-    # Force the offline fallback (no installer fetch) so the local teardown's
-    # own root check is the gate under test.
-    monkeypatch.setattr(cli_main, "_run_uninstall_via_installer", lambda **_kw: False)
-    # Force a non-root geteuid even on macOS CI hosts (where the attr exists).
-    monkeypatch.setattr(cli_main.os, "geteuid", lambda: 1000, raising=False)
-    result = runner.invoke(cli, ["uninstall", "--yes"])
-    assert result.exit_code != 0
-    assert "requires root" in result.output
-
-
-def test_uninstall_nothing_installed_is_a_clean_noop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """If install dir and config dir are missing, the command exits cleanly."""
-    monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(cli_main, "_run_uninstall_via_installer", lambda **_kw: False)
-    monkeypatch.setattr(cli_main.os, "geteuid", lambda: 0, raising=False)
-    monkeypatch.setattr(cli_main.shutil, "which", lambda _bin: None)
-
-    empty = tmp_path / "nothing-here"
-
-    def _select_path(arg: str) -> Path:
-        return empty / arg.replace("/", "_")
-
-    with patch.object(cli_main, "Path", side_effect=_select_path):
-        result = runner.invoke(cli, ["uninstall", "--yes"])
-
-    assert result.exit_code == 0
-    assert "Nothing to uninstall" in result.output
 
 
 def test_request_connect_error_yields_friendly_message() -> None:

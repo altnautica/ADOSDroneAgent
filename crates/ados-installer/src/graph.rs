@@ -41,8 +41,10 @@ pub trait Step {
     fn id(&self) -> &str;
     /// Ids of the steps that must succeed before this one runs.
     fn requires(&self) -> &[&str];
-    /// The checkpoint name this step marks on success, if any. A step with a
-    /// marked checkpoint is skipped (unless `--force`).
+    /// The checkpoint name this step marks when it returns
+    /// [`StepOutcome::Ok`], if any. A step with a marked checkpoint is skipped
+    /// (unless `--force`). A step that returns [`StepOutcome::Skipped`] did no
+    /// work and marks nothing, so a later run that should do it still does.
     fn checkpoint(&self) -> Option<&str>;
     /// Whether a failure is Required (fatal) or Optional (degrading).
     fn kind(&self) -> StepKind;
@@ -173,7 +175,7 @@ fn pop_lowest_index(ready: &mut Vec<String>, index: &BTreeMap<String, usize>) ->
 ///    success for dependents.
 /// 4. Otherwise run it. On [`StepOutcome::Failed`] record into `ctx.failures`
 ///    (required iff `kind() == Required`); a Required failure flips the graph
-///    to ABORTING. On success, mark its checkpoint.
+///    to ABORTING. On [`StepOutcome::Ok`], mark its checkpoint.
 ///
 /// A malformed graph (cycle / unknown require) is itself a hard error and is
 /// surfaced as a synthetic Required failure of a `graph` pseudo-step so the
@@ -244,9 +246,11 @@ pub fn run_graph(steps: Vec<Box<dyn Step>>, ctx: &mut Ctx) -> Vec<StepReport> {
         match &outcome {
             StepOutcome::Ok | StepOutcome::Skipped => {
                 succeeded.insert(id.clone());
-                if let Some(cp) = step.checkpoint() {
-                    if let Err(e) = ctx.checkpoint.mark(cp) {
-                        tracing::warn!(step = %id, checkpoint = %cp, error = %e, "failed to mark checkpoint");
+                if outcome == StepOutcome::Ok {
+                    if let Some(cp) = step.checkpoint() {
+                        if let Err(e) = ctx.checkpoint.mark(cp) {
+                            tracing::warn!(step = %id, checkpoint = %cp, error = %e, "failed to mark checkpoint");
+                        }
                     }
                 }
             }
@@ -540,5 +544,25 @@ mod tests {
         let mut c = Ctx::for_test(checkpoint.clone());
         run_graph(steps, &mut c);
         assert!(checkpoint.is_done("deps"));
+    }
+
+    /// A step that skipped did no work, so a later run (for example an opt-in
+    /// after an opt-out) must still run it.
+    #[test]
+    fn skipped_step_leaves_its_checkpoint_unmarked() {
+        let ran = recorder();
+        let cp_dir = tempfile::tempdir().unwrap();
+        let checkpoint = Checkpoint::with_root(cp_dir.path());
+        let steps: Vec<Box<dyn Step>> = vec![Box::new(TestStep {
+            id: "dkms",
+            requires: vec![],
+            checkpoint: Some("radio-driver"),
+            kind: StepKind::Optional,
+            outcome: StepOutcome::Skipped,
+            ran,
+        })];
+        let mut c = Ctx::for_test(checkpoint.clone());
+        run_graph(steps, &mut c);
+        assert!(!checkpoint.is_done("radio-driver"));
     }
 }

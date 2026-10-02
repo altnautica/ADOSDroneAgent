@@ -18,8 +18,9 @@
 //!      40-char object name to the binary fetch
 //!      stable — download the release wheel and deploy bundle for `--version`,
 //!      verify each against its SHA256 and its minisign signature (both
-//!      mandatory), `pip install <wheel>`, and unpack the bundle into the
-//!      persisted source tree the OS steps read their unit files from
+//!      mandatory), install the dependencies from the hashed lock inside the
+//!      signed bundle, `pip install --no-deps <wheel>`, and unpack the bundle
+//!      into the persisted source tree the OS steps read their unit files from
 //!
 //! The venv-path + pip-args + wheel-URL + git-args builders are pure so a unit
 //! test exercises them without a real interpreter or the network.
@@ -91,9 +92,32 @@ pub fn pip_install_edge_args(source: &str) -> Vec<String> {
 
 /// Build the `pip install` args for the stable (wheel) channel (pure). The arg
 /// is a local wheel file path (not `-e <repo>` / a URL), so pip installs the
-/// already-downloaded, already-verified wheel from disk.
+/// already-downloaded, already-verified wheel from disk. `--no-deps`: its
+/// dependencies come only from the signed hash lock ([`pip_install_lock_args`]),
+/// never from a live index resolve.
 pub fn pip_install_wheel_args(wheel_path: &str) -> Vec<String> {
-    vec!["install".to_string(), wheel_path.to_string()]
+    vec![
+        "install".to_string(),
+        "--no-deps".to_string(),
+        wheel_path.to_string(),
+    ]
+}
+
+/// The hashed dependency lock the release ships inside the signed deploy
+/// bundle, relative to the bundle's root.
+pub const BUNDLE_LOCK_MEMBER: &str = "repo/requirements.lock";
+
+/// Build the `pip install` args for the stable channel's dependencies (pure):
+/// every requirement pinned and hash-checked from the signed lock, nothing
+/// resolved beyond it.
+pub fn pip_install_lock_args(lock_path: &str) -> Vec<String> {
+    vec![
+        "install".to_string(),
+        "--require-hashes".to_string(),
+        "--no-deps".to_string(),
+        "-r".to_string(),
+        lock_path.to_string(),
+    ]
 }
 
 /// Normalize a `--version` value to the bare `X.Y.Z` form (pure). The operator
@@ -499,14 +523,19 @@ fn install_agent_edge(ctx: &mut Ctx) -> anyhow::Result<PathBuf> {
 /// and the deploy bundle for the pinned `--version`, verify each against its
 /// `.sha256` AND its `.minisig` (the signature is mandatory: a missing one, a
 /// host without `minisign`, or a signature that does not match the embedded
-/// trust anchor all refuse the install), `pip install <wheel>`, then unpack the
-/// bundle into the persisted source tree. Returns that tree so the caller records
-/// it into `ctx.source_dir`: the systemd, udev and radio steps read `data/` and
+/// trust anchor all refuse the install), install the dependencies from the
+/// hashed lock inside the signed bundle (`--require-hashes --no-deps`), then
+/// the wheel itself with `--no-deps`, then unpack the bundle into the persisted
+/// source tree. Returns that tree so the caller records it into
+/// `ctx.source_dir`: the systemd, udev and radio steps read `data/` and
 /// `scripts/` from it, exactly as they read an edge clone.
 ///
 /// Nothing is installed until BOTH artifacts have verified, so a release with a
-/// bad bundle never leaves a new wheel beside an old tree. Temp downloads are
-/// cleaned up on every exit path.
+/// bad bundle never leaves a new wheel beside an old tree, and a bundle without
+/// the lock refuses the install rather than trusting the index. Downloads stage
+/// in a fresh private directory (created exclusively, mode 0700), so nothing
+/// another local user prepared can stand in for a verified file; it is removed
+/// on every exit path.
 ///
 /// A `--ref` pin never reaches here: `ctx::rev_channel_conflict` refuses the
 /// stable+`--ref` pair before the install starts, because a `v<X.Y.Z>` release
@@ -518,40 +547,74 @@ fn install_agent_stable(ctx: &Ctx) -> anyhow::Result<PathBuf> {
     })?;
     let version = normalize_version(raw);
 
-    // Stage every download under a unique temp dir so a partial fetch never
-    // collides with a concurrent run and cleanup is a single dir remove.
-    let dir = wheel_tmp_dir()?;
+    // Dropping the TempDir removes the download tree, success or failure.
+    let staging = tempfile::Builder::new()
+        .prefix("ados-installer-wheel-")
+        .tempdir()
+        .context("create a private download directory")?;
+    let dir = staging.path();
     let sink = ctx.progress.clone();
-    let outcome = (|| {
-        let wheel_path = fetch_signed_release_asset(&version, &wheel_filename(&version), &dir)?;
-        let bundle_path = fetch_signed_release_asset(&version, &bundle_filename(&version), &dir)?;
-        sink.sub_log(
-            "venv_agent",
-            &format!("✓ v{version} wheel and deploy bundle signature-verified"),
+    let wheel_path = fetch_signed_release_asset(&version, &wheel_filename(&version), dir)?;
+    let bundle_path = fetch_signed_release_asset(&version, &bundle_filename(&version), dir)?;
+    sink.sub_log(
+        "venv_agent",
+        &format!("✓ v{version} wheel and deploy bundle signature-verified"),
+    );
+
+    let lock = extract_bundle_lock(&bundle_path, dir)?;
+    let lock_s = lock.to_string_lossy().into_owned();
+    run_venv_pip(
+        &pip_install_lock_args(&lock_s),
+        &sink,
+        "pip install of the agent's hash-locked dependencies failed",
+    )?;
+    let wheel_s = wheel_path.to_string_lossy().into_owned();
+    run_venv_pip(
+        &pip_install_wheel_args(&wheel_s),
+        &sink,
+        "pip install of the agent wheel failed",
+    )?;
+
+    let repo = clone_dest()?;
+    unpack_bundle(&bundle_path, &repo)?;
+    Ok(repo)
+}
+
+/// Run the venv pip with `args`, streaming its output; `what` names a failure.
+fn run_venv_pip(args: &[String], sink: &ProgressSink, what: &str) -> anyhow::Result<()> {
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let res = exec::run_streamed(&venv_pip(), &argv, on_pip_line(sink));
+    if !res.spawned {
+        anyhow::bail!("venv pip {} could not be spawned", venv_pip());
+    }
+    if !res.success() {
+        anyhow::bail!("{what}: {}", res.stderr.trim());
+    }
+    Ok(())
+}
+
+/// Extract the hashed dependency lock from a verified deploy bundle into
+/// `dir`. A bundle without it is refused: installing the wheel's dependencies
+/// any other way would resolve them unpinned from the index.
+fn extract_bundle_lock(bundle: &Path, dir: &Path) -> anyhow::Result<PathBuf> {
+    let bundle_s = bundle.to_string_lossy().into_owned();
+    let dir_s = dir.to_string_lossy().into_owned();
+    let res = exec::run(
+        "tar",
+        &["-xzf", &bundle_s, "-C", &dir_s, BUNDLE_LOCK_MEMBER],
+    );
+    let lock = dir.join(BUNDLE_LOCK_MEMBER);
+    if !res.success() || !lock.is_file() {
+        if !res.spawned {
+            anyhow::bail!("tar is not installed; cannot read the deploy bundle");
+        }
+        anyhow::bail!(
+            "the deploy bundle {} carries no hashed dependency lock ({BUNDLE_LOCK_MEMBER}); \
+             refusing to resolve the agent's dependencies unpinned from the index",
+            bundle.display()
         );
-
-        let wheel_s = wheel_path.to_string_lossy().into_owned();
-        let pip = pip_install_wheel_args(&wheel_s);
-        let pip_argv: Vec<&str> = pip.iter().map(String::as_str).collect();
-        let pip_res = exec::run_streamed(&venv_pip(), &pip_argv, on_pip_line(&sink));
-        if !pip_res.spawned {
-            anyhow::bail!("venv pip {} could not be spawned", venv_pip());
-        }
-        if !pip_res.success() {
-            anyhow::bail!(
-                "pip install of the agent wheel failed: {}",
-                pip_res.stderr.trim()
-            );
-        }
-
-        let repo = clone_dest()?;
-        unpack_bundle(&bundle_path, &repo)?;
-        Ok(repo)
-    })();
-
-    // Always remove the temp download tree, success or failure.
-    let _ = std::fs::remove_dir_all(&dir);
-    outcome
+    }
+    Ok(lock)
 }
 
 /// Fetch one asset of the `v<version>` release plus its `.sha256` and
@@ -571,16 +634,15 @@ fn fetch_signed_release_asset(version: &str, name: &str, dir: &Path) -> anyhow::
     Ok(path)
 }
 
-/// The stable-channel gate for a downloaded release asset: its `.sha256` AND a
-/// `.minisig` from [`verify::RELEASE_PUBKEY`], both mandatory. A sha-only asset
-/// is refused: the sidecar comes from the same host as the asset, so on its own
-/// it proves integrity, not origin.
+/// The gate for a downloaded release asset: its `.sha256` AND a `.minisig`
+/// from [`verify::RELEASE_PUBKEY`], both mandatory. A sha-only asset is
+/// refused: the sidecar comes from the same host as the asset, so on its own it
+/// proves integrity, not origin.
 fn verify_release_asset(path: &Path) -> anyhow::Result<()> {
     verify::verify_artifact(
         path,
-        Some(verify::RELEASE_PUBKEY),
-        verify::Channel::Stable,
-        false,
+        verify::RELEASE_PUBKEY,
+        verify::SignaturePolicy::Required,
     )
 }
 
@@ -621,18 +683,6 @@ fn sidecar(path: &Path, ext: &str) -> PathBuf {
     s.push(".");
     s.push(ext);
     PathBuf::from(s)
-}
-
-/// A unique temp directory for the stable wheel download (pid + a monotonic
-/// counter), created under the system temp root.
-fn wheel_tmp_dir() -> std::io::Result<PathBuf> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let base =
-        std::env::temp_dir().join(format!("ados-installer-wheel-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&base)?;
-    Ok(base)
 }
 
 /// The persisted clone destination. On a real SBC this is `/opt/ados/source`
@@ -850,12 +900,53 @@ mod tests {
         assert_eq!(args, vec!["install", "/tmp/repo"]);
     }
 
+    /// Build a `.tar.gz` bundle in `dir` holding `repo/README.md` and, when
+    /// `lock` is given, `repo/requirements.lock`.
+    fn bundle_with(dir: &Path, lock: Option<&str>) -> PathBuf {
+        let stage = dir.join("stage");
+        std::fs::create_dir_all(stage.join("repo")).unwrap();
+        std::fs::write(stage.join("repo/README.md"), b"readme").unwrap();
+        if let Some(body) = lock {
+            std::fs::write(stage.join("repo/requirements.lock"), body).unwrap();
+        }
+        let bundle = dir.join("bundle.tar.gz");
+        let ok = std::process::Command::new("tar")
+            .args([
+                "-czf",
+                &bundle.to_string_lossy(),
+                "-C",
+                &stage.to_string_lossy(),
+                "repo",
+            ])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        bundle
+    }
+
+    /// The stable install takes its dependencies only from the signed bundle's
+    /// hash lock; a bundle without one is refused before pip runs.
     #[test]
-    fn pip_wheel_args_install_a_local_file() {
-        let args = pip_install_wheel_args("/tmp/ados_drone_agent-0.93.0-py3-none-any.whl");
+    fn the_dependency_lock_comes_from_the_bundle_or_the_install_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let locked = bundle_with(dir.path(), Some("x==1 --hash=sha256:00\n"));
+        let lock = extract_bundle_lock(&locked, &out).unwrap();
         assert_eq!(
-            args,
-            vec!["install", "/tmp/ados_drone_agent-0.93.0-py3-none-any.whl"]
+            std::fs::read_to_string(lock).unwrap(),
+            "x==1 --hash=sha256:00\n"
+        );
+
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare_out = bare_dir.path().join("out");
+        std::fs::create_dir_all(&bare_out).unwrap();
+        let unlocked = bundle_with(bare_dir.path(), None);
+        let err = extract_bundle_lock(&unlocked, &bare_out).unwrap_err();
+        assert!(
+            err.to_string().contains("no hashed dependency lock"),
+            "{err}"
         );
     }
 

@@ -84,6 +84,10 @@ pub struct Ctx {
     /// rebooted mid-graph would kill the renderer and the operator would never
     /// learn why the box went away.
     pub pending_reboot: Vec<String>,
+    /// Every installed binary this run replaced, in placement order. Its
+    /// outgoing copy is retained at `<dest>.prev`; when a required step fails,
+    /// the binary hands this list to `rollback::roll_back`.
+    pub replaced_binaries: Vec<std::path::PathBuf>,
 }
 
 /// Resolve the release channel for this run: the `--channel` flag, else the
@@ -98,35 +102,21 @@ pub struct Ctx {
 /// installed on `stable` defected to tip-of-main on its first update. Nobody
 /// chose that; it is one keystroke from the status screen.
 ///
-/// The default stays `edge`, and NOT because signature verification is
-/// acceptable to leave off. The channel decides two unrelated things: how
-/// strict verification is, and where the agent package comes from. On `stable`
-/// the second meaning is "install this pinned release wheel", and `venv_agent`
-/// fails outright with "stable channel requires --version" when nothing is
-/// pinned. There is no resolve-the-latest-release path. A fresh box has no
-/// persisted version, so making `stable` the default would abort every flag-less
-/// install at the provision step — the verification posture would be irrelevant
-/// because nothing would finish installing. Publishing a resolvable latest
-/// release is what unblocks that default, and it is a release-process change,
-/// not a resolution change.
-///
-/// So the verification hole is closed where it actually was, at the fetch: a
-/// signature that does not match the vendored trust anchor is now refused on
-/// every channel, this one included. That also answers the box already carrying
-/// `channel: edge` in its `profile.conf` — and both rigs do. It gains the check
-/// on its next upgrade with no re-pin, whereas moving the default would have
-/// helped only boxes installed after it moved. What remains channel-gated is
-/// the weaker tolerance of a signature that cannot be OBTAINED. That tolerance
-/// is a fallback for an artifact published before signing existed, not the
-/// normal case: every current release carries a signature, and the vendored
-/// anchor validates them. `preflight::lenient_channel_note` reports the
-/// tolerance rather than asserting it is in use, because a warning that fires
-/// when nothing is wrong is one an operator learns to ignore.
+/// The default stays `edge`. On `stable` the channel means "install this pinned
+/// release wheel", and `venv_agent` fails outright with "stable channel
+/// requires --version" when nothing is pinned; a fresh box has no persisted
+/// version, so a `stable` default would abort every flag-less install. The
+/// channel does not decide signature strictness: every downloaded release asset
+/// needs a valid signature on every channel, and only `--artifacts` local
+/// builds may install on their SHA256 alone.
 pub fn resolve_channel(flag: Option<&str>) -> String {
     flag.map(str::to_string)
         .or_else(crate::env::read_persisted_channel)
-        .unwrap_or_else(|| crate::verify::EDGE_CHANNEL.to_string())
+        .unwrap_or_else(|| DEFAULT_CHANNEL.to_string())
 }
+
+/// The channel a box with no `--channel` and no persisted choice installs from.
+pub const DEFAULT_CHANNEL: &str = "edge";
 
 impl Ctx {
     /// Build the run context from parsed arguments. The profile defaults to
@@ -177,6 +167,7 @@ impl Ctx {
             artifacts,
             progress: ProgressSink::default(),
             pending_reboot: Vec::new(),
+            replaced_binaries: Vec::new(),
         }
     }
 
@@ -232,12 +223,10 @@ pub fn rev_channel_conflict(rev: Option<&str>, channel: &str) -> Option<String> 
 /// Two refusals, both because the alternative is a check that silently does not
 /// apply:
 ///
-/// * **`--channel stable`.** A locally-built binary carries no `.minisig`: the
-///   signing key is a CI secret, so nothing off the release job can produce one.
-///   `stable` refuses an artifact whose signature cannot be obtained, so the
-///   pair would abort partway through the binary loop with a per-binary
-///   signature message that reads as a broken release rather than as an
-///   impossible request. Said here, before any work, it names the real cause.
+/// * **`--channel stable`.** Stable installs exactly the signed artifacts of one
+///   pinned release. A locally-built binary is neither signed (the signing key
+///   is a CI secret) nor from that release, so the pair would report a pinned
+///   stable install that is not one. Said here, before any work.
 /// * **`--ref`.** The pin exists to guarantee the agent package and every
 ///   service binary come from ONE commit. A local artifact directory is by
 ///   definition not that commit — honouring both would produce exactly the
@@ -251,12 +240,11 @@ pub fn artifacts_conflict(
     let dir = artifacts?;
     if channel == "stable" {
         return Some(format!(
-            "--artifacts {dir} cannot be honoured on the stable channel: the \
-             stable channel refuses an artifact whose signature it cannot \
-             verify, and a locally-built binary has none (the signing key is a \
-             CI secret). Re-run with `--channel edge --artifacts {dir}`, where a \
-             missing signature is a warning and the SHA256 sidecar is still \
-             mandatory."
+            "--artifacts {dir} cannot be honoured on the stable channel: stable \
+             installs only the signed artifacts of one pinned release, and a \
+             locally-built binary is neither signed nor from that release. \
+             Re-run with `--channel edge --artifacts {dir}`; the SHA256 sidecar \
+             beside each local binary is still mandatory."
         ));
     }
     if let Some(rev) = rev {
@@ -416,11 +404,11 @@ mod tests {
     fn artifacts_are_refused_on_stable_and_alongside_a_revision_pin() {
         // Both refusals exist because the alternative is a check that silently
         // does not apply, so both messages have to name the real cause: on
-        // stable, the signature a local build cannot have; with --ref, the pin it
-        // would contradict.
+        // stable, the pinned signed release a local build is not; with --ref,
+        // the pin it would contradict.
         let stable = artifacts_conflict(Some("/srv/build"), None, "stable")
-            .expect("stable cannot verify an unsigned local build");
-        assert!(stable.contains("signature"), "names the cause: {stable}");
+            .expect("stable installs only a pinned signed release");
+        assert!(stable.contains("signed"), "names the cause: {stable}");
         assert!(stable.contains("--channel edge"), "names the fix: {stable}");
 
         let pinned = artifacts_conflict(Some("/srv/build"), Some("3b4b8dee"), "edge")

@@ -7,8 +7,10 @@
 //! gateway short-id plus a partition badge.
 //!
 //! Tapping the switch-role button toggles a role-picker overlay over the bottom
-//! half of the page; tapping a choice closes the picker and writes the role
-//! through `PUT /api/v1/ground-station/role`. The peer rows are a read-out, not
+//! half of the page. A role change re-forms the link, so a choice takes two
+//! taps: the first arms it (the row reads "Tap again: RELAY"), the second
+//! closes the picker and writes the role through
+//! `PUT /api/v1/ground-station/role`. The peer rows are a read-out, not
 //! controls. The role / mesh / peer data all come from [`PageContext::role`] and
 //! [`PageContext::mesh`].
 
@@ -21,7 +23,7 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_circle, fill_rect, fill_rect_outline, line, text, Canvas};
 use crate::pages::{
     blank_panel, AgentRequest, Chrome, HitAction, HitZone, MeshCtx, MeshState, Page, PageContext,
-    PanelAction,
+    PanelAction, TwoTapConfirm,
 };
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
@@ -64,6 +66,8 @@ pub struct MeshDetailPage {
     scroll_offset: Cell<i32>,
     /// Render-tick counter that orbits the "checking" progress dot.
     tick: Cell<u64>,
+    /// Two-tap arm state of the role choices, keyed by role.
+    role_confirm: TwoTapConfirm,
 }
 
 impl Default for MeshDetailPage {
@@ -72,6 +76,7 @@ impl Default for MeshDetailPage {
             picker_open: Cell::new(false),
             scroll_offset: Cell::new(0),
             tick: Cell::new(0),
+            role_confirm: TwoTapConfirm::default(),
         }
     }
 }
@@ -82,14 +87,17 @@ impl MeshDetailPage {
         Self::default()
     }
 
-    /// Toggle the role-picker overlay open / closed.
+    /// Toggle the role-picker overlay open / closed. Any armed choice is
+    /// dropped, so reopening never inherits a half-confirmed role.
     pub fn toggle_picker(&self) {
         self.picker_open.set(!self.picker_open.get());
+        self.role_confirm.disarm();
     }
 
     /// Close the role-picker overlay (e.g. after a choice commits).
     pub fn close_picker(&self) {
         self.picker_open.set(false);
+        self.role_confirm.disarm();
     }
 
     /// Whether the role-picker overlay is currently open.
@@ -245,7 +253,11 @@ impl Page for MeshDetailPage {
         }
 
         if self.picker_open.get() {
-            render_picker(&mut canvas, palette, &role);
+            let armed = ROLE_CHOICES
+                .iter()
+                .copied()
+                .find(|r| self.role_confirm.is_armed(r));
+            render_picker(&mut canvas, palette, &role, armed);
         }
         canvas
     }
@@ -284,7 +296,11 @@ impl Page for MeshDetailPage {
         }
         let role = ROLE_CHOICES
             .iter()
-            .find(|r| key.strip_prefix("mesh.role.") == Some(**r))?;
+            .copied()
+            .find(|r| key.strip_prefix("mesh.role.") == Some(*r))?;
+        if !self.role_confirm.tap(role) {
+            return Some(PanelAction::Repaint);
+        }
         self.close_picker();
         Some(PanelAction::Agent(AgentRequest {
             method: "PUT",
@@ -455,8 +471,9 @@ fn render_peer_list(canvas: &mut Canvas, palette: &Palette, mesh: &MeshCtx, scro
     }
 }
 
-/// Paint the bottom-half role-picker overlay with the three role choices.
-fn render_picker(canvas: &mut Canvas, palette: &Palette, current: &str) {
+/// Paint the bottom-half role-picker overlay with the three role choices. The
+/// `armed` choice reads "Tap again: ROLE" until its confirming tap.
+fn render_picker(canvas: &mut Canvas, palette: &Palette, current: &str, armed: Option<&str>) {
     let ovr_y = PEER_LIST_Y - 4;
     fill_rect_outline(
         canvas,
@@ -482,7 +499,11 @@ fn render_picker(canvas: &mut Canvas, palette: &Palette, current: &str) {
                 palette.bg_tertiary,
             );
         }
-        let label = choice.to_ascii_uppercase();
+        let label = if armed == Some(*choice) {
+            format!("Tap again: {}", choice.to_ascii_uppercase())
+        } else {
+            choice.to_ascii_uppercase()
+        };
         let (lw, lh) = row_font.text_size(&label);
         let color = if is_current {
             palette.accent_primary
@@ -556,9 +577,10 @@ mod tests {
         assert!(!page.picker_open());
     }
 
-    /// Switch opens the picker; a choice closes it and writes that role.
+    /// Switch opens the picker; a first choice tap only arms it, the
+    /// confirming tap closes the picker and writes that role.
     #[test]
-    fn a_role_choice_writes_the_role() {
+    fn a_role_choice_takes_two_taps() {
         let page = MeshDetailPage::new();
         let ctx = PageContext::default();
         assert_eq!(
@@ -566,8 +588,13 @@ mod tests {
             Some(PanelAction::Repaint)
         );
         assert!(page.picker_open());
+        assert_eq!(
+            page.on_custom("mesh.role.relay", &ctx),
+            Some(PanelAction::Repaint)
+        );
+        assert!(page.picker_open(), "an armed choice keeps the picker open");
         let Some(PanelAction::Agent(req)) = page.on_custom("mesh.role.relay", &ctx) else {
-            panic!("a role choice must reach the agent");
+            panic!("the confirming tap must reach the agent");
         };
         assert_eq!(
             (req.method, req.path),
@@ -576,6 +603,34 @@ mod tests {
         assert_eq!(req.body, Some(serde_json::json!({"role": "relay"})));
         assert!(!page.picker_open());
         assert!(page.on_custom("mesh.role.bogus", &ctx).is_none());
+    }
+
+    /// Arming one role and then tapping another re-arms the second rather
+    /// than writing either; closing the picker drops the arm.
+    #[test]
+    fn a_different_choice_or_reopen_rearms() {
+        let page = MeshDetailPage::new();
+        let ctx = PageContext::default();
+        page.toggle_picker();
+        assert_eq!(
+            page.on_custom("mesh.role.relay", &ctx),
+            Some(PanelAction::Repaint)
+        );
+        assert_eq!(
+            page.on_custom("mesh.role.receiver", &ctx),
+            Some(PanelAction::Repaint)
+        );
+        // Close and reopen: the receiver arm is gone.
+        page.toggle_picker();
+        page.toggle_picker();
+        assert_eq!(
+            page.on_custom("mesh.role.receiver", &ctx),
+            Some(PanelAction::Repaint)
+        );
+        assert!(matches!(
+            page.on_custom("mesh.role.receiver", &ctx),
+            Some(PanelAction::Agent(_))
+        ));
     }
 
     #[test]

@@ -77,10 +77,10 @@ impl Step for Start {
         tracing::info!(unit = SERVICE_NAME, "supervisor started");
 
         // The logging and telemetry store is PartOf the supervisor, so the
-        // restart above stopped it; bring it back unless the fallback marker
-        // pins it off. The log-view endpoints read it, so a fresh box must come
-        // up with it running and zero manual steps. Cross-profile.
-        if !Path::new(CONFIG_DIR).join("logd-python-fallback").exists() {
+        // restart above stopped it; bring it back when `logging.store.enabled`
+        // asks for it (the systemd step masks it otherwise). Cross-profile.
+        let config_body = std::fs::read_to_string(Path::new(CONFIG_DIR).join("config.yaml")).ok();
+        if crate::steps::systemd::logd_unit_wanted(config_body.as_deref()) {
             let _ = exec::run("systemctl", &["start", "--no-block", "ados-logd.service"]);
             tracing::info!(
                 unit = "ados-logd.service",
@@ -113,7 +113,7 @@ impl Step for Start {
         // after systemd had already restarted it. Start it so an upgrade from
         // such a release comes back with its API; on a current supervisor it is
         // already active and this is a no-op. The health gate waits for it.
-        if crate::steps::systemd::control_unit_wanted() {
+        {
             let _ = exec::run(
                 "systemctl",
                 &["start", "--no-block", "ados-control.service"],

@@ -67,8 +67,11 @@ pub struct Args {
     /// provisioning so a defense signer's key never needs to be committed to a
     /// public repo.
     pub plugin_key: Vec<String>,
-    /// `--wifi-pass <v>` — password for `--wifi-ssid` (omit for an open network).
-    pub wifi_pass: Option<String>,
+    /// `--wifi-pass-file <path>` — a file holding the password for
+    /// `--wifi-ssid` (omit for an open network). A file, not the password
+    /// itself, so the secret never sits in this process's argv where any local
+    /// user can read it.
+    pub wifi_pass_file: Option<String>,
     /// `--uninstall` — remove the agent.
     pub uninstall: bool,
     /// `--status` — print install status and exit.
@@ -163,7 +166,9 @@ impl Args {
                 "--display" => args.display = Some(take_value(&tokens, &mut i, "--display")?),
                 "--camera" => args.camera = Some(take_value(&tokens, &mut i, "--camera")?),
                 "--wifi-ssid" => args.wifi_ssid = Some(take_value(&tokens, &mut i, "--wifi-ssid")?),
-                "--wifi-pass" => args.wifi_pass = Some(take_value(&tokens, &mut i, "--wifi-pass")?),
+                "--wifi-pass-file" => {
+                    args.wifi_pass_file = Some(take_value(&tokens, &mut i, "--wifi-pass-file")?)
+                }
                 "--plugin-key" | "-k" => {
                     args.plugin_key
                         .push(take_value(&tokens, &mut i, "--plugin-key")?)
@@ -346,17 +351,25 @@ mod tests {
 
     #[test]
     fn parses_wifi_flags() {
-        // SSID/password can carry spaces and symbols (quoted by the shell).
-        let a = Args::parse(["--wifi-ssid", "Home Net", "--wifi-pass", "s3cr3t"]).unwrap();
+        // An SSID can carry spaces and symbols (quoted by the shell).
+        let a = Args::parse([
+            "--wifi-ssid",
+            "Home Net",
+            "--wifi-pass-file",
+            "/root/wifi.pass",
+        ])
+        .unwrap();
         assert_eq!(a.wifi_ssid.as_deref(), Some("Home Net"));
-        assert_eq!(a.wifi_pass.as_deref(), Some("s3cr3t"));
+        assert_eq!(a.wifi_pass_file.as_deref(), Some("/root/wifi.pass"));
         // Both absent by default (no headless Wi-Fi join unless requested).
         assert!(Args::default().wifi_ssid.is_none());
-        assert!(Args::default().wifi_pass.is_none());
+        assert!(Args::default().wifi_pass_file.is_none());
         // An SSID with no password parses (open network).
         let open = Args::parse(["--wifi-ssid", "cafe"]).unwrap();
         assert_eq!(open.wifi_ssid.as_deref(), Some("cafe"));
-        assert!(open.wifi_pass.is_none());
+        assert!(open.wifi_pass_file.is_none());
+        // The password itself is no longer accepted on the command line.
+        assert!(Args::parse(["--wifi-ssid", "cafe", "--wifi-pass", "s3cr3t"]).is_err());
     }
 
     #[test]

@@ -185,10 +185,36 @@ pub fn profile_conf_body(profile: &str, channel: &str, version: Option<&str>) ->
     body
 }
 
-/// Build the `pairing.json` body (pure).
-pub fn pairing_json(code: &str, created_at: u64) -> String {
-    let upper = code.to_ascii_uppercase();
-    format!("{{\n  \"pairing_code\": \"{upper}\",\n  \"code_created_at\": {created_at}\n}}\n")
+/// Build the `pairing.json` body (pure). The pending API key travels with the
+/// code, so the cloud beacon can advertise the code straight away and the
+/// later claim persists the same key; `None` leaves the key for the local API
+/// to mint.
+pub fn pairing_json(code: &str, created_at: u64, pending_api_key: Option<&str>) -> String {
+    let body = serde_json::json!({
+        "pairing_code": code.to_ascii_uppercase(),
+        "code_created_at": created_at,
+    });
+    let mut body = body.as_object().cloned().unwrap_or_default();
+    if let Some(key) = pending_api_key {
+        body.insert("pending_api_key".to_string(), serde_json::json!(key));
+    }
+    let mut out =
+        serde_json::to_string_pretty(&serde_json::Value::Object(body)).unwrap_or_default();
+    out.push('\n');
+    out
+}
+
+/// Mint a pending API key in the agent's key format: `"ados_"` plus url-safe
+/// base64 (no padding) of 32 random bytes. `None` when the OS RNG fails: a
+/// guessable key is worse than none, and the local API mints one later.
+pub fn mint_pending_api_key() -> Option<String> {
+    use base64::Engine as _;
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).ok()?;
+    Some(format!(
+        "ados_{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    ))
 }
 
 /// Mint or read the stable 12-hex device id. Never overwrites an existing id
@@ -411,7 +437,8 @@ fn write_pairing(code: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let body = pairing_json(code, now_epoch());
+    let pending_api_key = mint_pending_api_key();
+    let body = pairing_json(code, now_epoch(), pending_api_key.as_deref());
     if let Err(e) = crate::env::write_atomic_durable(path, body.as_bytes(), Some(0o600)) {
         tracing::warn!(error = %e, "writing pairing.json failed");
         return;
@@ -859,9 +886,15 @@ mod tests {
 
     #[test]
     fn pairing_json_uppercases_and_stamps() {
-        let body = pairing_json("abcd-1234", 1700000000);
+        let body = pairing_json("abcd-1234", 1700000000, None);
         assert!(body.contains("\"pairing_code\": \"ABCD-1234\""));
         assert!(body.contains("\"code_created_at\": 1700000000"));
+        assert!(!body.contains("pending_api_key"));
+        let keyed = pairing_json("abcd-1234", 1700000000, Some("ados_k"));
+        let doc: serde_json::Value = serde_json::from_str(&keyed).unwrap();
+        assert_eq!(doc["pending_api_key"], "ados_k");
+        let key = mint_pending_api_key().unwrap();
+        assert!(key.starts_with("ados_") && key.len() == 48, "key {key}");
     }
 
     #[test]

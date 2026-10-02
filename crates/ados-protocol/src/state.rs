@@ -124,11 +124,58 @@ pub fn decode_v2(body: &[u8]) -> Result<Value, StateError> {
     Ok(frame.s)
 }
 
-/// One frame off the wire: a decoded snapshot, or a single malformed-but-frame-
-/// aligned frame to skip without ending the connection.
+/// One frame off the wire: a decoded snapshot, a single malformed-but-frame-
+/// aligned frame to skip without ending the connection, or a well-formed frame
+/// whose wire version this build does not speak.
 enum StateFrame {
     Value(Value),
     Skip,
+    VersionMismatch { got: u16 },
+}
+
+/// How many consecutive version-mismatched frames a reader skips before it
+/// gives up on the connection. The producer publishes at 10 Hz, so this is
+/// under a second of frames: long enough to ride out one stray frame, short
+/// enough that a producer/reader version skew surfaces as an error instead of a
+/// live connection that never yields a snapshot.
+pub const MAX_CONSECUTIVE_VERSION_MISMATCHES: u32 = 8;
+
+/// Process-wide count of state frames skipped for a wire-version mismatch.
+static VERSION_MISMATCH_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Total state frames this process skipped because their wire version did not
+/// match [`STATE_WIRE_VERSION`], for status surfaces.
+pub fn version_mismatch_skips() -> u64 {
+    VERSION_MISMATCH_SKIPS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Tracks consecutive version mismatches inside one read call. Returns the
+/// error that ends the read once the run reaches the cap.
+struct MismatchRun(u32);
+
+impl MismatchRun {
+    fn record(&mut self, got: u16) -> io::Result<()> {
+        VERSION_MISMATCH_SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.0 += 1;
+        if self.0 < MAX_CONSECUTIVE_VERSION_MISMATCHES {
+            return Ok(());
+        }
+        // Logged once per give-up, so the caller's fixed reconnect pace is the
+        // rate limit.
+        tracing::warn!(
+            got,
+            ours = STATE_WIRE_VERSION,
+            skipped = self.0,
+            "state format mismatch: the producer speaks a different state wire version"
+        );
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "state format mismatch: producer sends state wire version {got}, \
+                 this reader expects {STATE_WIRE_VERSION}"
+            ),
+        ))
+    }
 }
 
 /// Validate a v2 frame's 4-byte big-endian length header and return the body
@@ -145,15 +192,20 @@ fn v2_body_len(header: [u8; frame::HEADER_SIZE]) -> io::Result<usize> {
     Ok(len)
 }
 
-/// Decode a complete frame body of the given wire kind, or `None` on a malformed
-/// body (which the reader skips rather than treating as fatal). Sharing this with
-/// [`v2_body_len`] keeps the framing + decode logic identical across the async
-/// and blocking readers; only the byte pump differs between them.
-fn decode_state_body(is_v2: bool, body: &[u8]) -> Option<Value> {
+/// Decode a complete frame body of the given wire kind. A malformed body is
+/// [`StateFrame::Skip`]; a well-formed v2 body with a foreign version is
+/// [`StateFrame::VersionMismatch`]. Sharing this with [`v2_body_len`] keeps the
+/// framing + decode logic identical across the async and blocking readers; only
+/// the byte pump differs between them.
+fn decode_state_body(is_v2: bool, body: &[u8]) -> StateFrame {
     if is_v2 {
-        decode_v2(body).ok()
+        match decode_v2(body) {
+            Ok(v) => StateFrame::Value(v),
+            Err(StateError::Version { got, .. }) => StateFrame::VersionMismatch { got },
+            Err(_) => StateFrame::Skip,
+        }
     } else {
-        decode_v1_line(body).ok()
+        decode_v1_line(body).map_or(StateFrame::Skip, StateFrame::Value)
     }
 }
 
@@ -170,7 +222,11 @@ fn decode_state_body(is_v2: bool, body: &[u8]) -> Option<Value> {
 /// a frame boundary (the caller reconnects), and `Err(e)` on an unrecoverable
 /// framing or IO error. A single malformed-but-frame-aligned frame (bad msgpack
 /// body or bad JSON line) is skipped internally and the next frame is read, so
-/// one bad snapshot never ends a hot connection.
+/// one bad snapshot never ends a hot connection. A run of
+/// [`MAX_CONSECUTIVE_VERSION_MISMATCHES`] frames in a wire version this build
+/// does not speak is an `InvalidData` error naming the "state format
+/// mismatch", so the caller reconnects and reports it instead of waiting
+/// forever on a connection that will never yield a snapshot.
 ///
 /// This is the single reader every `state.sock` consumer uses. Keeping the wire
 /// detection in one place is what stops a producer and a consumer in the same
@@ -181,10 +237,12 @@ pub async fn read_state_value<R>(reader: &mut R) -> io::Result<Option<Value>>
 where
     R: AsyncRead + Unpin,
 {
+    let mut mismatches = MismatchRun(0);
     loop {
         match read_state_frame(reader).await? {
             Some(StateFrame::Value(v)) => return Ok(Some(v)),
             Some(StateFrame::Skip) => continue,
+            Some(StateFrame::VersionMismatch { got }) => mismatches.record(got)?,
             None => return Ok(None),
         }
     }
@@ -208,10 +266,7 @@ where
         let len = v2_body_len([first[0], rest[0], rest[1], rest[2]])?;
         let mut body = vec![0u8; len];
         reader.read_exact(&mut body).await?;
-        Ok(Some(match decode_state_body(true, &body) {
-            Some(v) => StateFrame::Value(v),
-            None => StateFrame::Skip,
-        }))
+        Ok(Some(decode_state_body(true, &body)))
     } else {
         let mut line = vec![first[0]];
         let mut byte = [0u8; 1];
@@ -234,10 +289,7 @@ where
             }
             line.push(byte[0]);
         }
-        Ok(Some(match decode_state_body(false, &line) {
-            Some(v) => StateFrame::Value(v),
-            None => StateFrame::Skip,
-        }))
+        Ok(Some(decode_state_body(false, &line)))
     }
 }
 
@@ -249,10 +301,12 @@ pub fn read_state_value_blocking<R>(reader: &mut R) -> io::Result<Option<Value>>
 where
     R: io::Read,
 {
+    let mut mismatches = MismatchRun(0);
     loop {
         match read_state_frame_blocking(reader)? {
             Some(StateFrame::Value(v)) => return Ok(Some(v)),
             Some(StateFrame::Skip) => continue,
+            Some(StateFrame::VersionMismatch { got }) => mismatches.record(got)?,
             None => return Ok(None),
         }
     }
@@ -275,10 +329,7 @@ where
         let len = v2_body_len([first[0], rest[0], rest[1], rest[2]])?;
         let mut body = vec![0u8; len];
         reader.read_exact(&mut body)?;
-        Ok(Some(match decode_state_body(true, &body) {
-            Some(v) => StateFrame::Value(v),
-            None => StateFrame::Skip,
-        }))
+        Ok(Some(decode_state_body(true, &body)))
     } else {
         let mut line = vec![first[0]];
         let mut byte = [0u8; 1];
@@ -299,10 +350,7 @@ where
             }
             line.push(byte[0]);
         }
-        Ok(Some(match decode_state_body(false, &line) {
-            Some(v) => StateFrame::Value(v),
-            None => StateFrame::Skip,
-        }))
+        Ok(Some(decode_state_body(false, &line)))
     }
 }
 
@@ -452,5 +500,44 @@ mod tests {
         let mut v2 = std::io::Cursor::new(encode_v2(&state).unwrap());
         assert_eq!(read_state_value_blocking(&mut v1).unwrap().unwrap(), state);
         assert_eq!(read_state_value_blocking(&mut v2).unwrap().unwrap(), state);
+    }
+
+    fn foreign_version_frame() -> Vec<u8> {
+        let body = rmp_serde::to_vec_named(&StateFrameV2Ref {
+            v: STATE_WIRE_VERSION + 1,
+            s: &sample(),
+        })
+        .unwrap();
+        frame::encode_frame(&body, STATE_V2_MAX_FRAME).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_stream_of_foreign_versions_is_an_error_not_a_silent_stall() {
+        // A producer on another state wire version: every frame is well formed
+        // and every frame is skipped. The reader must end the read with an
+        // error naming the mismatch instead of looping forever on a live
+        // connection that never yields a snapshot.
+        let mut wire = Vec::new();
+        for _ in 0..MAX_CONSECUTIVE_VERSION_MISMATCHES {
+            wire.extend(foreign_version_frame());
+        }
+        wire.extend(encode_v2(&sample()).unwrap());
+        let before = version_mismatch_skips();
+        let mut r = std::io::Cursor::new(wire.clone());
+        let err = read_state_value(&mut r).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("state format mismatch"), "{err}");
+        assert!(version_mismatch_skips() >= before + MAX_CONSECUTIVE_VERSION_MISMATCHES as u64);
+
+        let mut r = std::io::Cursor::new(wire);
+        assert!(read_state_value_blocking(&mut r).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_single_foreign_version_frame_is_skipped() {
+        let mut wire = foreign_version_frame();
+        wire.extend(encode_v2(&sample()).unwrap());
+        let mut r = std::io::Cursor::new(wire);
+        assert_eq!(read_state_value(&mut r).await.unwrap().unwrap(), sample());
     }
 }

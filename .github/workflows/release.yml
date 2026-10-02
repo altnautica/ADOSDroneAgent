@@ -117,7 +117,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install build tools
-        run: pip install build
+        run: pip install build uv
 
       - name: Install minisign
         run: |
@@ -156,6 +156,16 @@ jobs:
           cp -a vendor  "${REPO_ROOT}/vendor"
           cp -a LICENSE "${REPO_ROOT}/LICENSE"
           cp -a README.md "${REPO_ROOT}/README.md"
+
+          # The wheel's runtime dependencies, every one pinned with the hashes
+          # of all its published files. The installer installs them with
+          # `--require-hashes --no-deps` from this file (it rides inside the
+          # signed bundle) and the wheel itself with `--no-deps`, so nothing is
+          # resolved from the index at install time. Universal so one lock
+          # serves every board's Python and architecture.
+          uv pip compile pyproject.toml --universal --generate-hashes \
+            --python-version 3.11 --no-header -o "${REPO_ROOT}/requirements.lock"
+          test -s "${REPO_ROOT}/requirements.lock"
 
           # Drop the vendored submodules' .git gitlink files + any nested VCS
           # metadata + Python bytecode caches so the bundle is a plain,

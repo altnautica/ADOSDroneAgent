@@ -53,6 +53,11 @@ pub const MAX_PHASE_MS: u32 = 5_000;
 /// the line low once the schedule completes.
 pub const MAX_TOTAL_MS: u64 = 30_000;
 
+/// Highest carrier frequency the service toggles, in Hz. The carrier is driven
+/// from userspace, so a request above this is clamped down rather than
+/// producing a toggle loop the scheduler cannot keep up with.
+pub const MAX_CARRIER_HZ: u32 = 5_000;
+
 /// The logical level a pin is driven to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -79,11 +84,11 @@ impl Level {
 
 /// A bounded software-PWM beep description.
 ///
-/// `freq_hz` and `duty_pct` describe the carrier a passive buzzer wants; for a
-/// simple active buzzer or an LED the schedule just toggles on `on_ms` then off
-/// `off_ms` for `cycles`. The carrier is modelled too so a passive buzzer driver
-/// can derive the toggle period from `freq_hz`; [`beep_schedule`] emits the
-/// envelope (the on/off cycles), which is what the service applies.
+/// The envelope toggles the line on for `on_ms` then off for `off_ms`, for
+/// `cycles`. During each on phase the service also drives the carrier a
+/// passive buzzer needs: the line toggles at `freq_hz` with `duty_pct` high
+/// time ([`carrier_timing`]). With `freq_hz` 0 (an active buzzer or an LED) the
+/// on phase is a steady high.
 ///
 /// Every field is advisory until [`clamp`](Self::clamp) bounds it; the service
 /// always clamps before scheduling, so a value out of range is corrected, never
@@ -91,8 +96,7 @@ impl Level {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeepPattern {
     /// Buzzer carrier frequency in Hz (0 = no carrier, a plain on/off envelope
-    /// for an active buzzer or LED). Advisory; consumed by a passive-buzzer
-    /// driver, not by the envelope schedule.
+    /// for an active buzzer or LED). Clamped to [`MAX_CARRIER_HZ`].
     pub freq_hz: u32,
     /// Carrier duty cycle as a percentage (0..=100). Clamped to 100.
     pub duty_pct: u8,
@@ -106,11 +110,12 @@ pub struct BeepPattern {
 
 impl BeepPattern {
     /// Clamp every field into the safe bounds. `duty_pct` is capped at 100,
-    /// `on_ms`/`off_ms` at [`MAX_PHASE_MS`], `cycles` at [`MAX_BEEP_CYCLES`].
-    /// Idempotent: clamping an already-clamped pattern is a no-op.
+    /// `freq_hz` at [`MAX_CARRIER_HZ`], `on_ms`/`off_ms` at [`MAX_PHASE_MS`],
+    /// `cycles` at [`MAX_BEEP_CYCLES`]. Idempotent: clamping an already-clamped
+    /// pattern is a no-op.
     pub fn clamp(self) -> Self {
         Self {
-            freq_hz: self.freq_hz,
+            freq_hz: self.freq_hz.min(MAX_CARRIER_HZ),
             duty_pct: self.duty_pct.min(100),
             on_ms: self.on_ms.min(MAX_PHASE_MS),
             off_ms: self.off_ms.min(MAX_PHASE_MS),
@@ -124,6 +129,23 @@ impl BeepPattern {
         let per_cycle = self.on_ms as u64 + self.off_ms as u64;
         per_cycle.saturating_mul(self.cycles as u64)
     }
+}
+
+/// The carrier half-periods for a clamped pattern: how long the line is high
+/// and low within one carrier period during an on phase. `None` means the on
+/// phase is a steady high: no carrier requested (`freq_hz` 0), or a duty of 0
+/// or 100 that a toggle cannot express.
+pub fn carrier_timing(pattern: BeepPattern) -> Option<(std::time::Duration, std::time::Duration)> {
+    let p = pattern.clamp();
+    if p.freq_hz == 0 || p.duty_pct == 0 || p.duty_pct >= 100 {
+        return None;
+    }
+    let period_us = 1_000_000u64 / p.freq_hz as u64;
+    let high_us = period_us * p.duty_pct as u64 / 100;
+    Some((
+        std::time::Duration::from_micros(high_us.max(1)),
+        std::time::Duration::from_micros((period_us - high_us).max(1)),
+    ))
 }
 
 /// One phase of a beep schedule: hold the line at `level` for `hold_ms`, then
@@ -328,8 +350,55 @@ mod tests {
         assert_eq!(p.on_ms, MAX_PHASE_MS);
         assert_eq!(p.off_ms, MAX_PHASE_MS);
         assert_eq!(p.cycles, MAX_BEEP_CYCLES);
-        // freq_hz is advisory and not bounded by clamp.
         assert_eq!(p.freq_hz, 2_000);
+        let fast = BeepPattern {
+            freq_hz: 40_000,
+            ..p
+        }
+        .clamp();
+        assert_eq!(fast.freq_hz, MAX_CARRIER_HZ);
+    }
+
+    #[test]
+    fn a_carrier_splits_the_period_by_duty() {
+        let p = BeepPattern {
+            freq_hz: 2_000,
+            duty_pct: 25,
+            on_ms: 100,
+            off_ms: 100,
+            cycles: 1,
+        };
+        let (high, low) = carrier_timing(p).unwrap();
+        assert_eq!(high, std::time::Duration::from_micros(125));
+        assert_eq!(low, std::time::Duration::from_micros(375));
+    }
+
+    #[test]
+    fn no_carrier_means_a_steady_on_phase() {
+        let base = BeepPattern {
+            freq_hz: 0,
+            duty_pct: 50,
+            on_ms: 100,
+            off_ms: 100,
+            cycles: 1,
+        };
+        assert_eq!(carrier_timing(base), None);
+        assert_eq!(
+            carrier_timing(BeepPattern {
+                freq_hz: 2_000,
+                duty_pct: 100,
+                ..base
+            }),
+            None
+        );
+        assert_eq!(
+            carrier_timing(BeepPattern {
+                freq_hz: 2_000,
+                duty_pct: 0,
+                ..base
+            }),
+            None
+        );
     }
 
     #[test]

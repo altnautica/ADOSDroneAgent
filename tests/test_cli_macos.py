@@ -1,10 +1,9 @@
 """macOS workstation CLI behavior.
 
 The macOS node is a rootless, Rust-only workstation under launchd. These tests
-pin the platform so they run deterministically on any host and cover the three
+pin the platform so they run deterministically on any host and cover the
 macOS-specific behaviors: reading status from the native control-surface routes
-(the proxied setup facade is absent), the honest no-op of the native-vs-packaged
-`ados rust` toggle, and the real launchd teardown on uninstall.
+(the proxied setup facade is absent) and the real launchd teardown on uninstall.
 """
 
 from __future__ import annotations
@@ -14,8 +13,6 @@ import subprocess
 from click.testing import CliRunner
 
 import ados.cli.main as cli_main
-import ados.cli.rust as rust_mod
-from ados.cli.rust import rust_group
 
 
 def test_native_status_composes_from_native_routes():
@@ -49,24 +46,6 @@ def test_native_status_composes_from_native_routes():
     assert data["lan_host"] == "ados-abcd12.local"
     assert data["cloud_choice"]["mode"] == "local"
     assert data["completion_percent"] == 100
-
-
-def test_rust_toggle_is_a_clear_noop_on_macos(monkeypatch):
-    """`ados rust status/enable/disable` on macOS says not-applicable and does
-    NOT write a marker, drive systemctl, or claim a false success."""
-    monkeypatch.setattr(rust_mod.platform, "system", lambda: "Darwin")
-    touched: list[str] = []
-    monkeypatch.setattr(rust_mod, "_apply", lambda *a, **k: touched.append("apply"))
-    monkeypatch.setattr(
-        rust_mod, "_systemctl", lambda *a, **k: touched.append("systemctl") or 0
-    )
-
-    for cmd in (["status"], ["enable", "control"], ["disable", "control"]):
-        res = CliRunner().invoke(rust_group, cmd)
-        assert res.exit_code == 0, res.output
-        assert "not applicable on macOS" in res.output
-        assert "enabled" not in res.output  # never a no-op success claim
-    assert touched == []  # nothing was actually toggled
 
 
 def test_uninstall_macos_boots_out_agents_and_purges(tmp_path, monkeypatch):

@@ -39,7 +39,6 @@ async fn main() -> Result<()> {
     init_logging();
     tracing::info!(
         socket = ados_control::paths::CONTROL_SOCKET,
-        tcp_port = ados_control::paths::CONTROL_TCP_PORT,
         "control API starting"
     );
     match ados_control::run_daemon().await {

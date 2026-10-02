@@ -81,6 +81,10 @@ fn sd_ready() {
 #[cfg(not(target_os = "linux"))]
 fn sd_ready() {}
 
+/// The cancel flag of the beep currently playing, keyed by `(chip, pin)`.
+#[cfg(target_os = "linux")]
+type BeepCancels = std::collections::HashMap<(u32, u32), Arc<std::sync::atomic::AtomicBool>>;
+
 /// The shared driver + the sidecar path. On Linux the driver owns the real GPIO
 /// lines; off Linux there is no driver, so the command path reports a clean
 /// `not available` error (the daemon still builds and runs on a dev host).
@@ -88,6 +92,11 @@ fn sd_ready() {}
 struct State {
     #[cfg(target_os = "linux")]
     output: Arc<Mutex<ados_gpio::GpioOutput>>,
+    /// The cancel flag of the beep currently playing on each `(chip, pin)`. A
+    /// new beep or a `set` on that pin raises it under the output lock, so the
+    /// old schedule never writes the line again.
+    #[cfg(target_os = "linux")]
+    beeps: Arc<std::sync::Mutex<BeepCancels>>,
     sidecar_path: Arc<std::path::PathBuf>,
 }
 
@@ -99,6 +108,8 @@ async fn main() -> Result<()> {
     let state = State {
         #[cfg(target_os = "linux")]
         output: Arc::new(Mutex::new(ados_gpio::GpioOutput::new())),
+        #[cfg(target_os = "linux")]
+        beeps: Arc::default(),
         sidecar_path: Arc::new(std::path::PathBuf::from(GPIO_OUTPUT_PATH)),
     };
 
@@ -187,11 +198,12 @@ async fn apply(cmd: Command, state: &State) -> Value {
         Command::Set { chip, pin, level } => set_line(chip, pin, level, state).await,
         Command::Beep { chip, pin, pattern } => {
             let phases = beep_schedule(pattern);
+            let carrier = ados_gpio::carrier_timing(pattern);
             // Drop the trailing terminal-low (hold 0): the player appends its own
             // final low. Report the count of real phases so the caller sees the
             // bounded schedule was accepted.
             let real = phases.iter().filter(|p| p.hold_ms > 0).count();
-            match start_beep(chip, pin, phases, state.clone()).await {
+            match start_beep(chip, pin, phases, carrier, state.clone()).await {
                 Ok(()) => json!({"ok": true, "phases": real}),
                 Err(code) => json!({"ok": false, "error": code}),
             }
@@ -215,13 +227,31 @@ async fn apply(cmd: Command, state: &State) -> Value {
 /// Drive one line and mirror the new state to the sidecar.
 #[cfg(target_os = "linux")]
 async fn set_line(chip: u32, pin: u32, level: ados_gpio::Level, state: &State) -> Value {
-    let result = state.output.lock().await.set(chip, pin, level);
+    let result = {
+        let mut out = state.output.lock().await;
+        // An explicit set wins over a beep playing on the same pin.
+        cancel_beep(state, chip, pin);
+        out.set(chip, pin, level)
+    };
     match result {
         Ok(()) => {
             persist_state(state).await;
             json!({"ok": true, "chip": chip, "pin": pin, "level": serde_json::to_value(level).unwrap_or(Value::Null)})
         }
         Err(e) => json!({"ok": false, "error": format!("E_DRIVE_FAILED: {e}")}),
+    }
+}
+
+/// Stop the beep playing on `(chip, pin)`, if any. Call with the output lock
+/// held so the player cannot slip one more write in after the caller's.
+#[cfg(target_os = "linux")]
+fn cancel_beep(state: &State, chip: u32, pin: u32) {
+    let mut beeps = state
+        .beeps
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(flag) = beeps.remove(&(chip, pin)) {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -232,50 +262,106 @@ async fn set_line(_chip: u32, _pin: u32, _level: ados_gpio::Level, _state: &Stat
     json!({"ok": false, "error": "E_NO_GPIO"})
 }
 
-/// Start a beep schedule. The first phase is driven before this returns, so a
-/// missing chip or a line another consumer holds is reported to the caller as
-/// `E_DRIVE_FAILED` rather than acknowledged; the remaining phases play on a
-/// background task so the request does not wait out the whole pattern.
+/// Start a beep schedule. Any beep already playing on the pin is cancelled
+/// first. The first phase is driven before this returns, so a missing chip or a
+/// line another consumer holds is reported to the caller as `E_DRIVE_FAILED`
+/// rather than acknowledged; the remaining phases play on a blocking thread so
+/// the request does not wait out the whole pattern. During a high phase with a
+/// carrier the line toggles at the carrier rate so a passive buzzer sounds.
 #[cfg(target_os = "linux")]
 async fn start_beep(
     chip: u32,
     pin: u32,
     phases: Vec<ados_gpio::BeepPhase>,
+    carrier: Option<(std::time::Duration, std::time::Duration)>,
     state: State,
 ) -> Result<(), String> {
-    let mut phases = phases.into_iter();
-    let Some(first) = phases.next() else {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    if phases.is_empty() {
         return Ok(());
-    };
-    state
-        .output
-        .lock()
-        .await
-        .set(chip, pin, first.level)
-        .map_err(|e| format!("E_DRIVE_FAILED: {e}"))?;
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut out = state.output.lock().await;
+        cancel_beep(&state, chip, pin);
+        out.set(chip, pin, phases[0].level)
+            .map_err(|e| format!("E_DRIVE_FAILED: {e}"))?;
+        state
+            .beeps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((chip, pin), cancel.clone());
+    }
     persist_state(&state).await;
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(first.hold_ms as u64)).await;
-        for phase in phases {
-            {
-                let mut out = state.output.lock().await;
-                if let Err(e) = out.set(chip, pin, phase.level) {
-                    tracing::warn!(chip, pin, error = %e, "beep phase drive failed");
-                    break;
+    let rt = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        // Write `level` unless this beep was cancelled; false ends the schedule.
+        let drive = |level: ados_gpio::Level| -> bool {
+            let mut out = state.output.blocking_lock();
+            if cancel.load(Ordering::SeqCst) {
+                return false;
+            }
+            if let Err(e) = out.set(chip, pin, level) {
+                tracing::warn!(chip, pin, error = %e, "beep phase drive failed");
+                return false;
+            }
+            true
+        };
+        // Sleep `d` in short slices so a cancel is honoured promptly.
+        let hold = |d: Duration| -> bool {
+            let end = Instant::now() + d;
+            while let Some(left) = end.checked_duration_since(Instant::now()) {
+                if cancel.load(Ordering::SeqCst) {
+                    return false;
+                }
+                std::thread::sleep(left.min(Duration::from_millis(10)));
+            }
+            !cancel.load(Ordering::SeqCst)
+        };
+        'schedule: for (i, phase) in phases.iter().enumerate() {
+            if i > 0 && !drive(phase.level) {
+                break;
+            }
+            if i > 0 {
+                rt.block_on(persist_state(&state));
+            }
+            let span = Duration::from_millis(phase.hold_ms as u64);
+            match (phase.level, carrier) {
+                (ados_gpio::Level::High, Some((high, low))) => {
+                    let end = Instant::now() + span;
+                    while Instant::now() < end {
+                        std::thread::sleep(high);
+                        if !drive(ados_gpio::Level::Low) {
+                            break 'schedule;
+                        }
+                        std::thread::sleep(low);
+                        if Instant::now() >= end || !drive(ados_gpio::Level::High) {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    if !hold(span) {
+                        break;
+                    }
                 }
             }
-            persist_state(&state).await;
-            if phase.hold_ms > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(phase.hold_ms as u64)).await;
+        }
+        // End low, unless a newer beep or an explicit set took the pin over.
+        if drive(ados_gpio::Level::Low) {
+            let mut beeps = state
+                .beeps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if beeps
+                .get(&(chip, pin))
+                .is_some_and(|f| Arc::ptr_eq(f, &cancel))
+            {
+                beeps.remove(&(chip, pin));
             }
         }
-        // The schedule already ends low, but assert it once more so an aborted
-        // mid-schedule run (or a failed phase) still returns the line low.
-        {
-            let mut out = state.output.lock().await;
-            let _ = out.set(chip, pin, ados_gpio::Level::Low);
-        }
-        persist_state(&state).await;
+        rt.block_on(persist_state(&state));
     });
     Ok(())
 }
@@ -287,6 +373,7 @@ async fn start_beep(
     _chip: u32,
     _pin: u32,
     _phases: Vec<ados_gpio::BeepPhase>,
+    _carrier: Option<(std::time::Duration, std::time::Duration)>,
     _state: State,
 ) -> Result<(), String> {
     Err("E_NO_GPIO".to_string())
@@ -302,6 +389,8 @@ mod tests {
         State {
             #[cfg(target_os = "linux")]
             output: Arc::new(Mutex::new(ados_gpio::GpioOutput::new())),
+            #[cfg(target_os = "linux")]
+            beeps: Arc::default(),
             sidecar_path: Arc::new(dir.join("gpio-output.json")),
         }
     }

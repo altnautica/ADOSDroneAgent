@@ -184,6 +184,7 @@ async fn run_page_ui(
 
     use ados_display::calibration::{
         take_recalibrate_flag, CalibrationController, CalibrationOutcome, RECALIBRATE_FLAG_PATH,
+        TOUCH_CALIB_SKIPPED_PATH,
     };
     use ados_display::fb_writer::{FbWriter, Frame};
     use ados_display::graphics::palette::{self, Palette};
@@ -370,6 +371,10 @@ async fn run_page_ui(
     // The active calibration wizard, if any. While `Some`, the loop paints the
     // calibration screen and routes every tap to it instead of the navigator.
     let mut calibration: Option<CalibrationController> = None;
+    // Set when an auto-launched wizard closed itself on the idle timeout, so it
+    // does not re-open for the rest of this run. Only a recalibration request
+    // launches it again before the next start.
+    let mut calibration_idle_closed = false;
     // When the operator last touched the panel, for the post-interaction render
     // boost.
     let mut last_interaction: Option<Instant> = None;
@@ -385,14 +390,28 @@ async fn run_page_ui(
 
                 // Engage the calibration wizard when a touch panel is present
                 // but has no saved calibration: the rotation-identity fallback
-                // is visibly off, so force a fit before the UI is usable. Stays
-                // engaged until a fit is saved (no skip).
+                // is visibly off, so prompt for a fit. An operator who skipped
+                // it (persistent marker) is not prompted again, and a wizard
+                // that timed out stays closed for this run.
                 if calibration.is_none()
+                    && !calibration_idle_closed
                     && touch_transform.touch_present()
                     && !touch_transform.is_calibrated()
+                    && !Path::new(TOUCH_CALIB_SKIPPED_PATH).exists()
                 {
                     tracing::info!("uncalibrated touch panel; launching calibration wizard");
                     calibration = Some(CalibrationController::new(rotation));
+                    last_render = None;
+                }
+
+                // Close a wizard nobody is tapping: the digitizer may be absent
+                // or unreadable, and the status screen must come back.
+                if calibration.as_ref().is_some_and(|c| c.idle_expired(now)) {
+                    tracing::info!("touch calibration idle; closing the wizard");
+                    calibration = None;
+                    calibration_idle_closed = true;
+                    ctx = source.build_context();
+                    last_state_poll = now;
                     last_render = None;
                 }
 
@@ -486,21 +505,36 @@ async fn run_page_ui(
                     last_interaction = Some(now);
 
                     if calibration.is_some() {
-                        // Calibration mode: a tap places a sample on the current
-                        // target. On the final accepted tap the fit is saved,
-                        // the live transform reloads, and the normal UI resumes.
+                        // Calibration mode: a tap on Skip arms or confirms it;
+                        // any other tap places a sample on the current target.
+                        // On the final accepted tap the fit is saved, the live
+                        // transform reloads, and the normal UI resumes; a
+                        // confirmed Skip resumes it on the fallback transform.
                         if event.gesture.kind == GestureKind::Tap {
                             let outcome = calibration
                                 .as_mut()
                                 .expect("calibration active")
-                                .on_tap_raw(event.raw, Path::new(TOUCH_CALIB_PATH));
-                            if outcome == CalibrationOutcome::Saved {
-                                touch_transform.reload();
+                                .on_tap(
+                                    (event.gesture.end_x, event.gesture.end_y),
+                                    event.raw,
+                                    Path::new(TOUCH_CALIB_PATH),
+                                    Path::new(TOUCH_CALIB_SKIPPED_PATH),
+                                );
+                            match outcome {
+                                CalibrationOutcome::Saved => {
+                                    touch_transform.reload();
+                                    tracing::info!("touch calibration saved; resuming UI");
+                                }
+                                CalibrationOutcome::Skipped => {
+                                    tracing::info!("touch calibration skipped; resuming UI");
+                                }
+                                CalibrationOutcome::Continue => {}
+                            }
+                            if outcome != CalibrationOutcome::Continue {
                                 calibration = None;
                                 // Re-poll so the resumed UI shows fresh state.
                                 ctx = source.build_context();
                                 last_state_poll = now;
-                                tracing::info!("touch calibration saved; resuming UI");
                             }
                         }
                         // Repaint immediately: the next target, or the resumed
@@ -548,8 +582,8 @@ async fn run_page_ui(
                     last_interaction = Some(now);
 
                     // While the calibration wizard is engaged the panel has no
-                    // usable coordinate frame and the wizard is deliberately
-                    // un-skippable, so a button must not navigate out of it.
+                    // usable coordinate frame; its on-screen Skip is the way
+                    // out, so a button must not navigate away from it.
                     if calibration.is_none() {
                         let dispatch = navigator.on_button(&event);
                         if matches!(
@@ -650,7 +684,7 @@ fn all_pages() -> Vec<Box<dyn ados_display::pages::Page>> {
         // How to join this ground station's own WiFi. A panel is the only
         // surface that helps when the box is the thing you cannot reach.
         Box::new(AccessPointDetailPage),
-        Box::new(PairDroneDetailPage),
+        Box::new(PairDroneDetailPage::default()),
         Box::new(DiagnosticsDetailPage),
         // The reserved data-driven page a plugin contributes content to. Not a
         // tab; reachable via a page-switch request for the `plugin` id.

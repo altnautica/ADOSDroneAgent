@@ -31,9 +31,10 @@ use ados_protocol::launchd::{current_uid, render_plist, unit_to_label, PlistLogP
 use crate::cli::Args;
 use crate::exec;
 use crate::result::{now_iso8601_utc, InstallResult};
-use crate::steps::config_identity::pairing_json;
+use crate::steps::config_identity::{mint_pending_api_key, pairing_json};
 use crate::steps::extensions::{
-    install_world_engine, world_engine_default, ExtensionOutcome, NodeTarget, MANUAL_INSTALL,
+    install_world_engine, world_engine_default, ExtensionOutcome, NodeTarget, DOWNLOAD_RETRY_DELAY,
+    MANUAL_INSTALL,
 };
 
 /// The control surface's LAN port. The plist pins `ADOS_CONTROL_PORT=8080` so the
@@ -668,7 +669,8 @@ fn write_identity_and_config(args: &Args, paths: &Paths, profile: &str) -> Resul
 
     // Pairing material (only when --pair given).
     if let Some(code) = args.pair.as_deref() {
-        let body = pairing_json(code, now_epoch());
+        let pending_api_key = mint_pending_api_key();
+        let body = pairing_json(code, now_epoch(), pending_api_key.as_deref());
         std::fs::write(&paths.pairing, body)
             .with_context(|| format!("writing {} failed", paths.pairing.display()))?;
         set_mode(&paths.pairing, 0o600);
@@ -957,6 +959,7 @@ fn install_extensions(
         // launchd enforces no sandbox, so a network grant never waits on the
         // Linux-only loopback guard.
         guard_wait: Duration::ZERO,
+        retry_delay: DOWNLOAD_RETRY_DELAY,
     });
     match result {
         Ok(ExtensionOutcome::Installed { version, .. }) => {
@@ -965,6 +968,10 @@ fn install_extensions(
         Ok(ExtensionOutcome::AlreadyInstalled { version }) => println!(
             "  extensions: World Engine {version} already installed; plugin auto-update keeps \
              it current"
+        ),
+        Ok(ExtensionOutcome::Finished { version, .. }) => println!(
+            "  extensions: World Engine {version} was installed but off; required permissions \
+             granted and enabled"
         ),
         Ok(ExtensionOutcome::Unavailable(reason)) | Err(reason) => println!(
             "  extensions: World Engine not installed: {reason}. Install it later with \

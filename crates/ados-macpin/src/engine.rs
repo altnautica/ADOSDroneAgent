@@ -72,10 +72,19 @@ pub enum Decision {
 
 // ── Pure helpers ────────────────────────────────────────────────────────────
 
-/// The `.link` filename for an interface: a `10-` prefix so it sorts before the
-/// stock board files (`50-...`) and wins.
+/// The file-name prefix every MAC-pin `.link` drop-in carries. The `10-` sorts
+/// before the stock board files (`50-...`) so the pin wins.
+pub const LINK_FILE_PREFIX: &str = "10-ados-mac-";
+
+/// The `.link` filename for an interface.
 pub fn link_file_name(iface: &str) -> String {
-    format!("10-ados-mac-{iface}.link")
+    format!("{LINK_FILE_PREFIX}{iface}.link")
+}
+
+/// Whether `name` is a MAC-pin `.link` file this engine writes (so an
+/// uninstall can sweep them without touching a board's own `.link` files).
+pub fn is_pin_link_file(name: &str) -> bool {
+    name.starts_with(LINK_FILE_PREFIX) && name.ends_with(".link")
 }
 
 /// Render the full `.link` body (pure). `match_block` is the body of the

@@ -15,9 +15,9 @@
 //! Each tap consumes its seam and never reimplements it: the taps are not the
 //! router, not the supervisor, not the radio. A seam being absent (no agent on a
 //! host, an idle agent before a service is up) is normal, and each tap retries
-//! on a capped backoff rather than treating absence as an error.
+//! at the fixed `ados_protocol::retry::LOCAL_SOCKET` pace rather than treating
+//! absence as an error.
 
-pub mod backoff;
 pub mod mavlink;
 pub mod sidecar;
 pub mod state;

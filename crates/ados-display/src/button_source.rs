@@ -16,14 +16,13 @@
 //!   the exact bytes `ados-hid` emits rather than against a mock.
 //! * **An absent socket is not an error.** A ground station whose `ados-pic` is
 //!   not running (no gpiochip, or the service is down) must still render. The
-//!   reader retries on a bounded backoff and the UI never notices.
+//!   reader retries at the fixed local-socket pace and the UI never notices.
 //!
 //! Decoding deliberately does NOT happen here. Short/long/cancel and the
 //! action mapping are owned by `ados-hid`; duplicating any of that would give the
 //! panel a second, drifting opinion about what a press means.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use ados_hid::buttons::{ButtonEvent, PressKind};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -37,9 +36,6 @@ pub const BUTTONS_SOCK: &str = "/run/ados/buttons.sock";
 /// human-rate event; anything beyond a handful queued means the UI is wedged, and
 /// dropping the excess is better than growing without bound.
 const CHANNEL_DEPTH: usize = 16;
-
-const RECONNECT_MIN: Duration = Duration::from_millis(500);
-const RECONNECT_MAX: Duration = Duration::from_secs(10);
 
 /// Parse one line of the `buttons.sock` stream into a [`ButtonEvent`].
 ///
@@ -86,29 +82,20 @@ pub fn parse_button_line(line: &str) -> Option<ButtonEvent> {
 /// Connect to `sock_path`, subscribe, and forward each decoded press.
 ///
 /// Returns immediately with the receiving half; the reader runs as a task and
-/// reconnects on a bounded backoff for the lifetime of the process. The channel
+/// reconnects at the fixed local-socket pace for the lifetime of the process. The channel
 /// closes only if the caller drops the receiver.
 pub fn spawn_button_reader(sock_path: PathBuf) -> mpsc::Receiver<ButtonEvent> {
     let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
     tokio::spawn(async move {
-        let mut backoff = RECONNECT_MIN;
         loop {
             match read_until_disconnect(&sock_path, &tx).await {
-                Ok(()) => {
-                    // Clean EOF: ados-pic restarted. Reset the backoff so a
-                    // service restart is picked up promptly.
-                    backoff = RECONNECT_MIN;
-                    tracing::debug!("button stream closed; reconnecting");
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "button stream unavailable");
-                }
+                Ok(()) => tracing::debug!("button stream closed; reconnecting"),
+                Err(e) => tracing::debug!(error = %e, "button stream unavailable"),
             }
             if tx.is_closed() {
                 return;
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(RECONNECT_MAX);
+            tokio::time::sleep(ados_protocol::retry::LOCAL_SOCKET.wait()).await;
         }
     });
     rx

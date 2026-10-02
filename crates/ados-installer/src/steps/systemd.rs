@@ -151,30 +151,6 @@ const RETIRED_UDEV_RULES: &[&str] = &[
     "99-ados-modem.rules",
 ];
 
-/// Cutover marker files retired by a default sense flip or a fallback deletion.
-/// The net uplink matrix, the mesh relay/receiver and the plugin host are all
-/// native-only now — their packaged Python entrypoints were deleted — so both
-/// their old opt-IN markers (`plugin-host-rust-enabled`, `net-rust-enabled`) and
-/// their fallback markers (`net-python-fallback`, `groundlink-python-fallback`,
-/// `plugin-host-python-fallback`) are retired outright; none of them select
-/// anything any more. The installer deletes these on every run
-/// (`prune_legacy_cutover_flags`).
-///
-/// This list must only ever name a marker whose alternative no longer exists.
-/// Naming a marker that still selects between two live paths would erase an
-/// operator's pinned choice on each upgrade. Retiring one is therefore part of
-/// deleting the path it selected, never a step on its own — a box pinned to a
-/// deleted fallback is a box with nothing running, and the prune is what
-/// recovers it.
-const RETIRED_CUTOVER_FLAGS: &[&str] = &[
-    "plugin-host-rust-enabled",
-    "plugin-host-python-fallback",
-    "groundlink-python-fallback",
-    "net-rust-enabled",
-    "net-python-fallback",
-    "display-python-fallback",
-];
-
 /// The other-profile teardown list, keyed by the profile being installed
 /// (`disable_other_profile_units`). On a GS rig the drone TX unit must not run;
 /// on a drone rig every GS-only unit gets disabled.
@@ -1159,23 +1135,15 @@ fn reconcile_tunnel_marker() {
 }
 
 /// Decide whether the logging and telemetry store unit should be enabled, from
-/// the config body and the legacy pin marker. Pure, so the default and both
-/// override directions are asserted without a filesystem or a systemd.
+/// the config body. Pure, so the default and the override are asserted without
+/// a filesystem or a systemd.
 ///
 /// The store is **off unless asked for**. It is ~96% of everything the box
 /// writes to its card, and the largest single lump of space it occupies, so a
 /// node that nobody configured for it does not run it. `logging.store.enabled`
-/// is the one key; the `logd-python-fallback` marker is honoured as a force-off
-/// so a box already pinned by `ados rust disable logd` stays pinned.
-///
-/// There is no marker that forces it ON. A second way to enable something is a
-/// second thing to check when a node is behaving unexpectedly, and this one has
-/// a measured cost that makes "why is this on?" a question worth being able to
-/// answer from the config alone.
-pub fn logd_unit_wanted(config_body: Option<&str>, pinned_off: bool) -> bool {
-    if pinned_off {
-        return false;
-    }
+/// is the one key; there is no marker file that overrides it in either
+/// direction, so "why is this on?" is always answered by the config alone.
+pub fn logd_unit_wanted(config_body: Option<&str>) -> bool {
     config_body
         .map(ados_config::log_store::enabled_from)
         .unwrap_or(false)
@@ -1191,8 +1159,7 @@ pub fn logd_unit_wanted(config_body: Option<&str>, pinned_off: bool) -> bool {
 fn reconcile_logd_unit() {
     const UNIT: &str = "ados-logd.service";
     let config_body = std::fs::read_to_string(Path::new(CONFIG_DIR).join("config.yaml")).ok();
-    let pinned_off = Path::new(CONFIG_DIR).join("logd-python-fallback").exists();
-    if logd_unit_wanted(config_body.as_deref(), pinned_off) {
+    if logd_unit_wanted(config_body.as_deref()) {
         // Un-mask first: a box that carried the store while it was off may have
         // been masked by an earlier reconcile, and `enable` on a masked unit is
         // a silent no-op that would leave the operator's opt-in inert.
@@ -1210,34 +1177,12 @@ fn reconcile_logd_unit() {
     }
 }
 
-/// Reconcile the native control surface unit against its markers. The surface
-/// is the LAN front by default: `ensure_front_default_on` writes
-/// `front-rust-enabled` on every install, so the unit is enabled and owns :8080.
-/// `control-rust-enabled` (written by `ados rust enable control`) runs it on the
-/// alternate LAN port beside the Python API. With neither marker (the front
-/// marker removed for a debug session) the unit is disabled until the next
-/// install restores the default. Idempotent; runs on every install so a partial
-/// state self-heals. The START half is the start step's job (the unit is PartOf
-/// the supervisor).
+/// Enable the native control surface unit. It is the node's LAN front on
+/// every profile, so it is always wanted. Idempotent; runs on every install so
+/// a partial state self-heals. The START half is the start step's job (the
+/// unit is PartOf the supervisor).
 fn reconcile_control_unit() {
-    const UNIT: &str = "ados-control.service";
-    if control_unit_wanted() {
-        enable_if_present(UNIT);
-    } else {
-        let _ = exec::run("systemctl", &["stop", UNIT]);
-        let _ = exec::run("systemctl", &["disable", UNIT]);
-        let _ = exec::run("systemctl", &["reset-failed", UNIT]);
-    }
-}
-
-/// Whether this node runs the native control surface: either marker selects it.
-/// `control-rust-enabled` runs it on the alternate LAN port alongside FastAPI;
-/// `front-rust-enabled` runs it as the LAN front (the drop-in reconciled below
-/// binds it to :8080). The enable here, the start step's kick and the health
-/// gate's wait all read this one predicate.
-pub(crate) fn control_unit_wanted() -> bool {
-    Path::new(CONFIG_DIR).join("control-rust-enabled").exists()
-        || Path::new(CONFIG_DIR).join("front-rust-enabled").exists()
+    enable_if_present("ados-control.service");
 }
 
 /// The systemd drop-in directory + body that bind the native control surface to
@@ -1250,88 +1195,32 @@ const FRONT_DROPIN_NAME: &str = "front.conf";
 const FRONT_API_INTERNAL_SOCKET: &str = "/run/ados/api-internal.sock";
 
 /// The control drop-in body: bind the native surface to the LAN port the GCS
-/// uses, in place of FastAPI.
+/// uses.
 fn front_control_dropin_body() -> &'static str {
     "[Service]\nEnvironment=ADOS_CONTROL_PORT=8080\n"
 }
 
-/// The api drop-in body: move FastAPI off the LAN port onto the internal Unix
-/// socket the front proxies to.
+/// The api drop-in body: keep the residual API off the LAN port, on the
+/// internal Unix socket the front proxies to.
 fn front_api_dropin_body() -> String {
     format!("[Service]\nEnvironment=ADOS_API_INTERNAL_SOCKET={FRONT_API_INTERNAL_SOCKET}\n")
 }
 
-/// Reconcile the LAN-front cutover against its opt-in marker. When
-/// `front-rust-enabled` is present, the native control surface owns the LAN port
-/// (:8080) and FastAPI moves behind it onto an internal Unix socket; the two
-/// systemd drop-ins carry that env split. Absent, the drop-ins are removed so
-/// FastAPI owns the LAN port again. Writes/removes the drop-ins and runs its own
-/// `daemon-reload` (the flow's earlier reload predates these files); the actual
-/// unit restart is the start step's supervisor cycle (both units are PartOf it),
-/// matching the sibling reconciles. Idempotent; a partial state self-heals on the
-/// next install. The marker is written by `ados rust front enable`.
+/// Write the LAN-front drop-ins: the native control surface owns the LAN port
+/// (:8080) and the residual API sits behind it on an internal Unix socket. The
+/// front is unconditional — it is the only LAN surface that answers the
+/// migrated routes. Runs its own `daemon-reload` (the flow's earlier reload
+/// predates these files); the actual unit restart is the start step's
+/// supervisor cycle. Idempotent; a partial state self-heals on the next install.
 fn reconcile_front_unit() {
-    let front_on = Path::new(CONFIG_DIR).join("front-rust-enabled").exists();
     let control_dropin = Path::new(FRONT_CONTROL_DROPIN_DIR).join(FRONT_DROPIN_NAME);
     let api_dropin = Path::new(FRONT_API_DROPIN_DIR).join(FRONT_DROPIN_NAME);
-    if front_on {
-        let _ = std::fs::create_dir_all(FRONT_CONTROL_DROPIN_DIR);
-        let _ = write_atomic(&control_dropin, front_control_dropin_body());
-        let _ = std::fs::create_dir_all(FRONT_API_DROPIN_DIR);
-        let _ = write_atomic(&api_dropin, front_api_dropin_body());
-        let _ = exec::run("systemctl", &["daemon-reload"]);
-        tracing::info!("front cutover: native control surface bound to the LAN port");
-    } else {
-        // Remove only our own drop-in file (the dir may hold other drop-ins);
-        // rmdir the dir best-effort when it is now empty.
-        let removed = control_dropin.exists() || api_dropin.exists();
-        let _ = std::fs::remove_file(&control_dropin);
-        let _ = std::fs::remove_file(&api_dropin);
-        let _ = std::fs::remove_dir(FRONT_CONTROL_DROPIN_DIR);
-        let _ = std::fs::remove_dir(FRONT_API_DROPIN_DIR);
-        if removed {
-            let _ = exec::run("systemctl", &["daemon-reload"]);
-            tracing::info!("front cutover reverted: FastAPI owns the LAN port");
-        }
-    }
-}
-
-/// Ensure the native front is on by default. The status / pairing / command /
-/// telemetry / params / services / fleet / signing / wfb / video / ground-station
-/// read + control routes are served by `ados-control` and have been removed from
-/// the residual FastAPI (which keeps only the permanent-Python features —
-/// vision, plugins, setup, WHEP, display — behind the front's proxy). So the
-/// front is the only LAN surface that answers those routes: a fresh box, and an
-/// upgrade from a pre-removal release, must come up with `ados-control` owning
-/// :8080 or the migrated routes would 404 on FastAPI. Write the marker the two
-/// reconciles below read when it is absent. Idempotent. An operator can still
-/// `ados rust disable front` for a debug session; the next install restores it.
-fn ensure_front_default_on() {
-    let marker = Path::new(CONFIG_DIR).join("front-rust-enabled");
-    if !marker.exists() {
-        match std::fs::write(&marker, "1\n") {
-            Ok(()) => tracing::info!("front default: native control surface owns the LAN port"),
-            Err(e) => tracing::warn!(error = %e, "writing front-rust-enabled marker failed"),
-        }
-    }
-}
-
-/// Remove cutover marker files retired by a default sense flip so an
-/// `--upgrade` from an older release leaves no stale marker behind. The plugin
-/// host moved from an opt-IN marker (native only when the marker was present) to
-/// an opt-OUT marker (native by default; a fallback marker pins the packaged
-/// path), so the old opt-in marker no longer means anything — delete it. A fresh
-/// install writes NO marker (absent == native default), and this never writes
-/// the fallback marker, so the default stays native. Idempotent: a marker
-/// already gone is a clean no-op.
-fn prune_legacy_cutover_flags() {
-    for flag in RETIRED_CUTOVER_FLAGS {
-        let path = Path::new(CONFIG_DIR).join(flag);
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-            tracing::info!(flag, "pruned retired cutover marker");
-        }
-    }
+    let _ = std::fs::create_dir_all(FRONT_CONTROL_DROPIN_DIR);
+    let _ = write_atomic(&control_dropin, front_control_dropin_body());
+    let _ = std::fs::create_dir_all(FRONT_API_DROPIN_DIR);
+    let _ = write_atomic(&api_dropin, front_api_dropin_body());
+    let _ = exec::run("systemctl", &["daemon-reload"]);
+    tracing::info!("native control surface bound to the LAN port");
 }
 
 /// Drop the video-pipeline UDP sysctl tuning and apply it now so the running
@@ -1579,13 +1468,15 @@ fn install_avahi_gs_ap(source: Option<&Path>) {
     tracing::info!(path = AVAHI_GS_AP_FILE, "avahi service file installed");
 }
 
-/// Provision the `ados` system user and group (idempotent). Several downstream
-/// steps assume this identity already exists: the plugin runtime dir is created
-/// `0750 ados ados` (`install_plugin_tmpfiles`), every plugin subprocess unit
-/// runs `User=ados`/`Group=ados`, and the ground-station hardware-group
-/// memberships run `usermod -aG <grp> ados`. Without it the tmpfiles chown
-/// cannot resolve the owner and the GS usermod is gated behind `id ados` and
-/// silently no-ops.
+/// Provision the `ados` system user and group plus the plugin groups
+/// (idempotent). The plugin runtime dir is created `0750 ados ados`
+/// (`install_plugin_tmpfiles`) and the ground-station hardware-group
+/// memberships run `usermod -aG <grp> ados`. Every plugin runs as its own
+/// `ados-plg-*` user whose primary group is [`ados_protocol::ipc::PLUGIN_GROUP`];
+/// a plugin granted camera frames also carries
+/// [`ados_protocol::vision_rpc::VISION_READERS_GROUP`]. systemd refuses a unit
+/// whose `Group=`/`SupplementaryGroups=` names a missing group, so both exist
+/// before any plugin is installed.
 ///
 /// A system account: no login shell, no home directory, allocated below the
 /// regular-uid range. The group and the user are each created only when absent,
@@ -1615,6 +1506,28 @@ fn provision_ados_identity() {
                 "ados",
             ],
         );
+    }
+    for grp in [
+        ados_protocol::ipc::PLUGIN_GROUP,
+        ados_protocol::vision_rpc::VISION_READERS_GROUP,
+    ] {
+        if !exec::run_ok("getent", &["group", grp]) {
+            let _ = exec::run("groupadd", &["--system", grp]);
+        }
+    }
+}
+
+/// Where the plugin capability-token secret lives on a Linux node.
+const PLUGIN_TOKEN_SECRET: &str = "/etc/ados/secrets/plugin-token-secret";
+
+/// Create the plugin capability-token secret once, before any service that
+/// signs or checks a token starts, so no two processes race to create it.
+/// An existing secret is kept.
+fn provision_plugin_token_secret() {
+    if let Err(e) =
+        ados_plugin_host::token_secret::load_or_create_secret(Path::new(PLUGIN_TOKEN_SECRET))
+    {
+        tracing::warn!(error = %e, path = PLUGIN_TOKEN_SECRET, "plugin token secret could not be provisioned");
     }
 }
 
@@ -1719,13 +1632,13 @@ impl Step for Systemd {
             }
         };
 
-        // System identity: provision the `ados` user + group (idempotent)
-        // before anything that consumes it. The plugin runtime dir
-        // (/run/ados/plugins, 0750 ados ados), every plugin subprocess unit
-        // (User=ados/Group=ados), and the ground-station hardware-group
-        // memberships all reference `ados:ados`; create it first so the
-        // tmpfiles chown and the usermod resolve instead of silently no-opping.
+        // System identity: provision the `ados` user + group and the plugin
+        // groups (idempotent) before anything that consumes them, so the
+        // tmpfiles chown, the usermod and every plugin unit's group resolve
+        // instead of silently no-opping. The plugin token secret is created
+        // here, once, before the services that read it start.
         provision_ados_identity();
+        provision_plugin_token_secret();
 
         // Create the hardware-peripheral groups (gpio/i2c/spi) when the base
         // image lacks them, before any unit is enabled or started, so a unit's
@@ -1825,34 +1738,16 @@ impl Step for Systemd {
         reconcile_injector_arbitration();
         reconcile_aux_enable();
 
-        // 5b. The logging and telemetry store is on by default (the log-view
-        //     endpoints read it). Enable it unless the fallback marker pins it
-        //     off; the start step brings it up after the supervisor.
+        // 5b. The logging and telemetry store follows `logging.store.enabled`
+        //     (off by default); the start step brings it up after the
+        //     supervisor when it is on.
         reconcile_logd_unit();
 
-        // 5b-pre. The native front is the only LAN surface that answers the
-        //     migrated routes now that they are removed from FastAPI, so ensure
-        //     it is on by default before the control + front reconciles read the
-        //     marker.
-        ensure_front_default_on();
-
-        // 5b-bis. The native control surface runs as the LAN front when the
-        //     front marker is present (the default, ensured above) or when the
-        //     operator pinned the alternate-port control surface on via
-        //     `ados rust enable control`.
+        // 5b-bis. The native control surface is the LAN front on every node:
+        //     enable it, then bind it to the LAN port and keep the residual API
+        //     on the internal socket behind it.
         reconcile_control_unit();
-
-        // 5b-ter. The LAN-front cutover is on by default (ensured above). The
-        //     drop-ins bind the native surface to the LAN port and move FastAPI
-        //     onto the internal socket behind it; with the marker removed for a
-        //     debug session, FastAPI owns the port until the next install.
         reconcile_front_unit();
-
-        // 5c. Drop marker files retired by a default sense flip (the plugin
-        //     host moved from an opt-in to an opt-out marker). A fresh install
-        //     writes no marker, so the default stays native; this only deletes
-        //     the obsolete opt-in marker on an upgrade.
-        prune_legacy_cutover_flags();
 
         // 6. Profile-specific enable + teardown.
         if ctx.profile == "ground_station" {
@@ -2082,33 +1977,6 @@ mod tests {
     }
 
     #[test]
-    fn retired_cutover_flags_name_the_opt_in_marker_not_an_active_one() {
-        // The legacy plug-in-host opt-in marker is pruned on upgrade — its service
-        // flipped to opt-out, so the old enable flag carries no meaning.
-        assert!(RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-rust-enabled"));
-        // Net is native-only now (its packaged entrypoints were deleted), so BOTH
-        // its old opt-in marker and its fallback marker are meaningless and pruned.
-        assert!(RETIRED_CUTOVER_FLAGS.contains(&"net-rust-enabled"));
-        assert!(RETIRED_CUTOVER_FLAGS.contains(&"net-python-fallback"));
-        // The plugin host is native-only now too: the packaged host server was
-        // deleted, so its fallback marker selects nothing and is pruned. A box
-        // still carrying it has no plugin host at all (the old ExecStart resolved
-        // to /bin/true), so the prune is what recovers it.
-        assert!(RETIRED_CUTOVER_FLAGS.contains(&"plugin-host-python-fallback"));
-        // Display went native-only when the packaged render tree was deleted. All
-        // three display units exec their native binary unconditionally and gate on
-        // display.enabled / display.probation / the i2c device -- none of them
-        // reads this marker, so it selects nothing and is pruned. This assertion
-        // was inverted until then, which was correct while a packaged UI existed.
-        assert!(RETIRED_CUTOVER_FLAGS.contains(&"display-python-fallback"));
-        // A marker a live service still gates on must never be in the retired set,
-        // or the installer would erase the operator's pinned choice. `logd` is the
-        // live case: the installer itself reads that marker as a force-off at
-        // start.rs and in the enable path below.
-        assert!(!RETIRED_CUTOVER_FLAGS.contains(&"logd-python-fallback"));
-    }
-
-    #[test]
     fn front_dropins_set_the_lan_port_split() {
         // The control drop-in binds the native surface to the LAN port; the api
         // drop-in moves FastAPI onto the internal socket the front proxies to.
@@ -2121,19 +1989,6 @@ mod tests {
             "{api}"
         );
         assert!(api.starts_with("[Service]"));
-    }
-
-    #[test]
-    fn control_unit_runs_native_for_either_marker() {
-        // The shipped unit must exec the native binary when EITHER the plain
-        // control marker or the LAN-front marker is present, else /bin/true.
-        let unit =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd/ados-control.service");
-        let body = std::fs::read_to_string(unit).unwrap();
-        assert!(body.contains("control-rust-enabled"));
-        assert!(body.contains("front-rust-enabled"));
-        assert!(body.contains("exec /opt/ados/bin/ados-control"));
-        assert!(body.contains("exec /bin/true"));
     }
 
     #[test]
@@ -2656,34 +2511,21 @@ mod tests {
 
     #[test]
     fn a_fresh_node_does_not_enable_the_logging_store() {
-        // No key, no marker: off. This is the case that matters most, because
-        // it is every node that nobody configured.
-        assert!(!logd_unit_wanted(Some("agent:\n  name: x\n"), false));
+        // No key: off. This is the case that matters most, because it is every
+        // node that nobody configured.
+        assert!(!logd_unit_wanted(Some("agent:\n  name: x\n")));
         // No config file at all (a box mid-install) is also off.
-        assert!(!logd_unit_wanted(None, false));
+        assert!(!logd_unit_wanted(None));
     }
 
     #[test]
     fn the_config_key_is_what_turns_the_store_on() {
-        assert!(logd_unit_wanted(
-            Some("logging:\n  store:\n    enabled: true\n"),
-            false
-        ));
-        assert!(!logd_unit_wanted(
-            Some("logging:\n  store:\n    enabled: false\n"),
-            false
-        ));
-    }
-
-    #[test]
-    fn the_legacy_pin_still_forces_it_off_over_the_key() {
-        // A box already pinned by `ados rust disable logd` stays pinned even if
-        // the config asks for the store — the operator turned it off by hand
-        // and an upgrade must not quietly undo that.
-        assert!(!logd_unit_wanted(
-            Some("logging:\n  store:\n    enabled: true\n"),
-            true
-        ));
+        assert!(logd_unit_wanted(Some(
+            "logging:\n  store:\n    enabled: true\n"
+        )));
+        assert!(!logd_unit_wanted(Some(
+            "logging:\n  store:\n    enabled: false\n"
+        )));
     }
 
     #[test]
@@ -2692,16 +2534,15 @@ mod tests {
         // installer. A typo must not be able to hand a node back the write
         // volume that has been destroying cards; losing history is recoverable
         // with one key, a reflash is not.
-        assert!(!logd_unit_wanted(Some(": : : not yaml"), false));
-        assert!(!logd_unit_wanted(Some("logging: [a, list]"), false));
+        assert!(!logd_unit_wanted(Some(": : : not yaml")));
+        assert!(!logd_unit_wanted(Some("logging: [a, list]")));
     }
 
     #[test]
     fn an_unrelated_logging_block_does_not_turn_the_store_on() {
-        assert!(!logd_unit_wanted(
-            Some("logging:\n  level: debug\n  max_size_mb: 50\n"),
-            false
-        ));
+        assert!(!logd_unit_wanted(Some(
+            "logging:\n  level: debug\n  max_size_mb: 50\n"
+        )));
     }
 
     #[test]

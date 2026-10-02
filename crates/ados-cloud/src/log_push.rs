@@ -19,7 +19,9 @@
 //!
 //! 1. GET the unsynced window from the logging daemon over its trusted local
 //!    socket (`/v1/export?...&unsynced=1`), spooling the bytes and computing
-//!    their hash and size.
+//!    their hash and size. A window over [`MAX_WINDOW_BYTES`] is split at its
+//!    time midpoint into consecutive sub-windows, earliest first, until each
+//!    fits; every step below then runs per sub-window.
 //! 2. POST those exact bytes to the cloud ingest route in one authenticated
 //!    binary request (the same device-api-key header auth the heartbeat uses).
 //! 3. On a 2xx that is not a duplicate, POST `/v1/synced` over the same local
@@ -53,8 +55,8 @@ pub const LOGD_QUERY_SOCK: &str = "/run/ados/logd-query.sock";
 /// How often the watcher polls for a new request file.
 pub const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 
-/// The per-window upload cap. A single explicit window is bounded; a body over
-/// this is refused before any upload so a constrained uplink is never flooded.
+/// The per-window upload cap. One upload is bounded so a constrained uplink is
+/// never flooded; a larger backlog is sent as several consecutive windows.
 pub const MAX_WINDOW_BYTES: usize = 32 * 1024 * 1024;
 
 /// Slack over [`MAX_WINDOW_BYTES`] for the response framing (status line,
@@ -326,8 +328,9 @@ async fn service_request_file(
 }
 
 /// Run a push for one parsed request: gate, then loop the requested kinds,
-/// exporting each window over the local socket, uploading it, and marking the
-/// rows on success. Aggregates the per-kind outcomes into one [`PushResult`].
+/// exporting each kind's unsynced rows over the local socket in windows that
+/// fit the upload cap, uploading each, and marking each on success. Aggregates
+/// the per-kind outcomes into one [`PushResult`].
 pub async fn run_push(
     config: &CloudConfig,
     pairing: &PairingState,
@@ -356,25 +359,20 @@ pub async fn run_push(
 
     let mut out = PushResult::default();
     for kind in req.resolved_kinds() {
-        match push_one_kind(
+        let mut sink = LiveWindowSink {
             http,
             base_url,
             api_key,
             device_id,
-            &kind,
-            req.session,
-            req.since_us,
-            to_us,
-        )
-        .await
-        {
-            Ok(KindOutcome { deduped, bytes }) => {
-                if deduped {
-                    out.deduped += 1;
-                } else {
-                    out.pushed += 1;
-                    out.bytes += bytes as u64;
-                }
+            kind: &kind,
+            session: req.session,
+            socket: Path::new(LOGD_QUERY_SOCK),
+        };
+        match push_kind_windows(&mut sink, req.since_us, to_us).await {
+            Ok(k) => {
+                out.pushed += k.pushed;
+                out.deduped += k.deduped;
+                out.bytes += k.bytes;
             }
             Err(e) => {
                 tracing::warn!(kind = %kind, error = %e, "log-push for one kind failed");
@@ -389,101 +387,194 @@ pub async fn run_push(
     out
 }
 
-/// One kind's outcome.
+/// One kind's totals across the windows it was exported in.
+#[derive(Debug, Default, PartialEq, Eq)]
 struct KindOutcome {
-    deduped: bool,
-    bytes: usize,
+    pushed: u32,
+    deduped: u32,
+    bytes: u64,
 }
 
-/// Export, upload, and (on success) mark one kind's window. Returns the outcome
-/// or a terminal-error code string for this kind.
-#[allow(clippy::too_many_arguments)]
-async fn push_one_kind(
-    http: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    device_id: &str,
-    kind: &str,
-    session: Option<i64>,
+/// What exporting one window yielded.
+enum WindowExport {
+    /// The window's `jsonl.zst` bytes (empty when it holds no unsynced rows).
+    Bytes(Vec<u8>),
+    /// The window is over [`MAX_WINDOW_BYTES`]; it must be split.
+    TooLarge,
+}
+
+/// The store and cloud operations the window loop drives for one kind. A seam
+/// so the split-and-push progression is testable without a socket or a cloud.
+#[async_trait::async_trait]
+trait WindowSink {
+    /// Export the kind's unsynced rows in `[from_us, to_us)`.
+    async fn export(&mut self, from_us: Option<i64>, to_us: i64) -> Result<WindowExport, String>;
+    /// The oldest stored timestamp, to split a window with no lower bound.
+    async fn oldest_us(&mut self) -> Option<i64>;
+    /// Upload one window, then mark exactly that window synced when the cloud
+    /// stored it or already had it.
+    async fn upload(
+        &mut self,
+        from_us: Option<i64>,
+        to_us: i64,
+        bytes: Vec<u8>,
+    ) -> Result<IngestDecision, String>;
+}
+
+/// Push one kind's unsynced rows in `[since_us, to_us)`.
+///
+/// A window whose export is over [`MAX_WINDOW_BYTES`] is split at its time
+/// midpoint into two consecutive sub-windows, and the earlier one is exported
+/// first, until every window fits. Each window is uploaded and marked synced on
+/// its own, so a backlog of any size exports oldest first, and a failure part
+/// way leaves the windows already sent marked and the rest unsynced for the
+/// next push. Empty windows are skipped. Errors: `empty_window` when nothing
+/// in the range was unsynced; `window_too_large` when a window cannot be split
+/// further (one microsecond wide, or no lower bound is known); otherwise the
+/// export or upload code.
+async fn push_kind_windows<S: WindowSink + Send>(
+    sink: &mut S,
     since_us: Option<i64>,
     to_us: i64,
 ) -> Result<KindOutcome, String> {
-    // 1. Export the unsynced window over the trusted local socket. The read is
-    //    bounded; an over-cap window surfaces its own code rather than masking as
-    //    an unreachable store.
-    let bytes = export_window(Path::new(LOGD_QUERY_SOCK), kind, session, since_us, to_us)
-        .await
-        .map_err(|e| {
-            if e.to_string().contains("window_too_large") {
-                "window_too_large".to_string()
-            } else {
-                "store_unreachable".to_string()
+    // A stack of pending windows; the later half is pushed first so the
+    // earlier half pops (exports) first.
+    let mut pending: Vec<(Option<i64>, i64)> = vec![(since_us, to_us)];
+    let mut out = KindOutcome::default();
+    let mut any_rows = false;
+    while let Some((from, to)) = pending.pop() {
+        match sink.export(from, to).await? {
+            WindowExport::Bytes(bytes) if bytes.is_empty() => {}
+            WindowExport::Bytes(bytes) => {
+                any_rows = true;
+                let size = bytes.len() as u64;
+                let decision = sink.upload(from, to, bytes).await?;
+                if decision.deduped {
+                    out.deduped += 1;
+                } else {
+                    out.pushed += 1;
+                    out.bytes += size;
+                }
             }
-        })?;
-    if bytes.is_empty() {
+            WindowExport::TooLarge => {
+                let lower = match from {
+                    Some(f) => f,
+                    None => sink
+                        .oldest_us()
+                        .await
+                        .ok_or_else(|| "window_too_large".to_string())?,
+                };
+                let mid = lower.saturating_add(to.saturating_sub(lower) / 2);
+                if mid <= lower || mid >= to {
+                    return Err("window_too_large".to_string());
+                }
+                pending.push((Some(mid), to));
+                pending.push((from, mid));
+            }
+        }
+    }
+    if !any_rows {
         return Err("empty_window".to_string());
     }
-    if bytes.len() > MAX_WINDOW_BYTES {
-        return Err("window_too_large".to_string());
-    }
-    let content_hash = window_hash(&bytes);
-    let size = bytes.len();
-    // The window is `jsonl.zst`: one record per line. Decode locally to count
-    // the rows so the cloud window-list records the real count, not a placeholder.
-    let row_count = count_jsonl_rows(&bytes);
+    Ok(out)
+}
 
-    // 2. Upload to the cloud ingest route in one authenticated binary POST. The
-    //    cloud recomputes the hash server-side; the local hash only labels the
-    //    result.
-    let url = format!("{}/agent/logd/window", base_url.trim_end_matches('/'));
-    let resp = http
-        .post(&url)
-        .header("X-ADOS-Key", api_key)
-        .header("X-ADOS-Device", device_id)
-        .header(
-            "X-ADOS-Session",
-            session.map(|s| s.to_string()).unwrap_or_default(),
-        )
-        .header("X-ADOS-Kind", kind)
-        .header("X-ADOS-Format", "jsonl.zst")
-        .header("X-ADOS-Window-Start-Us", since_us.unwrap_or(0).to_string())
-        .header("X-ADOS-Window-End-Us", to_us.to_string())
-        .header("X-ADOS-Row-Count", row_count.to_string())
-        .header("Content-Type", "application/zstd")
-        .body(bytes)
-        .send()
-        .await
-        .map_err(|_| "cloud_error".to_string())?;
-    if !resp.status().is_success() {
-        return Err("cloud_error".to_string());
-    }
-    let status_field = resp
-        .json::<serde_json::Value>()
-        .await
-        .ok()
-        .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
-        .unwrap_or_else(|| "inserted".to_string());
-    let decision = IngestDecision::from_status(&status_field);
-    tracing::info!(
-        kind = %kind, deduped = decision.deduped, hash = %content_hash, bytes = size,
-        rows = row_count, "log window uploaded"
-    );
+/// The production [`WindowSink`]: the logging daemon's trusted local socket for
+/// export and mark, the cloud ingest route for upload.
+struct LiveWindowSink<'a> {
+    http: &'a reqwest::Client,
+    base_url: &'a str,
+    api_key: &'a str,
+    device_id: &'a str,
+    kind: &'a str,
+    session: Option<i64>,
+    socket: &'a Path,
+}
 
-    // 3. Mark the exact window synced over the local socket — only on a stored
-    //    (or already-present) window. A mark failure is non-fatal: the cloud
-    //    copy exists, and a later push re-dedupes and re-marks.
-    if decision.mark_synced {
-        if let Err(e) =
-            mark_synced(Path::new(LOGD_QUERY_SOCK), kind, session, since_us, to_us).await
-        {
-            tracing::warn!(kind = %kind, error = %e, "mark-synced failed after upload");
+#[async_trait::async_trait]
+impl WindowSink for LiveWindowSink<'_> {
+    async fn export(&mut self, from_us: Option<i64>, to_us: i64) -> Result<WindowExport, String> {
+        // The read is bounded; an over-cap window is reported as such rather
+        // than masking as an unreachable store.
+        match export_window(self.socket, self.kind, self.session, from_us, to_us).await {
+            Ok(bytes) if bytes.len() > MAX_WINDOW_BYTES => Ok(WindowExport::TooLarge),
+            Ok(bytes) => Ok(WindowExport::Bytes(bytes)),
+            Err(e) if e.to_string().contains("window_too_large") => Ok(WindowExport::TooLarge),
+            Err(_) => Err("store_unreachable".to_string()),
         }
     }
 
-    Ok(KindOutcome {
-        deduped: decision.deduped,
-        bytes: size,
-    })
+    async fn oldest_us(&mut self) -> Option<i64> {
+        let (status, body) = uds_request(self.socket, "GET", "/v1/stats", None)
+            .await
+            .ok()?;
+        if !(200..300).contains(&status) {
+            return None;
+        }
+        let stats: serde_json::Value = serde_json::from_slice(&body).ok()?;
+        stats.get("oldest_ts_us")?.as_i64()
+    }
+
+    async fn upload(
+        &mut self,
+        from_us: Option<i64>,
+        to_us: i64,
+        bytes: Vec<u8>,
+    ) -> Result<IngestDecision, String> {
+        let kind = self.kind;
+        let content_hash = window_hash(&bytes);
+        let size = bytes.len();
+        // The window is `jsonl.zst`: one record per line. Decode locally to
+        // count the rows so the cloud window-list records the real count.
+        let row_count = count_jsonl_rows(&bytes);
+
+        // Upload in one authenticated binary POST. The cloud recomputes the
+        // hash server-side; the local hash only labels the result.
+        let url = format!("{}/agent/logd/window", self.base_url.trim_end_matches('/'));
+        let resp = self
+            .http
+            .post(&url)
+            .header("X-ADOS-Key", self.api_key)
+            .header("X-ADOS-Device", self.device_id)
+            .header(
+                "X-ADOS-Session",
+                self.session.map(|s| s.to_string()).unwrap_or_default(),
+            )
+            .header("X-ADOS-Kind", kind)
+            .header("X-ADOS-Format", "jsonl.zst")
+            .header("X-ADOS-Window-Start-Us", from_us.unwrap_or(0).to_string())
+            .header("X-ADOS-Window-End-Us", to_us.to_string())
+            .header("X-ADOS-Row-Count", row_count.to_string())
+            .header("Content-Type", "application/zstd")
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|_| "cloud_error".to_string())?;
+        if !resp.status().is_success() {
+            return Err("cloud_error".to_string());
+        }
+        let status_field = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
+            .unwrap_or_else(|| "inserted".to_string());
+        let decision = IngestDecision::from_status(&status_field);
+        tracing::info!(
+            kind = %kind, deduped = decision.deduped, hash = %content_hash, bytes = size,
+            rows = row_count, "log window uploaded"
+        );
+
+        // Mark the exact window synced, only on a stored (or already-present)
+        // window. A mark failure is non-fatal: the cloud copy exists, and a
+        // later push re-dedupes and re-marks.
+        if decision.mark_synced {
+            if let Err(e) = mark_synced(self.socket, kind, self.session, from_us, to_us).await {
+                tracing::warn!(kind = %kind, error = %e, "mark-synced failed after upload");
+            }
+        }
+        Ok(decision)
+    }
 }
 
 /// GET the unsynced export window from the logging daemon over its local socket,
@@ -999,6 +1090,109 @@ mod tests {
         }
         let zst = zstd::encode_all(&jsonl[..], 3).unwrap();
         assert_eq!(count_jsonl_rows(&zst), 50_000);
+    }
+
+    // ── oversized windows split into consecutive sub-windows ────────────────
+
+    /// A store of rows at given timestamps, each `row_bytes` long once
+    /// exported. An export over `cap` bytes is reported too large, the way the
+    /// live sink reports a window over [`MAX_WINDOW_BYTES`].
+    struct FakeSink {
+        rows: Vec<i64>,
+        row_bytes: usize,
+        cap: usize,
+        uploads: Vec<(Option<i64>, i64, usize)>,
+    }
+
+    impl FakeSink {
+        fn rows_in(&self, from: Option<i64>, to: i64) -> usize {
+            self.rows
+                .iter()
+                .filter(|&&ts| from.is_none_or(|f| ts >= f) && ts < to)
+                .count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WindowSink for FakeSink {
+        async fn export(&mut self, from: Option<i64>, to: i64) -> Result<WindowExport, String> {
+            let bytes = self.rows_in(from, to) * self.row_bytes;
+            if bytes > self.cap {
+                Ok(WindowExport::TooLarge)
+            } else {
+                Ok(WindowExport::Bytes(vec![0u8; bytes]))
+            }
+        }
+        async fn oldest_us(&mut self) -> Option<i64> {
+            self.rows.iter().copied().min()
+        }
+        async fn upload(
+            &mut self,
+            from: Option<i64>,
+            to: i64,
+            bytes: Vec<u8>,
+        ) -> Result<IngestDecision, String> {
+            self.uploads.push((from, to, bytes.len()));
+            Ok(IngestDecision::from_status("inserted"))
+        }
+    }
+
+    fn sink(rows: Vec<i64>) -> FakeSink {
+        FakeSink {
+            rows,
+            row_bytes: 1024 * 1024,
+            cap: MAX_WINDOW_BYTES,
+            uploads: Vec::new(),
+        }
+    }
+
+    /// A 100 MB backlog with no lower bound goes out as consecutive windows,
+    /// oldest first, each within the cap, covering every row exactly once.
+    #[tokio::test]
+    async fn a_window_over_the_cap_is_pushed_as_consecutive_sub_windows() {
+        let mut s = sink((1_000..1_100).collect());
+        let out = push_kind_windows(&mut s, None, 2_000).await.unwrap();
+        assert!(s.uploads.len() > 1, "the backlog was split");
+        assert!(s.uploads.iter().all(|&(_, _, len)| len <= MAX_WINDOW_BYTES));
+        let total: usize = s.uploads.iter().map(|&(_, _, len)| len).sum();
+        assert_eq!(total, 100 * 1024 * 1024, "every row uploaded exactly once");
+        // Ordered and non-overlapping: each window starts at or after the
+        // previous one's end (empty stretches between them are skipped), and
+        // the first keeps the request's open lower bound.
+        assert_eq!(s.uploads[0].0, None);
+        for pair in s.uploads.windows(2) {
+            assert!(pair[1].0.unwrap() >= pair[0].1, "{pair:?}");
+        }
+        assert_eq!(out.pushed as usize, s.uploads.len());
+        assert_eq!(out.bytes, 100 * 1024 * 1024);
+    }
+
+    /// A window that fits is uploaded once, unsplit.
+    #[tokio::test]
+    async fn a_window_at_the_cap_is_not_split() {
+        let mut s = sink((0..32).collect());
+        push_kind_windows(&mut s, Some(0), 100).await.unwrap();
+        assert_eq!(s.uploads, vec![(Some(0), 100, MAX_WINDOW_BYTES)]);
+    }
+
+    /// Rows packed into one microsecond cannot be split below the cap.
+    #[tokio::test]
+    async fn an_unsplittable_window_reports_too_large() {
+        let mut s = sink(vec![5; 40]);
+        assert_eq!(
+            push_kind_windows(&mut s, Some(5), 6).await,
+            Err("window_too_large".to_string())
+        );
+        assert!(s.uploads.is_empty());
+    }
+
+    #[tokio::test]
+    async fn nothing_unsynced_reports_an_empty_window() {
+        let mut s = sink(Vec::new());
+        assert_eq!(
+            push_kind_windows(&mut s, None, 100).await,
+            Err("empty_window".to_string())
+        );
     }
 
     // ── bounded socket read (the OOM guard) ─────────────────────────────────

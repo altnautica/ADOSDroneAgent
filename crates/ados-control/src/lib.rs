@@ -53,38 +53,12 @@ use crate::state::{AppState, PairingPaths};
 
 /// Canonical runtime paths. The control socket lives under `/run/ados` (tmpfs);
 /// the pairing-state file lives under `/etc/ados` (persistent). The TCP port is
-/// the alternate LAN plane on the full agent (the GCS still uses FastAPI on
-/// `:8080`); the unit overrides it to `:8080` on the headless profile.
+/// the LAN front the GCS reaches the agent on.
 pub mod paths {
     /// Control socket: the trusted local plane (the on-box CLI).
     pub const CONTROL_SOCKET: &str = "/run/ados/control.sock";
-    /// The alternate LAN TCP port used when the native front is NOT the LAN
-    /// owner (the `control-rust-enabled` plane running alongside FastAPI's
-    /// `:8080`). Also the port a bare binary binds with no marker present.
-    pub const CONTROL_TCP_PORT: u16 = 8082;
-    /// The LAN TCP port the native front OWNS once it is enabled — the GCS
-    /// reaches the agent here.
+    /// The LAN TCP port the native front owns. `ADOS_CONTROL_PORT` overrides it.
     pub const FRONT_TCP_PORT: u16 = 8080;
-    /// The persistent marker the installer writes when the native front owns the
-    /// LAN port. It is the DURABLE source of truth for the port: it survives
-    /// reboots and a killed install, whereas the `front.conf` env drop-in can be
-    /// left empty by an install that died mid-write. Reading it here lets the
-    /// front self-heal to `:8080` on the next boot without a re-install.
-    pub const FRONT_MARKER_PATH: &str = "/etc/ados/front-rust-enabled";
-}
-
-/// Resolve the LAN TCP port from an explicit `ADOS_CONTROL_PORT` override or,
-/// absent that, the front-enabled marker. When the native front owns the LAN
-/// port (`/etc/ados/front-rust-enabled` present) a missing/empty `front.conf`
-/// still resolves to `:8080` — so a reboot self-heals a half-completed install
-/// instead of leaving the front stranded on the `:8082` fallback. An explicit env
-/// port always wins (the unit still pins it per profile).
-fn resolve_control_tcp_port(env_port: Option<u16>, front_enabled: bool) -> u16 {
-    match env_port {
-        Some(p) => p,
-        None if front_enabled => paths::FRONT_TCP_PORT,
-        None => paths::CONTROL_TCP_PORT,
-    }
 }
 
 /// How often the daemon pings the systemd watchdog while running. Comfortably
@@ -158,18 +132,16 @@ pub struct DaemonPaths {
 
 impl Default for DaemonPaths {
     fn default() -> Self {
-        // The env overrides mirror the sibling daemons so the unit can pin the
-        // port per profile (`:8082` inert on the full agent, `:8080` headless)
-        // and a test can redirect the socket/pairing paths without a real
-        // `/run/ados` or `/etc/ados`.
+        // The env overrides mirror the sibling daemons so a test can redirect
+        // the port and the socket/pairing paths without a real `/run/ados` or
+        // `/etc/ados`.
         let control_socket = std::env::var("ADOS_CONTROL_SOCKET")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(paths::CONTROL_SOCKET));
-        let env_port = std::env::var("ADOS_CONTROL_PORT")
+        let control_tcp_port = std::env::var("ADOS_CONTROL_PORT")
             .ok()
-            .and_then(|s| s.parse().ok());
-        let front_enabled = Path::new(paths::FRONT_MARKER_PATH).exists();
-        let control_tcp_port = resolve_control_tcp_port(env_port, front_enabled);
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(paths::FRONT_TCP_PORT);
         let pairing_path = std::env::var("ADOS_PAIRING_JSON")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(auth::DEFAULT_PAIRING_PATH));
@@ -327,7 +299,14 @@ pub async fn run_with_paths<F>(paths: DaemonPaths, shutdown: F) -> Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let pairing = Arc::new(PairingState::with_path(paths.pairing_path.clone()));
+    // One read of the security config, shared by the native credential check,
+    // the proxied-auth gate and the CORS allow-list, so they cannot be built
+    // from different snapshots.
+    let control_security = crate::config::ControlSecurityConfig::load_from(&paths.config_path);
+    let pairing = Arc::new(
+        PairingState::with_path(paths.pairing_path.clone())
+            .with_configured_key(control_security.security.api.api_key.clone()),
+    );
 
     // The vehicle-state reader the status + telemetry routes project. Its
     // background task connects to the state socket and reconnects on EOF / an
@@ -514,9 +493,6 @@ where
     // here from the same config the Python agent writes) supplies the configured
     // key + HMAC settings the gate reads. Built once and shared across all
     // connections (it holds the replay-detector nonce store).
-    // One read of the security config, shared by the proxied-auth gate and the
-    // CORS allow-list, so the two cannot be built from different snapshots.
-    let control_security = crate::config::ControlSecurityConfig::load_from(&paths.config_path);
     let proxied_auth = Arc::new(crate::proxy_auth::ProxiedAuth::new(
         control_security.security.clone(),
     ));
@@ -634,25 +610,5 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!("received interrupt");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn front_marker_resolves_lan_port_to_8080() {
-        // Front enabled, no env override -> the front OWNS :8080 (even if
-        // front.conf is missing/empty from a killed install -> self-heals).
-        assert_eq!(resolve_control_tcp_port(None, true), paths::FRONT_TCP_PORT);
-        // No front marker -> the alternate :8082 plane.
-        assert_eq!(
-            resolve_control_tcp_port(None, false),
-            paths::CONTROL_TCP_PORT
-        );
-        // An explicit env port always wins (the unit pins it per profile).
-        assert_eq!(resolve_control_tcp_port(Some(9999), true), 9999);
-        assert_eq!(resolve_control_tcp_port(Some(8082), true), 8082);
     }
 }

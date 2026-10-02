@@ -286,23 +286,12 @@ fn read_raw_config(path: &Path) -> (RawConfig, Option<String>) {
     ados_config::yaml_reporting(&text, "supervisor")
 }
 
-/// The name of the marker that pins the durable store off regardless of the
-/// config key. Written next to `config.yaml`, so it follows an `ADOS_CONFIG`
-/// override and stays with the config it belongs to.
-pub const LOGD_PIN_OFF_MARKER: &str = "logd-python-fallback";
-
 /// Whether the logging store is wanted on this node. The config key is read
 /// through the shared `ados_config::log_store` gate — the same one the
 /// installer's enable/mask reconcile and the daemon's own self-gate read — so
-/// the three cannot drift, and the pin marker is honoured because the installer
-/// MASKS the unit when it is present (a start against a masked unit only
-/// produces failures).
+/// the three cannot drift.
 pub fn log_store_wanted(config_yaml: &Path) -> bool {
-    let pinned_off = config_yaml
-        .parent()
-        .map(|dir| dir.join(LOGD_PIN_OFF_MARKER).exists())
-        .unwrap_or(false);
-    !pinned_off && ados_config::log_store::read_gate(config_yaml).enabled
+    ados_config::log_store::read_gate(config_yaml).enabled
 }
 
 /// Read the on-disk role sentinel. Falls back to `direct` if missing,

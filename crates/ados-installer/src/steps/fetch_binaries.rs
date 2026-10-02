@@ -48,7 +48,7 @@ use crate::env;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::net;
 use crate::ui::{activity, ProgressSink};
-use crate::verify::{self, Channel};
+use crate::verify::{self, SignaturePolicy};
 
 /// GitHub release-download base; each prebuilt asset hangs off
 /// `<base>/<release_tag>/<asset>` (plus `.sha256` / `.minisig` sidecars).
@@ -240,35 +240,6 @@ pub fn gate_outcome(gate: Gate, ok: bool) -> Decision {
     }
 }
 
-/// Resolve the channel enum from the ctx's channel string. The lenient branch is
-/// opt-in by exact name; see [`Channel::from_name`].
-fn channel_of(ctx: &Ctx) -> Channel {
-    Channel::from_name(&ctx.channel)
-}
-
-/// Whether a prebuilt fetch may skip the signature check outright.
-///
-/// Never, on any channel — which is why the channel is not consulted.
-///
-/// `allow_unsigned` short-circuits inside [`verify::verify_artifact`] BEFORE the
-/// pubkey is read, so it does not mean "tolerate a missing signature"; it means
-/// "do not look at signatures at all". Passing it on the default channel meant
-/// the vendored trust anchor below was never consulted on the path almost every
-/// install takes, so a binary carrying a signature that does NOT match it was
-/// installed without complaint. The key has been embedded here since it was
-/// generated, and this flag is the reason none of it ever ran.
-///
-/// Tolerating a signature we cannot OBTAIN is a separate and much weaker
-/// decision, and it already has a home that is still channel-gated:
-/// `verify_minisign` routes a missing `.minisig`, or a host with no `minisign`
-/// binary, through `unverifiable`, which warns on edge and refuses on stable.
-/// That is what keeps today's unsigned releases installable, so turning this off
-/// changes nothing for an install fetching an unsigned asset — and refuses a
-/// tampered one, everywhere, which is the case that mattered.
-fn allow_unsigned_for(_channel: Channel) -> bool {
-    false
-}
-
 // ---------------------------------------------------------------------------
 // Where one catalog entry's bytes come from.
 // ---------------------------------------------------------------------------
@@ -310,6 +281,20 @@ impl AssetSource<'_> {
         match self {
             AssetSource::Release { .. } => 3,
             AssetSource::Local { .. } => 1,
+        }
+    }
+
+    /// How strictly this source's signature is judged.
+    ///
+    /// A release download needs a valid signature on every channel: its
+    /// `.sha256` comes from the same host as the binary, so on its own it proves
+    /// the transfer and not the origin. Only a locally-built artifact, which
+    /// cannot carry the CI signature (the key is a CI secret), may install on
+    /// the SHA256 its build host recorded.
+    fn signature_policy(&self) -> SignaturePolicy {
+        match self {
+            AssetSource::Release { .. } => SignaturePolicy::Required,
+            AssetSource::Local { .. } => SignaturePolicy::LocalBuild,
         }
     }
 }
@@ -391,9 +376,10 @@ fn stage_asset(
                 sink.byte_progress("fetch_binaries", done, total, b.service);
             })?;
             net::fetch(&format!("{asset_url}.sha256"), dl_sha)?;
-            // Best-effort: verification upgrades to signature-checked
-            // automatically once CI signs. curl is invoked with `-f`, so a 404
-            // leaves no file rather than a saved error page.
+            // The signature is mandatory for a release asset, but its fetch is
+            // allowed to fail here so the refusal comes from the verifier, which
+            // names the artifact and the reason. curl is invoked with `-f`, so a
+            // 404 leaves no file rather than a saved error page.
             let _ = net::fetch(&format!("{asset_url}.minisig"), dl_sig);
             Ok(())
         }
@@ -597,21 +583,22 @@ fn validate_artifacts_dir(dir: &Path) -> Result<Vec<String>, String> {
 /// |---|---|---|
 /// | ELF machine matches this host | not applied (CI publishes aarch64 only) | **applied** |
 /// | SHA256 against the `.sha256` sidecar | applied (sidecar fetched) | **applied** (sidecar copied from the build host; a missing one is fatal) |
-/// | minisign against the vendored trust anchor | applied when a `.minisig` exists | applied when a `.minisig` exists — in practice never, since the signing key is a CI secret |
-/// | a signature that cannot be OBTAINED | warn on edge, fatal on stable | same rule; `--artifacts` is refused on stable up front for exactly this reason |
+/// | minisign against the vendored trust anchor | **mandatory**: a missing `.minisig` or `minisign` is fatal on every channel | applied when a `.minisig` exists; a missing one warns (the signing key is a CI secret) |
 /// | chmod 0755, atomic rename, `<dest>.prev` retention, Hard/BestEffort gate | applied | applied |
 fn install_one(
     b: &PrebuiltBinary,
     tmp_dir: &Path,
-    channel: Channel,
     sink: &ProgressSink,
     source: &AssetSource<'_>,
-) -> anyhow::Result<()> {
-    install_one_at(b, Path::new(b.dest), tmp_dir, channel, sink, source)
+) -> anyhow::Result<Option<PathBuf>> {
+    let dest = Path::new(b.dest);
+    let replaced = install_one_at(b, dest, tmp_dir, sink, source)?;
+    Ok(replaced.then(|| dest.to_path_buf()))
 }
 
-/// Obtain + verify + place one binary at `dest`. Returns `Ok(())` on success,
-/// `Err` on any stage/verify/place miss (the caller maps that through the gate).
+/// Obtain + verify + place one binary at `dest`. Returns whether an existing
+/// binary was replaced on success, `Err` on any stage/verify/place miss (the
+/// caller maps that through the gate).
 ///
 /// `dest` is a parameter rather than read off `b` because placement is a
 /// property of this call, not of the catalog: the sequence is "stage these
@@ -628,10 +615,9 @@ fn install_one_at(
     b: &PrebuiltBinary,
     dest: &Path,
     _tmp_dir: &Path,
-    channel: Channel,
     sink: &ProgressSink,
     source: &AssetSource<'_>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     // Ensure /opt/ados/bin exists so the `.dl` sibling and the final rename land
     // on the same filesystem as the destination (atomic rename requires it).
     if let Some(parent) = dest.parent() {
@@ -649,25 +635,11 @@ fn install_one_at(
     let outcome = (|| {
         stage_asset(b, source, &dl_bin, &dl_sha, &dl_sig, sink)?;
 
-        // Verify the staged temp BEFORE it is placed at the live path. Every
-        // channel checks any `.minisig` that arrived against the vendored trust
-        // anchor; only whether a MISSING one is fatal still varies by channel.
-        //
-        // The best-effort `.minisig` staging above is what makes that safe to run
-        // on the default channel today: curl is invoked with `-f`, so a 404
-        // leaves no file at all rather than a saved error page, `net::fetch`
-        // never promotes a failed transfer to the destination, and the local arm
-        // copies a `.minisig` only when one exists. An absent sidecar therefore
-        // reads as "unobtainable" (warn on edge) and not as a signature that
-        // fails to verify. The `.sha256` is NOT best-effort on either arm: the
-        // fetch fails on a missing one, and the local arm refuses before it
-        // copies anything.
-        verify::verify_artifact(
-            &dl_bin,
-            Some(verify::RELEASE_PUBKEY),
-            channel,
-            allow_unsigned_for(channel),
-        )?;
+        // Verify the staged temp BEFORE it is placed at the live path. A release
+        // asset needs its signature; a local build may lack one. The `.sha256`
+        // is NOT best-effort on either arm: the fetch fails on a missing one,
+        // and the local arm refuses before it copies anything.
+        verify::verify_artifact(&dl_bin, verify::RELEASE_PUBKEY, source.signature_policy())?;
 
         // Name what landed (with its size) in the running step's log tail — this
         // replaces the old repeated generic "installed prebuilt binary" line.
@@ -680,8 +652,7 @@ fn install_one_at(
         // chmod the temp, then atomically swap it over the (possibly running)
         // destination. A live process keeps its old inode through the rename.
         set_executable(&dl_bin)?;
-        place_binary(&dl_bin, dest)?;
-        Ok(())
+        place_binary(&dl_bin, dest)
     })();
 
     // Always clear the sidecars; clear the `.dl` binary too if we did not place
@@ -709,15 +680,14 @@ fn install_one_at(
 fn install_one_with_retry(
     b: &PrebuiltBinary,
     tmp_dir: &Path,
-    channel: Channel,
     sink: &ProgressSink,
     source: &AssetSource<'_>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<PathBuf>> {
     let max_attempts = source.max_attempts();
     let mut backoff = std::time::Duration::from_secs(1);
     for attempt in 1..=max_attempts {
-        match install_one(b, tmp_dir, channel, sink, source) {
-            Ok(()) => return Ok(()),
+        match install_one(b, tmp_dir, sink, source) {
+            Ok(replaced) => return Ok(replaced),
             Err(e) if attempt < max_attempts => {
                 tracing::warn!(
                     service = b.service,
@@ -751,10 +721,9 @@ fn install_service(
     b: &PrebuiltBinary,
     board_model: &str,
     tmp_dir: &Path,
-    channel: Channel,
     sink: &ProgressSink,
     source: &AssetSource<'_>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<PathBuf>> {
     if let AssetSource::Release { pin } = *source {
         if b.service == "ados-vision" && binaries::board_prefers_onnx_vision(board_model) {
             // The onnx binary links the ONNX Runtime dynamically, so the binary AND
@@ -762,8 +731,8 @@ fn install_service(
             // install falls back to the default (musl, no-onnx) build. Installing the
             // onnx binary without its runtime would leave a vision service that
             // cannot dlopen ORT at start.
-            match install_onnx_vision(tmp_dir, channel, sink, pin) {
-                Ok(()) => return Ok(()),
+            match install_onnx_vision(tmp_dir, sink, pin) {
+                Ok(replaced) => return Ok(replaced),
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -777,7 +746,9 @@ fn install_service(
             }
         }
     }
-    install_one_with_retry(b, tmp_dir, channel, sink, source)
+    Ok(install_one_with_retry(b, tmp_dir, sink, source)?
+        .into_iter()
+        .collect())
 }
 
 /// Whether a freshly-placed binary can actually `execve` on this host — probes
@@ -894,28 +865,25 @@ fn binary_execs_on_this_host(path: &Path) -> bool {
 /// vision build.
 fn install_onnx_vision(
     tmp_dir: &Path,
-    channel: Channel,
     sink: &ProgressSink,
     pin: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<PathBuf>> {
     // Both halves of the variant come from the release: this path is only
     // reached for a release-sourced `ados-vision` (see `install_service`).
     let source = AssetSource::Release { pin };
-    install_one_with_retry(
-        &binaries::PREBUILT_VISION_ONNX,
-        tmp_dir,
-        channel,
-        sink,
-        &source,
-    )?;
-    install_one_with_retry(
-        &binaries::PREBUILT_VISION_ONNX_RUNTIME,
-        tmp_dir,
-        channel,
-        sink,
-        &source,
-    )
-    .map_err(|e| anyhow::anyhow!("ONNX Runtime library fetch failed: {e}"))?;
+    let mut replaced: Vec<PathBuf> =
+        install_one_with_retry(&binaries::PREBUILT_VISION_ONNX, tmp_dir, sink, &source)?
+            .into_iter()
+            .collect();
+    replaced.extend(
+        install_one_with_retry(
+            &binaries::PREBUILT_VISION_ONNX_RUNTIME,
+            tmp_dir,
+            sink,
+            &source,
+        )
+        .map_err(|e| anyhow::anyhow!("ONNX Runtime library fetch failed: {e}"))?,
+    );
 
     if !binary_execs_on_this_host(Path::new(binaries::PREBUILT_VISION_ONNX.dest)) {
         anyhow::bail!(
@@ -924,7 +892,7 @@ fn install_onnx_vision(
              onnx build's glibc floor)"
         );
     }
-    Ok(())
+    Ok(replaced)
 }
 
 /// `<dest>.dl` sibling used as the verify-then-rename staging path. It lives in
@@ -943,11 +911,6 @@ fn sidecar_path(path: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Atomically place the verified, already-chmod'd `src` at `dest`. A same-dir
-/// `rename` swaps the inode in one step: it is never a half-written file, and a
-/// running service that has the old binary mmap'd keeps its old inode (no
-/// `ETXTBSY`, no `O_TRUNC` on a live executable). Falls back to a copy + chmod
-/// only if the rename fails (e.g. a cross-filesystem dest the caller forced).
 /// The retained previous copy of a placed binary: `<dest>.prev`.
 ///
 /// Kept so a bad upgrade has somewhere to go back to. Until this existed the
@@ -961,7 +924,14 @@ pub fn prev_sibling(dest: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn place_binary(src: &Path, dest: &Path) -> anyhow::Result<()> {
+/// Atomically place the verified, already-chmod'd `src` at `dest`. A same-dir
+/// `rename` swaps the inode in one step: it is never a half-written file, and a
+/// running service that has the old binary mmap'd keeps its old inode (no
+/// `ETXTBSY`, no `O_TRUNC` on a live executable). Falls back to a copy + chmod
+/// only if the rename fails (e.g. a cross-filesystem dest the caller forced).
+/// Returns whether an existing binary was replaced, so the run can record it
+/// for [`crate::rollback::roll_back`].
+fn place_binary(src: &Path, dest: &Path) -> anyhow::Result<bool> {
     // Retain the outgoing binary before it is replaced. A hard link keeps the
     // old inode alive at a second name without a copy, so this costs no disk
     // and cannot half-finish; a rename would leave the destination briefly
@@ -969,7 +939,8 @@ fn place_binary(src: &Path, dest: &Path) -> anyhow::Result<()> {
     // fatal — losing the rollback copy is better than failing the install — but
     // it is logged, because a silent failure would present as a rollback that
     // is simply missing when it is needed most.
-    if dest.exists() {
+    let replaced = dest.exists();
+    if replaced {
         let prev = prev_sibling(dest);
         let _ = std::fs::remove_file(&prev);
         if let Err(e) = std::fs::hard_link(dest, &prev) {
@@ -984,7 +955,7 @@ fn place_binary(src: &Path, dest: &Path) -> anyhow::Result<()> {
         }
     }
     match std::fs::rename(src, dest) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(replaced),
         Err(_) => {
             // Non-atomic fallback for a dest on a different filesystem.
             std::fs::copy(src, dest).map_err(|e| {
@@ -992,7 +963,7 @@ fn place_binary(src: &Path, dest: &Path) -> anyhow::Result<()> {
             })?;
             set_executable(dest)?;
             let _ = std::fs::remove_file(src);
-            Ok(())
+            Ok(replaced)
         }
     }
 }
@@ -1072,7 +1043,6 @@ impl Step for FetchBinaries {
             return StepOutcome::Skipped;
         }
 
-        let channel = channel_of(ctx);
         let tmp_dir: PathBuf = match tempdir() {
             Ok(d) => d,
             Err(e) => return StepOutcome::Failed(format!("could not create temp dir: {e}")),
@@ -1182,8 +1152,11 @@ impl Step for FetchBinaries {
         sink.sub_progress(self.id(), 0, total);
         for (i, (b, source)) in bins.iter().zip(&sources).enumerate() {
             sink.activity(self.id(), format!("installing {}", b.service));
-            let ok = match install_service(b, &board_model, &tmp_dir, channel, &sink, source) {
-                Ok(()) => {
+            let ok = match install_service(b, &board_model, &tmp_dir, &sink, source) {
+                Ok(replaced) => {
+                    // Recorded as each lands, so a later Hard-gate miss in this
+                    // same loop still rolls back what was already swapped.
+                    ctx.replaced_binaries.extend(replaced);
                     // Kept at debug: the live-detail pane names each component as
                     // it lands, so an info line here would just repeat "installed
                     // prebuilt binary" N times in the scroll-back. The journal
@@ -1219,17 +1192,15 @@ impl Step for FetchBinaries {
     }
 }
 
-/// Create a unique temp directory under the system temp root for this run's
-/// downloads. We roll our own (instead of pulling `tempfile` into the non-dev
-/// build) using the pid + a monotonic counter.
+/// Create this run's download directory under the system temp root: a fresh,
+/// randomly named directory created exclusively with mode 0700, so nothing
+/// another local user pre-created can stand in for a verified binary. The
+/// caller removes it when the step ends.
 fn tempdir() -> std::io::Result<PathBuf> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let base =
-        std::env::temp_dir().join(format!("ados-installer-fetch-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&base)?;
-    Ok(base)
+    Ok(tempfile::Builder::new()
+        .prefix("ados-installer-fetch-")
+        .tempdir()?
+        .keep())
 }
 
 #[cfg(test)]
@@ -1276,96 +1247,31 @@ mod tests {
     }
 
     #[test]
-    fn no_channel_skips_the_signature_check_outright() {
-        // `allow_unsigned` short-circuits inside `verify_artifact` BEFORE the
-        // pubkey is read, so it is not "tolerate a missing signature" — it is
-        // "do not look at signatures at all". Passing it on the default channel
-        // meant the vendored trust anchor was never consulted and a binary
-        // carrying a signature that does not match it was installed anyway.
-        //
-        // Tolerating a signature we cannot obtain is a separate, weaker
-        // decision, and it already has its own home: `verify_minisign` routes a
-        // missing `.minisig` (or a missing minisign binary) through
-        // `unverifiable`, which warns on edge and refuses on stable. That is
-        // what keeps an unsigned release installable today. Skipping the check
-        // outright is never the right answer on any channel.
-        assert!(
-            !allow_unsigned_for(Channel::Edge),
-            "the default channel must still consult the signing key"
+    fn only_a_local_build_may_install_without_a_signature() {
+        // A release download is judged on its signature on every channel; the
+        // `.sha256` beside it comes from the same host and proves nothing about
+        // origin. Only `--artifacts` bytes, which cannot carry the CI signature,
+        // may fall back to their build host's SHA256.
+        assert_eq!(
+            AssetSource::Release { pin: None }.signature_policy(),
+            SignaturePolicy::Required
         );
-        assert!(!allow_unsigned_for(Channel::Stable));
-    }
-
-    #[test]
-    fn an_unrecognised_channel_is_strict_not_lenient() {
-        // The lenient branch must be opt-in by name, never a fallthrough. The
-        // inverted test ("lenient unless exactly stable") reads the same for the
-        // two channels we ship and silently hands the lenient branch to every
-        // third value — a typo at the prompt, or a channel a newer build knows
-        // and this one does not. A channel string we do not understand is not a
-        // licence to skip a signature.
-        for name in ["stabel", "beta", "", "STABLE", "Edge"] {
-            let mut ctx = Ctx::for_test(Checkpoint::new());
-            ctx.channel = name.to_string();
-            assert_eq!(
-                channel_of(&ctx),
-                Channel::Stable,
-                "unrecognised channel {name:?} must not get the lenient branch"
-            );
-        }
-        // The one channel that IS lenient, by exact name.
-        let mut ctx = Ctx::for_test(Checkpoint::new());
-        ctx.channel = "edge".to_string();
-        assert_eq!(channel_of(&ctx), Channel::Edge);
-    }
-
-    #[test]
-    fn the_shell_and_rust_agree_on_which_channels_are_lenient() {
-        // Two implementations of one policy: `ados_channel_is_lenient` in
-        // `scripts/lib/verify.sh` gates the bootstrap and kernel-module fetches,
-        // `channel_of` gates the prebuilt-binary fetch. They must not drift —
-        // the shell side was already fixed to name its lenient channel
-        // explicitly, and a divergence means one entry point verifies while the
-        // other does not, which is worse than either posture chosen on purpose.
-        let sh = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/lib/verify.sh")
-            .canonicalize()
-            .expect("scripts/lib/verify.sh must exist");
-        let body = std::fs::read_to_string(&sh).unwrap();
-        let lenient_shell = shell_lenient_channels(&body);
-        assert!(
-            !lenient_shell.is_empty(),
-            "could not read the shell lenient set from {}",
-            sh.display()
+        assert_eq!(
+            AssetSource::Release {
+                pin: Some("v0.101.0")
+            }
+            .signature_policy(),
+            SignaturePolicy::Required
         );
-
-        for name in ["edge", "stable", "beta", "stabel", ""] {
-            let mut ctx = Ctx::for_test(Checkpoint::new());
-            ctx.channel = name.to_string();
-            let rust_lenient = channel_of(&ctx) == Channel::Edge;
-            let shell_lenient = lenient_shell.iter().any(|c| c == name);
-            assert_eq!(
-                rust_lenient, shell_lenient,
-                "channel {name:?}: shell lenient={shell_lenient}, rust lenient={rust_lenient}"
-            );
-        }
-    }
-
-    /// Extract the channel names `ados_channel_is_lenient` compares against, by
-    /// reading the literals in its body. Shell parameter expansions (`${1:-}`)
-    /// are not literals and are skipped.
-    fn shell_lenient_channels(script: &str) -> Vec<String> {
-        let after = match script.split_once("ados_channel_is_lenient() {") {
-            Some((_, rest)) => rest,
-            None => return Vec::new(),
-        };
-        let body = after.split_once("\n}").map(|(b, _)| b).unwrap_or(after);
-        body.split('"')
-            .skip(1)
-            .step_by(2)
-            .filter(|s| !s.contains('$'))
-            .map(str::to_string)
-            .collect()
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            AssetSource::Local {
+                dir: dir.path(),
+                host_arch: "aarch64"
+            }
+            .signature_policy(),
+            SignaturePolicy::LocalBuild
+        );
     }
 
     /// Write an executable shell script at `path` with `body` as its content.
@@ -1664,7 +1570,6 @@ mod tests {
             video_entry(),
             &dest,
             scratch.path(),
-            Channel::Edge,
             &ProgressSink::default(),
             &source,
         )
@@ -1725,7 +1630,6 @@ mod tests {
             video_entry(),
             &dest,
             scratch.path(),
-            Channel::Edge,
             &ProgressSink::default(),
             &AssetSource::Local {
                 dir: src.path(),
@@ -1772,7 +1676,6 @@ mod tests {
             video_entry(),
             &dest,
             scratch.path(),
-            Channel::Edge,
             &ProgressSink::default(),
             &AssetSource::Local {
                 dir: src.path(),
@@ -1784,61 +1687,6 @@ mod tests {
         assert!(msg.contains("no .sha256"), "names what is missing: {msg}");
         assert!(msg.contains("sha256sum"), "names how to produce it: {msg}");
         assert!(!dest.exists(), "nothing may be placed on a refusal");
-    }
-
-    #[test]
-    fn an_unsigned_local_artifact_installs_on_edge_and_is_refused_on_stable() {
-        // This is the signature story stated exactly. A locally-built binary
-        // cannot carry the CI signature (the key is a CI secret), so it reaches
-        // `verify_minisign`'s "unverifiable" branch: a warning on edge, a refusal
-        // on stable. Nothing special-cases the local path — it gets the same
-        // policy a release asset published before signing existed gets, which is
-        // why `--artifacts` is refused on stable at the command line instead of
-        // being allowed to fail here, one binary at a time.
-        let host_arch = crate::env::arch();
-        let Some(machine) = expected_elf_machine(host_arch) else {
-            return;
-        };
-        let src = tempfile::tempdir().unwrap();
-        let dst = tempfile::tempdir().unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        write_local_artifact(
-            src.path(),
-            "ados-video",
-            &fake_elf(machine, b"unsigned build"),
-        );
-        let source = AssetSource::Local {
-            dir: src.path(),
-            host_arch,
-        };
-
-        let edge_dest = dst.path().join("edge-ados-video");
-        install_one_at(
-            video_entry(),
-            &edge_dest,
-            scratch.path(),
-            Channel::Edge,
-            &ProgressSink::default(),
-            &source,
-        )
-        .expect("edge tolerates a signature it cannot obtain");
-        assert!(edge_dest.exists());
-
-        let stable_dest = dst.path().join("stable-ados-video");
-        let err = install_one_at(
-            video_entry(),
-            &stable_dest,
-            scratch.path(),
-            Channel::Stable,
-            &ProgressSink::default(),
-            &source,
-        )
-        .expect_err("stable refuses an artifact it cannot signature-verify");
-        assert!(
-            err.to_string().contains("stable channel"),
-            "must name the channel that refused it: {err}"
-        );
-        assert!(!stable_dest.exists());
     }
 
     #[test]

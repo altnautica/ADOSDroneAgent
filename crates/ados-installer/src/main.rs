@@ -299,10 +299,37 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
         "install finished"
     );
 
+    // A required step failed after the fetch swapped binaries in: put every
+    // binary this run replaced back and restart the units that run them, so the
+    // node is left on the build it was running instead of a half-applied
+    // upgrade. The exit stays non-zero below.
+    if status == "failed" && !ctx.replaced_binaries.is_empty() {
+        let report = ados_installer::rollback::roll_back(&ctx.replaced_binaries);
+        tracing::error!(
+            restored = report.restored.len(),
+            no_previous = report.no_previous.len(),
+            failed = report.failed.len(),
+            restarted = %report.restarted.join(","),
+            "install failed after replacing binaries; rolled back: {}",
+            report.summary()
+        );
+        sink.sub_log(
+            "fetch_binaries",
+            &format!("Rolled back service binaries: {}", report.summary()),
+        );
+    }
+
     // Build + write the result contract (best-effort: a dev host where
     // /var/lib is not writable must not panic the binary). The profile was
     // resolved into ctx by preflight, so read it back from there.
     write_result(&ctx.failures, status, &ctx.profile);
+
+    // Keep this installer on the box so `ados uninstall` can run the one
+    // uninstall path offline. Only after an install that did not fail: a
+    // failed run leaves the previous copy in place.
+    if status != "failed" {
+        persist_installer();
+    }
 
     // Hand the renderer the closing summary, then wait for it to draw the
     // success card / failure panel and restore the terminal.
@@ -376,8 +403,9 @@ fn validate_pair_code(pair: Option<&str>) -> Result<String> {
 /// never leave a truncated file and the 0600 mode is set before the file is
 /// visible at its final path — it carries pairing identity.
 fn write_pairing_material(code: &str) -> Result<()> {
-    use ados_installer::steps::config_identity::pairing_json;
-    let body = pairing_json(code, now_epoch());
+    use ados_installer::steps::config_identity::{mint_pending_api_key, pairing_json};
+    let pending_api_key = mint_pending_api_key();
+    let body = pairing_json(code, now_epoch(), pending_api_key.as_deref());
     env::write_atomic_durable(Path::new(env::PAIRING_JSON), body.as_bytes(), Some(0o600))
         .map_err(|e| anyhow::anyhow!("write {} failed: {e}", env::PAIRING_JSON))?;
     tracing::info!(code = %code.to_ascii_uppercase(), "pairing material rewritten for re-pair");
@@ -497,6 +525,28 @@ fn pairing_present() -> bool {
 fn print_result_json() {
     if let Ok(body) = std::fs::read_to_string(RESULT_PATH) {
         print!("{body}");
+    }
+}
+
+/// Copy the running installer to [`env::INSTALLED_INSTALLER`] (atomic, 0755).
+/// Best-effort: a failure only means `ados uninstall` downloads the installer
+/// instead, so it is logged, never fatal.
+fn persist_installer() {
+    let dest = Path::new(env::INSTALLED_INSTALLER);
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not locate the running installer to keep a copy");
+            return;
+        }
+    };
+    if exe == dest {
+        return;
+    }
+    let written =
+        std::fs::read(&exe).and_then(|bytes| env::write_atomic_durable(dest, &bytes, Some(0o755)));
+    if let Err(e) = written {
+        tracing::warn!(error = %e, dest = %dest.display(), "keeping a copy of the installer failed");
     }
 }
 

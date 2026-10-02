@@ -31,8 +31,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-# Native service binaries land here. Mirrors the ExecStart guards in
-# data/systemd/*.service and the cutover flags owned by ``ados rust``.
+# Native service binaries land here, as the data/systemd/*.service units exec.
 _DEFAULT_BIN_DIR = Path("/opt/ados/bin")
 _DEFAULT_ETC_DIR = Path("/etc/ados")
 
@@ -101,8 +100,7 @@ class _FlagGated:
         self.opt_out = opt_out
 
 
-# Keyed by service. Flag names + binaries mirror the cutover table in
-# ``ados.cli.rust``. ``profiles`` narrows each service to the nodes it
+# Keyed by service. ``profiles`` narrows each service to the nodes it
 # can actually run on so a drone is not held back by a ground-station
 # receive service it never starts (and vice versa). ``net``,
 # ``plugin-host`` and ``display`` apply to both profiles.

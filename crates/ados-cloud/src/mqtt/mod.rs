@@ -5,8 +5,10 @@
 //! * `ados/{id}/mavlink/tx` q0 (relay publishes FC->GCS frames)
 //! * `ados/{id}/mavlink/rx` q0 (relay subscribes GCS->FC frames)
 //! * `ados/{id}/msp/{tx,rx}` q0 (the MSP byte plane, same shape)
-//! * `ados/{id}/webrtc/offer`  q1 (signaling subscribes browser offers)
-//! * `ados/{id}/webrtc/answer` q1 (signaling publishes the SDP answer)
+//! * `ados/{id}/webrtc/offer`  q1 (signaling subscribes browser offers and
+//!   session closes, each a JSON envelope carrying the browser's session id)
+//! * `ados/{id}/webrtc/answer/{session_id}` q1 (signaling publishes the SDP
+//!   answer for that one session)
 //! * `ados/{id}/plugin/{plugin_id}/{stream}` q0 (a plugin's own live stream,
 //!   published for it by the cloud-publish lane)
 //!
@@ -77,8 +79,11 @@ pub fn topic_vision_detections(device_id: &str) -> String {
 pub fn topic_webrtc_offer(device_id: &str) -> String {
     format!("ados/{device_id}/webrtc/offer")
 }
-pub fn topic_webrtc_answer(device_id: &str) -> String {
-    format!("ados/{device_id}/webrtc/answer")
+/// The answer topic for one signaling session, so concurrent viewers never
+/// receive each other's SDP. `session_id` is validated by the signaling lane
+/// (no `/`, `+` or `#`) before it reaches a topic.
+pub fn topic_webrtc_answer(device_id: &str, session_id: &str) -> String {
+    format!("ados/{device_id}/webrtc/answer/{session_id}")
 }
 /// The plugin auto-update notice topic the GCS subscribes to (q1): an update
 /// the daily check will not apply on its own (major bump, permission change,
@@ -128,7 +133,7 @@ mod tests {
         assert_eq!(topic_msp_rx("d"), "ados/d/msp/rx");
         assert_eq!(topic_vision_detections("d"), "ados/d/vision/detections");
         assert_eq!(topic_webrtc_offer("d"), "ados/d/webrtc/offer");
-        assert_eq!(topic_webrtc_answer("d"), "ados/d/webrtc/answer");
+        assert_eq!(topic_webrtc_answer("d", "s1"), "ados/d/webrtc/answer/s1");
         assert_eq!(
             topic_plugin_stream("d", "com.example.a", "pose"),
             "ados/d/plugin/com.example.a/pose"

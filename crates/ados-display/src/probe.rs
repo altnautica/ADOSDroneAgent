@@ -175,7 +175,7 @@ pub fn revert(paths: &ProbePaths, marker: &BTreeMap<String, String>) -> std::io:
             // Never restore an empty/truncated snapshot over a working config.
             let data = std::fs::read(snap_path)?;
             if data.len() >= MIN_SNAPSHOT_BYTES {
-                std::fs::write(boot_path, &data)?;
+                ados_protocol::sidecar::write_durable(boot_path, &data)?;
                 restored = true;
             } else {
                 tracing::warn!(

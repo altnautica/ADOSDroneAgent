@@ -600,7 +600,7 @@ mod tests {
             // How to join this ground station's own WiFi. A panel is the only
             // surface that helps when the box is the thing you cannot reach.
             Box::new(AccessPointDetailPage),
-            Box::new(PairDroneDetailPage),
+            Box::new(PairDroneDetailPage::default()),
             Box::new(DiagnosticsDetailPage),
             Box::new(PluginPage::new()),
         ]

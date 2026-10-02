@@ -42,8 +42,7 @@ minisign -G -W -f -p pub2.key -s sec2.key </dev/null >/dev/null
 PUBKEY2="$(tail -n1 pub2.key)"
 
 # --- 1. happy path: valid sha256 + valid signature -----------------------
-ados_verify_artifact art.bin "${PUBKEY}" edge   || fail "clean artifact rejected (edge)"
-ados_verify_artifact art.bin "${PUBKEY}" stable || fail "clean artifact rejected (stable)"
+ados_verify_artifact art.bin "${PUBKEY}" || fail "clean artifact rejected"
 
 # --- 2. sha256 tamper: must be rejected before the signature even matters -
 cp art.bin art2.bin; cp art.bin.minisig art2.bin.minisig
@@ -51,40 +50,35 @@ printf 'x' >> art2.bin                       # corrupt payload
 cp art.bin.sha256 art2.bin.sha256            # stale sum now mismatches
 sed -i.bak 's/art\.bin/art2.bin/' art2.bin.sha256 2>/dev/null || \
     sed 's/art\.bin/art2.bin/' art.bin.sha256 > art2.bin.sha256
-if ados_verify_artifact art2.bin "${PUBKEY}" edge; then
+if ados_verify_artifact art2.bin "${PUBKEY}"; then
     fail "sha256-tampered artifact accepted"
 fi
 
 # --- 3. signature tamper: sha256 PASSES, signature is stale/invalid -------
 # Re-checksum the corrupted payload so sha256 passes, but keep the OLD
-# signature so the minisign check trips. Must be fatal on EVERY channel.
+# signature so the minisign check trips.
 cp art2.bin sigtamper.bin
 sha256sum sigtamper.bin > sigtamper.bin.sha256
 cp art.bin.minisig sigtamper.bin.minisig     # signature of the original, not this payload
 ados_verify_sha256 sigtamper.bin || fail "test setup: re-summed payload should pass sha256"
-if ados_verify_artifact sigtamper.bin "${PUBKEY}" edge; then
-    fail "signature-tampered artifact accepted on edge (must be fatal)"
-fi
-if ados_verify_artifact sigtamper.bin "${PUBKEY}" stable; then
-    fail "signature-tampered artifact accepted on stable"
+if ados_verify_artifact sigtamper.bin "${PUBKEY}"; then
+    fail "signature-tampered artifact accepted"
 fi
 
 # --- 4. wrong key: valid signature, wrong public key -> tamper -> fatal ---
-if ados_verify_artifact art.bin "${PUBKEY2}" edge; then
+if ados_verify_artifact art.bin "${PUBKEY2}"; then
     fail "artifact verified with the wrong public key"
 fi
 
-# --- 5. unverifiable (no .minisig): edge tolerates, stable refuses --------
+# --- 5. unverifiable (no .minisig): refused -------------------------------
 cp art.bin nosig.bin; sha256sum nosig.bin > nosig.bin.sha256
-ados_verify_artifact nosig.bin "${PUBKEY}" edge   || fail "missing-sig should be tolerated on edge"
-if ados_verify_artifact nosig.bin "${PUBKEY}" stable; then
-    fail "missing-sig accepted on stable (must refuse)"
+if ados_verify_artifact nosig.bin "${PUBKEY}"; then
+    fail "missing-sig accepted (must refuse)"
 fi
 
-# --- 6. explicit allow-unsigned bypass (sha256 still enforced) ------------
-ados_verify_artifact nosig.bin "${PUBKEY}" stable 1 || fail "allow-unsigned bypass failed"
-if ados_verify_artifact art2.bin "${PUBKEY}" edge 1; then
-    fail "allow-unsigned must still enforce sha256"
+# --- 6. no signing key: refused --------------------------------------------
+if ados_verify_artifact art.bin ""; then
+    fail "artifact accepted with no signing key"
 fi
 
-echo "ok: verify.sh sound (happy + sha256-tamper + sig-tamper + wrong-key + missing-sig + allow-unsigned)"
+echo "ok: verify.sh sound (happy + sha256-tamper + sig-tamper + wrong-key + missing-sig + no-key)"

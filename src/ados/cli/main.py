@@ -450,55 +450,67 @@ def _run_upgrade(profile: str | None = None) -> None:
         raise click.ClickException(f"Update finished with exit code {completed.returncode}.")
 
 
-def _run_uninstall_via_installer(purge: bool, yes: bool) -> bool:
-    """Confirm, then run the full-screen uninstall via the canonical install.sh.
+# The copy of the Rust installer a successful install keeps on the box
+# (`env::INSTALLED_INSTALLER` in crates/ados-installer), so uninstall runs
+# offline through the one uninstall path.
+LOCAL_INSTALLER_PATH = Path("/opt/ados/bin/ados-installer")
 
-    The Rust installer's `--uninstall` mode drives the same full-screen progress
-    UI the install uses, so `ados uninstall` delegates to it (mirroring how
-    `ados update` re-runs install.sh). Returns True when the installer actually
-    ran; returns False when it could not be fetched or launched (offline), so the
-    caller falls back to the in-process teardown. Raises `click.Abort` if the
+
+def _run_as_root(argv: list[str]) -> None:
+    """Run ``argv`` inline (sudo-elevated when not root); a non-zero exit fails."""
+    if os.geteuid() != 0:
+        if shutil.which("sudo") is None:
+            raise click.ClickException(
+                "Uninstall needs root on Linux. Re-run as: sudo ados uninstall"
+            )
+        argv = ["sudo", *argv]
+    try:
+        completed = subprocess.run(argv, check=False)  # noqa: S603
+    except OSError as exc:
+        raise click.ClickException(f"Failed to launch the installer: {exc}") from exc
+    if completed.returncode != 0:
+        raise click.ClickException(
+            f"Uninstall finished with exit code {completed.returncode}."
+        )
+
+
+def _run_uninstall_linux(*, purge: bool, yes: bool) -> None:
+    """Confirm, then run the Rust installer's ``--uninstall`` mode.
+
+    The installer owns the removal list and renders the same full-screen
+    progress as the install, so it is the only uninstall path. A successful
+    install keeps a copy at ``LOCAL_INSTALLER_PATH``, which runs offline; a box
+    without that copy fetches the canonical install.sh, which downloads the
+    installer and passes the flags through. Raises ``click.Abort`` if the
     operator declines the confirmation.
     """
     if not yes:
         click.confirm("Uninstall the ADOS Drone Agent from this device?", abort=True)
+    # `--force` is how the installer requests a config purge on uninstall.
+    flags = ["--uninstall", *(["--force"] if purge else [])]
+    if LOCAL_INSTALLER_PATH.is_file() and os.access(LOCAL_INSTALLER_PATH, os.X_OK):
+        _run_as_root([str(LOCAL_INSTALLER_PATH), *flags])
+        return
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             resp = client.get(INSTALL_SH_URL)
             resp.raise_for_status()
-    except httpx.HTTPError:
-        # Offline / unreachable: let the caller fall back to the local teardown.
-        return False
+    except httpx.HTTPError as exc:
+        raise click.ClickException(
+            "The installer is not on this device and could not be downloaded "
+            f"({exc}). Connect to the internet and run 'sudo ados uninstall' again."
+        ) from exc
 
     fd, script = tempfile.mkstemp(suffix="-ados-uninstall.sh")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(resp.text)
-        # `--force` is how the installer requests a config purge on uninstall.
-        argv = ["bash", script, "--uninstall"]
-        if purge:
-            argv.append("--force")
-        if os.geteuid() != 0:
-            if shutil.which("sudo") is None:
-                raise click.ClickException(
-                    "Uninstall needs root on Linux. Re-run as: sudo ados uninstall"
-                )
-            argv = ["sudo", *argv]
-        try:
-            completed = subprocess.run(argv, check=False)  # noqa: S603
-        except OSError:
-            return False
+        _run_as_root(["bash", script, *flags])
     finally:
         try:
             os.unlink(script)
         except OSError:
             pass
-
-    if completed.returncode != 0:
-        raise click.ClickException(
-            f"Uninstall finished with exit code {completed.returncode}."
-        )
-    return True
 
 
 @cli.command()
@@ -751,68 +763,7 @@ def uninstall(purge: bool, yes: bool) -> None:
     if is_mac:
         _uninstall_macos(purge=purge, yes=yes)
         return
-    # Prefer the full-screen installer-driven uninstall (the Rust `--uninstall`
-    # mode renders the same live progress as the install); fall back to the
-    # in-process teardown when the installer cannot be fetched/run (offline).
-    # The delegation confirms + sudo-elevates itself, so the fallback runs with
-    # yes=True to avoid a second prompt.
-    if _run_uninstall_via_installer(purge=purge, yes=yes):
-        return
-    click.echo("Full-screen uninstaller unavailable; removing locally…", err=True)
-    _uninstall_linux(purge=purge, yes=True)
-
-
-def _stop_service_with_kill_fallback(service: str) -> None:
-    """Best-effort stop with timeout + SIGKILL fallback.
-
-    Why: stubborn child processes (or a wedged supervisor with hung
-    children) can keep `systemctl stop <unit>` blocked past its
-    timeout. The previous code passed timeout=30 and let
-    `subprocess.TimeoutExpired` propagate, crashing the uninstall
-    mid-transaction so symlinks and directories never got cleaned
-    up. This helper bumps the graceful timeout to 60s, then on
-    timeout escalates to `systemctl kill -s SIGKILL` and one more
-    short stop. Any exception below this layer is logged and
-    swallowed so the uninstall always continues to the cleanup
-    phase.
-    """
-    if not shutil.which("systemctl"):
-        return
-    try:
-        subprocess.run(
-            ["systemctl", "stop", service],
-            capture_output=True,
-            timeout=60,
-        )
-        return
-    except subprocess.TimeoutExpired:
-        click.echo(
-            f"  warn: stop {service} timed out, escalating to SIGKILL", err=True
-        )
-    except OSError as exc:
-        click.echo(f"  warn: stop {service} failed: {exc}", err=True)
-        return
-
-    # Escalation: kill any remaining processes in the unit's cgroup,
-    # then a short stop to clear systemd's tracking. Both are best-
-    # effort — if even SIGKILL doesn't work, log and move on so the
-    # filesystem cleanup still runs.
-    try:
-        subprocess.run(
-            ["systemctl", "kill", "-s", "SIGKILL", service],
-            capture_output=True,
-            timeout=10,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        click.echo(f"  warn: kill {service} failed: {exc}", err=True)
-    try:
-        subprocess.run(
-            ["systemctl", "stop", service],
-            capture_output=True,
-            timeout=10,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        click.echo(f"  warn: post-kill stop {service} failed: {exc}", err=True)
+    _run_uninstall_linux(purge=purge, yes=yes)
 
 
 # The macOS workstation daemons registered as per-user LaunchAgents by the
@@ -933,206 +884,6 @@ def _uninstall_macos(*, purge: bool, yes: bool) -> None:
         raise click.ClickException("uninstall finished with warnings")
 
 
-def _uninstall_linux(*, purge: bool, yes: bool) -> None:
-    if os.geteuid() != 0:
-        raise click.ClickException("Uninstall requires root. Run with sudo.")
-
-    install_dir = Path("/opt/ados")
-    config_dir = Path("/etc/ados")
-    data_dir = Path("/var/ados")
-    state_dir = Path("/var/lib/ados")
-    log_dir = Path("/var/log/ados")
-    motd_file = Path("/etc/update-motd.d/30-ados")
-    systemd_dir = Path("/etc/systemd/system")
-
-    # Discover all ados-* systemd unit files at runtime rather than
-    # hardcoding a list. The installer's uninstall path
-    # (crates/ados-installer/src/uninstall.rs) uses the same glob pattern;
-    # keep this Python path in lockstep so the two uninstall surfaces never drift.
-    unit_globs = ("ados-*.service", "ados-*.slice", "ados-*.target", "ados-*.timer")
-    unit_files: list[Path] = []
-    for pattern in unit_globs:
-        unit_files.extend(sorted(systemd_dir.glob(pattern)))
-    # Dropin .wants directories built by the supervisor + any orphan
-    # multi-user.target.wants symlinks pointing into ados-*.
-    wants_dirs = sorted(systemd_dir.glob("ados-*.service.wants"))
-    target_wants_links = sorted((systemd_dir / "multi-user.target.wants").glob("ados-*"))
-
-    # Tmpfiles, sysctl, modules-load, udev, and avahi dropins that the
-    # install lays down outside /opt/ados. Without removing these, the
-    # next fresh install can pick up a stale ados-display modules-load
-    # line and load a wrong driver, or systemd-tmpfiles can recreate
-    # /run/ados sockets that the new layout did not expect.
-    dropin_files = [
-        Path("/etc/tmpfiles.d/ados.conf"),
-        Path("/etc/tmpfiles.d/ados-plugins.conf"),
-        Path("/etc/sysctl.d/99-ados-video.conf"),
-        Path("/etc/modules-load.d/ados-display.conf"),
-        Path("/etc/udev/rules.d/50-ados-uvc-no-autosuspend.rules"),
-        Path("/etc/udev/rules.d/99-ados-hardware.rules"),
-        Path("/etc/udev/rules.d/99-ados-input.rules"),
-        Path("/etc/udev/rules.d/99-ados-modem.rules"),
-        Path("/etc/udev/rules.d/99-ados-wifi-powersave.rules"),
-        Path("/etc/udev/rules.d/99-ados-usb-no-autosuspend.rules"),
-        Path("/etc/udev/rules.d/99-ados-eth-no-eee.rules"),
-        Path("/etc/NetworkManager/conf.d/99-ados-wifi-powersave.conf"),
-        Path("/etc/systemd/logind.conf.d/99-ados-nosleep.conf"),
-        Path("/etc/avahi/services/ados-gs-ap.service"),
-    ]
-
-    symlinks = [
-        Path("/usr/local/bin/ados"),
-        Path("/usr/local/bin/ados-agent"),
-        Path("/usr/local/bin/ados-supervisor"),
-    ]
-
-    base_items = [
-        *(f"systemd unit: {path.name}" for path in unit_files),
-        *(f"dropin dir: {path}" for path in wants_dirs),
-        *(f"target link: {path}" for path in target_wants_links),
-        *(f"system dropin: {path}" for path in dropin_files if path.exists()),
-        *(f"symlink: {path}" for path in symlinks if path.exists() or path.is_symlink()),
-        *(f"dir: {path}" for path in (install_dir, data_dir, state_dir, log_dir) if path.exists()),
-        *([f"login banner: {motd_file}"] if motd_file.exists() else []),
-    ]
-    if not base_items and not config_dir.exists():
-        click.echo("Nothing to uninstall. ADOS Drone Agent is not installed.")
-        return
-
-    # Interactive purge prompt. When the operator did not pass --purge and
-    # did not pass --yes, ask explicitly whether to keep the config so a
-    # full clean uninstall does not require remembering the flag.
-    if not yes and not purge and config_dir.exists():
-        click.echo("The following will be removed:")
-        for item in base_items:
-            click.echo(f"  {item}")
-        click.echo("")
-        click.echo(f"Config directory: {config_dir}")
-        click.echo("  Keep config: pairing key, device id, AP passphrase, custom YAML stay.")
-        click.echo("  Purge config: full uninstall, next install starts from clean defaults.")
-        purge = click.confirm("Also remove the config directory?", default=False)
-
-    items = list(base_items)
-    if purge and config_dir.exists():
-        items.append(f"dir: {config_dir}")
-    if not items:
-        click.echo("Nothing to uninstall. ADOS Drone Agent is not installed.")
-        return
-    click.echo("")
-    click.echo("The following will be removed:")
-    for item in items:
-        click.echo(f"  {item}")
-    if not purge and config_dir.exists():
-        click.echo(f"  keeping config: {config_dir}")
-    if not yes:
-        click.confirm("Proceed with uninstall?", abort=True)
-
-    # Execute the teardown as a live checklist so a slow `systemctl stop`
-    # (up to a minute for a stubborn unit) never looks frozen. Each step is
-    # best-effort: failures are swallowed so the cleanup always continues,
-    # matching the historical behavior. /var/lib/ados and /var/log/ados are
-    # created at every install, so removing them here is symmetric; /run/ados
-    # is tmpfs; config is gated by --purge.
-    run_dir = Path("/run/ados")
-
-    def _stop_services() -> str:
-        for unit_file in unit_files:
-            unit_name = unit_file.name
-            if unit_name.endswith(".service"):
-                _stop_service_with_kill_fallback(unit_name[: -len(".service")])
-                try:
-                    subprocess.run(
-                        ["systemctl", "disable", unit_name], capture_output=True, timeout=10
-                    )
-                except (subprocess.TimeoutExpired, OSError):
-                    pass
-            else:
-                # .slice, .target, .timer — stop best-effort.
-                try:
-                    subprocess.run(
-                        ["systemctl", "stop", unit_name], capture_output=True, timeout=10
-                    )
-                except (subprocess.TimeoutExpired, OSError):
-                    pass
-        return f"{len(unit_files)} units"
-
-    def _remove_units() -> str:
-        for unit_file in unit_files:
-            unit_file.unlink(missing_ok=True)
-        for wants_dir in wants_dirs:
-            shutil.rmtree(wants_dir, ignore_errors=True)
-        for link in target_wants_links:
-            try:
-                link.unlink(missing_ok=True)
-            except OSError:
-                pass
-        for dropin in dropin_files:
-            if dropin.exists() or dropin.is_symlink():
-                dropin.unlink(missing_ok=True)
-        return ""
-
-    def _reload_systemd() -> str:
-        if shutil.which("systemctl"):
-            for cmd in (["daemon-reload"], ["reset-failed"]):
-                try:
-                    subprocess.run(["systemctl", *cmd], capture_output=True, timeout=10)
-                except (subprocess.TimeoutExpired, OSError):
-                    pass
-        if shutil.which("udevadm"):
-            try:
-                subprocess.run(
-                    ["udevadm", "control", "--reload-rules"], capture_output=True, timeout=10
-                )
-            except (subprocess.TimeoutExpired, OSError):
-                pass
-        return ""
-
-    def _remove_command() -> str:
-        for path in symlinks:
-            if path.exists() or path.is_symlink():
-                path.unlink(missing_ok=True)
-        return ""
-
-    def _remove_files() -> str:
-        for path in (install_dir, data_dir, state_dir, log_dir):
-            if path.exists():
-                shutil.rmtree(path, ignore_errors=True)
-        if run_dir.exists():
-            shutil.rmtree(run_dir, ignore_errors=True)
-        if motd_file.exists():
-            motd_file.unlink(missing_ok=True)
-        return ""
-
-    def _purge_config() -> str:
-        shutil.rmtree(config_dir, ignore_errors=True)
-        return ""
-
-    steps: list[_ansi.Step] = [
-        ("Stop ados services", _stop_services),
-        ("Remove systemd units", _remove_units),
-        ("Reload systemd and udev", _reload_systemd),
-        ("Remove ados command", _remove_command),
-        ("Remove files", _remove_files),
-    ]
-    if purge and config_dir.exists():
-        steps.append(("Purge config", _purge_config))
-
-    theme = _ansi.detect_theme()
-    results = _ansi.run_steps(
-        theme, steps, title="Uninstalling ADOS", interactive=sys.stderr.isatty()
-    )
-    ok = all(r.ok for r in results)
-    done = sum(1 for r in results if r.ok)
-    glyph = theme.glyph_ok() if ok else theme.glyph_fail()
-    summary = [
-        f"{glyph} ADOS Drone Agent {'removed' if ok else 'removal finished with warnings'}",
-        f"{done}/{len(results)} steps",
-    ]
-    if not purge:
-        summary.append(f"config kept: {config_dir}  (--purge to remove)")
-    _ansi.print_card(theme, ok, summary)
-
-
 # Wire subcommand groups. Done at import time so the entry point in
 # pyproject.toml (ados = ados.cli.main:cli) sees the full command tree.
 from ados.cli.config import config_group  # noqa: E402
@@ -1147,7 +898,6 @@ from ados.cli.plugin import plugin_group  # noqa: E402
 from ados.cli.profile import profile_group  # noqa: E402
 from ados.cli.radio import radio_group  # noqa: E402
 from ados.cli.record import record_group  # noqa: E402
-from ados.cli.rust import rust_group  # noqa: E402
 from ados.cli.support import support_bundle  # noqa: E402
 
 # Primitive operator commands stay on the primary help surface. The advanced
@@ -1169,7 +919,6 @@ for _group in (
     profile_group,
     radio_group,
     record_group,
-    rust_group,
 ):
     _group.hidden = True
     cli.add_command(_group)

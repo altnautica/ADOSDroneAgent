@@ -1,15 +1,16 @@
 //! Full uninstall / purge path + GS→drone residue reversion.
 //!
-//! Mirrors the canonical removal list in `src/ados/cli/main.py:_uninstall_linux`
-//! and the bash `do_uninstall`: stop + disable + remove every `ados-*` unit,
-//! the `.wants` dropins + `multi-user.target.wants` links, the system dropins
-//! (tmpfiles/sysctl/udev/modules-load/NetworkManager/logind/avahi), the
-//! `/usr/local/bin/ados*` symlinks, then `daemon-reload` + `reset-failed` +
-//! `udevadm reload`, and finally the `/opt/ados`, `/var/ados`, `/var/lib/ados`,
-//! `/var/log/ados`, `/run/ados` trees + the MOTD; with `purge`, also
-//! `/etc/ados`. Shares the residue reversion in [`crate::steps::purge_residue`]
-//! (the orphan default route + the SPI-LCD boot config) so a GS→drone flip
-//! leaves a clean box.
+//! The one uninstall path: `ados uninstall` runs this through the installer
+//! copy a successful install keeps at [`env::INSTALLED_INSTALLER`] (or through
+//! a freshly fetched installer when that copy is absent). It stops + disables +
+//! removes every `ados-*` unit, the `.wants` dropins + `multi-user.target.wants`
+//! links, the system dropins (tmpfiles/sysctl/udev/modules-load/NetworkManager/
+//! logind/avahi), the `/usr/local/bin/ados*` symlinks, then `daemon-reload` +
+//! `reset-failed` + `udevadm reload`, and finally the `/opt/ados`, `/var/ados`,
+//! `/var/lib/ados`, `/var/log/ados`, `/run/ados` trees + the MOTD; with
+//! `purge`, also `/etc/ados`. Shares the residue reversion in
+//! [`crate::steps::purge_residue`] (the orphan default route + the SPI-LCD boot
+//! config) so a GS→drone flip leaves a clean box.
 
 use std::path::{Path, PathBuf};
 
@@ -51,9 +52,9 @@ pub fn masked_units() -> Vec<&'static str> {
     ]
 }
 
-/// The system dropin files the install lays down OUTSIDE `/opt/ados`. Pure +
-/// listed here (not glob-discovered) exactly as the canonical CLI removal list
-/// in `main.py:570-585`, so the two uninstall surfaces never drift.
+/// The system dropin files the install lays down OUTSIDE `/opt/ados`. Pure and
+/// listed explicitly (not glob-discovered) so a removal never reaches a file
+/// the install did not write.
 pub fn dropin_files() -> Vec<&'static str> {
     vec![
         "/etc/tmpfiles.d/ados.conf",
@@ -121,7 +122,8 @@ fn discover_unit_files() -> Vec<PathBuf> {
     units
 }
 
-/// Discover the `ados-*.service.wants` dropin directories.
+/// Discover the `ados-*.service.wants` and `ados-*.service.d` drop-in
+/// directories (the latter holds the LAN-front `front.conf`).
 fn discover_wants_dirs() -> Vec<PathBuf> {
     let dir = Path::new(SYSTEMD_DIR);
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -129,7 +131,10 @@ fn discover_wants_dirs() -> Vec<PathBuf> {
         for entry in read.flatten() {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("ados-") && name.ends_with(".service.wants") && path.is_dir() {
+                if name.starts_with("ados-")
+                    && (name.ends_with(".service.wants") || name.ends_with(".service.d"))
+                    && path.is_dir()
+                {
                     dirs.push(path);
                 }
             }
@@ -137,6 +142,44 @@ fn discover_wants_dirs() -> Vec<PathBuf> {
     }
     dirs.sort();
     dirs
+}
+
+/// The MAC-pin `.link` drop-ins under `dir`. Without removing them the box
+/// keeps the pinned MACs on its next boot after the agent is gone.
+fn discover_mac_pin_links(dir: &Path) -> Vec<PathBuf> {
+    let mut links: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(ados_macpin::engine::is_pin_link_file)
+        })
+        .collect();
+    links.sort();
+    links
+}
+
+/// The per-plugin system accounts in a `/etc/passwd` body (pure).
+fn plugin_users(passwd: &str) -> Vec<String> {
+    passwd
+        .lines()
+        .filter_map(|l| l.split(':').next())
+        .filter(|name| name.starts_with(ados_plugin_host::plugin_account::PLUGIN_USER_PREFIX))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The groups a purge removes, after every account in them is gone.
+fn purge_groups() -> [&'static str; 4] {
+    [
+        ados_protocol::ipc::PLUGIN_GROUP,
+        ados_protocol::vision_rpc::VISION_READERS_GROUP,
+        ados_protocol::ipc::OPERATOR_GROUP,
+        "ados",
+    ]
 }
 
 /// Discover the `multi-user.target.wants/ados-*` enable links.
@@ -209,9 +252,25 @@ pub fn run_uninstall(purge: bool, sink: &ProgressSink) -> anyhow::Result<()> {
     for dropin in dropin_files() {
         let _ = remove_path(Path::new(dropin));
     }
+    for link in discover_mac_pin_links(Path::new(ados_macpin::engine::NETWORKD_DIR)) {
+        if let Err(e) = remove_path(&link) {
+            tracing::warn!(link = %link.display(), error = %e, "removing MAC-pin link failed");
+        }
+    }
     for unit in masked_units() {
         let _ = exec::run("systemctl", &["unmask", unit]);
     }
+    // The plugin loopback guard lives in the kernel until reboot; with the
+    // plugins gone it would only drop traffic for accounts removed below.
+    let _ = exec::run(
+        "nft",
+        &[
+            "delete",
+            "table",
+            "inet",
+            ados_plugin_host::loopback_guard::TABLE,
+        ],
+    );
     sink.step_result("stop_units", &StepOutcome::Ok);
 
     // Reload systemd + udev so the removed units/rules are forgotten.
@@ -246,6 +305,20 @@ pub fn run_uninstall(purge: bool, sink: &ProgressSink) -> anyhow::Result<()> {
         let _ = std::fs::remove_dir_all(env::CONFIG_DIR);
     }
     sink.step_result("files", &StepOutcome::Ok);
+
+    // The per-plugin accounts own nothing once /var/ados is gone, so they go on
+    // every uninstall. The agent's own account and groups go only on purge,
+    // with the config they belong to.
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    for user in plugin_users(&passwd) {
+        let _ = exec::run("userdel", &[&user]);
+    }
+    if purge {
+        let _ = exec::run("userdel", &["ados"]);
+        for group in purge_groups() {
+            let _ = exec::run("groupdel", &[group]);
+        }
+    }
 
     // Revert residue so a GS→drone flip leaves a clean box.
     sink.step_started("cleanup");
@@ -321,5 +394,35 @@ mod tests {
         assert!(s.contains(&"/usr/local/bin/ados-supervisor"));
         // The demo console script is gone, so its command is not installed.
         assert!(!s.contains(&"/usr/local/bin/ados-agent"));
+    }
+
+    #[test]
+    fn only_the_engines_pin_links_are_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "10-ados-mac-wlan0.link",
+            "10-ados-mac-1-1.3.link",
+            "50-radxa-aic8800.link",
+            "10-ados-mac-notes.txt",
+        ] {
+            std::fs::write(dir.path().join(name), b"").unwrap();
+        }
+        let names: Vec<String> = discover_mac_pin_links(dir.path())
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["10-ados-mac-1-1.3.link", "10-ados-mac-wlan0.link"]
+        );
+    }
+
+    #[test]
+    fn only_per_plugin_accounts_are_removed_on_every_uninstall() {
+        let passwd = "root:x:0:0::/root:/bin/bash\n\
+                      ados:x:998:998::/nonexistent:/usr/sbin/nologin\n\
+                      ados-plg-1a2b3c4d:x:997:996::/nonexistent:/usr/sbin/nologin\n\
+                      operator:x:1000:1000::/home/operator:/bin/bash\n";
+        assert_eq!(plugin_users(passwd), vec!["ados-plg-1a2b3c4d".to_string()]);
     }
 }

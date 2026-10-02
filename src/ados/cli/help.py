@@ -1,7 +1,7 @@
 """``ados help`` — a curated overview of the everyday commands.
 
 The primary surface an operator sees. The advanced command groups still work
-(``ados rust``, ``ados plugin``, ``ados network`` …) but are kept off this list
+(``ados plugin``, ``ados network`` …) but are kept off this list
 so the common path stays uncluttered.
 """
 
@@ -24,7 +24,7 @@ _PRIMARY: list[tuple[str, str]] = [
     ("ados help", "show this overview"),
 ]
 
-_ADVANCED = ("rust", "plugin", "network", "radio", "hardware", "profile")
+_ADVANCED = ("plugin", "network", "radio", "hardware", "profile")
 
 
 def render_help(theme: _ansi.Theme | None = None) -> list[str]:

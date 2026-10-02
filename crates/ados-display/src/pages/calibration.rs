@@ -1,17 +1,17 @@
 //! Full-screen touch-calibration target screen.
 //!
 //! Painted by the render loop while a [`crate::calibration::CalibrationController`]
-//! is active (outside the navigator — there is no tab bar, and the operator
-//! cannot leave until the capture completes). It draws a reticle at the current
-//! target plus a centered instruction so the operator knows where to tap and how
-//! far through the 9-point capture they are. The instruction block is placed in
+//! is active (outside the navigator — there is no tab bar). It draws a reticle
+//! at the current target plus a centered instruction so the operator knows
+//! where to tap and how far through the 9-point capture they are, and a Skip
+//! button that reads "Tap again" once armed. The instruction block is placed in
 //! the half of the panel away from the current target so the text never sits
 //! under the reticle.
 
-use crate::calibration::CalibrationController;
+use crate::calibration::{instruction_block_y, skip_button_rect, CalibrationController};
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
-use crate::graphics::primitives::{fill_circle, line, text, Canvas};
+use crate::graphics::primitives::{fill_circle, fill_rect_outline, line, text, Canvas};
 use crate::pages::{PANEL_H, PANEL_W};
 
 /// Half-length of each crosshair arm in pixels.
@@ -37,11 +37,7 @@ pub fn render_calibration(ctrl: &CalibrationController, palette: &Palette) -> Ca
 
     // Place the instruction block in the half away from the current target so
     // the text never overlaps the reticle.
-    let block_y = if ty < PANEL_H as i32 / 2 {
-        (PANEL_H as i32 * 2) / 3
-    } else {
-        PANEL_H as i32 / 4
-    };
+    let block_y = instruction_block_y(ty);
 
     let title_font = LoadedFont::new(FontFace::SansBold, 20);
     let body_font = LoadedFont::new(FontFace::SansRegular, 14);
@@ -77,6 +73,34 @@ pub fn render_calibration(ctrl: &CalibrationController, palette: &Palette) -> Ca
             palette.status_warning,
         );
     }
+
+    // Skip button: an operator without a working digitizer, or without the
+    // time, can leave the wizard (two taps; the first arms it).
+    let (bx, by, bw, bh) = skip_button_rect(block_y);
+    fill_rect_outline(
+        &mut canvas,
+        bx,
+        by,
+        bx + bw - 1,
+        by + bh - 1,
+        palette.bg_secondary,
+        palette.border_strong,
+    );
+    let skip_label = if ctrl.skip_armed() {
+        "Tap again"
+    } else {
+        "Skip"
+    };
+    let skip_font = LoadedFont::new(FontFace::SansBold, 13);
+    let (sw, sh) = skip_font.text_size(skip_label);
+    text(
+        &mut canvas,
+        &skip_font,
+        skip_label,
+        bx + (bw - sw as i32) / 2,
+        by + (bh - sh as i32) / 2 - 1,
+        palette.text_primary,
+    );
 
     canvas
 }

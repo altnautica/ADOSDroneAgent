@@ -457,7 +457,7 @@ fn all_pages() -> Vec<PageEntry> {
         },
         PageEntry {
             file_id: "pair_drone",
-            page: Box::new(PairDroneDetailPage),
+            page: Box::new(PairDroneDetailPage::default()),
         },
         PageEntry {
             file_id: "diagnostics",

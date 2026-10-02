@@ -534,9 +534,12 @@ const LOCAL_API_BASE: &str = dispatch::loopback::LOCAL_API_BASE;
 /// asking the local API process to claim (loopback `POST /api/pairing/claim`),
 /// which writes `pairing.json` with the same `pending_api_key` the beacon
 /// registered — so the cloud-frozen key matches the persisted key and no
-/// heartbeat 401s after the claim. Best-effort throughout: a missing code, an
-/// empty cloud response, or a loopback failure simply means the next tick
-/// retries while still unpaired.
+/// heartbeat 401s after the claim. When the file holds no live code with its
+/// pending key (an install that seeded only a code, a native unpair, or a code
+/// past its lifetime), the beacon asks the local API to mint or roll it
+/// (loopback `GET /api/pairing/code`, the single native writer) and re-reads.
+/// Best-effort throughout: an empty cloud response or a loopback failure simply
+/// means the next tick retries while still unpaired.
 fn spawn_beacon(
     config: Arc<CloudConfig>,
     http: Arc<reqwest::Client>,
@@ -560,16 +563,20 @@ fn spawn_beacon(
                     {
                         continue;
                     }
-                    let pairing = PairingState::load();
+                    let mut pairing = PairingState::load();
                     if pairing.is_paired() {
                         continue;
                     }
-                    // The code + the stable pending key must both be present; skip
-                    // the POST otherwise (the Convex handler 400s on an empty
-                    // code, and an empty key would break the later claim).
-                    let (Some(code), Some(api_key)) =
-                        (pairing.pairing_code(), pairing.pending_api_key())
-                    else {
+                    // The code + the stable pending key must both be present and
+                    // the code live (the Convex handler 400s on an empty code, an
+                    // empty key would break the later claim, and an expired code
+                    // cannot be claimed). Otherwise have the local API mint them.
+                    let now_secs = now_epoch_ms() as f64 / 1000.0;
+                    if pairing.beacon_credentials(now_secs).is_none() {
+                        request_local_pairing_code(&http).await;
+                        pairing = PairingState::load();
+                    }
+                    let Some((code, api_key)) = pairing.beacon_credentials(now_secs) else {
                         continue;
                     };
                     beacon_register_once(
@@ -585,6 +592,20 @@ fn spawn_beacon(
             }
         }
     })
+}
+
+/// Ask the local API to mint or roll the pairing code. The route persists the
+/// code together with its pending API key; the caller re-reads `pairing.json`.
+async fn request_local_pairing_code(http: &reqwest::Client) {
+    let url = format!("{LOCAL_API_BASE}/api/pairing/code");
+    match http.get(&url).send().await {
+        Ok(r) if r.status().is_success() => {}
+        Ok(r) => tracing::debug!(
+            status = r.status().as_u16(),
+            "local pairing code request non-2xx"
+        ),
+        Err(e) => tracing::debug!(error = %e, "local pairing code request failed"),
+    }
 }
 
 /// One beacon registration pass: build + POST the `/pairing/register` body, and
@@ -674,6 +695,10 @@ fn spawn_command_poll(
     // synchronous; the download seam is blocking). Built once and reused.
     let download: SharedDownload = Arc::new(ados_plugin_host::download::HttpDownloadSource::new());
     tokio::spawn(async move {
+        // Loaded once; every execution persists, so a restart keeps the record.
+        let mut executed = dispatch::executed_commands::ExecutedCommands::load(
+            std::path::Path::new(dispatch::executed_commands::EXECUTED_COMMANDS_PATH),
+        );
         let mut tick = tokio::time::interval(command_poll::POLL_INTERVAL);
         loop {
             tokio::select! {
@@ -694,6 +719,7 @@ fn spawn_command_poll(
                         &config.agent.device_id,
                         &supervisor,
                         &download,
+                        &mut executed,
                     )
                     .await;
                 }
@@ -707,8 +733,9 @@ fn spawn_command_poll(
 /// supervisor; service/peripheral/fleet/log/WFB-pair commands forward to the
 /// local API over loopback and carry back the route's real ok/failed result; any
 /// command with no handler acks an honest `failed("not implemented: …")` rather
-/// than fabricating success. Best-effort: any transport failure is logged, not
-/// fatal.
+/// than fabricating success. A command id already in the executed record is
+/// answered with its stored ack and not run again. Best-effort: any transport
+/// failure is logged, not fatal.
 async fn poll_commands_once(
     http: &reqwest::Client,
     convex_url: &str,
@@ -716,7 +743,10 @@ async fn poll_commands_once(
     device_id: &str,
     supervisor: &SharedSupervisor,
     download: &SharedDownload,
+    executed: &mut dispatch::executed_commands::ExecutedCommands,
 ) {
+    use dispatch::executed_commands::Precheck;
+
     let url = format!("{}/agent/commands", convex_url.trim_end_matches('/'));
     let resp = match http
         .get(&url)
@@ -735,32 +765,77 @@ async fn poll_commands_once(
         Ok(b) => b,
         Err(_) => return,
     };
+    let ack_url = format!("{}/agent/commands/ack", convex_url.trim_end_matches('/'));
     for cmd in command_poll::parse_commands(&body) {
         let cmd_id = command_poll::command_id(&cmd).to_string();
         let name = command_poll::command_name(&cmd).to_string();
-        tracing::info!(command = %name, id = %cmd_id, "cloud command executing");
 
-        let seen = dispatch::seen_jobs::default_path();
-        let result = dispatch_command(http, &name, &cmd, supervisor, download, &seen).await;
-
-        if result.status == dispatch::CommandStatus::Failed {
-            tracing::warn!(
-                command = %name,
-                id = %cmd_id,
-                message = %result.result.get("message").and_then(|v| v.as_str()).unwrap_or(""),
-                "cloud command failed"
-            );
-        }
-
-        let ack = command_poll::build_ack(&cmd_id, device_id, &result);
-        let ack_url = format!("{}/agent/commands/ack", convex_url.trim_end_matches('/'));
-        let _ = http
-            .post(&ack_url)
-            .header("X-ADOS-Key", api_key)
-            .json(&ack)
-            .send()
-            .await;
+        let ack = match executed.precheck(&cmd) {
+            Precheck::Replay(ack) => {
+                tracing::info!(command = %name, id = %cmd_id, "cloud command already executed; re-sending its ack");
+                ack
+            }
+            Precheck::Refuse(result) => {
+                tracing::warn!(command = %name, id = %cmd_id, "cloud command redelivered without an execution record; refused");
+                let ack = command_poll::build_ack(&cmd_id, device_id, &result);
+                if let Err(e) = executed.record(&cmd_id, ack.clone()) {
+                    tracing::warn!(error = %e, "executed-command record write failed");
+                }
+                ack
+            }
+            Precheck::Execute => {
+                tracing::info!(command = %name, id = %cmd_id, "cloud command executing");
+                let seen = dispatch::seen_jobs::default_path();
+                let result = dispatch_command(http, &name, &cmd, supervisor, download, &seen).await;
+                if result.status == dispatch::CommandStatus::Failed {
+                    tracing::warn!(
+                        command = %name,
+                        id = %cmd_id,
+                        message = %result.result.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                        "cloud command failed"
+                    );
+                }
+                let ack = command_poll::build_ack(&cmd_id, device_id, &result);
+                if let Err(e) = executed.record(&cmd_id, ack.clone()) {
+                    tracing::warn!(error = %e, "executed-command record write failed");
+                }
+                ack
+            }
+        };
+        post_ack(http, &ack_url, api_key, &ack).await;
     }
+}
+
+/// Delays before each ack attempt: one immediate try, then two retries.
+const ACK_RETRY_DELAYS: [std::time::Duration; 3] = [
+    std::time::Duration::ZERO,
+    std::time::Duration::from_millis(500),
+    std::time::Duration::from_secs(2),
+];
+
+/// POST one command ack, retrying a transport error or a non-2xx answer. An
+/// ack that still fails leaves the row leased; the queue redelivers it and the
+/// executed record answers it without running the command again.
+async fn post_ack(http: &reqwest::Client, url: &str, api_key: &str, ack: &serde_json::Value) {
+    for delay in ACK_RETRY_DELAYS {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        match http
+            .post(url)
+            .header("X-ADOS-Key", api_key)
+            .json(ack)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => return,
+            Ok(r) => tracing::debug!(status = %r.status(), "cloud command ack refused"),
+            Err(e) => tracing::debug!(error = %e, "cloud command ack failed"),
+        }
+    }
+    tracing::warn!(
+        "cloud command ack not delivered; a redelivery is answered from the executed record"
+    );
 }
 
 /// Dispatch a single cloud command to its real handler and return the result.
@@ -1119,6 +1194,8 @@ mod tests {
     async fn the_command_poll_sends_the_key_as_a_header_and_only_the_device_id_as_a_query() {
         let (base, head) = capture_one_request(r#"{"commands":[]}"#).await;
         let http = test_client();
+        let (_dir, seen) = seen_path();
+        let mut executed = dispatch::executed_commands::ExecutedCommands::load(&seen);
         poll_commands_once(
             &http,
             &base,
@@ -1126,6 +1203,7 @@ mod tests {
             "dev-7",
             &supervisor(),
             &no_source(),
+            &mut executed,
         )
         .await;
         let head = head.await.unwrap();

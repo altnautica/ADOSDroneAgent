@@ -72,6 +72,58 @@ pub fn run(program: &str, args: &[&str]) -> CmdResult {
     }
 }
 
+/// Run `program args...` with `input` written to its stdin, capturing
+/// stdout/stderr like [`run`]. For secrets a command can read from stdin (a
+/// Wi-Fi passphrase), so they never appear in the process argv (readable by
+/// every local user through `/proc/<pid>/cmdline`) or in this module's logs:
+/// `input` is never logged.
+pub fn run_with_stdin(program: &str, args: &[&str], input: &[u8]) -> CmdResult {
+    use std::io::Write;
+
+    tracing::debug!(program, ?args, "exec (stdin input withheld)");
+    let spawned = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(program, error = %e, "exec spawn failed");
+            return CmdResult {
+                code: None,
+                stdout: String::new(),
+                stderr: e.to_string(),
+                spawned: false,
+            };
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        // A child that exits before reading closes the pipe; its exit status
+        // reports the real outcome, so a write error here is not one.
+        let _ = stdin.write_all(input);
+    }
+    match child.wait_with_output() {
+        Ok(out) => {
+            let res = CmdResult {
+                code: out.status.code(),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                spawned: true,
+            };
+            tracing::debug!(program, code = ?res.code, "exec done");
+            res
+        }
+        Err(e) => CmdResult {
+            code: None,
+            stdout: String::new(),
+            stderr: e.to_string(),
+            spawned: true,
+        },
+    }
+}
+
 /// Convenience: run and report only whether it exited 0. Use for best-effort
 /// commands where the output is not needed.
 pub fn run_ok(program: &str, args: &[&str]) -> bool {

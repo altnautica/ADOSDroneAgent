@@ -21,7 +21,7 @@ def test_help_lists_the_primitive_commands() -> None:
     for cmd in ("ados status", "ados pair", "ados unpair", "ados uninstall", "ados update"):
         assert cmd in result.output
     assert "Advanced:" in result.output
-    assert "rust" in result.output
+    assert "plugin" in result.output
 
 
 # ── ados pair (info screen) ─────────────────────────────────────────────────

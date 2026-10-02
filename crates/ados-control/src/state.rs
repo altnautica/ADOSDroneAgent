@@ -7,8 +7,7 @@
 //! command-send client the command route writes frames through, the logging-store
 //! query client + the board sidecar path the status route sources health + board
 //! from, and the process start instant used as the status route's uptime
-//! fallback. The surface is wired but ships disabled: the systemd unit is deployed
-//! off by default and only `ados rust enable control` starts the daemon.
+//! fallback.
 
 use std::path::PathBuf;
 use std::sync::Arc;

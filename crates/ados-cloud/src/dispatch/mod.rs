@@ -8,6 +8,7 @@
 //! dispatcher's `execute_command`, which has since been deleted; this is the
 //! implementation.
 
+pub mod executed_commands;
 pub mod install;
 pub mod loopback;
 pub mod plugin_commands;
@@ -37,7 +38,7 @@ impl CommandStatus {
 /// The dispatch outcome: the status plus the small `result` ACK doc and the
 /// optional larger `data` payload. Mirrors the Python `(status, result, data)`
 /// tuple, with `result` carrying `{success, message}`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommandResult {
     pub status: CommandStatus,
     pub result: serde_json::Value,

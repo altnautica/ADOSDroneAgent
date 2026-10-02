@@ -58,7 +58,6 @@ use crate::ctx::Ctx;
 use crate::env::{SERVICE_NAME, VENV_DIR};
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
-use crate::steps::systemd::control_unit_wanted;
 
 /// The set of systemd units that MUST be enabled for a profile's install to be
 /// complete (`expected_profile_units`). Drone needs only the supervisor (its
@@ -395,20 +394,16 @@ impl Step for Health {
         // probing the port while the unit is still cycling is a race, and a unit
         // that never comes up is named with the state systemd reports instead of
         // surfacing only as an unreachable port.
-        if control_unit_wanted() {
-            if let Err(state) =
-                wait_until_active(control_active_state, CONTROL_ACTIVE_POLLS, || {
-                    std::thread::sleep(CONTROL_ACTIVE_POLL)
-                })
-            {
-                tracing::error!(
-                    unit = CONTROL_UNIT,
-                    state = %state,
-                    waited_s = CONTROL_ACTIVE_POLLS,
-                    "control front never became active"
-                );
-                misses.push(format!("control-active:{state}"));
-            }
+        if let Err(state) = wait_until_active(control_active_state, CONTROL_ACTIVE_POLLS, || {
+            std::thread::sleep(CONTROL_ACTIVE_POLL)
+        }) {
+            tracing::error!(
+                unit = CONTROL_UNIT,
+                state = %state,
+                waited_s = CONTROL_ACTIVE_POLLS,
+                "control front never became active"
+            );
+            misses.push(format!("control-active:{state}"));
         }
         if !rest_reachable() {
             misses.push("api-reachable".to_string());

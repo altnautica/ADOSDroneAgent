@@ -59,7 +59,8 @@ OPTIONS:
     --camera <hint>                    Camera hardware hint
     --wifi-ssid <ssid>                 Join this Wi-Fi network during a headless
                                        install (so the wired cable can be unplugged)
-    --wifi-pass <password>             Password for --wifi-ssid (omit if open)
+    --wifi-pass-file <path>            File holding the --wifi-ssid password
+                                       (omit if open; keeps it off the command line)
     --uninstall                        Remove the agent
     --status                           Print install status and exit
     --plain                            Plain line output (no animation/color)

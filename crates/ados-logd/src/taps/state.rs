@@ -17,11 +17,11 @@
 //! is testable without a live socket: [`process_stream`] consumes any async byte
 //! source (a fixture file, a socket half, an in-memory pipe) and a test feeds it
 //! synthetic snapshots from a tempdir. [`run_state_tap`] wraps it with the
-//! connect-then-reconnect-with-backoff loop the daemon spawns.
+//! connect-then-reconnect loop the daemon spawns.
 //!
 //! The socket is absent on a host with no agent, and on an idle or unpaired
 //! agent before the state hub comes up. That is normal, not an error: the tap
-//! logs the absence at debug level and retries on a backoff. It only ever reads;
+//! logs the absence at debug level and retries at the fixed local-socket pace. It only ever reads;
 //! the state wire model stays frozen.
 
 use std::path::Path;
@@ -35,9 +35,9 @@ use tokio::sync::mpsc;
 use ados_protocol::logd::{EventFrame, IngestFrame, Level, TelemetryFrame};
 use ados_protocol::state::read_state_value;
 
-use super::backoff::ReconnectBackoff;
 use super::{Shutdown, SOURCE_STATE};
 use crate::writer::now_us;
+use ados_protocol::retry::LOCAL_SOCKET;
 
 /// One numeric metric to lift out of a state snapshot: the dotted JSON path to
 /// the value and the dotted metric key it is stored under.
@@ -182,7 +182,7 @@ fn sample_interval(sample_hz: f64) -> Duration {
 /// Run the state tap until `shutdown` resolves.
 ///
 /// Connects to `socket_path`, processes the snapshot stream, and on any
-/// disconnect or an absent socket reconnects with capped backoff. A missing
+/// disconnect or an absent socket reconnects at the fixed local-socket pace. A missing
 /// socket is expected (no agent on a host, an idle agent before the state hub is
 /// up) and is logged at debug level, never as an error.
 pub async fn run_state_tap(
@@ -192,7 +192,6 @@ pub async fn run_state_tap(
     mut shutdown: Shutdown,
 ) {
     let socket_path = socket_path.as_ref();
-    let mut backoff = ReconnectBackoff::default();
     tracing::info!(path = %socket_path.display(), sample_hz, "state tap started");
     loop {
         tokio::select! {
@@ -204,7 +203,6 @@ pub async fn run_state_tap(
             connected = connect(socket_path) => {
                 match connected {
                     Some(stream) => {
-                        backoff.reset();
                         let reader = BufReader::new(stream);
                         let mut prev = PrevState::new(sample_hz);
                         process_stream(reader, &tx, &mut prev, &mut shutdown).await;
@@ -217,7 +215,7 @@ pub async fn run_state_tap(
                     }
                     None => {
                         // Absent socket: normal on a host or an idle agent.
-                        let wait = backoff.next_delay();
+                        let wait = LOCAL_SOCKET.wait();
                         tokio::select! {
                             _ = shutdown.recv() => {
                                 tracing::info!("state tap stopping");

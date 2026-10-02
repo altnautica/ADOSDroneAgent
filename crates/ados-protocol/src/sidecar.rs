@@ -60,6 +60,36 @@ pub struct Versioned {
     pub version: u16,
 }
 
+/// Replace `path` with `data` so a power cut leaves either the old file or the
+/// new one, never a truncated mix: write a sibling temp file, fsync it, rename
+/// it over `path`, then fsync the directory so the rename itself is durable.
+/// The temp file keeps the target's permissions when the target exists.
+pub fn write_durable(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".tmp-{}", std::process::id()));
+    let tmp = parent.join(tmp_name);
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(data)?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            f.set_permissions(meta.permissions())?;
+        }
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)?;
+        std::fs::File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +116,19 @@ mod tests {
         let with_extra: Versioned =
             serde_json::from_str(r#"{"version":3,"link_state":"healthy"}"#).unwrap();
         assert_eq!(with_extra.version, 3);
+    }
+
+    #[test]
+    fn write_durable_replaces_the_file_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("extlinux.conf");
+        std::fs::write(&p, b"old").unwrap();
+        write_durable(&p, b"new contents").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"new contents");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
     }
 }

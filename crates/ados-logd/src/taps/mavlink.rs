@@ -16,7 +16,7 @@
 //! [`process_frames`] consumes any async byte source (a fixture file, a socket
 //! half, an in-memory pipe), so a test feeds synthetic length-prefixed frames
 //! without a live socket. [`run_mavlink_tap`] wraps it with the connect-then-
-//! reconnect-with-backoff loop the daemon spawns. The socket being absent is
+//! reconnect loop the daemon spawns, paced by the fixed local-socket retry. The socket being absent is
 //! normal (no agent on a host, an idle agent before the router is up) and is
 //! logged at debug, not as an error. It only ever reads.
 
@@ -33,9 +33,9 @@ use ados_protocol::frame::MAVLINK_MAX_FRAME;
 use ados_protocol::ipc::read_length_prefixed;
 use ados_protocol::logd::{EventFrame, IngestFrame, Level};
 
-use super::backoff::ReconnectBackoff;
 use super::{Shutdown, SOURCE_MAVLINK};
 use crate::writer::now_us;
+use ados_protocol::retry::LOCAL_SOCKET;
 
 /// MAVLink v1 start-of-frame magic.
 const MAGIC_V1: u8 = 0xfe;
@@ -70,7 +70,7 @@ struct FrameHead {
 /// Run the raw-frame tap until `shutdown` resolves.
 ///
 /// Connects to `socket_path`, samples the frame stream at `sample_hz`, and
-/// reconnects with capped backoff on any disconnect or an absent socket. A
+/// reconnects at the fixed local-socket pace on any disconnect or an absent socket. A
 /// non-positive `sample_hz` is clamped to the default so a misconfiguration
 /// cannot disable sampling silently or divide by zero.
 pub async fn run_mavlink_tap(
@@ -81,7 +81,6 @@ pub async fn run_mavlink_tap(
 ) {
     let socket_path = socket_path.as_ref();
     let interval = sample_interval(sample_hz);
-    let mut backoff = ReconnectBackoff::default();
     tracing::info!(
         path = %socket_path.display(),
         sample_hz,
@@ -97,14 +96,13 @@ pub async fn run_mavlink_tap(
             connected = connect(socket_path) => {
                 match connected {
                     Some(stream) => {
-                        backoff.reset();
                         process_frames(stream, &tx, interval, &mut shutdown).await;
                         if tx.is_closed() {
                             return;
                         }
                     }
                     None => {
-                        let wait = backoff.next_delay();
+                        let wait = LOCAL_SOCKET.wait();
                         tokio::select! {
                             _ = shutdown.recv() => {
                                 tracing::info!("frame tap stopping");

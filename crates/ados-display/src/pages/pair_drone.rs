@@ -6,6 +6,9 @@
 //! * **Paired** — when the paired-drone record carries a device id. Show the
 //!   device id, the key-fingerprint short form, the paired-at relative time plus
 //!   a short absolute clock, and a destructive "Unpair" button bottom-right.
+//!   Unpair wipes the station's radio keys for every drone, so it takes two
+//!   taps: the first arms it (the button reads "Tap again to unpair"), the
+//!   second sends the request.
 //! * **Unpaired** — show a NOT PAIRED banner and the WFB auto-pair state: armed
 //!   (a powered, unpaired drone in radio range pairs on its own), disarmed, or
 //!   unknown when the pair read did not answer.
@@ -22,6 +25,7 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, text, Canvas};
 use crate::pages::{
     blank_panel, AgentRequest, Chrome, HitAction, HitZone, Page, PageContext, PanelAction,
+    TwoTapConfirm,
 };
 use crate::widgets::{draw_detail_header, DETAIL_HEADER_H};
 
@@ -101,7 +105,11 @@ fn is_paired(ctx: &PageContext) -> bool {
 }
 
 /// The pair-drone detail view, registered as `details.pair_drone`.
-pub struct PairDroneDetailPage;
+#[derive(Default)]
+pub struct PairDroneDetailPage {
+    /// Two-tap arm state of the Unpair button.
+    unpair_confirm: TwoTapConfirm,
+}
 
 impl Page for PairDroneDetailPage {
     fn id(&self) -> &'static str {
@@ -121,7 +129,8 @@ impl Page for PairDroneDetailPage {
         draw_detail_header(&mut canvas, palette, "Pair drone");
 
         if is_paired(ctx) {
-            render_paired(&mut canvas, palette, ctx);
+            let armed = self.unpair_confirm.is_armed(UNPAIR_KEY);
+            render_paired(&mut canvas, palette, ctx, armed);
         } else {
             render_unpaired(&mut canvas, palette, ctx);
         }
@@ -145,19 +154,24 @@ impl Page for PairDroneDetailPage {
     }
 
     fn on_custom(&self, key: &str, ctx: &PageContext) -> Option<PanelAction> {
-        (key == UNPAIR_KEY && is_paired(ctx)).then(|| {
-            PanelAction::Agent(AgentRequest {
-                method: "DELETE",
-                path: "/api/v1/ground-station/wfb/pair",
-                body: None,
-                label: "Unpair".to_string(),
-            })
-        })
+        if key != UNPAIR_KEY || !is_paired(ctx) {
+            return None;
+        }
+        if !self.unpair_confirm.tap(UNPAIR_KEY) {
+            return Some(PanelAction::Repaint);
+        }
+        Some(PanelAction::Agent(AgentRequest {
+            method: "DELETE",
+            path: "/api/v1/ground-station/wfb/pair",
+            body: None,
+            label: "Unpair".to_string(),
+        }))
     }
 }
 
-/// Paint the paired body: identity rows + a destructive Unpair button.
-fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
+/// Paint the paired body: identity rows + a destructive Unpair button, which
+/// reads "Tap again to unpair" while `unpair_armed`.
+fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext, unpair_armed: bool) {
     let mono = LoadedFont::new(FontFace::MonoRegular, 12);
     let label = LoadedFont::new(FontFace::SansBold, 11);
 
@@ -196,7 +210,11 @@ fn render_paired(canvas: &mut Canvas, palette: &Palette, ctx: &PageContext) {
         btn_y + BTN_H - 1,
         palette.status_error,
     );
-    let btn_label = "Unpair";
+    let btn_label = if unpair_armed {
+        "Tap again to unpair"
+    } else {
+        "Unpair"
+    };
     let btn_font = LoadedFont::new(FontFace::SansBold, 14);
     let (bw, bh) = btn_font.text_size(btn_label);
     text(
@@ -263,7 +281,7 @@ mod tests {
 
     #[test]
     fn pair_drone_renders_with_back_zone() {
-        let page = PairDroneDetailPage;
+        let page = PairDroneDetailPage::default();
         let ctx = PageContext::default();
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
@@ -276,7 +294,7 @@ mod tests {
     fn unpaired_page_never_shows_the_cloud_claim_code() {
         // The claim code belongs to the Mission Control claim flow; radio
         // pairing uses none, so its presence must not change a single pixel.
-        let page = PairDroneDetailPage;
+        let page = PairDroneDetailPage::default();
         let mut without = PageContext::default();
         without.paired_drone.auto_pair_enabled = Some(true);
         let mut with = without.clone();
@@ -294,7 +312,7 @@ mod tests {
         assert_eq!(auto_pair_lines(Some(true)).0, "ON");
         assert_eq!(auto_pair_lines(Some(false)).0, "OFF");
         assert_eq!(auto_pair_lines(None).0, "--");
-        let page = PairDroneDetailPage;
+        let page = PairDroneDetailPage::default();
         let mut on = PageContext::default();
         on.paired_drone.auto_pair_enabled = Some(true);
         let mut off = on.clone();
@@ -307,7 +325,7 @@ mod tests {
 
     #[test]
     fn paired_exposes_unpair_zone() {
-        let page = PairDroneDetailPage;
+        let page = PairDroneDetailPage::default();
         let mut ctx = PageContext::default();
         ctx.paired_drone.device_id = Some("ados-58c27faf".to_string());
         ctx.paired_drone.key_fingerprint = Some("0123456789abcdef0011aabbcc".to_string());
@@ -321,18 +339,37 @@ mod tests {
             zones[1].action,
             HitAction::Custom("pair.unpair".to_string())
         );
-        // The tap is the station-wide unpair route.
+        // Unpaired, the key does nothing.
+        assert!(page
+            .on_custom("pair.unpair", &PageContext::default())
+            .is_none());
+    }
+
+    /// A single tap only arms Unpair; the confirming tap sends the
+    /// station-wide unpair, and the tap after that arms again.
+    #[test]
+    fn unpair_takes_two_taps() {
+        let page = PairDroneDetailPage::default();
+        let mut ctx = PageContext::default();
+        ctx.paired_drone.device_id = Some("ados-58c27faf".to_string());
+        let idle = page.render(&ctx, &DARK).as_rgb888().to_vec();
+        assert_eq!(
+            page.on_custom("pair.unpair", &ctx),
+            Some(PanelAction::Repaint)
+        );
+        // The armed button reads differently from the idle one.
+        assert_ne!(page.render(&ctx, &DARK).as_rgb888(), idle.as_slice());
         let Some(PanelAction::Agent(req)) = page.on_custom("pair.unpair", &ctx) else {
-            panic!("unpair must reach the agent");
+            panic!("the confirming tap must reach the agent");
         };
         assert_eq!(
             (req.method, req.path),
             ("DELETE", "/api/v1/ground-station/wfb/pair")
         );
-        // Unpaired, the key does nothing.
-        assert!(page
-            .on_custom("pair.unpair", &PageContext::default())
-            .is_none());
+        assert_eq!(
+            page.on_custom("pair.unpair", &ctx),
+            Some(PanelAction::Repaint)
+        );
     }
 
     #[test]

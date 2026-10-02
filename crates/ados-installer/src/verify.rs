@@ -1,22 +1,19 @@
 //! Artifact verification — port of `scripts/lib/verify.sh`.
 //!
 //! Mandatory SHA256 (computed in-process with `sha2` against the `.sha256`
-//! sidecar) plus an optional Ed25519/minisign signature (`.minisig`). The
-//! channel + `allow_unsigned` flag set the fatality matrix exactly as the bash
-//! `ados_verify_artifact`:
-//!   - SHA256 mismatch                → always fatal.
-//!   - `allow_unsigned == true`       → signature skipped entirely.
-//!   - pubkey empty, channel == Edge  → SHA256-only, warn, OK.
-//!   - pubkey empty, channel == Stable→ fatal (refuse unsigned on stable).
-//!   - pubkey present                 → minisign signature mandatory.
-//!
-//! `allow_unsigned` skips the check BEFORE the pubkey is read, so it is not a
-//! tolerance — it is an off switch, and the prebuilt fetch passes it false on
-//! every channel. A signature that is present and does not match the trust
-//! anchor is refused everywhere. What the channel still decides is the weaker
-//! question of whether a signature that cannot be OBTAINED (no `.minisig`
-//! published, or no `minisign` on the host) is fatal: it warns on edge and
-//! refuses on stable.
+//! sidecar) plus an Ed25519/minisign signature (`.minisig`) checked against the
+//! vendored trust anchor. Where the bytes came from sets the fatality matrix:
+//!   - SHA256 mismatch / missing sidecar → always fatal.
+//!   - a signature present and invalid    → always fatal (tamper).
+//!   - [`SignaturePolicy::Required`] (anything downloaded from a release, on
+//!     every channel): a missing `.minisig` or a host with no `minisign` is
+//!     fatal. The `.sha256` comes from the same host as the artifact, so on its
+//!     own it proves the transfer, not the origin; an attacker who controls the
+//!     download would simply withhold the signature.
+//!   - [`SignaturePolicy::LocalBuild`] (`--artifacts <dir>` only): a locally
+//!     built binary cannot carry the CI signature, so a signature that cannot be
+//!     obtained warns and the build host's SHA256 sidecar is the gate. A
+//!     signature that IS present is still verified.
 
 use std::io::Read;
 use std::path::Path;
@@ -35,49 +32,18 @@ use crate::exec;
 /// release host cannot swap the key. Key id `8DEB4E827E9D083F` (rotated 2026-07).
 pub const RELEASE_PUBKEY: &str = "RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN";
 
-/// Release channel — governs whether a signature we cannot OBTAIN is fatal.
-///
-/// It does not govern whether signatures are checked at all: a signature that is
-/// present and does not match the trust anchor is refused on every channel.
+/// How strictly one artifact's signature is judged. Chosen by where the bytes
+/// came from, never by the release channel: every channel downloads from the
+/// same host, so every channel needs the same proof of origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Channel {
-    /// Rolling `main` builds: an unobtainable signature warns and passes, on the
-    /// SHA256 alone. Publishing signed releases is what retires this tolerance.
-    Edge,
-    /// Everything else: a signature that cannot be obtained is fatal.
-    Stable,
+pub enum SignaturePolicy {
+    /// A downloaded release asset: the `.minisig` must exist, `minisign` must be
+    /// installed, and the signature must verify against the trust anchor.
+    Required,
+    /// A locally-built artifact the operator handed over with `--artifacts`: a
+    /// present signature is verified; one that cannot be obtained warns.
+    LocalBuild,
 }
-
-impl Channel {
-    /// Resolve a channel NAME to its verification posture.
-    ///
-    /// ONLY the development channel is lenient, by exact name. Every other value
-    /// — including one this build does not recognise — is strict.
-    ///
-    /// The inverted form ("lenient unless the name is exactly `stable`") reads
-    /// the same for the two channels we ship and silently opens a hole for a
-    /// third: a typo at the prompt, or a channel name a newer build knows and
-    /// this one does not, matched neither arm and so took the lenient branch. A
-    /// channel string we do not understand is not a licence to skip a signature.
-    ///
-    /// This mirrors `ados_channel_is_lenient` in `scripts/lib/verify.sh`, which
-    /// gates the kernel-module fetches and was already corrected to name its
-    /// lenient channel explicitly. (The bootstrap in `scripts/install.sh` has no
-    /// lenient channel at all: it requires a valid signature on every channel.)
-    /// A test reads that function's literals and asserts the two sets still
-    /// agree, because a drift means one entry point verifies while the other
-    /// does not.
-    pub fn from_name(name: &str) -> Channel {
-        if name == EDGE_CHANNEL {
-            Channel::Edge
-        } else {
-            Channel::Stable
-        }
-    }
-}
-
-/// The one channel name that tolerates a signature it cannot obtain.
-pub const EDGE_CHANNEL: &str = "edge";
 
 /// The outcome of the in-process SHA256 check against the `.sha256` sidecar.
 /// Pure: takes the digest the sidecar declares and the digest we computed.
@@ -135,61 +101,16 @@ fn sha_check(computed: &str, declared: &str) -> ShaCheck {
     }
 }
 
-/// Decide whether an unverifiable-but-untampered signature situation is fatal,
-/// given the channel + whether a pubkey was supplied + whether `allow_unsigned`
-/// is set. Pure — this is the heart of the bash fatality matrix, isolated so the
-/// branches are unit-testable without any files.
-///
-/// Returns `Ok(())` to proceed (possibly with a warning), `Err(msg)` to fail.
-/// Only called once the mandatory SHA256 has already passed.
-fn signature_policy(
-    pubkey: Option<&str>,
-    channel: Channel,
-    allow_unsigned: bool,
-    artifact_name: &str,
-) -> Result<(), String> {
-    // allow_unsigned force-skips the signature on any channel.
-    if allow_unsigned {
-        tracing::warn!(
-            artifact = artifact_name,
-            "allow-unsigned set; skipping signature check"
-        );
-        return Ok(());
-    }
-
-    // Treat an empty pubkey string the same as None (CI has not substituted a
-    // real key yet) — matches the bash `[ -z "$pubkey" ]`.
-    let key = pubkey.filter(|k| !k.is_empty());
-
-    match key {
-        None => match channel {
-            Channel::Stable => Err(format!(
-                "no signing key available; refusing unsigned {artifact_name} on stable channel"
-            )),
-            Channel::Edge => {
-                tracing::warn!(
-                    artifact = artifact_name,
-                    "no signing key; SHA256-checked only (edge channel)"
-                );
-                Ok(())
-            }
-        },
-        // A key IS present → the signature is mandatory and is verified by the
-        // caller below. This branch only signals "go run minisign".
-        Some(_) => Ok(()),
-    }
-}
-
 /// Verify the minisign signature of `artifact` against `<artifact>.minisig`
-/// using the provided pubkey. return codes,
-/// collapsed into the install's fatality model:
-///   - verified              → Ok(())
-///   - signature INVALID     → fatal everywhere (tamper)
-///   - minisign missing / no .minisig → unverifiable: fatal on stable, warn+OK on edge
+/// using `pubkey`, collapsed into the install's fatality model:
+///   - verified                         → Ok(())
+///   - signature INVALID                → fatal under every policy (tamper)
+///   - minisign missing / no .minisig   → unverifiable: fatal for a release
+///     asset, a warning for a local build
 fn verify_minisign(
     artifact: &Path,
     pubkey: &str,
-    channel: Channel,
+    policy: SignaturePolicy,
     artifact_name: &str,
 ) -> anyhow::Result<()> {
     let sig_path = sidecar(artifact, "minisig");
@@ -198,7 +119,7 @@ fn verify_minisign(
 
     if !sig_path.exists() {
         // No signature file — unverifiable, not tampered.
-        return unverifiable(channel, artifact_name, "missing .minisig");
+        return unverifiable(policy, artifact_name, "missing .minisig");
     }
 
     let res = exec::run(
@@ -207,28 +128,30 @@ fn verify_minisign(
     );
     if !res.spawned {
         // minisign not installed — unverifiable, not tampered.
-        return unverifiable(channel, artifact_name, "minisign not installed");
+        return unverifiable(policy, artifact_name, "minisign not installed");
     }
     if res.success() {
         return Ok(());
     }
-    // minisign ran and rejected the signature — tamper. Fatal on every channel.
+    // minisign ran and rejected the signature — tamper. Fatal everywhere.
     anyhow::bail!("tamper check failed for {artifact_name}; refusing to install");
 }
 
-/// The "unverifiable but not tampered" branch: fatal on stable, warn+OK on edge.
-fn unverifiable(channel: Channel, artifact_name: &str, why: &str) -> anyhow::Result<()> {
-    match channel {
-        Channel::Stable => {
+/// The "unverifiable but not tampered" branch: fatal for a release asset, a
+/// warning for a local build (whose SHA256 sidecar came from its build host).
+fn unverifiable(policy: SignaturePolicy, artifact_name: &str, why: &str) -> anyhow::Result<()> {
+    match policy {
+        SignaturePolicy::Required => {
             anyhow::bail!(
-                "{artifact_name} could not be signature-verified on stable channel ({why})"
+                "{artifact_name} could not be signature-verified ({why}); a downloaded \
+                 release asset is installed only with a valid signature"
             )
         }
-        Channel::Edge => {
+        SignaturePolicy::LocalBuild => {
             tracing::warn!(
                 artifact = artifact_name,
                 why,
-                "signature unverifiable; SHA256-checked only (edge channel)"
+                "local build signature unverifiable; SHA256-checked against its build host"
             );
             Ok(())
         }
@@ -272,20 +195,19 @@ pub fn verify_sha256(artifact: &Path, sidecar_path: &Path) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Verify `artifact` against its `.sha256` (mandatory) and, when `pubkey` is
-/// `Some`, its `.minisig`. `allow_unsigned` short-circuits the signature check.
+/// Verify `artifact` against its `.sha256` (mandatory) and its `.minisig`
+/// against `pubkey`, under `policy`.
 pub fn verify_artifact(
     artifact: &Path,
-    pubkey: Option<&str>,
-    channel: Channel,
-    allow_unsigned: bool,
+    pubkey: &str,
+    policy: SignaturePolicy,
 ) -> anyhow::Result<()> {
     let name = artifact
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| artifact.to_string_lossy().into_owned());
 
-    // ── SHA256 is always mandatory, on every channel. ──
+    // ── SHA256 is always mandatory. ──
     let sha_path = sidecar(artifact, "sha256");
     let sidecar_contents = std::fs::read_to_string(&sha_path).map_err(|_| {
         anyhow::anyhow!("SHA256 verification failed for {name}: missing {name}.sha256")
@@ -297,17 +219,7 @@ pub fn verify_artifact(
         anyhow::bail!("SHA256 verification failed for {name}");
     }
 
-    // ── Signature policy (channel + key + allow_unsigned). ──
-    signature_policy(pubkey, channel, allow_unsigned, &name).map_err(|m| anyhow::anyhow!(m))?;
-
-    // allow_unsigned already short-circuited inside signature_policy; if a real
-    // key is present (and we are not skipping), the signature is mandatory.
-    if !allow_unsigned {
-        if let Some(key) = pubkey.filter(|k| !k.is_empty()) {
-            verify_minisign(artifact, key, channel, &name)?;
-        }
-    }
-    Ok(())
+    verify_minisign(artifact, pubkey, policy, &name)
 }
 
 #[cfg(test)]
@@ -385,21 +297,13 @@ mod tests {
     }
 
     #[test]
-    fn good_sha_edge_no_key_passes() {
-        let (_d, art) = artifact_with_sha(b"hello world", true);
-        // Edge channel, no key, default allow_unsigned -> SHA-only, OK.
-        assert!(verify_artifact(&art, None, Channel::Edge, true).is_ok());
-        // Even with allow_unsigned off, edge + no key is OK (SHA256-only warn).
-        assert!(verify_artifact(&art, None, Channel::Edge, false).is_ok());
-    }
-
-    #[test]
     fn bad_sha_is_always_fatal() {
         let (_d, art) = artifact_with_sha(b"hello world", false);
-        // Mismatch is fatal regardless of channel / allow_unsigned.
-        let e = verify_artifact(&art, None, Channel::Edge, true).unwrap_err();
-        assert!(e.to_string().contains("SHA256 verification failed"));
-        assert!(verify_artifact(&art, None, Channel::Stable, false).is_err());
+        // Mismatch is fatal under either policy, before any signature check.
+        for policy in [SignaturePolicy::Required, SignaturePolicy::LocalBuild] {
+            let e = verify_artifact(&art, "REALKEY", policy).unwrap_err();
+            assert!(e.to_string().contains("SHA256 verification failed"));
+        }
     }
 
     #[test]
@@ -407,43 +311,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let art = dir.path().join("ados-video-aarch64");
         std::fs::write(&art, b"x").unwrap();
-        let e = verify_artifact(&art, None, Channel::Edge, true).unwrap_err();
+        let e = verify_artifact(&art, "REALKEY", SignaturePolicy::LocalBuild).unwrap_err();
         assert!(e.to_string().contains("SHA256 verification failed"));
     }
 
-    // ── The fatality matrix, exercised on the pure policy fn. ──
-
     #[test]
-    fn policy_allow_unsigned_skips_everywhere() {
-        assert!(signature_policy(None, Channel::Stable, true, "x").is_ok());
-        assert!(signature_policy(Some("KEY"), Channel::Stable, true, "x").is_ok());
-    }
-
-    #[test]
-    fn policy_empty_key_edge_ok_stable_fatal() {
-        // Edge + no key → OK (SHA-only).
-        assert!(signature_policy(None, Channel::Edge, false, "x").is_ok());
-        assert!(signature_policy(Some(""), Channel::Edge, false, "x").is_ok());
-        // Stable + no key → fatal.
-        assert!(signature_policy(None, Channel::Stable, false, "x").is_err());
-        assert!(signature_policy(Some(""), Channel::Stable, false, "x").is_err());
-    }
-
-    #[test]
-    fn policy_present_key_requires_signature_step() {
-        // A present key passes the policy gate (the actual minisign run happens
-        // after); the policy itself does not reject.
-        assert!(signature_policy(Some("REALKEY"), Channel::Edge, false, "x").is_ok());
-        assert!(signature_policy(Some("REALKEY"), Channel::Stable, false, "x").is_ok());
-    }
-
-    #[test]
-    fn good_sha_present_key_no_minisig_edge_warns_stable_fatal() {
+    fn a_release_asset_without_a_signature_is_refused() {
+        // The `.sha256` comes from the same host as the binary, so it cannot
+        // prove origin: whoever controls the download would withhold the
+        // `.minisig` and ship a matching digest. A downloaded asset with no
+        // signature is therefore refused, whatever channel the box is on.
         let (_d, art) = artifact_with_sha(b"payload", true);
-        // Key present, no .minisig sidecar present: edge tolerates (unverifiable
-        // not tampered), stable refuses.
-        assert!(verify_artifact(&art, Some("REALKEY"), Channel::Edge, false).is_ok());
-        let e = verify_artifact(&art, Some("REALKEY"), Channel::Stable, false).unwrap_err();
-        assert!(e.to_string().contains("stable"));
+        let e = verify_artifact(&art, "REALKEY", SignaturePolicy::Required).unwrap_err();
+        assert!(e.to_string().contains("missing .minisig"), "{e}");
+    }
+
+    #[test]
+    fn a_local_build_without_a_signature_installs_on_its_sha256() {
+        let (_d, art) = artifact_with_sha(b"payload", true);
+        assert!(verify_artifact(&art, "REALKEY", SignaturePolicy::LocalBuild).is_ok());
+    }
+
+    #[test]
+    fn a_garbage_signature_is_refused_even_for_a_local_build() {
+        // A present signature is checked under every policy. Whether minisign
+        // reports it invalid (tamper) or is absent from this host, a release
+        // asset is refused; a local build is refused only for the tamper case.
+        let (_d, art) = artifact_with_sha(b"payload", true);
+        std::fs::write(sidecar(&art, "minisig"), b"not a signature").unwrap();
+        assert!(verify_artifact(&art, RELEASE_PUBKEY, SignaturePolicy::Required).is_err());
+        if exec::run("minisign", &["-v"]).spawned {
+            let e = verify_artifact(&art, RELEASE_PUBKEY, SignaturePolicy::LocalBuild).unwrap_err();
+            assert!(e.to_string().contains("tamper"), "{e}");
+        }
     }
 }

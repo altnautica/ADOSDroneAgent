@@ -8,9 +8,10 @@
 //! and the arch translation (`uname -m` aarch64 → kernel `arm64`). Re-porting
 //! that is exactly the kind of heavy OS logic Rust delegates rather than
 //! rewrites. We only OWN the ORDER (this step runs after `deps`) + the verify:
-//! the checkpoint marks only when the module is actually present afterwards,
-//! mirroring the bash `run_health_gate` radio verify
-//! (`lsmod | grep 8812eu || modinfo 8812eu`).
+//! the step succeeds (and the checkpoint marks) only when the script exited 0
+//! AND the module the kernel resolves is built for the running kernel
+//! (`modinfo -F vermagic 8812eu` names `uname -r`), so a failed rebuild that
+//! leaves an older module on disk is reported as the failure it is.
 
 use std::path::Path;
 
@@ -27,19 +28,20 @@ const MODULE_NAME: &str = "8812eu";
 /// (`prebuilt` | `dkms`). The result builder reads this back.
 const WFB_MODULE_SOURCE_FILE: &str = "/run/ados/wfb-module-source";
 
-/// True when the RTL8812EU module is present — loaded (`lsmod`) or at least
-/// resolvable on disk (`modinfo`). Mirrors the bash health-gate radio verify.
-fn module_present() -> bool {
-    let lsmod = exec::run("lsmod", &[]);
-    if lsmod.success()
-        && lsmod
-            .stdout
-            .lines()
-            .any(|l| l.split_whitespace().next() == Some(MODULE_NAME))
-    {
-        return true;
-    }
-    exec::run_ok("modinfo", &[MODULE_NAME])
+/// Whether a module `vermagic` string was built for `kernel_release` (its
+/// first field is the release, e.g. `6.6.31+rpt-rpi-v8 SMP preempt ...`).
+fn vermagic_matches(vermagic: &str, kernel_release: &str) -> bool {
+    !kernel_release.is_empty() && vermagic.split_whitespace().next() == Some(kernel_release)
+}
+
+/// True when the RTL8812EU module the kernel resolves (`modinfo`) is built for
+/// the running kernel.
+fn module_current() -> bool {
+    let release = exec::run("uname", &["-r"]);
+    let vermagic = exec::run("modinfo", &["-F", "vermagic", MODULE_NAME]);
+    release.success()
+        && vermagic.success()
+        && vermagic_matches(vermagic.stdout.trim(), release.stdout.trim())
 }
 
 /// RTL8812EU DKMS build + install (delegated).
@@ -61,9 +63,8 @@ impl Step for Dkms {
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
         // Opt-out: a node with no long-range radio (workstation / compute) or an
         // explicit operator choice skips the driver build. Returning Skipped keeps
-        // the rtl_regulatory dependency satisfied; because the graph marks the
-        // `radio-driver` checkpoint on a skip too, a later opt-IN re-run needs
-        // `--upgrade`/`--force` (both clear checkpoints).
+        // the rtl_regulatory dependency satisfied; a skip marks no checkpoint, so
+        // a later opt-in re-run builds the driver.
         if !ctx.install_rtl8812eu {
             tracing::info!("RTL8812EU driver install skipped (--no-rtl-driver)");
             return StepOutcome::Skipped;
@@ -103,10 +104,11 @@ impl Step for Dkms {
             return StepOutcome::Failed("bash not available to run the driver script".to_string());
         }
 
-        // Verify the real outcome, not just the exit code: the bash health
-        // gate trusts the module presence, not the script's return.
-        if module_present() {
-            tracing::info!("RTL8812EU module present after install");
+        // Verify the real outcome: the script must report success AND the
+        // module on disk must be built for this kernel. Presence alone is not
+        // enough: a failed rebuild leaves the previous build resolvable.
+        if res.code == Some(0) && module_current() {
+            tracing::info!("RTL8812EU module built for the running kernel after install");
             // Belt-and-suspenders: if the script did not drop the sentinel (an
             // older script, or it built but did not write), record `dkms` so
             // the result's wfbModuleSource is accurate.
@@ -115,12 +117,18 @@ impl Step for Dkms {
         } else {
             tracing::warn!(
                 code = ?res.code,
-                "RTL8812EU module not present after driver install; recording optional failure"
+                "RTL8812EU driver install did not succeed for the running kernel; recording optional failure"
             );
             // Drop a stale/optimistic sentinel so the result reports the radio
             // as absent (wfbModuleSource empty) rather than a phantom value.
             let _ = std::fs::remove_file(WFB_MODULE_SOURCE_FILE);
-            StepOutcome::Failed("RTL8812EU kernel module not present after install".to_string())
+            let why = if res.code == Some(0) {
+                "RTL8812EU kernel module for the running kernel not present after install"
+                    .to_string()
+            } else {
+                format!("RTL8812EU driver install exited with {:?}", res.code)
+            };
+            StepOutcome::Failed(why)
         }
     }
 }
@@ -158,5 +166,21 @@ mod tests {
         let mut ctx = Ctx::from_args(args, EnvInfo::probe(), Checkpoint::new());
         assert!(!ctx.install_rtl8812eu);
         assert_eq!(Dkms.run(&mut ctx), StepOutcome::Skipped);
+    }
+
+    /// Only a module built for the running kernel counts as installed.
+    #[test]
+    fn vermagic_must_name_the_running_kernel() {
+        let release = "6.6.31+rpt-rpi-v8";
+        assert!(vermagic_matches(
+            "6.6.31+rpt-rpi-v8 SMP preempt mod_unload aarch64",
+            release
+        ));
+        assert!(!vermagic_matches(
+            "6.6.20+rpt-rpi-v8 SMP preempt mod_unload aarch64",
+            release
+        ));
+        assert!(!vermagic_matches("", release));
+        assert!(!vermagic_matches("6.6.31+rpt-rpi-v8 SMP", ""));
     }
 }
