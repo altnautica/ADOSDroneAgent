@@ -109,6 +109,23 @@ const TELEMETRY_STATE_MIN_INTERVAL: Duration =
 /// the task set without bound.
 const DETACHED_MAX_IN_FLIGHT: usize = 32;
 
+/// How long a new connection has to complete its `hello`. A peer that
+/// connects and stalls is dropped instead of holding a task and an fd.
+const HELLO_DEADLINE: Duration = Duration::from_secs(5);
+
+/// The largest frame accepted before the `hello` authenticates the peer. A
+/// hello is a token and a few fields; nothing larger is read until it verifies.
+const HELLO_MAX_FRAME: usize = 64 * 1024;
+
+/// Most connections one plugin socket serves at once: the main process, its
+/// declared services and a reconnect overlapping a teardown fit well inside
+/// it. A connection past the cap is closed on accept.
+pub const PLUGIN_MAX_CONNECTIONS: usize = 16;
+
+/// The read size a frame body grows by, so a short or stalled frame never
+/// costs its announced length up front.
+const READ_CHUNK: usize = 64 * 1024;
+
 /// Errors raised while running one plugin's socket server.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -135,16 +152,17 @@ fn now_ms() -> i64 {
 
 /// Live per-plugin token-refresh channels.
 ///
-/// A rotation has to reach the *open connection*, not just the env file: the
-/// connection gates every request against the token it verified at `hello`, so
-/// rewriting the env file alone would leave a running plugin on the old grant
-/// set until it restarted. Each connection registers a sender here for its
-/// session; [`push`](Self::push) hands a freshly minted token to it, the
-/// connection swaps its in-memory token and forwards a `token.refresh` event so
-/// the plugin's own copy (used on reconnect) is current too.
+/// A rotation has to reach every *open connection*, not just the token
+/// credential: each connection gates every request against the token it
+/// verified at `hello`, so rewriting the file alone would leave a running
+/// plugin on the old grant set until it restarted. One plugin may hold several
+/// sessions at once (its main process, its declared services, a reconnect), so
+/// each connection registers its own sender; [`push`](Self::push) hands a
+/// freshly minted token to every one of them, and each connection swaps its
+/// in-memory token and forwards a `token.refresh` event.
 #[derive(Default)]
 pub struct RefreshRegistry {
-    inner: Mutex<HashMap<String, mpsc::Sender<CapabilityToken>>>,
+    inner: Mutex<HashMap<String, Vec<mpsc::Sender<CapabilityToken>>>>,
 }
 
 impl RefreshRegistry {
@@ -156,32 +174,36 @@ impl RefreshRegistry {
 
     fn register(&self, plugin_id: &str, tx: mpsc::Sender<CapabilityToken>) {
         if let Ok(mut map) = self.inner.lock() {
-            map.insert(plugin_id.to_string(), tx);
+            map.entry(plugin_id.to_string()).or_default().push(tx);
         }
     }
 
-    /// Drop this session's sender, identity-checked so a superseding reconnect
-    /// is never evicted by an ending session.
+    /// Drop this session's sender, identity-checked so another live session of
+    /// the same plugin keeps its own.
     fn unregister_if(&self, plugin_id: &str, tx: &mpsc::Sender<CapabilityToken>) {
         if let Ok(mut map) = self.inner.lock() {
-            if map.get(plugin_id).is_some_and(|held| held.same_channel(tx)) {
-                map.remove(plugin_id);
+            if let Some(senders) = map.get_mut(plugin_id) {
+                senders.retain(|held| !held.same_channel(tx));
+                if senders.is_empty() {
+                    map.remove(plugin_id);
+                }
             }
         }
     }
 
-    /// Hand a token to a live connection. `false` when the plugin has no open
-    /// session (nothing to update; the env file the caller already wrote is
-    /// what the plugin will read when it connects).
+    /// Hand a token to every live session of the plugin. `false` when none
+    /// took it (nothing open, or every queue full); the credential the caller
+    /// already wrote is what the plugin reads when it next connects.
     pub fn push(&self, plugin_id: &str, token: CapabilityToken) -> bool {
-        let tx = match self.inner.lock() {
-            Ok(map) => map.get(plugin_id).cloned(),
-            Err(_) => None,
+        let senders = match self.inner.lock() {
+            Ok(map) => map.get(plugin_id).cloned().unwrap_or_default(),
+            Err(_) => Vec::new(),
         };
-        match tx {
-            Some(tx) => tx.try_send(token).is_ok(),
-            None => false,
+        let mut delivered = false;
+        for tx in senders {
+            delivered |= tx.try_send(token.clone()).is_ok();
         }
+        delivered
     }
 }
 
@@ -268,8 +290,8 @@ impl<H: HostServices> PluginIpcServer<H> {
     pub fn serve_plugin(&self, plugin_id: &str) -> Result<(PathBuf, JoinHandle<()>), ServerError> {
         // The plugin's own directory first (the one its unit bind-mounts), then
         // the shared helper's remove-stale / bind / chmod hygiene inside it.
-        // 0o660 and the `ados` group let the plugin's unit (which runs as
-        // `ados`) connect; every request is then gated on its token.
+        // 0o660 and the plugin group let the plugin's unit (its own user, in
+        // that group) connect; every request is then gated on its token.
         prepare_plugin_socket_dir(&plugin_socket_dir(&self.socket_dir, plugin_id))?;
         let path = self.socket_path(plugin_id);
         let listener = ados_protocol::ipc::bind_plugin_socket(&path, 0o660)?;
@@ -283,6 +305,7 @@ impl<H: HostServices> PluginIpcServer<H> {
         let refresh = self.refresh.clone();
         let mint = self.mint.clone();
         let shared_topics = self.shared_topics.clone();
+        let permits = Arc::new(tokio::sync::Semaphore::new(PLUGIN_MAX_CONNECTIONS));
         let task = tokio::spawn(async move {
             loop {
                 let stream = match listener.accept().await {
@@ -295,12 +318,20 @@ impl<H: HostServices> PluginIpcServer<H> {
                         continue;
                     }
                 };
-                // Every accepted connection is a new session; its teardown
-                // releases only what it acquired.
-                let session = host.begin_session(&plugin_id);
-                let conn = Connection {
+                // A connection past the cap is closed at once: the socket's
+                // group could otherwise hold unlimited idle connections.
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    tracing::warn!(
+                        plugin_id = %plugin_id,
+                        limit = PLUGIN_MAX_CONNECTIONS,
+                        "plugin socket connection limit reached; closing the new connection"
+                    );
+                    drop(stream);
+                    continue;
+                };
+                let mut conn = Connection {
                     plugin_id: plugin_id.clone(),
-                    session,
+                    session: 0,
                     token_issuer: token_issuer.clone(),
                     bus: bus.clone(),
                     host: host.clone(),
@@ -311,7 +342,31 @@ impl<H: HostServices> PluginIpcServer<H> {
                     shared_topics: shared_topics.clone(),
                 };
                 tokio::spawn(async move {
-                    if let Err(err) = conn.run(stream).await {
+                    let _permit = permit;
+                    let handshake = match tokio::time::timeout(
+                        HELLO_DEADLINE,
+                        conn.handshake(stream),
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(done))) => done,
+                        Ok(Ok(None)) => return,
+                        Ok(Err(err)) => {
+                            tracing::warn!(plugin_id = %conn.plugin_id, error = %err, "plugin handshake failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!(plugin_id = %conn.plugin_id, "plugin handshake timed out");
+                            return;
+                        }
+                    };
+                    // A session begins only once the peer has authenticated,
+                    // so a connection that never says hello can neither take
+                    // nor release anything another session holds.
+                    let session = conn.host.begin_session(&conn.plugin_id);
+                    conn.session = session;
+                    let (token, read_half, write_half) = handshake;
+                    if let Err(err) = conn.serve(token, read_half, write_half).await {
                         tracing::warn!(
                             plugin_id = %conn.plugin_id,
                             error = %err,
@@ -330,21 +385,34 @@ impl<H: HostServices> PluginIpcServer<H> {
     /// only unlinks the socket so a later re-serve binds cleanly and no stale
     /// socket lingers. A live connection's `release_session` already runs on
     /// disconnect (see [`serve_plugin`]); aborting the accept task stops new
-    /// connections.
+    /// connections. The host drops whatever it holds for the plugin as a whole
+    /// (its display page, its registered vision models).
     pub fn stop_plugin(&self, plugin_id: &str) {
         let path = self.socket_path(plugin_id);
         let _ = std::fs::remove_file(&path);
         // Drop the plugin's published-state sidecar too, so a stopped plugin
         // does not leave a stale state file the front would keep serving.
         crate::state_sidecar::remove(&self.socket_dir, plugin_id);
+        let host = self.host.clone();
+        let plugin_id = plugin_id.to_string();
+        tokio::spawn(async move { host.release_plugin(&plugin_id).await });
     }
 }
+
+/// The read and write halves of an authenticated connection, with the token
+/// its `hello` verified.
+type Handshake = (
+    CapabilityToken,
+    tokio::net::unix::OwnedReadHalf,
+    tokio::net::unix::OwnedWriteHalf,
+);
 
 /// One accepted connection from a plugin runner.
 struct Connection<H: HostServices> {
     plugin_id: String,
-    /// This connection's session, from [`HostServices::begin_session`]. The
-    /// host methods that hold per-connection state (an mDNS record) key it on
+    /// This connection's session, from [`HostServices::begin_session`], taken
+    /// once its `hello` verified. The host methods that hold per-connection
+    /// state (an mDNS record, the aux stream, the display page) key it on
     /// this, since one plugin may hold several connections at once.
     session: u64,
     token_issuer: Arc<TokenIssuer>,
@@ -357,7 +425,7 @@ struct Connection<H: HostServices> {
     /// sender here while its session is up so the control socket can reach it.
     invoke: Arc<InvokeRegistry>,
     /// The shared refresh registry: this connection registers a token sender
-    /// here so a rotation reaches the live session, not just the env file.
+    /// here so a rotation reaches the live session, not just the credential.
     refresh: Arc<RefreshRegistry>,
     /// Mints this plugin's current token from state, for the on-expiry re-mint.
     mint: Option<Arc<TokenMint>>,
@@ -366,23 +434,19 @@ struct Connection<H: HostServices> {
 }
 
 impl<H: HostServices> Connection<H> {
-    /// Run the handshake then the dispatch loop. Returns when the peer closes
-    /// or a protocol error occurs.
-    async fn run(&self, stream: UnixStream) -> Result<(), ServerError> {
+    /// Run the `hello` handshake: read one bounded frame, verify the token
+    /// against this socket's plugin, answer `ready`. `Ok(None)` when the peer
+    /// closed or was refused (the refusal was already sent).
+    async fn handshake(&self, stream: UnixStream) -> Result<Option<Handshake>, ServerError> {
         let (mut read_half, mut write_half) = stream.into_split();
-
-        // ---- handshake -------------------------------------------------
-        let Some(env) = read_envelope(&mut read_half).await? else {
-            return Ok(()); // clean EOF before any frame
+        let Some(env) = read_envelope_capped(&mut read_half, HELLO_MAX_FRAME).await? else {
+            return Ok(None); // clean EOF before any frame
         };
         if env.method != "hello" {
             send_error(&mut write_half, "-", "expected hello envelope").await?;
-            return Ok(());
+            return Ok(None);
         }
-        // Mutable: a rotation (permission change or TTL refresh) replaces the
-        // session's token in place, so the gate always runs against the
-        // operator's current grant set without tearing the connection down.
-        let mut token = match CapabilityToken::from_token_string(&env.token) {
+        let token = match CapabilityToken::from_token_string(&env.token) {
             Ok(t) => t,
             Err(e) => {
                 send_error(
@@ -391,7 +455,7 @@ impl<H: HostServices> Connection<H> {
                     &format!("capability token invalid: {e}"),
                 )
                 .await?;
-                return Ok(());
+                return Ok(None);
             }
         };
         if let Err(e) = self.token_issuer.verify(&token, now_secs()) {
@@ -401,7 +465,7 @@ impl<H: HostServices> Connection<H> {
                 &format!("capability token invalid: {e}"),
             )
             .await?;
-            return Ok(());
+            return Ok(None);
         }
         if token.plugin_id != self.plugin_id {
             send_error(
@@ -413,7 +477,7 @@ impl<H: HostServices> Connection<H> {
                 ),
             )
             .await?;
-            return Ok(());
+            return Ok(None);
         }
         // ready handshake response: {"ready": true}
         send_response(
@@ -422,7 +486,21 @@ impl<H: HostServices> Connection<H> {
             Value::Map(vec![(Value::from("ready"), Value::Boolean(true))]),
         )
         .await?;
+        Ok(Some((token, read_half, write_half)))
+    }
 
+    /// Run the dispatch loop of an authenticated connection. Returns when the
+    /// peer closes or a protocol error occurs.
+    async fn serve(
+        &self,
+        token: CapabilityToken,
+        mut read_half: tokio::net::unix::OwnedReadHalf,
+        mut write_half: tokio::net::unix::OwnedWriteHalf,
+    ) -> Result<(), ServerError> {
+        // Mutable: a rotation (permission change or TTL refresh) replaces the
+        // session's token in place, so the gate always runs against the
+        // operator's current grant set without tearing the connection down.
+        let mut token = token;
         // The event fan-out task pushes matching events to this plugin. Built
         // once the session is up; it filters the shared bus by the plugin's
         // active subscription patterns. A single task drains the bus receiver
@@ -441,7 +519,7 @@ impl<H: HostServices> Connection<H> {
         // dedupe; the forwarders own the receivers.
         let mut mavlink_subs: Vec<String> = Vec::new();
         let (mav_tx, mut mav_rx) = tokio::sync::mpsc::channel::<MavlinkDelivery>(256);
-        let mut forwarders: Vec<JoinHandle<()>> = Vec::new();
+        let mut forwarders = Forwarders::default();
 
         // Vision frame-descriptor subscriptions. Each `vision.subscribe_frames`
         // records the camera_id and a descriptor receiver from the host's vision
@@ -788,6 +866,21 @@ impl<H: HostServices> Connection<H> {
                             .collect();
                         let wire = fresh.to_token_string();
                         token = fresh;
+                        self.prune_revoked(
+                            &token,
+                            Subscriptions {
+                                events: &mut subscriptions,
+                                mavlink: &mut mavlink_subs,
+                                vision: &mut vision_subs,
+                                detections: &mut detection_subs,
+                                button: &mut button_subscribed,
+                                msp: &mut msp_subscribed,
+                                aux: &mut aux_subscribed,
+                                display_zone: &mut dz_subscribed,
+                                telemetry: &mut telemetry_subscribed,
+                            },
+                            &mut forwarders,
+                        );
                         let env = Envelope {
                             version: PROTOCOL_VERSION,
                             kind: "event".to_string(),
@@ -836,9 +929,7 @@ impl<H: HostServices> Connection<H> {
         // Stop the per-subscription forwarder tasks, the detached host calls
         // and the request reader so none survive the session. A detached call
         // is a stateless forward, so cutting it short leaves nothing held.
-        for f in forwarders {
-            f.abort();
-        }
+        forwarders.abort_all();
         in_flight.abort_all();
         reader.abort();
         result
@@ -868,7 +959,7 @@ impl<H: HostServices> Connection<H> {
         dz_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         telemetry_subscribed: &mut bool,
         tel_tx: &mpsc::Sender<Arc<Value>>,
-        forwarders: &mut Vec<JoinHandle<()>>,
+        forwarders: &mut Forwarders,
         in_flight: &mut JoinSet<DetachedReply>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
@@ -900,6 +991,21 @@ impl<H: HostServices> Connection<H> {
                         .map(|c| Value::from(c.as_str()))
                         .collect();
                     *token = fresh;
+                    self.prune_revoked(
+                        token,
+                        Subscriptions {
+                            events: &mut *subscriptions,
+                            mavlink: &mut *mavlink_subs,
+                            vision: &mut *vision_subs,
+                            detections: &mut *detection_subs,
+                            button: &mut *button_subscribed,
+                            msp: &mut *msp_subscribed,
+                            aux: &mut *aux_subscribed,
+                            display_zone: &mut *dz_subscribed,
+                            telemetry: &mut *telemetry_subscribed,
+                        },
+                        &mut *forwarders,
+                    );
                     let notice = Envelope {
                         version: PROTOCOL_VERSION,
                         kind: "event".to_string(),
@@ -988,7 +1094,7 @@ impl<H: HostServices> Connection<H> {
         dz_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
         telemetry_subscribed: &mut bool,
         tel_tx: &mpsc::Sender<Arc<Value>>,
-        forwarders: &mut Vec<JoinHandle<()>>,
+        forwarders: &mut Forwarders,
         in_flight: &mut JoinSet<DetachedReply>,
     ) -> Result<(), ServerError> {
         match method {
@@ -1012,11 +1118,14 @@ impl<H: HostServices> Connection<H> {
                 }
                 *telemetry_subscribed = true;
                 if let Some(rx) = self.host.telemetry_state_stream(&self.plugin_id) {
-                    forwarders.push(tokio::spawn(pace_snapshots(
-                        rx,
-                        tel_tx.clone(),
-                        TELEMETRY_STATE_MIN_INTERVAL,
-                    )));
+                    forwarders.push(
+                        Method::TelemetrySubscribe,
+                        tokio::spawn(pace_snapshots(
+                            rx,
+                            tel_tx.clone(),
+                            TELEMETRY_STATE_MIN_INTERVAL,
+                        )),
+                    );
                 }
                 let result = Value::Map(vec![
                     (Value::from("subscribed"), Value::Boolean(true)),
@@ -1135,30 +1244,35 @@ impl<H: HostServices> Connection<H> {
                 if let Some(mut rx) = self.host.mavlink_subscribe_stream(&self.plugin_id, &name) {
                     let tx = mav_tx.clone();
                     let fwd_name = name.clone();
-                    forwarders.push(tokio::spawn(async move {
-                        loop {
-                            match rx.recv().await {
-                                Ok(chunk) => {
-                                    for frame in ados_protocol::aux_mux::split_frames(&chunk) {
-                                        if crate::realhost::mavlink_msg_id(frame) != Some(msg_id) {
-                                            continue;
-                                        }
-                                        let delivery = MavlinkDelivery {
-                                            msg_name: fwd_name.clone(),
-                                            frame: frame.to_vec(),
-                                        };
-                                        if tx.send(delivery).await.is_err() {
-                                            return; // connection gone
+                    forwarders.push(
+                        Method::MavlinkSubscribe,
+                        tokio::spawn(async move {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(chunk) => {
+                                        for frame in ados_protocol::aux_mux::split_frames(&chunk) {
+                                            if crate::realhost::mavlink_msg_id(frame)
+                                                != Some(msg_id)
+                                            {
+                                                continue;
+                                            }
+                                            let delivery = MavlinkDelivery {
+                                                msg_name: fwd_name.clone(),
+                                                frame: frame.to_vec(),
+                                            };
+                                            if tx.send(delivery).await.is_err() {
+                                                return; // connection gone
+                                            }
                                         }
                                     }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    }));
+                        }),
+                    );
                 }
                 let result = Value::Map(vec![
                     (Value::from("subscribed"), Value::Boolean(true)),
@@ -1189,21 +1303,24 @@ impl<H: HostServices> Connection<H> {
                     .vision_subscribe_stream(&self.plugin_id, &camera_id)
                 {
                     let tx = vis_tx.clone();
-                    forwarders.push(tokio::spawn(async move {
-                        loop {
-                            match rx.recv().await {
-                                Ok(descriptor) => {
-                                    if tx.send(VisionDelivery { descriptor }).await.is_err() {
-                                        break; // connection gone
+                    forwarders.push(
+                        Method::VisionSubscribeFrames,
+                        tokio::spawn(async move {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(descriptor) => {
+                                        if tx.send(VisionDelivery { descriptor }).await.is_err() {
+                                            break; // connection gone
+                                        }
                                     }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    }));
+                        }),
+                    );
                 }
                 let result = Value::Map(vec![
                     (Value::from("subscribed"), Value::Boolean(true)),
@@ -1227,24 +1344,27 @@ impl<H: HostServices> Connection<H> {
                 *button_subscribed = true;
                 if let Some(mut rx) = self.host.button_subscribe_stream(&self.plugin_id) {
                     let tx = btn_tx.clone();
-                    forwarders.push(tokio::spawn(async move {
-                        loop {
-                            match rx.recv().await {
-                                Ok(press) => {
-                                    if tx.send(press).await.is_err() {
-                                        break;
+                    forwarders.push(
+                        Method::ButtonSubscribe,
+                        tokio::spawn(async move {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(press) => {
+                                        if tx.send(press).await.is_err() {
+                                            break;
+                                        }
                                     }
+                                    // Lagged: this subscriber fell behind and the
+                                    // oldest presses were dropped. Keep going — a
+                                    // missed press is better than a dead stream.
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 }
-                                // Lagged: this subscriber fell behind and the
-                                // oldest presses were dropped. Keep going — a
-                                // missed press is better than a dead stream.
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    }));
+                        }),
+                    );
                 }
                 let result = Value::Map(vec![(Value::from("subscribed"), Value::Boolean(true))]);
                 send_response(write_half, &env.request_id, result).await
@@ -1265,21 +1385,24 @@ impl<H: HostServices> Connection<H> {
                 *msp_subscribed = true;
                 if let Some(mut rx) = self.host.msp_subscribe_stream(&self.plugin_id) {
                     let tx = msp_tx.clone();
-                    forwarders.push(tokio::spawn(async move {
-                        loop {
-                            match rx.recv().await {
-                                Ok(bytes) => {
-                                    if tx.send(bytes).await.is_err() {
-                                        break;
+                    forwarders.push(
+                        Method::MspSubscribe,
+                        tokio::spawn(async move {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(bytes) => {
+                                        if tx.send(bytes).await.is_err() {
+                                            break;
+                                        }
                                     }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    }));
+                        }),
+                    );
                 }
                 let result = Value::Map(vec![(Value::from("subscribed"), Value::Boolean(true))]);
                 send_response(write_half, &env.request_id, result).await
@@ -1288,9 +1411,11 @@ impl<H: HostServices> Connection<H> {
             // datagram push stream off the host's shared aux reader, exactly like
             // button.subscribe arms the press stream. A second subscribe on the
             // same connection is idempotent rather than an error: re-arming would
-            // duplicate every app frame to that plugin. The plugin that subscribed
-            // IS this connection, so no separate owner gate is required — a plugin
-            // only ever receives the app frames it asked for on its own stream.
+            // duplicate every app frame to that plugin. The stream is one shared
+            // resource, so only the session that opened it may subscribe, and
+            // the forwarder passes a datagram only while that session still owns
+            // it: another plugin holding the capability never sees the owner's
+            // application traffic.
             Method::RadioAuxStreamSubscribe => {
                 if *aux_subscribed {
                     let result = Value::Map(vec![(
@@ -1299,27 +1424,42 @@ impl<H: HostServices> Connection<H> {
                     )]);
                     return send_response(write_half, &env.request_id, result).await;
                 }
+                let rx = match self
+                    .host
+                    .radio_aux_stream_subscribe_stream(&self.plugin_id, self.session)
+                {
+                    Ok(rx) => rx,
+                    Err(e) => return send_error(write_half, &env.request_id, &e.body()).await,
+                };
                 *aux_subscribed = true;
-                if let Some(mut rx) = self.host.radio_aux_stream_subscribe_stream(&self.plugin_id) {
+                if let Some(mut rx) = rx {
                     let tx = aux_tx.clone();
-                    forwarders.push(tokio::spawn(async move {
-                        loop {
-                            match rx.recv().await {
-                                Ok(app) => {
-                                    if tx.send(app).await.is_err() {
-                                        break;
+                    let host = self.host.clone();
+                    let (plugin_id, session) = (self.plugin_id.clone(), self.session);
+                    forwarders.push(
+                        Method::RadioAuxStreamSubscribe,
+                        tokio::spawn(async move {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(app) => {
+                                        if !host.aux_stream_owned_by(&plugin_id, session) {
+                                            continue;
+                                        }
+                                        if tx.send(app).await.is_err() {
+                                            break;
+                                        }
                                     }
+                                    // Lagged: this subscriber fell behind and the
+                                    // oldest frames were dropped. Keep going — the app
+                                    // lane is lossy-tolerant by design.
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 }
-                                // Lagged: this subscriber fell behind and the
-                                // oldest frames were dropped. Keep going — the app
-                                // lane is lossy-tolerant by design.
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    }));
+                        }),
+                    );
                 }
                 let result = Value::Map(vec![(Value::from("subscribed"), Value::Boolean(true))]);
                 send_response(write_half, &env.request_id, result).await
@@ -1328,9 +1468,8 @@ impl<H: HostServices> Connection<H> {
             // for the plugin's reserved display page, exactly like button.subscribe
             // arms the press stream. A second subscribe on the same connection is
             // idempotent (re-arming would duplicate every tap to that plugin). The
-            // plugin that subscribed IS the page owner for that connection, so no
-            // separate owner gate is needed — taps only ever reach the plugin that
-            // asked for them on its own stream.
+            // page is one shared resource, so a tap is passed on only while this
+            // plugin owns the page: a tap on another plugin's page never reaches it.
             Method::DisplayZoneSubscribe => {
                 if *dz_subscribed {
                     let result = Value::Map(vec![(
@@ -1342,24 +1481,32 @@ impl<H: HostServices> Connection<H> {
                 *dz_subscribed = true;
                 if let Some(mut rx) = self.host.display_zone_tap_stream(&self.plugin_id) {
                     let tx = dz_tx.clone();
-                    forwarders.push(tokio::spawn(async move {
-                        loop {
-                            match rx.recv().await {
-                                Ok(key) => {
-                                    if tx.send(key).await.is_err() {
-                                        break;
+                    let host = self.host.clone();
+                    let plugin_id = self.plugin_id.clone();
+                    forwarders.push(
+                        Method::DisplayZoneSubscribe,
+                        tokio::spawn(async move {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(key) => {
+                                        if !host.display_page_owned_by(&plugin_id) {
+                                            continue;
+                                        }
+                                        if tx.send(key).await.is_err() {
+                                            break;
+                                        }
                                     }
+                                    // Lagged: the watcher produced taps faster than this
+                                    // subscriber drained them. Drop the oldest — a
+                                    // missed tap is better than a dead stream.
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 }
-                                // Lagged: the watcher produced taps faster than this
-                                // subscriber drained them. Drop the oldest — a
-                                // missed tap is better than a dead stream.
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    }));
+                        }),
+                    );
                 }
                 let result = Value::Map(vec![(Value::from("subscribed"), Value::Boolean(true))]);
                 send_response(write_half, &env.request_id, result).await
@@ -1387,21 +1534,24 @@ impl<H: HostServices> Connection<H> {
                     .vision_subscribe_detection_stream(&self.plugin_id, &camera_id)
                 {
                     let tx = det_tx.clone();
-                    forwarders.push(tokio::spawn(async move {
-                        loop {
-                            match rx.recv().await {
-                                Ok(batch) => {
-                                    if tx.send(DetectionDelivery { batch }).await.is_err() {
-                                        break; // connection gone
+                    forwarders.push(
+                        Method::VisionSubscribeDetections,
+                        tokio::spawn(async move {
+                            loop {
+                                match rx.recv().await {
+                                    Ok(batch) => {
+                                        if tx.send(DetectionDelivery { batch }).await.is_err() {
+                                            break; // connection gone
+                                        }
                                     }
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                        continue
+                                    }
+                                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                                 }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
-                        }
-                    }));
+                        }),
+                    );
                 }
                 let result = Value::Map(vec![
                     (Value::from("subscribed"), Value::Boolean(true)),
@@ -1516,6 +1666,67 @@ impl<H: HostServices> Connection<H> {
         }
     }
 
+    /// Drop every subscription the adopted `token` no longer covers.
+    ///
+    /// A revoke re-mints the token, but a stream armed under the old grant
+    /// would keep running: its forwarder pulls frames whatever the token now
+    /// says. So each forwarder whose subscribe method needs a capability the
+    /// token lacks is aborted, and its subscription state is cleared so a
+    /// later re-grant can subscribe again. Event subscriptions are re-checked
+    /// pattern by pattern, since a topic can need its own capability.
+    fn prune_revoked(
+        &self,
+        token: &CapabilityToken,
+        subs: Subscriptions<'_>,
+        forwarders: &mut Forwarders,
+    ) {
+        let holds = |m: Method| {
+            m.required_cap()
+                .is_none_or(|c| token.granted_caps.contains(c))
+        };
+        forwarders.abort_where(|m| !holds(m));
+        let clear_list = |list: &mut Vec<String>, m: Method| {
+            if !holds(m) {
+                list.clear();
+            }
+        };
+        clear_list(subs.mavlink, Method::MavlinkSubscribe);
+        clear_list(subs.vision, Method::VisionSubscribeFrames);
+        clear_list(subs.detections, Method::VisionSubscribeDetections);
+        for (flag, m) in [
+            (subs.button, Method::ButtonSubscribe),
+            (subs.msp, Method::MspSubscribe),
+            (subs.aux, Method::RadioAuxStreamSubscribe),
+            (subs.display_zone, Method::DisplayZoneSubscribe),
+            (subs.telemetry, Method::TelemetrySubscribe),
+        ] {
+            if !holds(m) {
+                *flag = false;
+            }
+        }
+        if holds(Method::EventSubscribe) {
+            subs.events.retain(|pattern| {
+                handlers::is_subscribe_allowed(
+                    &self.plugin_id,
+                    pattern,
+                    &token.granted_caps,
+                    &self.shared_topics,
+                )
+            });
+        } else {
+            subs.events.clear();
+        }
+    }
+
+    /// Whether `token` still carries the capability `method` needs. Every
+    /// push re-checks it, so nothing already queued for a stream leaks out
+    /// after a revoke.
+    fn holds(token: &CapabilityToken, method: Method) -> bool {
+        method
+            .required_cap()
+            .is_none_or(|c| token.granted_caps.contains(c))
+    }
+
     /// Push a matched event to the plugin as an `event.deliver` envelope.
     async fn deliver_event<W: AsyncWriteExt + Unpin>(
         &self,
@@ -1523,6 +1734,9 @@ impl<H: HostServices> Connection<H> {
         token: &CapabilityToken,
         event: &Event,
     ) -> Result<(), ServerError> {
+        if !Self::holds(token, Method::EventSubscribe) {
+            return Ok(());
+        }
         let env = Envelope {
             version: PROTOCOL_VERSION,
             kind: "event".to_string(),
@@ -1584,6 +1798,9 @@ impl<H: HostServices> Connection<H> {
         msg_name: &str,
         frame: &[u8],
     ) -> Result<(), ServerError> {
+        if !Self::holds(token, Method::MavlinkSubscribe) {
+            return Ok(());
+        }
         let ts = now_ms();
         let env = Envelope {
             version: PROTOCOL_VERSION,
@@ -1614,6 +1831,9 @@ impl<H: HostServices> Connection<H> {
         token: &CapabilityToken,
         descriptor: &[u8],
     ) -> Result<(), ServerError> {
+        if !Self::holds(token, Method::VisionSubscribeFrames) {
+            return Ok(());
+        }
         let ts = now_ms();
         let env = Envelope {
             version: PROTOCOL_VERSION,
@@ -1647,6 +1867,9 @@ impl<H: HostServices> Connection<H> {
         token: &CapabilityToken,
         press: &[u8],
     ) -> Result<(), ServerError> {
+        if !Self::holds(token, Method::ButtonSubscribe) {
+            return Ok(());
+        }
         let ts = now_ms();
         let decoded: ados_protocol::buttons::ButtonPress = match serde_json::from_slice(press) {
             Ok(v) => v,
@@ -1700,6 +1923,9 @@ impl<H: HostServices> Connection<H> {
         token: &CapabilityToken,
         bytes: &[u8],
     ) -> Result<(), ServerError> {
+        if !Self::holds(token, Method::MspSubscribe) {
+            return Ok(());
+        }
         let ts = now_ms();
         let env = Envelope {
             version: PROTOCOL_VERSION,
@@ -1731,6 +1957,9 @@ impl<H: HostServices> Connection<H> {
         channel: u8,
         payload: &[u8],
     ) -> Result<(), ServerError> {
+        if !Self::holds(token, Method::RadioAuxStreamSubscribe) {
+            return Ok(());
+        }
         let ts = now_ms();
         let env = Envelope {
             version: PROTOCOL_VERSION,
@@ -1760,6 +1989,9 @@ impl<H: HostServices> Connection<H> {
         token: &CapabilityToken,
         key: &str,
     ) -> Result<(), ServerError> {
+        if !Self::holds(token, Method::DisplayZoneSubscribe) {
+            return Ok(());
+        }
         let ts = now_ms();
         let env = Envelope {
             version: PROTOCOL_VERSION,
@@ -1789,6 +2021,9 @@ impl<H: HostServices> Connection<H> {
         token: &CapabilityToken,
         batch: &[u8],
     ) -> Result<(), ServerError> {
+        if !Self::holds(token, Method::VisionSubscribeDetections) {
+            return Ok(());
+        }
         let ts = now_ms();
         let env = Envelope {
             version: PROTOCOL_VERSION,
@@ -1804,6 +2039,50 @@ impl<H: HostServices> Connection<H> {
             error: None,
         };
         write_frame(write_half, &env).await
+    }
+}
+
+/// One connection's subscription state, borrowed together so a token
+/// adoption can prune it in one place.
+struct Subscriptions<'a> {
+    events: &'a mut Vec<String>,
+    mavlink: &'a mut Vec<String>,
+    vision: &'a mut Vec<String>,
+    detections: &'a mut Vec<String>,
+    button: &'a mut bool,
+    msp: &'a mut bool,
+    aux: &'a mut bool,
+    display_zone: &'a mut bool,
+    telemetry: &'a mut bool,
+}
+
+/// The per-subscription forwarder tasks of one connection, each tagged with
+/// the subscribe method that armed it, so a revoke can stop exactly the
+/// streams it no longer covers.
+#[derive(Default)]
+struct Forwarders(Vec<(Method, JoinHandle<()>)>);
+
+impl Forwarders {
+    fn push(&mut self, method: Method, task: JoinHandle<()>) {
+        self.0.push((method, task));
+    }
+
+    /// Abort and drop every forwarder whose method `revoked` selects.
+    fn abort_where(&mut self, revoked: impl Fn(Method) -> bool) {
+        self.0.retain(|(method, task)| {
+            if revoked(*method) {
+                task.abort();
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn abort_all(self) {
+        for (_, task) in self.0 {
+            task.abort();
+        }
     }
 }
 
@@ -1952,16 +2231,32 @@ async fn write_detached_reply<W: AsyncWriteExt + Unpin>(
 async fn read_envelope<R: AsyncReadExt + Unpin>(
     reader: &mut R,
 ) -> Result<Option<Envelope>, ServerError> {
+    read_envelope_capped(reader, PLUGIN_MAX_FRAME).await
+}
+
+/// [`read_envelope`] with a tighter frame cap. The body is read as it
+/// arrives rather than into a buffer sized from the header, so a peer that
+/// announces a large frame and stalls holds no more memory than it sent.
+async fn read_envelope_capped<R: AsyncReadExt + Unpin>(
+    reader: &mut R,
+    max_frame: usize,
+) -> Result<Option<Envelope>, ServerError> {
     let mut header = [0u8; HEADER_SIZE];
     match reader.read_exact(&mut header).await {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e.into()),
     }
-    let len = decode_len(header, PLUGIN_MAX_FRAME, true)
+    let len = decode_len(header, max_frame, true)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    let mut body = vec![0u8; len];
-    reader.read_exact(&mut body).await?;
+    let mut body = Vec::with_capacity(len.min(READ_CHUNK));
+    let read = (&mut *reader)
+        .take(len as u64)
+        .read_to_end(&mut body)
+        .await?;
+    if read != len {
+        return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+    }
     let env = Envelope::from_msgpack(&body)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     Ok(Some(env))

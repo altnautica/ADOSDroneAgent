@@ -49,6 +49,10 @@ pub struct OffloadLink {
     pub device_id: Option<String>,
     /// The detector model id the offload session runs (labels the source).
     pub model_id: Option<String>,
+    /// The plugin that advertised this link, when a plugin did. While the link
+    /// is fresh no other plugin may replace it.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 impl OffloadLink {
@@ -72,7 +76,14 @@ impl OffloadLink {
             target,
             device_id,
             model_id,
+            owner: None,
         }
+    }
+
+    /// This link, recorded as advertised by plugin `owner`.
+    pub fn owned_by(mut self, owner: &str) -> Self {
+        self.owner = Some(owner.to_string());
+        self
     }
 
     /// Whether this link should count as an offload path for the tier decision:

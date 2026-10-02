@@ -129,7 +129,9 @@ pub fn parse_injector_declaration(payload: &[u8]) -> Option<InjectorClaim> {
 /// so they cannot be forged by the writer. `off_box_source` and `injector` are
 /// the writer's own declarations (see [`IPC_DECLARE_OFF_BOX_SOURCE`] /
 /// [`IPC_DECLARE_INJECTOR_PREFIX`]) and are sticky for the life of the
-/// connection. Not `Copy`: the injector claim carries owned strings.
+/// connection, except that a plugin-plane writer ([`is_plugin_peer`]) starts
+/// out as an injector whatever it declares. Not `Copy`: the injector claim
+/// carries owned strings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IpcPeer {
     pub uid: Option<u32>,
@@ -138,9 +140,9 @@ pub struct IpcPeer {
     /// The writing process has declared that it is forwarding bytes that
     /// reached this node from somewhere else.
     pub off_box_source: bool,
-    /// The writing process has declared itself an autonomous injector, so its
-    /// commands are subject to the PIC arbiter. `None` = an operator/human
-    /// writer, never gated.
+    /// The writer is an autonomous injector, so its commands are subject to
+    /// the PIC arbiter: it declared itself one, or its kernel credentials put
+    /// it on the plugin plane. `None` = an operator/human writer, never gated.
     pub injector: Option<InjectorClaim>,
 }
 
@@ -151,18 +153,70 @@ pub struct InboundCommand {
     pub peer: IpcPeer,
 }
 
+/// The shared service user plugin processes ran as before each plugin got its
+/// own user. Still treated as plugin plane wherever it exists.
+pub const LEGACY_PLUGIN_USER: &str = "ados";
+
+/// Whether a connecting peer is on the plugin plane: the shared plugin user,
+/// or any process carrying [`PLUGIN_GROUP`] as its primary or a supplementary
+/// group. Such a writer is autonomous by construction, so it is gated as an
+/// injector whether or not it declares itself one; a self-declaration only
+/// binds the cooperating ones.
+///
+/// Pure over the kernel-reported credentials so the decision is testable
+/// without a second uid.
+pub fn is_plugin_peer(
+    peer_uid: u32,
+    peer_gids: &[u32],
+    plugin_user_uid: Option<u32>,
+    plugin_gid: Option<u32>,
+) -> bool {
+    plugin_user_uid == Some(peer_uid) || plugin_gid.is_some_and(|gid| peer_gids.contains(&gid))
+}
+
+/// The injector claim a plugin-plane writer carries from the moment it
+/// connects. It has no ticket, so on a paired node it can never verify, and
+/// the PIC arbiter lets it through only on an affirmative "nobody holds
+/// control" report.
+fn plugin_plane_claim(uid: u32) -> InjectorClaim {
+    InjectorClaim {
+        client_id: format!("uid:{uid}"),
+        ticket: None,
+    }
+}
+
 /// Read the connecting process's credentials. A platform or kernel that will
 /// not answer leaves the fields empty rather than inventing a value.
 fn peer_identity(stream: &UnixStream) -> IpcPeer {
-    match stream.peer_cred() {
-        Ok(cred) => IpcPeer {
-            uid: Some(cred.uid()),
-            gid: Some(cred.gid()),
-            pid: cred.pid(),
-            off_box_source: false,
-            injector: None,
-        },
-        Err(_) => IpcPeer::default(),
+    let Ok(cred) = stream.peer_cred() else {
+        return IpcPeer::default();
+    };
+    #[allow(unused_mut)]
+    let mut gids = vec![cred.gid()];
+    #[cfg(target_os = "linux")]
+    gids.extend(peer_supplementary_groups(stream));
+    let plugin = is_plugin_peer(
+        cred.uid(),
+        &gids,
+        user_uid(LEGACY_PLUGIN_USER),
+        group_gid(PLUGIN_GROUP),
+    );
+    IpcPeer {
+        uid: Some(cred.uid()),
+        gid: Some(cred.gid()),
+        pid: cred.pid(),
+        off_box_source: false,
+        injector: plugin.then(|| plugin_plane_claim(cred.uid())),
+    }
+}
+
+fn user_uid(name: &str) -> Option<u32> {
+    match nix::unistd::User::from_name(name) {
+        Ok(user) => user.map(|u| u.uid.as_raw()),
+        Err(err) => {
+            tracing::debug!(error = %err, user = name, "resolving plugin user failed");
+            None
+        }
     }
 }
 
@@ -539,10 +593,12 @@ impl Drop for IpcBroadcast {
 /// it and adds the human operator; the plugin user is never a member.
 pub const OPERATOR_GROUP: &str = "ados-operator";
 
-/// The group the plugin units run in. It owns only the per-plugin sockets
+/// The group every plugin unit runs in as its primary group. Each plugin has
+/// its own system user; this shared group owns only the per-plugin sockets
 /// ([`bind_plugin_socket`]), which gate every request on the plugin's own
-/// capability token.
-pub const PLUGIN_GROUP: &str = "ados";
+/// capability token, and it is what the plugin loopback guard and the router
+/// match a plugin process by.
+pub const PLUGIN_GROUP: &str = "ados-plugins";
 
 /// Whether a connecting peer may use a command-plane socket.
 ///
@@ -1484,6 +1540,25 @@ mod tests {
 
         server.abort();
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn plugin_plane_peers_are_injectors_whatever_they_declare() {
+        let plugin_gid = Some(980);
+        let legacy_user = Some(995);
+        // A per-plugin user: primary group is the plugin group.
+        assert!(is_plugin_peer(1201, &[980], legacy_user, plugin_gid));
+        // The plugin group as a supplementary group counts too.
+        assert!(is_plugin_peer(1201, &[1201, 980], legacy_user, plugin_gid));
+        // The legacy shared plugin user, whatever its groups.
+        assert!(is_plugin_peer(995, &[995], legacy_user, plugin_gid));
+        // Root and an operator are not.
+        assert!(!is_plugin_peer(0, &[0], legacy_user, plugin_gid));
+        assert!(!is_plugin_peer(1000, &[1000, 990], legacy_user, plugin_gid));
+        // Neither the user nor the group exists on this host: nobody matches.
+        assert!(!is_plugin_peer(1201, &[980], None, None));
+        // The claim a plugin peer starts with can never verify on a paired node.
+        assert_eq!(plugin_plane_claim(1201).ticket, None);
     }
 
     #[test]

@@ -32,7 +32,11 @@ ProtectSystem=strict
 # /run/ados/plugin-http, and prunes per-plugin logs under /var/log/ados/plugins;
 # the install tree (/var/ados/plugins), plugin state and plugin data sit under
 # /var/ados. The native lifecycle routes in ados-control write the same paths.
-ReadWritePaths=/var/ados /run/ados /etc/ados /var/log/ados /etc/systemd/system
+# /etc is writable because the daemon is the one process that creates and
+# removes each plugin's own system user and the plugin groups (useradd and
+# groupadd write /etc/passwd, /etc/group, /etc/shadow and their lock files);
+# the other lifecycle callers ask it over the control socket.
+ReadWritePaths=/var/ados /run/ados /etc /var/log/ados
 LimitNOFILE=8192
 
 StandardOutput=journal

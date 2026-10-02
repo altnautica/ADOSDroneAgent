@@ -9,8 +9,9 @@
 //! `plugins.http:<plugin_id>` checked at the edge against this path), so the
 //! plugin treats every request on its socket as operator-authenticated.
 //!
-//! The operator's credentials stop here: the pairing key, dashboard session,
-//! MCP token and the ticket are stripped before the request reaches plugin
+//! The operator's credentials stop here: every credential header the edge reads
+//! (pairing key, setup token, dashboard session, MCP token and scopes, HMAC
+//! signature) and the ticket are stripped before the request reaches plugin
 //! code. When the browser offered the ticket subprotocol and the plugin selects
 //! none, the `101` names `ados-ws-ticket`, since a browser fails a handshake
 //! that ignores the subprotocols it offered.
@@ -26,13 +27,24 @@ use crate::state::AppState;
 /// The subprotocol marker a browser offers its ticket under.
 const WS_TICKET_SUBPROTOCOL: &str = "ados-ws-ticket";
 
-/// Request headers that carry an operator credential and never reach a plugin.
-const CREDENTIAL_HEADERS: [&str; 4] = [
+/// Request headers the edge reads as an operator credential. A request leaving
+/// the agent for a less trusted listener (a plugin, the logging store) has
+/// every one removed.
+const CREDENTIAL_HEADERS: [&str; 6] = [
     "x-ados-key",
+    "x-ados-setup-token",
     crate::dashboard_pin::DASHBOARD_SESSION_HEADER,
     crate::mcp::MCP_TOKEN_HEADER,
     crate::mcp::MCP_SCOPES_HEADER,
+    "x-hmac-signature",
 ];
+
+/// Remove every operator credential header from `headers`.
+pub(crate) fn strip_credentials(headers: &mut axum::http::HeaderMap) {
+    for name in CREDENTIAL_HEADERS {
+        headers.remove(name);
+    }
+}
 
 /// The `503` a plugin with no live HTTP socket answers.
 fn not_serving(plugin_id: &str) -> Response {
@@ -107,9 +119,7 @@ pub async fn plugin_http(
         Err(_) => return detail(StatusCode::BAD_REQUEST, "malformed plugin path"),
     }
     let headers = request.headers_mut();
-    for name in CREDENTIAL_HEADERS {
-        headers.remove(name);
-    }
+    strip_credentials(headers);
     let ticket_offered = strip_ticket(headers);
 
     let mut response = crate::proxy::forward(&socket, request, || not_serving(&plugin_id)).await;

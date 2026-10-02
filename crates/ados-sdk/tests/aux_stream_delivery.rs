@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ados_plugin_host::host::HostServices;
+use ados_plugin_host::host::{AuxDatagramRx, HostError, HostServices};
 use ados_plugin_host::{EventBus, PluginIpcServer};
 use ados_protocol::plugin::TokenIssuer;
 use ados_sdk::PluginIpcClient;
@@ -30,8 +30,9 @@ fn caps(items: &[&str]) -> BTreeSet<String> {
 }
 
 /// A host that arms an aux application-datagram stream from a broadcast channel
-/// the test pushes `(channel, payload)` into. Every other host method stays at
-/// the trait default, which is all the aux-delivery path needs.
+/// the test pushes `(channel, payload)` into, and reports the connected session
+/// as the stream's owner. Every other host method stays at the trait default,
+/// which is all the aux-delivery path needs.
 struct AuxStreamHost {
     app: broadcast::Sender<(u8, Vec<u8>)>,
 }
@@ -40,8 +41,13 @@ impl HostServices for AuxStreamHost {
     fn radio_aux_stream_subscribe_stream(
         &self,
         _plugin_id: &str,
-    ) -> Option<broadcast::Receiver<(u8, Vec<u8>)>> {
-        Some(self.app.subscribe())
+        _session: u64,
+    ) -> Result<Option<AuxDatagramRx>, HostError> {
+        Ok(Some(self.app.subscribe()))
+    }
+
+    fn aux_stream_owned_by(&self, _plugin_id: &str, _session: u64) -> bool {
+        true
     }
 }
 

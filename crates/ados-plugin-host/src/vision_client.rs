@@ -273,6 +273,18 @@ impl VisionClient {
             .request(methods::DESIGNATE_TRACK, "vision.track.designate", args)
             .await
     }
+
+    /// Ask the engine to drop every model `plugin_id` registered. Host-internal:
+    /// no plugin request reaches this method.
+    pub async fn unregister_owner(&self, plugin_id: &str) -> Result<Value, VisionRpcError> {
+        self.shared
+            .request(
+                ados_protocol::vision_rpc::UNREGISTER_OWNER,
+                "",
+                &ados_protocol::vision_rpc::unregister_owner_args(plugin_id),
+            )
+            .await
+    }
 }
 
 impl Drop for VisionClient {

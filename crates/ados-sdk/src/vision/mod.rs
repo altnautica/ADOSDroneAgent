@@ -16,7 +16,8 @@
 //! the host gates on the vision capabilities.
 //!
 //! The client gates nothing itself; the host enforces `vision.frame.read`,
-//! `vision.model.register`, and `vision.detection.publish`.
+//! `vision.model.register`, `vision.detection.publish` and
+//! `vision.offload.advertise`.
 
 pub mod pose;
 
@@ -179,7 +180,11 @@ impl VisionClient {
 
     /// Register an inference model with the engine. Sends
     /// [`methods::REGISTER_MODEL`] (gated on `vision.model.register`) in the
-    /// [`vision_rpc`] shape the engine decodes.
+    /// [`vision_rpc`] shape the engine decodes. The engine files it as
+    /// `<plugin_id>/<id>` (the reply's `model_id`), so it never replaces the
+    /// node's own models or another plugin's; a plugin holds at most eight. An
+    /// engine-run model's `model_path` must be a model delivered to this plugin
+    /// (see [`Self::resolved_model`]).
     pub async fn register_model(&self, model: &ModelMetadata) -> Result<Value, ClientError> {
         self.ipc.vision_register_model(model).await
     }
@@ -198,9 +203,10 @@ impl VisionClient {
     /// Run a registered model against one frame on the shared backend and
     /// return its detections. Sends [`methods::INFER`] (gated on
     /// `vision.model.register`); the engine arbitrates access to the
-    /// accelerator. The frame is passed by descriptor (the engine reads its own
-    /// ring), so no pixels cross the RPC envelope. A frame whose slot the ring
-    /// has since recycled is an error; infer on a fresher frame.
+    /// accelerator. `model_id` names this plugin's own model or one of the
+    /// node's configured models. The frame is passed by descriptor (the engine
+    /// reads its own ring), so no pixels cross the RPC envelope. A frame whose
+    /// slot the ring has since recycled is an error; infer on a fresher frame.
     pub async fn infer(
         &self,
         model_id: &str,
@@ -214,7 +220,10 @@ impl VisionClient {
 
     /// Publish a detection batch on `vision.detection`. Sends
     /// [`methods::PUBLISH_DETECTION`] (gated on `vision.detection.publish`) in
-    /// the [`vision_rpc`] shape the engine decodes.
+    /// the [`vision_rpc`] shape the engine decodes. Subscribers see its
+    /// `model_id` as
+    /// `<plugin_id>/<model_id>`, and `lock_state` / `track_id` are cleared
+    /// unless this plugin also holds `vision.track.designate`.
     pub async fn publish_detection(&self, batch: &DetectionBatch) -> Result<Value, ClientError> {
         self.ipc.vision_publish_detection(batch).await
     }
@@ -245,7 +254,7 @@ impl VisionClient {
     /// Report the perception-offload link this plugin holds, so the node's
     /// perception tier reads `offload` while it is live. Re-advertise at least
     /// every ~10 s (the link goes stale after 20 s) and send `paired: false`
-    /// when the link drops. Gated on `vision.detection.publish`. See
+    /// when the link drops. Gated on `vision.offload.advertise`. See
     /// [`PluginIpcClient::offload_advertise`].
     pub async fn advertise_offload(
         &self,

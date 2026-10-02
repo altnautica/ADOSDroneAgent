@@ -85,6 +85,18 @@ pub const METHOD_TOKEN_ROTATE: &str = "token.rotate";
 /// the runner finds both already in place. Args: none.
 pub const METHOD_PLUGIN_RECONCILE: &str = "plugin.reconcile";
 
+/// The control method that deletes a removed plugin's data dir. The lifecycle
+/// controller that removed the plugin may lack the privileges to enter a tree
+/// the plugin's own user owns; the plugin host has them. Refused while the
+/// plugin is still installed. Args: `{plugin_id}`.
+pub const METHOD_PLUGIN_PURGE_DATA: &str = "plugin.purge_data";
+
+/// The control method that creates (`op: ensure`) or removes (`op: remove`) a
+/// plugin's system user. Only the plugin host's unit may write the account
+/// database; every other lifecycle controller asks it here. Removal is refused
+/// while the plugin is still installed. Args: `{plugin_id, op}`.
+pub const METHOD_PLUGIN_ACCOUNT: &str = "plugin.account";
+
 /// The control socket path under a control dir.
 pub fn control_socket_path(control_dir: &Path) -> PathBuf {
     control_dir.join(CONTROL_SOCKET_NAME)
@@ -123,6 +135,10 @@ pub trait LifecycleControl: Send + Sync {
     fn rotate_token(&self, plugin_id: &str) -> Result<bool, String>;
     /// Reconcile served sockets against state. Returns `(started, stopped, serving)`.
     fn reconcile(&self) -> (usize, usize, usize);
+    /// Delete a removed plugin's data dir.
+    fn purge_data(&self, plugin_id: &str) -> Result<(), String>;
+    /// Create (`ensure`) or remove a plugin's system user.
+    fn account(&self, plugin_id: &str, ensure: bool) -> Result<(), String>;
 }
 
 fn ok_response(request_id: &str, scope: &str) -> Envelope {
@@ -308,6 +324,47 @@ fn handle_lifecycle(lifecycle: Option<&Arc<dyn LifecycleControl>>, req: &Envelop
             "plugin_id must be a non-empty string".into(),
         );
     };
+    if req.method == METHOD_PLUGIN_ACCOUNT {
+        let ensure = match arg_str(&req.args, "op") {
+            Some("ensure") => true,
+            Some("remove") => false,
+            _ => {
+                return lifecycle_err(
+                    &req.request_id,
+                    &req.method,
+                    "op must be \"ensure\" or \"remove\"".into(),
+                )
+            }
+        };
+        return match lifecycle.account(plugin_id, ensure) {
+            Ok(()) => Envelope {
+                version: PROTOCOL_VERSION,
+                kind: "response".to_string(),
+                method: req.method.clone(),
+                capability: String::new(),
+                args: Value::Map(vec![(Value::from("done"), Value::Boolean(true))]),
+                request_id: req.request_id.clone(),
+                token: String::new(),
+                error: None,
+            },
+            Err(e) => lifecycle_err(&req.request_id, &req.method, e),
+        };
+    }
+    if req.method == METHOD_PLUGIN_PURGE_DATA {
+        return match lifecycle.purge_data(plugin_id) {
+            Ok(()) => Envelope {
+                version: PROTOCOL_VERSION,
+                kind: "response".to_string(),
+                method: req.method.clone(),
+                capability: String::new(),
+                args: Value::Map(vec![(Value::from("purged"), Value::Boolean(true))]),
+                request_id: req.request_id.clone(),
+                token: String::new(),
+                error: None,
+            },
+            Err(e) => lifecycle_err(&req.request_id, &req.method, e),
+        };
+    }
     match lifecycle.rotate_token(plugin_id) {
         Ok(pushed) => Envelope {
             version: PROTOCOL_VERSION,
@@ -360,7 +417,12 @@ async fn serve_connection<H: ConfigControl>(
         Ok(req) if req.method == METHOD_TOOL_INVOKE => {
             handle_tool_invoke(invoke.as_ref(), &req).await
         }
-        Ok(req) if req.method == METHOD_TOKEN_ROTATE || req.method == METHOD_PLUGIN_RECONCILE => {
+        Ok(req)
+            if req.method == METHOD_TOKEN_ROTATE
+                || req.method == METHOD_PLUGIN_RECONCILE
+                || req.method == METHOD_PLUGIN_PURGE_DATA
+                || req.method == METHOD_PLUGIN_ACCOUNT =>
+        {
             handle_lifecycle(lifecycle.as_ref(), &req)
         }
         Ok(req) => handle_request(host.as_ref(), &req).await,

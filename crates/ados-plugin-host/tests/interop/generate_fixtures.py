@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """Generate cross-language plugin-lifecycle fixtures from the live agent code.
 
-This imports the live ``ados.plugins.archive`` canonical-hash function and the
-``ados.services.signing`` Ed25519 verifier, builds a real ``.adosplug``
-zip, computes the canonical payload hash the way the agent signs it, signs that
-hash with a fresh Ed25519 keypair, and writes everything the Rust
-``ados-plugin-host`` crate needs to assert byte-for-byte parity:
+This imports the live ``ados.plugins.archive`` canonical-hash function, builds a
+real ``.adosplug`` zip, computes the canonical payload hash the way the agent
+signs it, signs that hash with a fresh Ed25519 keypair, and writes everything
+the Rust ``ados-plugin-host`` crate needs to assert byte-for-byte parity:
 
 * the full archive bytes (so the Rust reader parses the exact same zip),
 * the canonical payload hash (hex),
 * the SPKI PEM public key + the base64 Ed25519 signature over that hash,
 * a tampered signature, a revoked-signer case, and an unknown-signer case.
 
-The signature itself is verified with the agent's own ``verify_signature`` here
-so the fixture cannot ship a signature the agent would reject. Run from the
-agent repo with its venv:
+The signature is checked against the public key here before it is written, and
+the Rust crate's interop test verifies it with the agent's own verifier. Run
+from the agent repo with its venv:
 
     .venv/bin/python crates/ados-plugin-host/tests/interop/generate_fixtures.py
 
@@ -31,11 +30,14 @@ import json
 import zipfile
 from pathlib import Path
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 
 from ados.plugins.archive import parse_archive_bytes
-from ados.services.signing import verify_signature
 
 SIGNER_ID = "altnautica-2026-A"
 
@@ -55,6 +57,14 @@ MANIFEST_YAML = (
 # Deterministic 32-byte Ed25519 seed so the keypair (and therefore the PEM and
 # the signature) is reproducible across runs.
 SEED = bytes(range(32))
+
+
+def _verifies(public_key: Ed25519PublicKey, message: bytes, signature: bytes) -> bool:
+    try:
+        public_key.verify(signature, message)
+    except InvalidSignature:
+        return False
+    return True
 
 
 def _build_archive() -> bytes:
@@ -91,17 +101,17 @@ def main() -> None:
     signature = private_key.sign(payload_hash)
     signature_b64 = base64.b64encode(signature).decode("ascii")
 
-    # Self-check: the agent's own verifier must accept this signature.
-    assert verify_signature(
-        payload_hash, signature_b64, public_pem.encode("ascii")
-    ), "agent verify_signature rejected the freshly produced signature"
+    # Self-check: the public key must accept this signature.
+    assert _verifies(
+        public_key, payload_hash, signature
+    ), "the freshly produced signature did not verify"
 
     # A tampered signature: flip the last base64 char to a different value.
     tampered = bytearray(signature)
     tampered[-1] ^= 0x01
     tampered_b64 = base64.b64encode(bytes(tampered)).decode("ascii")
-    assert not verify_signature(
-        payload_hash, tampered_b64, public_pem.encode("ascii")
+    assert not _verifies(
+        public_key, payload_hash, bytes(tampered)
     ), "tampered signature unexpectedly verified"
 
     out = {

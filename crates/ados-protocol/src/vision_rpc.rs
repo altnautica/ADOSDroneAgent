@@ -2,9 +2,15 @@
 //! `vision.sock`, and the reply `vision.infer` returns.
 //!
 //! A plugin's vision request crosses three parties: the SDK builds it, the
-//! plugin host forwards it to the engine unchanged, and the engine decodes it.
-//! Each shape lives here once, so the Rust SDK and the engine build and read
-//! the same bytes; the Python SDK mirrors them field for field.
+//! plugin host forwards it to the engine, and the engine decodes it. Each shape
+//! lives here once, so the Rust SDK and the engine build and read the same
+//! bytes; the Python SDK mirrors them field for field.
+//!
+//! The host stamps the calling plugin's id into `vision.register_model` and
+//! `vision.infer` as a string [`OWNER_FIELD`] before forwarding, so the engine
+//! keeps each plugin's models apart. A plugin never sets it: the host replaces
+//! whatever the request carried. When the host stops serving a plugin it sends
+//! [`UNREGISTER_OWNER`] `{owner}` so the engine drops that plugin's models.
 //!
 //! A contract payload rides as a msgpack binary field holding its
 //! [`crate::framebus`] encoding — the form the engine's own pushes already use
@@ -26,6 +32,62 @@ use rmpv::Value;
 use thiserror::Error;
 
 use crate::framebus::{BoundingBox, Detection, DetectionBatch, FrameDescriptor, ModelMetadata};
+
+/// The group that may read the camera frame rings in `/dev/shm`. The engine
+/// creates each ring `0640` in this group; a plugin unit joins it only while
+/// its `vision.frame.read` grant is held.
+pub const VISION_READERS_GROUP: &str = "ados-vision-readers";
+
+/// The args field carrying the plugin id the host stamped on a request.
+pub const OWNER_FIELD: &str = "owner";
+
+/// Host-to-engine request dropping every model one plugin registered. Not a
+/// plugin-facing method: no capability maps to it and the host never routes a
+/// plugin's request to it.
+pub const UNREGISTER_OWNER: &str = "vision.unregister_owner";
+
+/// `args` with [`OWNER_FIELD`] set to `owner`, replacing any value the caller
+/// put there. Non-map args come back as `{owner}` alone, which the engine then
+/// refuses for the missing payload.
+pub fn with_owner(args: &Value, owner: &str) -> Value {
+    let mut entries: Vec<(Value, Value)> = match args {
+        Value::Map(entries) => entries
+            .iter()
+            .filter(|(k, _)| k.as_str() != Some(OWNER_FIELD))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    };
+    entries.push((Value::from(OWNER_FIELD), Value::from(owner)));
+    Value::Map(entries)
+}
+
+/// The non-empty [`OWNER_FIELD`] a request carries.
+pub fn owner_of(args: &Value) -> Result<&str, VisionArgsError> {
+    field(args, OWNER_FIELD)?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| decode_err(OWNER_FIELD, "not a non-empty string"))
+}
+
+/// [`UNREGISTER_OWNER`] args: `{owner}`.
+pub fn unregister_owner_args(owner: &str) -> Value {
+    map(vec![(OWNER_FIELD, Value::from(owner))])
+}
+
+/// The id a plugin's model or published batch carries on the engine: the
+/// plugin's own id under its namespace (`<plugin_id>/<id>`), so a plugin can
+/// neither replace nor pose as the engine's configured models or another
+/// plugin's. An id the plugin already namespaced is kept as is.
+pub fn owned_model_id(owner: &str, id: &str) -> String {
+    match id
+        .strip_prefix(owner)
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        Some(_) => id.to_string(),
+        None => format!("{owner}/{id}"),
+    }
+}
 
 /// A vision request or reply that does not have its method's shape.
 #[derive(Debug, Error)]
@@ -129,9 +191,11 @@ pub fn designate_track_args(camera_id: &str, target: &Detection) -> Result<Value
 }
 
 /// Decode `vision.designate_track` args. Box fields read with numeric coercion,
-/// so an int- or float-encoded value decodes the same; a missing box field is
-/// 0. `class_label` and `confidence` default to an empty label and full
-/// confidence: the operator's pick overrides the auto-lock regardless.
+/// so an int- or float-encoded value decodes the same. Every box field is
+/// required and must be finite, `x`/`y` non-negative and `width`/`height`
+/// positive: a NaN or zero-size box would seed a tracker that never associates
+/// or predicts NaN. `class_label` defaults to empty and `confidence` to full,
+/// clamped to `0..=1`: the operator's pick overrides the auto-lock regardless.
 pub fn decode_designate_track(args: &Value) -> Result<DesignateTrack, VisionArgsError> {
     let camera_id = field(args, "camera_id")?
         .as_str()
@@ -141,23 +205,43 @@ pub fn decode_designate_track(args: &Value) -> Result<DesignateTrack, VisionArgs
     if !bbox.is_map() {
         return Err(decode_err("bbox", "not a map"));
     }
-    let side = |k: &'static str| field(bbox, k).ok().and_then(number).unwrap_or(0.0);
+    let side = |k: &'static str| -> Result<f32, VisionArgsError> {
+        let v = field(bbox, k)
+            .ok()
+            .and_then(number)
+            .ok_or_else(|| decode_err("bbox", format!("`{k}` is missing or not a number")))?;
+        if v.is_finite() {
+            Ok(v)
+        } else {
+            Err(decode_err("bbox", format!("`{k}` is not finite")))
+        }
+    };
+    let (x, y, width, height) = (side("x")?, side("y")?, side("width")?, side("height")?);
+    if x < 0.0 || y < 0.0 {
+        return Err(decode_err("bbox", "x and y must be non-negative"));
+    }
+    if width <= 0.0 || height <= 0.0 {
+        return Err(decode_err("bbox", "width and height must be positive"));
+    }
+    let confidence = field(args, "confidence")
+        .ok()
+        .and_then(number)
+        .filter(|c| c.is_finite())
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
     let target = Detection {
         bbox: Some(BoundingBox {
-            x: side("x"),
-            y: side("y"),
-            width: side("width"),
-            height: side("height"),
+            x,
+            y,
+            width,
+            height,
         }),
         class_label: field(args, "class_label")
             .ok()
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        confidence: field(args, "confidence")
-            .ok()
-            .and_then(number)
-            .unwrap_or(1.0),
+        confidence,
         track_id: None,
         assoc_confidence: None,
         lock_state: None,
@@ -303,5 +387,62 @@ mod tests {
             designate_track_args("cam-0", &boxless),
             Err(VisionArgsError::Missing("bbox"))
         ));
+    }
+
+    #[test]
+    fn designate_refuses_non_finite_and_empty_boxes_and_clamps_confidence() {
+        let with = |x: f64, w: f64, conf: f64| {
+            map(vec![
+                ("camera_id", Value::from("cam-0")),
+                (
+                    "bbox",
+                    map(vec![
+                        ("x", Value::from(x)),
+                        ("y", Value::from(1.0)),
+                        ("width", Value::from(w)),
+                        ("height", Value::from(5.0)),
+                    ]),
+                ),
+                ("confidence", Value::from(conf)),
+            ])
+        };
+        for bad in [
+            with(f64::NAN, 5.0, 0.5),
+            with(f64::INFINITY, 5.0, 0.5),
+            with(-1.0, 5.0, 0.5),
+            with(1.0, 0.0, 0.5),
+            with(1.0, -3.0, 0.5),
+        ] {
+            assert!(matches!(
+                decode_designate_track(&bad),
+                Err(VisionArgsError::Decode { field: "bbox", .. })
+            ));
+        }
+        let d = decode_designate_track(&with(1.0, 5.0, 7.0)).unwrap();
+        assert_eq!(d.target.confidence, 1.0);
+        let d = decode_designate_track(&with(1.0, 5.0, -2.0)).unwrap();
+        assert_eq!(d.target.confidence, 0.0);
+    }
+
+    #[test]
+    fn the_stamped_owner_replaces_whatever_the_plugin_sent() {
+        let spoofed = map(vec![
+            ("model_id", Value::from("det")),
+            (OWNER_FIELD, Value::from("com.example.victim")),
+        ]);
+        let stamped = with_owner(&spoofed, "com.example.caller");
+        assert_eq!(owner_of(&stamped).unwrap(), "com.example.caller");
+        let Value::Map(entries) = &stamped else {
+            panic!("not a map");
+        };
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|(k, _)| k.as_str() == Some(OWNER_FIELD))
+                .count(),
+            1
+        );
+        assert_eq!(field(&stamped, "model_id").unwrap().as_str(), Some("det"));
+        assert!(owner_of(&map(vec![(OWNER_FIELD, Value::from(""))])).is_err());
     }
 }

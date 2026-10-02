@@ -19,7 +19,6 @@ use sha2::{Digest, Sha256};
 use ados_plugin_host::archive::{parse_archive_bytes, ArchiveContents, ARCHIVE_MAX_BYTES};
 use ados_plugin_host::download::{
     fetch_capped, verify_sha256, DownloadError, DownloadSource, HttpDownloadSource,
-    DOWNLOAD_MAX_BYTES,
 };
 use ados_plugin_host::manifest::PluginManifest;
 use ados_plugin_host::supervisor::{InstallResult, PluginSupervisor};
@@ -296,14 +295,23 @@ fn download_refusal(e: DownloadError) -> Refusal {
     }
 }
 
-/// Fetch an archive from an allowlisted URL under the archive download cap and
-/// check it against `expected_sha256` (skipped when empty). Returns the bytes
-/// and their sha256. Runs on a blocking thread: the live client is blocking.
+/// One archive download at a time: each buffers up to the archive cap in
+/// memory, so parallel URL installs must not stack those buffers.
+static URL_DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Fetch an archive from an allowlisted URL under the archive cap and check it
+/// against `expected_sha256` (skipped when empty). Returns the bytes and their
+/// sha256. Downloads are serialized; each runs on a blocking thread because
+/// the live client is blocking.
 async fn download_archive(
     source: Option<Arc<dyn DownloadSource>>,
     url: String,
     expected_sha256: String,
 ) -> Result<(Vec<u8>, String), Refusal> {
+    let _permit = URL_DOWNLOADS
+        .acquire()
+        .await
+        .map_err(|e| Refusal::host_io(format!("download queue closed: {e}")))?;
     tokio::task::spawn_blocking(move || {
         let live;
         let source: &dyn DownloadSource = match &source {
@@ -313,7 +321,7 @@ async fn download_archive(
                 &live
             }
         };
-        let body = fetch_capped(source, &url, DOWNLOAD_MAX_BYTES).map_err(download_refusal)?;
+        let body = fetch_capped(source, &url, ARCHIVE_MAX_BYTES).map_err(download_refusal)?;
         verify_sha256(&body, &expected_sha256).map_err(|e| {
             tracing::debug!(error = %e, "plugin archive sha256 mismatch");
             download_refusal(e)
@@ -484,8 +492,8 @@ pub async fn install_plugin(
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Response {
     let result = async {
-        let (file_name, raw) = read_upload(multipart).await?;
-        let job = JobSidecar::new(&state.plugins.job_dir, query.job_id.clone());
+        let job = JobSidecar::new(&state.plugins.job_dir, query.job_id.clone())?;
+        let (file_name, raw) = read_upload(multipart).await.map_err(|r| job.fail(r))?;
         let wanted: Vec<String> = query
             .requested_permissions
             .as_deref()
@@ -538,35 +546,36 @@ fn catalog_pin_for(url: &str) -> Option<String> {
 /// `POST /api/plugins/install_from_url`: `{url, expected_sha256?,
 /// requested_permissions?, job_id?, from_catalog}`. Downloads an allowlisted
 /// archive (streamed under the cap, pinned when a sha256 is given) and installs
-/// it. A catalog install must pin a sha256, and one naming a URL the bundled
-/// catalog lists must pin that entry's sha256.
+/// it. A catalog install must name a URL the bundled catalog lists and pin that
+/// entry's sha256.
 pub async fn install_from_url(State(state): State<AppState>, body: Bytes) -> Response {
     let req: InstallFromUrlRequest = match parse_body(&body) {
         Ok(r) => r,
         Err(bad) => return bad.into_response(),
     };
     let result = async {
-        let url = validate_url(&req.url)?;
+        let job = JobSidecar::new(&state.plugins.job_dir, req.job_id.clone())?;
+        let url = validate_url(&req.url).map_err(|r| job.fail(r))?;
         let expected = req.expected_sha256.unwrap_or_default().trim().to_string();
         if req.from_catalog {
             if expected.is_empty() {
-                return Err(Refusal::usage(
+                return Err(job.fail(Refusal::usage(
                     "sha256_required",
                     "catalog installs must pin archive_sha256",
-                ));
+                )));
             }
-            if let Some(pin) = catalog_pin_for(&url) {
-                if !pin.eq_ignore_ascii_case(&expected) {
-                    return Err(Refusal::new(
-                        12,
-                        "catalog_mismatch",
-                        "archive_sha256 does not match the bundled catalog entry for this url",
-                        StatusCode::BAD_REQUEST,
-                    ));
-                }
+            let pinned =
+                catalog_pin_for(&url).is_some_and(|pin| pin.eq_ignore_ascii_case(&expected));
+            if !pinned {
+                return Err(job.fail(Refusal::new(
+                    12,
+                    "catalog_mismatch",
+                    "a catalog install must name a bundled catalog entry's url and pin its \
+                     archive_sha256",
+                    StatusCode::BAD_REQUEST,
+                )));
             }
         }
-        let job = JobSidecar::new(&state.plugins.job_dir, req.job_id.clone());
         job.stage("downloading");
         let (raw, sha256) = download_archive(state.plugins.download.clone(), url.clone(), expected)
             .await

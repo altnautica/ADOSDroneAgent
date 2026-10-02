@@ -12,9 +12,14 @@
 //! HMAC secret (0600 under `/etc/ados/secrets`), not a per-process random key,
 //! so a runner started by its own systemd unit can present a token this daemon
 //! verifies. When the daemon serves a plugin's socket it mints a fresh token
-//! from that shared issuer and writes the 0600 env file the unit references via
-//! `EnvironmentFile=`; the runner reads `ADOS_PLUGIN_TOKEN` / `ADOS_PLUGIN_SOCKET`
-//! from its environment and connects.
+//! from that shared issuer and writes the 0600 token credential the unit loads
+//! with `LoadCredential=`; the runner reads it from `$CREDENTIALS_DIRECTORY`
+//! and connects.
+//!
+//! `ados-plugin-host guard-load` is the privileged pre-start every plugin unit
+//! runs: it loads the loopback guard (with the current per-plugin listener
+//! exceptions) and exits non-zero when it cannot, so no plugin starts
+//! unguarded whatever the boot order.
 //!
 //! Lifecycle: the served set and the minted tokens are *maintained*, not
 //! snapshotted at boot. A [`PluginReconciler`] re-reads the plugin state file
@@ -444,9 +449,96 @@ async fn wire(paths: &Paths) -> WiredDaemon<RealHost> {
     }
 }
 
+/// Render the loopback-guard ruleset for the current install set: every
+/// local destination dropped for the plugin group, with each installed
+/// plugin's own declared listeners excepted for its uid only.
+fn guard_ruleset(supervisor: &PluginSupervisor) -> String {
+    let ws_port = std::fs::read_to_string(config_yaml_path())
+        .map(|y| loopback_guard::configured_ws_port(&y))
+        .unwrap_or(loopback_guard::DEFAULT_MAVLINK_WS_PORT);
+    loopback_guard::render_ruleset(
+        &supervisor.loopback_guard_exceptions(),
+        &loopback_guard::agent_tcp_ports(ws_port),
+    )
+}
+
+/// A lifecycle controller over this process's layout, with the board gates.
+fn production_supervisor(paths: &Paths) -> PluginSupervisor {
+    let (board_id, board_tier) =
+        PluginSupervisor::board_identity(&paths.run_dir.join("board.json"));
+    PluginSupervisor::production(paths.clone(), board_id, agent_version())
+        .with_profile(ados_config::node_profile())
+        .with_board_tier(board_tier)
+        .with_accounts(ados_plugin_host::plugin_account::local_accounts())
+}
+
+/// `guard-load`: ensure the plugin groups exist, load the guard, record the
+/// verdict, and exit non-zero when it did not load, so the plugin unit whose
+/// pre-start this is fails closed.
+fn guard_load() -> Result<()> {
+    let paths = Paths::from_env();
+    if let Err(e) = ados_plugin_host::plugin_account::ensure_groups() {
+        anyhow::bail!("plugin groups unavailable: {e}");
+    }
+    let mut supervisor = production_supervisor(&paths);
+    if let Err(e) = supervisor.discover() {
+        tracing::warn!(error = %e, "plugin discovery failed; loading the guard without listener exceptions");
+    }
+    let state = loopback_guard::install(&guard_ruleset(&supervisor), &paths.loopback_guard_state);
+    if !state.active {
+        anyhow::bail!("plugin loopback guard did not load: {}", state.reason);
+    }
+    Ok(())
+}
+
+/// How often the signer revocation list is checked for a change.
+const REVOCATION_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Disable every plugin signed by a revoked signer. Logged, never fatal: the
+/// next pass retries.
+fn enforce_revocations(paths: &Paths) {
+    let mut supervisor = production_supervisor(paths);
+    match supervisor.disable_revoked_signers() {
+        Ok(disabled) if !disabled.is_empty() => {
+            tracing::warn!(?disabled, "plugins disabled after their signer was revoked")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!(error = %e, "could not apply the signer revocation list"),
+    }
+}
+
+/// Re-apply the revocation list whenever the file changes (its mtime or its
+/// presence), on a fixed poll that never gives up.
+fn spawn_revocation_watch(paths: Paths) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let path = PathBuf::from(ados_plugin_host::signing::PLUGIN_REVOCATIONS_PATH);
+        let stamp = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+        let mut seen = stamp(&path);
+        let mut ticker = tokio::time::interval(REVOCATION_POLL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let now = stamp(&path);
+            if now != seen {
+                seen = now;
+                let paths = paths.clone();
+                if let Err(e) =
+                    tokio::task::spawn_blocking(move || enforce_revocations(&paths)).await
+                {
+                    tracing::error!(error = %e, "revocation enforcement task failed");
+                }
+            }
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
+
+    if std::env::args().nth(1).as_deref() == Some("guard-load") {
+        return tokio::task::spawn_blocking(guard_load).await?;
+    }
 
     // Every host path from its `ADOS_PLUGIN_*` / `ADOS_RUN_DIR` variable, so a
     // per-user install (the macOS workstation) or a test run points the whole
@@ -472,20 +564,6 @@ async fn main() -> Result<()> {
         "plugin host daemon starting"
     );
 
-    // Load the loopback guard before any plugin starts. Its verdict gates the
-    // `network.outbound` grant and the rendered sandbox of every unit, so the
-    // units are refreshed against it right after discovery.
-    let guard_state_path = paths.loopback_guard_state.clone();
-    let ws_port = std::fs::read_to_string(config_yaml_path())
-        .map(|y| loopback_guard::configured_ws_port(&y))
-        .unwrap_or(loopback_guard::DEFAULT_MAVLINK_WS_PORT);
-    let ruleset = loopback_guard::render_ruleset(
-        &loopback_guard::tcp_ports(ws_port),
-        loopback_guard::AGENT_UDP_PORTS,
-    );
-    tokio::task::spawn_blocking(move || loopback_guard::install(&ruleset, &guard_state_path))
-        .await?;
-
     // The lifecycle controller refuses to grant a capability the default Rust
     // host cannot back (its host method returns not_implemented regardless of
     // wiring) so an operator never hands out a capability that can only error at
@@ -505,19 +583,43 @@ async fn main() -> Result<()> {
     let mut supervisor = PluginSupervisor::production(paths.clone(), board_id, version)
         .with_profile(profile)
         .with_board_tier(board_tier)
+        .with_accounts(ados_plugin_host::plugin_account::local_accounts())
         .with_ungrantable_caps(ungrantable);
     if let Err(e) = supervisor.discover() {
         tracing::error!(error = %e, "plugin discovery failed");
+    }
+
+    // Load the loopback guard before any plugin starts. Its verdict gates the
+    // `network.outbound` grant and the rendered sandbox of every unit, so the
+    // units are refreshed against it right after. Every plugin unit also
+    // reloads it in its own pre-start.
+    if let Err(e) = ados_plugin_host::plugin_account::ensure_groups() {
+        tracing::error!(error = %e, "plugin groups could not be created");
+    }
+    let ruleset = guard_ruleset(&supervisor);
+    let guard_state_path = paths.loopback_guard_state.clone();
+    tokio::task::spawn_blocking(move || loopback_guard::install(&ruleset, &guard_state_path))
+        .await?;
+
+    // A plugin signed by a key revoked since it was installed is stopped
+    // before anything is refreshed or served.
+    match supervisor.disable_revoked_signers() {
+        Ok(disabled) if !disabled.is_empty() => {
+            tracing::warn!(?disabled, "plugins disabled after their signer was revoked")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!(error = %e, "could not apply the signer revocation list"),
     }
     supervisor.refresh_all_units();
     // Discovery's job here is the state reconciliation + tamper filter it runs
     // as a side effect; the reconciler reads state itself from now on.
     drop(supervisor);
+    let revocation_watch = spawn_revocation_watch(paths.clone());
 
     let daemon = wire(&paths).await;
     // The shared-secret issuer is owned by the daemon for the session lifetime;
     // it both verifies the runner's `hello` token and backs the mint that
-    // writes each served plugin's token env file.
+    // writes each served plugin's token credential.
     let _ = &daemon.issuer;
     tracing::info!(
         served = daemon.reconciler.serving().len(),
@@ -539,6 +641,7 @@ async fn main() -> Result<()> {
     }
 
     tracing::info!("plugin host daemon stopping");
+    revocation_watch.abort();
     daemon.shutdown();
     Ok(())
 }
@@ -558,7 +661,7 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     const PLUGIN_ID: &str = "com.example.thermal";
-    const SUBPROC_MANIFEST: &str = "id: com.example.thermal\nversion: 1.0.0\nrisk: high\ncompatibility:\n  ados_version: \">=0.1.0,<99.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n  subprocess_spawn:\n    - ffmpeg\n";
+    const SUBPROC_MANIFEST: &str = "id: com.example.thermal\nversion: 1.0.0\nrisk: high\ncompatibility:\n  ados_version: \">=0.1.0,<99.0.0\"\nagent:\n  entrypoint: agent/py/x.py\n  permissions:\n    - process.spawn\n  subprocess_spawn:\n    - ffmpeg\n";
 
     fn paths_in(dir: &Path) -> Paths {
         Paths {
@@ -670,8 +773,8 @@ mod tests {
         // reloaded from the same persisted secret (the cross-process contract:
         // a runner unit's env file is consumed by a different process). The
         // ping below then proves the daemon itself accepts that exact token.
-        let env_path = ados_plugin_host::token_env_path(PLUGIN_ID, Some(&socket_dir));
-        let env_body = std::fs::read_to_string(&env_path).expect("token env written");
+        let env_path = ados_plugin_host::token_credential_path(PLUGIN_ID, Some(&socket_dir));
+        let env_body = std::fs::read_to_string(&env_path).expect("token credential written");
         let token_line = env_body
             .lines()
             .find_map(|l| l.strip_prefix("ADOS_PLUGIN_TOKEN="))
@@ -755,11 +858,11 @@ mod tests {
     }
 
     /// The generated unit (for BOTH the Python and the Rust runtime branches)
-    /// references the EnvironmentFile the daemon writes, with a socket path that
-    /// matches what the env file declares, and the env token verifies against an
+    /// loads the token credential the daemon writes, with a socket path that
+    /// matches what the credential declares, and the token verifies against an
     /// issuer built from the same persisted secret. This is the unit-level proof
-    /// that "the generated unit env + token + socket are consistent" for both
-    /// runtimes — the practical stand-in for a full live two-process launch.
+    /// that "the generated unit credential + token + socket are consistent" for
+    /// both runtimes — the practical stand-in for a full live two-process launch.
     #[test]
     fn unit_env_token_and_socket_are_consistent_for_both_runtimes() {
         use ados_plugin_host::backend::render_systemd;
@@ -785,13 +888,16 @@ mod tests {
                     .expect("build")
                     .expect("unit"),
             );
-            let env_file = ados_plugin_host::token_env_path(plugin_id, Some(&socket_dir));
+            let env_file = ados_plugin_host::token_credential_path(plugin_id, Some(&socket_dir));
             let sock = ados_plugin_host::plugin_socket_path(&socket_dir, plugin_id);
-            // Both runtimes deliver the token via the same env file + static
-            // socket Environment line.
+            // Both runtimes receive the token as the same credential, plus the
+            // static socket Environment line.
             assert!(
-                unit.contains(&format!("EnvironmentFile=-{}", env_file.display())),
-                "{runtime} unit missing EnvironmentFile: {unit}"
+                unit.contains(&format!(
+                    "LoadCredential=ados-plugin-token:{}",
+                    env_file.display()
+                )),
+                "{runtime} unit missing LoadCredential: {unit}"
             );
             assert!(
                 unit.contains(&format!(
@@ -811,7 +917,7 @@ mod tests {
             // runner token and writes the env file. A separately-built issuer
             // (a stand-in for the serving daemon process) verifies it.
             let minting = ados_plugin_host::shared_issuer(&secret).expect("issuer");
-            ados_plugin_host::write_token_env(
+            ados_plugin_host::write_token_credential(
                 &minting,
                 plugin_id,
                 &caps(&["mavlink.read"]),

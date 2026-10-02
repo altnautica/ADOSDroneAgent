@@ -270,19 +270,16 @@ impl RealHost {
         }
     }
 
-    /// Require that `plugin_id` owns the auxiliary stream, so a plugin can
-    /// neither tear down nor transmit on a stream another plugin (or an agent
-    /// service) holds. Refused before anything reaches the radio service.
-    pub(super) fn require_aux_owner(&self, plugin_id: &str) -> Result<(), HostError> {
-        let owner = self
-            .aux_stream_owner
-            .lock()
-            .expect("aux stream owner mutex poisoned");
-        if owner.as_deref() == Some(plugin_id) {
+    /// Require that the connection `(plugin_id, session)` owns the auxiliary
+    /// stream, so a plugin can neither tear down, transmit on nor listen to a
+    /// stream another plugin, another of its own connections, or an agent
+    /// service holds. Refused before anything reaches the radio service.
+    pub(super) fn require_aux_owner(&self, plugin_id: &str, session: u64) -> Result<(), HostError> {
+        if self.owns_aux_stream(plugin_id, session) {
             Ok(())
         } else {
             Err(HostError::Rpc(
-                "radio aux stream is not open by this plugin".to_string(),
+                "radio aux stream is not open by this connection".to_string(),
             ))
         }
     }

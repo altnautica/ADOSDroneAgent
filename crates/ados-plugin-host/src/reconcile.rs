@@ -6,8 +6,8 @@
 //! supervisor behind the cloud relay) installs, enables, disables and
 //! grants — all of which are writes to the plugin state file plus `systemctl`
 //! calls. The daemon is what actually *serves* a plugin: it binds
-//! `<socket_dir>/<id>/host.sock` and writes the 0600 token env file the plugin's
-//! unit reads.
+//! `<socket_dir>/<id>/host.sock` and writes the 0600 token credential the
+//! plugin's unit loads.
 //!
 //! The daemon used to do that exactly once, at boot. Three failures came
 //! straight out of that:
@@ -242,8 +242,8 @@ impl<H: HostServices> PluginReconciler<H> {
                     if let Ok(mut map) = self.served.lock() {
                         map.insert(id.clone(), handle);
                     }
-                    // Mint before the plugin can connect. The token env file is
-                    // what the unit's `EnvironmentFile=` reads, so writing it
+                    // Mint before the plugin can connect. The token credential
+                    // is what the unit's `LoadCredential=` reads, so writing it
                     // here (rather than only at daemon boot) is what makes an
                     // enable effective without a restart.
                     match self.mint.mint_current(id) {
@@ -394,6 +394,48 @@ impl<H: HostServices> crate::control::LifecycleControl for PluginReconciler<H> {
     fn reconcile(&self) -> (usize, usize, usize) {
         let report = PluginReconciler::reconcile(self);
         (report.started, report.stopped, report.serving)
+    }
+
+    fn purge_data(&self, plugin_id: &str) -> Result<(), String> {
+        let installs = state::load_state_checked(Some(&self.state_path))
+            .map_err(|e| format!("plugin state is unreadable ({e}); refusing to purge"))?;
+        if state::find_install(&installs, plugin_id).is_some() {
+            return Err(format!(
+                "plugin {plugin_id} is still installed; its data dir is not purged"
+            ));
+        }
+        let mut parts = Path::new(plugin_id).components();
+        if !matches!(
+            (parts.next(), parts.next()),
+            (Some(std::path::Component::Normal(_)), None)
+        ) {
+            return Err(format!("plugin id {plugin_id:?} does not name a data dir"));
+        }
+        let dir = self.mint.data_root().join(plugin_id);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("remove {}: {e}", dir.display())),
+        }
+    }
+
+    fn account(&self, plugin_id: &str, ensure: bool) -> Result<(), String> {
+        use crate::plugin_account::PluginAccounts;
+        if !crate::manifest::is_plugin_id(plugin_id) {
+            return Err(format!("{plugin_id:?} is not a plugin id"));
+        }
+        let accounts = crate::plugin_account::LocalAccounts;
+        if ensure {
+            return accounts.ensure(plugin_id).map_err(|e| e.0);
+        }
+        let installs = state::load_state_checked(Some(&self.state_path))
+            .map_err(|e| format!("plugin state is unreadable ({e}); refusing to remove"))?;
+        if state::find_install(&installs, plugin_id).is_some() {
+            return Err(format!(
+                "plugin {plugin_id} is still installed; its user is kept"
+            ));
+        }
+        accounts.remove(plugin_id).map_err(|e| e.0)
     }
 }
 

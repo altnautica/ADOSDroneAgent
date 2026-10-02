@@ -324,7 +324,7 @@ fn leg_owner(leg: &serde_json::Value) -> String {
     leg.get("owner")
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty())
-        .unwrap_or("operator")
+        .unwrap_or(OPERATOR_OWNER)
         .to_string()
 }
 
@@ -347,36 +347,75 @@ fn stamp_owner(legs: &[serde_json::Value], owner: &str) -> Vec<serde_json::Value
         .collect()
 }
 
+/// The owner the operator's Cameras surface writes under. A leg with no owner tag
+/// (written before the field existed) reads as this owner.
+pub const OPERATOR_OWNER: &str = "operator";
+
+/// The effective primary of a leg list: the first leg with role `primary`, else
+/// the first leg (matching `VideoConfig::resolve_legs`).
+fn effective_primary(legs: &[serde_json::Value]) -> Option<&serde_json::Value> {
+    legs.iter()
+        .find(|c| c.get("role").and_then(serde_json::Value::as_str) == Some("primary"))
+        .or_else(|| legs.first())
+}
+
 /// Merge an owner's incoming leg list into the existing list.
 ///
-/// This is the key of the merge-by-owner persist: an operator write preserves a
-/// plugin's declared legs (a smart pod's streams) and a plugin write preserves
-/// the operator's legs. An existing leg is dropped when it is (a) owned by the
-/// same writer — so a shrinking write removes the writer's stale legs — or (b)
-/// shares an id with an incoming leg — so a re-declared leg (including a legacy
-/// leg written before the owner field) is replaced in place with no duplicate.
-/// Every other-owner leg is kept in its original position; the incoming block is
-/// spliced where the writer's first replaced leg was, or appended when the writer
-/// had none.
+/// An operator write preserves a plugin's declared legs (a smart pod's streams)
+/// and a plugin write preserves the operator's and other plugins' legs. The
+/// writer's own existing legs are replaced by the incoming block, which is
+/// spliced where the writer's first existing leg was, or appended when the
+/// writer had none; every other leg keeps its position.
+///
+/// The write is refused (`Err` with an `owner_conflict` reason) when:
+/// - an incoming id matches a leg another owner holds. A leg with no owner tag
+///   belongs to the operator, so only the operator replaces it;
+/// - a plugin declares a `primary` leg while the operator's leg is the current
+///   primary. The primary leg feeds the main stream (radio video, cloud relay and
+///   the vision tap), so a plugin may only take it on a node whose operator
+///   declared none.
 fn merge_camera_legs(
     existing: &[serde_json::Value],
     incoming_stamped: &[serde_json::Value],
     owner: &str,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, String> {
     let incoming_ids: std::collections::HashSet<&str> = incoming_stamped
         .iter()
         .filter_map(|l| l.get("id").and_then(serde_json::Value::as_str))
         .collect();
+    for leg in existing {
+        let holder = leg_owner(leg);
+        if holder == owner {
+            continue;
+        }
+        if let Some(id) = leg
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| incoming_ids.contains(id))
+        {
+            return Err(format!(
+                "owner_conflict: camera id {id:?} belongs to {holder}"
+            ));
+        }
+    }
+    if owner != OPERATOR_OWNER {
+        let declares_primary = incoming_stamped
+            .iter()
+            .any(|l| l.get("role").and_then(serde_json::Value::as_str) == Some("primary"));
+        let operator_primary = effective_primary(existing)
+            .map(|leg| leg_owner(leg) == OPERATOR_OWNER)
+            .unwrap_or(false);
+        if declares_primary && operator_primary {
+            return Err(
+                "owner_conflict: the operator's camera is the primary; a plugin cannot replace it"
+                    .to_string(),
+            );
+        }
+    }
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut spliced = false;
     for leg in existing {
-        let same_owner = leg_owner(leg) == owner;
-        let id_collision = leg
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .map(|id| incoming_ids.contains(id))
-            .unwrap_or(false);
-        if same_owner || id_collision {
+        if leg_owner(leg) == owner {
             if !spliced {
                 out.extend(incoming_stamped.iter().cloned());
                 spliced = true;
@@ -389,17 +428,22 @@ fn merge_camera_legs(
     if !spliced {
         out.extend(incoming_stamped.iter().cloned());
     }
-    out
+    Ok(out)
 }
 
 /// Merge the writer's `cameras` (attributed to `owner`) into the existing
 /// `video.cameras` list on the config mapping, then mirror the resulting primary
 /// leg's source into `video.camera.source`. A non-array `cameras` leaves the
 /// config untouched — the caller validates the list shape before this is reached,
-/// so this is defence-in-depth.
-pub fn apply_video_cameras(root: &mut Mapping, cameras: &serde_json::Value, owner: &str) {
+/// so this is defence-in-depth. A write that would take over another owner's leg
+/// (see [`merge_camera_legs`]) is refused with the config untouched.
+pub fn apply_video_cameras(
+    root: &mut Mapping,
+    cameras: &serde_json::Value,
+    owner: &str,
+) -> Result<(), String> {
     let Some(incoming) = cameras.as_array() else {
-        return;
+        return Ok(());
     };
 
     // The existing declared legs, read back as JSON so the merge works in one data
@@ -417,20 +461,14 @@ pub fn apply_video_cameras(root: &mut Mapping, cameras: &serde_json::Value, owne
         .unwrap_or_default();
 
     let stamped = stamp_owner(incoming, owner);
-    let merged = merge_camera_legs(&existing, &stamped, owner);
+    let merged = merge_camera_legs(&existing, &stamped, owner)?;
 
     // Mirror the PRIMARY merged leg's source into `video.camera.source`, so the
     // inline video pipeline (which reads `video.camera`) serves the primary leg. A
     // pod-only drone has no local camera — its primary leg is a network RTSP the
     // existing IP-camera path pulls into `/main`. Without this, the pipeline runs
-    // local V4L2/CSI discovery, finds nothing, and never starts (zero video). The
-    // primary is the leg with role `primary`, else the first (matching
-    // `VideoConfig::resolve_legs`).
-    let primary = merged
-        .iter()
-        .find(|c| c.get("role").and_then(serde_json::Value::as_str) == Some("primary"))
-        .or_else(|| merged.first());
-    if let Some(src) = primary
+    // local V4L2/CSI discovery, finds nothing, and never starts (zero video).
+    if let Some(src) = effective_primary(&merged)
         .and_then(|c| c.get("source"))
         .and_then(serde_json::Value::as_str)
         .filter(|s| !s.is_empty())
@@ -441,23 +479,35 @@ pub fn apply_video_cameras(root: &mut Mapping, cameras: &serde_json::Value, owne
 
     // Transcode the merged JSON list into the YAML data model and write it back.
     let Ok(value) = serde_norway::to_value(&merged) else {
-        return;
+        return Ok(());
     };
     let video = ensure_map(root, "video");
     video.insert(Value::String("cameras".to_string()), value);
+    Ok(())
+}
+
+/// The outcome of [`persist_video_cameras`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum CamerasPersist {
+    /// The merged list was written.
+    Written,
+    /// The write would take over another owner's leg; nothing was written.
+    Refused(String),
+    /// The config could not be read or written (or the caller is not root).
+    Failed,
 }
 
 /// Load → merge `video.cameras` by `owner` → atomically rewrite the config,
 /// serialised by the same flock and euid-0 gate as [`persist_pair_state`] (the
-/// file is 0600 root). Returns false (no write) for a non-root caller on Linux.
+/// file is 0600 root). A non-root caller on Linux gets `Failed` (no write).
 /// The video pipeline reads the new source list on its next start, so the caller
-/// restarts `ados-video` after a `true`.
+/// restarts `ados-video` after `Written`.
 pub fn persist_video_cameras(
     config_path: &Path,
     lock_path: &Path,
     cameras: &serde_json::Value,
     owner: &str,
-) -> bool {
+) -> CamerasPersist {
     #[cfg(target_os = "linux")]
     {
         if !nix::unistd::geteuid().is_root() {
@@ -466,7 +516,7 @@ pub fn persist_video_cameras(
                 euid = nix::unistd::geteuid().as_raw(),
                 "config_write_requires_root"
             );
-            return false;
+            return CamerasPersist::Failed;
         }
     }
 
@@ -479,23 +529,26 @@ pub fn persist_video_cameras(
         Ok(m) => m,
         Err(e) => {
             tracing::error!(error = %e, path = %config_path.display(), "config_write_aborted_unparseable");
-            return false;
+            return CamerasPersist::Failed;
         }
     };
-    apply_video_cameras(&mut root, cameras, owner);
+    if let Err(reason) = apply_video_cameras(&mut root, cameras, owner) {
+        tracing::warn!(owner, reason = %reason, "camera_legs_write_refused");
+        return CamerasPersist::Refused(reason);
+    }
 
     let body = match serde_norway::to_string(&Value::Mapping(root)) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, path = %config_path.display(), "config_write_failed");
-            return false;
+            return CamerasPersist::Failed;
         }
     };
     match atomic_write(config_path, body.as_bytes(), 0o600) {
-        Ok(()) => true,
+        Ok(()) => CamerasPersist::Written,
         Err(e) => {
             tracing::error!(error = %e, path = %config_path.display(), "config_write_failed");
-            false
+            CamerasPersist::Failed
         }
     }
 }
@@ -916,12 +969,12 @@ mod tests {
             {"id": "main", "source": "rtsp://192.168.144.25:8554/main", "role": "eo"},
             {"id": "ir", "source": "rtsp://192.168.144.25:8554/ir", "role": "ir", "codec": "h264"},
         ]);
-        let ok = persist_video_cameras(&cfg, &lock, &cameras, "operator");
-        // On Linux as non-root this returns false; on the dev host it writes.
+        let outcome = persist_video_cameras(&cfg, &lock, &cameras, "operator");
+        // On Linux as non-root this is Failed; on the dev host it writes.
         if cfg!(target_os = "linux") {
             return;
         }
-        assert!(ok);
+        assert_eq!(outcome, CamerasPersist::Written);
         let reloaded = try_load_config_mapping(&cfg).unwrap();
         let video = reloaded.get("video").and_then(Value::as_mapping).unwrap();
         let legs = video.get("cameras").and_then(Value::as_sequence).unwrap();
@@ -959,8 +1012,12 @@ mod tests {
         let lock = dir.path().join("config.yaml.lock");
         let before = std::fs::read_to_string(&cfg).unwrap();
         let cameras = serde_json::json!([{"id":"main","source":"rtsp://x/main","role":"eo"}]);
-        let ok = persist_video_cameras(&cfg, &lock, &cameras, "operator");
-        assert!(!ok, "must refuse to write over an unparseable config");
+        let outcome = persist_video_cameras(&cfg, &lock, &cameras, "operator");
+        assert_eq!(
+            outcome,
+            CamerasPersist::Failed,
+            "must refuse to write over an unparseable config"
+        );
         // The corrupt file is left untouched, not clobbered with an empty config
         // that would drop WFB pairing + profile.
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), before);
@@ -970,9 +1027,9 @@ mod tests {
     fn apply_video_cameras_ignores_a_non_array() {
         // Defence-in-depth: a non-sequence value never mutates the config.
         let mut root = Mapping::new();
-        apply_video_cameras(&mut root, &serde_json::json!({"id": "main"}), "operator");
+        apply_video_cameras(&mut root, &serde_json::json!({"id": "main"}), "operator").unwrap();
         assert!(root.get("video").is_none());
-        apply_video_cameras(&mut root, &serde_json::json!("main"), "operator");
+        apply_video_cameras(&mut root, &serde_json::json!("main"), "operator").unwrap();
         assert!(root.get("video").is_none());
     }
 
@@ -1001,12 +1058,14 @@ mod tests {
                 {"id": "ir", "source": "rtsp://pod/ir", "role": "ir"},
             ]),
             "com.altnautica.siyi-pod",
-        );
+        )
+        .unwrap();
         apply_video_cameras(
             &mut root,
             &serde_json::json!([{"id": "belly", "source": "/dev/video2"}]),
             "operator",
-        );
+        )
+        .unwrap();
         let legs = cameras_after_apply(&root);
         let ids: Vec<&str> = legs
             .iter()
@@ -1034,25 +1093,28 @@ mod tests {
             &mut root,
             &serde_json::json!([{"id": "belly", "source": "/dev/video2"}]),
             "operator",
-        );
+        )
+        .unwrap();
         apply_video_cameras(
             &mut root,
             &serde_json::json!([
-                {"id": "eo", "source": "rtsp://pod/main", "role": "primary"},
+                {"id": "eo", "source": "rtsp://pod/main", "role": "eo"},
                 {"id": "ir", "source": "rtsp://pod/ir"},
                 {"id": "wide", "source": "rtsp://pod/wide"},
             ]),
             "com.altnautica.siyi-pod",
-        );
+        )
+        .unwrap();
         // Re-declare with `wide` removed.
         apply_video_cameras(
             &mut root,
             &serde_json::json!([
-                {"id": "eo", "source": "rtsp://pod/main", "role": "primary"},
+                {"id": "eo", "source": "rtsp://pod/main", "role": "eo"},
                 {"id": "ir", "source": "rtsp://pod/ir"},
             ]),
             "com.altnautica.siyi-pod",
-        );
+        )
+        .unwrap();
         let legs = cameras_after_apply(&root);
         let ids: Vec<&str> = legs
             .iter()
@@ -1066,12 +1128,11 @@ mod tests {
     }
 
     #[test]
-    fn merge_by_owner_replaces_a_legacy_ownerless_leg_in_place_without_a_duplicate() {
-        // A leg written before the owner field existed (no owner ⇒ operator) with
-        // the same id is replaced in place, not duplicated, when the plugin that
-        // owns it re-declares.
+    fn only_the_operator_replaces_a_legacy_ownerless_leg_in_place() {
+        // A leg written before the owner field existed belongs to the operator.
+        // A plugin naming its id is refused with the config untouched; the
+        // operator's re-declaration replaces it in place, with no duplicate.
         let mut root = Mapping::new();
-        // Seed a legacy (ownerless) leg with id "eo".
         {
             let video = ensure_map(&mut root, "video");
             let seq = serde_json::json!([{"id": "eo", "source": "rtsp://old/eo"}]);
@@ -1080,23 +1141,109 @@ mod tests {
                 serde_norway::to_value(&seq).unwrap(),
             );
         }
+        let refused = apply_video_cameras(
+            &mut root,
+            &serde_json::json!([{"id": "eo", "source": "rtsp://pod/main"}]),
+            "com.altnautica.siyi-pod",
+        )
+        .unwrap_err();
+        assert!(refused.starts_with("owner_conflict"), "{refused}");
+        assert_eq!(cameras_after_apply(&root)[0]["source"], "rtsp://old/eo");
+
         apply_video_cameras(
             &mut root,
-            &serde_json::json!([{"id": "eo", "source": "rtsp://pod/main", "role": "primary"}]),
-            "com.altnautica.siyi-pod",
-        );
+            &serde_json::json!([{"id": "eo", "source": "/dev/video0", "role": "primary"}]),
+            "operator",
+        )
+        .unwrap();
         let legs = cameras_after_apply(&root);
         assert_eq!(legs.len(), 1, "no duplicate id");
-        assert_eq!(legs[0]["source"], "rtsp://pod/main");
-        assert_eq!(legs[0]["owner"], "com.altnautica.siyi-pod");
+        assert_eq!(legs[0]["source"], "/dev/video0");
+        assert_eq!(legs[0]["owner"], "operator");
         // The primary source was mirrored into video.camera.source.
-        let camera_source = root
-            .get("video")
+        assert_eq!(camera_source(&root), Some("/dev/video0"));
+    }
+
+    fn camera_source(root: &Mapping) -> Option<&str> {
+        root.get("video")
             .and_then(Value::as_mapping)
             .and_then(|v| v.get("camera"))
             .and_then(Value::as_mapping)
             .and_then(|c| c.get("source"))
-            .and_then(Value::as_str);
-        assert_eq!(camera_source, Some("rtsp://pod/main"));
+            .and_then(Value::as_str)
+    }
+
+    #[test]
+    fn a_plugin_cannot_take_over_another_owners_leg_or_the_operator_primary() {
+        let mut root = Mapping::new();
+        apply_video_cameras(
+            &mut root,
+            &serde_json::json!([{"id": "belly", "source": "/dev/video2", "role": "primary"}]),
+            "operator",
+        )
+        .unwrap();
+        apply_video_cameras(
+            &mut root,
+            &serde_json::json!([{"id": "ir", "source": "rtsp://pod/ir"}]),
+            "com.example.pod",
+        )
+        .unwrap();
+        let before = cameras_after_apply(&root);
+
+        // A plugin re-pointing the operator's leg id.
+        let err = apply_video_cameras(
+            &mut root,
+            &serde_json::json!([{"id": "belly", "source": "rtsp://example.com/x"}]),
+            "com.example.other",
+        )
+        .unwrap_err();
+        assert!(err.contains("belongs to operator"), "{err}");
+        // Another plugin's leg is just as protected.
+        let err = apply_video_cameras(
+            &mut root,
+            &serde_json::json!([{"id": "ir", "source": "rtsp://example.com/x"}]),
+            "com.example.other",
+        )
+        .unwrap_err();
+        assert!(err.contains("belongs to com.example.pod"), "{err}");
+        // A plugin declaring its own new leg as primary over the operator's.
+        let err = apply_video_cameras(
+            &mut root,
+            &serde_json::json!([{"id": "eo", "source": "rtsp://pod/main", "role": "primary"}]),
+            "com.example.pod",
+        )
+        .unwrap_err();
+        assert!(err.starts_with("owner_conflict"), "{err}");
+        // An operator write naming a plugin's leg id is refused too.
+        assert!(apply_video_cameras(
+            &mut root,
+            &serde_json::json!([{"id": "ir", "source": "/dev/video4"}]),
+            "operator",
+        )
+        .is_err());
+
+        // Every refusal left the legs and the primary source as they were.
+        assert_eq!(cameras_after_apply(&root), before);
+        assert_eq!(camera_source(&root), Some("/dev/video2"));
+    }
+
+    #[test]
+    fn a_plugin_may_declare_the_primary_when_the_operator_has_none() {
+        let mut root = Mapping::new();
+        apply_video_cameras(
+            &mut root,
+            &serde_json::json!([{"id": "eo", "source": "rtsp://pod/main", "role": "primary"}]),
+            "com.example.pod",
+        )
+        .unwrap();
+        assert_eq!(camera_source(&root), Some("rtsp://pod/main"));
+        // Re-declaring its own primary stays allowed.
+        apply_video_cameras(
+            &mut root,
+            &serde_json::json!([{"id": "eo", "source": "rtsp://pod/zoom", "role": "primary"}]),
+            "com.example.pod",
+        )
+        .unwrap();
+        assert_eq!(camera_source(&root), Some("rtsp://pod/zoom"));
     }
 }

@@ -19,11 +19,14 @@ use serde::Deserialize;
 use crate::backend::{ProbeSpec, UnitSpec};
 use crate::errors::SupervisorError;
 use crate::manifest::{bin_reference, canonical_profile, AgentIsolation, PluginManifest};
-use crate::sandbox::{sandbox_directives, NETWORK_LISTEN_CAP, NETWORK_OUTBOUND_CAP};
+use crate::sandbox::{
+    fc_port_exclusion, sandbox_directives, NETWORK_LISTEN_CAP, NETWORK_OUTBOUND_CAP,
+};
 use crate::supervisor::Paths;
 use crate::systemd::{
-    path_token, resolve_program, runner_context, sanitize_unit_name, service_log_path_for,
-    PLUGIN_SLICE_NAME, PLUGIN_UNIT_PREFIX,
+    exec_paths_for, fc_serial_port, path_token, plugin_unit_basename, resolve_program,
+    runner_context, sanitize_unit_name, service_log_path_for, PLUGIN_SLICE_NAME,
+    PLUGIN_UNIT_PREFIX,
 };
 
 /// How long an HTTP readiness probe may take.
@@ -435,11 +438,11 @@ pub(crate) fn exec_word(word: &str) -> String {
 }
 
 /// The unit name for a declared service, distinct from the main unit by its
-/// trailing `-<service>` segment.
+/// trailing `-<service>` segment after the plugin's hashed basename.
 pub fn service_unit_name_for(plugin_id: &str, service_name: &str) -> String {
     format!(
         "{PLUGIN_UNIT_PREFIX}{}-{}.service",
-        sanitize_unit_name(plugin_id),
+        plugin_unit_basename(plugin_id),
         sanitize_unit_name(service_name)
     )
 }
@@ -487,6 +490,8 @@ pub fn build_service_spec(
     spec.resources = agent.resources.clone();
     spec.sandbox_directives =
         sandbox_directives(granted, loopback_guard_active, &service.listen_ports);
+    spec.sandbox_directives
+        .extend(fc_port_exclusion(granted, fc_serial_port().as_deref()));
     Ok(spec)
 }
 
@@ -502,15 +507,19 @@ pub fn probe_spec(
 ) -> Result<ProbeSpec, SupervisorError> {
     let working_dir = paths.install_dir.join(&manifest.id);
     path_token("install dir", &working_dir)?;
+    let mut directives = sandbox_directives(granted, loopback_guard_active, &[]);
+    directives.extend(fc_port_exclusion(granted, fc_serial_port().as_deref()));
     Ok(ProbeSpec {
         argv: argv.to_vec(),
         working_dir,
+        user: crate::plugin_account::plugin_user_for(&manifest.id),
         resources: manifest
             .agent
             .as_ref()
             .map(|a| a.resources.clone())
             .unwrap_or_default(),
-        sandbox_directives: sandbox_directives(granted, loopback_guard_active, &[]),
+        exec_paths: exec_paths_for(manifest, paths)?,
+        sandbox_directives: directives,
     })
 }
 
@@ -615,11 +624,11 @@ mod tests {
         assert!(unit.contains("Slice=ados-plugins.slice"));
         assert!(unit.contains("WorkingDirectory=/var/ados/plugins/com.example.svc"));
         assert!(unit.contains("ExecStart=bin/api"));
-        assert!(unit.contains("User=ados"));
+        assert!(unit.contains("User=ados-plg-39e76452\nGroup=ados-plugins\n"));
         assert!(unit.contains("NoNewPrivileges=yes"));
         assert_eq!(
             service_unit_name_for("com.example.svc", "api"),
-            "ados-plugin-com-example-svc-api.service"
+            "ados-plugin-com-example-svc-39e76452-api.service"
         );
     }
 
@@ -634,7 +643,8 @@ mod tests {
         assert!(unit.contains(
             "Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.svc/host.sock"
         ));
-        assert!(unit.contains("EnvironmentFile=-/run/ados/plugins/com.example.svc.token.env"));
+        assert!(unit
+            .contains("LoadCredential=ados-plugin-token:/run/ados/plugins/com.example.svc.token"));
         assert!(unit.contains("BindReadOnlyPaths=/run/ados/plugins/com.example.svc\n"));
         assert!(unit.contains("Environment=ADOS_NODE_PROFILE=workstation\n"));
     }

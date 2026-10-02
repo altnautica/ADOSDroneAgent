@@ -12,7 +12,7 @@
 //!
 //! Two read shapes share one transport:
 //! * [`fetch_capped`] reads a body into memory under a cap (an archive, at most
-//!   [`DOWNLOAD_MAX_BYTES`]).
+//!   [`crate::archive::ARCHIVE_MAX_BYTES`]).
 //! * [`fetch_to_file`] streams a body to disk under a cap while hashing it and
 //!   refuses a digest mismatch (a payload, at most
 //!   [`crate::manifest::PAYLOAD_MAX_BYTES`]), so a gigabyte binary is never
@@ -24,22 +24,17 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-/// Hard cap on a downloaded archive body. The read aborts one byte past it, so
-/// a larger body is never buffered whole.
-pub const DOWNLOAD_MAX_BYTES: u64 = 100 * 1024 * 1024;
-
 /// Allowlisted hostname suffixes. A host must end with one of these (a suffix
-/// match on the parsed host, not a substring search); `localhost` is an exact
-/// match. The convex hosts serve cloud-relay archives; the GitHub and object
-/// storage hosts serve release archives and payloads.
+/// match on the parsed host, not a substring search). The convex hosts serve
+/// cloud-relay archives; the GitHub hosts serve release archives and payloads.
+/// No general object-storage domain is listed: anyone can host a bucket there,
+/// so it would admit any origin.
 pub const HOST_SUFFIXES: &[&str] = &[
     ".convex.cloud",
     ".convex.altnautica.com",
     "github.com",
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
-    ".amazonaws.com",
-    "localhost",
 ];
 
 /// Most redirect hops a download may follow. Each hop is allowlist-checked.
@@ -74,8 +69,7 @@ pub enum DownloadError {
 }
 
 /// Reject URLs that escape the allowlist. Three checks in order: scheme is
-/// `https`, host is present, host ends with an allowlisted suffix (`localhost`
-/// is an exact match, not a suffix, so `evil.localhost.example.com` is refused).
+/// `https`, host is present, host ends with an allowlisted suffix.
 pub fn validate_download_url(url: &str) -> Result<(), DownloadError> {
     if url.is_empty() {
         return Err(DownloadError::Empty);
@@ -103,7 +97,7 @@ pub fn validate_parsed_url(url: &reqwest::Url) -> Result<(), DownloadError> {
         } else {
             // A bare host is an exact match or a dot-separated parent, so
             // `github.com` admits `codeload.github.com` but not `evilgithub.com`.
-            host == *suffix || (*suffix != "localhost" && host.ends_with(&format!(".{suffix}")))
+            host == *suffix || host.ends_with(&format!(".{suffix}"))
         }
     });
     if allowed {
@@ -360,12 +354,9 @@ mod tests {
         for url in [
             "https://abc.convex.cloud/path?sig=1",
             "https://self.convex.altnautica.com/x",
-            "https://localhost/x",
-            "https://localhost:8443/x",
             "https://github.com/o/r/releases/download/v1/a.adosplug",
             "https://objects.githubusercontent.com/x",
             "https://release-assets.githubusercontent.com/x",
-            "https://bucket.s3.amazonaws.com/x",
             "https://user@abc.convex.cloud:443/x",
         ] {
             assert!(validate_download_url(url).is_ok(), "{url}");
@@ -389,10 +380,11 @@ mod tests {
     fn look_alike_hosts_are_rejected() {
         for (url, host) in [
             ("https://evil.example.com/x", "evil.example.com"),
-            // localhost is an exact match, not a suffix.
+            // Neither a loopback name nor an arbitrary object-storage bucket.
+            ("https://localhost/x", "localhost"),
             (
-                "https://evil.localhost.example.com/x",
-                "evil.localhost.example.com",
+                "https://bucket.s3.amazonaws.com/x",
+                "bucket.s3.amazonaws.com",
             ),
             // A bare suffix matches on a label boundary only.
             ("https://evilgithub.com/x", "evilgithub.com"),

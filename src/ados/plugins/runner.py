@@ -2,19 +2,21 @@
 
 This is the program systemd starts inside the per-plugin
 ``ados-plugin-<id>.service`` unit. The plugin host binds a Unix-domain
-socket for the plugin and writes a 0600 env file carrying the capability
-token, which the unit delivers through ``EnvironmentFile=``; the runner
-connects, builds a :class:`PluginContext` bound to that connection, imports
-the entry point, and runs lifecycle hooks until shutdown.
+socket for the plugin and writes a 0600 ``KEY=VALUE`` file carrying the
+capability token, which the unit loads with ``LoadCredential=`` so it appears
+only as ``$CREDENTIALS_DIRECTORY/ados-plugin-token``, readable by the plugin's
+own user; the runner reads it, connects, builds a :class:`PluginContext` bound
+to that connection, imports the entry point, and runs lifecycle hooks until
+shutdown.
 
 **The runner waits for its bridge; it never degrades quietly.** It used to
 fall through to a null IPC client whenever the socket or token was missing,
 which turned every ordering hiccup into a plugin that systemd reported active
 and the GCS reported running while it did nothing at all — no telemetry, no
-MAVLink, no config, and no error anywhere an operator could see. The token
-env file is written by a different process, so "not there yet" is a normal
-transient, not a terminal state. :func:`_await_bridge` therefore retries on a
-fixed interval forever, logging periodically, until both appear.
+MAVLink, no config, and no error anywhere an operator could see. The socket is
+bound by a different process, so "not there yet" is a normal transient, not a
+terminal state. :func:`_await_bridge` therefore retries on a fixed interval
+forever, logging periodically, until the host accepts the connection.
 
 Exit codes:
 * 0 graceful shutdown (SIGTERM / SIGINT)
@@ -139,31 +141,52 @@ def _load_plugin_class(install_dir: Path, manifest: PluginManifest):
     return klass
 
 
-def _token_env_path(plugin_id: str) -> Path:
-    """The 0600 env file the plugin host writes this plugin's token into.
+#: The systemd credential id the plugin unit loads its token file under. It
+#: appears as ``$CREDENTIALS_DIRECTORY/<this>`` inside the plugin process.
+TOKEN_CREDENTIAL_NAME = "ados-plugin-token"
 
-    The unit references it through ``EnvironmentFile=-<path>``, whose ``-``
-    prefix tolerates the file's absence so a unit start never fails on it.
-    That tolerance is why the runner has to be able to find the file itself:
-    if the plugin host had not written it yet when systemd exec'd us,
-    ``ADOS_PLUGIN_TOKEN`` is simply unset in our environment and no restart
-    will fix it, because systemd would exec us again just as early.
+
+def _credential_path() -> Path | None:
+    """Where systemd placed this process's token credential, if it did."""
+    directory = os.environ.get("CREDENTIALS_DIRECTORY")
+    if not directory:
+        return None
+    return Path(directory) / TOKEN_CREDENTIAL_NAME
+
+
+def _read_credential() -> dict[str, str]:
+    """The ``KEY=VALUE`` lines of the token credential (empty when absent).
+
+    The file carries ``ADOS_PLUGIN_TOKEN``, ``ADOS_PLUGIN_SOCKET``,
+    ``ADOS_PLUGIN_AGENT_ID`` and ``ADOS_PLUGIN_DATA_DIR``. Values are taken
+    verbatim after the first ``=``.
     """
-    return PLUGIN_RUN_DIR / f"{plugin_id}.token.env"
-
-
-def _read_token_env(plugin_id: str) -> str | None:
-    """Read ``ADOS_PLUGIN_TOKEN`` out of the plugin's env file, if present."""
-    path = _token_env_path(plugin_id)
+    path = _credential_path()
+    if path is None:
+        return {}
     try:
         body = path.read_text(encoding="utf-8")
     except OSError:
-        return None
+        return {}
+    values: dict[str, str] = {}
     for line in body.splitlines():
-        key, _, value = line.partition("=")
-        if key == "ADOS_PLUGIN_TOKEN" and value:
-            return value
-    return None
+        key, sep, value = line.partition("=")
+        if sep and key:
+            values[key] = value
+    return values
+
+
+def _launch_value(key: str) -> str | None:
+    """One launch value: the token credential's, else the environment's.
+
+    Under systemd the values arrive only in the credential. The launchd entry
+    script exports the same keys into the environment instead, which is the
+    fallback here.
+    """
+    value = _read_credential().get(key)
+    if value:
+        return value
+    return os.environ.get(key) or None
 
 
 async def _await_bridge(
@@ -180,10 +203,9 @@ async def _await_bridge(
     life is ordinary — and permanent from our side if we give up, because
     systemd would restart us just as early.
 
-    So this loop has no attempt cap and no backoff. It re-reads the token from
-    the env file each pass rather than trusting the copy systemd put in our
-    environment, because a rotation rewrites that file and a stale token from
-    process start would be refused forever.
+    So this loop has no attempt cap and no backoff. A token passed on the
+    command line is dropped after a refused connect and the credential is
+    read again, so a later pass presents what the host wrote.
 
     Returning only a live client is the point: the caller has no degraded path
     to fall into, so a plugin that reaches its lifecycle hooks is a plugin
@@ -193,7 +215,7 @@ async def _await_bridge(
     attempt = 0
     while True:
         attempt += 1
-        token = capability_token or _read_token_env(plugin_id)
+        token = capability_token or _launch_value("ADOS_PLUGIN_TOKEN")
         if token:
             client = PluginIpcClient(
                 plugin_id=plugin_id,
@@ -211,9 +233,8 @@ async def _await_bridge(
                 return client
             except Exception as exc:  # noqa: BLE001
                 reason = f"connect failed: {exc}"
-                # A token that came from the process environment may be the
-                # one minted before a rotation. Drop it so the next pass
-                # re-reads the env file.
+                # A token passed in at start may be the one minted before a
+                # rotation. Drop it so the next pass reads the credential.
                 capability_token = None
         else:
             reason = "no capability token yet"
@@ -223,7 +244,7 @@ async def _await_bridge(
                 "plugin_ipc_waiting_for_host",
                 plugin_id=plugin_id,
                 socket=resolved_socket,
-                token_env=str(_token_env_path(plugin_id)),
+                credential=str(_credential_path() or ""),
                 attempts=attempt,
                 detail=reason,
             )
@@ -414,18 +435,18 @@ def _prepare_plugin_dirs(plugin_id: str, agent_id: str) -> tuple[Path, Path, Pat
     """Resolve and create the three dirs the plugin context hands the plugin.
 
     ``data_dir`` prefers ``ADOS_PLUGIN_DATA_DIR`` — the path the host already
-    computed and delivered in the env file — so there is one source of truth.
-    ``_data_dir_for`` and the Rust host's ``plugin_data_dir`` derive the identical
-    path today, but two hand-synced derivations invite drift; when the env is
-    present it wins, and ``_data_dir_for`` is the fallback for a direct (no-host)
-    launch. The host creates the plugin's own data dir (and the per-drone leaf
-    when that dir is new); a leaf for a later device id, the config dir, or a
-    direct launch's dirs are made here, so a plugin's first write never hits
-    ``FileNotFoundError``. A create failure is logged (surfaced as the plugin's
-    own write error later), never a runner crash.
+    computed and delivered in the token credential — so there is one source of
+    truth. ``_data_dir_for`` and the Rust host's ``plugin_data_dir`` derive the
+    identical path today, but two hand-synced derivations invite drift; when the
+    host supplied it, it wins, and ``_data_dir_for`` is the fallback for a
+    direct (no-host) launch. The host creates the plugin's own data dir (and
+    the per-drone leaf when that dir is new); a leaf for a later device id, the
+    config dir, or a direct launch's dirs are made here, so a plugin's first
+    write never hits ``FileNotFoundError``. A create failure is logged
+    (surfaced as the plugin's own write error later), never a runner crash.
     """
-    env_data_dir = os.environ.get("ADOS_PLUGIN_DATA_DIR")
-    data_dir = Path(env_data_dir) if env_data_dir else _data_dir_for(plugin_id, agent_id)
+    host_data_dir = _launch_value("ADOS_PLUGIN_DATA_DIR")
+    data_dir = Path(host_data_dir) if host_data_dir else _data_dir_for(plugin_id, agent_id)
     config_dir = PLUGIN_DATA_DIR / plugin_id / "config"
     # Scratch space under the process temp dir, which the unit makes private
     # to this plugin (PrivateTmp). The agent run dir is not writable from a
@@ -485,19 +506,19 @@ def _spawn_allowlist(manifest: PluginManifest) -> frozenset[str]:
 @click.option(
     "--socket",
     "socket_path",
-    default=lambda: os.environ.get("ADOS_PLUGIN_SOCKET"),
+    default=lambda: _launch_value("ADOS_PLUGIN_SOCKET"),
     help="UDS path to the supervisor IPC server for this plugin.",
 )
 @click.option(
     "--token",
     "capability_token",
-    default=lambda: os.environ.get("ADOS_PLUGIN_TOKEN"),
+    default=lambda: _launch_value("ADOS_PLUGIN_TOKEN"),
     help="Capability token minted by the supervisor for this plugin process.",
 )
 @click.option(
     "--agent-id",
     "agent_id",
-    default=lambda: os.environ.get("ADOS_PLUGIN_AGENT_ID", ""),
+    default=lambda: _launch_value("ADOS_PLUGIN_AGENT_ID") or "",
     help="cmd_drones._id of the drone this plugin instance targets (per_drone_config).",
 )
 def main(

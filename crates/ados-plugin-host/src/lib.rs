@@ -58,6 +58,7 @@ pub mod invoke;
 pub mod loopback_guard;
 pub mod manifest;
 pub mod pic_gate;
+pub mod plugin_account;
 pub mod realhost;
 pub mod reconcile;
 pub mod sandbox;
@@ -98,8 +99,8 @@ pub use signing::{is_first_party_signer, FIRST_PARTY_SIGNERS};
 pub use state::{PluginInstall, PluginSource, PluginStatus};
 pub use supervisor::{semver_in_range, InstallResult, Paths, PluginSupervisor};
 pub use token_secret::{
-    load_or_create_secret, shared_issuer, token_env_path, write_token_env, TokenMint,
-    PLUGIN_TOKEN_SECRET_PATH,
+    load_or_create_secret, shared_issuer, token_credential_path, write_token_credential, TokenMint,
+    PLUGIN_TOKEN_SECRET_PATH, TOKEN_CREDENTIAL_NAME,
 };
 pub use vision_client::{VisionClient, VisionRpcError};
 

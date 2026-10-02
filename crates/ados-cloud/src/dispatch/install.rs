@@ -2,11 +2,14 @@
 //!
 //! The local-first multipart upload is the primary transport; this rides the
 //! cloud command queue when the GCS cannot reach the agent directly. Both
-//! converge on `PluginSupervisor::install_archive` — signature verify, unpack,
+//! converge on `PluginSupervisor::install_contents` — signature verify, unpack,
 //! and unit render are not re-implemented here. Ports the install half of
 //! `RemoteInstallReceiver` from `src/ados/plugins/remote_install.py`: the
-//! idempotency short-circuit, the allowlisted size-capped download, the staged
-//! archive install, the requested-permission grant loop, and the ACK shape.
+//! idempotency short-circuit, the allowlisted size-capped download, the archive
+//! install, the requested-permission grant loop, and the ACK shape. When the
+//! command names a `pluginId`, an archive declaring any other id is refused
+//! before anything is installed, so the operator's approved permissions only
+//! ever reach the plugin they were approved for.
 //!
 //! The download is behind the plugin host's [`DownloadSource`] seam so the
 //! install logic is unit-tested with no network; its `HttpDownloadSource` is
@@ -14,8 +17,9 @@
 
 use std::path::Path;
 
+use ados_plugin_host::archive::{parse_archive_bytes, ARCHIVE_MAX_BYTES};
 use ados_plugin_host::download::{
-    fetch_capped, validate_download_url, verify_sha256, DownloadSource, DOWNLOAD_MAX_BYTES,
+    fetch_capped, validate_download_url, verify_sha256, DownloadSource,
 };
 use ados_plugin_host::PluginSupervisor;
 
@@ -80,8 +84,8 @@ impl InstallCommand {
 
 /// Run the cloud-relay install. Mirrors `RemoteInstallReceiver.handle_install`:
 /// validate jobId, idempotency short-circuit, download (allowlist + size cap +
-/// optional sha), stage the archive, `install_archive`, grant the requested
-/// permissions, mark seen, return the ACK.
+/// optional sha), parse the archive and check it is the commanded plugin,
+/// install, grant the requested permissions, mark seen, return the ACK.
 pub fn handle_install(
     supervisor: &mut PluginSupervisor,
     cmd: &InstallCommand,
@@ -103,7 +107,7 @@ pub fn handle_install(
         return CommandResult::failed(format!("download failed: {e}"))
             .with_data(serde_json::json!({"code": "download_failed", "jobId": cmd.job_id}));
     }
-    let archive_bytes = match fetch_capped(source, &cmd.signed_url, DOWNLOAD_MAX_BYTES) {
+    let archive_bytes = match fetch_capped(source, &cmd.signed_url, ARCHIVE_MAX_BYTES) {
         Ok(b) => b,
         Err(e) => {
             return CommandResult::failed(format!("download failed: {e}"))
@@ -115,17 +119,31 @@ pub fn handle_install(
             .with_data(serde_json::json!({"code": "download_failed", "jobId": cmd.job_id}));
     }
 
-    // Stage the archive on disk so the supervisor's Path entry point works.
-    let tmp_dir = std::env::temp_dir();
-    let tmp_path = tmp_dir.join(format!("ados-install-{}.adosplug", cmd.job_id_safe()));
-    if let Err(e) = std::fs::write(&tmp_path, &archive_bytes) {
-        return CommandResult::failed(format!("stage failed: {e}"))
-            .with_data(serde_json::json!({"code": "stage_failed", "jobId": cmd.job_id}));
+    let contents = match parse_archive_bytes(archive_bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            return CommandResult::failed(format!("install: {e}"))
+                .with_data(serde_json::json!({"code": "supervisor_error", "jobId": cmd.job_id}));
+        }
+    };
+    if let Some(expected) = cmd.plugin_id.as_deref() {
+        if contents.manifest.id != expected {
+            tracing::warn!(
+                job_id = %cmd.job_id,
+                commanded = %expected,
+                archive = %contents.manifest.id,
+                "remote install refused: archive is a different plugin"
+            );
+            return CommandResult::failed(format!(
+                "install: archive is plugin {} but the command is for {expected}",
+                contents.manifest.id
+            ))
+            .with_data(serde_json::json!({"code": "plugin_mismatch", "jobId": cmd.job_id}));
+        }
     }
 
-    let install = supervisor.install_archive(&tmp_path);
-    let _ = std::fs::remove_file(&tmp_path);
-    let result = match install {
+    let source_uri = format!("cloud:{}", cmd.job_id);
+    let result = match supervisor.install_contents(contents, Path::new(&source_uri)) {
         Ok(r) => r,
         Err(e) => {
             return CommandResult::failed(format!("install: {e}"))
@@ -165,16 +183,6 @@ pub fn handle_install(
             "manifestHash": manifest_hash,
             "granted": granted,
         })),
-    }
-}
-
-impl InstallCommand {
-    /// A filesystem-safe form of the job id for the staged temp file name.
-    fn job_id_safe(&self) -> String {
-        self.job_id
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect()
     }
 }
 
@@ -367,5 +375,20 @@ mod tests {
             &seen,
         );
         assert_eq!(r.status, CommandStatus::Failed);
+    }
+
+    #[test]
+    fn an_archive_for_another_plugin_is_refused_before_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sup = supervisor(dir.path());
+        let seen = dir.path().join("seen.json");
+        let src = fake_source(build_archive());
+        let mut cmd = install_cmd("j-other", "https://abc.convex.cloud/x");
+        cmd.plugin_id = Some("com.example.other".to_string());
+        let r = handle_install(&mut sup, &cmd, &src, &seen);
+        assert_eq!(r.status, CommandStatus::Failed);
+        assert_eq!(r.data.unwrap()["code"], "plugin_mismatch");
+        assert!(sup.find_install("com.example.thermal").is_none());
+        assert!(sup.find_install("com.example.other").is_none());
     }
 }

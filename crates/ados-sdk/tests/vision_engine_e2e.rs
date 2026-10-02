@@ -493,7 +493,9 @@ fn field<'a>(args: &'a Value, key: &str) -> Option<&'a Value> {
 
 /// A batch a plugin publishes (an offloaded detection, say) must reach the
 /// drone's detection bus, not be refused by the engine as an undecodable
-/// batch (`decode args: missing field 'v'`).
+/// batch (`decode args: missing field 'v'`). It arrives bound to the plugin:
+/// under the plugin's model namespace, and without tracker fields the plugin
+/// was not granted designation to set.
 #[tokio::test]
 async fn a_published_batch_reaches_the_engines_detection_bus() {
     let (h, engine) = harness(&["vision.detection.publish"], RealEngine::start).await;
@@ -514,7 +516,16 @@ async fn a_published_batch_reaches_the_engines_detection_bus() {
         .await
         .expect("the batch never reached the engine's detection bus")
         .expect("detection bus open");
-    assert_eq!(got, sent);
+    let expected = DetectionBatch {
+        model_id: format!("{PLUGIN_ID}/{}", sent.model_id),
+        detections: vec![Detection {
+            track_id: None,
+            lock_state: None,
+            ..detection()
+        }],
+        ..sent
+    };
+    assert_eq!(got, expected);
     assert_eq!(field(&reply, "subscribers"), Some(&Value::from(1u64)));
     h.ipc.close().await;
 }
@@ -533,7 +544,8 @@ async fn a_registered_model_lands_in_the_engines_registry() {
     assert_eq!(field(&reply, "registered"), Some(&Value::Boolean(true)));
     let models = engine.engine.list_models().await;
     assert_eq!(models.len(), 1);
-    assert_eq!(models[0].id, model().id);
+    // Filed under the registering plugin, never in the engine's own namespace.
+    assert_eq!(models[0].id, format!("{PLUGIN_ID}/{}", model().id));
     assert_eq!(models[0].output_classes, model().output_classes);
     assert!(models[0].backend_loaded);
     h.ipc.close().await;
@@ -589,7 +601,21 @@ async fn infer_runs_the_engines_model_on_the_named_frame() {
 
 #[tokio::test]
 async fn a_designated_target_locks_the_engines_tracker() {
-    let (h, _engine) = harness(&["vision.track.designate"], RealEngine::start).await;
+    let (h, engine) = harness(&["vision.track.designate"], RealEngine::start).await;
+    // Only a camera the engine captures has a tracker to lock.
+    engine
+        .engine
+        .publish_frame(
+            CAMERA,
+            1,
+            1_700_000_000_000,
+            4,
+            4,
+            FrameFormat::Rgb24,
+            &[0u8; 48],
+        )
+        .await
+        .expect("publish frame");
 
     let reply = h
         .ctx

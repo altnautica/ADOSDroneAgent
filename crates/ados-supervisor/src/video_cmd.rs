@@ -93,21 +93,25 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     };
     let op = parsed.get("op").and_then(Value::as_str).unwrap_or("");
     // The owner attributed to the incoming legs. A `video.cameras.set` (the
-    // operator surface) defaults to `operator`; a `video.source.set` (a driver
-    // plugin) defaults to the generic `plugin` bucket when the caller did not
-    // stamp its plugin id, so a plugin write never collapses into the operator's
-    // legs. A caller-supplied `owner` (the plugin host stamps its plugin id, the
-    // operator route stamps `operator`) always wins.
-    let default_owner = match op {
-        "video.cameras.set" => "operator",
-        "video.source.set" => "plugin",
+    // operator surface) is always the operator. A `video.source.set` (a driver
+    // plugin) carries the plugin id the plugin host stamps, or the generic
+    // `plugin` bucket when none was stamped, and can never write as the operator:
+    // the merge lets only the operator replace the operator's legs.
+    let owner = match op {
+        "video.cameras.set" => bind::keys::OPERATOR_OWNER,
+        "video.source.set" => parsed
+            .get("owner")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("plugin"),
         _ => return json!({"ok": false, "error": "E_UNKNOWN_OP", "op": op}),
     };
-    let owner = parsed
-        .get("owner")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(default_owner);
+    if op == "video.source.set" && owner == bind::keys::OPERATOR_OWNER {
+        return json!({
+            "ok": false, "error": "E_ARGS",
+            "reason": "owner_conflict: a plugin source write cannot claim the operator owner",
+        });
+    }
     let Some(cameras) = parsed.get("cameras").filter(|c| c.is_array()) else {
         return json!({"ok": false, "error": "E_ARGS", "reason": "cameras must be an array"});
     };
@@ -170,16 +174,23 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     }
 
     // Persist video.cameras under the config flock (0600, euid-0), merging by
-    // owner so this write preserves the other party's legs, then restart the
-    // video pipeline so it resolves + serves the new source list.
-    let persisted = bind::keys::persist_video_cameras(
+    // owner so this write preserves the other owners' legs, then restart the
+    // video pipeline so it resolves + serves the new source list. A write that
+    // names another owner's leg, or a plugin primary over the operator's, is
+    // refused whole with nothing written.
+    match bind::keys::persist_video_cameras(
         Path::new(bind::CONFIG_YAML),
         Path::new(bind::CONFIG_LOCK_PATH),
         cameras,
         owner,
-    );
-    if !persisted {
-        return json!({"ok": false, "error": "E_PERSIST"});
+    ) {
+        bind::keys::CamerasPersist::Written => {}
+        bind::keys::CamerasPersist::Refused(reason) => {
+            return json!({"ok": false, "error": "E_ARGS", "reason": reason});
+        }
+        bind::keys::CamerasPersist::Failed => {
+            return json!({"ok": false, "error": "E_PERSIST"});
+        }
     }
     // The new sources are only LIVE once the pipeline restarts, so `ok` reflects
     // the actual restart (not just the config write). A restart failure is a
@@ -281,6 +292,25 @@ mod tests {
             assert_eq!(resp["ok"], false, "body should reject: {body:?}");
             assert_eq!(resp["error"], "E_ARGS");
         }
+    }
+
+    #[tokio::test]
+    async fn a_plugin_source_write_cannot_claim_the_operator_owner() {
+        let pm = RecordingPm {
+            restarted: std::sync::Mutex::new(Vec::new()),
+        };
+        let resp = dispatch(
+            br#"{"op":"video.source.set","owner":"operator","cameras":[{"id":"belly","source":"rtsp://example.com/x"}]}"#,
+            &pm,
+        )
+        .await;
+        assert_eq!(resp["ok"], false);
+        assert_eq!(resp["error"], "E_ARGS");
+        assert!(resp["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("owner_conflict"));
+        assert!(pm.restarted.lock().unwrap().is_empty());
     }
 
     // The valid-list path (persist + restart) writes the real /etc/ados config

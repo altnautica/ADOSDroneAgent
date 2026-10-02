@@ -272,6 +272,7 @@ impl HostServices for RealHost {
     fn mavlink_register_component(
         &self,
         plugin_id: &str,
+        session: u64,
         args: &Value,
         granted_caps: &BTreeSet<String>,
     ) -> Result<HostResult, HostError> {
@@ -300,7 +301,7 @@ impl HostServices for RealHost {
             .components
             .lock()
             .expect("components mutex poisoned")
-            .register(plugin_id, comp_id, kind, self.current_session(plugin_id))
+            .register(plugin_id, comp_id, kind, session)
             .map_err(HostError::Rpc)?;
         Ok(Value::Map(vec![
             (Value::from("registered"), Value::Boolean(true)),
@@ -438,13 +439,32 @@ impl HostServices for RealHost {
         ]))
     }
 
-    fn display_page_set(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+    fn display_page_set(
+        &self,
+        plugin_id: &str,
+        session: u64,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
         // Parse the request into the display-page shape, then atomically write
         // the sidecar the reserved page reads. The dispatch gate already
         // enforced the display capability before this runs.
         let page = parse_display_page(args)?;
         let rows = page.rows.len();
         let zones = page.zones.len();
+        // The page is one shared surface: while another plugin's connection
+        // owns it, this write is refused rather than overwriting that page.
+        // The owner is held for the write, so two plugins racing cannot both
+        // land a page.
+        let mut owner = self
+            .display_page_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((holder, _)) = owner.as_ref().filter(|(holder, _)| holder != plugin_id) {
+            return Err(HostError::Rpc(format!(
+                "the display page is owned by plugin {holder}"
+            )));
+        }
+        *owner = Some((plugin_id.to_string(), session));
         if let Err(e) = write_display_page(&self.display_page_path, &page) {
             tracing::warn!(
                 plugin_id = %plugin_id,
@@ -565,6 +585,7 @@ impl HostServices for RealHost {
     async fn radio_aux_stream_open(
         &self,
         plugin_id: &str,
+        session: u64,
         _args: &Value,
     ) -> Result<HostResult, HostError> {
         // The dispatch gate already enforced the auxiliary-stream capability. The
@@ -573,24 +594,25 @@ impl HostServices for RealHost {
         // lets a plugin pick a radio-port (which could collide with the data or
         // control planes).
         //
-        // The stream is one shared resource, so ownership is claimed BEFORE the
-        // forward: an open while another plugin owns it is refused without
-        // reaching the radio service, and two plugins opening at once cannot both
-        // come away as the owner. A claim the service then refuses is released.
+        // The stream is one shared resource, so ownership is claimed by this
+        // connection BEFORE the forward: an open while another connection owns
+        // it is refused without reaching the radio service, and two opening at
+        // once cannot both come away as the owner. A claim the service then
+        // refuses is released.
         let claimed = {
             let mut owner = self
                 .aux_stream_owner
                 .lock()
-                .expect("aux stream owner mutex poisoned");
-            match owner.as_deref() {
-                Some(holder) if holder != plugin_id => {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match owner.as_ref() {
+                Some((p, s)) if p == plugin_id && *s == session => false,
+                Some(_) => {
                     return Err(HostError::Rpc(
-                        "radio aux stream is open by another plugin".to_string(),
+                        "radio aux stream is open by another connection".to_string(),
                     ));
                 }
-                Some(_) => false,
                 None => {
-                    *owner = Some(plugin_id.to_string());
+                    *owner = Some((plugin_id.to_string(), session));
                     true
                 }
             }
@@ -601,8 +623,11 @@ impl HostServices for RealHost {
             let mut owner = self
                 .aux_stream_owner
                 .lock()
-                .expect("aux stream owner mutex poisoned");
-            if owner.as_deref() == Some(plugin_id) {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if owner
+                .as_ref()
+                .is_some_and(|(p, s)| p == plugin_id && *s == session)
+            {
                 *owner = None;
             }
         }
@@ -612,22 +637,25 @@ impl HostServices for RealHost {
     async fn radio_aux_stream_close(
         &self,
         plugin_id: &str,
+        session: u64,
         _args: &Value,
     ) -> Result<HostResult, HostError> {
-        // The dispatch gate already enforced the auxiliary-stream capability. Only
-        // the owning plugin may close: the pair is shared with the agent's own aux
-        // users, so a close from anyone else is refused before it reaches the
-        // radio service. A confirmed close clears the ownership record, so a later
-        // disconnect does not forward a redundant close.
-        self.require_aux_owner(plugin_id)?;
+        // Only the owning connection may close: the pair is shared with the
+        // agent's own aux users, so a close from anyone else is refused before
+        // it reaches the radio service. A confirmed close clears the ownership
+        // record, so a later disconnect does not forward a redundant close.
+        self.require_aux_owner(plugin_id, session)?;
         let req = serde_json::json!({"op": "close"});
         let (reply, ok) = self.forward_radio_aux(req, "radio.aux_stream.close").await;
         if ok {
             let mut owner = self
                 .aux_stream_owner
                 .lock()
-                .expect("aux stream owner mutex poisoned");
-            if owner.as_deref() == Some(plugin_id) {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if owner
+                .as_ref()
+                .is_some_and(|(p, s)| p == plugin_id && *s == session)
+            {
                 *owner = None;
             }
         }
@@ -636,10 +664,10 @@ impl HostServices for RealHost {
 
     async fn offload_advertise(
         &self,
-        _plugin_id: &str,
+        plugin_id: &str,
         args: &Value,
     ) -> Result<HostResult, HostError> {
-        self.advertise_offload(args)
+        self.advertise_offload(plugin_id, args).await
     }
 
     async fn node_info(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
@@ -679,6 +707,7 @@ impl HostServices for RealHost {
     async fn radio_aux_stream_send(
         &self,
         plugin_id: &str,
+        session: u64,
         args: &Value,
     ) -> Result<HostResult, HostError> {
         // The dispatch gate already enforced the auxiliary-stream capability. A
@@ -706,7 +735,7 @@ impl HostServices for RealHost {
             .expect("channel validated to 8/9 above");
         let frame = ados_protocol::aux_mux::encode(aux_channel, &payload)
             .ok_or_else(|| HostError::Rpc("payload exceeds the aux frame maximum".to_string()))?;
-        self.require_aux_owner(plugin_id)?;
+        self.require_aux_owner(plugin_id, session)?;
         let req = serde_json::json!({"op": "send", "frame": frame});
         let (reply, _ok) = self.forward_radio_aux(req, "radio.aux_stream.send").await;
         Ok(reply)
@@ -714,8 +743,12 @@ impl HostServices for RealHost {
 
     fn radio_aux_stream_subscribe_stream(
         &self,
-        _plugin_id: &str,
-    ) -> Option<tokio::sync::broadcast::Receiver<(u8, Vec<u8>)>> {
+        plugin_id: &str,
+        session: u64,
+    ) -> Result<Option<crate::host::AuxDatagramRx>, HostError> {
+        // Only the connection that opened the stream may listen to it: the
+        // datagrams are that plugin's application traffic.
+        self.require_aux_owner(plugin_id, session)?;
         // One connection to the radio service's aux command socket for the whole
         // host process, shared by every subscriber — mirrors the BUTTON_CLIENT
         // single-connection philosophy. Started lazily (per-instance, so a test
@@ -737,7 +770,44 @@ impl HostServices for RealHost {
             });
             tx
         });
-        Some(tx.subscribe())
+        Ok(Some(tx.subscribe()))
+    }
+
+    fn aux_stream_owned_by(&self, plugin_id: &str, session: u64) -> bool {
+        self.owns_aux_stream(plugin_id, session)
+    }
+
+    fn display_page_owned_by(&self, plugin_id: &str) -> bool {
+        self.display_page_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|(p, _)| p == plugin_id)
+    }
+
+    async fn release_plugin(&self, plugin_id: &str) {
+        // A stopped plugin's page does not stay on the panel.
+        let owned = {
+            let mut owner = self
+                .display_page_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owned = owner.as_ref().is_some_and(|(p, _)| p == plugin_id);
+            if owned {
+                *owner = None;
+            }
+            owned
+        };
+        if owned {
+            let _ = std::fs::remove_file(&self.display_page_path);
+        }
+        // Its registered vision models leave the engine's registry with it. An
+        // engine that is down holds no registry to clean.
+        if let Some(client) = self.vision.as_ref() {
+            if let Err(e) = client.unregister_owner(plugin_id).await {
+                tracing::debug!(plugin_id, error = %e, "vision_unregister_owner_failed");
+            }
+        }
     }
 
     fn guided_setpoint_send(
@@ -858,13 +928,8 @@ impl HostServices for RealHost {
         }
     }
 
-    fn begin_session(&self, plugin_id: &str) -> u64 {
-        let session = self.session_seq.fetch_add(1, Ordering::Relaxed) + 1;
-        self.sessions
-            .lock()
-            .expect("sessions mutex poisoned")
-            .insert(plugin_id.to_string(), session);
-        session
+    fn begin_session(&self, _plugin_id: &str) -> u64 {
+        self.session_seq.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     async fn release_session(&self, plugin_id: &str, session: u64) {
@@ -877,32 +942,41 @@ impl HostServices for RealHost {
             .expect("components mutex poisoned")
             .release_session(plugin_id, session);
         // An mDNS record belongs to the connection that published it, so it is
-        // withdrawn with exactly that session, even while a newer connection of
-        // the same plugin (its other service, or a reconnect) is live: the port
-        // it named is served by the process this connection was.
+        // withdrawn with exactly that session.
         self.mdns.release(plugin_id, session);
-        // The aux stream is released only when no newer
-        // session of this plugin has begun: a reconnect that overlaps this
-        // teardown keeps what it is using.
-        if self.current_session(plugin_id) != session {
-            return;
+        // The display page is cleared when the connection that set it ends.
+        let page_owned = {
+            let mut owner = self
+                .display_page_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owned = owner
+                .as_ref()
+                .is_some_and(|(p, s)| p == plugin_id && *s == session);
+            if owned {
+                *owner = None;
+            }
+            owned
+        };
+        if page_owned {
+            let _ = std::fs::remove_file(&self.display_page_path);
         }
-        // SAFE-by-default: a radio auxiliary stream never outlives the plugin that
-        // opened it. If this plugin held the stream open, forward a close so the
-        // additive radio pair is torn down on disconnect (it never touches the
-        // data / control planes). Take the owner slot first so the forward happens
-        // without holding the lock, and only when this plugin is the owner.
+        // SAFE-by-default: a radio auxiliary stream never outlives the
+        // connection that opened it, and no other connection's teardown closes
+        // it. Take the owner slot first so the forward happens without holding
+        // the lock.
         let owned = {
             let mut owner = self
                 .aux_stream_owner
                 .lock()
-                .expect("aux stream owner mutex poisoned");
-            if owner.as_deref() == Some(plugin_id) {
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owned = owner
+                .as_ref()
+                .is_some_and(|(p, s)| p == plugin_id && *s == session);
+            if owned {
                 *owner = None;
-                true
-            } else {
-                false
             }
+            owned
         };
         if owned {
             let req = serde_json::json!({"op": "close"});
@@ -1005,16 +1079,34 @@ impl HostServices for RealHost {
 
     async fn vision_register_model(
         &self,
-        _plugin_id: &str,
+        plugin_id: &str,
         args: &Value,
     ) -> Result<HostResult, HostError> {
         let Some(client) = self.vision.as_ref() else {
             return Ok(not_implemented("vision.register_model"));
         };
-        // A transport / engine error surfaces as the response envelope `error`
-        // (a soft failure), exactly like the engine's own reply error would.
+        // The engine (root) opens an engine-run model's file itself, so the
+        // plugin may only name a model delivered to it, never an arbitrary path.
+        let meta = ados_protocol::vision_rpc::decode_register_model(args)
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
+        if meta.execution == ados_protocol::framebus::ModelExecution::EngineRun {
+            if let Some(path) = meta.model_path.as_deref().filter(|p| !p.is_empty()) {
+                if !self
+                    .delivered_model_paths(plugin_id)
+                    .iter()
+                    .any(|p| p == path)
+                {
+                    return Err(HostError::Rpc(format!(
+                        "model_path {path} is not a model delivered to this plugin"
+                    )));
+                }
+            }
+        }
+        // The engine files the model under the plugin it is stamped with. A
+        // transport / engine error surfaces as the response envelope `error` (a
+        // soft failure), exactly like the engine's own reply error would.
         client
-            .register_model(args)
+            .register_model(&ados_protocol::vision_rpc::with_owner(args, plugin_id))
             .await
             .map_err(|e| HostError::Rpc(e.0))
     }
@@ -1037,23 +1129,36 @@ impl HostServices for RealHost {
         Ok(json_to_mpv(&serde_json::json!({ "models": models })))
     }
 
-    async fn vision_infer(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+    async fn vision_infer(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
         let Some(client) = self.vision.as_ref() else {
             return Ok(not_implemented("vision.infer"));
         };
-        client.infer(args).await.map_err(|e| HostError::Rpc(e.0))
+        client
+            .infer(&ados_protocol::vision_rpc::with_owner(args, plugin_id))
+            .await
+            .map_err(|e| HostError::Rpc(e.0))
     }
 
     async fn vision_publish_detection(
         &self,
-        _plugin_id: &str,
+        plugin_id: &str,
         args: &Value,
+        granted_caps: &std::collections::BTreeSet<String>,
     ) -> Result<HostResult, HostError> {
         let Some(client) = self.vision.as_ref() else {
             return Ok(not_implemented("vision.publish_detection"));
         };
+        let mut batch = ados_protocol::vision_rpc::decode_publish_detection(args)
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
+        bind_published_batch(
+            &mut batch,
+            plugin_id,
+            granted_caps.contains("vision.track.designate"),
+        );
+        let args = ados_protocol::vision_rpc::publish_detection_args(&batch)
+            .map_err(|e| HostError::Rpc(e.to_string()))?;
         client
-            .publish_detection(args)
+            .publish_detection(&args)
             .await
             .map_err(|e| HostError::Rpc(e.0))
     }
@@ -1070,5 +1175,47 @@ impl HostServices for RealHost {
             .designate_track(args)
             .await
             .map_err(|e| HostError::Rpc(e.0))
+    }
+}
+
+/// Bind a plugin-published detection batch to its publisher before it reaches
+/// the shared bus: the `model_id` moves under the plugin's namespace, so a
+/// consumer never mistakes it for the engine's own detector or another
+/// plugin's, and unless the plugin may designate tracks (`may_lock`) every
+/// detection's `lock_state` and `track_id` are cleared. A follow consumer only
+/// engages a locked track, and only the operator, or a plugin granted
+/// designation, may create one.
+pub(crate) fn bind_published_batch(
+    batch: &mut ados_protocol::framebus::DetectionBatch,
+    plugin_id: &str,
+    may_lock: bool,
+) {
+    batch.model_id = ados_protocol::vision_rpc::owned_model_id(plugin_id, &batch.model_id);
+    if !may_lock {
+        for detection in &mut batch.detections {
+            detection.lock_state = None;
+            detection.track_id = None;
+        }
+    }
+}
+
+impl RealHost {
+    /// The model files delivered to `plugin_id`: the `path` of every resolved
+    /// entry in its install record's model status. Read per call, like
+    /// `vision.read_model`, so a fresh delivery is seen without a restart.
+    fn delivered_model_paths(&self, plugin_id: &str) -> Vec<String> {
+        let installs = crate::state::load_state(Some(&self.state_path));
+        let Some(serde_json::Value::Array(entries)) =
+            crate::state::find_install(&installs, plugin_id).and_then(|i| i.model_status.clone())
+        else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter(|e| e.get("state").and_then(serde_json::Value::as_str) == Some("resolved"))
+            .filter_map(|e| e.get("path").and_then(serde_json::Value::as_str))
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect()
     }
 }

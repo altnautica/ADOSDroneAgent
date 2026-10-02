@@ -22,11 +22,12 @@
 //!   `RestrictAddressFamilies=AF_UNIX` (the plugin still needs its own IPC
 //!   socket) plus `IPAddressDeny=any`; `socket(AF_INET)` then fails with
 //!   `EAFNOSUPPORT` inside the plugin. Granted, `AF_INET`/`AF_INET6`/
-//!   `AF_NETLINK` are added and the address filter is lifted; the agent's own
-//!   loopback listeners, where a loopback peer is trusted as on-box, stay
-//!   closed through the nftables rule in [`crate::loopback_guard`], which
-//!   matches the plugin user and the agent ports only (a systemd address
-//!   filter would also cut the host's probe of the plugin's own listener).
+//!   `AF_NETLINK` are added and the address filter is lifted; every listener on
+//!   the node itself (loopback and every local interface address, where a peer
+//!   is trusted as on-box or lifeline) stays closed through the nftables rule
+//!   in [`crate::loopback_guard`], which matches the plugin group (a systemd
+//!   address filter would also cut the host's probe of the plugin's own
+//!   listener).
 //!   When that guard is not loaded, a granted unit keeps the no-grant socket
 //!   policy: the capability is not safe to hold without it.
 //! * **`filesystem.host`** maps to the mount namespace. Ungranted, the operator
@@ -45,17 +46,10 @@
 //! main unit binds the plugin's own socket directory (see
 //! [`crate::systemd::render_unit`]), never another plugin's.
 //!
-//! Two invariants this file exists to hold:
-//!
-//! 1. The map is **byte-identical** to `ados.plugins.systemd` on the Python
-//!    side, because either lifecycle path may be the one that rendered a given
-//!    unit (the Python supervisor owns the local REST path; this crate owns the
-//!    cloud-relay path). `tests/test_plugins_systemd_sandbox.py` asserts the two
-//!    renderers agree.
-//! 2. Every capability named here appears in
-//!    [`SANDBOX_ENFORCED_CAPS`](crate::SANDBOX_ENFORCED_CAPS), which the
-//!    capability-catalog guard tests read to decide whether an `enforced = true`
-//!    row is telling the truth.
+//! Every capability named here appears in
+//! [`SANDBOX_ENFORCED_CAPS`](crate::SANDBOX_ENFORCED_CAPS), which the
+//! capability-catalog guard tests read to decide whether an `enforced = true`
+//! row is telling the truth.
 //!
 //! **A grant only takes effect when the unit is re-rendered.** The supervisors
 //! rewrite the unit and restart the plugin on every grant and revoke; without
@@ -73,11 +67,19 @@ use std::collections::BTreeSet;
 /// path matches that one node; it is used where a driver registers as a misc
 /// device or under a name that differs between driver releases.
 pub const DEVICE_CAP_RULES: &[(&str, &[&str])] = &[
-    // A UART plugin may be handed a USB serial adapter, a native UART, or a CDC
-    // ACM modem; all three are the same grant to an operator.
+    // A UART plugin may be handed a USB serial adapter, a native UART (`ttyS`
+    // on most SoCs, `ttyAMA` on the Raspberry Pi's PL011), or a CDC ACM modem;
+    // all are the same grant to an operator. The bare `tty` group (major 4's
+    // virtual consoles) is never opened, and the flight controller's own port
+    // is masked separately (see [`fc_port_exclusion`]).
     (
         "hardware.uart",
-        &["char-ttyUSB rw", "char-ttyACM rw", "char-tty rw"],
+        &[
+            "char-ttyUSB rw",
+            "char-ttyACM rw",
+            "char-ttyS rw",
+            "char-ttyAMA rw",
+        ],
     ),
     ("hardware.i2c", &["char-i2c rw"]),
     ("hardware.spi", &["char-spidev rw"]),
@@ -120,6 +122,14 @@ pub const GPU_CAP: &str = "hardware.gpu";
 /// image; the plugin user joins them with the GPU grant, since the device
 /// policy admits a node but the file mode still has to.
 pub const GPU_SUPPLEMENTARY_GROUPS: &str = "video render";
+
+/// The capability that lets a plugin read camera frames out of the engine's
+/// shared-memory rings.
+pub const VISION_FRAME_READ_CAP: &str = "vision.frame.read";
+
+/// The UART capability, whose device rules can reach the flight controller's
+/// serial port.
+pub const UART_CAP: &str = "hardware.uart";
 
 /// The capability that lets a declared service bind its declared TCP ports.
 pub const NETWORK_LISTEN_CAP: &str = "network.listen";
@@ -254,6 +264,15 @@ pub fn sandbox_directives(
             lines.push(format!("SupplementaryGroups={GPU_SUPPLEMENTARY_GROUPS}"));
         }
     }
+    // The frame rings are 0640 in the readers group: a plugin joins it only
+    // while it holds the frame-read grant, so an ungranted plugin cannot map a
+    // ring by its predictable name.
+    if granted.contains(VISION_FRAME_READ_CAP) {
+        lines.push(format!(
+            "SupplementaryGroups={}",
+            ados_protocol::vision_rpc::VISION_READERS_GROUP
+        ));
+    }
 
     // ---- sockets ----------------------------------------------------
     if granted.contains(NETWORK_OUTBOUND_CAP) && loopback_guard_active {
@@ -311,6 +330,42 @@ pub fn sandbox_directives(
     lines.push(format!("InaccessiblePaths={}", inaccessible.join(" ")));
 
     lines
+}
+
+/// The line that masks the flight controller's configured serial port from a
+/// UART-granted plugin, so the grant cannot write raw MAVLink to the FC past
+/// the `mavlink.write` and pose gates. Empty without the grant or when no
+/// `/dev` port is configured.
+pub fn fc_port_exclusion(granted: &BTreeSet<String>, fc_serial_port: Option<&str>) -> Vec<String> {
+    match fc_serial_port {
+        Some(port)
+            if granted.contains(UART_CAP)
+                && port.starts_with("/dev/")
+                && !port.chars().any(|c| c.is_whitespace() || c.is_control()) =>
+        {
+            vec![format!("InaccessiblePaths=-{port}")]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The configured flight-controller serial port (`mavlink.serial_port`) from
+/// the agent config YAML, when it names a device path.
+pub fn configured_fc_serial_port(yaml: &str) -> Option<String> {
+    #[derive(serde::Deserialize, Default)]
+    struct Cfg {
+        #[serde(default)]
+        mavlink: Mav,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Mav {
+        #[serde(default)]
+        serial_port: String,
+    }
+    serde_norway::from_str::<Cfg>(yaml)
+        .ok()
+        .map(|c| c.mavlink.serial_port)
+        .filter(|p| p.starts_with("/dev/"))
 }
 
 #[cfg(test)]
@@ -521,5 +576,35 @@ mod tests {
                 "{cap} is sandbox-enforced but is not a declared agent capability"
             );
         }
+    }
+
+    #[test]
+    fn the_uart_grant_skips_the_consoles_reaches_the_pi_uart_and_masks_the_fc_port() {
+        let lines = sandbox_directives(&caps(&["hardware.uart"]), true, &[]);
+        assert!(lines.contains(&"DeviceAllow=char-ttyAMA rw".to_string()));
+        assert!(lines.contains(&"DeviceAllow=char-ttyS rw".to_string()));
+        assert!(!lines.contains(&"DeviceAllow=char-tty rw".to_string()));
+        let uart = caps(&["hardware.uart"]);
+        assert_eq!(
+            fc_port_exclusion(&uart, Some("/dev/ttyAMA0")),
+            ["InaccessiblePaths=-/dev/ttyAMA0"]
+        );
+        assert!(fc_port_exclusion(&caps(&[]), Some("/dev/ttyAMA0")).is_empty());
+        assert!(fc_port_exclusion(&uart, Some("udp:127.0.0.1:14550")).is_empty());
+        assert_eq!(
+            configured_fc_serial_port("mavlink:\n  serial_port: /dev/ttyACM0\n").as_deref(),
+            Some("/dev/ttyACM0")
+        );
+        assert_eq!(
+            configured_fc_serial_port("mavlink:\n  serial_port: ''\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_frame_read_grant_joins_the_ring_readers_group() {
+        let readers = "SupplementaryGroups=ados-vision-readers".to_string();
+        assert!(sandbox_directives(&caps(&["vision.frame.read"]), true, &[]).contains(&readers));
+        assert!(!sandbox_directives(&caps(&["hardware.gpu"]), true, &[]).contains(&readers));
     }
 }

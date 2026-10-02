@@ -248,9 +248,12 @@ async fn an_ending_session_keeps_what_a_newer_session_renewed() {
     ]);
     let cap = caps(&["mavlink.component.vio"]);
     let old = host.begin_session("p");
-    host.mavlink_register_component("p", &vio, &cap).unwrap();
+    host.mavlink_register_component("p", old, &vio, &cap)
+        .unwrap();
     let new = host.begin_session("p");
-    host.mavlink_register_component("p", &vio, &cap).unwrap();
+    assert_ne!(old, new);
+    host.mavlink_register_component("p", new, &vio, &cap)
+        .unwrap();
     host.release_session("p", old).await;
     assert!(host.components.lock().unwrap().is_registered("p", 197));
     host.release_session("p", new).await;
@@ -658,11 +661,12 @@ fn register_component_gate_uses_kind_cap() {
         ("component_id", Value::Integer(197.into())),
     ]);
     assert_eq!(
-        err_body(host.mavlink_register_component("p", &args, &caps(&[]))),
+        err_body(host.mavlink_register_component("p", 0, &args, &caps(&[]))),
         "capability_denied: mavlink.component.vio"
     );
     // Granted -> registers.
-    let m = ok_map(host.mavlink_register_component("p", &args, &caps(&["mavlink.component.vio"])));
+    let m =
+        ok_map(host.mavlink_register_component("p", 0, &args, &caps(&["mavlink.component.vio"])));
     assert_eq!(field(&m, "registered").and_then(Value::as_bool), Some(true));
 }
 
@@ -764,6 +768,7 @@ fn a_frame_stamped_with_a_vio_component_needs_the_capability_and_a_reservation()
     );
     host.mavlink_register_component(
         "p",
+        0,
         &map(&[
             ("kind", Value::from("vio")),
             ("component_id", Value::Integer(197.into())),
@@ -784,6 +789,7 @@ fn a_frame_stamped_with_another_plugins_component_is_refused() {
     let host = RealHost::new();
     host.mavlink_register_component(
         "a",
+        0,
         &map(&[
             ("kind", Value::from("camera")),
             ("component_id", Value::Integer(100.into())),
@@ -809,6 +815,7 @@ fn a_declared_component_id_must_match_every_frame_header() {
     let host = RealHost::new();
     host.mavlink_register_component(
         "p",
+        0,
         &map(&[
             ("kind", Value::from("camera")),
             ("component_id", Value::Integer(100.into())),
@@ -859,7 +866,12 @@ fn register_component_vio_reservation_rule() {
         ("component_id", Value::Integer(197.into())),
     ]);
     assert_eq!(
-        err_body(host.mavlink_register_component("p", &args, &caps(&["mavlink.component.camera"]))),
+        err_body(host.mavlink_register_component(
+            "p",
+            0,
+            &args,
+            &caps(&["mavlink.component.camera"])
+        )),
         "component_id 197 is reserved for kind=vio"
     );
     // The right kind registers and returns the shape.
@@ -867,7 +879,7 @@ fn register_component_vio_reservation_rule() {
         ("kind", Value::from("vio")),
         ("component_id", Value::Integer(197.into())),
     ]);
-    let m = ok_map(host.mavlink_register_component("p", &ok, &caps(&["mavlink.component.vio"])));
+    let m = ok_map(host.mavlink_register_component("p", 0, &ok, &caps(&["mavlink.component.vio"])));
     assert_eq!(field(&m, "registered").and_then(Value::as_bool), Some(true));
     assert_eq!(field(&m, "component_id").and_then(Value::as_i64), Some(197));
     assert_eq!(field(&m, "kind").and_then(Value::as_str), Some("vio"));
@@ -1179,6 +1191,7 @@ async fn release_plugin_clears_all_but_config() {
     // Seed every facade for plugin "p".
     host.mavlink_register_component(
         "p",
+        0,
         &map(&[
             ("kind", Value::from("vio")),
             ("component_id", Value::Integer(197.into())),
@@ -1330,6 +1343,7 @@ async fn vision_read_model_returns_the_plugins_resolved_status() {
         pinned_version: None,
         last_update_check_at: None,
         last_update_attempt: None,
+        reenable_pending: false,
         model_status: Some(serde_json::json!([
             {"state": "resolved", "model_id": "uav", "runtime": "onnx",
              "path": "/var/ados/models/uav.onnx", "reason": null}
@@ -1377,6 +1391,163 @@ async fn vision_read_model_returns_the_plugins_resolved_status() {
         .and_then(Value::as_array)
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn a_plugin_registers_only_a_model_file_delivered_to_it() {
+    use crate::state::{save_state, PluginInstall, PluginSource, PluginStatus};
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("plugin-state.json");
+    let install = PluginInstall {
+        plugin_id: "com.example.p".into(),
+        version: "1.0.0".into(),
+        source: PluginSource::Registry,
+        source_uri: None,
+        signer_id: None,
+        manifest_hash: "h".into(),
+        status: PluginStatus::Running,
+        installed_at: 0,
+        enabled_at: None,
+        failure_reason: None,
+        permissions: Default::default(),
+        auto_update: true,
+        pinned_version: None,
+        last_update_check_at: None,
+        last_update_attempt: None,
+        reenable_pending: false,
+        model_status: Some(serde_json::json!([
+            {"state": "resolved", "model_id": "uav", "runtime": "onnx",
+             "path": "/var/ados/models/uav.onnx", "reason": null},
+            {"state": "needs_model", "model_id": "next", "runtime": "onnx",
+             "path": "/var/ados/models/next.onnx", "reason": null}
+        ])),
+        service_status: None,
+    };
+    save_state(&[install], Some(&state_path)).unwrap();
+    // A wired client whose engine is not up: a request that passes the path
+    // check reaches the client and reports the engine unavailable.
+    let client = std::sync::Arc::new(VisionClient::spawn_with_interval(
+        dir.path().join("absent-vision.sock"),
+        std::time::Duration::from_millis(50),
+    ));
+    let host = RealHost::new()
+        .with_state_path(state_path)
+        .with_vision(client);
+    let register = |path: &str, execution| {
+        let model = ados_protocol::framebus::ModelMetadata {
+            id: "det".into(),
+            kind: ados_protocol::framebus::ModelKind::Detection,
+            execution,
+            input_width: 8,
+            input_height: 8,
+            input_format: ados_protocol::framebus::FrameFormat::Rgb24,
+            output_classes: Vec::new(),
+            model_path: Some(path.to_string()),
+            head: ados_protocol::framebus::DetectionHead::Yolo8,
+        };
+        ados_protocol::vision_rpc::register_model_args(&model).unwrap()
+    };
+    let engine_run = ados_protocol::framebus::ModelExecution::EngineRun;
+    let unavailable = Err(HostError::Rpc(
+        crate::vision_client::VISION_ENGINE_UNAVAILABLE.to_string(),
+    ));
+
+    for path in [
+        "/etc/shadow",
+        "/var/ados/models/../../../etc/shadow",
+        // Known to the record but not delivered yet.
+        "/var/ados/models/next.onnx",
+    ] {
+        let got = host
+            .vision_register_model("com.example.p", &register(path, engine_run))
+            .await;
+        assert!(
+            matches!(&got, Err(HostError::Rpc(e)) if e.contains("not a model delivered")),
+            "{path}: {got:?}"
+        );
+    }
+    // Another plugin cannot name this plugin's delivered file either.
+    let other = host
+        .vision_register_model(
+            "com.example.other",
+            &register("/var/ados/models/uav.onnx", engine_run),
+        )
+        .await;
+    assert!(
+        matches!(&other, Err(HostError::Rpc(e)) if e.contains("not a model delivered")),
+        "{other:?}"
+    );
+    assert_eq!(
+        host.vision_register_model(
+            "com.example.p",
+            &register("/var/ados/models/uav.onnx", engine_run)
+        )
+        .await,
+        unavailable
+    );
+    // A plugin-side model is never opened by the engine, so its path is not
+    // checked.
+    assert_eq!(
+        host.vision_register_model(
+            "com.example.p",
+            &register(
+                "/opt/plugin/model.bin",
+                ados_protocol::framebus::ModelExecution::PluginSide
+            )
+        )
+        .await,
+        unavailable
+    );
+}
+
+#[test]
+fn a_published_batch_is_bound_to_its_plugin() {
+    use ados_protocol::framebus::{BoundingBox, Detection, DetectionBatch, LockState};
+    let locked = Detection {
+        bbox: Some(BoundingBox {
+            x: 1.0,
+            y: 1.0,
+            width: 4.0,
+            height: 4.0,
+        }),
+        class_label: "person".into(),
+        confidence: 0.9,
+        track_id: Some(7),
+        assoc_confidence: None,
+        lock_state: Some(LockState::Locked),
+        attributes: None,
+        mask: None,
+        keypoints: None,
+        depth: None,
+        world_pos: None,
+    };
+    let batch = DetectionBatch {
+        v: ados_protocol::framebus::VISION_DETECTION_VERSION,
+        model_id: "det".into(),
+        camera_id: "uvc-0".into(),
+        frame_id: 1,
+        ts_ms: 0,
+        frame_width: 640,
+        frame_height: 480,
+        detections: vec![locked.clone()],
+    };
+
+    // Without designation rights: posing as the engine's detector and as a
+    // locked follow target are both undone.
+    let mut plain = batch.clone();
+    super::host_services::bind_published_batch(&mut plain, "com.example.p", false);
+    assert_eq!(plain.model_id, "com.example.p/det");
+    assert_eq!(plain.detections[0].lock_state, None);
+    assert_eq!(plain.detections[0].track_id, None);
+    assert_eq!(plain.detections[0].bbox, locked.bbox);
+
+    // With designation rights the tracker fields survive; the model id is
+    // still the plugin's, and an id it already namespaced is not doubled.
+    let mut designating = batch.clone();
+    designating.model_id = "com.example.p/det".into();
+    super::host_services::bind_published_batch(&mut designating, "com.example.p", true);
+    assert_eq!(designating.model_id, "com.example.p/det");
+    assert_eq!(designating.detections[0], locked);
 }
 
 #[tokio::test]
@@ -1444,10 +1615,21 @@ async fn vision_methods_proxy_to_a_wired_engine() {
         .broadcast(encode_frame(&body, PLUGIN_MAX_FRAME).unwrap().into())
         .await;
 
+    let model = ados_protocol::framebus::ModelMetadata {
+        id: "m".into(),
+        kind: ados_protocol::framebus::ModelKind::Detection,
+        execution: ados_protocol::framebus::ModelExecution::PluginSide,
+        input_width: 8,
+        input_height: 8,
+        input_format: ados_protocol::framebus::FrameFormat::Rgb24,
+        output_classes: Vec::new(),
+        model_path: None,
+        head: ados_protocol::framebus::DetectionHead::Yolo8,
+    };
     let res = host
         .vision_register_model(
             "p",
-            &Value::Map(vec![(Value::from("model"), Value::from("m"))]),
+            &ados_protocol::vision_rpc::register_model_args(&model).unwrap(),
         )
         .await
         .unwrap();
@@ -1512,7 +1694,7 @@ fn display_page_set_writes_the_sidecar_in_the_shared_shape() {
         ("zones", Value::Array(vec![zone])),
     ]);
 
-    let m = ok_map(host.display_page_set("p", &args));
+    let m = ok_map(host.display_page_set("p", 1, &args));
     assert_eq!(field(&m, "set").and_then(Value::as_bool), Some(true));
     assert_eq!(field(&m, "rows").and_then(Value::as_i64), Some(1));
     assert_eq!(field(&m, "zones").and_then(Value::as_i64), Some(1));
@@ -1541,7 +1723,7 @@ fn display_page_set_is_lenient_and_rejects_a_misshaped_list() {
     let host = RealHost::new().with_display_page_path(path.clone());
 
     // An empty payload writes an empty page.
-    let m = ok_map(host.display_page_set("p", &map(&[])));
+    let m = ok_map(host.display_page_set("p", 1, &map(&[])));
     assert_eq!(field(&m, "rows").and_then(Value::as_i64), Some(0));
     assert_eq!(field(&m, "zones").and_then(Value::as_i64), Some(0));
     let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -1549,11 +1731,11 @@ fn display_page_set_is_lenient_and_rejects_a_misshaped_list() {
 
     // A non-list rows is a clear error.
     assert_eq!(
-        err_body(host.display_page_set("p", &map(&[("rows", Value::from("nope"))]))),
+        err_body(host.display_page_set("p", 1, &map(&[("rows", Value::from("nope"))]))),
         "rows must be a list"
     );
     assert_eq!(
-        err_body(host.display_page_set("p", &map(&[("zones", Value::from(3))]))),
+        err_body(host.display_page_set("p", 1, &map(&[("zones", Value::from(3))]))),
         "zones must be a list"
     );
 }
@@ -1583,7 +1765,7 @@ fn display_page_set_refuses_a_page_past_the_size_caps() {
             Value::Array((0..DISPLAY_PAGE_MAX_ZONES).map(|_| zone()).collect()),
         ),
     ]);
-    let m = ok_map(host.display_page_set("p", &at_caps));
+    let m = ok_map(host.display_page_set("p", 1, &at_caps));
     assert_eq!(
         field(&m, "rows").and_then(Value::as_i64),
         Some(DISPLAY_PAGE_MAX_ROWS as i64)
@@ -1596,7 +1778,7 @@ fn display_page_set_refuses_a_page_past_the_size_caps() {
         Value::Array((0..=DISPLAY_PAGE_MAX_ROWS).map(|_| row()).collect()),
     )]);
     assert_eq!(
-        err_body(host.display_page_set("p", &too_many_rows)),
+        err_body(host.display_page_set("p", 1, &too_many_rows)),
         format!("rows has more than {DISPLAY_PAGE_MAX_ROWS} entries")
     );
     let too_many_zones = map(&[(
@@ -1604,7 +1786,7 @@ fn display_page_set_refuses_a_page_past_the_size_caps() {
         Value::Array((0..=DISPLAY_PAGE_MAX_ZONES).map(|_| zone()).collect()),
     )]);
     assert_eq!(
-        err_body(host.display_page_set("p", &too_many_zones)),
+        err_body(host.display_page_set("p", 1, &too_many_zones)),
         format!("zones has more than {DISPLAY_PAGE_MAX_ZONES} entries")
     );
     let long_value = map(&[(
@@ -1615,10 +1797,45 @@ fn display_page_set_refuses_a_page_past_the_size_caps() {
         )])]),
     )]);
     assert_eq!(
-        err_body(host.display_page_set("p", &long_value)),
+        err_body(host.display_page_set("p", 1, &long_value)),
         format!("row value longer than {DISPLAY_PAGE_MAX_TEXT} characters")
     );
     assert_eq!(std::fs::read(&path).unwrap(), accepted);
+}
+
+#[tokio::test]
+async fn the_display_page_belongs_to_the_connection_that_set_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lcd-plugin-page.json");
+    let host = RealHost::new().with_display_page_path(path.clone());
+    let page = |title: &str| map(&[("title", Value::from(title))]);
+
+    ok_map(host.display_page_set("p", 1, &page("mine")));
+    // Another plugin cannot overwrite the page while its owner is connected.
+    assert_eq!(
+        err_body(host.display_page_set("q", 2, &page("theirs"))),
+        "the display page is owned by plugin p"
+    );
+    assert!(host.display_page_owned_by("p"));
+    assert!(!host.display_page_owned_by("q"));
+
+    // Another connection ending (an old session of the same plugin, or
+    // another plugin) leaves the page up.
+    host.release_session("p", 3).await;
+    host.release_session("q", 1).await;
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(v["title"], "mine");
+
+    // The owning connection ending clears the page and frees the surface.
+    host.release_session("p", 1).await;
+    assert!(!path.exists());
+    ok_map(host.display_page_set("q", 2, &page("theirs")));
+    assert!(host.display_page_owned_by("q"));
+
+    // A stopped plugin's page does not stay on the panel either.
+    host.release_plugin("q").await;
+    assert!(!path.exists());
+    assert!(!host.display_page_owned_by("q"));
 }
 
 #[test]
@@ -1982,6 +2199,11 @@ fn gpio_methods_are_gated_on_the_gpio_output_capability() {
 
 // ---- radio.aux_stream.open / radio.aux_stream.close ------------------
 
+/// An aux-stream owner record for connection `(plugin_id, session)`.
+fn aux_owner(plugin_id: &str, session: u64) -> Option<(String, u64)> {
+    Some((plugin_id.to_string(), session))
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn radio_aux_open_forwards_a_bare_open_and_records_the_owner() {
@@ -1993,7 +2215,7 @@ async fn radio_aux_open_forwards_a_bare_open_and_records_the_owner() {
     );
     let host = RealHost::new().with_radio_aux_cmd_path(path);
 
-    let m = ok_map(host.radio_aux_stream_open("p", &map(&[])).await);
+    let m = ok_map(host.radio_aux_stream_open("p", 1, &map(&[])).await);
     // The reply round-trips back to the plugin verbatim.
     assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
     assert_eq!(field(&m, "active").and_then(Value::as_bool), Some(true));
@@ -2005,31 +2227,33 @@ async fn radio_aux_open_forwards_a_bare_open_and_records_the_owner() {
     assert_eq!(v["op"], "open");
     assert_eq!(v.as_object().unwrap().len(), 1);
 
-    // Ownership recorded so a later disconnect closes the stream.
-    assert_eq!(
-        *host.aux_stream_owner.lock().unwrap(),
-        Some("p".to_string())
-    );
+    // Ownership recorded for this connection so its disconnect closes the
+    // stream.
+    assert_eq!(*host.aux_stream_owner.lock().unwrap(), aux_owner("p", 1));
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn radio_aux_open_while_another_plugin_owns_the_stream_is_refused() {
+async fn radio_aux_open_while_another_connection_owns_the_stream_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("radio-aux.sock");
     let service = silent_stub(&path);
     let host = RealHost::new().with_radio_aux_cmd_path(path);
-    *host.aux_stream_owner.lock().unwrap() = Some("owner".to_string());
+    *host.aux_stream_owner.lock().unwrap() = aux_owner("owner", 1);
 
-    assert_eq!(
-        err_body(host.radio_aux_stream_open("intruder", &map(&[])).await),
-        "radio aux stream is open by another plugin"
-    );
+    // Another plugin, and another connection of the owning plugin, are both
+    // refused without reaching the radio service.
+    for (plugin, session) in [("intruder", 2), ("owner", 2)] {
+        assert_eq!(
+            err_body(host.radio_aux_stream_open(plugin, session, &map(&[])).await),
+            "radio aux stream is open by another connection"
+        );
+    }
     assert_never_contacted(&service);
     // The owner keeps the stream: its disconnect still closes the pair.
     assert_eq!(
         *host.aux_stream_owner.lock().unwrap(),
-        Some("owner".to_string())
+        aux_owner("owner", 1)
     );
 }
 
@@ -2040,7 +2264,7 @@ async fn radio_aux_send_forwards_the_aux_framed_datagram() {
     let path = dir.path().join("radio-aux.sock");
     let stub = gpio_stub(path.clone(), r#"{"ok":true}"#);
     let host = RealHost::new().with_radio_aux_cmd_path(path);
-    *host.aux_stream_owner.lock().unwrap() = Some("p".to_string());
+    *host.aux_stream_owner.lock().unwrap() = aux_owner("p", 1);
 
     // A payload on the AppStream channel (8). The host frames it as an aux
     // datagram, so the forwarded `frame` is the encoded bytes and the radio
@@ -2050,7 +2274,7 @@ async fn radio_aux_send_forwards_the_aux_framed_datagram() {
         ("channel", Value::from(8)),
         ("payload", Value::Binary(payload)),
     ]);
-    let m = ok_map(host.radio_aux_stream_send("p", &args).await);
+    let m = ok_map(host.radio_aux_stream_send("p", 1, &args).await);
     assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
 
     let sent = stub.join().unwrap();
@@ -2064,10 +2288,7 @@ async fn radio_aux_send_forwards_the_aux_framed_datagram() {
     );
     // A send never touches the owner record (the stream stays between the
     // matching open and close).
-    assert_eq!(
-        *host.aux_stream_owner.lock().unwrap(),
-        Some("p".to_string())
-    );
+    assert_eq!(*host.aux_stream_owner.lock().unwrap(), aux_owner("p", 1));
 }
 
 #[cfg(unix)]
@@ -2080,12 +2301,12 @@ async fn radio_aux_send_accepts_both_application_channels() {
         let path = dir.path().join(format!("radio-aux-{i}.sock"));
         let stub = gpio_stub(path.clone(), r#"{"ok":true}"#);
         let host = RealHost::new().with_radio_aux_cmd_path(path);
-        *host.aux_stream_owner.lock().unwrap() = Some("p".to_string());
+        *host.aux_stream_owner.lock().unwrap() = aux_owner("p", 1);
         let args = map(&[
             ("channel", Value::from(*channel)),
             ("payload", Value::Binary(vec![1, 2, 3])),
         ]);
-        let m = ok_map(host.radio_aux_stream_send("p", &args).await);
+        let m = ok_map(host.radio_aux_stream_send("p", 1, &args).await);
         assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
         let sent = stub.join().unwrap();
         let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
@@ -2098,7 +2319,7 @@ async fn radio_aux_send_accepts_both_application_channels() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn radio_aux_send_from_a_plugin_that_does_not_own_the_stream_is_refused() {
+async fn radio_aux_send_from_a_connection_that_does_not_own_the_stream_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("radio-aux.sock");
     let service = silent_stub(&path);
@@ -2107,12 +2328,13 @@ async fn radio_aux_send_from_a_plugin_that_does_not_own_the_stream_is_refused() 
         ("channel", Value::from(8)),
         ("payload", Value::Binary(vec![1, 2, 3])),
     ]);
-    // Nobody has opened it through the host, and then another plugin has.
-    for owner in [None, Some("owner".to_string())] {
+    // Nobody has opened it through the host; another plugin has; and the same
+    // plugin has, but on another of its connections.
+    for owner in [None, aux_owner("owner", 1), aux_owner("p", 1)] {
         *host.aux_stream_owner.lock().unwrap() = owner;
         assert_eq!(
-            err_body(host.radio_aux_stream_send("intruder", &args).await),
-            "radio aux stream is not open by this plugin"
+            err_body(host.radio_aux_stream_send("p", 2, &args).await),
+            "radio aux stream is not open by this connection"
         );
     }
     assert_never_contacted(&service);
@@ -2125,7 +2347,7 @@ async fn radio_aux_send_rejects_bad_channel_or_payload_before_forwarding() {
     // Missing channel.
     assert_eq!(
         err_body(
-            host.radio_aux_stream_send("p", &map(&[("payload", Value::Binary(vec![1]))]))
+            host.radio_aux_stream_send("p", 1, &map(&[("payload", Value::Binary(vec![1]))]))
                 .await
         ),
         "channel missing or not an integer"
@@ -2135,6 +2357,7 @@ async fn radio_aux_send_rejects_bad_channel_or_payload_before_forwarding() {
         err_body(
             host.radio_aux_stream_send(
                 "p",
+                1,
                 &map(&[
                     ("channel", Value::from(3)),
                     ("payload", Value::Binary(vec![1])),
@@ -2149,6 +2372,7 @@ async fn radio_aux_send_rejects_bad_channel_or_payload_before_forwarding() {
         err_body(
             host.radio_aux_stream_send(
                 "p",
+                1,
                 &map(&[
                     ("channel", Value::from(264)),
                     ("payload", Value::Binary(vec![1])),
@@ -2161,7 +2385,7 @@ async fn radio_aux_send_rejects_bad_channel_or_payload_before_forwarding() {
     // Missing payload.
     assert_eq!(
         err_body(
-            host.radio_aux_stream_send("p", &map(&[("channel", Value::from(8))]))
+            host.radio_aux_stream_send("p", 1, &map(&[("channel", Value::from(8))]))
                 .await
         ),
         "payload missing"
@@ -2171,6 +2395,7 @@ async fn radio_aux_send_rejects_bad_channel_or_payload_before_forwarding() {
         err_body(
             host.radio_aux_stream_send(
                 "p",
+                1,
                 &map(&[
                     ("channel", Value::from(8)),
                     ("payload", Value::from("hello")),
@@ -2188,11 +2413,11 @@ async fn radio_aux_close_forwards_and_clears_the_owner() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("radio-aux.sock");
     let host = RealHost::new().with_radio_aux_cmd_path(path.clone());
-    // Seed ownership as if this plugin had opened the stream.
-    *host.aux_stream_owner.lock().unwrap() = Some("p".to_string());
+    // Seed ownership as if this connection had opened the stream.
+    *host.aux_stream_owner.lock().unwrap() = aux_owner("p", 1);
 
     let stub = gpio_stub(path, r#"{"ok":true,"active":false}"#);
-    let m = ok_map(host.radio_aux_stream_close("p", &map(&[])).await);
+    let m = ok_map(host.radio_aux_stream_close("p", 1, &map(&[])).await);
     assert_eq!(field(&m, "active").and_then(Value::as_bool), Some(false));
 
     let sent = stub.join().unwrap();
@@ -2210,33 +2435,47 @@ async fn radio_aux_close_by_a_non_owner_is_refused_and_never_reaches_the_service
     let path = dir.path().join("radio-aux.sock");
     let service = silent_stub(&path);
     let host = RealHost::new().with_radio_aux_cmd_path(path);
-    // Another plugin owns the stream.
-    *host.aux_stream_owner.lock().unwrap() = Some("owner".to_string());
+    *host.aux_stream_owner.lock().unwrap() = aux_owner("owner", 1);
 
-    assert_eq!(
-        err_body(host.radio_aux_stream_close("intruder", &map(&[])).await),
-        "radio aux stream is not open by this plugin"
-    );
+    // Another plugin, and another connection of the owning plugin.
+    for (plugin, session) in [("intruder", 1), ("owner", 2)] {
+        assert_eq!(
+            err_body(
+                host.radio_aux_stream_close(plugin, session, &map(&[]))
+                    .await
+            ),
+            "radio aux stream is not open by this connection"
+        );
+    }
     // The owner's link was never torn down, and its record survives.
     assert_never_contacted(&service);
     assert_eq!(
         *host.aux_stream_owner.lock().unwrap(),
-        Some("owner".to_string())
+        aux_owner("owner", 1)
     );
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn release_plugin_closes_an_aux_stream_the_plugin_owned() {
+async fn an_ending_session_closes_the_aux_stream_only_when_it_owns_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("radio-aux.sock");
+    let service = silent_stub(&path);
     let host = RealHost::new().with_radio_aux_cmd_path(path.clone());
-    *host.aux_stream_owner.lock().unwrap() = Some("p".to_string());
+    // The plugin reconnected: session 2 opened the stream, and only then did
+    // the old session 1 tear down. Another plugin's teardown follows.
+    *host.aux_stream_owner.lock().unwrap() = aux_owner("p", 2);
+    host.release_session("p", 1).await;
+    host.release_session("other", 2).await;
+    assert_never_contacted(&service);
+    assert_eq!(*host.aux_stream_owner.lock().unwrap(), aux_owner("p", 2));
+    drop(service);
+    std::fs::remove_file(&path).unwrap();
 
+    // The owning connection's teardown closes it (safe-by-default: the
+    // stream never outlives its owner).
     let stub = gpio_stub(path, r#"{"ok":true,"active":false}"#);
-    host.release_session("p", 0).await;
-    // The disconnect forwarded a close (safe-by-default: the stream never
-    // outlives its owner).
+    host.release_session("p", 2).await;
     let sent = stub.join().unwrap();
     let v: serde_json::Value = serde_json::from_str(&sent).unwrap();
     assert_eq!(v["op"], "close");
@@ -2249,7 +2488,7 @@ async fn radio_aux_open_degrades_to_not_available_when_the_service_is_absent() {
     // NO ownership is recorded (so a later disconnect forwards nothing).
     let host = RealHost::new()
         .with_radio_aux_cmd_path(std::path::PathBuf::from("/nonexistent/ados-aux-test.sock"));
-    let m = ok_map(host.radio_aux_stream_open("p", &map(&[])).await);
+    let m = ok_map(host.radio_aux_stream_open("p", 1, &map(&[])).await);
     assert_eq!(
         field(&m, "error").and_then(Value::as_str),
         Some("not_available")
@@ -2895,15 +3134,19 @@ async fn an_advertised_offload_link_is_what_the_tier_readers_parse() {
     let dir = tempfile::tempdir().unwrap();
     let sidecar = dir.path().join("offload-link.json");
     let host = RealHost::new().with_offload_link_path(sidecar.clone());
+    // A node that answers, so the host stamps the link paired.
+    let node = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = node.local_addr().unwrap().to_string();
     let args = map(&[
         ("paired", Value::Boolean(true)),
         ("bearer_acceptable", Value::Boolean(true)),
-        ("target", Value::from("node.local:8092")),
+        ("target", Value::from(target.as_str())),
         ("device_id", Value::from("ws-1")),
         ("model_id", Value::from("yolo")),
     ]);
     let m = ok_map(host.offload_advertise("com.example.offload", &args).await);
     assert_eq!(field(&m, "ok").and_then(Value::as_bool), Some(true));
+    assert_eq!(field(&m, "paired").and_then(Value::as_bool), Some(true));
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2911,7 +3154,8 @@ async fn an_advertised_offload_link_is_what_the_tier_readers_parse() {
         .as_millis() as i64;
     let link = read_offload_link_from(&sidecar, now).expect("fresh link parses");
     assert!(link.is_offload_path());
-    assert_eq!(link.target.as_deref(), Some("node.local:8092"));
+    assert_eq!(link.owner.as_deref(), Some("com.example.offload"));
+    assert_eq!(link.target.as_deref(), Some(target.as_str()));
     assert_eq!(link.device_id.as_deref(), Some("ws-1"));
     assert_eq!(link.model_id.as_deref(), Some("yolo"));
     assert_eq!(
@@ -2941,18 +3185,56 @@ async fn an_advertised_offload_link_is_what_the_tier_readers_parse() {
         .is_err());
 }
 
+#[tokio::test]
+async fn an_offload_link_is_paired_only_when_its_target_answers_and_has_one_owner() {
+    use ados_protocol::offload_link::read_offload_link_from;
+    let dir = tempfile::tempdir().unwrap();
+    let sidecar = dir.path().join("offload-link.json");
+    let host = RealHost::new().with_offload_link_path(sidecar.clone());
+    // Nothing listens on this port once the listener is dropped.
+    let closed = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().to_string()
+    };
+    let claim = map(&[
+        ("paired", Value::Boolean(true)),
+        ("bearer_acceptable", Value::Boolean(true)),
+        ("target", Value::from(closed.as_str())),
+    ]);
+    let m = ok_map(host.offload_advertise("com.example.first", &claim).await);
+    assert_eq!(field(&m, "paired").and_then(Value::as_bool), Some(false));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let link = read_offload_link_from(&sidecar, now).unwrap();
+    assert!(!link.is_offload_path(), "an unreachable node is not a path");
+
+    // While the first plugin's link is fresh, another plugin cannot replace it.
+    assert!(host
+        .offload_advertise("com.example.second", &claim)
+        .await
+        .is_err());
+    let link = read_offload_link_from(&sidecar, now).unwrap();
+    assert_eq!(link.owner.as_deref(), Some("com.example.first"));
+}
+
 #[test]
-fn offload_advertise_is_gated_on_detection_publish() {
+fn offload_advertise_is_gated_on_its_own_capability() {
     use crate::dispatch::{gate, Gate, Method};
-    assert_eq!(
-        gate("offload.advertise", false, &caps(&[])),
-        Gate::CapabilityDenied("capability_denied: vision.detection.publish".to_string())
-    );
     assert_eq!(
         gate(
             "offload.advertise",
             false,
             &caps(&["vision.detection.publish"])
+        ),
+        Gate::CapabilityDenied("capability_denied: vision.offload.advertise".to_string())
+    );
+    assert_eq!(
+        gate(
+            "offload.advertise",
+            false,
+            &caps(&["vision.offload.advertise"])
         ),
         Gate::Allow(Method::OffloadAdvertise)
     );

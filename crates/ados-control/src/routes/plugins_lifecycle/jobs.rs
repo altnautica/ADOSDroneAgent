@@ -2,11 +2,14 @@
 //! WebSocket that streams it.
 //!
 //! An install that carries a `job_id` records its stage in
-//! `<run dir>/plugin_install_<job>.json` (`downloading`, `verifying`,
-//! `installing`, then `completed` with `pluginId` or `failed` with `kind` and
-//! `detail`). `WS /api/plugins/jobs/{job_id}` polls that file and sends each new
-//! version, closing on a terminal stage or after ten idle minutes. The
-//! transport is the file, so the stream serves any writer alike.
+//! `<run dir>/plugin_install_<job>.json` (`commanded` when the request is
+//! accepted, then `downloading`, `verifying`, `installing`, then `completed`
+//! with `pluginId` or `failed` with `kind` and `detail`). Every refusal after
+//! the request parses lands as `failed`. `WS /api/plugins/jobs/{job_id}` polls
+//! that file and sends each new version, closing on a terminal stage (and then
+//! deleting the file) or after ten idle minutes. Sidecars no stream collected
+//! are deleted once they are an hour old. The transport is the file, so the
+//! stream serves any writer alike.
 //!
 //! A browser authenticates the handshake with a ticket scoped
 //! `plugins.install_job:<job_id>` (checked at the LAN edge against this path);
@@ -35,14 +38,50 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Stages after which the job writes nothing more.
 const TERMINAL_STAGES: [&str; 3] = ["completed", "failed", "cancelled"];
 
-/// The sidecar path for `job_id`: the id keeps only alphanumerics, `-`, `_`
-/// and `.`, so it cannot leave the dir. `None` when nothing survives.
+/// Age past which a sidecar no stream collected is deleted.
+const SIDECAR_TTL: Duration = Duration::from_secs(3600);
+
+/// Longest accepted job id.
+const JOB_ID_MAX_LEN: usize = 128;
+
+const SIDECAR_PREFIX: &str = "plugin_install_";
+
+/// The sidecar path for `job_id`. The id may hold only ASCII letters, digits,
+/// `-`, `_` and `.` (so it cannot leave the dir and two ids never share a
+/// file); `None` for any other id.
 pub(crate) fn sidecar_path(dir: &Path, job_id: &str) -> Option<PathBuf> {
-    let safe: String = job_id
-        .chars()
-        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        .collect();
-    (!safe.is_empty()).then(|| dir.join(format!("plugin_install_{safe}.json")))
+    let valid = !job_id.is_empty()
+        && job_id.len() <= JOB_ID_MAX_LEN
+        && job_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    valid.then(|| dir.join(format!("{SIDECAR_PREFIX}{job_id}.json")))
+}
+
+/// Delete sidecars (and stray temp files) in `dir` older than `ttl`.
+fn prune_stale(dir: &Path, ttl: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(SIDECAR_PREFIX)
+        {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .is_some_and(|age| age > ttl);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Write one stage record atomically (a sibling temp file, then a rename), with
@@ -51,7 +90,7 @@ fn write_sidecar(dir: &Path, job_id: &str, fields: Map<String, Value>) -> std::i
     let Some(path) = sidecar_path(dir, job_id) else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "job_id is empty after sanitisation",
+            "job_id is not a valid job id",
         ));
     };
     std::fs::create_dir_all(dir)?;
@@ -76,11 +115,28 @@ pub(crate) struct JobSidecar {
 }
 
 impl JobSidecar {
-    pub(crate) fn new(dir: &Path, job_id: Option<String>) -> Self {
-        Self {
-            dir: dir.to_path_buf(),
-            job_id: job_id.filter(|j| !j.is_empty()),
+    /// Open the job and record `commanded`, which also replaces any record a
+    /// previous job under the same id left. An id that is not a valid job id
+    /// is refused.
+    pub(crate) fn new(dir: &Path, job_id: Option<String>) -> Result<Self, Refusal> {
+        let job_id = job_id.filter(|j| !j.is_empty());
+        if let Some(id) = &job_id {
+            if sidecar_path(dir, id).is_none() {
+                return Err(Refusal::usage(
+                    "usage_error",
+                    format!(
+                        "job_id must be 1-{JOB_ID_MAX_LEN} ASCII letters, digits, '-', '_' or '.'"
+                    ),
+                ));
+            }
+            prune_stale(dir, SIDECAR_TTL);
         }
+        let job = Self {
+            dir: dir.to_path_buf(),
+            job_id,
+        };
+        job.stage("commanded");
+        Ok(job)
     }
 
     fn write(&self, fields: Value) {
@@ -171,6 +227,9 @@ pub(crate) async fn run_job_stream(
                     return;
                 }
                 if terminal {
+                    // Delivered: the record has served its purpose, and a
+                    // later job reusing the id must not replay it.
+                    let _ = tokio::fs::remove_file(&path).await;
                     close(socket).await;
                     return;
                 }

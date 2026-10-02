@@ -58,7 +58,7 @@ REQUIRED_CAP: dict[str, str | None] = {
     "radio.aux_stream.subscribe": "radio.aux_stream",
     "cloud.publish": "cloud.publish",
     "cloud.records.put": "cloud.records",
-    "offload.advertise": "vision.detection.publish",
+    "offload.advertise": "vision.offload.advertise",
     "node.info": "node.info.read",
     "mdns.advertise": "network.listen",
     "mdns.browse": "network.outbound",

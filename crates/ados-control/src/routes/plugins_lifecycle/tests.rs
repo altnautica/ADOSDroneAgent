@@ -11,9 +11,10 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tower::util::ServiceExt;
 
+use ados_plugin_host::archive::ARCHIVE_MAX_BYTES;
 use ados_plugin_host::backend::RecordingBackend;
 use ados_plugin_host::download::{
-    DownloadBody, DownloadError, DownloadSource, StaticDownloadSource, DOWNLOAD_MAX_BYTES,
+    DownloadBody, DownloadError, DownloadSource, StaticDownloadSource,
 };
 use ados_plugin_host::manifest::PluginManifest;
 use ados_plugin_host::supervisor::{Paths, PluginSupervisor};
@@ -307,7 +308,7 @@ impl DownloadSource for Oversized {
     fn open(&self, _url: &str) -> Result<DownloadBody, DownloadError> {
         Ok(DownloadBody {
             reader: Box::new(std::io::empty()),
-            content_length: Some(DOWNLOAD_MAX_BYTES + 1),
+            content_length: Some(ARCHIVE_MAX_BYTES + 1),
         })
     }
 }
@@ -414,6 +415,62 @@ async fn a_catalog_install_must_pin_the_catalog_digest() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(envelope(&body), (12, "catalog_mismatch"));
+}
+
+#[tokio::test]
+async fn a_catalog_install_naming_an_uncatalogued_url_is_refused() {
+    let f = fixture();
+    let (status, body) = post_json(
+        &f.state,
+        "/api/plugins/install_from_url",
+        json!({"url": "https://github.com/example/web/releases/download/v1/web.adosplug",
+               "from_catalog": true, "expected_sha256": "ab".repeat(32), "job_id": "cat-1"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(envelope(&body), (12, "catalog_mismatch"));
+    assert_eq!(read_job(&f, "cat-1")["stage"], json!("failed"));
+}
+
+#[tokio::test]
+async fn every_refusal_fails_the_job_and_a_mangled_job_id_is_refused() {
+    let f = fixture();
+    // Refused before any download: the job still ends `failed`.
+    let (status, _) = post_json(
+        &f.state,
+        "/api/plugins/install_from_url",
+        json!({"url": "https://example.com/web.adosplug", "job_id": "early-1"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let job = read_job(&f, "early-1");
+    assert_eq!(job["stage"], json!("failed"));
+    assert_eq!(job["kind"], json!("url_invalid"));
+    // A malformed upload fails its job too.
+    let (content_type, body) = multipart("web.zip", b"x");
+    let (status, _) = send(
+        &f.state,
+        Request::builder()
+            .method("POST")
+            .uri("/api/plugins/install?job_id=early-2")
+            .header("content-type", content_type)
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(read_job(&f, "early-2")["stage"], json!("failed"));
+    // An id that would change under sanitising is refused, not merged with
+    // another job's file.
+    let (status, body) = post_json(
+        &f.state,
+        "/api/plugins/install_from_url",
+        json!({"url": "https://example.com/web.adosplug", "job_id": "a/b"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(envelope(&body).1, "usage_error");
+    assert!(!f.paths.run_dir.join("plugin_install_ab.json").exists());
 }
 
 #[tokio::test]
@@ -746,6 +803,8 @@ async fn the_job_stream_sends_the_stage_and_closes_on_a_terminal_one() {
     assert_eq!(stage["pluginId"], json!(WEB_ID));
     let (opcode, _) = read_frame(&mut conn).await;
     assert_eq!(opcode, 0x8, "a terminal stage closes the stream");
+    // The delivered record is gone, so a job reusing the id starts clean.
+    assert!(!f.paths.run_dir.join("plugin_install_job-9.json").exists());
 }
 
 #[tokio::test]

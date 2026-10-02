@@ -7,9 +7,9 @@
 //! `/api/v2/observability/v1/query?limit=10` reaches the store as
 //! `/v1/query?limit=10`. The response streams through (the live tail is SSE, the
 //! export a chunked stream). The front has already authenticated the request;
-//! the store's socket plane is unauthenticated, so the agent key is not
-//! forwarded. A store that is not serving is a `503` with the store's error
-//! envelope, so a client cascades to its next tier.
+//! the store's socket plane is unauthenticated, so no operator credential
+//! header is forwarded. A store that is not serving is a `503` with the store's
+//! error envelope, so a client cascades to its next tier.
 
 use axum::extract::Request;
 use axum::http::{StatusCode, Uri};
@@ -18,9 +18,6 @@ use axum::Json;
 use serde_json::json;
 
 const PREFIX: &str = "/api/v2/observability";
-
-/// The header carrying the agent key, never forwarded to the store.
-const AGENT_KEY_HEADER: &str = "x-ados-key";
 
 fn store_unavailable() -> Response {
     (
@@ -49,7 +46,7 @@ pub async fn observability_proxy(mut request: Request) -> Response {
         return crate::routes::detail(StatusCode::NOT_FOUND, "Not Found");
     };
     *request.uri_mut() = uri;
-    request.headers_mut().remove(AGENT_KEY_HEADER);
+    crate::routes::plugins_proxy::strip_credentials(request.headers_mut());
     crate::proxy::forward_plain(
         &crate::ipc::logd_client::default_logd_socket(),
         request,
@@ -78,7 +75,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_store_sees_the_tail_without_the_agent_key() {
+    async fn the_store_sees_the_tail_without_any_credential() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("logd-query.sock");
         let listener = tokio::net::UnixListener::bind(&sock).unwrap();
@@ -96,16 +93,22 @@ mod tests {
         });
         let mut request = Request::builder()
             .uri("/api/v2/observability/v1/query?limit=5")
-            .header(AGENT_KEY_HEADER, "secret-key")
+            .header("x-ados-key", "secret-key")
+            .header("x-ados-setup-token", "secret-setup")
+            .header(
+                crate::dashboard_pin::DASHBOARD_SESSION_HEADER,
+                "secret-session",
+            )
+            .header(crate::mcp::MCP_TOKEN_HEADER, "secret-mcp")
             .body(Body::empty())
             .unwrap();
         *request.uri_mut() = upstream_uri(request.uri()).unwrap();
-        request.headers_mut().remove(AGENT_KEY_HEADER);
+        crate::routes::plugins_proxy::strip_credentials(request.headers_mut());
         let resp = crate::proxy::forward_plain(&sock, request, store_unavailable).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let head = server.await.unwrap();
         assert!(head.starts_with("GET /v1/query?limit=5 HTTP/1.1"), "{head}");
-        assert!(!head.to_ascii_lowercase().contains("secret-key"));
+        assert!(!head.to_ascii_lowercase().contains("secret"), "{head}");
 
         let absent = dir.path().join("absent.sock");
         let request = Request::builder().uri("/v1/q").body(Body::empty()).unwrap();

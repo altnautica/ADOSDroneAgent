@@ -68,7 +68,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "radio.aux_stream.subscribe", required_cap: Some("radio.aux_stream"), inline: false },
     DispatchMethod { method: "cloud.publish", required_cap: Some("cloud.publish"), inline: false },
     DispatchMethod { method: "cloud.records.put", required_cap: Some("cloud.records"), inline: false },
-    DispatchMethod { method: "offload.advertise", required_cap: Some("vision.detection.publish"), inline: false },
+    DispatchMethod { method: "offload.advertise", required_cap: Some("vision.offload.advertise"), inline: false },
     DispatchMethod { method: "node.info", required_cap: Some("node.info.read"), inline: false },
     DispatchMethod { method: "mdns.advertise", required_cap: Some("network.listen"), inline: false },
     DispatchMethod { method: "mdns.browse", required_cap: Some("network.outbound"), inline: false },

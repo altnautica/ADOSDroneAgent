@@ -106,8 +106,7 @@ static BUTTON_CLIENT: std::sync::OnceLock<crate::button_client::ButtonClient> =
 /// command-socket paths and the runtime lookups every handler reads.
 pub struct RealHost {
     components: Mutex<ComponentRegistrar>,
-    /// The live connection session per plugin (see `begin_session`).
-    sessions: Mutex<HashMap<String, u64>>,
+    /// The last session id handed out (see `begin_session`).
     session_seq: AtomicU64,
     config: Mutex<ConfigStore>,
     /// The generation of the config snapshot last written to disk. Its lock
@@ -144,12 +143,19 @@ pub struct RealHost {
     /// the supervisor persists the source list + restarts the video service. A
     /// builder overrides it in tests.
     video_cmd_path: PathBuf,
-    /// The plugin id that currently holds the auxiliary stream open, or `None`
-    /// when the stream is closed. The aux pair is a single shared resource on the
-    /// one adapter, so at most one plugin owns it at a time. Used to close the
-    /// stream automatically when its owner disconnects (the SAFE-by-default
-    /// invariant: a stream never outlives the plugin that opened it).
-    aux_stream_owner: Mutex<Option<String>>,
+    /// The connection that currently holds the auxiliary stream open, as
+    /// `(plugin id, session)`, or `None` when the stream is closed. The aux
+    /// pair is a single shared resource on the one adapter, so at most one
+    /// connection owns it at a time. Its teardown closes the stream (the
+    /// SAFE-by-default invariant: a stream never outlives the connection that
+    /// opened it), and no other connection's teardown can.
+    aux_stream_owner: Mutex<Option<(String, u64)>>,
+    /// The connection whose page the reserved display shows, as
+    /// `(plugin id, session)`. The page and its touch zones are one shared
+    /// surface: another plugin may not overwrite it while its owner is
+    /// connected, taps reach only the owning plugin, and the page is cleared
+    /// when that connection ends or the plugin stops.
+    display_page_owner: Mutex<Option<(String, u64)>>,
     /// The process-global aux-subscribe reader, started lazily on the first
     /// `radio.aux_stream.subscribe` and shared by every subscribing plugin. One
     /// connection to the radio service's aux command socket feeds this broadcast;
@@ -199,7 +205,6 @@ impl RealHost {
     pub fn new() -> Self {
         Self {
             components: Mutex::new(ComponentRegistrar::default()),
-            sessions: Mutex::new(HashMap::new()),
             session_seq: AtomicU64::new(0),
             config: Mutex::new(ConfigStore::default()),
             config_written: Arc::new(Mutex::new(0)),
@@ -214,6 +219,7 @@ impl RealHost {
             radio_aux_cmd_path: PathBuf::from(RADIO_AUX_CMD_SOCK),
             video_cmd_path: PathBuf::from(VIDEO_CMD_SOCK),
             aux_stream_owner: Mutex::new(None),
+            display_page_owner: Mutex::new(None),
             aux_reader: std::sync::OnceLock::new(),
             vehicle_state_sock: PathBuf::from(VEHICLE_STATE_SOCK),
             state_reader: std::sync::OnceLock::new(),
@@ -351,14 +357,13 @@ impl RealHost {
         Arc::clone(&self.fc_identity)
     }
 
-    /// The plugin's live connection session, or 0 before its first.
-    fn current_session(&self, plugin_id: &str) -> u64 {
-        self.sessions
+    /// Whether the connection `(plugin_id, session)` holds the aux stream.
+    fn owns_aux_stream(&self, plugin_id: &str, session: u64) -> bool {
+        self.aux_stream_owner
             .lock()
-            .expect("sessions mutex poisoned")
-            .get(plugin_id)
-            .copied()
-            .unwrap_or(0)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|(p, s)| p == plugin_id && *s == session)
     }
 }
 

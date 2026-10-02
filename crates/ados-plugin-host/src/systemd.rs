@@ -1,10 +1,12 @@
 //! Unit generation for subprocess plugins.
 //!
-//! Each subprocess plugin runs as a generated service `ados-plugin-<id>.service`
-//! inside the shared `ados-plugins.slice` cgroup slice (on systemd; launchd
-//! runs the same spec as a LaunchAgent, see [`crate::backend`]). Restart,
-//! watchdog, and resource limits come from the service manager; there is no
-//! manual cgroupv2 management. Built-in `inprocess` plugins skip this entirely.
+//! Each subprocess plugin runs as a generated service
+//! `ados-plugin-<sanitized id>-<8 hex>.service` inside the shared
+//! `ados-plugins.slice` cgroup slice (on systemd; launchd runs the same spec as
+//! a LaunchAgent, see [`crate::backend`]), as its own system user (see
+//! [`crate::plugin_account`]). Restart, watchdog, and resource limits come from
+//! the service manager; there is no manual cgroupv2 management. Built-in
+//! `inprocess` plugins skip this entirely.
 //!
 //! [`build_unit_spec`] is a pure builder: it resolves the exec line, the runner
 //! environment, the binds and the capability sandbox into a
@@ -34,14 +36,23 @@ use std::path::{Path, PathBuf};
 use crate::backend::UnitSpec;
 use crate::errors::SupervisorError;
 use crate::manifest::{bin_reference, host_arch_os, AgentIsolation, AgentRuntime, PluginManifest};
-use crate::sandbox::sandbox_directives;
+use crate::plugin_account::{id_hash8, plugin_user_for};
+use crate::sandbox::{configured_fc_serial_port, fc_port_exclusion, sandbox_directives};
 use crate::server::{plugin_socket_dir, plugin_socket_path};
 use crate::supervisor::Paths;
-use crate::token_secret::{plugin_data_dir, token_env_path};
+use crate::token_secret::{plugin_data_dir, token_credential_path};
 
 /// Default path of the per-plugin runner binary a Python plugin's unit starts
 /// (`ADOS_PLUGIN_RUNNER` overrides it).
 pub const PLUGIN_RUNNER_BINARY: &str = "/opt/ados/venv/bin/ados-plugin-runner";
+/// Default path of the installed plugin-host binary whose `guard-load` every
+/// plugin unit runs as a privileged pre-start (`ADOS_PLUGIN_HOST_BIN`
+/// overrides it).
+pub const PLUGIN_HOST_BINARY: &str = "/opt/ados/bin/ados-plugin-host";
+/// Shared-library and loader directories every plugin process must map
+/// executable code from; each renders optional (`-`) so a host without one
+/// still starts the unit.
+pub const SHARED_LIBRARY_DIRS: &[&str] = &["/lib", "/lib64", "/usr/lib", "/usr/lib64"];
 /// The shared slice name.
 pub const PLUGIN_SLICE_NAME: &str = "ados-plugins.slice";
 /// Default directory units and the slice file are written to
@@ -99,19 +110,29 @@ IOAccounting=yes
 IOWeight=10
 ";
 
-/// Convert a reverse-DNS plugin id to a systemd-safe unit basename.
+/// Convert a reverse-DNS plugin id to a systemd-safe name segment.
 ///
 /// `com.example.thermal-lepton` becomes `com-example-thermal-lepton`. Periods
 /// are not permitted in unit-file basenames before `.service`; hyphens are.
+/// The mapping is not injective (`a.b` and `a-b` agree), which is why every
+/// per-plugin name also carries [`id_hash8`].
 pub fn sanitize_unit_name(plugin_id: &str) -> String {
     plugin_id.replace('.', "-")
 }
 
-/// The full unit name for a plugin, e.g. `ados-plugin-com-example-x.service`.
+/// The per-plugin name segment shared by its units and logs: the full
+/// sanitized id plus the 8-hex hash of the exact id, so two ids whose
+/// sanitized forms agree still get different units and logs.
+pub fn plugin_unit_basename(plugin_id: &str) -> String {
+    format!("{}-{}", sanitize_unit_name(plugin_id), id_hash8(plugin_id))
+}
+
+/// The full unit name for a plugin, e.g.
+/// `ados-plugin-com-example-x-1a2b3c4d.service`.
 pub fn unit_name_for(plugin_id: &str) -> String {
     format!(
         "{PLUGIN_UNIT_PREFIX}{}.service",
-        sanitize_unit_name(plugin_id)
+        plugin_unit_basename(plugin_id)
     )
 }
 
@@ -124,7 +145,7 @@ pub fn unit_name_for(plugin_id: &str) -> String {
 pub fn log_path_for(log_dir: &Path, plugin_id: &str) -> PathBuf {
     log_dir.join(format!(
         "{}{PLUGIN_LOG_SUFFIX}",
-        sanitize_unit_name(plugin_id)
+        plugin_unit_basename(plugin_id)
     ))
 }
 
@@ -133,7 +154,7 @@ pub fn log_path_for(log_dir: &Path, plugin_id: &str) -> PathBuf {
 pub fn service_log_path_for(log_dir: &Path, plugin_id: &str, service_name: &str) -> PathBuf {
     log_dir.join(format!(
         "{}-{}{PLUGIN_LOG_SUFFIX}",
-        sanitize_unit_name(plugin_id),
+        plugin_unit_basename(plugin_id),
         sanitize_unit_name(service_name)
     ))
 }
@@ -205,20 +226,77 @@ pub fn build_unit_spec(
     // The capability-backed half of the sandbox: these lines change with the
     // operator's grants, which is why a grant or revoke re-renders the unit.
     spec.sandbox_directives = sandbox_directives(granted, loopback_guard_active, &[]);
+    spec.sandbox_directives
+        .extend(fc_port_exclusion(granted, fc_serial_port().as_deref()));
     Ok(Some(spec))
 }
 
+/// The configured flight-controller serial port, read from the agent config
+/// (`ADOS_CONFIG`) at render time.
+pub(crate) fn fc_serial_port() -> Option<String> {
+    let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".into());
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|yaml| configured_fc_serial_port(&yaml))
+}
+
+/// The installed plugin-host binary (`ADOS_PLUGIN_HOST_BIN`, else
+/// [`PLUGIN_HOST_BINARY`]).
+pub fn plugin_host_binary() -> PathBuf {
+    std::env::var_os("ADOS_PLUGIN_HOST_BIN")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(PLUGIN_HOST_BINARY))
+}
+
+/// The paths a plugin's processes may execute or map executable code from:
+/// its own install tree (its binaries, the allowlisted `process.spawn` helpers
+/// it ships, a Python plugin's native extensions), the shared Python runtime
+/// for a Python plugin (the runner's virtualenv and the interpreter it links
+/// to), and the shared-library directories. Everything else is mounted
+/// `noexec`, so `process.spawn` is enforced in the kernel rather than only
+/// authorized by the host.
+pub(crate) fn exec_paths_for(
+    manifest: &PluginManifest,
+    paths: &Paths,
+) -> Result<Vec<String>, SupervisorError> {
+    let mut out = vec![path_token(
+        "install dir",
+        &paths.install_dir.join(&manifest.id),
+    )?];
+    let python = manifest
+        .agent
+        .as_ref()
+        .is_none_or(|a| a.runtime == AgentRuntime::Python);
+    if python {
+        match paths.runner.parent().and_then(Path::parent) {
+            Some(venv) => {
+                out.push(path_token("runner virtualenv", venv)?);
+                if let Ok(real) = std::fs::canonicalize(venv.join("bin").join("python3")) {
+                    if !real.starts_with(venv) {
+                        out.push(path_token("python interpreter", &real)?);
+                    }
+                }
+            }
+            None => out.push(path_token("runner", &paths.runner)?),
+        }
+    }
+    out.extend(SHARED_LIBRARY_DIRS.iter().map(|d| format!("-{d}")));
+    Ok(out)
+}
+
 /// The part every unit of a plugin shares, main and declared services alike:
-/// the host socket in the environment, the token file, and the binds. A
+/// the plugin's own user, the host socket in the environment, the token
+/// credential, the guard pre-start, the exec allowlist and the binds. A
 /// declared service runs as the plugin's identity, so it reaches the host SDK
 /// exactly as the main process does.
 ///
-/// Token delivery: a 0600 environment file carries `ADOS_PLUGIN_TOKEN` (and
-/// `ADOS_PLUGIN_SOCKET`) into the process, which reads both from its
-/// environment. The file is rewritten with a fresh token on each start and on
-/// every rotation, so it is optional at start (before the first mint) without
-/// failing the unit; the runner waits for it rather than degrading, so the
-/// optional file cannot produce a silently token-less plugin.
+/// Token delivery: a root-owned 0600 file carrying `ADOS_PLUGIN_TOKEN` (and
+/// the socket, agent id and data dir) is loaded with `LoadCredential=`, so it
+/// appears only in the process's private `$CREDENTIALS_DIRECTORY`, readable by
+/// that plugin's user alone, and never in its environment. The file is
+/// rewritten with a fresh token on each start and on every rotation, and the
+/// host prepares it before it starts the unit.
 ///
 /// The plugin's own socket directory is the one path under the hidden run dir
 /// bound into the unit (read-only; see [`crate::sandbox`]), so the plugin
@@ -233,9 +311,11 @@ pub(crate) fn runner_context(
 ) -> Result<UnitSpec, SupervisorError> {
     let socket_dir = plugin_socket_dir(&paths.socket_dir, &manifest.id);
     let socket_path = plugin_socket_path(&paths.socket_dir, &manifest.id);
-    let token_file = token_env_path(&manifest.id, Some(&paths.socket_dir));
+    let credential = token_credential_path(&manifest.id, Some(&paths.socket_dir));
     path_token("socket dir", &socket_dir)?;
-    path_token("token file", &token_file)?;
+    path_token("token credential", &credential)?;
+    let guard_loader = plugin_host_binary();
+    path_token("plugin host binary", &guard_loader)?;
     let mut env = vec![
         (
             ENV_PLUGIN_SOCKET.to_string(),
@@ -262,9 +342,12 @@ pub(crate) fn runner_context(
         argv: Vec::new(),
         working_dir: None,
         env,
-        env_file: Some(token_file),
+        user: plugin_user_for(&manifest.id),
+        credential: Some(credential),
         bind_read_only: vec![socket_dir],
         bind_read_write,
+        exec_paths: exec_paths_for(manifest, paths)?,
+        guard_loader: Some(guard_loader),
         log_path: PathBuf::new(),
         restart: String::new(),
         resources: Default::default(),
@@ -363,14 +446,16 @@ mod tests {
         .unwrap()
     }
 
-    /// The whole main unit, pinned: the text a running node's units were
-    /// rendered with, plus the socket-bind deny every plugin unit now carries,
-    /// the credential files under `/etc/ados` every unit hides, and the
-    /// plugin's own data dir as its only writable path under the data root.
+    /// The whole main unit, pinned: the plugin's own user in the plugin group,
+    /// the token as a credential, the guard pre-start and its ordering on the
+    /// plugin host, the exec allowlist, the socket-bind deny, the credential
+    /// files under `/etc/ados` every unit hides, and the plugin's own data dir
+    /// as its only writable path under the data root.
     const RUST_UNIT_GOLDEN: &str = "\
 [Unit]
 Description=ADOS plugin com.example.rustplug
-After=ados-supervisor.service
+After=ados-supervisor.service ados-plugin-host.service
+Requires=ados-plugin-host.service
 PartOf=ados-supervisor.service
 # No start rate limit: a plugin whose host socket is not up yet must keep
 # retrying rather than land in a failed state an operator has to clear by hand.
@@ -381,19 +466,20 @@ Slice=ados-plugins.slice
 Type=simple
 Environment=ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.rustplug/host.sock
 Environment=ADOS_NODE_PROFILE=drone
-EnvironmentFile=-/run/ados/plugins/com.example.rustplug.token.env
+LoadCredential=ados-plugin-token:/run/ados/plugins/com.example.rustplug.token
 BindReadOnlyPaths=/run/ados/plugins/com.example.rustplug
 BindPaths=/var/ados/plugin-data/com.example.rustplug
+ExecStartPre=+/opt/ados/bin/ados-plugin-host guard-load
 ExecStart=/var/ados/plugins/com.example.rustplug/agent/bin/com.example.rustplug com.example.rustplug --socket /run/ados/plugins/com.example.rustplug/host.sock
 Restart=on-failure
 RestartSec=2s
 MemoryMax=96M
 CPUQuota=25%
 TasksMax=12
-StandardOutput=append:/var/log/ados/plugins/com-example-rustplug.log
-StandardError=append:/var/log/ados/plugins/com-example-rustplug.log
-User=ados
-Group=ados
+StandardOutput=append:/var/log/ados/plugins/com-example-rustplug-3bb2d8d0.log
+StandardError=append:/var/log/ados/plugins/com-example-rustplug-3bb2d8d0.log
+User=ados-plg-3bb2d8d0
+Group=ados-plugins
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
@@ -406,6 +492,8 @@ ProtectControlGroups=yes
 ProtectProc=invisible
 RestrictNamespaces=yes
 SystemCallArchitectures=native
+NoExecPaths=/
+ExecPaths=/var/ados/plugins/com.example.rustplug -/lib -/lib64 -/usr/lib -/usr/lib64
 # ---- capability sandbox (re-rendered on every grant/revoke) ----
 DevicePolicy=closed
 DeviceAllow=char-i2c rw
@@ -456,14 +544,22 @@ WantedBy=ados-supervisor.service
     }
 
     #[test]
-    fn sanitize_replaces_dots_with_hyphens() {
+    fn two_ids_whose_sanitized_forms_collide_get_distinct_units_and_logs() {
         assert_eq!(
-            sanitize_unit_name("com.example.thermal-lepton"),
-            "com-example-thermal-lepton"
+            sanitize_unit_name("com.example.thermal"),
+            sanitize_unit_name("com.example-thermal")
+        );
+        assert_ne!(
+            unit_name_for("com.example.thermal"),
+            unit_name_for("com.example-thermal")
+        );
+        assert_ne!(
+            log_path_for(Path::new(PLUGIN_LOG_DIR), "com.example.thermal"),
+            log_path_for(Path::new(PLUGIN_LOG_DIR), "com.example-thermal")
         );
         assert_eq!(
             unit_name_for("com.example.thermal-lepton"),
-            "ados-plugin-com-example-thermal-lepton.service"
+            "ados-plugin-com-example-thermal-lepton-1b3dd913.service"
         );
     }
 
@@ -494,10 +590,14 @@ WantedBy=ados-supervisor.service
             !unit.contains("SocketBindAllow="),
             "the main unit never listens"
         );
-        // Log append path uses the sanitized id.
+        // Log append path uses the sanitized id plus its hash.
         assert!(unit.contains(
-            "StandardOutput=append:/var/log/ados/plugins/com-example-thermal-lepton.log"
+            "StandardOutput=append:/var/log/ados/plugins/com-example-thermal-lepton-1b3dd913.log"
         ));
+        // A Python plugin may execute its tree and the runner's virtualenv.
+        assert!(
+            unit.contains("ExecPaths=/var/ados/plugins/com.example.thermal-lepton /opt/ados/venv ")
+        );
     }
 
     #[test]
@@ -527,10 +627,10 @@ WantedBy=ados-supervisor.service
             "Environment=ADOS_PLUGIN_SOCKET=/Users/op/.ados/run/plugins/com.example.thermal-lepton/host.sock"
         ));
         assert!(unit.contains(
-            "EnvironmentFile=-/Users/op/.ados/run/plugins/com.example.thermal-lepton.token.env"
+            "LoadCredential=ados-plugin-token:/Users/op/.ados/run/plugins/com.example.thermal-lepton.token"
         ));
         assert!(unit.contains(
-            "StandardOutput=append:/Users/op/.ados/log/plugins/com-example-thermal-lepton.log"
+            "StandardOutput=append:/Users/op/.ados/log/plugins/com-example-thermal-lepton-1b3dd913.log"
         ));
         assert!(unit.contains("BindPaths=/Users/op/.ados/plugin-data/com.example.thermal-lepton\n"));
     }

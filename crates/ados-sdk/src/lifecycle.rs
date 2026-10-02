@@ -2,8 +2,10 @@
 //!
 //! Ports `ados.plugins.runner` for the `runtime: rust` case. A Rust plugin's
 //! binary implements [`Plugin`] and calls [`run_plugin`] from `main`; the
-//! runner reads `--socket` / `--token` / `--agent-id` (with `ADOS_PLUGIN_*`
-//! env-var fallbacks — the exact contract `runner.py` passes), connects the
+//! runner reads `--socket` / `--token` / `--agent-id`, falling back to the
+//! `ADOS_PLUGIN_*` values of the token credential systemd loads into
+//! `$CREDENTIALS_DIRECTORY` (or, without one, the environment — the exact
+//! contract `runner.py` follows), connects the
 //! [`PluginIpcClient`], builds a [`PluginContext`], and drives the lifecycle
 //! hooks until SIGTERM/SIGINT, then runs the teardown hooks. A lost host
 //! session (a plugin-host restart) also ends the run, as an error, so the
@@ -97,10 +99,14 @@ pub enum RunnerError {
     SessionLost,
 }
 
+/// The systemd credential id a plugin unit loads its token file under. It
+/// appears as `$CREDENTIALS_DIRECTORY/<this>` inside the plugin process.
+pub const TOKEN_CREDENTIAL_NAME: &str = "ados-plugin-token";
+
 /// The parsed runner arguments. Mirrors the `plugin_id` positional plus the
 /// `--socket` / `--token` / `--agent-id` options the Python runner reads, with
 /// the `ADOS_PLUGIN_SOCKET` / `ADOS_PLUGIN_TOKEN` / `ADOS_PLUGIN_AGENT_ID`
-/// env-var fallbacks.
+/// fallbacks read from the token credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerArgs {
     pub plugin_id: String,
@@ -108,8 +114,8 @@ pub struct RunnerArgs {
     pub token: Option<String>,
     pub agent_id: String,
     /// The plugin's per-drone data directory, from `ADOS_PLUGIN_DATA_DIR`. The
-    /// host sets this on the unit; a plugin reads it through `ctx.data_dir`
-    /// rather than re-deriving a path it might get wrong.
+    /// host delivers it in the token credential; a plugin reads it through
+    /// `ctx.data_dir` rather than re-deriving a path it might get wrong.
     pub data_dir: Option<String>,
 }
 
@@ -117,6 +123,12 @@ impl RunnerArgs {
     /// Parse from a raw argv (excluding argv[0]) and an env lookup. The env
     /// lookup is injected so the parse is unit-testable without touching the
     /// process environment.
+    ///
+    /// A value an option does not give comes from the `KEY=VALUE` lines of
+    /// `$CREDENTIALS_DIRECTORY/ados-plugin-token`, the file a systemd unit
+    /// loads with `LoadCredential=` (the token never sits in the process
+    /// environment there). Without a credential the environment supplies it,
+    /// which is how the launchd entry script delivers the same keys.
     pub fn parse<F>(args: &[String], env: F) -> Result<Self, RunnerError>
     where
         F: Fn(&str) -> Option<String>,
@@ -164,17 +176,45 @@ impl RunnerArgs {
             }
         }
 
+        let credential = read_credential(&env);
+        let launch_value = |key: &str| {
+            credential
+                .get(key)
+                .filter(|v| !v.is_empty())
+                .cloned()
+                .or_else(|| env(key).filter(|v| !v.is_empty()))
+        };
         Ok(Self {
             plugin_id: plugin_id.ok_or(RunnerError::MissingPluginId)?,
-            // Env fallbacks match the Python option `default=lambda: os.environ.get(...)`.
-            socket_path: socket_path.or_else(|| env("ADOS_PLUGIN_SOCKET")),
-            token: token.or_else(|| env("ADOS_PLUGIN_TOKEN")),
+            socket_path: socket_path.or_else(|| launch_value("ADOS_PLUGIN_SOCKET")),
+            token: token.or_else(|| launch_value("ADOS_PLUGIN_TOKEN")),
             agent_id: agent_id
-                .or_else(|| env("ADOS_PLUGIN_AGENT_ID"))
+                .or_else(|| launch_value("ADOS_PLUGIN_AGENT_ID"))
                 .unwrap_or_default(),
-            data_dir: env("ADOS_PLUGIN_DATA_DIR"),
+            data_dir: launch_value("ADOS_PLUGIN_DATA_DIR"),
         })
     }
+}
+
+/// The `KEY=VALUE` lines of the token credential under the
+/// `CREDENTIALS_DIRECTORY` the lookup names; empty when there is none or it
+/// cannot be read. Values are taken verbatim after the first `=`.
+fn read_credential<F>(env: &F) -> BTreeMap<String, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(dir) = env("CREDENTIALS_DIRECTORY").filter(|d| !d.is_empty()) else {
+        return BTreeMap::new();
+    };
+    let path = std::path::Path::new(&dir).join(TOKEN_CREDENTIAL_NAME);
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+    body.lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| !key.is_empty())
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
 }
 
 /// Run a plugin to completion: parse argv/env, connect, build the context,
@@ -400,6 +440,56 @@ mod tests {
         let argv = vec!["--socket".to_string(), "/tmp/x".to_string()];
         let err = RunnerArgs::parse(&argv, no_env).unwrap_err();
         assert!(matches!(err, RunnerError::MissingPluginId));
+    }
+
+    #[test]
+    fn the_token_credential_supplies_what_the_options_do_not() {
+        // Under systemd the launch values arrive only in the credential file;
+        // a stale environment value never wins over it, and an option does.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(TOKEN_CREDENTIAL_NAME),
+            "ADOS_PLUGIN_TOKEN=pay=load|sig==\n\
+             ADOS_PLUGIN_SOCKET=/run/ados/plugins/com.example.demo/host.sock\n\
+             ADOS_PLUGIN_AGENT_ID=drone-abc\n\
+             ADOS_PLUGIN_DATA_DIR=/var/ados/plugin-data/com.example.demo/drones/drone-abc\n",
+        )
+        .unwrap();
+        let creds = dir.path().to_string_lossy().into_owned();
+        let env = move |k: &str| match k {
+            "CREDENTIALS_DIRECTORY" => Some(creds.clone()),
+            "ADOS_PLUGIN_TOKEN" => Some("stale-env".to_string()),
+            _ => None,
+        };
+        let argv = vec![
+            "com.example.demo".to_string(),
+            "--agent-id=explicit".to_string(),
+        ];
+        let args = RunnerArgs::parse(&argv, env).unwrap();
+        assert_eq!(args.token.as_deref(), Some("pay=load|sig=="));
+        assert_eq!(
+            args.socket_path.as_deref(),
+            Some("/run/ados/plugins/com.example.demo/host.sock")
+        );
+        assert_eq!(args.agent_id, "explicit");
+        assert_eq!(
+            args.data_dir.as_deref(),
+            Some("/var/ados/plugin-data/com.example.demo/drones/drone-abc")
+        );
+    }
+
+    #[test]
+    fn an_unreadable_credential_falls_back_to_the_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent").to_string_lossy().into_owned();
+        let env = move |k: &str| match k {
+            "CREDENTIALS_DIRECTORY" => Some(missing.clone()),
+            "ADOS_PLUGIN_TOKEN" => Some("env-tok".to_string()),
+            _ => None,
+        };
+        let args = RunnerArgs::parse(&["com.example.demo".to_string()], env).unwrap();
+        assert_eq!(args.token.as_deref(), Some("env-tok"));
+        assert_eq!(args.socket_path, None);
     }
 
     /// A dummy plugin proves the trait's default-no-op hooks compile and that a

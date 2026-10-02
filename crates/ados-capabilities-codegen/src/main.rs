@@ -42,7 +42,7 @@ struct Cap {
 #[derive(Debug, Deserialize)]
 struct MethodRow {
     id: String,
-    /// The dispatch-level required cap, or `None` when the method is ungated or
+    /// The dispatch-level required cap, or `None` when the method is open or
     /// gated inline by its handler.
     #[serde(default)]
     required_cap: Option<String>,
@@ -51,6 +51,11 @@ struct MethodRow {
     /// an open method (event surface, ping) from an inline-gated one.
     #[serde(default)]
     inline: bool,
+    /// Declares the method intentionally ungated at the dispatch level. A row
+    /// must name exactly one of `required_cap`, `inline` or `open`, so a method
+    /// added without a gate fails validation instead of shipping open.
+    #[serde(default)]
+    open: bool,
 }
 
 /// The WFB adapter tables, the single source of truth for the radio adapter
@@ -783,9 +788,10 @@ fn gcs_mirror_manifest(targets: &[Target], monorepo: &Path) -> String {
 
 /// Referential checks the generated tables rely on, run before anything is
 /// emitted: ids unique within each section, every `[[method]]` `required_cap`
-/// naming a declared agent capability, and no method both inline-gated and
-/// dispatch-gated. A violation would otherwise generate a dispatch row no
-/// plugin can ever be granted, with `--check` reporting clean.
+/// naming a declared agent capability, and every method naming exactly one of
+/// `required_cap`, `inline` or `open`. A violation would otherwise generate a
+/// dispatch row no plugin can ever be granted, or one that is silently
+/// ungated, with `--check` reporting clean.
 fn validate_catalog(cat: &Catalog) -> Result<(), Vec<String>> {
     use std::collections::HashSet;
     let mut problems = Vec::new();
@@ -809,12 +815,15 @@ fn validate_catalog(cat: &Catalog) -> Result<(), Vec<String>> {
                     m.id
                 ));
             }
-            if m.inline {
-                problems.push(format!(
-                    "method `{}` is both inline-gated and dispatch-gated",
-                    m.id
-                ));
-            }
+        }
+        let gates =
+            usize::from(m.required_cap.is_some()) + usize::from(m.inline) + usize::from(m.open);
+        if gates != 1 {
+            problems.push(format!(
+                "method `{}` must name exactly one of required_cap, inline = true or \
+                 open = true",
+                m.id
+            ));
         }
     }
     if problems.is_empty() {
@@ -1071,6 +1080,7 @@ mod tests {
             id: "mission.read".into(),
             required_cap: Some("mission.raed".into()),
             inline: false,
+            open: false,
         }];
         let problems = validate_catalog(&cat).unwrap_err();
         assert!(problems[0].contains("unknown capability `mission.raed`"));
@@ -1087,22 +1097,49 @@ mod tests {
         assert!(validate_catalog(&cat).unwrap_err()[0].contains("duplicate agent id"));
     }
 
+    #[test]
+    fn a_method_must_name_exactly_one_gate() {
+        let mut cat = sample();
+        cat.method = sample_methods();
+        cat.method[1].required_cap = Some("mavlink.read".into());
+        assert!(validate_catalog(&cat).is_ok());
+        for (required_cap, inline, open) in [
+            (None, false, false),
+            (Some("event.publish".to_string()), true, false),
+            (Some("event.publish".to_string()), false, true),
+            (None, true, true),
+        ] {
+            let mut cat = sample();
+            cat.method = vec![MethodRow {
+                id: "new.method".into(),
+                required_cap,
+                inline,
+                open,
+            }];
+            let problems = validate_catalog(&cat).unwrap_err();
+            assert!(problems[0].contains("exactly one"), "{problems:?}");
+        }
+    }
+
     fn sample_methods() -> Vec<MethodRow> {
         vec![
             MethodRow {
                 id: "ping".into(),
                 required_cap: None,
                 inline: false,
+                open: true,
             },
             MethodRow {
                 id: "mission.read".into(),
                 required_cap: Some("mission.read".into()),
                 inline: false,
+                open: false,
             },
             MethodRow {
                 id: "mavlink.register_component".into(),
                 required_cap: None,
                 inline: true,
+                open: false,
             },
         ]
     }

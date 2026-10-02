@@ -19,6 +19,7 @@ def test_prepare_plugin_dirs_creates_a_writable_data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "PLUGIN_DATA_DIR", tmp_path / "plugin-data")
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     monkeypatch.delenv("ADOS_PLUGIN_DATA_DIR", raising=False)
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
 
     data_dir, config_dir, temp_dir = runner._prepare_plugin_dirs(
         "com.example.plugin", "drone-xyz"
@@ -41,6 +42,7 @@ def test_env_data_dir_wins_over_the_local_derivation(tmp_path, monkeypatch):
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     host_dir = tmp_path / "host-supplied" / "drones" / "drone-xyz"
     monkeypatch.setenv("ADOS_PLUGIN_DATA_DIR", str(host_dir))
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
 
     data_dir, _config_dir, _temp_dir = runner._prepare_plugin_dirs(
         "com.example.plugin", "drone-xyz"
@@ -51,10 +53,32 @@ def test_env_data_dir_wins_over_the_local_derivation(tmp_path, monkeypatch):
     (data_dir / "state.json").write_text("{}")
 
 
+def test_the_credential_data_dir_wins_over_env_and_derivation(tmp_path, monkeypatch):
+    # Under systemd the host's data dir arrives only in the token credential.
+    monkeypatch.setattr(runner, "PLUGIN_DATA_DIR", tmp_path / "plugin-data")
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
+    creds = tmp_path / "creds"
+    creds.mkdir()
+    host_dir = tmp_path / "from-credential" / "drones" / "drone-xyz"
+    (creds / "ados-plugin-token").write_text(
+        f"ADOS_PLUGIN_TOKEN=tok\nADOS_PLUGIN_DATA_DIR={host_dir}\n"
+    )
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(creds))
+    monkeypatch.setenv("ADOS_PLUGIN_DATA_DIR", str(tmp_path / "from-env"))
+
+    data_dir, _config_dir, _temp_dir = runner._prepare_plugin_dirs(
+        "com.example.plugin", "drone-xyz"
+    )
+
+    assert data_dir == host_dir
+    assert data_dir.is_dir()
+
+
 def test_idempotent_across_repeated_calls(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "PLUGIN_DATA_DIR", tmp_path / "plugin-data")
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     monkeypatch.delenv("ADOS_PLUGIN_DATA_DIR", raising=False)
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
 
     first = runner._prepare_plugin_dirs("com.example.plugin", "drone-xyz")
     (first[0] / "state.json").write_text("{}")

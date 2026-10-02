@@ -37,7 +37,7 @@ class ExecutionTier(str, enum.Enum):
     The tier decision itself is the agent's, from ``ados_offload::pick_tier``
     reading the offload-link sidecar; it is NOT reimplemented here. A plugin
     that holds an offload link publishes it through the ``offload.advertise``
-    host method (gated on ``vision.detection.publish``), and the agent reports
+    host method (gated on ``vision.offload.advertise``), and the agent reports
     the tier it resolved as a :class:`ResolvedTier`.
     """
 

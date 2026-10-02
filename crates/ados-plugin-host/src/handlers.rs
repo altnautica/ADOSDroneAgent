@@ -415,16 +415,18 @@ pub fn event_deliver_args(event: &Event) -> Value {
 ///
 /// `granted_caps` is the caller's verified capability set. Only the
 /// payload-gated methods (`mavlink.send`, `mavlink.register_component`,
-/// `peripheral.register_driver`, and `cloud.publish` for its detection stream)
-/// consume it; they apply their capability gate
+/// `peripheral.register_driver`, `cloud.publish` for its detection stream, and
+/// `vision.publish_detection` for a batch's tracker fields) consume it; they
+/// apply their capability gate
 /// inside the handler, after argument validation, exactly where the Python
 /// handlers apply it. The other methods are fully gated at the dispatch level and
 /// ignore it.
 ///
 /// `session` is the calling connection's session (see
-/// [`HostServices::begin_session`]). Only `mdns.advertise` consumes it: the
-/// record belongs to the connection that published it, and one plugin may hold
-/// several connections at once (its main process and each declared service).
+/// [`HostServices::begin_session`]). The methods that hold per-connection
+/// state (a component reservation, an mDNS record, the aux stream, the
+/// display page) key it on this, since one plugin may hold several
+/// connections at once (its main process and each declared service).
 pub async fn route_host_method<H: HostServices + ?Sized>(
     host: &H,
     method: Method,
@@ -446,7 +448,7 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::MspSend => host.msp_send(plugin_id, args),
         Method::MavlinkTunnelSend => host.mavlink_tunnel_send(plugin_id, args),
         Method::MavlinkRegisterComponent => {
-            host.mavlink_register_component(plugin_id, args, granted_caps)
+            host.mavlink_register_component(plugin_id, session, args, granted_caps)
         }
         Method::PeripheralRegisterDriver => {
             host.peripheral_register_driver(plugin_id, args, granted_caps)
@@ -459,14 +461,16 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::ConfigGet => host.config_get(plugin_id, args),
         Method::ConfigSet => host.config_set(plugin_id, args).await,
         Method::ProcessSpawn => host.process_spawn(plugin_id, args),
-        Method::DisplayPageSet => host.display_page_set(plugin_id, args),
+        Method::DisplayPageSet => host.display_page_set(plugin_id, session, args),
         Method::GpioOutputSet => host.gpio_output_set(plugin_id, args).await,
         Method::GpioBuzzerBeep => host.gpio_buzzer_beep(plugin_id, args).await,
         Method::GuidedSetpointSend => host.guided_setpoint_send(plugin_id, args),
         Method::RateSetpointSend => host.rate_setpoint_send(plugin_id, args),
-        Method::RadioAuxStreamOpen => host.radio_aux_stream_open(plugin_id, args).await,
-        Method::RadioAuxStreamClose => host.radio_aux_stream_close(plugin_id, args).await,
-        Method::RadioAuxStreamSend => host.radio_aux_stream_send(plugin_id, args).await,
+        Method::RadioAuxStreamOpen => host.radio_aux_stream_open(plugin_id, session, args).await,
+        Method::RadioAuxStreamClose => {
+            host.radio_aux_stream_close(plugin_id, session, args).await
+        }
+        Method::RadioAuxStreamSend => host.radio_aux_stream_send(plugin_id, session, args).await,
         // Subscribe is handled in the server (it arms the per-connection aux
         // push stream) and never reaches here, exactly like button.subscribe.
         Method::RadioAuxStreamSubscribe => {
@@ -489,7 +493,12 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         // the one vision method that does not proxy to the engine.
         Method::VisionReadModel => host.vision_read_model(plugin_id, args).await,
         Method::VisionInfer => host.vision_infer(plugin_id, args).await,
-        Method::VisionPublishDetection => host.vision_publish_detection(plugin_id, args).await,
+        // The publish binds the batch to the plugin; whether it may carry a
+        // tracker lock depends on its `vision.track.designate` grant.
+        Method::VisionPublishDetection => {
+            host.vision_publish_detection(plugin_id, args, granted_caps)
+                .await
+        }
         Method::VisionDesignateTrack => host.vision_designate_track(plugin_id, args).await,
         // The event surface, ping, and the streaming subscribe methods never
         // reach here; the server short-circuits `vision.subscribe_frames`,

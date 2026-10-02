@@ -31,7 +31,7 @@
 # Edit here, then run codegen. Do not edit the generated files by hand.
 
 # ===========================================================================
-# AGENT capabilities (52)
+# AGENT capabilities (53)
 # ===========================================================================
 
 [[agent]]
@@ -377,6 +377,15 @@ risk_reason = "Detections are derived data on a sandboxed topic and do not affec
 enforced = true
 
 [[agent]]
+id = "vision.offload.advertise"
+label = "Advertise a perception offload link"
+description = "Lets the plugin report the perception offload link it holds (whether a compute node is paired, whether the bearer to it is good enough, its address and the model it runs). The node's perception tier and status read it. The agent counts the node as paired only when the advertised address answers, and only one plugin owns the link at a time."
+category = "compute_process"
+risk = "medium"
+risk_reason = "The advertised link changes the perception tier the node reports and where its detections come from."
+enforced = true
+
+[[agent]]
 id = "vision.detection.subscribe"
 label = "Subscribe to detections from the vision engine"
 description = "Lets the plugin receive the detection batches the vision engine publishes (bounding boxes, class labels, confidence, and the tracker's stable track id and lock state on the locked object). Detections are derived data; subscribing does not command the vehicle or open the camera."
@@ -707,9 +716,12 @@ risk_reason = "Confined to the plugin's own namespace for the signed-in operator
 # plugin runtime (src/ados/plugins/_dispatch_generated.py, read by
 # plugins/ipc_client.py) so the two halves of the wire contract cannot drift.
 #
-# required_cap absent  -> the method is ungated at the dispatch level (the event
-#                         surface and ping are open; per-topic checks run inline
-#                         in the handler).
+# open = true          -> the method is ungated at the dispatch level on purpose
+#                         (the event surface and ping; per-topic checks run
+#                         inline in the handler; config is scoped to the calling
+#                         plugin). Every row names exactly one of required_cap,
+#                         inline or open, so a new method can never ship ungated
+#                         by omission.
 # inline = true        -> the method's cap is decided inline by the handler from
 #                         the request payload (the component-kind / driver-kind
 #                         classification), so the dispatch gate is None but the
@@ -722,12 +734,15 @@ risk_reason = "Confined to the plugin's own namespace for the signed-in operator
 # ---- ungated event surface (per-topic check inline) ----
 [[method]]
 id = "event.publish"
+open = true
 
 [[method]]
 id = "event.subscribe"
+open = true
 
 [[method]]
 id = "ping"
+open = true
 
 # ---- MCP tool invocation (host -> plugin request/response) ----
 # The one host->plugin request method: the host asks the plugin to run one of
@@ -831,9 +846,11 @@ required_cap = "video.source.set"
 # ---- config kv (per-drone / global) ----
 [[method]]
 id = "config.get"
+open = true
 
 [[method]]
 id = "config.set"
+open = true
 
 # ---- vendor binary spawn ----
 [[method]]
@@ -983,14 +1000,15 @@ required_cap = "cloud.records"
 # ---- perception offload advertisement ----
 # A plugin that runs perception offload reports the link it holds: whether a
 # compute node is paired, whether the bearer to it is good enough, its address
-# and the model it runs. The host stamps the facts and writes the offload-link
+# and the model it runs. The host checks the address answers, records the
+# plugin as the link's owner, stamps the facts and writes the offload-link
 # sidecar the perception-tier decision reads; the plugin re-advertises within
-# the sidecar's staleness window or the link reads as gone. Gated on the
-# detection-publish capability, since an advertised link steers where the
-# node's detections come from.
+# the sidecar's staleness window or the link reads as gone. Gated on its own
+# capability, since an advertised link steers where the node's detections
+# come from.
 [[method]]
 id = "offload.advertise"
-required_cap = "vision.detection.publish"
+required_cap = "vision.offload.advertise"
 
 # ---- node facts ----
 # Read the node's profile, board, ground-station role, camera readiness and main

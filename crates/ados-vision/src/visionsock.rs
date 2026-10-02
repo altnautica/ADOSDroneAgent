@@ -14,12 +14,15 @@
 //!   connection. Every published descriptor is pushed as a `vision.deliver`
 //!   event envelope whose `args` map carries the encoded descriptor as a binary
 //!   `descriptor` field (the host fans these out to subscribed plugins).
-//! - `vision.register_model` — register a model.
+//! - `vision.register_model` — register a model under the plugin the host
+//!   stamped as `owner`.
 //! - `vision.infer` — run a registered engine-run model against one frame this
 //!   engine published, named by its descriptor; the reply carries the batch.
 //! - `vision.publish_detection` — publish a [`DetectionBatch`]. Used by
 //!   plugin-side models and offloaded detection.
-//! - `vision.designate_track` — lock a camera's tracker onto a box.
+//! - `vision.designate_track` — lock a captured camera's tracker onto a box.
+//! - `vision.unregister_owner` — drop every model one plugin registered (sent
+//!   by the host when it stops serving the plugin).
 //!
 //! The `args` of the four plugin-facing requests are the shapes
 //! [`ados_protocol::vision_rpc`] defines, decoded with its decoders so the SDK
@@ -188,6 +191,7 @@ async fn dispatch(engine: &Arc<VisionEngine>, env: &Envelope) -> (Value, Option<
         m if m == methods::PUBLISH_DETECTION => handle_publish(engine, &env.args).await,
         m if m == methods::DESIGNATE_TRACK => handle_designate_track(engine, &env.args).await,
         m if m == methods::LIST_MODELS => handle_list_models(engine).await,
+        m if m == vision_rpc::UNREGISTER_OWNER => handle_unregister_owner(engine, &env.args).await,
         other => Err(anyhow!("unknown vision method {other}")),
     };
     match result {
@@ -215,10 +219,13 @@ async fn handle_list_models(engine: &Arc<VisionEngine>) -> Result<Value> {
     ]))
 }
 
+/// Handle `vision.register_model`. The host stamps the calling plugin's id, and
+/// the model lands under that plugin's namespace; the reply's `model_id` is the
+/// registry id.
 async fn handle_register(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
+    let owner = vision_rpc::owner_of(args)?;
     let meta = vision_rpc::decode_register_model(args)?;
-    let model_id = meta.id.clone();
-    let (exec, had_backend) = engine.register_model(meta).await?;
+    let (model_id, exec, had_backend) = engine.register_owned_model(owner, meta).await?;
     Ok(ok_map(&[
         ("registered", Value::Boolean(true)),
         ("model_id", Value::from(model_id)),
@@ -227,16 +234,31 @@ async fn handle_register(engine: &Arc<VisionEngine>, args: &Value) -> Result<Val
     ]))
 }
 
+/// Handle `vision.unregister_owner`: drop every model one plugin registered.
+async fn handle_unregister_owner(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
+    let owner = vision_rpc::owner_of(args)?;
+    let removed = engine.unregister_owner(owner).await;
+    Ok(ok_map(&[("removed", Value::from(removed as u64))]))
+}
+
 /// Handle `vision.infer`: read the named frame out of the camera's ring (a torn
 /// or recycled slot is an error, so the caller retries with a fresh descriptor)
-/// and run the model on it. The reply is the batch, not published: a plugin
-/// that wants it on the bus publishes it.
+/// and run the model on it for the plugin the host stamped. The reply is the
+/// batch, not published: a plugin that wants it on the bus publishes it.
 async fn handle_infer(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
+    let owner = vision_rpc::owner_of(args)?;
     let req = vision_rpc::decode_infer(args)?;
     let desc = &req.frame;
     let pixels = engine.read_frame(desc).await?;
     let detections = engine
-        .infer(&req.model_id, &pixels, desc.width, desc.height, desc.format)
+        .infer_for(
+            owner,
+            &req.model_id,
+            &pixels,
+            desc.width,
+            desc.height,
+            desc.format,
+        )
         .await?;
     let batch = DetectionBatch {
         v: VISION_DETECTION_VERSION,
@@ -253,7 +275,11 @@ async fn handle_infer(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value>
 
 /// Handle `vision.publish_detection`. The decoder refuses a batch whose version
 /// this build does not speak, so a mis-versioned batch is rejected loudly at
-/// this plugin ingress rather than relayed to be mis-read downstream.
+/// this plugin ingress rather than relayed to be mis-read downstream. The host
+/// has already bound the batch to the publishing plugin (namespaced model id,
+/// tracker fields cleared without designation rights). The camera id is not
+/// checked against the engine's rings: an offloaded detector names the camera
+/// it was fed, which need not be a camera this engine captures.
 async fn handle_publish(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
     let batch = vision_rpc::decode_publish_detection(args)?;
     let reached = engine.publish_detection(batch);
@@ -262,9 +288,14 @@ async fn handle_publish(engine: &Arc<VisionEngine>, args: &Value) -> Result<Valu
 
 /// Handle `vision.designate_track`: lock the named camera's tracker onto a
 /// specific box (the operator's click-to-follow pick, or a plugin's),
-/// overriding the auto-lock.
+/// overriding the auto-lock. Only a camera the engine captures has a tracker
+/// to lock, so any other camera id is refused rather than growing the tracker
+/// map.
 async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
     let req = vision_rpc::decode_designate_track(args)?;
+    if !engine.has_ring(&req.camera_id).await {
+        return Err(anyhow!("no camera {} on this node", req.camera_id));
+    }
     let track_id = engine.designate(&req.camera_id, &req.target).await;
     Ok(ok_map(&[
         ("designated", Value::Boolean(track_id.is_some())),
@@ -483,15 +514,36 @@ mod tests {
             model_path: None,
             head: ados_protocol::framebus::DetectionHead::Yolo8,
         };
-        let args = vision_rpc::register_model_args(&meta).unwrap();
+        // Unstamped (not through the host): refused.
+        let bare = vision_rpc::register_model_args(&meta).unwrap();
+        let (_resp, err) = dispatch(&e, &req_env(methods::REGISTER_MODEL, bare.clone())).await;
+        assert!(err.unwrap().contains("owner"));
+
+        let args = vision_rpc::with_owner(&bare, "com.example.p");
         let (resp, err) = dispatch(&e, &req_env(methods::REGISTER_MODEL, args)).await;
         assert!(err.is_none());
-        // The response carries registered=true and the model id.
+        // The response carries registered=true and the plugin-namespaced id.
         let map = as_map(&resp);
         assert_eq!(get(&map, "registered"), Some(Value::Boolean(true)));
-        assert_eq!(get(&map, "model_id"), Some(Value::from("com.example.m")));
+        assert_eq!(
+            get(&map, "model_id"),
+            Some(Value::from("com.example.p/com.example.m"))
+        );
         assert_eq!(get(&map, "execution"), Some(Value::from("engine_run")));
         assert_eq!(e.model_count().await, 1);
+
+        // Dropping the plugin's models empties the registry.
+        let (resp, err) = dispatch(
+            &e,
+            &req_env(
+                vision_rpc::UNREGISTER_OWNER,
+                vision_rpc::unregister_owner_args("com.example.p"),
+            ),
+        )
+        .await;
+        assert!(err.is_none());
+        assert_eq!(get(&as_map(&resp), "removed"), Some(Value::from(1u64)));
+        assert_eq!(e.model_count().await, 0);
     }
 
     #[tokio::test]
@@ -567,7 +619,7 @@ mod tests {
         e.register_model(meta).await.unwrap();
         let desc = published_frame(&e).await;
 
-        let args = vision_rpc::infer_args("m", &desc).unwrap();
+        let args = vision_rpc::with_owner(&vision_rpc::infer_args("m", &desc).unwrap(), "p");
         let (resp, err) = dispatch(&e, &req_env(methods::INFER, args)).await;
         assert!(err.is_none(), "infer errored: {err:?}");
         let batch = vision_rpc::decode_infer_reply(&resp).unwrap();
@@ -586,7 +638,7 @@ mod tests {
             &e,
             &req_env(
                 methods::INFER,
-                vision_rpc::infer_args("nope", &desc).unwrap(),
+                vision_rpc::with_owner(&vision_rpc::infer_args("nope", &desc).unwrap(), "p"),
             ),
         )
         .await;
@@ -600,7 +652,7 @@ mod tests {
             &e,
             &req_env(
                 methods::INFER,
-                vision_rpc::infer_args("nope", &stale).unwrap(),
+                vision_rpc::with_owner(&vision_rpc::infer_args("nope", &stale).unwrap(), "p"),
             ),
         )
         .await;
@@ -732,6 +784,9 @@ mod tests {
     #[tokio::test]
     async fn designate_track_dispatch_locks_a_camera() {
         let e = engine();
+        e.publish_frame("cam-0", 1, 0, 2, 2, FrameFormat::Rgb24, &[0u8; 12])
+            .await
+            .unwrap();
         // Mixed numeric encodings for the bbox fields exercise the coercion path.
         let args = Value::Map(vec![
             (Value::from("camera_id"), Value::from("cam-0")),
@@ -755,6 +810,36 @@ mod tests {
             matches!(get(&map, "track_id"), Some(Value::Integer(_))),
             "a track id was assigned"
         );
+    }
+
+    #[tokio::test]
+    async fn designate_track_on_a_camera_without_a_ring_is_refused() {
+        let e = engine();
+        let args = vision_rpc::designate_track_args(
+            "ghost-cam",
+            &Detection {
+                bbox: Some(BoundingBox {
+                    x: 1.0,
+                    y: 1.0,
+                    width: 4.0,
+                    height: 4.0,
+                }),
+                class_label: "person".into(),
+                confidence: 0.9,
+                track_id: None,
+                assoc_confidence: None,
+                lock_state: None,
+                attributes: None,
+                mask: None,
+                keypoints: None,
+                depth: None,
+                world_pos: None,
+            },
+        )
+        .unwrap();
+        let (_resp, err) = dispatch(&e, &req_env(methods::DESIGNATE_TRACK, args)).await;
+        assert!(err.unwrap().contains("no camera"));
+        assert_eq!(e.current_track("ghost-cam").await, None);
     }
 
     #[tokio::test]

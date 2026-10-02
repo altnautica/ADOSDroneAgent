@@ -91,6 +91,11 @@ pub struct PluginInstall {
     pub last_update_check_at: Option<i64>,
     #[serde(default)]
     pub last_update_attempt: Option<serde_json::Value>,
+    /// An auto-update stopped this plugin and could not start it again. The
+    /// update loop keeps retrying the enable until it succeeds or the operator
+    /// enables, disables or removes the plugin.
+    #[serde(default)]
+    pub reenable_pending: bool,
     /// The plugin's resolved model-delivery status, one entry per declared model
     /// (`{state, model_id, runtime, path, reason}`). Written by the Python
     /// resolver on install/configure; the Rust host reads it to serve
@@ -360,6 +365,7 @@ mod tests {
             pinned_version: None,
             last_update_check_at: None,
             last_update_attempt: None,
+            reenable_pending: false,
             model_status: None,
             service_status: None,
         }

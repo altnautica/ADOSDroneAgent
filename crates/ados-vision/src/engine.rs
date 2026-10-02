@@ -21,6 +21,7 @@ use ados_protocol::framebus::{
     Detection, DetectionBatch, FrameDescriptor, FrameFormat, ModelExecution, ModelMetadata,
     VISION_DETECTION_VERSION,
 };
+use ados_protocol::vision_rpc::owned_model_id;
 use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
@@ -32,12 +33,34 @@ use crate::tracker::{Appearance, Candidate, SingleObjectTracker, TrackerConfig};
 /// and skip rather than back up the publisher (latest-wins, like the rings).
 const BROADCAST_DEPTH: usize = 64;
 
-/// A registered model: its metadata plus, for engine-run models, the loaded
+/// The most models one plugin may hold registered at once. Each engine-run
+/// registration can load a backend session, so an uncapped plugin could grow
+/// the registry and the accelerator's memory without bound.
+pub const MAX_MODELS_PER_OWNER: usize = 8;
+
+/// A registered model: its metadata, the plugin that registered it (`None` for
+/// the engine's own configured models) and, for engine-run models, the loaded
 /// backend model that runs it. Plugin-side models have no loaded model (the
-/// plugin runs them itself).
+/// plugin runs them itself). The loaded model is shared so an inference can
+/// run on it after the registry lock is released.
 struct RegisteredModel {
     meta: ModelMetadata,
-    loaded: Option<Box<dyn LoadedModel>>,
+    owner: Option<String>,
+    loaded: Option<Arc<dyn LoadedModel>>,
+}
+
+/// Run a blocking model call (a sidecar round trip, an accelerator session)
+/// without stalling the async runtime. On a multi-thread runtime the worker
+/// hands its queued tasks to the other workers first; on a current-thread
+/// runtime (tests) the call runs in place. The borrowed frame is used as is,
+/// with no copy.
+fn run_blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(f)
+        }
+        _ => f(),
+    }
 }
 
 /// One camera's published surface: the ring writer it writes frames into.
@@ -364,15 +387,47 @@ impl VisionEngine {
             })
     }
 
-    /// Register a model. Engine-run models are loaded on the backend now (a load
-    /// failure falls back to recording the model without a loaded handle, so a
-    /// missing model file or sidecar never rejects the registration). Returns
-    /// the resolved execution and whether a backend model was loaded.
+    /// Whether `camera_id` has a frame ring, i.e. the engine captures it.
+    pub async fn has_ring(&self, camera_id: &str) -> bool {
+        self.cameras.lock().await.contains_key(camera_id)
+    }
+
+    /// Register one of the engine's own configured models. Engine-run models are
+    /// loaded on the backend now (a load failure falls back to recording the
+    /// model without a loaded handle, so a missing model file or sidecar never
+    /// rejects the registration). Returns the resolved execution and whether a
+    /// backend model was loaded.
     pub async fn register_model(&self, meta: ModelMetadata) -> Result<(ModelExecution, bool)> {
+        let (_, execution, had_backend) = self.insert_model(None, meta).await?;
+        Ok((execution, had_backend))
+    }
+
+    /// Register a plugin's model under the plugin's namespace
+    /// ([`owned_model_id`]). Refused when the namespaced id is held by someone
+    /// else, or when the plugin already holds [`MAX_MODELS_PER_OWNER`] other
+    /// models. Returns the registry id, the execution and whether a backend
+    /// model was loaded.
+    pub async fn register_owned_model(
+        &self,
+        owner: &str,
+        mut meta: ModelMetadata,
+    ) -> Result<(String, ModelExecution, bool)> {
+        if owner.is_empty() || meta.id.is_empty() {
+            return Err(anyhow!("a plugin model needs an owner and an id"));
+        }
+        meta.id = owned_model_id(owner, &meta.id);
+        self.insert_model(Some(owner.to_string()), meta).await
+    }
+
+    async fn insert_model(
+        &self,
+        owner: Option<String>,
+        meta: ModelMetadata,
+    ) -> Result<(String, ModelExecution, bool)> {
         let execution = meta.execution;
-        let loaded = if execution == ModelExecution::EngineRun {
-            match self.backend.load(&meta) {
-                Ok(m) => Some(m),
+        let loaded: Option<Arc<dyn LoadedModel>> = if execution == ModelExecution::EngineRun {
+            match run_blocking(|| self.backend.load(&meta)) {
+                Ok(m) => Some(Arc::from(m)),
                 Err(e) => {
                     tracing::warn!(model = %meta.id, error = %e, "model_load_failed; recorded without backend");
                     None
@@ -382,9 +437,58 @@ impl VisionEngine {
             None
         };
         let had_backend = loaded.is_some();
+        let id = meta.id.clone();
         let mut models = self.models.lock().await;
-        models.insert(meta.id.clone(), RegisteredModel { meta, loaded });
-        Ok((execution, had_backend))
+        if let Some(owner) = owner.as_deref() {
+            match models.get(&id) {
+                Some(existing) if existing.owner.as_deref() != Some(owner) => {
+                    return Err(anyhow!("model id {id} is registered by someone else"));
+                }
+                Some(_) => {}
+                None => {
+                    let held = models
+                        .values()
+                        .filter(|m| m.owner.as_deref() == Some(owner))
+                        .count();
+                    if held >= MAX_MODELS_PER_OWNER {
+                        return Err(anyhow!(
+                            "plugin {owner} already holds {MAX_MODELS_PER_OWNER} registered models"
+                        ));
+                    }
+                }
+            }
+        }
+        models.insert(
+            id.clone(),
+            RegisteredModel {
+                meta,
+                owner,
+                loaded,
+            },
+        );
+        Ok((id, execution, had_backend))
+    }
+
+    /// Drop every model `owner` registered, and their timings. Called when the
+    /// plugin host stops serving the plugin. Returns how many were dropped.
+    pub async fn unregister_owner(&self, owner: &str) -> usize {
+        let removed: Vec<String> = {
+            let mut models = self.models.lock().await;
+            let ids: Vec<String> = models
+                .iter()
+                .filter(|(_, m)| m.owner.as_deref() == Some(owner))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ids {
+                models.remove(id);
+            }
+            ids
+        };
+        let mut timings = self.timings.lock().await;
+        for id in &removed {
+            timings.remove(id);
+        }
+        removed.len()
     }
 
     /// Number of registered models.
@@ -474,36 +578,84 @@ impl VisionEngine {
         height: u32,
         format: FrameFormat,
     ) -> Result<Vec<Detection>> {
+        self.run_model(None, model_id, frame, width, height, format)
+            .await
+    }
+
+    /// [`Self::infer`] on behalf of plugin `owner`. `model_id` names the
+    /// plugin's own model ([`owned_model_id`]) when it has one by that id, else
+    /// one of the engine's configured models. Another plugin's model is refused.
+    pub async fn infer_for(
+        &self,
+        owner: &str,
+        model_id: &str,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+    ) -> Result<Vec<Detection>> {
+        self.run_model(Some(owner), model_id, frame, width, height, format)
+            .await
+    }
+
+    async fn run_model(
+        &self,
+        caller: Option<&str>,
+        model_id: &str,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+    ) -> Result<Vec<Detection>> {
         // Acquire the accelerator lease for the duration of the inference so two
-        // models never contend for the shared NPU. The inference call itself is
-        // synchronous, so it runs inside the permit's scope.
+        // models never contend for the shared NPU. The permit is held across the
+        // blocking call below.
         let _permit = self
             .accel_lease
             .acquire()
             .await
             .map_err(|_| anyhow!("accelerator lease closed"))?;
 
-        let models = self.models.lock().await;
-        let reg = models
-            .get(model_id)
-            .ok_or_else(|| anyhow!("unknown model {model_id}"))?;
-        if reg.meta.execution == ModelExecution::PluginSide {
-            return Err(anyhow!(
-                "model {model_id} is plugin-side; the plugin runs it"
-            ));
-        }
-        let loaded = reg
-            .loaded
-            .as_ref()
-            .ok_or_else(|| anyhow!("model {model_id} has no loaded backend"))?;
+        // Take a handle on the loaded model and release the registry lock before
+        // the (possibly slow) backend call, so model listing and registration
+        // never wait behind an inference.
+        let (key, loaded) = {
+            let models = self.models.lock().await;
+            let key = match caller {
+                Some(owner) => {
+                    let owned = owned_model_id(owner, model_id);
+                    if models.contains_key(&owned) {
+                        owned
+                    } else {
+                        model_id.to_string()
+                    }
+                }
+                None => model_id.to_string(),
+            };
+            let reg = models
+                .get(&key)
+                .ok_or_else(|| anyhow!("unknown model {model_id}"))?;
+            if let (Some(owner), Some(holder)) = (caller, reg.owner.as_deref()) {
+                if holder != owner {
+                    return Err(anyhow!("model {model_id} belongs to another plugin"));
+                }
+            }
+            if reg.meta.execution == ModelExecution::PluginSide {
+                return Err(anyhow!(
+                    "model {model_id} is plugin-side; the plugin runs it"
+                ));
+            }
+            let loaded = reg
+                .loaded
+                .clone()
+                .ok_or_else(|| anyhow!("model {model_id} has no loaded backend"))?;
+            (key, loaded)
+        };
         let t0 = std::time::Instant::now();
-        let result = loaded.infer(frame, width, height, format);
+        let result = run_blocking(|| loaded.infer(frame, width, height, format));
         let latency_ms = t0.elapsed().as_secs_f32() * 1000.0;
-        // Release the models lock (the borrow of `loaded`/`reg` ends with `result`)
-        // before recording the timing, keeping the lock order models → timings.
-        drop(models);
         if result.is_ok() {
-            self.record_timing(model_id, latency_ms, now_ms()).await;
+            self.record_timing(&key, latency_ms, now_ms()).await;
         }
         result
     }
@@ -656,33 +808,36 @@ impl VisionEngine {
             })
             .collect();
 
-        // Embed under the accelerator lease + the model lock. If the lease can't
-        // be acquired (a closing engine), degrade to motion-only rather than
-        // running embeds lease-less against a concurrent detector inference.
+        // Embed under the accelerator lease, with the registry lock released
+        // before the blocking calls. If the lease can't be acquired (a closing
+        // engine), degrade to motion-only rather than running embeds lease-less
+        // against a concurrent detector inference.
         let _permit = match self.accel_lease.acquire().await {
             Ok(p) => p,
             Err(_) => return none(),
         };
-        let models = self.models.lock().await;
-        let Some(reg) = models.get(&model_id) else {
-            return none();
+        let loaded = {
+            let models = self.models.lock().await;
+            match models.get(&model_id).and_then(|reg| reg.loaded.clone()) {
+                Some(loaded) => loaded,
+                None => return none(),
+            }
         };
-        let Some(loaded) = reg.loaded.as_ref() else {
-            return none();
-        };
-        crops
-            .into_iter()
-            .map(|crop| {
-                let crop = crop?;
-                match loaded.embed(&crop, iw, ih, FrameFormat::Rgb24) {
-                    Ok(Some(mut emb)) if !emb.is_empty() => {
-                        crate::reid::l2_normalize(&mut emb);
-                        Some(Appearance::from_features(emb))
+        run_blocking(|| {
+            crops
+                .into_iter()
+                .map(|crop| {
+                    let crop = crop?;
+                    match loaded.embed(&crop, iw, ih, FrameFormat::Rgb24) {
+                        Ok(Some(mut emb)) if !emb.is_empty() => {
+                            crate::reid::l2_normalize(&mut emb);
+                            Some(Appearance::from_features(emb))
+                        }
+                        _ => None,
                     }
-                    _ => None,
-                }
-            })
-            .collect()
+                })
+                .collect()
+        })
     }
 
     /// The track id the camera's lock currently holds (confirmed or coasting), if
@@ -891,6 +1046,134 @@ mod tests {
 
     fn capable_engine() -> Arc<VisionEngine> {
         VisionEngine::new(Box::new(CapableBackend), 4)
+    }
+
+    #[tokio::test]
+    async fn a_plugin_model_lives_in_its_own_namespace() {
+        let e = engine();
+        e.register_model(meta("det", ModelExecution::EngineRun))
+            .await
+            .unwrap();
+        // A plugin registering the engine's id gets its own namespaced entry;
+        // the configured detector stays the engine's.
+        let (id, _, _) = e
+            .register_owned_model("com.example.a", meta("det", ModelExecution::EngineRun))
+            .await
+            .unwrap();
+        assert_eq!(id, "com.example.a/det");
+        let ids: Vec<String> = e.list_models().await.into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["com.example.a/det", "det"]);
+
+        // Another plugin naming the first plugin's full id is refused, and so is
+        // its inference on that model.
+        let mut theirs = meta("x", ModelExecution::EngineRun);
+        theirs.id = "com.example.a/det".into();
+        let (id_b, _, _) = e
+            .register_owned_model("com.example.b", theirs)
+            .await
+            .unwrap();
+        assert_eq!(id_b, "com.example.b/com.example.a/det");
+        let frame = [0u8; 192];
+        assert!(e
+            .infer_for(
+                "com.example.c",
+                "com.example.a/det",
+                &frame,
+                8,
+                8,
+                FrameFormat::Rgb24
+            )
+            .await
+            .is_err());
+        // The owner reaches its model by its own id; any plugin may run the
+        // engine's configured models.
+        e.infer_for("com.example.a", "det", &frame, 8, 8, FrameFormat::Rgb24)
+            .await
+            .unwrap();
+        e.infer_for("com.example.c", "det", &frame, 8, 8, FrameFormat::Rgb24)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_plugin_holds_a_bounded_number_of_models_until_it_is_released() {
+        let e = engine();
+        for i in 0..MAX_MODELS_PER_OWNER {
+            e.register_owned_model("p", meta(&format!("m{i}"), ModelExecution::PluginSide))
+                .await
+                .unwrap();
+        }
+        assert!(e
+            .register_owned_model("p", meta("one-more", ModelExecution::PluginSide))
+            .await
+            .is_err());
+        // Re-registering a held id is a replace, not a new slot.
+        e.register_owned_model("p", meta("m0", ModelExecution::PluginSide))
+            .await
+            .unwrap();
+        e.register_model(meta("det", ModelExecution::PluginSide))
+            .await
+            .unwrap();
+
+        assert_eq!(e.unregister_owner("p").await, MAX_MODELS_PER_OWNER);
+        assert_eq!(e.model_count().await, 1, "the engine's own model stays");
+        e.register_owned_model("p", meta("one-more", ModelExecution::PluginSide))
+            .await
+            .unwrap();
+    }
+
+    /// A model whose inference takes a while, standing in for a slow sidecar.
+    struct SlowModel;
+
+    impl LoadedModel for SlowModel {
+        fn infer(
+            &self,
+            _frame: &[u8],
+            _w: u32,
+            _h: u32,
+            _f: FrameFormat,
+        ) -> Result<Vec<Detection>> {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            Ok(Vec::new())
+        }
+    }
+
+    struct SlowBackend;
+
+    impl VisionBackend for SlowBackend {
+        fn load(&self, _meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>> {
+            Ok(Box::new(SlowModel))
+        }
+        fn name(&self) -> &str {
+            "slow"
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_inference_does_not_hold_up_the_model_registry() {
+        let e = VisionEngine::new(Box::new(SlowBackend), 4);
+        e.register_model(meta("slow", ModelExecution::EngineRun))
+            .await
+            .unwrap();
+        let running = {
+            let e = e.clone();
+            tokio::spawn(
+                async move { e.infer("slow", &[0u8; 192], 8, 8, FrameFormat::Rgb24).await },
+            )
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let listed = tokio::time::timeout(std::time::Duration::from_millis(250), e.list_models())
+            .await
+            .expect("listing waited behind the inference");
+        assert_eq!(listed.len(), 1);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            e.register_model(meta("other", ModelExecution::PluginSide)),
+        )
+        .await
+        .expect("registration waited behind the inference")
+        .unwrap();
+        running.await.unwrap().unwrap();
     }
 
     #[tokio::test]

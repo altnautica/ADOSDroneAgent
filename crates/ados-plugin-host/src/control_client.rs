@@ -35,7 +35,10 @@ use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
 use rmpv::Value;
 
-use crate::control::{control_socket_path, METHOD_PLUGIN_RECONCILE, METHOD_TOKEN_ROTATE};
+use crate::control::{
+    control_socket_path, METHOD_PLUGIN_ACCOUNT, METHOD_PLUGIN_PURGE_DATA, METHOD_PLUGIN_RECONCILE,
+    METHOD_TOKEN_ROTATE,
+};
 
 /// Timeout for one control round trip. Generous against a loaded SBC, short
 /// enough that a wedged daemon cannot stall an operator's CLI call.
@@ -70,6 +73,36 @@ pub fn rotate_token(control_dir: &Path, plugin_id: &str) -> Result<bool, String>
         _ => false,
     };
     Ok(delivered)
+}
+
+/// Ask the daemon to delete a removed plugin's data dir. The daemon runs with
+/// the privileges a plugin-owned tree needs; a caller without DAC override
+/// (the cloud relay) cannot enter a dir the plugin's own user owns. Refused
+/// while the plugin is still installed.
+pub fn purge_data(control_dir: &Path, plugin_id: &str) -> Result<(), String> {
+    request(
+        control_dir,
+        METHOD_PLUGIN_PURGE_DATA,
+        Value::Map(vec![(Value::from("plugin_id"), Value::from(plugin_id))]),
+    )
+    .map(|_| ())
+}
+
+/// Ask the daemon to create (`ensure`) or remove a plugin's system user. Only
+/// the plugin host may write the account database.
+pub fn account(control_dir: &Path, plugin_id: &str, ensure: bool) -> Result<(), String> {
+    request(
+        control_dir,
+        METHOD_PLUGIN_ACCOUNT,
+        Value::Map(vec![
+            (Value::from("plugin_id"), Value::from(plugin_id)),
+            (
+                Value::from("op"),
+                Value::from(if ensure { "ensure" } else { "remove" }),
+            ),
+        ]),
+    )
+    .map(|_| ())
 }
 
 /// One request/response round trip. Returns the response args on success.

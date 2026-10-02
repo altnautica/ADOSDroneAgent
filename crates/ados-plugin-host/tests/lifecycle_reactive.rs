@@ -73,6 +73,7 @@ fn write_state(state_path: &Path, status: PluginStatus, granted: &[&str]) {
         pinned_version: None,
         last_update_check_at: None,
         last_update_attempt: None,
+        reenable_pending: false,
         model_status: None,
         service_status: None,
     };
@@ -80,7 +81,7 @@ fn write_state(state_path: &Path, status: PluginStatus, granted: &[&str]) {
 }
 
 fn token_from_env(socket_dir: &Path) -> String {
-    let path = ados_plugin_host::token_env_path(PLUGIN_ID, Some(socket_dir));
+    let path = ados_plugin_host::token_credential_path(PLUGIN_ID, Some(socket_dir));
     let body = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("token env at {}: {e}", path.display()));
     body.lines()
@@ -230,7 +231,7 @@ async fn disabling_a_plugin_tears_its_socket_and_token_down() {
     write_state(&h.state_path, PluginStatus::Running, &[]);
     assert_eq!(h.reconciler.reconcile().started, 1);
     let sock = ados_plugin_host::plugin_socket_path(&h.socket_dir, PLUGIN_ID);
-    let env_path = ados_plugin_host::token_env_path(PLUGIN_ID, Some(&h.socket_dir));
+    let env_path = ados_plugin_host::token_credential_path(PLUGIN_ID, Some(&h.socket_dir));
     assert!(sock.exists() && env_path.exists());
 
     write_state(&h.state_path, PluginStatus::Disabled, &[]);
@@ -414,7 +415,7 @@ async fn an_unreadable_state_file_keeps_every_plugin_served() {
     write_state(&h.state_path, PluginStatus::Running, &[]);
     assert_eq!(h.reconciler.reconcile().started, 1);
     let sock = ados_plugin_host::plugin_socket_path(&h.socket_dir, PLUGIN_ID);
-    let env_path = ados_plugin_host::token_env_path(PLUGIN_ID, Some(&h.socket_dir));
+    let env_path = ados_plugin_host::token_credential_path(PLUGIN_ID, Some(&h.socket_dir));
 
     std::fs::write(&h.state_path, b"{ not json").unwrap();
     let report = h.reconciler.reconcile();

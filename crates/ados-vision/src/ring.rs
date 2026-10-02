@@ -38,6 +38,38 @@ pub const RING_NAME_PREFIX: &str = "ados-vision-";
 /// memory; the depth is reduced to fit it.
 pub const DEFAULT_RING_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
+/// The mode every ring file is created and kept at: owner read-write, the
+/// frame-readers group read-only, nobody else.
+pub const RING_FILE_MODE: u32 = 0o640;
+
+/// Hand `file` to the frame-readers group. A host without the group (a dev
+/// box) or a process that may not chgrp keeps the file's group: the 0640 mode
+/// still keeps it from everyone but the owner and that group.
+#[cfg(target_os = "linux")]
+fn restrict_to_readers_group(file: &std::fs::File) -> std::io::Result<()> {
+    let Some(group) =
+        nix::unistd::Group::from_name(ados_protocol::vision_rpc::VISION_READERS_GROUP)
+            .ok()
+            .flatten()
+    else {
+        tracing::warn!(
+            group = ados_protocol::vision_rpc::VISION_READERS_GROUP,
+            "frame-readers group missing; rings are readable by their owner only"
+        );
+        return Ok(());
+    };
+    match std::os::unix::fs::fchown(file, None, Some(group.gid.as_raw())) {
+        Ok(()) => Ok(()),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                && !nix::unistd::geteuid().is_root() =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// The shallowest ring the engine will create: one slot being written while a
 /// consumer reads the other.
 pub const MIN_SLOT_COUNT: u32 = 2;
@@ -188,7 +220,7 @@ impl RingWriter {
 
         #[cfg(target_os = "linux")]
         {
-            use std::os::unix::fs::OpenOptionsExt;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
             let dir = std::env::var("ADOS_SHM_DIR").unwrap_or_else(|_| DEFAULT_SHM_DIR.to_string());
             let path = PathBuf::from(dir).join(shm_name);
             let file = std::fs::OpenOptions::new()
@@ -196,8 +228,15 @@ impl RingWriter {
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .mode(0o644)
+                .mode(RING_FILE_MODE)
                 .open(&path)?;
+            // Readable only by the owner and the frame-readers group, which a
+            // plugin joins only while it holds `vision.frame.read`; the names
+            // are predictable, so a world-readable ring would hand every
+            // plugin the camera. Re-applied on every open: a ring left by an
+            // older writer keeps its old mode otherwise.
+            file.set_permissions(std::fs::Permissions::from_mode(RING_FILE_MODE))?;
+            restrict_to_readers_group(&file)?;
             file.set_len(total as u64)?;
             // SAFETY: the file was just sized to `total`; the mapping covers
             // exactly the file and this writer is the only one mutating it.

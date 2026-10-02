@@ -171,11 +171,14 @@ fn now_ms() -> i64 {
 
 #[tokio::test]
 async fn an_advertised_offload_link_is_what_the_tier_reader_sees() {
-    let h = harness(&["vision.detection.publish"]).await;
+    let h = harness(&["vision.offload.advertise"]).await;
+    // A node that answers, so the host stamps the link paired.
+    let node = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target = node.local_addr().unwrap().to_string();
     let advert = OffloadAdvertisement {
         paired: true,
         bearer_acceptable: true,
-        target: Some("10.0.0.9:8092".to_string()),
+        target: Some(target.clone()),
         device_id: None,
         model_id: Some("yolo-n".to_string()),
     };
@@ -190,7 +193,7 @@ async fn an_advertised_offload_link_is_what_the_tier_reader_sees() {
     let link = ados_protocol::offload_link::read_offload_link_from(&h.offload_link, now_ms())
         .expect("a fresh link is live");
     assert!(link.paired && link.bearer_acceptable);
-    assert_eq!(link.target.as_deref(), Some("10.0.0.9:8092"));
+    assert_eq!(link.target.as_deref(), Some(target.as_str()));
     assert_eq!(link.device_id, None);
     assert_eq!(link.model_id.as_deref(), Some("yolo-n"));
 

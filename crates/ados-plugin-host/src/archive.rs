@@ -45,6 +45,13 @@ pub const ENTRY_MAX_BYTES: u64 = 25 * 1024 * 1024;
 /// entries can each stay under the per-entry cap while their sum blows past
 /// memory, so the running total is capped independently of the per-entry bound.
 pub const TOTAL_DECOMPRESSED_MAX: u64 = 100 * 1024 * 1024;
+/// Most an entry may expand over its compressed size once it inflates past
+/// [`ENTRY_RATIO_FLOOR_BYTES`]: a higher ratio is a decompression bomb, not a
+/// plugin file. Matches the Python reader.
+pub const ENTRY_MAX_COMPRESSION_RATIO: u64 = 200;
+/// Entries at or under this inflated size skip the ratio check: a small
+/// all-zero file legitimately compresses to almost nothing.
+pub const ENTRY_RATIO_FLOOR_BYTES: u64 = 1024 * 1024;
 pub const SIGNATURE_FILENAME: &str = "SIGNATURE";
 pub const MANIFEST_FILENAME: &str = "manifest.yaml";
 
@@ -76,7 +83,9 @@ pub struct ArchiveContents {
 /// matter because `./manifest.yaml` and `manifest.yaml` are different zip names
 /// that unpack to the same file: accepting both lets the manifest the install
 /// gates validated differ from the one written to disk. A directory entry's
-/// single trailing `/` is not a segment.
+/// single trailing `/` is not a segment. The top-level attestation file name is
+/// reserved: install writes it after unpack, so an archive entry under that
+/// name would be attested and then overwritten.
 fn safe_member_path(name: &str) -> Result<&str, ArchiveError> {
     if name.is_empty() || name.starts_with('/') || name.contains('\\') {
         return Err(ArchiveError(format!("unsafe archive entry path: {name:?}")));
@@ -86,6 +95,11 @@ fn safe_member_path(name: &str) -> Result<&str, ArchiveError> {
         if part.is_empty() || part == "." || part.starts_with("..") {
             return Err(ArchiveError(format!("unsafe archive entry path: {name:?}")));
         }
+    }
+    if body == crate::attestation::ATTESTATION_FILENAME {
+        return Err(ArchiveError(format!(
+            "archive entry {name:?} uses a name reserved for the install attestation"
+        )));
     }
     Ok(name)
 }
@@ -121,6 +135,22 @@ fn read_entry_bounded<R: Read>(reader: &mut R, name: &str) -> Result<Vec<u8>, Ar
         )));
     }
     Ok(buf)
+}
+
+/// Refuse an entry that inflated past [`ENTRY_RATIO_FLOOR_BYTES`] at more than
+/// [`ENTRY_MAX_COMPRESSION_RATIO`] times its compressed size.
+fn check_compression_ratio(name: &str, inflated: u64, compressed: u64) -> Result<(), ArchiveError> {
+    let compressed = compressed.max(1);
+    if inflated > ENTRY_RATIO_FLOOR_BYTES
+        && inflated > compressed.saturating_mul(ENTRY_MAX_COMPRESSION_RATIO)
+    {
+        return Err(ArchiveError(format!(
+            "archive entry {name} expands {}x from {compressed} compressed bytes; per-entry \
+             ratio cap is {ENTRY_MAX_COMPRESSION_RATIO}x",
+            inflated / compressed
+        )));
+    }
+    Ok(())
 }
 
 /// Compute the deterministic payload hash over manifest + assets.
@@ -234,13 +264,14 @@ fn read_entries(raw: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
         // payload bytes are read into memory. The declared `size()` is only used
         // as an early reject; the real inflation is bounded separately because
         // the declared size is attacker-controlled.
-        let (name, file_size, external_attr, is_dir) = {
+        let (name, file_size, compressed_size, external_attr, is_dir) = {
             let file = zf
                 .by_index(i)
                 .map_err(|e| ArchiveError(format!("corrupt zip entry {i}: {e}")))?;
             (
                 file.name().to_string(),
                 file.size(),
+                file.compressed_size(),
                 file.unix_mode().map(|m| m << 16).unwrap_or(0),
                 file.is_dir(),
             )
@@ -268,6 +299,7 @@ fn read_entries(raw: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
                 .map_err(|e| ArchiveError(format!("corrupt zip entry {i}: {e}")))?;
             read_entry_bounded(&mut file, &safe)?
         };
+        check_compression_ratio(&safe, buf.len() as u64, compressed_size)?;
         total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
         if total_decompressed > TOTAL_DECOMPRESSED_MAX {
             return Err(ArchiveError(format!(
@@ -418,10 +450,62 @@ pub fn unpacked_paths(root: &Path) -> BTreeSet<String> {
     out
 }
 
+/// The files a manifest runs, and so the only ones install marks executable:
+/// a rust agent's path entrypoint, every `binaries` path, the first word of a
+/// service command that is a path, and any file named by a `subprocess_spawn`
+/// basename. Derived from the signed manifest because a zip entry's mode bits
+/// sit outside the signed payload hash, so re-zipping a signed archive must not
+/// change what can run.
+#[derive(Debug, Default)]
+pub struct Executables {
+    paths: BTreeSet<String>,
+    basenames: BTreeSet<String>,
+}
+
+impl Executables {
+    pub fn of(manifest: &PluginManifest) -> Self {
+        let mut out = Executables::default();
+        let Some(agent) = &manifest.agent else {
+            return out;
+        };
+        let is_path =
+            |value: &str| !value.is_empty() && !value.contains(':') && !value.starts_with('/');
+        if agent.runtime == crate::manifest::AgentRuntime::Rust && is_path(&agent.entrypoint) {
+            out.paths.insert(agent.entrypoint.clone());
+        }
+        for by_arch in agent.binaries.values() {
+            out.paths.extend(by_arch.values().cloned());
+        }
+        for service in crate::services::declared_services(manifest).unwrap_or_default() {
+            if let Some(first) = service.command.split_whitespace().next() {
+                if is_path(first) {
+                    out.paths.insert(first.to_string());
+                }
+            }
+        }
+        out.basenames.extend(agent.subprocess_spawn.iter().cloned());
+        out
+    }
+
+    /// Whether the archive-relative `path` is one the manifest runs.
+    pub fn contains(&self, path: &str) -> bool {
+        self.paths.contains(path)
+            || path
+                .rsplit('/')
+                .next()
+                .is_some_and(|base| self.basenames.contains(base))
+    }
+}
+
 /// Unpack validated archive bytes to `dest`. The caller is responsible for
 /// having verified the signature first. The same traversal/symlink rejects run
 /// again so a caller that hands raw bytes straight to unpack is still safe.
-pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> {
+/// Only the paths in `executables` unpack runnable.
+pub fn unpack_to(
+    archive_bytes: &[u8],
+    dest: &Path,
+    executables: &Executables,
+) -> Result<(), ArchiveError> {
     std::fs::create_dir_all(dest)
         .map_err(|e| ArchiveError(format!("cannot create {}: {e}", dest.display())))?;
     let mut zf = zip::ZipArchive::new(Cursor::new(archive_bytes))
@@ -429,11 +513,16 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
     let mut total_decompressed: u64 = 0;
     let mut written: BTreeSet<String> = BTreeSet::new();
     for i in 0..zf.len() {
-        let (name, unix_mode, is_dir) = {
+        let (name, unix_mode, compressed_size, is_dir) = {
             let file = zf
                 .by_index(i)
                 .map_err(|e| ArchiveError(format!("corrupt zip entry {i}: {e}")))?;
-            (file.name().to_string(), file.unix_mode(), file.is_dir())
+            (
+                file.name().to_string(),
+                file.unix_mode(),
+                file.compressed_size(),
+                file.is_dir(),
+            )
         };
         let external_attr = unix_mode.map(|m| m << 16).unwrap_or(0);
         let safe = safe_member_path(&name)?.to_string();
@@ -455,13 +544,14 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
         }
         // Bound the inflated bytes the same way the in-memory parse does, so a
         // caller that hands raw bytes straight to unpack is still protected from
-        // a decompression bomb (the prior read_to_end had no cap at all).
+        // a decompression bomb.
         let buf = {
             let mut file = zf
                 .by_index(i)
                 .map_err(|e| ArchiveError(format!("corrupt zip entry {i}: {e}")))?;
             read_entry_bounded(&mut file, &safe)?
         };
+        check_compression_ratio(&safe, buf.len() as u64, compressed_size)?;
         total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
         if total_decompressed > TOTAL_DECOMPRESSED_MAX {
             return Err(ArchiveError(format!(
@@ -470,29 +560,25 @@ pub fn unpack_to(archive_bytes: &[u8], dest: &Path) -> Result<(), ArchiveError> 
         }
         std::fs::write(&target, &buf)
             .map_err(|e| ArchiveError(format!("write of {} failed: {e}", target.display())))?;
-        set_entry_mode(&target, unix_mode)?;
+        set_entry_mode(&target, executables.contains(&safe))?;
     }
     Ok(())
 }
 
-/// Set an unpacked file's mode: `0755` when the zip entry carried an exec bit
-/// (so an `agent/bin/<id>` Rust-plugin binary is runnable by the generated
-/// systemd `ExecStart`), `0644` otherwise. Never the entry's own bits: zip
-/// metadata is outside the signed payload hash (which covers content only), so
-/// a re-zipped signed archive could otherwise install a group- or
-/// world-writable binary that any local process could rewrite. Unix-only; a
-/// no-op elsewhere so the crate builds on a non-Unix dev host.
+/// Set an unpacked file's mode: `0755` for a file the manifest runs, `0644`
+/// otherwise. Never the entry's own bits, which are outside the signed payload
+/// hash. Unix-only; a no-op elsewhere so the crate builds on a non-Unix dev
+/// host.
 #[cfg(unix)]
-fn set_entry_mode(target: &Path, unix_mode: Option<u32>) -> Result<(), ArchiveError> {
+fn set_entry_mode(target: &Path, exec: bool) -> Result<(), ArchiveError> {
     use std::os::unix::fs::PermissionsExt;
-    let exec = unix_mode.is_some_and(|m| m & 0o111 != 0);
     let perms = std::fs::Permissions::from_mode(if exec { 0o755 } else { 0o644 });
     std::fs::set_permissions(target, perms)
         .map_err(|e| ArchiveError(format!("chmod of {} failed: {e}", target.display())))
 }
 
 #[cfg(not(unix))]
-fn set_entry_mode(_target: &Path, _unix_mode: Option<u32>) -> Result<(), ArchiveError> {
+fn set_entry_mode(_target: &Path, _exec: bool) -> Result<(), ArchiveError> {
     Ok(())
 }
 
@@ -643,7 +729,7 @@ mod tests {
             ],
             None,
         );
-        unpack_to(&zip, dir.path()).unwrap();
+        unpack_to(&zip, dir.path(), &Executables::default()).unwrap();
         let got = std::fs::read(dir.path().join("agent/py/thermal.py")).unwrap();
         assert_eq!(got, b"print('hi')");
     }
@@ -690,7 +776,7 @@ mod tests {
         );
         // unpack_to must enforce the same bound (it had no cap at all before).
         let dir = tempfile::tempdir().unwrap();
-        let err2 = unpack_to(&buf, dir.path()).unwrap_err();
+        let err2 = unpack_to(&buf, dir.path(), &Executables::default()).unwrap_err();
         assert!(
             err2.0.contains("per-entry cap"),
             "unpack must reject the bomb too, got: {}",
@@ -700,10 +786,70 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unpack_restores_exec_bit_for_executable_entries() {
+    fn only_files_the_manifest_runs_unpack_executable() {
         use std::os::unix::fs::PermissionsExt;
+        let manifest = PluginManifest::from_yaml_text(
+            "id: com.example.geo\nversion: 1.0.0\nrisk: critical\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: bin:geofence\n  runtime: rust\n  binaries:\n    geofence:\n      aarch64-linux: agent/bin/geofence\n  permissions:\n    - process.spawn\n  subprocess_spawn:\n    - helper\n",
+        )
+        .unwrap();
+        // The zip's own mode bits say the opposite of the manifest: the
+        // binary is plain and an asset carries every exec bit.
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let stored =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            w.start_file("manifest.yaml", stored.unix_permissions(0o777))
+                .unwrap();
+            w.write_all(b"id: x\n").unwrap();
+            w.start_file("agent/bin/geofence", stored.unix_permissions(0o644))
+                .unwrap();
+            w.write_all(b"#!/bin/sh\n").unwrap();
+            w.start_file("vendor/helper", stored.unix_permissions(0o600))
+                .unwrap();
+            w.write_all(b"#!/bin/sh\n").unwrap();
+            w.finish().unwrap();
+        }
         let dir = tempfile::tempdir().unwrap();
-        // Build a zip carrying an exec-mode binary entry plus a plain entry.
+        unpack_to(&buf, dir.path(), &Executables::of(&manifest)).unwrap();
+        let mode = |rel: &str| {
+            std::fs::metadata(dir.path().join(rel))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("agent/bin/geofence"), 0o755);
+        assert_eq!(mode("vendor/helper"), 0o755);
+        assert_eq!(mode("manifest.yaml"), 0o644);
+    }
+
+    #[test]
+    fn an_entry_under_the_attestation_name_is_refused() {
+        let zip = build_zip(
+            &[
+                ("manifest.yaml", manifest_yaml().as_bytes()),
+                (".attestation.json", b"{}"),
+            ],
+            None,
+        );
+        let err = parse_archive_bytes(zip).unwrap_err().to_string();
+        assert!(err.contains("reserved"), "{err}");
+        // The same name below the top level is an ordinary file.
+        let nested = build_zip(
+            &[
+                ("manifest.yaml", manifest_yaml().as_bytes()),
+                ("assets/.attestation.json", b"{}"),
+            ],
+            None,
+        );
+        assert!(parse_archive_bytes(nested).is_ok());
+    }
+
+    #[test]
+    fn an_entry_that_expands_past_the_ratio_cap_is_refused() {
+        // Two MiB of zeros deflate to a few KiB: past the floor and far past
+        // the ratio, while still under the per-entry byte cap.
         let mut buf = Vec::new();
         {
             let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
@@ -711,31 +857,17 @@ mod tests {
                 SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
             w.start_file("manifest.yaml", stored).unwrap();
             w.write_all(manifest_yaml().as_bytes()).unwrap();
-            w.start_file("agent/bin/geofence", stored.unix_permissions(0o777))
-                .unwrap();
-            w.write_all(b"#!/bin/sh\n").unwrap();
+            let deflated =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("assets/zeros.bin", deflated).unwrap();
+            w.write_all(&vec![0u8; 2 * 1024 * 1024]).unwrap();
             w.finish().unwrap();
         }
-        unpack_to(&buf, dir.path()).unwrap();
-
-        // The exec-marked binary comes back runnable...
-        let bin_mode = std::fs::metadata(dir.path().join("agent/bin/geofence"))
-            .unwrap()
-            .permissions()
-            .mode();
-        // A 0777 zip mode (outside the signed hash) still installs 0755: an
-        // executable, but never group- or world-writable.
-        assert_eq!(
-            bin_mode & 0o777,
-            0o755,
-            "agent/bin entry must unpack 0755 (mode {bin_mode:o})"
-        );
-        // ...and the plain manifest entry stays non-executable.
-        let mani_mode = std::fs::metadata(dir.path().join("manifest.yaml"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mani_mode & 0o111, 0, "plain entry must not gain exec bits");
+        let err = parse_archive_bytes(buf.clone()).unwrap_err().to_string();
+        assert!(err.contains("ratio cap"), "{err}");
+        let dir = tempfile::tempdir().unwrap();
+        let err = unpack_to(&buf, dir.path(), &Executables::default()).unwrap_err();
+        assert!(err.0.contains("ratio cap"), "{}", err.0);
     }
 
     #[test]
@@ -753,7 +885,10 @@ mod tests {
             let err = parse_archive_bytes(zip.clone()).unwrap_err().to_string();
             assert!(err.contains("unsafe archive entry path"), "{alias}: {err}");
             let dir = tempfile::tempdir().unwrap();
-            assert!(unpack_to(&zip, dir.path()).is_err(), "{alias}");
+            assert!(
+                unpack_to(&zip, dir.path(), &Executables::default()).is_err(),
+                "{alias}"
+            );
         }
     }
 

@@ -994,8 +994,10 @@ impl PluginIpcClient {
     /// last write, so a plugin keeps an active link counted by re-advertising at
     /// least every ~10 s, and advertises `paired: false` as soon as the link
     /// drops rather than waiting out the window. The optional strings must be
-    /// 1..=256 printable bytes. Gated on `vision.detection.publish`. The reply
-    /// is `{ok: true}`.
+    /// 1..=256 printable bytes. The host stamps `paired` only when `target`
+    /// accepts a TCP connection, and refuses the call while another plugin's
+    /// link is fresh. Gated on `vision.offload.advertise`. The reply is
+    /// `{ok: true, paired: <as stamped>}`.
     pub async fn offload_advertise(
         &self,
         advert: &OffloadAdvertisement,
@@ -1012,7 +1014,7 @@ impl PluginIpcClient {
             (Value::from("model_id"), opt(&advert.model_id)),
         ]);
         Ok(self
-            .send_request("offload.advertise", "vision.detection.publish", args)
+            .send_request("offload.advertise", "vision.offload.advertise", args)
             .await?
             .args)
     }

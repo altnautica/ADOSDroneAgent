@@ -25,8 +25,10 @@ use std::time::Duration;
 
 use crate::errors::SupervisorError;
 use crate::manifest::ResourceLimits;
+use crate::plugin_account::PLUGIN_GROUP;
 use crate::services::exec_word;
 use crate::systemd::{HARDENING_DIRECTIVES, PLUGIN_SLICE_CONTENT, PLUGIN_SLICE_NAME};
+use crate::token_secret::TOKEN_CREDENTIAL_NAME;
 
 /// How long one service-manager call may take before it is abandoned. Killing
 /// the client does not cancel a job the manager already queued; it only frees
@@ -46,13 +48,23 @@ pub struct UnitSpec {
     pub working_dir: Option<PathBuf>,
     /// Static environment.
     pub env: Vec<(String, String)>,
-    /// The owner-only `KEY=VALUE` file carrying the capability token, read at
-    /// every start. Optional at start: the runner waits for it.
-    pub env_file: Option<PathBuf>,
+    /// The plugin's own system user (see [`crate::plugin_account`]). Its primary
+    /// group is always [`PLUGIN_GROUP`].
+    pub user: String,
+    /// The owner-only `KEY=VALUE` file carrying the capability token, loaded
+    /// as a systemd credential at every start.
+    pub credential: Option<PathBuf>,
     /// Paths bound read-only into the sandbox (the plugin's socket dir).
     pub bind_read_only: Vec<PathBuf>,
     /// Paths bound read-write into the sandbox (the plugin's HTTP dir).
     pub bind_read_write: Vec<PathBuf>,
+    /// The only paths the unit may execute or map executable code from;
+    /// everything else is mounted `noexec`. Optional entries carry a `-`.
+    pub exec_paths: Vec<String>,
+    /// The plugin-host binary whose `guard-load` runs as a privileged
+    /// pre-start, so the loopback guard is loaded before the plugin runs and a
+    /// failed load fails the unit.
+    pub guard_loader: Option<PathBuf>,
     /// Where stdout and stderr append.
     pub log_path: PathBuf,
     /// `on-failure`, `always` or `no`.
@@ -68,7 +80,10 @@ pub struct UnitSpec {
 pub struct ProbeSpec {
     pub argv: Vec<String>,
     pub working_dir: PathBuf,
+    /// The plugin's own system user.
+    pub user: String,
     pub resources: ResourceLimits,
+    pub exec_paths: Vec<String>,
     pub sandbox_directives: Vec<String>,
 }
 
@@ -110,9 +125,11 @@ pub fn default_backend(unit_dir: &Path) -> Arc<dyn ServiceBackend> {
 /// Render a [`UnitSpec`] as a systemd service unit.
 ///
 /// Every generated plugin unit shares this text: the plugin slice, no start
-/// rate limit, the runner environment and token file, the binds, the resource
-/// envelope, the append logs, the `ados` user, the fixed hardening, then the
-/// capability sandbox (the part a grant or revoke changes).
+/// rate limit, the ordering on the plugin host (whose guard-load pre-start
+/// runs before the plugin's own process), the runner environment and token
+/// credential, the binds, the resource envelope, the append logs, the plugin's
+/// own user in the plugin group, the fixed hardening and exec allowlist, then
+/// the capability sandbox (the part a grant or revoke changes).
 pub fn render_systemd(spec: &UnitSpec) -> String {
     let mut service: Vec<String> = vec![
         format!("Slice={PLUGIN_SLICE_NAME}"),
@@ -124,14 +141,22 @@ pub fn render_systemd(spec: &UnitSpec) -> String {
     for (key, value) in &spec.env {
         service.push(format!("Environment={key}={value}"));
     }
-    if let Some(file) = &spec.env_file {
-        service.push(format!("EnvironmentFile=-{}", file.display()));
+    if let Some(file) = &spec.credential {
+        service.push(format!(
+            "LoadCredential={TOKEN_CREDENTIAL_NAME}:{}",
+            file.display()
+        ));
     }
     for path in &spec.bind_read_only {
         service.push(format!("BindReadOnlyPaths={}", path.display()));
     }
     for path in &spec.bind_read_write {
         service.push(format!("BindPaths={}", path.display()));
+    }
+    if let Some(loader) = &spec.guard_loader {
+        // `+` runs it with full privileges, outside the sandbox below; a
+        // non-zero exit fails the start, so the plugin never runs unguarded.
+        service.push(format!("ExecStartPre=+{} guard-load", loader.display()));
     }
     let exec: Vec<String> = spec.argv.iter().map(|w| exec_word(w)).collect();
     service.push(format!("ExecStart={}", exec.join(" ")));
@@ -145,17 +170,19 @@ pub fn render_systemd(spec: &UnitSpec) -> String {
         format!("TasksMax={}", res.max_pids),
         format!("StandardOutput=append:{log}"),
         format!("StandardError=append:{log}"),
-        "User=ados".to_string(),
-        "Group=ados".to_string(),
+        format!("User={}", spec.user),
+        format!("Group={PLUGIN_GROUP}"),
     ]);
     service.extend(HARDENING_DIRECTIVES.iter().map(|s| s.to_string()));
+    service.extend(exec_allowlist(&spec.exec_paths));
     service.push("# ---- capability sandbox (re-rendered on every grant/revoke) ----".to_string());
     service.extend(spec.sandbox_directives.iter().cloned());
     format!(
         "\
 [Unit]
 Description={description}
-After=ados-supervisor.service
+After=ados-supervisor.service {PLUGIN_HOST_UNIT}
+Requires={PLUGIN_HOST_UNIT}
 PartOf=ados-supervisor.service
 # No start rate limit: a plugin whose host socket is not up yet must keep
 # retrying rather than land in a failed state an operator has to clear by hand.
@@ -170,6 +197,24 @@ WantedBy=ados-supervisor.service
         description = spec.description,
         service = service.join("\n"),
     )
+}
+
+/// The unit every plugin unit requires and orders after: its `guard-load`
+/// pre-start and its socket server both live in the plugin host.
+pub const PLUGIN_HOST_UNIT: &str = "ados-plugin-host.service";
+
+/// `NoExecPaths=/` plus the allowlist, so the plugin can execute (and map
+/// executable code from) only its own tree, its runtime and the shared
+/// libraries, never `/bin/sh` or another binary it was not approved to run.
+/// Empty when the spec carries no allowlist.
+pub fn exec_allowlist(exec_paths: &[String]) -> Vec<String> {
+    if exec_paths.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        "NoExecPaths=/".to_string(),
+        format!("ExecPaths={}", exec_paths.join(" ")),
+    ]
 }
 
 /// Write `text` to `path` when it differs from what is there. Returns whether
@@ -348,9 +393,10 @@ impl ServiceBackend for SystemdBackend {
     }
 
     /// Run the probe as a transient unit with exactly what the plugin's
-    /// services get: the `ados` user, the hardening, the resource envelope,
-    /// the capability sandbox and the plugin slice. The argv is passed through
-    /// as separate words; no shell sees it.
+    /// services get: the plugin's own user in the plugin group, the hardening,
+    /// the exec allowlist, the resource envelope, the capability sandbox and
+    /// the plugin slice. The argv is passed through as separate words; no shell
+    /// sees it.
     fn probe(&self, probe: &ProbeSpec) -> Result<(), SupervisorError> {
         let argv = systemd_run_argv(probe);
         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -371,17 +417,12 @@ impl ServiceBackend for SystemdBackend {
 /// The `systemd-run` arguments that run one readiness probe as a transient,
 /// sandboxed unit.
 pub fn systemd_run_argv(probe: &ProbeSpec) -> Vec<String> {
-    let mut out: Vec<String> = [
-        "--quiet",
-        "--wait",
-        "--pipe",
-        "--collect",
-        "--uid=ados",
-        "--gid=ados",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
+    let mut out: Vec<String> = ["--quiet", "--wait", "--pipe", "--collect"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    out.push(format!("--uid={}", probe.user));
+    out.push(format!("--gid={PLUGIN_GROUP}"));
     out.push(format!("--slice={PLUGIN_SLICE_NAME}"));
     out.push(format!(
         "--working-directory={}",
@@ -389,6 +430,7 @@ pub fn systemd_run_argv(probe: &ProbeSpec) -> Vec<String> {
     ));
     let res = &probe.resources;
     let mut properties: Vec<String> = HARDENING_DIRECTIVES.iter().map(|s| s.to_string()).collect();
+    properties.extend(exec_allowlist(&probe.exec_paths));
     properties.push(format!("MemoryMax={}M", res.max_ram_mb));
     properties.push(format!("CPUQuota={}%", res.max_cpu_percent));
     properties.push(format!("TasksMax={}", res.max_pids));
@@ -404,12 +446,12 @@ pub fn systemd_run_argv(probe: &ProbeSpec) -> Vec<String> {
 // launchd
 // ---------------------------------------------------------------------------
 
-/// Reads the unit's token file into the environment, enters its working
-/// directory, then execs the program: launchd has no `EnvironmentFile=` or
+/// Reads the unit's token credential into the environment, enters its working
+/// directory, then execs the program: launchd has no credential store and no
 /// `WorkingDirectory=` of its own that tracks a file rewritten at every token
-/// rotation. Positional arguments: `$1` working dir (may be empty), `$2` env
-/// file (may be empty), then the argv. Values are taken verbatim after the
-/// first `=`; nothing is evaluated.
+/// rotation. Positional arguments: `$1` working dir (may be empty), `$2`
+/// credential file (may be empty), then the argv. Values are taken verbatim
+/// after the first `=`; nothing is evaluated.
 const LAUNCHD_ENTRY_SCRIPT: &str = "wd=\"$1\"; envf=\"$2\"; shift 2; \
 if [ -n \"$wd\" ]; then cd \"$wd\" || exit 78; fi; \
 if [ -n \"$envf\" ] && [ -r \"$envf\" ]; then \
@@ -492,8 +534,8 @@ impl LaunchdBackend {
 }
 
 /// Render a [`UnitSpec`] as a launchd property list. The program is
-/// `/bin/sh` running [`LAUNCHD_ENTRY_SCRIPT`], which reads the token file and
-/// enters the working directory before exec'ing the unit's argv.
+/// `/bin/sh` running [`LAUNCHD_ENTRY_SCRIPT`], which reads the token
+/// credential and enters the working directory before exec'ing the unit's argv.
 pub fn render_launchd(label: &str, spec: &UnitSpec) -> String {
     let mut args: Vec<String> = vec![
         "-c".to_string(),
@@ -503,7 +545,7 @@ pub fn render_launchd(label: &str, spec: &UnitSpec) -> String {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
-        spec.env_file
+        spec.credential
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
@@ -721,14 +763,50 @@ mod tests {
                 "ADOS_PLUGIN_SOCKET".to_string(),
                 "/run/ados/plugins/com.example.x/host.sock".to_string(),
             )],
-            env_file: Some(PathBuf::from("/run/ados/plugins/com.example.x.token.env")),
+            user: "ados-plg-0a1b2c3d".to_string(),
+            credential: Some(PathBuf::from("/run/ados/plugins/com.example.x.token")),
             bind_read_only: vec![PathBuf::from("/run/ados/plugins/com.example.x")],
             bind_read_write: Vec::new(),
+            exec_paths: vec![
+                "/var/ados/plugins/com.example.x".to_string(),
+                "-/usr/lib".to_string(),
+            ],
+            guard_loader: Some(PathBuf::from("/opt/ados/bin/ados-plugin-host")),
             log_path: PathBuf::from("/var/log/ados/plugins/com-example-x.log"),
             restart: "on-failure".to_string(),
             resources: ResourceLimits::default(),
             sandbox_directives: vec!["PrivateDevices=yes".to_string()],
         }
+    }
+
+    #[test]
+    fn a_unit_runs_as_its_own_user_after_the_guard_with_a_credential_and_no_exec_elsewhere() {
+        let unit = render_systemd(&spec());
+        assert!(unit.contains("\nUser=ados-plg-0a1b2c3d\nGroup=ados-plugins\n"));
+        assert!(unit.contains(
+            "\nLoadCredential=ados-plugin-token:/run/ados/plugins/com.example.x.token\n"
+        ));
+        assert!(!unit.contains("EnvironmentFile="));
+        assert!(unit.contains("\nRequires=ados-plugin-host.service\n"));
+        assert!(unit.contains("\nAfter=ados-supervisor.service ados-plugin-host.service\n"));
+        let pre = unit
+            .find("\nExecStartPre=+/opt/ados/bin/ados-plugin-host guard-load\n")
+            .expect("guard-load pre-start");
+        assert!(pre < unit.find("\nExecStart=").unwrap());
+        assert!(
+            unit.contains("\nNoExecPaths=/\nExecPaths=/var/ados/plugins/com.example.x -/usr/lib\n")
+        );
+        let probe = systemd_run_argv(&ProbeSpec {
+            argv: vec!["bin/check".to_string()],
+            working_dir: PathBuf::from("/var/ados/plugins/com.example.x"),
+            user: "ados-plg-0a1b2c3d".to_string(),
+            resources: ResourceLimits::default(),
+            exec_paths: spec().exec_paths,
+            sandbox_directives: Vec::new(),
+        });
+        assert!(probe.contains(&"--uid=ados-plg-0a1b2c3d".to_string()));
+        assert!(probe.contains(&"--gid=ados-plugins".to_string()));
+        assert!(probe.contains(&"--property=NoExecPaths=/".to_string()));
     }
 
     type Calls = Arc<Mutex<Vec<String>>>;
@@ -792,7 +870,7 @@ mod tests {
             std::fs::read_to_string(dir.path().join("co.ados.plugin.com-example-x.plist")).unwrap();
         assert!(plist.contains("<string>co.ados.plugin.com-example-x</string>"));
         assert!(plist.contains("<string>/bin/sh</string>"));
-        assert!(plist.contains("<string>/run/ados/plugins/com.example.x.token.env</string>"));
+        assert!(plist.contains("<string>/run/ados/plugins/com.example.x.token</string>"));
         assert!(plist.contains("<key>ADOS_PLUGIN_SOCKET</key>"));
         assert!(plist.contains(
             "<key>StandardOutPath</key>\n\t<string>/var/log/ados/plugins/com-example-x.log"
@@ -815,7 +893,7 @@ mod tests {
     fn the_launchd_entry_script_exports_the_token_file_verbatim() {
         // The token is `a|b=c` style text: nothing in it may be evaluated.
         let dir = tempfile::tempdir().unwrap();
-        let envf = dir.path().join("x.token.env");
+        let envf = dir.path().join("x.token");
         std::fs::write(&envf, "ADOS_PLUGIN_TOKEN=a|b=c;$(false)\nADOS_X=1").unwrap();
         let out = std::process::Command::new("/bin/sh")
             .args([

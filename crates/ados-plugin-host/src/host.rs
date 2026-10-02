@@ -29,6 +29,9 @@ use crate::dispatch::errors;
 /// A msgpack map the dispatcher returns to the plugin as the response `args`.
 pub type HostResult = Value;
 
+/// The receiving end of an auxiliary-stream push: `(channel, datagram)` pairs.
+pub type AuxDatagramRx = tokio::sync::broadcast::Receiver<(u8, Vec<u8>)>;
+
 /// A soft host-method failure that becomes the response envelope `error` field.
 ///
 /// The three failure kinds the dispatch loop converts to the wire `error`
@@ -172,10 +175,13 @@ pub trait HostServices: Send + Sync + 'static {
     }
 
     /// Gates on the requested component kind after arg validation, so it takes
-    /// the caller's `granted_caps`.
+    /// the caller's `granted_caps`. The reservation belongs to `session`, the
+    /// connection that made it, and a real host drops it in
+    /// [`Self::release_session`] unless a newer session renewed it.
     fn mavlink_register_component(
         &self,
         _plugin_id: &str,
+        _session: u64,
         _args: &Value,
         _granted_caps: &std::collections::BTreeSet<String>,
     ) -> Result<HostResult, HostError> {
@@ -237,11 +243,24 @@ pub trait HostServices: Send + Sync + 'static {
 
     /// Set the content of the host's reserved data-driven display page (title,
     /// label/value rows, touch zones). A real host writes the page sidecar the
-    /// display service reads. Fully gated at the dispatch level on the display
-    /// capability, so it does not see the caller's caps. The default returns
+    /// display service reads. The page is one shared surface owned by the
+    /// connection (`session`) that set it; a real host refuses another
+    /// plugin's write while that connection is live. Fully gated at the
+    /// dispatch level on the display capability. The default returns
     /// `not_implemented` so [`NoopHost`] stays inert.
-    fn display_page_set(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+    fn display_page_set(
+        &self,
+        _plugin_id: &str,
+        _session: u64,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
         Ok(not_implemented("display.page.set"))
+    }
+
+    /// Whether `plugin_id` owns the reserved display page, so a tap on it may
+    /// reach that plugin. The default (no page) is `false`.
+    fn display_page_owned_by(&self, _plugin_id: &str) -> bool {
+        false
     }
 
     /// Drive a host GPIO output line (a status buzzer or LED) high or low. A real
@@ -304,41 +323,45 @@ pub trait HostServices: Send + Sync + 'static {
     /// host forwards the request to the radio service's auxiliary command socket,
     /// which brings up a transmit/receive pair on a separate radio-port from the
     /// data and control planes. SAFE: the pair never starts on its own — only this
-    /// explicit open brings it up, and the matching close (or the plugin
-    /// disconnecting) tears it down. One plugin owns the stream at a time; an
-    /// open while another plugin owns it is refused. Fully gated at the dispatch
-    /// level on the auxiliary-stream capability, so it does not see the caller's
-    /// caps. The default returns `not_implemented` so [`NoopHost`] stays inert.
+    /// explicit open brings it up, and the matching close (or the owning
+    /// connection ending) tears it down. One connection (`session`) owns the
+    /// stream at a time; an open while another owns it is refused. Fully gated
+    /// at the dispatch level on the auxiliary-stream capability, so it does not
+    /// see the caller's caps. The default returns `not_implemented` so
+    /// [`NoopHost`] stays inert.
     fn radio_aux_stream_open(
         &self,
         _plugin_id: &str,
+        _session: u64,
         _args: &Value,
     ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("radio.aux_stream.open")))
     }
 
-    /// Close the auxiliary application stream the calling plugin opened. A real
-    /// host forwards the request to the radio service's auxiliary command
+    /// Close the auxiliary application stream the calling connection opened. A
+    /// real host forwards the request to the radio service's auxiliary command
     /// socket, which tears down the transmit/receive pair (additive — it never
-    /// touches the data or control planes). A close from a plugin that does not
-    /// own the stream is refused without reaching the radio service. The default
-    /// returns `not_implemented` so [`NoopHost`] stays inert.
+    /// touches the data or control planes). A close from a connection that does
+    /// not own the stream is refused without reaching the radio service. The
+    /// default returns `not_implemented` so [`NoopHost`] stays inert.
     fn radio_aux_stream_close(
         &self,
         _plugin_id: &str,
+        _session: u64,
         _args: &Value,
     ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("radio.aux_stream.close")))
     }
 
-    /// Send one application datagram on the auxiliary stream the calling plugin
-    /// opened. A real host validates the channel, encodes the aux frame, and
-    /// forwards it to the radio service's auxiliary command socket; a send from
-    /// a plugin that does not own the stream is refused. Gated at the dispatch
-    /// level on `radio.aux_stream`.
+    /// Send one application datagram on the auxiliary stream the calling
+    /// connection opened. A real host validates the channel, encodes the aux
+    /// frame, and forwards it to the radio service's auxiliary command socket;
+    /// a send from a connection that does not own the stream is refused. Gated
+    /// at the dispatch level on `radio.aux_stream`.
     fn radio_aux_stream_send(
         &self,
         _plugin_id: &str,
+        _session: u64,
         _args: &Value,
     ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("radio.aux_stream.send")))
@@ -359,18 +382,35 @@ pub trait HostServices: Send + Sync + 'static {
     /// A receiver for the auxiliary-stream application-datagram fanout, when this
     /// host has a wired aux reader. The server obtains one per
     /// `radio.aux_stream.subscribe` and pushes each `(channel, payload)` to the
-    /// plugin as a `radio.aux_stream.deliver` envelope. Mirrors the
-    /// button-subscription seam.
+    /// plugin as a `radio.aux_stream.deliver` envelope, while
+    /// [`aux_stream_owned_by`](Self::aux_stream_owned_by) holds for the
+    /// subscribing connection. A real host refuses a connection that does not
+    /// own the stream: the datagrams are the owner's application traffic.
     ///
-    /// The default returns `None`, which keeps [`NoopHost`] unaffected (no push
-    /// stream). A real host returns a receiver armed off the radio service's aux
-    /// command socket; `Some` is returned even when the service is down so the
-    /// subscription succeeds and stays quiet while the reader retries.
+    /// The default returns `Ok(None)`, which keeps [`NoopHost`] unaffected (no
+    /// push stream). A real host returns a receiver armed off the radio
+    /// service's aux command socket; it is returned even when the service is
+    /// down so the subscription succeeds and stays quiet while the reader
+    /// retries.
     fn radio_aux_stream_subscribe_stream(
         &self,
         _plugin_id: &str,
-    ) -> Option<tokio::sync::broadcast::Receiver<(u8, Vec<u8>)>> {
-        None
+        _session: u64,
+    ) -> Result<Option<AuxDatagramRx>, HostError> {
+        Ok(None)
+    }
+
+    /// Whether the connection `(plugin_id, session)` owns the auxiliary
+    /// stream. The default (no stream) is `false`.
+    fn aux_stream_owned_by(&self, _plugin_id: &str, _session: u64) -> bool {
+        false
+    }
+
+    /// Release whatever the host holds for `plugin_id` as a whole (not per
+    /// connection) once it stops being served: its display page, its
+    /// registered vision models. The default is a no-op.
+    fn release_plugin(&self, _plugin_id: &str) -> impl Future<Output = ()> + Send {
+        std::future::ready(())
     }
 
     /// Publish one message `{stream, payload: bytes}` on the plugin's own cloud
@@ -400,9 +440,10 @@ pub trait HostServices: Send + Sync + 'static {
 
     /// Report the perception-offload link the plugin holds
     /// `{paired, bearer_acceptable, target?, device_id?, model_id?}`. A real
-    /// host stamps it and writes the offload-link sidecar the perception-tier
-    /// decision reads. Gated at the dispatch level on
-    /// `vision.detection.publish`. The default returns `not_implemented`.
+    /// host verifies the target answers, records the plugin as the link's
+    /// owner, and writes the offload-link sidecar the perception-tier decision
+    /// reads. Gated at the dispatch level on `vision.offload.advertise`. The
+    /// default returns `not_implemented`.
     fn offload_advertise(
         &self,
         _plugin_id: &str,
@@ -607,11 +648,16 @@ pub trait HostServices: Send + Sync + 'static {
     }
 
     /// Publish a detection batch on `vision.detection`. Proxied to the engine,
-    /// which fans it out to overlay consumers and any subscribed plugin.
+    /// which fans it out to overlay consumers and any subscribed plugin. A real
+    /// host binds the batch to the publishing plugin first: its `model_id` goes
+    /// under the plugin's namespace, and its tracker fields (`lock_state`,
+    /// `track_id`) are cleared unless `granted_caps` holds
+    /// `vision.track.designate`, the grant that may already set a lock.
     fn vision_publish_detection(
         &self,
         _plugin_id: &str,
         _args: &Value,
+        _granted_caps: &std::collections::BTreeSet<String>,
     ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("vision.publish_detection")))
     }

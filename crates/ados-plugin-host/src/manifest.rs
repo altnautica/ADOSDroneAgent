@@ -430,7 +430,46 @@ impl AgentBlock {
             }),
         }
     }
+
+    /// `contains_vendor_binary` and a non-empty `vendor_attribution` must
+    /// agree: a vendor binary needs its source-offer record, and a record
+    /// without the flag is a typo the install dialog would not surface.
+    fn validate_vendor_attribution(&self) -> Result<(), ManifestError> {
+        let contains = match self.extra.get("contains_vendor_binary") {
+            None => false,
+            Some(v) => v.as_bool().ok_or_else(|| {
+                ManifestError("agent.contains_vendor_binary must be a boolean".to_string())
+            })?,
+        };
+        let has_attribution = match self.extra.get("vendor_attribution") {
+            None | Some(serde_norway::Value::Null) => false,
+            Some(serde_norway::Value::Sequence(records)) => !records.is_empty(),
+            Some(_) => {
+                return Err(ManifestError(
+                    "agent.vendor_attribution must be a list".to_string(),
+                ))
+            }
+        };
+        if contains && !has_attribution {
+            return Err(ManifestError(
+                "agent.contains_vendor_binary is true but agent.vendor_attribution is empty; \
+                 at least one source-offer record is required for vendor-binary plugins"
+                    .to_string(),
+            ));
+        }
+        if has_attribution && !contains {
+            return Err(ManifestError(
+                "agent.vendor_attribution is set but agent.contains_vendor_binary is false; \
+                 set the flag or remove the attribution block"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
+
+/// The manifest `risk` levels, lowest first.
+pub const RISK_LEVELS: &[&str] = &["low", "medium", "high", "critical"];
 
 /// The name a `bin:<name>` reference carries, or `None` when `value` is not one.
 pub fn bin_reference(value: &str) -> Option<&str> {
@@ -690,6 +729,25 @@ impl PluginManifest {
                 self.version
             )));
         }
+        if !RISK_LEVELS.contains(&self.risk.as_str()) {
+            return Err(ManifestError(format!(
+                "risk {:?} must be one of {RISK_LEVELS:?}",
+                self.risk
+            )));
+        }
+        if let Some(tier) = self.compatibility.min_tier {
+            if !(1..=4).contains(&tier) {
+                return Err(ManifestError(format!(
+                    "compatibility.min_tier {tier} must be between 1 and 4"
+                )));
+            }
+        }
+        if self.agent.is_none() && self.gcs.is_none() {
+            return Err(ManifestError(format!(
+                "plugin {} declares neither agent nor gcs half; at least one is required",
+                self.id
+            )));
+        }
         if let Some(agent) = &self.agent {
             self.validate_agent(agent)?;
         }
@@ -701,6 +759,24 @@ impl PluginManifest {
     }
 
     fn validate_agent(&self, agent: &AgentBlock) -> Result<(), ManifestError> {
+        if agent.runtime == AgentRuntime::Rust && agent.isolation == AgentIsolation::Inprocess {
+            return Err(ManifestError(
+                "Rust plugins have no in-process analog; rust runtime requires subprocess \
+                 isolation"
+                    .to_string(),
+            ));
+        }
+        if !agent.subprocess_spawn.is_empty()
+            && !agent.permissions.iter().any(|p| p.id == "process.spawn")
+        {
+            return Err(ManifestError(format!(
+                "agent.subprocess_spawn lists {} binary path(s) but the process.spawn \
+                 capability is not declared in agent.permissions; add it so the operator can \
+                 review the spawn allowlist at install time",
+                agent.subprocess_spawn.len()
+            )));
+        }
+        agent.validate_vendor_attribution()?;
         match bin_reference(&agent.entrypoint) {
             Some(name) => {
                 if agent.runtime != AgentRuntime::Rust {
@@ -769,7 +845,7 @@ impl PluginManifest {
                     cap.id
                 )));
             }
-            if !matches!(cap.risk.as_str(), "low" | "medium" | "high" | "critical") {
+            if !RISK_LEVELS.contains(&cap.risk.as_str()) {
                 return Err(ManifestError(format!(
                     "agent.declared_capabilities[{}].risk {:?} must be low, medium, high or \
                      critical",
@@ -864,7 +940,7 @@ impl PluginManifest {
 
 /// `^[a-z0-9]+(\.[a-z0-9-]+)+$`: at least two dot-separated segments, the first
 /// lowercase alnum, the rest lowercase alnum or hyphen.
-fn is_plugin_id(id: &str) -> bool {
+pub fn is_plugin_id(id: &str) -> bool {
     let mut segments = id.split('.');
     let first_ok = segments.next().is_some_and(|s| {
         !s.is_empty()
@@ -949,6 +1025,11 @@ fn validate_payload(payload: &PayloadSpec) -> Result<(), ManifestError> {
     if !is_relative_posix_path(path) {
         return Err(ManifestError(format!(
             "agent.payloads path {path:?} must be a relative posix path"
+        )));
+    }
+    if path == crate::attestation::ATTESTATION_FILENAME {
+        return Err(ManifestError(format!(
+            "agent.payloads path {path:?} is reserved for the install attestation"
         )));
     }
     if !payload.source.starts_with("https://") {
@@ -1140,6 +1221,8 @@ compatibility:
   ados_version: ">=0.1.0"
 agent:
   entrypoint: agent/py/x.py
+  permissions:
+    - process.spawn
   subprocess_spawn:
     - ffmpeg
     - v4l2-ctl
@@ -1149,6 +1232,55 @@ agent:
             m.agent.as_ref().unwrap().subprocess_spawn,
             vec!["ffmpeg".to_string(), "v4l2-ctl".to_string()]
         );
+    }
+
+    #[test]
+    fn manifests_the_sdk_refuses_are_refused_here_too() {
+        let base =
+            "id: com.example.rules\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\n";
+        let agent = "agent:\n  entrypoint: agent/py/x.py\n";
+        let refused = [
+            (base.to_string(), "neither agent nor gcs"),
+            (format!("{base}risk: extreme\n{agent}"), "risk"),
+            (
+                format!("{base}{agent}").replace(
+                    "ados_version: \">=0.1.0\"\n",
+                    "ados_version: \">=0.1.0\"\n  min_tier: 9\n",
+                ),
+                "min_tier",
+            ),
+            (
+                format!("{base}{agent}  subprocess_spawn:\n    - ffmpeg\n"),
+                "process.spawn",
+            ),
+            (
+                format!(
+                    "{base}agent:\n  entrypoint: bin/x\n  runtime: rust\n  isolation: inprocess\n"
+                ),
+                "in-process",
+            ),
+            (
+                format!("{base}{agent}  contains_vendor_binary: true\n"),
+                "vendor_attribution is empty",
+            ),
+            (
+                format!("{base}{agent}  vendor_attribution:\n    - name: lib\n"),
+                "contains_vendor_binary is false",
+            ),
+        ];
+        for (yaml, needle) in refused {
+            let err = PluginManifest::from_yaml_text(&yaml).unwrap_err().0;
+            assert!(err.contains(needle), "{needle}: {err}");
+        }
+        let tiered = format!("{base}{agent}").replace(
+            "ados_version: \">=0.1.0\"\n",
+            "ados_version: \">=0.1.0\"\n  min_tier: 4\n",
+        );
+        assert!(PluginManifest::from_yaml_text(&tiered).is_ok());
+        let paired = format!(
+            "{base}risk: critical\n{agent}  contains_vendor_binary: true\n  vendor_attribution:\n    - name: lib\n"
+        );
+        assert!(PluginManifest::from_yaml_text(&paired).is_ok());
     }
 
     #[test]
