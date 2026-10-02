@@ -29,9 +29,7 @@ use axum::http::{Method, StatusCode};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use ados_protocol::pairing_posture::{
-    constant_time_eq, data_plane_access, Access, CallerClass, Pairing,
-};
+use ados_protocol::pairing_posture::{constant_time_eq, Pairing};
 
 use crate::config::SecuritySection;
 
@@ -52,12 +50,16 @@ pub const DEFAULT_SETUP_TOKEN_PATH: &str = "/etc/ados/secrets/setup-token";
 /// `docs_url=None, redoc_url=None, openapi_url=None`, so they do not exist
 /// to serve; keeping them exempt here would only have re-opened them the
 /// moment someone re-enabled the app's defaults.
+///
+/// `/api/v1/setup/status` is NOT here: it reports LAN addresses, public tunnel
+/// URLs, the backend and the MAVLink WebSocket URL, which is reconnaissance
+/// against a paired aircraft. While unpaired the general posture below opens
+/// it to the setup wizard; once paired it needs a credential like any route.
 const EXEMPT_PATHS: &[&str] = &[
     "/",
     "/api/pairing/info",
     "/api/pairing/code",
     "/api/pairing/claim",
-    "/api/v1/setup/status",
 ];
 
 /// Cosmetic setup-wizard mutations under the same-origin trust model. Mirrors
@@ -93,15 +95,10 @@ const SAME_ORIGIN_SETUP_PREFIXES: &[&str] = &["/api/v1/setup/step/", "/api/v1/se
 /// which is not a real flow.
 const LOCAL_HOST_DEFAULTS: &[&str] = &["localhost", "127.0.0.1", "192.168.4.1", "192.168.7.1"];
 
-/// Routes exempt from HMAC verification even when HMAC is enabled. Mirrors
-/// `security.py` `EXEMPT_ROUTES`.
-const HMAC_EXEMPT_ROUTES: &[&str] = &[
-    "/",
-    "/docs",
-    "/openapi.json",
-    "/api/pairing/claim",
-    "/api/pairing/status",
-];
+/// The one mutation exempt from HMAC verification even when HMAC is enabled:
+/// the pairing claim, made by a fresh operator who holds no secret yet. Every
+/// other pairing mutation (unpair, accept) is signed like any write.
+const HMAC_EXEMPT_ROUTES: &[&str] = &["/api/pairing/claim"];
 
 /// The replay window in seconds. Mirrors the `window_seconds=300.0` the
 /// `SecurityMiddleware` constructs its `ReplayDetector` with.
@@ -474,17 +471,17 @@ impl ProxiedAuth {
     /// pairing posture. Mirrors `auth.py` `_valid_api_key`. A missing/empty key
     /// is not valid.
     fn valid_api_key(&self, headers: &RequestHeaders, pairing: &Pairing) -> bool {
-        let Some(key) = non_empty(headers.x_ados_key.as_deref()) else {
-            return false;
-        };
-        let configured = self.config.api.api_key.as_str();
-        if !configured.is_empty() && constant_time_eq(key.as_bytes(), configured.as_bytes()) {
-            return true;
-        }
-        // The pairing key compare: reuse the shared posture as a caller that
-        // is not on-box (this is only consulted off-box). Accept only when the
-        // key matches.
-        data_plane_access(pairing, CallerClass::Remote, Some(key)) == Access::Accept
+        crate::auth::credential_matches(
+            pairing,
+            &self.config.api.api_key,
+            headers.x_ados_key.as_deref(),
+        )
+    }
+
+    /// Whether `path` is a cloud-posture route that a dashboard session must
+    /// not unlock: it demands a real key or the setup token.
+    pub fn is_cloud_posture_path(path: &str) -> bool {
+        contains(SAME_ORIGIN_SETUP_CLOUD_PATHS, path)
     }
 
     /// True when the request carries the valid `X-ADOS-Setup-Token`. Mirrors
@@ -583,11 +580,9 @@ pub(crate) fn is_media_plane(path: &str) -> bool {
     path == "/whep" || path.starts_with("/whep/") || path == "/hls" || path.starts_with("/hls/")
 }
 
-/// True when the path is exempt from HMAC verification: the HMAC-exempt set OR
-/// any `/api/pairing/` path. Mirrors `security.py`'s exempt-route check + the
-/// `path.startswith("/api/pairing/")` skip.
+/// True when the path is exempt from HMAC verification.
 fn is_hmac_exempt(path: &str) -> bool {
-    contains(HMAC_EXEMPT_ROUTES, path) || path.starts_with("/api/pairing/")
+    contains(HMAC_EXEMPT_ROUTES, path)
 }
 
 /// The mutating methods the HMAC gate verifies.
@@ -946,7 +941,55 @@ mod tests {
                 ),
                 "{path} must require a credential even while unpaired"
             );
+            // Any non-empty key is not a credential on an unpaired node.
+            let d = auth.decide_api_key(
+                &Method::POST,
+                path,
+                &headers_with_key("x"),
+                false,
+                &Pairing::Unpaired,
+            );
+            assert_eq!(
+                d,
+                reject(
+                    StatusCode::UNAUTHORIZED,
+                    BodyField::Detail,
+                    messages::CLOUD_POSTURE
+                ),
+                "{path} must not accept an arbitrary key while unpaired"
+            );
         }
+    }
+
+    #[test]
+    fn setup_status_needs_a_credential_once_paired() {
+        let auth = auth_basic();
+        let status = "/api/v1/setup/status";
+        assert_eq!(
+            auth.decide_api_key(
+                &Method::GET,
+                status,
+                &RequestHeaders::default(),
+                false,
+                &Pairing::Unpaired
+            ),
+            Decision::Accept,
+            "the setup wizard reads it before pairing"
+        );
+        assert_eq!(
+            auth.decide_api_key(
+                &Method::GET,
+                status,
+                &RequestHeaders::default(),
+                false,
+                &paired("k")
+            ),
+            reject(
+                StatusCode::UNAUTHORIZED,
+                BodyField::Detail,
+                messages::MISSING_KEY
+            )
+        );
     }
 
     #[test]
@@ -1357,17 +1400,19 @@ mod tests {
             ),
             Decision::Accept
         );
-        // Any /api/pairing/ path is exempt.
-        assert_eq!(
-            auth.decide_hmac(
-                &Method::POST,
-                "/api/pairing/whatever",
-                None,
-                &RequestHeaders::default(),
-                b"{}"
-            ),
-            Decision::Accept
-        );
+        // The other pairing mutations are signed: a captured key alone must
+        // not be enough to replay an unpair.
+        for path in ["/api/pairing/unpair", "/api/pairing/accept"] {
+            assert_eq!(
+                auth.decide_hmac(&Method::POST, path, None, &RequestHeaders::default(), b"{}"),
+                reject(
+                    StatusCode::UNAUTHORIZED,
+                    BodyField::Error,
+                    messages::MISSING_SECURITY_HEADERS
+                ),
+                "{path}"
+            );
+        }
         // needs_body is false for an exempt/non-mutating path, true for a real one.
         assert!(!auth.hmac_needs_body(&Method::GET, "/api/command"));
         assert!(!auth.hmac_needs_body(&Method::POST, "/api/pairing/claim"));

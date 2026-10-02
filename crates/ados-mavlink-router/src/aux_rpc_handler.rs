@@ -27,7 +27,12 @@ use std::time::{Duration, Instant};
 
 use ados_protocol::aux_egress::AuxEgress;
 use ados_protocol::aux_mux::AuxChannel;
-use ados_protocol::aux_rpc::{self, ResponseSymbols, RpcMethod, RpcRequest};
+use ados_protocol::aux_rpc::{
+    self, ReassemblyOutcome, RequestFragment, RequestReassembler, ResponseSymbols, RpcMethod,
+    RpcRequest,
+};
+use ados_protocol::nonce_cache::NonceCache;
+use ados_protocol::relay_ticket::{RelayTicketError, RequestBinding, VerifiedRelayTicket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -68,25 +73,58 @@ fn is_relay_bootstrap(method: RpcMethod, path: &[u8]) -> bool {
 /// fleet radio key -- and a fleet shares one key by construction. The only
 /// exception is [`RELAY_BOOTSTRAP_PATH`], which is how a secret gets on file in
 /// the first place.
+///
+/// The ticket must be bound to this exact request (method, path with query,
+/// body). `Ok(Some(ticket))` carries the nonce the caller spends once it knows
+/// the request is not a retransmit; `Ok(None)` is the unticketed bootstrap.
 pub fn authorize(
     held: Option<&str>,
-    ticket: &[u8],
-    method: RpcMethod,
-    path: &[u8],
+    request: &RpcRequest,
     own_device_id: &str,
     now: i64,
-) -> Result<(), ados_protocol::relay_ticket::RelayTicketError> {
+) -> Result<Option<VerifiedRelayTicket>, RelayTicketError> {
     let Some(secret) = held else {
-        if is_relay_bootstrap(method, path) {
-            return Ok(());
+        if is_relay_bootstrap(request.method, &request.path) {
+            return Ok(None);
         }
-        return Err(ados_protocol::relay_ticket::RelayTicketError::NoSecret);
+        return Err(RelayTicketError::NoSecret);
     };
     let issuer = ados_protocol::relay_ticket::RelayTicketIssuer::from_secret(secret.as_bytes());
-    // A ticket that is not valid UTF-8 cannot be one we minted, and reads as a
-    // malformed one rather than being allowed to panic a decode.
-    let presented = std::str::from_utf8(ticket).unwrap_or("");
-    issuer.verify(presented, own_device_id, now)
+    // A ticket or path that is not valid UTF-8 cannot be one we minted, and
+    // reads as a malformed one rather than being allowed to panic a decode.
+    let presented =
+        std::str::from_utf8(&request.ticket).map_err(|_| RelayTicketError::Malformed)?;
+    let path = std::str::from_utf8(&request.path).map_err(|_| RelayTicketError::Malformed)?;
+    let binding = RequestBinding::new(request.method.as_http_method(), path, &request.body);
+    issuer
+        .verify(presented, own_device_id, &binding, now)
+        .map(Some)
+}
+
+/// Every relay ticket this drone has accepted, so each is honoured once.
+static SPENT_TICKETS: NonceCache = ados_protocol::relay_ticket::new_replay_cache();
+
+/// Request fragments waiting for the rest of their request.
+static REASSEMBLER: std::sync::LazyLock<std::sync::Mutex<RequestReassembler>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(RequestReassembler::new()));
+
+/// Feed one request fragment to the drone's reassembler. `Some` once the
+/// request it belongs to is whole.
+pub fn accept_fragment(fragment: &RequestFragment<'_>) -> Option<RpcRequest> {
+    let mut reassembler = REASSEMBLER.lock().unwrap_or_else(|p| p.into_inner());
+    match reassembler.push(fragment, Instant::now()) {
+        ReassemblyOutcome::Complete(request) => Some(request),
+        ReassemblyOutcome::Pending | ReassemblyOutcome::Duplicate => None,
+        ReassemblyOutcome::Rejected => {
+            tracing::warn!(
+                request_id = fragment.id,
+                seq = fragment.seq,
+                total = fragment.total,
+                "aux_rpc_request_fragment_rejected"
+            );
+            None
+        }
+    }
 }
 
 /// Whether the "this node holds no relay secret" warning has already been
@@ -189,7 +227,7 @@ const SEND_SLOT_WAIT_LIMIT: Duration = Duration::from_secs(6);
 /// ground needs to know which one this is before it feeds the symbols to a
 /// decoder that cannot tell two bodies apart.
 pub async fn handle(
-    request: &RpcRequest<'_>,
+    request: &RpcRequest,
     egress: &AuxEgress,
     dedupe: &RequestDedupe,
     counters: &AuxUplinkConsumerCounters,
@@ -201,6 +239,7 @@ pub async fn handle(
     // queue wait is past the ground's bound, and the burst transmitted anyway.
     let started = Instant::now();
     let id = request.id;
+    let now = now_unix_secs();
 
     // Authorise BEFORE the request reaches loopback.
     //
@@ -209,39 +248,21 @@ pub async fn handle(
     // it, the decision has already been made. This is the only place the check
     // can happen while it still means anything.
     //
-    // No secret on file denies. The window in which an unprovisioned aircraft
-    // served radio-range callers with its full authority is closed; the one
-    // path still served is the credential delivery itself, so the aircraft can
-    // still be provisioned.
+    // No secret on file denies. The one path still served is the credential
+    // delivery itself, so the aircraft can still be provisioned.
     let held = ados_protocol::relay_ticket::load_secret_at(std::path::Path::new(
         ados_protocol::relay_ticket::RELAY_SECRET_PATH,
     ));
     if held.is_none() {
         note_relay_secret_absent();
     }
-    if let Err(e) = authorize(
-        held.as_deref(),
-        request.ticket,
-        request.method,
-        request.path,
-        own_device_id,
-        now_unix_secs(),
-    ) {
-        counters.note_rpc_unauthorized();
-        tracing::warn!(
-            request_id = id,
-            error = %e,
-            "aux_rpc_request_unauthorized"
-        );
-        // Answered rather than dropped: a ground station presenting a bad
-        // credential should see it said so, not sit through a call timeout
-        // that reads identically to a dead radio.
-        let fragments = encode_fragments(own_device_id.as_bytes(), id, 401, &[], &[]);
-        if !fragments.is_empty() {
-            send_fragments(id, egress, &fragments, counters, started).await;
+    let ticket = match authorize(held.as_deref(), request, own_device_id, now) {
+        Ok(ticket) => ticket,
+        Err(e) => {
+            refuse(id, e, egress, counters, own_device_id, started).await;
+            return;
         }
-        return;
-    }
+    };
 
     let fragments = match dedupe.admit(id) {
         Admit::Duplicate => {
@@ -259,18 +280,33 @@ pub async fn handle(
             cached
         }
         Admit::Fresh => {
-            let (status, headers, body) = match http_call(
-                request.method,
-                request.path,
-                request.body,
-            )
-            .await
-            {
+            // Spend the ticket only now. A retransmit of the same request id
+            // carries the same ticket and is answered from the dedupe cache
+            // above; anything reaching here with a spent nonce is the same
+            // ticket replayed under a new id, which must not run again.
+            if let Some(ticket) = &ticket {
+                if let Err(e) = ticket.spend(&SPENT_TICKETS, now) {
+                    dedupe.abandon(id);
+                    refuse(id, e, egress, counters, own_device_id, started).await;
+                    return;
+                }
+            }
+            let (status, headers, body) = match http_call(request).await {
                 Ok(v) => v,
                 Err(e) => {
                     let status = e.status();
                     tracing::warn!(error = %e, request_id = id, status, "aux_rpc_http_call_failed");
-                    (status, Vec::new(), Vec::new())
+                    // Said in the body, so a caller can tell the drone's own
+                    // API failing from the ground station's lane failing: both
+                    // are a 5xx on the relay route.
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "error": "E_RELAY_PEER_API",
+                        "detail": e.to_string(),
+                    }))
+                    .unwrap_or_default();
+                    let headers =
+                        vec![("content-type".to_string(), "application/json".to_string())];
+                    (status, headers, body)
                 }
             };
             let fragments = encode_fragments(own_device_id.as_bytes(), id, status, &headers, &body);
@@ -291,6 +327,35 @@ pub async fn handle(
     };
 
     send_fragments(id, egress, &fragments, counters, started).await;
+}
+
+/// Answer a refused relayed request with 401 and a body that says why.
+///
+/// Answered rather than dropped: a ground station presenting a bad credential
+/// should see it said so, not sit through a call timeout that reads
+/// identically to a dead radio. The reason is what lets an operator tell a
+/// drone whose clock is wrong from one that holds no secret.
+async fn refuse(
+    id: u32,
+    error: RelayTicketError,
+    egress: &AuxEgress,
+    counters: &AuxUplinkConsumerCounters,
+    own_device_id: &str,
+    started: Instant,
+) {
+    counters.note_rpc_unauthorized();
+    tracing::warn!(
+        request_id = id,
+        error = %error,
+        reason = error.reason(),
+        "aux_rpc_request_unauthorized"
+    );
+    let body = ados_protocol::relay_ticket::refusal_body(error.reason());
+    let headers = vec![("content-type".to_string(), "application/json".to_string())];
+    let fragments = encode_fragments(own_device_id.as_bytes(), id, 401, &headers, &body);
+    if !fragments.is_empty() {
+        send_fragments(id, egress, &fragments, counters, started).await;
+    }
 }
 
 /// Emit one response's fragments as a single paced burst.
@@ -445,24 +510,24 @@ async fn read_response_bounded<R: tokio::io::AsyncRead + Unpin>(
 /// A minimal HTTP/1.1 client for localhost. No TLS, no redirects, no
 /// streaming — just a request/response round trip to the drone's own API.
 async fn http_call(
-    method: RpcMethod,
-    path: &[u8],
-    body: &[u8],
+    request: &RpcRequest,
 ) -> Result<(u16, Vec<aux_rpc::ResponseHeader>, Vec<u8>), HttpError> {
-    let path_str = std::str::from_utf8(path).map_err(|_| HttpError::BadPath)?;
+    let path_str = std::str::from_utf8(&request.path).map_err(|_| HttpError::BadPath)?;
     if !path_is_safe(path_str) {
         return Err(HttpError::BadPath);
     }
-    let method_str = method.as_http_method();
+    let content_type = std::str::from_utf8(&request.content_type).unwrap_or("");
+    let method_str = request.method.as_http_method();
+    let body = &request.body;
 
     let work = async {
         let mut stream = TcpStream::connect((HTTP_HOST, HTTP_PORT))
             .await
             .map_err(|e| HttpError::Connect(e.to_string()))?;
 
-        let request = build_request_head(method_str, path_str, body.len());
+        let head = build_request_head(method_str, path_str, content_type, body.len());
         stream
-            .write_all(request.as_bytes())
+            .write_all(head.as_bytes())
             .await
             .map_err(|e| HttpError::Write(e.to_string()))?;
         if !body.is_empty() {
@@ -484,25 +549,30 @@ async fn http_call(
 
 /// Build the HTTP/1.1 request line and headers.
 ///
-/// The wire frame carries no headers, so a body's content-type is synthesised
-/// rather than forwarded: the lane only ever carries JSON, and every GCS write
-/// already sets `Content-Type: application/json` on its own transport. The
+/// The caller's `Content-Type` crosses the radio with the request, so a plugin
+/// upload or a form body arrives labelled as what it is. A body sent with no
+/// type is labelled JSON, which is what every agent write route reads: the
 /// Rust front's axum `Json<T>` extractors reject a body with no
-/// `application/json` content-type before the handler runs, so a relayed write
-/// would 415 without this.
+/// `application/json` content-type before the handler runs. A type carrying a
+/// control character is dropped for the JSON default rather than interpolated,
+/// since it would otherwise inject a header into an on-box request.
 ///
-/// `X-ADOS-Relayed: 1` marks the call as having crossed the radio. It is for
-/// logging and attribution ONLY, and is deliberately NOT in
-/// `pairing_posture::FORWARDED_HEADERS`: a header in that set flips the request
-/// out of the on-box trust posture it reaches the local API with, which would
-/// put every relayed call behind `X-ADOS-Key`, pairing, and the rate limiter and
-/// break the lane outright. The trust boundary here is the WFB pairing plus the
-/// key-gated ground route, not this header — do not read it as an auth control.
-fn build_request_head(method: &str, path: &str, body_len: usize) -> String {
+/// `X-ADOS-Relayed: 1` marks the call as having crossed the radio. The front
+/// uses it to refuse the trust-root routes over the relay; it is deliberately
+/// NOT in `pairing_posture::FORWARDED_HEADERS`, because the ticket checked
+/// above is what authenticates the call and it must keep the on-box posture
+/// it reaches the local API with.
+fn build_request_head(method: &str, path: &str, content_type: &str, body_len: usize) -> String {
     let content_type = if body_len == 0 {
-        ""
+        String::new()
     } else {
-        "Content-Type: application/json\r\n"
+        let declared = content_type.trim();
+        let declared = if declared.is_empty() || !path_is_safe(&declared.replace(' ', "")) {
+            "application/json"
+        } else {
+            declared
+        };
+        format!("Content-Type: {declared}\r\n")
     };
     format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nX-ADOS-Relayed: 1\r\n{content_type}Content-Length: {body_len}\r\nConnection: close\r\n\r\n"
@@ -849,7 +919,7 @@ mod tests {
 
     #[test]
     fn a_request_with_a_body_declares_json_and_one_without_does_not() {
-        let write = build_request_head("PUT", "/api/config", 40);
+        let write = build_request_head("PUT", "/api/config", "", 40);
         assert!(
             write.contains("Content-Type: application/json\r\n"),
             "axum Json<T> rejects a body with no content-type before the handler runs"
@@ -857,9 +927,22 @@ mod tests {
         assert!(write.starts_with("PUT /api/config HTTP/1.1\r\n"));
         assert!(write.contains("Content-Length: 40\r\n"));
 
-        let read = build_request_head("GET", "/api/logs?limit=5", 0);
+        let read = build_request_head("GET", "/api/logs?limit=5", "", 0);
         assert!(!read.contains("Content-Type"));
         assert!(read.starts_with("GET /api/logs?limit=5 HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn the_callers_content_type_crosses_and_an_injected_one_does_not() {
+        let upload =
+            build_request_head("PATCH", "/api/plugins/p/x/f", "application/octet-stream", 9);
+        assert!(upload.starts_with("PATCH /api/plugins/p/x/f HTTP/1.1\r\n"));
+        assert!(upload.contains("Content-Type: application/octet-stream\r\n"));
+        let typed = build_request_head("POST", "/x", "text/csv; charset=utf-8", 3);
+        assert!(typed.contains("Content-Type: text/csv; charset=utf-8\r\n"));
+        let injected = build_request_head("POST", "/x", "text/plain\r\nX-Injected: 1", 3);
+        assert!(!injected.contains("X-Injected"));
+        assert!(injected.contains("Content-Type: application/json\r\n"));
     }
 
     #[test]
@@ -986,7 +1069,7 @@ Content-Length: 3\r\n\r\nabc";
 
     #[test]
     fn the_relayed_marker_rides_every_request_head() {
-        let head = build_request_head("GET", "/api/version", 0);
+        let head = build_request_head("GET", "/api/version", "", 0);
         assert!(
             head.contains("X-ADOS-Relayed: 1\r\n"),
             "attribution only: the key-gated ground route is the auth control, not this header"
@@ -1071,11 +1154,9 @@ Content-Length: 3\r\n\r\nabc";
     }
 
     mod relay_authorization {
-        use super::super::authorize;
-        use ados_protocol::aux_rpc::RpcMethod;
-        use ados_protocol::relay_ticket::{
-            RelayTicketError, RelayTicketIssuer, DEFAULT_TTL_SECONDS,
-        };
+        use super::super::{authorize, SPENT_TICKETS};
+        use ados_protocol::aux_rpc::{RpcMethod, RpcRequest};
+        use ados_protocol::relay_ticket::{RelayTicketError, RelayTicketIssuer, RequestBinding};
 
         const SECRET: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         const ME: &str = "0a1b2c3d4e5f";
@@ -1085,69 +1166,104 @@ Content-Length: 3\r\n\r\nabc";
         const ORDINARY: &[u8] = b"/api/config";
         const BOOTSTRAP: &[u8] = b"/api/relay/peer-secret";
 
-        fn ticket_for(target: &str) -> String {
-            RelayTicketIssuer::from_secret(SECRET.as_bytes()).mint_at(
-                target,
-                DEFAULT_TTL_SECONDS,
-                NOW,
+        fn request(method: RpcMethod, path: &[u8], body: &[u8], ticket: &str) -> RpcRequest {
+            RpcRequest {
+                id: 1,
+                method,
+                target: ME.as_bytes().to_vec(),
+                path: path.to_vec(),
+                content_type: Vec::new(),
+                ticket: ticket.as_bytes().to_vec(),
+                body: body.to_vec(),
+            }
+        }
+
+        /// A ticket for `target`, minted by the holder of `secret` for exactly
+        /// this method, path and body.
+        fn ticket(
+            secret: &str,
+            target: &str,
+            method: RpcMethod,
+            path: &[u8],
+            body: &[u8],
+            at: i64,
+        ) -> String {
+            RelayTicketIssuer::from_secret(secret.as_bytes())
+                .mint(
+                    target,
+                    &RequestBinding::new(
+                        method.as_http_method(),
+                        std::str::from_utf8(path).unwrap(),
+                        body,
+                    ),
+                    at,
+                )
+                .unwrap()
+        }
+
+        fn ticketed(method: RpcMethod, path: &[u8], body: &[u8]) -> RpcRequest {
+            request(
+                method,
+                path,
+                body,
+                &ticket(SECRET, ME, method, path, body, NOW),
             )
         }
 
         #[test]
         fn a_drone_with_no_secret_refuses_every_relayed_call() {
-            // The close. A relayed request lands on loopback and is treated as
-            // on-box, so an aircraft with no credential to check must refuse
-            // rather than hand radio range its full authority.
+            // A relayed request lands on loopback and is treated as on-box, so
+            // an aircraft with no credential to check must refuse rather than
+            // hand radio range its full authority.
             for method in [
                 RpcMethod::Get,
                 RpcMethod::Post,
                 RpcMethod::Put,
                 RpcMethod::Delete,
+                RpcMethod::Patch,
             ] {
                 assert_eq!(
-                    authorize(None, b"", method, ORDINARY, ME, NOW),
+                    authorize(None, &request(method, ORDINARY, b"", ""), ME, NOW),
                     Err(RelayTicketError::NoSecret)
                 );
                 assert_eq!(
-                    authorize(None, b"any old rubbish", method, ORDINARY, ME, NOW),
+                    authorize(None, &ticketed(method, ORDINARY, b""), ME, NOW),
                     Err(RelayTicketError::NoSecret)
                 );
             }
         }
 
         #[test]
-        fn a_ticket_cannot_open_a_drone_that_holds_no_secret() {
-            // There is nothing to verify against, so a well-formed ticket is
-            // worth no more than an absent one.
-            let t = ticket_for(ME);
+        fn the_secret_delivery_stays_reachable_before_a_secret_exists() {
+            // The one carve-out: the delivery cannot carry a ticket the drone
+            // could check, and first-write-wins bounds it.
             assert_eq!(
-                authorize(None, t.as_bytes(), RpcMethod::Put, ORDINARY, ME, NOW),
-                Err(RelayTicketError::NoSecret)
+                authorize(
+                    None,
+                    &request(RpcMethod::Post, BOOTSTRAP, b"{}", ""),
+                    ME,
+                    NOW
+                ),
+                Ok(None)
+            );
+            assert_eq!(
+                authorize(
+                    None,
+                    &request(
+                        RpcMethod::Post,
+                        b"/api/relay/peer-secret?whatever=1",
+                        b"",
+                        ""
+                    ),
+                    ME,
+                    NOW
+                ),
+                Ok(None)
             );
         }
 
         #[test]
-        fn the_secret_delivery_stays_reachable_before_a_secret_exists() {
-            // The one carve-out, and the reason denying everything else does
-            // not brick provisioning: the delivery cannot carry a ticket the
-            // drone could check, and first-write-wins bounds it.
-            assert!(authorize(None, b"", RpcMethod::Post, BOOTSTRAP, ME, NOW).is_ok());
-            assert!(authorize(
-                None,
-                b"",
-                RpcMethod::Post,
-                b"/api/relay/peer-secret?whatever=1",
-                ME,
-                NOW
-            )
-            .is_ok());
-        }
-
-        #[test]
         fn the_carve_out_is_that_one_method_and_that_one_path() {
-            // A read of the delivery route, a near-miss path and a prefix
-            // extension all stay refused, so the exception cannot be widened
-            // into a general bypass.
             for (method, path) in [
                 (RpcMethod::Get, BOOTSTRAP),
                 (RpcMethod::Put, BOOTSTRAP),
@@ -1160,7 +1276,7 @@ Content-Length: 3\r\n\r\nabc";
                 (RpcMethod::Post, b"/api/relay/peer-secre"),
             ] {
                 assert_eq!(
-                    authorize(None, b"", method, path, ME, NOW),
+                    authorize(None, &request(method, path, b"", ""), ME, NOW),
                     Err(RelayTicketError::NoSecret),
                     "{method:?} {}",
                     String::from_utf8_lossy(path)
@@ -1169,17 +1285,64 @@ Content-Length: 3\r\n\r\nabc";
         }
 
         #[test]
-        fn a_valid_ticket_is_admitted() {
-            let t = ticket_for(ME);
-            assert!(authorize(
+        fn a_ticket_bound_to_the_request_is_admitted() {
+            let got = authorize(
                 Some(SECRET),
-                t.as_bytes(),
-                RpcMethod::Put,
-                ORDINARY,
+                &ticketed(RpcMethod::Put, ORDINARY, b"{}"),
                 ME,
-                NOW
-            )
-            .is_ok());
+                NOW,
+            );
+            assert!(matches!(got, Ok(Some(_))));
+        }
+
+        #[test]
+        fn a_ticket_for_one_request_does_not_authorize_another() {
+            // Every fleet member hears the uplink. A ticket minted for a status
+            // read must not carry a command.
+            let read = ticket(SECRET, ME, RpcMethod::Get, b"/api/status", b"", NOW);
+            assert_eq!(
+                authorize(
+                    Some(SECRET),
+                    &request(
+                        RpcMethod::Post,
+                        b"/api/command",
+                        b"{\"cmd\":\"arm\"}",
+                        &read
+                    ),
+                    ME,
+                    NOW
+                ),
+                Err(RelayTicketError::BindingMismatch)
+            );
+        }
+
+        #[test]
+        fn the_same_ticket_is_honoured_once() {
+            let req = ticketed(RpcMethod::Get, b"/api/status", b"");
+            let first = authorize(Some(SECRET), &req, ME, NOW).unwrap().unwrap();
+            assert_eq!(first.spend(&SPENT_TICKETS, NOW), Ok(()));
+            let second = authorize(Some(SECRET), &req, ME, NOW + 1).unwrap().unwrap();
+            assert_eq!(
+                second.spend(&SPENT_TICKETS, NOW + 1),
+                Err(RelayTicketError::Replayed)
+            );
+        }
+
+        #[test]
+        fn a_skewed_clock_is_tolerated_within_bounds() {
+            let req = |at: i64| {
+                request(
+                    RpcMethod::Get,
+                    b"/api/status",
+                    b"",
+                    &ticket(SECRET, ME, RpcMethod::Get, b"/api/status", b"", at),
+                )
+            };
+            assert!(authorize(Some(SECRET), &req(NOW + 200), ME, NOW).is_ok());
+            assert_eq!(
+                authorize(Some(SECRET), &req(NOW + 400), ME, NOW),
+                Err(RelayTicketError::ClockSkew)
+            );
         }
 
         #[test]
@@ -1187,25 +1350,41 @@ Content-Length: 3\r\n\r\nabc";
             // Once the credential exists, an unaccompanied relayed request no
             // longer inherits on-box authority -- including on the delivery
             // route, which a re-key attempt would have to use.
-            assert!(authorize(Some(SECRET), b"", RpcMethod::Put, ORDINARY, ME, NOW).is_err());
-            assert!(authorize(Some(SECRET), b"", RpcMethod::Post, BOOTSTRAP, ME, NOW).is_err());
-        }
-
-        #[test]
-        fn a_ticket_minted_for_another_drone_is_refused() {
-            // Load-bearing because the uplink is a broadcast: every drone in
-            // the fleet hears every ticket, so one addressed elsewhere must not
-            // open this one.
-            let t = ticket_for("some-other-drone");
             assert!(authorize(
                 Some(SECRET),
-                t.as_bytes(),
-                RpcMethod::Put,
-                ORDINARY,
+                &request(RpcMethod::Put, ORDINARY, b"", ""),
                 ME,
                 NOW
             )
             .is_err());
+            assert!(authorize(
+                Some(SECRET),
+                &request(RpcMethod::Post, BOOTSTRAP, b"", ""),
+                ME,
+                NOW
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn a_ticket_minted_for_another_drone_is_refused() {
+            let t = ticket(
+                SECRET,
+                "some-other-drone",
+                RpcMethod::Put,
+                ORDINARY,
+                b"",
+                NOW,
+            );
+            assert_eq!(
+                authorize(
+                    Some(SECRET),
+                    &request(RpcMethod::Put, ORDINARY, b"", &t),
+                    ME,
+                    NOW
+                ),
+                Err(RelayTicketError::BindingMismatch)
+            );
         }
 
         #[test]
@@ -1213,47 +1392,37 @@ Content-Length: 3\r\n\r\nabc";
             // A second ground station holding the shared fleet radio key still
             // cannot mint one this drone accepts.
             let other = "f".repeat(64);
-            let t = RelayTicketIssuer::from_secret(other.as_bytes()).mint_at(
-                ME,
-                DEFAULT_TTL_SECONDS,
-                NOW,
+            let t = ticket(&other, ME, RpcMethod::Put, ORDINARY, b"", NOW);
+            assert_eq!(
+                authorize(
+                    Some(SECRET),
+                    &request(RpcMethod::Put, ORDINARY, b"", &t),
+                    ME,
+                    NOW
+                ),
+                Err(RelayTicketError::BadSignature)
             );
-            assert!(authorize(
-                Some(SECRET),
-                t.as_bytes(),
-                RpcMethod::Put,
-                ORDINARY,
-                ME,
-                NOW
-            )
-            .is_err());
         }
 
         #[test]
         fn an_expired_ticket_is_refused() {
-            let t = ticket_for(ME);
-            assert!(authorize(
-                Some(SECRET),
-                t.as_bytes(),
-                RpcMethod::Put,
-                ORDINARY,
-                ME,
-                NOW + DEFAULT_TTL_SECONDS + 1
-            )
-            .is_err());
+            let t = ticket(SECRET, ME, RpcMethod::Put, ORDINARY, b"", NOW - 400);
+            assert_eq!(
+                authorize(
+                    Some(SECRET),
+                    &request(RpcMethod::Put, ORDINARY, b"", &t),
+                    ME,
+                    NOW
+                ),
+                Err(RelayTicketError::Expired)
+            );
         }
 
         #[test]
         fn a_ticket_that_is_not_utf8_is_refused_rather_than_panicking() {
-            assert!(authorize(
-                Some(SECRET),
-                &[0xFF, 0xFE, 0xFD],
-                RpcMethod::Put,
-                ORDINARY,
-                ME,
-                NOW
-            )
-            .is_err());
+            let mut req = request(RpcMethod::Put, ORDINARY, b"", "");
+            req.ticket = vec![0xFF, 0xFE, 0xFD];
+            assert!(authorize(Some(SECRET), &req, ME, NOW).is_err());
         }
     }
 }

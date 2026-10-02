@@ -138,7 +138,6 @@ pub fn decision_path(raw: &str) -> Result<String, PathRejection> {
     }
     Ok(decoded)
 }
-use ados_protocol::pairing_posture::{data_plane_access, Access};
 
 /// Default pairing-state path: the agent's `pairing.json`.
 pub const DEFAULT_PAIRING_PATH: &str = "/etc/ados/pairing.json";
@@ -154,6 +153,9 @@ const PAIRING_TTL: Duration = Duration::from_secs(2);
 pub struct PairingState {
     path: PathBuf,
     cache: Mutex<Cache>,
+    /// The operator-configured `security.api.api_key`, empty when none. A
+    /// second credential accepted everywhere the pairing key is.
+    configured_key: String,
 }
 
 struct Cache {
@@ -177,7 +179,21 @@ impl PairingState {
                 at: Instant::now(),
                 primed: false,
             }),
+            configured_key: String::new(),
         }
+    }
+
+    /// Also accept the operator-configured `security.api.api_key`.
+    pub fn with_configured_key(mut self, key: impl Into<String>) -> Self {
+        self.configured_key = key.into();
+        self
+    }
+
+    /// Whether `presented` is a credential this node accepts: the pairing key
+    /// or the configured key. Every surface that checks a key calls this, so a
+    /// credential is never accepted on one route and refused on another.
+    pub fn credential_valid(&self, presented: Option<&str>) -> bool {
+        credential_matches(&self.current(), &self.configured_key, presented)
     }
 
     /// The pairing-state file path this reader watches.
@@ -208,7 +224,37 @@ impl PairingState {
         if is_public(path) {
             return true;
         }
-        data_plane_access(&self.current(), CallerClass::Remote, presented_key) == Access::Accept
+        let pairing = self.current();
+        if pairing == Pairing::Unpaired {
+            return true;
+        }
+        credential_matches(&pairing, &self.configured_key, presented_key)
+    }
+}
+
+/// The one credential check: `presented` is non-empty and equals the pairing
+/// key of a paired node or the operator-configured key, compared in constant
+/// time.
+///
+/// An unpaired node has no pairing key, so on its own an arbitrary string is
+/// never a credential: callers that open the unpaired data plane do so by
+/// their own posture, not by treating every key as valid here.
+pub fn credential_matches(
+    pairing: &Pairing,
+    configured_key: &str,
+    presented: Option<&str>,
+) -> bool {
+    let Some(presented) = presented.filter(|k| !k.is_empty()) else {
+        return false;
+    };
+    if !configured_key.is_empty()
+        && constant_time_eq(presented.as_bytes(), configured_key.as_bytes())
+    {
+        return true;
+    }
+    match pairing {
+        Pairing::Paired(key) => constant_time_eq(presented.as_bytes(), key.as_bytes()),
+        Pairing::Unpaired | Pairing::Unreadable => false,
     }
 }
 
@@ -223,43 +269,32 @@ pub const RELAYED_HEADER: &str = "x-ados-relayed";
 
 /// Paths a relayed caller may never reach, regardless of trust posture.
 ///
-/// A relayed request arrives in the on-box posture, because the relay has no
-/// credential to present: a fleet shares one radio key by design, and no
-/// per-node API credential is distributed with it. That posture is workable for
-/// the operating surface a linked ground agent is supposed to have — telemetry,
-/// parameters, configuration, services — which is the authority the relay exists
-/// to carry.
+/// A relayed request carries a per-pair relay ticket bound to exactly that
+/// request (see `ados_protocol::relay_ticket`), verified on the drone before it
+/// reaches loopback. It therefore carries the linked ground station's full
+/// authority over the node's operating surface: telemetry, parameters,
+/// configuration, services, plugins, reboots. What protects an airborne
+/// aircraft from an ill-timed restart is the armed interlock, which applies to
+/// every caller, not this list.
 ///
-/// It is NOT workable for the paths below, because they do not merely use the
-/// node's authority, they hand it out or give it away:
+/// This list holds only what changes WHO the node trusts — the paths that hand
+/// out or replace a credential, or move the node's trust root:
 ///
-/// - **Pairing mutation.** `unpair` clears the node's pairing and mints a fresh
-///   code, and `claim` is public by necessity (a fresh operator holds no key
-///   yet). Reachable together, they convert radio range into a standing API key
-///   that works from anywhere on the network, long after the caller is out of
-///   radio range. That is the one escalation that outlives the lane it came
-///   from, which is what makes it the important one.
-/// - **Credential issuance** — scoped tokens and the dashboard PIN, each of
-///   which is a second standing credential.
-/// - **Radio pairing** — a caller reaching this over the radio can drop the
-///   node off the very fleet key that let it in, or move it onto a different
-///   fleet. The ground-station install route is listed for the same reason: it
-///   is profile-gated, so a relayed call lands on a drone and 404s today, but
-///   the denylist is the layer that must not depend on where a route happens
-///   to be mounted.
-/// - **Plugin install and grants** — arbitrary code, self-granted permissions,
-///   and enabling a plugin with the permissions it holds.
-/// - **Destructive setup** — factory reset, setup reset, cloud re-posture, and
-///   the paths that take the node off the air outright: a reboot, a supervisor
-///   restart, or a restart of any single service (`ados-mavlink` in flight is
-///   the aircraft's command link). A caller in radio range must not be able to
-///   drop an airborne aircraft's service stack.
-/// - **Flight-controller signing** — disabling MAVLink signing on the FC strips
-///   the protection the operator enabled.
+/// - **Pairing.** `claim` mints the node's master LAN key, `code` publishes
+///   what a claim needs, `unpair` clears the pairing, `accept` binds a cloud
+///   account. Over the radio, together they convert radio range into a
+///   standing API key that works from anywhere on the network long after the
+///   caller is out of range.
+/// - **Credential issuance** — scoped tokens, the dashboard PIN and plugin
+///   capability tokens, each a second standing credential.
+/// - **Radio pairing** — moving the node onto or off a fleet key.
+/// - **Flight-controller signing** — removing the FC's link credential.
+/// - **Trust-root setup** — factory and setup reset (which wipe pairing),
+///   cloud posture, the combined setup apply and profile writes that reach it,
+///   and remote access.
 ///
-/// `PUT /api/config` stays reachable, because the slot reconciler and the
-/// relayed settings surface write through it, but not for every key: see
-/// [`relay_config_key_forbidden`].
+/// `PUT /api/config` stays reachable, but not for the keys that are trust
+/// roots: see [`relay_config_key_forbidden`].
 ///
 /// Refused at the edge rather than per-handler so the rule holds for native and
 /// proxied routes alike, and cannot be missed when a route moves between them.
@@ -268,10 +303,7 @@ pub const RELAYED_HEADER: &str = "x-ados-relayed";
 /// (`docs/api-surface.md`) by
 /// [`tests::every_denylisted_path_is_a_route_something_actually_serves`]. A
 /// denylist entry that matches no served path is worse than no entry: it reads
-/// as covered while the real path is wide open, which is exactly how
-/// `/api/v1/ground-station/ui/factory-reset` — a path no router has ever
-/// registered — sat here guarding nothing while
-/// `/api/v1/ground-station/factory-reset` was relay-reachable.
+/// as covered while the real path is wide open.
 /// Takes the normalized [`decision_path`], never `request.uri().path()`.
 /// Matching the raw target here is how `/api/pairing/%75npair` walked past a
 /// list that names `/api/pairing/unpair`.
@@ -320,50 +352,34 @@ fn path_covers(denied: &str, path: &str) -> bool {
 /// A denylist entry that matches no served path is worse than no entry: it
 /// reads as covered while the real path is wide open.
 pub const RELAY_FORBIDDEN_PATHS: &[&str] = &[
+    "/api/pairing/claim",
+    "/api/pairing/code",
     "/api/pairing/unpair",
     "/api/pairing/accept",
     "/api/mcp/tokens",
     "/api/mcp/revoke",
     "/api/dashboard/pin/set",
     "/api/dashboard/pin/clear",
+    "/api/plugins/capability-token",
     "/api/wfb/pair/local-bind",
     "/api/wfb/pair/unpair",
     "/api/v1/ground-station/wfb/pair",
-    "/api/plugins/install",
-    "/api/plugins/install_from_url",
-    "/api/plugins/capability-token",
-    "/api/plugins/{plugin_id}/grant",
-    "/api/plugins/{plugin_id}/enable",
-    "/api/services/{name}/restart",
     "/api/mavlink/signing/disable-on-fc",
     "/api/v1/setup/reset",
-    "/api/v1/setup/reboot",
     "/api/v1/setup/cloud-choice",
+    "/api/v1/setup/apply",
+    "/api/v1/setup/profile",
     "/api/v1/setup/remote-access/cloudflare",
-    "/api/v1/system/restart-supervisor",
     "/api/v1/ground-station/factory-reset",
 ];
 
 /// The config write route whose body a relayed request is checked against.
 pub const RELAY_CONFIG_WRITE_PATH: &str = "/api/config";
 
-/// Config subtrees a relayed caller may not write. `security.*` holds the API
-/// key the proxied lane honours after a restart (a standing LAN credential),
-/// `server.cloud.*` names the broker the pairing key is sent to, and
-/// `mavlink.*` re-routes or opens the flight controller's own link.
-pub const RELAY_FORBIDDEN_CONFIG_KEYS: &[&str] = &["security", "server.cloud", "mavlink"];
-
-/// Whether a relayed `PUT /api/config` may not write `key` (a dotted path):
-/// the key is one of [`RELAY_FORBIDDEN_CONFIG_KEYS`] or lies beneath one.
-pub fn relay_config_key_forbidden(key: &str) -> bool {
-    let key = key.trim();
-    RELAY_FORBIDDEN_CONFIG_KEYS.iter().any(|denied| {
-        key == *denied
-            || key
-                .strip_prefix(denied)
-                .is_some_and(|rest| rest.starts_with('.'))
-    })
-}
+/// Whether a relayed `PUT /api/config` may not write `key`. One definition,
+/// shared with the config tunnel, so both radio lanes refuse the same
+/// trust-root keys.
+pub use ados_protocol::pairing_posture::relay_config_key_forbidden;
 
 /// The PIN login paths: public, but charged to the caller's request budget at
 /// the edge, since they are the public paths a guesser loops on.
@@ -590,11 +606,6 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    /// The escalation this list exists to break: unpair clears the pairing and
-    /// mints a fresh code, and claim is public by necessity, so the two together
-    /// turn radio range into a standing API key that keeps working long after
-    /// the caller is out of range. Refusing unpair is what breaks the chain —
-    /// claim on its own hands out nothing while a pairing is intact.
     /// Claiming a device over the LAN is the documented local-first flow, so
     /// the pairing handshake must stay public. The unpaired-peer filter refuses
     /// non-public routes from an ordinary LAN peer; if these were gated too, a
@@ -619,16 +630,24 @@ mod tests {
         assert!(!is_public("/api/config"));
     }
 
+    /// A radio-only drone has no LAN pairing, so its claim would hand a
+    /// relayed caller the master key outright; every pairing mutation and the
+    /// code a claim needs stay off the relay.
     #[test]
-    fn a_relayed_caller_cannot_unpair_and_then_claim() {
-        assert!(
-            relay_forbidden("/api/pairing/unpair"),
-            "unpair over the relay is the escalation root and must be refused"
-        );
+    fn a_relayed_caller_reaches_no_pairing_route_that_mints_or_clears_a_key() {
+        for path in [
+            "/api/pairing/claim",
+            "/api/pairing/code",
+            "/api/pairing/unpair",
+            "/api/pairing/accept",
+        ] {
+            assert!(relay_forbidden(path), "{path}");
+        }
         assert!(
             is_public("/api/pairing/claim"),
-            "claim stays public — a fresh operator holds no key yet"
+            "claim stays public on the LAN — a fresh operator holds no key yet"
         );
+        assert!(!relay_forbidden("/api/pairing/info"));
     }
 
     #[test]
@@ -645,15 +664,17 @@ mod tests {
     }
 
     #[test]
-    fn destructive_and_code_loading_paths_are_refused_over_the_relay() {
+    fn trust_root_paths_are_refused_over_the_relay() {
         for path in [
             "/api/wfb/pair/unpair",
             "/api/wfb/pair/local-bind",
             "/api/v1/ground-station/wfb/pair",
-            "/api/plugins/install",
-            "/api/plugins/install_from_url",
             "/api/v1/setup/reset",
             "/api/v1/setup/cloud-choice",
+            // `apply` carries a cloud choice and a profile with restart in one
+            // body, so it reaches everything `cloud-choice` does.
+            "/api/v1/setup/apply",
+            "/api/v1/setup/profile",
             "/api/v1/setup/remote-access/cloudflare",
             // The path the ground-station router actually registers
             // (`APIRouter(prefix="/v1/ground-station")` + `@router.post(
@@ -746,6 +767,9 @@ mod tests {
     /// whole purpose, so pin the paths that must keep working.
     #[test]
     fn the_ordinary_operating_surface_still_crosses_the_relay() {
+        // A ticket bound to the request carries the linked ground station's
+        // authority, so plugin, service and reboot operations cross too; the
+        // armed interlock, not this list, guards them in flight.
         for path in [
             "/api/status",
             "/api/status/full",
@@ -755,6 +779,13 @@ mod tests {
             "/api/services",
             "/api/logs",
             "/api/vision/detections/latest",
+            "/api/plugins/install",
+            "/api/plugins/install_from_url",
+            "/api/plugins/com.example.tool/enable",
+            "/api/plugins/com.example.tool/grant",
+            "/api/services/ados-mavlink/restart",
+            "/api/v1/setup/reboot",
+            "/api/v1/system/restart-supervisor",
         ] {
             assert!(
                 !relay_forbidden(path),
@@ -1021,6 +1052,41 @@ mod tests {
     }
 
     #[test]
+    fn the_configured_key_and_the_pairing_key_are_both_credentials() {
+        let paired = Pairing::Paired("pair-key".into());
+        assert!(credential_matches(&paired, "", Some("pair-key")));
+        assert!(credential_matches(&paired, "cfg-key", Some("cfg-key")));
+        assert!(!credential_matches(&paired, "cfg-key", Some("other")));
+        assert!(!credential_matches(&paired, "", Some("")));
+        // An unconfigured key never matches an empty presentation.
+        assert!(!credential_matches(&Pairing::Unpaired, "", Some("")));
+    }
+
+    #[test]
+    fn an_unpaired_node_treats_no_arbitrary_string_as_a_credential() {
+        // Cloud-posture routes demand a real credential even while unpaired;
+        // "any non-empty key" was not one.
+        assert!(!credential_matches(&Pairing::Unpaired, "", Some("x")));
+        assert!(!credential_matches(&Pairing::Unreadable, "", Some("x")));
+        assert!(credential_matches(
+            &Pairing::Unpaired,
+            "cfg-key",
+            Some("cfg-key")
+        ));
+    }
+
+    #[test]
+    fn the_native_edge_accepts_the_configured_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_pairing(dir.path(), r#"{"paired": true, "api_key": "pair-key"}"#);
+        let state = PairingState::with_path(path).with_configured_key("cfg-key");
+        assert!(state.authorize("/api/status", Some("cfg-key")));
+        assert!(state.authorize("/api/status", Some("pair-key")));
+        assert!(!state.authorize("/api/status", Some("nope")));
+        assert!(state.credential_valid(Some("cfg-key")));
+    }
+
+    #[test]
     fn constant_time_eq_matches_byte_equality() {
         // Equal slices compare equal; any single-byte or length difference is
         // rejected, exactly as `==` would, only without the early exit.
@@ -1076,16 +1142,11 @@ mod tests {
         assert!(limiter.check(a), "the window refilled");
     }
 
-    /// The routes that carry a standing credential or take a service down are
-    /// refused over the relay, including the path-parameter ones.
     #[test]
-    fn service_restarts_plugin_grants_and_signing_disable_are_refused_over_the_relay() {
+    fn signing_disable_and_credential_issuance_are_refused_over_the_relay() {
         for path in [
-            "/api/services/ados-mavlink/restart",
-            "/api/services/ados-wfb/restart",
-            "/api/plugins/com.example.tool/grant",
-            "/api/plugins/com.example.tool/enable",
             "/api/mavlink/signing/disable-on-fc",
+            "/api/plugins/capability-token",
         ] {
             assert!(relay_forbidden(path), "{path} must not cross the relay");
         }
@@ -1100,20 +1161,24 @@ mod tests {
     }
 
     #[test]
-    fn relayed_config_writes_refuse_credential_and_link_keys() {
+    fn relayed_config_writes_refuse_trust_root_keys() {
         for key in [
             "security.api.api_key",
             "security",
             "server.cloud.mqtt_broker",
-            "mavlink.endpoints",
+            "server.mode",
+            "server.self_hosted.url",
+            "pairing.convex_url",
+            "remote_access.cloudflare.token_path",
         ] {
             assert!(relay_config_key_forbidden(key), "{key}");
         }
         for key in [
             "video.wfb.fleet_slot",
             "swarm.enabled",
-            "server.cloudy",
-            "mavlinkx",
+            "mavlink.endpoints",
+            "network.hotspot.enabled",
+            "serverx",
             "securityx.y",
         ] {
             assert!(!relay_config_key_forbidden(key), "{key}");

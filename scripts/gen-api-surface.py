@@ -291,27 +291,24 @@ def main() -> int:
 # back and asserts each of those literals appears above, so a denylist entry
 # that matches no served path fails the build instead of reading as protection.
 RELAY_FORBIDDEN = {
+    "/api/pairing/claim",
+    "/api/pairing/code",
     "/api/pairing/unpair",
     "/api/pairing/accept",
     "/api/mcp/tokens",
     "/api/mcp/revoke",
     "/api/dashboard/pin/set",
     "/api/dashboard/pin/clear",
+    "/api/plugins/capability-token",
     "/api/wfb/pair/local-bind",
     "/api/wfb/pair/unpair",
     "/api/v1/ground-station/wfb/pair",
-    "/api/plugins/install",
-    "/api/plugins/install_from_url",
-    "/api/plugins/capability-token",
-    "/api/plugins/{plugin_id}/grant",
-    "/api/plugins/{plugin_id}/enable",
-    "/api/services/{name}/restart",
     "/api/mavlink/signing/disable-on-fc",
     "/api/v1/setup/reset",
-    "/api/v1/setup/reboot",
     "/api/v1/setup/cloud-choice",
+    "/api/v1/setup/apply",
+    "/api/v1/setup/profile",
     "/api/v1/setup/remote-access/cloudflare",
-    "/api/v1/system/restart-supervisor",
     "/api/v1/ground-station/factory-reset",
 }
 

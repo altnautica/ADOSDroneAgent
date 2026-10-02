@@ -221,8 +221,19 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        let op = serde_json::json!({"op": "get"});
+        let body = ados_protocol::relay_ticket::tunnel_binding_body(&op);
         let ticket = ados_protocol::relay_ticket::RelayTicketIssuer::from_secret(SECRET.as_bytes())
-            .mint_at("drone-1", 60, now);
+            .mint(
+                "drone-1",
+                &ados_protocol::relay_ticket::RequestBinding::new(
+                    ados_protocol::relay_ticket::TUNNEL_BINDING_METHOD,
+                    ados_protocol::relay_ticket::TUNNEL_BINDING_PATH,
+                    &body,
+                ),
+                now,
+            )
+            .unwrap();
         let request =
             serde_json::to_vec(&serde_json::json!({"op": "get", "ticket": ticket})).unwrap();
         let auth = TunnelAuth {

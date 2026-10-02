@@ -195,6 +195,21 @@ impl PluginLifecycle {
         ados_plugin_host::systemd::plugin_http_dir(&self.run_dir, plugin_id)
             .join(ados_plugin_host::systemd::PLUGIN_HTTP_SOCKET_NAME)
     }
+
+    /// The installed manifest of `plugin_id`, `None` when it is not installed
+    /// or cannot be read. Used by the tool-invoke route to read a tool's
+    /// declared safety class.
+    pub(crate) async fn installed_manifest(
+        &self,
+        plugin_id: String,
+    ) -> Option<ados_plugin_host::manifest::PluginManifest> {
+        self.read(move |sup| {
+            sup.installed_manifest(&plugin_id)
+                .map_err(|e| Refusal::host_io(e.0))
+        })
+        .await
+        .ok()
+    }
 }
 
 /// One refused request in the lifecycle envelope.

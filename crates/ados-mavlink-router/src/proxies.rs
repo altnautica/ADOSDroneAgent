@@ -71,19 +71,18 @@ const PAIRING_TTL: Duration = Duration::from_secs(2);
 ///   `gs.mavlink_ws` ticket on the WebSocket; the raw edges have neither).
 ///
 /// **Two defaults, one mechanism.** `enforce` is supplied by the caller from
-/// the config, and the edges do not share a value: the WebSocket enforces by
-/// default because a client can present either the `X-ADOS-Key` header or an
-/// `ados-ws-ticket` subprotocol, while the byte-stream edges (TCP, UDP) default
-/// off because they have no credential channel to present anything on. With
-/// `enforce` off the gate is observe-only: an unauthorized connection is logged
-/// and STILL admitted. With it on, an unauthorized connection is refused at the
-/// handshake (WebSocket) or before any bytes are read (TCP, UDP).
+/// the config. Both edges enforce by default. The WebSocket authenticates its
+/// callers with the `X-ADOS-Key` header or an `ados-ws-ticket` subprotocol;
+/// the byte-stream edges (TCP, UDP) have no credential channel at all, so an
+/// off-box, non-lifeline raw peer is always unauthorized and is served only
+/// when the operator opened the raw edges to the LAN
+/// ([`WsProxyAuth::with_raw_lan_access`]). With `enforce` off the gate is
+/// observe-only for an unpaired node: an unauthorized connection is logged
+/// and STILL admitted. With it on, an unauthorized connection is refused at
+/// the handshake (WebSocket) or before any bytes are read (TCP, UDP).
 ///
-/// The byte-stream edges add one gate of their own on a PAIRED node: an
-/// off-box raw peer can never present the key, so it is served only when the
-/// operator opted the raw edges into LAN access
-/// ([`WsProxyAuth::with_raw_lan_access`]). Without that opt-in a paired node's
-/// raw proxies serve on-box callers only, whatever `enforce` says.
+/// On a PAIRED node the raw edges ignore `enforce`: without the LAN opt-in
+/// they serve on-box callers only, and with it they serve the LAN.
 ///
 /// The byte-stream proxies share this gate with the WebSocket, so the name is
 /// an alias rather than a second type: one posture, three edges.
@@ -139,13 +138,14 @@ impl WsProxyAuth {
         Self::new(enforce, path)
     }
 
-    /// Open the raw byte-stream edges (TCP, UDP) to off-box peers on a PAIRED
-    /// node (`mavlink.raw_proxy_lan_access`). Those edges carry no credential
-    /// channel, so on a paired node an off-box peer is always unauthorized;
-    /// without this opt-in it is refused, which makes the raw proxies on-box
-    /// only once the node is paired. With it, the peer is served unless
-    /// `enforce` is also on. Consulted only by [`Self::classify`]; the
-    /// WebSocket authenticates its callers instead.
+    /// Open the raw byte-stream edges (TCP, UDP) to off-box peers
+    /// (`mavlink.raw_proxy_lan_access`). Those edges carry no credential
+    /// channel, so an off-box, non-lifeline peer is always unauthorized; this
+    /// opt-in is what serves it (a desktop ground station on the LAN). Without
+    /// it a paired node's raw proxies are on-box only, and an unpaired node's
+    /// serve on-box callers and lifelines unless `enforce` is off. Consulted
+    /// only by [`Self::classify`]; the WebSocket authenticates its callers
+    /// instead.
     pub fn with_raw_lan_access(mut self, open: bool) -> Self {
         self.raw_lan_access = open;
         self
@@ -184,8 +184,9 @@ impl WsProxyAuth {
         let Some(token) = extract_ticket(offered) else {
             return false;
         };
+        // Spent on use: a ticket lifted from a log cannot open a second socket.
         WsTicketIssuer::from_api_key(&key)
-            .verify(token, SCOPE_MAVLINK_WS, now_unix())
+            .verify_once(token, SCOPE_MAVLINK_WS, now_unix())
             .is_ok()
     }
 
@@ -196,10 +197,10 @@ impl WsProxyAuth {
     /// present. Returns `(admit, access)`:
     ///
     /// - an authorized caller (on-box; a lifeline while unpaired) is admitted;
-    /// - on a PAIRED node any other caller is admitted only when the raw edges
-    ///   were opened to the LAN AND enforcement is off;
-    /// - on an UNPAIRED node any other caller is admitted only when
-    ///   enforcement is off (observe-only).
+    /// - any other caller is admitted when the operator opened the raw edges
+    ///   to the LAN;
+    /// - otherwise, on an UNPAIRED node it is admitted only when enforcement
+    ///   is off (observe-only), and on a PAIRED node never.
     ///
     /// `local` is the address the peer reached (see
     /// [`ados_protocol::pairing_posture::classify_caller`]); a private-LAN peer
@@ -219,8 +220,8 @@ impl WsProxyAuth {
         );
         let admit = match (access, &pairing) {
             (Access::Accept, _) => true,
-            (Access::Unauthorized, Pairing::Paired(_)) => self.raw_lan_access && !self.enforce,
-            (Access::Unauthorized, Pairing::Unpaired) => !self.enforce,
+            (Access::Unauthorized, Pairing::Paired(_)) => self.raw_lan_access,
+            (Access::Unauthorized, Pairing::Unpaired) => self.raw_lan_access || !self.enforce,
             (Access::Unauthorized, Pairing::Unreadable) => false,
         };
         (admit, access)
@@ -1064,8 +1065,8 @@ mod tests {
                         5760,
                         edge
                     ),
-                    None,
-                    "{ip} on {edge:?}: enforcement still refuses an opted-in LAN peer"
+                    Some(ClientOrigin::Unauthenticated),
+                    "{ip} on {edge:?}: the opt-in serves the LAN under the enforcing default too"
                 );
             }
         }
@@ -1079,6 +1080,49 @@ mod tests {
                 RawEdge::Tcp
             ),
             Some(ClientOrigin::Trusted)
+        );
+    }
+
+    #[test]
+    fn by_default_an_unpaired_node_refuses_lan_peers_on_the_raw_edges() {
+        // The shipped posture: with the config defaults, a host on the same
+        // LAN or hotspot cannot open 5760/14550 and command a never-paired
+        // drone, while the on-box operator and the first-boot lifelines still
+        // get in. The operator's LAN opt-in is what serves a desktop station.
+        let cfg = crate::config::MavlinkConfig::default();
+        let dir = tempfile::tempdir().unwrap();
+        let unpaired = dir.path().join("absent.json");
+        let auth = ProxyAuth::new(cfg.raw_proxy_enforce_auth, unpaired.clone())
+            .with_raw_lan_access(cfg.raw_proxy_lan_access);
+        let lan: std::net::IpAddr = "192.168.1.50".parse().unwrap();
+        for edge in [RawEdge::Tcp, RawEdge::Udp] {
+            assert_eq!(
+                admit_raw_peer(&auth, lan, None, 5760, edge),
+                None,
+                "{edge:?}"
+            );
+            assert_eq!(
+                admit_raw_peer(
+                    &auth,
+                    "192.168.4.20".parse().unwrap(),
+                    lifeline_local("192.168.4.20"),
+                    5760,
+                    edge
+                ),
+                Some(ClientOrigin::Trusted),
+                "{edge:?}: a lifeline is still served"
+            );
+            assert_eq!(
+                admit_raw_peer(&auth, "127.0.0.1".parse().unwrap(), None, 5760, edge),
+                Some(ClientOrigin::Trusted),
+                "{edge:?}: the on-box operator is still served"
+            );
+        }
+        let opted_in =
+            ProxyAuth::new(cfg.raw_proxy_enforce_auth, unpaired).with_raw_lan_access(true);
+        assert_eq!(
+            admit_raw_peer(&opted_in, lan, None, 5760, RawEdge::Tcp),
+            Some(ClientOrigin::Unauthenticated)
         );
     }
 
@@ -1245,6 +1289,7 @@ mod tests {
             let (_d, auth) = paired_auth(enforce, "ados_secret");
             let token = WsTicketIssuer::from_api_key("ados_secret")
                 .mint(SCOPE_MAVLINK_WS, 30)
+                .unwrap()
                 .token;
             let offered = vec!["ados-ws-ticket".to_string(), token];
             // off-box, no key, but a valid ticket => Accept under either flag.
@@ -1261,6 +1306,7 @@ mod tests {
         let (_d, auth) = paired_auth(true, "ados_secret");
         let token = WsTicketIssuer::from_api_key("a-different-key")
             .mint(SCOPE_MAVLINK_WS, 30)
+            .unwrap()
             .token;
         let offered = vec!["ados-ws-ticket".to_string(), token];
         let (admit, access) = auth.should_admit(LAN, None, &offered);
@@ -1275,6 +1321,7 @@ mod tests {
         let (_d, auth) = paired_auth(true, "ados_secret");
         let token = WsTicketIssuer::from_api_key("ados_secret")
             .mint("gs.pic_events", 30)
+            .unwrap()
             .token;
         let offered = vec!["ados-ws-ticket".to_string(), token];
         let (admit, _access) = auth.should_admit(LAN, None, &offered);

@@ -33,7 +33,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use ados_protocol::dashboard_session::DashboardSession;
-use ados_protocol::pairing_posture::{constant_time_eq, CallerClass, Pairing};
+use ados_protocol::pairing_posture::{CallerClass, Pairing};
 
 use crate::dashboard_pin::{PeerKey, PinStatus, VerifyOutcome, DASHBOARD_SESSION_HEADER};
 use crate::routes::detail;
@@ -127,11 +127,10 @@ pub async fn set_pin(
     // request that somehow carries none is treated as remote.
     let caller = caller.map_or(CallerClass::Remote, |Extension(c)| c);
 
-    // A valid pairing key (the GCS holds it).
-    let key_valid = match (&pairing, header(&headers, "x-ados-key")) {
-        (Pairing::Paired(k), Some(key)) => constant_time_eq(key.as_bytes(), k.as_bytes()),
-        _ => false,
-    };
+    // A valid credential (the pairing key the GCS holds, or the configured key).
+    let key_valid = state
+        .pairing
+        .credential_valid(header(&headers, "x-ados-key").as_deref());
     // A valid current dashboard session (a browser already unlocked).
     let session_valid = header(&headers, DASHBOARD_SESSION_HEADER)
         .map(|t| state.dashboard_pin.session_valid_for(&pairing, &t))

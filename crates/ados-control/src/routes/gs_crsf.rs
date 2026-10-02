@@ -8,12 +8,15 @@
 //! - **`POST /api/v1/ground-station/crsf/channels`** — programmatic channel
 //!   injection, forwarded as a `set_channels` op to the lane daemon's command
 //!   socket at `crsf-cmd.sock`. The body carries the 16 channel values plus
-//!   an optional time-to-live and client id; the daemon validates the values,
-//!   applies its TTL discipline, and replies with the live authority.
+//!   an optional time-to-live, client id and client ticket; the daemon
+//!   validates the values, applies its TTL discipline, and replies with the
+//!   live authority.
 //! - **`POST /api/v1/ground-station/crsf/params`** — an RC-module
 //!   configuration parameter write (the packet-rate / TX-power / telemetry
 //!   surface), forwarded as a `param_write` op; the daemon frames it and
-//!   queues it on the transmit lane.
+//!   queues it on the transmit lane. Refused while the vehicle is armed unless
+//!   the body says `"force": true`: a rate or power change mid-flight can break
+//!   the RC link.
 //!
 //! ## Why the writes forward to the lane's command socket
 //!
@@ -177,7 +180,8 @@ fn command_response(outcome: Option<Value>) -> Response {
 
 /// The channel-injection request body. The daemon validates the values
 /// (16 channels, each 172..=1811) and clamps the TTL; `client_id` names the
-/// injector for the hybrid PIC-holder authority decision.
+/// injector for the hybrid PIC-holder authority decision, and `client_ticket`
+/// is the attestation `pic/claim` (or `pic/heartbeat`) handed that client.
 #[derive(Debug, Deserialize)]
 pub struct CrsfChannelsBody {
     pub channels: Vec<u16>,
@@ -185,38 +189,19 @@ pub struct CrsfChannelsBody {
     pub ttl_ms: Option<u64>,
     #[serde(default)]
     pub client_id: Option<String>,
-}
-
-/// How long an injector attestation is good for.
-///
-/// One is minted per request, so this only has to cover the hop from here to
-/// the daemon's socket; it is generous against a slow node rather than sized
-/// for reuse.
-const INJECTOR_TICKET_TTL_SECONDS: i64 = 30;
-
-/// Attest a claimed injector id for the daemon.
-///
-/// This route is the boundary that can actually say something about who is
-/// calling: it sits behind the agent's data-plane auth, so reaching it means
-/// holding the pairing key or being the local operator. The daemon's command
-/// socket is not that boundary — it is group-reachable — so a name arriving
-/// there on its own means nothing, and used to be enough to claim the pilot's
-/// authority by simply repeating the pilot's name back.
-///
-/// Minting here converts "this caller cleared the API gate" into something the
-/// daemon can check without sharing state with this process. On an unpaired
-/// node there is no key and nothing to attest with; the daemon accepts a bare
-/// name in that state, which is the same posture this route itself takes.
-fn attest_injector(state: &AppState, client_id: &str) -> Option<String> {
-    ados_protocol::ws_ticket::mint_scoped_ticket(
-        &state.pairing_paths.pairing_json,
-        &ados_protocol::ws_ticket::crsf_inject_scope(client_id),
-        INJECTOR_TICKET_TTL_SECONDS,
-    )
+    #[serde(default)]
+    pub client_ticket: Option<String>,
 }
 
 /// `POST /api/v1/ground-station/crsf/channels` → inject the transmitted
 /// channel set (with its TTL) through the lane daemon.
+///
+/// The injector's identity is the attestation the PIC arbiter's routes issued
+/// to the client granted PIC under that name, forwarded as presented. This
+/// route mints nothing: minting here attested whatever name the body carried,
+/// so naming the current pilot (readable from `GET /pic`) was enough to claim
+/// the pilot's authority. A name with no attestation reaches the daemon bare
+/// and is treated as an unattested injector.
 pub async fn post_crsf_channels(
     State(state): State<AppState>,
     Json(body): Json<CrsfChannelsBody>,
@@ -224,6 +209,11 @@ pub async fn post_crsf_channels(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
+    command_response(crsf_cmd(&crsf_cmd_sock(), &channels_request(body)).await)
+}
+
+/// The `set_channels` op for a channel-injection body.
+fn channels_request(body: CrsfChannelsBody) -> Value {
     let mut request = json!({"op": "set_channels", "channels": body.channels});
     if let Some(ttl_ms) = body.ttl_ms {
         request["ttl_ms"] = json!(ttl_ms);
@@ -231,12 +221,12 @@ pub async fn post_crsf_channels(
     if let Some(client_id) = body.client_id {
         // The attestation rides alongside the name, never instead of it: the
         // daemon logs the name and decides authority on the attestation.
-        if let Some(ticket) = attest_injector(&state, &client_id) {
+        if let Some(ticket) = body.client_ticket.filter(|t| !t.is_empty()) {
             request["client_ticket"] = json!(ticket);
         }
         request["client_id"] = json!(client_id);
     }
-    command_response(crsf_cmd(&crsf_cmd_sock(), &request).await)
+    request
 }
 
 // ---------------------------------------------------------------------------
@@ -250,6 +240,23 @@ pub struct CrsfParamWriteBody {
     pub field_index: u8,
     #[serde(default)]
     pub data: Vec<u8>,
+    /// Write even though the vehicle is armed.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// How old the vehicle state may be before the vehicle is assumed armed.
+const ARMED_STATE_MAX_AGE: Duration = Duration::from_secs(3);
+
+/// Whether the vehicle should be treated as armed: the latest state says so,
+/// or there is no state newer than [`ARMED_STATE_MAX_AGE`] to say otherwise.
+fn vehicle_treated_as_armed(snapshot: Option<(std::time::Instant, Value)>) -> bool {
+    match snapshot {
+        Some((at, state)) if at.elapsed() <= ARMED_STATE_MAX_AGE => {
+            state.get("armed").and_then(Value::as_bool) != Some(false)
+        }
+        _ => true,
+    }
 }
 
 /// `POST /api/v1/ground-station/crsf/params` → queue an RC-module parameter
@@ -260,6 +267,17 @@ pub async fn post_crsf_param_write(
 ) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
+    }
+    if !body.force && vehicle_treated_as_armed(state.state.snapshot_at()) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "E_ARMED",
+                "message": "Vehicle is armed",
+                "override": "force",
+            })),
+        )
+            .into_response();
     }
     let request = json!({
         "op": "param_write",
@@ -427,5 +445,46 @@ mod tests {
         let resp = command_response(Some(reply.clone()));
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await, reply);
+    }
+
+    #[test]
+    fn a_named_injector_is_forwarded_with_only_the_attestation_it_presented() {
+        // Naming the current pilot must not be enough: nothing is minted for
+        // the name, so a bare name stays unattested.
+        let bare = channels_request(CrsfChannelsBody {
+            channels: vec![992; 16],
+            ttl_ms: None,
+            client_id: Some("pilot".into()),
+            client_ticket: None,
+        });
+        assert_eq!(bare["client_id"], "pilot");
+        assert!(bare.get("client_ticket").is_none());
+        let attested = channels_request(CrsfChannelsBody {
+            channels: vec![992; 16],
+            ttl_ms: None,
+            client_id: Some("pilot".into()),
+            client_ticket: Some("issued-at-claim".into()),
+        });
+        assert_eq!(attested["client_ticket"], "issued-at-claim");
+    }
+
+    #[test]
+    fn rf_writes_treat_an_armed_or_unknown_vehicle_as_armed() {
+        let now = std::time::Instant::now();
+        assert!(vehicle_treated_as_armed(None), "no state fails closed");
+        assert!(vehicle_treated_as_armed(Some((
+            now,
+            json!({"armed": true})
+        ))));
+        assert!(!vehicle_treated_as_armed(Some((
+            now,
+            json!({"armed": false})
+        ))));
+        assert!(vehicle_treated_as_armed(Some((now, json!({})))));
+        let stale = now - ARMED_STATE_MAX_AGE - Duration::from_secs(1);
+        assert!(
+            vehicle_treated_as_armed(Some((stale, json!({"armed": false})))),
+            "state older than the bound proves nothing"
+        );
     }
 }

@@ -79,6 +79,7 @@ pub mod msp;
 pub mod netif;
 pub mod node_info;
 pub mod node_status;
+pub mod nonce_cache;
 pub mod offload_link;
 pub mod pair_proof;
 pub mod pairing_posture;

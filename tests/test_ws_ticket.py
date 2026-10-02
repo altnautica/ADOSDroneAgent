@@ -17,18 +17,25 @@ def test_cross_language_vector_matches_rust():
     pins. If this drifts, cross-language tickets silently stop verifying — the
     two implementations MUST change in lockstep."""
     token = mint_ticket(
-        SCOPE_MAVLINK_WS, api_key="ados_secret", ttl_seconds=30, now=1_000_000
+        SCOPE_MAVLINK_WS,
+        api_key="ados_secret",
+        ttl_seconds=30,
+        now=1_000_000,
+        nonce="00112233445566778899aabbccddeeff",
     )
     assert token == (
-        "v1|gs.mavlink_ws|1000000|1000030|"
-        "655a695c0b38fa07b830a7ca3534a4cd6ef95831fb5e523cc98871bbef191413"
+        "v2|gs.mavlink_ws|1000000|1000030|00112233445566778899aabbccddeeff|"
+        "4d99ddf7a9dc48119b137be1fe135a50f7618a77f44d3a104e5ccac9171193e7"
     )
 
 
-def test_round_trip_verifies():
+def test_round_trip_verifies_once():
     token = mint_ticket(SCOPE_MAVLINK_WS, api_key="k", ttl_seconds=30, now=1000)
-    assert verify_ticket(token, expected_scope=SCOPE_MAVLINK_WS, api_key="k", now=1000)
     assert verify_ticket(token, expected_scope=SCOPE_MAVLINK_WS, api_key="k", now=1029)
+    # The same ticket cannot open a second socket.
+    assert not verify_ticket(
+        token, expected_scope=SCOPE_MAVLINK_WS, api_key="k", now=1029
+    )
 
 
 def test_rejects_expiry_scope_key_and_tamper():
@@ -47,14 +54,21 @@ def test_rejects_expiry_scope_key_and_tamper():
     )
     # Tampered expiry, original signature.
     parts = token.split("|")
-    forged = f"v1|{parts[1]}|{parts[2]}|99999|{parts[4]}"
+    forged = f"v2|{parts[1]}|{parts[2]}|99999|{parts[4]}|{parts[5]}"
     assert not verify_ticket(
         forged, expected_scope=SCOPE_MAVLINK_WS, api_key="k", now=1000
     )
 
 
 def test_rejects_malformed():
-    for bad in ["", "v2|s|1|2|ff", "v1|s|notanint|2|ff", "v1|s|1|2|nothex"]:
+    nonce = "00112233445566778899aabbccddeeff"
+    for bad in [
+        "",
+        "v1|s|1|2|ff",
+        f"v2|s|notanint|2|{nonce}|ff",
+        f"v2|s|1|2|{nonce}|nothex",
+        "v2|s|1|2|short|ff",
+    ]:
         assert not verify_ticket(bad, expected_scope="s", api_key="k", now=0)
 
 

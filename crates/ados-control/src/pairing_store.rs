@@ -23,6 +23,15 @@
 //!
 //! Both writes are atomic (temp sibling + fsync + rename) and 0600, matching the
 //! Python `atomic_write_json(..., mode=0o600, indent=2)`.
+//!
+//! ## One writer at a time
+//!
+//! Every writer — the claim, unpair and code routes here and the Python
+//! `PairingManager` — holds [`lock_writers`] across its read-check-write: a
+//! process-wide async mutex plus an exclusive `flock` on the sibling
+//! `pairing.json.lock` the Python writer takes too. Without it two concurrent
+//! claims each minted and returned a different key, and a Python code
+//! regeneration racing a claim could overwrite the paired document.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -45,6 +54,80 @@ const CODE_LENGTH: usize = 6;
 /// `secrets.token_urlsafe(32)`.
 const API_KEY_RANDOM_BYTES: usize = 32;
 
+/// How long an unpaired node's pairing code lives before it is regenerated.
+/// Matches the Python `CODE_TTL`, so every surface shows the same code.
+pub const CODE_TTL_SECONDS: f64 = 24.0 * 60.0 * 60.0;
+
+/// How long a writer waits for another writer's lock. A holder keeps it for one
+/// read plus one atomic write; the same bound the Python writer uses.
+const WRITE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Serialises this process's writers before they contend on the file lock, so
+/// two requests in one process queue rather than poll.
+static PROCESS_WRITERS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The lock file guarding `pairing_json`: the sibling `<name>.lock`.
+pub fn lock_path_for(pairing_json: &Path) -> std::path::PathBuf {
+    let mut name = pairing_json
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".lock");
+    pairing_json.with_file_name(name)
+}
+
+/// Held while a writer reads, checks and rewrites `pairing.json`. Dropping it
+/// releases both locks.
+pub struct WriterLock {
+    _process: tokio::sync::MutexGuard<'static, ()>,
+    _file: std::fs::File,
+}
+
+/// Take the pairing write lock for `pairing_json`.
+pub async fn lock_writers(pairing_json: &Path) -> std::io::Result<WriterLock> {
+    let process = PROCESS_WRITERS.lock().await;
+    let lock_path = lock_path_for(pairing_json);
+    let file = tokio::task::spawn_blocking(move || acquire_file_lock(&lock_path))
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))??;
+    Ok(WriterLock {
+        _process: process,
+        _file: file,
+    })
+}
+
+/// The exclusive `flock`, polled until [`WRITE_LOCK_TIMEOUT`] (a blocking
+/// `flock` cannot be given a deadline).
+fn acquire_file_lock(lock_path: &Path) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(0o600);
+    }
+    let file = opts.open(lock_path)?;
+    let deadline = std::time::Instant::now() + WRITE_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("{} held by another writer", lock_path.display()),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(std::fs::TryLockError::Error(e)) => return Err(e),
+        }
+    }
+}
+
 /// The read view of the pairing document the pairing-info route projects. Only
 /// the cloud-pair fields the route surfaces are typed; every other key is
 /// tolerated. An absent file reads as the all-`None` unpaired default; an
@@ -63,6 +146,8 @@ pub struct PairingDoc {
     pub paired_at: Option<f64>,
     #[serde(default)]
     pub pairing_code: Option<String>,
+    #[serde(default)]
+    pub code_created_at: Option<f64>,
     #[serde(default)]
     pub pending_api_key: Option<String>,
 }
@@ -114,15 +199,16 @@ impl PairingDoc {
         }
     }
 
-    /// The `pairing_code` the pairing-info route reports — only when UNPAIRED.
-    /// The Python `get_info()` returns the live code while unpaired and omits it
-    /// (`None`) while paired.
-    pub fn info_pairing_code(&self) -> Option<String> {
+    /// The code an unpaired node holds, when it is still inside
+    /// [`CODE_TTL_SECONDS`] at `now`. `None` when paired, absent or expired; a
+    /// caller that needs one regenerates it under [`lock_writers`].
+    pub fn live_code(&self, now: f64) -> Option<String> {
         if self.paired {
-            None
-        } else {
-            self.pairing_code.clone()
+            return None;
         }
+        let code = self.pairing_code.clone().filter(|c| !c.is_empty())?;
+        let created = self.code_created_at.unwrap_or(0.0);
+        (now - created < CODE_TTL_SECONDS).then_some(code)
     }
 }
 
@@ -272,28 +358,89 @@ pub fn remove_relay_secret(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Persist a fresh pairing code, mirroring the `code`-writing branch of
-/// `PairingManager.get_or_create_code` after an unpair: write
-/// `{pairing_code, code_created_at}` (the Python `unpair` then `get_or_create_code`
-/// sequence). Returns the new code. `now` is the `code_created_at` timestamp.
+/// Make sure an unpaired node holds a live pairing code AND a pending API key,
+/// mirroring `PairingManager.get_or_create_code`: the code and the key always
+/// travel together, so the key a cloud pair beacon advertises is the key a
+/// claim later persists. Returns the code on file afterwards. `now` is the
+/// `code_created_at` stamp of a newly minted code. The caller holds
+/// [`lock_writers`].
 ///
-/// Fails closed on a `getrandom` error: a code is credential-adjacent, so the
-/// caller surfaces the error rather than persisting a predictable code.
+/// A code still inside [`CODE_TTL_SECONDS`] is kept; an absent or expired one
+/// is replaced. A pending key on file is kept; an absent one is minted. When
+/// both are already present nothing is written.
+///
+/// Refuses a paired or unreadable document: a code belongs to an unpaired
+/// node, and overwriting a file that could not be read may destroy a live
+/// pairing. Fails closed on a `getrandom` error: a code and a key are
+/// credential-adjacent, so the caller surfaces the error rather than
+/// persisting a predictable value.
+pub fn ensure_code(path: &Path, now: f64) -> std::io::Result<String> {
+    let current = PairingDoc::read(path).map_err(std::io::Error::other)?;
+    if current.paired {
+        return Err(std::io::Error::other("already paired"));
+    }
+    let pending = current.pending_api_key.clone().filter(|k| !k.is_empty());
+    match (current.live_code(now), pending) {
+        (Some(code), Some(_)) => Ok(code),
+        (Some(code), None) => {
+            let created = current.code_created_at.unwrap_or(now);
+            write_code_state(path, &code, created, &mint_key()?)?;
+            Ok(code)
+        }
+        (None, pending) => {
+            let code = generate_code().map_err(|e| std::io::Error::other(e.to_string()))?;
+            let key = match pending {
+                Some(key) => key,
+                None => mint_key()?,
+            };
+            write_code_state(path, &code, now, &key)?;
+            Ok(code)
+        }
+    }
+}
+
+/// Replace the pairing code after an unpair, with a pending key beside it.
+/// The caller holds [`lock_writers`] and has just cleared the document.
 pub fn write_new_code(path: &Path, now: f64) -> std::io::Result<String> {
+    let current = PairingDoc::read(path).map_err(std::io::Error::other)?;
+    if current.paired {
+        return Err(std::io::Error::other("already paired"));
+    }
+    let code = generate_code().map_err(|e| std::io::Error::other(e.to_string()))?;
+    let key = match current.pending_api_key.filter(|k| !k.is_empty()) {
+        Some(key) => key,
+        None => mint_key()?,
+    };
+    write_code_state(path, &code, now, &key)?;
+    Ok(code)
+}
+
+fn mint_key() -> std::io::Result<String> {
+    generate_api_key().map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+/// Write the unpaired document: the code, its creation stamp and the pending
+/// key, in the order the Python writer leaves them.
+fn write_code_state(
+    path: &Path,
+    code: &str,
+    created_at: f64,
+    pending_key: &str,
+) -> std::io::Result<()> {
     #[derive(Serialize)]
     struct CodeState<'a> {
         pairing_code: &'a str,
         code_created_at: f64,
+        pending_api_key: &'a str,
     }
-    let code = generate_code().map_err(|e| std::io::Error::other(e.to_string()))?;
     let state = CodeState {
-        pairing_code: &code,
-        code_created_at: now,
+        pairing_code: code,
+        code_created_at: created_at,
+        pending_api_key: pending_key,
     };
     let body =
         serde_json::to_vec_pretty(&state).map_err(|e| std::io::Error::other(e.to_string()))?;
-    atomic_write_0600(path, &body)?;
-    Ok(code)
+    atomic_write_0600(path, &body)
 }
 
 /// Atomic 0600 write: temp sibling + write + flush + fsync + rename, mirroring
@@ -548,14 +695,45 @@ mod tests {
     }
 
     #[test]
-    fn write_new_code_persists_a_fresh_six_char_code() {
+    fn write_new_code_persists_a_fresh_six_char_code_and_keeps_the_pending_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pairing.json");
+        std::fs::write(&path, r#"{"pending_api_key":"ados_beacon"}"#).unwrap();
         let code = write_new_code(&path, 99.0).unwrap();
         assert_eq!(code.len(), CODE_LENGTH);
         let on_disk = read_json(&path);
         assert_eq!(on_disk["pairing_code"], Value::String(code));
         assert_eq!(on_disk["code_created_at"], serde_json::json!(99.0));
+        assert_eq!(on_disk["pending_api_key"], "ados_beacon");
+    }
+
+    #[test]
+    fn a_new_code_without_a_pending_key_mints_one_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pairing.json");
+        write_new_code(&path, 99.0).unwrap();
+        let key = read_json(&path)["pending_api_key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(key.starts_with("ados_"));
+        // Keeping a live code and its key writes nothing new.
+        let code = read_json(&path)["pairing_code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(ensure_code(&path, 100.0).unwrap(), code);
+        assert_eq!(read_json(&path)["pending_api_key"], Value::String(key));
+    }
+
+    #[test]
+    fn a_new_code_never_overwrites_a_paired_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pairing.json");
+        let paired = r#"{"paired":true,"api_key":"k"}"#;
+        std::fs::write(&path, paired).unwrap();
+        assert!(write_new_code(&path, 99.0).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), paired);
     }
 
     #[test]
@@ -571,18 +749,20 @@ mod tests {
         assert!(doc.is_paired());
         assert_eq!(doc.info_owner_id(), Some("user-42".to_string()));
         assert_eq!(doc.info_paired_at(), Some(1700000000.0));
-        // Paired → code omitted from info even if a stale code lingers in the file.
-        assert_eq!(doc.info_pairing_code(), None);
+        // Paired → no code, even if a stale code lingers in the file.
+        assert_eq!(doc.live_code(2.0), None);
     }
 
     #[test]
-    fn load_reports_the_code_only_when_unpaired() {
+    fn a_code_is_live_only_inside_its_lifetime_and_only_when_unpaired() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pairing.json");
         std::fs::write(&path, r#"{"pairing_code":"ABC234","code_created_at":1.0}"#).unwrap();
         let doc = PairingDoc::read(&path).unwrap();
         assert!(!doc.is_paired());
-        assert_eq!(doc.info_pairing_code(), Some("ABC234".to_string()));
+        assert_eq!(doc.live_code(2.0), Some("ABC234".to_string()));
+        // The same lifetime the Python writer applies, so both surfaces agree.
+        assert_eq!(doc.live_code(1.0 + CODE_TTL_SECONDS), None);
         // Unpaired → owner/paired_at omitted.
         assert_eq!(doc.info_owner_id(), None);
         assert_eq!(doc.info_paired_at(), None);
@@ -594,7 +774,7 @@ mod tests {
         let doc = PairingDoc::read(&dir.path().join("absent.json")).unwrap();
         assert!(!doc.is_paired());
         assert_eq!(doc.info_owner_id(), None);
-        assert_eq!(doc.info_pairing_code(), None);
+        assert_eq!(doc.live_code(0.0), None);
     }
 
     /// A present file that cannot be parsed is not "unpaired": reading it is an

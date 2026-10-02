@@ -37,15 +37,38 @@
 //!
 //! ## Shape
 //!
-//! Deliberately the same self-contained HMAC as [`crate::ws_ticket`]: no store,
-//! no lookup, no IPC between the minting process and the verifying one. They
-//! share only the secret. Domain-separated by its own label, so a ticket minted
-//! for one purpose can never be replayed as the other even though both derive
-//! from HMAC-SHA256.
+//! An HMAC over the request it accompanies, keyed from the per-pair secret and
+//! domain-separated by its own label so a ticket minted for one purpose can
+//! never verify as a WebSocket ticket even though both derive from
+//! HMAC-SHA256. The signed payload is
+//!
+//! ```text
+//! v2|{scope}|{target}|{issued_at}|{expires_at}|{nonce}|{METHOD}|{path_with_query}|{sha256_hex(body)}
+//! ```
+//!
+//! and the token on the wire is that payload followed by `|{hmac_hex}`.
+//!
+//! - **Bound to the request.** Every fleet member hears every ticket, because
+//!   the uplink is a broadcast. A ticket that named only its target could be
+//!   lifted off the air and replayed with any method, path and body against
+//!   the same aircraft; binding all three makes a captured ticket good for the
+//!   one request it was minted for and nothing else.
+//! - **Single use.** The 16-byte random nonce is remembered by the verifier
+//!   (see [`crate::nonce_cache`]) for at least [`REPLAY_RETENTION_SECONDS`],
+//!   so the same request cannot be played twice either.
+//! - **Tolerant of an unsynchronised clock.** A radio-only aircraft has no
+//!   time source but its own RTC, which can be minutes off after a reboot. The
+//!   lifetime is checked against the ticket's own `issued_at` (never longer
+//!   than [`TICKET_LIFETIME_SECONDS`]), and the verifier's clock may disagree
+//!   with the minter's by up to [`CLOCK_SKEW_TOLERANCE_SECONDS`] either way.
+//!   The nonce cache, not the clock, is what stops a replay inside that
+//!   window.
 
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+use crate::nonce_cache::NonceCache;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -54,7 +77,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// Distinct from the WS ticket's label on purpose: the two credentials protect
 /// different surfaces, and a token minted for one must not verify against the
 /// other even if a caller obtains it.
-pub const RELAY_KEY_LABEL: &[u8] = b"ados-relay-ticket-v1";
+pub const RELAY_KEY_LABEL: &[u8] = b"ados-relay-ticket-v2";
 
 /// Where the drone keeps the secret its ground station gave it. 0600, beside
 /// the plugin token secret, which is the established home for material like
@@ -64,22 +87,40 @@ pub const RELAY_SECRET_PATH: &str = "/etc/ados/secrets/relay-peer-secret";
 /// Secret length in bytes.
 pub const RELAY_SECRET_LEN: usize = 32;
 
-/// Default ticket lifetime.
+/// Ticket lifetime, `expires_at - issued_at`. A verifier refuses a ticket that
+/// claims a longer one.
 ///
 /// Short because a relayed request is a round trip over a radio, not a session:
-/// the ticket only has to outlive the call it accompanies. Long enough to
-/// tolerate the retransmit schedule, which can carry a request for several
-/// seconds on a lossy lane.
-pub const DEFAULT_TTL_SECONDS: i64 = 30;
+/// the ticket only has to outlive the call it accompanies, including the
+/// retransmit schedule on a lossy lane.
+pub const TICKET_LIFETIME_SECONDS: i64 = 30;
 
-/// Hard cap on a requested lifetime, so a caller cannot mint a long-lived
-/// bearer by asking for one.
-pub const MAX_TTL_SECONDS: i64 = 120;
+/// How far the verifier's wall clock may disagree with the minter's, in either
+/// direction, before a ticket is refused as `clock_skew` (issued too far in
+/// the future) or `expired`.
+pub const CLOCK_SKEW_TOLERANCE_SECONDS: i64 = 300;
+
+/// How long a spent nonce is remembered, at minimum.
+pub const REPLAY_RETENTION_SECONDS: i64 = 600;
+
+/// How many spent nonces a verifier remembers before evicting the oldest.
+pub const REPLAY_CACHE_CAPACITY: usize = 4096;
 
 /// The scope a relayed HTTP call carries.
 pub const SCOPE_RELAY: &str = "relay.http";
 
-#[derive(Debug, Error, PartialEq, Eq)]
+/// The `error` code every relay-ticket refusal answers with.
+pub const RELAY_REFUSAL_CODE: &str = "E_RELAY_TICKET";
+
+/// The method a config-tunnel ticket is bound to. Not an HTTP verb, so a
+/// tunnel ticket can never authorize a relayed HTTP request or the reverse.
+pub const TUNNEL_BINDING_METHOD: &str = "TUNNEL";
+
+/// The path a config-tunnel ticket is bound to: the one surface the tunnel
+/// reaches.
+pub const TUNNEL_BINDING_PATH: &str = "/api/config";
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum RelayTicketError {
     /// This node holds no per-pair secret, so it cannot verify any ticket and
     /// has nothing to distinguish its own ground station from anything else
@@ -87,18 +128,112 @@ pub enum RelayTicketError {
     /// admitting would hand radio range this node's full on-box authority.
     #[error("no relay peer secret on file")]
     NoSecret,
+    /// Not a ticket of this version's shape.
     #[error("malformed relay ticket")]
     Malformed,
-    #[error("relay ticket timestamp is not an integer")]
-    BadTimestamp,
-    #[error("relay ticket signature is not valid hex")]
+    /// The HMAC does not verify under this node's secret.
+    #[error("relay ticket signature does not verify")]
     BadSignature,
-    #[error("relay ticket HMAC mismatch")]
-    HmacMismatch,
-    #[error("relay ticket scope mismatch")]
-    ScopeMismatch,
+    /// Authentic, but minted for a different scope, target, method, path or
+    /// body than the request it arrived with.
+    #[error("relay ticket is bound to a different request")]
+    BindingMismatch,
+    /// Its expiry is further in the past than the clock tolerance allows.
     #[error("relay ticket expired")]
     Expired,
+    /// Issued further in the future than the clock tolerance allows.
+    #[error("relay ticket issued in the future beyond the clock tolerance")]
+    ClockSkew,
+    /// Its nonce has already been spent.
+    #[error("relay ticket already used")]
+    Replayed,
+}
+
+impl RelayTicketError {
+    /// The `reason` string a refusal body carries.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::NoSecret => "no_secret",
+            Self::Malformed | Self::BadSignature => "bad_signature",
+            Self::BindingMismatch => "binding_mismatch",
+            Self::Expired => "expired",
+            Self::ClockSkew => "clock_skew",
+            Self::Replayed => "replayed",
+        }
+    }
+}
+
+/// The reason a ground station refuses to relay at all because the drone holds
+/// a secret issued by a different ground station.
+pub const SECRET_CONFLICT_REASON: &str = "secret_conflict";
+
+/// The JSON body of a relay-ticket refusal:
+/// `{"error":"E_RELAY_TICKET","reason":"<reason>"}`. Answered with HTTP 401.
+pub fn refusal_body(reason: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "error": RELAY_REFUSAL_CODE,
+        "reason": reason,
+    }))
+    .unwrap_or_default()
+}
+
+/// The request a ticket is bound to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestBinding<'a> {
+    /// Upper-case HTTP method, or [`TUNNEL_BINDING_METHOD`].
+    pub method: &'a str,
+    /// The path exactly as the verifier will see it, including any query
+    /// string and still percent-encoded.
+    pub path: &'a str,
+    /// The request body bytes.
+    pub body: &'a [u8],
+}
+
+impl<'a> RequestBinding<'a> {
+    pub fn new(method: &'a str, path: &'a str, body: &'a [u8]) -> Self {
+        Self { method, path, body }
+    }
+}
+
+/// The body a config-tunnel request's ticket binds: the op, key and value of
+/// the request object, ignoring the `ticket` field itself.
+///
+/// Built from the parsed JSON rather than the raw bytes so the minting side
+/// (which inserts the ticket into the object) and the verifying side (which
+/// receives it there) agree without either depending on key order.
+pub fn tunnel_binding_body(request: &serde_json::Value) -> Vec<u8> {
+    let field = |name: &str| -> String {
+        match request.get(name) {
+            None | Some(serde_json::Value::Null) => String::new(),
+            Some(v) => v.to_string(),
+        }
+    };
+    format!("{}\n{}\n{}", field("op"), field("key"), field("value")).into_bytes()
+}
+
+/// What a verified ticket tells its verifier: the nonce to record as spent and
+/// the last second at which the ticket could still have verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRelayTicket {
+    pub nonce: String,
+    pub valid_until: i64,
+}
+
+impl VerifiedRelayTicket {
+    /// Spend the nonce in `cache`. A second use of the same ticket is
+    /// [`RelayTicketError::Replayed`].
+    pub fn spend(&self, cache: &NonceCache, now: i64) -> Result<(), RelayTicketError> {
+        if cache.admit(&self.nonce, now, self.valid_until) {
+            Ok(())
+        } else {
+            Err(RelayTicketError::Replayed)
+        }
+    }
+}
+
+/// A replay cache sized for relay tickets.
+pub const fn new_replay_cache() -> NonceCache {
+    NonceCache::new(REPLAY_CACHE_CAPACITY, REPLAY_RETENTION_SECONDS)
 }
 
 /// Mints and verifies relay tickets from a per-pair secret.
@@ -120,62 +255,77 @@ impl RelayTicketIssuer {
         }
     }
 
-    /// Mint a ticket naming the drone it is for, valid for `ttl_seconds`.
-    ///
-    /// The target device id is signed, not merely carried, so a ticket minted
-    /// for one drone cannot be lifted and replayed against another — which
-    /// matters precisely because the uplink is a broadcast every drone hears.
-    pub fn mint_at(&self, target: &str, ttl_seconds: i64, now: i64) -> String {
-        let ttl = ttl_seconds.clamp(1, MAX_TTL_SECONDS);
-        let expires_at = now.saturating_add(ttl);
-        let payload = sign_payload(SCOPE_RELAY, target, now, expires_at);
+    /// Mint a ticket for `request` addressed to `target`, issued at `now`,
+    /// with a fresh random nonce. `None` only when the system cannot supply
+    /// randomness.
+    pub fn mint(&self, target: &str, request: &RequestBinding<'_>, now: i64) -> Option<String> {
+        let nonce = crate::nonce_cache::random_nonce_hex()?;
+        Some(self.mint_with_nonce(target, request, now, &nonce))
+    }
+
+    /// Deterministic mint core (explicit nonce) for tests.
+    pub fn mint_with_nonce(
+        &self,
+        target: &str,
+        request: &RequestBinding<'_>,
+        now: i64,
+        nonce: &str,
+    ) -> String {
+        let expires_at = now.saturating_add(TICKET_LIFETIME_SECONDS);
+        let payload = sign_payload(SCOPE_RELAY, target, now, expires_at, nonce, request);
         let signature = self.sign(&payload);
         format!("{payload}|{signature}")
     }
 
-    /// Verify a ticket: authenticity first, then who it names, then expiry.
+    /// Verify a ticket against the request it arrived with: authenticity
+    /// first, then what it is bound to, then time.
     ///
-    /// Order matters. Checking the target or the clock before the HMAC would
+    /// Order matters. Checking the binding or the clock before the HMAC would
     /// answer questions about a string nobody has shown to be ours.
+    ///
+    /// This does NOT spend the nonce; the caller does that with
+    /// [`VerifiedRelayTicket::spend`] at the point where a second arrival
+    /// would re-execute the request.
     pub fn verify(
         &self,
         token: &str,
         expected_target: &str,
+        request: &RequestBinding<'_>,
         now: i64,
-    ) -> Result<(), RelayTicketError> {
-        let parts: Vec<&str> = token.split('|').collect();
-        if parts.len() != 6 || parts[0] != "v1" {
-            return Err(RelayTicketError::Malformed);
-        }
-        let scope = parts[1];
-        let target = parts[2];
-        let _issued: i64 = parts[3]
-            .parse()
-            .map_err(|_| RelayTicketError::BadTimestamp)?;
-        let expires_at: i64 = parts[4]
-            .parse()
-            .map_err(|_| RelayTicketError::BadTimestamp)?;
-        let sig = hex::decode(parts[5]).map_err(|_| RelayTicketError::BadSignature)?;
-
-        // Recompute over the exact signed substring, so reformatting can never
-        // drift from what was signed.
-        let payload = parts[..5].join("|");
+    ) -> Result<VerifiedRelayTicket, RelayTicketError> {
+        let parsed = ParsedTicket::parse(token)?;
+        let sig = hex::decode(parsed.signature).map_err(|_| RelayTicketError::BadSignature)?;
         let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC accepts any key length");
-        mac.update(payload.as_bytes());
+        mac.update(parsed.payload.as_bytes());
         // Constant-time.
         mac.verify_slice(&sig)
-            .map_err(|_| RelayTicketError::HmacMismatch)?;
+            .map_err(|_| RelayTicketError::BadSignature)?;
 
-        if scope != SCOPE_RELAY {
-            return Err(RelayTicketError::ScopeMismatch);
+        if parsed.scope != SCOPE_RELAY
+            || parsed.target != expected_target
+            || parsed.method != request.method
+            || parsed.path != request.path
+            || parsed.body_sha256 != body_digest(request.body)
+        {
+            return Err(RelayTicketError::BindingMismatch);
         }
-        if target != expected_target {
-            return Err(RelayTicketError::ScopeMismatch);
+        let lifetime = parsed.expires_at.saturating_sub(parsed.issued_at);
+        if !(1..=TICKET_LIFETIME_SECONDS).contains(&lifetime) {
+            return Err(RelayTicketError::Malformed);
         }
-        if now >= expires_at {
+        if parsed.issued_at > now.saturating_add(CLOCK_SKEW_TOLERANCE_SECONDS) {
+            return Err(RelayTicketError::ClockSkew);
+        }
+        let valid_until = parsed
+            .expires_at
+            .saturating_add(CLOCK_SKEW_TOLERANCE_SECONDS);
+        if now > valid_until {
             return Err(RelayTicketError::Expired);
         }
-        Ok(())
+        Ok(VerifiedRelayTicket {
+            nonce: parsed.nonce.to_owned(),
+            valid_until,
+        })
     }
 
     fn sign(&self, payload: &str) -> String {
@@ -185,9 +335,79 @@ impl RelayTicketIssuer {
     }
 }
 
-/// The signed substring: `v1|<scope>|<target>|<issued_at>|<expires_at>`.
-fn sign_payload(scope: &str, target: &str, issued_at: i64, expires_at: i64) -> String {
-    format!("v1|{scope}|{target}|{issued_at}|{expires_at}")
+/// The fields of a token, borrowed from it.
+struct ParsedTicket<'a> {
+    payload: &'a str,
+    signature: &'a str,
+    scope: &'a str,
+    target: &'a str,
+    issued_at: i64,
+    expires_at: i64,
+    nonce: &'a str,
+    method: &'a str,
+    path: &'a str,
+    body_sha256: &'a str,
+}
+
+impl<'a> ParsedTicket<'a> {
+    /// Split a token. The path is the one field that may itself contain `|`
+    /// (an unencoded query string can), so the fixed fields are taken from
+    /// both ends and the path is whatever lies between.
+    fn parse(token: &'a str) -> Result<Self, RelayTicketError> {
+        let (payload, signature) = token.rsplit_once('|').ok_or(RelayTicketError::Malformed)?;
+        let (head, body_sha256) = payload
+            .rsplit_once('|')
+            .ok_or(RelayTicketError::Malformed)?;
+        let mut fields = head.splitn(8, '|');
+        let mut next = || fields.next().ok_or(RelayTicketError::Malformed);
+        let version = next()?;
+        let scope = next()?;
+        let target = next()?;
+        let issued_at = next()?;
+        let expires_at = next()?;
+        let nonce = next()?;
+        let method = next()?;
+        let path = next()?;
+        if version != "v2" || nonce.len() != 32 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(RelayTicketError::Malformed);
+        }
+        Ok(Self {
+            payload,
+            signature,
+            scope,
+            target,
+            issued_at: issued_at.parse().map_err(|_| RelayTicketError::Malformed)?,
+            expires_at: expires_at
+                .parse()
+                .map_err(|_| RelayTicketError::Malformed)?,
+            nonce,
+            method,
+            path,
+            body_sha256,
+        })
+    }
+}
+
+/// Lowercase hex SHA-256 of a request body.
+fn body_digest(body: &[u8]) -> String {
+    hex::encode(Sha256::digest(body))
+}
+
+/// The signed substring.
+fn sign_payload(
+    scope: &str,
+    target: &str,
+    issued_at: i64,
+    expires_at: i64,
+    nonce: &str,
+    request: &RequestBinding<'_>,
+) -> String {
+    format!(
+        "v2|{scope}|{target}|{issued_at}|{expires_at}|{nonce}|{}|{}|{}",
+        request.method,
+        request.path,
+        body_digest(request.body)
+    )
 }
 
 /// Why a secret may or may not be accepted from the relay.
@@ -377,78 +597,151 @@ mod tests {
         );
     }
 
+    const NONCE: &str = "00112233445566778899aabbccddeeff";
+
+    fn status_get() -> RequestBinding<'static> {
+        RequestBinding::new("GET", "/api/status", b"")
+    }
+
+    fn mint(now: i64) -> String {
+        issuer().mint_with_nonce(DRONE, &status_get(), now, NONCE)
+    }
+
     #[test]
-    fn a_freshly_minted_ticket_verifies_for_its_target() {
-        let t = issuer().mint_at(DRONE, 30, 1_000);
-        assert_eq!(issuer().verify(&t, DRONE, 1_005), Ok(()));
+    fn a_freshly_minted_ticket_verifies_for_its_target_and_request() {
+        let t = mint(1_000);
+        let v = issuer().verify(&t, DRONE, &status_get(), 1_005).unwrap();
+        assert_eq!(v.nonce, NONCE);
+        assert_eq!(
+            v.valid_until,
+            1_000 + TICKET_LIFETIME_SECONDS + CLOCK_SKEW_TOLERANCE_SECONDS
+        );
+    }
+
+    #[test]
+    fn a_ticket_presented_with_another_request_is_a_binding_mismatch() {
+        // A ticket lifted off the broadcast uplink must not authorize any
+        // request but the one it was minted for.
+        let t = mint(1_000);
+        for other in [
+            RequestBinding::new("POST", "/api/command", b"{}"),
+            RequestBinding::new("POST", "/api/status", b""),
+            RequestBinding::new("GET", "/api/status?x=1", b""),
+            RequestBinding::new("GET", "/api/status", b"x"),
+        ] {
+            assert_eq!(
+                issuer().verify(&t, DRONE, &other, 1_005),
+                Err(RelayTicketError::BindingMismatch),
+                "{other:?}"
+            );
+        }
+        assert_eq!(
+            RelayTicketError::BindingMismatch.reason(),
+            "binding_mismatch"
+        );
     }
 
     #[test]
     fn a_ticket_for_one_drone_does_not_verify_at_another() {
-        // The uplink is a broadcast every drone hears, so a ticket that named
-        // its target only in an unsigned field could be lifted off the air and
-        // replayed against a different aircraft.
-        let t = issuer().mint_at(DRONE, 30, 1_000);
+        let t = mint(1_000);
         assert_eq!(
-            issuer().verify(&t, "f6aa0aa4", 1_005),
-            Err(RelayTicketError::ScopeMismatch)
+            issuer().verify(&t, "f6aa0aa4", &status_get(), 1_005),
+            Err(RelayTicketError::BindingMismatch)
         );
     }
 
     #[test]
     fn a_different_pair_secret_does_not_verify() {
-        // The whole point: a second ground station holding the shared fleet
-        // radio key still cannot mint a ticket this drone accepts.
-        let t = issuer().mint_at(DRONE, 30, 1_000);
+        // A second ground station holding the shared fleet radio key still
+        // cannot mint a ticket this drone accepts.
+        let t = mint(1_000);
         let other = RelayTicketIssuer::from_secret(b"ffffffffffffffffffffffffffffffff");
         assert_eq!(
-            other.verify(&t, DRONE, 1_005),
-            Err(RelayTicketError::HmacMismatch)
+            other.verify(&t, DRONE, &status_get(), 1_005),
+            Err(RelayTicketError::BadSignature)
         );
     }
 
     #[test]
     fn a_ws_ticket_key_derivation_does_not_verify_a_relay_ticket() {
-        // Domain separation. Both credentials are HMAC-SHA256 over the same
-        // shape; only the label keeps one from being replayed as the other.
-        let relay = RelayTicketIssuer::from_secret(SECRET);
-        let t = relay.mint_at(DRONE, 30, 1_000);
-
-        // Derive a key the WS way from the same material and check it rejects.
+        // Domain separation: only the label keeps one credential from being
+        // replayed as the other.
+        let t = mint(1_000);
         let mut mac = HmacSha256::new_from_slice(SECRET).unwrap();
         mac.update(crate::ws_ticket::TICKET_KEY_LABEL);
         let ws_keyed = RelayTicketIssuer {
             key: mac.finalize().into_bytes().to_vec(),
         };
         assert_eq!(
-            ws_keyed.verify(&t, DRONE, 1_005),
-            Err(RelayTicketError::HmacMismatch)
+            ws_keyed.verify(&t, DRONE, &status_get(), 1_005),
+            Err(RelayTicketError::BadSignature)
         );
         assert_ne!(RELAY_KEY_LABEL, crate::ws_ticket::TICKET_KEY_LABEL);
     }
 
     #[test]
-    fn an_expired_ticket_is_refused() {
-        let t = issuer().mint_at(DRONE, 30, 1_000);
+    fn clock_skew_inside_the_tolerance_is_accepted_and_beyond_it_is_refused() {
+        let now = 10_000;
+        // Minter's clock 200 s ahead of ours: inside the tolerance.
+        let ahead = mint(now + 200);
+        assert!(issuer().verify(&ahead, DRONE, &status_get(), now).is_ok());
+        // 400 s ahead: refused, and said why.
+        let far_ahead = mint(now + 400);
         assert_eq!(
-            issuer().verify(&t, DRONE, 1_030),
+            issuer().verify(&far_ahead, DRONE, &status_get(), now),
+            Err(RelayTicketError::ClockSkew)
+        );
+        // Minter's clock behind ours: accepted until the expiry is more than
+        // the tolerance in the past.
+        let behind = mint(now - 300);
+        assert!(issuer().verify(&behind, DRONE, &status_get(), now).is_ok());
+        let stale = mint(now - 400);
+        assert_eq!(
+            issuer().verify(&stale, DRONE, &status_get(), now),
             Err(RelayTicketError::Expired)
         );
     }
 
     #[test]
+    fn a_ticket_is_spent_once() {
+        let cache = new_replay_cache();
+        let t = mint(1_000);
+        let v = issuer().verify(&t, DRONE, &status_get(), 1_001).unwrap();
+        assert_eq!(v.spend(&cache, 1_001), Ok(()));
+        let again = issuer().verify(&t, DRONE, &status_get(), 1_002).unwrap();
+        assert_eq!(again.spend(&cache, 1_002), Err(RelayTicketError::Replayed));
+        assert_eq!(RelayTicketError::Replayed.reason(), "replayed");
+    }
+
+    #[test]
+    fn every_mint_carries_a_fresh_nonce() {
+        let a = issuer().mint(DRONE, &status_get(), 1_000).unwrap();
+        let b = issuer().mint(DRONE, &status_get(), 1_000).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
     fn a_tampered_field_is_refused_before_anything_else_is_read() {
-        let t = issuer().mint_at(DRONE, 30, 1_000);
-        // Push the expiry far out. Without an HMAC over the exact substring
-        // this would simply extend the ticket's life.
-        let parts: Vec<&str> = t.split('|').collect();
-        let forged = format!(
-            "{}|{}|{}|{}|{}|{}",
-            parts[0], parts[1], parts[2], parts[3], "99999999999", parts[5]
-        );
+        let t = mint(1_000);
+        // Push the expiry out. Without an HMAC over the exact substring this
+        // would simply extend the ticket's life.
+        let forged = t.replacen("|1030|", "|99999999999|", 1);
+        assert_ne!(forged, t);
         assert_eq!(
-            issuer().verify(&forged, DRONE, 1_005),
-            Err(RelayTicketError::HmacMismatch)
+            issuer().verify(&forged, DRONE, &status_get(), 1_005),
+            Err(RelayTicketError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_path_containing_a_pipe_still_binds_exactly() {
+        let req = RequestBinding::new("GET", "/api/logs?q=a|b", b"");
+        let t = issuer().mint_with_nonce(DRONE, &req, 1_000, NONCE);
+        assert!(issuer().verify(&t, DRONE, &req, 1_001).is_ok());
+        let other = RequestBinding::new("GET", "/api/logs?q=a", b"");
+        assert_eq!(
+            issuer().verify(&t, DRONE, &other, 1_001),
+            Err(RelayTicketError::BindingMismatch)
         );
     }
 
@@ -456,21 +749,38 @@ mod tests {
     fn a_malformed_token_is_refused_rather_than_panicking() {
         for bad in [
             "",
-            "v1",
-            "v2|relay.http|d|1|2|ff",
+            "v2",
+            "v1|relay.http|d|1|2|ff",
             "not-a-ticket",
-            "v1|a|b|c|d|e",
+            "v2|relay.http|d|1|2|short|GET|/x|ab|ff",
+            "v2|relay.http|d|x|2|00112233445566778899aabbccddeeff|GET|/x|ab|ff",
         ] {
-            assert!(issuer().verify(bad, DRONE, 1_000).is_err(), "{bad}");
+            assert!(
+                issuer().verify(bad, DRONE, &status_get(), 1_000).is_err(),
+                "{bad}"
+            );
         }
     }
 
     #[test]
-    fn a_requested_lifetime_cannot_exceed_the_cap() {
-        // Otherwise a caller mints a long-lived bearer just by asking.
-        let t = issuer().mint_at(DRONE, 86_400, 1_000);
-        let expires: i64 = t.split('|').nth(4).unwrap().parse().unwrap();
-        assert_eq!(expires, 1_000 + MAX_TTL_SECONDS);
+    fn a_refusal_body_names_the_code_and_reason() {
+        let body: serde_json::Value = serde_json::from_slice(&refusal_body("clock_skew")).unwrap();
+        assert_eq!(body["error"], RELAY_REFUSAL_CODE);
+        assert_eq!(body["reason"], "clock_skew");
+    }
+
+    #[test]
+    fn the_tunnel_binding_ignores_the_ticket_and_key_order() {
+        let a: serde_json::Value =
+            serde_json::from_str(r#"{"op":"put","key":"video.bitrate","value":4}"#).unwrap();
+        let b: serde_json::Value = serde_json::from_str(
+            r#"{"value":4,"ticket":"anything","key":"video.bitrate","op":"put"}"#,
+        )
+        .unwrap();
+        assert_eq!(tunnel_binding_body(&a), tunnel_binding_body(&b));
+        let c: serde_json::Value =
+            serde_json::from_str(r#"{"op":"put","key":"video.bitrate","value":5}"#).unwrap();
+        assert_ne!(tunnel_binding_body(&a), tunnel_binding_body(&c));
     }
 
     // Checked at compile time: a shorter secret would weaken every ticket,

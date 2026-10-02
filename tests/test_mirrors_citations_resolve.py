@@ -77,7 +77,11 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: 120 -> 118: the world-model capture crate was deleted from the workspace,
 #: and its two citations (the capture control socket's bind hygiene and the
 #: keyframe session's `on_frame`) went with the crate that held them.
-MIN_CITATIONS = 118
+#:
+#: 118 -> 117: the WebSocket handshake gained caller-class rules and one shared
+#: credential check that the Python `authenticate_websocket` order never had,
+#: so the Rust no longer mirrors it and its comment says what it does instead.
+MIN_CITATIONS = 117
 
 
 def _rust_sources() -> list[Path]:

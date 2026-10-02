@@ -266,7 +266,9 @@ pub async fn post_pic_claim(
     });
     match pic_request(&request).await {
         PicReply::Obj(reply) if has_outcome(&reply, "claimed") => {
-            Json(claim_body(&reply)).into_response()
+            let mut body = claim_body(&reply);
+            attach_injector_ticket(&state, &mut body);
+            Json(body).into_response()
         }
         PicReply::Obj(_) => pic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -498,6 +500,11 @@ pub async fn post_pic_heartbeat(
     }
     let request = json!({"op": "heartbeat", "client_id": req.client_id});
     match pic_request(&request).await {
+        PicReply::Obj(reply) if heartbeat_ok(&reply) => {
+            let mut body = heartbeat_ok_body(&reply);
+            attach_injector_ticket(&state, &mut body);
+            Json(body).into_response()
+        }
         PicReply::Obj(reply) => heartbeat_response(&reply),
         PicReply::Unavailable => pic_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -515,20 +522,8 @@ pub async fn post_pic_heartbeat(
 /// status from the reply (410), the error object carrying the reply's `error`
 /// string and the current holder.
 fn heartbeat_response(reply: &Map<String, Value>) -> Response {
-    let ok = reply
-        .get("ok_heartbeat")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if ok {
-        // The arbiter `heartbeat` ok dict: ok / claimed_by / claim_counter /
-        // last_heartbeat_ts, in that insertion order.
-        return Json(json!({
-            "ok": true,
-            "claimed_by": reply.get("claimed_by").cloned().unwrap_or(Value::Null),
-            "claim_counter": reply.get("claim_counter").cloned().unwrap_or(json!(0)),
-            "last_heartbeat_ts": reply.get("last_heartbeat_ts").cloned().unwrap_or(Value::Null),
-        }))
-        .into_response();
+    if heartbeat_ok(reply) {
+        return Json(heartbeat_ok_body(reply)).into_response();
     }
     // The not-holder path: the FastAPI route raises the 410 with the error object.
     let status = reply
@@ -555,6 +550,57 @@ fn heartbeat_response(reply: &Map<String, Value>) -> Response {
         })),
     )
         .into_response()
+}
+
+/// Whether the arbiter accepted the heartbeat.
+fn heartbeat_ok(reply: &Map<String, Value>) -> bool {
+    reply
+        .get("ok_heartbeat")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The arbiter `heartbeat` ok dict: ok / claimed_by / claim_counter /
+/// last_heartbeat_ts, in that insertion order.
+fn heartbeat_ok_body(reply: &Map<String, Value>) -> Value {
+    json!({
+        "ok": true,
+        "claimed_by": reply.get("claimed_by").cloned().unwrap_or(Value::Null),
+        "claim_counter": reply.get("claim_counter").cloned().unwrap_or(json!(0)),
+        "last_heartbeat_ts": reply.get("last_heartbeat_ts").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// How long the injector attestation handed to the PIC holder lasts. It is
+/// re-issued on every claim and heartbeat, so it only has to outlive the gap
+/// between heartbeats.
+const PIC_INJECTOR_TICKET_TTL_SECONDS: i64 = 120;
+
+/// Add `injector_ticket` to a successful claim or heartbeat body: the RC-lane
+/// attestation for the client the arbiter confirms holds PIC (`claimed_by`).
+///
+/// This is the only place an attestation for a client id is minted, so the
+/// RC injection route can no longer attest whatever name a request body
+/// carries: a caller has to have been granted PIC under that name. On an
+/// unpaired node there is no key to sign with and nothing is added.
+fn attach_injector_ticket(state: &AppState, body: &mut Value) {
+    if body.get("claimed").and_then(Value::as_bool) == Some(false) {
+        return;
+    }
+    let Some(holder) = body
+        .get("claimed_by")
+        .and_then(Value::as_str)
+        .filter(|h| !h.is_empty())
+    else {
+        return;
+    };
+    if let Some(ticket) = ados_protocol::ws_ticket::mint_scoped_ticket(
+        &state.pairing_paths.pairing_json,
+        &ados_protocol::ws_ticket::crsf_inject_scope(holder),
+        PIC_INJECTOR_TICKET_TTL_SECONDS,
+    ) {
+        body["injector_ticket"] = json!(ticket);
+    }
 }
 
 #[cfg(test)]

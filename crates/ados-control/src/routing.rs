@@ -232,6 +232,7 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}"),
         put("/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}"),
         delete("/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}"),
+        patch("/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}"),
         // Ground-station mesh (profile-gated).
         get("/api/v1/ground-station/role"),
         get("/api/v1/ground-station/mesh"),
@@ -694,10 +695,16 @@ mod tests {
         // Missing from the native set, this lane would be served with the
         // front's auth SKIPPED and outside the rate limiter its siblings share.
         let p = "/api/v1/ground-station/relay-proxy/0a1b2c3d4e5f/api/services";
-        for m in [Method::GET, Method::POST, Method::PUT, Method::DELETE] {
+        for m in [
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::PATCH,
+        ] {
             assert!(is_native(&m, p), "{m} {p} must be native");
         }
-        assert!(!is_native(&Method::PATCH, p));
+        assert!(!is_native(&Method::OPTIONS, p));
     }
 
     /// The plugin lifecycle is native: every route keeps the front's auth lane
@@ -809,7 +816,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            190,
+            191,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);

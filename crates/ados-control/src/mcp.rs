@@ -325,6 +325,13 @@ fn new_token_id() -> Result<String, getrandom::Error> {
 /// gated routes an MCP token can present against.
 pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
     use ScopeClass::*;
+    // The ground station's relay-proxy carries a request to a linked drone,
+    // which runs it with the ground station's full authority. It needs exactly
+    // the class the same request would need on the drone, so a token cannot
+    // reach a flight action (or a secret read) by wrapping it in the relay.
+    if let Some(inner) = relay_proxy_inner_path(path) {
+        return route_scope(method, inner);
+    }
     // The plugin lifecycle and a plugin's own HTTP API moved here from the
     // Python surface, where no MCP token ever reached them. They stay out of an
     // MCP token's reach, reads included (an install record or a plugin's API is
@@ -367,11 +374,11 @@ pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
             "/api/vision/designate" | "/api/logs/push" => Some(SafeWrite),
             // Unpairing tears down the trust relationship.
             "/api/pairing/unpair" => Some(Destructive),
-            // Running a plugin's MCP tool: the edge floor is admin. The connector
-            // enforces each tool's declared safety class (a flight tool needs the
-            // flight scope) and the plugin's own caps bound the effect, so this is
-            // a coarse floor, not the fine gate.
-            p if is_plugin_tool_invoke(p) => Some(Admin),
+            // RC channel injection and taking pilot-in-command command the
+            // aircraft.
+            "/api/v1/ground-station/crsf/channels" | "/api/v1/ground-station/pic/claim" => {
+                Some(Flight)
+            }
             // Ground-station control writes.
             p if p.starts_with("/api/v1/ground-station/") => Some(Admin),
             _ => None,
@@ -392,6 +399,52 @@ pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
         },
         _ => None,
     }
+}
+
+/// Whether the scope a token needs for `(method, path)` depends on what the
+/// route itself reads, so the edge admits any verified token and the route
+/// enforces the class: a plugin tool invocation needs the scope named by the
+/// tool's declared `safety_class` (see [`tool_scope_class`]), which only the
+/// installed manifest knows.
+pub fn route_decides_scope(method: &Method, path: &str) -> bool {
+    *method == Method::POST && is_plugin_tool_invoke(path)
+}
+
+/// The scope a plugin tool's declared `safety_class` requires of an MCP token.
+/// An unknown or missing class is `None`: the tool is not token-reachable.
+pub fn tool_scope_class(safety_class: &str) -> Option<ScopeClass> {
+    match safety_class {
+        "read" => Some(ScopeClass::Read),
+        "secret_read" => Some(ScopeClass::SecretRead),
+        "safe_write" => Some(ScopeClass::SafeWrite),
+        "admin" => Some(ScopeClass::Admin),
+        "flight" | "flight_action" => Some(ScopeClass::Flight),
+        "destructive" => Some(ScopeClass::Destructive),
+        _ => None,
+    }
+}
+
+/// The `safety_class` an installed manifest declares for `tool` in its agent
+/// half's `contributes.tools`, or `None` when the tool is not declared there.
+pub fn tool_safety_class(
+    manifest: &ados_plugin_host::manifest::PluginManifest,
+    tool: &str,
+) -> Option<String> {
+    let contributes = manifest.agent.as_ref()?.extra.get("contributes")?;
+    let tools = serde_json::to_value(contributes.get("tools")?).ok()?;
+    tools.as_array()?.iter().find_map(|t| {
+        (t.get("name")?.as_str()? == tool)
+            .then(|| t.get("safety_class")?.as_str().map(str::to_string))
+            .flatten()
+    })
+}
+
+/// The inner path of a ground-station relay-proxy route
+/// (`/api/v1/ground-station/relay-proxy/{peer}/{*inner}`), starting with `/`.
+fn relay_proxy_inner_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/v1/ground-station/relay-proxy/")?;
+    let slash = rest.find('/')?;
+    (slash > 0 && rest.len() > slash + 1).then(|| &rest[slash..])
 }
 
 /// `POST /api/params/{name}` — a single-segment param name after `/api/params/`.
@@ -742,16 +795,88 @@ mod tests {
             route_scope(&Method::POST, "/api/_ws/ticket"),
             Some(ScopeClass::Admin)
         );
-        // A plugin tool invoke floors at admin (the connector gates the fine class).
+        // A plugin tool invoke is classified by the route from the tool's
+        // declared safety class, not by the edge.
         assert_eq!(
             route_scope(&Method::POST, "/api/plugins/com.x.p/tools/greet/invoke"),
-            Some(ScopeClass::Admin)
+            None
         );
+        assert!(route_decides_scope(
+            &Method::POST,
+            "/api/plugins/com.x.p/tools/greet/invoke"
+        ));
+        assert!(!route_decides_scope(
+            &Method::POST,
+            "/api/plugins/com.x.p/install"
+        ));
         // A plugin path that is NOT the tool-invoke shape stays fail-closed.
         assert_eq!(
             route_scope(&Method::POST, "/api/plugins/com.x.p/install"),
             None
         );
+    }
+
+    /// An admin-only token cannot command the aircraft by wrapping a flight
+    /// request in the relay-proxy, injecting RC, or taking command.
+    #[test]
+    fn flight_actions_need_the_flight_scope_on_every_path_to_them() {
+        let relay = "/api/v1/ground-station/relay-proxy/0a1b2c3d4e5f";
+        assert_eq!(
+            route_scope(&Method::POST, &format!("{relay}/api/command")),
+            Some(ScopeClass::Flight)
+        );
+        assert_eq!(
+            route_scope(&Method::POST, &format!("{relay}/api/params/ARMING_CHECK")),
+            Some(ScopeClass::Admin)
+        );
+        assert_eq!(
+            route_scope(&Method::GET, &format!("{relay}/api/plugins/com.x.p/config")),
+            Some(ScopeClass::SecretRead),
+            "a relayed plugin config read is still a secret read"
+        );
+        assert_eq!(
+            route_scope(&Method::GET, &format!("{relay}/api/status")),
+            Some(ScopeClass::Read)
+        );
+        assert_eq!(
+            route_scope(&Method::POST, &format!("{relay}/api/does-not-exist")),
+            None
+        );
+        for path in [
+            "/api/v1/ground-station/crsf/channels",
+            "/api/v1/ground-station/pic/claim",
+        ] {
+            assert_eq!(
+                route_scope(&Method::POST, path),
+                Some(ScopeClass::Flight),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_needs_the_scope_its_safety_class_names() {
+        assert_eq!(tool_scope_class("flight"), Some(ScopeClass::Flight));
+        assert_eq!(tool_scope_class("safe_write"), Some(ScopeClass::SafeWrite));
+        assert_eq!(tool_scope_class("read"), Some(ScopeClass::Read));
+        assert_eq!(
+            tool_scope_class(""),
+            None,
+            "undeclared is not token-reachable"
+        );
+        let manifest = ados_plugin_host::manifest::PluginManifest::from_yaml_text(
+            "id: com.example.pod\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\nagent:\n  entrypoint: agent/py/x.py\n  contributes:\n    tools:\n      - name: fire\n        safety_class: flight\n      - name: status\n        safety_class: read\n",
+        )
+        .unwrap();
+        assert_eq!(
+            tool_safety_class(&manifest, "fire").as_deref(),
+            Some("flight")
+        );
+        assert_eq!(
+            tool_safety_class(&manifest, "status").as_deref(),
+            Some("read")
+        );
+        assert_eq!(tool_safety_class(&manifest, "absent"), None);
     }
 
     #[test]

@@ -10,11 +10,13 @@
 //! The WFB radio key is shared by a whole fleet, so it cannot tell this
 //! drone's ground station from any other key holder. Every request must
 //! therefore carry a relay ticket minted from the per-pair secret this drone
-//! was given at pairing and naming this drone ([`TunnelAuth`]); a drone with
-//! no secret refuses everything. A write is further limited to
+//! was given at pairing, naming this drone and bound to the request's op, key
+//! and value ([`TunnelAuth`]); each ticket is honoured once. A drone with no
+//! secret refuses everything. A write is further limited to
 //! [`WRITABLE_KEY_PREFIXES`]: the radio and video tuning the channel exists
-//! for. Credentials, cloud and MAVLink routing, and the tunnel's own gates are
-//! never writable over the radio.
+//! for. The trust-root keys every radio lane refuses
+//! (`pairing_posture::relay_config_key_forbidden`), MAVLink routing, and the
+//! tunnel's own gates are never writable over this channel.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,7 +25,12 @@ use tokio::sync::{watch, Notify};
 use tokio::time::Instant;
 
 use ados_protocol::mavlink::{build_tunnel_v2, tunnel_payload, tunnel_payload_type, MavHeader};
-use ados_protocol::relay_ticket::{load_secret_at, RelayTicketError, RelayTicketIssuer};
+use ados_protocol::nonce_cache::NonceCache;
+use ados_protocol::pairing_posture::relay_config_key_forbidden;
+use ados_protocol::relay_ticket::{
+    load_secret_at, new_replay_cache, refusal_body, tunnel_binding_body, RelayTicketError,
+    RelayTicketIssuer, RequestBinding, TUNNEL_BINDING_METHOD, TUNNEL_BINDING_PATH,
+};
 use ados_protocol::tunnel_config::{
     chunk_message, CompletedMessage, PushOutcome, Reassembler, CONFIG_TUNNEL_PAYLOAD_TYPE,
 };
@@ -44,9 +51,13 @@ const UNWRITABLE_KEY_PREFIXES: &[&str] = &["radio.tunnel."];
 #[must_use]
 pub fn key_is_writable(key: &str) -> bool {
     let key = key.trim();
-    WRITABLE_KEY_PREFIXES.iter().any(|p| key.starts_with(p))
+    !relay_config_key_forbidden(key)
+        && WRITABLE_KEY_PREFIXES.iter().any(|p| key.starts_with(p))
         && !UNWRITABLE_KEY_PREFIXES.iter().any(|p| key.starts_with(p))
 }
+
+/// Every tunnel ticket this drone has accepted, so each is honoured once.
+static SPENT_TICKETS: NonceCache = new_replay_cache();
 
 /// How a request's relay ticket is checked: against the per-pair secret on
 /// file (re-read per request, so a secret delivered after start applies) and
@@ -58,13 +69,20 @@ pub struct TunnelAuth {
 }
 
 impl TunnelAuth {
-    fn check(&self, ticket: Option<&str>, now: i64) -> Result<(), RelayTicketError> {
+    /// Verify `ticket` against the request it arrived with (`raw`, the parsed
+    /// request object) and spend it.
+    fn check(
+        &self,
+        ticket: Option<&str>,
+        raw: &serde_json::Value,
+        now: i64,
+    ) -> Result<(), RelayTicketError> {
         let secret = load_secret_at(&self.secret_path).ok_or(RelayTicketError::NoSecret)?;
-        RelayTicketIssuer::from_secret(secret.as_bytes()).verify(
-            ticket.unwrap_or(""),
-            &self.own_device_id,
-            now,
-        )
+        let body = tunnel_binding_body(raw);
+        let binding = RequestBinding::new(TUNNEL_BINDING_METHOD, TUNNEL_BINDING_PATH, &body);
+        RelayTicketIssuer::from_secret(secret.as_bytes())
+            .verify(ticket.unwrap_or(""), &self.own_device_id, &binding, now)?
+            .spend(&SPENT_TICKETS, now)
     }
 }
 
@@ -107,10 +125,12 @@ pub async fn handle_request(
             }
         }
     };
-    if let Err(e) = auth.check(request.ticket.as_deref(), now) {
-        tracing::warn!(error = %e, "config tunnel request unauthorized");
+    // `parse_request` accepted it, so it is a JSON object.
+    let raw: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+    if let Err(e) = auth.check(request.ticket.as_deref(), &raw, now) {
+        tracing::warn!(error = %e, reason = e.reason(), "config tunnel request unauthorized");
         return HandledResponse {
-            body: error_body("E_UNAUTHORIZED", &e.to_string()),
+            body: refusal_body(e.reason()),
             is_error: true,
         };
     }
@@ -371,17 +391,28 @@ mod tests {
     const DRONE: &str = "ados-drone-01";
     const SECRET: &str = "0123456789abcdef0123456789abcdef";
 
-    /// A drone holding `SECRET`, and a ticket its ground station minted for it.
-    fn paired() -> (tempfile::TempDir, TunnelAuth, String) {
+    /// A drone holding `SECRET`.
+    fn paired() -> (tempfile::TempDir, TunnelAuth) {
         let dir = tempfile::tempdir().unwrap();
         let secret_path = dir.path().join("relay-peer-secret");
         std::fs::write(&secret_path, SECRET).unwrap();
-        let ticket = RelayTicketIssuer::from_secret(SECRET.as_bytes()).mint_at(DRONE, 30, NOW);
         let auth = TunnelAuth {
             secret_path,
             own_device_id: DRONE.to_string(),
         };
-        (dir, auth, ticket)
+        (dir, auth)
+    }
+
+    /// A ticket minted by the holder of `secret` for `target`, bound to `op`.
+    fn mint_for(secret: &str, target: &str, op: &Value) -> String {
+        let body = tunnel_binding_body(op);
+        RelayTicketIssuer::from_secret(secret.as_bytes())
+            .mint(
+                target,
+                &RequestBinding::new(TUNNEL_BINDING_METHOD, TUNNEL_BINDING_PATH, &body),
+                NOW,
+            )
+            .unwrap()
     }
 
     /// `op` (a JSON object without a ticket) with `ticket` added.
@@ -391,14 +422,27 @@ mod tests {
         serde_json::to_vec(&v).unwrap()
     }
 
+    /// `op` carrying a fresh ticket this drone's ground station minted for it.
+    fn ticketed(op: &str) -> Vec<u8> {
+        let v: Value = serde_json::from_str(op).unwrap();
+        with_ticket(op, &mint_for(SECRET, DRONE, &v))
+    }
+
+    fn refusal_reason(body: &[u8]) -> String {
+        serde_json::from_slice::<Value>(body).unwrap()["reason"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
     #[tokio::test]
     async fn get_relays_the_config_body_verbatim() {
-        let (_d, auth, ticket) = paired();
+        let (_d, auth) = paired();
         let client = MockClient {
             get: ok(200, br#"{"radio":{"tunnel":{"enabled":true}}}"#),
             put: ok(200, b"{}"),
         };
-        let req = with_ticket(r#"{"op":"get"}"#, &ticket);
+        let req = ticketed(r#"{"op":"get"}"#);
         let out = handle_request(&req, false, &auth, NOW, &client).await;
         assert!(!out.is_error);
         assert_eq!(out.body, br#"{"radio":{"tunnel":{"enabled":true}}}"#);
@@ -408,57 +452,89 @@ mod tests {
     async fn a_request_without_a_ticket_for_this_drone_is_refused() {
         // Anyone holding the shared fleet radio key can inject a frame; only
         // this drone's own ground station holds the per-pair secret.
-        let (_d, auth, _ticket) = paired();
+        let (_d, auth) = paired();
         let client = MockClient {
             get: ok(200, b"{}"),
             put: ok(200, b"{}"),
         };
         let bare = handle_request(br#"{"op":"get"}"#, true, &auth, NOW, &client).await;
-        assert_eq!(err_code(&bare.body), "E_UNAUTHORIZED");
+        assert_eq!(err_code(&bare.body), "E_RELAY_TICKET");
 
-        let forged = RelayTicketIssuer::from_secret(b"ffffffffffffffffffffffffffffffff")
-            .mint_at(DRONE, 30, NOW);
+        let put: Value =
+            serde_json::from_str(r#"{"op":"put","key":"video.bitrate","value":"4"}"#).unwrap();
+        let forged = mint_for("ffffffffffffffffffffffffffffffff", DRONE, &put);
         let req = with_ticket(r#"{"op":"put","key":"video.bitrate","value":"4"}"#, &forged);
         let out = handle_request(&req, true, &auth, NOW, &client).await;
-        assert_eq!(err_code(&out.body), "E_UNAUTHORIZED");
+        assert_eq!(refusal_reason(&out.body), "bad_signature");
 
-        let for_other =
-            RelayTicketIssuer::from_secret(SECRET.as_bytes()).mint_at("ados-drone-02", 30, NOW);
+        let get: Value = serde_json::from_str(r#"{"op":"get"}"#).unwrap();
+        let for_other = mint_for(SECRET, "ados-drone-02", &get);
         let req = with_ticket(r#"{"op":"get"}"#, &for_other);
         let out = handle_request(&req, true, &auth, NOW, &client).await;
-        assert_eq!(err_code(&out.body), "E_UNAUTHORIZED");
+        assert_eq!(refusal_reason(&out.body), "binding_mismatch");
 
         // A drone with no secret on file refuses even a well-formed ticket.
-        let (_d2, mut unprovisioned, ticket) = paired();
+        let (_d2, mut unprovisioned) = paired();
         unprovisioned.secret_path = _d2.path().join("absent");
-        let req = with_ticket(r#"{"op":"get"}"#, &ticket);
-        let out = handle_request(&req, true, &unprovisioned, NOW, &client).await;
-        assert_eq!(err_code(&out.body), "E_UNAUTHORIZED");
+        let out = handle_request(
+            &ticketed(r#"{"op":"get"}"#),
+            true,
+            &unprovisioned,
+            NOW,
+            &client,
+        )
+        .await;
+        assert_eq!(refusal_reason(&out.body), "no_secret");
+    }
+
+    #[tokio::test]
+    async fn a_ticket_authorizes_one_request_once() {
+        // Bound to the op: a read ticket lifted off the air cannot carry a
+        // write, and the same request cannot be played twice.
+        let (_d, auth) = paired();
+        let client = MockClient {
+            get: ok(200, b"{}"),
+            put: ok(200, br#"{"status":"ok"}"#),
+        };
+        let get: Value = serde_json::from_str(r#"{"op":"get"}"#).unwrap();
+        let read_ticket = mint_for(SECRET, DRONE, &get);
+        let write = with_ticket(
+            r#"{"op":"put","key":"video.bitrate","value":"9"}"#,
+            &read_ticket,
+        );
+        let out = handle_request(&write, true, &auth, NOW, &client).await;
+        assert_eq!(refusal_reason(&out.body), "binding_mismatch");
+
+        let req = ticketed(r#"{"op":"put","key":"video.bitrate","value":"9"}"#);
+        assert!(
+            !handle_request(&req, true, &auth, NOW, &client)
+                .await
+                .is_error
+        );
+        let again = handle_request(&req, true, &auth, NOW, &client).await;
+        assert_eq!(refusal_reason(&again.body), "replayed");
     }
 
     #[tokio::test]
     async fn put_is_refused_until_command_enabled() {
-        let (_d, auth, ticket) = paired();
+        let (_d, auth) = paired();
         let client = MockClient {
             get: ok(200, b"{}"),
             put: ok(200, br#"{"status":"ok","persisted":true}"#),
         };
-        let req = with_ticket(
-            r#"{"op":"put","key":"video.wfb.tx_power_dbm","value":"10"}"#,
-            &ticket,
-        );
-        let refused = handle_request(&req, false, &auth, NOW, &client).await;
+        let op = r#"{"op":"put","key":"video.wfb.tx_power_dbm","value":"10"}"#;
+        let refused = handle_request(&ticketed(op), false, &auth, NOW, &client).await;
         assert!(refused.is_error);
         assert_eq!(err_code(&refused.body), "E_WRITE_DISABLED");
         // With command_enabled, the write goes through and the result relays.
-        let ok = handle_request(&req, true, &auth, NOW, &client).await;
+        let ok = handle_request(&ticketed(op), true, &auth, NOW, &client).await;
         assert!(!ok.is_error);
         assert_eq!(ok.body, br#"{"status":"ok","persisted":true}"#);
     }
 
     #[tokio::test]
     async fn credentials_and_link_keys_are_never_writable_over_the_radio() {
-        let (_d, auth, ticket) = paired();
+        let (_d, auth) = paired();
         let client = MockClient {
             get: ok(200, b"{}"),
             put: ok(200, br#"{"status":"ok"}"#),
@@ -471,7 +547,7 @@ mod tests {
             "agent.name",
         ] {
             let op = format!(r#"{{"op":"put","key":"{key}","value":"x"}}"#);
-            let out = handle_request(&with_ticket(&op, &ticket), true, &auth, NOW, &client).await;
+            let out = handle_request(&ticketed(&op), true, &auth, NOW, &client).await;
             assert_eq!(err_code(&out.body), "E_KEY_NOT_WRITABLE", "{key}");
         }
         assert!(key_is_writable("radio.channel"));
@@ -480,13 +556,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_too_large_body_returns_an_honest_error_not_a_truncation() {
-        let (_d, auth, ticket) = paired();
+        let (_d, auth) = paired();
         let big = vec![b'x'; MAX_CONFIG_RESPONSE_BYTES + 1];
         let client = MockClient {
             get: ok(200, &big),
             put: ok(200, b"{}"),
         };
-        let req = with_ticket(r#"{"op":"get"}"#, &ticket);
+        let req = ticketed(r#"{"op":"get"}"#);
         let out = handle_request(&req, false, &auth, NOW, &client).await;
         assert!(out.is_error);
         assert_eq!(err_code(&out.body), "E_RESPONSE_TOO_LARGE");
@@ -494,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_keyed_get_returns_the_subtree_so_it_fits_the_radio_link() {
-        let (_d, auth, ticket) = paired();
+        let (_d, auth) = paired();
         // A whole config over the radio-link cap, with a small radio subtree.
         let full = serde_json::json!({
             "radio": {"channel": 149},
@@ -504,35 +580,28 @@ mod tests {
             get: ok(200, &serde_json::to_vec(&full).unwrap()),
             put: ok(200, b"{}"),
         };
-        let whole = handle_request(
-            &with_ticket(r#"{"op":"get"}"#, &ticket),
-            false,
-            &auth,
-            NOW,
-            &client,
-        )
-        .await;
+        let whole = handle_request(&ticketed(r#"{"op":"get"}"#), false, &auth, NOW, &client).await;
         assert_eq!(err_code(&whole.body), "E_RESPONSE_TOO_LARGE");
-        let req = with_ticket(r#"{"op":"get","key":"radio"}"#, &ticket);
+        let req = ticketed(r#"{"op":"get","key":"radio"}"#);
         let out = handle_request(&req, false, &auth, NOW, &client).await;
         assert!(!out.is_error);
         assert_eq!(
             serde_json::from_slice::<Value>(&out.body).unwrap(),
             serde_json::json!({"channel": 149})
         );
-        let req = with_ticket(r#"{"op":"get","key":"radio.nope"}"#, &ticket);
+        let req = ticketed(r#"{"op":"get","key":"radio.nope"}"#);
         let out = handle_request(&req, false, &auth, NOW, &client).await;
         assert_eq!(err_code(&out.body), "E_KEY_NOT_FOUND");
     }
 
     #[tokio::test]
     async fn an_unreachable_surface_is_honest_not_fabricated() {
-        let (_d, auth, ticket) = paired();
+        let (_d, auth) = paired();
         let client = MockClient {
             get: Err(Unreachable("connection refused".into())),
             put: Err(Unreachable("connection refused".into())),
         };
-        let req = with_ticket(r#"{"op":"get"}"#, &ticket);
+        let req = ticketed(r#"{"op":"get"}"#);
         let out = handle_request(&req, true, &auth, NOW, &client).await;
         assert!(out.is_error);
         assert_eq!(err_code(&out.body), "E_CONFIG_UNAVAILABLE");
@@ -540,12 +609,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_validation_reject_relays_the_upstream_status() {
-        let (_d, auth, ticket) = paired();
+        let (_d, auth) = paired();
         let client = MockClient {
             get: ok(200, b"{}"),
             put: ok(422, br#"{"detail":"bad value"}"#),
         };
-        let req = with_ticket(r#"{"op":"put","key":"video.k","value":"bad"}"#, &ticket);
+        let req = ticketed(r#"{"op":"put","key":"video.k","value":"bad"}"#);
         let out = handle_request(&req, true, &auth, NOW, &client).await;
         assert!(out.is_error);
         assert_eq!(err_code(&out.body), "E_CONFIG_STATUS");

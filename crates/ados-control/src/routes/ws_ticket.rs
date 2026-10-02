@@ -79,15 +79,18 @@ fn plugin_http_scope_is_valid(scope: &str) -> bool {
 
 /// The scope class a ticket for `scope` grants its holder, or `None` for a scope
 /// the agent does not mint.
+///
+/// An install job's progress stream is read-only. A plugin's HTTP passthrough
+/// WebSocket carries whatever the plugin's own API accepts, writes included,
+/// so its ticket is admin-class: a read-only token must not be able to mint a
+/// ticket that drives it.
 fn ticket_scope_class(scope: &str) -> Option<ScopeClass> {
     TICKET_SCOPES
         .iter()
         .find(|(s, _)| *s == scope)
         .map(|(_, class)| *class)
-        .or_else(|| {
-            (install_job_scope_is_valid(scope) || plugin_http_scope_is_valid(scope))
-                .then_some(ScopeClass::Read)
-        })
+        .or_else(|| install_job_scope_is_valid(scope).then_some(ScopeClass::Read))
+        .or_else(|| plugin_http_scope_is_valid(scope).then_some(ScopeClass::Admin))
 }
 
 /// The ticket scope a WebSocket upgrade on a native `path` must carry, for the
@@ -196,7 +199,12 @@ pub async fn mint_ws_ticket(
             return detail(StatusCode::SERVICE_UNAVAILABLE, "The pairing state on this device is unreadable. Unpair it on the device itself to recover.")
         }
     };
-    let ticket = issuer.mint(&req.scope, ttl);
+    let Some(ticket) = issuer.mint(&req.scope, ttl) else {
+        return detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "This device could not generate a ticket nonce. Retry shortly.",
+        );
+    };
 
     Json(json!({
         "ok": true,
@@ -260,10 +268,16 @@ mod tests {
     /// upgrade path demands the ticket bound to its own id.
     #[test]
     fn plugin_http_tickets_are_bound_to_one_plugin() {
+        // The passthrough socket can carry writes, so a read-only token cannot
+        // buy one.
         assert_eq!(
             ticket_scope_class("plugins.http:com.example.web"),
-            Some(ScopeClass::Read)
+            Some(ScopeClass::Admin)
         );
+        assert!(!credential_allows(
+            &scopes_header("read"),
+            ScopeClass::Admin
+        ));
         for scope in [
             "plugins.http",
             "plugins.http:",
@@ -335,7 +349,7 @@ mod tests {
         // What the route does (paired branch) must produce a token the router's
         // identical `from_api_key(key).verify(...)` accepts for the scope + now.
         let issuer = WsTicketIssuer::from_api_key("ados_secret");
-        let t = issuer.mint(SCOPE_MAVLINK_WS, DEFAULT_TTL_SECONDS);
+        let t = issuer.mint(SCOPE_MAVLINK_WS, DEFAULT_TTL_SECONDS).unwrap();
         let now = ados_protocol::ws_ticket::now_unix();
         assert!(WsTicketIssuer::from_api_key("ados_secret")
             .verify(&t.token, SCOPE_MAVLINK_WS, now)

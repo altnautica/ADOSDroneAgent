@@ -59,13 +59,13 @@
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use ados_protocol::pairing_posture::Pairing;
+use ados_protocol::pairing_posture::{CallerClass, Pairing};
 use ados_protocol::ws_ticket::{now_unix, WsTicketIssuer};
 
 use crate::state::AppState;
@@ -135,29 +135,56 @@ fn extract_ticket(offered: &[String]) -> Option<&str> {
     offered.get(pos + 1).map(String::as_str)
 }
 
-/// Decide the handshake: open on an unpaired agent; on a paired agent require a
-/// matching `X-ADOS-Key` header OR a valid ticket for `scope`. Mirrors the Python
-/// `authenticate_websocket` order (unpaired → header → ticket → reject).
-fn decide_ws_auth(state: &AppState, headers: &HeaderMap, scope: &str) -> WsAuth {
+/// Decide the handshake.
+///
+/// - **Unpaired:** open to the caller classes that reach an unpaired node's
+///   data plane (the local operator, the first-boot lifelines, the operator's
+///   LAN), never to a remote caller (a public-WAN host, a tunnelled request).
+/// - **Unreadable pairing state:** only the on-box operator. A corrupt
+///   `pairing.json` may be a paired node's record on a failing card; reading
+///   it as unpaired would open these streams to anyone.
+/// - **Paired:** a valid credential in `X-ADOS-Key` (the pairing key or the
+///   configured key) OR a valid, unspent ticket for `scope`.
+///
+/// `caller` is the class the TCP edge stamped; the Unix socket edge stamps
+/// none and is the trusted on-box plane.
+fn decide_ws_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+    scope: &str,
+    caller: CallerClass,
+) -> WsAuth {
     let pairing = state.pairing.current();
-    let Pairing::Paired(key) = pairing else {
-        // Unpaired: open posture, no subprotocol to echo.
-        return WsAuth::AcceptPlain;
+    let key = match pairing {
+        Pairing::Unpaired => {
+            return if caller == CallerClass::Remote {
+                WsAuth::Reject
+            } else {
+                WsAuth::AcceptPlain
+            };
+        }
+        Pairing::Unreadable => {
+            return if caller == CallerClass::OnBox {
+                WsAuth::AcceptPlain
+            } else {
+                WsAuth::Reject
+            };
+        }
+        Pairing::Paired(key) => key,
     };
 
     // A native client (the CLI, integration tests) sets the key on the handshake.
-    if let Some(presented) = headers.get("x-ados-key").and_then(|v| v.to_str().ok()) {
-        if ados_protocol::pairing_posture::constant_time_eq(presented.as_bytes(), key.as_bytes()) {
-            return WsAuth::AcceptPlain;
-        }
-        // A bad header still falls through to the ticket path, matching the Python.
+    let presented = headers.get("x-ados-key").and_then(|v| v.to_str().ok());
+    if state.pairing.credential_valid(presented) {
+        return WsAuth::AcceptPlain;
     }
+    // A bad header still falls through to the ticket path, matching the Python.
 
-    // A browser presents a one-shot HMAC ticket through the subprotocol list.
+    // A browser presents a single-use HMAC ticket through the subprotocol list.
     let offered = offered_subprotocols(headers);
     if let Some(token) = extract_ticket(&offered) {
         if WsTicketIssuer::from_api_key(&key)
-            .verify(token, scope, now_unix())
+            .verify_once(token, scope, now_unix())
             .is_ok()
         {
             return WsAuth::AcceptTicket;
@@ -165,6 +192,12 @@ fn decide_ws_auth(state: &AppState, headers: &HeaderMap, scope: &str) -> WsAuth 
     }
 
     WsAuth::Reject
+}
+
+/// The caller class the TCP edge stamped, or the on-box class on the Unix
+/// socket edge, which stamps none and is reachable only from the box itself.
+fn caller_of(caller: Option<Extension<CallerClass>>) -> CallerClass {
+    caller.map_or(CallerClass::OnBox, |Extension(c)| c)
 }
 
 /// Resolve the `on_upgrade` subprotocol selection from the auth outcome: the
@@ -210,9 +243,10 @@ fn run_dir() -> std::path::PathBuf {
 pub async fn ws_uplink(
     State(state): State<AppState>,
     headers: HeaderMap,
+    caller: Option<Extension<CallerClass>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let auth = decide_ws_auth(&state, &headers, SCOPE_UPLINK_EVENTS);
+    let auth = decide_ws_auth(&state, &headers, SCOPE_UPLINK_EVENTS, caller_of(caller));
     let Some((ws, auth)) = upgrade_with(ws, auth) else {
         return ws_reject();
     };
@@ -319,9 +353,10 @@ fn json_truthy(value: Option<&Value>) -> bool {
 pub async fn ws_pic_events(
     State(state): State<AppState>,
     headers: HeaderMap,
+    caller: Option<Extension<CallerClass>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let auth = decide_ws_auth(&state, &headers, SCOPE_PIC_EVENTS);
+    let auth = decide_ws_auth(&state, &headers, SCOPE_PIC_EVENTS, caller_of(caller));
     let Some((ws, auth)) = upgrade_with(ws, auth) else {
         return ws_reject();
     };
@@ -416,9 +451,10 @@ async fn pic_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
 pub async fn ws_buttons(
     State(state): State<AppState>,
     headers: HeaderMap,
+    caller: Option<Extension<CallerClass>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let auth = decide_ws_auth(&state, &headers, SCOPE_BUTTON_EVENTS);
+    let auth = decide_ws_auth(&state, &headers, SCOPE_BUTTON_EVENTS, caller_of(caller));
     let Some((ws, auth)) = upgrade_with(ws, auth) else {
         return ws_reject();
     };
@@ -516,9 +552,10 @@ async fn buttons_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
 pub async fn ws_mesh(
     State(state): State<AppState>,
     headers: HeaderMap,
+    caller: Option<Extension<CallerClass>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let auth = decide_ws_auth(&state, &headers, SCOPE_MESH_EVENTS);
+    let auth = decide_ws_auth(&state, &headers, SCOPE_MESH_EVENTS, caller_of(caller));
     let Some((ws, auth)) = upgrade_with(ws, auth) else {
         return ws_reject();
     };
@@ -911,8 +948,77 @@ mod tests {
     fn unpaired_admits_without_a_credential() {
         let (_d, state) = state_with_pairing(r#"{"paired": false}"#);
         assert!(matches!(
-            decide_ws_auth(&state, &HeaderMap::new(), SCOPE_UPLINK_EVENTS),
+            decide_ws_auth(
+                &state,
+                &HeaderMap::new(),
+                SCOPE_UPLINK_EVENTS,
+                CallerClass::OperatorLan
+            ),
             WsAuth::AcceptPlain
+        ));
+    }
+
+    #[test]
+    fn an_unpaired_node_refuses_a_remote_caller() {
+        // Every data route refuses a remote caller while unpaired; these
+        // streams used to be the exception.
+        let (_d, state) = state_with_pairing(r#"{"paired": false}"#);
+        assert!(matches!(
+            decide_ws_auth(
+                &state,
+                &HeaderMap::new(),
+                SCOPE_UPLINK_EVENTS,
+                CallerClass::Remote
+            ),
+            WsAuth::Reject
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_pairing_file_serves_only_the_on_box_operator() {
+        let (_d, state) = state_with_pairing("this is not json");
+        for caller in [
+            CallerClass::Remote,
+            CallerClass::OperatorLan,
+            CallerClass::Lifeline,
+        ] {
+            assert!(
+                matches!(
+                    decide_ws_auth(&state, &HeaderMap::new(), SCOPE_MESH_EVENTS, caller),
+                    WsAuth::Reject
+                ),
+                "{caller:?}"
+            );
+        }
+        assert!(matches!(
+            decide_ws_auth(
+                &state,
+                &HeaderMap::new(),
+                SCOPE_MESH_EVENTS,
+                CallerClass::OnBox
+            ),
+            WsAuth::AcceptPlain
+        ));
+    }
+
+    #[test]
+    fn a_ticket_opens_one_socket() {
+        let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
+        let token = WsTicketIssuer::from_api_key("k")
+            .mint(SCOPE_PIC_EVENTS, 30)
+            .unwrap()
+            .token;
+        let h = headers_with(&[(
+            "sec-websocket-protocol",
+            &format!("ados-ws-ticket, {token}"),
+        )]);
+        assert!(matches!(
+            decide_ws_auth(&state, &h, SCOPE_PIC_EVENTS, CallerClass::OperatorLan),
+            WsAuth::AcceptTicket
+        ));
+        assert!(matches!(
+            decide_ws_auth(&state, &h, SCOPE_PIC_EVENTS, CallerClass::OperatorLan),
+            WsAuth::Reject
         ));
     }
 
@@ -921,7 +1027,7 @@ mod tests {
         let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
         let h = headers_with(&[("x-ados-key", "k")]);
         assert!(matches!(
-            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS),
+            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS, CallerClass::OperatorLan),
             WsAuth::AcceptPlain
         ));
     }
@@ -931,12 +1037,17 @@ mod tests {
         let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
         let h = headers_with(&[("x-ados-key", "wrong")]);
         assert!(matches!(
-            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS),
+            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS, CallerClass::OperatorLan),
             WsAuth::Reject
         ));
         // No credential at all is also rejected.
         assert!(matches!(
-            decide_ws_auth(&state, &HeaderMap::new(), SCOPE_UPLINK_EVENTS),
+            decide_ws_auth(
+                &state,
+                &HeaderMap::new(),
+                SCOPE_UPLINK_EVENTS,
+                CallerClass::OperatorLan
+            ),
             WsAuth::Reject
         ));
     }
@@ -946,13 +1057,14 @@ mod tests {
         let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
         let token = WsTicketIssuer::from_api_key("k")
             .mint(SCOPE_UPLINK_EVENTS, 30)
+            .unwrap()
             .token;
         let h = headers_with(&[(
             "sec-websocket-protocol",
             &format!("ados-ws-ticket, {token}"),
         )]);
         assert!(matches!(
-            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS),
+            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS, CallerClass::OperatorLan),
             WsAuth::AcceptTicket
         ));
     }
@@ -963,13 +1075,14 @@ mod tests {
         // Minted for pic_events but presented to the uplink scope.
         let token = WsTicketIssuer::from_api_key("k")
             .mint(SCOPE_PIC_EVENTS, 30)
+            .unwrap()
             .token;
         let h = headers_with(&[(
             "sec-websocket-protocol",
             &format!("ados-ws-ticket, {token}"),
         )]);
         assert!(matches!(
-            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS),
+            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS, CallerClass::OperatorLan),
             WsAuth::Reject
         ));
     }
@@ -979,13 +1092,14 @@ mod tests {
         let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
         let token = WsTicketIssuer::from_api_key("other-key")
             .mint(SCOPE_UPLINK_EVENTS, 30)
+            .unwrap()
             .token;
         let h = headers_with(&[(
             "sec-websocket-protocol",
             &format!("ados-ws-ticket, {token}"),
         )]);
         assert!(matches!(
-            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS),
+            decide_ws_auth(&state, &h, SCOPE_UPLINK_EVENTS, CallerClass::OperatorLan),
             WsAuth::Reject
         ));
     }
@@ -997,13 +1111,14 @@ mod tests {
         let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
         let token = WsTicketIssuer::from_api_key("k")
             .mint(SCOPE_MESH_EVENTS, 30)
+            .unwrap()
             .token;
         let h = headers_with(&[(
             "sec-websocket-protocol",
             &format!("ados-ws-ticket, {token}"),
         )]);
         assert!(matches!(
-            decide_ws_auth(&state, &h, SCOPE_MESH_EVENTS),
+            decide_ws_auth(&state, &h, SCOPE_MESH_EVENTS, CallerClass::OperatorLan),
             WsAuth::AcceptTicket
         ));
     }
@@ -1014,13 +1129,14 @@ mod tests {
         // A uplink-scoped ticket presented to the mesh scope is rejected.
         let token = WsTicketIssuer::from_api_key("k")
             .mint(SCOPE_UPLINK_EVENTS, 30)
+            .unwrap()
             .token;
         let h = headers_with(&[(
             "sec-websocket-protocol",
             &format!("ados-ws-ticket, {token}"),
         )]);
         assert!(matches!(
-            decide_ws_auth(&state, &h, SCOPE_MESH_EVENTS),
+            decide_ws_auth(&state, &h, SCOPE_MESH_EVENTS, CallerClass::OperatorLan),
             WsAuth::Reject
         ));
     }
@@ -1032,13 +1148,14 @@ mod tests {
         let (_d, state) = state_with_pairing(r#"{"paired": true, "api_key": "k"}"#);
         let token = WsTicketIssuer::from_api_key("k")
             .mint(SCOPE_BUTTON_EVENTS, 30)
+            .unwrap()
             .token;
         let h = headers_with(&[(
             "sec-websocket-protocol",
             &format!("ados-ws-ticket, {token}"),
         )]);
         assert!(matches!(
-            decide_ws_auth(&state, &h, SCOPE_BUTTON_EVENTS),
+            decide_ws_auth(&state, &h, SCOPE_BUTTON_EVENTS, CallerClass::OperatorLan),
             WsAuth::AcceptTicket
         ));
     }
@@ -1049,13 +1166,14 @@ mod tests {
         // A pic-scoped ticket presented to the button scope is rejected.
         let token = WsTicketIssuer::from_api_key("k")
             .mint(SCOPE_PIC_EVENTS, 30)
+            .unwrap()
             .token;
         let h = headers_with(&[(
             "sec-websocket-protocol",
             &format!("ados-ws-ticket, {token}"),
         )]);
         assert!(matches!(
-            decide_ws_auth(&state, &h, SCOPE_BUTTON_EVENTS),
+            decide_ws_auth(&state, &h, SCOPE_BUTTON_EVENTS, CallerClass::OperatorLan),
             WsAuth::Reject
         ));
     }

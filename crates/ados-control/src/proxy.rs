@@ -121,7 +121,13 @@ async fn proxy_plain_within(
     request: Request,
     head_timeout: std::time::Duration,
 ) -> Response {
-    let permanent = routing::is_permanent_python_path(request.uri().path());
+    // Decided on the same once-decoded path the auth edge decided on, so an
+    // encoded spelling of a permanent-Python route still reads as an absent
+    // feature (501) rather than an unknown route (404).
+    let raw = request.uri().path();
+    let permanent = routing::is_permanent_python_path(
+        &crate::auth::decision_path(raw).unwrap_or_else(|_| raw.to_string()),
+    );
     forward_within(socket, request, head_timeout, move || {
         absent_reply(permanent)
     })
@@ -130,7 +136,8 @@ async fn proxy_plain_within(
 
 /// Forward a plain request to another local HTTP-over-Unix-socket service with
 /// the same streaming and head deadline as the residual proxy, answering
-/// `on_absent()` when nothing serves the socket or the exchange breaks.
+/// `on_absent()` when nothing serves the socket, and 502 when the service
+/// accepted the request but failed before answering.
 pub(crate) async fn forward_plain(
     socket: &Path,
     request: Request,
@@ -141,7 +148,8 @@ pub(crate) async fn forward_plain(
 
 /// Forward any request, WebSocket upgrades included, to a local
 /// HTTP-over-Unix-socket service, answering `on_absent()` when nothing serves
-/// the socket or the exchange breaks before a response head.
+/// the socket (or a WebSocket handshake breaks), and 502 when a plain request
+/// was accepted but failed before answering.
 pub(crate) async fn forward(
     socket: &Path,
     request: Request,
@@ -198,10 +206,17 @@ async fn forward_within(
     };
     match result {
         Ok(upstream) => relay_response(upstream),
-        // The upstream accepted the connection but the exchange failed (it closed
-        // mid-request, or sent a malformed reply). Degrade rather than 500 — to
-        // the downstream client the route simply is not there right now.
-        Err(_) => on_absent(),
+        // The upstream accepted the connection but the exchange failed (it
+        // closed mid-request, or sent a malformed reply). That is not an absent
+        // route: the request may already have had its side effect, so say the
+        // upstream failed rather than that nothing is there.
+        Err(e) => {
+            tracing::warn!(error = %e, "upstream_failed_mid_request");
+            detail(
+                StatusCode::BAD_GATEWAY,
+                "the upstream API failed mid-request",
+            )
+        }
     }
 }
 
@@ -493,6 +508,42 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
         let body = body_bytes(resp).await;
         assert_eq!(body, br#"{"detail":"Not Found"}"#);
+    }
+
+    #[tokio::test]
+    async fn an_encoded_permanent_prefix_is_still_an_absent_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("absent.sock");
+        let request = http::Request::builder()
+            .uri("/api/%76ision/state")
+            .body(Body::empty())
+            .unwrap();
+        let resp = proxy_with_socket(&path, request).await;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn an_upstream_that_drops_mid_request_is_a_502_not_a_404() {
+        // The residual accepts the connection, reads the request, then closes
+        // without answering: the request may have had a side effect, so it must
+        // not read as "route does not exist".
+        use tokio::io::AsyncReadExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("api-internal.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+            }
+        });
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/api/unknown/thing")
+            .body(Body::from("{}"))
+            .unwrap();
+        let resp = proxy_with_socket(&path, request).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]

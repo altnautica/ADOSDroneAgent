@@ -1,10 +1,10 @@
 //! Ground-station relay-proxy route: forward an HTTP-shaped request to a
 //! WFB-linked drone the ground station has no IP reach to.
 //!
-//! **`{GET,POST,PUT,DELETE} /api/v1/ground-station/relay-proxy/{peer_device_id}/*path`**
+//! **`{GET,POST,PUT,DELETE,PATCH} /api/v1/ground-station/relay-proxy/{peer_device_id}/*path`**
 //!
 //! The ground station is paired to this drone only over WFB and has no IP
-//! address for it. The aux lane's new Request/Response channels carry the
+//! address for it. The aux lane's Request/Response channels carry the
 //! HTTP-shaped request and response over the radio, and the proxy on this
 //! ground station (in the ados-control process) bridges the HTTP call to the
 //! radio egress. Ground-station profile only: the same gate as
@@ -16,7 +16,19 @@
 //! against its own HTTP API, and returned a response with the same request id.
 //! The response's HTTP status (which may be 404, 500, anything) travels inside
 //! the RPC payload and is projected onto this route's response — callers see
-//! the drone's actual HTTP status, not a wrapped envelope.
+//! the drone's actual HTTP status and body, not a wrapped envelope. A relay
+//! ticket the drone refused arrives as its 401 with
+//! `{"error":"E_RELAY_TICKET","reason":...}`, relayed verbatim.
+//!
+//! ## Refused here, before the radio
+//!
+//! - A peer that is not in the fleet registry: 404 `E_PEER_NOT_LINKED`.
+//! - A drone this ground station holds no relay secret for, or one the
+//!   reconciler found holding another station's secret: 401 `E_RELAY_TICKET`
+//!   with reason `no_secret` or `secret_conflict`. Neither can succeed over
+//!   the radio, and answering here says why instead of spending airtime on a
+//!   refusal.
+//! - A body past the relay's request ceiling: 413.
 //!
 //! ## Bounded failure
 //!
@@ -26,19 +38,22 @@
 //! fragment — is also a 504, but says so: "the drone never answered" and "the
 //! radio dropped a fragment" are different faults with different operator
 //! actions. An egress failure (radio pair not open) returns a 502 Bad Gateway.
-//! An encode failure (request too large for one aux frame) returns a 413.
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, RawQuery, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+use ados_protocol::aux_rpc::{RequestParts, RpcMethod, MAX_REQUEST_BODY};
+use ados_protocol::relay_ticket::{refusal_body, RelayTicketError, SECRET_CONFLICT_REASON};
+
+use crate::routes::gs_fleet_slot::{relay_secret_state, RelaySecretState};
 use crate::state::AppState;
 
 /// Handle a relay-proxy request. The path captures `peer_device_id` (the
 /// linked drone's device id) and `path` (the rest of the URL, starting with
-/// a `/`). The HTTP method and request body are matched from the incoming
+/// a `/`). The HTTP method, content type and body are taken from the incoming
 /// request.
 pub async fn handle(
     State(state): State<AppState>,
@@ -46,6 +61,7 @@ pub async fn handle(
     method: axum::http::Method,
     uri: axum::http::Uri,
     RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     if !is_ground_station(&state) {
@@ -68,20 +84,14 @@ pub async fn handle(
             .into_response();
     };
 
-    let rpc_method = match method.as_str() {
-        "GET" => ados_protocol::aux_rpc::RpcMethod::Get,
-        "POST" => ados_protocol::aux_rpc::RpcMethod::Post,
-        "PUT" => ados_protocol::aux_rpc::RpcMethod::Put,
-        "DELETE" => ados_protocol::aux_rpc::RpcMethod::Delete,
-        _ => {
-            return (
-                StatusCode::METHOD_NOT_ALLOWED,
-                Json(serde_json::json!({
-                    "detail": format!("method {} not supported by relay-proxy", method)
-                })),
-            )
-                .into_response();
-        }
+    let Some(rpc_method) = RpcMethod::from_http_method(method.as_str()) else {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(serde_json::json!({
+                "detail": format!("method {} not supported by relay-proxy", method)
+            })),
+        )
+            .into_response();
     };
 
     // Build the full path the drone's HTTP API will see, from the RAW request
@@ -112,6 +122,21 @@ pub async fn handle(
             .into_response();
     }
 
+    if body.len() > MAX_REQUEST_BODY {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "detail": format!("request body exceeds the {MAX_REQUEST_BODY}-byte relay limit")
+            })),
+        )
+            .into_response();
+    }
+
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
     let slots = crate::routes::gs_fleet_slot::registered_slots();
     match forward(
         proxy,
@@ -119,12 +144,24 @@ pub async fn handle(
         &peer_device_id,
         rpc_method,
         full_path.as_bytes(),
+        content_type.as_bytes(),
         &body,
     )
     .await
     {
         Ok(resp) => relayed_response(resp),
-        Err(e) => {
+        Err(Refusal::NotLinked) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "detail": {"error": {
+                    "code": "E_PEER_NOT_LINKED",
+                    "message": format!("{peer_device_id} is not a drone linked to this ground station"),
+                }}
+            })),
+        )
+            .into_response(),
+        Err(Refusal::Ticket(reason)) => ticket_refusal(reason),
+        Err(Refusal::Rpc(e)) => {
             // Without this the lane's only witness is the one HTTP caller that
             // happened to be waiting; a failing radio left no trace anywhere.
             tracing::warn!(
@@ -134,9 +171,13 @@ pub async fn handle(
                 "relay_proxy_call_failed"
             );
             let (status, msg) = match e {
-                ados_protocol::aux_rpc_proxy::RpcError::Encode => (
+                ados_protocol::aux_rpc_proxy::RpcError::TooLarge => (
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    "request exceeds one aux frame".to_string(),
+                    "request exceeds the relay limit".to_string(),
+                ),
+                ados_protocol::aux_rpc_proxy::RpcError::Encode => (
+                    StatusCode::BAD_REQUEST,
+                    "request path, content type or target is too long to relay".to_string(),
                 ),
                 ados_protocol::aux_rpc_proxy::RpcError::Send(_) => (
                     StatusCode::BAD_GATEWAY,
@@ -164,25 +205,64 @@ pub async fn handle(
     }
 }
 
-/// Send one relayed request to `peer`, carrying the relay ticket minted from
-/// the registry snapshot `slots`.
+/// Why a relayed call never reached the drone, or failed on the way.
+#[derive(Debug)]
+enum Refusal {
+    /// The peer is not in the fleet registry.
+    NotLinked,
+    /// No ticket can be minted that the drone would accept.
+    Ticket(&'static str),
+    /// The radio round trip failed.
+    Rpc(ados_protocol::aux_rpc_proxy::RpcError),
+}
+
+/// A 401 in the same shape the drone uses for its own ticket refusals, so the
+/// caller handles both identically.
+fn ticket_refusal(reason: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        refusal_body(reason),
+    )
+        .into_response()
+}
+
+/// Send one relayed request to `peer`, carrying a relay ticket bound to it,
+/// minted from the registry snapshot `slots`.
 ///
 /// The drone authorizes every relayed request before it reaches its own API,
-/// and one without a ticket it can verify is answered 401 — so the ticket is
+/// and one without a ticket bound to it is answered 401 — so the ticket is
 /// what makes this route reach a drone at all.
 async fn forward(
     proxy: &ados_protocol::aux_rpc_proxy::AuxRpcProxy,
     slots: &[ados_groundlink::FleetSlot],
     peer: &str,
-    method: ados_protocol::aux_rpc::RpcMethod,
+    method: RpcMethod,
     path: &[u8],
+    content_type: &[u8],
     body: &[u8],
-) -> Result<ados_protocol::aux_rpc_proxy::RpcResponseOwned, ados_protocol::aux_rpc_proxy::RpcError>
-{
-    let ticket = crate::routes::gs_fleet_slot::mint_ticket(slots, peer);
+) -> Result<ados_protocol::aux_rpc_proxy::RpcResponseOwned, Refusal> {
+    if !slots.iter().any(|s| s.device_id == peer) {
+        return Err(Refusal::NotLinked);
+    }
+    if relay_secret_state(peer) == RelaySecretState::Conflict {
+        return Err(Refusal::Ticket(SECRET_CONFLICT_REASON));
+    }
+    let ticket = crate::routes::gs_fleet_slot::mint_ticket(slots, peer, method, path, body)
+        .ok_or(Refusal::Ticket(RelayTicketError::NoSecret.reason()))?;
     proxy
-        .call_with_ticket(peer.as_bytes(), method, path, body, ticket.as_bytes())
+        .call_request(
+            peer.as_bytes(),
+            method,
+            &RequestParts {
+                path,
+                content_type,
+                ticket: ticket.as_bytes(),
+                body,
+            },
+        )
         .await
+        .map_err(Refusal::Rpc)
 }
 
 /// Project a completed relay call onto the HTTP response this route returns:
@@ -413,24 +493,66 @@ mod tests {
             RpcMethod::Get,
             b"/api/version",
             b"",
+            b"",
         )
         .await
         .expect("the drone answers");
         assert_eq!(resp.status, 200, "the drone must admit the relayed call");
         assert_eq!(drone.seen.lock().last().unwrap().path, b"/api/version");
 
-        // With no secret on file for the drone there is nothing to mint, and
-        // the drone refuses exactly as it refuses any unticketed call.
+        // A body and a PATCH cross too, bound into the ticket.
         let resp = super::forward(
+            &drone.proxy,
+            &registered(DRONE, Some(SECRET)),
+            DRONE,
+            RpcMethod::Patch,
+            b"/api/plugins/com.example.tool/x/state",
+            b"application/json",
+            br#"{"on":true}"#,
+        )
+        .await
+        .expect("the drone answers");
+        assert_eq!(resp.status, 200);
+    }
+
+    #[tokio::test]
+    async fn a_peer_with_no_secret_is_refused_without_spending_airtime() {
+        use crate::routes::gs_fleet_slot::test_drone::{self, SECRET};
+        use ados_protocol::aux_rpc::RpcMethod;
+
+        const DRONE: &str = "ados-relay-02";
+        let drone = test_drone::spawn(DRONE, Some(SECRET)).await;
+        let got = super::forward(
             &drone.proxy,
             &registered(DRONE, None),
             DRONE,
             RpcMethod::Get,
             b"/api/version",
             b"",
+            b"",
         )
-        .await
-        .expect("the drone answers");
-        assert_eq!(resp.status, 401);
+        .await;
+        assert!(matches!(got, Err(super::Refusal::Ticket("no_secret"))));
+        assert!(drone.seen.lock().is_empty(), "nothing crossed the radio");
+    }
+
+    #[tokio::test]
+    async fn an_unregistered_peer_is_not_linked_rather_than_a_radio_round_trip() {
+        use crate::routes::gs_fleet_slot::test_drone::{self, SECRET};
+        use ados_protocol::aux_rpc::RpcMethod;
+
+        let drone = test_drone::spawn("ados-relay-03", Some(SECRET)).await;
+        let got = super::forward(
+            &drone.proxy,
+            &registered("ados-relay-03", Some(SECRET)),
+            "ados-relay-typo",
+            RpcMethod::Get,
+            b"/api/version",
+            b"",
+            b"",
+        )
+        .await;
+        assert!(matches!(got, Err(super::Refusal::NotLinked)));
+        assert!(drone.seen.lock().is_empty());
     }
 }

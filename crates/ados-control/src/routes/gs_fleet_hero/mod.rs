@@ -542,27 +542,39 @@ fn outcome_body(hero: &str, report: &SelectionReport) -> Value {
 }
 
 /// The per-drone call: a targeted `POST /api/video/profile` over the aux lane,
-/// carrying the relay ticket minted from `slots` for that drone.
+/// carrying a relay ticket bound to it, minted from `slots` for that drone.
 ///
-/// The drone refuses a relayed request without a ticket it can verify, so the
+/// The drone refuses a relayed request without a ticket bound to it, so the
 /// ticket is not optional here. It is minted per attempt, so a retry never
-/// presents one that expired while the first attempt timed out.
+/// presents one that expired or was already spent by the first attempt.
 pub(super) fn profile_caller(
     proxy: Arc<AuxRpcProxy>,
     slots: Arc<[FleetSlot]>,
 ) -> impl Fn(String, VideoProfile) -> ProfileCall + Clone + Send + 'static {
     move |device_id: String, profile: VideoProfile| {
         let proxy = Arc::clone(&proxy);
-        let ticket = mint_ticket(&slots, &device_id);
+        let body = json!({"profile": profile.as_str()}).to_string();
+        let ticket = mint_ticket(
+            &slots,
+            &device_id,
+            RpcMethod::Post,
+            DRONE_PROFILE_PATH,
+            body.as_bytes(),
+        );
         ProfileCall(Box::pin(async move {
-            let body = json!({"profile": profile.as_str()}).to_string();
+            let Some(ticket) = ticket else {
+                return Err("no relay secret on file for this drone".to_string());
+            };
             match proxy
-                .call_with_ticket(
+                .call_request(
                     device_id.as_bytes(),
                     RpcMethod::Post,
-                    DRONE_PROFILE_PATH,
-                    body.as_bytes(),
-                    ticket.as_bytes(),
+                    &ados_protocol::aux_rpc::RequestParts {
+                        path: DRONE_PROFILE_PATH,
+                        content_type: b"application/json",
+                        ticket: ticket.as_bytes(),
+                        body: body.as_bytes(),
+                    },
                 )
                 .await
             {
@@ -671,15 +683,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_promotion_for_a_drone_with_no_secret_on_file_is_refused_and_says_so() {
-        // Nothing to mint from, so the call goes out bare and the drone's
-        // refusal is surfaced rather than read as a success.
+        // Nothing to mint from, so nothing is sent and the refusal is
+        // surfaced rather than read as a success.
         const DRONE: &str = "ados-hero-02";
         let drone = test_drone::spawn(DRONE, Some(SECRET)).await;
         let promote = profile_caller(Arc::clone(&drone.proxy), Arc::from(slots(&[DRONE])));
         let err = promote(DRONE.to_string(), VideoProfile::Hero)
             .await
-            .expect_err("the drone refuses an unticketed call");
-        assert!(err.contains("401"), "{err}");
+            .expect_err("no ticket can be minted");
+        assert!(err.contains("no relay secret"), "{err}");
+        assert!(drone.seen.lock().is_empty());
     }
 
     #[test]

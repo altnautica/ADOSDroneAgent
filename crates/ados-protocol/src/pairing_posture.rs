@@ -120,6 +120,34 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(diff) == 0
 }
 
+/// Config subtrees no radio lane may write: the node's trust roots.
+///
+/// - `security` holds the configured API key and the HMAC secret, standing
+///   LAN credentials.
+/// - `server` names the cloud or self-hosted backend the node's key and
+///   beacon are sent to.
+/// - `pairing` names the cloud pairing endpoint.
+/// - `remote_access` configures the public tunnel, including the path its
+///   token is written to.
+///
+/// One list for both radio lanes (the relayed HTTP config write and the
+/// config tunnel), so they cannot disagree about which keys are trust roots.
+pub const RELAY_FORBIDDEN_CONFIG_KEYS: &[&str] =
+    &["security", "server", "pairing", "remote_access"];
+
+/// Whether a config write arriving over a radio lane may not touch `key` (a
+/// dotted path): the key is one of [`RELAY_FORBIDDEN_CONFIG_KEYS`] or lies
+/// beneath one.
+pub fn relay_config_key_forbidden(key: &str) -> bool {
+    let key = key.trim();
+    RELAY_FORBIDDEN_CONFIG_KEYS.iter().any(|denied| {
+        key == *denied
+            || key
+                .strip_prefix(denied)
+                .is_some_and(|rest| rest.starts_with('.'))
+    })
+}
+
 /// Who is on the other end of a request, derived once at the transport edge by
 /// [`classify_caller`].
 ///

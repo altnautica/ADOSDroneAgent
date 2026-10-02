@@ -5,20 +5,26 @@
 //! through this native route. It forwards `{arguments, timeout_ms?}` to the
 //! plugin host's on-box control socket via [`PluginControlClient::tool_invoke`],
 //! which reaches the plugin's LIVE connection, runs the tool, and returns its
-//! result. The connector is the authoritative gate on each tool's declared
-//! safety class (a `flight_action` tool needs the flight scope); the plugin host
-//! additionally gates the send on the plugin's own token carrying `mcp.expose`,
-//! and the tool's effect is bounded by the plugin's other granted capabilities.
+//! result.
+//!
+//! A caller admitted on a scoped MCP token must hold the scope the tool's
+//! declared `safety_class` names in the installed manifest (a `flight` tool
+//! needs the `flight` scope); a tool the manifest does not declare is refused
+//! to a token. This is enforced here, at the agent, rather than trusted to the
+//! connector, because a token can be presented to the agent directly. The
+//! plugin host additionally gates the send on the plugin's own token carrying
+//! `mcp.expose`, and the tool's effect is bounded by the plugin's other granted
+//! capabilities.
 //!
 //! RUST-FIRST: like the plugin-config write, a tool invocation is a control-plane
 //! operation, so it is a native `ados-control` route, not a residual-Python one.
 //!
 //! Auth: a native write route — the LAN edge requires the pairing key when paired
-//! (or a scoped MCP token covering the route's class); an unreachable daemon is a
-//! 503, never a silent drop.
+//! (or a verified MCP token, whose scope this route then checks against the
+//! tool); an unreachable daemon is a 503, never a silent drop.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -65,8 +71,9 @@ fn status_for_rpc(msg: &str) -> StatusCode {
 /// `POST /api/plugins/{plugin_id}/tools/{tool}/invoke` — run a plugin's MCP tool
 /// and return its result.
 pub async fn invoke_plugin_tool(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path((plugin_id, tool)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Option<Json<InvokeToolBody>>,
 ) -> Response {
     if plugin_id.trim().is_empty() || tool.trim().is_empty() {
@@ -74,6 +81,34 @@ pub async fn invoke_plugin_tool(
             StatusCode::BAD_REQUEST,
             "plugin_id and tool must be non-empty",
         );
+    }
+    // The edge stamps the granted scopes only on a request it admitted on an
+    // MCP token (any client-sent value is stripped first). Absent, the caller
+    // holds the pairing key or is on-box, and reaches every class.
+    if let Some(granted) = headers.get(crate::mcp::MCP_SCOPES_HEADER) {
+        let granted: Vec<String> = granted
+            .to_str()
+            .unwrap_or("")
+            .split(',')
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+            .map(str::to_string)
+            .collect();
+        let required = state
+            .plugins
+            .installed_manifest(plugin_id.clone())
+            .await
+            .and_then(|m| crate::mcp::tool_safety_class(&m, &tool))
+            .and_then(|class| crate::mcp::tool_scope_class(&class));
+        let allowed = required
+            .is_some_and(|class| ados_protocol::mcp_token::scope_allows_class(class, &granted));
+        if !allowed {
+            tracing::warn!(plugin_id = %plugin_id, tool = %tool, "plugin_tool_mcp_scope_denied");
+            return detail(
+                StatusCode::FORBIDDEN,
+                "The presented MCP token's scope does not cover this tool's declared safety class.",
+            );
+        }
     }
     let Json(body) = body.unwrap_or_default();
     let arguments = match body.arguments {

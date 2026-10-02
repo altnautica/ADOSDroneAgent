@@ -51,8 +51,8 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/mcp/revoke` | relay-forbidden |
 | GET | `/api/mcp/status` |  |
 | POST | `/api/mcp/tokens` | relay-forbidden |
-| POST | `/api/pairing/claim` | unauthenticated by design |
-| GET | `/api/pairing/code` | unauthenticated by design |
+| POST | `/api/pairing/claim` | unauthenticated by design; relay-forbidden |
+| GET | `/api/pairing/code` | unauthenticated by design; relay-forbidden |
 | GET | `/api/pairing/info` | unauthenticated by design |
 | POST | `/api/pairing/unpair` | relay-forbidden |
 | GET | `/api/params` |  |
@@ -61,9 +61,9 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/ping` | unauthenticated by design |
 | GET | `/api/plugins` |  |
 | POST | `/api/plugins/capability-token` | relay-forbidden |
-| POST | `/api/plugins/install` | relay-forbidden |
+| POST | `/api/plugins/install` |  |
 | POST | `/api/plugins/install_builtin` |  |
-| POST | `/api/plugins/install_from_url` | relay-forbidden |
+| POST | `/api/plugins/install_from_url` |  |
 | WS | `/api/plugins/jobs/{job_id}` |  |
 | POST | `/api/plugins/parse` |  |
 | POST | `/api/plugins/parse_from_url` |  |
@@ -74,9 +74,9 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/plugins/{plugin_id}/config` |  |
 | PUT | `/api/plugins/{plugin_id}/config` |  |
 | POST | `/api/plugins/{plugin_id}/disable` |  |
-| POST | `/api/plugins/{plugin_id}/enable` | relay-forbidden |
+| POST | `/api/plugins/{plugin_id}/enable` |  |
 | GET | `/api/plugins/{plugin_id}/gcs/{*asset_path}` |  |
-| POST | `/api/plugins/{plugin_id}/grant` | relay-forbidden |
+| POST | `/api/plugins/{plugin_id}/grant` |  |
 | GET | `/api/plugins/{plugin_id}/manifest` |  |
 | DELETE | `/api/plugins/{plugin_id}/perms/{permission_id}` |  |
 | POST | `/api/plugins/{plugin_id}/pin` |  |
@@ -91,7 +91,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/plugins/{plugin_id}/x/{*rest}` |  |
 | POST | `/api/relay/peer-secret` |  |
 | GET | `/api/services` |  |
-| POST | `/api/services/{name}/restart` | relay-forbidden |
+| POST | `/api/services/{name}/restart` |  |
 | GET | `/api/status` |  |
 | GET | `/api/status/full` |  |
 | GET | `/api/swarm/neighbors` |  |
@@ -154,6 +154,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/api/v1/ground-station/recording/{segment}` |  |
 | DELETE | `/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}` |  |
 | GET | `/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}` |  |
+| PATCH | `/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}` |  |
 | POST | `/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}` |  |
 | PUT | `/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}` |  |
 | GET | `/api/v1/ground-station/relayed/config` |  |
@@ -187,7 +188,7 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/network/mac/pin` |  |
 | DELETE | `/api/v1/network/mac/{iface}` |  |
 | GET | `/api/v1/plugins/catalog` |  |
-| POST | `/api/v1/system/restart-supervisor` | relay-forbidden |
+| POST | `/api/v1/system/restart-supervisor` |  |
 | GET | `/api/v2/observability/{*upstream_path}` |  |
 | GET | `/api/version` | unauthenticated by design |
 | GET | `/api/video/config` |  |
@@ -215,7 +216,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-190 native routes.
+191 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 
@@ -241,7 +242,7 @@ absent (a known feature, not on this profile) rather than `404`.
 | GET | `/api/v1/peripherals/{peripheral_id}` |  |
 | POST | `/api/v1/peripherals/{peripheral_id}/action` |  |
 | POST | `/api/v1/peripherals/{peripheral_id}/config` |  |
-| POST | `/api/v1/setup/apply` |  |
+| POST | `/api/v1/setup/apply` | relay-forbidden |
 | POST | `/api/v1/setup/cloud-choice` | relay-forbidden |
 | WS | `/api/v1/setup/cloudflare/logs` |  |
 | GET | `/api/v1/setup/cloudflare/verify` |  |
@@ -254,8 +255,8 @@ absent (a known feature, not on this profile) rather than `404`.
 | POST | `/api/v1/setup/hardware-check/refresh` |  |
 | GET | `/api/v1/setup/nudges` |  |
 | POST | `/api/v1/setup/nudges/{nudge_id}/ack` |  |
-| POST | `/api/v1/setup/profile` |  |
-| POST | `/api/v1/setup/reboot` | relay-forbidden |
+| POST | `/api/v1/setup/profile` | relay-forbidden |
+| POST | `/api/v1/setup/reboot` |  |
 | POST | `/api/v1/setup/remote-access/cloudflare` | relay-forbidden |
 | POST | `/api/v1/setup/reset` | relay-forbidden |
 | POST | `/api/v1/setup/skip` |  |

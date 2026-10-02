@@ -94,3 +94,51 @@ def test_no_temp_files_left_after_save(state_file: Path) -> None:
     mgr.get_or_create_code()
     leftovers = [p for p in state_file.parent.iterdir() if p.suffix == ".tmp"]
     assert leftovers == []
+
+
+def _write_behind_the_cache(state_file: Path, state: dict, mtime: float) -> None:
+    """Another process writes ``state`` within the same mtime tick the reader
+    last loaded at, so the reader's mtime check cannot notice it."""
+    state_file.write_text(json.dumps(state))
+    os.utime(state_file, (mtime, mtime))
+
+
+def test_a_stale_code_regeneration_never_undoes_a_claim(state_file: Path) -> None:
+    """A process whose cached code has expired regenerates it from the state on
+    disk under the lock, so a claim another process made is left intact."""
+    _write_behind_the_cache(
+        state_file, {"pairing_code": "OLD234", "code_created_at": 0}, 1_000.0
+    )
+    stale = PairingManager(state_path=str(state_file))
+    _write_behind_the_cache(
+        state_file,
+        {"paired": True, "api_key": "ados_live", "owner_id": "u", "paired_at": 1.0},
+        1_000.0,
+    )
+    assert stale.get_or_create_code() == ""
+    on_disk = json.loads(state_file.read_text())
+    assert on_disk["paired"] is True
+    assert on_disk["api_key"] == "ados_live"
+
+
+def test_a_second_claim_against_a_stale_cache_is_refused(state_file: Path) -> None:
+    _write_behind_the_cache(state_file, {"pairing_code": "ABC234"}, 1_000.0)
+    stale = PairingManager(state_path=str(state_file))
+    _write_behind_the_cache(
+        state_file,
+        {"paired": True, "api_key": "ados_first", "owner_id": "a", "paired_at": 1.0},
+        1_000.0,
+    )
+    with pytest.raises(ValueError):
+        stale.claim("b")
+    assert json.loads(state_file.read_text())["api_key"] == "ados_first"
+
+
+def test_a_writer_never_replaces_an_unreadable_file(state_file: Path) -> None:
+    from ados.core.pairing import PairingStateUnreadable
+
+    mgr = PairingManager(state_path=str(state_file))
+    state_file.write_text("{not json")
+    with pytest.raises(PairingStateUnreadable):
+        mgr.claim("u")
+    assert state_file.read_text() == "{not json"

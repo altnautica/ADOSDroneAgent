@@ -40,6 +40,7 @@ use std::time::Duration;
 use ados_groundlink::FleetSlot;
 use ados_protocol::aux_rpc::RpcMethod;
 use ados_protocol::aux_rpc_proxy::AuxRpcProxy;
+use ados_protocol::relay_ticket::{RelayTicketIssuer, RequestBinding};
 use serde_json::json;
 
 /// How often the ground station restates the fleet's slot assignments.
@@ -50,9 +51,8 @@ use serde_json::json;
 /// per-second one.
 pub const SLOT_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// The drone-side config write. `PUT /api/config` is already relay-reachable
-/// (it is absent from `auth::relay_forbidden`) and already validates its own
-/// key/value, so this carries no new drone-side surface.
+/// The drone-side config write. `PUT /api/config` is relay-reachable and
+/// validates its own key/value, so this carries no new drone-side surface.
 const DRONE_CONFIG_PATH: &[u8] = b"/api/config";
 
 /// The config key holding a node's fleet slot.
@@ -129,14 +129,25 @@ pub async fn deliver(
     assignment: &SlotAssignment,
 ) -> Result<(), String> {
     let body = json!({ "key": FLEET_SLOT_KEY, "value": assignment.slot }).to_string();
-    let ticket = mint_ticket(slots, &assignment.device_id);
+    let Some(ticket) = mint_ticket(
+        slots,
+        &assignment.device_id,
+        RpcMethod::Put,
+        DRONE_CONFIG_PATH,
+        body.as_bytes(),
+    ) else {
+        return Err("no relay secret on file for this drone".to_string());
+    };
     match proxy
-        .call_with_ticket(
+        .call_request(
             assignment.device_id.as_bytes(),
             RpcMethod::Put,
-            DRONE_CONFIG_PATH,
-            body.as_bytes(),
-            ticket.as_bytes(),
+            &ados_protocol::aux_rpc::RequestParts {
+                path: DRONE_CONFIG_PATH,
+                content_type: b"application/json",
+                ticket: ticket.as_bytes(),
+                body: body.as_bytes(),
+            },
         )
         .await
     {
@@ -167,31 +178,90 @@ fn secret_outcome(status: u16) -> Result<SecretOutcome, String> {
     }
 }
 
-/// Mint a relay ticket for `device_id` from the secret `slots` holds for it.
+/// Mint a relay ticket for one request to `device_id`, from the secret `slots`
+/// holds for it, bound to the request's method, path (with query) and body.
 ///
 /// Every ground-station-to-drone call except the secret delivery itself goes
 /// out with one: the drone refuses any relayed request that does not carry a
-/// ticket it can verify, so a caller that skips this is refused outright.
-/// `slots` is the registry snapshot the caller is already working from, so a
-/// fan-out across the fleet reads the registry once rather than per call.
+/// ticket bound to it. `slots` is the registry snapshot the caller is already
+/// working from, so a fan-out across the fleet reads the registry once rather
+/// than per call.
 ///
-/// Empty when the snapshot holds no secret for that drone, which encodes
-/// byte-identically to the request it always sent. That is the compatibility
-/// hinge: a drone running a build that predates the ticket field would refuse a
-/// frame carrying one, and this is what guarantees it never receives one.
-pub fn mint_ticket(slots: &[FleetSlot], device_id: &str) -> String {
-    let Some(secret) = slots
+/// `None` when the snapshot holds no secret for that drone: there is nothing
+/// to sign with, and the caller refuses rather than sending a request the
+/// drone would refuse anyway.
+pub fn mint_ticket(
+    slots: &[FleetSlot],
+    device_id: &str,
+    method: RpcMethod,
+    path: &[u8],
+    body: &[u8],
+) -> Option<String> {
+    let path = std::str::from_utf8(path).ok()?;
+    mint_bound_ticket(
+        slots,
+        device_id,
+        &RequestBinding::new(method.as_http_method(), path, body),
+    )
+}
+
+/// As [`mint_ticket`], for any binding (the config tunnel binds its op rather
+/// than an HTTP request).
+pub fn mint_bound_ticket(
+    slots: &[FleetSlot],
+    device_id: &str,
+    binding: &RequestBinding<'_>,
+) -> Option<String> {
+    let secret = slots
         .iter()
         .find(|s| s.device_id == device_id)
-        .and_then(|s| s.relay_secret.as_deref())
-    else {
-        return String::new();
-    };
-    ados_protocol::relay_ticket::RelayTicketIssuer::from_secret(secret.as_bytes()).mint_at(
-        device_id,
-        ados_protocol::relay_ticket::DEFAULT_TTL_SECONDS,
-        now_unix_secs(),
-    )
+        .and_then(|s| s.relay_secret.as_deref())?;
+    RelayTicketIssuer::from_secret(secret.as_bytes()).mint(device_id, binding, now_unix_secs())
+}
+
+/// Where the relay secret this ground station issued a drone stands, as last
+/// learned by the slot reconciler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelaySecretState {
+    /// Not yet confirmed by the drone (off, out of range, or not yet offered).
+    Pending,
+    /// The drone holds this ground station's secret.
+    Held,
+    /// The drone holds a different secret: it was paired to another ground
+    /// station and never unpaired. Relayed calls to it cannot succeed until it
+    /// is unpaired on the drone itself.
+    Conflict,
+}
+
+/// The reconciler's latest knowledge per device id.
+static RELAY_SECRET_STATES: std::sync::LazyLock<
+    std::sync::Mutex<BTreeMap<String, RelaySecretState>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Where `device_id`'s relay secret stands. A drone the reconciler has not
+/// heard from is [`RelaySecretState::Pending`].
+pub fn relay_secret_state(device_id: &str) -> RelaySecretState {
+    RELAY_SECRET_STATES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(device_id)
+        .copied()
+        .unwrap_or(RelaySecretState::Pending)
+}
+
+fn record_relay_secret_state(device_id: &str, state: RelaySecretState) {
+    RELAY_SECRET_STATES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(device_id.to_string(), state);
+}
+
+fn forget_departed_relay_secret_states(present: &std::collections::BTreeSet<&str>) {
+    RELAY_SECRET_STATES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|device_id, _| present.contains(device_id.as_str()));
 }
 
 /// Wall-clock unix seconds. The drone checks the ticket's expiry against its own
@@ -260,10 +330,12 @@ pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
         let present_ids: std::collections::BTreeSet<&str> =
             slots.iter().map(|s| s.device_id.as_str()).collect();
         secret_acked.retain(|device_id| present_ids.contains(device_id.as_str()));
+        forget_departed_relay_secret_states(&present_ids);
         for delivery in decide_secret_tick(&slots, &secret_acked) {
             match deliver_secret(&proxy, &delivery).await {
                 Ok(SecretOutcome::Held) => {
                     tracing::info!(device_id = %delivery.device_id, "relay_secret_delivered");
+                    record_relay_secret_state(&delivery.device_id, RelaySecretState::Held);
                     secret_acked.insert(delivery.device_id);
                 }
                 Ok(SecretOutcome::Conflict) => {
@@ -271,6 +343,7 @@ pub async fn run_slot_reconciler(proxy: Arc<AuxRpcProxy>) {
                         device_id = %delivery.device_id,
                         "relay_secret_conflict: the drone holds a different relay secret; unpair it to re-key"
                     );
+                    record_relay_secret_state(&delivery.device_id, RelaySecretState::Conflict);
                     // Settled: no further offers until it leaves the fleet.
                     secret_acked.insert(delivery.device_id);
                 }
@@ -378,35 +451,36 @@ pub(crate) mod test_drone {
         let log = Arc::clone(&seen);
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
+            let mut reassembler = aux_rpc::RequestReassembler::new();
             while let Ok((n, _)) = radio.recv_from(&mut buf).await {
                 let Ok((AuxChannel::Request, payload)) = aux_mux::decode(&buf[..n]) else {
                     continue;
                 };
-                let Ok(request) = aux_rpc::decode_request(payload) else {
+                let Ok(fragment) = aux_rpc::decode_request_fragment(payload) else {
                     continue;
                 };
-                if request.target != device_id.as_bytes() {
+                if fragment.target != device_id.as_bytes() {
                     continue;
                 }
+                let aux_rpc::ReassemblyOutcome::Complete(request) =
+                    reassembler.push(&fragment, std::time::Instant::now())
+                else {
+                    continue;
+                };
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs() as i64;
                 let status = match ados_mavlink_router::aux_rpc_handler::authorize(
-                    held,
-                    request.ticket,
-                    request.method,
-                    request.path,
-                    device_id,
-                    now,
+                    held, &request, device_id, now,
                 ) {
-                    Ok(()) => 200,
+                    Ok(_) => 200,
                     Err(_) => 401,
                 };
                 log.lock().push(Seen {
                     method: request.method,
-                    path: request.path.to_vec(),
-                    body: request.body.to_vec(),
+                    path: request.path.clone(),
+                    body: request.body.clone(),
                     status,
                 });
                 let symbols = aux_rpc::split_response(&[]).unwrap();

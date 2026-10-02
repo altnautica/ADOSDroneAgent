@@ -195,7 +195,7 @@ wire = "string"
 transport = "websocket-subprotocol"
 status = "metadata"
 rust_const = "ados_protocol::ws_ticket::TICKET_KEY_LABEL"
-description = "String-tagged (v1) HMAC-SHA256 WebSocket auth ticket; the version is a string tag, not a wire integer."
+description = "String-tagged (v2) single-use HMAC-SHA256 WebSocket auth ticket; the version is a string tag, not a wire integer."
 
 [[contract]]
 id = "cloud-publish"

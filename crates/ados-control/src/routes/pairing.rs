@@ -15,14 +15,21 @@
 //!   exception is `pairing.json` itself: an unreadable or malformed file is a
 //!   `503`, never the unpaired default, because "unpaired" is the state in which
 //!   anyone on the LAN may claim a fresh key.
-//! - **`GET /api/pairing/code`** — the bare code while unpaired; 409 when paired.
+//! - **`GET /api/pairing/code`** — the live code while unpaired, regenerated
+//!   once it is older than `pairing_store::CODE_TTL_SECONDS` (the same lifetime
+//!   the Python writer applies); 409 when paired.
 //! - **`POST /api/pairing/claim`** — claim the agent for a user. Writes
 //!   `pairing.json` (mirroring `PairingManager.claim` exactly) and returns the
 //!   key; 409 when already paired; 503 when the pairing file cannot be read.
+//!   Never served to a request that crossed the radio relay.
 //! - **`POST /api/pairing/unpair`** — clear pairing + mint a fresh code; 409 when
 //!   not paired. Gated by the auth middleware (it is not in the public set). An
 //!   unreadable pairing file is cleared too: the gate already restricts it to the
 //!   on-box operator, and this is how that operator recovers the node.
+//!
+//! Every write happens under `pairing_store::lock_writers`, with the
+//! already-paired check re-read inside the lock, so two concurrent claims cannot
+//! both mint a key.
 //!
 //! The pairing code is withheld from a remote caller (anything relayed through a
 //! proxy or tunnel, or a public-WAN host): `info` reports it as null and `code`
@@ -41,7 +48,7 @@
 //! record and the probe response name one host.
 
 use axum::extract::{Extension, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
@@ -129,6 +136,15 @@ pub async fn get_pairing_info(
     // FC presence from the live state snapshot's runtime extras.
     let (fc_connected, fc_port, fc_baud) = fc_from_snapshot(state.state.snapshot().as_ref());
 
+    // The same live code `/code` serves. One that cannot be minted or persisted
+    // is reported as absent here rather than failing the whole identity probe;
+    // `/code` says why.
+    let pairing_code = if may_see_code(caller) && !doc.is_paired() {
+        live_code(paths).await.ok().flatten()
+    } else {
+        None
+    };
+
     Json(json!({
         "device_id": device_id,
         "name": name,
@@ -143,7 +159,7 @@ pub async fn get_pairing_info(
         "paired": doc.is_paired(),
         "radio_paired": radio_paired,
         "radio_peer_device_id": radio_peer_device_id,
-        "pairing_code": if may_see_code(caller) { doc.info_pairing_code() } else { None },
+        "pairing_code": pairing_code,
         "owner_id": doc.info_owner_id(),
         "paired_at": doc.info_paired_at(),
         "mdns_host": mdns_host,
@@ -170,10 +186,10 @@ pub async fn get_pairing_info(
 /// `GET /api/pairing/code` → `{"code": <code>}` while unpaired; 409
 /// `{"detail":"Already paired"}` while paired.
 ///
-/// The FastAPI route generates a code on demand (`get_or_create_code`); the
-/// native read surface returns the persisted code when one is present, and mints
-/// then persists one when absent so a fresh agent still answers a usable code
-/// (the same effect `get_or_create_code` has). Paired agents 409.
+/// Returns the persisted code while it is live, and mints then persists a new
+/// one when there is none or it has outlived `pairing_store::CODE_TTL_SECONDS`,
+/// the same rule the Python `get_or_create_code` applies, so every surface shows
+/// one code. Paired agents 409.
 pub async fn get_pairing_code(
     State(state): State<AppState>,
     caller: Option<Extension<CallerClass>>,
@@ -184,32 +200,57 @@ pub async fn get_pairing_code(
             "The pairing code is only served on the device's own networks.",
         );
     }
-    let paths = &state.pairing_paths;
-    let doc = match PairingDoc::read(&paths.pairing_json) {
-        Ok(doc) => doc,
-        Err(reason) => return pairing_unreadable(&reason),
-    };
-    if doc.is_paired() {
-        return detail(StatusCode::CONFLICT, "Already paired");
+    match live_code(&state.pairing_paths).await {
+        Ok(Some(code)) => (StatusCode::OK, Json(json!({ "code": code }))).into_response(),
+        Ok(None) => detail(StatusCode::CONFLICT, "Already paired"),
+        Err(CodeError::Unreadable(reason)) => pairing_unreadable(&reason),
+        // A code that could not be persisted is refused: an in-memory one is
+        // not what the device holds and would change on every call.
+        Err(CodeError::Persist(e)) => {
+            tracing::warn!(error = %e, "pairing code persist failed");
+            detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Failed to persist a pairing code",
+            )
+        }
     }
-    let code = match doc.pairing_code.clone() {
-        Some(code) if !code.is_empty() => code,
-        // No code on file yet: mint + persist one, matching the
-        // `get_or_create_code` generate-and-save branch. A code that could not be
-        // persisted is refused: an in-memory one is not what the device holds and
-        // would change on every call.
-        _ => match pairing_store::write_new_code(&paths.pairing_json, now_unix_seconds()) {
-            Ok(code) => code,
-            Err(e) => {
-                tracing::warn!(error = %e, "pairing code persist failed");
-                return detail(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Failed to persist a pairing code",
-                );
-            }
-        },
-    };
-    (StatusCode::OK, Json(json!({ "code": code }))).into_response()
+}
+
+/// Why no live code could be produced.
+enum CodeError {
+    Unreadable(String),
+    Persist(std::io::Error),
+}
+
+/// The live pairing code of an unpaired node, minted under the writer lock
+/// when absent or expired; `None` when paired.
+async fn live_code(paths: &PairingPaths) -> Result<Option<String>, CodeError> {
+    let now = now_unix_seconds();
+    let doc = PairingDoc::read(&paths.pairing_json).map_err(CodeError::Unreadable)?;
+    if doc.is_paired() {
+        return Ok(None);
+    }
+    // The code and the pending key travel together; a live code with no key
+    // beside it still needs a write.
+    let has_pending_key = doc
+        .pending_api_key
+        .as_deref()
+        .is_some_and(|k| !k.is_empty());
+    if let Some(code) = doc.live_code(now).filter(|_| has_pending_key) {
+        return Ok(Some(code));
+    }
+    let _lock = pairing_store::lock_writers(&paths.pairing_json)
+        .await
+        .map_err(CodeError::Persist)?;
+    // Re-read under the lock: another writer may have paired the node or
+    // minted a code meanwhile, and either must win over a second mint.
+    let doc = PairingDoc::read(&paths.pairing_json).map_err(CodeError::Unreadable)?;
+    if doc.is_paired() {
+        return Ok(None);
+    }
+    pairing_store::ensure_code(&paths.pairing_json, now)
+        .map(Some)
+        .map_err(CodeError::Persist)
 }
 
 /// The `POST /api/pairing/claim` request body: a single `user_id` string.
@@ -228,11 +269,36 @@ pub struct ClaimRequest {
 /// own networks is the gate: the edge refuses a remote caller (a public-WAN
 /// host, or anything relayed through a proxy or tunnel) before this handler
 /// runs — see `auth::unpaired_decision`.
+///
+/// A request that crossed the radio relay is refused here as well as at the
+/// edge. A drone paired only by radio is unpaired on its LAN side, so a claim
+/// arriving over the relay would hand the master LAN key to whoever drives the
+/// relay, to keep after leaving radio range.
 pub async fn claim_pairing(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ClaimRequest>,
 ) -> Response {
+    if headers.contains_key(crate::auth::RELAYED_HEADER) {
+        tracing::warn!("pairing_claim_relayed_refused");
+        return detail(
+            StatusCode::FORBIDDEN,
+            "A pairing claim cannot be made over the radio relay.",
+        );
+    }
     let paths = &state.pairing_paths;
+    // Read, check and write under the writer lock, so two concurrent claims
+    // cannot each see an unpaired node and mint their own key.
+    let _lock = match pairing_store::lock_writers(&paths.pairing_json).await {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::error!(error = %e, "pairing claim lock failed");
+            return detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The pairing state is busy. Retry shortly.",
+            );
+        }
+    };
     let doc = match PairingDoc::read(&paths.pairing_json) {
         Ok(doc) => doc,
         Err(reason) => return pairing_unreadable(&reason),
@@ -301,8 +367,20 @@ pub async fn claim_pairing(
 /// Clears `pairing.json` (mirroring `PairingManager.unpair` → empty object) and
 /// mints a fresh pairing code. Requires a valid API key, enforced by the auth
 /// middleware (this path is NOT in the public set), matching the FastAPI route.
+/// The `_ados._tcp` advert picks the change up on its own refresh cadence, as
+/// it does for a claim.
 pub async fn unpair(State(state): State<AppState>) -> Response {
     let paths = &state.pairing_paths;
+    let _lock = match pairing_store::lock_writers(&paths.pairing_json).await {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::error!(error = %e, "pairing unpair lock failed");
+            return detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "The pairing state is busy. Retry shortly.",
+            );
+        }
+    };
     // An unreadable file is cleared as well: only the on-box operator reaches
     // this while it is unreadable (no key can match), and it is their recovery.
     if let Ok(doc) = PairingDoc::read(&paths.pairing_json) {
@@ -320,29 +398,20 @@ pub async fn unpair(State(state): State<AppState>) -> Response {
     }
 
     // Mint + persist the fresh code, mirroring the FastAPI route's
-    // `get_or_create_code()` after the unpair. A persist failure still returns a
-    // usable in-memory code rather than a 500.
+    // `get_or_create_code()` after the unpair. A code that could not be
+    // persisted is refused, as `/code` refuses it: an in-memory one is not what
+    // the device holds. The node is already unpaired, so `/code` mints one once
+    // the fault clears.
     let new_code = match pairing_store::write_new_code(&paths.pairing_json, now_unix_seconds()) {
         Ok(code) => code,
         Err(e) => {
             tracing::warn!(error = %e, "new pairing code persist failed after unpair");
-            // A getrandom failure fails closed to a 500 rather than a predictable
-            // code; the pairing.json is already cleared, so a fresh probe mints a
-            // code once entropy is back.
-            match pairing_store::generate_code() {
-                Ok(code) => code,
-                Err(gen_err) => {
-                    tracing::error!(error = %gen_err, "new pairing code mint failed after unpair");
-                    return detail(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Failed to mint pairing code",
-                    );
-                }
-            }
+            return detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Pairing was cleared, but a new pairing code could not be persisted. Read /api/pairing/code to retry.",
+            );
         }
     };
-
-    // mDNS TXT update deferred (same gap as claim).
 
     (
         StatusCode::OK,
@@ -554,6 +623,121 @@ mod tests {
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!ro.join("pairing.json").exists());
+    }
+
+    fn test_state(dir: &std::path::Path) -> AppState {
+        AppState::new(
+            std::sync::Arc::new(crate::auth::PairingState::with_path(
+                dir.join("pairing.json"),
+            )),
+            crate::ipc::StateIpcClient::disconnected(),
+            crate::ipc::MavlinkIpcClient::new(dir.join("absent-mavlink.sock")),
+            crate::ipc::LogdQueryClient::new(dir.join("absent-logd.sock")),
+            dir.join("board.json"),
+            test_paths(dir),
+            std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.join("dashboard-pin.json"),
+            )),
+            std::sync::Arc::new(crate::mcp::McpTokenStore::with_path(
+                dir.join("mcp-token.json"),
+            )),
+        )
+    }
+
+    fn claim_body(user: &str) -> Json<ClaimRequest> {
+        Json(ClaimRequest {
+            user_id: user.to_string(),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_claims_hand_out_one_key() {
+        // Two browsers claiming at once used to both get 200 with different
+        // keys; the loser's key then failed every request.
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let calls: Vec<_> = (0..8)
+            .map(|i| {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    claim_pairing(State(state), HeaderMap::new(), claim_body(&format!("u{i}")))
+                        .await
+                        .status()
+                })
+            })
+            .collect();
+        let mut ok = 0;
+        for call in calls {
+            match call.await.unwrap() {
+                StatusCode::OK => ok += 1,
+                StatusCode::CONFLICT => {}
+                other => panic!("unexpected {other}"),
+            }
+        }
+        assert_eq!(ok, 1, "exactly one claim succeeds");
+    }
+
+    #[tokio::test]
+    async fn a_relayed_claim_is_refused_even_on_an_unpaired_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let mut headers = HeaderMap::new();
+        headers.insert(crate::auth::RELAYED_HEADER, "1".parse().unwrap());
+        let resp = claim_pairing(State(state), headers, claim_body("radio")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !dir.path().join("pairing.json").exists(),
+            "nothing was minted"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_code_is_replaced_and_a_live_one_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let pairing = dir.path().join("pairing.json");
+        std::fs::write(
+            &pairing,
+            r#"{"pairing_code":"OLD234","code_created_at":1.0,"pending_api_key":"ados_k"}"#,
+        )
+        .unwrap();
+        let caller = || Some(Extension(CallerClass::OnBox));
+        let resp = get_pairing_code(State(state.clone()), caller()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let first = PairingDoc::read(&pairing).unwrap().pairing_code.unwrap();
+        assert_ne!(first, "OLD234", "a day-old code is regenerated");
+        assert_eq!(
+            PairingDoc::read(&pairing)
+                .unwrap()
+                .pending_api_key
+                .as_deref(),
+            Some("ados_k"),
+            "the pending key the beacon advertised survives a new code"
+        );
+        let _ = get_pairing_code(State(state), caller()).await;
+        assert_eq!(
+            PairingDoc::read(&pairing).unwrap().pairing_code.unwrap(),
+            first,
+            "a live code is stable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_code_without_a_pending_key_gets_one_and_keeps_the_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let pairing = dir.path().join("pairing.json");
+        let fresh = now_unix_seconds();
+        std::fs::write(
+            &pairing,
+            format!(r#"{{"pairing_code":"LIVE23","code_created_at":{fresh}}}"#),
+        )
+        .unwrap();
+        let resp = get_pairing_code(State(state), Some(Extension(CallerClass::OnBox))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let doc = PairingDoc::read(&pairing).unwrap();
+        assert_eq!(doc.pairing_code.as_deref(), Some("LIVE23"));
+        assert!(doc.pending_api_key.unwrap().starts_with("ados_"));
     }
 
     fn test_paths(dir: &std::path::Path) -> PairingPaths {

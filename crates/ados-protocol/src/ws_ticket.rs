@@ -11,18 +11,33 @@
 //! and no shared ticket store.
 //!
 //! Wire form (pipe-delimited, like the plugin capability token):
-//! `v1|<scope>|<issued_at>|<expires_at>|<sig_hex>`. The signature is
-//! `HMAC-SHA256(K, "v1|<scope>|<issued_at>|<expires_at>")` where the key
-//! `K = HMAC-SHA256(api_key, "ados-ws-ticket-v1")` is derived from the pairing
-//! key under a fixed domain-separation label (so the ticket key is never the
-//! pairing key itself, and is namespaced to this use). The Python verifier in
-//! `ados.core.ws_ticket` mirrors this byte-for-byte.
+//! `v2|<scope>|<issued_at>|<expires_at>|<nonce_hex>|<sig_hex>`. The signature
+//! is `HMAC-SHA256(K, "v2|<scope>|<issued_at>|<expires_at>|<nonce_hex>")`
+//! where the key `K = HMAC-SHA256(api_key, "ados-ws-ticket-v1")` is derived
+//! from the pairing key under a fixed domain-separation label (so the ticket
+//! key is never the pairing key itself, and is namespaced to this use). The
+//! Python verifier in `ados.core.ws_ticket` mirrors this byte-for-byte.
+//!
+//! ## Single use
+//!
+//! A ticket travels in a subprotocol header that can surface in proxy logs and
+//! HAR exports, so a WebSocket handshake spends it: [`WsTicketIssuer::verify_once`]
+//! records the 16-byte nonce in a process-wide cache and refuses it a second
+//! time. Each verifying process keeps its own cache, and a ticket is scoped to
+//! one surface, so a spent ticket opens nothing anywhere.
+//!
+//! The RC injector attestation (`crsf_inject_scope`) is not a handshake: the
+//! same attestation accompanies every declaration an injector makes for its
+//! lifetime, so it is checked with [`WsTicketIssuer::verify`], which does not
+//! spend.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use thiserror::Error;
+
+use crate::nonce_cache::NonceCache;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -76,6 +91,8 @@ pub enum WsTicketError {
     ScopeMismatch,
     #[error("ws ticket expired")]
     Expired,
+    #[error("ws ticket already used")]
+    Replayed,
 }
 
 /// A minted ticket: its compact string form plus the parsed expiry, so a mint
@@ -86,6 +103,9 @@ pub struct WsTicket {
     pub scope: String,
     pub expires_at: i64,
 }
+
+/// Every WebSocket ticket this process has accepted on a handshake.
+static SPENT_TICKETS: NonceCache = NonceCache::new(4096, MAX_TTL_SECONDS);
 
 /// Mints and verifies self-contained WS tickets, keyed by a pairing-derived
 /// secret. Build one with [`WsTicketIssuer::from_api_key`] from the same
@@ -105,17 +125,21 @@ impl WsTicketIssuer {
         Self { key }
     }
 
-    /// Mint a ticket for `scope` valid for `ttl_seconds`, using the wall clock.
-    pub fn mint(&self, scope: &str, ttl_seconds: i64) -> WsTicket {
-        self.mint_at(scope, ttl_seconds, now_unix())
+    /// Mint a ticket for `scope` valid for `ttl_seconds`, using the wall clock
+    /// and a fresh random nonce. `None` only when the system cannot supply
+    /// randomness.
+    pub fn mint(&self, scope: &str, ttl_seconds: i64) -> Option<WsTicket> {
+        let nonce = crate::nonce_cache::random_nonce_hex()?;
+        Some(self.mint_at(scope, ttl_seconds, now_unix(), &nonce))
     }
 
-    /// Deterministic mint core (explicit clock) for tests and cross-impl vectors.
-    pub fn mint_at(&self, scope: &str, ttl_seconds: i64, now: i64) -> WsTicket {
+    /// Deterministic mint core (explicit clock and nonce) for tests and
+    /// cross-impl vectors.
+    pub fn mint_at(&self, scope: &str, ttl_seconds: i64, now: i64, nonce: &str) -> WsTicket {
         // Saturating add so a far-future clock or a huge ttl cannot overflow
         // (which would panic under the workspace's panic=abort).
         let expires_at = now.saturating_add(ttl_seconds);
-        let payload = sign_payload(scope, now, expires_at);
+        let payload = sign_payload(scope, now, expires_at, nonce);
         let signature = self.sign(&payload);
         WsTicket {
             token: format!("{payload}|{signature}"),
@@ -125,19 +149,50 @@ impl WsTicketIssuer {
     }
 
     /// Verify a ticket string: HMAC authenticity first, then scope, then expiry.
-    /// `now` is unix seconds.
+    /// `now` is unix seconds. Does not spend the ticket; a WebSocket handshake
+    /// uses [`Self::verify_once`].
     pub fn verify(&self, token: &str, expected_scope: &str, now: i64) -> Result<(), WsTicketError> {
+        self.verify_claims(token, expected_scope, now).map(|_| ())
+    }
+
+    /// Verify a ticket presented on a WebSocket handshake and spend it, so the
+    /// same ticket cannot open a second socket.
+    pub fn verify_once(
+        &self,
+        token: &str,
+        expected_scope: &str,
+        now: i64,
+    ) -> Result<(), WsTicketError> {
+        let (nonce, expires_at) = self.verify_claims(token, expected_scope, now)?;
+        if SPENT_TICKETS.admit(nonce, now, expires_at) {
+            Ok(())
+        } else {
+            Err(WsTicketError::Replayed)
+        }
+    }
+
+    /// The checks both verifiers share; returns the nonce and expiry.
+    fn verify_claims<'t>(
+        &self,
+        token: &'t str,
+        expected_scope: &str,
+        now: i64,
+    ) -> Result<(&'t str, i64), WsTicketError> {
         let parts: Vec<&str> = token.split('|').collect();
-        if parts.len() != 5 || parts[0] != "v1" {
+        if parts.len() != 6 || parts[0] != "v2" {
             return Err(WsTicketError::Malformed);
         }
         let scope = parts[1];
         let _issued: i64 = parts[2].parse().map_err(|_| WsTicketError::BadTimestamp)?;
         let expires_at: i64 = parts[3].parse().map_err(|_| WsTicketError::BadTimestamp)?;
-        let sig = hex::decode(parts[4]).map_err(|_| WsTicketError::BadSignature)?;
-        // Recompute over the EXACT signed substring (the first four pipe fields),
-        // so reformatting never drifts from what was signed.
-        let payload = parts[..4].join("|");
+        let nonce = parts[4];
+        if nonce.len() != 32 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(WsTicketError::Malformed);
+        }
+        let sig = hex::decode(parts[5]).map_err(|_| WsTicketError::BadSignature)?;
+        // Recompute over the EXACT signed substring (the first five pipe
+        // fields), so reformatting never drifts from what was signed.
+        let payload = parts[..5].join("|");
         let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC accepts any key length");
         mac.update(payload.as_bytes());
         // verify_slice is a constant-time comparison.
@@ -149,7 +204,7 @@ impl WsTicketIssuer {
         if now >= expires_at {
             return Err(WsTicketError::Expired);
         }
-        Ok(())
+        Ok((nonce, expires_at))
     }
 
     fn sign(&self, payload: &str) -> String {
@@ -175,17 +230,15 @@ pub fn mint_scoped_ticket(
         crate::pairing_posture::Pairing::Unpaired | crate::pairing_posture::Pairing::Unreadable => {
             None
         }
-        crate::pairing_posture::Pairing::Paired(api_key) => Some(
-            WsTicketIssuer::from_api_key(&api_key)
-                .mint(scope, ttl_seconds)
-                .token,
-        ),
+        crate::pairing_posture::Pairing::Paired(api_key) => WsTicketIssuer::from_api_key(&api_key)
+            .mint(scope, ttl_seconds)
+            .map(|t| t.token),
     }
 }
 
-/// The signed substring: `v1|<scope>|<issued_at>|<expires_at>`.
-fn sign_payload(scope: &str, issued_at: i64, expires_at: i64) -> String {
-    format!("v1|{scope}|{issued_at}|{expires_at}")
+/// The signed substring: `v2|<scope>|<issued_at>|<expires_at>|<nonce>`.
+fn sign_payload(scope: &str, issued_at: i64, expires_at: i64, nonce: &str) -> String {
+    format!("v2|{scope}|{issued_at}|{expires_at}|{nonce}")
 }
 
 /// Unix seconds, clamped to 0 if the clock predates the epoch (a freshly booted
@@ -201,20 +254,43 @@ pub fn now_unix() -> i64 {
 mod tests {
     use super::*;
 
+    const NONCE: &str = "00112233445566778899aabbccddeeff";
+
     #[test]
     fn mint_round_trips_and_verifies() {
         let issuer = WsTicketIssuer::from_api_key("ados_secret");
-        let t = issuer.mint_at(SCOPE_MAVLINK_WS, 30, 1000);
+        let t = issuer.mint_at(SCOPE_MAVLINK_WS, 30, 1000, NONCE);
         assert_eq!(t.expires_at, 1030);
-        assert!(t.token.starts_with("v1|gs.mavlink_ws|1000|1030|"));
+        assert!(t.token.starts_with("v2|gs.mavlink_ws|1000|1030|"));
         assert!(issuer.verify(&t.token, SCOPE_MAVLINK_WS, 1000).is_ok());
         assert!(issuer.verify(&t.token, SCOPE_MAVLINK_WS, 1029).is_ok());
     }
 
     #[test]
+    fn a_handshake_spends_the_ticket() {
+        // A ticket lifted from a log must not open a second socket.
+        let issuer = WsTicketIssuer::from_api_key("k");
+        let t = issuer.mint("gs.pic_events", 30).unwrap();
+        let now = now_unix();
+        assert_eq!(issuer.verify_once(&t.token, "gs.pic_events", now), Ok(()));
+        assert_eq!(
+            issuer.verify_once(&t.token, "gs.pic_events", now),
+            Err(WsTicketError::Replayed)
+        );
+        // A forged ticket does not reach the cache, so it cannot evict anything.
+        let forged = WsTicketIssuer::from_api_key("other")
+            .mint("gs.pic_events", 30)
+            .unwrap();
+        assert_eq!(
+            issuer.verify_once(&forged.token, "gs.pic_events", now),
+            Err(WsTicketError::HmacMismatch)
+        );
+    }
+
+    #[test]
     fn rejects_expired_at_the_boundary() {
         let issuer = WsTicketIssuer::from_api_key("k");
-        let t = issuer.mint_at(SCOPE_MAVLINK_WS, 30, 1000);
+        let t = issuer.mint_at(SCOPE_MAVLINK_WS, 30, 1000, NONCE);
         // now == expires_at is expired (matches the plugin token's `>=`).
         assert_eq!(
             issuer.verify(&t.token, SCOPE_MAVLINK_WS, 1030),
@@ -225,7 +301,7 @@ mod tests {
     #[test]
     fn rejects_wrong_scope() {
         let issuer = WsTicketIssuer::from_api_key("k");
-        let t = issuer.mint_at("gs.pic_events", 30, 1000);
+        let t = issuer.mint_at("gs.pic_events", 30, 1000, NONCE);
         assert_eq!(
             issuer.verify(&t.token, SCOPE_MAVLINK_WS, 1000),
             Err(WsTicketError::ScopeMismatch)
@@ -238,7 +314,7 @@ mod tests {
     fn rejects_wrong_key() {
         let a = WsTicketIssuer::from_api_key("key-a");
         let b = WsTicketIssuer::from_api_key("key-b");
-        let t = a.mint_at(SCOPE_MAVLINK_WS, 30, 1000);
+        let t = a.mint_at(SCOPE_MAVLINK_WS, 30, 1000, NONCE);
         assert_eq!(
             b.verify(&t.token, SCOPE_MAVLINK_WS, 1000),
             Err(WsTicketError::HmacMismatch)
@@ -248,10 +324,13 @@ mod tests {
     #[test]
     fn rejects_tampered_expiry() {
         let issuer = WsTicketIssuer::from_api_key("k");
-        let t = issuer.mint_at(SCOPE_MAVLINK_WS, 30, 1000);
+        let t = issuer.mint_at(SCOPE_MAVLINK_WS, 30, 1000, NONCE);
         // Forge a longer expiry while keeping the original signature.
         let parts: Vec<&str> = t.token.split('|').collect();
-        let forged = format!("v1|{}|{}|99999|{}", parts[1], parts[2], parts[4]);
+        let forged = format!(
+            "v2|{}|{}|99999|{}|{}",
+            parts[1], parts[2], parts[4], parts[5]
+        );
         assert_eq!(
             issuer.verify(&forged, SCOPE_MAVLINK_WS, 1000),
             Err(WsTicketError::HmacMismatch)
@@ -266,16 +345,20 @@ mod tests {
             Err(WsTicketError::Malformed)
         );
         assert_eq!(
-            issuer.verify("v2|s|1|2|ff", SCOPE_MAVLINK_WS, 0),
+            issuer.verify("v1|s|1|2|ff", SCOPE_MAVLINK_WS, 0),
             Err(WsTicketError::Malformed)
         );
         assert_eq!(
-            issuer.verify("v1|s|notanint|2|ff", "s", 0),
+            issuer.verify(&format!("v2|s|notanint|2|{NONCE}|ff"), "s", 0),
             Err(WsTicketError::BadTimestamp)
         );
         assert_eq!(
-            issuer.verify("v1|s|1|2|nothex", "s", 0),
+            issuer.verify(&format!("v2|s|1|2|{NONCE}|nothex"), "s", 0),
             Err(WsTicketError::BadSignature)
+        );
+        assert_eq!(
+            issuer.verify("v2|s|1|2|short|ff", "s", 0),
+            Err(WsTicketError::Malformed)
         );
     }
 
@@ -285,12 +368,12 @@ mod tests {
     #[test]
     fn known_answer_vector_for_python_interop() {
         let issuer = WsTicketIssuer::from_api_key("ados_secret");
-        let t = issuer.mint_at(SCOPE_MAVLINK_WS, 30, 1_000_000);
+        let t = issuer.mint_at(SCOPE_MAVLINK_WS, 30, 1_000_000, NONCE);
         // Pin the full token so the Python test can assert the identical string.
         assert_eq!(
             t.token,
-            "v1|gs.mavlink_ws|1000000|1000030|\
-655a695c0b38fa07b830a7ca3534a4cd6ef95831fb5e523cc98871bbef191413",
+            "v2|gs.mavlink_ws|1000000|1000030|00112233445566778899aabbccddeeff|\
+4d99ddf7a9dc48119b137be1fe135a50f7618a77f44d3a104e5ccac9171193e7",
             "if this fails, regenerate the vector and update ados.core.ws_ticket"
         );
     }

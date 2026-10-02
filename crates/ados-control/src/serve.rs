@@ -48,7 +48,9 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 use crate::auth::{self, Pairing, PairingState, PeerKey, RateLimiter};
 use crate::config::{ControlSecurityConfig, PairingConfig};
-use crate::mcp::{route_scope, McpTokenStore, MCP_SCOPES_HEADER, MCP_TOKEN_HEADER};
+use crate::mcp::{
+    route_decides_scope, route_scope, McpTokenStore, MCP_SCOPES_HEADER, MCP_TOKEN_HEADER,
+};
 use crate::proxy_auth::{BodyField, Decision, ProxiedAuth, RequestHeaders};
 use crate::routes::detail;
 use ados_protocol::ipc::OperatorListener;
@@ -233,6 +235,12 @@ impl EdgeAuth {
         else {
             return McpDecision::Fallthrough;
         };
+        // A route that classifies the request from what it reads (a plugin
+        // tool's declared safety class) is admitted here and enforces the
+        // class itself against the scopes stamped on the request.
+        if route_decides_scope(method, path) && !claims.scopes.is_empty() {
+            return McpDecision::Admit(claims.scopes.join(","));
+        }
         match route_scope(method, path) {
             Some(required) if scope_allows_class(required, &claims.scopes) => {
                 McpDecision::Admit(claims.scopes.join(","))
@@ -298,19 +306,20 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     let peer_key = PeerKey::of(peer_ip);
 
     // A request that crossed the radio relay arrives on loopback, so it is
-    // on-box by the check above. That is deliberate and load-bearing — a fleet
-    // shares one radio key and distributes no per-node API credential, so the
-    // relay has nothing to present and refusing the posture would break the lane
-    // outright. But it means radio range carries the node's full authority, and
-    // a handful of paths turn that into a credential the caller keeps: unpair
-    // clears the pairing, the public claim route then hands back a fresh key,
-    // and the caller walks away with API access that outlives the radio link.
-    //
-    // Refuse those paths here, before the posture is applied. Trusting the
+    // on-box by the check above. The drone's relay handler admitted it only
+    // after verifying a per-pair ticket bound to this exact request, so it
+    // carries the linked ground station's authority. What it must not do is
+    // change who the node trusts: pairing, credentials, cloud posture. Those
+    // paths are refused here, before the posture is applied. Trusting the
     // marker is safe because it can only ever REMOVE authority: a caller who
     // sets it on a local request loses access to these paths, which is no
     // attack, and a caller who omits it off-box was never on-box to begin with.
     let is_relayed = request.headers().contains_key(auth::RELAYED_HEADER);
+    // The relay ticket already authenticated this exact request (method, path
+    // and body), so the HMAC gate is not asked to authenticate it a second
+    // time with a secret the relay does not hold. Only an on-box caller can be
+    // relayed: the marker on an off-box request changes nothing here.
+    let hmac_exempt = on_box && is_relayed;
     if is_relayed && auth::relay_forbidden(&path) {
         tracing::warn!(
             path = %path,
@@ -324,9 +333,8 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     }
 
     // The config write stays relay-reachable (the slot reconciler and the
-    // relayed settings surface use it), but not for the keys that mint a
-    // standing credential or re-route the flight link. The body is small JSON;
-    // it is read here, checked, and handed on unchanged.
+    // relayed settings surface use it), but not for the trust-root keys. The
+    // body is small JSON; it is read here, checked, and handed on unchanged.
     if is_relayed
         && request.method() == axum::http::Method::PUT
         && path == auth::RELAY_CONFIG_WRITE_PATH
@@ -454,10 +462,9 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     // is the single authenticator for every route it serves or forwards.
     if !crate::routing::is_native(request.method(), &path) {
         return proxied_auth_then_forward(
-            edge.proxied.clone(),
-            edge.pairing.clone(),
-            edge.dashboard_pin.clone(),
+            &edge,
             on_box,
+            hmac_exempt,
             // The SAME normalized path, not a second read of the raw target.
             // A second read is how the two halves of this edge ended up
             // authorizing different strings for one request.
@@ -474,6 +481,9 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         return next.run(request).await;
     }
 
+    if hmac_exempt {
+        return next.run(request).await;
+    }
     if on_box {
         return hmac_then_run(&edge.proxied, &path, request, next).await;
     }
@@ -592,10 +602,9 @@ async fn hmac_then_run(
 /// caller, so the residual still sees the trustworthy on-box signal. The HMAC
 /// gate then runs through [`hmac_then_run`], the same one the native lane uses.
 async fn proxied_auth_then_forward(
-    proxied: Arc<ProxiedAuth>,
-    pairing_state: Arc<PairingState>,
-    dashboard_pin: Arc<crate::dashboard_pin::DashboardPin>,
+    edge: &EdgeAuth,
     on_box: bool,
+    hmac_exempt: bool,
     // `path` is the normalized decision path from `tcp_edge`. Taken as an
     // argument rather than re-read from the request: a second read of
     // `request.uri().path()` gives the RAW target, so this half of the edge
@@ -609,7 +618,7 @@ async fn proxied_auth_then_forward(
     let headers = collect_headers(request.headers());
     // The pairing posture comes from the SAME short-TTL-cached reader the native
     // edge uses, so the gate and every other surface agree on one posture.
-    let pairing = pairing_state.current();
+    let pairing = edge.pairing.current();
 
     // The API-key gate first (the same order the Python middleware stack runs:
     // ApiKeyAuthMiddleware sits outside SecurityMiddleware). A rejection is
@@ -620,11 +629,17 @@ async fn proxied_auth_then_forward(
         status,
         field,
         message,
-    } = proxied.decide_api_key(&method, &path, &headers, on_box, &pairing)
+    } = edge
+        .proxied
+        .decide_api_key(&method, &path, &headers, on_box, &pairing)
     {
-        let session_ok = presented_session(&path, &request)
-            .map(|tok| dashboard_pin.session_valid(&pairing, &tok))
-            .unwrap_or(false);
+        // A dashboard session is a browser login, not a credential that may
+        // re-point the node's cloud posture: those routes demand the key or
+        // the setup token, and a session never stands in for them.
+        let session_ok = !ProxiedAuth::is_cloud_posture_path(&path)
+            && presented_session(&path, &request)
+                .map(|tok| edge.dashboard_pin.session_valid(&pairing, &tok))
+                .unwrap_or(false);
         // A browser cannot set `X-ADOS-Key` on a WebSocket handshake, so a
         // proxied WS route (e.g. the vision-detections stream) authenticates via
         // a one-shot HMAC ticket in the `Sec-WebSocket-Protocol` list. Admit at
@@ -637,7 +652,10 @@ async fn proxied_auth_then_forward(
         }
     }
 
-    hmac_then_run(&proxied, &path, request, next).await
+    if hmac_exempt {
+        return next.run(request).await;
+    }
+    hmac_then_run(&edge.proxied, &path, request, next).await
 }
 
 /// True when a WebSocket-upgrade request to a proxied route carries an authentic,
@@ -660,14 +678,15 @@ fn ws_upgrade_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing) -> boo
     let Some(token) = offered_ticket(headers) else {
         return false;
     };
-    // The scope is the token's 2nd `|`-field (`v1|<scope>|<issued>|<expires>|<mac>`).
+    // The scope is the token's 2nd `|`-field
+    // (`v2|<scope>|<issued>|<expires>|<nonce>|<mac>`).
     // Verify authenticity for that scope; the Python route independently enforces
     // the exact scope it expects, so a wrong-scope ticket is still rejected there.
     let Some(scope) = token.split('|').nth(1).filter(|s| !s.is_empty()) else {
         return false;
     };
     WsTicketIssuer::from_api_key(key)
-        .verify(&token, scope, now_unix())
+        .verify_once(&token, scope, now_unix())
         .is_ok()
 }
 
@@ -689,7 +708,7 @@ fn native_ws_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing, path: &
         return false;
     };
     WsTicketIssuer::from_api_key(key)
-        .verify(&token, &scope, now_unix())
+        .verify_once(&token, &scope, now_unix())
         .is_ok()
 }
 
@@ -1105,6 +1124,7 @@ mod tests {
         let paired = Pairing::Paired(key.to_string());
         let ticket = WsTicketIssuer::from_api_key(key)
             .mint("vision.detections", 30)
+            .unwrap()
             .token;
 
         // A WS upgrade carrying an authentic ticket subprotocol is admitted.
@@ -1129,6 +1149,7 @@ mod tests {
         // A ticket signed by a DIFFERENT pairing key → rejected.
         let forged = WsTicketIssuer::from_api_key("other-key")
             .mint("vision.detections", 30)
+            .unwrap()
             .token;
         let bad = ws_headers(Some(&format!("ados-ws-ticket, {forged}")));
         assert!(!ws_upgrade_ticket_admits(&bad, &paired));
@@ -1146,7 +1167,7 @@ mod tests {
         let offer = |scope: &str| {
             ws_headers(Some(&format!(
                 "ados-ws-ticket, {}",
-                issuer.mint(scope, 30).token
+                issuer.mint(scope, 30).unwrap().token
             )))
         };
         let web = "/api/plugins/com.example.web/x/live";
@@ -1676,7 +1697,7 @@ mod tests {
             "/api//pairing/unpair",
             "/api/pairing/%2e/unpair",
             // Prefix coverage: anything beneath a denied route is denied too.
-            "/api/plugins/install/resume",
+            "/api/pairing/claim/resume",
         ] {
             let req = Request::builder()
                 .uri(uri)
@@ -1690,6 +1711,49 @@ mod tests {
                 "{uri} must not be reachable over the relay, got {status}",
             );
         }
+    }
+
+    /// The relay carries the linked ground station's authority over the
+    /// operating surface but never a trust-root change, with HMAC enabled or
+    /// not: the ticket the drone verified is the request's authentication.
+    #[tokio::test]
+    async fn the_relay_reaches_operations_but_not_trust_roots() {
+        use tower::util::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut edge = paired_edge(dir.path());
+        // HMAC on: a relayed write must still go through, unsigned.
+        edge.proxied = Arc::new(ProxiedAuth::new(crate::config::SecuritySection {
+            hmac_enabled: true,
+            hmac_secret: "a-long-enough-secret-key".to_string(),
+            ..Default::default()
+        }));
+        let ok = || async { "ok" };
+        let app = axum::Router::new()
+            .route("/api/pairing/claim", axum::routing::post(ok))
+            .route("/api/v1/setup/apply", axum::routing::post(ok))
+            .route("/api/plugins/:id/enable", axum::routing::post(ok))
+            .layer(axum::middleware::from_fn_with_state(edge.clone(), tcp_edge))
+            .with_state(edge);
+        let relayed = |uri: &str| {
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(auth::RELAYED_HEADER, "1")
+                .extension(PeerAddr(SocketAddr::from(([127, 0, 0, 1], 45678))))
+                .body(Body::empty())
+                .unwrap()
+        };
+        for uri in ["/api/pairing/claim", "/api/v1/setup/apply"] {
+            let status = app.clone().oneshot(relayed(uri)).await.unwrap().status();
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        }
+        let status = app
+            .clone()
+            .oneshot(relayed("/api/plugins/com.example.tool/enable"))
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, StatusCode::OK, "a ticketed plugin enable crosses");
     }
 
     /// The normalizer's own contract, unit-level, so a failure names the rule

@@ -152,7 +152,17 @@ pub async fn post_relayed_config(
         );
     };
     let mut request = body.request;
-    request["ticket"] = json!(crate::routes::gs_fleet_slot::mint_ticket(&slots, &target));
+    let Some(ticket) = mint_tunnel_ticket(&slots, &target, &request) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            ados_protocol::relay_ticket::refusal_body(
+                ados_protocol::relay_ticket::RelayTicketError::NoSecret.reason(),
+            ),
+        )
+            .into_response();
+    };
+    request["ticket"] = json!(ticket);
     let mut forward = json!({
         "op": "config_request",
         "request": request,
@@ -169,6 +179,26 @@ pub async fn post_relayed_config(
             "config-over-radio channel not available",
         ),
     }
+}
+
+/// A relay ticket for one config-tunnel request to `target`, bound to the
+/// request's op, key and value. `None` when this ground station holds no
+/// secret for that drone.
+fn mint_tunnel_ticket(
+    slots: &[ados_groundlink::FleetSlot],
+    target: &str,
+    request: &Value,
+) -> Option<String> {
+    let body = ados_protocol::relay_ticket::tunnel_binding_body(request);
+    crate::routes::gs_fleet_slot::mint_bound_ticket(
+        slots,
+        target,
+        &ados_protocol::relay_ticket::RequestBinding::new(
+            ados_protocol::relay_ticket::TUNNEL_BINDING_METHOD,
+            ados_protocol::relay_ticket::TUNNEL_BINDING_PATH,
+            &body,
+        ),
+    )
 }
 
 /// The drone a relayed config request's ticket is minted for: the named one,
@@ -306,13 +336,20 @@ mod tests {
         );
         assert_eq!(ticket_target(Some("d1"), &two).as_deref(), Some("d1"));
 
-        let ticket = crate::routes::gs_fleet_slot::mint_ticket(&two, "d1");
+        let request = json!({"op": "put", "key": "video.bitrate", "value": "4"});
+        let ticket = mint_tunnel_ticket(&two, "d1", &request).expect("d1 has a secret");
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        let body = ados_protocol::relay_ticket::tunnel_binding_body(&request);
+        let binding = ados_protocol::relay_ticket::RequestBinding::new(
+            ados_protocol::relay_ticket::TUNNEL_BINDING_METHOD,
+            ados_protocol::relay_ticket::TUNNEL_BINDING_PATH,
+            &body,
+        );
         ados_protocol::relay_ticket::RelayTicketIssuer::from_secret(SECRET.as_bytes())
-            .verify(&ticket, "d1", now)
+            .verify(&ticket, "d1", &binding, now)
             .expect("d1 admits a ticket minted from its own secret");
     }
 }

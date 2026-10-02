@@ -124,6 +124,11 @@ const RPC_RETRY_DELAYS: [Duration; 4] = [
 /// working lane into a wall of `Busy`.
 const MAX_PENDING_CALLS: usize = 1024;
 
+/// Pause between the fragments of one multi-fragment request, for the same
+/// reason the drone paces its response fragments: back-to-back datagrams into
+/// the transmitter's UDP ingress can overrun its socket buffer and vanish.
+const REQUEST_FRAGMENT_PACING: Duration = Duration::from_millis(5);
+
 /// The default Unix socket path for the Response IPC seam.
 pub const DEFAULT_RESPONSE_SOCK: &str = "/run/ados/aux-rpc-responses.sock";
 
@@ -151,8 +156,11 @@ pub struct RpcResponseOwned {
 /// Why a call did not complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RpcError {
-    /// The request would not encode (oversized for one aux frame). The HTTP
+    /// The request body exceeds [`aux_rpc::MAX_REQUEST_BODY`]. The HTTP
     /// caller should surface a 413.
+    TooLarge,
+    /// A request field (target, path, content type, ticket) is too long to
+    /// encode. The HTTP caller should surface a 400.
     Encode,
     /// The aux egress failed to send the request datagram.
     Send(String),
@@ -174,7 +182,8 @@ pub enum RpcError {
 impl std::fmt::Display for RpcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Encode => write!(f, "request payload exceeds one aux frame"),
+            Self::TooLarge => write!(f, "request body exceeds the relay limit"),
+            Self::Encode => write!(f, "request field too long to encode"),
             Self::Send(e) => write!(f, "aux egress send failed: {e}"),
             Self::Timeout => write!(f, "no response before timeout"),
             Self::Incomplete { received, total } => {
@@ -332,27 +341,44 @@ impl AuxRpcProxy {
         path: &[u8],
         body: &[u8],
     ) -> Result<RpcResponseOwned, RpcError> {
-        self.call_with_ticket(target, method, path, body, &[]).await
+        self.call_request(
+            target,
+            method,
+            &aux_rpc::RequestParts {
+                path,
+                body,
+                ..Default::default()
+            },
+        )
+        .await
     }
 
-    /// As [`Self::call`], but carrying a per-pair relay ticket.
-    ///
-    /// An EMPTY ticket is byte-identical on the wire to [`Self::call`], so a
-    /// caller that has no credential for this drone -- or is talking to one
-    /// that predates the credential -- is indistinguishable from before. That
-    /// is what allows the ticket to be attached per-drone rather than needing a
-    /// fleet-wide flag day.
-    pub async fn call_with_ticket(
+    /// As [`Self::call`], carrying every part of the request: its relay ticket
+    /// and the caller's content type as well as the path and body.
+    pub async fn call_request(
         &self,
         target: &[u8],
         method: RpcMethod,
-        path: &[u8],
-        body: &[u8],
-        ticket: &[u8],
+        parts: &aux_rpc::RequestParts<'_>,
     ) -> Result<RpcResponseOwned, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.call_with_id(id, target, method, path, body, ticket)
-            .await
+        self.call_with_id(id, target, method, parts).await
+    }
+
+    /// Send every fragment of one request, paced so a multi-fragment burst
+    /// does not overrun the transmitter's ingress.
+    async fn send_fragments(&self, fragments: &[Vec<u8>]) -> Result<(), String> {
+        let last = fragments.len().saturating_sub(1);
+        for (index, fragment) in fragments.iter().enumerate() {
+            self.egress
+                .send(AuxChannel::Request, fragment)
+                .await
+                .map_err(|e| e.to_string())?;
+            if index < last {
+                tokio::time::sleep(REQUEST_FRAGMENT_PACING).await;
+            }
+        }
+        Ok(())
     }
 
     async fn call_with_id(
@@ -360,12 +386,13 @@ impl AuxRpcProxy {
         id: u32,
         target: &[u8],
         method: RpcMethod,
-        path: &[u8],
-        body: &[u8],
-        ticket: &[u8],
+        parts: &aux_rpc::RequestParts<'_>,
     ) -> Result<RpcResponseOwned, RpcError> {
-        let payload = aux_rpc::encode_request_with_ticket(method, id, target, path, body, ticket)
-            .ok_or(RpcError::Encode)?;
+        let fragments =
+            aux_rpc::encode_request(method, id, target, parts).map_err(|e| match e {
+                aux_rpc::RequestEncodeError::BodyTooLarge => RpcError::TooLarge,
+                aux_rpc::RequestEncodeError::FieldTooLong => RpcError::Encode,
+            })?;
         // An empty target is a broadcast, which any linked drone may answer,
         // so there is no single sender to hold its fragments to. A target that
         // is not UTF-8 is not a device id any drone will ever send back, and
@@ -405,18 +432,20 @@ impl AuxRpcProxy {
             armed: true,
         };
 
-        if let Err(e) = self.egress.send(AuxChannel::Request, &payload).await {
+        if let Err(e) = self.send_fragments(&fragments).await {
             guard.disarm();
             self.remove_pending(id).await;
             self.counters
                 .calls_send_error
                 .fetch_add(1, Ordering::Relaxed);
-            return Err(RpcError::Send(e.to_string()));
+            return Err(RpcError::Send(e));
         }
 
         // One datagram on a lane that loses 20-40% of the uplink is a coin
         // flip, so resend on a growing schedule until either the response
-        // starts arriving or the caller's bound elapses.
+        // starts arriving or the caller's bound elapses. The bound starts once
+        // the request is fully on the air, so a large request's own send time
+        // does not eat the drone's answer time.
         let deadline = tokio::time::Instant::now() + self.timeout;
         let mut attempt = 0usize;
         tokio::pin!(rx);
@@ -480,7 +509,7 @@ impl AuxRpcProxy {
                         // transmitter — read exactly like a healthy radio the
                         // far end simply was not answering, which is the wrong
                         // half of the link to go looking at.
-                        match self.egress.send(AuxChannel::Request, &payload).await {
+                        match self.send_fragments(&fragments).await {
                             Ok(()) => {
                                 self.counters.retransmits.fetch_add(1, Ordering::Relaxed);
                             }
@@ -1053,7 +1082,13 @@ mod tests {
         let consumer = tokio::spawn(async move {
             let (channel, payload) = sent.recv().await.expect("no request datagram");
             assert_eq!(channel, AuxChannel::Request);
-            let request = aux_rpc::decode_request(&payload).unwrap();
+            let fragment = aux_rpc::decode_request_fragment(&payload).unwrap();
+            assert_eq!(fragment.total, 1, "a small request is one datagram");
+            let aux_rpc::ReassemblyOutcome::Complete(request) =
+                aux_rpc::RequestReassembler::new().push(&fragment, std::time::Instant::now())
+            else {
+                panic!("a one-fragment request completes on arrival");
+            };
             assert_eq!(request.method, RpcMethod::Get);
             assert_eq!(request.target, DRONE);
             assert_eq!(request.path, b"/api/pairing/info");
@@ -1088,7 +1123,7 @@ mod tests {
         });
 
         let (_, payload) = sent.recv().await.expect("request datagram");
-        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
         let fragments = response_payloads(DRONE, id, 200, &body);
         assert_eq!(fragments.len(), 3 + aux_rpc::RPC_REPAIR_SYMBOLS as usize);
         // Only the systematic symbols. The repair symbols are the cushion, not
@@ -1118,7 +1153,7 @@ mod tests {
         });
 
         let (_, payload) = sent.recv().await.expect("request datagram");
-        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
         let mut fragments = response_payloads(DRONE, id, 200, &body);
         fragments.reverse();
         for fragment in &fragments {
@@ -1147,7 +1182,7 @@ mod tests {
         });
 
         let (_, payload) = sent.recv().await.expect("request datagram");
-        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
         let mut fragments = response_payloads(DRONE, id, 200, &body);
         assert_eq!(fragments.len(), 30, "26 systematic + 4 repair");
         // Reordered by the lane, and four of them never arrive.
@@ -1178,7 +1213,7 @@ mod tests {
             );
 
         let (_, payload) = sent.recv().await.expect("request datagram");
-        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
         let imposter = response_payloads(b"ados-elsewhere", id, 200, b"not-your-answer");
         for fragment in &imposter {
             deliver(&proxy, fragment).await;
@@ -1214,7 +1249,7 @@ mod tests {
             );
 
         let (_, payload) = sent.recv().await.expect("request datagram");
-        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
         for fragment in &response_payloads(b"ados-elsewhere", id, 200, b"wrong-drone") {
             deliver(&proxy, fragment).await;
         }
@@ -1237,7 +1272,7 @@ mod tests {
             tokio::spawn(async move { proxy_call.call(&[], RpcMethod::Get, b"/api/x", &[]).await });
 
         let (_, payload) = sent.recv().await.expect("request datagram");
-        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
         deliver_body(&proxy, b"ados-anyone", id, 200, b"answered").await;
 
         let result = call.await.unwrap().expect("call must succeed");
@@ -1259,7 +1294,7 @@ mod tests {
             );
 
         let (_, payload) = sent.recv().await.expect("request datagram");
-        let id = aux_rpc::decode_request(&payload).unwrap().id;
+        let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
         let fragments = response_payloads(DRONE, id, 200, &body);
         // Symbol 0 twice, then 1: a naive counter would report two received
         // with symbol 1 still missing.
@@ -1281,7 +1316,7 @@ mod tests {
         let proxy_for_consumer = proxy.clone();
         let consumer = tokio::spawn(async move {
             let (_, payload) = sent.recv().await.expect("request datagram");
-            let id = aux_rpc::decode_request(&payload).unwrap().id;
+            let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
             let fragments = response_payloads(DRONE, id, 200, &body);
             deliver(&proxy_for_consumer, &fragments[0]).await;
         });
@@ -1313,7 +1348,7 @@ mod tests {
         let proxy_for_consumer = proxy.clone();
         let consumer = tokio::spawn(async move {
             let (_, payload) = sent.recv().await.expect("request datagram");
-            let id = aux_rpc::decode_request(&payload).unwrap().id;
+            let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
             proxy_for_consumer
                 .dispatch_response(&aux_rpc::RpcResponse {
                     id,
@@ -1347,7 +1382,7 @@ mod tests {
         let proxy_for_consumer = proxy.clone();
         let consumer = tokio::spawn(async move {
             let (_, payload) = sent.recv().await.expect("request datagram");
-            let id = aux_rpc::decode_request(&payload).unwrap().id;
+            let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
             proxy_for_consumer
                 .dispatch_response(&aux_rpc::RpcResponse {
                     id,
@@ -1380,7 +1415,7 @@ mod tests {
         let proxy_for_consumer = proxy.clone();
         let consumer = tokio::spawn(async move {
             let (_, payload) = sent.recv().await.expect("request datagram");
-            let id = aux_rpc::decode_request(&payload).unwrap().id;
+            let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
             proxy_for_consumer
                 .dispatch_response(&aux_rpc::RpcResponse {
                     id,
@@ -1441,15 +1476,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_call_returns_encode_when_the_path_exceeds_one_aux_frame() {
+    async fn a_body_past_the_relay_limit_is_refused_before_sending() {
         let (egress, _sent) = loopback_egress().await;
         let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(200));
-        let big_path = vec![b'A'; aux_mux::AUX_MAX_PAYLOAD];
+        let big_body = vec![b'A'; aux_rpc::MAX_REQUEST_BODY + 1];
         let err = proxy
-            .call(&[], RpcMethod::Get, &big_path, &[])
+            .call(&[], RpcMethod::Post, b"/api/x", &big_body)
             .await
             .unwrap_err();
-        assert_eq!(err, RpcError::Encode);
+        assert_eq!(err, RpcError::TooLarge);
+    }
+
+    #[tokio::test]
+    async fn a_body_larger_than_one_frame_goes_out_as_several_fragments() {
+        let (egress, mut sent) = loopback_egress().await;
+        let proxy = AuxRpcProxy::with_timeout(egress, Duration::from_millis(500));
+        let body = vec![b'B'; 4 * aux_mux::AUX_MAX_PAYLOAD];
+        let expected = body.clone();
+        let proxy_for_consumer = proxy.clone();
+        let consumer = tokio::spawn(async move {
+            let mut reassembler = aux_rpc::RequestReassembler::new();
+            loop {
+                let (_, payload) = sent.recv().await.expect("request fragment");
+                let fragment = aux_rpc::decode_request_fragment(&payload).unwrap();
+                assert!(fragment.total > 1);
+                if let aux_rpc::ReassemblyOutcome::Complete(request) =
+                    reassembler.push(&fragment, std::time::Instant::now())
+                {
+                    assert_eq!(request.method, RpcMethod::Patch);
+                    assert_eq!(request.body, expected);
+                    deliver_body(&proxy_for_consumer, DRONE, request.id, 200, b"ok").await;
+                    return;
+                }
+            }
+        });
+        let result = proxy
+            .call(DRONE, RpcMethod::Patch, b"/api/plugins/p/x/upload", &body)
+            .await
+            .expect("call must succeed");
+        consumer.await.unwrap();
+        assert_eq!(result.status, 200);
     }
 
     #[tokio::test]
@@ -1472,7 +1538,7 @@ mod tests {
             for _ in 0..3 {
                 let (ch, payload) = sent.recv().await.expect("request datagram");
                 assert_eq!(ch, AuxChannel::Request);
-                let request = aux_rpc::decode_request(&payload).unwrap();
+                let request = aux_rpc::decode_request_fragment(&payload).unwrap();
                 let body = format!("{}", request.id).into_bytes();
                 deliver_body(&proxy_consumer, DRONE, request.id, 200, &body).await;
             }
@@ -1629,7 +1695,7 @@ mod tests {
             let (_, third) = sent.recv().await.expect("second retransmit");
             assert_eq!(first, second, "a retransmit must be the identical datagram");
             assert_eq!(second, third);
-            let request = aux_rpc::decode_request(&third).unwrap();
+            let request = aux_rpc::decode_request_fragment(&third).unwrap();
             deliver_body(
                 &proxy_for_consumer,
                 DRONE,
@@ -1698,7 +1764,7 @@ mod tests {
         let proxy_for_consumer = proxy.clone();
         let consumer = tokio::spawn(async move {
             let (_, payload) = sent.recv().await.expect("request datagram");
-            let id = aux_rpc::decode_request(&payload).unwrap().id;
+            let id = aux_rpc::decode_request_fragment(&payload).unwrap().id;
             // One symbol of seven lands; the rest never do. The call still
             // fails Incomplete, but the request demonstrably got through, so
             // resending it would only duplicate the drone's work.
