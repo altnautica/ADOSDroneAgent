@@ -18,14 +18,45 @@
 //!   slot. A restart that fast is not possible (the entry only goes stale after
 //!   [`super::NEIGHBOR_STALE`] of silence), so this is two nodes provisioned with one
 //!   slot, and the first one heard keeps it.
+//!
+//! The marks outlive the process. A receiver that forgot them on restart would
+//! read every slot as never heard, accept a frame captured during an earlier run
+//! as fresh, and then refuse the real sender as a second sender for as long as the
+//! replay kept the slot live. So the marks are written to [`REPLAY_STATE_PATH`]
+//! (at most once a second, and once more on a clean stop) and read back before
+//! the bus accepts its first frame.
 
 use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
 
 use crate::crypto::{SenderNonce, NONCE_PREFIX_LEN};
 
 /// How many superseded runs a slot remembers. A slot restarting more than this
-/// often inside one bus lifetime is already a fault in its own right.
+/// often within the remembered history is already a fault in its own right.
 pub const RETIRED_PREFIXES: usize = 8;
+
+/// Where the per-slot marks persist across restarts.
+pub const REPLAY_STATE_PATH: &str = "/var/lib/ados/swarmbus-replay.json";
+
+/// Schema version of the persisted marks.
+const REPLAY_STATE_VERSION: u16 = 1;
+
+/// One slot's marks as written to disk.
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedSlot {
+    slot: u8,
+    prefix: [u8; NONCE_PREFIX_LEN],
+    counter: u32,
+    retired: Vec<[u8; NONCE_PREFIX_LEN]>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedMarks {
+    version: u16,
+    slots: Vec<PersistedSlot>,
+}
 
 /// What the replay window says about one authenticated frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,9 +84,92 @@ struct SlotMark {
 #[derive(Debug, Default)]
 pub struct SenderMarks {
     by_slot: BTreeMap<u8, SlotMark>,
+    /// Whether an accept happened since the marks were last written out.
+    unsaved: bool,
 }
 
 impl SenderMarks {
+    /// The marks persisted at `path`. An absent file is a node that has never
+    /// heard a peer. An unreadable or malformed one is logged and starts empty:
+    /// refusing to run the bus over it would ground the fleet's separation layer
+    /// on a file this service itself writes.
+    pub fn load(path: &Path) -> Self {
+        let text = match std::fs::read(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => {
+                tracing::error!(path = %path.display(), error = %e, "swarm_replay_state_unreadable");
+                return Self::default();
+            }
+        };
+        let persisted: PersistedMarks = match serde_json::from_slice(&text) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(path = %path.display(), error = %e, "swarm_replay_state_malformed");
+                return Self::default();
+            }
+        };
+        ados_protocol::sidecar::check_sidecar_version(
+            "swarmbus-replay",
+            persisted.version,
+            REPLAY_STATE_VERSION,
+        );
+        let by_slot = persisted
+            .slots
+            .into_iter()
+            .map(|s| {
+                let mut retired = s.retired;
+                // A hand-edited file must not lift the bound.
+                let excess = retired.len().saturating_sub(RETIRED_PREFIXES);
+                retired.drain(..excess);
+                (
+                    s.slot,
+                    SlotMark {
+                        current: SenderNonce {
+                            prefix: s.prefix,
+                            counter: s.counter,
+                        },
+                        retired,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            by_slot,
+            unsaved: false,
+        }
+    }
+
+    /// The serialized marks when an accept happened since the last call, `None`
+    /// when nothing changed. Clears the unsaved flag; a caller whose write then
+    /// fails hands it back with [`Self::mark_unsaved`].
+    pub fn take_unsaved(&mut self) -> Option<Vec<u8>> {
+        if !self.unsaved {
+            return None;
+        }
+        self.unsaved = false;
+        let persisted = PersistedMarks {
+            version: REPLAY_STATE_VERSION,
+            slots: self
+                .by_slot
+                .iter()
+                .map(|(slot, mark)| PersistedSlot {
+                    slot: *slot,
+                    prefix: mark.current.prefix,
+                    counter: mark.current.counter,
+                    retired: mark.retired.clone(),
+                })
+                .collect(),
+        };
+        serde_json::to_vec(&persisted).ok()
+    }
+
+    /// Re-flag the marks as unsaved after a failed write, so the next persist
+    /// tick tries again.
+    pub fn mark_unsaved(&mut self) {
+        self.unsaved = true;
+    }
+
     /// Judge `sender` for `slot`. `slot_live` is whether the slot's table entry is
     /// present and not stale. Pure: nothing changes until [`Self::accept`].
     pub fn verdict(&self, slot: u8, sender: SenderNonce, slot_live: bool) -> SenderVerdict {
@@ -82,6 +196,7 @@ impl SenderMarks {
     /// Record `sender` as the slot's latest accepted frame, retiring the previous
     /// run when the prefix changed.
     pub fn accept(&mut self, slot: u8, sender: SenderNonce) {
+        self.unsaved = true;
         match self.by_slot.get_mut(&slot) {
             Some(mark) => {
                 if mark.current.prefix != sender.prefix {
@@ -177,5 +292,35 @@ mod tests {
             "oldest dropped"
         );
         assert!(mark.retired.contains(&[1; NONCE_PREFIX_LEN]));
+    }
+
+    #[test]
+    fn a_malformed_or_oversized_file_cannot_widen_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replay.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+        assert!(SenderMarks::load(&path).by_slot.is_empty());
+
+        // A file listing more retired runs than the bound keeps only the newest.
+        let retired: Vec<[u8; NONCE_PREFIX_LEN]> = (0..RETIRED_PREFIXES as u8 + 3)
+            .map(|p| [p; NONCE_PREFIX_LEN])
+            .collect();
+        let prefix = [0xEE_u8; NONCE_PREFIX_LEN];
+        let body = serde_json::json!({
+            "version": REPLAY_STATE_VERSION,
+            "slots": [{"slot": 3, "prefix": prefix, "counter": 7, "retired": retired}],
+        });
+        std::fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+        let marks = SenderMarks::load(&path);
+        let mark = &marks.by_slot[&3];
+        assert_eq!(mark.retired.len(), RETIRED_PREFIXES);
+        assert!(!mark.retired.contains(&[0; NONCE_PREFIX_LEN]));
+        assert_eq!(
+            marks.verdict(3, run(0xEE, 7), false),
+            SenderVerdict::Replayed
+        );
+        assert!(SenderMarks::load(&dir.path().join("absent.json"))
+            .by_slot
+            .is_empty());
     }
 }

@@ -23,7 +23,6 @@ use ados_mavlink_router::aux_tee::{self, TeeCounters};
 use ados_mavlink_router::aux_uplink;
 use ados_mavlink_router::aux_uplink_consumer::{self, AuxUplinkConsumerCounters};
 use ados_mavlink_router::config::MavlinkConfig;
-use ados_mavlink_router::connection::attitude_setpoint::{self, AttitudeSetpointStatus};
 use ados_mavlink_router::connection::swarm_setpoint::{self, SwarmSetpointStatus};
 use ados_mavlink_router::connection::ClientOrigin;
 use ados_mavlink_router::connection::FcConnection;
@@ -490,6 +489,9 @@ async fn main() {
     // sees it over the ports it already uses. Ground-station profile only: a
     // drone has its own flight controller and must never take frames from
     // off-board as if they were its own.
+    // The ground station's uplink sender, kept so its held-frame counter rides
+    // the state snapshot. `None` on a drone.
+    let mut uplink_sender: Option<aux_uplink::AuxUplinkSender> = None;
     if cfg.is_ground_station() {
         let ingest_sock = format!(
             "{dir}/{}",
@@ -545,7 +547,9 @@ async fn main() {
         // whichever drone the ground station's WFB link has bound, closing
         // the ground-to-drone half of the relay (the drone-to-ground half
         // has run since the aux downlink lane was wired up).
-        fc.set_aux_uplink(aux_uplink::spawn(aux_ports().tx)).await;
+        let sender = aux_uplink::spawn(aux_ports().tx);
+        uplink_sender = Some(sender.clone());
+        fc.set_aux_uplink(sender).await;
     }
 
     // MAVLink socket client commands -> FC.
@@ -653,40 +657,6 @@ async fn main() {
         Some(status)
     };
 
-    // The attitude rung: body-rate/thrust `SET_ATTITUDE_TARGET` out, a second
-    // way to fly ArduPilot until the G3 gate (a real Betaflight FC) passes.
-    // Gated INERT here: no rate injector producer or config enables it yet, so
-    // it never emits a live attitude command to any airframe (the G3 test is
-    // written failing-first and left #[ignore]d). `AttitudeSetpointStatus` is
-    // the reverse direction: the lane's verdict + counters for the snapshot.
-    let attitude_status: Option<Arc<AttitudeSetpointStatus>> = {
-        let status = Arc::new(AttitudeSetpointStatus::default());
-        let fc = fc.clone();
-        let state = state.clone();
-        let pic_path = format!("{dir}/pic-state.json");
-        let handle = status.clone();
-        let cancel = cancel.clone();
-        // A watch channel carrying the newest live rate command + its attested
-        // identity. No producer is wired yet (that is the G3-gated lane), so
-        // the channel stays empty and the rung suppresses to the human hold.
-        let (rate_tx, rate_rx) = tokio::sync::watch::channel::<
-            Option<(
-                ados_rate_control::AttitudeCommand,
-                String,
-                std::time::Instant,
-            )>,
-        >(None);
-        let _keep_writer_alive = rate_tx;
-        tasks.push(tokio::spawn(async move {
-            attitude_setpoint::run(
-                fc, state, false, // inert until a producer + config are wired
-                pic_path, rate_rx, handle, cancel,
-            )
-            .await
-        }));
-        Some(status)
-    };
-
     {
         let fc = fc.clone();
         let state = state.clone();
@@ -698,7 +668,7 @@ async fn main() {
         let aux_rpc_counters = aux_rpc_counters.clone();
         let frame_ingest_counters = frame_ingest_counters.clone();
         let relayed_vehicle = relayed_vehicle.clone();
-        let attitude_status = attitude_status.clone();
+        let uplink_sender = uplink_sender.clone();
         let proxy_posture = proxy_posture(&cfg);
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
@@ -738,7 +708,7 @@ async fn main() {
                             &fc, &state, &params, started, mavlink_drops, state_drops,
                             aux_tee_counters.as_ref(), frame_ingest_counters.as_ref(),
                             aux_rpc_counters.as_ref(), swarm_status.as_ref(),
-                            attitude_status.as_ref(),
+                            uplink_sender.as_ref(),
                             relayed_vehicle.as_ref(),
                             &proxy_posture,
                         )
@@ -844,7 +814,7 @@ async fn build_extras(
     frame_ingest_counters: Option<&Arc<IngestCounters>>,
     aux_rpc_counters: Option<&AuxUplinkConsumerCounters>,
     swarm: Option<&Arc<SwarmSetpointStatus>>,
-    attitude: Option<&Arc<AttitudeSetpointStatus>>,
+    uplink: Option<&aux_uplink::AuxUplinkSender>,
     relayed_vehicle: Option<&Arc<StdMutex<RelayedVehicle>>>,
     proxy_posture: &Value,
 ) -> Map<String, Value> {
@@ -873,6 +843,9 @@ async fn build_extras(
         json!(transport_open && mavlink_alive),
     );
     extras.insert("transport_open".into(), json!(transport_open));
+    // Cumulative frames decoded off the FC link: the supervisor's proof that
+    // the reader is working while the transport is open.
+    extras.insert("fc_frames_decoded".into(), json!(fc.frames_decoded()));
     extras.insert("mavlink_alive".into(), json!(mavlink_alive));
     extras.insert(
         "heartbeat_age_s".into(),
@@ -1034,28 +1007,13 @@ async fn build_extras(
     // A real JSON bool, not 0/1: the beacon builder reads a non-bool as false, and
     // for a safety flag that is the wrong direction to fail in.
     extras.insert(ados_swarm_control::EXTRA_EMERGENCY.into(), json!(emergency));
-    // The attitude rung's verdict + counters. Absent (the rung inert / not
-    // yet wired) reads as the honest "no-command" hold — never a fabricated
-    // default that implies a live rate lane.
-    match attitude {
-        Some(s) => {
-            extras.insert("attitude_verdict".into(), json!(s.verdict_wire()));
-            extras.insert(
-                "attitude_setpoints_emitted".into(),
-                json!(s.setpoints_emitted()),
-            );
-            extras.insert(
-                "attitude_ticks_suppressed".into(),
-                json!(s.ticks_suppressed()),
-            );
-            extras.insert(
-                "attitude_freshness_suppressions".into(),
-                json!(s.freshness_suppressions()),
-            );
-        }
-        None => {
-            extras.insert("attitude_verdict".into(), json!("no-command"));
-        }
+    // Operator frames the ground station held because two linked aircraft
+    // share the system id they were addressed to. Ground station only.
+    if let Some(u) = uplink {
+        extras.insert(
+            "uplink_blocked_sysid_conflict".into(),
+            json!(u.blocked_sysid_conflict()),
+        );
     }
     extras
 }
@@ -1170,17 +1128,14 @@ mod extras_key_set_tests {
     /// vehicle fields up in place of the withheld local ones. So it appears here
     /// but in neither classification list, which is correct rather than an
     /// omission.
-    const EXPECTED_EXTRAS_KEYS: [&str; 33] = [
-        "attitude_freshness_suppressions",
-        "attitude_setpoints_emitted",
-        "attitude_ticks_suppressed",
-        "attitude_verdict",
+    const EXPECTED_EXTRAS_KEYS: [&str; 31] = [
         "aux_mavlink_tee",
         "aux_rpc",
         "fc_baud",
         "fc_command_down_gated",
         "fc_connected",
         "fc_firmware",
+        "fc_frames_decoded",
         "fc_link_hint",
         "fc_port",
         "fc_reachable",
@@ -1203,6 +1158,7 @@ mod extras_key_set_tests {
         "swarm_emergency",
         "swarm_precedence",
         "transport_open",
+        "uplink_blocked_sysid_conflict",
         "video_profile",
     ];
 
@@ -1215,8 +1171,7 @@ mod extras_key_set_tests {
 
         // Every optional counter present at once. No single profile does this
         // (tee + rpc are drone-only, ingest is ground-station-only), but the pin
-        // is about the key SET, not about one profile's subset of it. The
-        // attitude rung is present because `main` always runs it.
+        // is about the key SET, not about one profile's subset of it.
         //
         // The relayed projection is POPULATED rather than default: an untouched
         // one has never seen a frame, so `to_wire` returns `None` and the key is
@@ -1235,7 +1190,7 @@ mod extras_key_set_tests {
             Some(&Arc::new(IngestCounters::default())),
             Some(&AuxUplinkConsumerCounters::new()),
             Some(&Arc::new(SwarmSetpointStatus::default())),
-            Some(&Arc::new(AttitudeSetpointStatus::default())),
+            Some(&aux_uplink::spawn(0)),
             Some(&relayed),
             &proxy_posture(&MavlinkConfig::default()),
         )

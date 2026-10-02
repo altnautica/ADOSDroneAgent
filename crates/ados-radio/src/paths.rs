@@ -33,22 +33,46 @@ pub const DRONE_KEY: &str = "/etc/drone.key";
 /// The wfb-ng key file size. A shared-key file of any other length is not a key.
 pub const DRONE_KEY_BYTES: usize = 64;
 
-/// Read the shared key the bind protocol delivers byte-for-byte to both rigs.
-///
-/// `None` when the file is absent, unreadable, or not exactly
-/// [`DRONE_KEY_BYTES`] long. A wrong-length file is treated as absent rather than
-/// hashed: a half-written key would derive a key only this node holds, and a
-/// link where one side's frames all fail authentication is far harder to
-/// diagnose than one where both sides sit on the cold-start key. Every plane that
-/// derives a symmetric key from the shared file (the presence beacon, the hop
-/// announce, the swarm bus) reads it through here so they agree on that rule.
-pub fn read_shared_key_at(path: &std::path::Path) -> Option<[u8; DRONE_KEY_BYTES]> {
-    std::fs::read(path).ok()?.try_into().ok()
+/// What reading the shared bind key found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharedKey {
+    /// A whole key: the node is bound.
+    Bound([u8; DRONE_KEY_BYTES]),
+    /// No key file: the node has not been bound yet, and the planes that derive
+    /// a key from it run on their published cold-start constant until it is.
+    Absent,
+    /// A key file exists but could not be read, or is not exactly
+    /// [`DRONE_KEY_BYTES`] long (a half-written rewrite, a permissions fault).
+    /// This is NOT the unbound case: falling back to the cold-start constant
+    /// here would quietly downgrade a bound node to a key anyone can compute.
+    Unavailable(String),
 }
 
-/// [`read_shared_key_at`] on the canonical [`DRONE_KEY`] path.
-pub fn read_shared_key() -> Option<[u8; DRONE_KEY_BYTES]> {
-    read_shared_key_at(std::path::Path::new(DRONE_KEY))
+/// Read the shared key the bind protocol delivers byte-for-byte to both rigs.
+///
+/// Every plane that derives a symmetric key from the shared file (the presence
+/// beacon, the hop announce, the swarm bus) reads it through here so they agree
+/// on the rule: only a missing file means "unbound"; any other failure is
+/// [`SharedKey::Unavailable`] and the caller must refuse to authenticate rather
+/// than fall back.
+pub fn load_shared_key_at(path: &std::path::Path) -> SharedKey {
+    match std::fs::read(path) {
+        Ok(bytes) => match <[u8; DRONE_KEY_BYTES]>::try_from(bytes.as_slice()) {
+            Ok(key) => SharedKey::Bound(key),
+            Err(_) => SharedKey::Unavailable(format!(
+                "{} is {} bytes, expected {DRONE_KEY_BYTES}",
+                path.display(),
+                bytes.len()
+            )),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SharedKey::Absent,
+        Err(e) => SharedKey::Unavailable(format!("{}: {e}", path.display())),
+    }
+}
+
+/// [`load_shared_key_at`] on the canonical [`DRONE_KEY`] path.
+pub fn load_shared_key() -> SharedKey {
+    load_shared_key_at(std::path::Path::new(DRONE_KEY))
 }
 
 /// Cross-process bind-liveness sentinel written by the supervisor while a bind
@@ -206,5 +230,28 @@ mod tests {
         std::fs::write(dir.path().join("bind-state.json"), r#"{"other": 1}"#).unwrap();
         assert!(!read_bind_sentinel_active());
         std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    #[test]
+    fn only_a_missing_key_file_reads_as_unbound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drone.key");
+        assert_eq!(load_shared_key_at(&path), SharedKey::Absent);
+        std::fs::write(&path, [7u8; DRONE_KEY_BYTES]).unwrap();
+        assert_eq!(
+            load_shared_key_at(&path),
+            SharedKey::Bound([7u8; DRONE_KEY_BYTES])
+        );
+        // A half-written rewrite is not the unbound state.
+        std::fs::write(&path, [7u8; 10]).unwrap();
+        assert!(matches!(
+            load_shared_key_at(&path),
+            SharedKey::Unavailable(_)
+        ));
+        // Nor is a path that cannot be read as a file.
+        assert!(matches!(
+            load_shared_key_at(dir.path()),
+            SharedKey::Unavailable(_)
+        ));
     }
 }

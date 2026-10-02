@@ -35,6 +35,11 @@
 //!   the radio supervisor. A bus whose radio never opened publishes the same
 //!   empty table and zeroed counters as a healthy listener with nobody in range;
 //!   `open: false` is what tells the two apart.
+//! - **`fleet_key_bound` says whether the table can be trusted to steer on.**
+//!   `true` when frames are authenticated under the fleet's bound key; `false`
+//!   on a node still running the cold-start key, which anyone can derive from the
+//!   public source and so forge beacons under. The onboard control laws refuse a
+//!   table that is not bound; the operator view still shows it.
 
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -96,6 +101,7 @@ pub fn neighbors_payload(
         "slot": table.own_slot(),
         "sender_id": table.own_sender().as_ref().map(sender_id_hex),
         "slot_conflict": table.slot_conflict(),
+        "fleet_key_bound": table.fleet_key_bound(),
         "neighbors": neighbors,
         "counters": counters_value(table.counters(), table.len()),
         "slots": device_ids
@@ -136,14 +142,15 @@ pub fn counters_value(c: SwarmCounters, neighbors_now: usize) -> Value {
 /// empty array rather than null: an empty registry is an honest description of a
 /// node with no registry of its own (every drone, and a ground station that has
 /// paired nobody), whereas `fleet_id`/`slot` being empty would be a guess about a
-/// fleet identity this degraded body cannot know. `radio` is null: no running bus
-/// has said whether it can hear.
+/// fleet identity this degraded body cannot know. `radio` and `fleet_key_bound`
+/// are null: no running bus has said whether it can hear or which key it holds.
 pub fn empty_payload() -> Value {
     json!({
         "fleet_id": Value::Null,
         "slot": Value::Null,
         "sender_id": Value::Null,
         "slot_conflict": Value::Null,
+        "fleet_key_bound": Value::Null,
         "neighbors": [],
         "counters": counters_value(SwarmCounters::default(), 0),
         "slots": [],
@@ -194,11 +201,12 @@ pub fn encode_line(payload: &Value) -> Vec<u8> {
 /// The top-level keys of the published payload. `slot_conflict` is `true` while a
 /// peer is beaconing this node's own slot, `false` when none is, and `null` when
 /// no running bus has reported.
-pub const PAYLOAD_KEYS: [&str; 8] = [
+pub const PAYLOAD_KEYS: [&str; 9] = [
     "fleet_id",
     "slot",
     "sender_id",
     "slot_conflict",
+    "fleet_key_bound",
     "neighbors",
     "counters",
     "slots",
@@ -302,6 +310,7 @@ mod tests {
                 "slot": 0,
                 "sender_id": null,
                 "slot_conflict": false,
+                "fleet_key_bound": false,
                 "neighbors": [{
                     "slot": 3,
                     "device_id": "ados-abc123",
@@ -539,6 +548,7 @@ mod tests {
         assert_eq!(p["fleet_id"], Value::Null, "a guessed fleet id is a lie");
         assert_eq!(p["slot"], Value::Null);
         assert_eq!(p["slot_conflict"], Value::Null, "no bus has looked");
+        assert_eq!(p["fleet_key_bound"], Value::Null, "no bus has said");
         assert_eq!(p["neighbors"], json!([]));
         assert_eq!(p["slots"], json!([]));
         assert_exact_keys(&p, &PAYLOAD_KEYS, "payload");

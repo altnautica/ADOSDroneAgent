@@ -30,6 +30,14 @@
 //! router is a separate process and a socket that stopped delivering would
 //! otherwise leave it replaying the last snapshot forever, which is precisely the
 //! "never fly on stale data" failure the age check exists to prevent.
+//!
+//! # Authentication
+//!
+//! A table is acted on only when the payload says `fleet_key_bound: true`. A bus
+//! on the cold-start key authenticates frames under a key derivable from the
+//! public source, so any of its rows could be forged; steering separation or
+//! formation on them would hand the aircraft to whoever is in radio range. An
+//! absent flag reads the same as false.
 
 use ados_swarmbus::NEIGHBOR_STALE;
 use serde_json::Value;
@@ -57,6 +65,10 @@ pub const EXTRA_EMERGENCY: &str = "swarm_emergency";
 /// Writes into `out` rather than returning a `Vec`: this runs at 10 Hz on an SBC
 /// that is also encoding video.
 ///
+/// A payload that does not state `fleet_key_bound: true` yields no fixes at all;
+/// see the module docs. With no neighbours the controller emits nothing and the
+/// flight controller holds.
+///
 /// An entry missing any field it needs is SKIPPED rather than defaulted, and so
 /// is an entry whose position is PRESENT but is not a measurement — see
 /// [`is_measured_fix`]. A neighbour with no position is not a neighbour at the
@@ -68,6 +80,9 @@ pub fn fixes_from_payload(
     out: &mut Vec<NeighborFix>,
 ) {
     out.clear();
+    if payload.get("fleet_key_bound").and_then(Value::as_bool) != Some(true) {
+        return;
+    }
     let Some(neighbors) = payload.get("neighbors").and_then(Value::as_array) else {
         return;
     };
@@ -88,11 +103,12 @@ pub fn fixes_from_payload(
         if !is_measured_fix(lat_deg, lon_deg, alt_m, status) {
             continue;
         }
-        let age_ms = n
-            .get("age_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .saturating_add(extra_ms);
+        // No published age means the fix cannot be aged: skipped, never treated
+        // as perfectly fresh.
+        let Some(published_age_ms) = n.get("age_ms").and_then(Value::as_u64) else {
+            continue;
+        };
+        let age_ms = published_age_ms.saturating_add(extra_ms);
         if age_ms >= NEIGHBOR_STALE.as_millis() as u64 {
             continue;
         }
@@ -205,6 +221,7 @@ mod tests {
         json!({
             "fleet_id": 1,
             "slot": 1,
+            "fleet_key_bound": true,
             "neighbors": [{
                 "slot": 3,
                 "device_id": "example-drone",
@@ -270,6 +287,7 @@ mod tests {
         let order_seen_by = |own: [u8; 8], peer: [u8; 8]| {
             let mut table = NeighborTable::new(5);
             table.set_own_sender(own);
+            table.set_fleet_key_bound(true);
             let beacon = SwarmBeacon {
                 slot: 5,
                 lat: 129_716_000,
@@ -296,6 +314,53 @@ mod tests {
         let mut out = Vec::new();
         fixes_from_payload(&payload(0, 0.0), Duration::ZERO, &mut out);
         assert_eq!(out[0].sender_order, std::cmp::Ordering::Equal);
+    }
+
+    /// Rows authenticated under the public cold-start key, or a payload that
+    /// does not say which key it holds, are never steered on.
+    #[test]
+    fn a_table_not_authenticated_under_a_bound_key_yields_no_fixes() {
+        let mut out = Vec::new();
+        for flag in [json!(false), Value::Null, json!("true"), json!(1)] {
+            let mut p = payload(0, 0.0);
+            p["fleet_key_bound"] = flag.clone();
+            fixes_from_payload(&p, Duration::ZERO, &mut out);
+            assert!(out.is_empty(), "fleet_key_bound = {flag}");
+        }
+        let mut p = payload(0, 0.0);
+        p.as_object_mut().expect("object").remove("fleet_key_bound");
+        fixes_from_payload(&p, Duration::ZERO, &mut out);
+        assert!(out.is_empty(), "an absent flag is not a bound key");
+
+        // The real producer on a cold-start bus publishes false.
+        use ados_swarmbus::beacon::{SwarmBeacon, STATUS_GPS_OK};
+        use ados_swarmbus::neighbors::NeighborTable;
+        use ados_swarmbus::publish::neighbors_payload;
+        let now = std::time::Instant::now();
+        let mut table = NeighborTable::new(5);
+        table.record(
+            SwarmBeacon {
+                slot: 3,
+                lat: 129_716_000,
+                lon: 775_946_000,
+                alt_dm: 300,
+                status: STATUS_ARMED | STATUS_GPS_OK,
+                ..SwarmBeacon::default()
+            },
+            ados_swarmbus::crypto::SenderNonce {
+                prefix: [0x30; 8],
+                counter: 0,
+            },
+            None,
+            now,
+        );
+        let unbound = neighbors_payload(1, &table, &std::collections::BTreeMap::new(), now);
+        fixes_from_payload(&unbound, Duration::ZERO, &mut out);
+        assert!(out.is_empty());
+        table.set_fleet_key_bound(true);
+        let bound = neighbors_payload(1, &table, &std::collections::BTreeMap::new(), now);
+        fixes_from_payload(&bound, Duration::ZERO, &mut out);
+        assert_eq!(out.len(), 1);
     }
 
     #[test]

@@ -64,12 +64,15 @@ use tokio::net::UdpSocket;
 /// silently truncated by the read and then misparsed as a damaged frame of ours.
 const BUF_SIZE: usize = 4096;
 
-/// First retry delay after the republish seam refuses a connection.
-const SEAM_BACKOFF_MIN: Duration = Duration::from_secs(1);
-
-/// Ceiling on the republish retry delay, so a router that is down for a long
-/// time is probed occasionally rather than continuously.
-const SEAM_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Fixed delay before the republish seam is tried again after it refused a
+/// connection.
+///
+/// Flat, with no growth: every frame dropped while the gate is closed is
+/// relayed telemetry or a command ack the operator does not see, so a router
+/// that came back must be picked up within seconds, not after a ladder that
+/// had doubled to half a minute. The interval still keeps a router that is
+/// down from facing one connection attempt per frame.
+const SEAM_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Fixed retry between attempts to bind the lane's loopback port.
 ///
@@ -392,27 +395,16 @@ impl AuxCountersSnapshot {
 
 /// Retry gate for the republish seam.
 ///
-/// Holds the backoff so a MAVLink router that is not up is retried on a schedule
-/// rather than on every single frame, which at telemetry rates would be a
-/// connection storm against a process that is already struggling.
-#[derive(Debug)]
+/// Holds the retry schedule so a MAVLink router that is not up is retried on a
+/// fixed interval rather than on every single frame, which at telemetry rates
+/// would be a connection storm against a process that is already struggling.
+#[derive(Debug, Default)]
 struct SeamGate {
     /// When the next attempt may be made. `None` means immediately.
     next_attempt: Option<Instant>,
-    backoff: Duration,
     /// Whether the current outage has been logged, so a long outage produces one
     /// line rather than one per retry.
     outage_logged: bool,
-}
-
-impl Default for SeamGate {
-    fn default() -> Self {
-        Self {
-            next_attempt: None,
-            backoff: SEAM_BACKOFF_MIN,
-            outage_logged: false,
-        }
-    }
 }
 
 impl SeamGate {
@@ -425,7 +417,6 @@ impl SeamGate {
             tracing::info!("ground_aux_republish_recovered");
         }
         self.next_attempt = None;
-        self.backoff = SEAM_BACKOFF_MIN;
         self.outage_logged = false;
     }
 
@@ -436,8 +427,7 @@ impl SeamGate {
         } else {
             tracing::debug!(error = %error, "ground_aux_republish_still_unavailable");
         }
-        self.next_attempt = Some(now + self.backoff);
-        self.backoff = (self.backoff * 2).min(SEAM_BACKOFF_MAX);
+        self.next_attempt = Some(now + SEAM_RETRY_INTERVAL);
     }
 }
 
@@ -467,18 +457,54 @@ fn report(counters: &AuxCounters, last: AuxCountersSnapshot) -> AuxCountersSnaps
     now
 }
 
-/// Decode one datagram and act on it, updating exactly one received-path
-/// counter.
+/// The system id in a MAVLink frame's header.
 ///
-/// The system id a MAVLink frame carries, for v1 and v2 alike.
-///
-/// Both versions place the system id at byte 5, after their differing headers
-/// begin with a magic this build does not need to interpret further -- the
-/// offset is the same, so no dialect knowledge is required to read who sent a
-/// frame. `None` when the buffer is too short to hold one, which is a runt
-/// rather than a vehicle.
+/// The two versions put it in different places: v2 (`0xFD`) has STX, LEN,
+/// INCOMPAT, COMPAT, SEQ, SYSID at byte 5; v1 (`0xFE`) has STX, LEN, SEQ, SYSID
+/// at byte 3, and byte 5 is its message id. `None` for anything else or a runt.
 fn mavlink_system_id(frame: &[u8]) -> Option<u8> {
-    frame.get(5).copied()
+    match frame.first()? {
+        0xFD => frame.get(5).copied(),
+        0xFE => frame.get(3).copied(),
+        _ => None,
+    }
+}
+
+/// `MAV_TYPE_GCS`: a ground station's own HEARTBEAT, never a vehicle.
+const MAV_TYPE_GCS: u8 = 6;
+/// `MAV_AUTOPILOT_INVALID`: a component that is not a flight controller (a
+/// companion computer, a gimbal, the drone agent's own heartbeat).
+const MAV_AUTOPILOT_INVALID: u8 = 8;
+
+/// The sender's system id when `frame` is a flight controller's HEARTBEAT.
+///
+/// Only an autopilot's own HEARTBEAT names the vehicle. The drone's tee also
+/// carries frames the FC forwards from other components (a ground station on
+/// a telemetry radio, a companion computer), and counting those would make a
+/// slot's identity flicker and report two healthy drones that each carry a
+/// local ground station on id 255 as a collision.
+fn autopilot_heartbeat_system_id(frame: &[u8]) -> Option<u8> {
+    let (payload_at, msg_id) = match frame.first()? {
+        0xFD => (
+            10usize,
+            u32::from_le_bytes([*frame.get(7)?, *frame.get(8)?, *frame.get(9)?, 0]),
+        ),
+        0xFE => (6usize, u32::from(*frame.get(5)?)),
+        _ => return None,
+    };
+    if msg_id != 0 {
+        return None;
+    }
+    let len = usize::from(*frame.get(1)?);
+    let payload = frame.get(payload_at..payload_at + len)?;
+    // A v2 sender trims trailing zero bytes from the payload, so a field past
+    // the end reads as zero rather than as a runt.
+    let byte = |i: usize| payload.get(i).copied().unwrap_or(0);
+    // HEARTBEAT wire order: custom_mode u32, type u8, autopilot u8, ...
+    if byte(4) == MAV_TYPE_GCS || byte(5) == MAV_AUTOPILOT_INVALID {
+        return None;
+    }
+    mavlink_system_id(frame)
 }
 
 /// A sink for the neutral application-stream channel ([`AuxChannel::AppStream`]).
@@ -542,6 +568,9 @@ impl AuxSinksOwned {
     }
 }
 
+/// Decode one datagram and act on it, updating exactly one received-path
+/// counter.
+///
 /// Split from the read loop so the whole decode-and-dispatch decision is
 /// testable without a socket.
 async fn dispatch(
@@ -605,25 +634,16 @@ async fn dispatch(
             } else {
                 split
             };
-            let now = Instant::now();
-            if !gate.may_attempt(now) {
-                // Count every frame the datagram carried, not the datagram, so
-                // sent and republished totals stay comparable.
-                for _ in &frames {
-                    counters.bump(&c.mavlink_frames);
-                    counters.bump(&c.republish_lane_down);
-                }
-                return;
-            }
-            for frame in frames {
-                counters.bump(&c.mavlink_frames);
-                // Read who this frame claims to be from, and say so when two
-                // slots claim the same identity. Until now the slot was known
-                // at the bind and thrown away before the send, so a fleet whose
-                // aircraft shared a system id looked exactly like a fleet whose
-                // aircraft did not -- the frames are byte-identical downstream
-                // and the counters are fleet aggregates.
-                if let Some(system_id) = mavlink_system_id(frame) {
+            // Read who each frame's flight controller is, and say so when two
+            // slots claim the same identity. Until now the slot was known at
+            // the bind and thrown away before the send, so a fleet whose
+            // aircraft shared a system id looked exactly like a fleet whose
+            // aircraft did not -- the frames are byte-identical downstream and
+            // the counters are fleet aggregates. Read before the seam gate: who
+            // a slot's aircraft is does not depend on whether the router's
+            // ingest socket is up right now.
+            for frame in &frames {
+                if let Some(system_id) = autopilot_heartbeat_system_id(frame) {
                     let colliding = peers.observe_system_id(slot, system_id);
                     if !colliding.is_empty() {
                         counters.bump(&c.system_id_collisions);
@@ -641,6 +661,19 @@ async fn dispatch(
                         );
                     }
                 }
+            }
+            let now = Instant::now();
+            if !gate.may_attempt(now) {
+                // Count every frame the datagram carried, not the datagram, so
+                // sent and republished totals stay comparable.
+                for _ in &frames {
+                    counters.bump(&c.mavlink_frames);
+                    counters.bump(&c.republish_lane_down);
+                }
+                return;
+            }
+            for frame in frames {
+                counters.bump(&c.mavlink_frames);
                 match sinks.mavlink.send_frame(frame).await {
                     Ok(()) => {
                         gate.on_success();
@@ -1046,12 +1079,82 @@ mod tests {
         server.abort();
     }
 
-    /// A MAVLink v2 heartbeat with an explicit system id, so two drones can be
-    /// given the SAME one — which is the shipped default.
+    /// A whole MAVLink v2 HEARTBEAT from an ArduPilot quadrotor with an
+    /// explicit system id, so two drones can be given the SAME one — which is
+    /// the shipped default.
     fn heartbeat_from(system_id: u8) -> Vec<u8> {
-        let mut f = heartbeat();
-        f[5] = system_id;
+        let mut f = vec![
+            0xFD, 0x09, 0x00, 0x00, 0x07, system_id, 0x01, 0x00, 0x00, 0x00,
+        ];
+        // custom_mode, type = quadrotor (2), autopilot = ArduPilot (3),
+        // base_mode, system_status, mavlink_version.
+        f.extend_from_slice(&[0, 0, 0, 0, 2, 3, 0, 4, 3]);
+        f.extend_from_slice(&[0xAA, 0xBB]);
         f
+    }
+
+    /// The same HEARTBEAT in MAVLink v1 framing: STX, LEN, SEQ, SYSID, COMPID,
+    /// MSGID, then the payload.
+    fn heartbeat_v1_from(system_id: u8) -> Vec<u8> {
+        let mut f = vec![0xFE, 0x09, 0x00, system_id, 0x01, 0x00];
+        f.extend_from_slice(&[0, 0, 0, 0, 2, 3, 0, 4, 3]);
+        f.extend_from_slice(&[0xAA, 0xBB]);
+        f
+    }
+
+    #[test]
+    fn the_system_id_is_read_from_each_version_s_own_header_offset() {
+        // v1 puts the message id at byte 5; reading the system id there made
+        // every v1 HEARTBEAT (message id 0) look like system 0.
+        assert_eq!(mavlink_system_id(&heartbeat_v1_from(7)), Some(7));
+        assert_eq!(
+            autopilot_heartbeat_system_id(&heartbeat_v1_from(7)),
+            Some(7)
+        );
+        assert_eq!(mavlink_system_id(&heartbeat_from(7)), Some(7));
+        assert_eq!(autopilot_heartbeat_system_id(&heartbeat_from(7)), Some(7));
+        assert_eq!(mavlink_system_id(&[0x55, 0, 0, 0, 0, 9]), None);
+    }
+
+    #[test]
+    fn only_a_flight_controller_heartbeat_names_the_slot() {
+        // A ground station's own HEARTBEAT (type 6) forwarded by the FC, and a
+        // companion's (autopilot 8), are not the vehicle.
+        let mut gcs = heartbeat_from(255);
+        gcs[14] = 6;
+        assert_eq!(autopilot_heartbeat_system_id(&gcs), None);
+        let mut companion = heartbeat_from(1);
+        companion[15] = 8;
+        assert_eq!(autopilot_heartbeat_system_id(&companion), None);
+        // Any other message id is not a HEARTBEAT.
+        let mut other = heartbeat_from(1);
+        other[7] = 30;
+        assert_eq!(autopilot_heartbeat_system_id(&other), None);
+    }
+
+    #[tokio::test]
+    async fn two_v1_drones_on_distinct_system_ids_are_not_a_collision() {
+        // Both v1 HEARTBEATs carry message id 0 at byte 5. Read as a system id
+        // that was a collision on every pair of v1 drones.
+        let ingest =
+            MavlinkIngest::with_timeout("/nonexistent/ingest.sock", Duration::from_millis(20));
+        let counters = AuxCounters::new();
+        let mut gate = SeamGate::default();
+        let peers = AuxPeerCache::new();
+        for (slot, system_id) in [(1u8, 7u8), (2, 8)] {
+            let d = aux_mux::encode(AuxChannel::Mavlink, &heartbeat_v1_from(system_id)).unwrap();
+            dispatch(
+                slot,
+                &d,
+                &AuxSinks::mavlink_only(&ingest),
+                &counters,
+                &mut gate,
+                &peers,
+            )
+            .await;
+        }
+        assert_eq!(counters.snapshot().system_id_collisions, 0);
+        assert_eq!(peers.system_ids_by_slot(), vec![(1, 7), (2, 8)]);
     }
 
     /// The slot every single-drone test dispatches on. Collision tests name

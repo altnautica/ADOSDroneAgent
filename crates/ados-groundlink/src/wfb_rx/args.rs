@@ -82,6 +82,10 @@ pub const STATE_NO_INJECTION: &str = "no_injection";
 /// (the gate refused), `no_injection` (the adapter would not inject) and
 /// `searching` (a chain is up, hunting).
 pub const STATE_BLOCKED_UNPAIRED: &str = "blocked_unpaired";
+/// The receive key is present but no receive adapter could be found: none
+/// plugged in, or the one in use was removed. Written so the sidecar stops
+/// carrying the previous generation's `active` body.
+pub const STATE_NO_ADAPTER: &str = "no_adapter";
 
 /// Data-plane RX `wfb_rx` args for the ground profile. `-l 1000` enables the
 /// per-second stats lines on stdout (without it the monitor stays empty and the

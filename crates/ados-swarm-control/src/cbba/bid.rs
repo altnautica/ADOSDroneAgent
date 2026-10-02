@@ -67,7 +67,9 @@ impl BidVector {
     /// Decode a peer's bid. `None` when the length does not match the roster the
     /// receiver holds — a mismatched task or agent count means the sender is
     /// auctioning a different problem, and silently truncating would splice two
-    /// auctions together.
+    /// auctions together — or when any bid is NaN, infinite or negative. A NaN
+    /// can never be outbid (every comparison against it is false) and an
+    /// infinity outbids everything, so either would lock a task forever.
     pub fn decode(bytes: &[u8], n_tasks: usize, n_agents: usize) -> Option<Self> {
         if bytes.len() != Self::wire_len(n_tasks, n_agents) {
             return None;
@@ -75,7 +77,11 @@ impl BidVector {
         let mut out = Self::new(n_tasks, n_agents);
         for j in 0..n_tasks {
             let at = j * BID_BYTES_PER_TASK;
-            out.y[j] = f32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+            let bid = f32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
+            if !bid.is_finite() || bid < 0.0 {
+                return None;
+            }
+            out.y[j] = bid;
             out.z[j] = match bytes[at + 4] {
                 0 => None,
                 slot => Some(slot),
@@ -104,9 +110,19 @@ mod tests {
     }
 
     #[test]
+    fn a_non_finite_or_negative_bid_is_refused() {
+        for bad in [f32::NAN, f32::INFINITY, -1.0] {
+            let mut v = BidVector::new(1, 1);
+            v.y[0] = bad;
+            let wire = v.encode();
+            assert!(BidVector::decode(&wire, 1, 1).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
     fn round_trips_bids_winners_and_timestamps() {
         let mut v = BidVector::new(3, 4);
-        v.y = vec![12.5, 0.0, -3.25];
+        v.y = vec![12.5, 0.0, 3.25];
         v.z = vec![Some(7), None, Some(24)];
         v.s = vec![0, 1, 65535, 300];
         let back = BidVector::decode(&v.encode(), 3, 4).expect("same shape");

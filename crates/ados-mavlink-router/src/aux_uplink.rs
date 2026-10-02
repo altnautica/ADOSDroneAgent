@@ -25,11 +25,25 @@
 //! retry batch of `PARAM_REQUEST_READ`s, say) collapse into one datagram
 //! rather than one radio transmission per frame, because this lane's loss
 //! tracks packets per second rather than bytes.
+//!
+//! ## Shared system ids
+//!
+//! One uplink transmission reaches every drone in the fleet, and each drone
+//! hands its flight controller only the frames addressed to that FC's system
+//! id. Two linked aircraft heartbeating with the same id are therefore one
+//! address: an ARM meant for one arms both. While the receive chain reports
+//! such a conflict (`conflicting_system_ids` in the relayed-status sidecar),
+//! every frame addressed to a conflicted id is dropped here and counted, until
+//! an operator gives one aircraft a unique id.
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ados_protocol::aux_mux::{self, AuxChannel, AUX_MAX_PAYLOAD};
+use serde_json::Value;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
@@ -43,11 +57,20 @@ const BATCH_WINDOW: Duration = Duration::from_millis(50);
 /// away; bound it so a stalled uplink cannot grow this queue without limit.
 const QUEUE_DEPTH: usize = 256;
 
+/// How often the relayed-status sidecar is re-read for the conflict set. The
+/// writer refreshes it every two seconds.
+const CONFLICT_REFRESH: Duration = Duration::from_secs(1);
+
+/// A sidecar older than this is from a stopped receive process; its conflict
+/// set is not trusted, and nothing is blocked on it.
+const CONFLICT_DOC_STALE_AFTER_S: f64 = 20.0;
+
 /// A handle to the batching task. Cheap to clone; every clone shares the same
 /// outbound queue and background sender.
 #[derive(Clone)]
 pub struct AuxUplinkSender {
     tx: mpsc::Sender<Vec<u8>>,
+    blocked_sysid_conflict: Arc<AtomicU64>,
 }
 
 impl AuxUplinkSender {
@@ -61,6 +84,12 @@ impl AuxUplinkSender {
             tracing::warn!(len = data.len(), "aux_uplink_queue_full_dropped_frame");
         }
     }
+
+    /// Frames dropped because they were addressed to a system id two linked
+    /// aircraft share. Cumulative.
+    pub fn blocked_sysid_conflict(&self) -> u64 {
+        self.blocked_sysid_conflict.load(Ordering::Relaxed)
+    }
 }
 
 /// Spawn the batching task, targeting the ground station's own aux-uplink
@@ -68,11 +97,135 @@ impl AuxUplinkSender {
 /// `AUX_TX_PORT`, currently 5602 on both sides of the aux pair by
 /// convention — see that crate's `wfb_rx::args` for the receiving `wfb_tx`
 /// this feeds). `ados-mavlink-router` does not depend on `ados-groundlink`,
-/// so the port travels as a plain config value rather than a shared const.
+/// so the port travels as a plain config value rather than a shared const,
+/// and the conflict set is read from the sidecar under the run dir.
 pub fn spawn(target_port: u16) -> AuxUplinkSender {
+    let run_dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
+    spawn_with(
+        target_port,
+        PathBuf::from(run_dir).join("relayed-status.json"),
+    )
+}
+
+fn spawn_with(target_port: u16, conflict_sidecar: PathBuf) -> AuxUplinkSender {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(QUEUE_DEPTH);
-    tokio::spawn(run(rx, target_port));
-    AuxUplinkSender { tx }
+    let blocked_sysid_conflict = Arc::new(AtomicU64::new(0));
+    let filter = ConflictFilter::new(conflict_sidecar, blocked_sysid_conflict.clone());
+    tokio::spawn(run(rx, target_port, filter));
+    AuxUplinkSender {
+        tx,
+        blocked_sysid_conflict,
+    }
+}
+
+/// The `target_system` a MAVLink frame is addressed to, when the frame decodes
+/// and its message carries one.
+pub(crate) fn frame_target_system(frame: &[u8]) -> Option<u8> {
+    use ados_protocol::mavlink::Message as _;
+    let (_, msg) = ados_protocol::mavlink::parse_any(frame).ok()?;
+    msg.target_system_id()
+}
+
+/// The system ids the receive chain reports two linked slots sharing.
+fn read_conflicts(path: &std::path::Path, now_unix: f64) -> Vec<u8> {
+    let Some(doc) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return Vec::new();
+    };
+    let written_at = doc
+        .get("wall_time_unix")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let age = now_unix - written_at;
+    if written_at <= 0.0 || !(-1.0..=CONFLICT_DOC_STALE_AFTER_S).contains(&age) {
+        return Vec::new();
+    }
+    doc.get("conflicting_system_ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|id| u8::try_from(id).ok())
+                .filter(|id| *id != 0)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Drops frames addressed to a conflicted system id, re-reading the conflict
+/// set at most once per [`CONFLICT_REFRESH`].
+struct ConflictFilter {
+    path: PathBuf,
+    conflicts: Vec<u8>,
+    read_at: Option<Instant>,
+    blocked: Arc<AtomicU64>,
+}
+
+impl ConflictFilter {
+    fn new(path: PathBuf, blocked: Arc<AtomicU64>) -> Self {
+        Self {
+            path,
+            conflicts: Vec::new(),
+            read_at: None,
+            blocked,
+        }
+    }
+
+    fn refresh(&mut self) {
+        let now = Instant::now();
+        if self
+            .read_at
+            .is_some_and(|at| now.duration_since(at) < CONFLICT_REFRESH)
+        {
+            return;
+        }
+        self.read_at = Some(now);
+        let wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        let next = read_conflicts(&self.path, wall);
+        if next != self.conflicts {
+            if next.is_empty() {
+                tracing::info!("aux_uplink_sysid_conflict_cleared");
+            } else {
+                tracing::warn!(system_ids = ?next, "aux_uplink_sysid_conflict_blocking");
+            }
+            self.conflicts = next;
+        }
+    }
+
+    /// The bytes of `chunk` that may go on the uplink.
+    ///
+    /// With no conflict the chunk passes untouched. During a conflict it is
+    /// split into whole frames and each addressed to a conflicted id is
+    /// dropped. A trailing remainder that is not a whole frame cannot be
+    /// shown to be safe, so it is dropped too and counted with the rest.
+    fn admit(&mut self, chunk: Vec<u8>) -> Vec<u8> {
+        self.refresh();
+        if self.conflicts.is_empty() {
+            return chunk;
+        }
+        let frames = aux_mux::split_frames(&chunk);
+        let whole: usize = frames.iter().map(|f| f.len()).sum();
+        let mut out = Vec::with_capacity(chunk.len());
+        let mut dropped = 0u64;
+        for frame in frames {
+            match frame_target_system(frame) {
+                Some(t) if self.conflicts.contains(&t) => dropped += 1,
+                _ => out.extend_from_slice(frame),
+            }
+        }
+        if whole < chunk.len() {
+            dropped += 1;
+        }
+        if dropped > 0 {
+            self.blocked.fetch_add(dropped, Ordering::Relaxed);
+        }
+        out
+    }
 }
 
 /// Break a chunk that cannot fit one datagram into pieces that can.
@@ -115,7 +268,7 @@ async fn flush(sock: &UdpSocket, target: SocketAddr, batch: &mut Vec<u8>) {
     batch.clear();
 }
 
-async fn run(mut rx: mpsc::Receiver<Vec<u8>>, target_port: u16) {
+async fn run(mut rx: mpsc::Receiver<Vec<u8>>, target_port: u16, mut filter: ConflictFilter) {
     let sock = match UdpSocket::bind(("127.0.0.1", 0)).await {
         Ok(s) => s,
         Err(e) => {
@@ -143,6 +296,10 @@ async fn run(mut rx: mpsc::Receiver<Vec<u8>>, target_port: u16) {
         tokio::select! {
             frame = rx.recv() => match frame {
                 Some(f) => {
+                    let f = filter.admit(f);
+                    if f.is_empty() {
+                        continue;
+                    }
                     for piece in split_oversize(&f) {
                         if batch.len() + piece.len() > AUX_MAX_PAYLOAD {
                             flush(&sock, target, &mut batch).await;
@@ -296,5 +453,95 @@ mod tests {
         let none_more =
             tokio::time::timeout(Duration::from_millis(80), listener.recv_from(&mut buf)).await;
         assert!(none_more.is_err(), "expected no second datagram");
+    }
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::*;
+    use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, COMMAND_LONG_DATA};
+    use ados_protocol::mavlink::{serialize_v2, MavHeader};
+
+    fn arm_for(target_system: u8) -> Vec<u8> {
+        let msg = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system,
+            target_component: 1,
+            command: MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
+            confirmation: 0,
+            param1: 1.0,
+            param2: 0.0,
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        });
+        serialize_v2(
+            MavHeader {
+                system_id: 255,
+                component_id: 190,
+                sequence: 0,
+            },
+            &msg,
+        )
+        .unwrap()
+    }
+
+    fn wall_now() -> f64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+    }
+
+    fn sidecar(dir: &std::path::Path, written_at: f64, conflicts: &[u8]) -> PathBuf {
+        let path = dir.join("relayed-status.json");
+        let doc = serde_json::json!({
+            "wall_time_unix": written_at,
+            "conflicting_system_ids": conflicts,
+        });
+        std::fs::write(&path, doc.to_string()).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_command_to_a_shared_system_id_is_held_and_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = sidecar(dir.path(), wall_now(), &[1]);
+        let blocked = Arc::new(AtomicU64::new(0));
+        let mut filter = ConflictFilter::new(path, blocked.clone());
+
+        let mut chunk = arm_for(1);
+        let other = arm_for(2);
+        chunk.extend_from_slice(&other);
+        assert_eq!(filter.admit(chunk), other, "only system 2's frame leaves");
+        assert_eq!(blocked.load(Ordering::Relaxed), 1);
+
+        // Broadcast is not an address two aircraft can share.
+        let broadcast = arm_for(0);
+        assert_eq!(filter.admit(broadcast.clone()), broadcast);
+    }
+
+    #[test]
+    fn without_a_live_conflict_report_nothing_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let frame = arm_for(1);
+
+        let none = sidecar(dir.path(), wall_now(), &[]);
+        let mut filter = ConflictFilter::new(none, Arc::new(AtomicU64::new(0)));
+        assert_eq!(filter.admit(frame.clone()), frame);
+
+        // A conflict written by a receive process that has since stopped.
+        let stale = sidecar(
+            dir.path(),
+            wall_now() - CONFLICT_DOC_STALE_AFTER_S - 5.0,
+            &[1],
+        );
+        let mut filter = ConflictFilter::new(stale, Arc::new(AtomicU64::new(0)));
+        assert_eq!(filter.admit(frame.clone()), frame);
+
+        let mut filter =
+            ConflictFilter::new(dir.path().join("absent.json"), Arc::new(AtomicU64::new(0)));
+        assert_eq!(filter.admit(frame.clone()), frame);
     }
 }

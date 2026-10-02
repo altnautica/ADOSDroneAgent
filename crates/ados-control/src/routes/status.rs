@@ -53,8 +53,9 @@ use crate::state::AppState;
 /// the FC connection triple + the service uptime + the FC-liveness detail (transport_open /
 /// mavlink_alive / heartbeat_age_s / fc_source / fc_link_hint). set. `batteries` is the per-pack
 /// BATTERY_STATUS list the battery engine reads and `/api/v1/battery` serves; the telemetry shape
-/// keeps its single-pack `battery` block.
-const IPC_ONLY_KEYS: [&str; 13] = [
+/// keeps its single-pack `battery` block. `fc_frames_decoded` is the cumulative FC frame counter
+/// the supervisor judges the router's work on.
+const IPC_ONLY_KEYS: [&str; 14] = [
     "fc_connected",
     "fc_port",
     "fc_baud",
@@ -67,6 +68,7 @@ const IPC_ONLY_KEYS: [&str; 13] = [
     "fc_command_down_gated",
     "fc_variant",
     "fc_firmware",
+    "fc_frames_decoded",
     "batteries",
 ];
 
@@ -119,17 +121,14 @@ const IPC_ONLY_KEYS: [&str; 13] = [
 /// a blank is indistinguishable from `hold`, which would read as "nothing has
 /// intervened" at exactly the moment something has.
 ///
-/// The `attitude_*` keys are the attitude-rate rung's own verdict and counters
-/// (setpoints it emitted, ticks and freshness checks it suppressed): what the
-/// agent's control lane did, not a reading off the vehicle, and exactly what an
-/// operator needs to see while the FC link is down.
+/// `uplink_blocked_sysid_conflict` is the ground station's count of operator
+/// frames it held because two linked aircraft share the system id they were
+/// addressed to. A ground station never decodes a HEARTBEAT of its own, so the
+/// gate would otherwise blank the one number that explains why a command did
+/// not go out.
 ///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 21] = [
-    "attitude_freshness_suppressions",
-    "attitude_setpoints_emitted",
-    "attitude_ticks_suppressed",
-    "attitude_verdict",
+const AGENT_DIAGNOSTIC_KEYS: [&str; 18] = [
     "aux_mavlink_tee",
     "aux_rpc",
     "fc_reachable",
@@ -146,6 +145,7 @@ const AGENT_DIAGNOSTIC_KEYS: [&str; 21] = [
     "swarm",
     "swarm_emergency",
     "swarm_precedence",
+    "uplink_blocked_sysid_conflict",
     "video_profile",
 ];
 
@@ -1283,22 +1283,18 @@ mod tests {
     }
 
     #[test]
-    fn the_attitude_rung_diagnostics_survive_a_down_link() {
+    fn the_uplink_conflict_counter_survives_a_down_link() {
+        // A ground station has no flight controller of its own, so its link
+        // always reads down; the count of commands it held must still show.
         let snapshot = json!({
             "armed": true,
             "mavlink_alive": false,
-            "attitude_verdict": "no-command",
-            "attitude_setpoints_emitted": 0,
-            "attitude_ticks_suppressed": 4,
-            "attitude_freshness_suppressions": 2,
+            "uplink_blocked_sysid_conflict": 4,
         });
         let tel = project_telemetry(Some(snapshot));
         let obj = tel.as_object().unwrap();
         assert!(!obj.contains_key("armed"));
-        assert_eq!(obj["attitude_verdict"], json!("no-command"));
-        assert_eq!(obj["attitude_ticks_suppressed"], json!(4));
-        assert_eq!(obj["attitude_freshness_suppressions"], json!(2));
-        assert_eq!(obj["attitude_setpoints_emitted"], json!(0));
+        assert_eq!(obj["uplink_blocked_sysid_conflict"], json!(4));
     }
 
     #[test]

@@ -1,18 +1,27 @@
 //! FHSS hop supervisor — HopAnnounce/HopAck/PresenceBeacon protocol.
 //!
-//! Mirrors `services/wfb/hop_supervisor.py`. The drone-side supervisor:
-//! - Broadcasts HopAnnounce on 127.0.0.1:5803 every 100ms for 3s.
+//! The drone-side supervisor:
+//! - Broadcasts HopAnnounce on 127.0.0.1:5803 every 100ms for up to 3s.
 //! - Waits for a HopAck (echo on UDP 5810) before executing the hop.
 //! - Executes: stop wfb_tx → iw set channel → start wfb_tx.
 //! - Returns to home channel 149 when peer is stale (>25s since last beacon).
 //! - Does not hop until first peer ACK is received (_was_linked gate).
 //!
-//! Packet formats verified from hop_supervisor.py G1 catalog.
+//! ## The flip time is relative
+//!
+//! A HopAnnounce carries the milliseconds remaining until the flip, measured
+//! when that announce was sent, not a wall-clock instant. Each side schedules
+//! the flip against its own monotonic clock from the moment it sent or received
+//! the frame, so a ground station and a drone with unsynchronised clocks (no
+//! NTP in the field, no RTC on the boards) still flip within one link latency
+//! of each other.
 
 use std::time::{Duration, Instant};
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+
+use crate::paths::SharedKey;
 
 /// Control-plane broadcast port (wfb_tx listens on this loopback UDP port).
 pub const HOP_CONTROL_PORT: u16 = 5803;
@@ -26,12 +35,14 @@ pub const PEER_STALE_SECS: f64 = 25.0;
 const HOP_BROADCAST_ROUNDS: u32 = 30;
 /// Interval between rounds.
 const HOP_BROADCAST_INTERVAL: Duration = Duration::from_millis(100);
-/// How far in the future the hop epoch is set (same as HOP_COUNTDOWN_MS).
-const HOP_EPOCH_ADVANCE_MS: u64 = 3000;
+/// How long after the first announce the coordinated flip fires.
+pub const HOP_COUNTDOWN: Duration = Duration::from_millis(3000);
 
 const HOP_MAGIC: &[u8; 8] = b"AD05HOP1";
 const PRESENCE_MAGIC: &[u8; 8] = b"AD05PRES";
-const HOP_VERSION: u8 = 2;
+/// Version 3: bytes `[9..17]` are a relative `delay_ms`. Version 2 carried a
+/// wall-clock epoch and is refused.
+const HOP_VERSION: u8 = 3;
 const PRESENCE_VERSION: u8 = 1;
 
 /// Trigger byte values (hop_supervisor.py:119-130).
@@ -65,6 +76,29 @@ pub fn derive_pair_key(drone_key: Option<&[u8]>) -> [u8; 32] {
     h.finalize_reset().into()
 }
 
+/// The hop/presence pair key for what the shared-key read found: the bound key,
+/// the cold-start constant on a node that has never been bound, or `None` when a
+/// key file exists but cannot be read. `None` means the control plane must not
+/// authenticate anything: falling back to the public constant there would let
+/// anyone in range forge hop and presence frames to a bound node.
+pub fn pair_key_for(shared: &SharedKey) -> Option<[u8; 32]> {
+    match shared {
+        SharedKey::Bound(key) => Some(derive_pair_key(Some(key))),
+        SharedKey::Absent => Some(derive_pair_key(None)),
+        SharedKey::Unavailable(_) => None,
+    }
+}
+
+/// The status label for what the shared-key read found, as the hop sidecars
+/// publish it: `bound`, `cold_start` or `key_unavailable`.
+pub fn key_status(shared: &SharedKey) -> &'static str {
+    match shared {
+        SharedKey::Bound(_) => "bound",
+        SharedKey::Absent => "cold_start",
+        SharedKey::Unavailable(_) => "key_unavailable",
+    }
+}
+
 // Convenience alias.
 type HmacSha256 = Hmac<Sha256>;
 
@@ -75,17 +109,18 @@ fn sign(data: &[u8], pair_key: &[u8; 32]) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
-/// Build a 51-byte HopAnnounce packet (hop_supervisor.py:159-169).
+/// Build a 51-byte HopAnnounce packet.
 ///
 /// Layout:
 ///   [0..8]  magic "AD05HOP1"
-///   [8]     version = 2
-///   [9..17] epoch_ms as big-endian u64
+///   [8]     version = 3
+///   [9..17] delay_ms as big-endian u64: milliseconds from this frame until
+///           the flip
 ///   [17]    target_channel
 ///   [18]    trigger byte
 ///   [19..51] HMAC-SHA256 of bytes [0..19]
 pub fn build_hop_announce(
-    epoch_ms: u64,
+    delay_ms: u64,
     target_channel: u8,
     trigger: HopTrigger,
     pair_key: &[u8; 32],
@@ -93,7 +128,7 @@ pub fn build_hop_announce(
     let mut pkt = [0u8; 51];
     pkt[0..8].copy_from_slice(HOP_MAGIC);
     pkt[8] = HOP_VERSION;
-    pkt[9..17].copy_from_slice(&epoch_ms.to_be_bytes());
+    pkt[9..17].copy_from_slice(&delay_ms.to_be_bytes());
     pkt[17] = target_channel;
     pkt[18] = trigger as u8;
     let sig = sign(&pkt[0..19], pair_key);
@@ -101,16 +136,24 @@ pub fn build_hop_announce(
     pkt
 }
 
-/// Verify a received HopAnnounce or HopAck packet.
+/// Verify a received HopAnnounce or HopAck packet: length, magic, version and
+/// HMAC.
 pub fn verify_hop_packet(pkt: &[u8], pair_key: &[u8; 32]) -> bool {
     if pkt.len() != 51 {
         return false;
     }
-    if &pkt[0..8] != HOP_MAGIC {
+    if &pkt[0..8] != HOP_MAGIC || pkt[8] != HOP_VERSION {
         return false;
     }
     let expected = sign(&pkt[0..19], pair_key);
     expected == pkt[19..51]
+}
+
+/// The `delay_ms` a verified HopAnnounce carries at bytes `[9..17]`. `None` if
+/// the slice is too short to hold the field.
+pub fn hop_announce_delay_ms(pkt: &[u8]) -> Option<u64> {
+    pkt.get(9..17)
+        .map(|b| u64::from_be_bytes(b.try_into().expect("9..17 is exactly 8 bytes")))
 }
 
 /// Build a 68-byte PresenceBeacon (hop_supervisor.py:235-250).
@@ -252,6 +295,9 @@ pub struct HopState {
     last_hop_at_unix: Option<f64>,
     /// Hop history ring (last 32 kept on read).
     history: Vec<HopHistoryEntry>,
+    /// Whether a return to the rendezvous channel has succeeded since the peer
+    /// was last heard. Cleared by every peer beacon.
+    returned_home_this_outage: bool,
 }
 
 impl HopState {
@@ -270,6 +316,7 @@ impl HopState {
         self.peer_last_seen = Some(Instant::now());
         self.peer_last_seen_unix = Some(now_unix());
         self.peer = Some(presence);
+        self.returned_home_this_outage = false;
     }
 
     /// The decoded peer, if one has been seen.
@@ -299,6 +346,7 @@ impl HopState {
         self.was_linked = true;
         self.peer_last_seen = Some(Instant::now());
         self.peer_last_seen_unix = Some(now_unix());
+        self.returned_home_this_outage = false;
     }
 
     /// True if the peer has been silent for more than PEER_STALE_SECS.
@@ -337,9 +385,28 @@ impl HopState {
         true
     }
 
-    /// Should we return to home channel? (peer gone >25s after ever being linked)
+    /// Should we return to the rendezvous channel? True once the peer has been
+    /// gone for more than [`PEER_STALE_SECS`] after ever being linked, until a
+    /// return succeeds.
+    ///
+    /// Not only when the recorded channel is off home: the record says where
+    /// this side last committed, not where the radio is, and a peer that went
+    /// silent may be waiting on rendezvous after a hop that half-completed. One
+    /// return per outage re-asserts home on the radio itself; while off home it
+    /// keeps retrying until it lands.
     pub fn should_return_home(&self) -> bool {
-        self.was_linked && self.peer_is_stale() && self.channel != self.home_channel
+        self.was_linked
+            && self.peer_is_stale()
+            && (self.channel != self.home_channel || !self.returned_home_this_outage)
+    }
+
+    /// Record the outcome of a return to the rendezvous channel. A success ends
+    /// the outage's return; a failure leaves it due on the next check.
+    pub fn record_return_home(&mut self, ok: bool) {
+        self.record_hop(self.home_channel, "return_home", ok);
+        if ok {
+            self.returned_home_this_outage = true;
+        }
     }
 
     /// True if a REACTIVE hop is allowed: the link was established and the 30s
@@ -382,21 +449,22 @@ impl HopState {
     }
 }
 
-/// Compute the hop announce epoch: current wall-clock ms + HOP_COUNTDOWN_MS.
-pub fn hop_epoch_ms() -> u64 {
+/// Wall-clock unix milliseconds, the diagnostic stamp a PresenceBeacon carries.
+pub fn now_unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let now_ms = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    now_ms + HOP_EPOCH_ADVANCE_MS
+        .unwrap_or(0)
 }
 
-/// Broadcast a HopAnnounce on 127.0.0.1:5803 up to 30 times, 100ms apart.
-/// Returns the epoch_ms that was embedded (to be used by `_execute_hop`).
-///
-/// In the full async manager this runs as a tokio task; here exposed as a pure
-/// computation for testability. The caller handles the actual UDP sends.
+/// The `delay_ms` to put in an announce sent at `now` for a flip at `deadline`.
+pub fn delay_until_ms(deadline: Instant, now: Instant) -> u64 {
+    deadline.saturating_duration_since(now).as_millis() as u64
+}
+
+/// Broadcast rounds per HopAnnounce: up to 30, 100ms apart. The caller handles
+/// the actual UDP sends.
 pub fn hop_announce_rounds() -> u32 {
     HOP_BROADCAST_ROUNDS
 }
@@ -422,7 +490,7 @@ mod tests {
     fn hop_announce_magic_and_version() {
         let pkt = build_hop_announce(0, 36, HopTrigger::Reactive, &test_key());
         assert_eq!(&pkt[0..8], b"AD05HOP1");
-        assert_eq!(pkt[8], 2); // version
+        assert_eq!(pkt[8], 3); // version
         assert_eq!(pkt[17], 36); // channel
         assert_eq!(pkt[18], 1); // reactive trigger
     }
@@ -444,12 +512,59 @@ mod tests {
     }
 
     #[test]
-    fn hop_announce_epoch_is_big_endian() {
-        let epoch: u64 = 0x0102_0304_0506_0708;
-        let pkt = build_hop_announce(epoch, 0, HopTrigger::Periodic, &test_key());
+    fn hop_announce_delay_is_big_endian() {
+        let delay: u64 = 0x0102_0304_0506_0708;
+        let pkt = build_hop_announce(delay, 0, HopTrigger::Periodic, &test_key());
         assert_eq!(
             &pkt[9..17],
             &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
+        );
+        assert_eq!(hop_announce_delay_ms(&pkt), Some(delay));
+        assert_eq!(hop_announce_delay_ms(&pkt[..8]), None);
+    }
+
+    #[test]
+    fn a_wall_clock_epoch_announce_is_refused() {
+        // The previous version put a wall-clock epoch in the same bytes. Read
+        // as a delay it would be decades; it must not verify at all.
+        let key = test_key();
+        let mut pkt = build_hop_announce(500, 149, HopTrigger::Periodic, &key);
+        pkt[8] = 2;
+        let sig = sign(&pkt[0..19], &key);
+        pkt[19..51].copy_from_slice(&sig);
+        assert!(!verify_hop_packet(&pkt, &key));
+        assert_eq!(parse_hop_announce(&pkt, &key), None);
+    }
+
+    #[test]
+    fn the_announced_delay_counts_down_to_one_deadline() {
+        let start = Instant::now();
+        let deadline = start + HOP_COUNTDOWN;
+        assert_eq!(delay_until_ms(deadline, start), 3000);
+        assert_eq!(
+            delay_until_ms(deadline, start + Duration::from_millis(700)),
+            2300
+        );
+        assert_eq!(
+            delay_until_ms(deadline, deadline + Duration::from_secs(1)),
+            0
+        );
+    }
+
+    #[test]
+    fn an_unreadable_key_yields_no_pair_key_but_an_absent_one_cold_starts() {
+        assert_eq!(
+            pair_key_for(&SharedKey::Absent),
+            Some(derive_pair_key(None))
+        );
+        assert_eq!(
+            pair_key_for(&SharedKey::Bound([3u8; 64])),
+            Some(derive_pair_key(Some(&[3u8; 64])))
+        );
+        assert_eq!(pair_key_for(&SharedKey::Unavailable("io".into())), None);
+        assert_eq!(
+            key_status(&SharedKey::Unavailable("io".into())),
+            "key_unavailable"
         );
     }
 
@@ -514,11 +629,36 @@ mod tests {
     }
 
     #[test]
-    fn hop_state_no_return_home_if_on_home() {
+    fn a_stale_peer_on_home_is_returned_once_per_outage() {
+        // The record says home, but the radio may not be there: the return runs
+        // once, then not again until the peer is heard and lost anew.
         let mut state = HopState::new(149);
         state.was_linked = true;
         state.peer_last_seen = Some(Instant::now() - Duration::from_secs(30));
-        state.channel = 149; // already home
+        state.channel = 149;
+        assert!(state.should_return_home());
+        state.record_return_home(false);
+        assert!(state.should_return_home(), "a failed return is retried");
+        state.record_return_home(true);
+        assert!(!state.should_return_home());
+
+        state.on_peer_seen();
+        assert!(!state.should_return_home(), "a live peer needs no return");
+        state.peer_last_seen = Some(Instant::now() - Duration::from_secs(30));
+        assert!(state.should_return_home(), "a new outage returns again");
+    }
+
+    #[test]
+    fn off_home_a_stale_peer_keeps_the_return_due_until_it_lands() {
+        let mut state = HopState::new(149);
+        state.was_linked = true;
+        state.peer_last_seen = Some(Instant::now() - Duration::from_secs(30));
+        state.channel = 36;
+        state.record_return_home(false);
+        assert_eq!(state.channel, 36);
+        assert!(state.should_return_home());
+        state.record_return_home(true);
+        assert_eq!(state.channel, 149);
         assert!(!state.should_return_home());
     }
 

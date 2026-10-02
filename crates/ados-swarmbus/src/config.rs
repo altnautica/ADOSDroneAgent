@@ -46,6 +46,8 @@ pub struct SwarmBusConfig {
     pub fleet_slot: u8,
     /// Where the IPC sockets live.
     pub socket_dir: String,
+    /// Where the replay window persists across restarts.
+    pub replay_state_path: String,
 }
 
 impl Default for SwarmBusConfig {
@@ -57,6 +59,7 @@ impl Default for SwarmBusConfig {
             fleet_id: wfb.fleet_id,
             fleet_slot: wfb.fleet_slot,
             socket_dir: default_socket_dir(),
+            replay_state_path: crate::neighbors::REPLAY_STATE_PATH.to_string(),
         }
     }
 }
@@ -117,6 +120,7 @@ impl SwarmBusConfig {
             fleet_id: raw.video.wfb.fleet_id.unwrap_or(d.fleet_id),
             fleet_slot: raw.video.wfb.fleet_slot.unwrap_or(d.fleet_slot),
             socket_dir: d.socket_dir,
+            replay_state_path: d.replay_state_path,
         }
     }
 

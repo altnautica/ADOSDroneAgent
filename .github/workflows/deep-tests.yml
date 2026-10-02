@@ -116,10 +116,7 @@ jobs:
           ADOS_TEST_PERSON_RGB: ${{ steps.model.outputs.person }}
         run: |
           set -uo pipefail
-          # --ignored runs ONLY the ignored tests. g3_gate needs a real flight
-          # controller, which a hosted runner does not have and cannot fake; it
-          # is named in the inventory below so its absence is recorded rather
-          # than implied.
+          # --ignored runs ONLY the ignored tests.
           cargo test --features onnx -p ados-vision -- --ignored --nocapture
 
       - name: Record the outcome
@@ -130,8 +127,3 @@ jobs:
           if [ "${{ steps.model.outputs.configured }}" = "yes" ]; then
             echo "### Real-model tests: RAN" >> "$GITHUB_STEP_SUMMARY"
           fi
-          {
-            echo
-            echo "Never runnable on a hosted runner, by design:"
-            echo "- \`ados-mavlink-router/tests/g3_gate.rs\` — needs a real flight controller"
-          } >> "$GITHUB_STEP_SUMMARY"

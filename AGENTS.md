@@ -77,12 +77,12 @@ you touched and do not treat the full run as a gate.
 
 ## Architecture Map
 
-Rust, under `crates/`, 31 workspace members. The flight-critical path:
+Rust, under `crates/`, 27 workspace members. The flight-critical path:
 
 - Service supervision: `crates/ados-supervisor/`
 - MAVLink routing: `crates/ados-mavlink-router/`
 - Video pipeline: `crates/ados-video/`
-- Radio and link control: `crates/ados-radio/`, `crates/ados-rate-control/`
+- Radio and link control: `crates/ados-radio/`
 - HTTP control surface, the native front on `:8080`: `crates/ados-control/`
 - Logging and telemetry store: `crates/ados-logd/`
 - Networking: `crates/ados-net/`, `crates/ados-macpin/`

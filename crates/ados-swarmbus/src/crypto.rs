@@ -109,16 +109,23 @@ pub fn derive_fleet_key(drone_key: Option<&[u8]>) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// The fleet key derived from the shared-key file at `path`, falling back to the
-/// cold-start constant when the file is absent or is not a whole key (the length
-/// gate lives in [`ados_radio::paths::read_shared_key_at`]).
+/// The fleet key derived from the shared-key file at `path`: the bound key, the
+/// cold-start constant on a node that has never been bound (no key file), or
+/// `None` when a key file exists but cannot be read or is not a whole key. The
+/// read rule lives in [`ados_radio::paths::load_shared_key_at`].
 ///
 /// Returns whether a bound key was found beside the key itself, so a caller can
 /// report which of the two the bus is running under.
-pub fn fleet_key_at(path: &Path) -> ([u8; 32], bool) {
-    match ados_radio::paths::read_shared_key_at(path) {
-        Some(shared) => (derive_fleet_key(Some(&shared)), true),
-        None => (derive_fleet_key(None), false),
+pub fn fleet_key_at(path: &Path) -> Option<([u8; 32], bool)> {
+    match ados_radio::paths::load_shared_key_at(path) {
+        ados_radio::paths::SharedKey::Bound(shared) => {
+            Some((derive_fleet_key(Some(&shared)), true))
+        }
+        ados_radio::paths::SharedKey::Absent => Some((derive_fleet_key(None), false)),
+        ados_radio::paths::SharedKey::Unavailable(reason) => {
+            tracing::error!(%reason, "swarm_fleet_key_unavailable: key file unreadable");
+            None
+        }
     }
 }
 
@@ -130,19 +137,26 @@ pub fn fleet_key_at(path: &Path) -> ([u8; 32], bool) {
 /// on the new key would count its beacons as bad tags. The service polls this on
 /// a fixed cadence and rebuilds its cipher whenever [`FleetKeyWatch::poll`]
 /// reports a change.
+///
+/// Once a bound key has been loaded it is never replaced by the cold-start
+/// constant: a read failure, a half-written rewrite or a briefly absent file
+/// keeps the last bound key. Downgrading would hand the bus to a key anyone can
+/// compute from the public source.
 #[derive(Debug)]
 pub struct FleetKeyWatch {
     path: PathBuf,
     key: [u8; 32],
+    bound: bool,
 }
 
 impl FleetKeyWatch {
-    /// Start watching the shared-key file at `path`, reading it now.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    /// Start watching the shared-key file at `path`, reading it now. `None`
+    /// when the file exists but cannot be read: the bus must not start.
+    pub fn new(path: impl Into<PathBuf>) -> Option<Self> {
         let path = path.into();
-        let (key, bound) = fleet_key_at(&path);
+        let (key, bound) = fleet_key_at(&path)?;
         log_key_source(&path, bound);
-        Self { path, key }
+        Some(Self { path, key, bound })
     }
 
     /// The key the bus should be running under now.
@@ -150,15 +164,28 @@ impl FleetKeyWatch {
         &self.key
     }
 
+    /// Whether the bus runs under a bound key rather than the cold-start one.
+    pub fn bound(&self) -> bool {
+        self.bound
+    }
+
     /// Re-read the key file. Returns the new key when it differs from the one
-    /// last reported, `None` when nothing changed.
+    /// last reported, `None` when nothing changed or the read must be ignored.
     pub fn poll(&mut self) -> Option<[u8; 32]> {
-        let (key, bound) = fleet_key_at(&self.path);
+        let (key, bound) = fleet_key_at(&self.path)?;
+        if self.bound && !bound {
+            tracing::warn!(
+                path = %self.path.display(),
+                "swarm_fleet_key_missing: keeping the bound key"
+            );
+            return None;
+        }
         if key == self.key {
             return None;
         }
         log_key_source(&self.path, bound);
         self.key = key;
+        self.bound = bound;
         Some(key)
     }
 }
@@ -169,7 +196,7 @@ fn log_key_source(path: &Path, bound: bool) {
     } else {
         tracing::warn!(
             path = %path.display(),
-            "swarm_fleet_key_unavailable: running on the cold-start key"
+            "swarm_fleet_key_unbound: running on the cold-start key"
         );
     }
 }
@@ -503,22 +530,22 @@ mod tests {
         );
     }
 
-    /// The resolver itself, against a real file: absent and wrong-length files
-    /// fall back to the cold-start key, and only a whole key file derives a bound
-    /// key.
+    /// The resolver itself, against a real file: an absent file is the unbound
+    /// cold-start key, a wrong-length file is refused outright, and only a whole
+    /// key file derives a bound key.
     #[test]
     fn fleet_key_at_derives_only_from_a_whole_key_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("drone.key");
-        assert_eq!(fleet_key_at(&path), (derive_fleet_key(None), false));
+        assert_eq!(fleet_key_at(&path), Some((derive_fleet_key(None), false)));
         std::fs::write(&path, [7u8; 32]).unwrap();
         assert_eq!(
             fleet_key_at(&path),
-            (derive_fleet_key(None), false),
-            "a truncated file must never derive a key only this node holds"
+            None,
+            "a truncated file is neither a key nor the unbound state"
         );
         std::fs::write(&path, [7u8; 64]).unwrap();
-        assert_eq!(fleet_key_at(&path), (key(), true));
+        assert_eq!(fleet_key_at(&path), Some((key(), true)));
     }
 
     /// A bind or pair rewrites the key file under a running bus. The watch must
@@ -528,7 +555,7 @@ mod tests {
     fn the_key_watch_reports_a_rewritten_key_file_once() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("drone.key");
-        let mut watch = FleetKeyWatch::new(&path);
+        let mut watch = FleetKeyWatch::new(&path).expect("absent file is the unbound state");
         assert_eq!(watch.key(), &derive_fleet_key(None), "unbound: cold start");
         assert_eq!(watch.poll(), None, "nothing changed");
 
@@ -550,8 +577,14 @@ mod tests {
             Err(SealError::BadTag)
         );
 
+        // A bound bus never falls back to the public cold-start key, whether the
+        // file vanishes or is caught mid-rewrite.
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(watch.poll(), Some(derive_fleet_key(None)), "key removed");
+        assert_eq!(watch.poll(), None, "key removed: the bound key is kept");
+        std::fs::write(&path, [9u8; 10]).unwrap();
+        assert_eq!(watch.poll(), None, "half-written: the bound key is kept");
+        assert_eq!(watch.key(), &rotated);
+        assert!(watch.bound());
     }
 
     /// The nonce read off the wire is exactly the one the sender sealed under, and

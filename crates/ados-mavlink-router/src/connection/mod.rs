@@ -36,7 +36,6 @@ mod framing;
 pub mod injector_gate;
 mod send_scheduler;
 pub use send_scheduler::ClientOrigin;
-pub mod attitude_setpoint;
 pub mod swarm_setpoint;
 pub(crate) mod transport;
 
@@ -86,6 +85,13 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
 /// dropped frame never flips the state. "Presence is not proof": an open
 /// transport is necessary but not sufficient to declare the FC connected.
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// How long a link opened without probe evidence (the fallback-baud open of a
+/// port that stayed silent through the whole baud sweep) may stay open without
+/// a HEARTBEAT or MSP traffic before the run loop closes it and sweeps again.
+/// A silent UART never errors or reaches EOF, so without this the router would
+/// sit on the wrong port for the life of the process.
+const UNPROVEN_LINK_TIMEOUT: Duration = Duration::from_secs(HEARTBEAT_TIMEOUT.as_secs() * 3);
 
 /// How long a sighting of MSP traffic keeps the `msp_detected` link hint armed.
 /// Generous relative to the read cadence so a steady MSP stream holds the hint,
@@ -162,9 +168,31 @@ pub struct FcConnection {
     seq: AtomicU8,
     /// FC system id learned from inbound heartbeats (default 1 = ArduPilot).
     target_system: AtomicU8,
+    /// FC component id latched from the same heartbeat as `target_system`.
+    target_component: AtomicU8,
+    /// True once a real autopilot HEARTBEAT has latched `target_system` and
+    /// `target_component` on this process. Until then the default 1/1 is a
+    /// guess, and anything that must address the vehicle exactly (the fleet
+    /// uplink filter, the swarm setpoint lane) refuses to act on it.
+    fc_identity_latched: AtomicBool,
     // pub(crate): same reasoning as `writer` above — a sibling module's tests
     // need to mark a fake link live.
     pub(crate) connected: AtomicBool,
+    /// Cumulative count of MAVLink frames decoded off the flight controller
+    /// link (every checksum-valid frame the read loop extracts, plus the demo
+    /// loop's synthetic frames). Published on the state snapshot as
+    /// `fc_frames_decoded`; the supervisor judges this service's work on its
+    /// deltas while the transport is open, because the process's own I/O keeps
+    /// moving on timers even when the FC reader has wedged.
+    fc_frames_decoded: AtomicU64,
+    /// Set by [`Self::open`] when the link it returned was opened at the
+    /// fallback baud without any probe evidence (no HEARTBEAT, no MSP). Such a
+    /// link is torn down by [`Self::run`] if it proves nothing within
+    /// [`UNPROVEN_LINK_TIMEOUT`], so a silent port cannot hold the router.
+    opened_unproven: AtomicBool,
+    /// True once the current session saw a vehicle HEARTBEAT or MSP traffic.
+    /// Reset at the start of every session.
+    link_proven: AtomicBool,
     /// True when the most recent open attempt FAILED to establish a transport
     /// (the socket/serial device could not be opened at all). Drives the
     /// `source_unreachable` link hint: a configured (non-auto) source whose
@@ -257,7 +285,12 @@ impl FcConnection {
             tx_liveness: Mutex::new(send_scheduler::TxLiveness::new()),
             seq: AtomicU8::new(0),
             target_system: AtomicU8::new(1),
+            target_component: AtomicU8::new(1),
+            fc_identity_latched: AtomicBool::new(false),
             connected: AtomicBool::new(false),
+            fc_frames_decoded: AtomicU64::new(0),
+            opened_unproven: AtomicBool::new(false),
+            link_proven: AtomicBool::new(false),
             open_failed: AtomicBool::new(false),
             port: Mutex::new(String::new()),
             fc_variant: Mutex::new(None),
@@ -326,6 +359,12 @@ impl FcConnection {
     pub fn transport_open(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
     }
+
+    /// Cumulative MAVLink frames decoded off the flight-controller link since
+    /// the process started. Never reset, so a consumer takes deltas.
+    pub fn frames_decoded(&self) -> u64 {
+        self.fc_frames_decoded.load(Ordering::Relaxed)
+    }
     /// Seconds since the last decoded HEARTBEAT, or `None` when none has been
     /// seen on the current process. The freshness signal the alive gate reads.
     /// The current attitude-arrival cadence.
@@ -343,6 +382,29 @@ impl FcConnection {
     /// in a distribution that otherwise describes milliseconds.
     pub async fn reset_attitude_cadence(&self) {
         self.attitude_cadence.lock().await.reset_stream();
+    }
+
+    /// The flight controller's `(system, component)` id as latched from its
+    /// own HEARTBEAT, or `None` before one has been seen on this process.
+    ///
+    /// The fleet assigns each aircraft its own system id, so the MAVLink
+    /// convention of "the autopilot is 1/1" is wrong on every drone but one.
+    /// Callers that address the vehicle use this, never a constant.
+    pub fn learned_fc_identity(&self) -> Option<(u8, u8)> {
+        if !self.fc_identity_latched.load(Ordering::Acquire) {
+            return None;
+        }
+        Some((
+            self.target_system.load(Ordering::Relaxed),
+            self.target_component.load(Ordering::Relaxed),
+        ))
+    }
+
+    /// Record the autopilot's identity from one of its HEARTBEATs.
+    pub(crate) fn latch_fc_identity(&self, system_id: u8, component_id: u8) {
+        self.target_system.store(system_id, Ordering::Relaxed);
+        self.target_component.store(component_id, Ordering::Relaxed);
+        self.fc_identity_latched.store(true, Ordering::Release);
     }
 
     pub async fn heartbeat_age_s(&self) -> Option<f64> {
@@ -554,13 +616,16 @@ impl FcConnection {
 
     /// Connect-and-read loop. Returns only on shutdown via `cancel`.
     ///
-    /// Three things end a live session: the read half hits EOF/error (the FC
-    /// went away), `cancel` fires (shutdown), or a write failure raises the
-    /// reconnect signal (a transient agent->FC write error). All three fall
-    /// through to one teardown + re-open path so the writer is always replaced
-    /// with a fresh half, after a fixed [`RECONNECT_INTERVAL`] that never grows
-    /// and never gives up. The interval floor is also what keeps a persistently
-    /// unwritable port from tight-looping on its failed writes.
+    /// Four things end a live session: the read half hits EOF/error (the FC
+    /// went away), `cancel` fires (shutdown), a write failure raises the
+    /// reconnect signal (a transient agent->FC write error), or a link opened
+    /// without probe evidence shows neither a HEARTBEAT nor MSP traffic within
+    /// [`UNPROVEN_LINK_TIMEOUT`] (a silent port never reaches EOF, so this is
+    /// what moves the sweep on). All of them fall through to one teardown +
+    /// re-open path so the writer is always replaced with a fresh half, after a
+    /// fixed [`RECONNECT_INTERVAL`] that never grows and never gives up. The
+    /// interval floor is also what keeps a persistently unwritable port from
+    /// tight-looping on its failed writes.
     pub async fn run(&self, cancel: Shutdown) {
         loop {
             let stream = tokio::select! {
@@ -608,6 +673,11 @@ impl FcConnection {
             }
             self.connected.store(true, Ordering::Relaxed);
             *self.last_msg_at.lock().await = Instant::now();
+            self.link_proven.store(false, Ordering::Relaxed);
+            // A board identified as MSP by its USB descriptor is proven by
+            // identity: it stays silent until a ground station polls it.
+            let unproven = self.opened_unproven.load(Ordering::Relaxed)
+                && self.fc_variant.lock().await.is_none();
 
             tokio::select! {
                 _ = self.read_loop(read_half) => {}
@@ -617,6 +687,9 @@ impl FcConnection {
                 // permanently for what may be a transient write error.
                 _ = self.reconnect.notified() => {
                     tracing::warn!("fc_write_failed_reconnecting");
+                }
+                _ = self.unproven_link_expired(), if unproven => {
+                    tracing::warn!(port = %port, "fc_unproven_link_silent_reopening");
                 }
                 _ = cancel.wait() => {
                     self.connected.store(false, Ordering::Relaxed);
@@ -653,6 +726,16 @@ impl FcConnection {
         }
     }
 
+    /// Resolves once a link opened without probe evidence has gone
+    /// [`UNPROVEN_LINK_TIMEOUT`] without a vehicle HEARTBEAT or MSP traffic.
+    /// Never resolves when the session proved itself inside the window.
+    async fn unproven_link_expired(&self) {
+        tokio::time::sleep(UNPROVEN_LINK_TIMEOUT).await;
+        if self.link_proven.load(Ordering::Relaxed) {
+            std::future::pending::<()>().await;
+        }
+    }
+
     /// Hardware-free demo loop. Instead of opening a serial link, a synthetic
     /// source ([`crate::demo`]) generates the circular-flight telemetry at 10 Hz
     /// and pushes it through the SAME paths a real FC drives: every frame is
@@ -686,6 +769,7 @@ impl FcConnection {
                             sequence: self.next_seq(),
                         };
                         if let Ok(bytes) = mavlink::serialize_v2(header, &msg) {
+                            self.fc_frames_decoded.fetch_add(1, Ordering::Relaxed);
                             let _ = self.frame_tx.send(bytes.into());
                         }
                         // Drive the shared state through the normal aggregator.
@@ -747,6 +831,7 @@ impl FcConnection {
             // framing path below is byte-unchanged; the MSP link hint comes from the
             // USB-descriptor variant, so the MSP-start sniff is unnecessary here too.
             if is_msp {
+                self.link_proven.store(true, Ordering::Relaxed);
                 let _ = self.raw_tx.send(Bytes::copy_from_slice(&chunk[..n]));
                 continue;
             }
@@ -771,6 +856,7 @@ impl FcConnection {
                 // live — the alive gate is what guards against a stray `$M`/`$X`
                 // landing inside a MAVLink payload on a healthy link.
                 if msp_count >= 2 && !self.mavlink_alive().await {
+                    self.link_proven.store(true, Ordering::Relaxed);
                     *self.last_msp_at.lock().await = Some(Instant::now());
                     if !self.msp_warned.swap(true, Ordering::Relaxed) {
                         let port = self.port.lock().await.clone();
@@ -782,6 +868,10 @@ impl FcConnection {
             if frames.is_empty() {
                 continue;
             }
+            // Work proof for the supervisor: every checksum-valid frame off the
+            // link counts, whatever component sent it.
+            self.fc_frames_decoded
+                .fetch_add(frames.len() as u64, Ordering::Relaxed);
             // The arrival timestamp is taken here, before any state lock and
             // before the fan-out, so the measurement describes when the bytes
             // reached this process rather than when they won a contended mutex.
@@ -830,8 +920,8 @@ impl FcConnection {
                         continue;
                     }
                     if let MavMessage::HEARTBEAT(_) = &msg {
-                        self.target_system
-                            .store(header.system_id, Ordering::Relaxed);
+                        self.latch_fc_identity(header.system_id, header.component_id);
+                        self.link_proven.store(true, Ordering::Relaxed);
                         *self.last_heartbeat_at.lock().await = Some(Instant::now());
                         // A real FC HEARTBEAT clears any MSP suspicion so a link
                         // that started noisy (or recovered) reads as healthy at
@@ -870,8 +960,10 @@ impl FcConnection {
     /// Open the configured (or discovered) transport. A configured port that
     /// starts with `tcp:` or `udp:` opens a network MAVLink transport; otherwise
     /// the serial discovery + baud-probe path runs. Returns the read/write halves
-    /// plus the port label and (serial only) baud on success.
+    /// plus the port label and (serial only) baud on success, and records in
+    /// `opened_unproven` whether the link was opened without probe evidence.
     async fn open(&self) -> Option<(BoxedReadHalf, BoxedWriteHalf, String, u32)> {
+        self.opened_unproven.store(false, Ordering::Relaxed);
         // MAVLink-over-ELRS ingest: a resolved source REPLACES the configured
         // port and discovery entirely. `radio.crsf.mode: mavlink` is the
         // operator's explicit statement that the RC module is the MAVLink
@@ -907,26 +999,33 @@ impl FcConnection {
         }
 
         let candidates = self.candidate_ports();
-        let candidate_count = candidates.len();
-        for (idx, cand) in candidates.into_iter().enumerate() {
-            let port = cand.name;
-            let usb = cand.usb;
-            // A configured baud skips the probe; otherwise probe the candidates.
-            if self.cfg.baud_rate != 0 && !self.cfg.serial_port.is_empty() {
-                if let Some(stream) = open_serial(&port, self.cfg.baud_rate) {
-                    return Some(split_serial(stream, port, self.cfg.baud_rate));
+        // A configured baud skips the probe.
+        if self.cfg.baud_rate != 0 && !self.cfg.serial_port.is_empty() {
+            for cand in candidates {
+                if let Some(stream) = open_serial(&cand.name, self.cfg.baud_rate) {
+                    return Some(split_serial(stream, cand.name, self.cfg.baud_rate));
                 }
-                continue;
             }
+            return None;
+        }
+
+        // Pass 1: probe EVERY candidate, best-ranked first (see
+        // `candidate_ports`), before any port is opened on a guess. A port that
+        // stayed silent is set aside rather than opened, so an idle onboard
+        // UART that enumerates ahead of the FC can never latch the router
+        // while the FC sits unprobed behind it.
+        let sole = candidates.len() == 1;
+        let mut silent: Vec<(FcCandidate, bool)> = Vec::new();
+        for cand in candidates {
             // Whether the sweep heard a talking FC (MAVLink or MSP) on this
             // port, even if the follow-up open failed.
             let mut sweep_heard_fc = false;
             for &baud in BAUD_CANDIDATES {
-                match probe_baud(&port, baud).await {
+                match probe_baud(&cand.name, baud).await {
                     ProbeOutcome::Heartbeat => {
                         sweep_heard_fc = true;
-                        if let Some(stream) = open_serial(&port, baud) {
-                            return Some(split_serial(stream, port, baud));
+                        if let Some(stream) = open_serial(&cand.name, baud) {
+                            return Some(split_serial(stream, cand.name, baud));
                         }
                     }
                     ProbeOutcome::Msp => {
@@ -934,14 +1033,28 @@ impl FcConnection {
                         // a HEARTBEAT. Open here so the read loop surfaces the
                         // msp_detected hint, and stop sweeping the remaining bauds.
                         sweep_heard_fc = true;
-                        if let Some(stream) = open_serial(&port, baud) {
-                            return Some(split_serial(stream, port, baud));
+                        if let Some(stream) = open_serial(&cand.name, baud) {
+                            return Some(split_serial(stream, cand.name, baud));
                         }
                         break;
                     }
                     ProbeOutcome::None => {}
                 }
             }
+            silent.push((cand, sweep_heard_fc));
+        }
+
+        // Pass 2: nothing proved itself, so open on a guess only where a guess
+        // is reasonable — the sole candidate, or a USB one (an FC's USB-CDC
+        // port, or a Betaflight / iNav board that stays silent until a ground
+        // station polls it). The link it yields is unproven: `run` closes it
+        // if it shows no HEARTBEAT and no MSP within `UNPROVEN_LINK_TIMEOUT`.
+        let eligible: Vec<(FcCandidate, bool)> = silent
+            .into_iter()
+            .filter(|(cand, _)| fallback_open_allowed(sole, cand))
+            .collect();
+        let eligible_count = eligible.len();
+        for (idx, (cand, sweep_heard_fc)) in eligible.into_iter().enumerate() {
             // A silent port behind a known RC-bridge USB id (CP2102 / CH340 /
             // ESP32-S3 — the bridges an ExpressLRS TX module enumerates behind)
             // is skipped by the no-evidence fallback open ONLY when the RC lane
@@ -953,14 +1066,14 @@ impl FcConnection {
             // controller: `probe_baud` is listen-only and a Betaflight / iNav FC
             // is SILENT until the GCS polls it, so `sweep_heard_fc` is always
             // false for a silent MSP FC, and an ungated skip would strand it (it
-            // never opens, so `fcReachable` never goes true). The sole/last
-            // remaining candidate is never skipped for the same reason — better
+            // never opens, so `fcReachable` never goes true). The last remaining
+            // eligible candidate is never skipped for the same reason — better
             // to try it than to guarantee no FC.
-            let is_last = idx + 1 == candidate_count;
-            if !sweep_heard_fc && self.skip_silent_bridge_candidate(usb, is_last) {
-                if let Some((vid, pid)) = usb {
+            let is_last = idx + 1 == eligible_count;
+            if !sweep_heard_fc && self.skip_silent_bridge_candidate(cand.usb, is_last) {
+                if let Some((vid, pid)) = cand.usb {
                     tracing::info!(
-                        port = %port,
+                        port = %cand.name,
                         vid = format_args!("{vid:04x}"),
                         pid = format_args!("{pid:04x}"),
                         "silent_rc_bridge_fallback_skipped"
@@ -969,8 +1082,9 @@ impl FcConnection {
                 continue;
             }
             // Last-ditch: open at the fallback baud without a positive probe.
-            if let Some(stream) = open_serial(&port, BAUD_FALLBACK) {
-                return Some(split_serial(stream, port, BAUD_FALLBACK));
+            if let Some(stream) = open_serial(&cand.name, BAUD_FALLBACK) {
+                self.opened_unproven.store(true, Ordering::Relaxed);
+                return Some(split_serial(stream, cand.name, BAUD_FALLBACK));
             }
         }
         None
@@ -1049,7 +1163,8 @@ impl FcConnection {
         matches!(usb, Some((vid, pid)) if is_rc_bridge_usb_id(vid, pid))
     }
 
-    /// The serial ports the FC link may open. The pinned CRSF/ELRS device
+    /// The serial ports the FC link may open, best candidate first (see
+    /// [`candidate_rank`]). The pinned CRSF/ELRS device
     /// (`radio.crsf.device`) is excluded on BOTH paths — an RC transmitter
     /// module's port must never be opened or baud-swept by the router, even when
     /// the FC port is (mis)configured to the same node — but ONLY while the CRSF
@@ -1080,18 +1195,25 @@ impl FcConnection {
             }];
         }
         match tokio_serial::available_ports() {
-            Ok(ports) => ports
-                .into_iter()
-                .filter(|p| is_candidate_port(&p.port_type, &p.port_name))
-                .filter(|p| crsf_pin.is_empty() || !same_device(&p.port_name, crsf_pin))
-                .map(|p| FcCandidate {
-                    usb: match &p.port_type {
-                        tokio_serial::SerialPortType::UsbPort(info) => Some((info.vid, info.pid)),
-                        _ => None,
-                    },
-                    name: p.port_name,
-                })
-                .collect(),
+            Ok(ports) => {
+                let mut candidates: Vec<FcCandidate> = ports
+                    .into_iter()
+                    .filter(|p| is_candidate_port(&p.port_type, &p.port_name))
+                    .filter(|p| crsf_pin.is_empty() || !same_device(&p.port_name, crsf_pin))
+                    .map(|p| FcCandidate {
+                        usb: match &p.port_type {
+                            tokio_serial::SerialPortType::UsbPort(info) => {
+                                Some((info.vid, info.pid))
+                            }
+                            _ => None,
+                        },
+                        name: p.port_name,
+                    })
+                    .collect();
+                // Stable: equal ranks keep the enumeration order.
+                candidates.sort_by_key(candidate_rank);
+                candidates
+            }
             Err(_) => Vec::new(),
         }
     }
@@ -1103,6 +1225,35 @@ impl FcConnection {
 struct FcCandidate {
     name: String,
     usb: Option<(u16, u16)>,
+}
+
+/// USB vendor ids flight controllers enumerate under: pid.codes (ArduPilot
+/// ChibiOS boards), 3D Robotics (PX4 / Pixhawk), CubePilot, Holybro, and
+/// STMicroelectronics (the STM32 virtual COM port Betaflight, iNav and many
+/// ArduPilot boards present).
+const FC_USB_VENDORS: [u16; 5] = [0x1209, 0x26AC, 0x2DAE, 0x3162, 0x0483];
+
+/// Probe order for discovered serial candidates, lowest first: a USB device
+/// from a known flight-controller vendor, then any USB CDC-ACM port (the class
+/// an FC's native USB presents), then other USB serial bridges, then onboard
+/// UARTs. Onboard UARTs come last because an idle console, GPS or modem UART
+/// is the most common silent port on a companion computer.
+fn candidate_rank(cand: &FcCandidate) -> u8 {
+    let acm = cand.name.contains("ttyACM") || cand.name.contains("usbmodem");
+    match cand.usb {
+        Some((vid, _)) if FC_USB_VENDORS.contains(&vid) => 0,
+        _ if acm => 1,
+        Some(_) => 2,
+        None => 3,
+    }
+}
+
+/// Whether a candidate that stayed silent through the whole baud sweep may be
+/// opened anyway at the fallback baud: only when it is the sole candidate, or
+/// a USB device. An onboard UART among several candidates is never opened on
+/// a guess.
+fn fallback_open_allowed(sole: bool, cand: &FcCandidate) -> bool {
+    sole || cand.usb.is_some()
 }
 
 #[cfg(test)]
@@ -1820,6 +1971,74 @@ mod liveness_tests {
         assert!(RECONNECT_INTERVAL >= Duration::from_secs(2));
         assert!(RECONNECT_INTERVAL <= Duration::from_secs(5));
     }
+
+    fn cand(name: &str, usb: Option<(u16, u16)>) -> FcCandidate {
+        FcCandidate {
+            name: name.into(),
+            usb,
+        }
+    }
+
+    #[test]
+    fn serial_candidates_probe_flight_controllers_first_and_onboard_uarts_last() {
+        // Enumeration order on a companion computer often lists the onboard
+        // UARTs first. Probed in that order, an idle UART ahead of the FC used
+        // to be the port the router latched onto.
+        let mut ports = [
+            cand("/dev/ttyAMA0", None),
+            cand("/dev/ttyS0", None),
+            cand("/dev/ttyUSB0", Some((0x10C4, 0xEA60))),
+            cand("/dev/ttyACM0", Some((0x1234, 0x0001))),
+            cand("/dev/ttyACM1", Some((0x1209, 0x5741))),
+        ];
+        ports.sort_by_key(candidate_rank);
+        let order: Vec<&str> = ports.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "/dev/ttyACM1",
+                "/dev/ttyACM0",
+                "/dev/ttyUSB0",
+                "/dev/ttyAMA0",
+                "/dev/ttyS0"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_silent_onboard_uart_is_never_opened_on_a_guess_beside_other_candidates() {
+        let uart = cand("/dev/ttyAMA0", None);
+        let usb = cand("/dev/ttyACM0", Some((0x1209, 0x5741)));
+        assert!(!fallback_open_allowed(false, &uart));
+        assert!(fallback_open_allowed(false, &usb));
+        // The sole candidate (or the operator's configured port) is still tried.
+        assert!(fallback_open_allowed(true, &uart));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unproven_link_that_stays_silent_is_released_for_a_new_sweep() {
+        let c = conn_with(MavlinkConfig::default());
+        c.link_proven.store(false, Ordering::Relaxed);
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(UNPROVEN_LINK_TIMEOUT * 2, c.unproven_link_expired())
+            .await
+            .expect("a silent unproven link is released");
+        assert!(started.elapsed() >= UNPROVEN_LINK_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unproven_link_that_shows_a_heartbeat_is_kept() {
+        let c = conn_with(MavlinkConfig::default());
+        c.link_proven.store(false, Ordering::Relaxed);
+        let watch = c.clone();
+        let expiry = tokio::spawn(async move { watch.unproven_link_expired().await });
+        tokio::time::sleep(UNPROVEN_LINK_TIMEOUT / 2).await;
+        // The read loop marks the session proven on the vehicle's HEARTBEAT.
+        c.link_proven.store(true, Ordering::Relaxed);
+        tokio::time::sleep(UNPROVEN_LINK_TIMEOUT * 3).await;
+        assert!(!expiry.is_finished(), "a proven link is never released");
+        expiry.abort();
+    }
 }
 
 #[cfg(test)]
@@ -1896,6 +2115,21 @@ mod passthrough_tests {
             // EOF, so `read_loop` returns rather than hanging.
             std::task::Poll::Ready(Ok(()))
         }
+    }
+
+    #[tokio::test]
+    async fn each_decoded_fc_frame_advances_the_work_counter_and_proves_the_link() {
+        // The supervisor judges this service on the counter, not on process
+        // I/O (which the 10 Hz state publish keeps moving even with a wedged
+        // reader), so every frame off the link must count, and only those.
+        let c = conn();
+        assert_eq!(c.frames_decoded(), 0);
+        let mut bytes = heartbeat_frame();
+        bytes.extend(heartbeat_frame());
+        bytes.extend([0x00, 0x55, 0xAA]); // line noise decodes nothing
+        c.read_loop(Box::pin(std::io::Cursor::new(bytes))).await;
+        assert_eq!(c.frames_decoded(), 2);
+        assert!(c.link_proven.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

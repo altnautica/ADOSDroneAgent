@@ -48,7 +48,7 @@
 
 use std::path::Path;
 
-use ados_groundlink::{FleetRegistry, FLEET_MAX_SLOTS, FLEET_REGISTRY_PATH};
+use ados_groundlink::{is_valid_device_id, FleetRegistry, FLEET_MAX_SLOTS, FLEET_REGISTRY_PATH};
 
 use crate::routes::status_full::{fresh_linked_peer_rows_in, now_unix_secs, run_dir};
 
@@ -76,37 +76,28 @@ const DRONE_ROLE: &str = "drone";
 /// Returns device ids in the order given; `allocate` assigns the lowest free
 /// slot, so ordering here decides only who gets the lower number when several
 /// arrive together.
+///
+/// A peer is already registered when [`FleetRegistry::slot_of`] finds it: an
+/// exact id, or the one derivation the two id forms actually have (the 8-hex
+/// short form of a 12-hex device id; see
+/// `ados_groundlink::fleet::id_refers_to_same_device`). The pair route records
+/// the id its caller supplied while the beacon carries the id the node holds
+/// for itself, so exact comparison alone read one aircraft as two. Any looser
+/// rule, such as either id being a prefix of the other, lets a short
+/// registered id like `drone-1` swallow `drone-10` and every later id that
+/// begins with it, which silently denies those aircraft a slot.
+///
+/// A beacon id that could not name a registry entry (see
+/// [`ados_groundlink::is_valid_device_id`]) is never enrolled.
 pub fn decide_enrollments(peers: &[(String, String)], registry: &FleetRegistry) -> Vec<String> {
-    let registered: Vec<&str> = registry.slots().map(|s| s.device_id.as_str()).collect();
     peers
         .iter()
         .filter(|(_, role)| role == DRONE_ROLE)
         .map(|(device_id, _)| device_id)
-        .filter(|device_id| !is_already_registered(device_id, &registered))
+        .filter(|device_id| is_valid_device_id(device_id))
+        .filter(|device_id| registry.slot_of(device_id).is_none())
         .cloned()
         .collect()
-}
-
-/// Whether `candidate` is an aircraft the registry already holds a slot for.
-///
-/// Not a plain equality check, because the two paths that name an aircraft do
-/// not name it identically. The pair route records the id its CALLER supplied,
-/// while the beacon carries the id the node holds for itself, and the first is
-/// in practice a truncation of the second. Comparing exactly therefore reads
-/// one aircraft as two, and the consequence is not cosmetic: it spends a second
-/// slot out of a table only [`FLEET_MAX_SLOTS`] deep, and the ground station
-/// then stands up a receiver on a slot no aircraft transmits on.
-///
-/// So a candidate matches when either id is a prefix of the other. That is the
-/// exact relationship the two forms have, and it is deliberately narrow --
-/// unrelated ids do not share a prefix, and two genuinely different aircraft
-/// would have to have been issued ids where one begins with the other for this
-/// to be wrong.
-fn is_already_registered(candidate: &str, registered: &[&str]) -> bool {
-    registered.iter().any(|held| {
-        let (a, b) = (held.to_ascii_lowercase(), candidate.to_ascii_lowercase());
-        a.starts_with(&b) || b.starts_with(&a)
-    })
 }
 
 /// Enrol every unregistered audible drone, returning the slots issued.
@@ -199,8 +190,8 @@ mod tests {
     fn an_audible_unregistered_drone_is_enrolled() {
         let registry = FleetRegistry::default();
         assert_eq!(
-            decide_enrollments(&[peer("drone-a", "drone")], &registry),
-            vec!["drone-a".to_string()]
+            decide_enrollments(&[peer("drone-aa", "drone")], &registry),
+            vec!["drone-aa".to_string()]
         );
     }
 
@@ -209,8 +200,8 @@ mod tests {
         // The idempotence that keeps a re-heard beacon from renumbering an
         // aircraft that may be flying.
         let mut registry = FleetRegistry::default();
-        registry.allocate("drone-a");
-        assert!(decide_enrollments(&[peer("drone-a", "drone")], &registry).is_empty());
+        registry.allocate("drone-aa");
+        assert!(decide_enrollments(&[peer("drone-aa", "drone")], &registry).is_empty());
     }
 
     #[test]
@@ -255,6 +246,49 @@ mod tests {
     }
 
     #[test]
+    fn a_registered_id_that_merely_begins_another_does_not_hide_it() {
+        // `drone-01` registered must not read `drone-010` or `drone-01abc`
+        // as the same aircraft: those are different airframes, and treating
+        // them as registered silently denied them a slot and a relay secret.
+        let mut registry = FleetRegistry::default();
+        registry.allocate("drone-01");
+        assert_eq!(
+            decide_enrollments(
+                &[peer("drone-010", "drone"), peer("drone-01abc", "drone")],
+                &registry
+            ),
+            vec!["drone-010".to_string(), "drone-01abc".to_string()]
+        );
+        // Nor does a short hex id that is not the 8-from-12 derivation.
+        let mut registry = FleetRegistry::default();
+        registry.allocate("40bb1a5a44");
+        assert_eq!(
+            decide_enrollments(&[peer("40bb1a5a4484", "drone")], &registry),
+            vec!["40bb1a5a4484".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_beacon_id_that_cannot_name_an_aircraft_is_not_enrolled() {
+        let registry = FleetRegistry::default();
+        let too_long = "a".repeat(33);
+        for bad in [
+            "",
+            " ",
+            "d",
+            "drone-1",
+            "drone 0001",
+            "drone/0001",
+            too_long.as_str(),
+        ] {
+            assert!(
+                decide_enrollments(&[peer(bad, "drone")], &registry).is_empty(),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_ground_station_peer_is_never_issued_a_slot() {
         // A second ground station audible on the same key would otherwise
         // consume a slot out of a table only FLEET_MAX_SLOTS deep, costing a
@@ -270,11 +304,11 @@ mod tests {
         let path = dir.path().join("fleet.json");
         assert!(!path.exists(), "precondition: no registry yet");
 
-        let issued = enrol_into(&path, &[peer("drone-a", "drone")]);
+        let issued = enrol_into(&path, &[peer("drone-aa", "drone")]);
 
-        assert_eq!(issued, vec![("drone-a".to_string(), 1)]);
+        assert_eq!(issued, vec![("drone-aa".to_string(), 1)]);
         assert!(path.exists(), "the registry is now on disk");
-        assert_eq!(FleetRegistry::load(&path).slot_of("drone-a"), Some(1));
+        assert_eq!(FleetRegistry::load(&path).slot_of("drone-aa"), Some(1));
     }
 
     #[test]
@@ -284,12 +318,12 @@ mod tests {
         // relay-credential work rather than merely tidying a table.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fleet.json");
-        enrol_into(&path, &[peer("drone-a", "drone")]);
+        enrol_into(&path, &[peer("drone-aa", "drone")]);
 
         let registry = FleetRegistry::load(&path);
         let entry = registry
             .slots()
-            .find(|s| s.device_id == "drone-a")
+            .find(|s| s.device_id == "drone-aa")
             .expect("registered");
         assert!(
             entry.relay_secret.is_some(),
@@ -301,7 +335,7 @@ mod tests {
     fn a_second_tick_over_the_same_beacon_changes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fleet.json");
-        let peers = [peer("drone-a", "drone")];
+        let peers = [peer("drone-aa", "drone")];
 
         enrol_into(&path, &peers);
         let after_first = std::fs::read(&path).unwrap();
@@ -322,7 +356,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fleet.json");
 
-        let issued = enrol_into(&path, &[peer("drone-a", "drone"), peer("drone-b", "drone")]);
+        let issued = enrol_into(
+            &path,
+            &[peer("drone-aa", "drone"), peer("drone-bb", "drone")],
+        );
 
         let slots: Vec<u8> = issued.iter().map(|(_, s)| *s).collect();
         assert_eq!(slots, vec![1, 2]);
@@ -333,7 +370,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fleet.json");
         let existing: Vec<(String, String)> = (0..FLEET_MAX_SLOTS)
-            .map(|i| peer(&format!("drone-{i}"), "drone"))
+            .map(|i| peer(&format!("drone-{i:02}"), "drone"))
             .collect();
         enrol_into(&path, &existing);
 
@@ -343,7 +380,7 @@ mod tests {
         let registry = FleetRegistry::load(&path);
         assert_eq!(registry.len(), FLEET_MAX_SLOTS as usize);
         assert_eq!(
-            registry.slot_of("drone-0"),
+            registry.slot_of("drone-00"),
             Some(1),
             "and no registered drone was evicted to make room"
         );

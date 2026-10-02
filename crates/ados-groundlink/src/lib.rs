@@ -48,7 +48,8 @@ pub use aux_consumer::{
 };
 pub use fanout::{run_default_fanout, run_fanout};
 pub use fleet::{
-    FleetRegistry, FleetSlot, FLEET_MAX_SLOTS, FLEET_RECONCILE_INTERVAL, FLEET_REGISTRY_PATH,
+    is_valid_device_id, FleetRegistry, FleetSlot, FLEET_MAX_SLOTS, FLEET_RECONCILE_INTERVAL,
+    FLEET_REGISTRY_PATH,
 };
 pub use fleet_hero::{hero_path, read_hero_from, write_hero_to, FleetHero, FLEET_HERO_JSON};
 pub use gs_config::GroundStationConfig;

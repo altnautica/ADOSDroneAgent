@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 use ados_radio::hop::{
-    build_hop_announce, build_presence_beacon, hop_announce_interval, hop_announce_rounds,
-    hop_epoch_ms, parse_hop_ack, parse_presence_beacon, HopState, HopTrigger, HOP_ACK_PORT,
-    HOP_CONTROL_PORT, PRESENCE_INTERVAL,
+    build_hop_announce, build_presence_beacon, delay_until_ms, hop_announce_interval,
+    hop_announce_rounds, now_unix_ms, parse_hop_ack, parse_presence_beacon, HopState, HopTrigger,
+    HOP_ACK_PORT, HOP_CONTROL_PORT, HOP_COUNTDOWN, PRESENCE_INTERVAL,
 };
 use ados_radio::link_quality::LinkStats;
 use ados_radio::paths::{read_bind_sentinel_active, run_path, write_sidecar, WFB_TX_KEY};
@@ -125,7 +125,7 @@ pub(crate) async fn emit_presence_beacons(
                 if let Some(live) = channel_from_iface(iface).await {
                     last_live = live;
                 }
-                let epoch = hop_epoch_ms();
+                let epoch = now_unix_ms();
                 let pkt = build_presence_beacon(
                     device_id,
                     true, // drone role
@@ -443,7 +443,7 @@ pub(crate) async fn run_hop_supervisor(
                         }
                         ok
                     };
-                    state.lock().await.record_hop(home, "return_home", channel_ok && spawn_ok);
+                    state.lock().await.record_return_home(channel_ok && spawn_ok);
                 }
 
                 // Keep the shared operating channel in sync with the hop state's
@@ -508,7 +508,12 @@ pub(crate) async fn run_hop_supervisor(
 /// Announce a hop to `target`, wait for the matching ACK, and on success
 /// execute the channel change (kill the radio group → `iw set channel` →
 /// respawn). Records the outcome in the hop history with `label`. Shared by the
-/// periodic and reactive triggers.
+/// periodic, reactive and manual triggers.
+///
+/// The ground station acks only when it can follow, so an ack commits both
+/// sides. If this side then fails to retune, the ground station has moved
+/// without it: [`reannounce_back`] tells it to come back to the channel this
+/// radio is still on.
 #[allow(clippy::too_many_arguments)]
 async fn try_execute_hop(
     iface: &str,
@@ -524,28 +529,24 @@ async fn try_execute_hop(
     link: &Arc<tokio::sync::Mutex<LinkStats>>,
     restart_count: &Arc<AtomicU64>,
 ) {
-    let epoch = hop_epoch_ms();
-    let pkt = build_hop_announce(epoch, target, trigger, pair_key);
-    // Drain stale acks so we only count one for THIS announce.
-    while ack_rx.try_recv().is_ok() {}
-
-    // Announce up to 30×@100ms, stop early on the matching ACK.
-    let mut acked = false;
-    for _ in 0..hop_announce_rounds() {
-        let _ = announce_sock
-            .send_to(&pkt, format!("127.0.0.1:{HOP_CONTROL_PORT}"))
-            .await;
-        if let Ok(Some(ch)) = tokio::time::timeout(hop_announce_interval(), ack_rx.recv()).await {
-            if ch == target {
-                acked = true;
-                break;
-            }
-        }
-    }
-    if !acked {
+    let from = state.lock().await.channel;
+    // The flip is scheduled on this side's monotonic clock; each announce
+    // carries the time remaining, so the peer schedules against its own.
+    let deadline = tokio::time::Instant::now() + HOP_COUNTDOWN;
+    if !announce_until_acked(
+        announce_sock,
+        ack_rx,
+        pair_key,
+        target,
+        trigger,
+        deadline,
+        hop_announce_rounds(),
+    )
+    .await
+    {
         return;
     }
-    sleep_to_epoch(epoch).await;
+    tokio::time::sleep_until(deadline).await;
     // A silent `iw set channel` failure makes the hop outcome false even when
     // the radio respawns cleanly: a hop that landed on the old channel is not a
     // successful hop. The radio is always respawned so the link is never left
@@ -576,18 +577,74 @@ async fn try_execute_hop(
         state.lock().await.record_hop(target, label, false);
         tracing::warn!(iface, channel = target, "hop_wfb_restart_failed");
     }
+    if !channel_ok {
+        reannounce_back(announce_sock, ack_rx, pair_key, from, trigger).await;
+    }
 }
 
-/// Sleep until the hop epoch (wall-clock ms). No-op if the epoch is past.
-async fn sleep_to_epoch(epoch_ms: u64) {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-    let delay = (epoch_ms as f64 / 1000.0) - now_secs;
-    if delay > 0.0 {
-        tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+/// Rounds of the announce that calls the ground station back after a failed
+/// retune: long enough to outlast its own no-traffic revert window, so the
+/// call is heard whichever of the two brings it back first.
+const REANNOUNCE_ROUNDS: u32 = 80;
+
+/// Call the ground station back to `channel`, the one this radio is still on.
+///
+/// The ground station acked and retuned; this side's retune failed. It reverts
+/// on its own when no traffic arrives on the new channel, but that takes
+/// seconds and a ground station that cannot verify traffic would stay. The
+/// announce is the explicit instruction, and costs nothing if it went back
+/// already.
+async fn reannounce_back(
+    announce_sock: &tokio::net::UdpSocket,
+    ack_rx: &mut tokio::sync::mpsc::Receiver<u8>,
+    pair_key: &[u8; 32],
+    channel: u8,
+    trigger: HopTrigger,
+) {
+    tracing::warn!(channel, "hop_retune_failed_calling_peer_back");
+    let deadline = tokio::time::Instant::now() + HOP_COUNTDOWN;
+    let acked = announce_until_acked(
+        announce_sock,
+        ack_rx,
+        pair_key,
+        channel,
+        trigger,
+        deadline,
+        REANNOUNCE_ROUNDS,
+    )
+    .await;
+    if acked {
+        tracing::info!(channel, "hop_peer_called_back");
     }
+}
+
+/// Send the announce for `target` up to `rounds` times, 100 ms apart, each
+/// carrying the milliseconds left until `deadline`; stop on the matching ACK.
+/// Returns whether the peer acked.
+async fn announce_until_acked(
+    announce_sock: &tokio::net::UdpSocket,
+    ack_rx: &mut tokio::sync::mpsc::Receiver<u8>,
+    pair_key: &[u8; 32],
+    target: u8,
+    trigger: HopTrigger,
+    deadline: tokio::time::Instant,
+    rounds: u32,
+) -> bool {
+    // Drain stale acks so we only count one for THIS announce.
+    while ack_rx.try_recv().is_ok() {}
+    for _ in 0..rounds {
+        let delay = delay_until_ms(deadline.into_std(), std::time::Instant::now());
+        let pkt = build_hop_announce(delay, target, trigger, pair_key);
+        let _ = announce_sock
+            .send_to(&pkt, format!("127.0.0.1:{HOP_CONTROL_PORT}"))
+            .await;
+        if let Ok(Some(ch)) = tokio::time::timeout(hop_announce_interval(), ack_rx.recv()).await {
+            if ch == target {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// True when a decoded beacon is this rig's own (a loopback race can deliver the
@@ -663,34 +720,64 @@ async fn write_hop_supervisor_json(
     enabled_channels: &std::collections::BTreeSet<u8>,
     periodic_hop_enabled: bool,
 ) {
-    let suppression = periodic_hop_suppression_reason(cfg);
     let v = {
         let s = state.lock().await;
-        let history =
-            serde_json::to_value(s.history()).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
-        let enabled: Vec<u8> = enabled_channels.iter().copied().collect();
-        json!({
-            // Sidecar schema version (best-effort drift signal for readers).
-            // Shared with the ground-station hop persister via the one const.
-            "version": ados_radio::paths::HOP_SUPERVISOR_SIDECAR_VERSION,
-            // `enabled` is the honest periodic-execution state, not the bare
-            // `auto_hop_enabled`: a suppressed periodic path reports false plus a
-            // reason. The reactive hop + the GS-coordinated follow run regardless.
-            "enabled": periodic_hop_enabled,
-            "auto_hop_enabled": cfg.auto_hop_enabled,
-            "periodic_hop_enabled": cfg.periodic_hop_enabled,
-            "periodic_suppression_reason": suppression,
-            "band": cfg.band,
-            "hop_period_seconds": cfg.hop_period_seconds,
-            "loss_threshold_percent": cfg.hop_loss_threshold_percent as f64,
-            "rssi_threshold_dbm": cfg.hop_rssi_threshold_dbm as f64,
-            "enabled_channels": enabled,
-            "last_hop_at": s.last_hop_at_unix(),
-            "history": history,
-            "wall_time_unix": ados_radio::hop::now_unix(),
-        })
+        hop_supervisor_body(
+            &s,
+            cfg,
+            enabled_channels,
+            periodic_hop_enabled,
+            periodic_hop_suppression_reason(cfg),
+        )
     };
     let _ = write_sidecar(&run_path("hop-supervisor.json"), &v);
+}
+
+/// Publish that hopping is refused because the shared key file exists but
+/// cannot be read. Nothing hops and no hop frame is authenticated until the
+/// key reads cleanly again (the radio re-reads it on its next generation).
+pub(crate) fn write_hop_key_unavailable(cfg: &WfbConfig) {
+    let state = HopState::new(cfg.rendezvous_channel());
+    let v = hop_supervisor_body(
+        &state,
+        cfg,
+        &std::collections::BTreeSet::new(),
+        false,
+        Some("key_unavailable"),
+    );
+    let _ = write_sidecar(&run_path("hop-supervisor.json"), &v);
+}
+
+fn hop_supervisor_body(
+    s: &HopState,
+    cfg: &WfbConfig,
+    enabled_channels: &std::collections::BTreeSet<u8>,
+    periodic_hop_enabled: bool,
+    suppression: Option<&'static str>,
+) -> serde_json::Value {
+    let history =
+        serde_json::to_value(s.history()).unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+    let enabled: Vec<u8> = enabled_channels.iter().copied().collect();
+    json!({
+        // Sidecar schema version (best-effort drift signal for readers).
+        // Shared with the ground-station hop persister via the one const.
+        "version": ados_radio::paths::HOP_SUPERVISOR_SIDECAR_VERSION,
+        // `enabled` is the honest periodic-execution state, not the bare
+        // `auto_hop_enabled`: a suppressed periodic path reports false plus a
+        // reason. The reactive hop + the GS-coordinated follow run regardless.
+        "enabled": periodic_hop_enabled,
+        "auto_hop_enabled": cfg.auto_hop_enabled,
+        "periodic_hop_enabled": cfg.periodic_hop_enabled,
+        "periodic_suppression_reason": suppression,
+        "band": cfg.band,
+        "hop_period_seconds": cfg.hop_period_seconds,
+        "loss_threshold_percent": cfg.hop_loss_threshold_percent as f64,
+        "rssi_threshold_dbm": cfg.hop_rssi_threshold_dbm as f64,
+        "enabled_channels": enabled,
+        "last_hop_at": s.last_hop_at_unix(),
+        "history": history,
+        "wall_time_unix": ados_radio::hop::now_unix(),
+    })
 }
 
 #[cfg(test)]
@@ -791,8 +878,12 @@ mod tests {
         let gs_addr = gs.local_addr().unwrap();
 
         // Exactly what try_execute_hop builds + sends for a manual hop.
-        let epoch = ados_radio::hop::hop_epoch_ms();
-        let pkt = build_hop_announce(epoch, 153, HopTrigger::Manual, &key);
+        let pkt = build_hop_announce(
+            HOP_COUNTDOWN.as_millis() as u64,
+            153,
+            HopTrigger::Manual,
+            &key,
+        );
         announce.send_to(&pkt, gs_addr).await.unwrap();
 
         let mut buf = [0u8; 128];

@@ -8,7 +8,9 @@
 use ados_radio::config::WfbConfig;
 use ados_radio::link_quality::LinkStats;
 
-use super::args::{STATE_BLOCKED_UNPAIRED, STATE_NO_INJECTION, STATE_REG_BLOCKED};
+use super::args::{
+    STATE_BLOCKED_UNPAIRED, STATE_NO_ADAPTER, STATE_NO_INJECTION, STATE_REG_BLOCKED,
+};
 
 /// The regulatory picture the receive sidecar surfaces, symmetric with the
 /// drone side. `domain` is the LIVE global country (`None` when unreadable);
@@ -252,32 +254,35 @@ pub fn write_blocked_unpaired_sidecar(
     cfg: &WfbConfig,
     ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
 ) {
-    let snap = LinkStats::default();
-    // No chain, no adapter, no live channel: report the rendezvous home.
-    let channels = GsChannelTruth {
-        actual: channel,
-        rendezvous: channel,
-        operating: channel,
-    };
-    let v = build_gs_stats(
-        &snap,
-        interface,
-        // Default = nothing resolved: null chipset, and therefore null injection
-        // and null USB verdicts rather than confident booleans about hardware
-        // this arm never looked at.
-        &GsAdapterInfo::default(),
-        channels,
-        &GsRegSnapshot::default(),
-        cfg,
-        STATE_BLOCKED_UNPAIRED,
-        crate::acquire::AcquireState::Searching.as_str(),
-        false, // not channel-locked
-        0.0,   // no valid decodes
-        0,     // no reacquire kills
-        0,     // no zombie kills
-        None,  // no silence window (the chain is not running)
-        0.0,   // no inbound video
-    );
+    write_unexamined_sidecar(interface, channel, cfg, STATE_BLOCKED_UNPAIRED, ingest);
+}
+
+/// Write a `no_adapter` ground sidecar: the receive key is present but no
+/// receive adapter could be found (unplugged, or never attached).
+///
+/// Without this write the sidecar kept the previous generation's body, so an
+/// adapter pulled mid-session left `state: active` on every surface that did
+/// not apply its own staleness rule. Like the unpaired arm nothing has been
+/// examined, so every hardware verdict is the honest unknown.
+pub fn write_no_adapter_sidecar(
+    interface: &str,
+    channel: u8,
+    cfg: &WfbConfig,
+    ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
+) {
+    write_unexamined_sidecar(interface, channel, cfg, STATE_NO_ADAPTER, ingest);
+}
+
+/// The shared body of the blocked arms that examined no hardware: `state`
+/// names why the plane is deaf, and nothing else is claimed.
+fn write_unexamined_sidecar(
+    interface: &str,
+    channel: u8,
+    cfg: &WfbConfig,
+    state: &str,
+    ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
+) {
+    let v = unexamined_stats(interface, channel, cfg, state);
     let _ = crate::sidecars::write_json_atomic(
         std::path::Path::new(crate::paths::WFB_STATS_JSON),
         &v,
@@ -290,6 +295,40 @@ pub fn write_blocked_unpaired_sidecar(
             json_object_to_fields(&v),
         );
     }
+}
+
+fn unexamined_stats(
+    interface: &str,
+    channel: u8,
+    cfg: &WfbConfig,
+    state: &str,
+) -> serde_json::Value {
+    let snap = LinkStats::default();
+    // No chain, no adapter, no live channel: report the rendezvous home.
+    let channels = GsChannelTruth {
+        actual: channel,
+        rendezvous: channel,
+        operating: channel,
+    };
+    build_gs_stats(
+        &snap,
+        interface,
+        // Default = nothing resolved: null chipset, and therefore null injection
+        // and null USB verdicts rather than confident booleans about hardware
+        // this arm never looked at.
+        &GsAdapterInfo::default(),
+        channels,
+        &GsRegSnapshot::default(),
+        cfg,
+        state,
+        crate::acquire::AcquireState::Searching.as_str(),
+        false, // not channel-locked
+        0.0,   // no valid decodes
+        0,     // no reacquire kills
+        0,     // no zombie kills
+        None,  // no silence window (the chain is not running)
+        0.0,   // no inbound video
+    )
 }
 
 /// Build the ground `wfb-stats.json` sidecar payload (the GS-extras the
@@ -1158,6 +1197,18 @@ mod tests {
         // And the receive plane never measures a transmit path, on any state.
         assert!(v["rf_unverified"].is_null());
         assert_eq!(v["channel_locked"], false);
+        assert_eq!(v["packets_received"], 0);
+    }
+
+    #[test]
+    fn a_missing_adapter_replaces_an_active_body_with_no_adapter() {
+        // The arm used to write nothing, so a pulled adapter left the last
+        // generation's `active` body in place.
+        let v = unexamined_stats("", 149, &WfbConfig::default(), STATE_NO_ADAPTER);
+        assert_eq!(v["state"], "no_adapter");
+        assert_eq!(v["link_state"], "no_adapter");
+        assert!(v["adapter_chipset"].is_null());
+        assert!(v["rssi_dbm"].is_null());
         assert_eq!(v["packets_received"], 0);
     }
 

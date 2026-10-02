@@ -144,15 +144,23 @@ impl ReceiverState {
 /// Build the `wfb_rx -a` aggregator args. With `accept_local_nic` the local monitor
 /// adapter is appended so its fragments are aggregated too; without it the receiver
 /// trusts only relay forwards.
+///
+/// `link_id` is the transmitting drone's (`link_id(fleet_id, slot)`). The
+/// aggregator checks every session against the `channel_id` built from it, so
+/// without `-i` it sat on wfb-ng's default link id 0 and accepted no fleet
+/// drone's stream.
 pub fn aggregate_args(
     drone_iface: &str,
     listen_port: u16,
     accept_local_nic: bool,
     rx_key: &Path,
+    link_id: u32,
 ) -> Vec<String> {
     let mut args = vec![
         "-p".into(),
         "0".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-c".into(),
         "127.0.0.1".into(),
         "-u".into(),
@@ -179,10 +187,22 @@ pub async fn spawn_aggregator(
     drone_iface: &str,
     listen_port: u16,
     accept_local_nic: bool,
+    link_id: u32,
 ) -> std::io::Result<GsWfbProcess> {
     let rx_key = Path::new(ados_radio::paths::WFB_RX_KEY);
-    let args = aggregate_args(drone_iface, listen_port, accept_local_nic, rx_key);
+    let args = aggregate_args(drone_iface, listen_port, accept_local_nic, rx_key, link_id);
     GsWfbProcess::spawn("wfb_rx", &args, Stdout::Piped, Some(AGGREGATOR_LOG)).await
+}
+
+/// Resolves once the drone this ground station serves is no longer
+/// `current`, so the aggregator can be rebuilt on the new link.
+async fn wait_for_link_change(current: u32) {
+    loop {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        if crate::fleet_hero::served_video_link_id() != Some(current) {
+            return;
+        }
+    }
 }
 
 /// The per-interval counters the receiver surfaces, off one aggregator stats
@@ -407,7 +427,16 @@ pub async fn run(
         // With no local adapter the receiver trusts only relay forwards (the
         // iface arg is dropped by `aggregate_args`).
         let use_local = accept_local_nic && !drone_iface.is_empty();
-        match spawn_aggregator(&drone_iface, listen_port, use_local).await {
+        let Some(link_id) = crate::fleet_hero::served_video_link_id() else {
+            // No registered drone: there is no link to aggregate.
+            state.lock().await.up = false;
+            tokio::select! {
+                _ = shutdown.wait() => break,
+                _ = tokio::time::sleep(RESPAWN_INTERVAL) => {}
+            }
+            continue;
+        };
+        match spawn_aggregator(&drone_iface, listen_port, use_local, link_id).await {
             Ok(mut aggregator) => {
                 state.lock().await.up = true;
                 let lines_seen = Arc::new(AtomicU64::new(0));
@@ -422,6 +451,10 @@ pub async fn run(
                     _ = shutdown.wait() => true,
                     reason = watch_aggregator(&mut aggregator, &lines_seen) => {
                         tracing::warn!(reason, "wfb_receiver_aggregator_down_respawning");
+                        false
+                    }
+                    _ = wait_for_link_change(link_id) => {
+                        tracing::info!(link_id, "wfb_receiver_served_drone_changed");
                         false
                     }
                 };
@@ -526,13 +559,21 @@ mod tests {
 
     #[test]
     fn aggregate_args_with_local_nic() {
-        // wfb_rx -p 0 -c 127.0.0.1 -u 5600 -a 5800 -K <rx.key> <iface>
-        let a = aggregate_args("wlan0", 5800, true, Path::new("/etc/ados/wfb/rx.key"));
+        // wfb_rx -p 0 -i <link> -c 127.0.0.1 -u 5600 -a 5800 -K <rx.key> <iface>
+        let a = aggregate_args(
+            "wlan0",
+            5800,
+            true,
+            Path::new("/etc/ados/wfb/rx.key"),
+            ados_radio::config::link_id(1, 1),
+        );
         assert_eq!(
             a,
             vec![
                 "-p",
                 "0",
+                "-i",
+                "257",
                 "-c",
                 "127.0.0.1",
                 "-u",
@@ -548,7 +589,7 @@ mod tests {
 
     #[test]
     fn aggregate_args_without_local_nic_drops_iface() {
-        let a = aggregate_args("wlan0", 5800, false, Path::new("/k"));
+        let a = aggregate_args("wlan0", 5800, false, Path::new("/k"), 257);
         assert!(!a.contains(&"wlan0".to_string()));
         // The aggregator still listens on the relay forward port.
         let ai = a.iter().position(|x| x == "-a").unwrap();

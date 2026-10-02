@@ -108,6 +108,22 @@ pub fn id_refers_to_same_device(a: &str, b: &str) -> bool {
         && long.starts_with(short)
 }
 
+/// The shortest device id a slot is issued to: the 8-hex short form.
+pub const DEVICE_ID_MIN_LEN: usize = 8;
+
+/// Whether `id` can name an aircraft in the registry: 8 to
+/// [`ados_protocol::node_status::MAX_DEVICE_ID`] bytes of ASCII letters,
+/// digits, `-`, `_` or `.`, with no surrounding whitespace.
+///
+/// A one-character or blank id would otherwise be stored as given, and every
+/// lookup that compares ids would have to guess what it meant.
+pub fn is_valid_device_id(id: &str) -> bool {
+    (DEVICE_ID_MIN_LEN..=ados_protocol::node_status::MAX_DEVICE_ID).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
 impl FleetRegistry {
     /// Read the registry from `path`. A missing file is an empty fleet (the
     /// pre-first-pair state).

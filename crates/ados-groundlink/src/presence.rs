@@ -18,6 +18,7 @@
 //!   cache, skipping a frame whose device-id is our own (the same self-pair
 //!   guard the Python listener applies).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -25,12 +26,13 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 use ados_radio::hop::{
-    build_presence_beacon, derive_pair_key, now_unix, parse_hop_announce, parse_presence_beacon,
+    build_presence_beacon, hop_announce_delay_ms, key_status, now_unix, now_unix_ms, pair_key_for,
+    parse_hop_announce, parse_presence_beacon, PEER_STALE_SECS,
 };
 
 use crate::acquire::ChannelSetter;
 use crate::watchdog::PresenceCache;
-use crate::wfb_rx;
+use crate::wfb_rx::{self, SharedValidCounter};
 use crate::{FleetRegistry, FLEET_RECONCILE_INTERVAL, FLEET_REGISTRY_PATH};
 
 /// Beacon cadence (10 s, matching the air side).
@@ -63,12 +65,15 @@ const HOP_FRAME_LEN: usize = 51;
 const PRESENCE_FRAME_LEN: usize = 68;
 
 /// Resolve the symmetric pair key used to authenticate the presence beacon
-/// HMAC, reusing the verified `ados_radio::hop::derive_pair_key`.
+/// and hop frames, reusing the verified `ados_radio::hop::pair_key_for`.
 ///
-/// Reads the 64-byte shared key through `ados_radio::paths::read_shared_key`
-/// (`/etc/drone.key`). Cold-start (no key on disk yet) falls back to the
-/// deterministic `sha256(b"ados/wfb/hop/v2/cold-start")` constant so a stray
-/// beacon still parses before bind.
+/// Reads the 64-byte shared key through `ados_radio::paths::load_shared_key`
+/// (`/etc/drone.key`). A node that has never been bound (no key file) uses the
+/// deterministic cold-start constant so a pre-bind beacon still parses. A key
+/// file that exists but cannot be read yields `None`: nothing is authenticated
+/// until it reads cleanly, rather than everything being authenticated under a
+/// constant anyone can compute. The second value is the status label the hop
+/// snapshot publishes (`bound`, `cold_start`, `key_unavailable`).
 ///
 /// HARD CONSTRAINT, do not reintroduce the gs.key/tx.key divergence: an earlier
 /// version hashed `/etc/ados/wfb/tx.key` on the drone and `/etc/ados/wfb/rx.key`
@@ -77,15 +82,23 @@ const PRESENCE_FRAME_LEN: usize = 68;
 /// diverged across the rigs and every beacon was silently dropped at the
 /// listener. The shared file is `/etc/drone.key`, present byte-identical on both
 /// rigs after bind. Only ever derive from that.
-pub fn resolve_pair_key() -> [u8; 32] {
-    match ados_radio::paths::read_shared_key() {
-        Some(shared) => derive_pair_key(Some(&shared)),
-        None => {
-            tracing::warn!("hop_supervisor_pair_key_unavailable");
-            derive_pair_key(None)
+pub fn resolve_pair_key() -> (Option<[u8; 32]>, &'static str) {
+    let shared = ados_radio::paths::load_shared_key();
+    let key = pair_key_for(&shared);
+    // Log the transition into and out of the refused state, not every frame.
+    let unavailable = key.is_none();
+    if KEY_UNAVAILABLE_LOGGED.swap(unavailable, Ordering::Relaxed) != unavailable {
+        if let ados_radio::paths::SharedKey::Unavailable(reason) = &shared {
+            tracing::error!(%reason, "ground_pair_key_unavailable: hop and presence authentication refused");
+        } else {
+            tracing::info!("ground_pair_key_readable_again");
         }
     }
+    (key, key_status(&shared))
 }
+
+/// Whether the refused-key state was the last one logged.
+static KEY_UNAVAILABLE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Read the persistent device-id (`/etc/ados/device-id`), trimmed. Empty when
 /// absent; the emit loop logs and still sends (an empty id zero-pads).
@@ -114,6 +127,8 @@ pub struct HopFollowEntry {
 /// `HopListener.snapshot()` so a reader (REST + the on-box channel-hops page)
 /// sees the same JSON whichever language drove the receive plane. The drone-only
 /// threshold fields are `null` on the listener side; `source` is `"listener"`.
+/// `last_refusal` is the most recent announce this station would not follow and
+/// why; `key_status` says which key the control plane authenticates under.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HopSnapshot {
     pub enabled: bool,
@@ -124,6 +139,19 @@ pub struct HopSnapshot {
     pub last_hop_at: f64,
     pub history: Vec<HopFollowEntry>,
     pub source: &'static str,
+    pub last_refusal: Option<HopRefusal>,
+    pub key_status: Option<&'static str>,
+}
+
+/// An announced hop this ground station refused to ack or follow.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HopRefusal {
+    /// Wall-clock unix of the refusal.
+    pub at: f64,
+    /// The announced target channel.
+    pub channel: u8,
+    /// `fleet_hop_refused`, `no_receive_iface`, `channel_not_permitted`.
+    pub reason: &'static str,
 }
 
 /// Decoded peer-presence cache, shared between the listener (writer) and the
@@ -162,6 +190,10 @@ struct PeerState {
     /// carries a name, but says nothing about signal. Keeping them apart is what
     /// stops the enrichment from inventing radio telemetry it never measured.
     aux_identities: std::collections::BTreeMap<String, Option<String>>,
+    /// The most recent announce this station refused to follow.
+    last_refusal: Option<HopRefusal>,
+    /// The key status the listener last authenticated under.
+    key_status: Option<&'static str>,
 }
 
 /// Schema version for the `linked-peers.json` sidecar (a best-effort drift
@@ -170,11 +202,10 @@ struct PeerState {
 pub const LINKED_PEERS_SIDECAR_VERSION: u16 = 1;
 
 /// A peer is dropped from the published list once its last decoded beacon is
-/// older than this. Matches the Python heartbeat's `_PEER_STALE_AFTER_S` so a
-/// peer that stops beaconing disappears from `linkedPeers[]` on both the
-/// listener-prune side and the reader-freshness side, never lingering as a
-/// stale confident entry (a dead relay shows dead, not a green ghost).
-pub const LINKED_PEER_STALE_AFTER_S: f64 = 60.0;
+/// older than this: the radio's own peer-stale threshold, after which the drone
+/// itself has declared the link gone and returned home. Holding the peer for
+/// longer showed a silent drone as linked well after both ends had given up.
+pub const LINKED_PEER_STALE_AFTER_S: f64 = PEER_STALE_SECS;
 
 /// Persist cadence for `linked-peers.json` (5 s, matching the hop-supervisor
 /// persister: the GCS heartbeat is 5 s and the fleet list does not need
@@ -183,10 +214,10 @@ pub const LINKED_PEERS_PERSIST_CADENCE: Duration = Duration::from_secs(5);
 
 /// One decoded WFB peer as it is published to `linked-peers.json`. The fields
 /// are exactly what the PresenceBeacon + the listener already carry (device-id,
-/// role, channel, RSSI) plus the wall-clock time of the last decode — the
-/// heartbeat's `linkedPeers[]` entry shape, no richer identity than the beacon
-/// itself carries. Serialized snake_case; the heartbeat producers remap to the
-/// camelCase wire keys (`deviceId`/`rssiDbm`/`seenAtUnix`).
+/// role, channel, RSSI), the fleet slot whose control port it was decoded on,
+/// and the wall-clock time of the last decode. Serialized snake_case; the
+/// heartbeat producers remap to the camelCase wire keys
+/// (`deviceId`/`rssiDbm`/`seenAtUnix`).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LinkedPeer {
     pub device_id: String,
@@ -195,6 +226,10 @@ pub struct LinkedPeer {
     pub rssi_dbm: i8,
     /// Wall-clock unix seconds of the last decoded beacon from this peer.
     pub last_seen_unix: f64,
+    /// The fleet slot whose receive chain decoded the beacon. A peer heard on a
+    /// slot other than the one it was paired to is told apart from a healthy
+    /// one by this.
+    pub slot: u8,
     /// The peer's human-facing name, learned from the auxiliary lane's identity
     /// frame rather than the beacon. The beacon is a fixed 68 bytes with its
     /// identity field already full, so a name cannot travel on it.
@@ -225,8 +260,8 @@ impl GsPresenceCache {
     /// transmitter advertises). The ring is trimmed to the last `HOP_HISTORY_CAP`
     /// entries, matching the Python listener. A PresenceBeacon carries no hop
     /// trigger, so its follow entries are labelled "periodic".
-    fn record_peer(&self, device_id: String, role: String, channel: u8, rssi_dbm: i8) {
-        let mut s = self.inner.lock().unwrap();
+    fn record_peer(&self, device_id: String, role: String, channel: u8, rssi_dbm: i8, slot: u8) {
+        let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let prev_channel = s.peer_channel;
         let now = now_unix();
         // The multi-peer map: upsert this peer keyed by its device-id so a ground
@@ -240,6 +275,7 @@ impl GsPresenceCache {
                 channel,
                 rssi_dbm,
                 last_seen_unix: now,
+                slot,
                 // Beacons carry no name; the auxiliary lane supplies it at read
                 // time, so this stays absent rather than being invented here.
                 name: None,
@@ -332,6 +368,24 @@ impl GsPresenceCache {
         }
     }
 
+    /// Record an announce this station refused to follow, for the snapshot.
+    fn record_hop_refusal(&self, channel: u8, reason: &'static str) {
+        let mut s = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        s.last_refusal = Some(HopRefusal {
+            at: now_unix(),
+            channel,
+            reason,
+        });
+    }
+
+    /// Record which key the control plane is authenticating under.
+    fn set_key_status(&self, status: &'static str) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .key_status = Some(status);
+    }
+
     /// Append a channel-follow entry to the bounded hop-history ring (shared by
     /// the beacon and HopAnnounce writers). `from` is the prior channel (0 when
     /// unknown, matching the Python listener) and `trigger` is the follow label.
@@ -368,6 +422,8 @@ impl GsPresenceCache {
             last_hop_at: s.last_hop_at,
             history: s.hop_history.clone(),
             source: "listener",
+            last_refusal: s.last_refusal.clone(),
+            key_status: s.key_status,
         }
     }
 
@@ -416,19 +472,22 @@ where
     tracing::info!(device_id = %device_id, cadence_s = 10, "ground_presence_emit_started");
 
     loop {
-        let pair_key = resolve_pair_key();
-        let epoch_ms = (now_unix() * 1000.0) as u64;
-        let beacon = build_presence_beacon(
-            &device_id,
-            // GS role (role byte 0x02). `role_drone = false`.
-            false,
-            channel_fn(),
-            0, // rssi unknown on the emit side
-            epoch_ms,
-            &pair_key,
-        );
-        if let Err(e) = sock.send_to(&beacon, target).await {
-            tracing::debug!(error = %e, "presence_emit_send_failed");
+        let (pair_key, _) = resolve_pair_key();
+        // With no readable key there is nothing to sign a beacon with that a
+        // peer should trust; stay silent until the key reads cleanly.
+        if let Some(pair_key) = pair_key {
+            let beacon = build_presence_beacon(
+                &device_id,
+                // GS role (role byte 0x02). `role_drone = false`.
+                false,
+                channel_fn(),
+                0, // rssi unknown on the emit side
+                now_unix_ms(),
+                &pair_key,
+            );
+            if let Err(e) = sock.send_to(&beacon, target).await {
+                tracing::debug!(error = %e, "presence_emit_send_failed");
+            }
         }
         tokio::time::sleep(PRESENCE_CADENCE).await;
     }
@@ -581,7 +640,23 @@ async fn listen_on_slot(
                 continue;
             }
         };
-        let pair_key = resolve_pair_key();
+        let (pair_key, status) = resolve_pair_key();
+        cache.set_key_status(status);
+        let Some(pair_key) = pair_key else {
+            // The key file exists but cannot be read: nothing on the control
+            // plane can be authenticated, so nothing is acted on.
+            continue;
+        };
+        // Only a hop frame needs the fleet size, and it is read fresh: a drone
+        // paired a moment ago turns a single-drone station into a fleet.
+        let fleet_slots = if len == HOP_FRAME_LEN {
+            wfb_rx::fleet_slots(&FleetRegistry::load(std::path::Path::new(
+                FLEET_REGISTRY_PATH,
+            )))
+            .len()
+        } else {
+            0
+        };
         handle_control_frame(
             &sock,
             &buf[..len],
@@ -590,6 +665,7 @@ async fn listen_on_slot(
             &own_device_id,
             ack_target,
             follower.as_ref(),
+            ControlContext { slot, fleet_slots },
         )
         .await;
     }
@@ -727,45 +803,82 @@ pub async fn listen_supervisor(
     }
 }
 
-/// Extract the big-endian `epoch_ms` a HopAnnounce frame carries at bytes
-/// `[9..17]`. The frame must already have passed `parse_hop_announce` (the
-/// length + magic + HMAC verify); this only reads the field that parser
-/// discards. Returns `None` if the slice is too short to hold the field.
-fn hop_announce_epoch_ms(frame: &[u8]) -> Option<u64> {
-    frame
-        .get(9..17)
-        .map(|b| u64::from_be_bytes(b.try_into().expect("9..17 is exactly 8 bytes")))
+/// Longest wait honoured before a follow. The drone's countdown is three
+/// seconds from its first announce; anything longer is a malformed or forged
+/// frame, so the retune happens at the cap rather than being parked.
+const MAX_FOLLOW_WAIT: Duration = Duration::from_secs(3);
+
+/// How long after a follow the new channel must deliver valid packets before
+/// the ground station reverts to the channel it left.
+pub const FOLLOW_VERIFY_WINDOW: Duration = Duration::from_secs(5);
+
+/// Why a verified HopAnnounce is not followed, or `None` to follow it.
+///
+/// The ground station acks only an announce it can carry out. An ack commits
+/// the drone to the hop, so acking one this station then cannot follow is what
+/// split drone and ground onto different channels:
+///
+/// * more than one registered slot: the one receive radio serves the whole
+///   fleet, so following one drone's hop strands every other drone;
+/// * no resolved receive interface: there is nothing to retune;
+/// * a target outside the adapter's permitted channel set (an empty set means
+///   it could not be read, which does not restrict).
+pub fn hop_follow_refusal(
+    fleet_slots: usize,
+    iface_resolved: bool,
+    permitted: &std::collections::BTreeSet<u8>,
+    channel: u8,
+) -> Option<&'static str> {
+    if fleet_slots > 1 {
+        return Some("fleet_hop_refused");
+    }
+    if !iface_resolved {
+        return Some("no_receive_iface");
+    }
+    if !permitted.is_empty() && !permitted.contains(&channel) {
+        return Some("channel_not_permitted");
+    }
+    None
 }
 
-/// Sleep until the wall-clock `epoch_ms`, capped so a far-future or malformed
-/// epoch can never park the follow indefinitely. A past epoch returns at once,
-/// so the GS still retunes (just without the coordinated dwell-sync) rather than
-/// missing the hop entirely.
-async fn sleep_to_epoch_ms(epoch_ms: u64) {
-    // Hard cap: a HopAnnounce epoch is always within a couple of seconds (the
-    // drone announces, the GS acks, the flip fires). Anything beyond this is a
-    // stale/forged frame — retune now rather than wait it out.
-    const MAX_FOLLOW_WAIT: Duration = Duration::from_secs(3);
-    let now_ms = (now_unix() * 1000.0) as u64;
-    if epoch_ms <= now_ms {
-        return;
-    }
-    let wait = Duration::from_millis(epoch_ms - now_ms).min(MAX_FOLLOW_WAIT);
-    tokio::time::sleep(wait).await;
+/// How one scheduled follow ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowOutcome {
+    /// Retuned, and the new channel delivered traffic (or there was no
+    /// receive chain to verify against).
+    Followed,
+    /// The retune failed; the radio was put back on the channel it left.
+    RevertedRetuneFailed,
+    /// Retuned, but no valid packet arrived inside [`FOLLOW_VERIFY_WINDOW`];
+    /// the radio was put back on the channel it left.
+    RevertedNoTraffic,
 }
 
 /// Drives the GS receive radio to follow a drone-announced channel hop. Holds the
 /// same `ChannelSetter` the acquirer uses plus the resolved-iface cell the
 /// receive loop writes, so on a verified HopAnnounce the listener retunes the
-/// live receive interface to the announced channel at the announce epoch — the
-/// reactive, coordinated counterpart to the drone's epoch-synced flip. Without
-/// this the GS only learned the new channel into its cache and waited for the
-/// valid-packet watchdog to notice the blackout and sweep, costing a guaranteed
-/// gap on every hop.
+/// live receive interface to the announced channel when the countdown expires —
+/// the coordinated counterpart to the drone's flip. Without this the GS only
+/// learned the new channel into its cache and waited for the valid-packet
+/// watchdog to notice the blackout and sweep, costing a guaranteed gap on every
+/// hop.
+///
+/// A follow is verified: the receive generation's valid-packet counter must
+/// advance on the new channel inside [`FOLLOW_VERIFY_WINDOW`], or the radio goes
+/// back to the channel it left. That is what recovers a hop the drone acked but
+/// then failed to carry out.
 #[derive(Clone)]
 pub struct HopFollower {
     setter: Arc<dyn ChannelSetter>,
     resolved_iface: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// The current receive generation's valid-decode counter. Replaced on every
+    /// generation; `None` before the first.
+    valid: Arc<Mutex<Option<SharedValidCounter>>>,
+    /// The channel a follow is already scheduled toward. The drone repeats its
+    /// announce until it hears the ack, so one hop arrives several times; only
+    /// the first schedules a retune.
+    pending: Arc<Mutex<Option<u8>>>,
+    verify_window: Duration,
 }
 
 impl HopFollower {
@@ -776,39 +889,114 @@ impl HopFollower {
         Self {
             setter,
             resolved_iface,
+            valid: Arc::new(Mutex::new(None)),
+            pending: Arc::new(Mutex::new(None)),
+            verify_window: FOLLOW_VERIFY_WINDOW,
         }
     }
 
-    /// Retune the live receive interface to `channel` at `epoch_ms`. Resolves the
-    /// interface from the shared cell (the receive loop's auto-detect writes it);
-    /// a `None` cell (no adapter resolved yet) is a no-op. The single retune is
-    /// serialized only by the setter, so a concurrent acquirer sweep cannot fight
-    /// it mid-flight on the same `&mut` acquirer (the acquirer is the watchdog's;
-    /// this is the listener's independent follow). Returns whether the retune
-    /// landed (for the test seam).
-    async fn follow_at_epoch(&self, channel: u8, epoch_ms: u64) -> bool {
-        let Some(iface) = self.resolved_iface.lock().await.clone() else {
-            tracing::debug!(channel, "ground_hop_follow_no_iface");
+    /// Point the follow verification at the current receive generation's
+    /// valid-decode counter.
+    pub fn set_valid_counter(&self, counter: SharedValidCounter) {
+        *self.valid.lock().unwrap_or_else(|e| e.into_inner()) = Some(counter);
+    }
+
+    /// A follower whose verification window is `window`, for tests.
+    #[cfg(test)]
+    fn with_verify_window(mut self, window: Duration) -> Self {
+        self.verify_window = window;
+        self
+    }
+
+    /// The resolved receive interface, if any.
+    async fn iface(&self) -> Option<String> {
+        self.resolved_iface.lock().await.clone()
+    }
+
+    /// Claim the follow toward `channel`. False when one is already scheduled.
+    fn claim(&self, channel: u8) -> bool {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if *pending == Some(channel) {
             return false;
-        };
-        sleep_to_epoch_ms(epoch_ms).await;
-        let ok = self.setter.set_channel(&iface, channel).await;
-        if ok {
-            tracing::info!(interface = %iface, channel, "ground_hop_follow_retuned");
-        } else {
-            tracing::warn!(interface = %iface, channel, "ground_hop_follow_retune_failed");
         }
-        ok
+        *pending = Some(channel);
+        true
+    }
+
+    fn release(&self, channel: u8) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if *pending == Some(channel) {
+            *pending = None;
+        }
+    }
+
+    /// Retune `iface` to `channel` after `delay`, then verify. `prev` is the
+    /// channel to go back to when the follow does not hold; with none known the
+    /// radio stays and the valid-packet watchdog owns recovery.
+    async fn follow(
+        &self,
+        iface: &str,
+        channel: u8,
+        delay: Duration,
+        prev: Option<u8>,
+        cache: &GsPresenceCache,
+    ) -> FollowOutcome {
+        tokio::time::sleep(delay.min(MAX_FOLLOW_WAIT)).await;
+        if !self.setter.set_channel(iface, channel).await {
+            tracing::warn!(interface = %iface, channel, "ground_hop_follow_retune_failed");
+            self.revert(iface, prev, cache).await;
+            return FollowOutcome::RevertedRetuneFailed;
+        }
+        tracing::info!(interface = %iface, channel, "ground_hop_follow_retuned");
+        let counter = self.valid.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let Some(counter) = counter else {
+            return FollowOutcome::Followed;
+        };
+        let before = counter.get();
+        tokio::time::sleep(self.verify_window).await;
+        if counter.get() > before {
+            return FollowOutcome::Followed;
+        }
+        tracing::warn!(
+            interface = %iface,
+            channel,
+            window_s = self.verify_window.as_secs_f64(),
+            "ground_hop_follow_no_traffic_reverting"
+        );
+        self.revert(iface, prev, cache).await;
+        FollowOutcome::RevertedNoTraffic
+    }
+
+    async fn revert(&self, iface: &str, prev: Option<u8>, cache: &GsPresenceCache) {
+        let Some(prev) = prev else {
+            return;
+        };
+        if self.setter.set_channel(iface, prev).await {
+            cache.record_hop_announce(prev, "revert");
+            tracing::info!(interface = %iface, channel = prev, "ground_hop_follow_reverted");
+        } else {
+            tracing::warn!(interface = %iface, channel = prev, "ground_hop_follow_revert_failed");
+        }
     }
 }
 
-/// Dispatch one inbound control frame: length-gate, verify, then either echo a
-/// HopAck (51-byte HopAnnounce) or record the peer (68-byte PresenceBeacon).
+/// Where a control frame arrived: the fleet slot whose control port decoded
+/// it, and how many slots the fleet has registered right now.
+#[derive(Debug, Clone, Copy)]
+struct ControlContext {
+    slot: u8,
+    fleet_slots: usize,
+}
+
+/// Dispatch one inbound control frame: length-gate, verify, then either handle
+/// a 51-byte HopAnnounce or record the peer (68-byte PresenceBeacon).
 /// Extracted from `listen_loop` so the dispatch is unit-testable over real
 /// loopback sockets. `sock` is the listener socket the HopAck echo is sent
-/// from; `ack_target` is `wfb_tx_control`'s loopback ingress. `follower`, when
-/// present, retunes the GS receive radio to the announced channel at the hop
-/// epoch (the coordinated channel follow).
+/// from; `ack_target` is `wfb_tx_control`'s loopback ingress. A HopAnnounce is
+/// acked only when `follower` can carry it out (see [`hop_follow_refusal`]);
+/// otherwise no ack is sent, so the drone stays where it is, and the reason is
+/// recorded on the hop snapshot.
+#[allow(clippy::too_many_arguments)]
 async fn handle_control_frame(
     sock: &UdpSocket,
     frame: &[u8],
@@ -817,6 +1005,7 @@ async fn handle_control_frame(
     own_device_id: &str,
     ack_target: (std::net::Ipv4Addr, u16),
     follower: Option<&HopFollower>,
+    ctx: ControlContext,
 ) {
     // Length gate first: a 51-byte frame is a HopAnnounce/HopAck, a 68-byte
     // frame is a PresenceBeacon. The magic + HMAC verify inside each parser is
@@ -824,30 +1013,57 @@ async fn handle_control_frame(
     // rather than mis-routed.
     match frame.len() {
         HOP_FRAME_LEN => {
-            if let Some((channel, trigger)) = parse_hop_announce(frame, pair_key) {
-                // ACK first so the drone's hop is not delayed by the cache
-                // update; the echo is the verbatim verified frame.
-                if let Err(e) = sock.send_to(frame, ack_target).await {
-                    tracing::debug!(error = %e, "ground_hop_ack_send_failed");
-                } else {
-                    tracing::info!(channel, trigger, "ground_hop_ack_echoed");
-                }
-                // Update the watchdog's channel hint (the cache the acquirer
-                // reads) so the receive loop knows where the peer is going.
-                cache.record_hop_announce(channel, trigger);
-                // Schedule the coordinated GS retune at the announce epoch. The
-                // retune is spawned so the listener's recv loop keeps feeding the
-                // presence cache instead of blocking on the epoch sleep; the
-                // setter is the only serialization the single retune needs.
-                if let Some(follower) = follower {
-                    if let Some(epoch_ms) = hop_announce_epoch_ms(frame) {
-                        let follower = follower.clone();
-                        tokio::spawn(async move {
-                            follower.follow_at_epoch(channel, epoch_ms).await;
-                        });
-                    }
-                }
+            let Some((channel, trigger)) = parse_hop_announce(frame, pair_key) else {
+                return;
+            };
+            let delay = Duration::from_millis(hop_announce_delay_ms(frame).unwrap_or(0));
+            let Some(follower) = follower else {
+                cache.record_hop_refusal(channel, "no_receive_iface");
+                return;
+            };
+            let iface = follower.iface().await;
+            let permitted = match iface.as_deref() {
+                Some(i) => ados_radio::adapter::enabled_channels(i).await,
+                None => std::collections::BTreeSet::new(),
+            };
+            if let Some(reason) =
+                hop_follow_refusal(ctx.fleet_slots, iface.is_some(), &permitted, channel)
+            {
+                cache.record_hop_refusal(channel, reason);
+                tracing::info!(
+                    channel,
+                    trigger,
+                    slot = ctx.slot,
+                    fleet_slots = ctx.fleet_slots,
+                    reason,
+                    "ground_hop_refused"
+                );
+                return;
             }
+            let Some(iface) = iface else { return };
+            // The ack commits both sides, so it goes only after the checks
+            // above. It is repeated for every announce of the same hop: the
+            // drone keeps announcing until one ack gets through.
+            if let Err(e) = sock.send_to(frame, ack_target).await {
+                tracing::debug!(error = %e, "ground_hop_ack_send_failed");
+            } else {
+                tracing::info!(channel, trigger, "ground_hop_ack_echoed");
+            }
+            if !follower.claim(channel) {
+                return;
+            }
+            // The channel being left, for the revert, read before the cache
+            // moves its hint to the new one.
+            let prev = cache.peer_channel();
+            cache.record_hop_announce(channel, trigger);
+            // Spawned so the listener's recv loop keeps feeding the presence
+            // cache through the countdown and the verification window.
+            let follower = follower.clone();
+            let cache = cache.clone();
+            tokio::spawn(async move {
+                follower.follow(&iface, channel, delay, prev, &cache).await;
+                follower.release(channel);
+            });
         }
         PRESENCE_FRAME_LEN => {
             let Some(peer) = parse_presence_beacon(frame, pair_key) else {
@@ -863,7 +1079,13 @@ async fn handle_control_frame(
                     return;
                 }
             }
-            cache.record_peer(peer.device_id, peer.role, peer.channel, peer.rssi_dbm);
+            cache.record_peer(
+                peer.device_id,
+                peer.role,
+                peer.channel,
+                peer.rssi_dbm,
+                ctx.slot,
+            );
         }
         _ => {}
     }
@@ -948,6 +1170,18 @@ pub async fn linked_peers_persist_loop(cache: GsPresenceCache) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ados_radio::hop::derive_pair_key;
+
+    /// The cold-start pair key, which a dev host without `/etc/drone.key` runs on.
+    fn test_key() -> [u8; 32] {
+        derive_pair_key(None)
+    }
+
+    /// A frame decoded on slot 1 of a single-drone station.
+    const SOLO: ControlContext = ControlContext {
+        slot: 1,
+        fleet_slots: 1,
+    };
 
     #[test]
     fn presence_ports_are_asymmetric() {
@@ -972,11 +1206,11 @@ mod tests {
     fn cold_start_pair_key_matches_radio_crate() {
         // With no key file on disk the resolver must produce the same cold-start
         // key the radio crate derives, so a pre-bind beacon round-trips.
-        let resolved = resolve_pair_key();
-        let cold = derive_pair_key(None);
+        let (resolved, status) = resolve_pair_key();
         // On a dev host /etc/drone.key is absent, so this is the cold path.
-        if ados_radio::paths::read_shared_key().is_none() {
-            assert_eq!(resolved, cold);
+        if ados_radio::paths::load_shared_key() == ados_radio::paths::SharedKey::Absent {
+            assert_eq!(resolved, Some(derive_pair_key(None)));
+            assert_eq!(status, "cold_start");
         }
     }
 
@@ -991,7 +1225,7 @@ mod tests {
     #[test]
     fn cache_records_peer_and_exposes_channel_and_fresh_age() {
         let cache = GsPresenceCache::new();
-        cache.record_peer("drone-abc".into(), "drone".into(), 157, -48);
+        cache.record_peer("drone-abc".into(), "drone".into(), 157, -48, 1);
         assert_eq!(cache.announced_channel(), Some(157));
         assert_eq!(cache.peer_channel(), Some(157));
         assert!(cache.peer_last_seen_unix().is_some());
@@ -1013,8 +1247,8 @@ mod tests {
         // A ground station relaying two drones must report BOTH — the scalar
         // fields only ever track the last-heard one, but the list carries all.
         let cache = GsPresenceCache::new();
-        cache.record_peer("drone-a".into(), "drone".into(), 149, -60);
-        cache.record_peer("drone-b".into(), "drone".into(), 157, -48);
+        cache.record_peer("drone-a".into(), "drone".into(), 149, -60, 1);
+        cache.record_peer("drone-b".into(), "drone".into(), 157, -48, 2);
         let peers = cache.linked_peers();
         assert_eq!(peers.len(), 2);
         // Newest decode (drone-b) is first.
@@ -1033,8 +1267,8 @@ mod tests {
         // Re-hearing the same drone refreshes its entry (channel/rssi/last-seen)
         // rather than appending a duplicate.
         let cache = GsPresenceCache::new();
-        cache.record_peer("drone-a".into(), "drone".into(), 149, -60);
-        cache.record_peer("drone-a".into(), "drone".into(), 157, -45);
+        cache.record_peer("drone-a".into(), "drone".into(), 149, -60, 1);
+        cache.record_peer("drone-a".into(), "drone".into(), 157, -45, 1);
         let peers = cache.linked_peers();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].channel, 157);
@@ -1047,7 +1281,7 @@ mod tests {
         // the camelCase wire shape; pin the on-disk keys so a producer reads the
         // right ones.
         let cache = GsPresenceCache::new();
-        cache.record_peer("drone-a".into(), "drone".into(), 149, -60);
+        cache.record_peer("drone-a".into(), "drone".into(), 149, -60, 3);
         let payload = linked_peers_payload(&cache.linked_peers());
         assert_eq!(payload["version"], LINKED_PEERS_SIDECAR_VERSION);
         assert!(payload["wall_time_unix"].as_f64().unwrap() > 0.0);
@@ -1100,7 +1334,7 @@ mod tests {
     fn record_peer_appends_a_follow_entry_only_on_channel_change() {
         let cache = GsPresenceCache::new();
         // First beacon: a follow from 0 (unknown prior) to 157.
-        cache.record_peer("drone-1".into(), "drone".into(), 157, -50);
+        cache.record_peer("drone-1".into(), "drone".into(), 157, -50, 1);
         let s = cache.hop_snapshot("u-nii-3");
         assert_eq!(s.history.len(), 1);
         assert_eq!(s.history[0].from, 0);
@@ -1110,11 +1344,11 @@ mod tests {
         assert!(s.last_hop_at > 0.0);
 
         // Same channel again: no new entry.
-        cache.record_peer("drone-1".into(), "drone".into(), 157, -47);
+        cache.record_peer("drone-1".into(), "drone".into(), 157, -47, 1);
         assert_eq!(cache.hop_snapshot("u-nii-3").history.len(), 1);
 
         // New channel: a follow from 157 to 149.
-        cache.record_peer("drone-1".into(), "drone".into(), 149, -45);
+        cache.record_peer("drone-1".into(), "drone".into(), 149, -45, 1);
         let s = cache.hop_snapshot("u-nii-3");
         assert_eq!(s.history.len(), 2);
         assert_eq!(s.history[1].from, 157);
@@ -1128,7 +1362,7 @@ mod tests {
         // past the 32-entry cap and confirm only the last 32 survive.
         for i in 0..50u8 {
             let ch = if i % 2 == 0 { 149 } else { 153 };
-            cache.record_peer("drone-1".into(), "drone".into(), ch, -50);
+            cache.record_peer("drone-1".into(), "drone".into(), ch, -50, 1);
         }
         let s = cache.hop_snapshot("u-nii-3");
         assert_eq!(s.history.len(), HOP_HISTORY_CAP);
@@ -1156,7 +1390,7 @@ mod tests {
         let listen_addr = sock.local_addr().unwrap();
 
         // Drive one decode by hand using the same verify path the listener uses.
-        let pair_key = resolve_pair_key();
+        let pair_key = test_key();
         let beacon = build_presence_beacon("drone-xyz", true, 161, -55, 123_456, &pair_key);
 
         let sender = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -1170,7 +1404,7 @@ mod tests {
             .expect("listener recv timed out")
             .unwrap();
         let peer = parse_presence_beacon(&buf[..len], &pair_key).expect("beacon verifies");
-        listener_cache.record_peer(peer.device_id, peer.role, peer.channel, peer.rssi_dbm);
+        listener_cache.record_peer(peer.device_id, peer.role, peer.channel, peer.rssi_dbm, 1);
 
         assert_eq!(cache.announced_channel(), Some(161));
         assert_eq!(cache.peer_channel(), Some(161));
@@ -1197,7 +1431,7 @@ mod tests {
     fn record_hop_announce_uses_real_trigger_and_preserves_presence_identity() {
         let cache = GsPresenceCache::new();
         // Seed a prior verified beacon: identity + liveness are now set.
-        cache.record_peer("drone-1".into(), "drone".into(), 149, -50);
+        cache.record_peer("drone-1".into(), "drone".into(), 149, -50, 1);
         let seeded_age = cache.peer_last_seen_unix();
         assert!(seeded_age.is_some());
 
@@ -1236,7 +1470,7 @@ mod tests {
         use ados_radio::hop::{build_hop_announce, HopTrigger};
 
         let cache = GsPresenceCache::new();
-        let pair_key = resolve_pair_key();
+        let pair_key = test_key();
 
         // The listener's socket (sends the echo from here) + a stand-in for
         // wfb_tx_control's loopback ingress (receives the ACK).
@@ -1251,8 +1485,12 @@ mod tests {
             std::net::SocketAddr::V4(a) => (*a.ip(), a.port()),
             _ => unreachable!("ipv4 loopback"),
         };
+        let follower = HopFollower::new(
+            RecordingSetter::ok(),
+            Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string()))),
+        );
 
-        let announce = build_hop_announce(123_456, 157, HopTrigger::Reactive, &pair_key);
+        let announce = build_hop_announce(0, 157, HopTrigger::Reactive, &pair_key);
         handle_control_frame(
             &listen_sock,
             &announce,
@@ -1260,7 +1498,8 @@ mod tests {
             &cache,
             "", // own device id irrelevant to the hop path
             ack_target,
-            None, // no follower: this test asserts the ack-echo + cache record
+            Some(&follower),
+            SOLO,
         )
         .await;
 
@@ -1276,6 +1515,91 @@ mod tests {
         let s = cache.hop_snapshot("u-nii-3");
         assert_eq!(s.history.last().unwrap().trigger, "reactive");
         assert_eq!(s.history.last().unwrap().to, 157);
+    }
+
+    /// Dispatch `announce` and report whether an ack reached the tx ingress.
+    async fn acked(
+        announce: &[u8],
+        cache: &GsPresenceCache,
+        follower: Option<&HopFollower>,
+        ctx: ControlContext,
+    ) -> bool {
+        let listen_sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_recv = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let ack_target = match ack_recv.local_addr().unwrap() {
+            std::net::SocketAddr::V4(a) => (*a.ip(), a.port()),
+            _ => unreachable!("ipv4 loopback"),
+        };
+        handle_control_frame(
+            &listen_sock,
+            announce,
+            &test_key(),
+            cache,
+            "",
+            ack_target,
+            follower,
+            ctx,
+        )
+        .await;
+        let mut buf = [0u8; 64];
+        tokio::time::timeout(Duration::from_millis(200), ack_recv.recv_from(&mut buf))
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn a_fleet_station_neither_acks_nor_follows_one_drone_s_hop() {
+        // One receive radio serves every slot. Following drone A's hop would
+        // strand drones B..N on the old channel.
+        use ados_radio::hop::{build_hop_announce, HopTrigger};
+        let cache = GsPresenceCache::new();
+        cache.record_peer("drone-a".into(), "drone".into(), 149, -50, 1);
+        let setter = RecordingSetter::ok();
+        let follower = HopFollower::new(
+            setter.clone(),
+            Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string()))),
+        );
+        let announce = build_hop_announce(0, 157, HopTrigger::Reactive, &test_key());
+        let fleet = ControlContext {
+            slot: 1,
+            fleet_slots: 2,
+        };
+        assert!(!acked(&announce, &cache, Some(&follower), fleet).await);
+        assert_eq!(
+            cache.peer_channel(),
+            Some(149),
+            "the receive hint stays put"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(setter.calls().is_empty());
+        let refusal = cache
+            .hop_snapshot("u-nii-3")
+            .last_refusal
+            .expect("recorded");
+        assert_eq!(refusal.reason, "fleet_hop_refused");
+        assert_eq!(refusal.channel, 157);
+    }
+
+    #[tokio::test]
+    async fn a_station_that_cannot_retune_does_not_ack() {
+        // An ack commits the drone. With no receive interface resolved there is
+        // nothing to retune, so acking would split the pair.
+        use ados_radio::hop::{build_hop_announce, HopTrigger};
+        let cache = GsPresenceCache::new();
+        let follower = HopFollower::new(
+            RecordingSetter::ok(),
+            Arc::new(tokio::sync::Mutex::new(None)),
+        );
+        let announce = build_hop_announce(0, 157, HopTrigger::Periodic, &test_key());
+        assert!(!acked(&announce, &cache, Some(&follower), SOLO).await);
+        assert_eq!(
+            cache.hop_snapshot("u-nii-3").last_refusal.unwrap().reason,
+            "no_receive_iface"
+        );
     }
 
     #[test]
@@ -1322,7 +1646,7 @@ mod tests {
         // assert the cache is fed and stays fed across repeated dispatches,
         // proving the per-frame handler is independent of any single recv outcome.
         let cache = GsPresenceCache::new();
-        let pair_key = resolve_pair_key();
+        let pair_key = test_key();
         let listen_sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .unwrap();
@@ -1337,7 +1661,17 @@ mod tests {
 
         // First good frame.
         let b1 = build_presence_beacon("drone-aaa", true, 149, -50, 1, &pair_key);
-        handle_control_frame(&listen_sock, &b1, &pair_key, &cache, "", ack_target, None).await;
+        handle_control_frame(
+            &listen_sock,
+            &b1,
+            &pair_key,
+            &cache,
+            "",
+            ack_target,
+            None,
+            SOLO,
+        )
+        .await;
         assert_eq!(cache.peer_channel(), Some(149));
         let first_seen = cache.peer_last_seen_unix();
         assert!(first_seen.is_some());
@@ -1352,13 +1686,24 @@ mod tests {
             "",
             ack_target,
             None,
+            SOLO,
         )
         .await;
         assert_eq!(cache.peer_channel(), Some(149));
 
         // A later good frame still updates the cache: the writer is alive.
         let b2 = build_presence_beacon("drone-aaa", true, 157, -45, 2, &pair_key);
-        handle_control_frame(&listen_sock, &b2, &pair_key, &cache, "", ack_target, None).await;
+        handle_control_frame(
+            &listen_sock,
+            &b2,
+            &pair_key,
+            &cache,
+            "",
+            ack_target,
+            None,
+            SOLO,
+        )
+        .await;
         assert_eq!(cache.peer_channel(), Some(157));
         assert!(cache.peer_present());
     }
@@ -1368,7 +1713,7 @@ mod tests {
         // A 68-byte PresenceBeacon must NOT be echoed as a HopAck (no ACK lands)
         // and MUST be recorded as a peer via the presence path.
         let cache = GsPresenceCache::new();
-        let pair_key = resolve_pair_key();
+        let pair_key = test_key();
 
         let listen_sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1391,6 +1736,7 @@ mod tests {
             "",
             ack_target,
             None,
+            SOLO,
         )
         .await;
 
@@ -1439,40 +1785,75 @@ mod tests {
         }
     }
 
-    #[test]
-    fn hop_announce_epoch_is_read_from_bytes_9_to_17() {
-        use ados_radio::hop::{build_hop_announce, HopTrigger};
-        let pair_key = resolve_pair_key();
-        let epoch_ms = 1_700_000_000_123_u64;
-        let announce = build_hop_announce(epoch_ms, 157, HopTrigger::Reactive, &pair_key);
-        // The follower reads the epoch the parser discards, straight from the frame.
-        assert_eq!(hop_announce_epoch_ms(&announce), Some(epoch_ms));
-        // A frame too short to hold the field reads as None rather than panicking.
-        assert_eq!(hop_announce_epoch_ms(&announce[..8]), None);
-    }
-
     #[tokio::test]
-    async fn hop_follower_retunes_the_resolved_iface_to_the_announced_channel() {
-        // The follower retunes the live receive interface to the announced channel
-        // (a past epoch returns at once, so no real wait in the test).
+    async fn a_follow_that_carries_traffic_holds() {
         let setter = RecordingSetter::ok();
         let iface = Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string())));
-        let follower = HopFollower::new(setter.clone(), iface);
-        let landed = follower.follow_at_epoch(157, 1).await; // epoch in the past
-        assert!(landed, "the retune must report success");
+        let follower =
+            HopFollower::new(setter.clone(), iface).with_verify_window(Duration::from_millis(50));
+        let counter = SharedValidCounter::new();
+        follower.set_valid_counter(counter.clone());
+        let cache = GsPresenceCache::new();
+        let feeding = {
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                for _ in 0..20 {
+                    counter.add(10);
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+        };
+        let outcome = follower
+            .follow("wlan1", 157, Duration::ZERO, Some(149), &cache)
+            .await;
+        feeding.abort();
+        assert_eq!(outcome, FollowOutcome::Followed);
         assert_eq!(setter.calls(), vec![("wlan1".to_string(), 157)]);
     }
 
     #[tokio::test]
-    async fn hop_follower_no_iface_is_a_noop() {
-        // No resolved receive adapter yet → the follow is a no-op (no retune), so a
-        // pre-adapter HopAnnounce never drives `iw` against a nonexistent iface.
+    async fn a_follow_with_no_traffic_on_the_new_channel_goes_back() {
+        // The drone acked path failed on its side: nothing arrives on the target.
+        // The station returns to the channel it left instead of staying deaf.
         let setter = RecordingSetter::ok();
-        let iface = Arc::new(tokio::sync::Mutex::new(None));
-        let follower = HopFollower::new(setter.clone(), iface);
-        let landed = follower.follow_at_epoch(157, 1).await;
-        assert!(!landed);
-        assert!(setter.calls().is_empty());
+        let iface = Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string())));
+        let follower =
+            HopFollower::new(setter.clone(), iface).with_verify_window(Duration::from_millis(20));
+        follower.set_valid_counter(SharedValidCounter::new());
+        let cache = GsPresenceCache::new();
+        let outcome = follower
+            .follow("wlan1", 157, Duration::ZERO, Some(149), &cache)
+            .await;
+        assert_eq!(outcome, FollowOutcome::RevertedNoTraffic);
+        assert_eq!(
+            setter.calls(),
+            vec![("wlan1".to_string(), 157), ("wlan1".to_string(), 149)]
+        );
+        assert_eq!(
+            cache.peer_channel(),
+            Some(149),
+            "the hint follows the revert"
+        );
+    }
+
+    #[test]
+    fn the_follow_gate_names_each_refusal() {
+        let any = std::collections::BTreeSet::new();
+        let unii3: std::collections::BTreeSet<u8> = [149, 153, 157].into_iter().collect();
+        assert_eq!(hop_follow_refusal(1, true, &any, 36), None);
+        assert_eq!(hop_follow_refusal(0, true, &unii3, 157), None);
+        assert_eq!(
+            hop_follow_refusal(2, true, &any, 157),
+            Some("fleet_hop_refused")
+        );
+        assert_eq!(
+            hop_follow_refusal(1, false, &any, 157),
+            Some("no_receive_iface")
+        );
+        assert_eq!(
+            hop_follow_refusal(1, true, &unii3, 36),
+            Some("channel_not_permitted")
+        );
     }
 
     #[tokio::test]
@@ -1482,7 +1863,7 @@ mod tests {
         // follower to retune the receive iface to the announced channel.
         use ados_radio::hop::{build_hop_announce, HopTrigger};
         let cache = GsPresenceCache::new();
-        let pair_key = resolve_pair_key();
+        let pair_key = test_key();
 
         let listen_sock = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
@@ -1500,8 +1881,8 @@ mod tests {
         let iface = Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string())));
         let follower = HopFollower::new(setter.clone(), iface);
 
-        // A past epoch so the spawned retune fires immediately.
-        let announce = build_hop_announce(1, 161, HopTrigger::Reactive, &pair_key);
+        // A zero countdown so the spawned retune fires immediately.
+        let announce = build_hop_announce(0, 161, HopTrigger::Reactive, &pair_key);
         handle_control_frame(
             &listen_sock,
             &announce,
@@ -1510,6 +1891,7 @@ mod tests {
             "",
             ack_target,
             Some(&follower),
+            SOLO,
         )
         .await;
 
@@ -1538,7 +1920,7 @@ mod tests {
         // audibly-present peer vanishes. The identity frame is the only place the
         // real id can come from.
         let cache = GsPresenceCache::new();
-        cache.record_peer(String::new(), "drone".into(), 149, -55);
+        cache.record_peer(String::new(), "drone".into(), 149, -55, 1);
         assert_eq!(cache.linked_peers()[0].device_id, "");
 
         cache.set_aux_identities(vec![("drone-a".into(), Some("Alpha".into()))]);
@@ -1554,7 +1936,7 @@ mod tests {
     #[test]
     fn an_aux_identity_names_a_matching_beacon_row() {
         let cache = GsPresenceCache::new();
-        cache.record_peer("drone-a".into(), "drone".into(), 157, -48);
+        cache.record_peer("drone-a".into(), "drone".into(), 157, -48, 1);
         cache.set_aux_identities(vec![("drone-a".into(), Some("Alpha".into()))]);
         let peers = cache.linked_peers();
         assert_eq!(peers[0].device_id, "drone-a");
@@ -1567,7 +1949,7 @@ mod tests {
         // tell which is which, and a guess would attach one node's identity to
         // another node's signal.
         let cache = GsPresenceCache::new();
-        cache.record_peer(String::new(), "drone".into(), 149, -55);
+        cache.record_peer(String::new(), "drone".into(), 149, -55, 1);
         cache.set_aux_identities(vec![
             ("drone-a".into(), Some("Alpha".into())),
             ("drone-b".into(), Some("Bravo".into())),
@@ -1595,7 +1977,7 @@ mod tests {
         // The setter takes the current fresh set, so a peer that went quiet loses
         // its label rather than keeping it as a confident stale claim.
         let cache = GsPresenceCache::new();
-        cache.record_peer("drone-a".into(), "drone".into(), 157, -48);
+        cache.record_peer("drone-a".into(), "drone".into(), 157, -48, 1);
         cache.set_aux_identities(vec![("drone-a".into(), Some("Alpha".into()))]);
         assert_eq!(cache.linked_peers()[0].name.as_deref(), Some("Alpha"));
 
@@ -1608,7 +1990,7 @@ mod tests {
         // Additive by construction: a peer with no name serializes exactly the
         // shape existing readers already parse.
         let cache = GsPresenceCache::new();
-        cache.record_peer("drone-a".into(), "drone".into(), 157, -48);
+        cache.record_peer("drone-a".into(), "drone".into(), 157, -48, 1);
         let payload = linked_peers_payload(&cache.linked_peers());
         let entry = &payload["peers"][0];
         assert!(entry.get("name").is_none());

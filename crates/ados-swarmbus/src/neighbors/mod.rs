@@ -24,7 +24,8 @@ use crate::beacon::SwarmBeacon;
 use crate::crypto::{SenderNonce, NONCE_PREFIX_LEN};
 
 pub use counters::SwarmCounters;
-use replay::{SenderMarks, SenderVerdict};
+use replay::SenderVerdict;
+pub use replay::{SenderMarks, REPLAY_STATE_PATH};
 
 /// How long a neighbour survives without a beacon: six missed transmissions at
 /// [`crate::BEACON_HZ`].
@@ -102,24 +103,57 @@ pub struct NeighborTable {
     radio_iface: Option<String>,
     counters: SwarmCounters,
     senders: SenderMarks,
+    /// Whether the bus authenticates frames under a bound fleet key. False on a
+    /// node running the cold-start key, whose frames anyone can forge from the
+    /// public source; consumers that steer on the table refuse it then.
+    fleet_key_bound: bool,
 }
 
 impl NeighborTable {
-    /// A table for the node in `own_slot`.
+    /// A table for the node in `own_slot`, with no sender history.
     ///
     /// This node's own looped-back transmissions never reach the table: the
     /// receive path recognises them by the cipher's nonce prefix, which identifies
     /// this process on the bus. The own slot is kept to tell a peer that CLAIMS our
     /// slot apart from the rest (see [`Recorded::OwnSlotConflict`]).
     pub fn new(own_slot: u8) -> Self {
+        Self::with_sender_marks(own_slot, SenderMarks::default())
+    }
+
+    /// A table for the node in `own_slot` that resumes the replay window `senders`
+    /// left by an earlier run (see [`SenderMarks::load`]).
+    pub fn with_sender_marks(own_slot: u8, senders: SenderMarks) -> Self {
         Self {
             by_slot: BTreeMap::new(),
             own_slot,
             own_sender: None,
             radio_iface: None,
             counters: SwarmCounters::default(),
-            senders: SenderMarks::default(),
+            senders,
+            fleet_key_bound: false,
         }
+    }
+
+    /// The serialized replay window when it changed since the last call; see
+    /// [`SenderMarks::take_unsaved`].
+    pub fn take_unsaved_sender_marks(&mut self) -> Option<Vec<u8>> {
+        self.senders.take_unsaved()
+    }
+
+    /// Flag the replay window as unsaved again after a failed write.
+    pub fn mark_sender_marks_unsaved(&mut self) {
+        self.senders.mark_unsaved();
+    }
+
+    /// Whether frames are authenticated under a bound fleet key.
+    pub fn fleet_key_bound(&self) -> bool {
+        self.fleet_key_bound
+    }
+
+    /// Record which key the bus authenticates under. The radio supervisor calls
+    /// this whenever it (re)builds its cipher.
+    pub fn set_fleet_key_bound(&mut self, bound: bool) {
+        self.fleet_key_bound = bound;
     }
 
     /// This node's own fleet slot.

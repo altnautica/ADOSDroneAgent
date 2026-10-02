@@ -39,10 +39,10 @@ use ados_radio::bitrate::{
 };
 use ados_radio::cmdsock::{self, CmdState, TxPowerState};
 use ados_radio::config::WfbConfig;
-use ados_radio::hop::derive_pair_key;
+use ados_radio::hop::pair_key_for;
 use ados_radio::link_quality::LinkStats;
 use ados_radio::link_state::derive_link_state;
-use ados_radio::paths::{read_bind_sentinel_active, read_shared_key, WFB_TX_KEY};
+use ados_radio::paths::{load_shared_key, read_bind_sentinel_active, SharedKey, WFB_TX_KEY};
 use ados_radio::process::RadioProcesses;
 use ados_radio::watchdog::{
     aux_liveness_watchdog, control_plane_watchdog, new_counters, tx_health_watchdog,
@@ -50,7 +50,9 @@ use ados_radio::watchdog::{
 };
 
 use bringup::{channel_from_iface, ensure_monitor_and_channel, ensure_radiating};
-use hop_supervisor::{emit_presence_beacons, proof_only_listener, run_hop_supervisor};
+use hop_supervisor::{
+    emit_presence_beacons, proof_only_listener, run_hop_supervisor, write_hop_key_unavailable,
+};
 use reg_gate::{decide_reg_gate, RegGateDecision, BRINGUP_RETRY_SECS, STATE_REG_BLOCKED};
 use sidecar::{
     build_stats_value, json_object_to_fields, read_device_id, write_adapters_sidecar,
@@ -727,8 +729,15 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         };
 
         // ── Load pair key for HMAC derivation ────────────────────────────
-        let drone_key = read_shared_key();
-        let pair_key = derive_pair_key(drone_key.as_ref().map(|k| &k[..]));
+        // An unbound node (no key file) runs on the cold-start constant; a key
+        // file that exists but cannot be read leaves the control plane with no
+        // key at all, so nothing is authenticated rather than everything being
+        // authenticated under a constant anyone can compute.
+        let shared_key = load_shared_key();
+        if let SharedKey::Unavailable(reason) = &shared_key {
+            tracing::error!(%reason, "hop_pair_key_unavailable: hop and presence authentication refused");
+        }
+        let pair_key = pair_key_for(&shared_key);
 
         // ── Regulatory-enabled channel set, for the hop target filter ─────
         // Channels this adapter's reg domain forbids fail `iw set channel` with
@@ -1360,14 +1369,20 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let beacon_fallback = rendezvous_ch;
         let beacon_device = device_id.clone();
         let mut beacon = tokio::spawn(async move {
-            emit_presence_beacons(
-                &beacon_device,
-                &beacon_iface,
-                beacon_fallback,
-                &beacon_key,
-                beacon_cancel,
-            )
-            .await
+            match beacon_key {
+                Some(key) => {
+                    emit_presence_beacons(
+                        &beacon_device,
+                        &beacon_iface,
+                        beacon_fallback,
+                        &key,
+                        beacon_cancel,
+                    )
+                    .await
+                }
+                // No usable key: a beacon nobody can verify is worse than none.
+                None => beacon_cancel.wait().await,
+            }
         });
 
         // Hop supervisor (enabled only when configured). When hop is disabled the
@@ -1382,6 +1397,16 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let hop_proof_reference = proof_reference;
         let hop_operating = operating_channel.clone();
         let mut hop = tokio::spawn(async move {
+            let Some(hop_key) = hop_key else {
+                // The key file exists but cannot be read. Refuse every hop
+                // (manual requests read as unavailable once the receiver drops)
+                // and say why on the hop sidecar, rather than hopping under a
+                // key anyone can compute.
+                drop(manual_hop_rx);
+                write_hop_key_unavailable(&hop_cfg);
+                hop_cancel.wait().await;
+                return;
+            };
             if hop_enabled {
                 run_hop_supervisor(
                     &hop_iface,

@@ -52,6 +52,10 @@ pub struct MeshSnapshot {
     pub partition: bool,
     pub started_at_ms: i64,
     pub last_poll_ms: i64,
+    /// Consecutive polls on which the mesh was up but heard no neighbour. Not
+    /// published: `partition` is the verdict a reader acts on.
+    #[serde(skip)]
+    pub isolated_polls: u32,
 }
 
 impl MeshSnapshot {
@@ -72,6 +76,7 @@ impl MeshSnapshot {
             partition: false,
             started_at_ms: 0,
             last_poll_ms: 0,
+            isolated_polls: 0,
         }
     }
 

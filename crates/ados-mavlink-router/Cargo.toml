@@ -15,10 +15,8 @@ ados-config = { path = "../ados-config" }
 ados-swarm-control = { path = "../ados-swarm-control" }
 # For the beacon `status` bit layout the autonomy status block encodes into.
 ados-swarmbus = { path = "../ados-swarmbus" }
-# The attitude rung's pure control laws (body-rate/thrust command set).
-ados-rate-control = { path = "../ados-rate-control" }
-# The PIC-verdict authority half the attitude rung's precedence gate consults
-# (ground-profile, so the same verdict propagates over every bearer).
+# The PIC-verdict authority half the injector gate consults (ground-profile,
+# so the same verdict propagates over every bearer).
 ados-hid = { path = "../ados-hid" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -49,13 +47,3 @@ tempfile = "3"
 # real half-second. Dev-only: resolver 2 keeps test-util out of the shipped
 # binary's features.
 tokio = { workspace = true, features = ["test-util"] }
-
-# Linux-only: the G3 hardware gate opens the FC's `/dev/ttyACM*` directly, and a
-# CDC-ACM tty comes up in CANONICAL mode — `read()` blocks for a newline and
-# `ICRNL` rewrites 0x0D to 0x0A inside binary MAVLink frames. Both make the
-# gate's telemetry-echo assertion measure garbage. `nix::sys::termios` puts the
-# port in raw mode with a bounded VMIN/VTIME read, which is what makes the
-# assertion honest. Dev-only and target-gated, matching the crate's Linux-only
-# device path; the file still compiles on a non-Linux dev host.
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-nix = { workspace = true }

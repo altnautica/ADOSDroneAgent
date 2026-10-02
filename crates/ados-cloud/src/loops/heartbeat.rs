@@ -85,10 +85,11 @@ fn read_video_streams_sidecar(now_ms: i64) -> Option<Vec<VideoStreamHb>> {
 const LINKED_PEERS_SIDECAR: &str = "/run/ados/linked-peers.json";
 
 /// A linked-peer whose last beacon is older than this is dropped, matching the
-/// listener's 60 s prune window (`LINKED_PEER_STALE_AFTER_S`). Per-entry gating
-/// also covers the dead-writer case: a stale file's entries are all old, so the
-/// whole list reads absent rather than republishing ghost peers.
-const LINKED_PEER_STALE_MS: i64 = 60_000;
+/// listener's 25 s prune window (`LINKED_PEER_STALE_AFTER_S`, the radio's own
+/// peer-stale threshold). Per-entry gating also covers the dead-writer case: a
+/// stale file's entries are all old, so the whole list reads absent rather than
+/// republishing ghost peers.
+const LINKED_PEER_STALE_MS: i64 = 25_000;
 
 /// One raw peer row as the `linked-peers.json` sidecar writes it (snake_case,
 /// the receive listener's `LinkedPeer`). Deserialized then remapped to the

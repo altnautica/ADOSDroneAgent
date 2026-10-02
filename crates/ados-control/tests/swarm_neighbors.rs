@@ -164,6 +164,7 @@ fn table_from_the_air(now: Instant) -> (NeighborTable, [String; 2]) {
     let ground = SwarmCipher::new(&fleet_key);
     let mut table = NeighborTable::new(OWN_SLOT);
     table.set_own_sender(ground.sender_prefix());
+    table.set_fleet_key_bound(true);
     let (hero, degraded) = peers();
     let mut sender_ids: [String; 2] = Default::default();
 
@@ -279,6 +280,7 @@ async fn a_peers_on_air_beacon_becomes_the_published_http_body() {
             "slot": 0,
             "sender_id": own_sender_id,
             "slot_conflict": false,
+            "fleet_key_bound": true,
             "neighbors": [
                 {
                     "slot": 3,

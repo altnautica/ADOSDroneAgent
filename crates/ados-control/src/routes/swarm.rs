@@ -160,6 +160,7 @@ mod tests {
             "slot": 0,
             "sender_id": "00112233445566ff",
             "slot_conflict": false,
+            "fleet_key_bound": true,
             "neighbors": [{
                 "slot": 3,
                 "device_id": "ados-abc123",

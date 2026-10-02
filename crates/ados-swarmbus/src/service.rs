@@ -29,7 +29,7 @@ use crate::config::SwarmBusConfig;
 use crate::crypto::{FleetKeyWatch, SwarmCipher};
 use crate::fleet_join::{load_device_ids, FLEET_REGISTRY_PATH};
 use crate::ingest::Ingest;
-use crate::neighbors::NeighborTable;
+use crate::neighbors::{NeighborTable, SenderMarks};
 use crate::publish::{encode_line, neighbors_payload};
 use crate::schedule::{beacon_delay, random_word, BEACON_PERIOD};
 use crate::vehicle::{beacon_from_state, OWN_STATE_STALE};
@@ -52,6 +52,10 @@ const TX_FAILURE_LIMIT: u32 = 10;
 /// Pairing and binding are human-scale events, so this is deliberately far slower
 /// than the publish rate.
 const REGISTRY_REFRESH: Duration = Duration::from_secs(10);
+
+/// How often the replay window is written out when it changed. Frames accepted
+/// inside the last tick before a crash are the only ones a restart forgets.
+const REPLAY_PERSIST_PERIOD: Duration = Duration::from_secs(1);
 
 /// The latest vehicle-state snapshot, with the instant it was RECEIVED.
 ///
@@ -141,7 +145,13 @@ async fn cancelled(cancel: &watch::Receiver<bool>) {
 
 /// Run the service until `cancel` is set to `true`.
 pub async fn run(cfg: SwarmBusConfig, cancel: watch::Receiver<bool>) {
-    let table = Arc::new(Mutex::new(NeighborTable::new(cfg.fleet_slot)));
+    // The replay window from the previous run is restored before the radio half
+    // starts, so the first frame this run hears is judged against it.
+    let replay_path = std::path::PathBuf::from(&cfg.replay_state_path);
+    let table = Arc::new(Mutex::new(NeighborTable::with_sender_marks(
+        cfg.fleet_slot,
+        SenderMarks::load(&replay_path),
+    )));
 
     // The publish socket comes up first and unconditionally. A bus with no radio
     // still answers `GET /api/swarm/neighbors` with an empty table and zeroed
@@ -178,12 +188,53 @@ pub async fn run(cfg: SwarmBusConfig, cancel: watch::Receiver<bool>) {
         cancel.clone(),
     ));
 
+    let persist = tokio::spawn(replay_persist_loop(
+        replay_path.clone(),
+        table.clone(),
+        cancel.clone(),
+    ));
+
     cancelled(&cancel).await;
     publish.abort();
     radio.abort();
     state_reader.abort();
+    // Not aborted: it returns between writes, so no write is in flight when the
+    // final one below runs.
+    let _ = persist.await;
+    // The last accepts of this run, so a clean restart forgets none of them.
+    persist_replay(&replay_path, &table);
     let _ = std::fs::remove_file(&swarm_sock);
     tracing::info!("ados-swarmbus stopped");
+}
+
+/// Write the replay window to `path` when it changed since the last write. A
+/// failed write is logged and left flagged, so the next call retries it.
+fn persist_replay(path: &Path, table: &Mutex<NeighborTable>) {
+    let Some(body) = table.lock().take_unsaved_sender_marks() else {
+        return;
+    };
+    if let Err(e) = ados_protocol::sidecar::write_durable(path, &body) {
+        tracing::warn!(path = %path.display(), error = %e, "swarm_replay_state_write_failed");
+        table.lock().mark_sender_marks_unsaved();
+    }
+}
+
+/// Persist the replay window at most once per [`REPLAY_PERSIST_PERIOD`] until
+/// `cancel` fires. The fsync runs off the async workers, and each write is
+/// awaited before the next tick, so two writes never share the temp file.
+async fn replay_persist_loop(
+    path: std::path::PathBuf,
+    table: Arc<Mutex<NeighborTable>>,
+    cancel: watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = cancelled(&cancel) => return,
+            _ = tokio::time::sleep(REPLAY_PERSIST_PERIOD) => {}
+        }
+        let (path, table) = (path.clone(), table.clone());
+        let _ = tokio::task::spawn_blocking(move || persist_replay(&path, &table)).await;
+    }
 }
 
 /// Why the radio-bound loops were torn down.
@@ -208,7 +259,18 @@ async fn radio_supervisor(
     state: SharedState,
     cancel: watch::Receiver<bool>,
 ) {
-    let mut keys = FleetKeyWatch::new(ados_radio::paths::DRONE_KEY);
+    // A key file that exists but cannot be read refuses the bus: it is not
+    // started on the cold-start constant. Re-checked until it reads cleanly.
+    let mut keys = loop {
+        if let Some(k) = FleetKeyWatch::new(ados_radio::paths::DRONE_KEY) {
+            break k;
+        }
+        tracing::error!("swarm_bus_refused: key_unavailable");
+        tokio::select! {
+            _ = cancelled(&cancel) => return,
+            _ = tokio::time::sleep(REGISTRY_REFRESH) => {}
+        }
+    };
     let mut cipher = Arc::new(SwarmCipher::new(keys.key()));
     // The prefix survives every re-key below, so recording it once is enough.
     table.lock().set_own_sender(cipher.sender_prefix());
@@ -227,7 +289,13 @@ async fn radio_supervisor(
             slot = bus.slot(),
             "swarm bus open"
         );
-        table.lock().set_radio_iface(Some(bus.iface().to_string()));
+        {
+            let mut t = table.lock();
+            t.set_radio_iface(Some(bus.iface().to_string()));
+            // Re-stated on every open: a re-key from the cold-start key to a
+            // bound one reopens the bus through here.
+            t.set_fleet_key_bound(keys.bound());
+        }
 
         let mut rx = tokio::spawn(recv_loop(bus.clone(), table.clone()));
         // A ground station receives only. Slot 0 is not an aircraft, so it has no
@@ -839,6 +907,11 @@ mod tests {
             interface: "nonexistent-swarm-iface0".to_string(),
             fleet_slot: ados_radio::config::SLOT_GROUND,
             socket_dir: dir.path().to_string_lossy().into_owned(),
+            replay_state_path: dir
+                .path()
+                .join("replay.json")
+                .to_string_lossy()
+                .into_owned(),
             ..SwarmBusConfig::default()
         };
         let (cancel, cancel_rx) = watch::channel(false);
@@ -851,5 +924,73 @@ mod tests {
             !Path::new(&cfg.swarm_socket_path()).exists(),
             "shutdown removes the socket"
         );
+    }
+
+    /// A frame heard before a restart is still a replay after it. Without the
+    /// persisted window the restarted receiver read the slot as never heard,
+    /// accepted the captured frame as fresh, and then refused the real sender's
+    /// next run as a second sender while the replay kept the slot live.
+    #[test]
+    fn a_frame_heard_before_a_restart_is_refused_after_it() {
+        use crate::beacon::SwarmBeacon;
+        use crate::crypto::SenderNonce;
+        use crate::neighbors::Recorded;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("swarmbus-replay.json");
+        let t0 = Instant::now();
+        let beacon = SwarmBeacon {
+            slot: 3,
+            ..SwarmBeacon::default()
+        };
+        let run = |counter| SenderNonce {
+            prefix: [0x5A; 8],
+            counter,
+        };
+
+        let before = Mutex::new(NeighborTable::new(1));
+        assert_eq!(
+            before.lock().record(beacon, run(40), None, t0),
+            Recorded::Accepted
+        );
+        persist_replay(&path, &before);
+        drop(before);
+
+        // The restarted receiver: empty neighbour table, window read back.
+        let mut after = NeighborTable::with_sender_marks(1, SenderMarks::load(&path));
+        assert!(after.is_empty());
+        assert_eq!(after.record(beacon, run(40), None, t0), Recorded::Replayed);
+        assert_eq!(after.record(beacon, run(12), None, t0), Recorded::Replayed);
+        // The same sender carrying on is still heard.
+        assert_eq!(after.record(beacon, run(41), None, t0), Recorded::Accepted);
+    }
+
+    /// Writes happen only when something was accepted, and a failed write is
+    /// retried on the next call rather than lost.
+    #[test]
+    fn the_window_is_written_only_when_it_changed_and_a_failed_write_retries() {
+        use crate::beacon::SwarmBeacon;
+        use crate::crypto::SenderNonce;
+
+        let dir = tempfile::tempdir().unwrap();
+        let table = Mutex::new(NeighborTable::new(1));
+        let path = dir.path().join("replay.json");
+        persist_replay(&path, &table);
+        assert!(!path.exists(), "nothing heard, nothing written");
+
+        let beacon = SwarmBeacon {
+            slot: 3,
+            ..SwarmBeacon::default()
+        };
+        let sender = SenderNonce {
+            prefix: [1; 8],
+            counter: 0,
+        };
+        table.lock().record(beacon, sender, None, Instant::now());
+        let unwritable = dir.path().join("missing-dir/replay.json");
+        persist_replay(&unwritable, &table);
+        assert!(!unwritable.exists());
+        persist_replay(&path, &table);
+        assert!(path.exists(), "the failed write was retried");
     }
 }

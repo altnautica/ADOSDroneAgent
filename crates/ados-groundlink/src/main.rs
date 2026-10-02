@@ -425,13 +425,15 @@ async fn run_direct(
     // the shutdown path below also restores that adapter to managed mode.
     let resolved_iface: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     // The hop follower retunes the GS receive radio to a drone-announced channel
-    // at the announce epoch, so a coordinated hop is a brief dwell-synced retune
-    // rather than a blackout the valid-packet watchdog has to sweep out of.
+    // when its countdown expires, so a coordinated hop is a brief retune rather
+    // than a blackout the valid-packet watchdog has to sweep out of. It verifies
+    // each follow against the receive generation's valid-packet counter, which
+    // the receive loop hands it per generation.
     let hop_follower =
         presence::HopFollower::new(Arc::new(IwChannelSetter), resolved_iface.clone());
     tokio::spawn(presence::listen_supervisor(
         presence_cache.clone(),
-        Some(hop_follower),
+        Some(hop_follower.clone()),
         service_slots.clone(),
     ));
     {
@@ -627,6 +629,7 @@ async fn run_direct(
             &config,
             presence_cache,
             resolved_iface.clone(),
+            hop_follower,
             aux_counters,
             progress,
         ) => {}
@@ -759,6 +762,7 @@ async fn receive_loop(
     config: &WfbConfig,
     presence_cache: GsPresenceCache,
     resolved_iface: Arc<Mutex<Option<String>>>,
+    hop_follower: presence::HopFollower,
     aux_counters: ados_groundlink::AuxCounters,
     progress: ados_supervisor::sdnotify::MonitorProgress,
 ) {
@@ -864,6 +868,14 @@ async fn receive_loop(
             None => {
                 manager.set_adapter(wfb_rx::GsAdapterInfo::default());
                 tracing::warn!("ground_no_wfb_adapter_found");
+                // Replace whatever the last generation published: an adapter
+                // pulled mid-session must not leave `active` on the sidecar.
+                wfb_rx::write_no_adapter_sidecar(
+                    &config.interface,
+                    config.rendezvous_channel(),
+                    config,
+                    Some(&ingest),
+                );
                 tokio::time::sleep(RETRY_INTERVAL).await;
                 continue;
             }
@@ -966,6 +978,7 @@ async fn receive_loop(
 
         // Shared liveness state for this generation.
         let counter = SharedValidCounter::new();
+        hop_follower.set_valid_counter(counter.clone());
         let link = Arc::new(Mutex::new(LinkStats::default()));
         let last_stdout_at = Arc::new(Mutex::new(clock.monotonic()));
         let zombie_kills = Arc::new(AtomicU32::new(0));

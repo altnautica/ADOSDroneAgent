@@ -567,11 +567,12 @@ async fn wait_for_slot_change<R: Fn() -> u8>(resolve: &R, current: u8, poll: Dur
 ///
 /// The two downstream ports are single-stream surfaces (one mediamtx ingest, one
 /// LCD tap), so exactly one slot is fanned out at a time: the operator's hero.
-/// Every other registered slot is still fully received and FEC-decoded onto
-/// `VIDEO_RX_PORT_BASE + slot`, but nothing reads those ports — no per-drone
-/// ingest exists yet — so a non-hero drone's video is decoded and discarded.
-/// That is what makes serving the RIGHT slot here the whole of what the operator
-/// sees.
+/// Apart from the receive chain's primary, only the hero slot's video receiver
+/// runs (see `wfb_rx::SlotReceivers`), and nothing reads any slot's video port
+/// but this one: another drone's video is not served by this ground station
+/// until it is made the hero. That is what makes serving the
+/// RIGHT slot here the whole of what the operator sees, and why the fleet
+/// roster marks the served slot as `video_hero`.
 pub async fn run_default_fanout(
     fallback_slot: u8,
     counters: FanoutCounters,

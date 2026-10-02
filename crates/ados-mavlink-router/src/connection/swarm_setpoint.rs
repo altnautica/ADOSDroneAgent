@@ -35,9 +35,11 @@
 //! # What it never does
 //!
 //! No failsafe of its own, and none of ArduPilot's replaced. When the swarm is
-//! disabled, the vehicle is disarmed, the FC is out of GUIDED, or the neighbour
-//! table has been empty for `NEIGHBOR_STALE`, this loop emits NOTHING and the FC
-//! holds on its own terms.
+//! disabled, the vehicle is disarmed, the FC is out of GUIDED, the neighbour
+//! table has been empty for `NEIGHBOR_STALE`, or the autopilot has not yet
+//! named its own system id in a HEARTBEAT, this loop emits NOTHING and the FC
+//! holds on its own terms. Setpoints are addressed to that latched id, never
+//! to a conventional 1/1: a fleet drone flies with its slot as its system id.
 //!
 //! # Config changes
 //!
@@ -439,22 +441,47 @@ async fn control_loop(
             }
         };
 
+        // The fleet gives each aircraft its own system id, so the target comes
+        // from the autopilot's own HEARTBEAT. Before one has latched there is no
+        // address to command and the layer does not run: ticking anyway would
+        // count setpoints that went nowhere.
+        let Some(target) = fc.learned_fc_identity() else {
+            status.stand_down();
+            continue;
+        };
         let out = live.tick(own, &fixes, now);
         status.publish(out.precedence, out.emergency, live.controller.counters());
         if let Some(setpoint) = out.setpoint {
-            send_setpoint(&fc, &setpoint).await;
+            send_setpoint(&fc, target, &setpoint).await;
         }
     }
 }
 
-/// Turn a control-layer setpoint into MAVLink 86 and send it.
+/// Turn a control-layer setpoint into MAVLink 86 and send it to `target`, the
+/// autopilot's latched `(system, component)` id.
 ///
 /// The message is built through `ados_protocol::mavlink::GuidedSetpoint`, which
 /// validates the `type_mask` and the coordinate frame and refuses a NaN on an
 /// active axis. That validation is the reason this goes through the shared builder
 /// instead of constructing the payload here: a malformed setpoint must be refused
 /// on this side of the wire, not diagnosed from the vehicle's behaviour.
-async fn send_setpoint(fc: &Arc<FcConnection>, setpoint: &Setpoint) {
+async fn send_setpoint(fc: &Arc<FcConnection>, target: (u8, u8), setpoint: &Setpoint) {
+    let msg = match setpoint_message(target, setpoint) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, kind = ?setpoint.kind, "swarm_setpoint_rejected");
+            return;
+        }
+    };
+    fc.send_msg(&msg).await;
+}
+
+/// The validated `SET_POSITION_TARGET_GLOBAL_INT` for `setpoint`, addressed to
+/// `target`.
+fn setpoint_message(
+    target: (u8, u8),
+    setpoint: &Setpoint,
+) -> Result<ados_protocol::mavlink::MavMessage, ados_protocol::mavlink::SetpointError> {
     let wire = GuidedSetpoint {
         kind: WireSetpointKind::GlobalInt,
         coordinate_frame: setpoint.coordinate_frame(),
@@ -472,23 +499,38 @@ async fn send_setpoint(fc: &Arc<FcConnection>, setpoint: &Setpoint) {
         yaw: 0.0,
         yaw_rate: 0.0,
     };
-    // Target ids, not ours: the autopilot is system 1 / component 1
-    // (MAV_COMP_ID_AUTOPILOT1) by MAVLink convention, and the router's own
-    // identity goes in the header `send_msg` builds.
-    let msg = match wire.build_message(1, 1) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(error = %e, kind = ?setpoint.kind, "swarm_setpoint_rejected");
-            return;
-        }
-    };
-    fc.send_msg(&msg).await;
+    // Target ids are the autopilot's, not ours: the router's own identity goes
+    // in the header `send_msg` builds.
+    wire.build_message(target.0, target.1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ados_swarm_control::geo::Ned;
+
+    #[test]
+    fn a_setpoint_is_addressed_to_the_latched_autopilot_not_system_one() {
+        // A fleet drone on slot 3 flies with system id 3; a setpoint for system
+        // 1 is dropped by its autopilot while the counters say it was sent.
+        use ados_protocol::mavlink::Message as _;
+        let sp = Setpoint::velocity(Ned::new(1.0, 0.0, 0.0));
+        let msg = setpoint_message((3, 1), &sp).expect("builds");
+        assert_eq!(msg.target_system_id(), Some(3));
+        assert_eq!(msg.target_component_id(), Some(1));
+    }
+
+    #[test]
+    fn no_autopilot_identity_is_known_before_its_heartbeat() {
+        let state = Arc::new(Mutex::new(VehicleState::default()));
+        let params = Arc::new(Mutex::new(crate::param_cache::ParamCache::new(
+            "/tmp/ados-swarm-setpoint-test-params.json",
+        )));
+        let fc = FcConnection::new(crate::config::MavlinkConfig::default(), state, params);
+        assert_eq!(fc.learned_fc_identity(), None);
+        fc.latch_fc_identity(3, 1);
+        assert_eq!(fc.learned_fc_identity(), Some((3, 1)));
+    }
 
     #[test]
     fn the_status_block_round_trips_every_precedence_level() {

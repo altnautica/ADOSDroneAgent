@@ -38,6 +38,10 @@ fn ground_station_config(dir: &Path) -> SwarmBusConfig {
         fleet_id: 7,
         fleet_slot: 0,
         socket_dir: dir.to_string_lossy().into_owned(),
+        replay_state_path: dir
+            .join("swarmbus-replay.json")
+            .to_string_lossy()
+            .into_owned(),
     }
 }
 

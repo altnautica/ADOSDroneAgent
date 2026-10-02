@@ -1493,12 +1493,11 @@ fn read_crsf_status_in(path: &Path, now: std::time::SystemTime) -> Option<Value>
 const LINKED_PEERS_SIDECAR: &str = "linked-peers.json";
 
 /// A linked peer whose last decoded beacon is older than this reads as stale and
-/// is dropped, matching the receive listener's prune window
-/// (`LINKED_PEER_STALE_AFTER_S`) and the cloud heartbeat's fold of the same
-/// sidecar. Per-entry gating also covers the dead-writer case: a stale file's
-/// entries are all old, so the whole fold reads absent rather than republishing
-/// ghost peers.
-const LINKED_PEER_STALE_S: f64 = 60.0;
+/// is dropped: the receive listener's own prune window, which is the radio's
+/// peer-stale threshold. Per-entry gating also covers the dead-writer case: a
+/// stale file's entries are all old, so the whole fold reads absent rather than
+/// republishing ghost peers.
+const LINKED_PEER_STALE_S: f64 = ados_groundlink::presence::LINKED_PEER_STALE_AFTER_S;
 
 /// One raw peer row as the linked-peers sidecar writes it (snake_case, the
 /// receive listener's `LinkedPeer`). The sidecar's `version` / `wall_time_unix`
@@ -1515,6 +1514,9 @@ pub(crate) struct LinkedPeerRow {
     rssi_dbm: i8,
     #[serde(default)]
     last_seen_unix: f64,
+    /// The fleet slot whose receive chain decoded the beacon.
+    #[serde(default)]
+    slot: Option<u8>,
 }
 
 /// The linked-peers sidecar document (the peer list plus header keys we ignore).
@@ -1599,6 +1601,9 @@ fn read_linked_peers_in(path: &Path, now: f64) -> Vec<(String, Value)> {
                 // `seen_at_unix`. Remap on emit so this LAN producer stays in
                 // lockstep with the FullStatusResponse.linked_peers reader.
                 "seen_at_unix": p.last_seen_unix,
+                // Which fleet slot's receiver decoded the beacon, so a peer
+                // heard on a slot other than its own is visible.
+                "slot": p.slot,
             })
         })
         .collect();
@@ -2848,8 +2853,8 @@ mod tests {
             dir.path().join("linked-peers.json"),
             format!(
                 r#"{{"version":1,"wall_time_unix":{now},"peers":[
-                    {{"device_id":"drone-a","role":"drone","channel":149,"rssi_dbm":-51,"last_seen_unix":{now}}},
-                    {{"device_id":"drone-b","role":"drone","channel":157,"rssi_dbm":-63,"last_seen_unix":{older}}}
+                    {{"device_id":"drone-a","role":"drone","channel":149,"rssi_dbm":-51,"last_seen_unix":{now},"slot":2}},
+                    {{"device_id":"drone-b","role":"drone","channel":157,"rssi_dbm":-63,"last_seen_unix":{older},"slot":3}}
                 ]}}"#
             ),
         )
@@ -2870,7 +2875,14 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["channel", "device_id", "role", "rssi_dbm", "seen_at_unix"]
+            [
+                "channel",
+                "device_id",
+                "role",
+                "rssi_dbm",
+                "seen_at_unix",
+                "slot"
+            ]
         );
         // The sidecar's `last_seen_unix` was remapped — never surfaced verbatim.
         assert!(!entry.contains_key("last_seen_unix"));
@@ -2879,6 +2891,7 @@ mod tests {
         assert_eq!(entry["channel"], json!(149));
         assert_eq!(entry["rssi_dbm"], json!(-51));
         assert_eq!(entry["seen_at_unix"], json!(now));
+        assert_eq!(entry["slot"], json!(2));
 
         // The camelCase scalar fallback carries the freshest peer.
         assert_eq!(map.get("peerDeviceId"), Some(&json!("drone-a")));
@@ -2886,12 +2899,14 @@ mod tests {
     }
 
     /// Every entry past the prune window → nothing folded, so a quiet / dead lane
-    /// clears the surface rather than pinning ghost peers.
+    /// clears the surface rather than pinning ghost peers. The window is the
+    /// radio's own 25 s peer-stale threshold: a drone silent for 30 s has
+    /// already returned home and is not linked.
     #[test]
     fn linked_peers_absent_when_every_entry_is_stale() {
         let dir = tempfile::tempdir().unwrap();
         let now = 1_700_000_000.0;
-        let stale = now - 120.0; // > the 60 s prune window
+        let stale = now - 30.0;
         std::fs::write(
             dir.path().join("linked-peers.json"),
             format!(

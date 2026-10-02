@@ -132,15 +132,23 @@ impl RelayState {
 
 /// Build the `wfb_rx -f` FEC-forward args for the drone-facing adapter. Uses the rx key
 /// (decrypts the drone uplink).
+///
+/// `link_id` is the transmitting drone's (`link_id(fleet_id, slot)`). `wfb_rx`
+/// filters on a `channel_id` built from it, so a forwarder without `-i` sits on
+/// wfb-ng's default link id 0, which no drone transmits on, and forwards
+/// nothing.
 pub fn forward_args(
     drone_iface: &str,
     receiver_ip: &str,
     receiver_port: u16,
     rx_key: &Path,
+    link_id: u32,
 ) -> Vec<String> {
     vec![
         "-p".into(),
         "0".into(),
+        "-i".into(),
+        link_id.to_string(),
         "-f".into(),
         format!("{receiver_ip}:{receiver_port}"),
         "-K".into(),
@@ -156,9 +164,10 @@ pub async fn spawn_forwarder(
     drone_iface: &str,
     receiver_ip: &str,
     receiver_port: u16,
+    link_id: u32,
 ) -> std::io::Result<GsWfbProcess> {
     let rx_key = Path::new(ados_radio::paths::WFB_RX_KEY);
-    let args = forward_args(drone_iface, receiver_ip, receiver_port, rx_key);
+    let args = forward_args(drone_iface, receiver_ip, receiver_port, rx_key, link_id);
     GsWfbProcess::spawn("wfb_rx", &args, Stdout::Null, Some(FORWARDER_LOG)).await
 }
 
@@ -227,7 +236,11 @@ pub async fn run(
     }
 
     let mut forwarder: Option<GsWfbProcess> = None;
-    let mut current_receiver: Option<(String, u16)> = None;
+    // The receiver the forwarder feeds and the drone link it forwards. A change
+    // in either (a new receiver, or the operator picking a different hero)
+    // replaces the forwarder.
+    let mut current_target: Option<(String, u16, u32)> = None;
+    let mut reported_no_drone = false;
 
     loop {
         // One stamp per pass: mDNS resolve, forwarder reconcile, state write.
@@ -241,18 +254,23 @@ pub async fn run(
         if forwarder_needs_respawn(forwarder.is_some(), running) {
             tracing::warn!("wfb_relay_forwarder_exited_respawning");
             forwarder = None;
-            current_receiver = None;
+            current_target = None;
             state.lock().await.up = false;
         }
         let resolved =
             crate::mdns::resolve_receiver(&service_type, &mesh_iface, RESOLVE_TIMEOUT).await;
         let now = mesh_events::now_ms();
+        let link = crate::fleet_hero::served_video_link_id();
+        if link.is_none() && !reported_no_drone {
+            tracing::warn!("wfb_relay_no_registered_drone");
+        }
+        reported_no_drone = link.is_none();
 
-        if let Some((ip, port)) = resolved {
+        if let (Some((ip, port)), Some(link_id)) = (resolved.clone(), link) {
             state.lock().await.receiver_last_seen_ms = now;
-            if current_receiver.as_ref() != Some(&(ip.clone(), port)) {
-                // Receiver changed (or the forwarder died): tear down the old
-                // forwarder, spawn fresh.
+            if current_target.as_ref() != Some(&(ip.clone(), port, link_id)) {
+                // Receiver or drone changed (or the forwarder died): tear down
+                // the old forwarder, spawn fresh.
                 if let Some(mut old) = forwarder.take() {
                     old.terminate_then_kill(FORWARDER_GRACE).await;
                 }
@@ -261,16 +279,16 @@ pub async fn run(
                     s.receiver_ip = Some(ip.clone());
                     s.receiver_port = port as i64;
                 }
-                match spawn_forwarder(&drone_iface, &ip, port).await {
+                match spawn_forwarder(&drone_iface, &ip, port, link_id).await {
                     Ok(proc) => {
                         forwarder = Some(proc);
                         state.lock().await.up = true;
-                        current_receiver = Some((ip.clone(), port));
+                        current_target = Some((ip.clone(), port, link_id));
                         mesh_events::emit(
                             mesh_events::KIND_RELAY_CONNECTED,
                             json!({ "receiver_ip": ip, "receiver_port": port }),
                         );
-                        tracing::info!(receiver = %ip, port, "wfb_relay_forwarding");
+                        tracing::info!(receiver = %ip, port, link_id, "wfb_relay_forwarding");
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "wfb_relay_spawn_failed");
@@ -278,6 +296,16 @@ pub async fn run(
                     }
                 }
             }
+        } else if link.is_none() {
+            // No drone to forward: nothing this relay forwards is real.
+            if let Some(mut old) = forwarder.take() {
+                old.terminate_then_kill(FORWARDER_GRACE).await;
+            }
+            current_target = None;
+            if resolved.is_some() {
+                state.lock().await.receiver_last_seen_ms = now;
+            }
+            state.lock().await.up = false;
         } else {
             // No receiver this poll: if we had one and the grace window passed,
             // mark the link down, emit the event, and tear the forwarder down.
@@ -295,7 +323,7 @@ pub async fn run(
                 if let Some(mut old) = forwarder.take() {
                     old.terminate_then_kill(FORWARDER_GRACE).await;
                 }
-                current_receiver = None;
+                current_target = None;
                 tracing::warn!(stale_ms = stale, "wfb_relay_receiver_unreachable");
             }
         }
@@ -365,14 +393,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn forward_args_match_python() {
-        // wfb_rx -p 0 -f <ip>:<port> -K <rx.key> <iface>
-        let a = forward_args("wlan0", "10.0.0.5", 5800, Path::new("/etc/ados/wfb/rx.key"));
+    fn the_forwarder_listens_on_the_drone_s_link_id() {
+        // wfb_rx -p 0 -i <link> -f <ip>:<port> -K <rx.key> <iface>. Without
+        // `-i` the forwarder sat on link id 0 and captured nothing from a
+        // fleet drone, which transmits on link_id(fleet_id, slot >= 1).
+        let link = ados_radio::config::link_id(1, 2);
+        let a = forward_args(
+            "wlan0",
+            "10.0.0.5",
+            5800,
+            Path::new("/etc/ados/wfb/rx.key"),
+            link,
+        );
         assert_eq!(
             a,
             vec![
                 "-p",
                 "0",
+                "-i",
+                "258",
                 "-f",
                 "10.0.0.5:5800",
                 "-K",
@@ -380,6 +419,7 @@ mod tests {
                 "wlan0"
             ]
         );
+        assert_eq!(link, 258);
     }
 
     /// A forwarder that exited on its own is respawned; a live one, or no

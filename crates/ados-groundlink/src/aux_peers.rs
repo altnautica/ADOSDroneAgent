@@ -65,6 +65,12 @@ pub const STATUS_STALE_AFTER_S: f64 = 15.0;
 /// A peer with no frame of any kind inside this window is dropped entirely.
 pub const PEER_STALE_AFTER_S: f64 = 120.0;
 
+/// A slot's flight-controller system id older than this no longer counts as
+/// that slot's current identity. The drone tees its autopilot's 1 Hz HEARTBEAT,
+/// so this rides out a burst of lost datagrams while a drone that has gone
+/// quiet stops holding a system id another aircraft may now need.
+pub const SYSTEM_ID_STALE_AFTER_S: f64 = 15.0;
+
 /// Most peers held at once.
 ///
 /// A fleet is up to `FLEET_MAX_SLOTS` (24) drones on one ground radio, and the
@@ -125,17 +131,18 @@ fn seq_is_newer(candidate: u32, held: u32) -> bool {
 #[derive(Debug, Default, Clone)]
 pub struct AuxPeerCache {
     inner: Arc<Mutex<BTreeMap<String, PeerRecord>>>,
-    /// The MAVLink system id most recently seen on each fleet slot.
+    /// The flight-controller system id most recently seen on each fleet slot,
+    /// with the wall-clock time it was last seen.
     ///
     /// Kept apart from the status-derived records above because it comes from a
     /// different source with different evidence: a status frame is a node
-    /// describing itself, while this is read off the MAVLink header of traffic
-    /// that node's flight controller actually produced. Only the second can
-    /// answer whether two aircraft are addressable apart, which is the question
-    /// that matters here -- two flight controllers on one system id are ONE
-    /// vehicle to a ground station, and a command sent to that id is accepted by
-    /// both of them.
-    system_ids: Arc<Mutex<BTreeMap<u8, u8>>>,
+    /// describing itself, while this is read off the MAVLink header of the
+    /// HEARTBEAT that node's flight controller actually produced. Only the
+    /// second can answer whether two aircraft are addressable apart, which is
+    /// the question that matters here -- two flight controllers on one system id
+    /// are ONE vehicle to a ground station, and a command sent to that id is
+    /// accepted by both of them.
+    system_ids: Arc<Mutex<BTreeMap<u8, (u8, f64)>>>,
 }
 
 impl AuxPeerCache {
@@ -143,33 +150,77 @@ impl AuxPeerCache {
         Self::default()
     }
 
-    /// Note the MAVLink system id seen on `slot`.
+    /// Note the flight-controller system id seen on `slot`.
     ///
-    /// Returns the set of OTHER slots already presenting the same id, so the
+    /// Returns the set of OTHER slots currently presenting the same id, so the
     /// caller can report a collision the first time it becomes observable. It
     /// returns rather than logs because the decision of how loudly to report
     /// belongs to the consumer, which knows whether this is the first sighting.
     pub fn observe_system_id(&self, slot: u8, system_id: u8) -> Vec<u8> {
-        let mut map = self.system_ids.lock().unwrap();
-        let previous = map.insert(slot, system_id);
-        // Nothing to say when this slot has not changed what it presents; the
-        // collision, if any, was already reported when it first appeared.
-        if previous == Some(system_id) {
-            return Vec::new();
+        self.observe_system_id_at(slot, system_id, now_unix())
+    }
+
+    /// [`Self::observe_system_id`] with an injected clock, for tests.
+    pub fn observe_system_id_at(&self, slot: u8, system_id: u8, now: f64) -> Vec<u8> {
+        let mut map = self.system_ids.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = map.insert(slot, (system_id, now));
+        // Nothing to say when this slot has not changed what it presents and
+        // was not stale; the collision, if any, was already reported.
+        if let Some((id, seen)) = previous {
+            if id == system_id && now - seen <= SYSTEM_ID_STALE_AFTER_S {
+                return Vec::new();
+            }
         }
         map.iter()
-            .filter(|(other_slot, other_id)| **other_slot != slot && **other_id == system_id)
+            .filter(|(other_slot, (other_id, seen))| {
+                **other_slot != slot
+                    && *other_id == system_id
+                    && now - *seen <= SYSTEM_ID_STALE_AFTER_S
+            })
             .map(|(other_slot, _)| *other_slot)
             .collect()
     }
 
-    /// Every slot's currently-observed MAVLink system id, in slot order.
+    /// Every slot's currently-observed flight-controller system id, in slot
+    /// order, fresh entries only.
     pub fn system_ids_by_slot(&self) -> Vec<(u8, u8)> {
+        self.system_ids_by_slot_at(now_unix())
+    }
+
+    fn system_ids_by_slot_at(&self, now: f64) -> Vec<(u8, u8)> {
         self.system_ids
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .map(|(s, i)| (*s, *i))
+            .filter(|(_, (_, seen))| now - *seen <= SYSTEM_ID_STALE_AFTER_S)
+            .map(|(s, (i, _))| (*s, *i))
+            .collect()
+    }
+
+    /// System ids that two or more fresh slots present at once, ascending.
+    pub fn conflicting_system_ids(&self, now: f64) -> Vec<u8> {
+        let mut counts: BTreeMap<u8, usize> = BTreeMap::new();
+        for (_, id) in self.system_ids_by_slot_at(now) {
+            *counts.entry(id).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The `fleet_system_ids` sidecar block: one row per slot with a fresh
+    /// flight-controller system id.
+    fn fleet_system_ids_payload(&self, now: f64) -> Vec<Value> {
+        self.system_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, (_, seen))| now - *seen <= SYSTEM_ID_STALE_AFTER_S)
+            .map(|(slot, (id, seen))| {
+                json!({"slot": slot, "fc_system_id": id, "seen_at_unix": seen})
+            })
             .collect()
     }
 
@@ -298,14 +349,85 @@ impl AuxPeerCache {
     }
 
     /// The full sidecar document.
+    ///
+    /// `fleet_system_ids` and `conflicting_system_ids` are what the fleet
+    /// roster and the ground station's uplink read: a system id two linked
+    /// aircraft share cannot be commanded safely, so the uplink holds every
+    /// frame addressed to it while the conflict lasts.
     pub fn sidecar_payload(&self, now: f64) -> Value {
         json!({
             "version": AUX_PEERS_SIDECAR_VERSION,
             "wall_time_unix": now,
             "status_stale_after_s": STATUS_STALE_AFTER_S,
             "peers": self.peers_payload(now),
+            "fleet_system_ids": self.fleet_system_ids_payload(now),
+            "conflicting_system_ids": self.conflicting_system_ids(now),
         })
     }
+}
+
+/// One slot's flight-controller identity as the fleet roster reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotSystemId {
+    /// The system id the slot's flight controller is heartbeating with.
+    pub fc_system_id: u8,
+    /// Whether another linked slot presents the same system id.
+    pub conflict: bool,
+}
+
+/// Read the per-slot flight-controller system ids out of a relayed-status
+/// document, re-aged against `now`.
+///
+/// A document whose writer stamp is older than `max_doc_age_s` (or from the
+/// future by more than a second) yields nothing: a stopped receive process
+/// must not keep asserting identities it no longer hears. Each row is
+/// re-aged against [`SYSTEM_ID_STALE_AFTER_S`] too, and the conflict flag is
+/// recomputed from the surviving rows rather than trusted from the writer.
+pub fn slot_system_ids_from_sidecar(
+    doc: &Value,
+    now: f64,
+    max_doc_age_s: f64,
+) -> BTreeMap<u8, SlotSystemId> {
+    let mut out = BTreeMap::new();
+    let written_at = doc
+        .get("wall_time_unix")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let age = now - written_at;
+    if written_at <= 0.0 || !(-1.0..=max_doc_age_s).contains(&age) {
+        return out;
+    }
+    let rows = doc
+        .get("fleet_system_ids")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for row in rows {
+        let slot = row.get("slot").and_then(Value::as_u64);
+        let id = row.get("fc_system_id").and_then(Value::as_u64);
+        let seen = row.get("seen_at_unix").and_then(Value::as_f64);
+        let (Some(slot), Some(id), Some(seen)) = (slot, id, seen) else {
+            continue;
+        };
+        let (Ok(slot), Ok(id)) = (u8::try_from(slot), u8::try_from(id)) else {
+            continue;
+        };
+        if now - seen > SYSTEM_ID_STALE_AFTER_S {
+            continue;
+        }
+        out.insert(
+            slot,
+            SlotSystemId {
+                fc_system_id: id,
+                conflict: false,
+            },
+        );
+    }
+    let ids: Vec<u8> = out.values().map(|s| s.fc_system_id).collect();
+    for entry in out.values_mut() {
+        entry.conflict = ids.iter().filter(|i| **i == entry.fc_system_id).count() > 1;
+    }
+    out
 }
 
 fn round2(x: f64) -> f64 {
@@ -572,5 +694,52 @@ mod tests {
         // used, without hardcoding it.
         assert_eq!(doc["status_stale_after_s"], STATUS_STALE_AFTER_S);
         assert!(doc["peers"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn two_linked_slots_on_one_system_id_are_published_as_a_conflict() {
+        let cache = AuxPeerCache::new();
+        let t0 = 1_700_000_000.0;
+        assert!(cache.observe_system_id_at(1, 1, t0).is_empty());
+        assert_eq!(cache.observe_system_id_at(2, 1, t0 + 1.0), vec![1]);
+        cache.observe_system_id_at(3, 3, t0 + 1.0);
+
+        let doc = cache.sidecar_payload(t0 + 2.0);
+        assert_eq!(doc["conflicting_system_ids"], json!([1]));
+        let ids = slot_system_ids_from_sidecar(&doc, t0 + 2.0, 20.0);
+        assert_eq!(
+            ids.get(&1),
+            Some(&SlotSystemId {
+                fc_system_id: 1,
+                conflict: true
+            })
+        );
+        assert!(ids[&2].conflict);
+        assert_eq!(
+            ids.get(&3),
+            Some(&SlotSystemId {
+                fc_system_id: 3,
+                conflict: false
+            })
+        );
+    }
+
+    #[test]
+    fn a_slot_that_went_quiet_stops_holding_its_system_id() {
+        let cache = AuxPeerCache::new();
+        let t0 = 1_700_000_000.0;
+        cache.observe_system_id_at(1, 1, t0);
+        let later = t0 + SYSTEM_ID_STALE_AFTER_S + 1.0;
+        // A different aircraft now on id 1 is not in conflict with a silent slot.
+        assert!(cache.observe_system_id_at(2, 1, later).is_empty());
+        assert!(cache.conflicting_system_ids(later).is_empty());
+
+        // The reader re-ages rows too: a document read after its rows went
+        // stale reports no identity rather than a frozen one.
+        let doc = cache.sidecar_payload(later);
+        let read_late = later + SYSTEM_ID_STALE_AFTER_S + 1.0;
+        assert!(slot_system_ids_from_sidecar(&doc, read_late, 60.0).is_empty());
+        // A document whose writer stopped is ignored outright.
+        assert!(slot_system_ids_from_sidecar(&doc, later + 30.0, 20.0).is_empty());
     }
 }

@@ -5,16 +5,15 @@
 //! injector's commands and the operator's are indistinguishable, so an
 //! autonomous behaviour can fight a human who has taken manual control. This
 //! gate closes that: a writer that DECLARES itself an autonomous injector (see
-//! [`ados_protocol::ipc::IPC_DECLARE_INJECTOR_PREFIX`]) is subject to the PIC
-//! arbiter; a writer that declares nothing is the operator/human path and is
-//! NEVER gated — the load-bearing invariant.
+//! [`ados_protocol::ipc::IPC_DECLARE_INJECTOR_PREFIX`]), and any writer whose
+//! kernel credentials put it on the plugin plane whatever it declares (see
+//! [`ados_protocol::ipc::is_plugin_peer`]), is subject to the PIC arbiter; an
+//! operator writer is the human path and is NEVER gated — the load-bearing
+//! invariant. A self-declaration alone would only bind cooperating clients.
 //!
-//! Ships INERT: nothing declares injector until a producer is armed, so no
-//! command carries a claim and this gate never runs. When a producer is armed
-//! (opt-in on a deployment with a PIC arbiter), a declared injector is refused
-//! whenever the arbiter reports a human holds manual control, and — fail-closed
-//! — whenever the arbiter is not reporting at all. A dead or hung arbiter is not
-//! consent.
+//! A declared or plugin-plane injector is refused whenever the arbiter reports
+//! a human holds manual control, and — fail-closed — whenever the arbiter is
+//! not reporting at all. A dead or hung arbiter is not consent.
 //!
 //! The verification reuses the EXACT `ados-protocol` primitives that `ados-crsf`
 //! `InjectorAuth` uses (`crsf_inject_scope` + `WsTicketIssuer` against the
@@ -81,9 +80,8 @@ const VERIFY_CACHE_TTL: Duration = Duration::from_secs(5);
 ///   ticket is minted once per connection, so a claim that verified once stays
 ///   verified; the HMAC + pairing read run once per distinct claim, not per
 ///   command.
-/// * the **PIC read** is reused within [`PIC_CACHE_TTL`], exactly as the
-///   attitude rung reads it once per tick. `None` (absent/stale/malformed) still
-///   fails closed to the human hold.
+/// * the **PIC read** is reused within [`PIC_CACHE_TTL`]. `None`
+///   (absent/stale/malformed) still fails closed to the human hold.
 ///
 /// Held behind a `std::sync::Mutex` on the connection and used synchronously, so
 /// the lock never spans an `.await`.

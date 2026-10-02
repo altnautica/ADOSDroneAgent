@@ -1,9 +1,9 @@
-//! The PIC-verdict authority half of the RC/attitude merge.
+//! The PIC-verdict authority half of the RC/injector merge.
 //!
 //! This module owns the PIC arbiter's *report* — the sidecar read plus the
 //! pure decision that maps a mode and the arbiter's holder onto the source that
 //! has authority — so any control lane (the RC packer in `ados-crsf`, the
-//! attitude rung in the MAVLink router) shares the one verdict rather than each
+//! injector gate in the MAVLink router) shares the one verdict rather than each
 //! re-deriving it from a caller-supplied label.
 //!
 //! The rules this half encodes are the launch-critical ones:

@@ -102,6 +102,38 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// The radio `link_id` of the drone whose video this ground station serves:
+/// the published hero while it is still registered, otherwise the lowest
+/// registered slot. `None` with an empty fleet, when there is no drone to
+/// receive.
+///
+/// The distributed-receive roles (the relay's forwarder and the receiver's
+/// aggregator) key `wfb_rx -i` off this. Without it they ran on wfb-ng's
+/// default link id 0, which no drone transmits on, and captured nothing.
+pub fn served_video_link_id() -> Option<u32> {
+    let fleet_id =
+        ados_radio::config::WfbConfig::load_from(Path::new(crate::paths::CONFIG_YAML)).fleet_id;
+    served_video_link_id_from(
+        fleet_id,
+        Path::new(&hero_path()),
+        Path::new(crate::fleet::FLEET_REGISTRY_PATH),
+    )
+}
+
+/// [`served_video_link_id`] against explicit paths and fleet id, for tests.
+pub fn served_video_link_id_from(
+    fleet_id: u16,
+    hero_path: &Path,
+    registry_path: &Path,
+) -> Option<u32> {
+    let primary = crate::fleet::FleetRegistry::load(registry_path)
+        .slots()
+        .map(|s| s.slot)
+        .min()?;
+    let slot = crate::fanout::resolve_fanout_slot(primary, hero_path, registry_path);
+    Some(ados_radio::config::link_id(fleet_id, slot))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +207,29 @@ mod tests {
         write_hero_to(&path, 4, "drone-d").unwrap();
         let hero = read_hero_from(&path).unwrap();
         assert_eq!((hero.slot, hero.device_id.as_str()), (4, "drone-d"));
+    }
+
+    #[test]
+    fn the_served_link_id_is_a_real_drone_s_never_link_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let hero = dir.path().join("fleet-hero.json");
+        let registry = dir.path().join("fleet.json");
+        // No drone, nothing to receive.
+        assert_eq!(served_video_link_id_from(1, &hero, &registry), None);
+
+        let mut reg = crate::fleet::FleetRegistry::default();
+        reg.allocate("drone-a").unwrap();
+        reg.allocate("drone-b").unwrap();
+        reg.persist(&registry).unwrap();
+        // The primary (lowest slot) until a hero is published.
+        assert_eq!(
+            served_video_link_id_from(1, &hero, &registry),
+            Some(ados_radio::config::link_id(1, 1))
+        );
+        write_hero_to(&hero, 2, "drone-b").unwrap();
+        assert_eq!(
+            served_video_link_id_from(1, &hero, &registry),
+            Some(ados_radio::config::link_id(1, 2))
+        );
     }
 }

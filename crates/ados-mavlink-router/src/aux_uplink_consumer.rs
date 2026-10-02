@@ -85,6 +85,18 @@ struct CountersInner {
     /// is wedged or flow-controlled; bounding the write is what keeps a
     /// relay-proxy Request behind it from being dropped by the kernel.
     mavlink_write_timeouts: AtomicU64,
+    /// FC-bound frames addressed to another aircraft's system id and dropped.
+    ///
+    /// The ground station transmits the uplink once for the whole fleet, so
+    /// every drone hears every operator command. A frame whose `target_system`
+    /// is neither broadcast (0) nor this drone's own flight controller is for
+    /// a different aircraft; handing it to this FC is how one ARM became an
+    /// ARM on every drone that shared the system id.
+    mavlink_foreign_target_dropped: AtomicU64,
+    /// FC-bound frames with a non-broadcast `target_system` dropped because
+    /// this drone has not yet latched its flight controller's system id from a
+    /// HEARTBEAT. Without that id the frame cannot be proven to be ours.
+    mavlink_target_unknown_dropped: AtomicU64,
     decode_foreign: AtomicU64,
     decode_damaged: AtomicU64,
     non_mavlink_channel: AtomicU64,
@@ -181,6 +193,8 @@ pub struct AuxUplinkConsumerSnapshot {
     pub mavlink_frames: u64,
     pub mavlink_injected: u64,
     pub mavlink_write_timeouts: u64,
+    pub mavlink_foreign_target_dropped: u64,
+    pub mavlink_target_unknown_dropped: u64,
     pub decode_foreign: u64,
     pub decode_damaged: u64,
     pub non_mavlink_channel: u64,
@@ -215,6 +229,12 @@ impl AuxUplinkConsumerCounters {
             mavlink_frames: c.mavlink_frames.load(Ordering::Relaxed),
             mavlink_injected: c.mavlink_injected.load(Ordering::Relaxed),
             mavlink_write_timeouts: c.mavlink_write_timeouts.load(Ordering::Relaxed),
+            mavlink_foreign_target_dropped: c
+                .mavlink_foreign_target_dropped
+                .load(Ordering::Relaxed),
+            mavlink_target_unknown_dropped: c
+                .mavlink_target_unknown_dropped
+                .load(Ordering::Relaxed),
             decode_foreign: c.decode_foreign.load(Ordering::Relaxed),
             decode_damaged: c.decode_damaged.load(Ordering::Relaxed),
             non_mavlink_channel: c.non_mavlink_channel.load(Ordering::Relaxed),
@@ -386,6 +406,35 @@ pub struct UplinkDeps {
     pub config_tunnel: Option<Arc<ados_protocol::config_tunnel_ingest::ConfigTunnelIngest>>,
 }
 
+/// Whether an FC-bound uplink frame is addressed to this drone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetVerdict {
+    /// Broadcast, no target field, or addressed to our own flight controller.
+    Deliver,
+    /// Addressed to a different aircraft's system id.
+    ForeignTarget,
+    /// Addressed to a specific system id, but ours is not latched yet.
+    IdentityUnknown,
+}
+
+/// Decide whether `frame` may go to the local flight controller.
+///
+/// The target is read from the decoded message, so every message type that
+/// carries a `target_system` field is covered without a hand-kept offset table.
+/// A frame that does not decode against the dialect carries no target this
+/// router can read; it passes, as it did before, and the autopilot applies its
+/// own CRC and id checks.
+fn fc_bound_verdict(frame: &[u8], fc_identity: Option<(u8, u8)>) -> TargetVerdict {
+    match crate::aux_uplink::frame_target_system(frame) {
+        None | Some(0) => TargetVerdict::Deliver,
+        Some(target) => match fc_identity {
+            Some((own, _)) if own == target => TargetVerdict::Deliver,
+            Some(_) => TargetVerdict::ForeignTarget,
+            None => TargetVerdict::IdentityUnknown,
+        },
+    }
+}
+
 async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsumerCounters) {
     let (channel, inner) = match aux_mux::decode(payload) {
         Ok(v) => v,
@@ -454,6 +503,26 @@ async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsume
                 // landed on the radio. A bounded write instead drops the writer
                 // and asks for a reconnect: one frame lost and the link
                 // re-opened, which is the honest outcome.
+                // Fleet addressing. Every drone hears the one uplink, so a
+                // frame naming another aircraft's system id must never reach
+                // this FC. Broadcast (0) and frames with no target field pass.
+                match fc_bound_verdict(frame, deps.fc.learned_fc_identity()) {
+                    TargetVerdict::Deliver => {}
+                    TargetVerdict::ForeignTarget => {
+                        counters
+                            .0
+                            .mavlink_foreign_target_dropped
+                            .fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    TargetVerdict::IdentityUnknown => {
+                        counters
+                            .0
+                            .mavlink_target_unknown_dropped
+                            .fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                }
                 if deps
                     .fc
                     .send_client_bytes_bounded(frame, ClientOrigin::Relayed, None, FC_WRITE_TIMEOUT)
@@ -474,7 +543,7 @@ async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsume
             // downlink. Runs in a spawned task so the uplink consumer's read
             // loop never stalls behind a slow HTTP call.
             counters.0.rpc_requests.fetch_add(1, Ordering::Relaxed);
-            match ados_protocol::aux_rpc::decode_request(inner) {
+            match ados_protocol::aux_rpc::decode_request_fragment(inner) {
                 Ok(request) => {
                     // An unresolved local id cannot adjudicate a target, so accept
                     // everything and let the operator see it in the counter —
@@ -493,6 +562,11 @@ async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsume
                         warn_target_mismatch_once(request.target, &deps.own_device_id);
                         return;
                     }
+                    // Fragments of a request accumulate until it is whole; only
+                    // a complete request takes an in-flight slot.
+                    let Some(request) = crate::aux_rpc_handler::accept_fragment(&request) else {
+                        return;
+                    };
                     let Ok(permit) = REQUEST_SLOTS.clone().try_acquire_owned() else {
                         // Already at the in-flight ceiling. Dropping is safe
                         // and cheap here: the ground retransmits an unanswered
@@ -502,27 +576,14 @@ async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsume
                         return;
                     };
                     if let Some(egress) = &deps.egress {
-                        let id = request.id;
-                        let method = request.method;
-                        let path = request.path.to_vec();
-                        let body = request.body.to_vec();
-                        let ticket = request.ticket.to_vec();
                         let egress = Arc::clone(egress);
                         let dedupe = Arc::clone(&deps.dedupe);
                         let counters = counters.clone();
                         let sender = deps.own_device_id.to_string();
                         tokio::spawn(async move {
                             let _permit = permit;
-                            let req = ados_protocol::aux_rpc::RpcRequest {
-                                id,
-                                method,
-                                target: &[],
-                                path: &path,
-                                body: &body,
-                                ticket: &ticket,
-                            };
                             crate::aux_rpc_handler::handle(
-                                &req, &egress, &dedupe, &counters, &sender,
+                                &request, &egress, &dedupe, &counters, &sender,
                             )
                             .await;
                         });
@@ -856,6 +917,97 @@ mod tests {
         assert_eq!(counters.snapshot().mavlink_injected, 2);
     }
 
+    /// An ARM command from a ground station, addressed to `target_system`.
+    fn arm_command_bytes(target_system: u8) -> Vec<u8> {
+        use ados_protocol::mavlink::ardupilotmega::{MavCmd, COMMAND_LONG_DATA};
+        let msg = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system,
+            target_component: 1,
+            command: MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
+            confirmation: 0,
+            param1: 1.0,
+            param2: 0.0,
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        });
+        mavlink::serialize_v2(
+            MavHeader {
+                system_id: 255,
+                component_id: 190,
+                sequence: 0,
+            },
+            &msg,
+        )
+        .unwrap()
+    }
+
+    /// Dispatch one MAVLink datagram carrying `frame` to a live FC whose
+    /// latched identity is `fc_identity`, returning what reached the FC and the
+    /// counters.
+    async fn dispatch_to_fc(
+        frame: &[u8],
+        fc_identity: Option<(u8, u8)>,
+    ) -> (Vec<u8>, AuxUplinkConsumerSnapshot) {
+        let (fc, captured) = test_connection();
+        fc.connected
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *fc.writer.lock().await = Some(Box::pin(CapturingWriter(captured.clone())));
+        if let Some((sys, comp)) = fc_identity {
+            fc.latch_fc_identity(sys, comp);
+        }
+        let counters = AuxUplinkConsumerCounters::new();
+        let datagram = aux_mux::encode(AuxChannel::Mavlink, frame).unwrap();
+        dispatch(
+            &datagram,
+            &UplinkDeps {
+                fc,
+                egress: None,
+                own_device_id: OWN_ID.into(),
+                dedupe: dedupe(),
+                config_tunnel: None,
+            },
+            &counters,
+        )
+        .await;
+        let written = captured.lock().unwrap().clone();
+        (written, counters.snapshot())
+    }
+
+    #[tokio::test]
+    async fn a_command_for_another_aircraft_never_reaches_this_fc() {
+        let (written, snap) = dispatch_to_fc(&arm_command_bytes(2), Some((1, 1))).await;
+        assert!(written.is_empty(), "system 2's ARM must not reach system 1");
+        assert_eq!(snap.mavlink_foreign_target_dropped, 1);
+        assert_eq!(snap.mavlink_injected, 0);
+    }
+
+    #[tokio::test]
+    async fn a_command_for_this_fc_or_broadcast_is_delivered() {
+        for target in [1u8, 0] {
+            let frame = arm_command_bytes(target);
+            let (written, snap) = dispatch_to_fc(&frame, Some((1, 1))).await;
+            assert_eq!(written, frame, "target {target}");
+            assert_eq!(snap.mavlink_injected, 1, "target {target}");
+            assert_eq!(snap.mavlink_foreign_target_dropped, 0, "target {target}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_addressed_command_is_held_until_the_fc_identity_is_known() {
+        let (written, snap) = dispatch_to_fc(&arm_command_bytes(1), None).await;
+        assert!(written.is_empty());
+        assert_eq!(snap.mavlink_target_unknown_dropped, 1);
+
+        // A frame with no target field is not addressed and still passes.
+        let hb = heartbeat_bytes();
+        let (written, snap) = dispatch_to_fc(&hb, None).await;
+        assert_eq!(written, hb);
+        assert_eq!(snap.mavlink_target_unknown_dropped, 0);
+    }
+
     /// `ADOS_RUN_DIR` is process-global, so the sidecar tests serialise on it
     /// the same way the radio crate's sidecar tests do.
     static RUN_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -964,10 +1116,13 @@ mod tests {
             ados_protocol::aux_rpc::RpcMethod::Get,
             9,
             OWN_ID.as_bytes(),
-            b"/api/status",
-            &[],
+            &ados_protocol::aux_rpc::RequestParts {
+                path: b"/api/status",
+                ..Default::default()
+            },
         )
-        .unwrap();
+        .unwrap()
+        .remove(0);
         let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
         dispatch(
             &datagram,
@@ -1121,10 +1276,13 @@ mod tests {
             ados_protocol::aux_rpc::RpcMethod::Get,
             1,
             b"deadbeefcafe",
-            b"/api/pairing/info",
-            &[],
+            &ados_protocol::aux_rpc::RequestParts {
+                path: b"/api/pairing/info",
+                ..Default::default()
+            },
         )
-        .unwrap();
+        .unwrap()
+        .remove(0);
         let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
 
         dispatch(
@@ -1157,10 +1315,13 @@ mod tests {
                 ados_protocol::aux_rpc::RpcMethod::Get,
                 1,
                 target,
-                b"/api/pairing/info",
-                &[],
+                &ados_protocol::aux_rpc::RequestParts {
+                    path: b"/api/pairing/info",
+                    ..Default::default()
+                },
             )
-            .unwrap();
+            .unwrap()
+            .remove(0);
             let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
 
             dispatch(
@@ -1194,10 +1355,13 @@ mod tests {
             ados_protocol::aux_rpc::RpcMethod::Get,
             1,
             b"deadbeefcafe",
-            b"/api/pairing/info",
-            &[],
+            &ados_protocol::aux_rpc::RequestParts {
+                path: b"/api/pairing/info",
+                ..Default::default()
+            },
         )
-        .unwrap();
+        .unwrap()
+        .remove(0);
         let datagram = aux_mux::encode(AuxChannel::Request, &payload).unwrap();
 
         dispatch(

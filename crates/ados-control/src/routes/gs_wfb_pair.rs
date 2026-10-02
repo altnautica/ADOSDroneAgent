@@ -18,7 +18,9 @@
 //!
 //! `POST .../wfb/pair` runs the guards in order: profile gate (404
 //! `E_PROFILE_MISMATCH`); the deprecated-`pair_key` 400; the missing-`blob_b64`
-//! 400; the missing-`drone_device_id` 400; then the FLEET gate.
+//! 400; the missing-`drone_device_id` 400 (`E_DEVICE_ID_REQUIRED`) or a
+//! malformed one (`E_DEVICE_ID_INVALID`, see
+//! [`ados_groundlink::is_valid_device_id`]); then the FLEET gate.
 //!
 //! A fleet of up to [`FLEET_MAX_SLOTS`] drones shares ONE keypair — the wfb-ng
 //! `channel_id` separates the drones, not the key — so a second drone presenting
@@ -45,6 +47,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use ados_groundlink::aux_peers::SlotSystemId;
 use ados_groundlink::{FleetRegistry, FLEET_MAX_SLOTS, FLEET_REGISTRY_PATH};
 
 use crate::routes::gs_cmd::groundlink_cmd_roundtrip;
@@ -135,17 +138,85 @@ pub(crate) fn load_registry() -> FleetRegistry {
 /// pair write and the pair read, and it picks its fields explicitly so a
 /// `FleetSlot` growing a field — the per-pair relay secret already did — cannot
 /// leak onto the wire through either of them. A test pins that.
+///
+/// Each row also carries the flight-controller identity the receive chain
+/// currently hears on that slot: `fc_system_id` (null until a HEARTBEAT has
+/// been heard recently) and `system_id_conflict` (another linked slot is
+/// heartbeating with the same system id, so commands to it are held).
+///
+/// `video_hero` marks the one slot whose video the ground station is serving
+/// on its `main` stream. Only that slot's video is decoded, so every other
+/// drone in the fleet has no live feed here until it is made the hero.
 pub(crate) fn slot_table(registry: &FleetRegistry) -> Vec<Value> {
+    slot_table_with(
+        registry,
+        &load_slot_system_ids(),
+        served_video_slot(registry),
+    )
+}
+
+/// [`slot_table`] against an explicit identity map and served slot, so the
+/// shape is testable without a live receive process.
+fn slot_table_with(
+    registry: &FleetRegistry,
+    ids: &std::collections::BTreeMap<u8, SlotSystemId>,
+    video_slot: Option<u8>,
+) -> Vec<Value> {
     registry
         .slots()
         .map(|s| {
+            let id = ids.get(&s.slot);
             json!({
                 "slot": s.slot,
                 "device_id": s.device_id,
                 "paired_at_ms": s.paired_at_ms,
+                "fc_system_id": id.map(|i| i.fc_system_id),
+                "system_id_conflict": id.is_some_and(|i| i.conflict),
+                "video_hero": video_slot == Some(s.slot),
+                // Whether the drone holds this ground station's relay secret:
+                // `pending`, `held`, or `conflict` (it holds another station's
+                // and relayed calls to it are refused until it is unpaired).
+                "relay_credential": crate::routes::gs_fleet_slot::relay_secret_state(&s.device_id),
             })
         })
         .collect()
+}
+
+/// The slot the ground station's video fan-out serves: the published hero
+/// while it is still registered, otherwise the lowest registered slot, which
+/// is the receive chain's primary. Resolved by the same function the fan-out
+/// runs, so the roster and the stream cannot disagree.
+fn served_video_slot(registry: &FleetRegistry) -> Option<u8> {
+    let primary = registry.slots().map(|s| s.slot).min()?;
+    Some(ados_groundlink::fanout::resolve_fanout_slot(
+        primary,
+        std::path::Path::new(&ados_groundlink::hero_path()),
+        std::path::Path::new(FLEET_REGISTRY_PATH),
+    ))
+}
+
+/// How old the relayed-status document may be before its identities are not
+/// served. The writer rewrites it every two seconds.
+const SLOT_IDS_DOC_STALE_AFTER_S: f64 = 20.0;
+
+/// The per-slot flight-controller identities the receive chain publishes in
+/// the relayed-status sidecar, re-aged now. Absent or stale reads as empty.
+fn load_slot_system_ids() -> std::collections::BTreeMap<u8, SlotSystemId> {
+    let path = std::path::PathBuf::from(
+        std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()),
+    )
+    .join(ados_groundlink::aux_peers::AUX_PEERS_SIDECAR);
+    let Some(doc) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return Default::default();
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    ados_groundlink::aux_peers::slot_system_ids_from_sidecar(&doc, now, SLOT_IDS_DOC_STALE_AFTER_S)
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +328,34 @@ fn write_secret_0600(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()
     std::fs::rename(&tmp, path)
 }
 
+/// The device id a pair is issued to, or the 400 that refuses it.
+///
+/// A slot is issued TO a device and `FleetRegistry::allocate` is idempotent by
+/// device id, so without one every re-pair would burn a fresh slot until the
+/// fleet reported full. A blank or one-character id is refused too: stored as
+/// given, it could never be matched to the id the aircraft beacons for itself.
+fn pair_device_id(raw: Option<String>) -> Result<String, Box<Response>> {
+    let Some(id) = raw.filter(|s| !s.is_empty()) else {
+        return Err(Box::new(nested_detail(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "code": "E_DEVICE_ID_REQUIRED",
+                "message": "drone_device_id is required: a fleet slot is issued to a device and re-pairing is matched by it",
+            }),
+        )));
+    };
+    if !ados_groundlink::is_valid_device_id(&id) {
+        return Err(Box::new(nested_detail(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "code": "E_DEVICE_ID_INVALID",
+                "message": "drone_device_id must be 8 to 32 characters of letters, digits, '-', '_' or '.'",
+            }),
+        )));
+    }
+    Ok(id)
+}
+
 /// `POST .../wfb/pair` →
 /// `{paired,paired_with_device_id,paired_at,fingerprint,role,fleet_slot,slots}`.
 ///
@@ -315,18 +414,9 @@ pub async fn post_wfb_pair(
         return nested_detail(StatusCode::BAD_REQUEST, json!({"code": "E_BLOB_REQUIRED"}));
     };
 
-    // A slot is issued TO a device and `FleetRegistry::allocate` is idempotent by
-    // device id, so without one every re-pair would burn a fresh slot until the
-    // fleet reported full. Refuse loudly rather than hand out a slot nothing can
-    // be re-matched to.
-    let Some(device_id) = req.drone_device_id.filter(|s| !s.is_empty()) else {
-        return nested_detail(
-            StatusCode::BAD_REQUEST,
-            json!({
-                "code": "E_DEVICE_ID_REQUIRED",
-                "message": "drone_device_id is required: a fleet slot is issued to a device and re-pairing is matched by it",
-            }),
-        );
+    let device_id = match pair_device_id(req.drone_device_id) {
+        Ok(id) => id,
+        Err(resp) => return *resp,
     };
 
     // Decode here as well as in the socket op: the byte-identity gate below
@@ -895,6 +985,31 @@ mod tests {
     }
 
     #[test]
+    fn the_slot_table_flags_two_slots_sharing_a_system_id() {
+        let mut registry = FleetRegistry::default();
+        registry.allocate("drone-a").unwrap();
+        registry.allocate("drone-b").unwrap();
+        registry.allocate("drone-c").unwrap();
+        let conflict = SlotSystemId {
+            fc_system_id: 1,
+            conflict: true,
+        };
+        let ids = std::collections::BTreeMap::from([(1u8, conflict), (2u8, conflict)]);
+        let table = slot_table_with(&registry, &ids, Some(2));
+        assert_eq!(table[0]["fc_system_id"], 1);
+        assert_eq!(table[0]["system_id_conflict"], true);
+        assert_eq!(table[1]["system_id_conflict"], true);
+        // A slot whose flight controller has not been heard has no identity,
+        // and so cannot be in conflict.
+        assert_eq!(table[2]["fc_system_id"], Value::Null);
+        assert_eq!(table[2]["system_id_conflict"], false);
+        // Exactly one slot is the drone whose video the ground serves.
+        assert_eq!(table[0]["video_hero"], false);
+        assert_eq!(table[1]["video_hero"], true);
+        assert_eq!(table[2]["video_hero"], false);
+    }
+
+    #[test]
     fn an_empty_registry_renders_an_empty_table_not_null() {
         // The GCS iterates this; a null would need a second code path.
         assert_eq!(slot_table(&FleetRegistry::default()), Vec::<Value>::new());
@@ -917,24 +1032,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_device_id_is_refused_before_anything_is_installed() {
-        // A slot is issued TO a device and allocation is idempotent by device id.
-        // Without one, every re-pair would burn a fresh slot until the fleet
-        // reported full, so the route refuses rather than issuing an
-        // unmatchable slot. Drive the guard's body shape directly (the handler
-        // needs an AppState + the GS profile sentinel).
-        let resp = nested_detail(
-            StatusCode::BAD_REQUEST,
-            json!({
-                "code": "E_DEVICE_ID_REQUIRED",
-                "message": "drone_device_id is required: a fleet slot is issued to a device and re-pairing is matched by it",
-            }),
-        );
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body_json(resp).await["detail"]["error"]["code"],
-            "E_DEVICE_ID_REQUIRED"
-        );
+    async fn a_missing_or_malformed_device_id_is_refused() {
+        let code = |raw: Option<&str>| {
+            let resp = *pair_device_id(raw.map(str::to_string)).expect_err("refused");
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            resp
+        };
+        for missing in [None, Some("")] {
+            assert_eq!(
+                body_json(code(missing)).await["detail"]["error"]["code"],
+                "E_DEVICE_ID_REQUIRED"
+            );
+        }
+        let too_long = "a".repeat(33);
+        for bad in [
+            " ",
+            "d",
+            "drone-1",
+            " 40bb1a5a",
+            "drone 01x",
+            "drone/01x",
+            too_long.as_str(),
+        ] {
+            assert_eq!(
+                body_json(code(Some(bad))).await["detail"]["error"]["code"],
+                "E_DEVICE_ID_INVALID",
+                "{bad:?}"
+            );
+        }
+        let longest = "a".repeat(32);
+        for good in ["40bb1a5a", "40bb1a5a4484", "drone-01", longest.as_str()] {
+            assert_eq!(
+                pair_device_id(Some(good.to_string())).ok().as_deref(),
+                Some(good)
+            );
+        }
     }
 
     #[test]
