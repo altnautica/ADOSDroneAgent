@@ -85,18 +85,18 @@ def test_every_gate_flag_default_matches_the_router() -> None:
 @pytest.mark.skipif(
     not ROUTER_CONFIG.exists(), reason="native crate not in this checkout"
 )
-def test_the_raw_edges_are_closed_to_the_lan_once_paired_by_default() -> None:
+def test_the_raw_edges_are_closed_to_the_lan_by_default() -> None:
     """Pinned, because a default flip on any of these is a breaking change.
 
-    The raw TCP/UDP edges carry no credential channel: a paired node serves
-    them off-box only when the operator opts into LAN access. Enforcement stays
-    off so an opted-in LAN ground station is served. The aux uplink is taken
-    only on a ground station relaying a drone that may be airborne, so refusing
-    it by default lands on the operator's screen mid-flight.
+    The raw TCP/UDP edges carry no credential channel: unauthorized peers are
+    refused by default and served only when the operator opts into LAN
+    access. The aux uplink is taken only on a ground station relaying a drone
+    that may be airborne, so refusing it by default lands on the operator's
+    screen mid-flight.
     """
     model = MavlinkConfig()
     assert model.raw_proxy_lan_access is False
-    assert model.raw_proxy_enforce_auth is False
+    assert model.raw_proxy_enforce_auth is True
     assert model.aux_uplink_enforce_origin is False
     # The WebSocket is the deliberate exception: it has two credential channels.
     assert model.ws_proxy_enforce_auth is True
@@ -110,14 +110,14 @@ def test_the_flags_survive_a_round_trip_through_the_model() -> None:
     `config.yaml` the first time the agent persists it.
     """
     dumped = MavlinkConfig(
-        raw_proxy_enforce_auth=True,
+        raw_proxy_enforce_auth=False,
         raw_proxy_lan_access=True,
         aux_uplink_enforce_origin=True,
     ).model_dump()
-    assert dumped["raw_proxy_enforce_auth"] is True
+    assert dumped["raw_proxy_enforce_auth"] is False
     assert dumped["raw_proxy_lan_access"] is True
     assert dumped["aux_uplink_enforce_origin"] is True
     reloaded = MavlinkConfig(**dumped)
-    assert reloaded.raw_proxy_enforce_auth is True
+    assert reloaded.raw_proxy_enforce_auth is False
     assert reloaded.raw_proxy_lan_access is True
     assert reloaded.aux_uplink_enforce_origin is True

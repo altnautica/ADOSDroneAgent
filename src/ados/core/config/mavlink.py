@@ -51,22 +51,22 @@ class MavlinkConfig(BaseModel):
     # write silently pins every node to the losing side, and the migration that
     # removes the stale recorded value is undone by the write that follows it.
     ws_proxy_enforce_auth: bool = True
-    # When true, the raw byte-stream proxies (TCP 5760, UDP 14550) refuse an
-    # unauthorized off-box peer instead of recording it and serving it anyway.
+    # When true, the raw byte-stream proxies (TCP 5760, UDP 14550) refuse a
+    # peer that is neither on-box nor (while unpaired) a first-boot lifeline,
+    # unless `raw_proxy_lan_access` opens them.
     #
-    # Off, and the disagreement with the WebSocket flag above is the point.
-    # The WebSocket enforces because a client can present either the
-    # `X-ADOS-Key` header or an `ados-ws-ticket` subprotocol. The raw edges
-    # have no credential channel at all -- no handshake, no headers. Declared
-    # here for the same reason as the flag above: the router reads it, and a
-    # key this model does not declare is stripped from the file on the next
-    # config write.
-    raw_proxy_enforce_auth: bool = False
-    # When true, a PAIRED node's raw byte-stream proxies serve off-box peers
-    # (a desktop ground station on the LAN), subject to the flag above. Off:
-    # those edges carry no credential, so serving them to the LAN once paired
-    # hands flight control to any host on it; closed, they serve on-box
-    # callers only. Declared for the same reason as the flags above.
+    # On. The raw edges have no credential channel at all -- no handshake, no
+    # headers -- so every off-box, non-lifeline peer is unauthorized, and
+    # serving it anyway hands flight-controller write to any host on the LAN
+    # of a never-paired node. Declared here for the same reason as the flag
+    # above: the router reads it, and a key this model does not declare is
+    # stripped from the file on the next config write.
+    raw_proxy_enforce_auth: bool = True
+    # When true, the raw byte-stream proxies serve off-box peers that cannot
+    # authenticate (a desktop ground station on the LAN). Off: those edges
+    # carry no credential, so serving them to the LAN hands flight control to
+    # any host on it; closed, they serve on-box callers and an unpaired node's
+    # lifelines only. Declared for the same reason as the flags above.
     raw_proxy_lan_access: bool = False
     # When true, a client the router could not authenticate is refused the
     # aux-radio uplink instead of being recorded and relayed anyway.

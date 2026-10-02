@@ -6,15 +6,23 @@
 //!   `ados-input` daemon selects, gated by the PIC arbiter (the `hid` module
 //!   owns the device read; this module owns only the merged values). Each
 //!   sample carries a freshness deadline the reader must keep refreshing, so a
-//!   device that goes quiet WITHOUT erroring stops flying instead of having its
-//!   last stick re-sent forever.
+//!   device that stops answering stops flying instead of having its last
+//!   stick re-sent forever.
 //! * **Injection** — explicit channel values set programmatically over the
 //!   command socket, each write carrying a time-to-live. An injector that goes
-//!   silent past its TTL decays to the safe neutral set.
+//!   silent past its TTL stops feeding the lane.
 //!
 //! Neither lane may hold a stale stick. Both are therefore time-bounded: the
 //! transmitted set is only ever a sample its producer has re-attested inside
 //! its window.
+//!
+//! When the winning source has no live sample, the merge yields NOTHING and
+//! the transmitter sends no RC frames at all. That silence is the signal the
+//! receiver and flight controller are built around: the receiver times out
+//! and the flight controller runs its own configured RC-loss failsafe
+//! (return, land, or whatever the operator set). Transmitting a synthetic
+//! "neutral" set instead would keep the receiver linked and fly the aircraft
+//! on values nobody commanded.
 //!
 //! The configured `channel_source` mode decides authority. In `hybrid` the
 //! PIC arbiter's holder wins: while a client holds the PIC claim the lane
@@ -23,11 +31,11 @@
 //! affirmative "no claim held" report the programmatic lane feeds. A PIC
 //! arbiter that is NOT reporting (its sidecar absent, unreadable, malformed,
 //! or stale) is treated as UNKNOWN, never as "no human wants control": hybrid
-//! fails SAFE to the human/neutral hold, so a dead or hung arbiter can never
-//! hand the autonomous injector authority on a missing verdict. The losing
-//! source's values are stored but never transmitted — authority never silently
-//! falls through to the other source, because a source that did not win must
-//! not fly the aircraft.
+//! fails SAFE to the human path, so a dead or hung arbiter can never hand the
+//! autonomous injector authority on a missing verdict. The losing source's
+//! values are stored but never transmitted — authority never silently falls
+//! through to the other source, because a source that did not win must not
+//! fly the aircraft.
 
 use std::time::{Duration, Instant};
 
@@ -54,29 +62,26 @@ pub fn clamp_ttl(requested: Duration) -> Duration {
     requested.clamp(MIN_INJECT_TTL, MAX_INJECT_TTL)
 }
 
-/// How often the HID reader must re-attest that its device is still producing.
+/// How often the HID reader re-attests that its device still answers.
 ///
-/// The reader stamps every evdev event it receives; between events it
-/// re-stamps on this cadence so a still-but-live device keeps its slot, and it
-/// stops stamping the moment the device stops delivering.
+/// On this cadence the reader polls the device's current axis and button
+/// state straight from the kernel. A poll that succeeds re-stamps the slot
+/// with the polled values, so a stick held perfectly still (which evdev
+/// reports as no events at all) keeps its authority. A poll that fails, a
+/// read error, or the device disappearing stops the stamping.
 pub const HID_LIVENESS_INTERVAL: Duration = Duration::from_millis(200);
 
 /// How long a HID sample stays transmittable without a refresh.
 ///
 /// Three [`HID_LIVENESS_INTERVAL`]s: the smallest multiple that tolerates a
-/// missed refresh under load without holding a dead stick for long.
-///
-/// Without this bound the lane has no way to tell a silent source from a held
-/// stick — evdev is edge-triggered, so a read ERROR is the only other liveness
-/// signal available, and a wireless pad out of range, a wedged driver and a
-/// starved reader task all produce silence with no error. Any of them would
-/// otherwise leave the last non-neutral stick packed into every RC frame to an
-/// armed aircraft for as long as the process lives.
+/// missed refresh under load without holding a dead stick for long. A starved
+/// or wedged reader task stops re-stamping, so its last stick ages out here
+/// even though no error was ever observed.
 pub const HID_STALE_AFTER: Duration = Duration::from_millis(600);
 
 /// The source a transmitted value set actually came from, reported on the
-/// sidecar (`channel_source`). `None` (⇒ a JSON null) means the neutral
-/// fallback — no live source, never a fabricated label.
+/// sidecar (`channel_source`). No source (⇒ a JSON null) means nothing is
+/// being transmitted — never a fabricated label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelSource {
     Hid,
@@ -173,7 +178,7 @@ impl SourceMerge {
     }
 
     /// Inject one channel with a TTL. The base is the still-fresh injected set
-    /// when one exists, else the neutral set — never an expired (stale) one.
+    /// when one exists, else the default bank — never an expired (stale) one.
     pub fn inject_one(
         &mut self,
         index: usize,
@@ -198,13 +203,10 @@ impl SourceMerge {
     /// Update the HID source's latest channel set and re-arm its freshness
     /// deadline.
     ///
-    /// The reader calls this on every evdev event AND on the
-    /// [`HID_LIVENESS_INTERVAL`] cadence while the device is still delivering,
-    /// so the deadline is an attestation that the device is producing — not a
-    /// guess about whether a stick is being held. Only a received event may
-    /// extend it: evdev is edge-triggered, so without that attestation a silent
-    /// device and a held stick are the same observation, and resolving the
-    /// ambiguity in the source's favour flies its last sample forever.
+    /// The reader calls this on every changed channel AND on every successful
+    /// [`HID_LIVENESS_INTERVAL`] device poll, so the deadline is an
+    /// attestation that the device still answers — not a guess about whether
+    /// a stick is being held.
     pub fn set_hid(&mut self, values: [u16; CHANNEL_COUNT], now: Instant) -> Result<(), BankError> {
         let mut bank = match self.hid.take() {
             Some(held) => held.bank,
@@ -248,19 +250,19 @@ impl SourceMerge {
         resolve_authority(self.mode, self.pic.as_ref(), injector)
     }
 
-    /// The channel set to transmit right now, plus the live source it came
-    /// from (`None` = the safe neutral fallback: the winning source has no
-    /// live values). The losing source's values are never transmitted.
-    pub fn current(&self, now: Instant) -> ([u16; CHANNEL_COUNT], Option<ChannelSource>) {
+    /// The channel set to transmit right now and the live source it came
+    /// from, or `None` when the winning source has no live values: the
+    /// transmitter then sends no RC frames, so the receiver and flight
+    /// controller run their own failsafe. The losing source's values are
+    /// never transmitted.
+    pub fn current(&self, now: Instant) -> Option<([u16; CHANNEL_COUNT], ChannelSource)> {
         match self.authority(now) {
-            Authority::Inject => match self.live_inject(now) {
-                Some(live) => (live.bank.values(), Some(ChannelSource::Inject)),
-                None => (ChannelBank::neutral(), None),
-            },
-            Authority::Hid => match self.live_hid(now) {
-                Some(held) => (held.bank.values(), Some(ChannelSource::Hid)),
-                None => (ChannelBank::neutral(), None),
-            },
+            Authority::Inject => self
+                .live_inject(now)
+                .map(|live| (live.bank.values(), ChannelSource::Inject)),
+            Authority::Hid => self
+                .live_hid(now)
+                .map(|held| (held.bank.values(), ChannelSource::Hid)),
         }
     }
 }
@@ -296,21 +298,21 @@ mod tests {
 
         // A fresh unclaimed report: the injection flies.
         merge.set_pic(Some(PicView::default()));
-        assert_eq!(merge.current(now), (injected, Some(ChannelSource::Inject)));
+        assert_eq!(merge.current(now), Some((injected, ChannelSource::Inject)));
 
         // A human claims PIC: the HID path takes over on the same tick.
         merge.set_pic(Some(PicView {
             claimed: true,
             holder: Some("operator".into()),
         }));
-        assert_eq!(merge.current(now), (hid, Some(ChannelSource::Hid)));
+        assert_eq!(merge.current(now), Some((hid, ChannelSource::Hid)));
 
         // The injector claims PIC: the programmatic lane wins again.
         merge.set_pic(Some(PicView {
             claimed: true,
             holder: Some("ai".into()),
         }));
-        assert_eq!(merge.current(now), (injected, Some(ChannelSource::Inject)));
+        assert_eq!(merge.current(now), Some((injected, ChannelSource::Inject)));
     }
 
     #[test]
@@ -328,14 +330,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(merge.authority(now), Authority::Hid);
-        assert_eq!(merge.current(now), (ChannelBank::neutral(), None));
+        assert_eq!(merge.current(now), None);
 
         // A human is at the sticks while the arbiter is still down: HID keeps
         // control, the injector still never wins.
-        let mut hid = ChannelBank::neutral();
+        let mut hid = ChannelBank::default().values();
         hid[0] = CHANNEL_MAX;
         merge.set_hid(hid, now).unwrap();
-        assert_eq!(merge.current(now), (hid, Some(ChannelSource::Hid)));
+        assert_eq!(merge.current(now), Some((hid, ChannelSource::Hid)));
 
         // A FRESH unclaimed report finally arrives: only now may the
         // programmatic lane feed.
@@ -343,7 +345,7 @@ mod tests {
         merge.set_pic(Some(PicView::default()));
         assert_eq!(
             merge.current(now),
-            ([CHANNEL_MAX; CHANNEL_COUNT], Some(ChannelSource::Inject))
+            Some(([CHANNEL_MAX; CHANNEL_COUNT], ChannelSource::Inject))
         );
     }
 
@@ -359,30 +361,31 @@ mod tests {
             .inject_all(injected, DEFAULT_INJECT_TTL, now, Some("ai".into()))
             .unwrap();
         merge.set_pic(Some(PicView::default()));
-        assert_eq!(merge.current(now), (injected, Some(ChannelSource::Inject)));
+        assert_eq!(merge.current(now), Some((injected, ChannelSource::Inject)));
 
-        // The arbiter stops reporting: fail safe, injector loses, neutral hold.
+        // The arbiter stops reporting: fail safe, the injector loses and with
+        // no human input nothing is transmitted.
         merge.set_pic(None);
         assert_eq!(merge.authority(now), Authority::Hid);
-        assert_eq!(merge.current(now), (ChannelBank::neutral(), None));
+        assert_eq!(merge.current(now), None);
     }
 
     #[test]
     fn losing_source_never_falls_through() {
-        // HID authority with no HID data transmits neutral, NOT the live
+        // HID authority with no HID data transmits nothing, NOT the live
         // injected set — the losing source must not fly the aircraft.
         let mut merge = SourceMerge::new(ChannelSourceMode::Hid);
         let now = t0();
         merge
             .inject_all([CHANNEL_MAX; CHANNEL_COUNT], DEFAULT_INJECT_TTL, now, None)
             .unwrap();
-        assert_eq!(merge.current(now), (ChannelBank::neutral(), None));
+        assert_eq!(merge.current(now), None);
     }
 
     // ── injection TTL ────────────────────────────────────────────────────────
 
     #[test]
-    fn injection_expires_to_neutral() {
+    fn an_expired_injection_stops_feeding_the_lane() {
         let mut merge = SourceMerge::new(ChannelSourceMode::Inject);
         let now = t0();
         let values = [CHANNEL_MID; CHANNEL_COUNT];
@@ -392,13 +395,11 @@ mod tests {
         // Live inside the TTL.
         assert_eq!(
             merge.current(now + Duration::from_millis(400)),
-            (values, Some(ChannelSource::Inject))
+            Some((values, ChannelSource::Inject))
         );
-        // Expired: the safe neutral, with no fabricated source label.
-        assert_eq!(
-            merge.current(now + Duration::from_millis(600)),
-            (ChannelBank::neutral(), None)
-        );
+        // Expired: nothing to transmit, so the receiver's failsafe takes over
+        // instead of a synthetic set flying the aircraft.
+        assert_eq!(merge.current(now + Duration::from_millis(600)), None);
     }
 
     #[test]
@@ -415,7 +416,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             merge.current(now + Duration::from_millis(800)),
-            (values, Some(ChannelSource::Inject))
+            Some((values, ChannelSource::Inject))
         );
     }
 
@@ -423,7 +424,7 @@ mod tests {
     fn inject_one_bases_on_the_live_set_but_never_a_stale_one() {
         let mut merge = SourceMerge::new(ChannelSourceMode::Inject);
         let now = t0();
-        let mut values = ChannelBank::neutral();
+        let mut values = ChannelBank::default().values();
         values[4] = 1500;
         merge
             .inject_all(values, Duration::from_millis(500), now, None)
@@ -434,29 +435,32 @@ mod tests {
         merge
             .inject_one(7, 1000, Duration::from_millis(500), fresh_at, None)
             .unwrap();
-        let (current, _) = merge.current(fresh_at);
+        let (current, _) = merge.current(fresh_at).unwrap();
         assert_eq!(current[4], 1500);
         assert_eq!(current[7], 1000);
 
-        // After expiry a single-channel write bases on NEUTRAL: the stale
-        // channel 4 value must not resurrect.
+        // After expiry a single-channel write bases on the default bank: the
+        // stale channel 4 value must not resurrect.
         let late = fresh_at + Duration::from_secs(10);
         merge
             .inject_one(7, 1000, Duration::from_millis(500), late, None)
             .unwrap();
-        let (current, src) = merge.current(late);
-        assert_eq!(current[4], ChannelBank::neutral()[4], "no stale resurrect");
+        let (current, src) = merge.current(late).unwrap();
+        assert_eq!(
+            current[4],
+            ChannelBank::default().values()[4],
+            "no stale resurrect"
+        );
         assert_eq!(current[7], 1000);
-        assert_eq!(src, Some(ChannelSource::Inject));
+        assert_eq!(src, ChannelSource::Inject);
     }
 
     #[test]
     fn expired_injection_loses_its_hybrid_identity() {
         // In hybrid, an EXPIRED injection's client id no longer counts as the
         // injector for authority: with the injector holding PIC but its values
-        // stale, the lane transmits neutral (Inject authority via the claim is
-        // gone — the holder no longer matches a live injector, so HID wins,
-        // and with no HID data that is neutral).
+        // stale, the holder no longer matches a live injector, so HID wins,
+        // and with no HID data nothing is transmitted.
         let mut merge = SourceMerge::new(ChannelSourceMode::Hybrid);
         let now = t0();
         merge
@@ -473,7 +477,7 @@ mod tests {
         }));
         let late = now + Duration::from_secs(5);
         assert_eq!(merge.authority(late), Authority::Hid);
-        assert_eq!(merge.current(late), (ChannelBank::neutral(), None));
+        assert_eq!(merge.current(late), None);
     }
 
     #[test]
@@ -485,45 +489,40 @@ mod tests {
         assert!(merge
             .inject_all(bad, DEFAULT_INJECT_TTL, now, None)
             .is_err());
-        assert_eq!(merge.current(now), (ChannelBank::neutral(), None));
+        assert_eq!(merge.current(now), None);
     }
 
     // ── HID slot lifecycle ───────────────────────────────────────────────────
 
     #[test]
-    fn a_silent_hid_source_stops_flying_instead_of_holding_its_last_stick() {
-        // The hazard: an evdev source that goes quiet WITHOUT erroring — a
-        // wireless pad out of range, a wedged driver, a starved reader task.
-        // The reader's only liveness signal was a read error, so the last
-        // NON-NEUTRAL stick kept being packed into every RC frame at the full
-        // transmit cadence for as long as the process lived.
+    fn a_hid_source_nobody_re_attests_stops_flying_instead_of_holding_its_last_stick() {
+        // The hazard: a reader that stops re-stamping without erroring — a
+        // starved or wedged task. Without a deadline the last NON-NEUTRAL
+        // stick would be packed into every RC frame at the full transmit
+        // cadence for as long as the process lived.
         let mut merge = SourceMerge::new(ChannelSourceMode::Hid);
         let now = t0();
-        let mut hid = ChannelBank::neutral();
+        let mut hid = ChannelBank::default().values();
         hid[0] = CHANNEL_MAX;
         merge.set_hid(hid, now).unwrap();
 
-        // Inside the window the stick flies: a live device that simply has not
-        // moved keeps its authority.
+        // Inside the window the stick flies.
         assert_eq!(
             merge.current(now + HID_LIVENESS_INTERVAL),
-            (hid, Some(ChannelSource::Hid))
+            Some((hid, ChannelSource::Hid))
         );
-        // Past it the lane fails over to the safe neutral set, with no
-        // fabricated source label.
-        assert_eq!(
-            merge.current(now + HID_STALE_AFTER),
-            (ChannelBank::neutral(), None)
-        );
+        // Past it the lane has nothing to transmit, with no fabricated source
+        // label.
+        assert_eq!(merge.current(now + HID_STALE_AFTER), None);
 
         // A refresh re-arms it: recovery needs no reopen, just a live device.
         let later = now + HID_STALE_AFTER;
         merge.set_hid(hid, later).unwrap();
-        assert_eq!(merge.current(later), (hid, Some(ChannelSource::Hid)));
+        assert_eq!(merge.current(later), Some((hid, ChannelSource::Hid)));
 
         // And an explicit clear still drops it immediately.
         merge.clear_hid();
-        assert_eq!(merge.current(later), (ChannelBank::neutral(), None));
+        assert_eq!(merge.current(later), None);
     }
 
     #[test]

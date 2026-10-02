@@ -14,6 +14,13 @@
 //! advanced across the whole [`STALL_WINDOW`] while the unit reports active is
 //! a stall, and the supervisor treats it exactly as it treats a death.
 //!
+//! `ados-mavlink` is the exception. Its process I/O keeps moving on its own
+//! timers (the 10 Hz state publish, the 1 Hz companion heartbeat) whether or
+//! not the flight-controller reader is alive, so a wedged reader never looks
+//! flat there. The router is instead judged on the cumulative count of frames
+//! it decoded off the FC link (`fc_frames_decoded` on its state snapshot), and
+//! only while that link's transport is open ([`router_work_counter`]).
+//!
 //! Three rules keep this from becoming a false-positive generator, which on a
 //! flight node would be worse than the defect it fixes:
 //!
@@ -28,21 +35,25 @@
 //!    for long stretches are not judged this way.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use serde_json::Value;
 
 // `tokio::time::Instant`, not `std::time::Instant`: identical in production,
 // but a paused-clock test can drive the stall window deterministically instead
 // of sleeping through 30 s of real time. Same reason `sdnotify` uses it.
 use tokio::time::Instant;
 
-/// How long a unit's byte counter may stay flat before it is judged stalled.
+/// How long a unit's work counter may stay flat before it is judged stalled.
 ///
 /// Sized against what each supervised lane does when healthy, so the quietest
-/// of them still clears it comfortably: the MAVLink router carries a ≥1 Hz
-/// heartbeat in both directions, the swarm bus beacons at 2 Hz, the CRSF lane
-/// runs an RC frame train, and the vision engine consumes the camera ring. 30 s
-/// is six monitor passes at the 5 s tick — long enough that a scheduling hiccup
-/// or one slow pass cannot manufacture a stall.
+/// of them still clears it comfortably: the MAVLink router decodes the FC's
+/// ≥1 Hz HEARTBEAT, the swarm bus beacons at 2 Hz, the CRSF lane rewrites its
+/// status sidecar every heartbeat (its RC frame train runs only while a source
+/// is live), and the vision engine consumes the camera ring. 30 s is six
+/// monitor passes at the 5 s tick — long enough that a scheduling hiccup or one
+/// slow pass cannot manufacture a stall.
 pub const STALL_WINDOW: Duration = Duration::from_secs(30);
 
 /// The units whose `active` state is not accepted as proof of work.
@@ -66,6 +77,57 @@ pub const WORK_PROVEN_UNITS: &[&str] =
 /// True when `unit` must prove work rather than merely being active.
 pub fn requires_work_proof(unit: &str) -> bool {
     WORK_PROVEN_UNITS.contains(&unit)
+}
+
+/// The MAVLink router's unit, judged on decoded FC frames rather than on
+/// process I/O.
+pub const ROUTER_UNIT: &str = "ados-mavlink";
+
+/// How long one read of the router's state socket may take. The socket replays
+/// the latest snapshot on connect, so a healthy router answers at once.
+const ROUTER_STATE_READ_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The router's vehicle-state socket, honouring the `ADOS_RUN_DIR` override
+/// the router binds under.
+pub fn router_state_sock() -> PathBuf {
+    let run_dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
+    Path::new(&run_dir).join("state.sock")
+}
+
+/// The router's work counter from one state snapshot: the cumulative frames
+/// decoded off the FC link.
+///
+/// `None` (no verdict) unless the FC transport is open and the FC is one that
+/// streams on its own. A closed transport means the router is between
+/// reconnect attempts, which its own fixed-interval loop owns; an MSP board
+/// (`fc_variant` set) is silent until a ground station polls it, so a flat
+/// counter there is an idle link, not a wedged reader.
+pub fn router_work_counter(snapshot: &Value) -> Option<u64> {
+    if snapshot.get("transport_open").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    if snapshot.get("fc_variant").is_some_and(|v| !v.is_null()) {
+        return None;
+    }
+    snapshot.get("fc_frames_decoded").and_then(Value::as_u64)
+}
+
+/// Read one snapshot from the router's state socket and lift its work counter
+/// (see [`router_work_counter`]). `None` when the socket is absent, silent or
+/// unreadable: no reading, no verdict.
+pub async fn read_router_work_counter(sock: &Path) -> Option<u64> {
+    let read = async {
+        let mut stream = tokio::net::UnixStream::connect(sock).await.ok()?;
+        ados_protocol::state::read_state_value(&mut stream)
+            .await
+            .ok()
+            .flatten()
+    };
+    let snapshot = tokio::time::timeout(ROUTER_STATE_READ_TIMEOUT, read)
+        .await
+        .ok()
+        .flatten()?;
+    router_work_counter(&snapshot)
 }
 
 /// The outcome of folding one counter reading into a unit's history.
@@ -277,5 +339,62 @@ mod tests {
         assert!(!requires_work_proof("ados-video"));
         assert!(!requires_work_proof("ados-wfb"));
         assert!(!requires_work_proof("ados-logd"));
+    }
+
+    #[test]
+    fn the_router_is_judged_on_decoded_frames_only_while_its_fc_link_is_open() {
+        use serde_json::json;
+        let open = json!({"transport_open": true, "fc_variant": null, "fc_frames_decoded": 120});
+        assert_eq!(router_work_counter(&open), Some(120));
+        // Between reconnect attempts: the router's own loop owns that, no verdict.
+        let closed = json!({"transport_open": false, "fc_frames_decoded": 120});
+        assert_eq!(router_work_counter(&closed), None);
+        // An MSP board answers only when polled, so a flat count is idle, not wedged.
+        let msp =
+            json!({"transport_open": true, "fc_variant": "betaflight", "fc_frames_decoded": 0});
+        assert_eq!(router_work_counter(&msp), None);
+        // A snapshot without the counter is no reading.
+        assert_eq!(router_work_counter(&json!({"transport_open": true})), None);
+    }
+
+    #[tokio::test]
+    async fn a_router_whose_frame_count_stops_is_stalled_while_it_keeps_publishing() {
+        // The wedged-reader case: the router keeps answering on its state
+        // socket (its process I/O never goes flat), but the frame count does.
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("state.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let frame = ados_protocol::state::encode_v2(&serde_json::json!({
+            "transport_open": true,
+            "fc_variant": null,
+            "fc_frames_decoded": 4096,
+        }))
+        .unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut peer, _)) = listener.accept().await {
+                let _ = peer.write_all(&frame).await;
+            }
+        });
+
+        let mut wp = WorkProof::new();
+        let t0 = Instant::now();
+        let mut verdict = WorkVerdict::Unknown;
+        for pass in 0..=6u32 {
+            let reading = read_router_work_counter(&sock).await;
+            assert_eq!(reading, Some(4096));
+            verdict = wp.observe(ROUTER_UNIT, reading, t0 + Duration::from_secs(5) * pass);
+        }
+        assert_eq!(
+            verdict,
+            WorkVerdict::Stalled {
+                flat_for: STALL_WINDOW
+            }
+        );
+        // No socket at all is no reading, never a stall.
+        assert_eq!(
+            read_router_work_counter(&dir.path().join("absent.sock")).await,
+            None
+        );
     }
 }

@@ -184,6 +184,24 @@ def apply_ws_proxy_enforce_default(raw: dict[str, Any]) -> bool:
     return True
 
 
+def apply_raw_proxy_enforce_default(raw: dict[str, Any]) -> bool:
+    """Drop a persisted ``mavlink.raw_proxy_enforce_auth: false``.
+
+    The raw TCP/UDP MAVLink proxies used to serve an unauthorized LAN peer
+    on an unpaired node, and ``false`` was the shipped default, so every
+    node written while it was carries ``false`` in its own config file and
+    would keep serving the whole LAN after the default moved to ``true``.
+    Removed rather than rewritten, and one-shot, for the same reasons as
+    :func:`apply_ws_proxy_enforce_default`: a ``false`` an operator records
+    after the cleanup is a deliberate opt-out.
+    """
+    mav = raw.get("mavlink")
+    if not isinstance(mav, dict) or mav.get("raw_proxy_enforce_auth") is not False:
+        return False
+    mav.pop("raw_proxy_enforce_auth", None)
+    return True
+
+
 # The `security` sub-blocks older builds wrote for TLS and WireGuard. No server
 # or tunnel ever read them, so they only suggested a protection the node did
 # not have.
@@ -240,6 +258,7 @@ NORMALISERS: tuple[tuple[str, Migration], ...] = (
 # once per node, recorded in a persistent ledger. Never on the read path.
 ONE_SHOTS: tuple[tuple[str, Migration], ...] = (
     ("ws_proxy_enforce_default", apply_ws_proxy_enforce_default),
+    ("raw_proxy_enforce_default", apply_raw_proxy_enforce_default),
     ("mqtt_username_device_id", apply_mqtt_username_device_id),
 )
 

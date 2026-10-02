@@ -38,6 +38,13 @@ pub const SWIPE_DUR_MS: i64 = 250;
 /// Displacement floor (LCD px) for a fast contact to count as a swipe.
 pub const SWIPE_DISPLACEMENT_PX: f64 = 24.0;
 
+/// Most move samples one stroke keeps. A pen held down on a jittery digitiser
+/// would otherwise grow the stroke for as long as it stays down. The first
+/// sample (the stroke's origin) is always kept; past the cap the oldest sample
+/// after it is dropped, so the stroke carries its origin plus the most recent
+/// path.
+pub const MAX_STROKE_SAMPLES: usize = 512;
+
 /// The classified kind of a completed stroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureKind {
@@ -100,6 +107,8 @@ pub struct TouchGesture {
     pub duration_ms: i64,
     pub direction: Option<Direction>,
     pub velocity_px_per_s: f64,
+    /// The stroke's accepted moves: the first one plus up to
+    /// [`MAX_STROKE_SAMPLES`] - 1 of the most recent.
     pub samples: Vec<TouchMove>,
 }
 
@@ -123,7 +132,7 @@ pub struct StrokeFsm {
     down_y_lcd: i32,
     last_x_lcd: i32,
     last_y_lcd: i32,
-    samples: Vec<TouchMove>,
+    samples: std::collections::VecDeque<TouchMove>,
     pen_down: bool,
 }
 
@@ -165,7 +174,7 @@ impl StrokeFsm {
                 y_lcd,
                 timestamp_ms: now_ms,
             };
-            self.samples.push(m);
+            self.samples.push_back(m);
             return Some(m);
         }
         let dx = (x_lcd - self.last_x_lcd).abs();
@@ -180,7 +189,11 @@ impl StrokeFsm {
             y_lcd,
             timestamp_ms: now_ms,
         };
-        self.samples.push(m);
+        if self.samples.len() >= MAX_STROKE_SAMPLES {
+            // Index 0 is the origin; drop the oldest sample after it.
+            self.samples.remove(1);
+        }
+        self.samples.push_back(m);
         Some(m)
     }
 
@@ -189,7 +202,7 @@ impl StrokeFsm {
     /// the FSM to the pen-up state.
     pub fn close_stroke(&mut self, now_ms: i64) -> Option<TouchGesture> {
         self.pen_down = false;
-        let last = self.samples.last().copied()?;
+        let last = self.samples.back().copied()?;
         let end_x_lcd = last.x_lcd;
         let end_y_lcd = last.y_lcd;
         let duration_ms = (now_ms - self.down_at_ms).max(0);
@@ -217,7 +230,7 @@ impl StrokeFsm {
             duration_ms,
             direction,
             velocity_px_per_s: velocity,
-            samples: std::mem::take(&mut self.samples),
+            samples: Vec::from(std::mem::take(&mut self.samples)),
         };
         Some(gesture)
     }
@@ -450,6 +463,32 @@ mod tests {
         fsm.record_move(5, 5, 1000);
         let g2 = fsm.close_stroke(1100).unwrap();
         assert_eq!(g2.samples.len(), 1);
+    }
+
+    #[test]
+    fn a_long_held_stroke_keeps_its_origin_and_recent_path_within_the_cap() {
+        let mut fsm = StrokeFsm::new();
+        fsm.open_stroke(0);
+        let total = MAX_STROKE_SAMPLES as i32 * 3;
+        // Every move clears the delta filter, so each one is accepted.
+        for i in 0..total {
+            let x = (i % 2) * MOVE_DELTA_PX * 2;
+            assert!(fsm.record_move(x, i, i64::from(i)).is_some());
+        }
+        let g = fsm.close_stroke(i64::from(total)).unwrap();
+        assert_eq!(g.samples.len(), MAX_STROKE_SAMPLES);
+        assert_eq!(g.samples[0].timestamp_ms, 0, "origin kept");
+        assert_eq!(
+            g.samples.last().unwrap().timestamp_ms,
+            i64::from(total - 1),
+            "latest kept"
+        );
+        assert_eq!(
+            g.samples[1].timestamp_ms,
+            i64::from(total) - MAX_STROKE_SAMPLES as i64 + 1,
+            "the oldest samples after the origin were the ones dropped"
+        );
+        assert_eq!((g.start_x, g.start_y), (0, 0));
     }
 
     #[test]

@@ -5,8 +5,10 @@
 //!
 //! 1. **TX-live**: the RC-frame counter (frames the serial driver actually
 //!    accepted, bumped only after a successful write + flush) must advance at
-//!    the transmit cadence. The transmitter runs unconditionally while the
-//!    port is open, so a flat counter past the silence window means the
+//!    the transmit cadence WHILE A SOURCE IS LIVE. With no live source the
+//!    transmitter deliberately sends nothing (so the receiver's failsafe
+//!    runs), and a flat counter then is the correct idle lane, not a stall.
+//!    A flat counter past the silence window with a source live means the
 //!    module/driver has silently wedged — this watchdog fires and the run
 //!    loop reinitialises the transport (reopen + fresh tasks) and re-verifies
 //!    from scratch.
@@ -25,16 +27,18 @@ use ados_protocol::shutdown::Shutdown;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
 use tokio::time::{Duration, Instant};
 
+use crate::sources::SourceMerge;
 use crate::transport::WireCounters;
 
 /// How often the watchdog samples the TX frame counter.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How long the TX counter may stay flat before the transport is declared
-/// wedged. The transmitter runs at ≥1 Hz unconditionally while the port is
-/// open, so five silent seconds is a real stall, not an idle lane.
+/// How long the TX counter may stay flat, with a source live the whole time,
+/// before the transport is declared wedged. The transmitter runs at ≥1 Hz
+/// while a source is live, so five silent seconds is a real stall.
 pub const TX_SILENCE_THRESHOLD: Duration = Duration::from_secs(5);
 
 /// Why the watchdog returned.
@@ -49,11 +53,17 @@ pub enum WatchdogFired {
 }
 
 /// Watch the TX frame counter for silent stalls. Returns [`WatchdogFired::TxStalled`]
-/// when the counter has not advanced for [`TX_SILENCE_THRESHOLD`], or
-/// [`WatchdogFired::Cancelled`] on the cancel notify. The caller respawns the
-/// whole transport on a stall — a fresh bring-up re-arms a fresh watchdog, so
-/// recovery is re-verified rather than assumed.
-pub async fn tx_liveness_watchdog(counters: Arc<WireCounters>, cancel: Shutdown) -> WatchdogFired {
+/// when the counter has not advanced for [`TX_SILENCE_THRESHOLD`] while a
+/// source was live at every sample, or [`WatchdogFired::Cancelled`] on the
+/// cancel notify. A sample with no live source restarts the window: the lane
+/// is idle by design then. The caller respawns the whole transport on a
+/// stall — a fresh bring-up re-arms a fresh watchdog, so recovery is
+/// re-verified rather than assumed.
+pub async fn tx_liveness_watchdog(
+    counters: Arc<WireCounters>,
+    merge: Arc<Mutex<SourceMerge>>,
+    cancel: Shutdown,
+) -> WatchdogFired {
     let mut prev = counters.tx_frames.load(Ordering::Relaxed);
     let mut last_progress = Instant::now();
     loop {
@@ -63,7 +73,12 @@ pub async fn tx_liveness_watchdog(counters: Arc<WireCounters>, cancel: Shutdown)
             _ = tokio::time::sleep(POLL_INTERVAL) => {}
         }
         let current = counters.tx_frames.load(Ordering::Relaxed);
-        if current > prev {
+        let source_live = merge
+            .lock()
+            .await
+            .current(std::time::Instant::now())
+            .is_some();
+        if current > prev || !source_live {
             last_progress = Instant::now();
         } else if last_progress.elapsed() >= TX_SILENCE_THRESHOLD {
             tracing::warn!(
@@ -80,24 +95,64 @@ pub async fn tx_liveness_watchdog(counters: Arc<WireCounters>, cancel: Shutdown)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::{CHANNEL_COUNT, CHANNEL_MID};
+    use crate::sources::{ChannelSourceMode, MAX_INJECT_TTL};
 
     fn counters() -> Arc<WireCounters> {
         Arc::new(WireCounters::default())
     }
 
-    /// A flat TX counter fires the stall after the silence window (paused
-    /// clock: sleeps auto-advance, so the window elapses deterministically).
+    /// A merge with no source: the transmitter is idle by design.
+    fn idle_merge() -> Arc<Mutex<SourceMerge>> {
+        Arc::new(Mutex::new(SourceMerge::new(ChannelSourceMode::Inject)))
+    }
+
+    /// A merge with a live injection. The merge's deadline runs on the wall
+    /// clock, which the paused runtime clock does not advance, so the
+    /// injection stays live for the whole (virtual-time) test.
+    fn live_merge() -> Arc<Mutex<SourceMerge>> {
+        let mut merge = SourceMerge::new(ChannelSourceMode::Inject);
+        merge
+            .inject_all(
+                [CHANNEL_MID; CHANNEL_COUNT],
+                MAX_INJECT_TTL,
+                std::time::Instant::now(),
+                None,
+            )
+            .unwrap();
+        Arc::new(Mutex::new(merge))
+    }
+
+    /// A flat TX counter with a live source fires the stall after the silence
+    /// window (paused clock: sleeps auto-advance, so the window elapses
+    /// deterministically).
     #[tokio::test(start_paused = true)]
-    async fn flat_tx_fires_the_stall() {
+    async fn flat_tx_with_a_live_source_fires_the_stall() {
         let c = counters();
         let cancel = Shutdown::new();
         let fired = tokio::time::timeout(
             TX_SILENCE_THRESHOLD + POLL_INTERVAL * 3,
-            tx_liveness_watchdog(c, cancel),
+            tx_liveness_watchdog(c, live_merge(), cancel),
         )
         .await
         .expect("fires within the window");
         assert_eq!(fired, WatchdogFired::TxStalled);
+    }
+
+    /// With no live source the transmitter sends nothing on purpose, so a
+    /// flat counter is the idle lane and must never be reported as a stall
+    /// (a respawn loop there would churn the port for nothing).
+    #[tokio::test(start_paused = true)]
+    async fn flat_tx_without_a_source_never_fires() {
+        let c = counters();
+        let cancel = Shutdown::new();
+        let watchdog = tokio::spawn(tx_liveness_watchdog(c, idle_merge(), cancel.clone()));
+        for _ in 0..20 {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            assert!(!watchdog.is_finished(), "an idle lane is not a stall");
+        }
+        cancel.trigger();
+        assert_eq!(watchdog.await.unwrap(), WatchdogFired::Cancelled);
     }
 
     /// An advancing counter keeps the watchdog silent well past the window;
@@ -106,7 +161,11 @@ mod tests {
     async fn advancing_tx_never_fires() {
         let c = counters();
         let cancel = Shutdown::new();
-        let watchdog = tokio::spawn(tx_liveness_watchdog(c.clone(), cancel.clone()));
+        let watchdog = tokio::spawn(tx_liveness_watchdog(
+            c.clone(),
+            live_merge(),
+            cancel.clone(),
+        ));
         // Advance the counter every poll for several full silence windows.
         for _ in 0..20 {
             c.tx_frames.fetch_add(1, Ordering::Relaxed);
@@ -123,14 +182,15 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_fresh_watchdog_after_a_stall_re_verifies() {
         let c = counters();
+        let merge = live_merge();
         let cancel = Shutdown::new();
         // First transport wedges: flat counter → stall.
-        let fired = tx_liveness_watchdog(c.clone(), cancel.clone()).await;
+        let fired = tx_liveness_watchdog(c.clone(), merge.clone(), cancel.clone()).await;
         assert_eq!(fired, WatchdogFired::TxStalled);
 
         // The reinit brings a fresh transport (fresh counters) that flows.
         let fresh = counters();
-        let watchdog = tokio::spawn(tx_liveness_watchdog(fresh.clone(), cancel.clone()));
+        let watchdog = tokio::spawn(tx_liveness_watchdog(fresh.clone(), merge, cancel.clone()));
         for _ in 0..10 {
             fresh.tx_frames.fetch_add(1, Ordering::Relaxed);
             tokio::time::sleep(POLL_INTERVAL).await;
@@ -146,7 +206,11 @@ mod tests {
     async fn stall_window_counts_from_last_progress() {
         let c = counters();
         let cancel = Shutdown::new();
-        let watchdog = tokio::spawn(tx_liveness_watchdog(c.clone(), cancel.clone()));
+        let watchdog = tokio::spawn(tx_liveness_watchdog(
+            c.clone(),
+            live_merge(),
+            cancel.clone(),
+        ));
         // Healthy for three windows' worth of ticks.
         for _ in 0..15 {
             c.tx_frames.fetch_add(1, Ordering::Relaxed);
@@ -168,7 +232,7 @@ mod tests {
         let cancel = Shutdown::new();
         cancel.trigger();
         assert_eq!(
-            tx_liveness_watchdog(c, cancel).await,
+            tx_liveness_watchdog(c, live_merge(), cancel).await,
             WatchdogFired::Cancelled
         );
     }

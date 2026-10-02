@@ -981,7 +981,7 @@
           "type": "boolean"
         },
         "raw_proxy_enforce_auth": {
-          "default": false,
+          "default": true,
           "title": "Raw Proxy Enforce Auth",
           "type": "boolean"
         },
@@ -2199,7 +2199,7 @@
           }
         ],
         "legacy_stream_request": false,
-        "raw_proxy_enforce_auth": false,
+        "raw_proxy_enforce_auth": true,
         "raw_proxy_lan_access": false,
         "serial_port": "",
         "source": "auto",

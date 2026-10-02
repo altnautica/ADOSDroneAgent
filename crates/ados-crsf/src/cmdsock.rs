@@ -25,8 +25,8 @@
 //! arrives on the telemetry stream.
 //!
 //! Every injection carries a time-to-live (`ttl_ms`, clamped into the allowed
-//! window, defaulting when absent): a silent injector's values decay to the
-//! safe neutral set, never a held stale stick. `authority` in the reply names
+//! window, defaulting when absent): a silent injector stops feeding the lane
+//! (nothing is transmitted), never a held stale stick. `authority` in the reply names
 //! the source the transmitter obeys RIGHT NOW — an injection accepted while
 //! the HID path holds authority is stored but not transmitted, and the reply
 //! says so honestly.
@@ -499,9 +499,9 @@ mod tests {
         assert_eq!(resp["channel_source"], "inject");
         assert_eq!(resp["authority"], "inject");
         assert_eq!(resp["ttl_ms"], DEFAULT_INJECT_TTL.as_millis() as u64);
-        let (values, src) = st.merge.lock().await.current(Instant::now());
+        let (values, src) = st.merge.lock().await.current(Instant::now()).unwrap();
         assert_eq!(values, [1000u16; 16]);
-        assert_eq!(src.map(|s| s.as_str()), Some("inject"));
+        assert_eq!(src.as_str(), "inject");
     }
 
     #[tokio::test]
@@ -509,7 +509,7 @@ mod tests {
         let st = state();
         let resp = dispatch(br#"{"op":"set_channel","index":7,"value":1500}"#, &st).await;
         assert_eq!(resp["ok"], true);
-        let (values, _) = st.merge.lock().await.current(Instant::now());
+        let (values, _) = st.merge.lock().await.current(Instant::now()).unwrap();
         assert_eq!(values[7], 1500);
     }
 
@@ -525,11 +525,9 @@ mod tests {
         .await;
         assert_eq!(resp["ok"], true);
         assert_eq!(resp["authority"], "hid");
-        // The transmitted set stays neutral (no HID data): the injection did
-        // not leak through.
-        let (values, src) = st.merge.lock().await.current(Instant::now());
-        assert_eq!(values, crate::bank::ChannelBank::neutral());
-        assert!(src.is_none());
+        // Nothing is transmitted (no HID data): the injection did not leak
+        // through.
+        assert!(st.merge.lock().await.current(Instant::now()).is_none());
     }
 
     #[test]
@@ -633,7 +631,7 @@ mod tests {
         stream.read_to_end(&mut buf).await.unwrap();
         let resp: Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(resp["ok"], true);
-        let (values, _) = st.merge.lock().await.current(Instant::now());
+        let (values, _) = st.merge.lock().await.current(Instant::now()).unwrap();
         assert_eq!(values[2], 992);
         server.abort();
     }

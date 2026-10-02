@@ -304,8 +304,8 @@ async fn run_service_pass(
     // The HID/PIC source: stick + switch intent from the primary gamepad,
     // fed into the merge for the whole service lifetime (the gamepad is
     // independent of the serial module's respawn cycle). Device reads are
-    // Linux-only; elsewhere the hid slot stays empty, which reads as the
-    // safe neutral under HID authority.
+    // Linux-only; elsewhere the hid slot stays empty, so under HID authority
+    // the lane transmits nothing.
     #[cfg(target_os = "linux")]
     if cfg.channel_source != ChannelSourceMode::Inject {
         tokio::spawn(ados_crsf::hid::run_hid_source(
@@ -397,11 +397,13 @@ async fn run_service_pass(
             counters.clone(),
             task_cancel.clone(),
         ));
-        // The flat-TX liveness watchdog: frames must keep being accepted by
-        // the module at cadence. A fire breaks to the respawn loop, which
-        // reinitialises the transport and re-verifies from a fresh window.
+        // The flat-TX liveness watchdog: while a source is live, frames must
+        // keep being accepted by the module at cadence. A fire breaks to the
+        // respawn loop, which reinitialises the transport and re-verifies from
+        // a fresh window.
         let mut watchdog_task = tokio::spawn(ados_crsf::watchdog::tx_liveness_watchdog(
             counters.clone(),
+            merge.clone(),
             task_cancel.clone(),
         ));
         let cmd_state = CmdState {
@@ -424,7 +426,10 @@ async fn run_service_pass(
         });
 
         // ── Heartbeat loop ───────────────────────────────────────────────
-        let started = Instant::now();
+        // When RC frames started flowing continuously. `None` while the lane
+        // transmits nothing (no live source), so the link ladder never reads
+        // an idle lane as a transmitter waiting for received proof.
+        let mut tx_since: Option<Instant> = None;
         let mut prev_tx: u64 = 0;
         let mut prev_rx: u64 = 0;
         let mut prev_at = Instant::now();
@@ -454,6 +459,11 @@ async fn run_service_pass(
             let rx_total = counters.rx_frames.load(Ordering::Relaxed);
             let tx_fps = ((tx_total - prev_tx) as f64 / elapsed * 10.0).round() / 10.0;
             let rx_fps = ((rx_total - prev_rx) as f64 / elapsed * 10.0).round() / 10.0;
+            if tx_total > prev_tx {
+                tx_since.get_or_insert(now);
+            } else {
+                tx_since = None;
+            }
             prev_tx = tx_total;
             prev_rx = rx_total;
             prev_at = now;
@@ -495,7 +505,7 @@ async fn run_service_pass(
             let state = derive_state(&LinkInputs {
                 enabled: true,
                 device_open: true,
-                tx_running_for: Some(now.duration_since(started)),
+                tx_running_for: tx_since.map(|since| now.duration_since(since)),
                 stats_age,
                 uplink_lq: link_copy.map(|l| l.uplink_lq),
             });
@@ -505,7 +515,7 @@ async fn run_service_pass(
                 Some(age) if age <= ados_crsf::link::STATS_FRESH_WINDOW => link_copy,
                 _ => None,
             };
-            let source = merge.lock().await.current(now).1.map(|s| s.as_str());
+            let source = merge.lock().await.current(now).map(|(_, s)| s.as_str());
             let inputs = StatsInputs {
                 link: fresh_link.as_ref(),
                 // The operating band is a measurement the lane does not have

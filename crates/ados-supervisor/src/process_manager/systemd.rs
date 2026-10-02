@@ -89,7 +89,10 @@ impl ProcessManager for SystemdManager {
 
     /// `systemctl show -p MainPID` then `/proc/<pid>/io`, summing `rchar` and
     /// `wchar` (bytes handed to read/write syscalls, which covers both the
-    /// serial/UART lanes and the unix-socket ones).
+    /// serial/UART lanes and the unix-socket ones). The MAVLink router is the
+    /// exception: its own timers keep its process I/O moving with a wedged FC
+    /// reader, so it answers with the frames it decoded off the FC link (see
+    /// [`crate::work_proof::router_work_counter`]).
     ///
     /// Every failure mode answers `None` rather than a number: no `systemctl`,
     /// `MainPID=0` (the unit is not running, or is a type systemd does not
@@ -97,6 +100,12 @@ impl ProcessManager for SystemdManager {
     /// recycled between the two reads. The caller must not be able to tell a
     /// zero-progress process from an unreadable one by the value alone.
     async fn work_counter(&self, unit: &str) -> Option<u64> {
+        if unit == crate::work_proof::ROUTER_UNIT {
+            return crate::work_proof::read_router_work_counter(
+                &crate::work_proof::router_state_sock(),
+            )
+            .await;
+        }
         let out = run(&["show", "-p", "MainPID", "--value", unit], PROBE_TIMEOUT).await?;
         let pid: u32 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
         if pid == 0 {

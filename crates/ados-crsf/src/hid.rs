@@ -17,13 +17,18 @@
 //!
 //! # Liveness
 //!
-//! A gamepad is not a heartbeat source: evdev delivers edges, so a device that
-//! stops producing without erroring looks exactly like one held still. The
-//! reader therefore re-attests a producing device into the merge on
-//! [`crate::sources::HID_LIVENESS_INTERVAL`], and only a received event
-//! extends the slot's deadline — so silence expires the lane to neutral
-//! instead of latching the last stick.
+//! evdev delivers edges only, and the kernel's fuzz/flat filtering keeps a
+//! stick held steady completely silent, so silence on its own says nothing
+//! about the device. The reader therefore polls the device's current axis and
+//! button state from the kernel on [`crate::sources::HID_LIVENESS_INTERVAL`]:
+//! a successful poll re-stamps the merge with the polled values, so a pilot
+//! holding the sticks still keeps authority. A poll error, a read error
+//! (including a dropped-event resync the kernel refused) or the device going
+//! away ends the session and clears the slot at once; the lane then transmits
+//! nothing, so the receiver's failsafe runs. The frame is seeded from a poll
+//! at open, so a stick already deflected is reported as it is.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -139,7 +144,8 @@ pub fn abs_to_channel(raw: i32, min: i32, max: i32, inverted: bool) -> u16 {
     axis_to_channel(scaled.clamp(-32_768, 32_767) as i32)
 }
 
-/// The HID source's live channel frame: starts neutral, mutated by events.
+/// The HID source's live channel frame: starts from the default bank, then
+/// follows the device's polled state and events.
 #[derive(Debug, Clone)]
 pub struct HidChannels {
     values: [u16; CHANNEL_COUNT],
@@ -148,7 +154,7 @@ pub struct HidChannels {
 impl Default for HidChannels {
     fn default() -> Self {
         Self {
-            values: crate::bank::ChannelBank::neutral(),
+            values: crate::bank::ChannelBank::default().values(),
         }
     }
 }
@@ -187,6 +193,26 @@ impl HidChannels {
         }
         self.values[map.channel] = value;
         true
+    }
+
+    /// Apply one stream observation. Returns whether any channel changed.
+    pub fn apply_input(&mut self, input: HidInput, cal: &[AxisCal]) -> bool {
+        match input {
+            HidInput::Abs { code, value } => self.apply_abs(code, value, cal),
+            HidInput::Key { code, pressed } => self.apply_key(code, pressed),
+            HidInput::Other => false,
+        }
+    }
+
+    /// Apply a full polled device state. Axes without a calibration (the
+    /// device does not report them) keep their current value.
+    pub fn apply_snapshot(&mut self, snapshot: &HidSnapshot, cal: &[AxisCal]) {
+        for (map, &raw) in DEFAULT_AXIS_MAP.iter().zip(snapshot.axes.iter()) {
+            self.apply_abs(map.code, raw, cal);
+        }
+        for (map, &pressed) in DEFAULT_BUTTON_MAP.iter().zip(snapshot.buttons.iter()) {
+            self.apply_key(map.code, pressed);
+        }
     }
 }
 
@@ -246,22 +272,129 @@ pub async fn query_primary(socket: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Whether a received event should be pushed into the merge.
+/// One observation from a device's event stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HidInput {
+    /// An absolute-axis sample: evdev ABS code and raw value.
+    Abs { code: u16, value: i32 },
+    /// A key/button edge: evdev KEY code and whether it is down.
+    Key { code: u16, pressed: bool },
+    /// Anything the channel map does not consume (sync reports, misc).
+    Other,
+}
+
+/// The device's current state as one kernel poll read it, in the order of
+/// [`DEFAULT_AXIS_MAP`] and [`DEFAULT_BUTTON_MAP`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HidSnapshot {
+    /// Raw value of each mapped axis.
+    pub axes: [i32; DEFAULT_AXIS_MAP.len()],
+    /// Whether each mapped button is down.
+    pub buttons: [bool; DEFAULT_BUTTON_MAP.len()],
+}
+
+/// An open input device as the reader sees it: an event stream plus a direct
+/// state poll. The evdev node implements it on Linux.
+pub trait HidDevice {
+    /// The next event. An error means the device is gone or its stream can no
+    /// longer be trusted (a dropped-event resync the kernel refused).
+    fn next_input(&mut self) -> impl Future<Output = std::io::Result<HidInput>> + Send + '_;
+
+    /// The device's current axis and button state, read from the kernel. An
+    /// error means the device no longer answers.
+    fn poll_state(&self) -> std::io::Result<HidSnapshot>;
+}
+
+/// Why a device session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderExit {
+    /// Shutdown latched.
+    Shutdown,
+    /// The device failed a read or a poll, or the primary selection moved.
+    DeviceLost,
+}
+
+/// Re-stamp the merge's HID slot with the frame.
+async fn push_frame(
+    merge: &std::sync::Arc<tokio::sync::Mutex<crate::sources::SourceMerge>>,
+    frame: &HidChannels,
+) {
+    let now = std::time::Instant::now();
+    if let Err(e) = merge.lock().await.set_hid(frame.values(), now) {
+        // Unreachable through the clamped scaler; loud if the invariant ever
+        // breaks.
+        tracing::error!(error = ?e, "hid_scaled_value_rejected");
+    }
+}
+
+/// Stream one open device into the merge until it fails a read or a poll, or
+/// `stop` resolves.
 ///
-/// A changed channel value always goes. An UNCHANGED one goes on the
-/// [`crate::sources::HID_LIVENESS_INTERVAL`] cadence, because the push is what
-/// re-arms the slot's deadline: a device delivering steady jitter that never
-/// crosses a channel step is alive and must keep its authority, while locking
-/// the shared merge on every event would put a 1 kHz report rate through a
-/// mutex the transmitter also holds.
-///
-/// `since_last_push` is `None` before the first push of a session.
-///
-/// Pure and un-gated deliberately: the evdev read loop it serves is
-/// Linux-only, and a throttle that stopped re-attesting would silently expire
-/// a live pilot's sticks on every host the loop cannot be tested on.
-pub fn should_reattest(changed: bool, since_last_push: Option<std::time::Duration>) -> bool {
-    changed || since_last_push.is_none_or(|d| d >= crate::sources::HID_LIVENESS_INTERVAL)
+/// The frame is seeded from a poll before the first push. Every changed
+/// channel is pushed as it arrives, and every successful
+/// [`crate::sources::HID_LIVENESS_INTERVAL`] poll re-stamps the slot with the
+/// polled state, so a device held perfectly still stays live while one that
+/// stops answering is dropped on the next poll. The HID slot is cleared on
+/// every exit: its last stick never outlives the session.
+pub async fn drive_device<D: HidDevice>(
+    device: &mut D,
+    cal: &[AxisCal],
+    merge: &std::sync::Arc<tokio::sync::Mutex<crate::sources::SourceMerge>>,
+    stop: impl Future<Output = ReaderExit>,
+) -> ReaderExit {
+    let exit = drive_until_exit(device, cal, merge, stop).await;
+    merge.lock().await.clear_hid();
+    exit
+}
+
+async fn drive_until_exit<D: HidDevice>(
+    device: &mut D,
+    cal: &[AxisCal],
+    merge: &std::sync::Arc<tokio::sync::Mutex<crate::sources::SourceMerge>>,
+    stop: impl Future<Output = ReaderExit>,
+) -> ReaderExit {
+    let mut frame = HidChannels::default();
+    match device.poll_state() {
+        Ok(snapshot) => frame.apply_snapshot(&snapshot, cal),
+        Err(e) => {
+            tracing::warn!(error = %e, "hid_device_poll_failed");
+            return ReaderExit::DeviceLost;
+        }
+    }
+    push_frame(merge, &frame).await;
+
+    let mut liveness_tick = tokio::time::interval(crate::sources::HID_LIVENESS_INTERVAL);
+    liveness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick completes at once; the open-time poll above covered it.
+    liveness_tick.tick().await;
+    tokio::pin!(stop);
+    loop {
+        tokio::select! {
+            biased;
+            exit = &mut stop => return exit,
+            _ = liveness_tick.tick() => match device.poll_state() {
+                Ok(snapshot) => {
+                    frame.apply_snapshot(&snapshot, cal);
+                    push_frame(merge, &frame).await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "hid_device_poll_failed");
+                    return ReaderExit::DeviceLost;
+                }
+            },
+            ev = device.next_input() => match ev {
+                Ok(input) => {
+                    if frame.apply_input(input, cal) {
+                        push_frame(merge, &frame).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "hid_device_lost");
+                    return ReaderExit::DeviceLost;
+                }
+            },
+        }
+    }
 }
 
 /// How often the reader re-resolves the primary gamepad (and notices a
@@ -320,14 +453,44 @@ pub async fn run_hid_source(
     }
 }
 
+/// The evdev node as a [`HidDevice`]. `evdev::Device` resyncs its state on a
+/// dropped-event report itself, so a resync the kernel refuses surfaces as a
+/// read error here.
 #[cfg(target_os = "linux")]
-enum ReaderExit {
-    Shutdown,
-    DeviceLost,
+impl HidDevice for evdev::EventStream {
+    async fn next_input(&mut self) -> std::io::Result<HidInput> {
+        use evdev::InputEventKind;
+        let ev = self.next_event().await?;
+        Ok(match ev.kind() {
+            InputEventKind::AbsAxis(axis) => HidInput::Abs {
+                code: axis.0,
+                value: ev.value(),
+            },
+            InputEventKind::Key(key) => HidInput::Key {
+                code: key.code(),
+                pressed: ev.value() != 0,
+            },
+            _ => HidInput::Other,
+        })
+    }
+
+    fn poll_state(&self) -> std::io::Result<HidSnapshot> {
+        let device = self.device();
+        let abs = device.get_abs_state()?;
+        let keys = device.get_key_state()?;
+        let mut snapshot = HidSnapshot::default();
+        for (slot, map) in snapshot.axes.iter_mut().zip(DEFAULT_AXIS_MAP.iter()) {
+            *slot = abs[map.code as usize].value;
+        }
+        for (slot, map) in snapshot.buttons.iter_mut().zip(DEFAULT_BUTTON_MAP.iter()) {
+            *slot = keys.contains(evdev::Key::new(map.code));
+        }
+        Ok(snapshot)
+    }
 }
 
-/// Open one evdev node and stream its events into the merge until the device
-/// dies, the primary selection changes, or shutdown latches.
+/// Open one evdev node and stream it into the merge until the device dies,
+/// the primary selection changes, or shutdown latches.
 #[cfg(target_os = "linux")]
 async fn stream_device(
     node: &str,
@@ -335,16 +498,23 @@ async fn stream_device(
     merge: &std::sync::Arc<tokio::sync::Mutex<crate::sources::SourceMerge>>,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> ReaderExit {
-    use evdev::{Device, InputEventKind};
+    use evdev::{AbsoluteAxisType, Device};
 
     let Ok(device) = Device::open(node) else {
         tracing::warn!(node, "hid_device_open_failed");
         return ReaderExit::DeviceLost;
     };
-    // Per-axis calibration for the mapped codes, from the device's absinfo.
+    // Per-axis calibration from the device's absinfo, for the mapped axes the
+    // device actually reports. An axis it lacks gets no calibration, so its
+    // channel keeps the default bank value instead of reading a fake center.
     let cal: Vec<AxisCal> = match device.get_abs_state() {
         Ok(abs) => DEFAULT_AXIS_MAP
             .iter()
+            .filter(|m| {
+                device
+                    .supported_absolute_axes()
+                    .is_some_and(|axes| axes.contains(AbsoluteAxisType(m.code)))
+            })
             .map(|m| {
                 let info = abs[m.code as usize];
                 AxisCal {
@@ -365,89 +535,26 @@ async fn stream_device(
     };
     tracing::info!(node, "hid_source_reading");
 
-    let mut frame = HidChannels::default();
-    let mut resolve_tick = tokio::time::interval(RESOLVE_INTERVAL);
-    resolve_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // Liveness. evdev is edge-triggered, so a device that goes quiet WITHOUT
-    // erroring — a wireless pad out of range, a wedged driver — is
-    // indistinguishable from a stick held still, and a read error is the only
-    // other signal available. The merge's HID slot therefore carries a deadline
-    // (`sources::HID_STALE_AFTER`) that ONLY a received event extends: an
-    // unchanged frame is re-pushed on this cadence to re-attest a producing
-    // device, and once the events stop the slot ages out and the lane fails
-    // over to the safe neutral set rather than re-sending the last stick to an
-    // armed aircraft for as long as the process lives.
-    let mut liveness_tick = tokio::time::interval(crate::sources::HID_LIVENESS_INTERVAL);
-    liveness_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut last_event = std::time::Instant::now();
-    let mut last_push: Option<std::time::Instant> = None;
-    let mut silent = false;
-    loop {
-        tokio::select! {
-            biased;
-            _ = wait_flag(shutdown) => return ReaderExit::Shutdown,
-            _ = resolve_tick.tick() => {
-                // The operator re-selected the primary: reopen onto it.
-                let current = query_primary(&hid_cmd_sock_path()).await;
-                if current.as_deref() != Some(bound_primary) {
-                    tracing::info!(node, "hid_primary_changed");
-                    return ReaderExit::DeviceLost;
-                }
-            }
-            _ = liveness_tick.tick() => {
-                let quiet = last_event.elapsed();
-                if !silent && quiet >= crate::sources::HID_STALE_AFTER {
-                    silent = true;
-                    tracing::warn!(
-                        node,
-                        quiet_ms = quiet.as_millis() as u64,
-                        "hid_source_silent"
-                    );
-                    // The slot's own deadline has already stopped it flying;
-                    // dropping it here makes the transmitted source label
-                    // honest on the same tick rather than one TX period later.
-                    merge.lock().await.clear_hid();
-                }
-            }
-            ev = stream.next_event() => match ev {
-                Ok(ev) => {
-                    let now = std::time::Instant::now();
-                    if silent {
-                        // Nothing about the pre-silence axis values is attested
-                        // any more, and the lane has already transmitted neutral
-                        // in their place. Rebuilding from neutral means only
-                        // freshly reported axes leave it, rather than
-                        // resurrecting a stick the lane just refused.
-                        frame = HidChannels::default();
-                        silent = false;
-                        last_push = None;
-                    }
-                    let changed = match ev.kind() {
-                        InputEventKind::AbsAxis(axis) => {
-                            frame.apply_abs(axis.0, ev.value(), &cal)
-                        }
-                        InputEventKind::Key(key) => {
-                            frame.apply_key(key.code(), ev.value() != 0)
-                        }
-                        _ => false,
-                    };
-                    last_event = now;
-                    if should_reattest(changed, last_push.map(|t| now.duration_since(t))) {
-                        last_push = Some(now);
-                        if let Err(e) = merge.lock().await.set_hid(frame.values(), now) {
-                            // Unreachable through the clamped scaler; loud if
-                            // the invariant ever breaks.
-                            tracing::error!(error = ?e, "hid_scaled_value_rejected");
-                        }
+    // Ends the session on shutdown, or when the operator re-selects the
+    // primary so the reader reopens onto it.
+    let stop = async {
+        let mut resolve_tick = tokio::time::interval(RESOLVE_INTERVAL);
+        resolve_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                _ = wait_flag(shutdown) => return ReaderExit::Shutdown,
+                _ = resolve_tick.tick() => {
+                    let current = query_primary(&hid_cmd_sock_path()).await;
+                    if current.as_deref() != Some(bound_primary) {
+                        tracing::info!(node, "hid_primary_changed");
+                        return ReaderExit::DeviceLost;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(node, error = %e, "hid_device_lost");
-                    return ReaderExit::DeviceLost;
-                }
-            },
+            }
         }
-    }
+    };
+    drive_device(&mut stream, &cal, merge, stop).await
 }
 
 #[cfg(test)]
@@ -621,30 +728,145 @@ mod tests {
         assert!(query_primary(&gone).await.is_none());
     }
 
-    #[test]
-    fn an_unchanged_event_still_re_attests_the_device_on_the_cadence() {
-        use crate::sources::{HID_LIVENESS_INTERVAL, HID_STALE_AFTER};
-        use std::time::Duration;
+    // ── device liveness ─────────────────────────────────────────────────────
 
-        // A changed channel always goes, and so does the first event of a
-        // session: the slot has no deadline until something arms it.
-        assert!(should_reattest(true, None));
-        assert!(should_reattest(true, Some(Duration::ZERO)));
-        assert!(should_reattest(false, None));
+    /// A device that never emits an event (a stick held perfectly still) and
+    /// whose state poll can be made to fail, as an unplugged node does.
+    struct StillDevice {
+        snapshot: HidSnapshot,
+        poll_fails: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
 
-        // Inside the cadence an unchanged event is dropped — that is the whole
-        // point of the throttle.
-        assert!(!should_reattest(
-            false,
-            Some(HID_LIVENESS_INTERVAL - Duration::from_millis(1))
+    impl HidDevice for StillDevice {
+        async fn next_input(&mut self) -> std::io::Result<HidInput> {
+            std::future::pending().await
+        }
+
+        fn poll_state(&self) -> std::io::Result<HidSnapshot> {
+            if self.poll_fails.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(std::io::Error::from_raw_os_error(19))
+            } else {
+                Ok(self.snapshot)
+            }
+        }
+    }
+
+    /// Throttle stick held full up, every other axis centered.
+    fn throttle_up_snapshot() -> HidSnapshot {
+        let mut snapshot = HidSnapshot::default();
+        for (slot, map) in snapshot.axes.iter_mut().zip(DEFAULT_AXIS_MAP.iter()) {
+            if map.channel == 2 {
+                *slot = -32768;
+            }
+        }
+        snapshot
+    }
+
+    fn hid_merge() -> std::sync::Arc<tokio::sync::Mutex<crate::sources::SourceMerge>> {
+        std::sync::Arc::new(tokio::sync::Mutex::new(crate::sources::SourceMerge::new(
+            crate::sources::ChannelSourceMode::Hid,
+        )))
+    }
+
+    #[tokio::test]
+    async fn a_device_held_still_keeps_its_stick_past_the_stale_window() {
+        use crate::sources::{ChannelSource, HID_STALE_AFTER};
+
+        let merge = hid_merge();
+        let device = StillDevice {
+            snapshot: throttle_up_snapshot(),
+            poll_fails: Default::default(),
+        };
+        let reader_merge = merge.clone();
+        let reader = tokio::spawn(async move {
+            let mut device = device;
+            drive_device(
+                &mut device,
+                &full_cal(),
+                &reader_merge,
+                std::future::pending(),
+            )
+            .await
+        });
+
+        // Well past the stale window with no event at all: the successful
+        // polls keep the slot live, and the frame came from the polled state
+        // (seeded at open), not the throttle-low default.
+        tokio::time::sleep(HID_STALE_AFTER + std::time::Duration::from_millis(300)).await;
+        let (values, source) = merge
+            .lock()
+            .await
+            .current(std::time::Instant::now())
+            .expect("a still but answering device stays live");
+        assert_eq!(source, ChannelSource::Hid);
+        assert_eq!(
+            values[2], CHANNEL_MAX,
+            "throttle held where the pilot left it"
+        );
+        reader.abort();
+    }
+
+    #[tokio::test]
+    async fn a_device_that_stops_answering_goes_stale_and_rc_frames_stop() {
+        use crate::sources::HID_STALE_AFTER;
+        use crate::transport::{run_tx, OobQueue, WireCounters};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let merge = hid_merge();
+        let poll_fails = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let device = StillDevice {
+            snapshot: throttle_up_snapshot(),
+            poll_fails: poll_fails.clone(),
+        };
+        let reader_merge = merge.clone();
+        let reader = tokio::spawn(async move {
+            let mut device = device;
+            drive_device(
+                &mut device,
+                &full_cal(),
+                &reader_merge,
+                std::future::pending(),
+            )
+            .await
+        });
+        let (tx_side, _rx_keep) = tokio::io::duplex(1 << 16);
+        let counters = std::sync::Arc::new(WireCounters::default());
+        let cancel = ados_protocol::shutdown::Shutdown::new();
+        let tx = tokio::spawn(run_tx(
+            tx_side,
+            merge.clone(),
+            200,
+            counters.clone(),
+            std::sync::Arc::new(OobQueue::default()),
+            cancel.clone(),
         ));
-        // At and past it the unchanged event goes, so a device delivering only
-        // sub-step jitter keeps its authority instead of expiring under a pilot
-        // holding position.
-        assert!(should_reattest(false, Some(HID_LIVENESS_INTERVAL)));
-        assert!(should_reattest(false, Some(HID_STALE_AFTER)));
-        // And the re-attest lands strictly inside the deadline it re-arms,
-        // which is what makes the two cooperate rather than race.
-        assert!(HID_LIVENESS_INTERVAL < HID_STALE_AFTER);
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            counters.tx_frames.load(Ordering::Relaxed) > 0,
+            "frames flow while the device answers"
+        );
+
+        // The device stops answering its state poll.
+        let failed_at = Instant::now();
+        poll_fails.store(true, Ordering::SeqCst);
+        let exit = tokio::time::timeout(HID_STALE_AFTER, reader)
+            .await
+            .expect("dropped inside the stale window")
+            .unwrap();
+        assert_eq!(exit, ReaderExit::DeviceLost);
+        assert!(failed_at.elapsed() < HID_STALE_AFTER);
+        assert!(merge.lock().await.current(Instant::now()).is_none());
+
+        // One frame may already have been in flight; after that the wire is
+        // silent, so the receiver's failsafe runs.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let settled = counters.tx_frames.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(counters.tx_frames.load(Ordering::Relaxed), settled);
+
+        cancel.trigger();
+        tx.await.unwrap();
     }
 }

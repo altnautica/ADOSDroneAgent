@@ -411,12 +411,20 @@ impl FcConnection {
         injector: Option<&ados_protocol::ipc::InjectorClaim>,
         budget: Option<Duration>,
     ) -> bool {
-        // PIC-arbiter gate. A writer that declared itself an autonomous injector
-        // is refused whenever a human holds manual control (or the arbiter is not
-        // reporting — fail closed). An undeclared writer (injector = None) is the
-        // operator/human path and is NEVER gated. Inert until a producer is armed.
+        // PIC-arbiter gate. An autonomous injector — a writer that declared
+        // itself one, or any writer on the plugin plane by its kernel
+        // credentials, whatever it declared (see `ados_protocol::ipc::IpcPeer`)
+        // — is refused whenever a human holds manual control (or the arbiter is
+        // not reporting — fail closed). An operator writer (injector = None) is
+        // the human path and is NEVER gated. A poisoned lock is recovered: the
+        // cache inside is valid, and a panic here would take the FC path down.
         if let Some(claim) = injector {
-            if self.injector_gate.lock().unwrap().refused(claim) {
+            if self
+                .injector_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refused(claim)
+            {
                 tracing::warn!(
                     injector = %claim.client_id,
                     len = data.len(),
@@ -495,7 +503,12 @@ impl FcConnection {
         // Same PIC-arbiter gate as send_client_bytes; MSP is a second way to
         // command an airframe, so it is gated identically.
         if let Some(claim) = injector {
-            if self.injector_gate.lock().unwrap().refused(claim) {
+            if self
+                .injector_gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .refused(claim)
+            {
                 tracing::warn!(
                     injector = %claim.client_id,
                     len = data.len(),

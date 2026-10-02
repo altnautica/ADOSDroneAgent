@@ -4,8 +4,8 @@
 //! against the usable endpoint range (172..=1811) at this boundary, so an
 //! out-of-range value is rejected before it ever reaches the wire; the codec
 //! below stays faithful to any 11-bit value. Which bank feeds the transmitter
-//! (and when it decays to neutral) is the sibling `sources` module's job —
-//! this module owns only values + validation.
+//! (and when nothing is transmitted at all) is the sibling `sources` module's
+//! job — this module owns only values + validation.
 
 use crate::channels::{CHANNEL_COUNT, CHANNEL_MAX, CHANNEL_MID, CHANNEL_MIN};
 
@@ -25,10 +25,12 @@ pub struct ChannelBank {
 }
 
 impl Default for ChannelBank {
-    /// The safe neutral posture transmitted when no source feeds the lane:
-    /// roll/pitch/yaw (channels 1/2/4 in AETR order) centered, throttle
-    /// (channel 3) full low, every auxiliary channel full low — the
-    /// stick-neutral, everything-off posture.
+    /// The base a fresh bank starts from before a source fills it: roll,
+    /// pitch and yaw (channels 1/2/4 in AETR order) centered, throttle
+    /// (channel 3) full low, every auxiliary channel full low. A single-channel
+    /// injection builds on it, and so do HID axes the device does not report.
+    /// It is never transmitted on its own: with no live source the lane sends
+    /// no RC frames.
     fn default() -> Self {
         let mut values = [CHANNEL_MIN; CHANNEL_COUNT];
         values[0] = CHANNEL_MID; // roll
@@ -39,11 +41,6 @@ impl Default for ChannelBank {
 }
 
 impl ChannelBank {
-    /// The safe neutral channel set (see [`Default`]).
-    pub fn neutral() -> [u16; CHANNEL_COUNT] {
-        Self::default().values
-    }
-
     /// The current values.
     pub fn values(&self) -> [u16; CHANNEL_COUNT] {
         self.values
@@ -91,7 +88,6 @@ mod tests {
         assert_eq!(v[2], CHANNEL_MIN, "throttle low");
         assert_eq!(v[3], CHANNEL_MID);
         assert!(v[4..].iter().all(|&x| x == CHANNEL_MIN));
-        assert_eq!(ChannelBank::neutral(), v);
     }
 
     #[test]

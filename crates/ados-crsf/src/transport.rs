@@ -120,8 +120,10 @@ pub enum RxExit {
 
 /// Transmit one RC channels frame per tick at `rate_hz` until cancelled or
 /// the writer dies. Each tick reads the source merge (authority + TTL applied
-/// per tick), so an injection lands on the very next frame and a silent
-/// injector decays to neutral on the very next frame after its TTL.
+/// per tick), so an injection lands on the very next frame. A tick with no
+/// live source writes NO RC frame: the receiver then times out and the flight
+/// controller runs its own RC-loss failsafe, instead of the lane flying a
+/// synthetic set nobody commanded.
 pub async fn run_tx<W: AsyncWrite + Unpin>(
     mut writer: W,
     merge: Arc<Mutex<SourceMerge>>,
@@ -141,7 +143,19 @@ pub async fn run_tx<W: AsyncWrite + Unpin>(
             _ = cancel.wait() => return TxExit::Cancelled,
             _ = ticker.tick() => {}
         }
-        let (values, _source) = merge.lock().await.current(Instant::now());
+        // Bound first so the merge lock is released before any write awaits.
+        let current = merge.lock().await.current(Instant::now());
+        let Some((values, _source)) = current else {
+            // No source has authority with live values. Out-of-band parameter
+            // frames are addressed to the transmitter module, not carried as
+            // RC data, so operator-paced module configuration still goes out.
+            for pending in oob.drain() {
+                if writer.write_all(&pending).await.is_err() || writer.flush().await.is_err() {
+                    return TxExit::WriteError;
+                }
+            }
+            continue;
+        };
         // 16 in-range channel values always build; a failure here would be a
         // codec bug, and silently skipping the tick would hide it.
         let frame = match build_rc_frame(&values) {
@@ -428,13 +442,24 @@ mod tests {
     async fn tx_write_error_surfaces_when_the_peer_closes() {
         let (tx_side, rx_side) = tokio::io::duplex(64);
         drop(rx_side);
+        let merge = inject_merge();
+        merge
+            .lock()
+            .await
+            .inject_all(
+                [992u16; CHANNEL_COUNT],
+                MAX_INJECT_TTL,
+                Instant::now(),
+                None,
+            )
+            .unwrap();
         let counters = Arc::new(WireCounters::default());
         let cancel = Shutdown::new();
         let exit = tokio::time::timeout(
             Duration::from_secs(5),
             run_tx(
                 tx_side,
-                inject_merge(),
+                merge,
                 100,
                 counters,
                 Arc::new(OobQueue::default()),
@@ -444,6 +469,53 @@ mod tests {
         .await
         .expect("exit promptly");
         assert_eq!(exit, TxExit::WriteError);
+    }
+
+    /// With no live source the transmitter writes no RC frames at all, so the
+    /// receiver times out and the flight controller's own failsafe runs. A
+    /// synthetic set sent instead would keep the receiver linked and fly the
+    /// aircraft on values nobody commanded.
+    #[tokio::test]
+    async fn no_live_source_transmits_no_rc_frames() {
+        let (tx_side, mut rx_side) = tokio::io::duplex(4096);
+        let merge = inject_merge();
+        let counters = Arc::new(WireCounters::default());
+        let cancel = Shutdown::new();
+        let tx = tokio::spawn(run_tx(
+            tx_side,
+            merge.clone(),
+            200,
+            counters.clone(),
+            Arc::new(OobQueue::default()),
+            cancel.clone(),
+        ));
+
+        let mut buf = [0u8; 64];
+        let read = tokio::time::timeout(Duration::from_millis(500), rx_side.read(&mut buf)).await;
+        assert!(
+            read.is_err(),
+            "no bytes may reach the wire without a source"
+        );
+        assert_eq!(counters.tx_frames.load(Ordering::Relaxed), 0);
+
+        // A source arriving resumes the cadence on a following tick.
+        merge
+            .lock()
+            .await
+            .inject_all(
+                [992u16; CHANNEL_COUNT],
+                MAX_INJECT_TTL,
+                Instant::now(),
+                None,
+            )
+            .unwrap();
+        let n = tokio::time::timeout(Duration::from_secs(5), rx_side.read(&mut buf))
+            .await
+            .expect("a frame once a source is live")
+            .unwrap();
+        assert!(n > 0);
+        cancel.trigger();
+        assert_eq!(tx.await.unwrap(), TxExit::Cancelled);
     }
 
     /// The out-of-band queue is bounded: pushes beyond the cap are refused,
