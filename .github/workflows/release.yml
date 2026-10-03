@@ -53,7 +53,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The installer requests `ados_drone_agent-<tag version>-py3-none-any.whl`
       # and the deploy bundle by the same version, while the wheel takes its
@@ -109,7 +109,7 @@ jobs:
       RELEASE_PUBKEY: RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The deploy-bundle ships the vendored radio source (vendor/wfb-ng,
           # vendor/rtl8812eu) the on-device install builds against, so the
