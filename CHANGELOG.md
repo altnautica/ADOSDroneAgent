@@ -4,6 +4,35 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.102.1] - 2026-10-03
+
+### Fixed
+
+- **Legacy uplink NAT.** Every install and upgrade now removes the NAT older
+  builds left behind: `-A POSTROUTING -o <iface> -j MASQUERADE` rules in the
+  live table and in `/etc/iptables/rules.v4`, and a `table ip ados_nat` block
+  in `/etc/nftables.conf`, which gains an `include "/etc/nftables.d/*.nft"`
+  line if it has none. The firewall manager's own `ADOS_NAT` chain and live
+  `ados_nat` table are left alone. The step is optional: a failure is reported
+  and the install continues.
+- **MAC-pin overrides keyed by interface name.** An override under
+  `network.mac_pin.overrides` keyed by an interface name (`wlan1`) was ignored
+  at runtime. The upgrade moves it to the adapter key
+  (`<vidpid>@<usb_path>`) recorded for that interface in
+  `/etc/ados/mac-pins.state`; a name the state file cannot resolve stays as it
+  is. The installer's MAC-pin step now runs after config migration so the
+  reconcile sees the translated keys.
+
+### Internal
+
+- Rust tests keep their scratch files in a `TempDir` instead of leaving them
+  in the system temp directory.
+- The Python test fixture isolates the config writer's lock path, so the
+  suite passes on a Linux host without `/run/ados`.
+- The prebuilt driver pipeline builds the Debian 11 kernel rows from a pinned
+  Debian snapshot, and the Raspberry Pi rows verify the archive with the
+  vendor's SHA-512 keyring.
+
 ## [0.102.0] - 2026-10-03
 
 ### Security
