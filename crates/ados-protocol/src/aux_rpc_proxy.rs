@@ -961,10 +961,8 @@ mod tests {
         // The caller awaits this inside the aux consumer's single recv loop, so
         // an unbounded write to a wedged proxy stalls that slot's whole inbound
         // path — MAVLink ingest, status frames and the peer cache, not just RPC.
-        let dir = std::env::temp_dir().join(format!("ados-ingest-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("ingest.sock");
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ingest.sock");
         let _listener = deaf_listener(&sock).await;
 
         let ingest = AuxRpcResponseIngest::new(&sock);
@@ -980,7 +978,6 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "sends took {elapsed:?}; a wedged peer is stalling the caller"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

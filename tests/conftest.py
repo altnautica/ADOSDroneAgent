@@ -29,9 +29,11 @@ def _isolate_agent_globals(tmp_path, monkeypatch):
 
     And two node-level paths the config machinery owns, for the same reason:
 
-    * ``ados.core.config._lock.CONFIG_LOCK`` — the reader/writer flock. A
-      test that took the real one would serialise against a live agent on
-      the developer's own box.
+    * ``ados.core.config._lock.CONFIG_LOCK`` and the writer's own binding of
+      it — the reader/writer flock. A test that took the real one would
+      serialise against a live agent on the developer's own box, and on a
+      Linux host without a root-created ``/run/ados`` it cannot be opened at
+      all, so every write through the canonical path is refused.
     * ``ados.core.config.maintenance.CONFIG_MIGRATIONS_PATH`` — the
       one-shot-cleanup ledger. This one bites hardest: a test run that
       recorded a cleanup in the real ledger made a *later* test in the same
@@ -39,6 +41,7 @@ def _isolate_agent_globals(tmp_path, monkeypatch):
       which is exactly the order-dependence this fixture exists to kill.
     """
     import ados.api.deps as deps
+    import ados.core.config.writer as config_writer
     import ados.core.profile as profile
     from ados.core.config import _lock
     from ados.core.config import maintenance as config_maintenance
@@ -50,6 +53,7 @@ def _isolate_agent_globals(tmp_path, monkeypatch):
     # restores the real path afterward).
     monkeypatch.setattr(profile, "PROFILE_CONF", tmp_path / "profile.conf")
     monkeypatch.setattr(_lock, "CONFIG_LOCK", tmp_path / "config.yaml.lock")
+    monkeypatch.setattr(config_writer, "CONFIG_LOCK", tmp_path / "config.yaml.lock")
     monkeypatch.setattr(
         config_maintenance,
         "CONFIG_MIGRATIONS_PATH",

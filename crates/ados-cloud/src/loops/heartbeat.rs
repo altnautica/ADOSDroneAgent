@@ -947,7 +947,8 @@ mod tests {
 
     #[test]
     fn fresh_plugin_sidecars_fold_keyed_by_id_with_the_slice_verbatim() {
-        let dir = std::env::temp_dir().join(format!("ados-cloud-plugins-{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         write_named(
             &dir,
             "com.example.world-state.json",
@@ -965,13 +966,12 @@ mod tests {
         // Malformed JSON + non-state files are skipped, never the whole read.
         assert!(!out.contains_key("bad"));
         assert!(!out.contains_key("notes"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_stale_plugin_sidecar_is_dropped() {
-        let dir =
-            std::env::temp_dir().join(format!("ados-cloud-plugins-stale-{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         write_named(
             &dir,
             "com.example.world-state.json",
@@ -980,18 +980,19 @@ mod tests {
         // A reference `now` an hour after the just-written file -> past the gate.
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
         assert!(read_plugin_state_sidecars_from(&dir, later).is_empty());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn an_absent_plugin_dir_is_an_empty_map() {
-        let dir = std::env::temp_dir().join("ados-cloud-plugins-nope-does-not-exist");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("does-not-exist");
         assert!(read_plugin_state_sidecars_from(&dir, std::time::SystemTime::now()).is_empty());
     }
 
     #[test]
     fn linked_peers_fold_fresh_remap_camelcase_and_drop_stale_and_idless() {
-        let dir = std::env::temp_dir().join(format!("ados-cloud-linked-{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         let now_s = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1021,7 +1022,6 @@ mod tests {
         for k in v.as_object().unwrap().keys() {
             assert!(!k.contains('_'), "{k} must be camelCase on the wire");
         }
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1032,8 +1032,8 @@ mod tests {
         assert!(read_linked_peers_sidecar_from(missing, 1_000_000).is_none());
         // A file whose only peer is stale reads None — the dead-writer case
         // never republishes a ghost peer as a confident list.
-        let dir =
-            std::env::temp_dir().join(format!("ados-cloud-linked-stale-{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         write_named(
             &dir,
             "linked-peers.json",
@@ -1044,12 +1044,12 @@ mod tests {
             read_linked_peers_sidecar_from(&dir.join("linked-peers.json"), 10_000_000_000)
                 .is_none()
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_fresh_crsf_sidecar_folds_and_a_stale_or_bad_one_reads_absent() {
-        let dir = std::env::temp_dir().join(format!("ados-cloud-crsf-{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         // The exact sidecar body the lane writes, including its extra derived
         // `flyable` field — outside the pinned block, ignored by the parse.
         write_named(
@@ -1088,7 +1088,6 @@ mod tests {
             read_crsf_sidecar_from(&dir.join("crsf-bad.json"), std::time::SystemTime::now())
                 .is_none()
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1096,7 +1095,8 @@ mod tests {
         // The exact body the lane writes while standing by in mavlink mode: the
         // MAVLink router owns the carrier telemetry-only, so the command-down
         // gate reads true. A consumer of only the crsf block must see it.
-        let dir = std::env::temp_dir().join(format!("ados-cloud-crsf-mav-{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         write_named(
             &dir,
             "crsf-stats.json",
@@ -1111,12 +1111,12 @@ mod tests {
         assert_eq!(fresh.state.as_deref(), Some("ready"));
         assert_eq!(fresh.mode.as_deref(), Some("mavlink"));
         assert_eq!(fresh.fc_command_down_gated, Some(true));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn config_status_sidecars_surface_only_live_errors_sorted_by_service() {
-        let dir = std::env::temp_dir().join(format!("ados-cloud-cfgstatus-{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         // Two faulty services (unsorted on disk), one healthy (null error → skip).
         write_named(
             &dir,
@@ -1153,12 +1153,12 @@ mod tests {
         assert!(!out.iter().any(|e| e.service == "supervisor"));
         assert!(!out.iter().any(|e| e.service == "ground_station"));
         assert!(!out.iter().any(|e| e.service == "bad"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn an_absent_config_status_dir_is_an_empty_list() {
-        let dir = std::env::temp_dir().join("ados-cloud-cfgstatus-nope-does-not-exist");
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("does-not-exist");
         assert!(read_config_error_sidecars_from(&dir).is_empty());
     }
 

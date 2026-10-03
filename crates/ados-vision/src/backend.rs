@@ -855,10 +855,8 @@ mod tests {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixListener;
 
-        let dir = std::env::temp_dir().join(format!("ados-vision-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let sock = dir.join("rknn.sock");
-        let _ = std::fs::remove_file(&sock);
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("rknn.sock");
         let listener = UnixListener::bind(&sock).unwrap();
 
         // A mock sidecar: answer the load handshake, then return one detection for infer.
@@ -915,7 +913,6 @@ mod tests {
             .infer(&[1, 2, 3, 4], 1, 1, FrameFormat::Rgb24)
             .unwrap();
         server.join().unwrap();
-        let _ = std::fs::remove_file(&sock);
 
         assert_eq!(dets.len(), 1);
         assert_eq!(dets[0].class_label, "UAV");

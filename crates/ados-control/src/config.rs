@@ -299,16 +299,12 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn temp_yaml(name: &str, body: &str) -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
-        p.push(format!(
-            "ados-control-cfg-{}-{}.yaml",
-            std::process::id(),
-            name
-        ));
+    fn temp_yaml(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.yaml");
         let mut f = std::fs::File::create(&p).unwrap();
         f.write_all(body.as_bytes()).unwrap();
-        p
+        (dir, p)
     }
 
     #[test]
@@ -333,7 +329,7 @@ mod tests {
             serde_norway::from_str::<serde_json::Value>(malformed).is_err(),
             "fixture must be a parse error, otherwise this case proves nothing"
         );
-        let bad = temp_yaml("obj-malformed", malformed);
+        let (_bad_dir, bad) = temp_yaml(malformed);
         assert_eq!(load_config_object(&bad), serde_json::json!({}));
 
         // Parses cleanly, but the root is not a mapping — a distinct path from
@@ -342,14 +338,11 @@ mod tests {
         let parsed = serde_norway::from_str::<serde_json::Value>(scalar_text)
             .expect("fixture must parse, to separate this case from the malformed one");
         assert!(!parsed.is_object());
-        let scalar = temp_yaml("obj-scalar", scalar_text);
+        let (_scalar_dir, scalar) = temp_yaml(scalar_text);
         assert_eq!(load_config_object(&scalar), serde_json::json!({}));
 
         // The happy path still projects the mapping through untouched.
-        let good = temp_yaml(
-            "obj-good",
-            "agent:\n  name: test-drone\nvideo:\n  mode: disabled\n",
-        );
+        let (_good_dir, good) = temp_yaml("agent:\n  name: test-drone\nvideo:\n  mode: disabled\n");
         let v = load_config_object(&good);
         assert_eq!(v["agent"]["name"], "test-drone");
         assert_eq!(v["video"]["mode"], "disabled");
@@ -376,12 +369,11 @@ agent:
 video:
   mode: disabled
 ";
-        let path = temp_yaml("agent", yaml);
+        let (_dir, path) = temp_yaml(yaml);
         let cfg = PairingConfig::load_from(&path);
         assert_eq!(cfg.agent.device_id, "abcdef1234567890");
         assert_eq!(cfg.agent.name, "test-drone");
         assert_eq!(cfg.agent.profile, "drone");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -392,13 +384,12 @@ video:
     channel: 149
     paired_with_device_id: peer-1234567890
 ";
-        let path = temp_yaml("wfbpeer", yaml);
+        let (_dir, path) = temp_yaml(yaml);
         let cfg = PairingConfig::load_from(&path);
         assert_eq!(
             cfg.radio_peer_device_id(),
             Some("peer-1234567890".to_string())
         );
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -410,10 +401,9 @@ video:
   wfb:
     paired_with_device_id: \"\"
 ";
-        let path = temp_yaml("emptypeer", yaml);
+        let (_dir, path) = temp_yaml(yaml);
         let cfg = PairingConfig::load_from(&path);
         assert_eq!(cfg.radio_peer_device_id(), None);
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -438,13 +428,12 @@ security:
   hmac_secret: a-very-long-secret-key
   setup_token_required: true
 ";
-        let path = temp_yaml("py-security", yaml);
+        let (_dir, path) = temp_yaml(yaml);
         let cfg = ControlSecurityConfig::load_from(&path);
         let s = cfg.security();
         assert_eq!(s.api.api_key, "configured-key");
         assert!(s.hmac_enabled);
         assert_eq!(s.hmac_secret, "a-very-long-secret-key");
         assert!(s.setup_token_required);
-        let _ = std::fs::remove_file(&path);
     }
 }

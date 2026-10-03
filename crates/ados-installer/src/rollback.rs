@@ -224,21 +224,15 @@ pub fn restore_one(dest: &Path, prev: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn tmp(name: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static N: AtomicU64 = AtomicU64::new(0);
-        let d = std::env::temp_dir().join(format!(
-            "ados-rollback-{}-{}-{name}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_path_buf();
+        (dir, d)
     }
 
     #[test]
     fn a_binary_with_no_retained_copy_is_reported_not_skipped() {
-        let d = tmp("noprev");
+        let (_dir, d) = tmp();
         let dest = d.join("ados-video");
         std::fs::write(&dest, b"current").unwrap();
 
@@ -248,7 +242,7 @@ mod tests {
 
     #[test]
     fn a_retained_copy_is_planned_for_restore() {
-        let d = tmp("hasprev");
+        let (_dir, d) = tmp();
         let dest = d.join("ados-video");
         std::fs::write(&dest, b"new").unwrap();
         std::fs::write(prev_sibling(&dest), b"old").unwrap();
@@ -261,7 +255,7 @@ mod tests {
 
     #[test]
     fn restore_swaps_and_is_its_own_inverse() {
-        let d = tmp("swap");
+        let (_dir, d) = tmp();
         let dest = d.join("ados-video");
         std::fs::write(&dest, b"new").unwrap();
         std::fs::write(prev_sibling(&dest), b"old").unwrap();
@@ -283,7 +277,7 @@ mod tests {
 
     #[test]
     fn a_failed_restore_leaves_something_executable_at_dest() {
-        let d = tmp("failed");
+        let (_dir, d) = tmp();
         let dest = d.join("ados-video");
         std::fs::write(&dest, b"current").unwrap();
         // A retained path that does not exist: the rename will fail.
@@ -299,7 +293,7 @@ mod tests {
 
     #[test]
     fn a_failed_run_restores_only_what_it_replaced() {
-        let d = tmp("run");
+        let (_dir, d) = tmp();
         let video = d.join("ados-video");
         std::fs::write(&video, b"new video").unwrap();
         std::fs::write(prev_sibling(&video), b"old video").unwrap();

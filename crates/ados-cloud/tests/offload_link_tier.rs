@@ -20,9 +20,8 @@ fn tier_from_link(link: Option<&OffloadLink>) -> Option<PerceptionTier> {
 
 #[test]
 fn a_fresh_paired_link_makes_an_npu_less_board_offload() {
-    let dir = std::env::temp_dir().join(format!("ados-link-tier-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("offload-link.json");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("offload-link.json");
     let now = 1_700_000_000_000i64;
 
     let link = OffloadLink::stamped(
@@ -42,15 +41,12 @@ fn a_fresh_paired_link_makes_an_npu_less_board_offload() {
         Some(PerceptionTier::Offload),
         "an NPU-less board with a fresh paired link offloads"
     );
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn a_stale_link_makes_the_board_report_none() {
-    let dir = std::env::temp_dir().join(format!("ados-link-tier-stale-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("offload-link.json");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("offload-link.json");
     let gen = 1_700_000_000_000i64;
 
     let link = OffloadLink::stamped(true, true, Some("h:8092".into()), None, None, gen);
@@ -64,6 +60,4 @@ fn a_stale_link_makes_the_board_report_none() {
         None,
         "no fresh link ⇒ an NPU-less board reports none"
     );
-
-    std::fs::remove_dir_all(&dir).ok();
 }

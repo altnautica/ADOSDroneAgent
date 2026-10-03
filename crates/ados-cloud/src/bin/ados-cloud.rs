@@ -1075,9 +1075,10 @@ mod tests {
             .expect("test client builds with the rustls config")
     }
 
-    fn supervisor() -> SharedSupervisor {
+    fn supervisor() -> (tempfile::TempDir, SharedSupervisor) {
         // A temp-rooted supervisor so the test never touches /var/ados.
-        let dir = std::env::temp_dir().join(format!("ados-cloud-test-{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let paths = Paths {
             install_dir: dir.join("plugins"),
             unit_dir: dir.join("units"),
@@ -1092,9 +1093,10 @@ mod tests {
             data_root: dir.join("plugin-data"),
             device_id_file: dir.join("device-id"),
         };
-        Arc::new(Mutex::new(PluginSupervisor::new(
+        let sup = Arc::new(Mutex::new(PluginSupervisor::new(
             paths, false, None, "1.0.0",
-        )))
+        )));
+        (tmp, sup)
     }
 
     #[test]
@@ -1113,7 +1115,8 @@ mod tests {
         // default holds with no env override.
         let prev = std::env::var("ADOS_PLUGIN_REQUIRE_SIGNED").ok();
         std::env::remove_var("ADOS_PLUGIN_REQUIRE_SIGNED");
-        let dir = std::env::temp_dir().join(format!("ados-cloud-signed-{}", std::process::id()));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let paths = Paths {
             install_dir: dir.join("plugins"),
             unit_dir: dir.join("units"),
@@ -1195,13 +1198,14 @@ mod tests {
         let (base, head) = capture_one_request(r#"{"commands":[]}"#).await;
         let http = test_client();
         let (_dir, seen) = seen_path();
+        let (_sup_dir, sup) = supervisor();
         let mut executed = dispatch::executed_commands::ExecutedCommands::load(&seen);
         poll_commands_once(
             &http,
             &base,
             "k-secret",
             "dev-7",
-            &supervisor(),
+            &sup,
             &no_source(),
             &mut executed,
         )
@@ -1227,7 +1231,7 @@ mod tests {
         // The catch-all must never fabricate success for a command with no
         // handler. No HTTP is issued on this path (route_for returns None).
         let http = test_client();
-        let sup = supervisor();
+        let (_sup_dir, sup) = supervisor();
         let (_dir, seen) = seen_path();
         let cmd = serde_json::json!({"_id": "c1", "command": "totally_unknown"});
         let r = dispatch_command(&http, "totally_unknown", &cmd, &sup, &no_source(), &seen).await;
@@ -1288,7 +1292,7 @@ mod tests {
         // A restart_service with no name has no route; dispatch_command must fail
         // it honestly rather than POST to a malformed path.
         let http = test_client();
-        let sup = supervisor();
+        let (_sup_dir, sup) = supervisor();
         let (_dir, seen) = seen_path();
         let cmd = serde_json::json!({"_id": "c2", "command": "restart_service", "args": {}});
         let r = dispatch_command(&http, "restart_service", &cmd, &sup, &no_source(), &seen).await;
@@ -1302,7 +1306,7 @@ mod tests {
         // enable of a plugin that was never installed is a real failed ACK, not
         // a fabricated success.
         let http = test_client();
-        let sup = supervisor();
+        let (_sup_dir, sup) = supervisor();
         let (_dir, seen) = seen_path();
         let cmd = serde_json::json!({
             "_id": "c3",

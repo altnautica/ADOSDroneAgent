@@ -26,6 +26,15 @@
 #     reproduce the flashed kernel byte-for-byte regardless of whether the vendor
 #     still hosts that version.
 #
+# Optional per-row `base_snapshot` (a snapshot.debian.org timestamp such as
+# "20260831T211327Z") repoints the container's own Debian sources at that
+# frozen snapshot before the first `apt-get update`. It exists for a base whose
+# release has left the live mirrors (Debian 11 bullseye reached end of life and
+# its security suite is being withdrawn) while a vendor BSP still targets it.
+# The snapshot is fetched over plain http because ca-certificates is not
+# installed yet; apt still verifies every Release signature against the
+# container's Debian archive keyring.
+#
 # The build installs the headers, derives the exact kernelrelease, runs
 # build-prebuilt-ko.sh against it (same patches + relax-cflags as the on-device
 # DKMS build), and emits the artifact + a manifest row. The publish job folds the
@@ -118,6 +127,16 @@ jobs:
       - name: Prepare container
         run: |
           set -eux
+          if [ -n "${{ matrix.base_snapshot }}" ]; then
+            . /etc/os-release
+            snap="${{ matrix.base_snapshot }}"
+            rm -f /etc/apt/sources.list.d/debian.sources
+            printf '%s\n' \
+              "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${snap} ${VERSION_CODENAME} main" \
+              "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${snap} ${VERSION_CODENAME}-updates main" \
+              "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${snap} ${VERSION_CODENAME}-security main" \
+              > /etc/apt/sources.list
+          fi
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y git ca-certificates
 

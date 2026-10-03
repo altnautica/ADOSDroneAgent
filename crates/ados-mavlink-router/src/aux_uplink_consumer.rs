@@ -1044,27 +1044,25 @@ mod tests {
     // sibling test retarget ADOS_RUN_DIR mid-dispatch.
     /// Point both the run dir and the config at a temp tree, and name this
     /// node's slot so the addressee check has something to compare against.
-    fn stage(tag: &str, slot: u8) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("ados-lfd-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn stage(slot: u8) -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         config_with_slot(&dir, slot);
         std::env::set_var("ADOS_RUN_DIR", &dir);
         std::env::set_var("ADOS_CONFIG_YAML", dir.join("config.yaml"));
-        dir
+        (tmp, dir)
     }
 
-    fn unstage(dir: &std::path::Path) {
+    fn unstage() {
         std::env::remove_var("ADOS_RUN_DIR");
         std::env::remove_var("ADOS_CONFIG_YAML");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_link_feedback_report_for_this_slot_is_published_for_the_ladder() {
         let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = stage("mine", 1);
+        let (_tmp, dir) = stage(1);
 
         let (fc, _captured) = test_connection();
         let counters = AuxUplinkConsumerCounters::new();
@@ -1090,7 +1088,7 @@ mod tests {
                 .expect("the ladder's input must be on disk");
         assert!((written.loss_percent - 24.29).abs() < 0.01);
         assert_eq!(written.target_slot, 1);
-        unstage(&dir);
+        unstage();
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -1102,7 +1100,7 @@ mod tests {
         // Shedding is safe: the ground retransmits, and the dedupe cache
         // answers the retry from the first attempt's work.
         let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = stage("shed", 1);
+        let (_tmp, _dir) = stage(1);
 
         // Hold every permit, as saturated in-flight work would.
         let mut held = Vec::new();
@@ -1143,7 +1141,7 @@ mod tests {
             "a request past the ceiling must be shed rather than spawned"
         );
         drop(held);
-        unstage(&dir);
+        unstage();
     }
 
     // Each in-flight request can hold a full response body, so the ceiling is
@@ -1160,7 +1158,7 @@ mod tests {
         // clean drone would shed video rate because a neighbour was at the edge
         // of the link. Worse than no sample, because a no-sample ladder holds.
         let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = stage("theirs", 2);
+        let (_tmp, dir) = stage(2);
 
         let (fc, _captured) = test_connection();
         let counters = AuxUplinkConsumerCounters::new();
@@ -1186,7 +1184,7 @@ mod tests {
                 .is_none(),
             "another drone's measurement must never reach this drone's ladder"
         );
-        unstage(&dir);
+        unstage();
     }
 
     #[allow(clippy::await_holding_lock)]
@@ -1195,9 +1193,8 @@ mod tests {
         // With no slot in config a node cannot prove a record is about itself,
         // and guessing is exactly the failure the addressee prevents.
         let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("ados-lfd-unprov-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::fs::write(
             dir.join("config.yaml"),
             "video:\n  wfb:\n    channel: 149\n",
@@ -1226,15 +1223,15 @@ mod tests {
             ados_protocol::link_feedback::read_sidecar_from(&dir.join("link-feedback.json"))
                 .is_none()
         );
-        unstage(&dir);
+        unstage();
     }
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_damaged_link_feedback_report_is_counted_and_not_published() {
         let _guard = RUN_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join(format!("ados-lfd-bad-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         std::env::set_var("ADOS_RUN_DIR", &dir);
 
         let (fc, _captured) = test_connection();
@@ -1265,7 +1262,6 @@ mod tests {
         );
 
         std::env::remove_var("ADOS_RUN_DIR");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

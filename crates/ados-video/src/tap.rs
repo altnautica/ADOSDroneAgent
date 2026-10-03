@@ -371,9 +371,8 @@ mod tests {
         use tokio::io::AsyncReadExt as _;
         use tokio::io::AsyncWriteExt as _;
 
-        let dir = std::env::temp_dir().join(format!("ados-tap-test-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let sink = dir.join("vision-tap.sock");
+        let dir = tempfile::tempdir().unwrap();
+        let sink = dir.path().join("vision-tap.sock");
         let sink_str = sink.to_string_lossy().to_string();
 
         let (w, h) = (4u32, 2u32);
@@ -410,6 +409,5 @@ mod tests {
         assert_eq!(pixels, frame_a);
 
         server.abort();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

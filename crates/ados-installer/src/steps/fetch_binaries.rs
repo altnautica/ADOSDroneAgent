@@ -1287,8 +1287,8 @@ mod tests {
         // blocks writing, so it never exits, so nothing drains the pipe, so the
         // probe times out and calls a rejected binary runnable. Draining on a
         // separate thread is what makes this terminate at all.
-        let dir = tempdir().unwrap();
-        let script = dir.join("fake-chatty-vision");
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-chatty-vision");
         write_script(
             &script,
             "printf '%s\\n' \"fake-chatty-vision: /lib/libc.so.6: version GLIBC_2.34 not found\" >&2\n\
@@ -1304,8 +1304,8 @@ mod tests {
 
     #[test]
     fn exec_probe_detects_a_glibc_rejection() {
-        let dir = tempdir().unwrap();
-        let script = dir.join("fake-onnx-vision");
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-onnx-vision");
         write_script(
             &script,
             "printf '%s\\n' \"fake-onnx-vision: /lib/aarch64-linux-gnu/libc.so.6: version GLIBC_2.34 not found (required by fake-onnx-vision)\" >&2\nexit 1",
@@ -1318,8 +1318,8 @@ mod tests {
 
     #[test]
     fn exec_probe_accepts_a_binary_that_actually_starts() {
-        let dir = tempdir().unwrap();
-        let script = dir.join("fake-working-vision");
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-working-vision");
         // Sleeps well past the probe's deadline, mirroring a real service that
         // stays up — the probe must kill it and report success, not hang.
         // `exec` replaces the shell with `sleep` so the probe's kill() reaps
@@ -1333,8 +1333,8 @@ mod tests {
 
     #[test]
     fn exec_probe_treats_an_unrelated_nonzero_exit_as_runnable() {
-        let dir = tempdir().unwrap();
-        let script = dir.join("fake-crashing-vision");
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-crashing-vision");
         // Fails fast, but for a reason that has nothing to do with the dynamic
         // loader (e.g. a real startup error against a missing config) — the
         // probe's job is narrowly the GLIBC_ signature, not "did it exit 0".

@@ -285,11 +285,10 @@ fn now_unix_ms() -> u64 {
 mod tests {
     use super::*;
 
-    fn tmpdir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("ados-fleet-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmpdir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_path_buf();
+        (dir, d)
     }
 
     #[test]
@@ -298,7 +297,7 @@ mod tests {
         // who is paired with whom, and is where per-device relay credentials
         // are due to live.
         use std::os::unix::fs::PermissionsExt;
-        let dir = tmpdir("mode");
+        let (_tmp, dir) = tmpdir();
         let path = dir.join("fleet.json");
         let mut reg = FleetRegistry::default();
         reg.allocate("drone-a");
@@ -306,7 +305,6 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "the fleet registry must not be world-readable");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -315,7 +313,7 @@ mod tests {
         // world-readable temp from an older build must not survive into the
         // renamed registry.
         use std::os::unix::fs::PermissionsExt;
-        let dir = tmpdir("mode-stale");
+        let (_tmp, dir) = tmpdir();
         let path = dir.join("fleet.json");
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, b"stale").unwrap();
@@ -327,7 +325,6 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -338,7 +335,7 @@ mod tests {
         // those slots were free to reissue to different devices. Two drones on
         // one slot share a channel_id and thrash each other's FEC decoder,
         // which is the exact failure this registry exists to prevent.
-        let dir = tmpdir("corrupt");
+        let (_tmp, dir) = tmpdir();
         let path = dir.join("fleet.json");
         std::fs::write(&path, b"{ this is not json").unwrap();
 
@@ -359,14 +356,13 @@ mod tests {
             !path.exists(),
             "the corrupt file is moved aside, not copied"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn repeated_corruption_never_clobbers_an_earlier_quarantine() {
         // Repeated corruption is exactly when the OLDEST copy is most likely to
         // still hold the real assignments.
-        let dir = tmpdir("corrupt-twice");
+        let (_tmp, dir) = tmpdir();
         let path = dir.join("fleet.json");
 
         std::fs::write(&path, b"first corrupt").unwrap();
@@ -383,12 +379,11 @@ mod tests {
             std::fs::read(dir.join("fleet.json.corrupt.1")).unwrap(),
             b"second corrupt"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_valid_registry_is_never_quarantined() {
-        let dir = tmpdir("valid");
+        let (_tmp, dir) = tmpdir();
         let path = dir.join("fleet.json");
         let mut reg = FleetRegistry::default();
         reg.allocate("drone-a");
@@ -398,16 +393,14 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert!(path.exists(), "a good registry stays where it was");
         assert!(!dir.join("fleet.json.corrupt").exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_missing_registry_is_the_pre_pair_state_not_a_corruption() {
-        let dir = tmpdir("missing");
+        let (_tmp, dir) = tmpdir();
         let reg = FleetRegistry::load(&dir.join("fleet.json"));
         assert!(reg.is_empty());
         assert!(!dir.join("fleet.json.corrupt").exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

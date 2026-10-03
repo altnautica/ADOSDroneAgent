@@ -520,9 +520,8 @@ mod tests {
         // The bug this closes: the per-drone leaf never existed, so a plugin's
         // first write failed. Prove the nested path is created and a file can be
         // written under it — not just that a path string was produced.
-        let base = std::env::temp_dir().join(format!("ados-ddir-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let leaf = base.join("com.example.plugin/drones/drone-xyz");
+        let base = tempfile::tempdir().unwrap();
+        let leaf = base.path().join("com.example.plugin/drones/drone-xyz");
         assert!(!leaf.exists());
 
         ensure_data_dir(Some(leaf.to_str().unwrap()));
@@ -538,8 +537,6 @@ mod tests {
         ensure_data_dir(Some(leaf.to_str().unwrap()));
         // None is a no-op (does not panic).
         ensure_data_dir(None);
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[tokio::test]

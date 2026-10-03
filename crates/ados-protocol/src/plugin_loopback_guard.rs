@@ -68,15 +68,12 @@ mod tests {
 
     #[test]
     fn an_absent_or_garbled_sidecar_reads_unavailable() {
-        let dir = std::env::temp_dir().join(format!("ados-guard-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(SIDECAR_NAME);
-        let _ = std::fs::remove_file(&path);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SIDECAR_NAME);
         assert_eq!(read_state_at(&path).label(), "unavailable");
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(read_state_at(&path).label(), "unavailable");
         std::fs::write(&path, r#"{"active":true}"#).unwrap();
         assert_eq!(read_state_at(&path).label(), "active");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -147,9 +147,8 @@ mod tests {
 
     #[test]
     fn a_fresh_paired_link_round_trips_and_reads_back() {
-        let dir = std::env::temp_dir().join(format!("ados-offload-link-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("offload-link.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("offload-link.json");
         let now = 1_700_000_000_000i64;
         let link = OffloadLink::stamped(
             true,
@@ -161,19 +160,17 @@ mod tests {
         );
         write_offload_link_to(&path, &link).unwrap();
         // No leftover temp file.
-        assert!(!dir.join("offload-link.json.tmp").exists());
+        assert!(!dir.path().join("offload-link.json.tmp").exists());
 
         let back = read_offload_link_from(&path, now + 1_000).unwrap();
         assert_eq!(back, link);
         assert!(back.is_offload_path());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn a_stale_link_reads_as_absent() {
-        let dir = std::env::temp_dir().join(format!("ados-offload-stale-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("offload-link.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("offload-link.json");
         let gen = 1_700_000_000_000i64;
         let link = OffloadLink::stamped(true, true, Some("h:8092".into()), None, None, gen);
         write_offload_link_to(&path, &link).unwrap();
@@ -181,7 +178,6 @@ mod tests {
         // Just inside the window ⇒ present; just past it ⇒ absent.
         assert!(read_offload_link_from(&path, gen + OFFLOAD_LINK_STALE_MS).is_some());
         assert!(read_offload_link_from(&path, gen + OFFLOAD_LINK_STALE_MS + 1).is_none());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

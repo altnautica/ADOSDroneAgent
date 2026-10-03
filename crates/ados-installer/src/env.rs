@@ -513,14 +513,8 @@ mod tests {
 
     #[test]
     fn write_atomic_durable_lands_content_mode_and_no_residue() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "ados-installer-env-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let path = dir.join("nested").join("config.yaml");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.yaml");
 
         write_atomic_durable(&path, b"first: value\n", Some(0o600)).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"first: value\n");

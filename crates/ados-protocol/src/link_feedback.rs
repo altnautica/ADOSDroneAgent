@@ -426,15 +426,14 @@ mod tests {
 
     #[test]
     fn the_sidecar_round_trips_through_a_file() {
-        let dir = std::env::temp_dir().join(format!("ados-lf-{}", std::process::id()));
-        let path = dir.join("link-feedback.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("link-feedback.json");
         let s = LinkFeedbackSidecar::stamped(&sample(), 1234);
         write_sidecar_to(&path, &s).expect("write");
         let back = read_sidecar_from(&path).expect("read");
         assert_eq!(back.received_at_unix_ms, 1234);
         assert!((back.loss_percent - 24.29).abs() < 0.001);
         assert!(back.has_measurement);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
