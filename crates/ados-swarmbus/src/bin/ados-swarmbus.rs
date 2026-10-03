@@ -1,18 +1,20 @@
 //! `ados-swarmbus` entry point: the decentralized swarm state bus.
 //!
-//! Resolves the fleet identity, refuses to run on an invalid one, then runs the
-//! receive / transmit / publish loops until SIGTERM or SIGINT.
+//! Resolves the fleet identity, idles on an unassigned one, refuses to run on a
+//! wrong one, then runs the receive / transmit / publish loops until SIGTERM or
+//! SIGINT.
 //!
 //! The identity gate is the one hard failure here. A drone left on the ground
 //! station's slot 0, or two drones sharing a slot, thrashes the wfb-ng FEC decoder
 //! roughly once a second — which presents as unexplained link loss, not as a
-//! configuration error. So a misprovisioned drone exits non-zero and does not
-//! radiate: a `failed` unit is a diagnosable state, an aircraft quietly jamming its
-//! own fleet is not.
+//! configuration error. So neither ever radiates. A drone that simply has not
+//! been given a slot yet (every fresh install) exits 0 and stays idle until the
+//! config changes; a misprovisioned one exits non-zero: a `failed` unit is a
+//! diagnosable state, an aircraft quietly jamming its own fleet is not.
 
 use std::path::Path;
 
-use ados_swarmbus::config::{SwarmBusConfig, CONFIG_YAML};
+use ados_swarmbus::config::{Startup, SwarmBusConfig, CONFIG_YAML};
 use tokio::sync::watch;
 
 fn init_tracing() {
@@ -58,13 +60,28 @@ async fn main() {
         "ados-swarmbus resolved config"
     );
 
-    if let Some(err) = config.identity_error() {
-        tracing::error!(
-            error = %err,
-            "ados-swarmbus refusing to start: a duplicate or unprovisioned fleet slot \
-             thrashes the wfb-ng FEC decoder and presents as unexplained link loss"
-        );
-        std::process::exit(1);
+    match config.startup() {
+        Startup::Run => {}
+        Startup::Unprovisioned(reason) => {
+            // Nothing to run, not a failure: exit 0 so the unit settles idle
+            // (RestartPreventExitStatus=0) and the supervisor parks it. The
+            // supervisor starts it again when the agent config changes, which
+            // is how a fleet slot arrives.
+            tracing::info!(
+                reason = %reason,
+                "ados-swarmbus idle: this node has no fleet slot yet and does not \
+                 radiate; the bus starts once one is assigned"
+            );
+            return;
+        }
+        Startup::Refuse(err) => {
+            tracing::error!(
+                error = %err,
+                "ados-swarmbus refusing to start: a duplicate or misprovisioned fleet slot \
+                 thrashes the wfb-ng FEC decoder and presents as unexplained link loss"
+            );
+            std::process::exit(1);
+        }
     }
 
     let (cancel, cancel_rx) = watch::channel(false);

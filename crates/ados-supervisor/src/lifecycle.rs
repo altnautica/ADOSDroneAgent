@@ -113,6 +113,12 @@ fn stops_on_shutdown(spec: &ServiceSpec) -> bool {
     spec.state == ServiceState::Running && !spec.adopted
 }
 
+/// The agent config file's modification time, or `None` when it is absent or
+/// unreadable (a fresh node has no config yet; its appearance is a change too).
+fn config_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 pub struct Supervisor {
     services: Vec<ServiceSpec>,
     config: AgentConfig,
@@ -198,7 +204,7 @@ pub struct Supervisor {
     /// inside one stage takes the unit down (systemd restarts it) instead of
     /// reporting healthy forever with death-detection and auto-restart dead.
     progress: MonitorProgress,
-    /// Per-unit byte-counter history for the units whose `active` state is not
+    /// Per-unit work-counter history for the units whose `active` state is not
     /// accepted as proof of work ([`crate::work_proof::WORK_PROVEN_UNITS`]).
     /// Without it the monitor's only liveness judgement is "has the process
     /// exited?", which a wedged FC link, a stopped swarm beacon, a frozen RC
@@ -207,6 +213,9 @@ pub struct Supervisor {
     /// When the adoption sweep last ran. The sweep is what gives the monitor
     /// any coverage of the catalog rows this process did not itself start.
     last_adoption_sweep: Option<Instant>,
+    /// The agent config file's modification time as last seen. A change wakes
+    /// every idle row (see [`Self::idle_rows_due_on_config_change`]).
+    config_stamp: Option<std::time::SystemTime>,
 }
 
 impl Supervisor {
@@ -225,6 +234,7 @@ impl Supervisor {
     ) -> Self {
         Supervisor {
             services: build_specs(),
+            config_stamp: config_mtime(&config.config_yaml),
             config,
             pm,
             bind,
@@ -362,7 +372,7 @@ impl Supervisor {
             return false;
         };
         let ok = self.pm.stop(name).await;
-        // The replacement process starts its byte counters at zero, so the
+        // The replacement process starts its work counter at zero, so the
         // dead one's total must not survive as a baseline to compare against.
         self.work_proof.forget(name);
         self.set_state(i, ServiceState::Stopped, "stopped");
@@ -666,6 +676,28 @@ impl Supervisor {
             .collect()
     }
 
+    /// Names of every idle row to start again because the agent config changed
+    /// since the last look, consuming the change.
+    ///
+    /// A row is idle because its unit exited 0: this node had nothing for it to
+    /// run under the config it read (a drone with no fleet slot yet, a feature
+    /// switched off). A config change can be exactly what gives it work, and
+    /// nothing else would ever start it again, so every idle row gets one fresh
+    /// start per change. A unit that still has nothing to run exits 0 again and
+    /// returns to idle; there is no retry cadence to loop on.
+    fn idle_rows_due_on_config_change(&mut self) -> Vec<&'static str> {
+        let stamp = config_mtime(&self.config.config_yaml);
+        if stamp == self.config_stamp {
+            return Vec::new();
+        }
+        self.config_stamp = stamp;
+        self.services
+            .iter()
+            .filter(|spec| spec.state == ServiceState::Idle)
+            .map(|spec| spec.name)
+            .collect()
+    }
+
     /// Promote gate-allowed catalog rows that are already `active` into the
     /// supervised set, so the monitor's death detection covers them.
     ///
@@ -701,7 +733,7 @@ impl Supervisor {
         }
     }
 
-    /// Judge one active, work-proven unit on its byte-counter delta and
+    /// Judge one active, work-proven unit on its work-counter delta and
     /// restart it when the counter has been flat across the whole stall
     /// window. Returns whether it was judged stalled.
     ///
@@ -720,7 +752,7 @@ impl Supervisor {
         tracing::warn!(
             service = name,
             flat_for_s = flat_for.as_secs(),
-            "service is active but has moved no bytes; treating as dead"
+            "service is active but its work counter has not moved; treating as dead"
         );
         let Some(i) = self.index_of(name) else {
             return false;
@@ -848,9 +880,18 @@ impl Supervisor {
             self.adopt_active_units().await;
         }
 
-        // Parked-service retry (bounded by the cooldown). Held, like the
-        // auto-restart above, while systemd cycles the supervisor.
-        if to_retry.is_empty() || held || self.service_manager_cycling_self().await {
+        // Parked-service retry (bounded by the cooldown) and the one fresh start
+        // an idle row gets per config change. Held, like the auto-restart above,
+        // while systemd cycles the supervisor.
+        let to_wake = if held {
+            Vec::new()
+        } else {
+            self.idle_rows_due_on_config_change()
+        };
+        if (to_retry.is_empty() && to_wake.is_empty())
+            || held
+            || self.service_manager_cycling_self().await
+        {
             return;
         }
         for name in to_retry {
@@ -861,6 +902,17 @@ impl Supervisor {
                 self.services[i].last_retry_at = Some(Instant::now());
             }
             tracing::info!(service = name, "parked retry");
+            self.start_service(name).await;
+            self.progress.mark();
+        }
+        for name in to_wake {
+            if self.restart_blocked_by_bind(name).await {
+                continue;
+            }
+            tracing::info!(
+                service = name,
+                "agent config changed; starting idle service"
+            );
             self.start_service(name).await;
             self.progress.mark();
         }
@@ -1004,6 +1056,7 @@ mod tests {
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_default(),
+            config_yaml: std::path::PathBuf::from("/nonexistent/ados/config.yaml"),
         }
     }
 
@@ -1179,7 +1232,7 @@ mod tests {
     struct MockProcessManager {
         calls: std::sync::Mutex<Vec<String>>,
         starts_fail: std::sync::atomic::AtomicBool,
-        /// The byte counter served for every unit. Only meaningful while
+        /// The work counter served for every unit. Only meaningful while
         /// `work_counter_known` is set; otherwise the backend answers `None`,
         /// which is the honest "cannot resolve it" and must never read as a
         /// stall.
@@ -1224,7 +1277,7 @@ mod tests {
             self.starts_fail
                 .store(false, std::sync::atomic::Ordering::Relaxed);
         }
-        /// Serve `counter` as every unit's cumulative byte total, or `None` to
+        /// Serve `counter` as every unit's cumulative work count, or `None` to
         /// model a backend that cannot read it.
         fn set_work_counter(&self, counter: Option<u64>) {
             self.work_counter_known
@@ -1397,6 +1450,80 @@ mod tests {
         assert!(!sup
             .parked_retries_due(Instant::now())
             .contains(&"ados-gpio"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_unit_is_started_again_when_the_agent_config_changes() {
+        // The fleet-slot case: the swarm bus exits 0 on a drone with no slot,
+        // and a slot arrives later as a config write. Nothing but the config
+        // change may start it, and a still-idle unit must not loop.
+        let dir = tempfile::tempdir().unwrap();
+        let config_yaml = dir.path().join("config.yaml");
+        std::fs::write(&config_yaml, "agent:\n  profile: drone\n").unwrap();
+        let mut config = cfg("drone");
+        config.config_yaml = config_yaml.clone();
+        let mock = Arc::new(MockProcessManager::new());
+        let mut sup = Supervisor::with_process_manager(
+            config,
+            Arc::new(BindOrchestrator::new()),
+            mock.clone(),
+        );
+        let bus = "ados-swarmbus";
+        let i = sup.index_of(bus).unwrap();
+        let starts = |m: &MockProcessManager| {
+            m.calls()
+                .iter()
+                .filter(|c| c.as_str() == "start:ados-swarmbus")
+                .count()
+        };
+
+        assert!(sup.start_service(bus).await);
+        mock.deactivate_all();
+        mock.exit_cleanly();
+        sup.reconcile_services().await;
+        assert_eq!(sup.services[i].state, ServiceState::Idle);
+        assert!(sup.services[i].failure_times.is_empty());
+        let idle_starts = starts(&mock);
+
+        // No config change: the idle unit stays down, pass after pass.
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            sup.reconcile_services().await;
+        }
+        assert_eq!(
+            starts(&mock),
+            idle_starts,
+            "an idle unit has no retry cadence"
+        );
+
+        // The slot is written. Stamp a later mtime so the change is visible
+        // whatever the filesystem's timestamp granularity.
+        std::fs::write(
+            &config_yaml,
+            "agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_slot: 2\n",
+        )
+        .unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&config_yaml)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        sup.reconcile_services().await;
+        assert_eq!(
+            starts(&mock),
+            idle_starts + 1,
+            "the config change starts it"
+        );
+        assert_eq!(sup.services[i].state, ServiceState::Running);
+
+        // One start per change: a unit that still has nothing to run settles
+        // idle again and is not started a second time.
+        sup.reconcile_services().await;
+        assert_eq!(sup.services[i].state, ServiceState::Idle);
+        sup.reconcile_services().await;
+        assert_eq!(starts(&mock), idle_starts + 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1749,7 +1876,7 @@ mod tests {
             "a single sample must not condemn a unit"
         );
 
-        // The unit stays `active` across the whole window and moves no bytes.
+        // The unit stays `active` across the whole window and its counter is flat.
         tokio::time::advance(crate::work_proof::STALL_WINDOW + Duration::from_secs(1)).await;
         sup.reconcile_services().await;
 
@@ -1792,9 +1919,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_counter_the_backend_cannot_read_never_condemns_a_unit() {
-        // The dangerous direction. On a host with no `/proc/<pid>/io` — or in
-        // a PID recycling window — the counter is unreadable, and reading that
-        // as "moved nothing" would restart every supervised lane every window.
+        // The dangerous direction. A unit's counter can be unreadable (its
+        // socket or sidecar absent, or its lane idle), and reading that as
+        // "moved nothing" would restart every supervised lane every window.
         let pm = Arc::new(MockProcessManager::new());
         pm.set_work_counter(None);
         let bind = Arc::new(BindOrchestrator::new());

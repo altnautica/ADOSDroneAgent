@@ -79,14 +79,27 @@ impl std::fmt::Display for AuxEgressError {
 
 impl std::error::Error for AuxEgressError {}
 
+/// Where an [`AuxEgress`] finds the transmit port it sends to.
+enum Route {
+    /// Ask the radio's aux command socket (`radio-aux.sock`), which opens the
+    /// pair on demand and replies with its transmit port. The drone side.
+    Radio(PathBuf),
+    /// A fixed loopback port that an already running `wfb_tx` listens on. The
+    /// ground station side, which has no aux command socket.
+    Direct(u16),
+}
+
 /// A producer's handle on the auxiliary application stream.
 ///
 /// Opens lazily on first send and keeps the egress socket for subsequent ones.
 /// A send that fails drops the socket so the next send re-opens the stream
-/// rather than blackholing into a stale handle.
+/// rather than blackholing into a stale handle. Re-opening repeats the route's
+/// own open: a fresh handshake on the radio route, a fresh bind and connect on
+/// the direct route, so a transmitter that restarted is picked up again by the
+/// next send, however many sends failed before it.
 pub struct AuxEgress {
-    /// The radio's aux command socket (`radio-aux.sock` under the run dir).
-    cmd_sock: PathBuf,
+    /// How the transmit port is resolved on every (re)open.
+    route: Route,
     /// Bound on each command-socket round trip.
     request_timeout: Duration,
     /// The connected egress socket, `None` until the pair is open. The mutex
@@ -105,7 +118,7 @@ impl AuxEgress {
     /// wedged-peer case does not cost seconds).
     pub fn with_timeout(cmd_sock: impl Into<PathBuf>, request_timeout: Duration) -> Self {
         Self {
-            cmd_sock: cmd_sock.into(),
+            route: Route::Radio(cmd_sock.into()),
             request_timeout,
             conn: Mutex::new(None),
         }
@@ -113,35 +126,41 @@ impl AuxEgress {
 
     /// Test/dev: a client already connected to a UDP target, skipping the
     /// handshake, so the framing and emission path can be exercised over plain
-    /// loopback with no radio and no command socket.
+    /// loopback with no radio and no command socket. A re-open reconnects to
+    /// the same loopback port.
     pub fn connected_for_test(sock: UdpSocket) -> Self {
+        let port = sock
+            .peer_addr()
+            .expect("connected_for_test needs a connected socket")
+            .port();
         Self {
-            cmd_sock: PathBuf::new(),
+            route: Route::Direct(port),
             request_timeout: AUX_REQUEST_TIMEOUT,
             conn: Mutex::new(Some(sock)),
         }
     }
 
-    /// Production: a client connected directly to a UDP target port, skipping
-    /// the radio command-socket handshake. Used on a ground station where the
-    /// `wfb_tx -p3 -u<port>` process is already running (spawned by the
-    /// groundlink receive chain), so the aux TX ingress is a plain UDP port
+    /// Production: a client that sends straight to a loopback UDP port,
+    /// skipping the radio command-socket handshake. Used on a ground station
+    /// where the `wfb_tx -p3 -u<port>` process is already running (spawned by
+    /// the groundlink receive chain), so the aux TX ingress is a plain UDP port
     /// with no `radio-aux.sock` command socket to negotiate through.
+    ///
+    /// That `wfb_tx` restarts with every receive-chain generation, and a send
+    /// while it is down fails (`ECONNREFUSED`). The next send binds and connects
+    /// a fresh socket to the same port, so the egress recovers as soon as the
+    /// transmitter is back.
     ///
     /// The drone side still uses the command-socket path ([`Self::new`]) because
     /// the radio service owns the open/close lifecycle there.
     pub async fn connected_to_udp(target_port: u16) -> Result<Self, AuxEgressError> {
-        let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
-        sock.connect(("127.0.0.1", target_port))
-            .await
-            .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
-        Ok(Self {
-            cmd_sock: PathBuf::new(),
+        let egress = Self {
+            route: Route::Direct(target_port),
             request_timeout: AUX_REQUEST_TIMEOUT,
-            conn: Mutex::new(Some(sock)),
-        })
+            conn: Mutex::new(None),
+        };
+        egress.ensure_open().await?;
+        Ok(egress)
     }
 
     /// Whether the egress socket is currently held open by this client.
@@ -150,14 +169,19 @@ impl AuxEgress {
     }
 
     /// One newline-JSON request/response round trip, bounded by the configured
-    /// timeout.
+    /// timeout. A direct egress has no command socket to ask.
     async fn request_body(
         &self,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, AuxEgressError> {
+        let Route::Radio(cmd_sock) = &self.route else {
+            return Err(AuxEgressError::Unavailable(
+                "no radio command socket on a direct egress".into(),
+            ));
+        };
         let line = format!("{body}\n");
         let work = async {
-            let stream = UnixStream::connect(&self.cmd_sock)
+            let stream = UnixStream::connect(cmd_sock)
                 .await
                 .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
             let (rx, mut tx) = stream.into_split();
@@ -246,14 +270,36 @@ impl AuxEgress {
 
     /// Ensure the aux pair is up and the egress socket is connected.
     ///
-    /// Idempotent and cheap once open. The handshake runs without the conn lock
-    /// held, so a slow radio never blocks a concurrent send; a racing opener
-    /// that wins keeps its socket and the loser drops its own (both target the
-    /// same port, so either is correct).
+    /// Idempotent and cheap once open. On the radio route the handshake runs
+    /// without the conn lock held, so a slow radio never blocks a concurrent
+    /// send; a racing opener that wins keeps its socket and the loser drops its
+    /// own (both target the same port, so either is correct). On the direct
+    /// route an open is a fresh bind and connect to the fixed port.
     pub async fn ensure_open(&self) -> Result<(), AuxEgressError> {
         if self.is_open().await {
             return Ok(());
         }
+        let tx_port = match &self.route {
+            Route::Direct(port) => *port,
+            Route::Radio(_) => self.open_radio_pair().await?,
+        };
+
+        let sock = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
+        sock.connect(("127.0.0.1", tx_port))
+            .await
+            .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
+        let mut guard = self.conn.lock().await;
+        if guard.is_none() {
+            *guard = Some(sock);
+        }
+        Ok(())
+    }
+
+    /// The radio route's `open` handshake: bring the pair up and return the
+    /// transmit port it reports.
+    async fn open_radio_pair(&self) -> Result<u16, AuxEgressError> {
         let reply = self.request("open").await?;
         if reply.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let err = reply
@@ -269,24 +315,12 @@ impl AuxEgress {
         if reply.get("active").and_then(|v| v.as_bool()) != Some(true) {
             return Err(AuxEgressError::Refused("open reported inactive".into()));
         }
-        let tx_port: u16 = reply
+        reply
             .get("tx_port")
             .and_then(|v| v.as_u64())
             .and_then(|v| u16::try_from(v).ok())
             .filter(|p| *p != 0)
-            .ok_or_else(|| AuxEgressError::Refused("open reported no transmit port".into()))?;
-
-        let sock = UdpSocket::bind("127.0.0.1:0")
-            .await
-            .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
-        sock.connect(("127.0.0.1", tx_port))
-            .await
-            .map_err(|e| AuxEgressError::Unavailable(e.to_string()))?;
-        let mut guard = self.conn.lock().await;
-        if guard.is_none() {
-            *guard = Some(sock);
-        }
-        Ok(())
+            .ok_or_else(|| AuxEgressError::Refused("open reported no transmit port".into()))
     }
 
     /// One write attempt against the socket currently installed. `Ok(None)`
@@ -401,6 +435,47 @@ mod tests {
         assert_eq!(channel, AuxChannel::Mavlink);
         assert_eq!(payload, b"frame bytes");
         radio.abort();
+    }
+
+    /// A ground station's direct egress outlives its transmitter restarting:
+    /// sends fail while nothing listens on the port, and once a listener binds
+    /// it again the next send reaches it.
+    #[tokio::test]
+    async fn a_direct_egress_recovers_once_its_transmitter_is_back() {
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let client = AuxEgress::connected_to_udp(port).await.unwrap();
+        // Nothing listens: a connected loopback send learns ECONNREFUSED from
+        // the previous datagram's port-unreachable, so one of a few sends fails.
+        let mut failed = false;
+        for _ in 0..20 {
+            if client.send(AuxChannel::Status, b"down").await.is_err() {
+                failed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            failed,
+            "a send to a closed loopback port must fail at least once"
+        );
+
+        // The transmitter comes back on the same port.
+        let listener = UdpSocket::bind(("127.0.0.1", port)).await.unwrap();
+        client
+            .send(AuxChannel::Status, b"back")
+            .await
+            .expect("the send after a failure re-binds and reconnects");
+        let mut buf = [0u8; 256];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(2), listener.recv_from(&mut buf))
+            .await
+            .expect("the datagram arrives")
+            .unwrap();
+        let (channel, payload) = aux_mux::decode(&buf[..n]).unwrap();
+        assert_eq!(channel, AuxChannel::Status);
+        assert_eq!(payload, b"back");
     }
 
     #[tokio::test]

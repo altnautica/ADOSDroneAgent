@@ -219,13 +219,13 @@ async fn ap_view(cfg: &Value) -> Value {
         .and_then(|h| h.get("ssid"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let device_id = cfg
+    let configured_id = cfg
         .get("agent")
         .filter(|v| v.is_object())
         .and_then(|v| v.get("device_id"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let ssid = resolve_ap_ssid(configured_ssid, device_id);
+        .and_then(Value::as_str);
+    let device_id = ados_protocol::identity::device_id(configured_id);
+    let ssid = resolve_ap_ssid(configured_ssid, &device_id);
     let channel = hotspot
         .and_then(|h| h.get("channel"))
         .and_then(json_to_i64)

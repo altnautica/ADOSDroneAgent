@@ -34,6 +34,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Device id.** A node's device id is now the full id from
+  `/etc/ados/device-id` everywhere: the pairing info, the cloud and MQTT
+  identity, mDNS, relay targets and presence beacons. A short `agent.device_id`
+  left in `config.yaml` is ignored when the file exists. A cloud-paired node
+  must pair again after upgrading, and ground-station fleet slots registered
+  before the upgrade must be released and the drones paired again: the fleet
+  registry now matches device ids exactly. One node used to answer to two ids,
+  and the drone refused every relayed request (hero selection, relayed status,
+  fleet slot delivery) addressed by the id its own pairing info reported.
 - **Armed interlock.** Reboot, shutdown, factory reset, profile change,
   ground-station unpair, radio channel and TX power writes, parameter writes,
   CRSF parameter writes, and restarts of the MAVLink, radio, WFB, groundlink
@@ -67,6 +76,26 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - The supervisor judges the MAVLink router on frames decoded from the flight
   controller, so a wedged serial reader is restarted.
+- The supervisor no longer judges any lane on process I/O, which never counts
+  socket traffic. The vision engine is judged on the frames it consumed while
+  an input is delivering (a fed engine used to be restarted about every 48 s),
+  the swarm bus on beacons sent and heard while its radio is open, and the
+  CRSF lane on RC frames written while a source is live. The CRSF stats
+  sidecar gains `tx_frames_total`.
+- A drone with no fleet slot no longer restart-loops the swarm bus. The bus
+  exits cleanly and idles, and the supervisor starts every idle service again
+  when the agent config changes, so a slot written later brings it up.
+- `GET /api/video/snapshot` returns a frame from the 1 fps thumbnail stream.
+  The grab skips stream probing and decoder frame threading, its deadline
+  follows the encoder's live rate, and `X-Captured-At` dates the frame's
+  arrival instead of the end of the grab.
+- The installer installs `minisign` with its required packages and stops if
+  it cannot. A direct installer run on a box without it used to skip every
+  downloaded asset.
+- The ground station's aux uplink recovers after its transmitter restarts. One
+  failed send used to leave relayed requests, hero selection and fleet slot
+  delivery failing with "Invalid argument" until the control service
+  restarted. Each send after a failure now reconnects to the transmitter.
 - Swarm setpoints target the learned flight-controller system id. The swarm
   replay window persists across restarts.
 - A failed upgrade restores every replaced binary and restarts its units.

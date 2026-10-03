@@ -36,6 +36,8 @@
 //!   canonical detection type (the lock primitive follow-me / framing /
 //!   target-lock consumers read).
 //! - [`config`] — the `vision:` block of the agent config.
+//! - [`work_status`] — the frames-consumed and live-input counters, published
+//!   to the `vision-status.json` sidecar the supervisor judges the engine on.
 
 pub mod backend;
 pub mod config;
@@ -48,4 +50,5 @@ pub mod ring;
 pub mod source;
 pub mod tracker;
 pub mod visionsock;
+pub mod work_status;
 pub mod yolo;

@@ -145,8 +145,15 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // fleet view work without a cloud round-trip, and its slot 0 never emits a
     // beacon because a ground station is not an aircraft. In the headless KEEP
     // set: onboard collision avoidance reads this table, so a lean flight node
-    // that keeps ados-mavlink must keep the bus that feeds separation.
-    def_keep("ados-swarmbus", Core, Some("drone|ground_station"), None),
+    // that keeps ados-mavlink must keep the bus that feeds separation. A drone
+    // with no fleet slot yet (every fresh install) has nothing to run: the bus
+    // exits 0 and the row idles until the agent config changes.
+    idle_ok(def_keep(
+        "ados-swarmbus",
+        Core,
+        Some("drone|ground_station"),
+        None,
+    )),
     def("ados-api", Core, None, None),
     def("ados-cloud", Core, None, None),
     def("ados-health", Core, None, None),

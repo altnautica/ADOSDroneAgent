@@ -503,15 +503,6 @@ fn json_to_mpv(value: &serde_json::Value) -> ados_protocol::logd::Value {
     }
 }
 
-/// Read the device-id from the canonical agent location (`/etc/ados/device-id`,
-/// hyphen — matches `core/paths.py:122 DEVICE_ID_PATH`).
-pub(crate) fn read_device_id() -> String {
-    std::fs::read_to_string("/etc/ados/device-id")
-        .unwrap_or_default()
-        .trim()
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

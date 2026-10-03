@@ -94,9 +94,9 @@ use crate::systemd::{
     PLUGIN_UNIT_DIR,
 };
 use crate::token_secret::{
-    plugin_data_dir, read_device_id, shared_issuer, token_credential_path, write_token_credential,
-    DEVICE_ID_PATH, PLUGIN_DATA_DIR,
+    plugin_data_dir, shared_issuer, token_credential_path, write_token_credential, PLUGIN_DATA_DIR,
 };
+use ados_protocol::identity::device_id_at;
 
 /// Default install directory for unpacked third-party archives.
 pub const PLUGINS_INSTALL_DIR: &str = "/var/ados/plugins";
@@ -181,7 +181,7 @@ impl Paths {
             runner: env_path("ADOS_PLUGIN_RUNNER", PLUGIN_RUNNER_BINARY),
             run_dir: env_path("ADOS_RUN_DIR", DEFAULT_RUN_DIR),
             data_root: env_path("ADOS_PLUGIN_DATA_DIR_ROOT", PLUGIN_DATA_DIR),
-            device_id_file: env_path("ADOS_DEVICE_ID_PATH", DEVICE_ID_PATH),
+            device_id_file: ados_protocol::identity::device_id_path(),
         }
     }
 }
@@ -1797,7 +1797,7 @@ impl PluginSupervisor {
         std::fs::create_dir_all(&self.paths.data_root)?;
         let mut fresh: Vec<PathBuf> = Vec::new();
         if create_private_dir(&base)? {
-            let agent_id = read_device_id(&self.paths.device_id_file);
+            let agent_id = device_id_at(&self.paths.device_id_file, None);
             if is_one_component(&agent_id) {
                 let leaf = plugin_data_dir(&self.paths.data_root, &manifest.id, &agent_id);
                 for dir in [leaf.parent().map(Path::to_path_buf), Some(leaf)]
@@ -1868,7 +1868,7 @@ impl PluginSupervisor {
                 &granted,
                 &plugin_socket_path(&self.paths.socket_dir, plugin_id),
                 &self.paths.data_root,
-                &read_device_id(&self.paths.device_id_file),
+                &device_id_at(&self.paths.device_id_file, None),
                 Some(&self.paths.socket_dir),
             )?;
         }
@@ -2246,7 +2246,7 @@ pub(crate) mod tests_support {
             runner: PathBuf::from(PLUGIN_RUNNER_BINARY),
             run_dir: PathBuf::from(DEFAULT_RUN_DIR),
             data_root: PathBuf::from(PLUGIN_DATA_DIR),
-            device_id_file: PathBuf::from(DEVICE_ID_PATH),
+            device_id_file: PathBuf::from(ados_protocol::identity::DEVICE_ID_FILE),
         }
     }
 

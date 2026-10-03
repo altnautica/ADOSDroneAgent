@@ -441,13 +441,15 @@ impl CloudConfig {
     /// Load from an explicit path, also returning the parse-error message so the
     /// startup path can publish it. `None` on success or a missing/unreadable
     /// file (a fresh node is not a fault); `Some(msg)` on a present-but-malformed
-    /// file.
+    /// file. `agent.device_id` is always the node's resolved identity
+    /// ([`ados_protocol::identity::device_id`]), the provisioned file first.
     fn load_reporting(path: &Path) -> (Self, Option<String>) {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => return (CloudConfig::default(), None),
+        let (mut config, error): (Self, _) = match std::fs::read_to_string(path) {
+            Ok(text) => ados_config::yaml_reporting(&text, "cloud"),
+            Err(_) => (CloudConfig::default(), None),
         };
-        ados_config::yaml_reporting(&text, "cloud")
+        config.agent.device_id = ados_protocol::identity::device_id(Some(&config.agent.device_id));
+        (config, error)
     }
 }
 

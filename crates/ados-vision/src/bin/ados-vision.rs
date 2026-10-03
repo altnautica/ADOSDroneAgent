@@ -29,6 +29,7 @@ use ados_vision::source::{
     discover_cameras_default, AnySource, CaptureSource, FrameSource, TapSource,
 };
 use ados_vision::visionsock;
+use ados_vision::work_status::{self, InputLiveness, WorkStatus, INPUT_SILENCE_TIMEOUT};
 
 /// Canonical agent config file.
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
@@ -248,14 +249,27 @@ async fn main() {
 
     let mut tasks = Vec::new();
 
+    // The work counters the supervisor judges this engine on, published to the
+    // status sidecar about once a second.
+    let work = WorkStatus::new();
+    {
+        let work = work.clone();
+        let cancel = cancel.clone();
+        let path = work_status::sidecar_path(&config.socket_dir);
+        tasks.push(tokio::spawn(async move {
+            work_status::run_writer(work, path, cancel).await;
+        }));
+    }
+
     // One capture task per camera.
     for cam in cameras {
         let engine = engine.clone();
         let cancel = cancel.clone();
         let downscale = (config.downscale_width, config.downscale_height);
         let paces = paces.clone();
+        let input = work.input();
         tasks.push(tokio::spawn(async move {
-            run_camera(engine, cam, downscale, paces, cancel).await;
+            run_camera(engine, cam, downscale, paces, input, cancel).await;
         }));
     }
 
@@ -372,6 +386,11 @@ struct ModelPace {
 /// is left to the source (which publishes its native format), and
 /// publish each into the engine ring. A source error backs off and re-opens.
 ///
+/// Every frame taken off the source is counted on `input`, and the input is
+/// live from its first frame until the source fails, ends or delivers nothing
+/// for [`INPUT_SILENCE_TIMEOUT`]. A silent source is closed and reopened, so an
+/// upstream that stopped sending never reads as a stalled engine.
+///
 /// Inference is driven by a per-camera [`PerceptionScheduler`] over `paces`: on
 /// each free frame the scheduler returns the detection models DUE now (by rate +
 /// priority), and they run in one spawned batch that serializes on the engine's
@@ -382,6 +401,7 @@ async fn run_camera(
     cam: ResolvedCamera,
     _downscale: (u32, u32),
     paces: Vec<ModelPace>,
+    mut input: InputLiveness,
     cancel: ados_protocol::shutdown::Shutdown,
 ) {
     let mut frame_id: u64 = 0;
@@ -423,9 +443,21 @@ async fn run_camera(
 
         loop {
             tokio::select! {
-                frame = source.next_frame() => {
+                frame = tokio::time::timeout(INPUT_SILENCE_TIMEOUT, source.next_frame()) => {
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(_) => {
+                            tracing::debug!(
+                                camera = %cam.id,
+                                silent_s = INPUT_SILENCE_TIMEOUT.as_secs(),
+                                "frame source delivered nothing; reopening"
+                            );
+                            break;
+                        }
+                    };
                     match frame {
                         Ok(raw) => {
+                            input.frame();
                             frame_id = frame_id.wrapping_add(1);
                             match engine
                                 .publish_frame(
@@ -485,6 +517,7 @@ async fn run_camera(
                 _ = cancel.wait() => return,
             }
         }
+        input.lost();
         if backoff(&cancel).await {
             return;
         }

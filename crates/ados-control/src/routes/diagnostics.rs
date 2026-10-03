@@ -12,7 +12,7 @@
 //!   durable logging store's merged hardware snapshot (the one Rust collector),
 //!   mapped to the diagnostics field names.
 //! * `network` — the primary IPv4 + the ethernet/wlan MAC reads.
-//! * `device` — the configured `device_id`.
+//! * `device` — the node's resolved `device_id`.
 //! * `logs.agent` — the last few `ados-agent` log lines.
 //!
 //! Every section is fault-tolerant: an absent store / sidecar / config / `/sys`
@@ -380,34 +380,17 @@ fn is_ipv4_literal(s: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// device — the configured device id.
+// device — this node's device id.
 // ---------------------------------------------------------------------------
 
-/// The device identity, mirroring the FastAPI `_collect_device`: the configured
-/// `agent.device_id`, falling back to `/etc/ados/device_id`, then to `"--"`. The
-/// config is read off the same `/etc/ados/config.yaml` slice the pairing-info
-/// route projects.
+/// The device identity: the node's resolved device id (the same one the
+/// pairing-info route reports), or `"--"` on an unprovisioned node.
 fn collect_device(config_path: &Path) -> Value {
     let cfg = crate::config::PairingConfig::load_from(config_path);
-    let from_config = Some(cfg.agent.device_id).filter(|s| !s.is_empty());
-    let device_id = from_config
-        .or_else(read_device_id_file)
+    let device_id = Some(cfg.agent.device_id)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "--".to_string());
     json!({ "device_id": device_id })
-}
-
-/// The device id persisted at `/etc/ados/device_id`, trimmed. The same file the
-/// Python `_collect_device` falls back to when the config carries no `device_id`.
-/// `None` when absent / unreadable / empty.
-fn read_device_id_file() -> Option<String> {
-    let raw = std::fs::read_to_string("/etc/ados/device_id").ok()?;
-    let id = raw.trim();
-    if id.is_empty() {
-        None
-    } else {
-        Some(id.to_string())
-    }
 }
 
 // ---------------------------------------------------------------------------

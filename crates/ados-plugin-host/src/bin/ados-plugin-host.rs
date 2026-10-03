@@ -366,7 +366,7 @@ async fn wire(paths: &Paths) -> WiredDaemon<RealHost> {
     // The paired device id scopes each plugin's per-drone data dir, written into
     // the runner's env file by the mint, and its drone-scoped config. Empty on
     // an unpaired node (node scope).
-    let device_id = ados_plugin_host::token_secret::read_device_id(&paths.device_id_file);
+    let device_id = ados_protocol::identity::device_id_at(&paths.device_id_file, None);
     let host = build_host(
         install_dir.clone(),
         run_dir,

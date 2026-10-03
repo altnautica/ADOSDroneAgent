@@ -525,6 +525,7 @@ async fn run_service_pass(
                 band: None,
                 packet_rate_hz: Some(cfg.packet_rate_hz),
                 tx_frames_per_s: Some(tx_fps),
+                tx_frames_total: Some(tx_total),
                 rx_frames_per_s: Some(rx_fps),
                 mode: Some(cfg.mode.as_str()),
                 channel_source: source,
@@ -805,7 +806,7 @@ mod shutdown_tests {
             "standing by carries no liveness verdict"
         );
         assert!(
-            body["tx_frames_per_s"].is_null(),
+            body["tx_frames_per_s"].is_null() && body["tx_frames_total"].is_null(),
             "no transmit counter may be fabricated while held off"
         );
         tx.send(true).unwrap();

@@ -24,6 +24,13 @@ Type=simple
 # image so the chosen binary owns the cgroup + restart track.
 ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-swarmbus ]; then exec /opt/ados/bin/ados-swarmbus; else echo "ados-swarmbus binary missing; reinstall to fetch it" >&2; exit 1; fi'
 Restart=always
+# Exit 0 means this node has nothing for the bus to run: a drone that has not
+# been given a fleet slot yet. It must not respawn every RestartSec; the
+# supervisor starts it again when the agent config changes, so a slot written
+# later brings the bus up with no operator restart. A misprovisioned identity
+# (a slot out of range, a ground station on a drone slot) exits non-zero and,
+# like any other exit, signal or watchdog timeout, restarts forever.
+RestartPreventExitStatus=0
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env

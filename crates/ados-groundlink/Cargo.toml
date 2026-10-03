@@ -15,6 +15,11 @@ path = "src/lib.rs"
 name = "ados-groundlink"
 path = "src/main.rs"
 
+[features]
+# Hardware-free bench builds only; see the feature of the same name in
+# ados-radio, whose adapter selection this crate uses.
+bench-adapters = ["ados-radio/bench-adapters"]
+
 [dependencies]
 # Sibling Rust crates: the radio adapter/manager, the process orchestrator, and
 # the shared wire-contract types. Pulled in by path within the workspace.

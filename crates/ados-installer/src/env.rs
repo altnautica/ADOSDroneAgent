@@ -45,7 +45,9 @@ pub const SERVICE_NAME: &str = "ados-supervisor";
 /// back to this (then `INSTALL_DIR/repo`) when `ctx.source_dir` is `None`.
 pub const PERSISTED_SOURCE_DIR: &str = "/opt/ados/source";
 /// The device-id file: a normalized 12-hex string (no dashes), never rewritten.
-pub const DEVICE_ID_FILE: &str = "/etc/ados/device-id";
+/// The installer mints it; every service resolves the id through
+/// `ados_protocol::identity`, which reads this same path.
+pub const DEVICE_ID_FILE: &str = ados_protocol::identity::DEVICE_ID_FILE;
 /// On-disk profile selector read by the agent + the bash `resolve_profile`.
 pub const PROFILE_CONF: &str = "/etc/ados/profile.conf";
 /// The operator config the agent reads on boot.

@@ -66,18 +66,6 @@ pub const ENV_DATA_DIR: &str = "ADOS_PLUGIN_DATA_DIR";
 /// `PLUGIN_DATA_DIR`. Each plugin's unit binds only its own `<base>/<id>`
 /// writable.
 pub const PLUGIN_DATA_DIR: &str = "/var/ados/plugin-data";
-/// Default path of this node's device id (`ADOS_DEVICE_ID_PATH` overrides it):
-/// the persistent 12-hex identity the agent writes on first boot.
-pub const DEVICE_ID_PATH: &str = "/etc/ados/device-id";
-
-/// The device id at `path`, trimmed. Empty when the file is absent or
-/// unreadable (an unpaired or pre-first-boot node), which scopes plugin data
-/// and drone-scoped config to the node.
-pub fn read_device_id(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
 
 /// The plugin's data directory, matching the Python `_data_dir_for`: node-scoped
 /// at `<data_root>/<id>`, or per-drone at `<data_root>/<id>/drones/<agent_id>`

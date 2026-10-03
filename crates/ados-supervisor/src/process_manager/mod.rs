@@ -50,15 +50,15 @@ pub trait ProcessManager: Send + Sync {
     /// and treating that as "inactive" restarts every healthy unit on the node.
     async fn is_active(&self, unit: &str) -> Option<bool>;
 
-    /// Cumulative bytes the unit's main process has read plus written since it
-    /// started, or `None` when this backend cannot resolve it.
+    /// The cumulative work count the unit publishes about its own lane, or
+    /// `None` when there is no reading or the lane has nothing to do.
     ///
     /// The delta of this value across monitor passes is the supervisor's only
     /// proof that an `active` unit is doing anything (see
     /// [`crate::work_proof`]). `None` is the honest answer wherever the signal
-    /// does not exist — launchd and the inert backend have no `/proc/<pid>/io`
-    /// analogue — and the caller renders that as "no verdict", never as a
-    /// stall. Defaulted so a backend that cannot answer says so by omission.
+    /// does not exist — the judged units run only on systemd hosts — and the
+    /// caller renders that as "no verdict", never as a stall. Defaulted so a
+    /// backend that cannot answer says so by omission.
     async fn work_counter(&self, _unit: &str) -> Option<u64> {
         None
     }

@@ -219,10 +219,12 @@ async fn run_drone(
     );
 
     // Every request must carry a relay ticket minted from the per-pair secret
-    // for this drone's device id; the fleet radio key alone admits nothing.
+    // for this drone's device id; the fleet radio key alone admits nothing. An
+    // unprovisioned box resolves an empty id, which no ticket names, so every
+    // request is refused until it is provisioned.
     let auth = TunnelAuth {
         secret_path: std::path::PathBuf::from(ados_protocol::relay_ticket::RELAY_SECRET_PATH),
-        own_device_id: own_device_id(),
+        own_device_id: ados_protocol::identity::device_id(None),
     };
     let reloaded = run_terminator(
         transport,
@@ -242,23 +244,6 @@ async fn run_drone(
     } else {
         RunExit::Shutdown
     }
-}
-
-/// This node's device id: the provisioned `/etc/ados/device-id`, then
-/// `ADOS_DEVICE_ID`, then empty (which no ticket names, so every request is
-/// refused until the box is provisioned).
-fn own_device_id() -> String {
-    std::fs::read_to_string("/etc/ados/device-id")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("ADOS_DEVICE_ID")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_default()
 }
 
 async fn run_ground_station(

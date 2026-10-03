@@ -100,14 +100,6 @@ pub fn resolve_pair_key() -> (Option<[u8; 32]>, &'static str) {
 /// Whether the refused-key state was the last one logged.
 static KEY_UNAVAILABLE_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Read the persistent device-id (`/etc/ados/device-id`), trimmed. Empty when
-/// absent; the emit loop logs and still sends (an empty id zero-pads).
-fn read_device_id() -> String {
-    std::fs::read_to_string("/etc/ados/device-id")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-
 /// Cap on the hop-history ring (matches the Python listener's 32-entry trim).
 const HOP_HISTORY_CAP: usize = 32;
 
@@ -462,7 +454,7 @@ pub async fn emit_loop<F>(channel_fn: F) -> std::io::Result<()>
 where
     F: Fn() -> u8 + Send,
 {
-    let device_id = read_device_id();
+    let device_id = ados_protocol::identity::device_id(None);
     if device_id.is_empty() {
         tracing::warn!("ground_presence_emit_no_device_id");
     }
@@ -520,7 +512,7 @@ pub async fn listen_loop(
     follower: Option<HopFollower>,
     slots: &[u8],
 ) -> std::io::Result<()> {
-    let own_device_id = read_device_id();
+    let own_device_id = ados_protocol::identity::device_id(None);
     let mut socks = Vec::with_capacity(slots.len());
     for &slot in slots {
         let port = presence_listen_port(slot);

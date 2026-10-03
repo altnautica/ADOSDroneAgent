@@ -505,11 +505,9 @@ fn read_ap_passphrase() -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// The 12-hex device id, or `unknown`.
+/// The node's device id (the full 12-hex id), or `unknown`.
 fn read_device_id() -> String {
-    std::fs::read_to_string(env::DEVICE_ID_FILE)
-        .ok()
-        .map(|s| s.trim().to_string())
+    Some(ados_protocol::identity::device_id(None))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string())
 }

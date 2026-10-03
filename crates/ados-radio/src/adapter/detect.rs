@@ -261,6 +261,10 @@ impl SelectionOutcome {
 #[cfg(target_os = "linux")]
 pub async fn detect_and_select(override_iface: &str) -> SelectionOutcome {
     let adapters = detect_wfb_adapters().await;
+    // Bench builds only: a pin on a `dummy` link joins the scan as an adapter
+    // and then faces the same candidate gate and monitor-mode readback.
+    #[cfg(feature = "bench-adapters")]
+    let adapters = super::bench::with_pinned_dummy(adapters, override_iface).await;
 
     let candidates = injection_candidates(&adapters, override_iface);
     let mut selected = None;
@@ -644,6 +648,37 @@ mod tests {
         // A pin on a gated adapter moves it to the front.
         assert_eq!(
             names(injection_candidates(&adapters, "wlan2")),
+            vec!["wlan2", "wlan1"]
+        );
+    }
+
+    /// Bench builds only: a pin on a `dummy` link becomes the first candidate,
+    /// and the gate still holds for every other pin. Release builds never
+    /// compile this path; there `an_interface_pin_never_bypasses_the_injection_gate`
+    /// is the whole rule.
+    #[cfg(feature = "bench-adapters")]
+    #[test]
+    fn a_bench_build_selects_a_pinned_dummy_link() {
+        let names = |c: Vec<&WifiAdapterInfo>| -> Vec<String> {
+            c.into_iter().map(|a| a.interface_name.clone()).collect()
+        };
+        let mut adapters = vec![
+            monitor_adapter("wlan0", "brcmfmac"),
+            monitor_adapter("wlan2", "rtl8812au"),
+        ];
+        let dummy = super::super::bench::pinned_dummy_adapter(&adapters, "wlan1", Some("dummy"))
+            .expect("a pinned dummy link is a bench adapter");
+        adapters.push(dummy);
+        assert_eq!(
+            names(injection_candidates(&adapters, "wlan1")),
+            vec!["wlan1", "wlan2"]
+        );
+        // The management WiFi pin is still refused in a bench build.
+        assert!(
+            super::super::bench::pinned_dummy_adapter(&adapters, "wlan0", Some("dummy")).is_none()
+        );
+        assert_eq!(
+            names(injection_candidates(&adapters, "wlan0")),
             vec!["wlan2", "wlan1"]
         );
     }

@@ -69,25 +69,27 @@ class ADOSConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def fill_device_id(cls, data: Any) -> Any:
-        """Fill device_id if empty, preferring the persisted /etc/ados/device-id.
+        """Resolve ``agent.device_id`` to the node's one identity.
 
-        Reading the persisted identity (instead of minting a throwaway UUID on
-        every validation) keeps the short device_id deterministic across
-        restarts and prefix-consistent with the WFB peer-id derived from the
-        same file. Only mints a fallback when no persisted id is available.
+        The device-id file wins over ``ADOS_DEVICE_ID`` and over whatever
+        config.yaml carries (``resolve_device_id``), so a stale or shortened
+        configured id never shadows the provisioned one. When nothing resolves,
+        the full id is minted and persisted at the device-id path so later
+        validations and every other reader agree. The id is never truncated.
         """
         if isinstance(data, dict):
             agent = data.get("agent", {})
-            if isinstance(agent, dict) and not agent.get("device_id"):
-                short = ""
-                try:
-                    from ados.core.identity import get_or_create_device_id
-                    short = get_or_create_device_id()[:8]
-                except Exception:
-                    short = ""
-                if not short:
-                    import uuid
-                    short = uuid.uuid4().hex[:8]
-                agent["device_id"] = short
+            if isinstance(agent, dict):
+                from ados.core.identity import (
+                    device_id_path,
+                    get_or_create_device_id,
+                    resolve_device_id,
+                )
+
+                # A YAML scalar of all digits loads as an int; the id is text.
+                configured = str(agent.get("device_id") or "")
+                agent["device_id"] = resolve_device_id(
+                    configured
+                ) or get_or_create_device_id(device_id_path())
                 data["agent"] = agent
         return data

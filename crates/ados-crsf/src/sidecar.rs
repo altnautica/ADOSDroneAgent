@@ -6,9 +6,9 @@
 //! ```json
 //! { "v": 1, "state": "…", "rssi_dbm": …, "lq_uplink": …, "lq_downlink": …,
 //!   "snr_db": …, "band": …, "packet_rate_hz": …, "tx_power_mw": …,
-//!   "tx_frames_per_s": …, "rx_frames_per_s": …, "rf_unverified": …,
-//!   "flyable": …, "mode": …, "channel_source": …, "pic": …, "relay_role": …,
-//!   "fc_command_down_gated": … }
+//!   "tx_frames_per_s": …, "tx_frames_total": …, "rx_frames_per_s": …,
+//!   "rf_unverified": …, "flyable": …, "mode": …, "channel_source": …, "pic": …,
+//!   "relay_role": …, "fc_command_down_gated": … }
 //! ```
 //!
 //! `state` ∈ `unconfigured|ready|link_ok|degraded|rf_unverified|disabled`.
@@ -52,6 +52,11 @@ pub struct StatsInputs<'a> {
     pub packet_rate_hz: Option<u16>,
     /// Measured transmitted frames per second over the last interval.
     pub tx_frames_per_s: Option<f64>,
+    /// RC frames written to the module since the lane's transport opened. The
+    /// supervisor judges the lane on this count while `channel_source` names a
+    /// live source: with no live source the lane sends nothing by design, so a
+    /// flat count is idle, not wedged.
+    pub tx_frames_total: Option<u64>,
     /// Measured received frames per second over the last interval.
     pub rx_frames_per_s: Option<f64>,
     /// The configured lane mode (`crsf_rc` while the RC channel lane runs;
@@ -119,6 +124,7 @@ pub fn build_stats_value(state: LaneState, inputs: &StatsInputs<'_>) -> Value {
         "packet_rate_hz": inputs.packet_rate_hz,
         "tx_power_mw": tx_power_mw,
         "tx_frames_per_s": inputs.tx_frames_per_s,
+        "tx_frames_total": inputs.tx_frames_total,
         "rx_frames_per_s": inputs.rx_frames_per_s,
         "rf_unverified": state.rf_unverified_flag(),
         "flyable": state.flyable(),
@@ -194,7 +200,7 @@ mod tests {
 
     /// The pinned field set, in one place, so a drift in either direction
     /// (a missing field or an invented one) fails loudly.
-    const PINNED_FIELDS: [&str; 18] = [
+    const PINNED_FIELDS: [&str; 19] = [
         "v",
         "state",
         "rssi_dbm",
@@ -205,6 +211,7 @@ mod tests {
         "packet_rate_hz",
         "tx_power_mw",
         "tx_frames_per_s",
+        "tx_frames_total",
         "rx_frames_per_s",
         "rf_unverified",
         "flyable",
@@ -273,6 +280,7 @@ mod tests {
             band: None,
             packet_rate_hz: Some(50),
             tx_frames_per_s: Some(49.8),
+            tx_frames_total: Some(1_200),
             rx_frames_per_s: Some(12.0),
             mode: Some("rc"),
             channel_source: Some("inject"),
@@ -290,6 +298,7 @@ mod tests {
         assert_eq!(v["tx_power_mw"], 100);
         assert_eq!(v["packet_rate_hz"], 50);
         assert_eq!(v["tx_frames_per_s"], 49.8);
+        assert_eq!(v["tx_frames_total"], 1_200);
         assert_eq!(v["rx_frames_per_s"], 12.0);
         assert_eq!(v["rf_unverified"], false);
         assert_eq!(v["flyable"], true);

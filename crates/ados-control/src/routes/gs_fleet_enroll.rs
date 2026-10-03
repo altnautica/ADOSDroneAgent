@@ -77,15 +77,11 @@ const DRONE_ROLE: &str = "drone";
 /// slot, so ordering here decides only who gets the lower number when several
 /// arrive together.
 ///
-/// A peer is already registered when [`FleetRegistry::slot_of`] finds it: an
-/// exact id, or the one derivation the two id forms actually have (the 8-hex
-/// short form of a 12-hex device id; see
-/// `ados_groundlink::fleet::id_refers_to_same_device`). The pair route records
-/// the id its caller supplied while the beacon carries the id the node holds
-/// for itself, so exact comparison alone read one aircraft as two. Any looser
-/// rule, such as either id being a prefix of the other, lets a short
-/// registered id like `drone-1` swallow `drone-10` and every later id that
-/// begins with it, which silently denies those aircraft a slot.
+/// A peer is already registered when [`FleetRegistry::slot_of`] finds its exact
+/// id. A node has one device id (`ados_protocol::identity`), which both the pair
+/// route and the presence beacon carry, so a looser rule would only ever merge
+/// two different aircraft: a short registered id like `drone-1` swallowing
+/// `drone-10` and every later id that begins with it.
 ///
 /// A beacon id that could not name a registry entry (see
 /// [`ados_groundlink::is_valid_device_id`]) is never enrolled.
@@ -206,29 +202,28 @@ mod tests {
 
     #[test]
     fn a_drone_the_pair_route_already_registered_is_not_enrolled_again() {
-        // Caught on the two-drone bench: the pair route records the id its
-        // caller supplied and the beacon carries the id the node holds for
-        // itself, and the first is a truncation of the second. Compared
-        // exactly, one aircraft read as two and was issued a second slot -- so
-        // a two-drone fleet filled four slots, and the ground station stood up
-        // receivers on two slots nothing was transmitting on.
+        // The pair route and the presence beacon carry the same id (the node's
+        // one identity), so a beacon from a paired drone adds no second slot.
         let mut registry = FleetRegistry::default();
-        registry.allocate("40bb1a5a");
+        registry.allocate("40bb1a5a4484");
 
         assert!(
             decide_enrollments(&[peer("40bb1a5a4484", "drone")], &registry).is_empty(),
-            "the longer form of an already-registered id is the same aircraft"
+            "an already-registered id is the same aircraft"
         );
     }
 
     #[test]
-    fn the_shorter_form_of_a_registered_id_is_also_the_same_aircraft() {
-        // The relationship is symmetric: whichever path registered first, the
-        // other must not add a duplicate.
+    fn an_id_sharing_a_registered_prefix_is_a_different_aircraft() {
+        // One node has one id, so a shared prefix proves nothing; the other
+        // aircraft is enrolled in its own slot.
         let mut registry = FleetRegistry::default();
         registry.allocate("40bb1a5a4484");
 
-        assert!(decide_enrollments(&[peer("40bb1a5a", "drone")], &registry).is_empty());
+        assert_eq!(
+            decide_enrollments(&[peer("40bb1a5a", "drone")], &registry),
+            vec!["40bb1a5a".to_string()]
+        );
     }
 
     #[test]

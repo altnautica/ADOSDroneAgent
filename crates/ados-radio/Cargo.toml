@@ -16,6 +16,10 @@ path = "src/main.rs"
 # OFF by default — the backend seam ships inert; the userspace implementation
 # lands behind this gate in a later wave.
 userspace-usb = []
+# Hardware-free bench builds only: a `video.wfb.interface` pin that names a
+# `dummy` link is accepted as the WFB adapter. Never enabled in a release or CI
+# publish build, where the adapter gate is absolute.
+bench-adapters = []
 
 [dependencies]
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds

@@ -55,14 +55,16 @@ pub fn slugify_hostname(name: &str) -> String {
     cut
 }
 
-/// Build the default `config.yaml` body (pure). `short_id` is the first 8 hex of the
-/// device id, `agent_name` is `--name` or `ados-<short_id>`, `fc_port` is the
+/// Build the default `config.yaml` body (pure). `device_id` is the full id from
+/// `/etc/ados/device-id`, written whole so the config never carries a second,
+/// shorter identity. `agent_name` is `--name` or [`default_agent_name`],
+/// `fc_port` is the
 /// auto-detected FC serial port (empty when none found), `server_mode` is `local`
 /// (local-first) or `cloud` (reach from anywhere), and `region` pins an operating
 /// region (`None` = unrestricted). `ack_at` is the ISO-8601 stamp recorded when a
 /// region is pinned (unused for the unrestricted default).
 pub fn default_config_yaml(
-    short_id: &str,
+    device_id: &str,
     agent_name: &str,
     profile: &str,
     fc_port: &str,
@@ -77,7 +79,7 @@ pub fn default_config_yaml(
 # Docs: https://docs.altnautica.com/drone-agent/config\n\
 \n\
 agent:\n  \
-device_id: \"{short_id}\"\n  \
+device_id: \"{device_id}\"\n  \
 name: \"{agent_name}\"\n  \
 profile: \"{profile}\"\n  \
 tier: \"auto\"\n\
@@ -283,15 +285,24 @@ fn detect_fc_port() -> String {
     String::new()
 }
 
+/// The default human-readable node name: `ados-` plus the first 8 hex of the
+/// device id. A label only; the identity is always the full id.
+fn default_agent_name(device_id: &str) -> String {
+    let short: String = device_id.chars().take(8).collect();
+    format!("ados-{short}")
+}
+
 /// Write the default config (skip-if-exists, matching `generate_default_config`).
 /// A pre-existing config is left intact (an operator may have edited it / an
-/// `--upgrade` preserves it); we only mint a fresh one on a clean box.
+/// `--upgrade` preserves it); we only mint a fresh one on a clean box. A short
+/// `agent.device_id` an older install left there is harmless: every reader
+/// resolves the identity file first.
 ///
 /// `server_mode` (`local` local-first / `cloud` reach-from-anywhere) and
 /// `region` (an ISO country code, or `None` for the unrestricted default) come
 /// from the operator's onboarding choices.
 fn write_default_config(
-    short_id: &str,
+    device_id: &str,
     name: Option<&str>,
     profile: &str,
     server_mode: &str,
@@ -307,7 +318,7 @@ fn write_default_config(
     }
     let agent_name = name
         .map(|n| n.to_string())
-        .unwrap_or_else(|| format!("ados-{short_id}"));
+        .unwrap_or_else(|| default_agent_name(device_id));
     let fc_port = detect_fc_port();
     if !fc_port.is_empty() {
         tracing::info!(fc_port = %fc_port, "detected flight controller serial port");
@@ -319,7 +330,7 @@ fn write_default_config(
         String::new()
     };
     let body = default_config_yaml(
-        short_id,
+        device_id,
         &agent_name,
         profile,
         &fc_port,
@@ -720,7 +731,6 @@ impl Step for ConfigIdentity {
             Ok(id) => id,
             Err(e) => return StepOutcome::Failed(format!("could not mint device id: {e}")),
         };
-        let short_id: String = device_id.chars().take(8).collect();
 
         // 2. Persist the resolved profile + the default config. The server mode
         //    and operating region come from the operator's onboarding choices
@@ -732,7 +742,7 @@ impl Step for ConfigIdentity {
             "local"
         };
         write_default_config(
-            &short_id,
+            &device_id,
             ctx.args.name.as_deref(),
             &ctx.profile,
             server_mode,
@@ -815,6 +825,28 @@ mod tests {
     fn slugify_all_disallowed_is_empty() {
         assert_eq!(slugify_hostname("@@@"), "");
         assert_eq!(slugify_hostname(""), "");
+    }
+
+    /// The generated config carries the identity file's id whole, so config and
+    /// file can never name the node differently. An 8-char prefix here once
+    /// made a drone refuse every relayed request addressed by its full id.
+    #[test]
+    fn the_generated_config_names_the_node_by_the_identity_file() {
+        let id = "4e7a083410f5";
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("device-id");
+        std::fs::write(&file, format!("{id}\n")).unwrap();
+
+        let cfg = default_config_yaml(id, &default_agent_name(id), "drone", "", "local", None, "");
+        let parsed: serde_norway::Value = serde_norway::from_str(&cfg).unwrap();
+        let configured = parsed["agent"]["device_id"].as_str().unwrap();
+        assert_eq!(configured, std::fs::read_to_string(&file).unwrap().trim());
+        assert_eq!(
+            ados_protocol::identity::resolve(&file, None, Some(configured)),
+            configured
+        );
+        // The name stays a short label.
+        assert_eq!(parsed["agent"]["name"].as_str(), Some("ados-4e7a0834"));
     }
 
     #[test]

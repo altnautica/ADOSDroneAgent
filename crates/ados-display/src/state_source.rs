@@ -51,10 +51,6 @@ const AP_PASSPHRASE_PATH: &str = "/etc/ados/ap-passphrase";
 /// instead of getting 401'd (which would leave the panel rendering blanks).
 pub const PAIRING_JSON_PATH: &str = "/etc/ados/pairing.json";
 
-/// Device-id file (`/etc/ados/device-id`, hyphen) — the canonical id the about
-/// and diagnostics surfaces show when the setup snapshot doesn't carry one.
-pub const DEVICE_ID_PATH: &str = "/etc/ados/device-id";
-
 /// Per-request timeout for the local status polls. Matches the Python LCD
 /// service's `httpx` 0.9 s ceiling so a wedged agent never stalls the panel.
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(900);
@@ -252,7 +248,7 @@ impl StateSource {
             device.version = string_field(su, "version");
         }
         if device.device_id.is_none() {
-            let id = read_trimmed(Path::new(DEVICE_ID_PATH));
+            let id = ados_protocol::identity::device_id(None);
             if !id.is_empty() {
                 device.device_id = Some(id);
             }

@@ -15,6 +15,8 @@
 //! subprocess runners + the control-interface guard live in this barrel because
 //! every sub-module relies on them.
 
+#[cfg(feature = "bench-adapters")]
+mod bench;
 mod detect;
 mod monitor;
 mod reg;

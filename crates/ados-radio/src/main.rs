@@ -55,8 +55,8 @@ use hop_supervisor::{
 };
 use reg_gate::{decide_reg_gate, RegGateDecision, BRINGUP_RETRY_SECS, STATE_REG_BLOCKED};
 use sidecar::{
-    build_stats_value, json_object_to_fields, read_device_id, write_adapters_sidecar,
-    write_stats_sidecar, AdapterInfo, ChannelTruth, RegPosture, RegSnapshot,
+    build_stats_value, json_object_to_fields, write_adapters_sidecar, write_stats_sidecar,
+    AdapterInfo, ChannelTruth, RegPosture, RegSnapshot,
 };
 use txrate::{TxLiveness, TxRates};
 
@@ -1359,7 +1359,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let hop_cfg = cfg.clone();
         let hop_key = pair_key;
         let presence_cancel = task_cancel.clone();
-        let device_id = read_device_id();
+        let device_id = ados_protocol::identity::device_id(None);
 
         // Presence beacon emitter (10s interval). It advertises the LIVE channel
         // (read from the interface each tick), not the configured value, so a GS

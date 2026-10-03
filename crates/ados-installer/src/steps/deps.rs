@@ -62,8 +62,17 @@ pub fn core_packages() -> &'static [&'static str] {
         // Without `nft` that rule cannot load and every `network.outbound`
         // grant is refused.
         "nftables",
+        // The signature verifier. Every asset downloaded from a release must
+        // carry a minisign signature that verifies against the trust anchor,
+        // and a host without the tool cannot verify one, so it would refuse
+        // every download. The bootstrap script installs it before it runs this
+        // installer, but the installer can be run directly on a stock image.
+        MINISIGN,
     ]
 }
+
+/// The signature verifier's apt package and binary name.
+const MINISIGN: &str = "minisign";
 
 /// Optional packages installed best-effort (failure only degrades). The
 /// gstreamer -dev headers are only needed to compile the optional wfb_rtsp
@@ -411,6 +420,16 @@ impl Step for Deps {
         if let Err(e) = apt_install(&required, true, &sink) {
             return StepOutcome::Failed(e.to_string());
         }
+        // Every later step that downloads a release asset refuses it unless
+        // its signature verifies, so a host still without the verifier would
+        // install nothing that is downloaded. Stop here, naming the cause.
+        if !exec::run(MINISIGN, &["-v"]).spawned {
+            return StepOutcome::Failed(
+                "minisign is not installed, so no downloaded release asset can be \
+                 verified; install it (apt-get install minisign) and re-run"
+                    .to_string(),
+            );
+        }
 
         // Optional headers tolerate failure (wfb_rtsp demo target only).
         if let Err(e) = apt_install(optional_packages(), false, &sink) {
@@ -505,6 +524,20 @@ mod tests {
         }
         // The wrong v4l package name must NOT appear (it breaks the install).
         assert!(!core.contains(&"v4l2-utils"));
+    }
+
+    #[test]
+    fn every_profile_installs_the_signature_verifier_as_required() {
+        // Release downloads refuse to install unverified, so the verifier must be
+        // in the REQUIRED set (a failed install stops the step) on every profile,
+        // not left to the bootstrap script that a direct run skips.
+        for profile in ["drone", "ground_station", "compute", "workstation"] {
+            assert!(
+                required_packages(profile).contains(&"minisign"),
+                "{profile} must install minisign"
+            );
+        }
+        assert!(!optional_packages().contains(&"minisign"));
     }
 
     #[test]

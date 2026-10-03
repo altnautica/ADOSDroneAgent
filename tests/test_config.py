@@ -21,13 +21,6 @@ def test_default_config():
     assert cfg.swarm.enabled is False
 
 
-def test_device_id_auto_generated():
-    """Empty device_id should be auto-filled."""
-    cfg = ADOSConfig()
-    assert cfg.agent.device_id != ""
-    assert len(cfg.agent.device_id) == 8
-
-
 def test_load_config_from_yaml():
     """Config loaded from YAML should override defaults."""
     data = {

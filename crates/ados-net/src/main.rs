@@ -73,14 +73,6 @@ fn notify_ready() {
 #[cfg(not(target_os = "linux"))]
 fn notify_ready() {}
 
-/// Read the device id from `/etc/ados/device-id` (trimmed). Empty on a board
-/// that has not been provisioned yet, which yields the all-zeros SSID suffix.
-fn read_device_id() -> String {
-    std::fs::read_to_string(ados_net::paths::DEVICE_ID_PATH)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-
 /// Wire the real ethernet + Wi-Fi-client + cellular modem managers. The modem
 /// fills the `wwan0` slot; its `is_up` only reports kernel-iface liveness, so
 /// the router never auto-connects it (bring-up is an explicit, config-gated
@@ -110,7 +102,7 @@ async fn main() -> Result<()> {
     init_logging();
 
     let runner = Arc::new(TokioCmdRunner);
-    let device_id = read_device_id();
+    let device_id = ados_protocol::identity::device_id(None);
     let priority = failover::load_priority(ados_net::paths::gs_uplink_json());
     tracing::info!(
         priority = ?priority,

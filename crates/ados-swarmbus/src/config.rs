@@ -89,6 +89,19 @@ struct RawConfig {
     video: RawVideo,
 }
 
+/// The startup verdict on a node's fleet identity (see
+/// [`SwarmBusConfig::startup`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Startup {
+    /// The identity is usable: run the bus.
+    Run,
+    /// No fleet slot has been assigned yet. Nothing to run: exit cleanly and
+    /// start again once the agent config changes.
+    Unprovisioned(FleetIdentityError),
+    /// The identity is wrong. Refuse to radiate and fail the unit.
+    Refuse(FleetIdentityError),
+}
+
 impl SwarmBusConfig {
     /// Load from the agent config file and the profile sentinel. A missing config
     /// yields defaults (the profile still resolves from `profile_conf`); a parse
@@ -138,6 +151,23 @@ impl SwarmBusConfig {
     /// unexplained link loss rather than as an obvious configuration error.
     pub fn identity_error(&self) -> Option<FleetIdentityError> {
         fleet_identity_error(self.fleet_id, self.fleet_slot, self.is_ground_station())
+    }
+
+    /// What the bus does with this node's fleet identity at startup.
+    ///
+    /// A drone that has not been given a slot (it still holds the ground
+    /// station's slot 0, the value every fresh install boots with) or that sits
+    /// in the reserved unprovisioned fleet has nothing to run yet: it must not
+    /// radiate, and it is not broken either. Every other identity error is a
+    /// misprovisioned node and is refused loudly.
+    pub fn startup(&self) -> Startup {
+        match self.identity_error() {
+            None => Startup::Run,
+            Some(
+                e @ (FleetIdentityError::DroneWithoutSlot | FleetIdentityError::UnprovisionedFleet),
+            ) => Startup::Unprovisioned(e),
+            Some(e) => Startup::Refuse(e),
+        }
     }
 
     /// The swarm neighbour-table broadcast socket this service binds.
@@ -244,7 +274,7 @@ mod tests {
     #[test]
     fn a_misprovisioned_identity_is_rejected_with_the_radio_planes_reasons() {
         // A drone left on the ground station's slot 0 — the default a fresh box
-        // boots with, and the case that must fail loudest.
+        // boots with. It must never radiate on it.
         let c = parse("agent:\n  profile: drone\n");
         assert_eq!(
             c.identity_error(),
@@ -281,6 +311,47 @@ mod tests {
             "agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_slot: {FLEET_MAX_SLOTS}\n"
         ));
         assert_eq!(c.identity_error(), None);
+    }
+
+    /// An unassigned drone has nothing to run and idles cleanly; a wrong identity
+    /// is refused. Exiting non-zero on the first used to make systemd and the
+    /// supervisor restart the bus every few seconds on every default install.
+    #[test]
+    fn an_unassigned_drone_idles_and_a_wrong_identity_is_refused() {
+        // The default drone install: no slot written yet.
+        assert_eq!(
+            parse("agent:\n  profile: drone\n").startup(),
+            Startup::Unprovisioned(FleetIdentityError::DroneWithoutSlot)
+        );
+        // The reserved unprovisioned fleet.
+        assert_eq!(
+            parse("agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_id: 0\n    fleet_slot: 2\n")
+                .startup(),
+            Startup::Unprovisioned(FleetIdentityError::UnprovisionedFleet)
+        );
+        // Misprovisioned: refused, so the unit fails and is retried.
+        assert_eq!(
+            parse(&format!(
+                "agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_slot: {}\n",
+                FLEET_MAX_SLOTS + 1
+            ))
+            .startup(),
+            Startup::Refuse(FleetIdentityError::SlotOutOfRange(FLEET_MAX_SLOTS + 1))
+        );
+        assert_eq!(
+            parse("agent:\n  profile: ground_station\nvideo:\n  wfb:\n    fleet_slot: 4\n")
+                .startup(),
+            Startup::Refuse(FleetIdentityError::GroundWithDroneSlot(4))
+        );
+        // Assigned drone and ground station both run.
+        assert_eq!(
+            parse("agent:\n  profile: drone\nvideo:\n  wfb:\n    fleet_slot: 3\n").startup(),
+            Startup::Run
+        );
+        assert_eq!(
+            parse("agent:\n  profile: ground_station\n").startup(),
+            Startup::Run
+        );
     }
 
     /// A malformed config must not take the fleet id with it: the parse error is

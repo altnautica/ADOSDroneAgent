@@ -26,10 +26,6 @@ pub const UPLINK_ACTIVE_FLAG: &str = "/run/ados/uplink-active";
 /// dedicated manager is wired.
 pub const USB0_CARRIER: &str = "/sys/class/net/usb0/carrier";
 
-/// Device-id file (`DEVICE_ID_PATH`). The AP SSID derives its short suffix from
-/// the first four hex chars of this id.
-pub const DEVICE_ID_PATH: &str = "/etc/ados/device-id";
-
 /// hostapd config (`HOSTAPD_CONF_PATH`), written 0600.
 pub const HOSTAPD_CONF_PATH: &str = "/etc/ados/hostapd-gs.conf";
 

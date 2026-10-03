@@ -143,6 +143,11 @@ pub struct AgentConfig {
     /// socket, the per-role state files a role transition clears, and the
     /// mesh-event journal it appends to.
     pub run_dir: PathBuf,
+    /// The agent config file this was resolved from. The monitor watches its
+    /// modification time: a unit that exited because this node had nothing for
+    /// it to run is started again when the config changes, since the change may
+    /// be the one that gives it work (a fleet slot, an enabled feature).
+    pub config_yaml: PathBuf,
 }
 
 impl AgentConfig {
@@ -249,6 +254,7 @@ impl AgentConfig {
             mesh_role_path: mesh_role.to_path_buf(),
             run_dir: run_dir.to_path_buf(),
             log_store_enabled: log_store_wanted(config_yaml),
+            config_yaml: config_yaml.to_path_buf(),
         }
     }
 

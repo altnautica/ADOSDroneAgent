@@ -735,13 +735,15 @@ fn ap_ssid_from_config(cfg: &Value) -> String {
         .and_then(|h| h.get("ssid"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    let device_id = cfg
+    let configured_id = cfg
         .get("agent")
         .filter(|v| v.is_object())
         .and_then(|v| v.get("device_id"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    resolve_ap_ssid(configured, device_id)
+        .and_then(Value::as_str);
+    resolve_ap_ssid(
+        configured,
+        &ados_protocol::identity::device_id(configured_id),
+    )
 }
 
 /// Resolve the AP SSID exactly as the live hostapd manager does (the

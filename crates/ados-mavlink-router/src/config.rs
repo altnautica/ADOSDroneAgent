@@ -252,6 +252,10 @@ pub struct MavlinkConfig {
     /// controller-bearing profiles, so the drone-only paths gate on it.
     #[serde(skip)]
     pub profile: String,
+    /// This node's device id ([`ados_protocol::identity::device_id`]), filled
+    /// in by the loader. A relay-proxy request naming another id is not ours.
+    #[serde(skip)]
+    pub device_id: String,
 }
 
 /// The resolved MAVLink-over-ELRS ingest source.
@@ -302,6 +306,7 @@ impl Default for MavlinkConfig {
             crsf_mavlink_transport: "serial".to_string(),
             crsf_mavlink_command_enabled: false,
             profile: default_profile(),
+            device_id: String::new(),
         }
     }
 }
@@ -394,6 +399,8 @@ impl MavlinkConfig {
             // on `auto`, which resolves from the on-disk profile marker.
             #[serde(default)]
             profile: Option<String>,
+            #[serde(default)]
+            device_id: Option<String>,
         }
         #[derive(Debug, Default, Deserialize)]
         struct RadioSection {
@@ -438,6 +445,7 @@ impl MavlinkConfig {
         let profile_conf =
             std::env::var("ADOS_PROFILE_CONF").unwrap_or_else(|_| PROFILE_CONF.to_string());
         cfg.profile = resolve_profile(raw.agent.profile.as_deref(), Path::new(&profile_conf));
+        cfg.device_id = ados_protocol::identity::device_id(raw.agent.device_id.as_deref());
         (cfg, error)
     }
 
