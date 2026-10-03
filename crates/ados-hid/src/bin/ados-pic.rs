@@ -55,7 +55,7 @@ fn init_logging() {
 /// systemd readiness. No-op off Linux / outside a Type=notify unit.
 #[cfg(target_os = "linux")]
 fn sd_ready() {
-    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+    if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Ready]) {
         tracing::debug!(error = %e, "sd_notify READY failed");
     }
 }
@@ -65,7 +65,7 @@ fn sd_ready() {}
 
 #[cfg(target_os = "linux")]
 fn sd_watchdog() {
-    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]);
+    let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
 }
 
 #[cfg(not(target_os = "linux"))]

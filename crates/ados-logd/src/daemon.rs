@@ -102,7 +102,7 @@ impl Default for DaemonPaths {
 /// recorded as `result 'protocol'` — a failure — however clean its exit code.
 #[cfg(target_os = "linux")]
 pub fn sd_ready() {
-    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+    if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Ready]) {
         tracing::debug!(error = %e, "sd_notify READY failed");
     }
 }
@@ -113,7 +113,7 @@ pub fn sd_ready() {}
 /// systemd stopping ping. No-op off Linux / outside a notify unit.
 #[cfg(target_os = "linux")]
 fn sd_stopping() {
-    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Stopping]) {
+    if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Stopping]) {
         tracing::debug!(error = %e, "sd_notify STOPPING failed");
     }
 }
@@ -125,7 +125,7 @@ fn sd_stopping() {}
 /// `WatchdogSec`-armed `Type=notify` unit (`WATCHDOG_USEC` unset).
 #[cfg(target_os = "linux")]
 fn sd_watchdog() {
-    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]);
+    let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -73,7 +73,7 @@ fn init_logging() {
 
 #[cfg(target_os = "linux")]
 fn sd_ready() {
-    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+    if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Ready]) {
         tracing::debug!(error = %e, "sd_notify READY failed");
     }
 }

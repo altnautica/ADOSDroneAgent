@@ -114,7 +114,7 @@ async fn main() {
 fn notify_ready() {
     #[cfg(target_os = "linux")]
     {
-        let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+        let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
     }
 }
 

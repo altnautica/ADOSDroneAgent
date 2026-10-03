@@ -156,14 +156,14 @@ pub fn spawn_watchdog_pinger(_progress: MonitorProgress, _monitor_interval: Dura
 
 #[cfg(target_os = "linux")]
 pub fn ready() {
-    if let Err(e) = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]) {
+    if let Err(e) = sd_notify::notify(&[sd_notify::NotifyState::Ready]) {
         tracing::debug!(error = %e, "sd_notify READY failed");
     }
 }
 
 #[cfg(target_os = "linux")]
 pub fn watchdog() {
-    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Watchdog]);
+    let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
 }
 
 #[cfg(not(target_os = "linux"))]
