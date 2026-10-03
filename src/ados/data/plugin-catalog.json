@@ -61,7 +61,7 @@
     {
       "id": "com.altnautica.world-engine",
       "name": "ADOS World Engine",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "description": "3D world model from drone flights, reconstructed on a LAN compute node, plus perception offload for drones without an NPU.",
       "author": "Altnautica",
       "homepage": "https://github.com/altnautica/ADOSExtensions/tree/main/extensions/world-engine",
@@ -69,8 +69,8 @@
       "risk": "high",
       "category": "ai",
       "halves": ["agent", "gcs"],
-      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/world-engine-v1.0.0/com.altnautica.world-engine-1.0.0.signed.adosplug",
-      "archive_sha256": "3c0e9bc69c8ca2e076c5b8cbba7eb0d9cf4d77c5d9b0269b409c801d8ea6712b"
+      "download_url": "https://github.com/altnautica/ADOSExtensions/releases/download/world-engine-v1.0.1/com.altnautica.world-engine-1.0.1.signed.adosplug",
+      "archive_sha256": "847a4b32318ae2720711469b114ef6cd61241f130571ca081556ee28c3aeec8c"
     }
   ]
 }

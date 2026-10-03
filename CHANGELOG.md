@@ -4,6 +4,12 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.102.2] - 2026-10-03
+
+### Changed
+
+- The bundled extension catalog pins ADOS World Engine 1.0.1.
+
 ## [0.102.1] - 2026-10-03
 
 ### Fixed
