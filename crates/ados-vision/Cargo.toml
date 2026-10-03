@@ -55,7 +55,7 @@ memmap2 = { workspace = true }
 # glibc/libstdc++. Default features are kept for the pregenerated bindings; the
 # build-time download is never linked (load-dynamic) and the shipped runtime is
 # a separate glibc-2.17 manylinux build the installer places on the box.
-ort = { version = "2.0.0-rc.9", optional = true }
+ort = { version = "2.0.0-rc.13", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = { workspace = true }

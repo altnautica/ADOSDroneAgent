@@ -154,13 +154,13 @@ mod onnx_backend {
             // unaffected.
             #[cfg(all(feature = "coreml", target_os = "macos"))]
             {
-                use ort::execution_providers::CoreMLExecutionProvider;
+                use ort::ep::CoreML;
                 // `with_execution_providers` returns `ort::Error<SessionBuilder>`,
                 // which is not `Send` under the coreml feature (it carries a
                 // non-Send OperatorDomain), so `?`-into-anyhow would not compile.
                 // Format the error to a string and wrap it fresh instead.
                 builder = builder
-                    .with_execution_providers([CoreMLExecutionProvider::default().build()])
+                    .with_execution_providers([CoreML::default().build()])
                     .map_err(|e| anyhow!("register CoreML execution provider: {e}"))?;
             }
             let session = builder.commit_from_file(path)?;
