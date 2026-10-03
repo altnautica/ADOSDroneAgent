@@ -1,27 +1,35 @@
-"""FastAPI REST API server for ADOS Drone Agent."""
+"""The residual FastAPI app behind the native control front.
+
+The native front (``ados-control``) owns the LAN port, authenticates every
+request, and serves every route except a fixed set of permanent prefixes, which
+it forwards here over the internal Unix socket (see
+``ados.api.internal_socket``). This app mounts only those prefixes:
+
+* ``/api/v1/setup`` — the setup facade
+* ``/api/v1/display`` — the LCD/OLED display surface
+* ``/api/peripherals`` — the hardware scan
+* ``/api/v1/peripherals`` — the peripheral plugin registry
+* ``/api/vision`` — model delivery and the detection stream
+* ``/whep`` — the WebRTC playback exchange with the local mediamtx
+
+The front never forwards anything else, so a router mounted outside these
+prefixes would be unreachable. ``tests/api/test_residual_surface.py`` pins it.
+"""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from ados import __version__
 from ados.api.deps import set_agent_app
-from ados.api.onbox_origin import OnboxOriginMiddleware
 from ados.api.routes import (
-    dashboard,
     display,
-    ground_station,
-    network,
-    pairing,
     peripherals,
     peripherals_v1,
     setup,
-    video,
     vision_detections,
     vision_models,
     whep,
@@ -37,11 +45,8 @@ def create_app(agent: Any) -> FastAPI:
     app = FastAPI(
         title="ADOS Drone Agent",
         version=__version__,
-        # No interactive docs, no schema. This app is reached only through the
-        # native front's reverse proxy; nothing legitimate browses it. Serving
-        # them published a complete map of the agent's route surface —
-        # including every path the front's auth gate then tries to cover — to
-        # any peer that could reach the proxy.
+        # No interactive docs, no schema: nothing legitimate browses this app,
+        # and the front would never forward those paths anyway.
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -58,201 +63,22 @@ def create_app(agent: Any) -> FastAPI:
             allow_headers=["*"],
         )
 
-    # The native control front is the single authenticator for every route it
-    # serves or forwards, so this residual API carries no auth layers of its
-    # own — AND it refuses anything that did not arrive through the front.
-    #
-    # The comment that used to sit here asserted only the first half, while
-    # `crates/ados-control/src/serve.rs` carried a comment asserting the
-    # opposite contract. Two comments claiming opposite things is how a gap
-    # survives review: this app trusted a property nothing checked. The
-    # middleware below makes the claim true instead of stated.
-    app.add_middleware(OnboxOriginMiddleware)
+    # No auth layer and no rate limiter here: the app listens only on the
+    # internal Unix socket, and the front authenticates and charges each
+    # caller's budget before it forwards a request.
 
-    # No rate limiter here: this app is reached only over the front's Unix
-    # socket, where every caller has the same (absent) address, so a limiter
-    # here is one bucket shared by every client. The front charges each caller's
-    # own budget before it forwards a request.
-
-    # /healthz and /api/version are served by the native control front; the
-    # residual registers neither (the front owns the LAN port, answers the
-    # liveness probe, and reports the capability contract).
-
-    # Mount routes
-    app.include_router(video.router, prefix="/api")
-    app.include_router(pairing.router, prefix="/api")
     app.include_router(setup.router, prefix="/api")
-    app.include_router(dashboard.router, prefix="/api")
     app.include_router(display.router, prefix="/api")
     app.include_router(peripherals.router, prefix="/api")
-    # Peripheral Manager plugin registry. Lives alongside the legacy
-    # /api/peripherals hardware scan route.
     app.include_router(peripherals_v1.router, prefix="/api")
     app.include_router(vision_models.router, prefix="/api")
     # Live vision-detection WebSocket bridge. Forwards the engine's
     # detection-batch broadcast socket to the browser as JSON.
     app.include_router(vision_detections.router, prefix="/api")
-    app.include_router(ground_station.router, prefix="/api")
-    app.include_router(network.router, prefix="/api")
-
-    # The WebSocket-auth ticket mint (POST /api/_ws/ticket) is served by the
-    # native control surface; the residual WebSocket routes verify the
-    # self-contained HMAC ticket via ados.core.ws_ticket, so there is no Python
-    # mint to register here.
-
-    # WHEP reverse-proxy mounted at root (no /api prefix) so WebRTC
-    # clients reach the offer/answer exchange at the same host:port as
-    # the rest of the agent's REST + WS surface. The proxy forwards to
-    # the local MediaMTX WHEP endpoint and is profile-gated to the
-    # ground station.
+    # WHEP reverse-proxy mounted at the root (no /api prefix) so WebRTC clients
+    # reach the offer/answer exchange at the same host:port as the rest of the
+    # agent's surface. Forwards to the local mediamtx WHEP endpoint on every
+    # profile.
     app.include_router(whep.router)
-
-    from importlib.resources import files
-
-    # On-screen ground-station cockpit. A separate committed bundle from the
-    # laptop dashboard, served at /cockpit for the HDMI kiosk (a light SPA, not
-    # a Next.js build on the box). Mounted BEFORE the dashboard's ``/`` mount so
-    # ``/cockpit/*`` matches here first. The source lives at
-    # ADOSDroneAgent/cockpit/; scripts/build-cockpit.sh builds it and copies the
-    # output into the ``ados.cockpit.static`` package on the wheel. The cockpit
-    # has no client-side URL routing, so a plain html=True static mount is
-    # sufficient (``/cockpit`` -> ``/cockpit/`` -> index.html, assets under
-    # ``/cockpit/assets/``).
-    try:
-        import ados.cockpit as _cockpit_pkg
-    except ImportError as exc:
-        raise RuntimeError(
-            "Cockpit package 'ados.cockpit' is missing. "
-            "Reinstall the agent package or rebuild from source."
-        ) from exc
-    cockpit_static_dir = Path(str(files(_cockpit_pkg))) / "static"
-    if not cockpit_static_dir.exists():
-        raise RuntimeError(
-            f"Cockpit static directory missing at {cockpit_static_dir}. "
-            "Run scripts/build-cockpit.sh or reinstall the agent package."
-        )
-
-    from starlette.responses import RedirectResponse, Response
-    from starlette.types import Scope
-
-    async def _cockpit_index_redirect(request: Any) -> RedirectResponse:
-        # A bare /cockpit (no trailing slash) does not match the StaticFiles
-        # mount below (which serves /cockpit/), so redirect to it. This lets the
-        # kiosk and reach links target the clean /cockpit URL.
-        #
-        # The query string must survive the hop. The cockpit reads its access
-        # key off the URL, so dropping it silently broke every /cockpit?key=...
-        # reach link — the operator landed on a page that asked to be paired
-        # again, with nothing to explain why. The kiosk's own render-profile
-        # flag travels the same way.
-        query = getattr(getattr(request, "url", None), "query", "") or ""
-        target = f"/cockpit/?{query}" if query else "/cockpit/"
-        return RedirectResponse(url=target)
-
-    class _RevalidatedStaticFiles(StaticFiles):
-        """StaticFiles that lets a browser cache assets but never the entry.
-
-        The build emits content-hashed asset names, so an asset is safe to keep
-        forever — its name changes when its bytes do. `index.html` is the
-        opposite: its name never changes and it is the only thing that points at
-        the new asset names, so a browser holding a cached copy keeps loading the
-        OLD bundle no matter how many times the operator reloads.
-
-        Starlette sends validators but no `Cache-Control`, which leaves the entry
-        open to heuristic caching. That is how a panel ends up running code the
-        node stopped serving days ago, and it is invisible: the page renders, so
-        nothing looks stale.
-        """
-
-        async def get_response(self, path: str, scope: Scope) -> Response:
-            response = await super().get_response(path, scope)
-            if path.startswith("assets/"):
-                # The name carries a content hash, so these are safe forever.
-                response.headers["cache-control"] = (
-                    "public, max-age=31536000, immutable"
-                )
-            else:
-                # Everything else — the entry, the icon, and the directory form
-                # of the entry, which arrives here as "." rather than a filename
-                # — revalidates. A 304 keeps that cheap, and getting it wrong
-                # means an operator reloading a broken panel is served the same
-                # broken panel.
-                response.headers["cache-control"] = "no-cache"
-            return response
-
-    app.add_route("/cockpit", _cockpit_index_redirect, include_in_schema=False)
-    app.mount(
-        "/cockpit",
-        _RevalidatedStaticFiles(directory=str(cockpit_static_dir), html=True),
-        name="cockpit_static",
-    )
-
-    # Browser dashboard. Mounted AFTER every router above so API routes
-    # match first and `/` serves the SPA entry. The TypeScript source
-    # lives at ADOSDroneAgent/dashboard/; CI builds it and copies the
-    # output into the ``ados.dashboard.static`` package on the wheel.
-    # Resolved via ``importlib.resources`` so editable installs and
-    # wheel installs both find the same files.
-    #
-    # The dashboard is a client-routed SPA (react-router): direct URL
-    # loads of paths like /setup or /pairing must resolve to index.html
-    # so the router can take over. StaticFiles in html=True mode only
-    # serves index.html for directories, not arbitrary missing paths.
-    # SpaStaticFiles below adds a 404 → index.html fallback for any
-    # request that doesn't map to a real asset and isn't an /api/* path
-    # (those are handled earlier in the middleware chain).
-    try:
-        import ados.dashboard as _dashboard_pkg
-    except ImportError as exc:
-        raise RuntimeError(
-            "Dashboard package 'ados.dashboard' is missing. "
-            "Reinstall the agent package or rebuild from source."
-        ) from exc
-    static_dir = Path(str(files(_dashboard_pkg))) / "static"
-    if not static_dir.exists():
-        raise RuntimeError(
-            f"Dashboard static directory missing at {static_dir}. "
-            "Run scripts/build-dashboard.sh or reinstall the agent package."
-        )
-
-    from starlette.exceptions import HTTPException as StarletteHTTPException
-    from starlette.responses import FileResponse
-
-    class SpaStaticFiles(StaticFiles):
-        """StaticFiles + SPA fallback. Unknown paths return index.html
-        (200) so the React router can resolve client-side routes; real
-        asset 404s still bubble up because they live under /assets/* and
-        404 there is a packaging bug, not a missing route.
-        """
-
-        index_path: Path
-
-        def __init__(self, *, directory: str, **kwargs: Any) -> None:
-            super().__init__(directory=directory, html=True, **kwargs)
-            self.index_path = Path(directory) / "index.html"
-
-        async def get_response(self, path: str, scope: Scope) -> Response:
-            try:
-                return await super().get_response(path, scope)
-            except StarletteHTTPException as exc:
-                if exc.status_code != 404:
-                    raise
-                # Don't fall back for asset paths — those should 404 cleanly
-                # so the user sees missing files instead of a silent index.
-                if path.startswith("assets/") or "." in path.rsplit("/", 1)[-1]:
-                    raise
-                # Don't fall back for /api/*: an unknown API path means the
-                # caller hit a typo'd endpoint or a wrong HTTP method, and
-                # returning the SPA HTML there silently masks the real 404 /
-                # 405. Plugin and external integrations need crisp errors.
-                if path.startswith("api/") or path == "api":
-                    raise
-                return FileResponse(self.index_path)
-
-    app.mount(
-        "/",
-        SpaStaticFiles(directory=str(static_dir)),
-        name="dashboard_static",
-    )
 
     return app

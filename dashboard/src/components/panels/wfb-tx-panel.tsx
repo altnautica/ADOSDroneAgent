@@ -16,7 +16,7 @@ export function WfbTxPanel() {
 
   const state = (w?.state ?? "unknown").toLowerCase();
   const iface = w?.interface ?? "";
-  const channel = w?.channel ?? null;
+  const channel = w?.actual_channel ?? null;
   const freq = w?.frequency_mhz ?? null;
   const bw = w?.bandwidth_mhz ?? null;
   const txPower = w?.tx_power_dbm ?? null;

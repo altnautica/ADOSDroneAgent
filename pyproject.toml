@@ -105,7 +105,7 @@ ground-station = [
     # dependency graph stays stable across the ground-station extra.
     "Pillow>=10.0.0",
 ]
-# Vision inference extras. The RKNN and TensorRT inference sidecars
+# Vision inference extras. The RKNN and Hailo inference sidecars
 # import numpy lazily on the real infer path; pulled only when a
 # vision-capable build needs on-device detection. Kept out of the base
 # and drone installs so the default footprint stays small.
@@ -203,8 +203,6 @@ module = [
     "numpy.*",
     "PIL",
     "PIL.*",
-    "pycuda",
-    "pycuda.*",
 ]
 ignore_missing_imports = true
 

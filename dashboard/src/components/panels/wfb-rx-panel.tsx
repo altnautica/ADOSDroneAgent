@@ -16,7 +16,7 @@ export function WfbRxPanel() {
 
   const state = (w?.state ?? "unknown").toLowerCase();
   const iface = w?.interface ?? "";
-  const channel = w?.channel ?? null;
+  const channel = w?.actual_channel ?? null;
   const freq = w?.frequency_mhz ?? null;
   const rssi = w?.rssi_dbm ?? null;
   const snr = w?.snr_db ?? null;

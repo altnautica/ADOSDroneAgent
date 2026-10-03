@@ -88,8 +88,11 @@ async def test_the_process_exits_nonzero_when_the_http_server_dies(monkeypatch) 
     )
     monkeypatch.setitem(
         sys.modules,
-        "ados.api.dual_bind",
-        SimpleNamespace(make_listen_sockets=lambda *_a: []),
+        "ados.api.internal_socket",
+        SimpleNamespace(
+            bind_internal_socket=lambda *_a: None,
+            internal_socket_path=lambda: "/run/ados/api-internal.sock",
+        ),
     )
     monkeypatch.setattr(api_main.uvicorn, "Config", lambda *a, **k: None)
 

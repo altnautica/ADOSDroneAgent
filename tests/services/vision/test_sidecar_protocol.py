@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Altnautica — ADOS Drone Agent
 """Round-trip tests for the inference sidecar wire codec and server.
 
-Pure Python: no rknn-toolkit-lite2, tensorrt, pycuda, or numpy import is needed
+Pure Python: no rknn-toolkit-lite2, hailo_platform, or numpy import is needed
 to pass. Inference is mocked so the transport and the response shape are what
 get exercised. The response field names are asserted to match the Rust
 ``ados_protocol::framebus`` ``Detection`` / ``BoundingBox`` contract exactly.
@@ -163,6 +163,85 @@ def test_rknn_embed_unknown_model_is_an_error():
         )
     )
     assert resp["status"] == proto.STATUS_ERROR
+
+
+class _FakeRknnRuntime:
+    """Stands in for RKNNLite: counts releases across every instance."""
+
+    releases: list[_FakeRknnRuntime] = []
+    init_code = 0
+
+    def load_rknn(self, path: str) -> int:
+        return 0
+
+    def init_runtime(self) -> int:
+        return type(self).init_code
+
+    def release(self) -> None:
+        type(self).releases.append(self)
+
+
+def _fake_rknn_backend(monkeypatch, init_code: int = 0):
+    from ados.services.vision.rknn_sidecar import RknnBackend
+
+    class Runtime(_FakeRknnRuntime):
+        releases: list[_FakeRknnRuntime] = []
+
+    Runtime.init_code = init_code
+    monkeypatch.setattr(RknnBackend, "_import_runtime", staticmethod(lambda: Runtime))
+    return RknnBackend(), Runtime
+
+
+def test_rknn_reloading_an_id_releases_the_previous_runtime(tmp_path, monkeypatch):
+    model = tmp_path / "det.rknn"
+    model.write_bytes(b"rknn")
+    backend, runtime_cls = _fake_rknn_backend(monkeypatch)
+    req = LoadModelRequest("det", str(model), 640, 640, "rgb24", ["person"])
+
+    assert backend.load_model(req)["status"] == proto.STATUS_OK
+    first = backend._models["det"].runtime
+    assert runtime_cls.releases == []
+
+    assert backend.load_model(req)["status"] == proto.STATUS_OK
+    assert runtime_cls.releases == [first]
+    assert backend._models["det"].runtime is not first
+
+
+def test_rknn_failed_init_releases_the_new_runtime_and_keeps_the_old(tmp_path, monkeypatch):
+    model = tmp_path / "det.rknn"
+    model.write_bytes(b"rknn")
+    backend, runtime_cls = _fake_rknn_backend(monkeypatch)
+    req = LoadModelRequest("det", str(model), 640, 640, "rgb24", ["person"])
+    assert backend.load_model(req)["status"] == proto.STATUS_OK
+    resident = backend._models["det"].runtime
+
+    runtime_cls.init_code = -1
+    assert backend.load_model(req)["status"] == proto.STATUS_ERROR
+    assert len(runtime_cls.releases) == 1
+    assert runtime_cls.releases[0] is not resident
+    assert backend._models["det"].runtime is resident
+
+
+def test_rknn_unload_releases_the_runtime_and_forgets_the_id(tmp_path, monkeypatch):
+    model = tmp_path / "det.rknn"
+    model.write_bytes(b"rknn")
+    backend, runtime_cls = _fake_rknn_backend(monkeypatch)
+    backend.load_model(LoadModelRequest("det", str(model), 640, 640, "rgb24", []))
+    resident = backend._models["det"].runtime
+
+    resp = backend.unload(proto.UnloadRequest("det"))
+    assert resp["status"] == proto.STATUS_OK and resp["unloaded"] is True
+    assert runtime_cls.releases == [resident]
+    infer = backend.infer(InferRequest("det", b"", 640, 640, "rgb24"))
+    assert "not loaded" in infer["error"]
+    # Unloading again is not an error and releases nothing more.
+    assert backend.unload(proto.UnloadRequest("det"))["unloaded"] is False
+    assert len(runtime_cls.releases) == 1
+
+
+def test_unload_request_round_trips_through_parse():
+    parsed = proto.parse_request(proto.UnloadRequest("det").to_dict())
+    assert parsed == proto.UnloadRequest("det")
 
 
 def test_hailo_sidecar_degrades_cleanly_without_the_runtime(tmp_path):

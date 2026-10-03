@@ -8,7 +8,7 @@ import { useStatus } from "@/hooks/use-status";
 import { useWfb } from "@/hooks/use-wfb";
 import { fmtBitrate, fmtNum } from "@/lib/format";
 import { startHls, type HlsSession } from "@/lib/hls";
-import { fetchSnapshot } from "@/lib/snapshot";
+import { capturedLabel, fetchSnapshot } from "@/lib/snapshot";
 import { startWhep, type WhepSession } from "@/lib/whep";
 import { cn } from "@/lib/utils";
 
@@ -60,9 +60,10 @@ export function VideoPanel() {
   // can still fail to bootstrap if no IDR with SPS/PPS arrives.
   const [framesArrived, setFramesArrived] = useState(false);
   const [noFramesWarning, setNoFramesWarning] = useState(false);
-  // Object URL of the last still frame, fetched with the credential when every
-  // live transport failed.
+  // Object URL of a still frame grabbed from the live stream, fetched with the
+  // credential when every live transport failed, and when the agent took it.
   const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
+  const [snapshotAt, setSnapshotAt] = useState<Date | null>(null);
 
   const whepUrl = status.data?.video?.whep_url ?? "";
   const hlsUrl = status.data?.video?.hls_url ?? "";
@@ -94,7 +95,7 @@ export function VideoPanel() {
 
   const wfbPacketsReceived = wfb.data?.packets_received ?? 0;
   const wfbState = wfb.data?.state ?? "unknown";
-  const wfbChannel = wfb.data?.channel ?? null;
+  const wfbChannel = wfb.data?.actual_channel ?? null;
   const wfbStreaming = wfbPacketsReceived > 0;
   const waitingForWfb = isGround && !wfbStreaming;
   const wfbWaitDetail =
@@ -183,9 +184,9 @@ export function VideoPanel() {
         }
       }
 
-      // Every transport in the cascade failed. Fall through to
-      // the still-snapshot fallback so the operator at least sees
-      // the last good frame.
+      // Every transport in the cascade failed. Fall through to the
+      // still-snapshot fallback: the agent grabs one frame from the
+      // stream now, so the operator sees a current still and its time.
       if (cancelled) return;
       setError(errors.join("; "));
       setState("snapshot");
@@ -209,9 +210,10 @@ export function VideoPanel() {
     const ac = new AbortController();
     let url: string | null = null;
     fetchSnapshot(ac.signal).then(
-      (blob) => {
-        url = URL.createObjectURL(blob);
+      (shot) => {
+        url = URL.createObjectURL(shot.blob);
         setSnapshotUrl(url);
+        setSnapshotAt(shot.capturedAt);
       },
       () => {
         if (ac.signal.aborted) return;
@@ -223,6 +225,7 @@ export function VideoPanel() {
       ac.abort();
       if (url) URL.revokeObjectURL(url);
       setSnapshotUrl(null);
+      setSnapshotAt(null);
     };
   }, [state, retryToken]);
 
@@ -388,6 +391,11 @@ export function VideoPanel() {
                   <div className="flex items-center gap-1 text-[10px]">
                     <ImageIcon className="h-3 w-3" />
                     Snapshot only — live feed unavailable
+                    {snapshotAt && (
+                      <span className="font-mono opacity-80">
+                        · {capturedLabel(snapshotAt)}
+                      </span>
+                    )}
                   </div>
                   <Button
                     size="sm"

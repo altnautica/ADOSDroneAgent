@@ -174,11 +174,19 @@ def save_revocations(revoked: set[str]) -> None:
     _REVOCATIONS_CACHE_TS_NS = time.monotonic_ns()
 
 
-def revoke(device_id: str) -> None:
+def revoke(device_id: str) -> bool:
+    """Add ``device_id`` to the revocation set.
+
+    Returns True when this call revoked it, False when it was already revoked
+    (nothing written).
+    """
     rs = load_revocations()
+    if device_id in rs:
+        return False
     rs.add(device_id)
     save_revocations(rs)
     log.info("pairing_revoked", device_id=device_id)
+    return True
 
 
 def unrevoke(device_id: str) -> None:

@@ -5,7 +5,8 @@
 The Rust vision engine cannot link rknn-toolkit-lite2: it ships as a
 proprietary Python-only wheel built against the Rockchip NPU runtime. This
 module is the Python side that owns it. It listens on
-``/run/ados/vision-rknn.sock`` and answers ``load_model`` / ``infer`` requests
+``/run/ados/vision-rknn.sock`` and answers ``load_model`` / ``infer`` /
+``embed`` / ``unload`` requests
 in the :mod:`ados.services.vision.sidecar_protocol` shape, returning detections
 already in the Rust ``Detection`` field layout.
 
@@ -107,17 +108,27 @@ class RknnBackend:
 
         try:
             runtime = rknn_lite_cls()
+        except Exception as exc:  # pragma: no cover - depends on board wheel
+            log.error("rknn_load_failed", model=req.model_id, error=str(exc))
+            return proto.error_response(f"rknn load error: {exc}")
+        try:
             ret = runtime.load_rknn(str(path))
             if ret != 0:
+                proto.release_runtime(runtime, log, model=req.model_id)
                 return proto.error_response(f"load_rknn failed (code {ret}) for {req.path}")
             # Auto target picks the NPU core layout for the running SoC.
             ret = runtime.init_runtime()
             if ret != 0:
+                proto.release_runtime(runtime, log, model=req.model_id)
                 return proto.error_response(f"init_runtime failed (code {ret})")
         except Exception as exc:  # pragma: no cover - depends on board wheel
+            proto.release_runtime(runtime, log, model=req.model_id)
             log.error("rknn_load_failed", model=req.model_id, error=str(exc))
             return proto.error_response(f"rknn load error: {exc}")
 
+        # A reload of a resident id replaces it: the new runtime is up, so the
+        # old one is released rather than leaked on the NPU.
+        previous = self._models.get(req.model_id)
         self._models[req.model_id] = _LoadedModel(
             runtime=runtime,
             input_w=req.input_w,
@@ -126,8 +137,17 @@ class RknnBackend:
             class_labels=req.class_labels,
             head=req.head,
         )
+        if previous is not None:
+            proto.release_runtime(previous.runtime, log, model=req.model_id)
         log.info("rknn_model_loaded", model=req.model_id, path=req.path)
         return proto.ok_response()
+
+    def unload(self, req: proto.UnloadRequest) -> dict[str, Any]:
+        model = self._models.pop(req.model_id, None)
+        if model is not None:
+            proto.release_runtime(model.runtime, log, model=req.model_id)
+            log.info("rknn_model_unloaded", model=req.model_id)
+        return proto.ok_response(unloaded=model is not None)
 
     def infer(self, req: proto.InferRequest) -> dict[str, Any]:
         model = self._models.get(req.model_id)

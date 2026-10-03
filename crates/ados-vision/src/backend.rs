@@ -11,7 +11,7 @@
 //! - [`SidecarBackend`] — an IPC client that forwards load + infer requests
 //!   to the Python accelerator sidecar over `/run/ados/vision-rknn.sock` using
 //!   the same 4-byte big-endian length-prefixed msgpack framing as the other
-//!   agent sockets. The NPU vendor runtime (RKNN, TensorRT, or HailoRT on a
+//!   agent sockets. The NPU vendor runtime (RKNN, or HailoRT on a
 //!   Pi AI HAT) is reached only through that sidecar, never linked here — one
 //!   sidecar client, the accelerator differs by socket + name.
 
@@ -274,7 +274,7 @@ pub use onnx_backend::OnnxBackend;
 // --- rknn sidecar ---------------------------------------------------------
 
 /// An IPC client to the Python accelerator sidecar. The sidecar owns the vendor
-/// NPU runtime (RKNN on Rockchip, TensorRT on Jetson); this backend forwards
+/// NPU runtime (RKNN on Rockchip, HailoRT on a Pi AI HAT); this backend forwards
 /// `load_model` and `infer` requests to it and decodes the detection reply.
 ///
 /// The socket path is resolved once at construction. A load or infer call that
@@ -332,7 +332,7 @@ fn probe_sidecar(socket_path: &str) -> bool {
 
 impl SidecarBackend {
     /// `name` is the accelerator the sidecar owns behind this socket — "rknn"
-    /// (Rockchip/Jetson) or "hailo" (a Hailo-8 on a Pi AI HAT). The wire
+    /// (Rockchip) or "hailo" (a Hailo-8 on a Pi AI HAT). The wire
     /// protocol is identical; only the socket and the reported name differ,
     /// because the vendor runtime lives in the Python sidecar, not here.
     pub fn new(socket_path: impl Into<String>, name: impl Into<String>) -> Self {
@@ -742,8 +742,9 @@ const ONNX_COMPILED: bool = cfg!(feature = "onnx");
 /// Pick the backend for a board.
 ///
 /// "auto" resolves by SoC family: a Rockchip part with an NPU (`rk3576`,
-/// `rk3588`, `rk3566`, ...) or a Jetson prefers the accelerator sidecar; a
-/// non-NPU board (a Pi-class CPU-only SoC) prefers the ONNX CPU backend when the
+/// `rk3588`, `rk3566`, ...) prefers the accelerator sidecar; any other board
+/// (a Pi-class CPU-only SoC, or a Jetson, which has no accelerated backend)
+/// prefers the ONNX CPU backend when the
 /// binary was built with the `onnx` feature, and only falls back to the
 /// detection-less mock when no runtime is available. An explicit preference is
 /// honoured. The selection is logged at `warn` when it resolves to the mock so
@@ -753,7 +754,7 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
     let soc = board_soc.to_ascii_lowercase();
     let want = match prefs.preference {
         "auto" => {
-            if soc.starts_with("rk") || soc.contains("tegra") || soc.contains("jetson") {
+            if soc.starts_with("rk") {
                 "rknn"
             } else if ONNX_COMPILED {
                 // A non-NPU board with a real CPU runtime compiled in: use it
@@ -935,7 +936,9 @@ mod tests {
         };
         assert_eq!(select_backend("rk3576", &prefs).name(), "rknn");
         assert_eq!(select_backend("RK3588S2", &prefs).name(), "rknn");
-        assert_eq!(select_backend("tegra234", &prefs).name(), "rknn");
+        // A Jetson has no accelerated backend: auto must not route it to the
+        // RKNN sidecar, which cannot run there.
+        assert_ne!(select_backend("tegra234", &prefs).name(), "rknn");
         // A CPU-only SoC under auto prefers the real ONNX CPU backend when it is
         // compiled in, and only falls back to the detection-less mock when no
         // runtime is available. Either way it never silently picks mock when a

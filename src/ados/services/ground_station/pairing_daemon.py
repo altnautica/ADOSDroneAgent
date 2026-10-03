@@ -95,7 +95,7 @@ def _build_invite_bundle() -> InviteBundle | None:
         drone_channel=config.video.wfb.channel,
         wfb_rx_key=wfb_rx_key,
         receiver_mdns_host=hostname,
-        receiver_mdns_port=5800,
+        receiver_mdns_port=config.ground_station.wfb_receiver.listen_port,
         issued_at_ms=now_ms,
         expires_at_ms=now_ms + 120_000,
     )
@@ -147,8 +147,8 @@ async def _handle_op(op: str, args: dict[str, Any]) -> dict[str, Any]:
             device_id = str(args.get("device_id", ""))
             if not device_id:
                 return {"ok": False, "error": "device_id required"}
-            revoke_device(device_id)
-            return {"ok": True, "result": {"revoked": True}}
+            newly_revoked = revoke_device(device_id)
+            return {"ok": True, "result": {"revoked": newly_revoked}}
         if op == "join":
             # Relay side: ECDH over UDP, invite decrypt under the receiver's
             # window code, mesh identity persisted. Runs here, the single owner

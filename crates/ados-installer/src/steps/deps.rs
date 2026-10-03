@@ -78,7 +78,8 @@ pub fn optional_packages() -> &'static [&'static str] {
 /// required set: its apt package name varies by distro, so it installs
 /// best-effort by candidate name in the Deps step ([`install_browser`]).
 /// Required for the ground_station profile. `batctl` + `wpasupplicant` back the
-/// self-healing local mesh carrier on dual-RTL ground stations.
+/// self-healing local mesh carrier on dual-RTL ground stations. `wlr-randr`
+/// sets the HDMI output mode inside cage for `ground_station.kiosk.resolution`.
 pub fn ground_station_core_packages() -> &'static [&'static str] {
     &[
         "hostapd",
@@ -86,6 +87,7 @@ pub fn ground_station_core_packages() -> &'static [&'static str] {
         "bluetooth",
         "bluez",
         "cage",
+        "wlr-randr",
         "batctl",
         "wpasupplicant",
     ]
@@ -524,6 +526,7 @@ mod tests {
             "bluetooth",
             "bluez",
             "cage",
+            "wlr-randr",
             "batctl",
             "wpasupplicant",
         ] {

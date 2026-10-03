@@ -50,11 +50,11 @@ const RKNN_RAW_BASE: &str = "https://raw.githubusercontent.com/airockchip/rknn-t
 const LIBRKNNRT_DEST: &str = "/usr/lib/librknnrt.so";
 
 /// Board-model substrings that identify an NPU-class board the agent provisions
-/// the RKNN/TensorRT inference path for. Matched case-insensitively against the
+/// the RKNN inference path for. Matched case-insensitively against the
 /// device-tree model string. The Rockchip RK3588/RK3582/RK3576 family and the
-/// boards built on them carry the 6-TOPS NPU the sidecar targets; the Jetson
-/// family (Orin/Tegra) is included so the same step gate is the single place the
-/// NPU decision lives (its own runtime path layers on the TensorRT sidecar).
+/// boards built on them carry the 6-TOPS NPU the sidecar targets. Jetson boards
+/// are deliberately absent: there is no in-tree accelerated backend for them,
+/// so they are not provisioned as an NPU board.
 const NPU_BOARD_SUBSTRINGS: &[&str] = &[
     "rk3588",
     "rk3582",
@@ -64,9 +64,6 @@ const NPU_BOARD_SUBSTRINGS: &[&str] = &[
     "orange-pi-5",
     "orangepi5",
     "orange pi 5",
-    "jetson",
-    "orin",
-    "tegra",
 ];
 
 /// True when the board-model string names an NPU-class board. Case-insensitive
@@ -579,7 +576,6 @@ mod tests {
         assert!(is_npu_board("Radxa ROCK 5C Lite (RK3582)"));
         assert!(is_npu_board("rock-5c-lite"));
         assert!(is_npu_board("Orange Pi 5 Plus"));
-        assert!(is_npu_board("NVIDIA Jetson Orin Nano"));
         assert!(is_npu_board("rk3576"));
     }
 
@@ -589,6 +585,10 @@ mod tests {
         assert!(!is_npu_board("Raspberry Pi 4 Model B"));
         assert!(!is_npu_board("Raspberry Pi Compute Module 4"));
         assert!(!is_npu_board("rk3566"));
+        // No accelerated vision backend exists for Jetson, so it must not be
+        // provisioned (the RKNN runtime and sidecar cannot run there).
+        assert!(!is_npu_board("NVIDIA Jetson Orin Nano"));
+        assert!(!is_npu_board("tegra234"));
         assert!(!is_npu_board(""));
         assert!(!is_npu_board("unknown"));
     }

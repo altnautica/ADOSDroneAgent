@@ -47,7 +47,7 @@ PY_ROUTES_DIR = REPO_ROOT / "src" / "ados" / "api" / "routes"
 # work of this file. So these are deliberately loose.
 MIN_NATIVE_ROUTES = 75
 MIN_CASES = 30
-MIN_PYTHON_ROUTES = 45
+MIN_PYTHON_ROUTES = 25
 
 
 def _native_routes() -> set[tuple[str, str]]:
@@ -91,9 +91,9 @@ def _python_routes() -> set[tuple[str, str]]:
     conformance case against a route that does not exist there, while a case
     naming the real `/api/v1/setup/...` path reads as served by nobody.
 
-    Verified against the tree: `routes/setup/` is the only package declaring a
-    prefix on its `__init__.py` (`ground_station/` and `video/` declare none and
-    their sub-modules carry their own), and no `include_router` call anywhere
+    Verified against the tree: `routes/setup/` is the only package, and it
+    declares the prefix on its `__init__.py` while its sub-modules carry none,
+    and no `include_router` call anywhere
     adds a prefix of its own. So one level of package prefix is the whole rule.
     """
     routes: set[tuple[str, str]] = set()

@@ -32,7 +32,9 @@ NoNewPrivileges=no
 ProtectSystem=strict
 ReadWritePaths=/var/ados /run/ados /dev /etc/ados /sys/class/net
 
-MemoryMax=48M
+# The cgroup also holds the wpa_supplicant child that keeps the mesh join
+# authenticated (SAE / IBSS-RSN), so the ceiling covers both processes.
+MemoryMax=64M
 
 StandardOutput=journal
 StandardError=journal

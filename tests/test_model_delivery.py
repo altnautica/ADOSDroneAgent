@@ -53,10 +53,10 @@ def test_sha256_file(tmp_path) -> None:
 def test_select_ref_for_board(tmp_path) -> None:
     mgr = _mgr(tmp_path)
     refs = [_ref(runtime="rknn", board_match="rk3588"),
-            _ref(runtime="tensorrt", board_match="orin"),
+            _ref(runtime="tflite", board_match="orin"),
             _ref(runtime="onnx", board_match="generic")]
     assert mgr.select_ref_for_board(refs, "rk3588s2").runtime == "rknn"
-    assert mgr.select_ref_for_board(refs, "jetson-orin-nano").runtime == "tensorrt"
+    assert mgr.select_ref_for_board(refs, "jetson-orin-nano").runtime == "tflite"
     assert mgr.select_ref_for_board(refs, "rpi4b").runtime == "onnx"   # generic fallback
 
 

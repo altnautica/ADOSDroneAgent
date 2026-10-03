@@ -39,17 +39,12 @@ OUT = REPO / "docs" / "api-surface.md"
 # added there and not here is a surface the table would silently omit, which
 # ``check-api-surface.py`` then reports as an unresolvable client path.
 API_ROUTERS = [
-    "video",
-    "pairing",
     "setup",
-    "dashboard",
     "display",
     "peripherals",
     "peripherals_v1",
     "vision_models",
     "vision_detections",
-    "ground_station",
-    "network",
 ]
 ROOT_ROUTERS = ["whep"]
 
@@ -66,6 +61,14 @@ LOGD_PATHS = [
     "/v1/stats",
     "/v1/healthz",
     "/v1/openapi.json",
+]
+
+# Paths the front's fallback answers without a native route: the HLS playback
+# plane (relayed to mediamtx on loopback) and the operator UI bundles.
+FRONT_FALLBACK = [
+    ("GET", "/hls/{*path}", "relayed to mediamtx on loopback"),
+    ("GET", "/cockpit/{*path}", "on-box cockpit bundle"),
+    ("GET", "/", "dashboard bundle; its client routes and assets beneath it"),
 ]
 
 # Paths served with no credential at all, by design. Recorded beside the route
@@ -198,9 +201,9 @@ def shadow_native(
     rather than listing one route twice with two different owners.
 
     Keyed on ``(method, path)``, NOT on path alone. ``routing::is_native`` is
-    method-scoped, so one path can be split between the two producers:
-    ``GET /api/video/config`` is native while ``POST /api/video/config`` is
-    proxied to the residual. Shadowing by path erased that POST from the table
+    method-scoped, so one path can be split between the two producers: a
+    native ``GET`` beside a ``POST`` proxied to the residual. Shadowing by path
+    erased that POST from the table
     entirely — the table asserted the front owned a route it forwards, and the
     client calling the write had no row of its own to resolve against. The
     failure mode is invisible from the output: a table missing a row looks
@@ -248,16 +251,25 @@ def main() -> int:
         "",
         "## Residual — FastAPI behind the front's proxy, same :8080",
         "",
-        "The front forwards these to the residual Python over its internal Unix",
-        "socket, authenticating them on the proxied lane first. A path under a",
-        "`PERMANENT_PYTHON_PREFIXES` prefix answers `501` when the residual is",
-        "absent (a known feature, not on this profile) rather than `404`.",
+        "The front forwards only the `PERMANENT_PYTHON_PREFIXES` prefixes to the",
+        "residual Python over its internal Unix socket, authenticating them on the",
+        "proxied lane first. They answer `501` when the residual is absent (a",
+        "known feature, not on this profile) rather than `404`.",
         "",
     ]
     body += table([(m, p, note_for(m, p)) for m, p in residual])
     body += [
         "",
         f"{len(residual)} residual routes.",
+        "",
+        "## Front fallback — `ados-control` on :8080, outside the route table",
+        "",
+        "Answered by the front's fallback after the proxied-lane auth, never",
+        "forwarded to Python. Any other path under `/api` is a `404`.",
+        "",
+    ]
+    body += table(FRONT_FALLBACK)
+    body += [
         "",
         f"## Logging store — `ados-logd` on :{LOGD_PORT}",
         "",

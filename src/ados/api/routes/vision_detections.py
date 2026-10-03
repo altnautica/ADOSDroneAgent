@@ -58,10 +58,13 @@ from __future__ import annotations
 
 import asyncio
 import struct
+import time
 
+import msgpack
 import structlog
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
+from ados.api.ws_downlink import send_until_disconnect
 from ados.core import paths as _paths
 
 log = structlog.get_logger("api.vision_detections")
@@ -83,20 +86,15 @@ _MAX_FRAME_SIZE = 1024 * 1024
 # ticket-mint allow-set so the GCS can mint a ticket for it.
 _WS_SCOPE = "vision.detections"
 
+# A batch older than this is not served as current by the latest poll: the
+# engine replays its last batch forever, so a camera that stopped would
+# otherwise keep a click-to-track overlay frozen on boxes from the past.
+_LATEST_MAX_AGE_MS = 1000
+
 
 def _msgpack_loads(data: bytes) -> dict | None:
-    """Decode a msgpack detection-batch body, or ``None`` if msgpack is
-    unavailable or the frame is malformed.
-
-    ``msgpack`` is an optional dependency on some minimal installs, so the
-    import is local and a missing module degrades to "no detections"
-    rather than a hard import error at module load.
-    """
-    try:
-        import msgpack  # type: ignore[import-not-found]
-    except ImportError:
-        log.warning("vision_detections_msgpack_missing")
-        return None
+    """Decode a msgpack detection-batch body, or ``None`` if the frame is
+    malformed or not a mapping."""
     try:
         decoded = msgpack.unpackb(data, raw=False)
     except Exception as exc:  # malformed frame
@@ -114,8 +112,9 @@ async def ws_vision_detections(websocket: WebSocket) -> None:
     it to the WebSocket as JSON. The socket's last-state replay means a
     fresh subscriber gets the most recent batch right away.
 
-    The connection is downlink-only (engine → browser). The route does
-    not read from the WebSocket; a peer disconnect ends the stream.
+    The connection is downlink-only (engine → browser): client frames are
+    read only to notice a disconnect, which ends the stream and releases the
+    engine socket even when no batch is flowing.
     """
     from ados.api.middleware.ws_auth import authenticate_websocket as _ws_auth
 
@@ -158,17 +157,22 @@ async def ws_vision_detections(websocket: WebSocket) -> None:
                     return
 
         assert reader is not None
-        while True:
-            header = await reader.readexactly(_HEADER_SIZE)
-            (length,) = struct.unpack("!I", header)
-            if length == 0 or length > _MAX_FRAME_SIZE:
-                log.warning("vision_detections_bad_frame_len", length=length)
-                break
-            body = await reader.readexactly(length)
-            batch = _msgpack_loads(body)
-            if batch is None:
-                continue
-            await websocket.send_json(batch)
+        engine = reader
+
+        async def _forward() -> None:
+            while True:
+                header = await engine.readexactly(_HEADER_SIZE)
+                (length,) = struct.unpack("!I", header)
+                if length == 0 or length > _MAX_FRAME_SIZE:
+                    log.warning("vision_detections_bad_frame_len", length=length)
+                    return
+                body = await engine.readexactly(length)
+                batch = _msgpack_loads(body)
+                if batch is None:
+                    continue
+                await websocket.send_json(batch)
+
+        await send_until_disconnect(websocket, _forward())
     except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
         # Engine went away or the socket closed. End the stream.
         pass
@@ -191,7 +195,7 @@ async def ws_vision_detections(websocket: WebSocket) -> None:
 
 @router.get("/vision/detections/latest")
 async def get_latest_detection() -> dict:
-    """Return the single most-recent detection batch, or ``{"detections": []}``.
+    """Return the most-recent detection batch, or ``{"detections": []}``.
 
     A poll target for a caller that cannot hold a WebSocket open — chiefly
     the ground-station WFB relay proxy (see the module docstring's
@@ -203,6 +207,9 @@ async def get_latest_detection() -> dict:
     Auth is inherited from the agent's normal HTTP middleware (the same
     ``X-ADOS-Key`` gate every other REST route sits behind); this is a plain
     GET; it does not use the WebSocket ticket scheme.
+
+    A batch older than ``_LATEST_MAX_AGE_MS`` (by its ``ts_ms`` capture time)
+    is not current: the reply is the empty shape with ``stale: true``.
     """
     sock_path = str(VISION_DETECTIONS_SOCK)
     try:
@@ -231,4 +238,10 @@ async def get_latest_detection() -> dict:
     batch = _msgpack_loads(body)
     if batch is None:
         raise HTTPException(status_code=502, detail="malformed detection batch")
+    ts_ms = batch.get("ts_ms")
+    if (
+        not isinstance(ts_ms, int)
+        or int(time.time() * 1000) - ts_ms > _LATEST_MAX_AGE_MS
+    ):
+        return {"detections": [], "stale": True}
     return batch

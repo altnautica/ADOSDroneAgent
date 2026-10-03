@@ -1,11 +1,9 @@
 //! batman-adv local wireless mesh for the relay/receiver roles.
 //!
-//! Ports `mesh_manager.py`: brings up a second wireless interface in 802.11s or
-//! IBSS mode bound to `bat0`, drives batman-adv gateway mode from role + cloud
-//! uplink, polls neighbors/gateways, and publishes the `mesh-state.json`
-//! snapshot. Identity (`mesh-id` + `psk.key`) and the snapshot writer are in
-//! their own modules; the batctl parsers + gateway-mode logic are pure and
-//! unit-tested.
+//! Observes the mesh `mesh_manager.py` brings up: polls batman-adv
+//! neighbours/gateways and publishes the `mesh-state.json` snapshot. Identity
+//! (`mesh-id` + `psk.key`) and the snapshot writer are in their own modules;
+//! the batctl parsers are pure and unit-tested.
 //!
 //! On a relay with no delivered identity the manager surfaces
 //! [`identity::MeshIdentityError::Missing`] so the caller downgrades to `direct`

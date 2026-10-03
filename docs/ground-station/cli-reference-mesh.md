@@ -46,7 +46,7 @@ Common endpoints:
 | Symptom | Likely cause | Recovery |
 |---|---|---|
 | Mesh health shows `up: false` | Mesh dongle not detected or driver not loaded | Check `dmesg`, `iw list`, and confirm a second WiFi adapter is present. |
-| Carrier is `none` | 802.11s SAE not available and IBSS fallback failed | Install mesh-capable `wpa_supplicant` package or switch adapter. |
+| Mesh stays down, journal shows `mesh_secure_join_unverified` or `wpa_supplicant_exited` | The adapter or the installed `wpa_supplicant` cannot do SAE mesh (802.11s) or IBSS-RSN. The node refuses an unauthenticated join. | Install a mesh-capable `wpa_supplicant` build, or set `ground_station.mesh.carrier` to the mode the adapter supports, or switch adapter. |
 | Pending list stays empty after relay joins | Relay never reached receiver on UDP 5801 | Confirm both nodes are on the same mesh carrier and `bat0` is up on receiver. |
 | Approve returns a pubkey mismatch | Stale pending entry after relay rebooted | Ask relay to resend from OLED or setup webapp, then approve the new entry. |
 | Gateway selection looks wrong | Local uplink is preferred or no gateway is reachable | Use Hardware tab Mesh view to inspect gateways and uplink priority. |

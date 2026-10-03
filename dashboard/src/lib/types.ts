@@ -172,7 +172,7 @@ export interface SetupAccessUrl {
   codec?: string;
 }
 
-// /api/v1/dashboard/snapshot (api/routes/dashboard.py). Only these slices are
+// /api/v1/dashboard/snapshot (ados-control routes/dashboard.rs). Only these slices are
 // sent; everything the snapshot does not measure lives on its own route.
 export interface DashboardSnapshot {
   video: VideoSnapshot;
@@ -293,7 +293,10 @@ export interface WifiForgetResult {
 export interface WfbStatus {
   state: string;
   interface: string;
+  /** The configured home channel. */
   channel: number;
+  /** The live interface channel; null until the radio reports one. */
+  actual_channel: number | null;
   frequency_mhz: number | null;
   bandwidth_mhz: number | null;
   adapter: {

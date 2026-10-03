@@ -1,38 +1,41 @@
-//! The front's route map: which paths it serves natively vs reverse-proxies.
+//! The front's route map: which paths it serves natively, which it forwards to
+//! the residual Python, and what answers everything else.
 //!
-//! The LAN front owns the TCP port and answers a fixed set of routes itself,
-//! byte-identically to the FastAPI surface. Everything else falls through to the
-//! reverse proxy ([`crate::proxy`]) and is served by the residual Python over its
-//! internal Unix socket. As more routes move into the front, they leave the
-//! proxied set and join the native set here.
+//! The LAN front owns the TCP port and answers a fixed set of routes itself.
+//! A request that matches no native route goes to the router fallback, which
+//! dispatches on [`classify`]: the permanent-Python prefixes
+//! ([`PERMANENT_PYTHON_PREFIXES`]) are forwarded to the residual app over its
+//! internal Unix socket ([`crate::proxy`]); `/hls/*` is relayed to mediamtx on
+//! loopback; the operator UI bundles are served from disk; and any other `/api`
+//! path is a 404 (or a 405 when the path is native under another method).
 //!
 //! [`is_native`] is the single source of truth the auth edge ([`crate::serve`])
 //! consults. A native route takes the front's own auth lane — rate limiter,
 //! pairing gate, MCP-scope admission. A non-native route is authenticated on the
 //! proxied lane instead ([`crate::serve`]'s `proxied_auth_then_forward`: API key,
-//! HMAC, dashboard session, WS ticket) and then forwarded, so it never sees the
-//! native lane's rate limiter or scope admission. Classifying a served route
-//! non-native by accident therefore drops it off those three protections.
-//! The proxied-prefix table
-//! is documentation/diagnostics only — it records which prefixes are known
-//! features that simply have not migrated, so a graceful-degradation reply can
-//! distinguish "this feature is absent on this profile" (a permanent-Python
-//! feature, served `501` when the upstream is gone) from "no such route" (`404`).
+//! HMAC, dashboard session, WS ticket) before the fallback answers it, so it
+//! never sees the native lane's rate limiter or scope admission. Classifying a
+//! served route non-native by accident therefore drops it off those three
+//! protections.
 
 use std::sync::LazyLock;
 
 use http::Method;
 
-/// How the front handles a given route.
+/// How the front handles a given request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteMode {
     /// The front answers this route itself.
     Native,
-    /// The front forwards this route to the residual Python. `permanent` marks a
-    /// prefix the agent keeps in Python by design (vision/setup/peripherals/…), so a
-    /// graceful-degradation reply can return `501` (feature absent on this
-    /// profile) rather than `404` when the upstream is gone.
-    Proxied { permanent: bool },
+    /// A permanent-Python prefix, forwarded to the residual app.
+    Residual,
+    /// The HLS playback fallback, relayed to mediamtx on loopback.
+    Hls,
+    /// The browser dashboard and the on-box cockpit, served from their bundles.
+    OperatorUi,
+    /// An `/api` path no route serves. `other_method` is true when the path is a
+    /// native route under a different method (a 405 rather than a 404).
+    Unrouted { other_method: bool },
 }
 
 /// One native route: a `(method, path)` template the front serves itself. A
@@ -90,6 +93,7 @@ fn native_routes() -> Vec<NativeRoute> {
         get("/api/pairing/code"),
         post("/api/pairing/claim"),
         post("/api/pairing/unpair"),
+        post("/api/pairing/accept"),
         // Command.
         post("/api/command"),
         get("/api/commands"),
@@ -191,6 +195,8 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/wfb/pair/unpair"),
         // Consolidated status.
         get("/api/status/full"),
+        // The agent webapp's one-pager poll.
+        get("/api/v1/dashboard/snapshot"),
         // The swarm neighbour table (profile-agnostic: served on drones too).
         get("/api/swarm/neighbors"),
         // Per-pack battery health (the battery engine's read model).
@@ -204,12 +210,17 @@ fn native_routes() -> Vec<NativeRoute> {
         // Storage-wear verdict (write-counter delta, sticky throttle bits, store
         // footprint).
         get("/api/diag/storage"),
-        // Video reads.
+        // Video pipeline: composite status, the discovered-camera enumeration, a
+        // one-shot still, latency, and the config read + link-tuning write.
+        get("/api/video"),
+        get("/api/video/cameras"),
+        get("/api/video/snapshot"),
         get("/api/video/latency"),
         get("/api/video/config"),
+        post("/api/video/config"),
         // Camera roster read (declared + discovered + live, reconciled) + the
         // operator write (persists the leg list via the supervisor's video socket).
-        // Distinct path from the legacy /api/video/cameras switchable enumeration.
+        // Distinct path from the flat /api/video/cameras enumeration.
         get("/api/video/roster"),
         put("/api/video/roster"),
         // Drone attention-profile write: hero / thumbnail. Retargets the local
@@ -294,15 +305,16 @@ fn native_routes() -> Vec<NativeRoute> {
         post("/api/v1/system/restart-supervisor"),
         post("/api/mavlink/signing/enroll-fc"),
         post("/api/mavlink/signing/disable-on-fc"),
-        // Wi-Fi client reads (profile-agnostic): live station status + saved NM
-        // profiles. The scan stays proxied (its rescan is a side effect).
+        // Wi-Fi client reads (profile-agnostic): live station status, saved NM
+        // profiles, and a nearby-network scan on the station interface.
         get("/api/v1/network/client/status"),
         get("/api/v1/network/client/configured"),
+        get("/api/v1/network/client/scan"),
         // MAC-pin read: the per-adapter stable-MAC verdicts from the state file.
         get("/api/v1/network/mac/adapters"),
         // Wi-Fi client writes: join (PUT) + leave (DELETE) + forget (DELETE, a
-        // {name} template). Each forwards to the native uplink daemon's command
-        // socket; the autoconnect toggle stays proxied.
+        // {name} template) + the saved-profile autoconnect toggle (PUT). Each
+        // forwards to the native uplink daemon's command socket.
         put("/api/v1/network/client/join"),
         delete("/api/v1/network/client"),
         delete("/api/v1/network/client/configured/{name}"),
@@ -343,6 +355,8 @@ fn native_routes() -> Vec<NativeRoute> {
         delete("/api/v1/ground-station/wfb/pair"),
         // Release one drone's fleet slot, without touching the shared radio keys.
         delete("/api/v1/ground-station/wfb/pair/{device_id}"),
+        // Return the station to first-boot posture (on-box callers only).
+        post("/api/v1/ground-station/factory-reset"),
         // Ground-station video writes: recording start/stop (ados-video) + the
         // camera-source switch (a MAVLink COMMAND_LONG to the FC socket).
         post("/api/v1/ground-station/recording/start"),
@@ -397,17 +411,19 @@ pub fn native_route_table() -> Vec<(String, &'static str)> {
 
 /// The path prefixes the agent keeps in Python by design — the ecosystem-bound
 /// features (vision/AI, the setup facade, peripherals, the WebRTC playback
-/// endpoint, the LCD/OLED display surface). A request under one of these is a
-/// known feature that has not migrated, NOT an unknown path: when the residual
-/// upstream is gone (the zero-Python headless profile), the proxy answers `501`
-/// for these rather than `404`.
+/// endpoint, the LCD/OLED display surface). These are the ONLY paths the front
+/// forwards to the residual app; every other non-native path is answered here
+/// ([`classify`]). When the residual upstream is gone (the zero-Python headless
+/// profile), the proxy answers `501` for these: the feature is absent on this
+/// profile, not an unknown path.
 ///
 /// These are the paths as MOUNTED, not as the feature is named. The FastAPI app
 /// includes each router under `/api` and several routers carry their own `/v1`
-/// prefix, so the served path is `/api/v1/setup`, not `/api/setup`. Both the
-/// unversioned and `/v1` forms of peripherals are live and are listed
-/// separately. Touch-panel calibration needs no entry of its own: those
-/// routes hang off the display and setup routers (`/api/v1/display/calibrate/*`,
+/// prefix, so the served path is `/api/v1/setup`, not `/api/setup`. The
+/// unversioned `/api/peripherals` (the hardware scan) and `/api/v1/peripherals`
+/// (the peripheral plugin registry) are different surfaces and are listed
+/// separately. Touch-panel calibration needs no entry of its own: those routes
+/// hang off the display and setup routers (`/api/v1/display/calibrate/*`,
 /// `/api/v1/setup/display/calibrate/*`) and are already covered.
 pub const PERMANENT_PYTHON_PREFIXES: [&str; 6] = [
     "/api/vision",
@@ -418,17 +434,28 @@ pub const PERMANENT_PYTHON_PREFIXES: [&str; 6] = [
     "/api/v1/display",
 ];
 
-/// How the front handles a `(method, path)`: native, a known permanent-Python
-/// prefix, or an other proxied path. The auth edge and the proxy fallback consult
-/// [`is_native`]; this richer view is for diagnostics and the graceful-degradation
-/// status choice.
+/// How the front handles a `(method, path)`. The auth edge consults
+/// [`is_native`] alone; this is what the router fallback dispatches on for every
+/// request that is not a native route.
 pub fn classify(method: &Method, path: &str) -> RouteMode {
     if is_native(method, path) {
         return RouteMode::Native;
     }
-    RouteMode::Proxied {
-        permanent: is_permanent_python_path(path),
+    if is_permanent_python_path(path) {
+        return RouteMode::Residual;
     }
+    if path == "/hls" || path.starts_with("/hls/") {
+        return RouteMode::Hls;
+    }
+    if path == "/api" || path.starts_with("/api/") {
+        // A native path under the wrong method is a 405, any other API path a
+        // 404. Never the dashboard: a typo'd endpoint must fail crisply.
+        let other_method = NATIVE_TABLE
+            .iter()
+            .any(|r| segments_match(&r.segments, path));
+        return RouteMode::Unrouted { other_method };
+    }
+    RouteMode::OperatorUi
 }
 
 /// One pre-split template segment.
@@ -619,20 +646,66 @@ mod tests {
     }
 
     #[test]
-    fn classify_marks_permanent_prefixes() {
+    fn the_fallback_dispatch_sends_each_path_to_its_owner() {
         assert_eq!(
             classify(&Method::GET, "/api/vision/state"),
-            RouteMode::Proxied { permanent: true }
+            RouteMode::Residual
         );
+        assert_eq!(classify(&Method::POST, "/whep"), RouteMode::Residual);
         assert_eq!(
-            classify(&Method::GET, "/whep"),
-            RouteMode::Proxied { permanent: true }
+            classify(&Method::GET, "/hls/main/index.m3u8"),
+            RouteMode::Hls
         );
-        // An ordinary proxied path (not under a permanent prefix) is not permanent.
+        assert_eq!(classify(&Method::GET, "/"), RouteMode::OperatorUi);
+        assert_eq!(classify(&Method::GET, "/cockpit/"), RouteMode::OperatorUi);
+        assert_eq!(
+            classify(&Method::GET, "/setup/network"),
+            RouteMode::OperatorUi
+        );
+        // An API path nothing serves is a 404, never the dashboard.
         assert_eq!(
             classify(&Method::GET, "/api/flights"),
-            RouteMode::Proxied { permanent: false }
+            RouteMode::Unrouted {
+                other_method: false
+            }
         );
+        // A native path under the wrong method is a 405.
+        assert_eq!(
+            classify(&Method::POST, "/api/status"),
+            RouteMode::Unrouted { other_method: true }
+        );
+    }
+
+    /// The residual app is reached only for the permanent prefixes. Every route
+    /// it used to serve outside them is now answered by the front: a request for
+    /// one of these paths never reaches Python, whatever the residual mounts.
+    #[test]
+    fn nothing_outside_the_permanent_prefixes_reaches_python() {
+        for (method, path) in [
+            (Method::GET, "/api/video"),
+            (Method::GET, "/api/video/cameras"),
+            (Method::POST, "/api/video/config"),
+            (Method::GET, "/api/video/snapshot"),
+            (Method::GET, "/api/video/snapshot.jpg"),
+            (Method::POST, "/api/video/camera/switch"),
+            (Method::POST, "/api/pairing/accept"),
+            (Method::GET, "/api/v1/dashboard/snapshot"),
+            (Method::GET, "/api/v1/network/client/scan"),
+            (Method::POST, "/api/v1/ground-station/factory-reset"),
+            (Method::GET, "/hls/main/index.m3u8"),
+            (Method::GET, "/"),
+            (Method::GET, "/index.html"),
+            (Method::GET, "/cockpit"),
+            (Method::GET, "/cockpit/assets/app.js"),
+            (Method::GET, "/docs"),
+            (Method::GET, "/openapi.json"),
+        ] {
+            assert_ne!(
+                classify(&method, path),
+                RouteMode::Residual,
+                "{method} {path} must not be forwarded to the residual app"
+            );
+        }
     }
 
     #[test]
@@ -794,13 +867,12 @@ mod tests {
             assert!(
                 is_permanent_python_path(path),
                 "{path} is served by residual Python but is not covered by \
-                 PERMANENT_PYTHON_PREFIXES, so a headless node answers 404 \
-                 instead of 501"
+                 PERMANENT_PYTHON_PREFIXES, so the front never forwards it"
             );
             assert_eq!(
                 classify(&Method::GET, path),
-                RouteMode::Proxied { permanent: true },
-                "{path} should classify as permanently proxied"
+                RouteMode::Residual,
+                "{path} should be forwarded to the residual app"
             );
         }
     }
@@ -816,7 +888,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            191,
+            199,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -840,6 +912,9 @@ mod tests {
             "/api/video/latency",
             "/api/video/config",
             "/api/video/roster",
+            "/api/video",
+            "/api/video/cameras",
+            "/api/video/snapshot",
             "/api/v1/ground-station/status",
             "/api/v1/ground-station/wfb",
             "/api/v1/ground-station/wfb/relay/status",
@@ -864,6 +939,7 @@ mod tests {
             "/api/params/{name}",
             "/api/v1/network/client/status",
             "/api/v1/network/client/configured",
+            "/api/v1/network/client/scan",
             "/api/v1/network/mac/adapters",
             "/api/plugins/{plugin_id}/state",
             "/api/cloud/link",
@@ -879,6 +955,7 @@ mod tests {
         assert!(has(Method::POST, "/api/can/passthrough"));
         assert!(has(Method::POST, "/api/services/{name}/restart"));
         assert!(has(Method::POST, "/api/v1/system/restart-supervisor"));
+        assert!(has(Method::POST, "/api/v1/ground-station/factory-reset"));
         assert!(has(Method::POST, "/api/mavlink/signing/enroll-fc"));
         assert!(has(Method::POST, "/api/mavlink/signing/disable-on-fc"));
         // The Wi-Fi client writes: a PUT join + two DELETEs (leave + the {name}
@@ -896,6 +973,8 @@ mod tests {
         assert!(has(Method::PUT, "/api/video/roster"));
         // The drone attention-profile write (hero / thumbnail).
         assert!(has(Method::POST, "/api/video/profile"));
+        // The video link-tuning write.
+        assert!(has(Method::POST, "/api/video/config"));
         assert!(has(Method::POST, "/api/video/record/start"));
         assert!(has(Method::POST, "/api/video/record/stop"));
         // The WFB radio writes + the GS network priority + GS wfb config writes.
@@ -1018,5 +1097,8 @@ mod tests {
         assert!(has(Method::GET, "/api/v1/ground-station/pic/events"));
         assert!(has(Method::GET, "/api/v1/ground-station/ws/mesh"));
         assert!(has(Method::GET, "/api/v1/ground-station/ws/buttons"));
+        // The external-code pairing accept and the webapp snapshot poll.
+        assert!(has(Method::POST, "/api/pairing/accept"));
+        assert!(has(Method::GET, "/api/v1/dashboard/snapshot"));
     }
 }

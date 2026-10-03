@@ -1,19 +1,21 @@
-"""Tests for the authoritative video-readiness probe.
+"""Tests for the setup surface's primary-stream readiness probe.
 
-The dashboard's video-state verdict must be decided by the :9997 paths-list
-(`ready && source`), not by a flaky 1s WHEP GET whose only positive signal is a
-405 ("bound", not "streaming"). The WHEP fallback fires only when :9997 is
-unreachable / auth-blocked, and a 405 there is degraded, never ready.
+The advertised ``/whep`` and HLS URLs address mediamtx's ``main`` path, so the
+verdict is decided by that path alone (``ready`` AND a publisher ``source``),
+never by whichever path the paths-list happens to name first.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 
 import httpx
 import pytest
 
-from ados.api.routes.video import _common
+# The package re-exports a function named `_access_urls` that shadows the
+# submodule attribute, so import the module itself.
+_access_urls = importlib.import_module("ados.setup.service._access_urls")
 
 
 class _FakeResponse:
@@ -29,10 +31,10 @@ class _FakeResponse:
 
 class _FakeClient:
     """Stand-in for ``httpx.AsyncClient`` that answers the paths-list URL with
-    a canned response and raises on anything else."""
+    a canned response, or raises when none is given."""
 
-    def __init__(self, responses: dict[str, _FakeResponse]) -> None:
-        self._responses = responses
+    def __init__(self, response: _FakeResponse | None) -> None:
+        self._response = response
 
     async def __aenter__(self) -> _FakeClient:
         return self
@@ -41,100 +43,50 @@ class _FakeClient:
         return None
 
     async def get(self, url: str) -> _FakeResponse:
-        for needle, resp in self._responses.items():
-            if needle in url:
-                return resp
-        raise httpx.ConnectError(f"no canned response for {url}")
+        if self._response is None:
+            raise httpx.ConnectError(f"no canned response for {url}")
+        return self._response
 
 
 @pytest.fixture
-def patch_client(monkeypatch):
-    def _install(responses: dict[str, _FakeResponse]) -> None:
-        monkeypatch.setattr(
-            _common.httpx, "AsyncClient", lambda *a, **k: _FakeClient(responses)
-        )
+def paths_list(monkeypatch):
+    def _install(response: _FakeResponse | None) -> None:
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _FakeClient(response))
 
     return _install
 
 
-def test_ready_when_paths_list_reports_a_ready_source(patch_client) -> None:
-    patch_client(
-        {
-            "/v3/paths/list": _FakeResponse(
-                200,
-                {
-                    "items": [
-                        {
-                            "name": "main",
-                            "ready": True,
-                            "source": {"type": "rtmpConn"},
-                            "tracks": ["H264"],
-                            "bytesReceived": 123456,
-                        }
-                    ]
-                },
-            )
-        }
+def _ready() -> bool:
+    return asyncio.run(_access_urls._main_stream_ready())
+
+
+def test_ready_when_main_has_a_publisher(paths_list) -> None:
+    paths_list(
+        _FakeResponse(
+            200,
+            {"items": [{"name": "main", "ready": True, "source": {"type": "rtspSession"}}]},
+        )
     )
-    ready, track = asyncio.run(_common.mediamtx_ready())
-    assert ready is True
-    assert track is not None and track.get("codec") == "H264"
+    assert _ready() is True
 
 
-def test_not_ready_when_paths_list_has_a_ready_path_with_no_source(patch_client) -> None:
-    # A bound path that is "ready" but has no publisher source is NOT delivering.
-    patch_client(
-        {
-            "/v3/paths/list": _FakeResponse(
-                200,
-                {"items": [{"name": "main", "ready": True, "source": None}]},
-            )
-        }
+def test_a_ready_secondary_path_does_not_stand_in_for_an_absent_main(paths_list) -> None:
+    paths_list(
+        _FakeResponse(
+            200,
+            {"items": [{"name": "eo_wide", "ready": True, "source": {"type": "rtspSource"}}]},
+        )
     )
-    ready, _track = asyncio.run(_common.mediamtx_ready())
-    assert ready is False
+    assert _ready() is False
 
 
-def test_not_ready_when_no_paths_yet(patch_client) -> None:
-    patch_client({"/v3/paths/list": _FakeResponse(200, {"items": []})})
-    ready, track = asyncio.run(_common.mediamtx_ready())
-    assert ready is False
-    assert track is None
+def test_main_flagged_ready_without_a_publisher_is_not_ready(paths_list) -> None:
+    paths_list(_FakeResponse(200, {"items": [{"name": "main", "ready": True, "source": None}]}))
+    assert _ready() is False
 
 
-def test_not_ready_when_paths_list_unreachable(patch_client) -> None:
-    # :9997 raises (auth-blocked / down). The WHEP fallback proves only that the
-    # endpoint is bound, never that frames flow → degraded, not ready.
-    patch_client({})  # every URL raises ConnectError
-    ready, track = asyncio.run(_common.mediamtx_ready())
-    assert ready is False
-    assert track is None
-
-
-def test_whep_probe_405_is_bound_not_ready() -> None:
-    # A 405 means the WHEP endpoint exists (bound), NOT that a publisher streams.
-    # The async probe must report running:true but ready:false.
-    class _R:
-        status_code = 405
-
-    class _C:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *exc):
-            return None
-
-        async def get(self, _url):
-            return _R()
-
-    import ados.api.routes.video._common as common_mod
-
-    orig = common_mod.httpx.AsyncClient
-    common_mod.httpx.AsyncClient = lambda *a, **k: _C()
-    try:
-        result = asyncio.run(common_mod._probe_mediamtx_via_whep())
-    finally:
-        common_mod.httpx.AsyncClient = orig
-    assert result is not None
-    assert result["running"] is True
-    assert result["ready"] is False, "a 405 is bound, not streaming"
+def test_an_unreachable_or_credentialed_api_is_not_ready(paths_list) -> None:
+    paths_list(None)
+    assert _ready() is False
+    paths_list(_FakeResponse(401, {"error": "authentication error"}))
+    assert _ready() is False

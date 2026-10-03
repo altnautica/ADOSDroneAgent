@@ -42,7 +42,7 @@ SyslogIdentifier=ados-gpio
 
 [Install]
 # Not enabled by default at the .wants level beyond the supervisor; the
-# installer enable-links it cross-profile (like ados-peripherals) and the
+# installer enable-links it cross-profile (like ados-discovery) and the
 # supervisor pulls it up via WantedBy. The ExecStart guard keeps it inert until
 # the operator drops the gpio-rust-enabled marker.
 WantedBy=ados-supervisor.service

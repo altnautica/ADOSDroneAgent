@@ -279,39 +279,6 @@ class WifiClientManager:
 
     # -------------------- public API --------------------
 
-    async def scan(self, timeout_s: float = 10.0) -> list[dict]:
-        """Scan for nearby networks. Returns list sorted by signal desc."""
-        rc, out, err = await _run(
-            [
-                "nmcli", "-t",
-                "-f", "SSID,BSSID,SIGNAL,SECURITY,IN-USE",
-                "device", "wifi", "list", "--rescan", "yes",
-            ],
-            timeout=timeout_s,
-        )
-        if rc != 0:
-            log.warning("wifi_scan_failed", rc=rc, err=err.strip())
-            return []
-        rows = _parse_nmcli_terse(out, 5)
-        results: list[dict] = []
-        for row in rows:
-            ssid, bssid, sig, security, in_use = row
-            if not ssid:
-                continue
-            try:
-                sig_int = int(sig)
-            except ValueError:
-                sig_int = 0
-            results.append({
-                "ssid": ssid,
-                "bssid": bssid,
-                "signal": sig_int,
-                "security": security or "--",
-                "in_use": in_use.strip() == "*",
-            })
-        results.sort(key=lambda r: r["signal"], reverse=True)
-        return results
-
     async def _disable_powersave(self, connection: str) -> None:
         """Force WiFi power-save off on the active station link.
 

@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Altnautica — ADOS Drone Agent
 """HailoRT inference sidecar for compiled ``.hef`` models (Raspberry Pi + AI HAT).
 
-Mirror of the RKNN / TensorRT sidecars for a Hailo-8 (or Hailo-8L) accelerator on
+Mirror of the RKNN sidecar for a Hailo-8 (or Hailo-8L) accelerator on
 a Raspberry Pi AI HAT+. The ``hailo_platform`` (HailoRT) runtime is x86/ARM board
 software tied to the Hailo PCIe device, so the Rust vision engine reaches this
 Python process over ``/run/ados/vision-hailo.sock`` and speaks the same
@@ -13,8 +13,8 @@ Two deliberate design choices:
 
 * **Decode here, in Python, not in Hailo's C++ TAPPAS.** The compiled ``.hef``
   emits raw output tensors; this sidecar decodes them with the SAME
-  :func:`decode_yolo_detections` the other sidecars use, so a model exported to
-  ``.rknn``, ``.engine`` and ``.hef`` produces identical boxes and the decode is
+  :func:`decode_yolo_detections` the RKNN sidecar uses, so a model exported to
+  ``.rknn`` and ``.hef`` produces identical boxes and the decode is
   one tested implementation rather than a vendor C++ post-process. HailoRT's own
   post-process (HailoRT-Post-Process / TAPPAS) is C++-only and is not used.
 * **``hailo_platform`` is imported lazily** inside :class:`HailoBackend`. On a
@@ -114,8 +114,14 @@ class HailoBackend:
             infer_model = self._vdevice.create_infer_model(str(path))
         except Exception as exc:  # pragma: no cover - depends on the Hailo device
             log.error("hailo_load_failed", model=req.model_id, error=str(exc))
+            # A device opened for this load alone is released, not left
+            # holding the accelerator with no model on it.
+            self._release_idle_vdevice()
             return proto.error_response(f"hailo load error: {exc}")
 
+        # A reload of a resident id replaces it: the new model is configured, so
+        # the old one is released rather than leaked on the device.
+        previous = self._models.get(req.model_id)
         self._models[req.model_id] = _LoadedHef(
             infer_model=infer_model,
             input_w=req.input_w,
@@ -124,8 +130,24 @@ class HailoBackend:
             class_labels=req.class_labels,
             head=req.head,
         )
+        if previous is not None:
+            proto.release_runtime(previous.infer_model, log, model=req.model_id)
         log.info("hailo_model_loaded", model=req.model_id, path=req.path)
         return proto.ok_response()
+
+    def unload(self, req: proto.UnloadRequest) -> dict[str, Any]:
+        loaded = self._models.pop(req.model_id, None)
+        if loaded is not None:
+            proto.release_runtime(loaded.infer_model, log, model=req.model_id)
+            log.info("hailo_model_unloaded", model=req.model_id)
+        self._release_idle_vdevice()
+        return proto.ok_response(unloaded=loaded is not None)
+
+    def _release_idle_vdevice(self) -> None:
+        """Release the virtual device once no model is resident on it."""
+        if self._vdevice is not None and not self._models:
+            proto.release_runtime(self._vdevice, log)
+            self._vdevice = None
 
     def infer(self, req: proto.InferRequest) -> dict[str, Any]:
         loaded = self._models.get(req.model_id)
@@ -173,7 +195,7 @@ class HailoBackend:
         """Decode this model's head to detections in source-frame pixels.
 
         Delegates to the shared :func:`decode_yolo_detections` — the same decoder
-        the RKNN and TensorRT sidecars use — so one model produces identical boxes
+        the RKNN sidecar uses — so one model produces identical boxes
         across accelerators and there is no vendor C++ post-process (no TAPPAS).
         """
         return decode_yolo_detections(

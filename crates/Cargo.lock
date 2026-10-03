@@ -109,6 +109,7 @@ dependencies = [
  "ados-offload",
  "ados-plugin-host",
  "ados-protocol",
+ "ados-radio",
  "ados-supervisor",
  "ados-swarmbus",
  "ados-video",
@@ -127,8 +128,10 @@ dependencies = [
  "mdns-sd",
  "nix 0.29.0",
  "parking_lot",
+ "reqwest",
  "rmp-serde",
  "rmpv",
+ "rustls",
  "sd-notify",
  "serde",
  "serde_json",
@@ -145,6 +148,7 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
+ "webpki-roots 0.26.11",
  "zip",
 ]
 

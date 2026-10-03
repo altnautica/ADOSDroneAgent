@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
 import { fmtBitrate, fmtNum } from "@/lib/format";
-import { fetchSnapshot } from "@/lib/snapshot";
+import { capturedLabel, fetchSnapshot } from "@/lib/snapshot";
 
 interface VideoCamerasResponse {
   cameras: Array<{
@@ -55,6 +55,8 @@ interface VideoLatencyResponse {
 export function VideoRoute() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // When the agent grabbed the last downloaded still.
+  const [snapshotAt, setSnapshotAt] = useState<Date | null>(null);
 
   const cameras = useResource<VideoCamerasResponse>(
     "video-cameras",
@@ -76,11 +78,12 @@ export function VideoRoute() {
     setBusy(true);
     setError(null);
     try {
-      const blob = await fetchSnapshot();
-      const url = URL.createObjectURL(blob);
+      const shot = await fetchSnapshot();
+      setSnapshotAt(shot.capturedAt);
+      const url = URL.createObjectURL(shot.blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `ados-snapshot-${Date.now()}.jpg`;
+      a.download = `ados-snapshot-${(shot.capturedAt ?? new Date()).getTime()}.jpg`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
@@ -94,8 +97,8 @@ export function VideoRoute() {
     setBusy(true);
     setError(null);
     try {
-      // Re-probe cameras via the config fetch path; the agent rescans
-      // /dev/video* on every poll already, so we just refetch.
+      // Refetch the camera list and config. The list is the agent's latest
+      // HAL enumeration, refreshed whenever the video pipeline (re)starts.
       await Promise.all([cameras.refetch(), config.refetch()]);
     } catch (e) {
       setError(e instanceof Error ? e.message : "rescan failed");
@@ -122,6 +125,11 @@ export function VideoRoute() {
       blurb="Live stream, encoder configuration, camera assignment, and latency probe."
       rightAction={
         <div className="flex items-center gap-2">
+          {snapshotAt && (
+            <span className="text-xs font-mono text-muted-foreground">
+              {capturedLabel(snapshotAt)}
+            </span>
+          )}
           <Button variant="outline" size="sm" onClick={rescan} disabled={busy}>
             <RefreshCw className="h-3.5 w-3.5" /> Rescan
           </Button>

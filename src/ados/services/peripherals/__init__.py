@@ -9,10 +9,10 @@ how to match a device on a transport (USB, serial, network, BLE),
 what capabilities it exposes, which actions can be invoked on it, and
 an optional JSON Schema for its runtime config.
 
-The current release ships the schema, loader, registry, systemd
-service, and REST surface under ``/api/v1/peripherals/*``. Live
-transport detection and plugin-driven action handling land once real
-plugins exist.
+The current release ships the schema, loader, registry and the REST
+surface under ``/api/v1/peripherals/*``; the API process owns the
+registry in-process. Config writes, and actions with no dispatcher on
+this agent, are refused rather than reported as applied.
 
 Exports:
     PeripheralManifest: Pydantic model for a manifest.

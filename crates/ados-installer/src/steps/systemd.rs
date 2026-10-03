@@ -35,7 +35,6 @@ const UDEV_RULES_DIR: &str = "/etc/udev/rules.d";
 /// resolves to `/bin/true` — so enabling them on a board without the hardware
 /// (or without the native binary) is a clean no-op (`enable_universal_units`).
 const UNIVERSAL_UNITS: &[&str] = &[
-    "ados-peripherals.service",
     "ados-fbcon-detach.service",
     "ados-display-probe.service",
     // The camera counterpart of the display probe: a oneshot gated on
@@ -50,7 +49,7 @@ const UNIVERSAL_UNITS: &[&str] = &[
     // code in the TXT) so Mission Control can find the agent on the LAN and
     // pair by 6-char code, not just by hostname. Enabled here so systemd's
     // `WantedBy=ados-supervisor.service` auto-starts it with the supervisor
-    // (the ados-peripherals pattern); the supervisor only monitors it.
+    // (the same pattern as the plugin host); the supervisor only monitors it.
     "ados-discovery.service",
     // The native plugin host owns the per-plugin sockets. Every profile fetches
     // the binary, so it is enabled cross-profile here and the supervisor pulls
@@ -140,6 +139,11 @@ const RETIRED_UNITS: &[&str] = &[
     // deleted; ados-net composes the gadget in-process, so the unit selects
     // nothing and is pruned rather than stopped and disabled on every install.
     "ados-usb-gadget.service",
+    // The resident peripheral-manager process. The REST API reads the
+    // peripheral registry in-process, so this unit's own registry copy (and
+    // its SIGHUP reload) served nobody. Its module was deleted, so left on disk
+    // its ExecStart points at nothing.
+    "ados-peripherals.service",
 ];
 
 /// Udev rules retired with the units they triggered. Same reasoning as
@@ -1191,7 +1195,7 @@ const FRONT_CONTROL_DROPIN_DIR: &str = "/etc/systemd/system/ados-control.service
 const FRONT_API_DROPIN_DIR: &str = "/etc/systemd/system/ados-api.service.d";
 const FRONT_DROPIN_NAME: &str = "front.conf";
 /// The residual API's internal socket path the front reverse-proxies to. Must
-/// match the Rust proxy default + the Python `make_listen_sockets` reader.
+/// match the Rust proxy default + the Python `internal_socket_path` reader.
 const FRONT_API_INTERNAL_SOCKET: &str = "/run/ados/api-internal.sock";
 
 /// The control drop-in body: bind the native surface to the LAN port the GCS
@@ -1893,7 +1897,7 @@ mod tests {
         assert!(drone.contains(&"ados-batman.service"));
         // It must NOT tear down the supervisor or a cross-profile unit.
         assert!(!drone.contains(&"ados-supervisor.service"));
-        assert!(!drone.contains(&"ados-peripherals.service"));
+        assert!(!drone.contains(&"ados-discovery.service"));
     }
 
     #[test]
@@ -1961,7 +1965,6 @@ mod tests {
 
     #[test]
     fn universal_units_are_profile_agnostic() {
-        assert!(UNIVERSAL_UNITS.contains(&"ados-peripherals.service"));
         assert!(UNIVERSAL_UNITS.contains(&"ados-display-probe.service"));
         // The mDNS advertiser is cross-profile so every agent is discoverable
         // for local pair-by-code, not just the ground station's static file.
@@ -2320,7 +2323,7 @@ mod tests {
             problems.extend(restart_policy_problems(name, &body));
         }
         assert!(
-            checked >= 39,
+            checked >= 38,
             "parsed only {checked} ados-*.service files under {}",
             dir.display()
         );
@@ -2416,7 +2419,7 @@ mod tests {
             checked += 1;
             problems.extend(unguaranteed_paths(name, &body));
         }
-        assert!(checked >= 39, "parsed only {checked} units");
+        assert!(checked >= 38, "parsed only {checked} units");
         assert!(
             problems.is_empty(),
             "these units fail namespace setup when the path is absent:\n{}",

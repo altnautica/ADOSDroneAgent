@@ -315,26 +315,3 @@ def test_invalid_camera_id_is_rejected(ground_client: TestClient) -> None:
         headers={"content-type": "application/sdp"},
     )
     assert resp.status_code == 400
-
-
-def test_hls_proxy_preserves_leg_subpath(
-    ground_client: TestClient,
-    install_mock_upstream: InstallUpstream,
-) -> None:
-    """``/hls/<leg>/<file>`` forwards to mediamtx's :8888 preserving the subpath so
-    the playlist's relative segment URIs resolve back through the proxy."""
-    playlist = b"#EXTM3U\n#EXT-X-VERSION:3\n"
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == "http://127.0.0.1:8888/main/index.m3u8"
-        return httpx.Response(
-            200,
-            headers={"content-type": "application/vnd.apple.mpegurl"},
-            content=playlist,
-        )
-
-    captured = install_mock_upstream(_handler)
-    resp = ground_client.get("/hls/main/index.m3u8")
-    assert resp.status_code == 200
-    assert resp.content == playlist
-    assert len(captured) == 1

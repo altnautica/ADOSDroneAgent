@@ -51,6 +51,7 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/mcp/revoke` | relay-forbidden |
 | GET | `/api/mcp/status` |  |
 | POST | `/api/mcp/tokens` | relay-forbidden |
+| POST | `/api/pairing/accept` | relay-forbidden |
 | POST | `/api/pairing/claim` | unauthenticated by design; relay-forbidden |
 | GET | `/api/pairing/code` | unauthenticated by design; relay-forbidden |
 | GET | `/api/pairing/info` | unauthenticated by design |
@@ -99,6 +100,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/telemetry` |  |
 | GET | `/api/time` |  |
 | GET | `/api/v1/battery` |  |
+| GET | `/api/v1/dashboard/snapshot` |  |
 | GET | `/api/v1/diagnostics` |  |
 | POST | `/api/v1/ground-station/bluetooth/pair` |  |
 | GET | `/api/v1/ground-station/bluetooth/paired` |  |
@@ -111,6 +113,7 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/ground-station/crsf/params` |  |
 | GET | `/api/v1/ground-station/display` |  |
 | PUT | `/api/v1/ground-station/display` |  |
+| POST | `/api/v1/ground-station/factory-reset` | relay-forbidden |
 | POST | `/api/v1/ground-station/fleet/hero` |  |
 | GET | `/api/v1/ground-station/gamepads` |  |
 | PUT | `/api/v1/ground-station/gamepads/primary` |  |
@@ -183,6 +186,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/api/v1/network/client/configured/{name}` |  |
 | PUT | `/api/v1/network/client/configured/{name}/autoconnect` |  |
 | PUT | `/api/v1/network/client/join` |  |
+| GET | `/api/v1/network/client/scan` |  |
 | GET | `/api/v1/network/client/status` |  |
 | GET | `/api/v1/network/mac/adapters` |  |
 | POST | `/api/v1/network/mac/pin` |  |
@@ -191,13 +195,17 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/system/restart-supervisor` |  |
 | GET | `/api/v2/observability/{*upstream_path}` |  |
 | GET | `/api/version` | unauthenticated by design |
+| GET | `/api/video` |  |
+| GET | `/api/video/cameras` |  |
 | GET | `/api/video/config` |  |
+| POST | `/api/video/config` |  |
 | GET | `/api/video/latency` |  |
 | POST | `/api/video/profile` |  |
 | POST | `/api/video/record/start` |  |
 | POST | `/api/video/record/stop` |  |
 | GET | `/api/video/roster` |  |
 | PUT | `/api/video/roster` |  |
+| GET | `/api/video/snapshot` |  |
 | GET | `/api/vision/capabilities` |  |
 | POST | `/api/vision/designate` |  |
 | DELETE | `/api/vision/detector` |  |
@@ -216,28 +224,24 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-191 native routes.
+199 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 
-The front forwards these to the residual Python over its internal Unix
-socket, authenticating them on the proxied lane first. A path under a
-`PERMANENT_PYTHON_PREFIXES` prefix answers `501` when the residual is
-absent (a known feature, not on this profile) rather than `404`.
+The front forwards only the `PERMANENT_PYTHON_PREFIXES` prefixes to the
+residual Python over its internal Unix socket, authenticating them on the
+proxied lane first. They answer `501` when the residual is absent (a
+known feature, not on this profile) rather than `404`.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| POST | `/api/pairing/accept` | relay-forbidden |
 | GET | `/api/peripherals` |  |
 | POST | `/api/peripherals/scan` |  |
-| GET | `/api/v1/dashboard/snapshot` |  |
 | POST | `/api/v1/display/calibrate/start` |  |
 | GET | `/api/v1/display/calibrate/status` |  |
 | GET | `/api/v1/display/page` |  |
 | POST | `/api/v1/display/page` |  |
 | GET | `/api/v1/display/snapshot` |  |
-| POST | `/api/v1/ground-station/factory-reset` | relay-forbidden |
-| GET | `/api/v1/network/client/scan` |  |
 | GET | `/api/v1/peripherals` |  |
 | GET | `/api/v1/peripherals/{peripheral_id}` |  |
 | POST | `/api/v1/peripherals/{peripheral_id}/action` |  |
@@ -262,24 +266,28 @@ absent (a known feature, not on this profile) rather than `404`.
 | POST | `/api/v1/setup/skip` |  |
 | GET | `/api/v1/setup/status` |  |
 | POST | `/api/v1/setup/step/{step_id}/skip` |  |
-| GET | `/api/video` |  |
-| POST | `/api/video/camera/switch` |  |
-| GET | `/api/video/cameras` |  |
-| POST | `/api/video/config` |  |
-| POST | `/api/video/snapshot` |  |
-| GET | `/api/video/snapshot.jpg` |  |
 | GET | `/api/vision/detections/latest` |  |
 | WS | `/api/vision/detections/ws` |  |
 | GET | `/api/vision/models` |  |
 | POST | `/api/vision/models/{model_id}/download` |  |
 | GET | `/api/vision/models/{model_id}/status` |  |
 | POST | `/api/vision/plugin-models/{plugin_id}/deliver` |  |
-| GET | `/hls/{*path}` |  |
 | POST | `/whep` |  |
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-51 residual routes.
+40 residual routes.
+
+## Front fallback — `ados-control` on :8080, outside the route table
+
+Answered by the front's fallback after the proxied-lane auth, never
+forwarded to Python. Any other path under `/api` is a `404`.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/hls/{*path}` | relayed to mediamtx on loopback |
+| GET | `/cockpit/{*path}` | on-box cockpit bundle |
+| GET | `/` | dashboard bundle; its client routes and assets beneath it |
 
 ## Logging store — `ados-logd` on :8090
 

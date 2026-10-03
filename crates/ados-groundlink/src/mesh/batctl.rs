@@ -1,9 +1,8 @@
-//! batman-adv control: `batctl` output parsers + command wrappers.
+//! batman-adv control: `batctl` output parsers + command wrapper.
 //!
-//! Ports `_parse_neighbors` / `_parse_gateways` / `_configure_gateway_mode` /
-//! the `batctl if`/`gw_sel` calls from `mesh_manager.py`. The parsers are pure
-//! (column split with TQ tolerance across batman-adv versions); the command
-//! wrappers shell out to `batctl`/`ip`/`iw`/`modprobe`.
+//! Ports `_parse_neighbors` / `_parse_gateways` and the `batctl gw_sel` call.
+//! The parsers are pure (column split with TQ tolerance across batman-adv
+//! versions); the command wrapper shells out to `batctl`/`ip`/`iw`.
 //!
 //! The Python module runs `batctl` through `asyncio.to_thread` so a wedged
 //! kernel module cannot stall the event loop. The Rust equivalent uses tokio's
@@ -14,9 +13,6 @@
 use std::time::Duration;
 
 use super::state::{MeshGateway, MeshNeighbor};
-
-/// 10 Mbps down / 2 Mbps up advertisement hint for `batctl gw_mode server`.
-pub const GATEWAY_BANDWIDTH_DEFAULT: &str = "10000/2000";
 
 /// Run a command with a hard timeout. Returns `(rc, stdout, stderr)`; a timeout
 /// or spawn failure yields a non-zero rc so the caller degrades gracefully.
@@ -117,34 +113,6 @@ pub fn parse_gateways(text: &str) -> Vec<MeshGateway> {
         });
     }
     out
-}
-
-/// Decide and apply the batman gateway mode. Returns the resulting mode string
-/// (`server` / `client` / `off`). Mirrors `_configure_gateway_mode`: `force_on`
-/// advertises, `force_off` does not, `auto` advertises iff `has_uplink`; a
-/// receiver that does not advertise runs as a gateway client, everyone else off.
-pub async fn configure_gateway_mode(role: &str, cloud_uplink: &str, has_uplink: bool) -> String {
-    let advertise = match cloud_uplink {
-        "force_on" => true,
-        "force_off" => false,
-        _ => has_uplink, // auto
-    };
-
-    if advertise {
-        run(
-            "batctl",
-            &["gw_mode", "server", GATEWAY_BANDWIDTH_DEFAULT],
-            Duration::from_secs(5),
-        )
-        .await;
-        "server".to_string()
-    } else if role == "receiver" {
-        run("batctl", &["gw_mode", "client"], Duration::from_secs(5)).await;
-        "client".to_string()
-    } else {
-        run("batctl", &["gw_mode", "off"], Duration::from_secs(5)).await;
-        "off".to_string()
-    }
 }
 
 #[cfg(test)]

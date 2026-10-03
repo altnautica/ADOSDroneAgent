@@ -222,6 +222,76 @@ class TestJobTracker:
         assert "install.sh" in msg
         assert "--upgrade" in msg
 
+    @pytest.mark.asyncio
+    async def test_a_hung_install_times_out_and_frees_the_slot(self, monkeypatch):
+        monkeypatch.setattr(display_install, "INSTALL_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(display_install, "shutil_which", lambda _name: None)
+        monkeypatch.setattr(
+            display_install,
+            "_resolve_driver_script",
+            lambda: Path("/usr/bin/true"),
+        )
+        killed: list[bool] = []
+
+        class _HangingStdout:
+            def __aiter__(self):
+                async def gen():
+                    await asyncio.Event().wait()
+                    yield b""  # pragma: no cover - never reached
+
+                return gen()
+
+        class _HangingProc:
+            stdout = _HangingStdout()
+
+            def kill(self) -> None:
+                killed.append(True)
+
+            async def wait(self) -> int:  # pragma: no cover - never reached
+                await asyncio.Event().wait()
+                return 0
+
+        async def _factory(*args: Any, **kwargs: Any):
+            return _HangingProc()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _factory)
+        handle = await display_install.start_install("waveshare35a")
+        for _ in range(40):
+            if handle.status == "failed":
+                break
+            await asyncio.sleep(0.05)
+        assert handle.status == "failed"
+        assert handle.exit_code == -1
+        assert killed == [True]
+        assert display_install._active_job_id is None
+        # The single-job slot is free again: a new install is accepted.
+        second = await display_install.start_install("waveshare35a")
+        assert second.job_id != handle.job_id
+        await asyncio.wait_for(second._task, timeout=2.0)
+
+
+class TestDisplayInstallRequest:
+    @pytest.fixture(autouse=True)
+    def _board_supports(self, monkeypatch):
+        monkeypatch.setattr(
+            display_install, "supported_display_ids", lambda: {"waveshare35a"}
+        )
+
+    @pytest.mark.parametrize("display_id", ["../x", "waveshare35a/../../etc", "unknown-panel"])
+    def test_an_id_the_board_does_not_declare_is_rejected(self, display_id: str):
+        from pydantic import ValidationError
+
+        from ados.setup.models import DisplayInstallRequest
+
+        with pytest.raises(ValidationError):
+            DisplayInstallRequest(display_id=display_id)
+
+    @pytest.mark.parametrize("display_id", ["waveshare35a", "none"])
+    def test_a_declared_id_and_the_skip_id_are_accepted(self, display_id: str):
+        from ados.setup.models import DisplayInstallRequest
+
+        assert DisplayInstallRequest(display_id=display_id).display_id == display_id
+
 
 # ---------------------------------------------------------------------------
 # Reboot route — schedules a reboot and returns success quickly

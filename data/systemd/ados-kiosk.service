@@ -17,7 +17,8 @@ PartOf=ados-supervisor.service
 #
 # No ConditionPathExists on the DRM node either: the KMS display device can be
 # created a few seconds after this unit starts (a boot race a one-shot condition
-# loses); the service waits for a display and exits cleanly if none appears.
+# loses), and a monitor can be plugged in at any time; the service polls for a
+# display for as long as it takes.
 StartLimitIntervalSec=0
 
 [Service]
@@ -35,8 +36,8 @@ Environment=XDG_RUNTIME_DIR=/run/user/0
 EnvironmentFile=-/etc/ados/env
 ExecStart=/opt/ados/venv/bin/python -m ados.services.kiosk.kiosk_service
 Restart=always
-# Exit 0 means this node has nothing for the unit to run (feature off, role
-# not applicable, display absent); it must not respawn every RestartSec. Any
+# Exit 0 means this node has nothing for the unit to run (display.type lcd/none
+# or ground_station.kiosk.enabled false); it must not respawn every RestartSec. Any
 # other exit, signal or watchdog timeout restarts forever (no start limit).
 RestartPreventExitStatus=0
 RestartSec=3

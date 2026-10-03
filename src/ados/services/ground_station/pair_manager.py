@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,8 +42,6 @@ from ados.core.config.writer import read_config_mapping, update_config
 from ados.core.logging import get_logger
 from ados.core.paths import (
     CONFIG_YAML,
-    FACTORY_RESET_DIRS,
-    FACTORY_RESET_FILES,
     SECRETS_DIR,
     SETUP_COMPLETE_PATH,
 )
@@ -58,13 +55,6 @@ log = get_logger("ground_station.pair_manager")
 
 _SETUP_COMPLETE_PATH = SETUP_COMPLETE_PATH
 
-# Module-level aliases of the canonical reset set so a test can redirect them at
-# a tmp dir. They are ASSIGNED from `ados.core.paths`, not re-listed, so the
-# shell script and this module still share one source — but a reset that walks
-# hard-coded absolute paths cannot be isolated, and an unisolated factory reset
-# in a test run as root would wipe the machine it runs on.
-_FACTORY_RESET_FILES = FACTORY_RESET_FILES
-_FACTORY_RESET_DIRS = FACTORY_RESET_DIRS
 _CONFIG_PATH = CONFIG_YAML
 
 # The relay peer secret a ground station offered over the radio. It belongs to
@@ -130,23 +120,6 @@ def _get_video_wfb_section(data: dict[str, Any]) -> dict[str, Any]:
     video = _get_section(data, "video")
     return _get_section(video, "wfb")
 
-
-def _clear_configured_hotspot_password() -> None:
-    """Remove `network.hotspot.password` so a reset really does re-key the AP.
-
-    `ensure_passphrase` prefers a configured password over generating one, so
-    deleting `/etc/ados/ap-passphrase` alone left a configured rig coming back
-    up on exactly the key it had before — which is the opposite of what a
-    factory reset promises, and silently so.
-    """
-    def _clear(data: dict[str, Any]) -> None:
-        network = data.get("network")
-        hotspot = network.get("hotspot") if isinstance(network, dict) else None
-        if isinstance(hotspot, dict):
-            hotspot.pop("password", None)
-
-    if update_config(_clear, path=_CONFIG_PATH, changed=("network.hotspot.password",)):
-        log.info("factory_reset_cleared_configured_hotspot_password")
 
 
 def _persist_pair_state(
@@ -413,54 +386,6 @@ class PairManager:
             "role": role,
         }
 
-    async def recover_half_pair_state(self, role: Role) -> dict[str, Any]:
-        """Detect and recover from a stuck half-pair.
-
-        A half-pair is when the local bind protocol wrote a key file
-        and stamped `paired_at` but never learned the peer's device id.
-        From the rig's own perspective it looks paired; from the peer's
-        perspective the bind aborted before its half landed. auto_pair
-        is disarmed on both sides and nothing climbs out without
-        operator intervention.
-
-        Recovery: if a key file is present but `paired_with_device_id`
-        is None / "unknown", treat the rig as never having paired.
-        Delete the orphan key file, clear the stale `paired_at`, and
-        leave `auto_pair_enabled` armed so the supervisor picks up the
-        next bind cycle on its own.
-
-        Returns a dict with `recovered: bool` and the cleared fields.
-        Safe to call on a healthy rig (where it returns recovered=False
-        without touching anything).
-        """
-        target = self._key_path_for_role(role)
-        if not (target.is_file() and target.stat().st_size == WFB_KEY_FILE_BYTES):
-            return {"recovered": False, "reason": "no_key_file"}
-
-        cfg = _load_config_dict()
-        wfb_section = (
-            cfg.get("video", {}).get("wfb", {})
-            if isinstance(cfg.get("video"), dict) else {}
-        )
-        peer = wfb_section.get("paired_with_device_id")
-        # A local radio bind never records a peer device-id (the bind
-        # protocol exchanges keys, not ADOS device ids), so an unknown
-        # peer is NOT evidence of a half-pair — it is the normal shape of
-        # a successful local bind. A valid-sized key file on disk means the
-        # rig paired; keep it. Deleting it here on every boot was what made
-        # local pairings evaporate across reboots: the key vanished, auto
-        # pair re-armed, and the rig rebound (re-keying away from its peer)
-        # on every restart. A cloud-relay pairing does carry a device-id
-        # and is equally healthy. Either way a present valid key is left
-        # untouched; a genuinely broken pairing is cleared by the operator
-        # with `ados radio pair unpair`, not silently wiped on boot.
-        reason = (
-            "real_peer_known"
-            if isinstance(peer, str) and peer and peer != "unknown"
-            else "local_bind_no_peer_id"
-        )
-        return {"recovered": False, "reason": reason}
-
     async def status(self, role: Role) -> dict[str, Any]:
         """Return live pair status for the given role.
 
@@ -526,73 +451,6 @@ class PairManager:
 
         log.info("auto_pair_set", enabled=enabled, role=role)
         return {**current, "auto_pair_enabled": enabled}
-
-    async def factory_reset(self, role: Role) -> dict[str, Any]:
-        """Destroy every standing credential and return to first-boot posture.
-
-        This is what an operator runs before handing a unit to somebody else,
-        so the bar is that nothing the previous holder knows still opens the
-        box. That means the API key, the dashboard PIN, the MCP token, the
-        setup/tunnel/server secrets, the AP passphrase and the radio keypair —
-        the full set in :data:`~ados.core.paths.FACTORY_RESET_FILES` and
-        :data:`~ados.core.paths.FACTORY_RESET_DIRS`, which the shell script
-        shares so the two cannot drift apart again.
-
-        The configured hotspot password is cleared too. Without that this reset
-        did not actually change the passphrase: deleting the file only makes
-        the manager fall through to `network.hotspot.password`, so a rig with
-        one configured came back up on the same key it had before.
-
-        Identity goes too: `device-id`, `config.yaml` and `/var/log/ados` are
-        in the canonical set, so a reset unit comes back indistinguishable from
-        a freshly flashed one and reappears in the GCS as a new device. This
-        path used to preserve them while the shell script erased them, which is
-        how the two answers to "what does a factory reset mean" diverged.
-
-        What is deliberately left alone: `profile.conf` (what this hardware is,
-        not who owns it — removing it lets a later bare upgrade reprofile the
-        box, which has already cost one rig a full reflash).
-        """
-        await self.unpair(role)
-
-        for path in _FACTORY_RESET_FILES:
-            try:
-                if path.is_file():
-                    path.unlink()
-            except OSError as exc:
-                log.warning(
-                    "factory_reset_delete_failed",
-                    path=str(path),
-                    error=str(exc),
-                )
-
-        for directory in _FACTORY_RESET_DIRS:
-            try:
-                if directory.is_dir():
-                    shutil.rmtree(directory)
-            except OSError as exc:
-                log.warning(
-                    "factory_reset_delete_failed",
-                    path=str(directory),
-                    error=str(exc),
-                )
-
-        # Clear the configured hotspot password, or the "fresh passphrase"
-        # this reset promises is not fresh at all — `ensure_passphrase`
-        # prefers a configured value over generating one.
-        _clear_configured_hotspot_password()
-
-        # Re-arm auto-pair so the next boot binds again.
-        _persist_pair_state(
-            role=role,
-            peer_device_id=None,
-            paired_at=None,
-            auto_pair_enabled=True,
-        )
-
-        ts = _iso_now()
-        log.warning("factory_reset_performed", role=role, timestamp=ts)
-        return {"reset": True, "timestamp": ts, "auto_pair_enabled": True}
 
 
 # ---------------------------------------------------------------------

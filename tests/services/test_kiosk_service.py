@@ -41,6 +41,22 @@ def _config_with_kiosk(url: str | None = None, minimal: bool | None = None) -> S
     )
 
 
+def _config_with_kiosk_settings(enabled: bool, resolution: str = "auto") -> SimpleNamespace:
+    """A full-enough config for ``_amain``: logging, display and kiosk blocks."""
+    return SimpleNamespace(
+        logging=SimpleNamespace(level="info"),
+        ground_station=SimpleNamespace(
+            display=SimpleNamespace(type="auto"),
+            kiosk=SimpleNamespace(
+                enabled=enabled,
+                resolution=resolution,
+                target_url=None,
+                minimal_layer=None,
+            ),
+        ),
+    )
+
+
 class _FakeProc:
     """Minimal stand-in for ``asyncio.subprocess.Process`` used by the supervisor."""
 
@@ -176,23 +192,39 @@ def test_hdmi_present_false_when_no_drm(tmp_path: Any) -> None:
         assert _hdmi_present() is False
 
 
+def _watch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, *, enabled: bool = True
+) -> ks._SettingsWatch:
+    """A settings watch over a config file under tmp_path (absent at start)."""
+    monkeypatch.setattr(ks, "CONFIG_YAML", tmp_path / "config.yaml")
+    return ks._SettingsWatch(ks.KioskSettings(enabled=enabled, output_mode=None), None)
+
+
 @pytest.mark.asyncio
-async def test_wait_for_display_returns_immediately_when_present() -> None:
+async def test_wait_for_display_returns_immediately_when_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
     with patch.object(ks, "_hdmi_present", return_value=True):
-        assert await ks._wait_for_display() is True
+        assert await ks._wait_for_display(_watch(monkeypatch, tmp_path)) is True
 
 
 @pytest.mark.asyncio
-async def test_wait_for_display_times_out_headless(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "_DISPLAY_WAIT_SECONDS", 0.05)
+async def test_wait_for_display_never_gives_up_while_headless(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A monitor plugged in long after boot must still get the kiosk, so a
+    headless box keeps polling instead of returning after a deadline."""
     monkeypatch.setattr(ks, "_DISPLAY_POLL_SECONDS", 0.01)
+    watch = _watch(monkeypatch, tmp_path)
     with patch.object(ks, "_hdmi_present", return_value=False):
-        assert await ks._wait_for_display() is False
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(ks._wait_for_display(watch), timeout=0.3)
 
 
 @pytest.mark.asyncio
-async def test_wait_for_display_appears_after_poll(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "_DISPLAY_WAIT_SECONDS", 1.0)
+async def test_wait_for_display_appears_after_poll(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
     monkeypatch.setattr(ks, "_DISPLAY_POLL_SECONDS", 0.01)
     calls = {"n": 0}
 
@@ -201,7 +233,19 @@ async def test_wait_for_display_appears_after_poll(monkeypatch: pytest.MonkeyPat
         return calls["n"] >= 3  # appears on the 3rd check
 
     with patch.object(ks, "_hdmi_present", side_effect=_present):
-        assert await ks._wait_for_display() is True
+        assert await ks._wait_for_display(_watch(monkeypatch, tmp_path)) is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_display_stands_down_when_kiosk_disabled_meanwhile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    monkeypatch.setattr(ks, "_DISPLAY_POLL_SECONDS", 0.01)
+    watch = _watch(monkeypatch, tmp_path)
+    (tmp_path / "config.yaml").write_text("ground_station: {}\n")
+    monkeypatch.setattr(ks, "load_config", lambda: _config_with_kiosk_settings(False))
+    with patch.object(ks, "_hdmi_present", return_value=False):
+        assert await asyncio.wait_for(ks._wait_for_display(watch), timeout=2.0) is False
 
 
 class _FakeResp:
@@ -1271,19 +1315,20 @@ async def test_amain_downgrades_gpu_to_software_on_cage_crash_loop(
     renderers_used: list[str] = []
     fakes = [_FakeSupervisor(crash=True), _FakeSupervisor(crash=False)]
 
-    def _fake_make(_url: str, _session: Any, renderer: str, _lib: Any) -> _FakeSupervisor:
+    def _fake_make(
+        _url: str, _session: Any, renderer: str, _lib: Any, _mode: Any = None
+    ) -> _FakeSupervisor:
         renderers_used.append(renderer)
         return fakes[len(renderers_used) - 1]
 
     async def _no_session() -> None:
         return None
 
-    monkeypatch.setattr(
-        ks, "load_config", lambda: SimpleNamespace(logging=SimpleNamespace(level="info"))
-    )
+    monkeypatch.setattr(ks, "load_config", lambda: _config_with_kiosk_settings(True))
     monkeypatch.setattr(ks, "configure_logging", lambda *a, **k: None)
     monkeypatch.setattr(ks, "_hdmi_present", lambda: True)
     monkeypatch.setattr(ks, "_resolve_target_url", lambda _c: ("http://x", False))
+    monkeypatch.setattr(ks, "_wait_for_url", _async_true)
     monkeypatch.setattr(
         ks, "_resolve_render_plan", lambda: (ks._RENDERER_GPU, "/opt/ados/gpu/mali")
     )
@@ -1294,6 +1339,113 @@ async def test_amain_downgrades_gpu_to_software_on_cage_crash_loop(
     assert renderers_used == [ks._RENDERER_GPU, ks._RENDERER_SOFTWARE]
     assert rc == 0
 
+
+# ---------------------------------------------------------------------------
+# ground_station.kiosk.enabled / resolution
+# ---------------------------------------------------------------------------
+
+
+async def _async_true(*_args: Any) -> bool:
+    return True
+
+
+@pytest.mark.asyncio
+async def test_kiosk_disabled_in_config_exits_zero_without_launching() -> None:
+    """`ground_station.kiosk.enabled: false` stands the service down cleanly:
+    exit 0 (the unit's "nothing to run"), no display wait, no browser."""
+    with (
+        patch.object(ks, "load_config", return_value=_config_with_kiosk_settings(False)),
+        patch.object(ks, "configure_logging"),
+        patch.object(ks, "_wait_for_display") as waited,
+        patch.object(ks, "_make_supervisor") as made,
+    ):
+        rc = await ks._amain()
+    assert rc == 0
+    waited.assert_not_called()
+    made.assert_not_called()
+
+
+def test_kiosk_settings_maps_resolution_presets_and_leaves_auto_alone() -> None:
+    assert ks._kiosk_settings(_config_with_kiosk_settings(True, "1080p")) == ks.KioskSettings(
+        enabled=True, output_mode="1920x1080"
+    )
+    assert ks._kiosk_settings(_config_with_kiosk_settings(True, "720p")).output_mode == "1280x720"
+    for value in ("auto", "4k", ""):
+        assert ks._kiosk_settings(_config_with_kiosk_settings(True, value)).output_mode is None
+    # A config without the section reads as the model default: disabled.
+    assert ks._kiosk_settings(SimpleNamespace()).enabled is False
+
+
+class _BlockingSupervisor:
+    """Runs until request_stop(), like the real supervisor's live child."""
+
+    def __init__(self) -> None:
+        self.crash_looped = False
+        self.last_stderr_tail = ""
+        self._stop = asyncio.Event()
+
+    def request_stop(self) -> None:
+        self._stop.set()
+
+    async def run(self) -> int:
+        await self._stop.wait()
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_config_edit_restarts_child_with_new_resolution_then_stands_down(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """A resolution edit restarts the child with the new mode; disabling the
+    kiosk afterwards stops it and exits 0. No reboot or unit restart needed."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("v1\n")
+    monkeypatch.setattr(ks, "CONFIG_YAML", config_path)
+    monkeypatch.setattr(ks, "_CONFIG_POLL_SECONDS", 0.01)
+    configs = {"current": _config_with_kiosk_settings(True, "auto")}
+    monkeypatch.setattr(ks, "load_config", lambda: configs["current"])
+    monkeypatch.setattr(ks, "configure_logging", lambda *a, **k: None)
+    monkeypatch.setattr(ks, "_hdmi_present", lambda: True)
+    monkeypatch.setattr(ks, "_wait_for_url", _async_true)
+    monkeypatch.setattr(ks, "_resolve_render_plan", lambda: (ks._RENDERER_SOFTWARE, None))
+
+    async def _no_session() -> None:
+        return None
+
+    monkeypatch.setattr(ks, "_resolve_desktop_session", _no_session)
+
+    modes: list[str | None] = []
+    sups: list[_BlockingSupervisor] = []
+
+    def _fake_make(
+        _url: str, _session: Any, _renderer: str, _lib: Any, mode: str | None = None
+    ) -> _BlockingSupervisor:
+        modes.append(mode)
+        sups.append(_BlockingSupervisor())
+        return sups[-1]
+
+    monkeypatch.setattr(ks, "_make_supervisor", _fake_make)
+
+    def _rewrite(config: SimpleNamespace, body: str) -> None:
+        configs["current"] = config
+        tmp = tmp_path / "config.yaml.tmp"
+        tmp.write_text(body)
+        os.replace(tmp, config_path)  # new inode, as the real writers do
+
+    async def _operator() -> None:
+        while len(sups) < 1:
+            await asyncio.sleep(0.01)
+        _rewrite(_config_with_kiosk_settings(True, "1080p"), "v2\n")
+        while len(sups) < 2:
+            await asyncio.sleep(0.01)
+        _rewrite(_config_with_kiosk_settings(False, "1080p"), "v3\n")
+
+    operator = asyncio.create_task(_operator())
+    rc = await asyncio.wait_for(ks._amain(), timeout=5.0)
+    await operator
+    assert rc == 0
+    assert modes == [None, "1920x1080"]
+    assert all(s._stop.is_set() for s in sups)
 
 # ---------------------------------------------------------------------------
 # Helpers used by tests

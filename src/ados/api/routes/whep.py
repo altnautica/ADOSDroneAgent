@@ -9,8 +9,8 @@ with its captive defaults across upstream version bumps; a thin proxy
 that streams the request and response bodies through is cheaper and
 upgrade-safe.
 
-Routes (all gated to the ground-station profile, all forwarded to the
-local MediaMTX instance):
+Routes (served on every profile, all forwarded to the local MediaMTX
+instance):
 
 * ``POST   /whep``                  — initial SDP offer/answer exchange
 * ``DELETE /whep/{session_id}``     — terminate the WHEP session
@@ -31,6 +31,7 @@ from __future__ import annotations
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 from ados.core.logging import get_logger
 
@@ -38,20 +39,19 @@ log = get_logger("api.whep")
 
 router = APIRouter()
 
-# Local MediaMTX media endpoints, fronted so a browser reaches the live video
+# Local MediaMTX WHEP endpoint, fronted so a browser reaches the live video
 # plane through the SAME host:port as the REST + WebSocket surface. Advertising
-# absolute ``:8889`` / ``:8888`` URLs broke off-LAN (a ``.local`` name a remote
-# GCS cannot resolve, or an IP the browser cannot route) and under an HTTPS GCS
-# (mixed content); a same-origin ``/whep`` + ``/hls`` path resolves against
-# whatever host reached the agent. WHEP (WebRTC) is served per published leg at
-# ``:8889/<leg>/whep``, HLS at ``:8888/<leg>/index.m3u8``. PROFILE-AGNOSTIC: the
-# on-drone cockpit needs its own proxy, not only the ground station. Module-level
-# so tests can swap the upstreams.
+# an absolute ``:8889`` URL broke off-LAN (a ``.local`` name a remote GCS cannot
+# resolve, or an IP the browser cannot route) and under an HTTPS GCS (mixed
+# content); a same-origin ``/whep`` path resolves against whatever host reached
+# the agent. WHEP (WebRTC) is served per published leg at ``:8889/<leg>/whep``.
+# HLS is not proxied here: the native front forwards ``/hls`` to mediamtx
+# directly. PROFILE-AGNOSTIC: the on-drone cockpit needs this proxy too.
+# Module-level so tests can swap the upstream.
 _WHEP_BASE = "http://127.0.0.1:8889"
-_HLS_BASE = "http://127.0.0.1:8888"
 
 # The primary published leg. A multi-leg node addresses a secondary leg by
-# ``?camera=<id>`` (WHEP) or ``/hls/<id>/index.m3u8`` (HLS).
+# ``?camera=<id>``.
 _DEFAULT_CAMERA = "main"
 
 
@@ -87,6 +87,19 @@ _HOP_BY_HOP = frozenset(
     }
 )
 
+# Client credentials and front-set trust headers. They authenticate the caller
+# to this agent; mediamtx needs none of them, and forwarding them would land
+# the pairing key and session cookies in its logs.
+_CREDENTIAL_HEADERS = frozenset(
+    {
+        "x-ados-key",
+        "authorization",
+        "cookie",
+        "x-ados-session",
+        "x-ados-onbox",
+    }
+)
+
 
 # Module-level singleton. Initialised on first use so test suites that
 # never touch the WHEP routes do not pay the connection-pool startup
@@ -110,20 +123,26 @@ def _get_client() -> httpx.AsyncClient:
 
 
 def _filter_request_headers(req: Request) -> dict[str, str]:
-    """Strip hop-by-hop headers before forwarding to upstream."""
+    """Strip hop-by-hop and credential headers before forwarding upstream."""
     out: dict[str, str] = {}
     for key, value in req.headers.items():
-        if key.lower() in _HOP_BY_HOP:
+        lowered = key.lower()
+        if lowered in _HOP_BY_HOP or lowered in _CREDENTIAL_HEADERS:
             continue
         out[key] = value
     return out
 
 
 def _filter_response_headers(resp: httpx.Response) -> dict[str, str]:
-    """Strip hop-by-hop headers before returning the upstream response."""
+    """Strip hop-by-hop headers before returning the upstream response.
+
+    ``content-encoding`` goes too: the body is relayed decoded
+    (``aiter_bytes``), so the upstream encoding no longer describes it.
+    """
     out: dict[str, str] = {}
     for key, value in resp.headers.items():
-        if key.lower() in _HOP_BY_HOP:
+        lowered = key.lower()
+        if lowered in _HOP_BY_HOP or lowered == "content-encoding":
             continue
         out[key] = value
     return out
@@ -136,12 +155,12 @@ async def _forward(
     *,
     camera: str | None = None,
 ) -> StreamingResponse:
-    """Forward a request to a local MediaMTX media endpoint (WHEP or HLS).
+    """Forward a request to the local MediaMTX WHEP endpoint.
 
     ``upstream_url`` is the absolute loopback target. Reads the request body in
     full (the SDP / SDP-fragment payload is a few KB and MediaMTX expects a known
-    Content-Length); the response is streamed back so chunked encodings and HLS
-    segments flow through cleanly.
+    Content-Length); the response body is streamed back chunk by chunk and the
+    upstream response is closed once the client response finishes.
 
     When ``camera`` is set (a WHEP offer), the upstream ``Location`` — a mediamtx
     resource path like ``/<camera>/whep/<session>`` — is rewritten to this proxy's
@@ -154,11 +173,9 @@ async def _forward(
     client = _get_client()
 
     try:
-        upstream = await client.request(
-            method,
-            upstream_url,
-            content=body,
-            headers=headers,
+        upstream = await client.send(
+            client.build_request(method, upstream_url, content=body, headers=headers),
+            stream=True,
         )
     except httpx.ConnectError:
         log.warning("media_upstream_unreachable", url=upstream_url)
@@ -186,10 +203,11 @@ async def _forward(
     )
 
     return StreamingResponse(
-        content=iter([upstream.content]),
+        content=upstream.aiter_bytes(),
         status_code=upstream.status_code,
         headers=response_headers,
         media_type=media_type,
+        background=BackgroundTask(upstream.aclose),
     )
 
 
@@ -235,11 +253,3 @@ async def whep_ice_restart(session_id: str, request: Request) -> StreamingRespon
     return await _forward(
         "PATCH", f"{_WHEP_BASE}/{camera}/whep/{session_id}", request
     )
-
-
-@router.get("/hls/{path:path}")
-async def hls_proxy(path: str, request: Request) -> StreamingResponse:
-    """Forward an HLS playlist or segment to the local MediaMTX HLS server,
-    preserving the leg subpath (``/hls/<id>/index.m3u8`` → ``:8888/<id>/index.m3u8``)
-    so the playlist's relative segment URIs resolve back through this proxy."""
-    return await _forward("GET", f"{_HLS_BASE}/{path}", request)

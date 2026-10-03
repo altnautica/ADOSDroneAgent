@@ -9,10 +9,11 @@ endpoint at 1-2 Hz while the job runs and renders the trailing log
 lines so the operator sees progress.
 
 Job lifecycle: ``queued`` -> ``running`` -> ``done`` (rc 0) or
-``failed`` (rc != 0). Only one job runs at a time per agent process;
-concurrent install requests get a 409 from the route. Job state lives
-in a module-level dict and is forgotten across agent restart — fine
-because the install script is idempotent.
+``failed`` (rc != 0, or the run outlived ``INSTALL_TIMEOUT_S``). Only one
+job runs at a time per agent process; concurrent install requests get a
+409 from the route. Job state lives in a module-level dict holding the
+last ``JOB_HISTORY_CAP`` runs and is forgotten across agent restart —
+fine because the install script is idempotent.
 
 The installer requires root. The agent normally runs as root via
 systemd; on a dev box where it doesn't, the subprocess call will
@@ -25,6 +26,7 @@ sudo password prompt that would hang the wizard.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import uuid
 from collections import deque
@@ -42,11 +44,35 @@ log = get_logger("setup.display_install")
 # verbose subprocess writes thousands of lines.
 LOG_TAIL_CAP = 40
 
+# Wall-clock ceiling for one install run. A first install pulls apt
+# packages and compiles overlays, which takes minutes, not tens of
+# minutes; a run past this is hung, and leaving it would hold the
+# single-job slot (every later install a 409) until the API restarts.
+INSTALL_TIMEOUT_S = 600.0
+
+# Finished jobs kept for the wizard to re-read after a page reload.
+JOB_HISTORY_CAP = 16
+
 # Path resolution helpers. The shell driver lives next to install.sh
 # under scripts/drivers/. The agent installs itself under
 # /opt/ados/source/ via curl-pipe, but the dev path (running from a
 # git checkout) needs to walk up from this module's location.
 _SCRIPT_NAME = "install-display-overlay.sh"
+
+
+def supported_display_ids() -> set[str]:
+    """The display ids the detected board's HAL profile declares.
+
+    The id becomes an argument to a root script that interpolates it into
+    overlay paths and ``display.conf``, so only an id the board actually
+    supports may reach it.
+    """
+    from ados.hal.detect import detect_board_profile
+
+    profile = detect_board_profile()
+    if profile is None:
+        return set()
+    return {binding.id for binding in profile.displays.supported}
 
 
 def _resolve_driver_script() -> Path | None:
@@ -74,6 +100,7 @@ class _JobHandle:
         "exit_code",
         "log_tail",
         "_proc",
+        "_task",
     )
 
     def __init__(self, *, job_id: str, display_id: str) -> None:
@@ -85,6 +112,7 @@ class _JobHandle:
         self.exit_code: int | None = None
         self.log_tail: deque[str] = deque(maxlen=LOG_TAIL_CAP)
         self._proc: asyncio.subprocess.Process | None = None
+        self._task: asyncio.Task[None] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -157,10 +185,42 @@ async def start_install(display_id: str) -> _JobHandle:
         handle = _JobHandle(job_id=job_id, display_id=display_id)
         _jobs[job_id] = handle
         _active_job_id = job_id
+        _prune_history()
         # Kick off the subprocess outside the lock — the lock guards
-        # only the single-job invariant.
-    asyncio.create_task(_run_job(handle, script, display_id))
+        # only the single-job invariant. The handle keeps the task so it
+        # is not garbage-collected mid-run.
+    handle._task = asyncio.create_task(_run_job(handle, script, display_id))
     return handle
+
+
+def _prune_history() -> None:
+    """Drop the oldest jobs beyond ``JOB_HISTORY_CAP``, never the active one."""
+    for job_id in list(_jobs):
+        if len(_jobs) <= JOB_HISTORY_CAP:
+            break
+        if job_id != _active_job_id:
+            del _jobs[job_id]
+
+
+def _transient_unit(handle: _JobHandle) -> str:
+    return f"ados-display-install-{handle.job_id}"
+
+
+async def _stop_transient_unit(unit: str) -> None:
+    """Stop a timed-out install's transient unit (the script runs there,
+    outside this process, so killing our ``systemd-run`` client alone would
+    leave it running)."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl",
+            "stop",
+            unit,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=30.0)
+    except (TimeoutError, OSError) as exc:
+        log.warning("display_install_unit_stop_failed", unit=unit, error=str(exc))
 
 
 async def _run_job(
@@ -196,18 +256,27 @@ async def _run_job(
             "--pipe",
             "--collect",
             "--unit",
-            f"ados-display-install-{handle.job_id}",
+            _transient_unit(handle),
             str(script),
             "--display",
             display_id,
         ]
         handle.log_tail.append(
-            "[runner] systemd-run transient unit "
-            f"(ados-display-install-{handle.job_id})"
+            f"[runner] systemd-run transient unit ({_transient_unit(handle)})"
         )
     else:
         argv = [str(script), "--display", display_id]
         handle.log_tail.append("[runner] direct subprocess (no systemd-run)")
+
+    async def _drive(proc: asyncio.subprocess.Process) -> int:
+        assert proc.stdout is not None
+        async for raw in proc.stdout:
+            try:
+                text = raw.decode("utf-8", errors="replace").rstrip("\n")
+            except Exception:  # noqa: BLE001
+                text = "<undecodable line>"
+            handle.log_tail.append(text)
+        return await proc.wait()
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -216,14 +285,26 @@ async def _run_job(
             stderr=asyncio.subprocess.STDOUT,
         )
         handle._proc = proc
-        assert proc.stdout is not None
-        async for raw in proc.stdout:
-            try:
-                text = raw.decode("utf-8", errors="replace").rstrip("\n")
-            except Exception:  # noqa: BLE001
-                text = "<undecodable line>"
-            handle.log_tail.append(text)
-        rc = await proc.wait()
+        try:
+            rc = await asyncio.wait_for(_drive(proc), timeout=INSTALL_TIMEOUT_S)
+        except TimeoutError:
+            if use_systemd_run:
+                await _stop_transient_unit(_transient_unit(handle))
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            handle.exit_code = -1
+            handle.status = "failed"
+            handle.finished_at = _now_iso()
+            handle.log_tail.append(
+                f"[{handle.finished_at}] install did not finish within "
+                f"{INSTALL_TIMEOUT_S:g} s; stopped"
+            )
+            log.warning(
+                "display_install_timed_out",
+                job_id=handle.job_id,
+                timeout_s=INSTALL_TIMEOUT_S,
+            )
+            return
         handle.exit_code = rc
         handle.status = "done" if rc == 0 else "failed"
         handle.finished_at = _now_iso()

@@ -12,8 +12,5 @@ def test_emit_openapi_does_not_duplicate_v1_prefixes() -> None:
     assert not any("/api/v1/v1/" in path for path in paths)
     # Two live `/api/v1/` samples, one per sub-router, so the "no duplicated
     # prefix" assertion above cannot pass vacuously on an empty spec.
-    # `ground-station/ui` used to be the first sample; it was deleted as a
-    # dead route that `ados-control` already served natively, so the sample
-    # moved rather than the route being resurrected to satisfy a test.
-    assert "/api/v1/ground-station/factory-reset" in paths
+    assert "/api/v1/setup/status" in paths
     assert "/api/v1/peripherals" in paths

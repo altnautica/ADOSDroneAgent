@@ -1,8 +1,8 @@
 """Peripheral Manager REST surface (``/api/v1/peripherals/*``).
 
-Lives alongside the legacy ``/api/peripherals`` hardware scan route
-rather than replacing it. The legacy route returns freshly probed USB
-devices, cameras, and modems for the GCS "Sensors" panel. This v1
+A different surface from ``/api/peripherals``, the hardware scan, which
+returns freshly probed USB devices, cameras, and modems for the GCS
+"Sensors" panel and the cloud scan command. This v1
 surface serves the plugin registry: declarative manifests from pip
 packages and ``/etc/ados/peripherals/*.yaml`` plus live connection
 state per manifest.
@@ -16,22 +16,17 @@ from __future__ import annotations
 import asyncio
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ados.core.atomic import atomic_write_json
 from ados.core.logging import get_logger
-from ados.core.paths import PERIPHERALS_DIR
 from ados.services.peripherals.registry import get_peripheral_registry
 
 log = get_logger("api.peripherals_v1")
 
 router = APIRouter(prefix="/v1/peripherals", tags=["peripherals"])
-
-_CONFIG_DIR = PERIPHERALS_DIR
 
 
 class PeripheralActionRequest(BaseModel):
@@ -41,21 +36,38 @@ class PeripheralActionRequest(BaseModel):
     body: dict[str, Any] = Field(default_factory=dict)
 
 
-def _config_path(peripheral_id: str) -> Path:
-    """Return the persisted-config path for a given peripheral id.
+def _not_found(peripheral_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={
+            "code": "E_PERIPHERAL_NOT_FOUND",
+            "peripheral_id": peripheral_id,
+        },
+    )
 
-    Sanitizes the id so path traversal is impossible. The registry
-    already owns the canonical id; this guard is defense in depth.
+
+def _advertised(entry: dict[str, Any]) -> dict[str, Any]:
+    """A registry entry with ``actions`` narrowed to the ones that dispatch.
+
+    A manifest may declare actions nothing on this agent implements; listing
+    those would offer the operator a button that cannot do anything.
     """
-    safe = peripheral_id.replace("/", "_").replace("..", "_")
-    return _CONFIG_DIR / f"{safe}.config.json"
+    peripheral_id = entry.get("id")
+    actions = entry.get("actions") or []
+    return {
+        **entry,
+        "actions": [
+            a for a in actions
+            if (peripheral_id, a.get("id")) in _ACTION_DISPATCHERS
+        ],
+    }
 
 
 @router.get("")
 async def list_peripherals() -> dict:
     """Return every registered peripheral manifest plus live status."""
     registry = get_peripheral_registry()
-    items = registry.list()
+    items = [_advertised(entry) for entry in registry.list()]
     return {"peripherals": items, "count": len(items)}
 
 
@@ -68,14 +80,8 @@ async def get_peripheral(peripheral_id: str) -> dict:
     registry = get_peripheral_registry()
     entry = registry.get(peripheral_id)
     if entry is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "E_PERIPHERAL_NOT_FOUND",
-                "peripheral_id": peripheral_id,
-            },
-        )
-    return entry
+        raise _not_found(peripheral_id)
+    return _advertised(entry)
 
 
 @router.post("/{peripheral_id}/config")
@@ -83,74 +89,23 @@ async def put_peripheral_config(
     peripheral_id: str,
     body: dict[str, Any],
 ) -> dict:
-    """Persist a config blob for the given peripheral.
+    """Refuse a config write: nothing on this agent consumes peripheral config.
 
-    Validates against the manifest's ``config_schema`` if one is declared,
-    then writes ``/etc/ados/peripherals/<id>.config.json`` atomically.
-    Plugin-side consumption of this file is not implemented yet.
+    Persisting the blob and answering success would tell the operator a
+    setting took effect when no process ever reads it.
     """
-    registry = get_peripheral_registry()
-    manifest = registry.get_manifest(peripheral_id)
-    if manifest is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "E_PERIPHERAL_NOT_FOUND",
+    if get_peripheral_registry().get_manifest(peripheral_id) is None:
+        raise _not_found(peripheral_id)
+    raise HTTPException(
+        status_code=501,
+        detail={
+            "error": {
+                "code": "E_NOT_SUPPORTED",
+                "message": "peripheral configuration is not supported on this agent",
                 "peripheral_id": peripheral_id,
-            },
-        )
-
-    if manifest.config_schema:
-        try:
-            # jsonschema is a declared dependency. A broken install without it
-            # writes the config unvalidated, loudly, rather than refusing it.
-            import jsonschema  # type: ignore[import-not-found]
-            jsonschema.validate(instance=body, schema=manifest.config_schema)
-        except ImportError:
-            log.warning(
-                "peripheral_config_validate_skipped",
-                peripheral_id=peripheral_id,
-                reason="jsonschema_not_installed",
-            )
-        except jsonschema.ValidationError as exc:  # type: ignore[attr-defined]
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "E_CONFIG_SCHEMA_INVALID",
-                    "peripheral_id": peripheral_id,
-                    "message": exc.message,
-                    "path": list(exc.absolute_path),
-                },
-            ) from exc
-
-    path = _config_path(peripheral_id)
-    try:
-        atomic_write_json(path, body, mode=0o644, sort_keys=True)
-    except OSError as exc:
-        log.error(
-            "peripheral_config_write_failed",
-            peripheral_id=peripheral_id,
-            path=str(path),
-            error=str(exc),
-        )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "code": "E_CONFIG_WRITE_FAILED",
-                "peripheral_id": peripheral_id,
-            },
-        ) from exc
-
-    log.info(
-        "peripheral_config_written",
-        peripheral_id=peripheral_id,
-        path=str(path),
+            }
+        },
     )
-    return {
-        "persisted": True,
-        "peripheral_id": peripheral_id,
-        "path": str(path),
-    }
 
 
 async def _systemctl(*args: str, timeout: float) -> tuple[int, str, str]:
@@ -175,9 +130,10 @@ def _wfb_unit() -> str:
     """The radio unit this node actually runs: ``ados-wfb-rx`` on a ground
     station (where ``ados-wfb`` is a no-op), ``ados-wfb`` everywhere else."""
     from ados.api.deps import get_agent_app
-    from ados.api.routes.ground_station._common.profile import is_ground_station
+    from ados.core.profile import current_profile_and_role
 
-    return "ados-wfb-rx" if is_ground_station(get_agent_app()) else "ados-wfb"
+    profile, _ = current_profile_and_role(get_agent_app().config)
+    return "ados-wfb-rx" if profile == "ground-station" else "ados-wfb"
 
 
 async def _dispatch_restart_radio() -> dict:
@@ -256,9 +212,8 @@ async def _dispatch_restart_radio() -> dict:
 
 # Map of (peripheral_id, action_id) -> dispatcher. Returning a dict is
 # the wire shape the dashboard renders. Raise HTTPException for clean
-# 4xx / 5xx responses. Anything not in the map falls through to the
-# generic "action declared but not wired yet" stub so the dashboard can
-# still surface the button without lying about completion.
+# 4xx / 5xx responses. An action not in the map is refused with a 501 and
+# is left out of the listing, so no surface offers it.
 _ACTION_DISPATCHERS = {
     ("ados.rtl8812eu-radio", "restart_radio"): _dispatch_restart_radio,
 }
@@ -274,20 +229,13 @@ async def invoke_peripheral_action(
     Validates the action is declared on the manifest, then looks up a
     real dispatcher in the ``_ACTION_DISPATCHERS`` table. Wired
     actions execute and return ``{ok: true, dispatched_at, message?}``;
-    declared-but-not-yet-wired actions return a clear
-    ``{queued: false, reason}`` envelope so the dashboard surfaces a
-    "not yet implemented" message rather than pretending success.
+    a declared action with no dispatcher is a 501
+    ``E_ACTION_NOT_SUPPORTED`` rather than a reported success.
     """
     registry = get_peripheral_registry()
     manifest = registry.get_manifest(peripheral_id)
     if manifest is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "E_PERIPHERAL_NOT_FOUND",
-                "peripheral_id": peripheral_id,
-            },
-        )
+        raise _not_found(peripheral_id)
 
     declared = {action.id for action in manifest.actions}
     if request.action_id not in declared:
@@ -303,22 +251,17 @@ async def invoke_peripheral_action(
 
     dispatcher = _ACTION_DISPATCHERS.get((peripheral_id, request.action_id))
     if dispatcher is None:
-        log.info(
-            "peripheral_action_not_wired",
-            peripheral_id=peripheral_id,
-            action_id=request.action_id,
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "error": {
+                    "code": "E_ACTION_NOT_SUPPORTED",
+                    "message": "this action has no implementation on this agent",
+                    "peripheral_id": peripheral_id,
+                    "action_id": request.action_id,
+                }
+            },
         )
-        return {
-            "ok": False,
-            "peripheral_id": peripheral_id,
-            "action_id": request.action_id,
-            "reason": "action_declared_but_not_yet_wired",
-            "message": (
-                "The agent recognises this action but no dispatcher is "
-                "wired yet. The manifest entry is the contract; "
-                "implementation lands separately."
-            ),
-        }
 
     result = await dispatcher()
     log.info(

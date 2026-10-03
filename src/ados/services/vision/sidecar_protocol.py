@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: GPL-3.0-only
 # Copyright (C) 2026 Altnautica — ADOS Drone Agent
-"""Wire codec for the NPU/TensorRT inference sidecar.
+"""Wire codec for the NPU inference sidecars.
 
 The Rust vision engine cannot host the proprietary Python-only inference
-runtimes (rknn-toolkit-lite2 for RK3588/RK3582/RK3576, tensorrt for Jetson
-Orin), so a small Python sidecar process owns the model and the inference call.
+runtimes (rknn-toolkit-lite2 for RK3588/RK3582/RK3576, HailoRT for a Hailo-8
+on a Pi AI HAT), so a small Python sidecar process owns the model and the
+inference call.
 The engine reaches it over a Unix domain socket with the same framing every
 other ADOS IPC socket uses: a 4-byte big-endian unsigned length prefix followed
 by a msgpack body (see ``ados.core.ipc`` and the ``frame`` contract in the
 ``ados-protocol`` crate).
 
-Two request operations cross the wire:
+Four request operations cross the wire:
 
 * ``load_model`` — open a model file and keep it resident, addressed by id.
+  Loading an id that is already resident replaces it and releases the
+  previous runtime.
 * ``infer`` — run a resident model against one raw frame, returning detections.
+* ``embed`` — run a resident re-id model against one crop, returning a vector.
+* ``unload`` — release a resident model's runtime and forget the id.
 
 Detection responses use the exact field names of the ``Detection`` and
 ``BoundingBox`` shapes the Rust client deserializes (``bbox`` with
@@ -27,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -45,6 +51,7 @@ MAX_FRAME_BYTES = 8 * 1024 * 1024
 OP_LOAD_MODEL = "load_model"
 OP_INFER = "infer"
 OP_EMBED = "embed"
+OP_UNLOAD = "unload"
 
 # Response statuses.
 STATUS_OK = "ok"
@@ -185,7 +192,24 @@ class EmbedRequest:
         )
 
 
-def parse_request(raw: dict[str, Any]) -> LoadModelRequest | InferRequest | EmbedRequest:
+@dataclass
+class UnloadRequest:
+    """Ask the sidecar to release a resident model's runtime and forget the id.
+    Unloading an id that is not resident is not an error."""
+
+    model_id: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"op": OP_UNLOAD, "model_id": self.model_id}
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> UnloadRequest:
+        return cls(model_id=str(raw["model_id"]))
+
+
+def parse_request(
+    raw: dict[str, Any],
+) -> LoadModelRequest | InferRequest | EmbedRequest | UnloadRequest:
     """Dispatch a decoded request mapping to its typed form by ``op``."""
     op = raw.get("op")
     if op == OP_LOAD_MODEL:
@@ -194,7 +218,25 @@ def parse_request(raw: dict[str, Any]) -> LoadModelRequest | InferRequest | Embe
         return InferRequest.from_dict(raw)
     if op == OP_EMBED:
         return EmbedRequest.from_dict(raw)
+    if op == OP_UNLOAD:
+        return UnloadRequest.from_dict(raw)
     raise ProtocolError(f"unknown request op: {op!r}")
+
+
+def release_runtime(handle: Any, log: Any, **context: Any) -> None:
+    """Release a vendor runtime handle that exposes ``release()``.
+
+    A release failure is logged, never raised: the handle is being dropped
+    either way, and a failing release must not fail the request that replaced
+    or unloaded it.
+    """
+    release = getattr(handle, "release", None)
+    if not callable(release):
+        return
+    try:
+        release()
+    except Exception as exc:  # vendor runtime: any failure is non-fatal here
+        log.warning("sidecar_runtime_release_failed", error=str(exc), **context)
 
 
 def detection_dict(
@@ -337,7 +379,9 @@ class Backend(Protocol):
 
     A backend turns typed requests into response mappings already in the
     protocol shape (see :func:`ok_response` / :func:`error_response`). Both the
-    RKNN and TensorRT sidecars implement this so the socket plumbing is shared.
+    RKNN and Hailo sidecars implement this so the socket plumbing is shared.
+    The server serialises every call into a backend, so an implementation does
+    not need its own locking.
     """
 
     def load_model(self, req: LoadModelRequest) -> dict[str, Any]: ...
@@ -346,21 +390,28 @@ class Backend(Protocol):
 
     def embed(self, req: EmbedRequest) -> dict[str, Any]: ...
 
+    def unload(self, req: UnloadRequest) -> dict[str, Any]: ...
+
 
 class SidecarServer:
     """An asyncio Unix-socket server that frames requests, dispatches them to a
     :class:`Backend`, and frames the response back.
 
     Each connection is handled serially: a request is read, the backend runs
-    (in a thread so a blocking NPU/TensorRT call does not stall the event
-    loop), and the response is written before the next request is read. A
-    backend exception becomes an ``error`` response so one bad request never
-    drops the connection.
+    (in a thread so a blocking NPU call does not stall the event loop), and the
+    response is written before the next request is read. A backend exception
+    becomes an ``error`` response so one bad request never drops the
+    connection.
+
+    Calls into the backend are serialised by one lock across every connection:
+    the vendor runtimes are not thread-safe, and two clients must never run a
+    load and an inference on the same runtime object at once.
     """
 
     def __init__(self, socket_path: str, backend: Backend, log: Any) -> None:
         self._socket_path = socket_path
         self._backend = backend
+        self._backend_lock = threading.Lock()
         self._log = log
         self._server: asyncio.AbstractServer | None = None
 
@@ -415,16 +466,26 @@ class SidecarServer:
         except (ProtocolError, KeyError, ValueError) as exc:
             return error_response(f"bad request: {exc}")
 
-        # The backend call may block (NPU / TensorRT), so run it off the loop.
+        if isinstance(req, LoadModelRequest):
+            call: Any = self._backend.load_model
+        elif isinstance(req, EmbedRequest):
+            call = self._backend.embed
+        elif isinstance(req, UnloadRequest):
+            call = self._backend.unload
+        else:
+            call = self._backend.infer
+
+        # The backend call may block on the NPU, so run it off the loop.
         try:
-            if isinstance(req, LoadModelRequest):
-                return await asyncio.to_thread(self._backend.load_model, req)
-            if isinstance(req, EmbedRequest):
-                return await asyncio.to_thread(self._backend.embed, req)
-            return await asyncio.to_thread(self._backend.infer, req)
+            return await asyncio.to_thread(self._call_locked, call, req)
         except Exception as exc:  # backend bug must not drop the connection
             self._log.error("sidecar_backend_error", error=str(exc))
             return error_response(f"backend error: {exc}")
+
+    def _call_locked(self, call: Any, req: Any) -> dict[str, Any]:
+        with self._backend_lock:
+            result: dict[str, Any] = call(req)
+            return result
 
     async def _safe_write(
         self, writer: asyncio.StreamWriter, payload: dict[str, Any]

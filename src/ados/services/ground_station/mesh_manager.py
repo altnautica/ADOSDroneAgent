@@ -1,9 +1,14 @@
 """batman-adv local wireless mesh lifecycle for relay/receiver roles.
 
 Brings up a second wireless interface in 802.11s (preferred) or IBSS
-(fallback) mode, binds it to `bat0`, and drives batman-adv gateway
-mode based on role + cloud_uplink config, then holds the mesh up until
-stopped. Neighbor, gateway and partition state is polled and published by
+(fallback) mode with authenticated keying (SAE for 802.11s, IBSS-RSN for
+IBSS, both through wpa_supplicant keyed from the deployment PSK), binds it to
+`bat0`, and drives batman-adv gateway mode based on role + cloud_uplink
+config. A fixed-cadence supervision loop then re-joins and re-binds the mesh
+when the interface, its wpa_supplicant, the join or the batman membership is
+lost, and re-evaluates the gateway mode as the uplink comes and goes. There is
+no open-join path: if the secure join cannot be brought up the node stays off
+the mesh. Neighbor, gateway and partition state is polled and published by
 the native groundlink mesh loop (``/run/ados/mesh-state.json`` and the
 mesh-event journal), not here.
 
@@ -40,6 +45,7 @@ import secrets
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import structlog
@@ -47,6 +53,7 @@ import structlog
 from ados.core.config import ADOSConfig, load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import (
+    ADOS_RUN_DIR,
     MESH_GATEWAY_JSON,
     MESH_ROLE_PATH,
     UPLINK_ACTIVE_FLAG,
@@ -66,6 +73,25 @@ MESH_ID_PATH = _MESH_ID_PATH
 MESH_PSK_PATH = _MESH_PSK_PATH
 
 _GATEWAY_BANDWIDTH_DEFAULT = "10000/2000"  # 10 Mbps down, 2 Mbps up hint
+
+# Where the per-interface wpa_supplicant config (it carries the mesh passphrase)
+# is written, 0700 directory / 0600 file.
+_WPA_RUN_DIR = ADOS_RUN_DIR / "mesh"
+_SYS_CLASS_NET = Path("/sys/class/net")
+
+# How long a fresh wpa_supplicant gets to show the interface joined.
+_JOIN_VERIFY_TIMEOUT_S = 15.0
+_JOIN_VERIFY_POLL_S = 0.5
+_WPA_STOP_GRACE_S = 5.0
+
+# Supervision cadence. Fixed on purpose: the loop never backs off and never
+# gives up, so a replugged dongle or a returning uplink is picked up within one
+# interval however long the outage lasted.
+_SUPERVISE_INTERVAL_S = 3.0
+
+# Per carrier: the `iw ... set type` argument and the `iw dev <if> info` type.
+_IW_SET_TYPE = {"802.11s": "mp", "ibss": "ibss"}
+_IW_INFO_TYPE = {"802.11s": "mesh point", "ibss": "IBSS"}
 
 
 def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
@@ -191,51 +217,193 @@ def _modprobe_batman() -> bool:
     return True
 
 
+def _channel_freq_mhz(channel: int) -> int:
+    """2.4 GHz channel to centre frequency. Channel 1 is 2412 MHz."""
+    return 2407 + channel * 5 if 1 <= channel <= 13 else 2412
+
+
+def _mesh_passphrase(psk: bytes) -> str:
+    """The mesh passphrase every paired node derives from the shared key.
+
+    ``psk.key`` holds raw random bytes, so they are hex-encoded into printable
+    ASCII and cut at 63 characters, the WPA passphrase ceiling IBSS-RSN
+    enforces. SAE takes the same string as its ``sae_password``. The same key
+    bytes on every node give the same passphrase."""
+    return psk.hex()[:63]
+
+
+def _check_conf_value(name: str, value: str, min_len: int, max_len: int) -> None:
+    """Refuse a value that cannot sit verbatim inside a quoted wpa_supplicant
+    string: printable ASCII only (no newline, no quote, no backslash), no
+    edge whitespace, within the length bounds."""
+    if not min_len <= len(value) <= max_len:
+        raise ValueError(f"{name} must be {min_len}-{max_len} characters")
+    if value != value.strip() or any(
+        not (" " <= c <= "~") or c in '"\\' for c in value
+    ):
+        raise ValueError(
+            f"{name} must be printable ASCII without quotes, backslashes or "
+            "edge whitespace"
+        )
+
+
+def _wpa_supplicant_conf(
+    carrier: str, mesh_id: str, passphrase: str, freq_mhz: int
+) -> str:
+    """wpa_supplicant config for an authenticated mesh join.
+
+    802.11s: mesh mode (``mode=5``) with SAE and management-frame protection
+    required. IBSS: ad-hoc (``mode=1``) with IBSS-RSN, WPA2-PSK over CCMP.
+    Raises ValueError for an unknown carrier or a mesh_id / passphrase that
+    cannot be written safely (1-32 characters for the mesh_id, 8-63 for the
+    passphrase)."""
+    _check_conf_value("mesh_id", mesh_id, 1, 32)
+    _check_conf_value("mesh passphrase", passphrase, 8, 63)
+    if carrier == "802.11s":
+        lines = [
+            "network={",
+            f'\tssid="{mesh_id}"',
+            "\tmode=5",
+            f"\tfrequency={freq_mhz}",
+            "\tkey_mgmt=SAE",
+            f'\tsae_password="{passphrase}"',
+            "\tieee80211w=2",
+            "}",
+        ]
+    elif carrier == "ibss":
+        lines = [
+            # IBSS-RSN needs the driver-side scan/selection mode.
+            "ap_scan=2",
+            "network={",
+            f'\tssid="{mesh_id}"',
+            "\tmode=1",
+            f"\tfrequency={freq_mhz}",
+            "\tproto=RSN",
+            "\tkey_mgmt=WPA-PSK",
+            "\tpairwise=CCMP",
+            "\tgroup=CCMP",
+            f'\tpsk="{passphrase}"',
+            "}",
+        ]
+    else:
+        raise ValueError(f"unknown mesh carrier {carrier!r}")
+    return "\n".join(lines) + "\n"
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` as a 0600 file in a 0700 directory."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(text)
+
+
+def _wpa_conf_path(iface: str) -> Path:
+    return _WPA_RUN_DIR / f"wpa_supplicant-{iface}.conf"
+
+
+def _iface_joined(iface: str, carrier: str, mesh_id: str) -> bool:
+    """True when ``iw dev <iface> info`` shows the carrier's interface type
+    joined to ``mesh_id`` (iw reports the mesh ID / IBSS SSID as ``ssid``)."""
+    rc, out, _e = _run(["iw", "dev", iface, "info"], timeout=5.0)
+    if rc != 0:
+        return False
+    iftype = ssid = None
+    for line in out.splitlines():
+        field = line.strip()
+        if field.startswith("type "):
+            iftype = field[len("type "):].strip()
+        elif field.startswith("ssid "):
+            ssid = field[len("ssid "):].strip()
+    return iftype == _IW_INFO_TYPE.get(carrier) and ssid == mesh_id
+
+
+def _bat_member(iface: str, bat_iface: str) -> bool:
+    """True when ``iface`` is a batman-adv hard interface of ``bat_iface``."""
+    try:
+        member_of = (_SYS_CLASS_NET / iface / "batman_adv" / "mesh_iface").read_text()
+    except OSError:
+        return False
+    return member_of.strip() == bat_iface
+
+
+def _stop_wpa_supplicant(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=_WPA_STOP_GRACE_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            log.warning("wpa_supplicant_kill_unreaped", pid=proc.pid)
+
+
 def _bring_up_mesh_iface(
     iface: str,
     carrier: str,
     mesh_id: str,
     psk: bytes,
     channel: int,
-) -> bool:
-    """Configure the mesh-side wireless interface in 802.11s or IBSS mode."""
-    # Flush the interface first to a clean baseline.
-    _run(["ip", "link", "set", iface, "down"], timeout=5.0)
-    _run(["iw", "dev", iface, "disconnect"], timeout=5.0)
+) -> subprocess.Popen[bytes] | None:
+    """Join the mesh with authenticated keying, or refuse to join at all.
 
-    if carrier == "802.11s":
-        # Set mesh type. Some drivers require `mesh` explicitly.
-        rc, _o, e = _run(["iw", "dev", iface, "set", "type", "mp"], timeout=5.0)
-        if rc != 0:
-            log.warning("iw_set_type_mp_failed", iface=iface, err=e.strip())
-        _run(["ip", "link", "set", iface, "up"], timeout=5.0)
-        # 2.4 GHz channel to frequency. Channel 1 is 2412 MHz.
-        freq_mhz = 2407 + channel * 5 if 1 <= channel <= 13 else 2412
-        rc, _o, e = _run(
-            ["iw", "dev", iface, "mesh", "join", mesh_id, "freq", str(freq_mhz), "HT20"],
-            timeout=10.0,
-        )
-        if rc != 0:
-            log.error("iw_mesh_join_failed", iface=iface, err=e.strip())
-            return False
-    elif carrier == "ibss":
-        rc, _o, e = _run(["iw", "dev", iface, "set", "type", "ibss"], timeout=5.0)
-        if rc != 0:
-            log.warning("iw_set_type_ibss_failed", iface=iface, err=e.strip())
-        _run(["ip", "link", "set", iface, "up"], timeout=5.0)
-        freq_mhz = 2407 + channel * 5 if 1 <= channel <= 13 else 2412
-        rc, _o, e = _run(
-            ["iw", "dev", iface, "ibss", "join", mesh_id, str(freq_mhz), "HT20"],
-            timeout=10.0,
-        )
-        if rc != 0:
-            log.error("iw_ibss_join_failed", iface=iface, err=e.strip())
-            return False
-    else:
+    Writes the wpa_supplicant config (0600, under the run dir), starts
+    wpa_supplicant on the interface and waits for ``iw`` to show it joined to
+    ``mesh_id``. Returns the running wpa_supplicant for the caller to track, or
+    None when the secure join could not be brought up. There is deliberately
+    no fallback to an open ``iw ... join``: a mesh without keying would let any
+    radio that knows the mesh_id onto the batman-adv fabric.
+    """
+    set_type = _IW_SET_TYPE.get(carrier)
+    if set_type is None:
         log.error("unknown_carrier", carrier=carrier)
-        return False
+        return None
+    try:
+        conf = _wpa_supplicant_conf(
+            carrier, mesh_id, _mesh_passphrase(psk), _channel_freq_mhz(channel)
+        )
+    except ValueError as exc:
+        log.error("mesh_identity_invalid", error=str(exc))
+        return None
+    conf_path = _wpa_conf_path(iface)
+    try:
+        _write_private(conf_path, conf)
+    except OSError as exc:
+        log.error("mesh_wpa_conf_write_failed", path=str(conf_path), error=str(exc))
+        return None
 
-    return True
+    _run(["ip", "link", "set", iface, "down"], timeout=5.0)
+    rc, _o, e = _run(["iw", "dev", iface, "set", "type", set_type], timeout=5.0)
+    if rc != 0:
+        log.warning("iw_set_type_failed", iface=iface, type=set_type, err=e.strip())
+    _run(["ip", "link", "set", iface, "up"], timeout=5.0)
+
+    try:
+        proc = subprocess.Popen(
+            ["wpa_supplicant", "-i", iface, "-D", "nl80211", "-c", str(conf_path)],
+            stdin=subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        log.error("wpa_supplicant_spawn_failed", iface=iface, error=str(exc))
+        return None
+
+    deadline = time.monotonic() + _JOIN_VERIFY_TIMEOUT_S
+    while True:
+        if proc.poll() is not None:
+            log.error("wpa_supplicant_exited", iface=iface, rc=proc.returncode)
+            return None
+        if _iface_joined(iface, carrier, mesh_id):
+            return proc
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(_JOIN_VERIFY_POLL_S)
+    log.error("mesh_secure_join_unverified", iface=iface, carrier=carrier)
+    _stop_wpa_supplicant(proc)
+    return None
 
 
 def _bind_iface_to_bat(iface: str, bat_iface: str) -> bool:
@@ -289,29 +457,32 @@ def _apply_persisted_gateway_preference() -> str | None:
     return str(pinned_mac)
 
 
-def _configure_gateway_mode(role: str, cloud_uplink: str, has_uplink: bool) -> str:
-    """Pick batman gateway mode and apply it. Returns the resulting mode."""
-    advertise = False
+def _gateway_mode_for(role: str, cloud_uplink: str, has_uplink: bool) -> str:
+    """The batman gateway mode for this node.
+
+    ``force_on`` advertises, ``force_off`` does not, ``auto`` advertises iff
+    the uplink is live. A receiver that does not advertise runs as a gateway
+    client; every other non-advertising node runs with gateway mode off."""
     if cloud_uplink == "force_on":
         advertise = True
     elif cloud_uplink == "force_off":
         advertise = False
     else:  # auto
         advertise = has_uplink
-
     if advertise:
-        mode = "server"
-        _run(
-            ["batctl", "gw_mode", "server", _GATEWAY_BANDWIDTH_DEFAULT],
-            timeout=5.0,
-        )
-    elif role == "receiver":
-        mode = "client"
-        _run(["batctl", "gw_mode", "client"], timeout=5.0)
-    else:
-        mode = "off"
-        _run(["batctl", "gw_mode", "off"], timeout=5.0)
-    return mode
+        return "server"
+    return "client" if role == "receiver" else "off"
+
+
+def _apply_gateway_mode(mode: str) -> bool:
+    cmd = ["batctl", "gw_mode", mode]
+    if mode == "server":
+        cmd.append(_GATEWAY_BANDWIDTH_DEFAULT)
+    rc, _o, err = _run(cmd, timeout=5.0)
+    if rc != 0:
+        log.warning("gw_mode_apply_failed", mode=mode, err=err.strip())
+        return False
+    return True
 
 
 class MeshManager:
@@ -325,15 +496,23 @@ class MeshManager:
         self._carrier = config.ground_station.mesh.carrier
         self._channel = config.ground_station.mesh.channel
         self._mesh_id = ""
+        self._psk = b""
+        # The wpa_supplicant holding the secure join, tracked so supervision
+        # notices it dying.
+        self._wpa: subprocess.Popen[bytes] | None = None
+        # The gateway mode last applied; None until one applied successfully.
+        self._gw_mode: str | None = None
+        # The last fault supervision saw, so a lasting outage logs once.
+        self._fault: str | None = None
 
     async def setup(self) -> bool:
-        """One-shot bringup. Returns True on success."""
+        """Initial bringup. Returns True on success."""
         if self._role not in ("relay", "receiver"):
             log.warning("mesh_skip_direct_role")
             return False
 
         try:
-            mesh_id, _psk = _ensure_mesh_identity(self._role, self._config)
+            mesh_id, psk = _ensure_mesh_identity(self._role, self._config)
         except MeshIdentityMissing as exc:
             log.error("mesh_identity_missing", error=str(exc))
             # Signal a distinct "graceful downgrade" path to main() by
@@ -344,6 +523,7 @@ class MeshManager:
             log.error("mesh_identity_error", error=str(exc))
             return False
         self._mesh_id = mesh_id
+        self._psk = psk
 
         iface = _pick_mesh_iface(self._config.ground_station.mesh.interface_override)
         if not iface:
@@ -354,25 +534,13 @@ class MeshManager:
         if not _modprobe_batman():
             return False
 
-        ok = _bring_up_mesh_iface(
-            iface, self._carrier, mesh_id, _psk, self._channel,
-        )
-        if not ok:
+        if not self._join_and_bind():
             return False
 
-        if not _bind_iface_to_bat(iface, self._bat_iface):
-            return False
-
-        # Gateway mode decision. "has_uplink" is best-effort here;
-        # uplink_router owns the real decision. Operator preference from
-        # the GCS lands in /etc/ados/mesh/gateway.json and is re-applied
-        # here at setup so pins survive agent + mesh restarts.
-        has_uplink = UPLINK_ACTIVE_FLAG.is_file()
-        mode = _configure_gateway_mode(
-            self._role,
-            self._config.ground_station.cloud_uplink,
-            has_uplink,
-        )
+        # Operator preference from the GCS lands in
+        # /etc/ados/mesh/gateway.json and is re-applied here at setup so pins
+        # survive agent + mesh restarts.
+        mode = self._update_gateway_mode()
         pinned_mac = _apply_persisted_gateway_preference()
         log.info(
             "mesh_up",
@@ -385,11 +553,85 @@ class MeshManager:
         )
         return True
 
+    def _stop_wpa(self) -> None:
+        if self._wpa is not None:
+            _stop_wpa_supplicant(self._wpa)
+            self._wpa = None
+
+    def _join_and_bind(self) -> bool:
+        """(Re)run the secure join and the batman bind on the mesh iface."""
+        self._stop_wpa()
+        proc = _bring_up_mesh_iface(
+            self._mesh_iface, self._carrier, self._mesh_id, self._psk, self._channel,
+        )
+        if proc is None:
+            return False
+        self._wpa = proc
+        return _bind_iface_to_bat(self._mesh_iface, self._bat_iface)
+
+    def _mesh_fault(self) -> str | None:
+        """Why the mesh is not up as configured, or None when it is."""
+        iface = self._mesh_iface
+        if not iface or not (_SYS_CLASS_NET / iface).exists():
+            return "iface_missing"
+        if self._wpa is None or self._wpa.poll() is not None:
+            return "wpa_supplicant_dead"
+        if not _iface_joined(iface, self._carrier, self._mesh_id):
+            return "not_joined"
+        if not _bat_member(iface, self._bat_iface):
+            return "not_in_bat"
+        return None
+
+    def _update_gateway_mode(self) -> str | None:
+        """Re-decide the gateway mode from the uplink flag; run `batctl` only
+        when the decision differs from the mode last applied."""
+        mode = _gateway_mode_for(
+            self._role,
+            self._config.ground_station.cloud_uplink,
+            UPLINK_ACTIVE_FLAG.is_file(),
+        )
+        if mode != self._gw_mode and _apply_gateway_mode(mode):
+            log.info("mesh_gw_mode_applied", previous=self._gw_mode, mode=mode)
+            self._gw_mode = mode
+        return self._gw_mode
+
+    def tick(self) -> None:
+        """One supervision pass: heal the mesh if it was lost, then re-evaluate
+        the gateway mode."""
+        fault = self._mesh_fault()
+        if fault is not None:
+            if fault != self._fault:
+                log.warning("mesh_link_lost", iface=self._mesh_iface, reason=fault)
+            if fault == "iface_missing":
+                # A replugged dongle can come back under another name.
+                self._stop_wpa()
+                iface = _pick_mesh_iface(
+                    self._config.ground_station.mesh.interface_override
+                )
+                if iface and (_SYS_CLASS_NET / iface).exists():
+                    self._mesh_iface = iface
+                    fault = None if self._join_and_bind() else fault
+            else:
+                fault = None if self._join_and_bind() else fault
+            if fault is None:
+                log.info("mesh_rejoined", iface=self._mesh_iface)
+        self._fault = fault
+        self._update_gateway_mode()
+
+    async def supervise(self, shutdown: asyncio.Event) -> None:
+        """Run :meth:`tick` every ``_SUPERVISE_INTERVAL_S`` until ``shutdown``."""
+        while not shutdown.is_set():
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=_SUPERVISE_INTERVAL_S)
+            except TimeoutError:
+                await asyncio.to_thread(self.tick)
+
     async def teardown(self) -> None:
+        self._stop_wpa()
         if self._mesh_iface:
             _run(["batctl", "if", "del", self._mesh_iface], timeout=5.0)
-            _run(["iw", "dev", self._mesh_iface, "disconnect"], timeout=5.0)
             _run(["ip", "link", "set", self._mesh_iface, "down"], timeout=5.0)
+            _wpa_conf_path(self._mesh_iface).unlink(missing_ok=True)
         _run(["ip", "link", "set", self._bat_iface, "down"], timeout=5.0)
 
 
@@ -435,7 +677,7 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, shutdown.set)
 
-    await shutdown.wait()
+    await manager.supervise(shutdown)
 
     slog.info("mesh_manager_stopping")
     await manager.teardown()

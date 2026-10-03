@@ -37,17 +37,6 @@ def isolated_pm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PairManager:
     monkeypatch.setattr(
         pm_mod, "_SETUP_COMPLETE_PATH", tmp_path / "setup-complete"
     )
-    # Redirect the whole factory-reset set at the tmp dir. A reset walks
-    # absolute paths, so without this a test running as root would wipe the
-    # machine it runs on.
-    monkeypatch.setattr(
-        pm_mod,
-        "_FACTORY_RESET_FILES",
-        (tmp_path / "ap_passphrase", tmp_path / "pairing.json"),
-    )
-    monkeypatch.setattr(
-        pm_mod, "_FACTORY_RESET_DIRS", (tmp_path / "secrets",)
-    )
     monkeypatch.setattr(
         pm_mod, "_RELAY_SECRET_PATH", tmp_path / "secrets" / "relay-peer-secret"
     )
@@ -207,20 +196,6 @@ def test_set_auto_pair_allowed_when_unpaired(
     assert result["auto_pair_enabled"] is True
 
 
-def test_recover_half_pair_keeps_valid_local_key(isolated_pm: PairManager) -> None:
-    """A valid local-bind key (no peer device-id) must survive the boot
-    half-pair check. The local bind protocol never records a peer device-id,
-    so an unknown peer is the normal shape of a real pairing, not a half-pair.
-    Wiping it here is what made local pairings evaporate across reboots."""
-    asyncio.run(isolated_pm.apply_keypair(_make_blob(0x5A), "drone"))
-    target = isolated_pm._key_path_for_role("drone")
-    assert target.is_file()
-    result = asyncio.run(isolated_pm.recover_half_pair_state("drone"))
-    assert result["recovered"] is False
-    assert result["reason"] == "local_bind_no_peer_id"
-    assert target.is_file()  # key preserved across the boot check
-
-
 def test_status_when_no_key_present(isolated_pm: PairManager) -> None:
     status = asyncio.run(isolated_pm.status("gs"))
     assert status["paired"] is False
@@ -235,15 +210,3 @@ def test_status_rejects_wrong_size_key(
     (tmp_path / "rx.key").write_bytes(b"\x00" * 32)
     status = asyncio.run(isolated_pm.status("gs"))
     assert status["paired"] is False
-
-
-def test_factory_reset_rearms_auto_pair(
-    isolated_pm: PairManager, tmp_path: Path
-) -> None:
-    asyncio.run(
-        isolated_pm.apply_keypair(_make_blob(0x77), "gs", peer_device_id="d")
-    )
-    result = asyncio.run(isolated_pm.factory_reset("gs"))
-    assert result["reset"] is True
-    assert result["auto_pair_enabled"] is True
-    assert not (tmp_path / "rx.key").is_file()

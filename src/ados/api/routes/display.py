@@ -20,15 +20,19 @@ Implementation notes:
   is cached for ~800 ms so a half-second of concurrent polls collapses into
   one read.
 * ``POST /page`` writes the requested page id to a JSON request file the
-  display service consumes and unlinks.
+  display service consumes and unlinks. It is refused while ``ados-display``
+  is not active: ``lcd-state.json`` outlives a crashed service, so its route
+  list alone would accept a request nothing will ever consume.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -271,6 +275,11 @@ RECALIBRATE_FLAG_PATH = ADOS_RUN_DIR / "recalibrate.flag"
 #: The crosshair count of the native wizard (a 3x3 grid).
 CALIBRATION_TARGET_COUNT = 9
 
+#: The latest ``/calibrate/start`` this process accepted: its request id and
+#: the wall-clock ms it was made at. A fit is only "calibrated" for that
+#: request once the calibration file is newer than it.
+_calibration_request: tuple[str, int] | None = None
+
 
 def arm_touch_recalibration() -> str | None:
     """Drop the recalibrate flag. Returns an error string, or None on success."""
@@ -282,33 +291,88 @@ def arm_touch_recalibration() -> str | None:
     return None
 
 
+def _calib_mtime_ms() -> int | None:
+    try:
+        return int(TOUCH_CALIB_PATH.stat().st_mtime * 1000)
+    except OSError:
+        return None
+
+
 @router.post("/calibrate/start")
 async def post_calibrate_start() -> dict[str, Any]:
     """Ask the panel to launch its calibration wizard.
 
     The wizard runs on the panel, where the operator taps the crosshairs; this
     only queues the request. There is no remote step counter: the result shows
-    up in ``/calibrate/status`` as ``calibrated`` once the fit is saved.
+    up in ``/calibrate/status`` as ``calibrated`` once a fit newer than this
+    request (``request_id``) is saved.
     """
+    global _calibration_request
     error = arm_touch_recalibration()
     if error is not None:
         log.warning("recalibrate_flag_write_failed", error=error)
         raise HTTPException(status_code=500, detail="calibration_request_failed")
-    return {"requested": True, "target_count": CALIBRATION_TARGET_COUNT}
+    request_id = uuid.uuid4().hex[:12]
+    _calibration_request = (request_id, int(time.time() * 1000))
+    return {
+        "requested": True,
+        "target_count": CALIBRATION_TARGET_COUNT,
+        "request_id": request_id,
+    }
 
 
 @router.get("/calibrate/status")
 async def get_calibrate_status() -> dict[str, Any]:
     """Calibration state for the GCS dialog poll.
 
-    ``calibrated`` is the on-disk fit. ``requested`` is true while a start
-    request is queued and the display service has not consumed it yet (it
-    stays true when no display service is running to consume it).
+    ``calibrated`` is a fit on disk that is newer than the latest
+    ``/calibrate/start`` (``request_id``), so a poll right after a start does
+    not report the previous fit as the new one. With no start since the API
+    came up it is simply whether a fit exists. ``calib_mtime_ms`` is the fit
+    file's modification time (null when there is none). ``requested`` is true
+    while a start request is queued and the display service has not consumed
+    it yet (it stays true when no display service is running to consume it).
     """
+    mtime_ms = _calib_mtime_ms()
+    has_fit = load_calib(TOUCH_CALIB_PATH) is not None
+    request = _calibration_request
+    if request is None:
+        calibrated = has_fit
+    else:
+        calibrated = has_fit and mtime_ms is not None and mtime_ms > request[1]
     return {
-        "calibrated": load_calib(TOUCH_CALIB_PATH) is not None,
+        "calibrated": calibrated,
         "requested": RECALIBRATE_FLAG_PATH.exists(),
+        "request_id": request[0] if request is not None else None,
+        "calib_mtime_ms": mtime_ms,
     }
+
+
+#: The native display service unit that consumes page requests.
+_DISPLAY_UNIT = "ados-display"
+
+
+async def _display_service_active() -> bool:
+    """Whether ``ados-display`` is running to consume a page request."""
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            systemctl,
+            "is-active",
+            "--quiet",
+            _DISPLAY_UNIT,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    try:
+        return await asyncio.wait_for(proc.wait(), timeout=3.0) == 0
+    except TimeoutError:
+        proc.kill()
+        return False
 
 
 # ── routes: snapshot / page ───────────────────────────────
@@ -360,16 +424,17 @@ async def post_page(body: PageSetBody) -> dict[str, Any]:
     the requested page and unlinks the file. Validation is strict: the
     id must be one the running navigator registered (it publishes the
     list in ``lcd-state.json``), so a typo never hangs the watcher, and
-    no request is queued while no display service has published one.
+    no request is queued while ``ados-display`` is not active or has not
+    published its routes (503 ``E_DISPLAY_NOT_RUNNING``).
     """
     page_id = body.page.strip()
     valid = _registered_page_ids()
-    if not valid:
+    if not valid or not await _display_service_active():
         raise HTTPException(
             status_code=503,
             detail={
                 "ok": False,
-                "error": "display_not_running",
+                "error": "E_DISPLAY_NOT_RUNNING",
                 "page": page_id,
             },
         )

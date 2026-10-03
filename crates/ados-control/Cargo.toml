@@ -59,6 +59,11 @@ ados-groundlink = { path = "../ados-groundlink" }
 # to: the supervisor executes role transitions, so both halves read its
 # definitions rather than a copy. Already linked through ados-groundlink.
 ados-supervisor = { path = "../ados-supervisor" }
+# The radio's link-tuning tables: the bitrate/FEC ladder (`bitrate::DEFAULT_TIERS`)
+# a pinned tier index resolves against, and the named link-preset trio table
+# (`config::link_preset_trio`). The video-config write reads the radio's own
+# definitions rather than a copy. Already linked through ados-groundlink.
+ados-radio = { path = "../ados-radio" }
 # The swarm state bus: this surface serves its published neighbour table on
 # `GET /api/swarm/neighbors` and folds it into `/api/status/full`. Depended on for
 # the PUBLISHED SHAPE (`publish::normalise_payload` + `empty_payload`), so the
@@ -151,6 +156,15 @@ sysinfo = { workspace = true }
 # no record. Same version the groundlink advert uses, so one mDNS
 # implementation ships on the box.
 mdns-sd = "0.13"
+# The external-code pairing accept registers the device with the pairing
+# backend over HTTPS: an async client on rustls with the ring provider and the
+# bundled webpki roots, the same TLS posture and versions the cloud relay and the
+# plugin host already link, so no new TLS stack ships.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls-manual-roots-no-provider",
+] }
 
 [dev-dependencies]
 tempfile = "3"

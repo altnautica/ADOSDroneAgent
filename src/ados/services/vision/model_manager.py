@@ -153,16 +153,28 @@ def board_family(board_id: str | None) -> str:
     b = (board_id or "").lower()
     if any(k in b for k in ("orin", "tegra", "jetson")):
         return "orin"
-    if any(k in b for k in ("rk3588", "rk3582", "orange-pi-5", "rock-5c", "rock5c")):
+    if any(
+        k in b
+        for k in (
+            "rk3588", "rk3582", "orange-pi-5", "orange pi 5", "orangepi5", "orangepi-5",
+            "rock-5c", "rock5c",
+        )
+    ):
         return "rk3588"
-    if any(k in b for k in ("raspberrypi-5", "raspberry pi 5", "raspberrypi5", "bcm2712")):
+    if any(
+        k in b
+        for k in (
+            "raspberrypi-5", "raspberry pi 5", "raspberrypi5", "bcm2712",
+            "raspberry pi cm5", "raspberry pi compute module 5", "rpi-cm5",
+        )
+    ):
         # Raspberry Pi 5 (BCM2712). A plugin that ships an accelerator variant keyed to this
         # family expects the Pi 5's add-on AI HAT (Hailo-class); a bare Pi 5 with no HAT should
         # still declare — and will then match — the plugin's cpu/generic fallback via the second
         # pass in ``select_ref_for_board``. (Presence-gating the accelerator on measured NPU TOPS
         # is the follow-up refinement; this restores the family the board was silently missing.)
         return "raspberrypi-5"
-    if any(k in b for k in ("a733", "sun60i", "cubie-a7s", "cubie a7s")):
+    if any(k in b for k in ("a733", "sun60i", "cubie-a7s", "cubie a7s", "cubie-a7z", "cubie a7z")):
         return "cpu"
     return "generic"
 
@@ -339,7 +351,7 @@ class ModelManager:
             installed.append({**entry, "id": mid, "custom": True})
             seen.add(mid)
 
-        valid_suffixes = {".rknn", ".tflite", ".onnx", ".engine"}
+        valid_suffixes = {".rknn", ".tflite", ".onnx"}
         for model_file in sorted(self._models_dir.iterdir()):
             if model_file.is_file() and model_file.suffix in valid_suffixes:
                 if model_file.stem in seen:
@@ -528,7 +540,7 @@ class ModelManager:
         """Report total model cache size and limit."""
         total_bytes = 0
         if self._models_dir.is_dir():
-            valid_suffixes = {".rknn", ".tflite", ".onnx", ".engine", ".hef"}
+            valid_suffixes = {".rknn", ".tflite", ".onnx", ".hef"}
             for f in self._models_dir.iterdir():
                 if f.is_file() and f.suffix in valid_suffixes:
                     total_bytes += f.stat().st_size
@@ -586,7 +598,7 @@ class ModelManager:
         if not ref.source:
             raise ValueError("model ref has no source")
         self._models_dir.mkdir(parents=True, exist_ok=True)
-        suffix = {"rknn": ".rknn", "tensorrt": ".engine", "tflite": ".tflite",
+        suffix = {"rknn": ".rknn", "tflite": ".tflite",
                   "pytorch": ".pt", "hailo": ".hef"}.get(ref.runtime, ".onnx")
         dest = self._models_dir / f"{ref.id}-{ref.board_match}{suffix}"
         tmp = dest.with_suffix(dest.suffix + ".tmp")

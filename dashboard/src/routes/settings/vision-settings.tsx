@@ -15,10 +15,9 @@ const BACKEND_OPTIONS: ReadonlyArray<{
   {
     value: "auto",
     label: "Auto",
-    description: "Pick the best available accelerator (NPU, GPU, or CPU).",
+    description: "Pick the best available accelerator (NPU or CPU).",
   },
   { value: "rknn", label: "RKNN", description: "Rockchip NPU." },
-  { value: "tensorrt", label: "TensorRT", description: "NVIDIA GPU." },
   {
     value: "opencv_dnn",
     label: "OpenCV DNN",

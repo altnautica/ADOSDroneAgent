@@ -6,12 +6,14 @@ agent-served cockpit at ``http://localhost:8080/cockpit`` (a light SPA served
 by the agent's own front, not a Next.js build on the box).
 
 Lifecycle:
-1. Probe `/dev/dri/card0`. If absent, the box has no HDMI sink connected
-   (or the DRM driver did not bind). Log clearly and exit 0 so systemd
-   does not churn restarting. Plug-and-play: the rest of the ground station
-   keeps working even without HDMI.
-2. Resolve target URL via config -> env var -> default chain.
-3. Launch Chromium full-screen, adaptively:
+1. Honour the operator's config: ``ground_station.display.type`` of ``lcd`` /
+   ``none`` or ``ground_station.kiosk.enabled: false`` stands the service down
+   with exit 0 (the unit treats that as "nothing to run").
+2. Wait for a DRM display, polling for HDMI hotplug at a fixed interval for as
+   long as it takes, so a monitor plugged in long after boot still gets the
+   cockpit. The rest of the ground station keeps working without HDMI.
+3. Resolve target URL via config -> env var -> default chain.
+4. Launch Chromium full-screen, adaptively:
    - When a graphical desktop session is already running on the box (a
      display manager with KDE / GNOME / etc.), launch Chromium as a
      full-screen kiosk window INSIDE that session. cage is NOT used here:
@@ -20,10 +22,15 @@ Lifecycle:
    - When no desktop is present (the appliance case), launch under `cage`,
      a Wayland single-app compositor that owns the display itself.
    The Chromium binary is resolved at runtime (its name varies by distro).
-4. Supervise the child. On exit, retry on a fixed short interval. Five
+   On the cage path a ``ground_station.kiosk.resolution`` of ``720p`` /
+   ``1080p`` sets the output mode via ``wlr-randr``; ``auto`` leaves it alone.
+5. Supervise the child. On exit, retry on a fixed short interval. Five
    crashes in 60 seconds either downgrades a GPU launch to software or ends
    the service with a non-zero code so systemd restarts it (RestartSec=3).
-5. On SIGTERM: send SIGTERM to the child, wait 10 s for graceful exit,
+   The config file is re-checked on a fixed cadence: a change to ``enabled``
+   or ``resolution`` restarts the child with the new settings (or stands the
+   service down when the kiosk was disabled).
+6. On SIGTERM: send SIGTERM to the child, wait 10 s for graceful exit,
    SIGKILL if it is still up. Under cage we also sweep orphaned cage /
    chromium processes; inside a running desktop we do NOT broad-sweep
    chromium (that would kill the operator's own browser windows).
@@ -51,7 +58,7 @@ import structlog
 
 from ados.core.config import load_config
 from ados.core.logging import configure_logging, get_logger
-from ados.core.paths import ADOS_RUN_DIR
+from ados.core.paths import ADOS_RUN_DIR, CONFIG_YAML
 
 log = get_logger("kiosk.kiosk_service")
 
@@ -60,11 +67,24 @@ _DRM_DIR = Path("/dev/dri")
 _DRM_SYSFS = Path("/sys/class/drm")
 
 # The DRM display devices can appear a few seconds AFTER multi-user/graphical
-# is reached at boot (the GPU/KMS driver probes asynchronously), so a one-shot
-# presence check loses a boot race and the kiosk never starts. We wait for a
-# display to appear instead of gating on it once.
-_DISPLAY_WAIT_SECONDS = 60.0
-_DISPLAY_POLL_SECONDS = 2.0
+# is reached at boot (the GPU/KMS driver probes asynchronously), and an operator
+# may plug a monitor in at any time after that. We poll for a display at a fixed
+# interval for as long as it takes instead of gating on it once or giving up.
+_DISPLAY_POLL_SECONDS = 5.0
+
+# How often the kiosk re-reads the config file's stat signature to notice an
+# operator edit to `ground_station.kiosk.enabled` / `resolution` without a reboot.
+_CONFIG_POLL_SECONDS = 3.0
+
+# `ground_station.kiosk.resolution` -> the DRM mode applied to the connected
+# output inside cage. Anything else (``auto``, an unknown value) leaves the mode
+# the compositor picked alone.
+_RESOLUTION_MODES = {"720p": "1280x720", "1080p": "1920x1080"}
+
+# How long to keep retrying the output-mode set after a cage launch while the
+# compositor brings its Wayland socket up.
+_OUTPUT_MODE_WAIT_SECONDS = 30.0
+_OUTPUT_MODE_POLL_SECONDS = 1.0
 
 # The agent HTTP surface that serves the cockpit (the native control front and
 # the FastAPI app it proxies) finishes starting a few seconds after this service
@@ -241,19 +261,48 @@ def _resolve_drm_device() -> str:
     return _DRM_DEVICE
 
 
-async def _wait_for_display() -> bool:
-    """Wait (bounded) for a DRM display to appear, absorbing the boot race where
-    the KMS device is created shortly after the service starts. Returns True as
-    soon as one is present, False after the timeout (a genuinely headless box)."""
+def _connected_outputs() -> dict[str, frozenset[str]]:
+    """Connected DRM connectors -> the modes each one advertises.
+
+    Keyed by the connector name without its card prefix
+    (``card1-HDMI-A-1`` -> ``HDMI-A-1``), which is the output name wlroots (and
+    so cage and ``wlr-randr``) uses. Modes are the ``WIDTHxHEIGHT`` lines of the
+    connector's sysfs ``modes`` file.
+    """
+    outputs: dict[str, frozenset[str]] = {}
+    try:
+        statuses = sorted(_DRM_SYSFS.glob("card*-*/status"))
+    except OSError:
+        return outputs
+    for status in statuses:
+        try:
+            if status.read_text().strip() != "connected":
+                continue
+            modes = (status.parent / "modes").read_text().split()
+        except OSError:
+            continue
+        name = status.parent.name.split("-", 1)[1]
+        outputs[name] = frozenset(modes)
+    return outputs
+
+
+async def _wait_for_display(watch: _SettingsWatch) -> bool:
+    """Wait for a DRM display to appear, for as long as it takes.
+
+    Absorbs both the boot race (the KMS device is created shortly after the
+    service starts) and a monitor hot-plugged at any later time: the display is
+    re-probed on a fixed interval with no deadline. Returns True as soon as a
+    display is present, or False when the operator disables the kiosk while it
+    is waiting (the config is re-checked on the same tick)."""
     if _hdmi_present():
         return True
-    log.info("kiosk_waiting_for_display", timeout_s=_DISPLAY_WAIT_SECONDS)
-    deadline = time.monotonic() + _DISPLAY_WAIT_SECONDS
-    while time.monotonic() < deadline:
+    log.info("kiosk_waiting_for_display", poll_s=_DISPLAY_POLL_SECONDS)
+    while True:
         await asyncio.sleep(_DISPLAY_POLL_SECONDS)
+        if await asyncio.to_thread(watch.poll) and not watch.settings.enabled:
+            return False
         if _hdmi_present():
             return True
-    return False
 
 
 def _url_serving(url: str) -> bool:
@@ -343,6 +392,95 @@ def _get_kiosk_config(config: Any) -> tuple[str | None, bool | None]:
     if isinstance(url, str) and not url.strip():
         url = None
     return url, minimal
+
+
+@dataclass(frozen=True)
+class KioskSettings:
+    """The kiosk config fields that change what the service runs.
+
+    ``output_mode`` is the DRM mode (``WIDTHxHEIGHT``) the configured
+    resolution maps to, or None to leave the compositor's choice alone."""
+
+    enabled: bool
+    output_mode: str | None
+
+
+def _kiosk_settings(config: Any) -> KioskSettings:
+    """Read ``ground_station.kiosk.enabled`` / ``resolution``.
+
+    Defensive like the other readers: a missing section or a non-bool
+    ``enabled`` reads as disabled (the model default), and a resolution that is
+    not one of the known presets (``auto`` included) leaves the mode alone.
+    """
+    kiosk = getattr(getattr(config, "ground_station", None), "kiosk", None)
+    enabled = getattr(kiosk, "enabled", False) is True
+    resolution = getattr(kiosk, "resolution", None)
+    mode = (
+        _RESOLUTION_MODES.get(resolution.strip().lower())
+        if isinstance(resolution, str)
+        else None
+    )
+    return KioskSettings(enabled=enabled, output_mode=mode)
+
+
+def _config_signature() -> tuple[int, int] | None:
+    """``(inode, mtime_ns)`` of the config file, or None when it is absent.
+
+    The config writers replace the file atomically, so either half changing
+    means a new file landed."""
+    try:
+        st = os.stat(CONFIG_YAML)
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns
+
+
+class _SettingsWatch:
+    """Notices an edit to the kiosk settings without a reboot.
+
+    ``poll()`` is cheap when nothing changed (one ``stat``); it reloads the
+    config only when the file's signature moved, and reports True only when
+    the kiosk settings themselves differ from the ones in force."""
+
+    def __init__(
+        self, settings: KioskSettings, signature: tuple[int, int] | None
+    ) -> None:
+        self.settings = settings
+        self._signature = signature
+
+    def poll(self) -> bool:
+        signature = _config_signature()
+        if signature == self._signature:
+            return False
+        self._signature = signature
+        try:
+            config = load_config()
+        except Exception as exc:
+            log.warning("kiosk_config_reload_failed", error=str(exc))
+            return False
+        settings = _kiosk_settings(config)
+        if settings == self.settings:
+            return False
+        log.info(
+            "kiosk_settings_changed",
+            enabled=settings.enabled,
+            output_mode=settings.output_mode,
+            previous_enabled=self.settings.enabled,
+            previous_output_mode=self.settings.output_mode,
+        )
+        self.settings = settings
+        return True
+
+
+async def _stop_on_settings_change(
+    watch: _SettingsWatch, supervisor: KioskSupervisor
+) -> None:
+    """Stop ``supervisor`` once the kiosk settings change, then return."""
+    while True:
+        await asyncio.sleep(_CONFIG_POLL_SECONDS)
+        if await asyncio.to_thread(watch.poll):
+            supervisor.request_stop()
+            return
 
 
 def _resolve_target_url(config: Any) -> tuple[str, bool]:
@@ -696,18 +834,22 @@ def _loginctl_session_props(session_id: str) -> dict[str, str]:
     return props
 
 
-def _wayland_display_for(uid: int) -> str:
-    """Best-effort discovery of the wayland socket name in the user's runtime
-    dir, defaulting to ``wayland-0`` (the common default) when none is found."""
-    runtime_dir = f"/run/user/{uid}"
+def _wayland_sockets(runtime_dir: str) -> list[str]:
+    """The Wayland socket names bound in ``runtime_dir``, sorted."""
     try:
-        names = sorted(
+        return sorted(
             n
             for n in os.listdir(runtime_dir)
             if n.startswith("wayland-") and not n.endswith(".lock")
         )
     except OSError:
-        names = []
+        return []
+
+
+def _wayland_display_for(uid: int) -> str:
+    """Best-effort discovery of the wayland socket name in the user's runtime
+    dir, defaulting to ``wayland-0`` (the common default) when none is found."""
+    names = _wayland_sockets(f"/run/user/{uid}")
     return names[0] if names else "wayland-0"
 
 
@@ -912,6 +1054,7 @@ class KioskSupervisor:
         env_unset: frozenset[str] | set[str] | None = None,
         sweep_orphans: bool = True,
         run_as_uid: int | None = None,
+        output_mode: str | None = None,
     ) -> None:
         self._argv = argv
         # When set, the child is dropped to this uid (and its primary gid) before
@@ -932,6 +1075,9 @@ class KioskSupervisor:
         # (safe — cage owns the only chromium). False inside a running desktop,
         # where a broad chromium sweep would kill the operator's own browser.
         self._sweep_orphans_enabled = sweep_orphans
+        # The ``WIDTHxHEIGHT`` mode to set on the connected outputs once the
+        # compositor is up (cage path only). None leaves the mode alone.
+        self._output_mode = output_mode
         self._proc: asyncio.subprocess.Process | None = None
         self._stop = asyncio.Event()
         self._crash_times: list[float] = []
@@ -1111,6 +1257,68 @@ class KioskSupervisor:
                 return
             await asyncio.sleep(_BROWSER_POLL_SECONDS)
 
+    async def _apply_output_mode(self) -> None:
+        """Set the configured mode on every connected output inside cage.
+
+        Uses ``wlr-randr`` over cage's Wayland socket (cage implements the
+        wlr-output-management protocol it drives). Retried on a fixed interval
+        until the compositor's socket answers or the wait expires; an output that
+        does not advertise the mode keeps the one cage picked. Inert on the
+        windowed path, where the desktop owns its display settings.
+        """
+        mode = self._output_mode
+        if mode is None or not self._sweep_orphans_enabled:
+            return
+        runtime_dir = (self._env or {}).get("XDG_RUNTIME_DIR", _CAGE_RUNTIME_DIR)
+        pending: set[str] = set()
+        for name, modes in _connected_outputs().items():
+            if mode in modes:
+                pending.add(name)
+            else:
+                log.warning("kiosk_output_mode_unsupported", output=name, mode=mode)
+        deadline = time.monotonic() + _OUTPUT_MODE_WAIT_SECONDS
+        last_error = "compositor socket never appeared"
+        while pending and time.monotonic() < deadline:
+            sockets = _wayland_sockets(runtime_dir)
+            if sockets:
+                env = {
+                    **os.environ,
+                    **(self._env or {}),
+                    "WAYLAND_DISPLAY": sockets[0],
+                }
+                env.pop("DISPLAY", None)
+                for name in sorted(pending):
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            "wlr-randr",
+                            "--output",
+                            name,
+                            "--mode",
+                            mode,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.PIPE,
+                            env=env,
+                        )
+                    except OSError as exc:
+                        log.warning(
+                            "kiosk_output_mode_unavailable",
+                            mode=mode,
+                            error=str(exc),
+                        )
+                        return
+                    _out, err = await proc.communicate()
+                    if proc.returncode == 0:
+                        log.info("kiosk_output_mode_applied", output=name, mode=mode)
+                        pending.discard(name)
+                    else:
+                        last_error = err.decode("utf-8", errors="replace").strip()
+            if pending:
+                await asyncio.sleep(_OUTPUT_MODE_POLL_SECONDS)
+        for name in sorted(pending):
+            log.warning(
+                "kiosk_output_mode_failed", output=name, mode=mode, error=last_error
+            )
+
     async def run(self) -> int:
         """Supervise loop. Returns process exit code or 0 on clean stop."""
         while not self._stop.is_set():
@@ -1145,6 +1353,11 @@ class KioskSupervisor:
             browser_task = asyncio.create_task(
                 self._watch_browser(proc), name="kiosk_browser_watch"
             )
+            # Apply the configured output mode once the compositor is up. cage
+            # picks the preferred mode on every launch, so this runs per spawn.
+            mode_task = asyncio.create_task(
+                self._apply_output_mode(), name="kiosk_output_mode"
+            )
             done, pending = await asyncio.wait(
                 {wait_task, stop_task, browser_task},
                 return_when=asyncio.FIRST_COMPLETED,
@@ -1161,11 +1374,13 @@ class KioskSupervisor:
                 for t in pending:
                     t.cancel()
                 drain_task.cancel()
+                mode_task.cancel()
                 await self._graceful_kill(proc)
                 self._record_crash_and_check()
                 await asyncio.sleep(_RETRY_SECONDS)
                 continue
             drain_task.cancel()
+            mode_task.cancel()
 
             if stop_task in done:
                 for t in pending:
@@ -1262,6 +1477,7 @@ def _make_supervisor(
     session: DesktopSession | None,
     renderer: str,
     mali_lib_dir: str | None,
+    output_mode: str | None = None,
 ) -> KioskSupervisor:
     """Build the supervisor for the current (session, renderer) combination.
 
@@ -1337,10 +1553,14 @@ def _make_supervisor(
         argv,
         env=_cage_env(renderer, mali_lib_dir),
         env_unset=frozenset({"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"}),
+        output_mode=output_mode,
     )
 
 
 async def _amain() -> int:
+    # Signature first: an edit that lands between it and the load is then seen
+    # as a change by the watch below and re-read, never missed.
+    signature = _config_signature()
     config = load_config()
     configure_logging(config.logging.level)
     slog = structlog.get_logger()
@@ -1362,10 +1582,19 @@ async def _amain() -> int:
         )
         return 0
 
-    if not await _wait_for_display():
+    settings = _kiosk_settings(config)
+    if not settings.enabled:
         slog.info(
-            "kiosk_hdmi_absent",
-            msg="no DRM display after wait; HDMI kiosk skipped cleanly",
+            "kiosk_disabled_by_config",
+            msg="ground_station.kiosk.enabled is false; HDMI kiosk stood down cleanly",
+        )
+        return 0
+    watch = _SettingsWatch(settings, signature)
+
+    if not await _wait_for_display(watch):
+        slog.info(
+            "kiosk_disabled_by_config",
+            msg="kiosk disabled while waiting for a display; stood down cleanly",
         )
         return 0
 
@@ -1413,7 +1642,9 @@ async def _amain() -> int:
     tried_software = renderer == _RENDERER_SOFTWARE
     while True:
         try:
-            supervisor = _make_supervisor(url, session, renderer, mali_lib_dir)
+            supervisor = _make_supervisor(
+                url, session, renderer, mali_lib_dir, watch.settings.output_mode
+            )
         except FileNotFoundError as exc:
             # No Chromium browser installed. Report which names were searched
             # and exit non-zero so the failure is visible without churning.
@@ -1435,7 +1666,25 @@ async def _amain() -> int:
                 renderer=renderer,
             )
 
+        settings_watch = asyncio.create_task(
+            _stop_on_settings_change(watch, supervisor), name="kiosk_settings_watch"
+        )
         rc = await supervisor.run()
+        settings_changed = settings_watch.done() and not settings_watch.cancelled()
+        settings_watch.cancel()
+
+        if settings_changed:
+            if not watch.settings.enabled:
+                slog.info(
+                    "kiosk_disabled_by_config",
+                    msg="ground_station.kiosk.enabled turned false; stood down cleanly",
+                )
+                return 0
+            slog.info(
+                "kiosk_restarting_for_settings",
+                output_mode=watch.settings.output_mode,
+            )
+            continue
 
         # Self-heal: a crash-looping GPU cage launch downgrades to software so
         # the cockpit still ends up rendering (the windowed path is already

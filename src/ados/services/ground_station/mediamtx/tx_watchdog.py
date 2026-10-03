@@ -177,8 +177,6 @@ async def monitor_ffmpeg(
        is what ``ffmpeg_output_stalled`` (ffmpeg's own ``total_size``) and the
        mediamtx-side ``bytesReceived`` delta each independently prove.
     """
-    backoff = 5.0
-    max_backoff = 60.0
     # Monotonic timestamp of when ffmpeg was first seen alive with no
     # live source and no publisher (a stuck codec probe). Reset whenever
     # a live source or an actual publisher reappears.
@@ -207,9 +205,8 @@ async def monitor_ffmpeg(
             if not await manager.restart_core():
                 slog.error(
                     "ground_mediamtx_core_restart_failed",
-                    backoff_seconds=backoff,
+                    retry_in_seconds=FFMPEG_MONITOR_TICK_SECONDS,
                 )
-                backoff = min(backoff * 2, max_backoff)
                 continue
             slog.info("ground_mediamtx_core_restarted")
             # The core just came back, so whatever ffmpeg was doing it was
@@ -250,18 +247,15 @@ async def monitor_ffmpeg(
                 )
                 continue
             slog.warning(
-                "ground_ffmpeg_dead_restarting", backoff_seconds=backoff
+                "ground_ffmpeg_dead_restarting",
+                retry_in_seconds=FFMPEG_MONITOR_TICK_SECONDS,
             )
             ok = await manager.restart_ffmpeg()
             if ok:
                 slog.info("ground_ffmpeg_restarted")
-                backoff = 5.0
                 inbound_bytes = -1
                 inbound_advanced_at = time.monotonic()
-            else:
-                # Capped exponential backoff so a persistently broken
-                # ffmpeg doesn't spin the supervisor.
-                backoff = min(backoff * 2, max_backoff)
+            # A failed restart is retried on the next fixed tick.
             continue
 
         # --- 2. The delta-counter checks on a LIVE ffmpeg -------------------
@@ -349,7 +343,6 @@ async def monitor_ffmpeg(
                 no_source_since = None
         else:
             no_source_since = None
-        backoff = 5.0
 
 
 __all__ = ["monitor_ffmpeg", "wfb_source_signal"]

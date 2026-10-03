@@ -36,12 +36,14 @@ The installer always pulls `batctl`, `avahi-daemon`, `wpasupplicant` (and `wpasu
 
 ## Carrier modes
 
-batman-adv rides on a Layer-2 carrier. The agent picks one in this order:
+batman-adv rides on a Layer-2 carrier, chosen by `ground_station.mesh.carrier`:
 
-1. **802.11s with SAE**. encrypted mesh with a shared PSK. Preferred.
-2. **IBSS (ad-hoc)**. no authentication. Fallback when the SAE backend is not available on the host.
+1. **802.11s with SAE** (`802.11s`, default). wpa_supplicant mesh mode, SAE keyed from the deployment PSK, management-frame protection required.
+2. **IBSS with IBSS-RSN** (`ibss`). wpa_supplicant ad-hoc mode, WPA2-PSK over CCMP keyed from the same PSK. For adapters without 802.11s.
 
-Mode is detected at bringup. You can inspect which one is in use from the setup webapp, Mission Control Hardware tab, or mesh health REST endpoint. The `carrier` field is either `80211s` or `ibss`.
+Both carriers are always authenticated. The passphrase is the hex encoding of `/etc/ados/mesh/psk.key` (first 63 characters), so every node paired to the same receiver derives the same one. The wpa_supplicant config lives at `/run/ados/mesh/wpa_supplicant-<iface>.conf` (mode 0600). If the secure join cannot be brought up and verified, the node does not join the mesh at all; there is no open fallback.
+
+Once up, `ados-batman` checks the mesh every 3 s: the interface still exists, its wpa_supplicant is alive, the interface is joined to the mesh ID, and it is still a member of `bat0`. On any loss it re-runs the secure join and the `batctl if add` bind, on the same fixed cadence, for as long as it takes. You can inspect the carrier in use from the setup webapp, Mission Control Hardware tab, or mesh health REST endpoint. The `carrier` field is either `80211s` or `ibss`.
 
 ## Cloud gateway election
 
@@ -57,7 +59,7 @@ where `10000/2000` is the advertised down/up capacity in kbit/s. Nodes that want
 batctl gw_mode client
 ```
 
-The client measures TQ to each advertised gateway and routes cloud-bound traffic through the best one. If the selected gateway dies, batman-adv reselects in 3-5 s. The agent exposes this via:
+The client measures TQ to each advertised gateway and routes cloud-bound traffic through the best one. If the selected gateway dies, batman-adv reselects in 3-5 s. With `ground_station.cloud_uplink: auto` the mode follows `/run/ados/uplink-active`: the 3 s supervision pass switches a node to `server` when its uplink comes up and back to `client` (receiver) or `off` (relay) when it drops, issuing `batctl gw_mode` only when the decision changes. `force_on` and `force_off` pin it. The agent exposes this via:
 
 - Mesh gateways status: list every advertised gateway and the one currently selected.
 - GET `/api/v1/ground-station/mesh/gateways`. same, as JSON

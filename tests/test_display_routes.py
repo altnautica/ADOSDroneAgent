@@ -12,6 +12,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,8 +35,20 @@ def calib_paths(tmp_path: Path):
     flag = tmp_path / "recalibrate.flag"
     calib = tmp_path / "touch.calib"
     with patch.object(display_routes, "RECALIBRATE_FLAG_PATH", flag), \
-         patch.object(display_routes, "TOUCH_CALIB_PATH", calib):
+         patch.object(display_routes, "TOUCH_CALIB_PATH", calib), \
+         patch.object(display_routes, "_calibration_request", None):
         yield flag, calib
+
+
+@pytest.fixture(autouse=True)
+def display_service_active():
+    """The page routes consult the unit state; default it to running."""
+
+    async def _active() -> bool:
+        return True
+
+    with patch.object(display_routes, "_display_service_active", _active):
+        yield
 
 
 # ── calibrate -------------------------------------------------------
@@ -44,18 +58,46 @@ def test_calibrate_start_queues_the_native_wizard(client: TestClient, calib_path
     flag, _calib = calib_paths
     resp = client.post("/api/v1/display/calibrate/start")
     assert resp.status_code == 200
-    assert resp.json() == {"requested": True, "target_count": 9}
+    body = resp.json()
+    assert body["requested"] is True and body["target_count"] == 9
+    assert isinstance(body["request_id"], str) and body["request_id"]
     # The native display service launches its wizard when this file appears.
     assert flag.read_text() == "1\n"
     status = client.get("/api/v1/display/calibrate/status").json()
-    assert status == {"calibrated": False, "requested": True}
+    assert status == {
+        "calibrated": False,
+        "requested": True,
+        "request_id": body["request_id"],
+        "calib_mtime_ms": None,
+    }
 
 
 def test_calibrate_status_reads_the_fit_on_disk(client: TestClient, calib_paths) -> None:
     _flag, calib = calib_paths
+    calib.write_text("fit")
     with patch.object(display_routes, "load_calib", return_value=object()):
         status = client.get("/api/v1/display/calibrate/status").json()
-    assert status == {"calibrated": True, "requested": False}
+    assert status["calibrated"] is True
+    assert status["requested"] is False
+    assert status["request_id"] is None
+    assert status["calib_mtime_ms"] == int(calib.stat().st_mtime * 1000)
+
+
+def test_a_fit_older_than_the_start_is_not_the_new_calibration(
+    client: TestClient, calib_paths,
+) -> None:
+    """A poll right after a start must not read the previous fit as done."""
+    _flag, calib = calib_paths
+    calib.write_text("old fit")
+    old = time.time() - 3600
+    os.utime(calib, (old, old))
+    with patch.object(display_routes, "load_calib", return_value=object()):
+        client.post("/api/v1/display/calibrate/start")
+        assert client.get("/api/v1/display/calibrate/status").json()["calibrated"] is False
+        # The panel saves a new fit after the start.
+        new = time.time() + 5
+        os.utime(calib, (new, new))
+        assert client.get("/api/v1/display/calibrate/status").json()["calibrated"] is True
 
 
 def test_setup_calibrate_start_uses_the_same_request(client: TestClient, calib_paths) -> None:
@@ -248,5 +290,25 @@ def test_page_post_refuses_when_no_navigator_published_routes(
          patch.object(display_routes, "LCD_STATE_PATH", tmp_path / "absent.json"):
         resp = client.post("/api/v1/display/page", json={"page": "video"})
     assert resp.status_code == 503
-    assert resp.json()["detail"]["error"] == "display_not_running"
+    assert resp.json()["detail"]["error"] == "E_DISPLAY_NOT_RUNNING"
+    assert not target.exists()
+
+
+def test_page_post_refuses_when_the_display_service_is_down(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    """lcd-state.json survives a crashed display service; its route list
+    alone must not accept a request nothing will consume."""
+    target = tmp_path / "lcd-page-request.json"
+    state = _state_with_routes(tmp_path, ["dashboard", "video"])
+
+    async def _inactive() -> bool:
+        return False
+
+    with patch.object(display_routes, "LCD_PAGE_REQUEST_PATH", target), \
+         patch.object(display_routes, "LCD_STATE_PATH", state), \
+         patch.object(display_routes, "_display_service_active", _inactive):
+        resp = client.post("/api/v1/display/page", json={"page": "video"})
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error"] == "E_DISPLAY_NOT_RUNNING"
     assert not target.exists()
