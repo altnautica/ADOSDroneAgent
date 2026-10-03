@@ -4,6 +4,19 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.102.3] - 2026-10-03
+
+### Changed
+
+- Dependency updates: axum 0.8 with tower-http 0.6, getrandom 0.4, base64
+  0.23, toml 1, sd-notify 0.5, hmac 0.13, blake2 0.11, chacha20poly1305 0.11
+  and sha2 0.11, plus the minor-version group (including ort 2.0.0-rc.13).
+  The WFB key fingerprint is unchanged: it is still BLAKE2b with an 8-byte
+  digest, checked against fixed reference values.
+- The dashboard and cockpit build with Vite 8 and @vitejs/plugin-react 6; the
+  dashboard uses lucide-react 1. Both bundles are rebuilt.
+- CI actions move to their current majors.
+
 ## [0.102.2] - 2026-10-03
 
 ### Changed
