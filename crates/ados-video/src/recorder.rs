@@ -679,7 +679,21 @@ mod tests {
         };
         std::env::set_var("PATH", &combined);
 
-        let started = rec.start(Some("frag")).await.expect("start succeeds");
+        // A script written moments ago can refuse to exec with ETXTBSY while a
+        // fork running concurrently in another test still holds the write
+        // descriptor it inherited. That is a test-timing artefact, not the
+        // recorder's behaviour, so retry it briefly.
+        let mut busy_retries = 0;
+        let started = loop {
+            match rec.start(Some("frag")).await {
+                Ok(started) => break started,
+                Err(e) if e.message.contains("Text file busy") && busy_retries < 20 => {
+                    busy_retries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("start succeeds: {e:?}"),
+            }
+        };
         let out_path = started["path"].as_str().unwrap().to_string();
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let _ = rec.stop().await;
