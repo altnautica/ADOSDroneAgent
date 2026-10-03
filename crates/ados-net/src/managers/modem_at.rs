@@ -95,6 +95,19 @@ where
         apn.to_string()
     };
 
+    // The APN is spliced into an AT command line; anything outside the APN
+    // charset could close the quoted string and append further AT commands.
+    if let Err(reason) = crate::managers::modem::validate_apn(&resolved) {
+        warn!(reason = %reason, "modem_at.apn_refused");
+        return json!({
+            "connected": false,
+            "iface": "usb0",
+            "ip": "",
+            "apn": "",
+            "fallback_mode": true,
+            "error": "invalid_apn",
+        });
+    }
     port.command(&format!("AT+CGDCONT=1,\"IP\",\"{resolved}\""), AT_TIMEOUT)
         .await;
     info!(apn = %resolved, "modem_at.apn_set");

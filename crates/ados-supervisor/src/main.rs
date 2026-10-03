@@ -158,33 +158,53 @@ async fn main() -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
-    loop {
+    // A stop signal must not wait for a pass to finish: a pass can run the USB
+    // rehome, the janitor and dozens of bounded systemctl calls, which together
+    // can outlast systemd's stop timeout and end in a SIGKILL with no ordered
+    // teardown. Every unit of in-flight work therefore races the signals, and
+    // the teardown below runs as soon as one arrives.
+    let stopped_by = loop {
         tokio::select! {
             _ = tick.tick() => {
                 // Feeds the watchdog as a side effect: `monitor_pass` stamps the
                 // progress marker the ticker reads at every stage boundary.
-                supervisor.monitor_pass().await;
+                tokio::select! {
+                    _ = supervisor.monitor_pass() => {}
+                    s = stop_signal(&mut sigterm, &mut sigint) => break s,
+                }
             }
             Some(kind) = rx.recv() => {
-                supervisor.handle_hotplug(kind).await;
+                tokio::select! {
+                    _ = supervisor.handle_hotplug(kind) => {}
+                    s = stop_signal(&mut sigterm, &mut sigint) => break s,
+                }
             }
             Some(req) = role_rx.recv() => {
-                let outcome = supervisor.apply_role(&req.target, &req.reason).await;
-                let _ = req.reply.send(role::role_reply(outcome));
+                tokio::select! {
+                    outcome = supervisor.apply_role(&req.target, &req.reason) => {
+                        let _ = req.reply.send(role::role_reply(outcome));
+                    }
+                    s = stop_signal(&mut sigterm, &mut sigint) => break s,
+                }
             }
-            _ = sigterm.recv() => {
-                tracing::info!("received SIGTERM");
-                break;
-            }
-            _ = sigint.recv() => {
-                tracing::info!("received SIGINT");
-                break;
-            }
+            s = stop_signal(&mut sigterm, &mut sigint) => break s,
         }
-    }
+    };
+    tracing::info!(signal = stopped_by, "received stop signal");
 
     // Stop the background tasks (auto-pair) before tearing down the services.
     let _ = shutdown_tx.send(true);
     supervisor.stop().await;
     Ok(())
+}
+
+/// Resolve on the first SIGTERM or SIGINT, naming which.
+async fn stop_signal(
+    sigterm: &mut tokio::signal::unix::Signal,
+    sigint: &mut tokio::signal::unix::Signal,
+) -> &'static str {
+    tokio::select! {
+        _ = sigterm.recv() => "SIGTERM",
+        _ = sigint.recv() => "SIGINT",
+    }
 }

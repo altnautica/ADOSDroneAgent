@@ -19,9 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -36,6 +34,8 @@ use crate::sidecar;
 const WWAN_IFACE: &str = "wwan0";
 const USB_IFACE: &str = "usb0";
 const DBUS_FAIL_THRESHOLD: u32 = 3;
+/// How often a manager in AT fallback tries D-Bus again on a bring-up.
+const DBUS_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_APN_FALLBACK: &str = "internet";
 /// configfs root + gadget name the daemon provisions the USB tether under. A
 /// present gadget dir means `usb0` belongs to the tether, not the modem, so the
@@ -95,6 +95,20 @@ pub fn apn_for_imsi(imsi: &str) -> Option<&'static str> {
         .iter()
         .find(|(prefix, _)| imsi.starts_with(prefix))
         .map(|(_, apn)| *apn)
+}
+
+/// An APN is 1-63 characters of `[A-Za-z0-9.-]`. It is spliced into an AT
+/// command line on the AT fallback path, so nothing else is ever accepted.
+pub fn validate_apn(apn: &str) -> Result<(), String> {
+    let ok = (1..=63).contains(&apn.len())
+        && apn
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err("APN must be 1-63 characters of letters, digits, '.' and '-'".to_string())
+    }
 }
 
 /// The cellular session the daemon should drive given the persisted config.
@@ -252,12 +266,19 @@ pub struct ModemManager {
     /// tether NIC the daemon created, not the modem, so the modem skips it.
     gadget_dir: PathBuf,
     state: Mutex<ModemState>,
+    /// Serializes bring-up and tear-down against each other. Held across the
+    /// slow D-Bus / AT dial so the state mutex never is, keeping `status`,
+    /// `enabled`, `configure` and `reload_config` responsive during a dial.
+    dial: Mutex<()>,
 }
 
 #[derive(Default)]
 struct ModemState {
     dbus_fail_count: u32,
     fallback_mode: bool,
+    /// When the last D-Bus retry from fallback was made, so fallback probes
+    /// D-Bus again on a fixed cadence instead of never.
+    last_dbus_retry: Option<Instant>,
     config: ModemConfig,
     brought_up: bool,
     /// The AT control port held open across an AT-fallback bring-up so status
@@ -303,6 +324,7 @@ impl ModemManager {
                 config,
                 ..Default::default()
             }),
+            dial: Mutex::new(()),
         }
     }
 
@@ -350,13 +372,17 @@ impl ModemManager {
         }
     }
 
-    /// Bring up the cellular data session. D-Bus first; on failure the manager advances
-    /// its failure counter and (past threshold) flips to fallback, where the AT work
-    /// belongs to the Python service. Returns a status dict. `apn = "auto"` resolves
-    /// via the supplied IMSI (sysfs has none, so the daemon passes a resolved APN;
-    /// "auto" with no IMSI falls back to `internet`).
+    /// Bring up the cellular data session. D-Bus first; on failure the manager
+    /// advances its failure counter and (past threshold) flips to the AT
+    /// fallback. In fallback D-Bus is retried every [`DBUS_RETRY_INTERVAL`], so
+    /// a transient D-Bus outage does not pin the modem to AT for good. Returns
+    /// a status dict. `apn = "auto"` resolves via the supplied IMSI ("auto"
+    /// with no IMSI falls back to `internet`).
+    ///
+    /// The state mutex is held only to snapshot and to record results, never
+    /// across the dial itself.
     pub async fn bring_up(&self, apn: &str, imsi: Option<&str>) -> Value {
-        let mut st = self.state.lock().await;
+        let _dial = self.dial.lock().await;
         let resolved = if apn == "auto" {
             imsi.and_then(apn_for_imsi)
                 .unwrap_or(DEFAULT_APN_FALLBACK)
@@ -365,11 +391,25 @@ impl ModemManager {
             apn.to_string()
         };
 
-        if !st.fallback_mode {
-            match self.dbus.bring_up(&resolved).await {
+        let try_dbus = {
+            let mut st = self.state.lock().await;
+            let due = !st.fallback_mode
+                || st
+                    .last_dbus_retry
+                    .is_none_or(|t| t.elapsed() >= DBUS_RETRY_INTERVAL);
+            if st.fallback_mode && due {
+                st.last_dbus_retry = Some(Instant::now());
+            }
+            due
+        };
+        if try_dbus {
+            let res = self.dbus.bring_up(&resolved).await;
+            let mut st = self.state.lock().await;
+            match res {
                 Ok(res) => {
                     self.register_dbus_success(&mut st);
                     st.brought_up = true;
+                    st.at_port = None;
                     return json!({
                         "connected": true,
                         "iface": res.iface,
@@ -396,17 +436,14 @@ impl ModemManager {
                     .get("connected")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-                if connected {
-                    st.brought_up = true;
-                    // Cache the open port so status polls reuse it.
-                    st.at_port = Some(port);
-                } else {
-                    st.brought_up = false;
-                }
+                let mut st = self.state.lock().await;
+                st.brought_up = connected;
+                // Cache the open port so status polls reuse it.
+                st.at_port = connected.then_some(port);
                 result
             }
             None => {
-                st.brought_up = false;
+                self.state.lock().await.brought_up = false;
                 json!({
                     "connected": false,
                     "iface": USB_IFACE,
@@ -419,13 +456,30 @@ impl ModemManager {
         }
     }
 
+    /// Whether the data session the daemon dialed is still in place: the last
+    /// bring-up connected and the modem netdev is present and not down.
+    /// Raw-IP WWAN netdevs report `unknown` while carrying traffic.
+    pub async fn session_up(&self) -> bool {
+        if !self.state.lock().await.brought_up {
+            return false;
+        }
+        let Some(iface) = self.cellular_iface() else {
+            return false;
+        };
+        std::fs::read_to_string(self.net_dir.join(iface).join("operstate"))
+            .is_ok_and(|s| matches!(s.trim(), "up" | "unknown"))
+    }
+
     /// Tear the data session down (best-effort D-Bus, then a raw link-down via the
     /// iface operstate is left to the daemon).
     pub async fn bring_down(&self) -> Value {
-        let mut st = self.state.lock().await;
+        let _dial = self.dial.lock().await;
+        let fallback_mode = self.state.lock().await.fallback_mode;
         let mut ok = false;
-        if !st.fallback_mode {
-            match self.dbus.bring_down().await {
+        if !fallback_mode {
+            let res = self.dbus.bring_down().await;
+            let mut st = self.state.lock().await;
+            match res {
                 Ok(()) => {
                     self.register_dbus_success(&mut st);
                     ok = true;
@@ -433,6 +487,7 @@ impl ModemManager {
                 Err(reason) => self.register_dbus_failure(&mut st, &reason),
             }
         }
+        let mut st = self.state.lock().await;
         st.brought_up = false;
         // Drop the cached AT port so the next bring-up re-opens a clean port.
         st.at_port = None;
@@ -545,14 +600,18 @@ impl ModemManager {
     }
 
     /// Update the persisted config sidecar (atomic, byte-parity write). Returns
-    /// the new config as a dict. The bring-up/down side effect is driven by the
-    /// daemon, not here, to keep this lock-free of I/O on the link.
+    /// the new config as a dict, or an error when the APN is not a valid APN
+    /// (nothing is written then). The bring-up/down side effect is driven by
+    /// the daemon, not here, to keep this lock-free of I/O on the link.
     pub async fn configure(
         &self,
         apn: Option<&str>,
         cap_gb: Option<f64>,
         enabled: Option<bool>,
-    ) -> Value {
+    ) -> Result<Value, String> {
+        if let Some(a) = apn {
+            validate_apn(a)?;
+        }
         let mut st = self.state.lock().await;
         let mut cfg = st.config.clone();
         let mut changed = false;
@@ -583,7 +642,7 @@ impl ModemManager {
                 st.config = cfg.clone();
             }
         }
-        config_to_json(&st.config)
+        Ok(config_to_json(&st.config))
     }
 
     /// Re-read the persisted config sidecar into the manager's live config, so
@@ -1121,7 +1180,10 @@ mod tests {
     async fn configure_persists_sidecar_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let m = mgr(Arc::new(DisabledDbus), dir.path());
-        let out = m.configure(Some("jionet"), Some(5.0), Some(true)).await;
+        let out = m
+            .configure(Some("jionet"), Some(5.0), Some(true))
+            .await
+            .unwrap();
         assert_eq!(out["apn"], "jionet");
         assert_eq!(out["enabled"], true);
         // On-disk bytes byte-match Python.
@@ -1130,6 +1192,23 @@ mod tests {
         // A fresh manager reads it back.
         let m2 = mgr(Arc::new(DisabledDbus), dir.path());
         assert!(m2.enabled().await);
+    }
+
+    #[tokio::test]
+    async fn configure_refuses_an_apn_that_could_splice_at_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = mgr(Arc::new(DisabledDbus), dir.path());
+        for bad in [
+            "inet\"\r\nAT+CFUN=0",
+            "",
+            "has space",
+            "a".repeat(64).as_str(),
+        ] {
+            assert!(m.configure(Some(bad), None, None).await.is_err(), "{bad:?}");
+        }
+        assert!(!dir.path().join("ground-station-modem.json").exists());
+        assert!(validate_apn("airtelgprs.com").is_ok());
+        assert!(validate_apn("my-apn.example").is_ok());
     }
 
     #[tokio::test]
@@ -1152,6 +1231,23 @@ mod tests {
         assert_eq!(r3["connected"], false);
         assert_eq!(r3["needs_at_fallback"], true);
         assert!(m.needs_at_fallback().await);
+    }
+
+    #[tokio::test]
+    async fn fallback_retries_dbus_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = mgr(
+            Arc::new(ScriptedDbus::new(vec![false, false, false, true])),
+            dir.path(),
+        );
+        for _ in 0..3 {
+            m.bring_up("internet", None).await;
+        }
+        assert!(m.needs_at_fallback().await);
+        // The next bring-up in fallback tries D-Bus again, and it is back.
+        let ok = m.bring_up("internet", None).await;
+        assert_eq!(ok["connected"], true);
+        assert!(!m.needs_at_fallback().await);
     }
 
     #[tokio::test]

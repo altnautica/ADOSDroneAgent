@@ -1,15 +1,14 @@
 //! USB hot-plug detection by presence-transition polling.
 //!
-//! Polls a small set of device-class presence flags on an interval (1s on a
+//! Polls a small set of device-class identity sets on an interval (1s on a
 //! normal board, 10s on a low-RAM SBC, matching the Python monitor's swap
-//! sensitivity tradeoff) and emits an event when a class appears or
-//! disappears. The first snapshot is the baseline, so devices already present
-//! at boot do not fire — the equivalent of the Python first-scan gate.
-//!
-//! A future optimization is an event-driven udev monitor; presence-transition
-//! polling is the proven, testable parity baseline.
+//! sensitivity tradeoff) and emits an event when any class's set changes. An
+//! identity carries the USB device number, which the kernel reassigns on every
+//! re-enumeration, so a swap, a partial removal, or an unplug and replug inside
+//! one poll all read as a change. The first snapshot is the baseline, so
+//! devices already present at boot do not fire.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -42,19 +41,17 @@ pub const HOTPLUG_DEBOUNCE: Duration = Duration::from_secs(3);
 /// prior restart for the same device class is still settling.
 ///
 /// The supervisor drives this serially: each edge calls `should_restart`, and
-/// only when it returns true does the restart run. Two guards combine to give
-/// the Python "3s per-device debounce + per-service restart coalescing"
-/// behavior:
-///
-/// - A restart that was just issued marks the device class as restarted, and
-///   any further edge inside the debounce window is dropped (coalesced into the
-///   in-flight / just-completed restart).
-/// - Because the loop is serial, an edge that arrives while a restart is
-///   actually running is queued behind it and then evaluated against the
-///   just-recorded restart time — so it, too, coalesces.
+/// only when it returns true does the restart run. A restart that was just
+/// issued marks the device class as restarted, and any further edge inside the
+/// debounce window is coalesced. A coalesced edge is not lost: it leaves a
+/// trailing restart pending, which [`HotplugCoordinator::due_trailing`] hands
+/// back once the window has passed. A remove-then-add inside the window thus
+/// ends with one restart AFTER the device returned, not only the one issued
+/// while it was absent.
 #[derive(Debug, Default)]
 pub struct HotplugCoordinator {
     last_restart: HashMap<DevKind, Instant>,
+    trailing: HashSet<DevKind>,
     debounce: Option<Duration>,
 }
 
@@ -68,6 +65,7 @@ impl HotplugCoordinator {
     pub fn with_debounce(debounce: Duration) -> Self {
         HotplugCoordinator {
             last_restart: HashMap::new(),
+            trailing: HashSet::new(),
             debounce: Some(debounce),
         }
     }
@@ -75,41 +73,68 @@ impl HotplugCoordinator {
     /// Decide whether a hot-plug edge for `kind` at `now` should issue a
     /// restart. Returns true (and records `now` as the restart time) only when
     /// no restart for the same class landed inside the debounce window;
-    /// otherwise the edge is coalesced and false is returned.
+    /// otherwise the edge is coalesced, a trailing restart is left pending,
+    /// and false is returned.
     pub fn should_restart(&mut self, kind: DevKind, now: Instant) -> bool {
         if let Some(window) = self.debounce {
             if let Some(&last) = self.last_restart.get(&kind) {
                 if now.duration_since(last) < window {
+                    self.trailing.insert(kind);
                     return false;
                 }
             }
         }
         self.last_restart.insert(kind, now);
+        self.trailing.remove(&kind);
         true
+    }
+
+    /// The device classes whose coalesced edge is now due its trailing
+    /// restart. Each returned class is recorded as restarted at `now`.
+    pub fn due_trailing(&mut self, now: Instant) -> Vec<DevKind> {
+        let window = self.debounce.unwrap_or_default();
+        let due: Vec<DevKind> = self
+            .trailing
+            .iter()
+            .copied()
+            .filter(|k| {
+                self.last_restart
+                    .get(k)
+                    .is_none_or(|&last| now.duration_since(last) >= window)
+            })
+            .collect();
+        for k in &due {
+            self.trailing.remove(k);
+            self.last_restart.insert(*k, now);
+        }
+        due
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One identity per present device, per class.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Presence {
-    camera: bool,
-    fc: bool,
-    radio: bool,
-    elrs: bool,
+    camera: BTreeSet<String>,
+    fc: BTreeSet<String>,
+    radio: BTreeSet<String>,
+    elrs: BTreeSet<String>,
 }
 
-/// Whether a WFB radio is on the bus, by the same generated adapter table the
-/// boot detection uses ([`hardware::is_wfb_adapter_id`]). One table: a second,
-/// hand-kept PID list here once left every TP-Link adapter the rest of the
-/// stack supports invisible to hot-plug recovery.
-fn radio_present() -> bool {
-    radio_in(&hardware::enumerate_usb_ids())
+/// Identities of every WFB radio on the bus, by the same generated adapter
+/// table the boot detection uses ([`hardware::is_wfb_adapter_id`]). One table:
+/// a second, hand-kept PID list here once left every TP-Link adapter the rest
+/// of the stack supports invisible to hot-plug recovery.
+fn radio_ids() -> BTreeSet<String> {
+    radio_ids_in(&hardware::enumerate_usb_devices())
 }
 
-/// [`radio_present`] over an explicit USB inventory. Pure for testing.
-fn radio_in(usb_ids: &[(u16, u16)]) -> bool {
-    usb_ids
+/// [`radio_ids`] over an explicit USB inventory. Pure for testing.
+fn radio_ids_in(devices: &[hardware::UsbDevice]) -> BTreeSet<String> {
+    devices
         .iter()
-        .any(|&(vid, pid)| hardware::is_wfb_adapter_id(vid, pid))
+        .filter(|d| hardware::is_wfb_adapter_id(d.vid, d.pid))
+        .map(hardware::UsbDevice::identity)
+        .collect()
 }
 
 /// The `radio.crsf` claim from the agent config: the pinned RC-module device
@@ -214,10 +239,10 @@ fn pin_node_name(pin: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Split the USB-serial tty inventory into `(fc, elrs)` presence, keyed on the
-/// pin and the lane mode — pin-only, mode-aware ownership that mirrors the
-/// MAVLink router's. Only the PINNED node is ever the RC module, and only when
-/// the router does not own it:
+/// Split the USB-serial tty inventory into `(fc, elrs)` identity sets, keyed
+/// on the pin and the lane mode — pin-only, mode-aware ownership that mirrors
+/// the MAVLink router's. Only the PINNED node is ever the RC module, and only
+/// when the router does not own it:
 ///
 /// - **`mavlink` mode** hands the pinned module to the MAVLink router as its
 ///   FC source, so the pinned node counts as FC presence — a replug restarts
@@ -231,24 +256,24 @@ fn pin_node_name(pin: &str) -> String {
 ///   claiming an unpinned bridge as ELRS would steal a bridge-connected FC.
 ///
 /// The two classes are exclusive per node, so plugging the RC module never
-/// flips `fc` (no spurious FC-service restart) and plugging an FC never flips
-/// `elrs`.
+/// changes `fc` (no spurious FC-service restart) and plugging an FC never
+/// changes `elrs`.
 fn classify_serial_nodes(
-    nodes: &[(String, Option<(u16, u16)>)],
+    nodes: &[hardware::SerialNode],
     pin_node: &str,
     mode: &str,
-) -> (bool, bool) {
+) -> (BTreeSet<String>, BTreeSet<String>) {
     // In `mavlink` mode the router owns the pinned module as its FC source; in
     // every other mode the RC lane owns/reserves the pinned port.
     let router_owns_pin = mode == "mavlink";
-    let mut fc = false;
-    let mut elrs = false;
-    for (name, _usb) in nodes {
-        let pinned = !pin_node.is_empty() && name == pin_node;
+    let mut fc = BTreeSet::new();
+    let mut elrs = BTreeSet::new();
+    for node in nodes {
+        let pinned = !pin_node.is_empty() && node.name == pin_node;
         if pinned && !router_owns_pin {
-            elrs = true;
+            elrs.insert(node.identity());
         } else {
-            fc = true;
+            fc.insert(node.identity());
         }
     }
     (fc, elrs)
@@ -259,12 +284,12 @@ fn snapshot() -> Presence {
     let pin_node = pin_node_name(&claim.device);
     // A USB flight controller enumerates as a CDC-ACM / USB-serial node — but
     // so does an ELRS RC module's bridge, so the tty inventory is classified
-    // node-by-node instead of read as one class-wide presence bool.
+    // node-by-node instead of read as one class-wide presence.
     let (fc, elrs) = classify_serial_nodes(&hardware::serial_tty_nodes(), &pin_node, &claim.mode);
     Presence {
-        camera: hardware::video_node_present(),
+        camera: hardware::video_node_ids(),
         fc,
-        radio: radio_present(),
+        radio: radio_ids(),
         elrs,
     }
 }
@@ -301,14 +326,14 @@ fn low_ram() -> bool {
 }
 
 /// Emit hot-plug events until the channel closes. The first snapshot is the
-/// baseline; only subsequent transitions fire.
+/// baseline; only subsequent changes to a class's identity set fire.
 pub async fn run(tx: Sender<DevKind>, interval: Duration) {
     let mut prev = snapshot();
     tracing::info!(
-        camera = prev.camera,
-        fc = prev.fc,
-        radio = prev.radio,
-        elrs = prev.elrs,
+        camera = prev.camera.len(),
+        fc = prev.fc.len(),
+        radio = prev.radio.len(),
+        elrs = prev.elrs.len(),
         "hotplug baseline established"
     );
     loop {
@@ -332,27 +357,54 @@ pub async fn run(tx: Sender<DevKind>, interval: Duration) {
 mod tests {
     use super::*;
 
+    fn usb(vid: u16, pid: u16, devnum: u32) -> hardware::UsbDevice {
+        hardware::UsbDevice {
+            vid,
+            pid,
+            bus_dev: format!("1-{devnum}"),
+        }
+    }
+
     #[test]
     fn every_supported_adapter_counts_as_a_radio_for_hot_plug() {
         // Every adapter the boot detection accepts must also be one whose
         // replug triggers recovery — including the TP-Link rebadges, which do
         // not carry the Realtek vendor id.
         for (vid, pid, label) in ados_protocol::wfb_tables::WFB_COMPATIBLE {
-            assert!(
-                radio_in(&[(0x1D6B, 0x0002), (*vid, *pid)]),
+            assert_eq!(
+                radio_ids_in(&[usb(0x1D6B, 0x0002, 1), usb(*vid, *pid, 2)]).len(),
+                1,
                 "{label} ({vid:#06x}:{pid:#06x}) must count as a radio"
             );
         }
-        assert!(radio_in(&[(0x2357, 0x0120)]));
         // A management-WiFi chip and an empty bus are not radios.
-        assert!(!radio_in(&[(0xA69C, 0x8801)]));
-        assert!(!radio_in(&[]));
+        assert!(radio_ids_in(&[usb(0xA69C, 0x8801, 3)]).is_empty());
+        assert!(radio_ids_in(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_radio_replugged_inside_one_poll_reads_as_a_change() {
+        let (vid, pid, _) = ados_protocol::wfb_tables::WFB_COMPATIBLE[0];
+        let before = radio_ids_in(&[usb(vid, pid, 4)]);
+        // Same adapter, re-enumerated: the kernel hands it a new device number.
+        let after = radio_ids_in(&[usb(vid, pid, 5)]);
+        assert_eq!(before.len(), after.len());
+        assert_ne!(before, after);
     }
 
     /// Node names for the classification tests. CP2102 / CH340 / Espressif are
     /// the RC-bridge ids; STM native USB is the archetypal FC.
-    fn node(name: &str, usb: Option<(u16, u16)>) -> (String, Option<(u16, u16)>) {
-        (name.to_string(), usb)
+    fn node(name: &str, ids: Option<(u16, u16)>) -> hardware::SerialNode {
+        hardware::SerialNode {
+            name: name.to_string(),
+            usb: ids.map(|(vid, pid)| usb(vid, pid, 7)),
+        }
+    }
+
+    /// Class presence of the classification, which is what these cases pin.
+    fn classify(nodes: &[hardware::SerialNode], pin_node: &str, mode: &str) -> (bool, bool) {
+        let (fc, elrs) = classify_serial_nodes(nodes, pin_node, mode);
+        (!fc.is_empty(), !elrs.is_empty())
     }
 
     #[test]
@@ -360,19 +412,13 @@ mod tests {
         // The RC lane owns the pinned port in the default mode: the module
         // alone reads (fc=false, elrs=true), never as an FC.
         let nodes = [node("ttyUSB0", Some((0x10C4, 0xEA60)))];
-        assert_eq!(
-            classify_serial_nodes(&nodes, "ttyUSB0", "crsf_rc"),
-            (false, true)
-        );
+        assert_eq!(classify(&nodes, "ttyUSB0", "crsf_rc"), (false, true));
         // With an FC beside it, both classes are present and independent.
         let both = [
             node("ttyACM0", Some((0x0483, 0x5740))),
             node("ttyUSB0", Some((0x10C4, 0xEA60))),
         ];
-        assert_eq!(
-            classify_serial_nodes(&both, "ttyUSB0", "crsf_rc"),
-            (true, true)
-        );
+        assert_eq!(classify(&both, "ttyUSB0", "crsf_rc"), (true, true));
     }
 
     #[test]
@@ -381,19 +427,13 @@ mod tests {
         // source, so the pinned node counts as FC presence — a replug restarts
         // the FC link (the owner), never the RC lane.
         let nodes = [node("ttyUSB0", Some((0x10C4, 0xEA60)))];
-        assert_eq!(
-            classify_serial_nodes(&nodes, "ttyUSB0", "mavlink"),
-            (true, false)
-        );
+        assert_eq!(classify(&nodes, "ttyUSB0", "mavlink"), (true, false));
         // An FC beside it: both are FC, so ELRS stays absent.
         let both = [
             node("ttyACM0", Some((0x0483, 0x5740))),
             node("ttyUSB0", Some((0x10C4, 0xEA60))),
         ];
-        assert_eq!(
-            classify_serial_nodes(&both, "ttyUSB0", "mavlink"),
-            (true, false)
-        );
+        assert_eq!(classify(&both, "ttyUSB0", "mavlink"), (true, false));
     }
 
     #[test]
@@ -402,10 +442,7 @@ mod tests {
         // the RC lane, so the pinned node reads ELRS (never a spurious FC
         // restart, since the router excludes the pin outside mavlink mode).
         let nodes = [node("ttyUSB0", Some((0x10C4, 0xEA60)))];
-        assert_eq!(
-            classify_serial_nodes(&nodes, "ttyUSB0", "airport"),
-            (false, true)
-        );
+        assert_eq!(classify(&nodes, "ttyUSB0", "airport"), (false, true));
     }
 
     #[test]
@@ -417,10 +454,7 @@ mod tests {
             node("ttyUSB0", Some((0x10C4, 0xEA60))), // an FC behind a CP2102 bridge
             node("ttyUSB1", Some((0x1A86, 0x7523))), // the pinned ELRS module
         ];
-        assert_eq!(
-            classify_serial_nodes(&nodes, "ttyUSB1", "crsf_rc"),
-            (true, true)
-        );
+        assert_eq!(classify(&nodes, "ttyUSB1", "crsf_rc"), (true, true));
     }
 
     #[test]
@@ -432,7 +466,7 @@ mod tests {
             for mode in ["crsf_rc", "mavlink", "airport"] {
                 let nodes = [node("ttyUSB0", Some(usb))];
                 assert_eq!(
-                    classify_serial_nodes(&nodes, "", mode),
+                    classify(&nodes, "", mode),
                     (true, false),
                     "usb={usb:?} mode={mode}"
                 );
@@ -450,18 +484,12 @@ mod tests {
             node("ttyACM0", Some((0x0483, 0x5740))),
             node("ttyUSB0", Some((0x10C4, 0xEA60))),
         ];
-        assert_eq!(
-            classify_serial_nodes(&with_fc, "ttyUSB0", "crsf_rc"),
-            (true, true)
-        );
+        assert_eq!(classify(&with_fc, "ttyUSB0", "crsf_rc"), (true, true));
         // The FC unplugged: fc drops to false (elrs still present) — a real
         // presence transition on the FC class, which run() turns into a
         // DevKind::Fc restart of the FC link.
         let without_fc = [node("ttyUSB0", Some((0x10C4, 0xEA60)))];
-        assert_eq!(
-            classify_serial_nodes(&without_fc, "ttyUSB0", "crsf_rc"),
-            (false, true)
-        );
+        assert_eq!(classify(&without_fc, "ttyUSB0", "crsf_rc"), (false, true));
     }
 
     #[test]
@@ -469,15 +497,9 @@ mod tests {
         // A pin on ttyUSB1 leaves ttyUSB0 an FC candidate and reads no ELRS
         // while the pinned node is absent (truthful: not present).
         let nodes = [node("ttyUSB0", None)];
-        assert_eq!(
-            classify_serial_nodes(&nodes, "ttyUSB1", "crsf_rc"),
-            (true, false)
-        );
+        assert_eq!(classify(&nodes, "ttyUSB1", "crsf_rc"), (true, false));
         // No nodes at all: neither class present.
-        assert_eq!(
-            classify_serial_nodes(&[], "ttyUSB0", "crsf_rc"),
-            (false, false)
-        );
+        assert_eq!(classify(&[], "ttyUSB0", "crsf_rc"), (false, false));
     }
 
     #[test]
@@ -577,6 +599,24 @@ mod tests {
 
         // Past the window, a fresh plug event restarts again.
         assert!(c.should_restart(DevKind::Fc, t0 + Duration::from_millis(3001)));
+    }
+
+    #[test]
+    fn a_coalesced_edge_leaves_one_trailing_restart_after_the_window() {
+        // Remove edge restarts the unit while the device is absent; the add
+        // edge 1 s later is coalesced. The device is back, so one more restart
+        // must follow once the window has passed.
+        let mut c = HotplugCoordinator::with_debounce(Duration::from_secs(3));
+        let t0 = Instant::now();
+        assert!(c.should_restart(DevKind::Camera, t0));
+        assert!(!c.should_restart(DevKind::Camera, t0 + Duration::from_secs(1)));
+        assert!(c.due_trailing(t0 + Duration::from_secs(2)).is_empty());
+        assert_eq!(
+            c.due_trailing(t0 + Duration::from_secs(3)),
+            vec![DevKind::Camera]
+        );
+        // Delivered once.
+        assert!(c.due_trailing(t0 + Duration::from_secs(10)).is_empty());
     }
 
     #[test]

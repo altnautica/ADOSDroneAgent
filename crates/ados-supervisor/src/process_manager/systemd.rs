@@ -47,6 +47,24 @@ fn ok(out: &Option<std::process::Output>) -> bool {
     out.as_ref().map(|o| o.status.success()).unwrap_or(false)
 }
 
+/// Map `systemctl show -p Result -p ExecMainCode -p ExecMainStatus` output to
+/// a clean-exit verdict. All three properties must be present to answer.
+/// Pure for testing.
+fn clean_exit_verdict(stdout: &str) -> Option<bool> {
+    let mut result = None;
+    let mut code = None;
+    let mut status = None;
+    for line in stdout.lines() {
+        match line.trim().split_once('=') {
+            Some(("Result", v)) => result = Some(v.to_string()),
+            Some(("ExecMainCode", v)) => code = v.parse::<i32>().ok(),
+            Some(("ExecMainStatus", v)) => status = v.parse::<i32>().ok(),
+            _ => {}
+        }
+    }
+    Some(result? == "success" && code? == 1 && status? == 0)
+}
+
 /// Drives service units via the `systemctl` binary.
 pub struct SystemdManager;
 
@@ -139,6 +157,27 @@ impl ProcessManager for SystemdManager {
             .then(|| !String::from_utf8_lossy(&out.stdout).trim().is_empty())
     }
 
+    /// `systemctl show <unit> -p Result -p ExecMainCode -p ExecMainStatus`:
+    /// a clean exit is `Result=success` with the main process having exited
+    /// (`ExecMainCode=1`, CLD_EXITED) with status 0.
+    async fn exited_cleanly(&self, unit: &str) -> Option<bool> {
+        let out = run(
+            &[
+                "show",
+                unit,
+                "--property=Result",
+                "--property=ExecMainCode",
+                "--property=ExecMainStatus",
+            ],
+            PROBE_TIMEOUT,
+        )
+        .await?;
+        if !out.status.success() {
+            return None;
+        }
+        clean_exit_verdict(&String::from_utf8_lossy(&out.stdout))
+    }
+
     /// `systemctl mask <unit>` (idempotent).
     async fn mask(&self, unit: &str) {
         let _ = run(&["mask", unit], PROBE_TIMEOUT).await;
@@ -162,5 +201,17 @@ mod tests {
         assert_eq!(is_active_verdict("activating"), Some(false));
         assert_eq!(is_active_verdict(""), None);
         assert_eq!(is_active_verdict("  \n"), None);
+    }
+
+    #[test]
+    fn only_an_exit_zero_with_a_success_result_is_clean() {
+        let clean = "Result=success\nExecMainCode=1\nExecMainStatus=0\n";
+        assert_eq!(clean_exit_verdict(clean), Some(true));
+        let crashed = "Result=exit-code\nExecMainCode=1\nExecMainStatus=1\n";
+        assert_eq!(clean_exit_verdict(crashed), Some(false));
+        // Killed by SIGKILL: code 2 (CLD_KILLED), status 9.
+        let killed = "Result=signal\nExecMainCode=2\nExecMainStatus=9\n";
+        assert_eq!(clean_exit_verdict(killed), Some(false));
+        assert_eq!(clean_exit_verdict("Result=success\n"), None);
     }
 }

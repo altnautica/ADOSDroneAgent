@@ -33,9 +33,6 @@ use crate::router::UplinkManager;
 
 use self::lock::Wlan0Lock;
 
-/// Fallback station interface, used only when driver resolution finds no
-/// onboard WiFi (mirrors the AP guard's `AP_IFACE_FALLBACK`).
-const WLAN_IFACE_FALLBACK: &str = "wlan0";
 const HOSTAPD_UNIT: &str = "ados-hostapd.service";
 const LOCK_DIR: &str = "/var/lock";
 const AP_FLAG_PATH: &str = crate::paths::AP_WAS_ENABLED_FLAG;
@@ -79,25 +76,25 @@ fn lock_path_for(iface: &str) -> PathBuf {
 /// `wlan0` was the onboard chip twice and the USB long-range radio once, so a
 /// name-bound station would have driven the flight link one boot in three.
 ///
-/// Falls back to the historical name rather than refusing, matching the AP
-/// guard: `join` refuses separately when the radio is already claimed.
+/// `None` when no onboard (non-radio) WiFi resolves: there is then no station
+/// interface, and `join` refuses rather than guessing a name.
 fn station_iface_from(
     ifaces: &[ados_protocol::netif::WirelessIface],
     configured: &str,
     radio_iface: Option<&str>,
-) -> String {
+) -> Option<String> {
     match ados_protocol::netif::choose_ap_interface(ifaces, configured, radio_iface) {
-        Ok(iface) => iface,
+        Ok(iface) => Some(iface),
         Err(exc) => {
-            warn!(error = %exc, fallback = WLAN_IFACE_FALLBACK, "station_iface_unresolved");
-            WLAN_IFACE_FALLBACK.to_string()
+            warn!(error = %exc, "station_iface_unresolved");
+            None
         }
     }
 }
 
 /// [`station_iface_from`] against the live `/sys/class/net`, the operator's pin,
 /// and the interface the radio itself reports it took.
-fn station_interface() -> String {
+fn station_interface() -> Option<String> {
     station_iface_from(
         &ados_protocol::netif::list_wireless(),
         &ados_protocol::ap_country::configured_ap_interface(),
@@ -107,6 +104,7 @@ fn station_interface() -> String {
 
 /// NetworkManager-backed WiFi station manager for the onboard management radio.
 pub struct WifiClientManager {
+    /// The resolved station interface; empty when none resolved.
     interface: String,
     runner: Arc<dyn CmdRunner>,
     lock_path: PathBuf,
@@ -124,7 +122,7 @@ impl WifiClientManager {
     /// the AP guard resolve theirs, so a boot-time udev race cannot leave the
     /// station pointed at whatever enumerated as `wlan0` this time.
     pub fn new(runner: Arc<dyn CmdRunner>) -> Self {
-        let interface = station_interface();
+        let interface = station_interface().unwrap_or_default();
         let lock_path = lock_path_for(&interface);
         Self::with_paths(
             interface,
@@ -259,6 +257,26 @@ impl WifiClientManager {
         if ssid.is_empty() {
             return json!({"joined": false, "error": "ssid_required", "ip": null, "gateway": null});
         }
+        if self.interface.is_empty() {
+            return json!({
+                "joined": false,
+                "error": "no_station_interface",
+                "hint": "No onboard WiFi interface was found",
+                "interface": null,
+                "ip": null,
+                "gateway": null,
+            });
+        }
+        // Never run nmcli on the aircraft's flight radio, whatever the name.
+        if ados_protocol::netif::radio_interface().as_deref() == Some(self.interface.as_str()) {
+            return json!({
+                "joined": false,
+                "error": "station_is_wfb_radio",
+                "interface": self.interface,
+                "ip": null,
+                "gateway": null,
+            });
+        }
 
         let ap_active = self.is_hostapd_active().await;
         if ap_active && !force {
@@ -272,6 +290,7 @@ impl WifiClientManager {
             });
         }
 
+        let fresh_lock = !self.holds_lock();
         if !self.acquire_lock() {
             return json!({
                 "joined": false,
@@ -282,8 +301,12 @@ impl WifiClientManager {
             });
         }
 
-        // Record whether the AP was up so leave() (or a failed join) restores it.
-        self.write_ap_flag(ap_active);
+        // Record whether the AP was up so leave() (or a failed join) restores
+        // it. A rejoin while already holding the station keeps the record of
+        // the first join: hostapd is down now because that join stopped it.
+        if fresh_lock || ap_active {
+            self.write_ap_flag(ap_active);
+        }
         if ap_active {
             info!(ssid = ssid, "stopping_hostapd_for_client");
             self.runner
@@ -337,13 +360,8 @@ impl WifiClientManager {
         };
         if !out.ok() {
             warn!(ssid = ssid, "wifi_join_failed");
-            // Restore the AP if we stole it, then release the lock.
-            if ap_active {
-                self.runner
-                    .run(&["systemctl", "start", HOSTAPD_UNIT], SYSTEMCTL_TIMEOUT)
-                    .await;
-                self.clear_ap_flag();
-            }
+            // Restore the AP if a join took it, then release the lock.
+            self.restore_ap_if_taken().await;
             self.release_lock();
             return json!({
                 "joined": false,
@@ -444,47 +462,56 @@ impl WifiClientManager {
         }
     }
 
-    /// Disconnect the current WiFi client connection, restore the AP if it was
-    /// ours, and release the wlan0 lock. Mirrors `leave`.
-    pub async fn leave(&mut self) -> Value {
-        let st = self.status().await;
-        let prev_ssid = st.get("ssid").and_then(|v| v.as_str()).map(str::to_string);
-        let prev_ssid = match prev_ssid {
-            Some(s) => s,
-            None => {
-                self.release_lock();
-                return json!({"left": false, "previous_ssid": null});
-            }
-        };
-
-        let down = self
-            .runner
-            .run(
-                &["nmcli", "connection", "down", &prev_ssid],
-                SYSTEMCTL_TIMEOUT,
-            )
-            .await;
-        if !down.ok() {
-            // Fallback: disconnect the device.
-            self.runner
-                .run(
-                    &["nmcli", "device", "disconnect", &self.interface],
-                    SYSTEMCTL_TIMEOUT,
-                )
-                .await;
-        }
-
-        // Restore hostapd if it was running before we took the radio.
+    /// Start hostapd again when a join recorded that it was up, and clear the
+    /// record.
+    async fn restore_ap_if_taken(&self) {
         if self.read_ap_flag() {
-            info!("restoring_hostapd_after_client_leave");
+            info!("restoring_hostapd_after_client");
             self.runner
                 .run(&["systemctl", "start", HOSTAPD_UNIT], SYSTEMCTL_TIMEOUT)
                 .await;
         }
         self.clear_ap_flag();
+    }
+
+    /// Disconnect the current WiFi client connection, restore the AP if it was
+    /// ours, and release the station lock. The AP is restored even when no
+    /// client link is active any more (the joined network went away), so the
+    /// node is never left with neither uplink nor its AP.
+    pub async fn leave(&mut self) -> Value {
+        let st = self.status().await;
+        let prev_ssid = st.get("ssid").and_then(|v| v.as_str()).map(str::to_string);
+
+        if let Some(prev) = prev_ssid.as_deref() {
+            let down = self
+                .runner
+                .run(&["nmcli", "connection", "down", prev], SYSTEMCTL_TIMEOUT)
+                .await;
+            if !down.ok() {
+                // Fallback: disconnect the device.
+                self.runner
+                    .run(
+                        &["nmcli", "device", "disconnect", &self.interface],
+                        SYSTEMCTL_TIMEOUT,
+                    )
+                    .await;
+            }
+        }
+
+        self.restore_ap_if_taken().await;
         self.release_lock();
 
-        json!({"left": true, "previous_ssid": prev_ssid})
+        json!({"left": prev_ssid.is_some(), "previous_ssid": prev_ssid})
+    }
+
+    /// Scan for nearby networks on the station interface. When hostapd holds
+    /// the radio the scan runs in `ap-force` mode so the AP stays up.
+    pub async fn scan(&self) -> Result<Vec<Value>, String> {
+        if self.interface.is_empty() {
+            return Err("no station radio".to_string());
+        }
+        let ap_active = self.is_hostapd_active().await;
+        crate::iw_scan::scan(self.runner.as_ref(), &self.interface, ap_active).await
     }
 
     /// Delete a saved NetworkManager connection profile by name. Removes the
@@ -559,6 +586,14 @@ impl WifiClientManager {
 
     /// Current station status. Mirrors `status`.
     pub async fn status(&self) -> serde_json::Map<String, Value> {
+        if self.interface.is_empty() {
+            let mut m = serde_json::Map::new();
+            for key in ["ssid", "bssid", "signal", "ip", "gateway", "security"] {
+                m.insert(key.into(), Value::Null);
+            }
+            m.insert("connected".into(), json!(false));
+            return m;
+        }
         let list = self
             .runner
             .run(
@@ -784,24 +819,106 @@ mod tests {
         let root = fake_net_root(dir.path(), &[("wlan0", "rtl88x2eu"), ("wlan1", "brcmfmac")]);
         let ifaces = ados_protocol::netif::list_wireless_in(&root);
         assert_eq!(ifaces.first().map(|c| c.name.as_str()), Some("wlan0"));
-        assert_eq!(station_iface_from(&ifaces, "", None), "wlan1");
+        assert_eq!(
+            station_iface_from(&ifaces, "", None).as_deref(),
+            Some("wlan1")
+        );
         // The lock is named for the radio actually held, so hostapd's holder and
         // this one collide on the same file instead of passing each other by.
         assert_eq!(
-            lock_path_for(&station_iface_from(&ifaces, "", None)),
+            lock_path_for(&station_iface_from(&ifaces, "", None).unwrap()),
             std::path::PathBuf::from("/var/lock/ados-wlan1.lock")
         );
     }
 
     #[test]
-    fn station_falls_back_when_no_onboard_wifi_is_present() {
-        // Radio-only box: no onboard management chip to hand the station. The
-        // historical name is returned rather than a refusal, matching the AP
-        // guard; the join path is what refuses when the radio is claimed.
+    fn no_station_resolves_when_only_the_flight_radio_is_present() {
+        // Radio-only box: no onboard management chip to hand the station, so
+        // there is no station interface rather than a guessed `wlan0`.
         let dir = tempfile::tempdir().unwrap();
         let root = fake_net_root(dir.path(), &[("wlan0", "rtl88x2eu")]);
         let ifaces = ados_protocol::netif::list_wireless_in(&root);
-        assert_eq!(station_iface_from(&ifaces, "", None), "wlan0");
+        assert_eq!(station_iface_from(&ifaces, "", None), None);
+    }
+
+    #[tokio::test]
+    async fn join_refuses_with_no_station_interface() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        let mut m = mgr(dir.path(), Arc::clone(&runner));
+        m.interface.clear();
+        let res = m.join("SomeAP", Some("password1"), true).await;
+        assert_eq!(res["error"], "no_station_interface");
+        assert!(runner.recorded().is_empty(), "nothing ran");
+    }
+
+    fn active() -> CmdOut {
+        CmdOut {
+            rc: 0,
+            stdout: "active\n".to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    fn inactive() -> CmdOut {
+        CmdOut {
+            rc: 3,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    fn hostapd_starts(runner: &ScriptedRunner) -> usize {
+        runner
+            .recorded()
+            .iter()
+            .filter(|c| c.iter().any(|a| a == "start") && c.iter().any(|a| a == HOSTAPD_UNIT))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn switching_networks_then_leaving_restores_the_ap() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        // First join takes the radio from a running AP (forced).
+        runner.push(active()); // is-active
+        runner.push(CmdOut::failed(0, "")); // systemctl stop hostapd
+        runner.push(CmdOut::failed(0, "")); // nmcli connect ok
+        let mut m = mgr(dir.path(), Arc::clone(&runner));
+        assert_eq!(m.join("NetA", None, true).await["joined"], true);
+        assert!(m.read_ap_flag());
+        // Second join (switching SSIDs): hostapd is down now.
+        runner.push(inactive()); // is-active
+        runner.push(CmdOut::failed(0, "")); // nmcli connect ok
+        assert_eq!(m.join("NetB", None, false).await["joined"], true);
+        assert!(
+            m.read_ap_flag(),
+            "the first join's record survives the rejoin"
+        );
+        // Leaving restores the AP.
+        let before = hostapd_starts(&runner);
+        m.leave().await;
+        assert_eq!(hostapd_starts(&runner), before + 1);
+        assert!(!m.holds_lock());
+    }
+
+    #[tokio::test]
+    async fn leaving_after_the_network_dropped_still_restores_the_ap() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        runner.push(active()); // is-active
+        runner.push(CmdOut::failed(0, "")); // systemctl stop hostapd
+        runner.push(CmdOut::failed(0, "")); // nmcli connect ok
+        let mut m = mgr(dir.path(), Arc::clone(&runner));
+        assert_eq!(m.join("NetA", None, true).await["joined"], true);
+        // The joined network went away: status reports no active SSID (the
+        // scripted runner answers every status query with empty output).
+        let before = hostapd_starts(&runner);
+        let res = m.leave().await;
+        assert_eq!(res["left"], false);
+        assert_eq!(hostapd_starts(&runner), before + 1);
+        assert!(!m.read_ap_flag());
+        assert!(!m.holds_lock());
     }
 
     #[test]
@@ -812,7 +929,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = fake_net_root(dir.path(), &[("wlan0", "brcmfmac"), ("wlan1", "brcmfmac")]);
         let ifaces = ados_protocol::netif::list_wireless_in(&root);
-        assert_eq!(station_iface_from(&ifaces, "", Some("wlan0")), "wlan1");
+        assert_eq!(
+            station_iface_from(&ifaces, "", Some("wlan0")).as_deref(),
+            Some("wlan1")
+        );
     }
 
     #[test]

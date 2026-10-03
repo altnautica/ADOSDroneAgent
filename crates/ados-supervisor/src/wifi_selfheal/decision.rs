@@ -7,20 +7,6 @@
 //! `os`; the threshold + cooldown state machine lives on the `WifiSelfHeal`
 //! struct in the module root.
 
-/// WFB-compatible driver names: an interface running one of these is the USB
-/// injection adapter, never an onboard management link. Matches the radio
-/// adapter selection's compatible-driver set so the two halves agree on which
-/// interface is the radio. Lower-cased compare.
-#[cfg(any(target_os = "linux", test))]
-const INJECTION_DRIVERS: &[&str] = &[
-    "8812au",
-    "8812eu",
-    "rtl8812au",
-    "rtl8812eu",
-    "rtl88x2eu",
-    "rtl88xxau",
-];
-
 /// One onboard managed-WiFi connection considered by the watchdog: the
 /// NetworkManager connection name and the interface it is bound to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,14 +30,6 @@ pub enum HealDecision {
     /// Threshold met and no cooldown in force: re-associate now. Carries the
     /// failure count that crossed the threshold for the heal event.
     Heal { consecutive_failures: u32 },
-}
-
-/// True when a driver name denotes the USB injection adapter (a WFB-compatible
-/// Realtek chip), which is never an onboard management link. Lower-cased compare.
-#[cfg(any(target_os = "linux", test))]
-fn is_injection_driver(driver: &str) -> bool {
-    let d = driver.trim().to_ascii_lowercase();
-    INJECTION_DRIVERS.contains(&d.as_str())
 }
 
 /// Heuristic for whether a NetworkManager connection name denotes an access
@@ -162,40 +140,36 @@ pub(super) fn parse_gateway(text: &str) -> Option<String> {
 }
 
 /// Parse the neighbor (ARP) reachability for a gateway out of
-/// `ip neighbor show <gw> dev <iface>` output. The line ends with the neighbor
-/// state token (REACHABLE / STALE / DELAY / PROBE / INCOMPLETE / FAILED). A
-/// reachable data path resolves the gateway to a MAC with a usable state
-/// (REACHABLE / STALE / DELAY / PROBE — the kernel has a cached entry it is
-/// using); INCOMPLETE / FAILED or an absent entry means the gateway does not
-/// answer ARP, i.e. the dead-data-path condition. Pure.
+/// `ip neighbor show <gw> dev <iface>` output, read right after a probe has
+/// been sent to the gateway. Only a confirmed state counts: REACHABLE (the
+/// gateway answered recently), PERMANENT or NOARP (static entries). STALE
+/// persists indefinitely on an idle link, and DELAY / PROBE are the kernel
+/// actively doubting the entry, so none of them proves the data path; nor do
+/// INCOMPLETE / FAILED or an absent entry. Pure.
 #[cfg(any(target_os = "linux", test))]
 pub(super) fn parse_neighbor_reachable(text: &str) -> bool {
-    for line in text.lines() {
-        let upper = line.to_ascii_uppercase();
-        // A usable cached neighbor: the kernel has (or is actively refreshing) a
-        // MAC for the gateway. STALE is reachable — it just means the entry has
-        // not been confirmed recently; traffic flows and revalidates it.
-        if upper.contains("REACHABLE")
-            || upper.contains("STALE")
-            || upper.contains("DELAY")
-            || upper.contains("PROBE")
-        {
-            return true;
-        }
-    }
-    false
+    text.lines().any(|line| {
+        line.split_whitespace()
+            .next_back()
+            .is_some_and(|state| matches!(state, "REACHABLE" | "PERMANENT" | "NOARP"))
+    })
 }
 
-/// Decide whether an interface (given its driver and current mode) is an onboard
-/// managed-WiFi candidate. Excludes the injection adapter (WFB-compatible
-/// driver) and anything not in managed/station mode (a monitor-mode iface is the
-/// radio adapter and must never be touched). `mode` is the `iw` operating mode
-/// string, or `None` when unreadable — an unreadable mode is treated as NOT a
-/// candidate (fail safe: never act on an interface we cannot positively confirm
-/// is a managed station). Pure.
+/// Decide whether an interface (given its driver, USB ids and current mode)
+/// is an onboard managed-WiFi candidate. Excludes the injection adapter (the
+/// shared WFB adapter table: driver or VID:PID) and anything not in
+/// managed/station mode (a monitor-mode iface is the radio adapter and must
+/// never be touched). `mode` is the `iw` operating mode string, or `None` when
+/// unreadable — an unreadable mode is treated as NOT a candidate (fail safe:
+/// never act on an interface we cannot positively confirm is a managed
+/// station). Pure.
 #[cfg(any(target_os = "linux", test))]
-pub(super) fn iface_is_managed_candidate(driver: &str, mode: Option<&str>) -> bool {
-    if is_injection_driver(driver) {
+pub(super) fn iface_is_managed_candidate(
+    driver: &str,
+    vid_pid: Option<(u16, u16)>,
+    mode: Option<&str>,
+) -> bool {
+    if ados_protocol::netif::is_wfb_adapter(driver, vid_pid) {
         return false;
     }
     match mode {
@@ -290,31 +264,62 @@ hotspot:802-11-wireless:wlan0:activated
     // ----- interface-level exclusion -----
 
     #[test]
-    fn injection_driver_is_never_a_candidate() {
+    fn injection_adapter_is_never_a_candidate() {
         // The WFB injection adapter (RTL family), even reported in managed mode,
         // is never an onboard management link.
-        assert!(!iface_is_managed_candidate("rtl88x2eu", Some("managed")));
-        assert!(!iface_is_managed_candidate("8812eu", Some("managed")));
-        assert!(!iface_is_managed_candidate("rtl8812au", Some("monitor")));
+        assert!(!iface_is_managed_candidate(
+            "rtl88x2eu",
+            None,
+            Some("managed")
+        ));
+        assert!(!iface_is_managed_candidate(
+            "rtl8812au",
+            None,
+            Some("monitor")
+        ));
+        // A flight radio bound to a driver outside the driver table is still
+        // recognised by its USB ids.
+        let (vid, pid, _) = ados_protocol::wfb_tables::WFB_COMPATIBLE[0];
+        assert!(!iface_is_managed_candidate(
+            "rtw88_8822bu",
+            Some((vid, pid)),
+            Some("managed")
+        ));
     }
 
     #[test]
     fn monitor_mode_iface_is_never_a_candidate() {
         // A monitor-mode interface is the radio adapter; never touch it.
-        assert!(!iface_is_managed_candidate("brcmfmac", Some("monitor")));
+        assert!(!iface_is_managed_candidate(
+            "brcmfmac",
+            None,
+            Some("monitor")
+        ));
     }
 
     #[test]
     fn unreadable_mode_is_not_a_candidate() {
         // Fail safe: never act on an interface whose mode we cannot confirm.
-        assert!(!iface_is_managed_candidate("brcmfmac", None));
+        assert!(!iface_is_managed_candidate("brcmfmac", None, None));
     }
 
     #[test]
     fn onboard_managed_wifi_is_a_candidate() {
-        assert!(iface_is_managed_candidate("brcmfmac", Some("managed")));
-        assert!(iface_is_managed_candidate("aic8800_fdrv", Some("managed")));
-        assert!(iface_is_managed_candidate("brcmfmac", Some("station")));
+        assert!(iface_is_managed_candidate(
+            "brcmfmac",
+            None,
+            Some("managed")
+        ));
+        assert!(iface_is_managed_candidate(
+            "aic8800_fdrv",
+            None,
+            Some("managed")
+        ));
+        assert!(iface_is_managed_candidate(
+            "brcmfmac",
+            None,
+            Some("station")
+        ));
     }
 
     // ----- gateway + neighbor parsing -----
@@ -337,21 +342,20 @@ hotspot:802-11-wireless:wlan0:activated
             "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
         ));
         assert!(parse_neighbor_reachable(
-            "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff STALE\n"
-        ));
-        assert!(parse_neighbor_reachable(
-            "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff DELAY\n"
+            "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff PERMANENT\n"
         ));
     }
 
     #[test]
-    fn neighbor_unreachable_states() {
-        // INCOMPLETE / FAILED / empty all mean the gateway does not answer ARP.
+    fn an_unconfirmed_neighbor_entry_is_not_a_reachable_gateway() {
+        // STALE lingers on an idle link whose gateway stopped answering, and
+        // DELAY / PROBE mean the kernel is already doubting the entry.
+        for state in ["STALE", "DELAY", "PROBE", "FAILED"] {
+            let line = format!("192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff {state}\n");
+            assert!(!parse_neighbor_reachable(&line), "{state}");
+        }
         assert!(!parse_neighbor_reachable(
             "192.168.1.1 dev wlan0  INCOMPLETE\n"
-        ));
-        assert!(!parse_neighbor_reachable(
-            "192.168.1.1 dev wlan0 lladdr aa:bb:cc:dd:ee:ff FAILED\n"
         ));
         assert!(!parse_neighbor_reachable(""));
     }

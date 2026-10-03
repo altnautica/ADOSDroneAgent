@@ -20,10 +20,10 @@
 //!
 //! Safety invariants (it can never cap the WFB radio):
 //! - It only ever forces a domain that PERMITS the configured rendezvous
-//!   channel. It reads the injection interface's enabled channel set (`iw phy
-//!   channels`, which already excludes DFS / disabled / no-IR) and re-asserts
-//!   only when the rendezvous channel is in that set (or the set is unknown,
-//!   matching the bring-up gate's "empty = do not restrict").
+//!   channel, judged from that domain's own rules in the regulatory database
+//!   (excluding DFS / no-IR), never from the live per-phy channel sets, which
+//!   describe the domain being replaced. An unreadable database or unknown
+//!   country reads as not permitted.
 //! - It never forces the all-restrictive world default (`00`) or a malformed
 //!   domain.
 //! - It is idempotent: a no-op when the live domain already equals the wanted

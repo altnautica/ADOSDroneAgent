@@ -22,6 +22,8 @@
 //!     -> {"ok":true,"left":true,"previous_ssid":"Net"}
 //! {"op":"wifi_status"}
 //!     -> {"ok":true,"connected":true,"ssid":"Net","ip":"...",...}
+//! {"op":"wifi_scan"}
+//!     -> {"ok":true,"networks":[{"ssid":"Net","bssid":"..","signal":-48,"frequency_mhz":2437,"channel":6,"security":"wpa2"}]}
 //! {"op":"wifi_autoconnect","name":"Net","enabled":true}
 //!     -> {"ok":true,"autoconnect":true,"name":"Net","error":null}
 //! {"op":"ap_config","ssid":"ADOS-GS-1234","passphrase":"pw","channel":6,"enabled":true}
@@ -153,6 +155,8 @@ enum Command {
     },
     Leave,
     Status,
+    /// Scan for nearby networks on the station radio.
+    Scan,
     /// Toggle the NM autoconnect flag of a saved WiFi profile.
     Autoconnect {
         name: String,
@@ -220,6 +224,7 @@ fn parse_command(line: &[u8]) -> Parsed {
         },
         "wifi_leave" => Parsed::Cmd(Command::Leave),
         "wifi_status" => Parsed::Cmd(Command::Status),
+        "wifi_scan" => Parsed::Cmd(Command::Scan),
         "wifi_autoconnect" => match (req.name, req.enabled) {
             // The manager treats an empty name as `name_required`, so the empty
             // case is forwarded (it is a normal manager result, not a transport
@@ -327,6 +332,11 @@ async fn apply_wifi(cmd: Command, wifi: &Mutex<WifiClientManager>) -> Result<Val
         Command::Autoconnect { name, enabled } => {
             with_ok(wifi.lock().await.set_autoconnect(&name, enabled).await)
         }
+        // The manager stays locked for the scan so it cannot overlap a join.
+        Command::Scan => match wifi.lock().await.scan().await {
+            Ok(networks) => json!({"ok": true, "networks": networks}),
+            Err(error) => json!({"ok": false, "error": error}),
+        },
         other => return Err(other),
     })
 }
@@ -360,16 +370,16 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
             apn,
             cap_gb,
             enabled,
-        } => {
-            let res = state.modem.configure(apn.as_deref(), cap_gb, enabled).await;
-            with_ok(res)
-        }
+        } => match state.modem.configure(apn.as_deref(), cap_gb, enabled).await {
+            Ok(res) => with_ok(res),
+            Err(error) => json!({"ok": false, "error": format!("E_INVALID_APN: {error}")}),
+        },
         Command::ShareUplink { enabled } => {
             let iface = state.router.active_iface().await;
             with_ok(
                 state
                     .firewall
-                    .apply_share_uplink(enabled, iface.as_deref())
+                    .set_share_uplink(enabled, iface.as_deref())
                     .await,
             )
         }
@@ -377,6 +387,7 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
         | Command::Forget { .. }
         | Command::Leave
         | Command::Status
+        | Command::Scan
         | Command::Autoconnect { .. } => unreachable!("Wi-Fi-client ops are applied above"),
     }
 }
@@ -398,6 +409,11 @@ async fn apply_ap_config(
     channel: Option<u32>,
     enabled: Option<bool>,
 ) -> Value {
+    if let Err(error) =
+        crate::managers::validate_ap_settings(ssid.as_deref(), passphrase.as_deref(), channel)
+    {
+        return json!({"ok": false, "error": format!("E_AP_INVALID_CONFIG: {error}")});
+    }
     let mut mgr = state.hostapd.lock().await;
     let ok = mgr
         .apply_ap_config(ssid.as_deref(), passphrase.as_deref(), channel)

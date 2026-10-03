@@ -169,22 +169,6 @@ pub fn should_active_probe_gateway(
     !passive_reachable && carrier && has_lease
 }
 
-/// True when a kernel driver name denotes the WFB injection adapter (a
-/// Realtek monitor-mode radio), which is never a management link. Lower-cased
-/// compare; matches the radio adapter selection's compatible-driver set. Pure.
-pub fn is_injection_driver(driver: &str) -> bool {
-    const INJECTION_DRIVERS: &[&str] = &[
-        "8812au",
-        "8812eu",
-        "rtl8812au",
-        "rtl8812eu",
-        "rtl88x2eu",
-        "rtl88xxau",
-    ];
-    let d = driver.trim().to_ascii_lowercase();
-    INJECTION_DRIVERS.contains(&d.as_str())
-}
-
 /// True when an interface NAME denotes a wireless device by the conventional
 /// kernel prefixes (`wlan*`, the predictable `wlp*` / `wlx*`, and `wwan*`).
 /// Pure. Used as the authoritative first signal for wireless classification so
@@ -347,7 +331,11 @@ pub async fn collect_candidates() -> Vec<IfaceCandidate> {
         }
         let is_virtual = is_virtual_or_loopback(&name);
         let driver = driver_name(&name).await;
-        let is_injection = is_injection_driver(&driver);
+        // Driver plus USB VID:PID through the same table the radio selects
+        // its adapter from, so a flight radio on a mainline driver is still
+        // recognised as the radio and never as a management link.
+        let is_injection =
+            ados_protocol::netif::is_wfb_adapter(&driver, ados_protocol::netif::usb_vid_pid(&name));
         let transport = if is_wireless(&name).await {
             Transport::Wifi
         } else {
@@ -481,16 +469,6 @@ mod tests {
         // A down link (no carrier or no lease) is Down regardless → no probe.
         assert!(!should_active_probe_gateway(false, false, true));
         assert!(!should_active_probe_gateway(false, true, false));
-    }
-
-    #[test]
-    fn injection_driver_detection() {
-        assert!(is_injection_driver("rtl88x2eu"));
-        assert!(is_injection_driver("8812eu"));
-        assert!(is_injection_driver("RTL8812AU"));
-        assert!(!is_injection_driver("brcmfmac"));
-        assert!(!is_injection_driver("aic8800_fdrv"));
-        assert!(!is_injection_driver(""));
     }
 
     #[test]

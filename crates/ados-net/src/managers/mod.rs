@@ -17,7 +17,9 @@ pub mod wifi_client;
 
 pub use ap_guard::{ApGuardDecision, SetupApGuard};
 pub use ethernet::EthernetManager;
-pub use hostapd::{build_ssid, HostapdManager};
-pub use modem::{apn_for_imsi, desired_modem_session, ModemConfig, ModemManager, ModemSession};
+pub use hostapd::{build_ssid, validate_ap_settings, HostapdManager};
+pub use modem::{
+    apn_for_imsi, desired_modem_session, validate_apn, ModemConfig, ModemManager, ModemSession,
+};
 pub use usb_gadget::UsbGadgetManager;
 pub use wifi_client::{ClientConfig, WifiClientManager};

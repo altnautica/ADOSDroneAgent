@@ -10,6 +10,7 @@ pub mod cmdsock;
 pub mod config;
 pub mod data_cap;
 pub mod firewall;
+pub mod iw_scan;
 pub mod managers;
 pub mod nmcli;
 pub mod paths;
@@ -24,7 +25,7 @@ pub use cmd::{CmdOut, CmdRunner, TokioCmdRunner};
 pub use cmdsock::CmdState;
 pub use config::UplinkConfig;
 pub use data_cap::{DataCapTracker, SysfsUsageSource, UsageSource};
-pub use firewall::{FirewallBackend, ShareUplinkFirewall};
+pub use firewall::{FirewallBackend, FirewallIntent, ShareUplinkFirewall};
 pub use managers::{
     apn_for_imsi, build_ssid, EthernetManager, HostapdManager, ModemConfig, ModemManager,
     UsbGadgetManager, WifiClientManager,
@@ -36,4 +37,4 @@ pub use router::failover;
 pub use router::health;
 pub use router::{CloudProber, IpRouteApplier, StubManager, UplinkManager, UplinkRouter};
 pub use sysfs::detect_ethernet_iface;
-pub use throttle::{run_share_uplink_consumer, run_throttle_consumer};
+pub use throttle::run_firewall_reconciler;

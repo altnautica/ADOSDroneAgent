@@ -167,30 +167,39 @@ fn read_config() -> MgmtFailoverConfig {
 /// Fold this tick's wired-interface carrier readings into the sticky ever-up
 /// set, then decide whether a management primary exists and whether it is up.
 ///
+/// Interfaces are keyed by a stable identity (the device's bus path, else its
+/// MAC), never by name: names are reassigned across re-enumeration.
+///
 /// A wired interface counts as a primary only once it has carried a link at
 /// least once (`ever_up`): a built-in Ethernet port that is unplugged from boot
 /// (no carrier, no lease) is ignored, so a WiFi-managed rig does not read its
 /// dead `eth0` as a "down primary" and flap into the heartbeat reach-back. A
 /// was-up-now-down wired link stays a primary (sticky), so a real cable pull
-/// still fails over. Pure (the set is mutated in place) so the stickiness is
-/// unit-tested without a clock or sysfs.
+/// still fails over. A was-up primary whose device has vanished from the box
+/// altogether (`present` no longer lists it: a USB-Ethernet dongle pulled or
+/// browned out) is a down primary too, not "no primary". Pure (the set is
+/// mutated in place) so the stickiness is unit-tested without a clock or sysfs.
 #[cfg(any(target_os = "linux", test))]
 fn resolve_primary(
     wired: &[(String, bool)],
+    present: &std::collections::HashSet<String>,
     ever_up: &mut std::collections::HashSet<String>,
 ) -> (bool, bool) {
     let mut has_primary = false;
     let mut primary_up = false;
-    for (name, up) in wired {
+    for (id, up) in wired {
         if *up {
-            ever_up.insert(name.clone());
+            ever_up.insert(id.clone());
         }
-        if ever_up.contains(name) {
+        if ever_up.contains(id) {
             has_primary = true;
             if *up {
                 primary_up = true;
             }
         }
+    }
+    if ever_up.iter().any(|id| !present.contains(id)) {
+        has_primary = true;
     }
     (has_primary, primary_up)
 }
@@ -204,10 +213,11 @@ pub struct MgmtFailover {
     healthy_since: Option<Instant>,
     last_tick: Option<Instant>,
     failover_iface: Option<String>,
-    /// Wired interfaces that have carried a link at least once this process
-    /// lifetime. Only such an interface is treated as a management *primary*,
-    /// so a port that is unplugged from boot is never read as a "down primary"
-    /// (which would strand a WiFi-managed rig in the heartbeat reach-back).
+    /// Wired interfaces (by stable identity) that have carried a link at least
+    /// once this process lifetime. Only such an interface is treated as a
+    /// management *primary*, so a port that is unplugged from boot is never
+    /// read as a "down primary" (which would strand a WiFi-managed rig in the
+    /// heartbeat reach-back).
     ever_up: std::collections::HashSet<String>,
     events: EventEmitter,
 }
@@ -310,11 +320,16 @@ impl MgmtFailover {
         // set, and decide whether a real management primary exists and is up. A
         // port unplugged from boot (no carrier ever) never becomes a primary,
         // so a WiFi-managed rig does not flap into the heartbeat reach-back.
+        let mut present = std::collections::HashSet::with_capacity(candidates.len());
+        for c in &candidates {
+            present.insert(iface_identity(&c.name).await);
+        }
         let mut wired_carriers: Vec<(String, bool)> = Vec::with_capacity(wired.len());
         for c in &wired {
-            wired_carriers.push((c.name.clone(), iface_carrier(&c.name).await));
+            wired_carriers.push((iface_identity(&c.name).await, iface_carrier(&c.name).await));
         }
-        let (has_primary, primary_up) = resolve_primary(&wired_carriers, &mut self.ever_up);
+        let (has_primary, primary_up) =
+            resolve_primary(&wired_carriers, &present, &mut self.ever_up);
 
         // No wired primary → management is over WiFi normally; there is no
         // reach-back concept. Stay Primary and surface it.
@@ -465,6 +480,20 @@ async fn iface_carrier(iface: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// A stable identity for an interface: the resolved bus path of its device
+/// (same for a USB NIC re-enumerating on the same port), else its MAC, else
+/// the name for a device-less virtual interface.
+#[cfg(target_os = "linux")]
+async fn iface_identity(iface: &str) -> String {
+    if let Ok(path) = tokio::fs::canonicalize(format!("/sys/class/net/{iface}/device")).await {
+        return path.to_string_lossy().into_owned();
+    }
+    match tokio::fs::read_to_string(format!("/sys/class/net/{iface}/address")).await {
+        Ok(mac) if !mac.trim().is_empty() => mac.trim().to_string(),
+        _ => iface.to_string(),
+    }
+}
+
 /// Seconds since the Unix epoch, or 0.
 #[cfg(target_os = "linux")]
 fn now_unix() -> u64 {
@@ -527,6 +556,10 @@ mod tests {
         ))
     }
 
+    fn present(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn unplugged_wired_from_boot_is_never_a_primary() {
         // A built-in eth0 unplugged from boot (no carrier ever) must not be read
@@ -534,8 +567,11 @@ mod tests {
         // heartbeat reach-back forever.
         let mut ever = std::collections::HashSet::new();
         for _ in 0..5 {
-            let (has_primary, primary_up) =
-                resolve_primary(&[("eth0".to_string(), false)], &mut ever);
+            let (has_primary, primary_up) = resolve_primary(
+                &[("eth0".to_string(), false)],
+                &present(&["eth0"]),
+                &mut ever,
+            );
             assert!(!has_primary);
             assert!(!primary_up);
         }
@@ -547,10 +583,31 @@ mod tests {
         // A real cable: up on boot, then unplugged. It stays a primary (sticky)
         // so the drop still triggers failover.
         let mut ever = std::collections::HashSet::new();
-        let (has_primary, primary_up) = resolve_primary(&[("eth0".to_string(), true)], &mut ever);
+        let all = present(&["eth0"]);
+        let (has_primary, primary_up) =
+            resolve_primary(&[("eth0".to_string(), true)], &all, &mut ever);
         assert!(has_primary && primary_up);
-        let (has_primary, primary_up) = resolve_primary(&[("eth0".to_string(), false)], &mut ever);
+        let (has_primary, primary_up) =
+            resolve_primary(&[("eth0".to_string(), false)], &all, &mut ever);
         assert!(has_primary && !primary_up);
+    }
+
+    #[test]
+    fn a_usb_ethernet_primary_that_vanishes_is_a_down_primary() {
+        // The dongle was the management primary; pulling it removes the netdev
+        // altogether, so it is in no candidate list this tick. That is a down
+        // primary to fail over from, not a box with no wired primary.
+        let dongle = "/sys/devices/platform/usb/1-1/1-1:1.0";
+        let mut ever = std::collections::HashSet::new();
+        let (has_primary, primary_up) = resolve_primary(
+            &[(dongle.to_string(), true)],
+            &present(&[dongle]),
+            &mut ever,
+        );
+        assert!(has_primary && primary_up);
+        let (has_primary, primary_up) = resolve_primary(&[], &present(&["wlan0"]), &mut ever);
+        assert!(has_primary, "a vanished primary must still count");
+        assert!(!primary_up);
     }
 
     #[test]
@@ -558,14 +615,17 @@ mod tests {
         // Even if the injection radio is briefly misclassified as a wired iface
         // (with carrier), once it is correctly classified out of the wired set
         // the only remaining wired iface (eth0, never up) is not a primary — so
-        // there is no false "down primary".
+        // there is no false "down primary". The radio is still present on the
+        // box, so it is not a vanished primary either.
         let mut ever = std::collections::HashSet::new();
+        let all = present(&["eth0", "wlan1"]);
         let (has_primary, primary_up) = resolve_primary(
             &[("eth0".to_string(), false), ("wlan1".to_string(), true)],
+            &all,
             &mut ever,
         );
         assert!(has_primary && primary_up);
-        let (has_primary, _) = resolve_primary(&[("eth0".to_string(), false)], &mut ever);
+        let (has_primary, _) = resolve_primary(&[("eth0".to_string(), false)], &all, &mut ever);
         assert!(!has_primary);
     }
 

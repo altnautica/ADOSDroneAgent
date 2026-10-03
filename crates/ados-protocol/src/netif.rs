@@ -22,7 +22,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::wfb_tables::{DENY_DRIVER_PREFIXES, WFB_COMPATIBLE_DRIVERS};
+use crate::wfb_tables::{DENY_DRIVER_PREFIXES, DENY_VID, WFB_COMPATIBLE, WFB_COMPATIBLE_DRIVERS};
 
 /// A wireless interface and the kernel driver bound to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +70,58 @@ impl std::fmt::Display for ApIfaceError {
 pub fn is_injection_driver(driver: &str) -> bool {
     let d = driver.trim().to_ascii_lowercase();
     WFB_COMPATIBLE_DRIVERS.iter().any(|k| *k == d)
+}
+
+/// True when an adapter is a WFB injection radio by the rule the radio's own
+/// adapter selection applies: the management-WiFi deny set first (driver
+/// prefix or vendor id), then the USB VID:PID table, then the compatible-driver
+/// table. The VID:PID leg is what catches a radio bound to a driver outside the
+/// driver table (a mainline driver on a known flight-radio id).
+pub fn is_wfb_adapter(driver: &str, vid_pid: Option<(u16, u16)>) -> bool {
+    let d = driver.trim().to_ascii_lowercase();
+    if DENY_DRIVER_PREFIXES.iter().any(|p| d.starts_with(p)) {
+        return false;
+    }
+    if let Some((vid, pid)) = vid_pid {
+        if DENY_VID.contains(&vid) {
+            return false;
+        }
+        if WFB_COMPATIBLE
+            .iter()
+            .any(|(v, p, _)| *v == vid && *p == pid)
+        {
+            return true;
+        }
+    }
+    is_injection_driver(&d)
+}
+
+/// `(idVendor, idProduct)` of the USB device backing a netdev under `root`.
+///
+/// The netdev's `device` link points at the USB *interface* node, which has no
+/// id files; they live on the parent *device* node, one (sometimes more) levels
+/// up. The walk is bounded so a non-USB device never climbs to the root.
+pub fn usb_vid_pid_in(root: &Path, iface: &str) -> Option<(u16, u16)> {
+    const MAX_PARENT_HOPS: usize = 4;
+    let mut dir = std::fs::canonicalize(root.join(iface).join("device")).ok()?;
+    for _ in 0..=MAX_PARENT_HOPS {
+        if let (Ok(vid), Ok(pid)) = (
+            std::fs::read_to_string(dir.join("idVendor")),
+            std::fs::read_to_string(dir.join("idProduct")),
+        ) {
+            return Some((
+                u16::from_str_radix(vid.trim(), 16).ok()?,
+                u16::from_str_radix(pid.trim(), 16).ok()?,
+            ));
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
+    None
+}
+
+/// [`usb_vid_pid_in`] against the live `/sys/class/net`.
+pub fn usb_vid_pid(iface: &str) -> Option<(u16, u16)> {
+    usb_vid_pid_in(Path::new(NET_DIR), iface)
 }
 
 /// True when this driver is onboard management WiFi — the access-point radio.
@@ -196,6 +248,70 @@ pub fn resolve_ap_interface(
     choose_ap_interface(&list_wireless(), configured, radio_iface)
 }
 
+/// Drivers that present an Ethernet-class interface without being a wired
+/// port: the USB gadget the board itself exposes to a laptop, a phone's USB
+/// tether, and cellular modems. Their interfaces are uplinks or lifelines of
+/// their own, never the operator's cable.
+const NOT_WIRED_DRIVERS: &[&str] = &[
+    "g_ether",
+    "g_multi",
+    "rndis_host",
+    "ipheth",
+    "qmi_wwan",
+    "cdc_mbim",
+    "huawei_cdc_ncm",
+];
+
+/// True when the interface is a physical wired Ethernet port: Ethernet link
+/// type, backed by a device with a bound driver, not 802.11, and not a USB
+/// gadget, phone tether or modem. Classified by device, never by name, since
+/// wired names vary across boards (`eth0`, `end1`, `enp1s0`, `enx…`).
+pub fn is_wired_in(root: &Path, iface: &str) -> bool {
+    if iface == "lo" || is_wireless_in(root, iface) {
+        return false;
+    }
+    let dir = root.join(iface);
+    // ARPHRD_ETHER.
+    let ether = std::fs::read_to_string(dir.join("type"))
+        .map(|t| t.trim() == "1")
+        .unwrap_or(false);
+    if !ether {
+        return false;
+    }
+    // A gadget function's interface hangs off the board's own UDC.
+    let device = match std::fs::read_link(dir.join("device")) {
+        Ok(target) => target,
+        Err(_) => return false,
+    };
+    if device.to_string_lossy().contains("gadget") {
+        return false;
+    }
+    match driver_name_in(root, iface) {
+        Some(driver) => {
+            !NOT_WIRED_DRIVERS.contains(&driver.as_str()) && !driver.starts_with("usb_f_")
+        }
+        None => false,
+    }
+}
+
+/// Every physical wired interface, sorted by name for determinism.
+pub fn list_wired_in(root: &Path) -> Vec<String> {
+    let mut out: Vec<String> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| is_wired_in(root, name))
+        .collect();
+    out.sort();
+    out
+}
+
+/// [`list_wired_in`] against the live `/sys/class/net`.
+pub fn list_wired() -> Vec<String> {
+    list_wired_in(&PathBuf::from(NET_DIR))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +342,35 @@ mod tests {
         );
         assert!(is_onboard_wifi_driver("aic8800"));
         assert!(!is_onboard_wifi_driver("rtl88x2eu"));
+    }
+
+    #[test]
+    fn a_known_radio_id_is_a_wfb_adapter_whatever_driver_it_bound() {
+        let (vid, pid, _) = WFB_COMPATIBLE[0];
+        // A mainline driver outside the driver table, on a flight-radio id.
+        assert!(is_wfb_adapter("rtw88_8822bu", Some((vid, pid))));
+        // The driver table still answers when the ids could not be read.
+        assert!(is_wfb_adapter("rtl88x2eu", None));
+        // Management WiFi is denied before either table is consulted.
+        assert!(!is_wfb_adapter("brcmfmac", Some((vid, pid))));
+        assert!(!is_wfb_adapter("rtl88x2eu", Some((DENY_VID[0], 0x0001))));
+        assert!(!is_wfb_adapter("rtw88_8822bu", Some((0x1234, 0x5678))));
+    }
+
+    #[test]
+    fn usb_ids_are_read_from_the_parent_device_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let device = dir.path().join("usb1").join("1-1");
+        let interface = device.join("1-1:1.0");
+        std::fs::create_dir_all(&interface).unwrap();
+        std::fs::write(device.join("idVendor"), "0bda\n").unwrap();
+        std::fs::write(device.join("idProduct"), "a81a\n").unwrap();
+        let net = dir.path().join("net");
+        std::fs::create_dir_all(net.join("wlan1")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&interface, net.join("wlan1").join("device")).unwrap();
+        assert_eq!(usb_vid_pid_in(&net, "wlan1"), Some((0x0BDA, 0xA81A)));
+        assert_eq!(usb_vid_pid_in(&net, "eth0"), None);
     }
 
     /// The bug itself: the same two devices under both name orderings must
@@ -322,6 +467,40 @@ mod tests {
             found,
             ifaces(&[("wlan0", "brcmfmac"), ("wlan1", "rtl88x2eu")]),
             "sorted, wireless only, and an unidentifiable iface is dropped"
+        );
+    }
+
+    #[test]
+    fn wired_ports_are_classified_by_device_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // (iface, device path fragment, driver, link type)
+        let rigs = [
+            ("end1", "platform/fe300000.ethernet", "rk_gmac-dwmac", "1"),
+            ("enx001122334455", "usb1/1-1/1-1:1.0", "r8152", "1"),
+            ("usb0", "platform/fe980000.usb/gadget", "g_ether", "1"),
+            ("eth1", "usb1/1-2/1-2:1.0", "rndis_host", "1"),
+            ("wwan0", "usb1/1-3/1-3:1.4", "qmi_wwan", "65534"),
+        ];
+        for (name, device, driver, link_type) in rigs {
+            let dev = root.join("devices").join(device);
+            let drv = root.join("drivers").join(driver);
+            std::fs::create_dir_all(&dev).unwrap();
+            std::fs::create_dir_all(&drv).unwrap();
+            std::os::unix::fs::symlink(&drv, dev.join("driver")).unwrap();
+            let iface = root.join(name);
+            std::fs::create_dir_all(&iface).unwrap();
+            std::fs::write(iface.join("type"), format!("{link_type}\n")).unwrap();
+            std::os::unix::fs::symlink(&dev, iface.join("device")).unwrap();
+        }
+        // A virtual bridge: Ethernet type, no backing device.
+        std::fs::create_dir_all(root.join("br0")).unwrap();
+        std::fs::write(root.join("br0").join("type"), "1\n").unwrap();
+
+        assert_eq!(
+            list_wired_in(root),
+            vec!["end1".to_string(), "enx001122334455".to_string()],
+            "gadget, tether, modem and virtual interfaces are not wired ports"
         );
     }
 }

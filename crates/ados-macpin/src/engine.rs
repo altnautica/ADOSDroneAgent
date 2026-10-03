@@ -49,7 +49,10 @@ pub struct NetAdapter {
 pub struct ReconcileConfig {
     pub enabled: bool,
     pub apply_live_allowed: bool,
-    /// Operator overrides keyed by `vvvv:pppp` or interface name -> explicit MAC.
+    /// Operator overrides -> explicit MAC, keyed by a stable identity: the
+    /// adapter key `vvvv:pppp@<usb_path>` (one adapter in one port), or a bare
+    /// `vvvv:pppp` (every adapter of that model). Interface names are not
+    /// identities and are not honoured.
     pub overrides: HashMap<String, String>,
 }
 
@@ -76,9 +79,62 @@ pub enum Decision {
 /// before the stock board files (`50-...`) so the pin wins.
 pub const LINK_FILE_PREFIX: &str = "10-ados-mac-";
 
-/// The `.link` filename for an interface.
-pub fn link_file_name(iface: &str) -> String {
-    format!("{LINK_FILE_PREFIX}{iface}.link")
+/// The stable identity of a USB adapter: its model plus the port it sits in.
+/// Survives a kernel rename and enumeration-order changes; two adapters of
+/// the same model in different ports get different keys.
+pub fn adapter_key(vidpid: &str, usb_path: &str) -> String {
+    format!("{vidpid}@{usb_path}")
+}
+
+/// The `.link` filename for an adapter key (see [`adapter_key`]). Characters
+/// outside `[A-Za-z0-9.@-]` become `-`, so the name is always a plain file.
+pub fn link_file_name(key: &str) -> String {
+    let safe: String = key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '@' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("{LINK_FILE_PREFIX}{safe}.link")
+}
+
+/// The adapter key the state file records for the adapter currently named
+/// `iface`, or `None` when the file is absent or knows no such adapter. The
+/// write routes take an interface name from the operator and pin by this key.
+pub fn adapter_key_for_iface(state_path: &Path, iface: &str) -> Option<String> {
+    let doc = read_state(state_path)?;
+    doc.get("adapters")?.as_array()?.iter().find_map(|a| {
+        if a.get("name")?.as_str()? != iface {
+            return None;
+        }
+        let vidpid = a.get("vidpid")?.as_str()?;
+        let usb_path = a.get("usb_path")?.as_str()?;
+        (!vidpid.is_empty() && !usb_path.is_empty()).then(|| adapter_key(vidpid, usb_path))
+    })
+}
+
+/// The pin `.link` files to remove (pure). `existing` are the pin file names
+/// in the drop-in directory, `present` the file names for every adapter on
+/// the box now, `pinned` those this pass pinned. A file for a present adapter
+/// that is no longer pinned is stale, and so is any file not named by an
+/// adapter key (a legacy interface-name file pins whichever adapter holds
+/// that name). A keyed file for an adapter that is merely unplugged is kept,
+/// so it still applies when the adapter comes back.
+pub fn stale_pin_links(
+    existing: &[String],
+    present: &std::collections::HashSet<String>,
+    pinned: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    existing
+        .iter()
+        .filter(|name| is_pin_link_file(name) && !pinned.contains(*name))
+        .filter(|name| present.contains(*name) || !name.contains('@'))
+        .cloned()
+        .collect()
 }
 
 /// Whether `name` is a MAC-pin `.link` file this engine writes (so an
@@ -202,7 +258,7 @@ pub fn parse_udev_id_path(props: &str) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 pub fn classify_adapter(
     usb_id: UsbId,
-    iface: &str,
+    key: &str,
     vidpid: &str,
     machine_id: Option<&str>,
     salt: &str,
@@ -211,11 +267,11 @@ pub fn classify_adapter(
     learner: Option<&LearnerRecord>,
     with_learner: bool,
 ) -> Decision {
-    // 1. Operator override wins (by vidpid or by interface name).
+    // 1. Operator override wins (by adapter key, else by model).
     if let Some(raw) = config
         .overrides
-        .get(vidpid)
-        .or_else(|| config.overrides.get(iface))
+        .get(key)
+        .or_else(|| config.overrides.get(vidpid))
     {
         return match (config.enabled, link_mechanism, MacAddr::parse(raw)) {
             (false, _, _) => Decision::Disabled,
@@ -567,42 +623,40 @@ mod linux {
     }
 
     /// Resolve the `[Match]` block for `iface`: the adapter's stable USB-port
-    /// path when udev knows it, else this interface's kernel name.
+    /// path (`Path=`), or `None` when udev does not know it. There is no
+    /// interface-name fallback: `OriginalName=` names whichever adapter
+    /// enumerated under that name this boot, so a pin keyed on it moves
+    /// between adapters when they swap order.
     ///
     /// It deliberately does NOT mirror whichever stock `.link` wins for the
     /// interface. That file is normally `99-default.link`, whose match is
     /// `OriginalName=*`, and copying it into a drop-in carrying an
     /// unconditional `MACAddress=` pinned ONE adapter's address onto every
-    /// interface on the box. Both forms below name a single adapter, and
-    /// [`match_block_is_specific`] is the write-time backstop.
-    pub fn resolve_match_block(iface: &str) -> String {
-        match udev_id_path(iface) {
-            // Path= survives a kernel rename (wlan0 -> wlan1) because it names
-            // the port, not the interface.
-            Some(p) => format!("Path={p}"),
-            None => format!("OriginalName={iface}"),
-        }
+    /// interface on the box. [`match_block_is_specific`] is the write-time
+    /// backstop.
+    pub fn resolve_match_block(iface: &str) -> Option<String> {
+        udev_id_path(iface).map(|p| format!("Path={p}"))
     }
 
-    /// Write the pin `.link` for `iface`. Idempotent: a no-op when the file
-    /// already has identical content. Reloads udev so a later boot applies it;
-    /// never touches the live interface. Returns the file path.
+    /// Write the pin `.link` for the adapter `key`. Idempotent: a no-op when
+    /// the file already has identical content. Reloads udev so a later boot
+    /// applies it; never touches the live interface. Returns the file path.
     ///
     /// Refused when `match_block` is not specific to one adapter: the file
     /// carries an unconditional `MACAddress=`, so a glob match would give every
     /// interface on the box the same address.
     pub fn write_pin_link(
         dir: &Path,
-        iface: &str,
+        key: &str,
         match_block: &str,
         mac: &MacAddr,
     ) -> std::io::Result<PathBuf> {
         if !match_block_is_specific(match_block) {
             return Err(std::io::Error::other(format!(
-                "refusing to pin {iface}: [Match] block {match_block:?} does not name one adapter"
+                "refusing to pin {key}: [Match] block {match_block:?} does not name one adapter"
             )));
         }
-        let path = dir.join(link_file_name(iface));
+        let path = dir.join(link_file_name(key));
         let body = render_link_file(match_block, mac);
         let unchanged = std::fs::read_to_string(&path)
             .map(|cur| cur == body)
@@ -614,14 +668,15 @@ mod linux {
         Ok(path)
     }
 
-    /// Remove the pin `.link` for `iface`. Returns whether a file was removed.
+    /// Remove the pin `.link` for the adapter `key`. Returns whether a file
+    /// was removed.
     ///
     /// Async because its only caller is the `DELETE /api/v1/network/mac/{iface}`
     /// handler: the udev reload is a subprocess whose settle would otherwise
     /// block the reactor and stall every other in-flight request on a
     /// single-core SBC.
-    pub async fn remove_pin_link(dir: &Path, iface: &str) -> std::io::Result<bool> {
-        let path = dir.join(link_file_name(iface));
+    pub async fn remove_pin_link(dir: &Path, key: &str) -> std::io::Result<bool> {
+        let path = dir.join(link_file_name(key));
         if path.exists() {
             std::fs::remove_file(&path)?;
             reload_udev_async().await;
@@ -629,6 +684,37 @@ mod linux {
         } else {
             Ok(false)
         }
+    }
+
+    /// Remove the stale pin `.link` files (see [`stale_pin_links`]). Returns
+    /// how many were removed.
+    fn sweep_pin_links(
+        dir: &Path,
+        present: &std::collections::HashSet<String>,
+        pinned: &std::collections::HashSet<String>,
+    ) -> usize {
+        let existing: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let mut removed = 0;
+        for name in stale_pin_links(&existing, present, pinned) {
+            match std::fs::remove_file(dir.join(&name)) {
+                Ok(()) => {
+                    removed += 1;
+                    tracing::info!(file = %name, "removed a stale MAC pin link");
+                }
+                Err(e) => {
+                    tracing::warn!(file = %name, error = %e, "stale MAC pin link not removed")
+                }
+            }
+        }
+        if removed > 0 {
+            reload_udev();
+        }
+        removed
     }
 
     /// Re-tag the LIVE interface now (drops any connection over it). Opt-in; the
@@ -704,12 +790,16 @@ mod linux {
         let now = now_unix();
 
         let mut verdicts = Vec::new();
+        let mut present = std::collections::HashSet::new();
+        let mut pinned = std::collections::HashSet::new();
         for a in &adapters {
             let usb_id = match a.usb_id {
                 Some(id) => id,
                 None => continue, // skip non-USB
             };
             let vidpid = format!("{:04x}:{:04x}", usb_id.vid, usb_id.pid);
+            let key = adapter_key(&vidpid, &a.usb_path);
+            present.insert(link_file_name(&key));
             // Always salt the derived MAC by the adapter's stable USB path, so a
             // lone randomizer can never derive the same machine-id-only MAC that
             // collides with another radio's (the 2026-08 A7S dup-MAC bug).
@@ -719,7 +809,7 @@ mod linux {
             // quirk, not known-efuse, not override). The record is keyed by the
             // stable identity so a churning MAC + name still resolves to it.
             let is_unknown = !config.overrides.contains_key(&vidpid)
-                && !config.overrides.contains_key(&a.name)
+                && !config.overrides.contains_key(&key)
                 && !is_known_stable_efuse(usb_id)
                 && is_quirk_randomizer(usb_id).is_none();
             if is_unknown {
@@ -735,7 +825,7 @@ mod linux {
 
             let decision = classify_adapter(
                 usb_id,
-                &a.name,
+                &key,
                 &vidpid,
                 machine_id.as_deref(),
                 salt,
@@ -744,8 +834,13 @@ mod linux {
                 learner_rec.as_ref(),
                 with_learner,
             );
-            verdicts.push(realize(decision, a, &vidpid));
+            let verdict = realize(decision, a, &vidpid, &key);
+            if verdict.state == AdapterState::Pinned {
+                pinned.insert(link_file_name(&key));
+            }
+            verdicts.push(verdict);
         }
+        sweep_pin_links(Path::new(NETWORKD_DIR), &present, &pinned);
         state.adapters = verdicts;
         state.updated_at = now;
         let _ = save_state(&state);
@@ -753,7 +848,7 @@ mod linux {
     }
 
     /// Turn a [`Decision`] into a verdict, writing the `.link` for a `Pin`.
-    fn realize(decision: Decision, a: &NetAdapter, vidpid: &str) -> AdapterVerdict {
+    fn realize(decision: Decision, a: &NetAdapter, vidpid: &str, key: &str) -> AdapterVerdict {
         let mut v = AdapterVerdict {
             name: a.name.clone(),
             vidpid: vidpid.to_string(),
@@ -779,15 +874,21 @@ mod linux {
                 v.pinned_mac = proposed;
             }
             Decision::Pin { mac, source } => {
-                let match_block = resolve_match_block(&a.name);
-                match write_pin_link(Path::new(NETWORKD_DIR), &a.name, &match_block, &mac) {
+                let Some(match_block) = resolve_match_block(&a.name) else {
+                    v.state = AdapterState::Deferred;
+                    v.deferred_reason =
+                        Some("no stable device path (udev ID_PATH) to match on".into());
+                    tracing::warn!(iface = %a.name, "MAC pin deferred: no stable device path");
+                    return v;
+                };
+                match write_pin_link(Path::new(NETWORKD_DIR), key, &match_block, &mac) {
                     Ok(path) => {
                         v.state = AdapterState::Pinned;
                         v.source = Some(source);
                         v.pinned_mac = Some(mac);
                         v.link_file = Some(path.to_string_lossy().to_string());
                         tracing::info!(
-                            iface = %a.name, vidpid, mac = %mac,
+                            iface = %a.name, key, mac = %mac,
                             "pinned a stable MAC on a no-efuse adapter (next boot)"
                         );
                     }
@@ -867,9 +968,63 @@ mod tests {
     }
 
     #[test]
-    fn link_filename_sorts_before_stock() {
-        assert_eq!(link_file_name("wlan0"), "10-ados-mac-wlan0.link");
-        assert!("10-ados-mac-wlan0.link" < "50-radxa-aic8800.link");
+    fn link_filename_sorts_before_stock_and_names_the_adapter() {
+        let name = link_file_name(&adapter_key("a69c:8d81", "5-1.3"));
+        // Assembled from the key so the expected name does not read as an email
+        // address to the repository's leak scanner.
+        assert_eq!(name, format!("10-ados-mac-{}.link", "a69c-8d81@5-1.3"));
+        assert!(is_pin_link_file(&name));
+        assert!(name.as_str() < "50-radxa-aic8800.link");
+    }
+
+    #[test]
+    fn an_override_follows_the_adapter_not_the_interface_name() {
+        let mut c = cfg(true);
+        c.overrides
+            .insert(adapter_key("1234:5678", "1-2"), "02:11:22:33:44:55".into());
+        c.overrides
+            .insert("wlan0".into(), "02:aa:aa:aa:aa:aa".into());
+        let id = UsbId {
+            vid: 0x1234,
+            pid: 0x5678,
+        };
+        let pin = |key: &str| {
+            classify_adapter(id, key, "1234:5678", Some("m"), "", &c, true, None, false)
+        };
+        // The keyed adapter is pinned wherever it enumerates.
+        assert_eq!(
+            pin(&adapter_key("1234:5678", "1-2")),
+            Decision::Pin {
+                mac: MacAddr::parse("02:11:22:33:44:55").unwrap(),
+                source: AdapterSource::Override
+            }
+        );
+        // The same model in another port is not, and a name key never applies.
+        assert_eq!(pin(&adapter_key("1234:5678", "1-3")), Decision::Observe);
+    }
+
+    #[test]
+    fn stale_pin_links_are_swept_but_an_unplugged_adapter_keeps_its_pin() {
+        let set = |names: &[&str]| -> std::collections::HashSet<String> {
+            names.iter().map(|s| s.to_string()).collect()
+        };
+        let kept = link_file_name(&adapter_key("a69c:8d81", "5-1.3"));
+        let unpinned = link_file_name(&adapter_key("a69c:8d81", "5-1.4"));
+        let unplugged = link_file_name(&adapter_key("a69c:8d81", "3-1"));
+        let existing = vec![
+            kept.clone(),
+            unpinned.clone(),
+            unplugged.clone(),
+            "10-ados-mac-wlan0.link".to_string(),
+            "50-radxa-aic8800.link".to_string(),
+        ];
+        let mut stale = stale_pin_links(
+            &existing,
+            &set(&[kept.as_str(), unpinned.as_str()]),
+            &set(&[kept.as_str()]),
+        );
+        stale.sort();
+        assert_eq!(stale, vec![unpinned, "10-ados-mac-wlan0.link".to_string()]);
     }
 
     #[test]

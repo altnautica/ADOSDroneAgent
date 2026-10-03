@@ -308,14 +308,14 @@ impl Supervisor {
         }
     }
 
-    /// Record a failure (which may open the breaker) and emit the resulting transition.
-    /// Returns whether the breaker opened.
+    /// Record a failure (which may label the unit crash-looping) and emit the
+    /// resulting transition. Returns whether it is now crash-looping.
     fn record_failure_and_emit(&mut self, i: usize, now: Instant, reason: &str) -> bool {
         let from = self.services[i].state;
         let opened = self.services[i].record_failure(now);
         let to = if opened {
-            // record_failure already set the state to CircuitOpen.
-            ServiceState::CircuitOpen
+            // record_failure already set the state to CrashLooping.
+            ServiceState::CrashLooping
         } else {
             self.services[i].state = ServiceState::Failed;
             ServiceState::Failed
@@ -326,7 +326,8 @@ impl Supervisor {
         opened
     }
 
-    /// Start a unit, honoring profile/role gates and the circuit breaker.
+    /// Start a unit, honoring profile/role gates. A crash-looping unit is
+    /// started like any other: the label never stretches the retry cadence.
     /// Returns true only when the unit reached `active`.
     pub async fn start_service(&mut self, name: &str) -> bool {
         let Some(i) = self.index_of(name) else {
@@ -337,16 +338,6 @@ impl Supervisor {
         if !gate_allows(&self.services[i], &self.config) {
             tracing::info!(service = name, "service gated off for this profile/role");
             return false;
-        }
-
-        let now = Instant::now();
-        if self.services[i].breaker_blocks(now) {
-            tracing::warn!(service = name, "circuit breaker open");
-            return false;
-        }
-        // Breaker has cooled: clear the open state so the start can take.
-        if self.services[i].state == ServiceState::CircuitOpen {
-            self.set_state(i, ServiceState::Stopped, "breaker_cooldown");
         }
 
         self.set_state(i, ServiceState::Starting, "start_requested");
@@ -574,26 +565,28 @@ impl Supervisor {
         })
     }
 
+    /// The unit that owns a hot-plugged device class on this node.
+    fn hotplug_unit(&self, kind: crate::hotplug::DevKind) -> Option<&'static str> {
+        use crate::hotplug::DevKind;
+        let name = match kind {
+            DevKind::Camera => "ados-video",
+            DevKind::Fc => "ados-mavlink",
+            DevKind::Radio => self.radio_unit()?,
+            // The CRSF lane service. Kept separate from Fc so an RC-module
+            // replug never restarts the FC link.
+            DevKind::Elrs => "ados-crsf",
+        };
+        self.index_of(name).map(|_| name)
+    }
+
     /// Restart the service that owns a hot-plugged device class. A radio edge
     /// goes to the node's own radio unit ([`Self::radio_unit`]), and is held
     /// off while a bind session owns the adapter, exactly like the monitor's
     /// auto-restart.
     pub async fn handle_hotplug(&mut self, kind: crate::hotplug::DevKind) {
-        use crate::hotplug::DevKind;
-        let name = match kind {
-            DevKind::Camera => "ados-video",
-            DevKind::Fc => "ados-mavlink",
-            DevKind::Radio => match self.radio_unit() {
-                Some(unit) => unit,
-                None => return,
-            },
-            // The CRSF lane service. Kept separate from Fc so an RC-module
-            // replug never restarts the FC link.
-            DevKind::Elrs => "ados-crsf",
-        };
-        if self.index_of(name).is_none() {
+        let Some(name) = self.hotplug_unit(kind) else {
             return;
-        }
+        };
         if self.restart_blocked_by_bind(name).await {
             tracing::info!(
                 service = name,
@@ -605,6 +598,8 @@ impl Supervisor {
         // Coalesce re-enumeration storms: a device that drops and re-appears
         // within the debounce window (DFU → flight, a flaky cable) must not
         // issue a second `systemctl restart` while the first is still settling.
+        // The coalesced edge leaves a trailing restart the monitor pass runs
+        // once the window has passed.
         if !self
             .hotplug_coord
             .should_restart(kind, std::time::Instant::now())
@@ -614,6 +609,23 @@ impl Supervisor {
         }
         tracing::info!(service = name, ?kind, "hot-plug triggered restart");
         self.restart_service(name).await;
+    }
+
+    /// Run the trailing restart owed to every device class whose last edge was
+    /// coalesced, so a device that came back inside the debounce window gets a
+    /// restart after it returned.
+    async fn run_trailing_hotplug_restarts(&mut self) {
+        for kind in self.hotplug_coord.due_trailing(std::time::Instant::now()) {
+            let Some(name) = self.hotplug_unit(kind) else {
+                continue;
+            };
+            if self.restart_blocked_by_bind(name).await {
+                continue;
+            }
+            tracing::info!(service = name, ?kind, "hot-plug trailing restart");
+            self.restart_service(name).await;
+            self.progress.mark();
+        }
     }
 
     /// Whether the monitor should skip auto-restarting `name` because a bind
@@ -632,20 +644,23 @@ impl Supervisor {
     ///
     /// Deliberately NOT filtered by category. `Category::OnDemand` used to be
     /// excluded, which let `ados-control` — the lean headless node's only HTTP
-    /// surface — latch `CircuitOpen` permanently after five failures in a
-    /// minute, clearable only over SSH. A unit the operator never enabled sits
-    /// in `Stopped`, never `Failed`/`CircuitOpen`, so retrying every parked
+    /// surface — stay down permanently after five failures in a minute,
+    /// clearable only over SSH. A unit the operator never enabled sits in
+    /// `Stopped`, never `Failed`/`CrashLooping`, so retrying every parked
     /// service cannot spuriously start one: `gate_allows` plus the unit's own
-    /// `ConditionPathExists` marker remain the gate.
+    /// `ConditionPathExists` marker remain the gate. The cadence is the fixed
+    /// [`PARKED_RETRY_COOLDOWN`] whatever the failure history.
     fn parked_retries_due(&self, now: Instant) -> Vec<&'static str> {
         self.services
             .iter()
             .filter(|spec| {
-                matches!(spec.state, ServiceState::Failed | ServiceState::CircuitOpen)
-                    && spec
-                        .last_retry_at
-                        .map(|t| now.duration_since(t) >= PARKED_RETRY_COOLDOWN)
-                        .unwrap_or(true)
+                matches!(
+                    spec.state,
+                    ServiceState::Failed | ServiceState::CrashLooping
+                ) && spec
+                    .last_retry_at
+                    .map(|t| now.duration_since(t) >= PARKED_RETRY_COOLDOWN)
+                    .unwrap_or(true)
             })
             .map(|spec| spec.name)
             .collect()
@@ -664,7 +679,7 @@ impl Supervisor {
             .services
             .iter()
             .filter(|spec| {
-                spec.state == ServiceState::Stopped
+                matches!(spec.state, ServiceState::Stopped | ServiceState::Idle)
                     && !SELF_TERMINATING_UNITS.contains(&spec.name)
                     && gate_allows(spec, &self.config)
             })
@@ -712,7 +727,7 @@ impl Supervisor {
         };
         let _ = self.record_failure_and_emit(i, Instant::now(), "stalled");
         self.work_proof.forget(name);
-        if self.services[i].state != ServiceState::CircuitOpen
+        if self.services[i].state != ServiceState::CrashLooping
             && !self.restart_blocked_by_bind(name).await
         {
             self.restart_service(name).await;
@@ -788,11 +803,22 @@ impl Supervisor {
                     );
                     continue;
                 }
+                // A unit declared to exit 0 when the node has nothing for it
+                // to run (`RestartPreventExitStatus=0`) and that did exactly
+                // that is idle, not dead: no failure, no restart.
+                if self.services[i].nothing_to_run_ok
+                    && self.pm.exited_cleanly(name).await == Some(true)
+                {
+                    tracing::info!(service = name, "service exited cleanly: nothing to run");
+                    self.work_proof.forget(name);
+                    self.set_state(i, ServiceState::Idle, "nothing_to_run");
+                    continue;
+                }
                 tracing::warn!(service = name, "service died");
                 self.work_proof.forget(name);
                 let _ = self.record_failure_and_emit(i, Instant::now(), "died");
                 let blocked = self.restart_blocked_by_bind(name).await;
-                if self.services[i].state != ServiceState::CircuitOpen && !blocked {
+                if self.services[i].state != ServiceState::CrashLooping && !blocked {
                     tracing::info!(service = name, "auto-restart");
                     self.start_service(name).await;
                     self.progress.mark();
@@ -852,6 +878,8 @@ impl Supervisor {
     /// here is a real wedge and not a slow external command.
     pub async fn monitor_pass(&mut self) {
         self.reconcile_services().await;
+        self.progress.mark();
+        self.run_trailing_hotplug_restarts().await;
         self.progress.mark();
 
         // Regulatory-domain reconcile (PREVENTION): re-assert the configured
@@ -1013,7 +1041,7 @@ mod tests {
         assert!(gate_allows(&spec("ados-wfb"), &c)); // drone-gated
         assert!(!gate_allows(&spec("ados-wfb-rx"), &c)); // ground_station-gated
         assert!(!gate_allows(&spec("ados-oled"), &c));
-        assert!(gate_allows(&spec("ados-peripherals"), &c)); // cross-profile
+        assert!(gate_allows(&spec("ados-gpio"), &c)); // cross-profile
     }
 
     #[test]
@@ -1044,7 +1072,7 @@ mod tests {
         assert!(!gate_allows(&spec("ados-api"), &c));
         assert!(!gate_allows(&spec("ados-cloud"), &c));
         assert!(!gate_allows(&spec("ados-health"), &c));
-        assert!(!gate_allows(&spec("ados-peripherals"), &c));
+        assert!(!gate_allows(&spec("ados-gpio"), &c));
         // The full-agent gate is unchanged: with headless off, ados-api runs.
         assert!(gate_allows(&spec("ados-api"), &cfg("drone")));
     }
@@ -1147,7 +1175,7 @@ mod tests {
     /// A recording process-manager double: every verb logs `verb:unit` and
     /// reports success so the lifecycle proceeds as if the unit really started.
     /// `fail_starts` flips `start` to failure so a test can drive a unit into
-    /// the circuit breaker and then let it recover.
+    /// a crash loop and then let it recover.
     struct MockProcessManager {
         calls: std::sync::Mutex<Vec<String>>,
         starts_fail: std::sync::atomic::AtomicBool,
@@ -1165,6 +1193,8 @@ mod tests {
         /// When set, the supervisor's own unit has a job pending: systemd is
         /// stopping or restarting it, and every `PartOf=` unit with it.
         supervisor_job_pending: std::sync::atomic::AtomicBool,
+        /// When set, every unit's last run reads as a clean `exit 0`.
+        clean_exit: std::sync::atomic::AtomicBool,
     }
 
     impl MockProcessManager {
@@ -1177,6 +1207,7 @@ mod tests {
                 all_inactive: std::sync::atomic::AtomicBool::new(false),
                 probes_fail: std::sync::atomic::AtomicBool::new(false),
                 supervisor_job_pending: std::sync::atomic::AtomicBool::new(false),
+                clean_exit: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn record(&self, verb: &str, unit: &str) {
@@ -1211,6 +1242,10 @@ mod tests {
         }
         fn cycle_supervisor(&self) {
             self.supervisor_job_pending
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn exit_cleanly(&self) {
+            self.clean_exit
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -1257,6 +1292,10 @@ mod tests {
                         .supervisor_job_pending
                         .load(std::sync::atomic::Ordering::Relaxed),
             )
+        }
+        async fn exited_cleanly(&self, unit: &str) -> Option<bool> {
+            self.record("exited_cleanly", unit);
+            Some(self.clean_exit.load(std::sync::atomic::Ordering::Relaxed))
         }
         async fn mask(&self, unit: &str) {
             self.record("mask", unit);
@@ -1331,6 +1370,46 @@ mod tests {
             "nothing may be restarted on an unanswered probe: {:?}",
             mock.calls()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_unit_that_exits_zero_with_nothing_to_run_goes_idle_not_failed() {
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, mock.clone());
+        assert!(sup.start_service("ados-gpio").await);
+        let i = sup.index_of("ados-gpio").unwrap();
+        let starts = |m: &MockProcessManager| {
+            m.calls()
+                .iter()
+                .filter(|c| c.as_str() == "start:ados-gpio")
+                .count()
+        };
+        let before = starts(&mock);
+
+        mock.deactivate_all();
+        mock.exit_cleanly();
+        sup.reconcile_services().await;
+
+        assert_eq!(sup.services[i].state, ServiceState::Idle);
+        assert!(sup.services[i].failure_times.is_empty());
+        assert_eq!(starts(&mock), before, "a clean idle exit is not restarted");
+        assert!(!sup
+            .parked_retries_due(Instant::now())
+            .contains(&"ados-gpio"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_clean_exit_of_a_unit_that_must_keep_running_is_a_death() {
+        let mock = Arc::new(MockProcessManager::new());
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, mock.clone());
+        assert!(sup.start_service("ados-mavlink").await);
+        let i = sup.index_of("ados-mavlink").unwrap();
+        mock.deactivate_all();
+        mock.exit_cleanly();
+        sup.reconcile_services().await;
+        assert_eq!(sup.services[i].failure_times.len(), 1);
     }
 
     #[tokio::test]
@@ -1555,49 +1634,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_parked_on_demand_service_is_retried_and_recovers() {
-        // Regression: the parked retry used to be filtered to Core|Hardware, so
-        // an OnDemand unit that hit the breaker latched CircuitOpen for the rest
-        // of the process. On a lean headless node ados-control is the ONLY
-        // control surface, so that state left the box flying with no API, no
-        // pairing and no diagnostics, clearable only over SSH.
+    async fn a_crash_looping_service_is_still_retried_on_the_fixed_cadence() {
+        // Regression: the breaker used to refuse every start while five
+        // failures sat inside its 60 s window, so a parked retry every 5 s was
+        // a no-op and a crash-looped unit (an FC link after a brownout) waited
+        // up to a minute for its next real attempt. On a lean headless node
+        // ados-control is the ONLY control surface, so that left the box with
+        // no API for the whole window.
         let pm = Arc::new(MockProcessManager::new());
         pm.fail_starts();
         let bind = Arc::new(BindOrchestrator::new());
         let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
-        // Six start attempts inside the failure window: five record a failure
-        // and the fifth opens the breaker; the sixth is refused by it.
         for _ in 0..6 {
             assert!(!sup.start_service("ados-control").await);
         }
         let i = sup.index_of("ados-control").unwrap();
-        assert_eq!(
-            sup.services[i].state,
-            ServiceState::CircuitOpen,
-            "six failures in the window must open the breaker"
-        );
+        assert_eq!(sup.services[i].state, ServiceState::CrashLooping);
+        // Every attempt reached the service manager; none was refused.
+        let starts = pm
+            .calls()
+            .iter()
+            .filter(|c| c.as_str() == "start:ados-control")
+            .count();
+        assert_eq!(starts, 6);
 
-        // The fix: a parked OnDemand unit is queued for retry like any other.
         let due = sup.parked_retries_due(Instant::now());
         assert!(
             due.contains(&"ados-control"),
-            "a parked OnDemand service must be retried; due={due:?}"
+            "a crash-looping service must be retried; due={due:?}"
         );
 
-        // Once the failures age out of the window the breaker half-opens (see
-        // `circuit_breaker_half_opens_after_window`); model that prune, let the
-        // unit come up, and drive one service reconcile.
-        sup.services[i].failure_times.clear();
+        // The failures are all still inside the window; the next retry takes.
         pm.let_starts_succeed();
         sup.reconcile_services().await;
-
         assert_eq!(
             sup.services[i].state,
             ServiceState::Running,
-            "the retried OnDemand service must recover, not stay parked"
+            "the retried service must recover inside the failure window"
         );
-        // The retry clears the systemd start-limit latch before starting, which
-        // is the half that needed an SSH `reset-failed` before.
+        // The retry clears the systemd start-limit latch before starting.
         let calls = pm.calls();
         assert!(
             calls.contains(&"reset_failed:ados-control".to_string()),
@@ -1737,7 +1812,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_unit_the_installer_started_is_adopted_and_then_death_detected() {
-        // `ados-peripherals` is enabled and started by the INSTALLER, never by
+        // `ados-gpio` is enabled and started by the INSTALLER, never by
         // this process, so its row sat at `Stopped` forever and the monitor —
         // which only walked Running|Starting rows — never probed it once. It
         // could die on boot and stay dead through every "healthy" pass. Twenty-
@@ -1745,7 +1820,7 @@ mod tests {
         let pm = Arc::new(MockProcessManager::new());
         let bind = Arc::new(BindOrchestrator::new());
         let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
-        let i = sup.index_of("ados-peripherals").unwrap();
+        let i = sup.index_of("ados-gpio").unwrap();
         assert_eq!(sup.services[i].state, ServiceState::Stopped);
 
         // Pass 1: systemd reports it active, so the supervisor adopts it.

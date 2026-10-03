@@ -35,8 +35,9 @@ pub(super) async fn enumerate_candidates() -> Vec<WifiConnection> {
     let mut out = Vec::new();
     for conn in conns {
         let driver = driver_name(&conn.iface).await;
+        let vid_pid = ados_protocol::netif::usb_vid_pid(&conn.iface);
         let mode = interface_mode(&conn.iface).await;
-        if iface_is_managed_candidate(&driver, mode.as_deref()) {
+        if iface_is_managed_candidate(&driver, vid_pid, mode.as_deref()) {
             out.push(conn);
         }
     }
@@ -77,12 +78,18 @@ pub(super) async fn default_gateway_for_iface(iface: &str) -> Option<String> {
     parse_gateway(&out)
 }
 
-/// Probe whether the gateway is reachable from an interface via the kernel
-/// neighbor (ARP) table: a single, cheap, read-only `ip neighbor show <gw> dev
-/// <iface>`. Never sends traffic on or reconfigures the radio interface. A
-/// missing or INCOMPLETE/FAILED entry means the gateway does not answer ARP (the
-/// dead-data-path condition).
+/// Probe whether the gateway is reachable from an interface. One
+/// interface-bound ping (1 s) makes the kernel re-resolve the gateway's MAC,
+/// then `ip neighbor show <gw> dev <iface>` is read. A gateway is reachable
+/// when it answered the ping, or when the neighbor entry is confirmed
+/// (REACHABLE / PERMANENT / NOARP) after the probe — a gateway that filters
+/// ICMP still answers ARP. A cached STALE entry on an idle link no longer
+/// passes for a live data path. Only ever sent on the managed station
+/// interface, never the radio.
 pub(super) async fn gateway_reachable(iface: &str, gateway: &str) -> bool {
+    if run_status("ping", &["-c", "1", "-W", "1", "-I", iface, gateway]).await {
+        return true;
+    }
     match run_output("ip", &["neighbor", "show", gateway, "dev", iface]).await {
         Some(out) => parse_neighbor_reachable(&out),
         None => false,

@@ -32,7 +32,44 @@ use tracing::{error, info, warn};
 
 use crate::cmd::CmdRunner;
 
-const AP_IFACE: &str = "wlan0";
+/// 2.4 GHz channels a `hw_mode=g` AP may use (the regulatory set; channel 14
+/// is 802.11b-only).
+const AP_CHANNELS_G: std::ops::RangeInclusive<u32> = 1..=13;
+
+/// Check AP settings before any of them reach `hostapd.conf`, the one place
+/// they are interpolated raw. An SSID is 1-32 bytes with no control
+/// characters; a WPA2 passphrase is 8-63 printable ASCII characters; the
+/// channel is one `hw_mode=g` allows. A newline in either string would inject
+/// a hostapd directive (`wpa=0` after `wpa=2` opens the AP), and an
+/// out-of-range value would fail hostapd on restart and take the AP down.
+/// `None` means "unchanged" and is not checked.
+pub fn validate_ap_settings(
+    ssid: Option<&str>,
+    passphrase: Option<&str>,
+    channel: Option<u32>,
+) -> Result<(), String> {
+    if let Some(s) = ssid {
+        if s.is_empty() || s.len() > 32 || s.chars().any(char::is_control) {
+            return Err("SSID must be 1-32 bytes with no control characters".to_string());
+        }
+    }
+    if let Some(p) = passphrase {
+        if !(8..=63).contains(&p.len()) || !p.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+            return Err("passphrase must be 8-63 printable ASCII characters".to_string());
+        }
+    }
+    if let Some(c) = channel {
+        if !AP_CHANNELS_G.contains(&c) {
+            return Err(format!(
+                "channel {c} is not a 2.4 GHz channel ({}-{})",
+                AP_CHANNELS_G.start(),
+                AP_CHANNELS_G.end()
+            ));
+        }
+    }
+    Ok(())
+}
+
 const AP_ADDR: &str = "192.168.4.1";
 const AP_CIDR: &str = "192.168.4.1/24";
 const DHCP_RANGE: &str = "192.168.4.10,192.168.4.100,12h";
@@ -206,9 +243,9 @@ impl HostapdManager {
     /// configuring hostapd on the aircraft's radio link.
     ///
     /// Resolution is by DRIVER, cross-checked against the interface the radio
-    /// says it actually took. A failure here leaves the interface set to the
-    /// `wlan0` fallback and is logged loudly rather than silently accepted; the
-    /// start path refuses separately if that fallback turns out to be the radio.
+    /// says it actually took. A failure leaves the interface unresolved (empty)
+    /// and is logged loudly; `write_config` then refuses, so the AP is never
+    /// configured on a guessed name.
     pub fn resolve_interface(&mut self, configured: &str) {
         let radio = ados_protocol::netif::radio_interface();
         match ados_protocol::netif::resolve_ap_interface(configured, radio.as_deref()) {
@@ -223,6 +260,7 @@ impl HostapdManager {
             }
             Err(e) => {
                 error!(error = %e, radio = ?radio, "ap_interface_unresolved");
+                self.interface.clear();
             }
         }
     }
@@ -242,7 +280,7 @@ impl HostapdManager {
         Self {
             ssid: ssid.unwrap_or_else(|| build_ssid(device_id)),
             channel,
-            interface: AP_IFACE.to_string(),
+            interface: String::new(),
             configured_passphrase,
             passphrase: String::new(),
             country_code: ados_protocol::ap_country::load(),
@@ -259,6 +297,13 @@ impl HostapdManager {
     /// production always reads `/sys/class/net`.
     pub fn set_sysfs_net_root(&mut self, root: PathBuf) {
         self.sysfs_net_root = root;
+    }
+
+    /// Pin the AP interface as if [`Self::resolve_interface`] had resolved it.
+    /// Tests only: production always resolves by driver.
+    #[cfg(test)]
+    pub(crate) fn set_interface(&mut self, iface: &str) {
+        self.interface = iface.to_string();
     }
 
     pub fn ssid(&self) -> &str {
@@ -439,11 +484,25 @@ impl HostapdManager {
                 "refusing to write hostapd.conf without a passphrase",
             ));
         }
+        if self.interface.is_empty() {
+            error!("ap_config_refused_interface_unresolved");
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "refusing to write hostapd.conf: no onboard WiFi interface resolved",
+            ));
+        }
+        // The settings are interpolated raw, so they are checked at render
+        // time too: a passphrase loaded from disk or config never went through
+        // the apply path.
+        if let Err(reason) =
+            validate_ap_settings(Some(&self.ssid), Some(&self.passphrase), Some(self.channel))
+        {
+            error!(reason = %reason, "ap_config_refused_invalid_settings");
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, reason));
+        }
         // Never emit a conf that points hostapd at the aircraft's radio link.
         // The resolver should already have avoided it; this is the backstop for
-        // the case where resolution failed and left the `wlan0` fallback in
-        // place on a boot where `wlan0` IS the radio -- which is the exact
-        // one-in-three ordering measured on the bench.
+        // a boot where the radio took the interface the AP resolved to.
         if let Some(radio) = ados_protocol::netif::radio_interface() {
             if radio == self.interface {
                 error!(
@@ -769,7 +828,7 @@ impl HostapdManager {
             "running": running,
             "ssid": self.ssid,
             "channel": self.channel,
-            "interface": self.interface,
+            "interface": (!self.interface.is_empty()).then_some(&self.interface),
             "gateway": AP_ADDR,
             "connected_clients": clients,
             "hostapd_unit_active": unit_active,
@@ -787,13 +846,19 @@ impl HostapdManager {
 
     /// Idempotent update. Restarts hostapd only when something changed. A
     /// passphrase update overwrites `/etc/ados/ap-passphrase` (0600 + trailing
-    /// newline). Mirrors `apply_ap_config`.
+    /// newline). `false` when the settings are refused, a write fails, or the
+    /// hostapd restart does not succeed: the new settings are then on disk but
+    /// not on the air, and the caller must not report them as applied.
     pub async fn apply_ap_config(
         &mut self,
         ssid: Option<&str>,
         passphrase: Option<&str>,
         channel: Option<u32>,
     ) -> bool {
+        if let Err(reason) = validate_ap_settings(ssid, passphrase, channel) {
+            error!(reason = %reason, "ap_config_refused_invalid_settings");
+            return false;
+        }
         let mut changed = false;
         if let Some(s) = ssid {
             if s != self.ssid {
@@ -832,7 +897,10 @@ impl HostapdManager {
         // A restart resets the interface's counters, so the old baseline would
         // read as a huge backwards jump and then as fresh flatness.
         *self.tx_sample.lock() = None;
-        self.systemctl("restart", HOSTAPD_UNIT).await;
+        if !self.systemctl("restart", HOSTAPD_UNIT).await {
+            error!(ssid = %self.ssid, channel = self.channel, "ap_config_restart_failed");
+            return false;
+        }
         info!(ssid = %self.ssid, channel = self.channel, "ap_config_applied");
         true
     }
@@ -882,7 +950,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn mgr(dir: &std::path::Path, device_id: &str, runner: Arc<ScriptedRunner>) -> HostapdManager {
-        HostapdManager::with_paths(
+        let mut m = HostapdManager::with_paths(
             device_id,
             None,
             6,
@@ -891,7 +959,9 @@ mod tests {
             dir.join("hostapd-gs.conf"),
             dir.join("dnsmasq-gs.conf"),
             dir.join("ap-passphrase"),
-        )
+        );
+        m.interface = "wlan0".to_string();
+        m
     }
 
     #[test]
@@ -1099,6 +1169,7 @@ mod tests {
             dir.path().join("dnsmasq-gs.conf"),
             dir.path().join("ap-passphrase"),
         );
+        m.interface = "wlan0".to_string();
         m.ensure_passphrase(); // → the configured "altnautica"
                                // Pin the country so the golden body does not depend on the host's
                                // /etc/ados/config.yaml. An unpinned unit resolves to the same default.
@@ -1182,6 +1253,56 @@ no-resolv\n";
             .recorded()
             .iter()
             .any(|c| c.contains(&"restart".to_string())));
+    }
+
+    #[tokio::test]
+    async fn apply_ap_config_reports_a_failed_hostapd_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        let mut m = mgr(dir.path(), "58c27faf", runner.clone());
+        m.ensure_passphrase();
+        // The restart is the first command the apply runs.
+        runner.push(CmdOut::failed(1, "Job for hostapd.service failed"));
+        assert!(!m.apply_ap_config(None, Some("new-secret"), None).await);
+        assert_eq!(runner.recorded().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn apply_ap_config_refuses_settings_that_would_inject_directives() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(ScriptedRunner::new());
+        let mut m = mgr(dir.path(), "58c27faf", runner.clone());
+        m.ensure_passphrase();
+        let before = m.passphrase().to_string();
+        // A passphrase that would land `wpa=0` after `wpa=2`.
+        assert!(!m.apply_ap_config(None, Some("x\nwpa=0"), None).await);
+        assert!(
+            !m.apply_ap_config(Some("ap\nctrl_interface=/tmp"), None, None)
+                .await
+        );
+        assert!(!m.apply_ap_config(None, Some("short"), None).await);
+        assert!(!m.apply_ap_config(None, None, Some(36)).await);
+        assert_eq!(m.passphrase(), before);
+        assert!(!dir.path().join("hostapd-gs.conf").exists());
+        assert!(runner.recorded().is_empty(), "nothing restarted");
+    }
+
+    #[test]
+    fn write_config_refuses_an_invalid_loaded_passphrase() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = mgr(dir.path(), "58c27faf", Arc::new(ScriptedRunner::new()));
+        m.passphrase = "open\nwpa=0".to_string();
+        assert!(m.write_config().is_err());
+        assert!(!dir.path().join("hostapd-gs.conf").exists());
+    }
+
+    #[test]
+    fn write_config_refuses_an_unresolved_interface() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = mgr(dir.path(), "58c27faf", Arc::new(ScriptedRunner::new()));
+        m.interface.clear();
+        m.ensure_passphrase();
+        assert!(m.write_config().is_err());
     }
 
     /// `iw dev <iface> info` for a ground station whose AP is up.

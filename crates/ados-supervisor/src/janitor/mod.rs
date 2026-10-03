@@ -474,20 +474,10 @@ pub async fn sweep(
     let mut recordings =
         reclaim::reclaim_recordings(&roots.recordings, cutoff, p.recording_keep_newest, now);
 
-    // The recording volume's space floor. Time-based retention cannot cover
-    // this: mediamtx's own 24h `recordDeleteAfter` window does not fire until
-    // long after a high-bitrate day has filled the card, and a full card stops
-    // the recorder dead mid-flight. Reclaims oldest-first through the SAME
-    // machinery the age and cap rules use, so there is one reclaimer over this
-    // directory rather than two fighting.
-    recordings = recordings.saturating_add(reclaim::reclaim_recordings_to_free_floor(
-        &roots.recordings,
-        plan::free_space_deficit(free_bytes, plan::RECORD_MIN_FREE_BYTES),
-        p.recording_keep_newest,
-        now,
-    ));
-
-    // Things with residual value, only once space is short.
+    // Things with residual value, only once space is short. They run before
+    // the recording floor below: recordings are the one category a human
+    // deliberately created, so they are never deleted for space that the
+    // package index, the journal or a quarantined store could have given.
     let apt_lists = if p.apt_lists {
         reclaim::reclaim_apt_lists(&roots.apt_lists)
     } else {
@@ -502,6 +492,31 @@ pub async fn sweep(
     } else {
         0
     };
+
+    // The recording volume's space floor. Time-based retention cannot cover
+    // this: mediamtx's own 24h `recordDeleteAfter` window does not fire until
+    // long after a high-bitrate day has filled the card, and a full card stops
+    // the recorder dead mid-flight. Reclaims oldest-first through the SAME
+    // machinery the age and cap rules use, so there is one reclaimer over this
+    // directory rather than two fighting. The deficit is what is still missing
+    // after everything freed above (the node keeps all of it on one volume; on
+    // a split layout the next sweep's fresh reading corrects an over-credit).
+    let freed_before_floor = apt_archives
+        .saturating_add(plugin_logs)
+        .saturating_add(audit_log)
+        .saturating_add(recordings)
+        .saturating_add(apt_lists)
+        .saturating_add(journal)
+        .saturating_add(quarantined_stores);
+    recordings = recordings.saturating_add(reclaim::reclaim_recordings_to_free_floor(
+        &roots.recordings,
+        plan::free_space_deficit(
+            free_bytes.map(|f| f.saturating_add(freed_before_floor)),
+            plan::RECORD_MIN_FREE_BYTES,
+        ),
+        p.recording_keep_newest,
+        now,
+    ));
 
     let mut freed = Reclaimed {
         apt_archives,
@@ -1335,6 +1350,32 @@ mod tests {
             roots.recordings.join("main/seg-live.mp4").exists(),
             "and the in-flight segment is never a space-floor target"
         );
+    }
+
+    #[tokio::test]
+    async fn recordings_are_spared_when_cheaper_categories_cover_the_deficit() {
+        // The card is short by 2 500 bytes, and the escalated rung's quarantine
+        // prune alone frees 4 000. The operator's recordings must not be what
+        // pays for space a dead store corpse was holding.
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = populate_segments(tmp.path());
+        let cfg = JanitorConfig {
+            recording_retention: Duration::from_secs(86_400 * 3650),
+            recording_pressure_retention: Duration::from_secs(86_400 * 3650),
+            recording_keep_newest: 1,
+            ..JanitorConfig::default()
+        };
+        let (rung, freed) = sweep(
+            &roots,
+            &cfg,
+            Some(1.0),
+            Some(plan::RECORD_MIN_FREE_BYTES - 2_500),
+        )
+        .await;
+        assert_eq!(rung, Rung::Critical);
+        assert!(freed.quarantined_stores >= 2_500);
+        assert_eq!(freed.recordings, 0, "recordings paid for reclaimable waste");
+        assert!(roots.recordings.join("flight-0.mp4").exists());
     }
 
     #[tokio::test]

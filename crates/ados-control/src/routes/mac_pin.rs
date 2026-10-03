@@ -7,17 +7,21 @@
 //! learner candidate, set an explicit override, or unpin:
 //!
 //! - **`POST /api/v1/network/mac/pin`** — pin a stable MAC on an adapter. The body
-//!   is `{"iface", "mac"?, "apply_now"?}`. The MAC is resolved from `mac` or, when
-//!   absent, the adapter's learner-proposed value in the on-disk state file. The
-//!   resolved MAC is stored as a `network.mac_pin.overrides[iface]` entry and the
-//!   config is persisted; the supervisor reconciler writes the actual `.link` on
-//!   its next reconcile and on the next boot. With `apply_now` (and the config
+//!   is `{"iface", "mac"?, "apply_now"?}`. The interface name is resolved to the
+//!   adapter's stable key (`vvvv:pppp@<usb_path>`) through the state file; an
+//!   interface the state file does not know is `400 E_UNKNOWN_ADAPTER`, because a
+//!   pin keyed on a name would follow whichever adapter holds that name. The MAC
+//!   is resolved from `mac` or, when absent, the adapter's learner-proposed value
+//!   in the on-disk state file. The resolved MAC is stored as a
+//!   `network.mac_pin.overrides[<adapter key>]` entry and the config is
+//!   persisted; the supervisor reconciler writes the actual `.link` on its next
+//!   reconcile and on the next boot. With `apply_now` (and the config
 //!   `apply_live_allowed` gate) it also re-tags the LIVE interface — refused on the
 //!   management interface so it cannot drop the caller's own connection. Returns
-//!   `{status, iface, mac, persisted, appliedLive, note}`.
-//! - **`DELETE /api/v1/network/mac/{iface}`** — unpin: clear the override entry and
-//!   remove the `.link`. Returns `{status, iface, removedOverride, removedLinkFile,
-//!   note}`.
+//!   `{status, iface, adapterKey, mac, persisted, appliedLive, note}`.
+//! - **`DELETE /api/v1/network/mac/{iface}`** — unpin: resolve the adapter key,
+//!   clear its override entry and remove its `.link`. Returns `{status, iface,
+//!   adapterKey, removedOverride, removedLinkFile, note}`.
 //!
 //! ## Why these port cleanly to the native front
 //!
@@ -296,23 +300,23 @@ async fn apply_live(_iface: &str, _mac: &str) -> Result<(), String> {
     Err("live re-tag unavailable on this platform".to_string())
 }
 
-/// Remove the pin `.link` for `iface` from `dir`: `Ok(true)` when a file was
-/// removed, `Ok(false)` when none existed, `Err(message)` when one exists and
-/// could not be removed (a read-only or unwritable networkd dir), so the reply
-/// never passes a surviving `.link` off as "there was no file". Reuses the
-/// shared `ados-macpin` engine on Linux (which also reloads udev, bounded and
-/// off the reactor); on a non-Linux dev host it removes the file directly so
+/// Remove the pin `.link` for the adapter `key` from `dir`: `Ok(true)` when a
+/// file was removed, `Ok(false)` when none existed, `Err(message)` when one
+/// exists and could not be removed (a read-only or unwritable networkd dir), so
+/// the reply never passes a surviving `.link` off as "there was no file". Reuses
+/// the shared `ados-macpin` engine on Linux (which also reloads udev, bounded
+/// and off the reactor); on a non-Linux dev host it removes the file directly so
 /// the flag and the error are still exercised by tests.
 #[cfg(target_os = "linux")]
-async fn remove_link_file(dir: &Path, iface: &str) -> Result<bool, String> {
-    ados_macpin::engine::remove_pin_link(dir, iface)
+async fn remove_link_file(dir: &Path, key: &str) -> Result<bool, String> {
+    ados_macpin::engine::remove_pin_link(dir, key)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn remove_link_file(dir: &Path, iface: &str) -> Result<bool, String> {
-    let path = dir.join(ados_macpin::engine::link_file_name(iface));
+async fn remove_link_file(dir: &Path, key: &str) -> Result<bool, String> {
+    let path = dir.join(ados_macpin::engine::link_file_name(key));
     if path.exists() {
         std::fs::remove_file(&path)
             .map(|()| true)
@@ -320,6 +324,21 @@ async fn remove_link_file(dir: &Path, iface: &str) -> Result<bool, String> {
     } else {
         Ok(false)
     }
+}
+
+/// The adapter key for `iface` from the state file, or the `400
+/// E_UNKNOWN_ADAPTER` response when the state file does not know it.
+fn adapter_key_or_400(state_path: &Path, iface: &str) -> Result<String, Box<Response>> {
+    ados_macpin::engine::adapter_key_for_iface(state_path, iface).ok_or_else(|| {
+        Box::new(error_object(
+            StatusCode::BAD_REQUEST,
+            "E_UNKNOWN_ADAPTER",
+            format!(
+                "{iface} is not a known USB adapter; pins are keyed by the adapter's port, \
+                 so only an adapter the agent has enumerated can be pinned"
+            ),
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +386,11 @@ pub async fn post_mac_pin(
 /// resolves both from the app state / env; this takes them directly so a test can
 /// point them at temp paths without mutating process-global env.
 async fn post_mac_pin_at(config_path: &Path, state_path: &Path, req: MacPinRequest) -> Response {
+    // 0. The adapter's stable identity: overrides are keyed by it, never by name.
+    let key = match adapter_key_or_400(state_path, &req.iface) {
+        Ok(k) => k,
+        Err(resp) => return *resp,
+    };
     // 1. Resolve the MAC: the body value (trimmed) wins; an empty body MAC falls
     //    back to the state file's learner-proposed value for the interface.
     let mut mac = req.mac.as_deref().unwrap_or("").trim().to_string();
@@ -395,7 +419,7 @@ async fn post_mac_pin_at(config_path: &Path, state_path: &Path, req: MacPinReque
     let mac = normalise_mac(&mac);
 
     // 3. Merge the override into the config + persist. A fault is the E_PERSIST 500.
-    if let Err(e) = config_set_override(config_path, &req.iface, &mac) {
+    if let Err(e) = config_set_override(config_path, &key, &mac) {
         return error_object(StatusCode::INTERNAL_SERVER_ERROR, "E_PERSIST", e);
     }
     let persisted = true;
@@ -427,6 +451,7 @@ async fn post_mac_pin_at(config_path: &Path, state_path: &Path, req: MacPinReque
         Json(json!({
             "status": "ok",
             "iface": req.iface,
+            "adapterKey": key,
             "mac": mac,
             "persisted": persisted,
             "appliedLive": outcome.applied_live,
@@ -497,24 +522,40 @@ async fn apply_now_outcome(
 const NOTE_UNPIN: &str =
     "a known no-efuse adapter is re-pinned automatically unless network.mac_pin.enabled is false";
 
-/// `DELETE /api/v1/network/mac/{iface}` → unpin: clear the override + remove the `.link`. Always a
-/// `200` with `{status, iface, removedOverride, removedLinkFile, note}` — an absent override /
-/// absent `.link` are reported as `false`. A config the store refuses adds `persist_error`; a
-/// `.link` that exists but could not be removed adds `link_error`.
+/// `DELETE /api/v1/network/mac/{iface}` → unpin: clear the override + remove the `.link`. A
+/// `200` with `{status, iface, adapterKey, removedOverride, removedLinkFile, note}` — an absent
+/// override / absent `.link` are reported as `false`. A config the store refuses adds
+/// `persist_error`; a `.link` that exists but could not be removed adds `link_error`. An
+/// interface the state file does not know is `400 E_UNKNOWN_ADAPTER`.
 pub async fn delete_mac_pin(
     State(state): State<AppState>,
     AxumPath(iface): AxumPath<String>,
 ) -> Response {
-    delete_mac_pin_at(&state.pairing_paths.config, &networkd_dir(), &iface).await
+    delete_mac_pin_at(
+        &state.pairing_paths.config,
+        &state_file_path(),
+        &networkd_dir(),
+        &iface,
+    )
+    .await
 }
 
-/// The unpin logic against explicit config + networkd-dir paths. The public
-/// handler resolves both from the app state / env; this takes them directly so a
-/// test can point them at temp paths.
-async fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str) -> Response {
+/// The unpin logic against explicit config, state-file and networkd-dir paths.
+/// The public handler resolves them from the app state / env; this takes them
+/// directly so a test can point them at temp paths.
+async fn delete_mac_pin_at(
+    config_path: &Path,
+    state_path: &Path,
+    networkd_dir: &Path,
+    iface: &str,
+) -> Response {
+    let key = match adapter_key_or_400(state_path, iface) {
+        Ok(k) => k,
+        Err(resp) => return *resp,
+    };
     // Pop the override. A config the store refuses (or cannot write) leaves the
     // pin in place, so the body says so rather than reporting a clean unpin.
-    let (removed_override, persist_error) = match config_remove_override(config_path, iface) {
+    let (removed_override, persist_error) = match config_remove_override(config_path, &key) {
         Ok(removed) => (removed, None),
         Err(e) => {
             tracing::error!(error = %e, iface, "mac pin override not removed from the config");
@@ -524,7 +565,7 @@ async fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str)
     // Remove the `.link` (a file existed → true). A `.link` that exists but
     // could not be removed is reported with its error: networkd would re-apply
     // the old MAC at the next boot, so a bare `false` would read as "no file".
-    let (removed_link, link_error) = match remove_link_file(networkd_dir, iface).await {
+    let (removed_link, link_error) = match remove_link_file(networkd_dir, &key).await {
         Ok(removed) => (removed, None),
         Err(e) => {
             tracing::error!(error = %e, iface, "mac pin .link not removed");
@@ -538,6 +579,7 @@ async fn delete_mac_pin_at(config_path: &Path, networkd_dir: &Path, iface: &str)
     let mut body = json!({
         "status": if failed { "error" } else { "ok" },
         "iface": iface,
+        "adapterKey": key,
         "removedOverride": removed_override,
         "removedLinkFile": removed_link,
         "note": NOTE_UNPIN,
@@ -723,11 +765,61 @@ mod tests {
 
     // ── POST handler: the guard order + the success body ──────────────────────
 
+    /// The adapter key the seeded state file gives `wlan0`.
+    const WLAN0_KEY: &str = "a69c:8d81@5-1.0";
+
+    /// Seed a state file whose adapters are `(name, pinned_mac)`, the i-th one
+    /// on USB port `5-1.<i>`.
+    fn seed_state(path: &Path, adapters: &[(&str, Option<&str>)]) {
+        let list: Vec<Value> = adapters
+            .iter()
+            .enumerate()
+            .map(|(i, (name, pinned))| {
+                json!({
+                    "name": name,
+                    "vidpid": "a69c:8d81",
+                    "usb_path": format!("5-1.{i}"),
+                    "pinned_mac": pinned,
+                })
+            })
+            .collect();
+        std::fs::write(
+            path,
+            serde_json::to_string(&json!({"version": 1, "adapters": list})).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_interface_the_agent_never_enumerated_is_a_400_e_unknown_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        let state = dir.path().join("mac-pins.state");
+        seed_state(&state, &[("wlan0", None)]);
+        let resp = post_mac_pin_at(
+            &cfg,
+            &state,
+            MacPinRequest {
+                iface: "wlan7".to_string(),
+                mac: Some("02:c6:75:83:1a:3e".to_string()),
+                apply_now: false,
+            },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body_json(resp).await["detail"]["error"]["code"],
+            json!("E_UNKNOWN_ADAPTER")
+        );
+        assert!(!cfg.exists(), "nothing is persisted under a name key");
+    }
+
     #[tokio::test]
     async fn no_mac_and_no_candidate_is_a_400_e_no_mac() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let state = dir.path().join("mac-pins.state");
+        seed_state(&state, &[("wlan0", None)]);
         let resp = post_mac_pin_at(
             &cfg,
             &state,
@@ -751,6 +843,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let state = dir.path().join("mac-pins.state");
+        seed_state(&state, &[("wlan0", None)]);
         let resp = post_mac_pin_at(
             &cfg,
             &state,
@@ -774,6 +867,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let state = dir.path().join("mac-pins.state");
+        seed_state(&state, &[("wlan0", None)]);
         let resp = post_mac_pin_at(
             &cfg,
             &state,
@@ -791,13 +885,14 @@ mod tests {
             json!({
                 "status": "ok",
                 "iface": "wlan0",
+                "adapterKey": WLAN0_KEY,
                 "mac": "02:c6:75:83:1a:3e",
                 "persisted": true,
                 "appliedLive": false,
                 "note": "pinned for next boot; the agent writes the .link on its next reconcile",
             })
         );
-        // The normalised MAC landed in the config override.
+        // The normalised MAC landed in the config override, keyed by the adapter.
         let parsed: serde_norway::Value =
             serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         assert_eq!(
@@ -805,7 +900,7 @@ mod tests {
                 .get("network")
                 .and_then(|n| n.get("mac_pin"))
                 .and_then(|m| m.get("overrides"))
-                .and_then(|o| o.get("wlan0"))
+                .and_then(|o| o.get(WLAN0_KEY))
                 .and_then(serde_norway::Value::as_str),
             Some("02:c6:75:83:1a:3e")
         );
@@ -816,15 +911,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let state = dir.path().join("mac-pins.state");
-        std::fs::write(
-            &state,
-            serde_json::to_string(&json!({
-                "version": 1,
-                "adapters": [{"name": "wlan0", "pinned_mac": "AA:BB:CC:DD:EE:FF"}],
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        seed_state(&state, &[("wlan0", Some("AA:BB:CC:DD:EE:FF"))]);
         let resp = post_mac_pin_at(
             &cfg,
             &state,
@@ -847,6 +934,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         let state = dir.path().join("mac-pins.state");
+        seed_state(&state, &[("wlan0", None), ("wlan9", None)]);
         let resp = post_mac_pin_at(
             &cfg,
             &state,
@@ -930,25 +1018,30 @@ mod tests {
     async fn delete_removes_a_present_override_and_link_and_reports_both_true() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
+        let state = dir.path().join("mac-pins.state");
+        seed_state(&state, &[("wlan0", None)]);
         let netd = dir.path().join("networkd");
         std::fs::create_dir_all(&netd).unwrap();
         std::fs::write(
             &cfg,
-            "network:\n  mac_pin:\n    overrides:\n      wlan0: 02:c6:75:83:1a:3e\n",
+            format!(
+                "network:\n  mac_pin:\n    overrides:\n      '{WLAN0_KEY}': 02:c6:75:83:1a:3e\n"
+            ),
         )
         .unwrap();
         // Seed a .link file at the engine's canonical name so the remove reports true.
-        let link = netd.join(ados_macpin::engine::link_file_name("wlan0"));
+        let link = netd.join(ados_macpin::engine::link_file_name(WLAN0_KEY));
         std::fs::write(
             &link,
-            "[Match]\nOriginalName=wlan0\n[Link]\nMACAddress=02:c6:75:83:1a:3e\n",
+            "[Match]\nPath=platform-xhci-usb-0:1.0:1.0\n[Link]\nMACAddress=02:c6:75:83:1a:3e\n",
         )
         .unwrap();
 
-        let resp = delete_mac_pin_at(&cfg, &netd, "wlan0").await;
+        let resp = delete_mac_pin_at(&cfg, &state, &netd, "wlan0").await;
         let body = body_json(resp).await;
         assert_eq!(body["status"], json!("ok"));
         assert_eq!(body["iface"], json!("wlan0"));
+        assert_eq!(body["adapterKey"], json!(WLAN0_KEY));
         assert_eq!(body["removedOverride"], json!(true));
         assert_eq!(body["removedLinkFile"], json!(true));
         assert_eq!(
@@ -963,11 +1056,13 @@ mod tests {
     async fn delete_of_an_absent_override_and_link_reports_both_false() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
+        let state = dir.path().join("mac-pins.state");
+        seed_state(&state, &[("wlan0", None)]);
         let netd = dir.path().join("networkd");
         std::fs::create_dir_all(&netd).unwrap();
         std::fs::write(&cfg, "agent:\n  name: my-drone\n").unwrap();
 
-        let resp = delete_mac_pin_at(&cfg, &netd, "wlan0").await;
+        let resp = delete_mac_pin_at(&cfg, &state, &netd, "wlan0").await;
         let body = body_json(resp).await;
         assert_eq!(body["removedOverride"], json!(false));
         assert_eq!(body["removedLinkFile"], json!(false));
@@ -981,12 +1076,14 @@ mod tests {
         // collapse into `removedLinkFile: false` as if no file existed.
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
+        let state = dir.path().join("mac-pins.state");
+        seed_state(&state, &[("wlan0", None)]);
         let netd = dir.path().join("networkd");
-        let link = netd.join(ados_macpin::engine::link_file_name("wlan0"));
+        let link = netd.join(ados_macpin::engine::link_file_name(WLAN0_KEY));
         std::fs::create_dir_all(&link).unwrap();
         std::fs::write(&cfg, "agent:\n  name: my-drone\n").unwrap();
 
-        let resp = delete_mac_pin_at(&cfg, &netd, "wlan0").await;
+        let resp = delete_mac_pin_at(&cfg, &state, &netd, "wlan0").await;
         let body = body_json(resp).await;
         assert_eq!(body["removedLinkFile"], json!(false));
         assert!(

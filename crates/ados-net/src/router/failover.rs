@@ -14,46 +14,22 @@ use tracing::{info, warn};
 
 use crate::cmd::CmdRunner;
 use crate::sidecar;
-use crate::sysfs::detect_ethernet_iface_async;
 
 /// Default priority chain. The LAN-side AP SSID served to phones and laptops
 /// is not an uplink, so it is absent here.
 pub const DEFAULT_PRIORITY: [&str; 4] = ["eth0", "wlan0_client", "wwan0", "usb0"];
 
-/// Per-uplink route metric. Lower wins in the kernel routing table; the gap is
-/// kept large to survive manual `ip route` probes. Unknown ifaces use 500.
-pub const PRIORITY_METRIC_DEFAULT: u32 = 500;
-
-/// Resolve the route metric for `iface` given the resolved wired iface name.
+/// The metric the router programs the ACTIVE uplink's default route at.
 ///
-/// The wired uplink is the top-priority route, but its kernel name varies by
-/// BSP (`eth0`, `end1`, `enp*`). Matching the resolved name (not a hard-coded
-/// `eth0`) makes the wired link metric 100 wherever it lands. Pure so the
-/// mapping is unit-testable without touching sysfs.
-pub fn priority_metric_for(iface: &str, wired_iface: &str) -> u32 {
-    if iface == wired_iface {
-        return 100;
-    }
-    match iface {
-        "wlan0_client" => 200,
-        "wwan0" => 300,
-        "usb0" => 400,
-        _ => PRIORITY_METRIC_DEFAULT,
-    }
-}
-
-/// Resolve the route metric for `iface`, detecting the wired iface from sysfs.
-/// Mirrors `PRIORITY_METRIC.get(iface, 500)` with the wired slot resolved to
-/// whatever the board calls its NIC.
-///
-/// `async` because the sysfs scan under it is a blocking directory walk and the
-/// only caller ([`apply_default_route`]) runs on the router's `tick` path. There
-/// is deliberately no sync twin: one would be a blocking filesystem call reachable
-/// from a sync helper, which is the shape this module is moving away from. Callers
-/// that already know the wired iface name use the pure [`priority_metric_for`].
-pub async fn priority_metric(iface: &str) -> u32 {
-    priority_metric_for(iface, &detect_ethernet_iface_async().await)
-}
+/// Below every default a DHCP client installs (NetworkManager uses 100 for
+/// wired, 600 for Wi-Fi, 700 for WWAN; dhcpcd 200+), so the uplink the router
+/// chose is the one the kernel routes through even while a demoted link keeps
+/// carrier and its own DHCP default. One fixed metric also means each
+/// `ip route replace` overwrites the previous active uplink's route (an IPv4
+/// replace matches on prefix, TOS and metric), so a switch never leaves the
+/// old uplink's router-installed default preferred. The demoted links keep
+/// their DHCP defaults, which the per-interface health probes rely on.
+pub const ACTIVE_ROUTE_METRIC: u32 = 10;
 
 /// Three consecutive fails flip us down to the next viable uplink.
 pub const FAIL_DOWN_THRESHOLD: u32 = 3;
@@ -254,7 +230,7 @@ pub async fn apply_default_route(
     iface: &str,
     gateway: Option<&str>,
 ) -> bool {
-    let metric = priority_metric(iface).await;
+    let metric = ACTIVE_ROUTE_METRIC;
     let metric_s = metric.to_string();
     // `via <gw>` is the only optional segment; `dev`/`metric` are common to both
     // forms, so appending them once keeps the two argv shapes provably identical
@@ -291,29 +267,6 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
-    }
-
-    #[test]
-    fn priority_metric_table_and_default() {
-        // The classic eth0 board: eth0 is the wired iface, metric 100.
-        assert_eq!(priority_metric_for("eth0", "eth0"), 100);
-        assert_eq!(priority_metric_for("wlan0_client", "eth0"), 200);
-        assert_eq!(priority_metric_for("wwan0", "eth0"), 300);
-        assert_eq!(priority_metric_for("usb0", "eth0"), 400);
-        assert_eq!(priority_metric_for("anything-else", "eth0"), 500);
-    }
-
-    #[test]
-    fn detected_wired_iface_gets_top_metric() {
-        // A board whose NIC is `end1`: the detected wired iface, not a literal
-        // `eth0`, must be the metric-100 route. The plain `eth0` string is then
-        // just another unknown iface (metric 500).
-        assert_eq!(priority_metric_for("end1", "end1"), 100);
-        assert_eq!(priority_metric_for("eth0", "end1"), 500);
-        // The other slots are unchanged.
-        assert_eq!(priority_metric_for("wlan0_client", "end1"), 200);
-        assert_eq!(priority_metric_for("wwan0", "end1"), 300);
-        assert_eq!(priority_metric_for("usb0", "end1"), 400);
     }
 
     #[test]
@@ -419,9 +372,8 @@ mod tests {
     }
 
     /// The `ip` argv the route applier builds, asserted over the scripted
-    /// runner. Both ifaces here are non-wired, so their metric is fixed by the
-    /// table regardless of what this board calls its NIC — which keeps the
-    /// assertion deterministic without a live `/sys/class/net`.
+    /// runner: the kernel iface, never the logical uplink name, at the single
+    /// active-route metric.
     #[tokio::test]
     async fn route_apply_builds_the_ip_argv_with_a_gateway() {
         let runner = ScriptedRunner::new();
@@ -430,7 +382,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         });
-        assert!(apply_default_route(&runner, "wlan0_client", Some("192.168.1.50")).await);
+        assert!(apply_default_route(&runner, "wlan1", Some("192.168.1.50")).await);
         assert_eq!(
             runner.recorded()[0],
             [
@@ -441,9 +393,9 @@ mod tests {
                 "via",
                 "192.168.1.50",
                 "dev",
-                "wlan0_client",
+                "wlan1",
                 "metric",
-                "200",
+                "10",
             ]
         );
     }
@@ -457,7 +409,7 @@ mod tests {
         assert!(!apply_default_route(&runner, "usb0", None).await);
         assert_eq!(
             runner.recorded()[0],
-            ["ip", "route", "replace", "default", "dev", "usb0", "metric", "400"]
+            ["ip", "route", "replace", "default", "dev", "usb0", "metric", "10"]
         );
     }
 }

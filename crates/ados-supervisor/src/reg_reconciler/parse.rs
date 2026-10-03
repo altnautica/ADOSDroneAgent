@@ -1,8 +1,7 @@
-//! Pure `iw` output parsers for the regulatory reconciler.
-//!
-//! These transcribe `iw reg get` / `iw <iface> info` / `iw phy <phy> channels` /
-//! `iw dev` output into the values the OS edges act on. Pure, so the parsing is
-//! unit-tested without shelling `iw`. Gated to Linux + test (the OS edges that
+//! Pure parsers for the regulatory reconciler: the global domain out of
+//! `iw reg get`, and the wanted domain's rules out of the wireless-regdb
+//! `regulatory.db` image. Pure, so the parsing is unit-tested without shelling
+//! `iw` or reading `/lib/firmware`. Gated to Linux + test (the OS edges that
 //! drive them are Linux-only).
 
 #![cfg(any(target_os = "linux", test))]
@@ -23,67 +22,82 @@ pub(super) fn parse_global_reg_domain(text: &str) -> Option<String> {
     None
 }
 
-/// Extract the `phyN` wiphy name from `iw <iface> info` output (the `wiphy <N>`
-/// line). Returns e.g. `"phy0"`, or `None`. Pure.
-pub(super) fn parse_wiphy(info: &str) -> Option<String> {
-    for line in info.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("wiphy ") {
-            let n = rest.split_whitespace().next()?;
-            if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
-                return Some(format!("phy{}", n));
-            }
-        }
-    }
-    None
+/// `regulatory.db` magic (`RGDB`) and the one format version the kernel loads.
+const REGDB_MAGIC: u32 = 0x5247_4442;
+const REGDB_VERSION: u32 = 20;
+/// Rule flags that forbid an injection radio from radiating on a channel:
+/// no initiating radiation, and radar detection (DFS).
+const REGDB_FLAG_DFS: u8 = 1 << 2;
+const REGDB_FLAG_NO_IR: u8 = 1 << 3;
+
+/// Centre frequency in kHz of a WiFi channel number (2.4 GHz 1-14, 5 GHz).
+fn channel_center_khz(channel: u8) -> Option<u32> {
+    let mhz = match channel {
+        1..=13 => 2407 + 5 * u32::from(channel),
+        14 => 2484,
+        32..=196 => 5000 + 5 * u32::from(channel),
+        _ => return None,
+    };
+    Some(mhz * 1000)
 }
 
-/// Parse `iw phy <phy> channels` output into the set of usable channel numbers
-/// (the `[<channel>]` token on a line not marked `disabled` / `no ir` /
-/// `radar`). An empty set means "could not determine". Pure. Identical filter
-/// to the radio-side `parse_enabled_channels` so the two halves agree.
-pub(super) fn parse_enabled_channels(text: &str) -> std::collections::BTreeSet<u8> {
-    let mut out = std::collections::BTreeSet::new();
-    for line in text.lines() {
-        let Some(start) = line.find('[') else {
-            continue;
-        };
-        let Some(len) = line[start + 1..].find(']') else {
-            continue;
-        };
-        let token = &line[start + 1..start + 1 + len];
-        let Ok(ch) = token.parse::<u8>() else {
-            continue;
-        };
-        let low = line.to_lowercase();
-        if low.contains("disabled") || low.contains("no ir") || low.contains("radar") {
-            continue;
-        }
-        out.insert(ch);
+/// Whether `country`'s rules in a wireless-regdb `regulatory.db` image let a
+/// transmitter use the 20 MHz `channel`: some rule covers it and the rule is
+/// neither no-IR nor DFS (the same channels `iw phy channels` would list as
+/// usable under that country). `None` when the image is malformed, the
+/// country is not in it, or the channel number is unknown. Pure: it judges
+/// the WANTED domain from the database, never the live per-phy state.
+///
+/// Layout (big-endian, offsets are `ptr << 2`): a `magic`/`version` header,
+/// then `{alpha2[2], coll_ptr u16}` country entries ending at `coll_ptr == 0`;
+/// a collection is `{len, n_rules, dfs_region}` followed (at `len` rounded up
+/// to 2) by `n_rules` u16 rule pointers; a rule is
+/// `{len, flags, max_eirp u16, start u32, end u32, max_bw u32}` in kHz.
+pub(super) fn regdb_permits_channel(db: &[u8], country: &str, channel: u8) -> Option<bool> {
+    let u8_at = |off: usize| db.get(off).copied();
+    let u16_at = |off: usize| {
+        db.get(off..off + 2)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]))
+    };
+    let u32_at = |off: usize| {
+        db.get(off..off + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    if u32_at(0)? != REGDB_MAGIC || u32_at(4)? != REGDB_VERSION {
+        return None;
     }
-    out
-}
+    let want = country.trim().to_ascii_uppercase();
+    let want = want.as_bytes();
+    if want.len() != 2 {
+        return None;
+    }
+    let center = channel_center_khz(channel)?;
+    let (low, high) = (center - 10_000, center + 10_000);
 
-/// First WFB-compatible injection interface from `iw dev` output, or `None`. The
-/// channel-safety read needs the injection adapter's wiphy. We do not parse the
-/// driver here (that needs sysfs); the wiphy channel set is the same for any
-/// interface on that phy, and the only interface whose enabled set matters for
-/// the WFB channel is the injection adapter — which is the only one whose phy
-/// would carry the U-NII-3 channels in the first place. We pick the first phy
-/// whose enabled set contains the target channel, so an onboard 2.4 GHz phy is
-/// naturally skipped. Pure.
-pub(super) fn parse_interfaces(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let s = line.trim();
-        if let Some(rest) = s.strip_prefix("Interface ") {
-            let name = rest.trim();
-            if !name.is_empty() {
-                out.push(name.to_string());
-            }
+    let mut entry = 8;
+    let coll = loop {
+        let ptr = usize::from(u16_at(entry + 2)?);
+        if ptr == 0 {
+            return None;
+        }
+        if db.get(entry..entry + 2)? == want {
+            break ptr << 2;
+        }
+        entry += 4;
+    };
+    let coll_len = usize::from(u8_at(coll)?);
+    let n_rules = usize::from(u8_at(coll + 1)?);
+    let rules_at = coll + coll_len.div_ceil(2) * 2;
+    for i in 0..n_rules {
+        let rule = usize::from(u16_at(rules_at + 2 * i)?) << 2;
+        let flags = u8_at(rule + 1)?;
+        let start = u32_at(rule + 4)?;
+        let end = u32_at(rule + 8)?;
+        if start <= low && high <= end {
+            return Some(flags & (REGDB_FLAG_NO_IR | REGDB_FLAG_DFS) == 0);
         }
     }
-    out
+    Some(false)
 }
 
 #[cfg(test)]
@@ -103,33 +117,60 @@ country US: DFS-FCC
         assert_eq!(parse_global_reg_domain(text).as_deref(), Some("BO"));
     }
 
-    #[test]
-    fn parses_wiphy_and_channels() {
-        let info = "Interface wlan1\n\twiphy 3\n\ttype monitor\n";
-        assert_eq!(parse_wiphy(info).as_deref(), Some("phy3"));
-        let chans = "\
-* 5745 MHz [149] (24.0 dBm)
-* 5765 MHz [153] (disabled)
-* 5260 MHz [52] (no IR, radar detection)
-* 5825 MHz [165] (24.0 dBm)
-";
-        let enabled = parse_enabled_channels(chans);
-        assert!(enabled.contains(&149));
-        assert!(enabled.contains(&165));
-        assert!(!enabled.contains(&153)); // disabled
-        assert!(!enabled.contains(&52)); // radar / no IR
+    /// Build a minimal `regulatory.db` image: one country, given rules of
+    /// `(start_khz, end_khz, flags)`.
+    fn regdb(country: &str, rules: &[(u32, u32, u8)]) -> Vec<u8> {
+        let mut db = Vec::new();
+        db.extend_from_slice(&REGDB_MAGIC.to_be_bytes());
+        db.extend_from_slice(&REGDB_VERSION.to_be_bytes());
+        // Country entry + terminator: collection at byte 16 (ptr 4).
+        db.extend_from_slice(country.as_bytes());
+        db.extend_from_slice(&4u16.to_be_bytes());
+        db.extend_from_slice(&[0, 0, 0, 0]);
+        // Collection: len 3, n_rules, dfs_region, then rule pointers at 16+4.
+        let rules_base = 20 + 2 * rules.len();
+        let rules_base = rules_base.div_ceil(4) * 4;
+        db.extend_from_slice(&[3, rules.len() as u8, 0, 0]);
+        for i in 0..rules.len() {
+            db.extend_from_slice(&(((rules_base + 20 * i) >> 2) as u16).to_be_bytes());
+        }
+        db.resize(rules_base, 0);
+        for (start, end, flags) in rules {
+            db.extend_from_slice(&[16, *flags]);
+            db.extend_from_slice(&3000u16.to_be_bytes());
+            db.extend_from_slice(&start.to_be_bytes());
+            db.extend_from_slice(&end.to_be_bytes());
+            db.extend_from_slice(&80_000u32.to_be_bytes());
+            db.extend_from_slice(&[0, 0, 0, 0]);
+        }
+        db
     }
 
     #[test]
-    fn parses_interface_list() {
-        let dev = "\
-phy#3
-\tInterface wlan1
-\t\ttype monitor
-phy#0
-\tInterface wlan0
-\t\ttype managed
-";
-        assert_eq!(parse_interfaces(dev), vec!["wlan1", "wlan0"]);
+    fn the_wanted_domain_is_judged_from_its_own_rules() {
+        // U-NII-3 open, U-NII-2 radar-only.
+        let db = regdb(
+            "US",
+            &[
+                (5_735_000, 5_835_000, 0),
+                (5_250_000, 5_330_000, REGDB_FLAG_DFS | REGDB_FLAG_NO_IR),
+            ],
+        );
+        assert_eq!(regdb_permits_channel(&db, "US", 149), Some(true));
+        assert_eq!(regdb_permits_channel(&db, "us", 161), Some(true));
+        assert_eq!(regdb_permits_channel(&db, "US", 56), Some(false), "DFS");
+        assert_eq!(regdb_permits_channel(&db, "US", 36), Some(false), "no rule");
+        // A country the image does not carry, or a broken image: unknown.
+        assert_eq!(regdb_permits_channel(&db, "BO", 149), None);
+        assert_eq!(regdb_permits_channel(&db[..12], "US", 149), None);
+        assert_eq!(regdb_permits_channel(b"not a regdb", "US", 149), None);
+    }
+
+    #[test]
+    fn a_channel_must_fit_inside_the_rule_whole() {
+        // 5815-5835 for channel 165 overhangs a rule ending at 5825 MHz.
+        let db = regdb("IN", &[(5_725_000, 5_825_000, 0)]);
+        assert_eq!(regdb_permits_channel(&db, "IN", 161), Some(true));
+        assert_eq!(regdb_permits_channel(&db, "IN", 165), Some(false));
     }
 }

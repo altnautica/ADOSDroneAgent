@@ -38,22 +38,20 @@ use crate::router::UplinkManager;
 /// `phy1`, ...); counting entries here is the wifi-radio count.
 const IEEE80211_DIR: &str = "/sys/class/ieee80211";
 
-/// Fallback AP interface name, used only when resolution fails.
-const AP_IFACE_FALLBACK: &str = "wlan0";
-
 /// The AP interface the hostapd manager binds. The client-uplink probe checks
 /// this same interface (they contend for it on a single radio).
 ///
 /// Resolved by driver rather than assumed to be `wlan0`: interface names race
 /// at boot, and reporting a name the AP is not actually on is a status surface
 /// stating something untrue. The hostapd manager resolves the same way from the
-/// same inputs, so the two agree without this holding a lock on it.
-fn ap_interface() -> String {
+/// same inputs, so the two agree without this holding a lock on it. `None`
+/// when no onboard WiFi resolves; the sidecar then reports `null`.
+fn ap_interface() -> Option<String> {
     ados_protocol::netif::resolve_ap_interface(
         &ados_protocol::ap_country::configured_ap_interface(),
         ados_protocol::netif::radio_interface().as_deref(),
     )
-    .unwrap_or_else(|_| AP_IFACE_FALLBACK.to_string())
+    .ok()
 }
 
 /// Reason strings surfaced on the guard sidecar / status for diagnosability.
@@ -210,7 +208,7 @@ impl SetupApGuard {
             if hostapd.is_running().await {
                 info!(
                     wifi_phy_count = decision.wifi_phy_count,
-                    ap_interface = %ap_interface(),
+                    ap_interface = ?ap_interface(),
                     "ap_setup_standdown: sole radio is a client uplink; bringing the setup AP down"
                 );
                 hostapd.stop().await;
@@ -218,7 +216,7 @@ impl SetupApGuard {
             } else if startup {
                 info!(
                     wifi_phy_count = decision.wifi_phy_count,
-                    ap_interface = %ap_interface(),
+                    ap_interface = ?ap_interface(),
                     "ap_setup_standdown: sole radio is a client uplink; leaving the setup AP down"
                 );
             }
@@ -243,7 +241,7 @@ impl SetupApGuard {
                 hostapd.ensure_passphrase();
                 if hostapd.start().await {
                     info!(
-                        ap_interface = %ap_interface(),
+                        ap_interface = ?ap_interface(),
                         "ap_setup_restored: client uplink gone; bringing the setup AP back up"
                     );
                 } else {
@@ -263,7 +261,7 @@ mod tests {
     use crate::cmd::CmdOut;
 
     fn hostapd_mgr(dir: &Path, runner: Arc<ScriptedRunner>) -> Arc<Mutex<HostapdManager>> {
-        Arc::new(Mutex::new(HostapdManager::with_paths(
+        let mut m = HostapdManager::with_paths(
             "58c27faf",
             None,
             6,
@@ -272,7 +270,11 @@ mod tests {
             dir.join("hostapd-gs.conf"),
             dir.join("dnsmasq-gs.conf"),
             dir.join("ap-passphrase"),
-        )))
+        );
+        // The AP binds an onboard interface resolved by driver; an unresolved
+        // one refuses to start, which is not what these cases exercise.
+        m.set_interface("wlan0");
+        Arc::new(Mutex::new(m))
     }
 
     fn wifi_mgr(dir: &Path, runner: Arc<ScriptedRunner>) -> WifiClientManager {

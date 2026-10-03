@@ -39,10 +39,11 @@ use super::REG_REASSERT_KIND;
 ///
 /// SAFETY (identical to the periodic path): re-asserts ONLY a forceable operator
 /// country (never the world default / a malformed code) and ONLY when that
-/// domain permits the configured rendezvous channel (`channel_permitted` reads
-/// the live enabled set), so it can never cap the WFB radio onto a forbidden
-/// frequency, and never moves toward the injection PHY's baked country.
-/// Idempotent: a cheap no-op (one `iw reg get` + a compare) when already in sync.
+/// domain's own rules in the regulatory database permit the configured
+/// rendezvous channel (`channel_permitted`), so it can never cap the WFB radio
+/// onto a forbidden frequency, and never moves toward the injection PHY's
+/// baked country. Idempotent: a cheap no-op (one `iw reg get` + a compare)
+/// when already in sync.
 #[cfg(target_os = "linux")]
 pub async fn reconcile_global_domain(events: &EventEmitter) {
     if !iw_available().await {
@@ -51,14 +52,14 @@ pub async fn reconcile_global_domain(events: &EventEmitter) {
     let wanted = read_wanted();
     let live = active_global_reg_domain().await;
 
-    // Cheap common path: already correct, no `iw phy channels` read needed.
+    // Cheap common path: already correct, no regulatory database read needed.
     if let ReconcileDecision::InSync = reconcile_decision(live.as_deref(), &wanted.domain, true) {
         return;
     }
-    // Out of sync (or unreadable live): determine whether the wanted domain
+    // Out of sync (or unreadable live): determine whether the WANTED domain
     // permits the rendezvous channel before forcing it, so we can never cap
     // the radio onto a forbidden frequency.
-    let channel_ok = channel_permitted(wanted.channel).await;
+    let channel_ok = channel_permitted(&wanted.domain, wanted.channel).await;
     match reconcile_decision(live.as_deref(), &wanted.domain, channel_ok) {
         ReconcileDecision::InSync | ReconcileDecision::NoWanted => {}
         ReconcileDecision::SkipChannelUnsafe => {
@@ -168,46 +169,35 @@ async fn active_global_reg_domain() -> Option<String> {
     super::parse::parse_global_reg_domain(&out)
 }
 
-/// Whether the configured rendezvous channel is permitted on any present phy.
-/// Reads each interface's wiphy channel set; the channel is permitted when it is
-/// in the enabled set of at least one phy (the injection adapter's), or when no
-/// phy's set could be read (matching the bring-up gate's "empty = do not
-/// restrict"). Never restricts on an unknown — it can only ever ALLOW a
-/// re-assert it is sure is safe, and otherwise falls through to allow rather than
-/// wedge (the wanted domain is, by construction, a sane operator country).
+/// Where wireless-regdb installs the database the kernel loads.
 #[cfg(target_os = "linux")]
-async fn channel_permitted(channel: u8) -> bool {
-    let Some(dev) = run_output("iw", &["dev"]).await else {
-        return true; // could not enumerate — do not restrict
-    };
-    let ifaces = super::parse::parse_interfaces(&dev);
-    if ifaces.is_empty() {
-        return true;
+const REGDB_PATHS: &[&str] = &[
+    "/lib/firmware/regulatory.db",
+    "/usr/lib/firmware/regulatory.db",
+];
+
+/// Whether the WANTED domain permits the rendezvous channel, judged from that
+/// domain's own rules in the regulatory database. The live per-phy channel
+/// sets are not consulted: they describe whatever domain is in force now (the
+/// one being replaced), not the one about to be set. An unreadable database or
+/// a country it does not carry is not proof of safety, so it reads as not
+/// permitted and the re-assert is skipped (logged).
+#[cfg(target_os = "linux")]
+async fn channel_permitted(domain: &str, channel: u8) -> bool {
+    for path in REGDB_PATHS {
+        let Ok(db) = tokio::fs::read(path).await else {
+            continue;
+        };
+        return match super::parse::regdb_permits_channel(&db, domain, channel) {
+            Some(permitted) => permitted,
+            None => {
+                tracing::warn!(domain, channel, path, "reg_reconciler_domain_not_in_regdb");
+                false
+            }
+        };
     }
-    let mut any_set_read = false;
-    for iface in ifaces {
-        let Some(info) = run_output("iw", &[&iface, "info"]).await else {
-            continue;
-        };
-        let Some(phy) = super::parse::parse_wiphy(&info) else {
-            continue;
-        };
-        let Some(chans) = run_output("iw", &["phy", &phy, "channels"]).await else {
-            continue;
-        };
-        let enabled = super::parse::parse_enabled_channels(&chans);
-        if enabled.is_empty() {
-            continue;
-        }
-        any_set_read = true;
-        if enabled.contains(&channel) {
-            return true;
-        }
-    }
-    // If we read at least one non-empty channel set and the target was in none,
-    // the wanted domain would NOT permit the channel on the present radios — do
-    // not force it. If no set could be read, do not restrict.
-    !any_set_read
+    tracing::warn!(domain, channel, "reg_reconciler_regdb_unreadable");
+    false
 }
 
 /// Apply the regulatory domain via `iw reg set <domain>` and verify the readback

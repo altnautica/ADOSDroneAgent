@@ -7,21 +7,24 @@
 
 #![cfg(any(target_os = "linux", test))]
 
-/// Parse the `wlan*` interface names from `iw dev` output.
+/// Parse the station (`type managed`) interface names from `iw dev` output.
 ///
-/// Only WiFi station interfaces (`wlan*`) matter for the power-save reconcile.
-/// The WFB monitor injection adapter is a `wlan*` too, but it is never in a
-/// managed station's power-save state, so a `set power_save off` on it is a
-/// harmless no-op — we do not need to distinguish it here. Non-station names
-/// (`mon0`, `p2p0`) are skipped. Pure.
-pub(super) fn parse_wlan_interfaces(text: &str) -> Vec<String> {
+/// Selected by interface type, not name: predictable names (`wlx…`, `wlp…`)
+/// are stations too, and a monitor-mode injection adapter or a P2P helper is
+/// not. The OS edge additionally drops any interface the WFB adapter table
+/// claims. Pure.
+pub(super) fn parse_station_interfaces(text: &str) -> Vec<String> {
     let mut out = Vec::new();
+    let mut current: Option<&str> = None;
     for line in text.lines() {
         let s = line.trim();
         if let Some(rest) = s.strip_prefix("Interface ") {
-            let name = rest.trim();
-            if name.starts_with("wlan") {
-                out.push(name.to_string());
+            current = Some(rest.trim());
+        } else if let Some(kind) = s.strip_prefix("type ") {
+            if let Some(name) = current.take() {
+                if kind.trim() == "managed" {
+                    out.push(name.to_string());
+                }
             }
         }
     }
@@ -89,20 +92,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_only_wlan_station_interfaces() {
+    fn parses_only_station_interfaces_whatever_their_name() {
         let dev = "\
 phy#0
 \tInterface wlan0
+\t\tifindex 3
 \t\ttype managed
 phy#3
 \tInterface wlan1
 \t\ttype monitor
+phy#4
+\tInterface wlx00c0ca123456
+\t\ttype managed
 phy#0
 \tInterface p2p0
 \t\ttype P2P-device
 ";
-        // Both wlan* interfaces are captured; the p2p0 helper interface is not.
-        assert_eq!(parse_wlan_interfaces(dev), vec!["wlan0", "wlan1"]);
+        assert_eq!(
+            parse_station_interfaces(dev),
+            vec!["wlan0", "wlx00c0ca123456"]
+        );
     }
 
     #[test]

@@ -66,7 +66,14 @@ pub(super) async fn reconcile_wifi_powersave(
     let Some(dev) = run_output("iw", &["dev"]).await else {
         return;
     };
-    let ifaces = super::parse::parse_wlan_interfaces(&dev);
+    let ifaces: Vec<String> = super::parse::parse_station_interfaces(&dev)
+        .into_iter()
+        .filter(|iface| {
+            let root = std::path::Path::new("/sys/class/net");
+            let driver = ados_protocol::netif::driver_name_in(root, iface).unwrap_or_default();
+            !ados_protocol::netif::is_wfb_adapter(&driver, ados_protocol::netif::usb_vid_pid(iface))
+        })
+        .collect();
 
     let mut snapshot: BTreeMap<String, WifiIfaceSnapshot> = BTreeMap::new();
     for iface in ifaces {

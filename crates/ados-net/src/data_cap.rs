@@ -13,8 +13,10 @@
 //! (RNDIS/AT) ONLY when the USB-gadget tether is not provisioned. `usb0` is
 //! also the gadget tether NIC the daemon itself creates, so counting it against
 //! the cellular cap would falsely throttle a board that has no modem at all.
-//! The reads return 0 when the resolved iface is absent, so the tracker is
-//! bench-runnable on a board with no modem.
+//! A poll with no modem iface, or with unreadable counters, counts nothing and
+//! keeps the baseline, so the tracker is bench-runnable on a board with no
+//! modem. The baseline is tagged with its interface: a switch between `wwan0`
+//! and `usb0` re-baselines instead of counting an unrelated counter.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -45,11 +47,22 @@ pub struct UsageBytes {
     pub tx_bytes: u64,
 }
 
+/// One reading of the modem interface's cumulative counters, tagged with the
+/// kernel interface they were read from so a baseline is only ever compared
+/// against the same netdev.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSample {
+    pub iface: String,
+    pub bytes: UsageBytes,
+}
+
 /// A source of cumulative rx/tx byte counters. The default impl reads sysfs;
-/// tests inject a scripted source.
+/// tests inject a scripted source. `None` means nothing can be counted this
+/// poll (no modem interface, or its counters could not be read), so the
+/// tracker skips the sample and keeps its baseline.
 #[async_trait]
 pub trait UsageSource: Send + Sync {
-    async fn data_usage(&self) -> UsageBytes;
+    async fn data_usage(&self) -> Option<UsageSample>;
 }
 
 /// Cellular MBIM/QMI iface.
@@ -61,8 +74,8 @@ const USB_IFACE: &str = "usb0";
 const USB_GADGET_DIR: &str = "/sys/kernel/config/usb_gadget/ados_gs";
 
 /// Reads `/sys/class/net/<iface>/statistics/{rx,tx}_bytes` for the modem's
-/// CURRENT interface only. Returns 0 when that iface is absent, so a bench
-/// board with no modem reports zero usage rather than failing.
+/// CURRENT interface only. Returns `None` when that iface is absent or a
+/// counter cannot be read, so a bench board with no modem counts nothing.
 ///
 /// The iface is resolved on every read (interfaces appear/disappear with the
 /// modem and the gadget): `wwan0` when present, else `usb0` ONLY when the
@@ -108,12 +121,11 @@ impl SysfsUsageSource {
         None
     }
 
-    fn read_counter(&self, iface: &str, counter: &str) -> u64 {
+    fn read_counter(&self, iface: &str, counter: &str) -> Option<u64> {
         let path = self.net_dir.join(iface).join("statistics").join(counter);
         std::fs::read_to_string(path)
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
-            .unwrap_or(0)
     }
 }
 
@@ -125,24 +137,27 @@ impl Default for SysfsUsageSource {
 
 #[async_trait]
 impl UsageSource for SysfsUsageSource {
-    async fn data_usage(&self) -> UsageBytes {
-        match self.modem_iface() {
-            Some(iface) => UsageBytes {
-                rx_bytes: self.read_counter(&iface, "rx_bytes"),
-                tx_bytes: self.read_counter(&iface, "tx_bytes"),
-            },
-            None => UsageBytes::default(),
-        }
+    async fn data_usage(&self) -> Option<UsageSample> {
+        let iface = self.modem_iface()?;
+        let rx_bytes = self.read_counter(&iface, "rx_bytes")?;
+        let tx_bytes = self.read_counter(&iface, "tx_bytes")?;
+        Some(UsageSample {
+            iface,
+            bytes: UsageBytes { rx_bytes, tx_bytes },
+        })
     }
 }
 
-/// Persisted cumulative-usage window.
+/// Persisted cumulative-usage window. `last_rx`/`last_tx` are the kernel
+/// counters of `last_iface` at the previous sample; they are a baseline for
+/// that interface only.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageState {
     pub window_started_at: f64,
     pub cumulative_bytes: u64,
     pub last_rx: u64,
     pub last_tx: u64,
+    pub last_iface: Option<String>,
     pub last_reset_month: String,
 }
 
@@ -153,33 +168,45 @@ impl UsageState {
             cumulative_bytes: 0,
             last_rx: 0,
             last_tx: 0,
+            last_iface: None,
             last_reset_month: month,
         }
     }
 
-    /// Render byte-identically to Python `json.dumps(state.to_json())`: fixed
-    /// key order, `", "` / `": "` separators with spaces, floats rendered the
-    /// same way serde and Python both render them, no trailing newline.
+    /// A new month window that keeps the current kernel-counter baseline, so
+    /// the first poll of the month counts only traffic since the last sample
+    /// and not every byte the interface has carried since boot.
+    fn next_month(&self, month: String) -> Self {
+        Self {
+            window_started_at: now_secs(),
+            cumulative_bytes: 0,
+            last_rx: self.last_rx,
+            last_tx: self.last_tx,
+            last_iface: self.last_iface.clone(),
+            last_reset_month: month,
+        }
+    }
+
+    /// Render with a fixed key order and `", "` / `": "` separators.
     pub fn render_json(&self) -> String {
-        // serde_json renders f64 identically to Python json.dumps for these
-        // values; the integers are exact. Only the separator spacing differs
-        // from a compact `to_string`, so the body is assembled by hand.
         let w = serde_json::to_string(&self.window_started_at).unwrap_or_else(|_| "0.0".into());
         let m = serde_json::to_string(&self.last_reset_month).unwrap_or_else(|_| "\"\"".into());
+        let i = serde_json::to_string(&self.last_iface).unwrap_or_else(|_| "null".into());
         format!(
-            "{{\"window_started_at\": {w}, \"cumulative_bytes\": {}, \"last_rx\": {}, \"last_tx\": {}, \"last_reset_month\": {m}}}",
+            "{{\"window_started_at\": {w}, \"cumulative_bytes\": {}, \"last_rx\": {}, \"last_tx\": {}, \"last_iface\": {i}, \"last_reset_month\": {m}}}",
             self.cumulative_bytes, self.last_rx, self.last_tx
         )
     }
 }
 
-/// Lenient loader mirror of `_UsageState.from_json` (missing fields default).
+/// Lenient loader (missing fields default).
 #[derive(Debug, Default, Deserialize)]
 struct RawUsageState {
     window_started_at: Option<f64>,
     cumulative_bytes: Option<u64>,
     last_rx: Option<u64>,
     last_tx: Option<u64>,
+    last_iface: Option<String>,
     last_reset_month: Option<String>,
 }
 
@@ -257,7 +284,7 @@ impl DataCapTracker {
                 bytes_used = self.state.cumulative_bytes,
                 "uplink.datacap_month_reset"
             );
-            self.state = UsageState::fresh(now_month);
+            self.state = self.state.next_month(now_month);
             self.last_threshold = None;
             self.save_state();
             true
@@ -280,22 +307,13 @@ impl DataCapTracker {
     /// persists, and emits a `data_cap_threshold` event ONLY on a state
     /// transition.
     pub async fn poll_once(&mut self) {
-        let usage = self.source.data_usage().await;
-        let rx = usage.rx_bytes;
-        let tx = usage.tx_bytes;
-
-        // Counter-reset handling: a new value smaller than the last sample
-        // means the modem (or kernel iface) re-counted from zero, so the delta
-        // for that sample is dropped rather than counted as a huge spike.
-        let (drx, dtx) = if rx < self.state.last_rx || tx < self.state.last_tx {
-            (0, 0)
-        } else {
-            (rx - self.state.last_rx, tx - self.state.last_tx)
-        };
-
-        self.state.last_rx = rx;
-        self.state.last_tx = tx;
-        self.state.cumulative_bytes += drx + dtx;
+        if let Some(sample) = self.source.data_usage().await {
+            let carried = self.accrue(&sample);
+            self.state.cumulative_bytes += carried;
+            self.state.last_rx = sample.bytes.rx_bytes;
+            self.state.last_tx = sample.bytes.tx_bytes;
+            self.state.last_iface = Some(sample.iface);
+        }
         self.save_state();
 
         // Ship the just-persisted usage snapshot to the store. The body is the
@@ -321,6 +339,19 @@ impl DataCapTracker {
                 timestamp_ms: now_ms(),
             });
         }
+    }
+
+    /// Bytes carried since the previous sample. A sample from a different
+    /// interface than the baseline only re-baselines (the two counters are
+    /// unrelated). A counter smaller than its baseline restarted from zero, so
+    /// its current value is the traffic since the restart.
+    fn accrue(&self, sample: &UsageSample) -> u64 {
+        if self.state.last_iface.as_deref() != Some(sample.iface.as_str()) {
+            return 0;
+        }
+        let delta = |now: u64, last: u64| if now < last { now } else { now - last };
+        delta(sample.bytes.rx_bytes, self.state.last_rx)
+            + delta(sample.bytes.tx_bytes, self.state.last_tx)
     }
 
     /// Usage snapshot. Key names + rounding match the Python `get_usage`.
@@ -389,6 +420,7 @@ fn load_state(path: &Path) -> UsageState {
                 cumulative_bytes: raw.cumulative_bytes.unwrap_or(0),
                 last_rx: raw.last_rx.unwrap_or(0),
                 last_tx: raw.last_tx.unwrap_or(0),
+                last_iface: raw.last_iface,
                 last_reset_month: raw.last_reset_month.unwrap_or_default(),
             },
             Err(exc) => {
@@ -509,12 +541,39 @@ fn round2(x: f64) -> f64 {
 mod tests {
     use super::*;
 
-    struct FixedSource(UsageBytes);
+    struct FixedSource(Option<UsageSample>);
     #[async_trait]
     impl UsageSource for FixedSource {
-        async fn data_usage(&self) -> UsageBytes {
-            self.0
+        async fn data_usage(&self) -> Option<UsageSample> {
+            self.0.clone()
         }
+    }
+
+    fn sample_on(iface: &str, rx: u64, tx: u64) -> Arc<FixedSource> {
+        Arc::new(FixedSource(Some(UsageSample {
+            iface: iface.to_string(),
+            bytes: UsageBytes {
+                rx_bytes: rx,
+                tx_bytes: tx,
+            },
+        })))
+    }
+
+    fn fixed(rx: u64, tx: u64) -> Arc<FixedSource> {
+        sample_on("wwan0", rx, tx)
+    }
+
+    /// A tracker whose baseline is wwan0 at zero, so the first poll counts the
+    /// whole sample.
+    fn baselined(
+        src: Arc<FixedSource>,
+        bus: &Arc<UplinkEventBus>,
+        cap_gb: f64,
+        state_path: PathBuf,
+    ) -> DataCapTracker {
+        let mut t = DataCapTracker::with_config(src, Arc::clone(bus), cap_gb, state_path);
+        t.state.last_iface = Some("wwan0".to_string());
+        t
     }
 
     fn tracker(
@@ -524,11 +583,7 @@ mod tests {
         tx: u64,
     ) -> (DataCapTracker, Arc<UplinkEventBus>) {
         let bus = Arc::new(UplinkEventBus::new());
-        let src = Arc::new(FixedSource(UsageBytes {
-            rx_bytes: rx,
-            tx_bytes: tx,
-        }));
-        let t = DataCapTracker::with_config(src, Arc::clone(&bus), cap_gb, state_path);
+        let t = baselined(fixed(rx, tx), &bus, cap_gb, state_path);
         (t, bus)
     }
 
@@ -551,17 +606,18 @@ mod tests {
     }
 
     #[test]
-    fn render_json_is_byte_exact_to_python_json_dumps() {
+    fn render_json_has_a_fixed_key_order() {
         let st = UsageState {
             window_started_at: 1_700_000_000.0,
             cumulative_bytes: 123_456,
             last_rx: 1000,
             last_tx: 2000,
+            last_iface: Some("wwan0".to_string()),
             last_reset_month: "2026-05".to_string(),
         };
         assert_eq!(
             st.render_json(),
-            r#"{"window_started_at": 1700000000.0, "cumulative_bytes": 123456, "last_rx": 1000, "last_tx": 2000, "last_reset_month": "2026-05"}"#
+            r#"{"window_started_at": 1700000000.0, "cumulative_bytes": 123456, "last_rx": 1000, "last_tx": 2000, "last_iface": "wwan0", "last_reset_month": "2026-05"}"#
         );
     }
 
@@ -581,32 +637,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_accumulates_and_handles_counter_reset() {
+    async fn poll_counts_a_restarted_counter_from_zero() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("modem-usage.json");
-        // Start at rx=1000 tx=500.
         let bus = Arc::new(UplinkEventBus::new());
-        let src = Arc::new(FixedSource(UsageBytes {
-            rx_bytes: 1000,
-            tx_bytes: 500,
-        }));
-        let mut t = DataCapTracker::with_config(src, Arc::clone(&bus), 5.0, path);
-        // First poll baselines: delta from last_rx/tx=0 → +1500.
+        let mut t = baselined(fixed(1000, 500), &bus, 5.0, path);
         t.poll_once().await;
         assert_eq!(t.state.cumulative_bytes, 1500);
         assert_eq!(t.state.last_rx, 1000);
-        // Simulate a counter reset: new sample smaller than last → delta 0.
-        let bus2 = Arc::new(UplinkEventBus::new());
-        let src2 = Arc::new(FixedSource(UsageBytes {
-            rx_bytes: 10,
-            tx_bytes: 5,
-        }));
-        t.source = src2 as Arc<dyn UsageSource>;
-        let _ = bus2;
+        // The modem re-enumerated: the counter restarted, so its current value
+        // is the traffic since the restart and is counted, not dropped.
+        t.source = fixed(10, 5);
         t.poll_once().await;
-        // cumulative unchanged (reset dropped the delta), baseline re-set.
-        assert_eq!(t.state.cumulative_bytes, 1500);
+        assert_eq!(t.state.cumulative_bytes, 1515);
         assert_eq!(t.state.last_rx, 10);
+    }
+
+    #[tokio::test]
+    async fn an_interface_switch_rebaselines_instead_of_counting_the_new_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let bus = Arc::new(UplinkEventBus::new());
+        let mut t = baselined(fixed(1000, 500), &bus, 5.0, path);
+        t.poll_once().await;
+        assert_eq!(t.state.cumulative_bytes, 1500);
+        // The modem now presents usb0, whose counter is unrelated to wwan0's.
+        t.source = sample_on("usb0", 9_000_000, 9_000_000);
+        t.poll_once().await;
+        assert_eq!(t.state.cumulative_bytes, 1500);
+        assert_eq!(t.state.last_iface.as_deref(), Some("usb0"));
+        // Next sample on usb0 counts against the usb0 baseline.
+        t.source = sample_on("usb0", 9_000_100, 9_000_000);
+        t.poll_once().await;
+        assert_eq!(t.state.cumulative_bytes, 1600);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_sample_keeps_the_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let bus = Arc::new(UplinkEventBus::new());
+        let mut t = baselined(fixed(1000, 500), &bus, 5.0, path);
+        t.poll_once().await;
+        t.source = Arc::new(FixedSource(None));
+        t.poll_once().await;
+        assert_eq!(t.state.last_rx, 1000);
+        assert_eq!(t.state.cumulative_bytes, 1500);
+        // The next good sample counts only the growth since the last one.
+        t.source = fixed(1100, 500);
+        t.poll_once().await;
+        assert_eq!(t.state.cumulative_bytes, 1600);
+    }
+
+    #[tokio::test]
+    async fn a_month_rollover_does_not_charge_the_since_boot_counter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modem-usage.json");
+        let bus = Arc::new(UplinkEventBus::new());
+        // A box that has carried 4 GiB since boot, sampled last month.
+        let since_boot = 4 * 1024 * 1024 * 1024u64;
+        let mut t = baselined(fixed(since_boot, 0), &bus, 5.0, path);
+        t.state.last_rx = since_boot;
+        t.state.cumulative_bytes = 3 * 1024 * 1024 * 1024;
+        t.state.last_reset_month = "1999-01".to_string();
+        assert!(t.check_month_reset());
+        // 1 MiB more arrives in the new month.
+        t.source = fixed(since_boot + 1024 * 1024, 0);
+        t.poll_once().await;
+        assert_eq!(t.state.cumulative_bytes, 1024 * 1024);
+        assert_eq!(t.classify(), DataCapState::Ok);
     }
 
     #[tokio::test]
@@ -616,17 +715,7 @@ mod tests {
         // cap 1 KiB so a small counter trips blocked_100 immediately.
         let bus = Arc::new(UplinkEventBus::new());
         let mut rx = bus.subscribe();
-        let src = Arc::new(FixedSource(UsageBytes {
-            rx_bytes: 4096,
-            tx_bytes: 0,
-        }));
-        let mut t = DataCapTracker::with_config(
-            src,
-            Arc::clone(&bus),
-            // 1 KiB cap.
-            1.0 / (1024.0 * 1024.0),
-            path,
-        );
+        let mut t = baselined(fixed(4096, 0), &bus, 1.0 / (1024.0 * 1024.0), path);
         t.poll_once().await;
         let evt = rx
             .try_recv()
@@ -705,6 +794,7 @@ mod tests {
             cumulative_bytes: 12345,
             last_rx: 100,
             last_tx: 200,
+            last_iface: Some("usb0".to_string()),
             last_reset_month: "2026-04".to_string(),
         };
         std::fs::write(&path, written.render_json()).unwrap();
@@ -714,30 +804,20 @@ mod tests {
         assert_eq!(st.last_rx, 100);
         assert_eq!(st.last_tx, 200);
         assert_eq!(st.last_reset_month, "2026-04");
+        assert_eq!(st.last_iface.as_deref(), Some("usb0"));
     }
 
     #[tokio::test]
     async fn two_polls_accumulate_against_the_previous_sample() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("modem-usage.json");
-        // First poll baselines against zero → +1500.
+        // First poll counts from the zero wwan0 baseline → +1500.
         let bus = Arc::new(UplinkEventBus::new());
-        let mut t = DataCapTracker::with_config(
-            Arc::new(FixedSource(UsageBytes {
-                rx_bytes: 1000,
-                tx_bytes: 500,
-            })),
-            Arc::clone(&bus),
-            1.0,
-            path,
-        );
+        let mut t = baselined(fixed(1000, 500), &bus, 1.0, path);
         t.poll_once().await;
         assert_eq!(t.state.cumulative_bytes, 1500);
         // Second poll: rx 1000→1700 (+700), tx 500→800 (+300) → +1000.
-        t.source = Arc::new(FixedSource(UsageBytes {
-            rx_bytes: 1700,
-            tx_bytes: 800,
-        }));
+        t.source = fixed(1700, 800);
         t.poll_once().await;
         assert_eq!(t.state.cumulative_bytes, 2500);
     }
@@ -751,15 +831,7 @@ mod tests {
         let mut rx = bus.subscribe();
         let cap = cap_to_bytes(1.0);
         let at_81 = ((cap as f64) * 0.81) as u64;
-        let mut t = DataCapTracker::with_config(
-            Arc::new(FixedSource(UsageBytes {
-                rx_bytes: at_81,
-                tx_bytes: 0,
-            })),
-            Arc::clone(&bus),
-            1.0,
-            path,
-        );
+        let mut t = baselined(fixed(at_81, 0), &bus, 1.0, path);
         t.poll_once().await;
         let evt = rx.try_recv().expect("a warn_80 threshold event");
         assert_eq!(evt.kind, UplinkEventKind::DataCapThreshold);
@@ -833,16 +905,7 @@ mod tests {
         let bus = Arc::new(UplinkEventBus::new());
         let emitter = IngestEmitter::with_socket("ados-net", dir.path().join("ingest.sock"));
         let stats = emitter.stats();
-        let mut t = DataCapTracker::with_config(
-            Arc::new(FixedSource(UsageBytes {
-                rx_bytes: 1000,
-                tx_bytes: 500,
-            })),
-            Arc::clone(&bus),
-            5.0,
-            path,
-        )
-        .with_emitter(emitter);
+        let mut t = baselined(fixed(1000, 500), &bus, 5.0, path).with_emitter(emitter);
 
         t.poll_once().await;
         assert_eq!(stats.enqueued(), 1);
@@ -864,9 +927,10 @@ mod tests {
             std::fs::write(stats.join("tx_bytes"), tx).unwrap();
         }
         let src = SysfsUsageSource::with_roots(net, dir.path().join("no-gadget"));
-        let u = src.data_usage().await;
-        assert_eq!(u.rx_bytes, 100);
-        assert_eq!(u.tx_bytes, 200);
+        let u = src.data_usage().await.expect("wwan0 sample");
+        assert_eq!(u.iface, "wwan0");
+        assert_eq!(u.bytes.rx_bytes, 100);
+        assert_eq!(u.bytes.tx_bytes, 200);
     }
 
     #[tokio::test]
@@ -880,9 +944,10 @@ mod tests {
         std::fs::write(stats.join("rx_bytes"), "300").unwrap();
         std::fs::write(stats.join("tx_bytes"), "400").unwrap();
         let src = SysfsUsageSource::with_roots(net, dir.path().join("no-gadget"));
-        let u = src.data_usage().await;
-        assert_eq!(u.rx_bytes, 300);
-        assert_eq!(u.tx_bytes, 400);
+        let u = src.data_usage().await.expect("usb0 sample");
+        assert_eq!(u.iface, "usb0");
+        assert_eq!(u.bytes.rx_bytes, 300);
+        assert_eq!(u.bytes.tx_bytes, 400);
     }
 
     #[tokio::test]
@@ -901,8 +966,11 @@ mod tests {
         let gadget = dir.path().join("gadget");
         std::fs::create_dir_all(&gadget).unwrap();
         let src = SysfsUsageSource::with_roots(net, gadget);
-        let u = src.data_usage().await;
-        assert_eq!(u, UsageBytes::default(), "tether traffic must not count");
+        assert_eq!(
+            src.data_usage().await,
+            None,
+            "tether traffic must not count"
+        );
 
         // And drive it through a poll: a 1 KiB cap stays OK because nothing
         // accrued, so the cap never crosses a throttle threshold.
@@ -932,10 +1000,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sysfs_source_with_no_ifaces_reads_zero() {
+    async fn sysfs_source_with_no_ifaces_reads_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let src = SysfsUsageSource::with_roots(dir.path().join("net"), dir.path().join("gadget"));
-        assert_eq!(src.data_usage().await, UsageBytes::default());
+        assert_eq!(src.data_usage().await, None);
+    }
+
+    #[tokio::test]
+    async fn sysfs_source_with_an_unreadable_counter_reads_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let net = dir.path().join("net");
+        let stats = net.join("wwan0").join("statistics");
+        std::fs::create_dir_all(&stats).unwrap();
+        std::fs::write(stats.join("rx_bytes"), "garbage").unwrap();
+        std::fs::write(stats.join("tx_bytes"), "10").unwrap();
+        let src = SysfsUsageSource::with_roots(net, dir.path().join("no-gadget"));
+        assert_eq!(src.data_usage().await, None);
     }
 
     #[tokio::test]
@@ -945,15 +1025,7 @@ mod tests {
         let bus = Arc::new(UplinkEventBus::new());
         let probe = IngestEmitter::with_socket("ados-net", dir.path().join("probe.sock"));
         let stats = probe.stats();
-        let mut t = DataCapTracker::with_config(
-            Arc::new(FixedSource(UsageBytes {
-                rx_bytes: 1000,
-                tx_bytes: 500,
-            })),
-            bus,
-            5.0,
-            path,
-        );
+        let mut t = baselined(fixed(1000, 500), &bus, 5.0, path);
         t.poll_once().await;
         assert_eq!(stats.enqueued(), 0);
     }

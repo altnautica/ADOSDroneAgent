@@ -11,16 +11,16 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// Stop restarting a service after this many failures inside the window.
+/// Failures inside the window at which a service is labelled crash-looping.
 pub const MAX_FAILURES: usize = 5;
-/// Sliding window over which failures are counted for the circuit breaker.
+/// Sliding window over which failures are counted for the crash-loop label.
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(60);
-/// How often the monitor re-attempts a service parked in `Failed`/`CircuitOpen`
+/// How often the monitor re-attempts a service parked in `Failed`/`CrashLooping`
 /// so it self-recovers when the underlying condition (e.g. a hot-plugged
 /// camera) returns, instead of staying dead until a manual restart. Fixed, in
-/// the 2-5 s recovery band and matching the monitor tick: a recovery loop that
-/// waits longer than that costs a drone whose FC needs one more attempt after
-/// a brownout half a minute per try.
+/// the 2-5 s recovery band and matching the monitor tick. The crash-loop label
+/// never stretches it: a drone whose FC needs one more attempt after a brownout
+/// gets that attempt within 5 s however many came before.
 pub const PARKED_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
 
 /// Service tier. Start order is core first, then hardware, then on-demand;
@@ -39,7 +39,12 @@ pub enum ServiceState {
     Starting,
     Running,
     Failed,
-    CircuitOpen,
+    /// Failed [`MAX_FAILURES`] times inside [`FAILURE_WINDOW`]. A label only:
+    /// the unit is still retried on the fixed parked cadence.
+    CrashLooping,
+    /// The unit's main process exited 0 on purpose: the node has nothing for
+    /// it to run. Not a failure, and not restarted.
+    Idle,
 }
 
 impl ServiceState {
@@ -50,7 +55,8 @@ impl ServiceState {
             ServiceState::Starting => "starting",
             ServiceState::Running => "running",
             ServiceState::Failed => "failed",
-            ServiceState::CircuitOpen => "circuit_open",
+            ServiceState::CrashLooping => "crash_looping",
+            ServiceState::Idle => "idle",
         }
     }
 }
@@ -72,6 +78,10 @@ pub struct ServiceDef {
     /// Rust core. `false` for all other services (the default via `def`); the
     /// KEEP set is marked with `def_keep`.
     pub headless_keep: bool,
+    /// True for units whose `exit 0` means "this node has nothing for me to
+    /// run" (the unit file carries `RestartPreventExitStatus=0`). Such an exit
+    /// parks the row in [`ServiceState::Idle`] instead of counting a death.
+    pub nothing_to_run_ok: bool,
 }
 
 const fn def(
@@ -86,6 +96,7 @@ const fn def(
         profile_gate,
         role_gate,
         headless_keep: false,
+        nothing_to_run_ok: false,
     }
 }
 
@@ -99,11 +110,16 @@ const fn def_keep(
     role_gate: Option<&'static str>,
 ) -> ServiceDef {
     ServiceDef {
-        name,
-        category,
-        profile_gate,
-        role_gate,
         headless_keep: true,
+        ..def(name, category, profile_gate, role_gate)
+    }
+}
+
+/// Mark an entry whose clean `exit 0` is an idle verdict, not a death.
+const fn idle_ok(d: ServiceDef) -> ServiceDef {
+    ServiceDef {
+        nothing_to_run_ok: true,
+        ..d
     }
 }
 
@@ -150,7 +166,7 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // Gated on `log_store_enabled` in `gate_allows`, not here: the store ships
     // OFF and the installer MASKS the unit when it is off, so an ungated row
     // would have the supervisor start-fail a masked unit forever.
-    def_keep("ados-logd", Core, None, None),
+    idle_ok(def_keep("ados-logd", Core, None, None)),
     // Hardware-dependent (started on detection). Drone-only: the camera encode
     // pipeline runs on the air side; a ground station receives video through
     // ados-mediamtx-gs, never ados-video. The prebuilt catalog fetches the
@@ -188,13 +204,11 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // detection, and shutdown leaves it to systemd. In the KEEP set because the
     // lean headless profile runs it as its only HTTP surface.
     def_keep("ados-control", OnDemand, None, None),
-    // Peripheral Manager registry. Cross-profile.
-    def("ados-peripherals", Hardware, None, None),
     // GPIO-output substrate (status buzzer / LED). Cross-profile (a header GPIO
     // can drive an indicator on either an air or a ground node) and not in the
     // headless KEEP set. The unit ships disabled until the operator turns it on,
     // so on a board with no GPIO header it is a clean no-op.
-    def("ados-gpio", Hardware, None, None),
+    idle_ok(def("ados-gpio", Hardware, None, None)),
     // CRSF / ExpressLRS RC control lane. Ground-side today (the ground node
     // drives the RC transmitter module) with a drone gate for the relay
     // last-mile posture; the service itself idles on a drone profile and the
@@ -202,7 +216,12 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // radio.crsf.enabled), so an un-opted node skips it cleanly. NOT in the
     // headless KEEP set. Hot-plugging the RC module's USB bridge restarts it
     // via the dedicated Elrs hot-plug class.
-    def("ados-crsf", Hardware, Some("drone|ground_station"), None),
+    idle_ok(def(
+        "ados-crsf",
+        Hardware,
+        Some("drone|ground_station"),
+        None,
+    )),
     // Config-over-radio channel: a MAVLink-TUNNEL request/response lane so a
     // node reachable only over the radio can have its /api/config read and
     // written from the ground. It rides the radio's auxiliary application lane
@@ -212,21 +231,21 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // radio.tunnel.enabled), so an un-opted node skips it cleanly.
     // Cross-profile (drone terminator + ground injector), NOT in the headless
     // KEEP set.
-    def(
+    idle_ok(def(
         "ados-tunnel-config",
         Hardware,
         Some("drone|ground_station"),
         None,
-    ),
+    )),
     // Ground-station-only services. ados-wfb-rx is the single-node RX path,
     // gated to the direct role so it does not grab the adapter the relay or
     // receiver units drive.
-    def(
+    idle_ok(def(
         "ados-wfb-rx",
         Hardware,
         Some("ground_station"),
         Some("direct"),
-    ),
+    )),
     def("ados-mediamtx-gs", Hardware, Some("ground_station"), None),
     // Physical UI + AP + first-boot captive portal.
     def("ados-oled", Hardware, Some("ground_station"), None),
@@ -237,7 +256,9 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     def("ados-dnsmasq-gs", Hardware, Some("ground_station"), None),
     def("ados-setup-captive", OnDemand, Some("ground_station"), None),
     // Standalone flight stack.
-    def("ados-kiosk", Hardware, Some("ground_station"), None),
+    // The kiosk exits 0 when the configured display is an LCD or none: there
+    // is nothing for it to show on this node.
+    idle_ok(def("ados-kiosk", Hardware, Some("ground_station"), None)),
     def("ados-input", Hardware, Some("ground_station"), None),
     def("ados-pic", Hardware, Some("ground_station"), None),
     // Uplink matrix and cloud relay.
@@ -249,24 +270,24 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // drone). A row here would have the supervisor report, and try to
     // reconcile, a service no install ever leaves running.
     // Distributed-receive role-gated services.
-    def(
+    idle_ok(def(
         "ados-batman",
         Hardware,
         Some("ground_station"),
         Some("relay|receiver"),
-    ),
-    def(
+    )),
+    idle_ok(def(
         "ados-wfb-relay",
         Hardware,
         Some("ground_station"),
         Some("relay"),
-    ),
-    def(
+    )),
+    idle_ok(def(
         "ados-wfb-receiver",
         Hardware,
         Some("ground_station"),
         Some("receiver"),
-    ),
+    )),
 ];
 
 /// Per-service mutable runtime state held by the supervisor.
@@ -279,8 +300,10 @@ pub struct ServiceSpec {
     /// Mirrors `ServiceDef::headless_keep`: whether this unit is in the lean
     /// headless KEEP set the gate permits when the agent runs headless.
     pub headless_keep: bool,
+    /// Mirrors `ServiceDef::nothing_to_run_ok`.
+    pub nothing_to_run_ok: bool,
     pub state: ServiceState,
-    /// Failure timestamps inside the circuit-breaker window.
+    /// Failure timestamps inside the crash-loop window.
     pub failure_times: VecDeque<Instant>,
     /// Last monitor-driven retry of a parked service (cooldown bound).
     pub last_retry_at: Option<Instant>,
@@ -301,6 +324,7 @@ impl ServiceSpec {
             profile_gate: d.profile_gate,
             role_gate: d.role_gate,
             headless_keep: d.headless_keep,
+            nothing_to_run_ok: d.nothing_to_run_ok,
             state: ServiceState::Stopped,
             failure_times: VecDeque::new(),
             last_retry_at: None,
@@ -308,13 +332,14 @@ impl ServiceSpec {
         }
     }
 
-    /// Record a failure and open the breaker if the window threshold is hit.
-    /// Returns true if the breaker is now open.
+    /// Record a failure and label the unit crash-looping when the window
+    /// threshold is hit. Returns true when it is now crash-looping. The label
+    /// never blocks a start; the parked retry keeps its fixed cadence.
     pub fn record_failure(&mut self, now: Instant) -> bool {
         self.failure_times.push_back(now);
         self.prune_failures(now);
         if self.failure_times.len() >= MAX_FAILURES {
-            self.state = ServiceState::CircuitOpen;
+            self.state = ServiceState::CrashLooping;
             true
         } else {
             false
@@ -331,13 +356,6 @@ impl ServiceSpec {
             }
         }
     }
-
-    /// Whether the breaker should still block a start attempt. Half-opens once
-    /// the recent-failure count falls back under the threshold.
-    pub fn breaker_blocks(&mut self, now: Instant) -> bool {
-        self.prune_failures(now);
-        self.state == ServiceState::CircuitOpen && self.failure_times.len() >= MAX_FAILURES
-    }
 }
 
 /// Build the ordered runtime spec list from the static registry.
@@ -352,7 +370,7 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 30, "service count drifted from the catalog");
+        assert_eq!(specs.len(), 29, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health/logd are the
         // cross-profile always-on core (the single cloud unit serves the gateway
         // + heartbeat on both profiles, spawning the ground-station bridge when
@@ -542,27 +560,26 @@ mod tests {
     }
 
     #[test]
-    fn circuit_breaker_opens_after_threshold_in_window() {
+    fn crash_loop_label_applies_after_threshold_in_window() {
         let mut spec = ServiceSpec::from_def(&SERVICE_REGISTRY[0]);
         let t0 = Instant::now();
         for i in 0..(MAX_FAILURES - 1) {
             assert!(!spec.record_failure(t0 + Duration::from_millis(i as u64)));
         }
         assert!(spec.record_failure(t0 + Duration::from_millis(MAX_FAILURES as u64)));
-        assert_eq!(spec.state, ServiceState::CircuitOpen);
-        assert!(spec.breaker_blocks(t0 + Duration::from_millis(MAX_FAILURES as u64 + 1)));
+        assert_eq!(spec.state, ServiceState::CrashLooping);
+        assert_eq!(spec.state.as_str(), "crash_looping");
     }
 
     #[test]
-    fn circuit_breaker_half_opens_after_window() {
+    fn failures_outside_the_window_do_not_count_toward_a_crash_loop() {
         let mut spec = ServiceSpec::from_def(&SERVICE_REGISTRY[0]);
         let t0 = Instant::now();
-        for _ in 0..MAX_FAILURES {
+        for _ in 0..(MAX_FAILURES - 1) {
             spec.record_failure(t0);
         }
-        assert_eq!(spec.state, ServiceState::CircuitOpen);
-        // After the window the stale failures prune and the breaker stops blocking.
         let later = t0 + FAILURE_WINDOW + Duration::from_secs(1);
-        assert!(!spec.breaker_blocks(later));
+        assert!(!spec.record_failure(later));
+        assert_eq!(spec.failure_times.len(), 1);
     }
 }

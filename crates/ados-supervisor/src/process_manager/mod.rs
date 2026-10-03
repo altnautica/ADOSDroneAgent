@@ -71,6 +71,14 @@ pub trait ProcessManager: Send + Sync {
         None
     }
 
+    /// Whether the unit's last run ended in a deliberate clean exit (the main
+    /// process exited with status 0): `Some(true)` clean, `Some(false)` any
+    /// other end, `None` when this backend cannot tell. Defaulted to `None`,
+    /// and a caller reads `None` as "not a clean exit".
+    async fn exited_cleanly(&self, _unit: &str) -> Option<bool> {
+        None
+    }
+
     /// Mask the unit so a stray `start` cannot bring it up (idempotent).
     async fn mask(&self, unit: &str);
 
