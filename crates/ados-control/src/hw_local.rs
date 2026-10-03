@@ -1,9 +1,9 @@
-//! Local host-hardware collector for the non-SBC (workstation / macOS) path.
+//! Local host-hardware collector for hosts whose log store has no fresh sample.
 //!
-//! On an SBC the durable logging daemon (`ados-logd`) samples CPU / memory / disk
-//! into its store and the status routes read those merged signals. On a
-//! workstation host (a Mac, a dev box) `ados-logd` is not the running collector,
-//! so `latest_hw_signals()` is `None` and the status surfaces would report zeros.
+//! When the durable logging daemon (`ados-logd`) runs its store, it samples CPU /
+//! memory / disk / thermal and the status routes read those merged signals. The
+//! store is off by default, and a workstation host (a Mac, a dev box) never runs
+//! it, so `latest_hw_signals()` is `None` and the status surfaces would report zeros.
 //! This module fills that gap with a cross-platform `sysinfo` read, shaped as the
 //! same `logd` signal map (`mem.total_bytes`, `cpu.util.all`, …) so the existing
 //! `derive_system` / `derive_health` mappers consume it unchanged. The board
@@ -11,9 +11,11 @@
 //!
 //! Honest by construction: a signal the host cannot supply is omitted
 //! (so the mapper degrades it to its documented default) and a board field that
-//! is unknown is `null` — never faked. There is no portable thermal source here,
-//! so no `thermal.*` signal is emitted and the temperature reads `null`.
+//! is unknown is `null` — never faked. The primary temperature comes from the
+//! first readable Linux thermal zone; a host with none (a Mac) emits no
+//! `thermal.*` signal and the temperature reads `null`.
 
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::{json, Map, Value};
@@ -41,10 +43,10 @@ fn shared_system() -> &'static Mutex<System> {
 
 /// Collect the host hardware signals as a `logd`-compatible signal map, so the
 /// existing `derive_system` / `derive_health` mappers produce their canonical
-/// shapes from a workstation host with no logging daemon. Emits the five
-/// essential signals (memory total + available, aggregate CPU, filesystem total +
-/// used) plus swap when available; omits thermal (no portable source → the
-/// mappers leave temperature `null`).
+/// shapes from a host with no logging daemon (a workstation, or an SBC whose
+/// log store is off). Emits the five essential signals (memory total +
+/// available, aggregate CPU, filesystem total + used), swap when available, and
+/// `thermal.primary_c` when a thermal zone is readable.
 pub fn collect_signals() -> Map<String, Value> {
     let mut signals = Map::new();
     if let Ok(mut sys) = shared_system().lock() {
@@ -60,7 +62,38 @@ pub fn collect_signals() -> Map<String, Value> {
         signals.insert("disk.fs_total_bytes".into(), json!(total));
         signals.insert("disk.fs_used_bytes".into(), json!(used));
     }
+    if let Some(c) = primary_thermal_c(Path::new(THERMAL_ROOT)) {
+        signals.insert("thermal.primary_c".into(), json!(c));
+    }
     signals
+}
+
+/// The Linux thermal class directory.
+const THERMAL_ROOT: &str = "/sys/class/thermal";
+
+/// The primary temperature in °C: the lowest-numbered `thermal_zone<N>` under
+/// `root` whose `temp` (millidegrees) parses, the same zone the log store
+/// reports as primary. `None` when no zone is readable.
+fn primary_thermal_c(root: &Path) -> Option<f64> {
+    let mut zones: Vec<(u32, std::path::PathBuf)> = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let index = name
+                .to_str()?
+                .strip_prefix("thermal_zone")?
+                .parse::<u32>()
+                .ok()?;
+            Some((index, entry.path()))
+        })
+        .collect();
+    zones.sort_unstable_by_key(|(index, _)| *index);
+    zones.into_iter().find_map(|(_, zone)| {
+        let text = std::fs::read_to_string(zone.join("temp")).ok()?;
+        let milli: i64 = text.trim().parse().ok()?;
+        Some(milli as f64 / 1000.0)
+    })
 }
 
 /// Total + used bytes of the root filesystem. Prefers the volume mounted at `/`;
@@ -221,6 +254,26 @@ fn normalize_arch(arch: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_primary_temperature_is_the_lowest_readable_thermal_zone() {
+        let dir = tempfile::tempdir().unwrap();
+        let zone = |name: &str, temp: Option<&str>| {
+            let z = dir.path().join(name);
+            std::fs::create_dir(&z).unwrap();
+            if let Some(t) = temp {
+                std::fs::write(z.join("temp"), t).unwrap();
+            }
+        };
+        assert_eq!(primary_thermal_c(dir.path()), None);
+        zone("cooling_device0", Some("1\n"));
+        zone("thermal_zone10", Some("61000\n"));
+        zone("thermal_zone2", Some("47500\n"));
+        zone("thermal_zone0", None);
+        // zone0 has no reading, so the next zone in numeric order (2, not 10) is
+        // primary.
+        assert_eq!(primary_thermal_c(dir.path()), Some(47.5));
+    }
 
     #[test]
     fn collect_signals_carries_the_essential_resource_keys() {

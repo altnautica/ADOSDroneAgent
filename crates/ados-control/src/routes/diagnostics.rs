@@ -51,7 +51,16 @@ const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 /// GCS polls do not fan out to journalctl + psutil; that is a cost optimisation,
 /// not part of the contract, so the native composes fresh each call.
 pub async fn get_diagnostics(State(state): State<AppState>) -> Json<Value> {
-    let signals = state.logd.latest_hw_signals().await;
+    // The log store ships off, so on a stock node the store has no signals; the
+    // host read is the same fallback `/api/status/full` takes. The degraded
+    // all-null shape is left for a host that answers neither.
+    let signals = match state.logd.latest_hw_signals().await {
+        Some(s) => Some(s),
+        None => {
+            let local = crate::hw_local::collect_signals();
+            (!local.is_empty()).then_some(local)
+        }
+    };
 
     Json(json!({
         "agent": collect_agent(&state),
@@ -180,14 +189,13 @@ fn collect_board(board_path: &Path) -> Value {
 // system — CPU / RAM / disk / temp / load average.
 // ---------------------------------------------------------------------------
 
-/// The system block, mirroring the FastAPI `_collect_system`'s store-first leg:
-/// the merged hardware signals mapped to the diagnostics field set
-/// (`cpu_percent`, `memory_used_mb`, `memory_total_mb`, `disk_used_gb`,
-/// `disk_total_gb`, `temp_c`, `load_avg`). The Python falls back to a live
-/// `psutil` read when the store is unreachable or missing an essential field; the
-/// native front has no psutil, so a store miss degrades to the all-null shape
-/// (the Python `except ImportError` arm) — the same store-first / degrade-in-place
-/// contract `/api/system` and `/api/status/full` follow.
+/// The system block, mirroring the FastAPI `_collect_system`: the hardware
+/// signals (the log store's when it runs, else the host's own read through
+/// [`crate::hw_local`]) mapped to the diagnostics field set (`cpu_percent`,
+/// `memory_used_mb`, `memory_total_mb`, `disk_used_gb`, `disk_total_gb`,
+/// `temp_c`, `load_avg`). When neither source yields the essentials the block
+/// degrades to the all-null shape, the same contract `/api/system` and
+/// `/api/status/full` follow.
 ///
 /// `memory_used_mb` / `memory_total_mb` are ints (the Python `int(r[...])` cast on
 /// the rounded MB), `disk_used_gb` / `disk_total_gb` are one-decimal floats, and
@@ -195,7 +203,8 @@ fn collect_board(board_path: &Path) -> Value {
 /// absent the native reads `/sys/class/thermal/thermal_zone0/temp` directly, the
 /// same sysfs fallback the Python `_read_cpu_temp` lands on. `load_avg` is the
 /// 1/5/15 average read straight from `/proc/loadavg` (the value
-/// `os.getloadavg()` reports), each rounded to two decimals.
+/// `os.getloadavg()` reports), each rounded to two decimals, or null when the
+/// host has no load average to read.
 fn collect_system(signals: Option<&Map<String, Value>>) -> Value {
     match signals.and_then(derive_system) {
         Some(body) => body,
@@ -238,11 +247,9 @@ fn derive_system(signals: &Map<String, Value>) -> Option<Value> {
     }))
 }
 
-/// The most-degraded system shape: the FastAPI `except ImportError` arm (store
-/// down AND no psutil). Every numeric reading is null; `temp_c` still attempts the
-/// sysfs read (the Python keeps `_read_cpu_temp()` in that arm), and `load_avg`
-/// still reads `/proc/loadavg` (the Python keeps `[0.0, 0.0, 0.0]` only on a hard
-/// `getloadavg` miss). The native reaches this only when the store is unreachable.
+/// The most-degraded system shape: neither the store nor the host read yielded
+/// the essentials. Every numeric reading is null; `temp_c` still attempts the
+/// sysfs read and `load_avg` still reads `/proc/loadavg`.
 fn degraded_system() -> Value {
     json!({
         "cpu_percent": Value::Null,
@@ -256,13 +263,17 @@ fn degraded_system() -> Value {
 }
 
 /// The 1/5/15-minute load average from `/proc/loadavg`, each rounded to two
-/// decimals — the value `os.getloadavg()` reports, which the Python diagnostics
-/// `load_avg` carries. A read / parse miss degrades to `[0.0, 0.0, 0.0]`, the
-/// Python `except (AttributeError, OSError)` fallback.
+/// decimals — the value `os.getloadavg()` reports. Null when it cannot be read:
+/// three zeros would claim a measured idle host.
 fn load_avg() -> Value {
-    match read_loadavg() {
+    load_avg_value(read_loadavg())
+}
+
+/// The wire form of a parsed load average.
+fn load_avg_value(parsed: Option<[f64; 3]>) -> Value {
+    match parsed {
         Some([a, b, c]) => json!([round2(a), round2(b), round2(c)]),
-        None => json!([0.0, 0.0, 0.0]),
+        None => Value::Null,
     }
 }
 
@@ -938,10 +949,7 @@ mod tests {
         assert_eq!(v["disk_used_gb"], json!(8.0));
         // Primary thermal zone, rounded to one decimal.
         assert_eq!(v["temp_c"], json!(47.5));
-        // The load average is read from the host /proc/loadavg; just assert the
-        // shape is a three-element array (the values are masked in conformance).
-        let load = v["load_avg"].as_array().expect("load_avg is an array");
-        assert_eq!(load.len(), 3);
+        assert_load_avg_shape(&v["load_avg"]);
     }
 
     #[test]
@@ -961,7 +969,7 @@ mod tests {
         assert_eq!(degraded["disk_used_gb"], Value::Null);
         // The shape still carries every key (temp_c + load_avg attempt their reads).
         assert!(degraded.get("temp_c").is_some());
-        assert_eq!(degraded["load_avg"].as_array().unwrap().len(), 3);
+        assert_load_avg_shape(&degraded["load_avg"]);
     }
 
     #[test]
@@ -970,7 +978,26 @@ mod tests {
         assert_eq!(d["cpu_percent"], Value::Null);
         assert_eq!(d["memory_used_mb"], Value::Null);
         assert_eq!(d["disk_total_gb"], Value::Null);
-        assert_eq!(d["load_avg"].as_array().unwrap().len(), 3);
+        assert_load_avg_shape(&d["load_avg"]);
+    }
+
+    /// The load average is read from the host: three numbers where the host
+    /// has `/proc/loadavg`, null where it does not.
+    fn assert_load_avg_shape(v: &Value) {
+        match v {
+            Value::Array(a) => assert_eq!(a.len(), 3),
+            Value::Null => {}
+            other => panic!("load_avg must be a 3-array or null, got {other}"),
+        }
+    }
+
+    #[test]
+    fn an_unreadable_load_average_is_null_not_zeros() {
+        assert_eq!(load_avg_value(None), Value::Null);
+        assert_eq!(
+            load_avg_value(Some([0.456, 1.0, 2.004])),
+            json!([0.46, 1.0, 2.0])
+        );
     }
 
     #[test]

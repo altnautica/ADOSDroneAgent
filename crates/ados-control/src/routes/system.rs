@@ -20,15 +20,12 @@ use crate::state::AppState;
 pub const API_VERSION: &str = "1";
 
 /// Capability flags. Add a new flag whenever a new endpoint or behaviour ships
-/// that the GCS may want to gate on. Never rename or remove a flag that once
-/// worked — an older GCS may rely on the absence to take a fallback code path,
-/// so a retired feature keeps its token (see `scripts.runtime` below). That
-/// protection is for flags with a working past, not for a flag that never had
-/// one: a claim no release ever honoured has nothing depending on it, and
-/// leaving it in the list only steers a client away from the path that does
-/// work. This list is the canonical surface contract between the agent and the
-/// GCS; order matters, since it is emitted as a JSON array.
-pub const CAPABILITIES: [&str; 15] = [
+/// that the GCS may want to gate on. A flag is a claim that the agent can do the
+/// thing, so it leaves the list in the same change that removes what backs it;
+/// a flag with no route behind it only steers a client away from the path that
+/// does work. This list is the canonical surface contract between the agent and
+/// the GCS; order matters, since it is emitted as a JSON array.
+pub const CAPABILITIES: [&str; 12] = [
     // /api/status/full consolidated endpoint (fewer round-trips).
     "status.full",
     // /api/version endpoint (this one). Trivially true.
@@ -39,24 +36,15 @@ pub const CAPABILITIES: [&str; 15] = [
     "video.pipeline",
     // /api/wfb/* WFB-ng radio link control + telemetry.
     "wfb.link",
-    // Retired capability. The endpoint it gated no longer ships, but the flag
-    // stays in the list because this surface contract is append-only: an older
-    // GCS may key a fallback path on its presence or absence, so the token is
-    // never renamed or removed once shipped.
-    "scripts.runtime",
-    // /api/pairing/* device-link mnemonic + token rotation.
-    "pairing.mnemonic",
     // /api/pairing/info carries a folded bind_state + radio snapshot.
     "pairing.bind_state",
-    // /api/peripherals/* legacy hardware scan + /v1 plugin registry.
+    // /api/peripherals/* hardware scan + /api/v1/peripherals plugin registry.
     "peripherals.registry",
     // /api/fleet/* fleet roster surface.
     "fleet.roster",
-    // /api/features/* HAL feature catalog.
-    "features.catalog",
     // /api/ground-station/* full ground-agent profile surface.
     "ground_station.profile",
-    // /api/signing/* MAVLink v2 signing key enrollment.
+    // /api/mavlink/signing/* MAVLink v2 signing key enrollment.
     "signing.mavlink",
     // WebRTC SDP signaling broker rejection surfaced via cloud status.
     "webrtc.signaling.last_error",
@@ -266,18 +254,15 @@ mod tests {
     /// there in the same release, so the served list is pinned whole.
     #[test]
     fn served_capabilities_match_the_gcs_contract() {
-        const AGENT_CAPABILITIES_FROZEN: [&str; 15] = [
+        const AGENT_CAPABILITIES_FROZEN: [&str; 12] = [
             "status.full",
             "version.endpoint",
             "services.control",
             "video.pipeline",
             "wfb.link",
-            "scripts.runtime",
-            "pairing.mnemonic",
             "pairing.bind_state",
             "peripherals.registry",
             "fleet.roster",
-            "features.catalog",
             "ground_station.profile",
             "signing.mavlink",
             "webrtc.signaling.last_error",

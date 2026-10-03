@@ -255,6 +255,34 @@ fn a_dead_fc_link_is_not_sampled_and_goes_stale() {
 }
 
 #[test]
+fn a_pack_whose_stream_stopped_is_not_sampled_and_reads_stale() {
+    // The FC link stays up, so every snapshot is live, but pack 2's own
+    // BATTERY_STATUS stopped: the router keeps its last values and reports
+    // their age.
+    let mut e = engine();
+    e.ingest(1000, &snap(json!([pack(0, &HEALTHY), pack(2, &HEALTHY)])));
+    let mut frozen = pack(2, &LOW);
+    frozen["age_ms"] = json!(STALE_AFTER_MS + 1);
+    let mut live = pack(0, &HEALTHY);
+    live["age_ms"] = json!(200);
+    for t in [2000, 4000, 6500] {
+        assert!(e
+            .ingest(t, &snap(json!([live.clone(), frozen.clone()])))
+            .is_empty());
+    }
+    let w = wire(&e, 6500);
+    assert_eq!(w["stale"], json!(false));
+    let packs = w["packs"].as_array().unwrap();
+    assert_eq!(packs[0]["id"], json!(0));
+    assert_eq!(packs[0]["stale"], json!(false));
+    assert_eq!(packs[1]["id"], json!(2));
+    // The frozen LOW reading never entered, and the last real one is marked old.
+    assert_eq!(packs[1]["stale"], json!(true));
+    assert_eq!(packs[1]["min_cell_v"], json!(3.9));
+    assert!(packs[1]["anomalies"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn nothing_ingested_yet_is_stale() {
     let w = wire(&engine(), 1000);
     assert_eq!(w["stale"], json!(true));

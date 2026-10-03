@@ -20,11 +20,9 @@
 //!   config-seeded stub when a sidecar is absent.
 //!
 //! Every read is fault-tolerant: an absent store / sidecar / config degrades to the
-//! same empty/default shape the FastAPI route returns when its own source is
-//! unavailable, never a 500. The routes carry no path params and never mutate, so
-//! they are safe to serve natively while the snapshot/record/switch writes and the
-//! camera-enumeration route (which needs the Python camera HAL) stay on the residual
-//! surface.
+//! same empty/default shape the route always returns when its source is
+//! unavailable, never a 500. The config write (`POST /api/video/config`) lives in
+//! `video_config_write.rs` and answers with this module's config body.
 
 use std::path::{Path, PathBuf};
 
@@ -124,8 +122,7 @@ fn wfb_stats_path() -> PathBuf {
 }
 
 /// Read a JSON snapshot file written by a sidecar producer, returning the parsed
-/// object, or `None` on any read / parse failure or a non-object body. Mirrors the
-/// Python `_read_state_file` / the latency live read's tolerant file load.
+/// object, or `None` on any read / parse failure or a non-object body.
 fn read_state_file(path: &Path) -> Option<Map<String, Value>> {
     let text = std::fs::read_to_string(path).ok()?;
     match serde_json::from_str::<Value>(&text) {
@@ -294,11 +291,15 @@ fn project_latency_live(path: &Path) -> Value {
 /// (the loaded config object's `video.wfb` + `video.camera` slices, with the
 /// Pydantic field defaults applied for any absent field). The dynamic `adaptive` /
 /// `hopping` / `link` blocks come from the controller sidecar files; an absent
-/// sidecar degrades each to the config-seeded stub. Guaranteed 200. Mirrors the
-/// FastAPI `get_video_config` on the multi-process path (where the in-process
-/// managers are absent and every dynamic block reads its sidecar).
+/// sidecar degrades each to the config-seeded stub. Guaranteed 200.
 pub async fn get_video_config() -> Json<Value> {
-    let cfg = VideoConfig::load();
+    Json(video_config_body(&VideoConfig::load()))
+}
+
+/// The `GET /api/video/config` body for a loaded config. The config write route
+/// (`POST /api/video/config`) answers with this same body, re-read after it
+/// persists, plus its `warnings`.
+pub(crate) fn video_config_body(cfg: &VideoConfig) -> Value {
     let wfb = &cfg.video.wfb;
     let camera = &cfg.video.camera;
 
@@ -353,13 +354,13 @@ pub async fn get_video_config() -> Json<Value> {
 
     let link = link_snapshot(wfb.channel, &wfb_stats_path());
 
-    Json(json!({
+    json!({
         "radio": radio,
         "encoder": encoder,
         "adaptive": Value::Object(adaptive),
         "hopping": hopping,
         "link": link,
-    }))
+    })
 }
 
 /// Beyond this age the `wfb-stats.json` snapshot can no longer describe the link
@@ -412,7 +413,7 @@ fn rf_unverified_field(status: &Map<String, Value>, fresh: bool) -> Value {
 /// the values come from the `wfb-stats.json` sidecar the radio mirrors; `channel`
 /// falls back to the configured value when the sidecar has no value yet. Every
 /// field is present (a `null` placeholder when unknown) so the panel never sees a
-/// missing key. Mirrors the Python `_link_snapshot` multi-process branch.
+/// missing key.
 ///
 /// Alongside the liveness counters the block folds in the signals that EXPLAIN why
 /// a counter it carries should not be believed — the derived `state`/`link_state`,
@@ -425,10 +426,11 @@ fn rf_unverified_field(status: &Map<String, Value>, fresh: bool) -> Value {
 /// dead now, so every counter reads `null` (unknown) rather than a frozen
 /// last-known value — a stale advancing `tx_bytes_per_s` or a stale
 /// `channel_locked: true` is exactly the healthy-looking dead link operating rule
-/// 44 forbids. `channel` is the exception: when stale it falls back to the
-/// configured value (always truthful) so the panel keeps a channel number.
+/// 44 forbids. `channel` is the exception: it carries the sidecar's live
+/// `actual_channel` when fresh and otherwise falls back to the configured value
+/// (always truthful) so the panel keeps a channel number.
 fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
-    const FIELDS: [&str; 17] = [
+    const FIELDS: [&str; 16] = [
         // Liveness counters.
         "tx_bytes_per_s",
         "valid_rx_packets_per_s",
@@ -436,7 +438,6 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
         "rx_silent_seconds",
         "channel_locked",
         "acquire_state",
-        "channel",
         // Derived link state. The radio writes the same string under both keys
         // (`state` is the legacy name, `link_state` the state-machine name); a
         // consumer keys off whichever it knows. Folded in so the panel reads the
@@ -465,6 +466,7 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
     for f in FIELDS {
         link.insert(f.to_string(), Value::Null);
     }
+    link.insert("channel".to_string(), Value::Null);
     // The received-side verdict is always present too, `null` until it can be
     // sourced honestly — it is gated on type and freshness rather than merged
     // verbatim, so it gets its own placeholder outside the loop above.
@@ -491,6 +493,9 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
                         link.insert(f.to_string(), v.clone());
                     }
                 }
+            }
+            if let Some(ch) = status.get("actual_channel").filter(|v| !v.is_null()) {
+                link.insert("channel".to_string(), ch.clone());
             }
         }
         link.insert(
@@ -635,7 +640,7 @@ struct VideoSection {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
-struct VideoConfig {
+pub(crate) struct VideoConfig {
     #[serde(default)]
     video: VideoSection,
 }
@@ -651,11 +656,18 @@ impl VideoConfig {
         Self::load_from(Path::new(&path))
     }
 
-    fn load_from(path: &Path) -> Self {
+    pub(crate) fn load_from(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(text) => serde_norway::from_str(&text).unwrap_or_default(),
             Err(_) => VideoConfig::default(),
         }
+    }
+
+    /// The configured data-plane trio `(mcs_index, fec_k, fec_n)` from
+    /// `video.wfb`, each at its default when absent.
+    pub(crate) fn data_plane(&self) -> (i64, i64, i64) {
+        let wfb = &self.video.wfb;
+        (wfb.mcs_index, wfb.fec_k, wfb.fec_n)
     }
 }
 
@@ -1160,7 +1172,7 @@ mod tests {
         let path = dir.path().join("wfb-stats.json");
         std::fs::write(
             &path,
-            r#"{"tx_bytes_per_s": 12345, "acquire_state": "locked", "channel": 149,
+            r#"{"tx_bytes_per_s": 12345, "acquire_state": "locked", "actual_channel": 149,
                 "channel_locked": true, "extra": "ignored"}"#,
         )
         .unwrap();
@@ -1172,8 +1184,8 @@ mod tests {
         assert_eq!(link["channel"], json!(149));
         // A field not in the stats file stays null.
         assert_eq!(link["video_inbound_bytes_per_s"], Value::Null);
-        // Only the contract fields are present (the extra is dropped): the 17
-        // merged fields plus the rf_unverified verdict.
+        // Only the contract fields are present (the extra is dropped): the 16
+        // merged fields, the live channel and the rf_unverified verdict.
         assert_eq!(link.as_object().unwrap().len(), 18);
     }
 
@@ -1328,7 +1340,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wfb-stats.json");
         let body = r#"{"tx_bytes_per_s": 750000, "valid_rx_packets_per_s": 42.5,
-            "channel_locked": true, "acquire_state": "locked", "channel": 165,
+            "channel_locked": true, "acquire_state": "locked", "actual_channel": 165,
             "video_inbound_bytes_per_s": 900000, "rx_silent_seconds": 0.0}"#;
 
         write_sidecar_aged(&path, body, 30);

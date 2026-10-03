@@ -13,9 +13,9 @@
 //!   hostapd unit is active), the system snapshot (CPU/RAM/temp/uptime/version),
 //!   the recorder flag mirrored into a `video` block, the role block, and (for a
 //!   relay/receiver) the mesh block.
-//! - **`GET /api/v1/ground-station/wfb`** — the stored radio config
-//!   `{channel, bitrate_profile, fec}` from `video.wfb` (Python defaults
-//!   `0`/`"default"`/`"8/12"` when unset).
+//! - **`GET /api/v1/ground-station/wfb`** — the live radio view
+//!   `{channel, tx_power_dbm}` from the radio sidecar, each `null` when the
+//!   radio is not reporting.
 //! - **`GET /api/v1/ground-station/wfb/relay/status`** — relay-role fragment
 //!   counters, store-first off the `gs.relay_state` event, sidecar-fallback off
 //!   `/run/ados/wfb-relay.json`. `404` `E_WRONG_ROLE` off a relay node.
@@ -507,8 +507,11 @@ fn link_view_from(path: &Path) -> Value {
     );
     merged.insert("fec_lost".to_string(), json!(fec_failed));
     merged.insert("fec_failed".to_string(), json!(fec_failed));
-    // Channel: the payload value when truthy, else the (null) config channel.
-    let payload_channel = payload.get("channel").cloned().unwrap_or(Value::Null);
+    // Channel: the tuned channel the payload reports when truthy, else null.
+    let payload_channel = payload
+        .get("actual_channel")
+        .cloned()
+        .unwrap_or(Value::Null);
     merged.insert(
         "channel".to_string(),
         if json_truthy(&payload_channel) {
@@ -1074,64 +1077,34 @@ fn receiver_combined_stale() -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/ground-station/wfb — the stored radio config.
+// GET /api/v1/ground-station/wfb — the live radio channel and TX power.
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/ground-station/wfb` → the stored radio config `{channel,
-/// bitrate_profile, fec}` from `video.wfb`, defaulting to `channel: 0`,
-/// `bitrate_profile: "default"`, `fec: "8/12"` when the section or a field is
-/// absent. `404` `E_PROFILE_MISMATCH` off a ground-station node.
+/// `GET /api/v1/ground-station/wfb` → `{channel, tx_power_dbm}` read from the
+/// live radio sidecar (`wfb-stats.json`): the channel the radio is actually
+/// tuned to and its effective TX power. Each is `null` when the sidecar is
+/// absent, older than [`SNAPSHOT_FRESH_S`], or does not carry it — never a
+/// configured default dressed up as a reading. `404` `E_PROFILE_MISMATCH` off a
+/// ground-station node.
 pub async fn get_wfb(State(state): State<AppState>) -> Response {
     if ground_station_role(&state).is_none() {
         return profile_mismatch();
     }
-    let cfg = WfbViewConfig::load_from(&state.pairing_paths.config);
-    let wfb = &cfg.video.wfb;
-    Json(json!({
-        "channel": wfb.channel.unwrap_or(0),
-        "bitrate_profile": wfb
-            .bitrate_profile
-            .clone()
-            .unwrap_or_else(|| "default".to_string()),
-        "fec": wfb.fec.clone().unwrap_or_else(|| "8/12".to_string()),
-    }))
-    .into_response()
+    Json(wfb_view_from(&wfb_stats_path(), SystemTime::now())).into_response()
 }
 
-/// The `video.wfb` slice the `/wfb` view reads. Each field is optional so an absent
-/// section reads the Python field default (`channel: 0`, `bitrate_profile:
-/// "default"`, `fec: "8/12"`), applied at projection time above.
-#[derive(Debug, Clone, Default, Deserialize)]
-struct WfbViewSection {
-    #[serde(default)]
-    channel: Option<i64>,
-    #[serde(default)]
-    bitrate_profile: Option<String>,
-    #[serde(default)]
-    fec: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct WfbViewVideo {
-    #[serde(default)]
-    wfb: WfbViewSection,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-struct WfbViewConfig {
-    #[serde(default)]
-    video: WfbViewVideo,
-}
-
-impl WfbViewConfig {
-    /// Load the `video.wfb` slice from the config path. A missing / unparseable
-    /// file yields the all-defaults slice, so the route still answers a usable body.
-    fn load_from(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(text) => serde_norway::from_str(&text).unwrap_or_default(),
-            Err(_) => WfbViewConfig::default(),
-        }
-    }
+/// The path-injectable core of [`get_wfb`].
+fn wfb_view_from(path: &Path, now: SystemTime) -> Value {
+    let live = read_fresh_json(path, now).unwrap_or_default();
+    let channel = live
+        .get("actual_channel")
+        .and_then(json_to_i64)
+        .filter(|&c| c > 0);
+    let tx_power_dbm = live.get("tx_power_dbm").filter(|v| v.is_number()).cloned();
+    json!({
+        "channel": channel,
+        "tx_power_dbm": tx_power_dbm,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,7 +1255,7 @@ mod tests {
             "bitrate_kbps": 5740,
             "fec_recovered": 3,
             "fec_failed": 1,
-            "channel": 149,
+            "actual_channel": 149,
             "snr_db": 28.0,
             "noise_dbm": -95.0,
             "packets_received": 598,
@@ -1698,44 +1671,31 @@ mod tests {
     }
 
     #[test]
-    fn wfb_view_of_an_empty_config_is_the_python_defaults() {
-        // No video.wfb section → the Python defaults channel 0, profile "default",
-        // fec "8/12".
+    fn wfb_view_reports_the_live_radio_and_nothing_when_it_is_silent() {
         let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("config.yaml");
-        std::fs::write(&cfg_path, "agent:\n  profile: ground_station\n").unwrap();
-        let cfg = WfbViewConfig::load_from(&cfg_path);
-        let view = json!({
-            "channel": cfg.video.wfb.channel.unwrap_or(0),
-            "bitrate_profile": cfg
-                .video
-                .wfb
-                .bitrate_profile
-                .clone()
-                .unwrap_or_else(|| "default".to_string()),
-            "fec": cfg.video.wfb.fec.clone().unwrap_or_else(|| "8/12".to_string()),
-        });
-        let want = json!({
-            "channel": 0,
-            "bitrate_profile": "default",
-            "fec": "8/12",
-        });
-        assert_eq!(view, want);
-    }
+        let path = dir.path().join("wfb-stats.json");
+        let now = SystemTime::now();
 
-    #[test]
-    fn wfb_view_reads_the_configured_radio() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("config.yaml");
-        std::fs::write(
-            &cfg_path,
-            "video:\n  wfb:\n    channel: 161\n    bitrate_profile: high\n    fec: 12/16\n",
-        )
-        .unwrap();
-        let cfg = WfbViewConfig::load_from(&cfg_path);
-        assert_eq!(cfg.video.wfb.channel, Some(161));
-        assert_eq!(cfg.video.wfb.bitrate_profile.as_deref(), Some("high"));
-        assert_eq!(cfg.video.wfb.fec.as_deref(), Some("12/16"));
+        // No sidecar: the channel is unknown, never 0.
+        assert_eq!(
+            wfb_view_from(&path, now),
+            json!({"channel": null, "tx_power_dbm": null})
+        );
+
+        std::fs::write(&path, r#"{"actual_channel": 149, "tx_power_dbm": 20}"#).unwrap();
+        // Read after the write: a file stamped after `now` is not provably fresh.
+        let now = SystemTime::now();
+        assert_eq!(
+            wfb_view_from(&path, now),
+            json!({"channel": 149, "tx_power_dbm": 20})
+        );
+
+        // A dead writer's last file is not a reading.
+        let later = now + Duration::from_secs_f64(SNAPSHOT_FRESH_S + 5.0);
+        assert_eq!(
+            wfb_view_from(&path, later),
+            json!({"channel": null, "tx_power_dbm": null})
+        );
     }
 
     #[test]

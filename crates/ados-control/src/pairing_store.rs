@@ -48,7 +48,7 @@ pub const PAIRING_JSON: &str = "/etc/ados/pairing.json";
 const SAFE_CHARSET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
 /// The pairing-code length, matching the Python `CODE_LENGTH`.
-const CODE_LENGTH: usize = 6;
+pub const CODE_LENGTH: usize = 6;
 
 /// The number of random bytes behind a generated API key, matching the Python
 /// `secrets.token_urlsafe(32)`.
@@ -324,16 +324,40 @@ pub fn claim(path: &Path, user_id: &str, now: f64) -> Result<ClaimOutcome, Claim
         Some(pending) => pending,
         None => generate_api_key().map_err(ClaimError::KeyGen)?,
     };
+    write_claimed(path, user_id, &api_key, now)?;
+    Ok(ClaimOutcome { api_key })
+}
+
+/// Claim the agent for `user_id` under `api_key`, a key the caller already
+/// handed to the pairing backend (the external-code accept registers the key
+/// with the cloud before the device persists it). Mirrors
+/// `PairingManager.claim(user_id, api_key)`: the same four-key paired object,
+/// with the code and the pending key dropped.
+///
+/// The caller holds [`lock_writers`] and has checked the node is unpaired. The
+/// document is still read first so a file that cannot be read is never
+/// overwritten: it may hold a live pairing.
+pub fn claim_with_key(
+    path: &Path,
+    user_id: &str,
+    api_key: &str,
+    now: f64,
+) -> Result<(), ClaimError> {
+    PairingDoc::read(path).map_err(ClaimError::Unreadable)?;
+    write_claimed(path, user_id, api_key, now)
+}
+
+/// Atomically write the paired object.
+fn write_claimed(path: &Path, user_id: &str, api_key: &str, now: f64) -> Result<(), ClaimError> {
     let state = ClaimedState {
         paired: true,
-        api_key: &api_key,
+        api_key,
         owner_id: user_id,
         paired_at: now,
     };
     let body = serde_json::to_vec_pretty(&state)
         .map_err(|e| ClaimError::Persist(std::io::Error::other(e.to_string())))?;
-    atomic_write_0600(path, &body).map_err(ClaimError::Persist)?;
-    Ok(ClaimOutcome { api_key })
+    atomic_write_0600(path, &body).map_err(ClaimError::Persist)
 }
 
 /// Clear pairing state, mirroring `PairingManager.unpair`: write an empty object

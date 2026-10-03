@@ -353,7 +353,10 @@ pub fn wfb_base_block(cfg: &WfbStatusConfig) -> Map<String, Value> {
     let mut block = Map::new();
     block.insert("state".to_string(), json!("disabled"));
     block.insert("interface".to_string(), json!(""));
+    // `channel` is the configured home channel; `actual_channel` is the live
+    // interface channel, null until a producer reports one.
     block.insert("channel".to_string(), json!(cfg.channel));
+    block.insert("actual_channel".to_string(), Value::Null);
     block.insert("frequency_mhz".to_string(), json!(0));
     block.insert("bandwidth_mhz".to_string(), json!(0));
     block.insert(
@@ -459,10 +462,13 @@ pub fn build_status_from_stats_file_at(cfg: &WfbStatusConfig, path: &Path) -> Va
     finalize_wfb_status(merged)
 }
 
-/// Re-derive `frequency_mhz` / `bandwidth_mhz` from the channel and add the
+/// Re-derive `frequency_mhz` / `bandwidth_mhz` from the live channel and add the
 /// `bitrate_mbps` shim, on top of a base+payload merge.
 pub fn finalize_wfb_status(mut merged: Map<String, Value>) -> Value {
-    let channel = merged.get("channel").and_then(json_to_i64).unwrap_or(0);
+    let channel = merged
+        .get("actual_channel")
+        .and_then(json_to_i64)
+        .unwrap_or(0);
     if let Some(ch) = get_channel(channel) {
         merged.insert("frequency_mhz".to_string(), json!(ch.frequency_mhz));
         merged.insert("bandwidth_mhz".to_string(), json!(ch.bandwidth_mhz));
@@ -543,8 +549,10 @@ pub fn build_radio_block(wfb_status: Option<&Map<String, Value>>) -> Value {
         .unwrap_or(Value::Null);
     let iface_value = iface.clone().map(Value::from).unwrap_or(Value::Null);
 
+    // The radio block's `channel` is the LIVE interface channel; null when no
+    // producer has reported one.
     let channel = status
-        .get("channel")
+        .get("actual_channel")
         .filter(|v| !is_falsey(v))
         .cloned()
         .unwrap_or(Value::Null);
@@ -777,11 +785,11 @@ mod tests {
     #[test]
     fn the_radio_block_resolves_a_channel_40_frequency() {
         let mut status = Map::new();
-        status.insert("channel".to_string(), json!(40));
+        status.insert("actual_channel".to_string(), json!(40));
         let block = build_radio_block(Some(&status));
         assert_eq!(block["freq_mhz"], json!(5200));
         let mut status44 = Map::new();
-        status44.insert("channel".to_string(), json!(44));
+        status44.insert("actual_channel".to_string(), json!(44));
         assert_eq!(build_radio_block(Some(&status44))["freq_mhz"], json!(5220));
     }
 
@@ -864,6 +872,11 @@ mod tests {
         let obj = body.as_object().unwrap();
         assert_eq!(obj["state"], json!("disabled"));
         assert_eq!(obj["channel"], json!(149));
+        assert_eq!(
+            obj["actual_channel"],
+            Value::Null,
+            "no producer, no live channel"
+        );
         // The bare base carries no finalize legs.
         assert!(!obj.contains_key("bitrate_mbps"));
         assert_eq!(obj["frequency_mhz"], json!(0));
@@ -875,7 +888,7 @@ mod tests {
         let path = dir.path().join("wfb-stats.json");
         std::fs::write(
             &path,
-            r#"{"state":"active","interface":"wlan1","channel":40,"bitrate_kbps":4057,"rssi_dbm":-40.0}"#,
+            r#"{"state":"active","interface":"wlan1","actual_channel":40,"bitrate_kbps":4057,"rssi_dbm":-40.0}"#,
         )
         .unwrap();
         let body = build_status_from_stats_file_at(&WfbStatusConfig::default(), &path);
@@ -893,7 +906,7 @@ mod tests {
         let path = dir.path().join("wfb-stats.json");
         std::fs::write(
             &path,
-            r#"{"state":"active","rf_unverified":false,"channel":149}"#,
+            r#"{"state":"active","rf_unverified":false,"actual_channel":149}"#,
         )
         .unwrap();
         // Back-date the file past the ceiling. `File::set_modified` keeps this

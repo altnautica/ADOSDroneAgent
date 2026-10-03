@@ -268,6 +268,7 @@ impl BatteryEngine {
                     let extremes = latest.cell_extremes();
                     Some(PackHealth {
                         id,
+                        stale: now_ms - latest.t_ms > STALE_AFTER_MS,
                         cells_plausible: latest.cells_plausible,
                         cell_voltages_v: &latest.cells,
                         weakest_cell_index: extremes.map(|(i, _, _)| i),
@@ -312,6 +313,9 @@ pub struct BatteryHealth<'a> {
 #[derive(Debug, Serialize)]
 pub struct PackHealth<'a> {
     pub id: u8,
+    /// No fresh reading from this pack for [`STALE_AFTER_MS`]: its stream
+    /// stopped, so the values below are its last report, not its state.
+    pub stale: bool,
     pub cells_plausible: bool,
     pub cell_voltages_v: &'a [f64],
     pub weakest_cell_index: Option<usize>,
@@ -331,7 +335,9 @@ pub struct PackHealth<'a> {
 
 /// One sample per pack from a state snapshot. Packs come from `batteries[]`;
 /// a snapshot with none but a `battery` block carrying a reading yields pack 0
-/// from that block (an FC that sends only SYS_STATUS).
+/// from that block (an FC that sends only SYS_STATUS). A `batteries[]` entry
+/// whose own BATTERY_STATUS is older than [`STALE_AFTER_MS`] (`age_ms`) is not
+/// a reading: the router keeps a pack's last values after its stream stops.
 fn readings(t_ms: i64, snapshot: &Value) -> Vec<(u8, Sample)> {
     let sys = snapshot.get("battery");
     let sys_field = |key: &str| sys.and_then(|b| b.get(key));
@@ -379,6 +385,12 @@ fn readings(t_ms: i64, snapshot: &Value) -> Vec<(u8, Sample)> {
     match packs {
         Some(packs) => packs
             .iter()
+            .filter(|entry| {
+                entry
+                    .get("age_ms")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|age| age <= STALE_AFTER_MS as u64)
+            })
             .filter_map(|entry| {
                 let id = u8::try_from(entry.get("id")?.as_u64()?).ok()?;
                 Some((id, reading(id, entry, &PACK_KEYS)))

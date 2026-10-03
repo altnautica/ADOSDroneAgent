@@ -19,12 +19,22 @@
 //!   10-microsecond units since 2015-01-01 UTC) **twice, 200 ms apart**, so a
 //!   single-frame radio hiccup during enrollment does not lose the key. The key
 //!   buffer is overwritten with zeros before the route returns. The response is
-//!   `{success, key_id, enrolled_at}`: `key_id` is the first 8 hex chars of
+//!   `{sent, verified, key_id, enrolled_at}`: `key_id` is the first 8 hex chars of
 //!   sha256(key) (a fingerprint, never the key), `enrolled_at` an ISO-8601 UTC
 //!   timestamp at seconds precision.
 //! - **`POST /api/mavlink/signing/disable-on-fc`** sends `SETUP_SIGNING` with an
 //!   all-zero key and a zero timestamp, which ArduPilot recognises as
-//!   "disable signing", and returns `{success: true}`.
+//!   "disable signing", and returns `{sent, verified}`.
+//!
+//! ## Sent is not applied
+//!
+//! Writing the frame proves only that the router took it. An FC that already
+//! enforces signing drops an unsigned `SETUP_SIGNING` on every link but its
+//! USB channel, and says nothing. So each route watches the FC's own frames
+//! for [`VERIFY_WINDOW`] after the send, on the same socket connection:
+//! enrollment is `verified` once a frame from the target arrives signed with
+//! the new key, and a disable once a frame from the target arrives unsigned.
+//! `verified: false` means no such frame was seen, not that the write failed.
 //!
 //! ## Error shapes (matched verbatim to the Python routes)
 //!
@@ -47,8 +57,12 @@ use time::OffsetDateTime;
 use ados_protocol::mavlink::ardupilotmega::{MavMessage, SETUP_SIGNING_DATA};
 use ados_protocol::mavlink::{self, MavHeader};
 
+use crate::ipc::{AckStream, FrameRead};
 use crate::routes::detail;
 use crate::state::AppState;
+
+/// How long a signing write watches the FC's frames for proof it applied.
+const VERIFY_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// The source identity stamped on every signing frame, matching the Python
 /// signing encoder (`srcSystem=255, srcComponent=MAV_COMP_ID_MISSIONPLANNER`), so
@@ -106,11 +120,13 @@ fn default_target_component() -> i64 {
 ///
 /// Gates on the FC being connected (`503` when not), parses+validates the hex key
 /// (`400` with the exact parse error on a bad body), then builds `SETUP_SIGNING`
-/// and writes it to the MAVLink socket twice. On success returns `{success: true,
-/// key_id, enrolled_at}` — `key_id` is the first 8 hex of sha256(key), never the
-/// key. A failure to reach the socket is the Python `503 "MAVLink command link
-/// unavailable"`; any other failure is the Python `500 "enrollment failed"`. The
-/// parsed key bytes are zeroized before the route returns on every path.
+/// and writes it to the MAVLink socket twice. On success returns `{sent: true,
+/// verified, key_id, enrolled_at}` — `verified` is whether a frame from the
+/// target signed with this key was seen within [`VERIFY_WINDOW`], `key_id` the
+/// first 8 hex of sha256(key), never the key. A failure to reach the socket is
+/// the Python `503 "MAVLink command link unavailable"`; any other failure is the
+/// Python `500 "enrollment failed"`. The parsed key bytes are zeroized before the
+/// route returns on every path.
 pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequest>) -> Response {
     if !state.fc_connected() {
         return detail(StatusCode::SERVICE_UNAVAILABLE, "FC not connected");
@@ -137,8 +153,9 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
         Err(msg) => return detail(StatusCode::BAD_REQUEST, msg),
     };
 
-    // Build the SETUP_SIGNING frame once (the same bytes are sent twice, so the
-    // key is read exactly once into the message), then zeroize the key buffer.
+    // Build the SETUP_SIGNING frame once (the same bytes are sent twice). The
+    // key stays in memory until the observation window closes, because checking
+    // the FC's signatures needs it; it is zeroized on every path after that.
     let initial_ts = initial_timestamp_10us(OffsetDateTime::now_utc());
     let key_id = fingerprint(&key);
     let frame = match build_setup_signing_frame(target_system, target_component, &key, initial_ts) {
@@ -149,13 +166,25 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
             return detail(StatusCode::INTERNAL_SERVER_ERROR, "enrollment failed");
         }
     };
-    zeroize(&mut key);
+
+    // One connection carries the sends and the observation, so it sees only FC
+    // frames broadcast after it connected.
+    let mut stream = match state.mavlink.open_ack_stream().await {
+        Ok(s) => s,
+        Err(e) => {
+            zeroize(&mut key);
+            tracing::warn!(error = %e, "signing enroll connect failed");
+            return detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "MAVLink command link unavailable",
+            );
+        }
+    };
 
     // Send twice, 200 ms apart, matching the Python double-send for radio
-    // resilience. A send failure is the Python connect/send failure: the first
-    // failure maps to the link-unavailable 503 (the Python connect branch), since
-    // an absent socket is the no-link condition the route reports.
-    if let Err(e) = state.mavlink.send(&frame).await {
+    // resilience. A failure on the first frame is the link-unavailable 503.
+    if let Err(e) = stream.write_frame(&frame).await {
+        zeroize(&mut key);
         tracing::warn!(error = %e, "signing enroll send (1/2) failed");
         return detail(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -163,7 +192,8 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
         );
     }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    if let Err(e) = state.mavlink.send(&frame).await {
+    if let Err(e) = stream.write_frame(&frame).await {
+        zeroize(&mut key);
         // The FIRST frame already reached the FC, so the key may well be
         // enrolled and the FC may already be rejecting unsigned frames. A bare
         // 500 "enrollment failed" tells the operator the opposite and invites
@@ -185,14 +215,21 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
             .into_response();
     }
 
+    let verified = observe(&mut stream, VERIFY_WINDOW, |f| {
+        signed_by(f, target_system, &key)
+    })
+    .await;
+    zeroize(&mut key);
+
     let enrolled_at = iso8601_seconds_utc(OffsetDateTime::now_utc());
 
     // Log the fingerprint only, never the key.
-    tracing::info!(key_id = %key_id, link_id = req.link_id, target_system, "signing enroll completed");
+    tracing::info!(key_id = %key_id, link_id = req.link_id, target_system, verified, "signing enroll sent");
     (
         StatusCode::OK,
         Json(json!({
-            "success": true,
+            "sent": true,
+            "verified": verified,
             "key_id": key_id,
             "enrolled_at": enrolled_at,
         })),
@@ -214,11 +251,14 @@ pub struct DisableRequest {
 ///
 /// Takes an optional `{target_system, target_component}` body (default 1/1, the
 /// same defaults and bounds enrolment uses). Gates on the FC being connected
-/// (`503` when not), then sends `SETUP_SIGNING`
-/// with an all-zero key + a zero timestamp (ArduPilot reads this as "disable
-/// signing") and returns `{success: true}`. A socket failure is the Python `503
-/// "MAVLink command link unavailable"`; any other failure is the Python `500
-/// "disable failed"`.
+/// (`503` when not), then sends `SETUP_SIGNING` with an all-zero key + a zero
+/// timestamp (ArduPilot reads this as "disable signing") and returns `{sent:
+/// true, verified}`, `verified` being whether an unsigned frame from the target
+/// was seen within [`VERIFY_WINDOW`]. The frame itself is unsigned, so an FC
+/// that enforces signing applies it only from its USB channel; anywhere else
+/// it is dropped and `verified` stays false. A socket failure is the Python
+/// `503 "MAVLink command link unavailable"`; any other failure is the Python
+/// `500 "disable failed"`.
 pub async fn disable_on_fc(
     State(state): State<AppState>,
     body: Option<Json<DisableRequest>>,
@@ -240,7 +280,17 @@ pub async fn disable_on_fc(
         }
     };
 
-    if let Err(e) = state.mavlink.send(&frame).await {
+    let mut stream = match state.mavlink.open_ack_stream().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "signing disable connect failed");
+            return detail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "MAVLink command link unavailable",
+            );
+        }
+    };
+    if let Err(e) = stream.write_frame(&frame).await {
         tracing::warn!(error = %e, "signing disable send failed");
         return detail(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -248,8 +298,87 @@ pub async fn disable_on_fc(
         );
     }
 
-    tracing::info!(target_system, target_component, "signing disabled on fc");
-    (StatusCode::OK, Json(json!({ "success": true }))).into_response()
+    let verified = observe(&mut stream, VERIFY_WINDOW, |f| {
+        unsigned_from(f, target_system)
+    })
+    .await;
+    tracing::info!(
+        target_system,
+        target_component,
+        verified,
+        "signing disable sent"
+    );
+    (
+        StatusCode::OK,
+        Json(json!({ "sent": true, "verified": verified })),
+    )
+        .into_response()
+}
+
+/// Read FC frames off `stream` until one satisfies `matches` or `window` closes.
+/// A closed or stalled stream ends the watch unproven.
+async fn observe(
+    stream: &mut AckStream,
+    window: std::time::Duration,
+    mut matches: impl FnMut(&[u8]) -> bool,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + window;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        match stream.read_frame(deadline - now).await {
+            FrameRead::Frame(f) if matches(&f) => return true,
+            FrameRead::Frame(_) => {}
+            FrameRead::Timeout | FrameRead::Eof => return false,
+        }
+    }
+}
+
+/// The MAVLink frame layout the signing checks read.
+const V2_MAGIC: u8 = 0xFD;
+const V1_MAGIC: u8 = 0xFE;
+const V2_HEADER_LEN: usize = 10;
+const V2_CRC_LEN: usize = 2;
+const V2_SIGNATURE_BLOCK_LEN: usize = 13;
+const V2_SIGNATURE_LEN: usize = 6;
+const IFLAG_SIGNED: u8 = 0x01;
+
+/// Whether `frame` is a MAVLink 2 frame from `system` carrying a valid
+/// signature under `key`. The signature is the first 6 bytes of
+/// sha256(key ‖ every frame byte before the signature), which covers the
+/// header, payload, checksum, link id and timestamp.
+fn signed_by(frame: &[u8], system: u8, key: &[u8]) -> bool {
+    if frame.len() < V2_HEADER_LEN
+        || frame[0] != V2_MAGIC
+        || frame[2] & IFLAG_SIGNED == 0
+        || frame[5] != system
+    {
+        return false;
+    }
+    let total = V2_HEADER_LEN + usize::from(frame[1]) + V2_CRC_LEN + V2_SIGNATURE_BLOCK_LEN;
+    if frame.len() != total {
+        return false;
+    }
+    let (signed, signature) = frame.split_at(total - V2_SIGNATURE_LEN);
+    let digest = Sha256::new()
+        .chain_update(key)
+        .chain_update(signed)
+        .finalize();
+    digest[..V2_SIGNATURE_LEN] == *signature
+}
+
+/// Whether `frame` is an unsigned frame from `system`: a MAVLink 2 frame with
+/// the signed flag clear, or any MAVLink 1 frame (v1 has no signing).
+fn unsigned_from(frame: &[u8], system: u8) -> bool {
+    match frame.first() {
+        Some(&V2_MAGIC) => {
+            frame.len() >= V2_HEADER_LEN && frame[2] & IFLAG_SIGNED == 0 && frame[5] == system
+        }
+        Some(&V1_MAGIC) => frame.len() >= 6 && frame[3] == system,
+        _ => false,
+    }
 }
 
 /// The disable target: the body's system/component (bounded like enrolment), or
@@ -602,24 +731,28 @@ mod tests {
         )
     }
 
-    /// Spawn a one-shot Unix listener that accepts one connection and reads one
-    /// length-prefixed frame, returning the raw frame bytes.
-    fn accept_one_frame(listener: UnixListener) -> tokio::task::JoinHandle<Vec<u8>> {
+    /// A fake router: accepts ONE connection, reads `n` length-prefixed frames
+    /// from it, broadcasts `replies` back on the same connection, then closes it.
+    /// Returns the frames it read.
+    fn fake_router(
+        listener: UnixListener,
+        n: usize,
+        replies: Vec<Vec<u8>>,
+    ) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
+        use tokio::io::AsyncWriteExt;
         tokio::spawn(async move {
             let (mut conn, _addr) = listener.accept().await.unwrap();
-            read_framed(&mut conn).await
-        })
-    }
-
-    /// Spawn a Unix listener that reads `n` length-prefixed frames, returning
-    /// each frame's raw bytes. The MAVLink client opens one connection per
-    /// fire-and-forget frame, so each frame arrives on its own accepted stream.
-    fn accept_n_frames(listener: UnixListener, n: usize) -> tokio::task::JoinHandle<Vec<Vec<u8>>> {
-        tokio::spawn(async move {
             let mut frames = Vec::with_capacity(n);
             for _ in 0..n {
-                let (mut conn, _addr) = listener.accept().await.unwrap();
                 frames.push(read_framed(&mut conn).await);
+            }
+            for reply in replies {
+                let wire = ados_protocol::frame::encode_frame(
+                    &reply,
+                    ados_protocol::frame::MAVLINK_MAX_FRAME,
+                )
+                .unwrap();
+                conn.write_all(&wire).await.unwrap();
             }
             frames
         })
@@ -637,24 +770,72 @@ mod tests {
         body
     }
 
-    #[tokio::test]
-    async fn enroll_writes_setup_signing_to_the_socket_and_returns_the_fingerprint() {
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("mavlink.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
-        // The enroll sends the SAME frame twice, for radio resilience.
-        let server = accept_n_frames(listener, 2);
+    /// An unsigned MAVLink 2 HEARTBEAT from the FC at `system`.
+    fn fc_heartbeat(system: u8) -> Vec<u8> {
+        use ados_protocol::mavlink::ardupilotmega::{
+            MavAutopilot, MavModeFlag, MavState, MavType, HEARTBEAT_DATA,
+        };
+        let header = MavHeader {
+            system_id: system,
+            component_id: 1,
+            sequence: 0,
+        };
+        let msg = MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+            custom_mode: 0,
+            mavtype: MavType::MAV_TYPE_QUADROTOR,
+            autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+            base_mode: MavModeFlag::empty(),
+            system_status: MavState::MAV_STATE_STANDBY,
+            mavlink_version: 3,
+        });
+        mavlink::serialize_v2(header, &msg).unwrap()
+    }
 
-        let key_hex = (0u8..32).map(|b| format!("{b:02x}")).collect::<String>();
-        let state = state_with_mavlink(sock.clone(), true);
-        let body = EnrollRequest {
-            key_hex: key_hex.clone(),
+    /// `frame` with the signed flag set and a signature block under `key`
+    /// appended. The checksum is left as it was; the route checks the signature,
+    /// which is what proves the key.
+    fn sign(mut frame: Vec<u8>, key: &[u8]) -> Vec<u8> {
+        frame[2] |= IFLAG_SIGNED;
+        frame.push(0); // link id
+        frame.extend_from_slice(&[1, 0, 0, 0, 0, 0]); // timestamp
+        let digest = Sha256::new()
+            .chain_update(key)
+            .chain_update(&frame)
+            .finalize();
+        frame.extend_from_slice(&digest[..V2_SIGNATURE_LEN]);
+        frame
+    }
+
+    fn enroll_body(key: &[u8]) -> EnrollRequest {
+        EnrollRequest {
+            key_hex: key.iter().map(|b| format!("{b:02x}")).collect(),
             link_id: 0,
             target_system: 1,
             target_component: 1,
-        };
-        // Drive the handler on a task so the server reads the frames while the
-        // route sleeps 200 ms between its two sends.
+        }
+    }
+
+    #[tokio::test]
+    async fn enroll_is_verified_by_a_frame_signed_with_the_new_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let key: Vec<u8> = (0u8..32).collect();
+        let other_key = [7u8; 32];
+        // Before the key lands the FC is unsigned or signs with an older key;
+        // only a frame signed with THIS key proves the enrollment.
+        let server = fake_router(
+            listener,
+            2,
+            vec![
+                fc_heartbeat(1),
+                sign(fc_heartbeat(1), &other_key),
+                sign(fc_heartbeat(1), &key),
+            ],
+        );
+
+        let state = state_with_mavlink(sock.clone(), true);
+        let body = enroll_body(&key);
         let handle = tokio::spawn(async move { enroll_fc(State(state), Json(body)).await });
 
         let frames = server.await.unwrap();
@@ -665,12 +846,11 @@ mod tests {
         let resp = handle.await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let value = body_json(resp).await;
-        assert_eq!(value["success"], json!(true));
+        assert_eq!(value["sent"], json!(true));
+        assert_eq!(value["verified"], json!(true));
+        assert!(value.get("success").is_none());
         // The fingerprint is the first 8 hex of sha256(key), never the key.
-        assert_eq!(
-            value["key_id"],
-            json!(fingerprint(&(0u8..32).collect::<Vec<u8>>()))
-        );
+        assert_eq!(value["key_id"], json!(fingerprint(&key)));
         // enrolled_at is the ISO-8601 seconds-precision UTC string.
         let enrolled = value["enrolled_at"].as_str().unwrap();
         assert!(enrolled.contains('T'));
@@ -682,10 +862,36 @@ mod tests {
         assert_eq!(header.component_id, 190);
         match msg {
             MavMessage::SETUP_SIGNING(d) => {
-                assert_eq!(d.secret_key.to_vec(), (0u8..32).collect::<Vec<u8>>());
+                assert_eq!(d.secret_key.to_vec(), key);
             }
             other => panic!("expected SETUP_SIGNING, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn enroll_is_unverified_when_no_frame_carries_the_new_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let key: Vec<u8> = (0u8..32).collect();
+        // Unsigned, signed with another key, and signed with this key by a
+        // different vehicle: none of them shows THIS FC holding THIS key.
+        let server = fake_router(
+            listener,
+            2,
+            vec![
+                fc_heartbeat(1),
+                sign(fc_heartbeat(1), &[7u8; 32]),
+                sign(fc_heartbeat(2), &key),
+            ],
+        );
+        let state = state_with_mavlink(sock, true);
+        let resp = enroll_fc(State(state), Json(enroll_body(&key))).await;
+        server.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let value = body_json(resp).await;
+        assert_eq!(value["sent"], json!(true));
+        assert_eq!(value["verified"], json!(false));
     }
 
     #[tokio::test]
@@ -747,20 +953,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disable_writes_an_all_zero_setup_signing_and_returns_success() {
+    async fn disable_is_verified_by_an_unsigned_frame_from_the_fc() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("mavlink.sock");
         let listener = UnixListener::bind(&sock).unwrap();
-        let server = accept_one_frame(listener);
+        let key = [3u8; 32];
+        // A frame still in flight from before the clear is signed; the unsigned
+        // one after it shows the store was cleared.
+        let server = fake_router(
+            listener,
+            1,
+            vec![sign(fc_heartbeat(1), &key), fc_heartbeat(1)],
+        );
 
         let state = state_with_mavlink(sock, true);
         let resp = disable_on_fc(State(state), None).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let value = body_json(resp).await;
-        assert_eq!(value, json!({ "success": true }));
+        assert_eq!(value, json!({ "sent": true, "verified": true }));
 
-        let frame = server.await.unwrap();
-        let (_h, msg) = mavlink::parse_v2(&frame).unwrap();
+        let frames = server.await.unwrap();
+        let (_h, msg) = mavlink::parse_v2(&frames[0]).unwrap();
         match msg {
             MavMessage::SETUP_SIGNING(d) => {
                 assert_eq!(d.initial_timestamp, 0);
@@ -768,6 +981,29 @@ mod tests {
             }
             other => panic!("expected SETUP_SIGNING, got {other:?}"),
         }
+    }
+
+    /// An enrolled FC drops the unsigned clear on a non-USB link and keeps
+    /// signing. The route must not report that as done.
+    #[tokio::test]
+    async fn disable_is_unverified_while_the_fc_still_signs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let key = [3u8; 32];
+        let server = fake_router(
+            listener,
+            1,
+            vec![sign(fc_heartbeat(1), &key), sign(fc_heartbeat(1), &key)],
+        );
+        let state = state_with_mavlink(sock, true);
+        let resp = disable_on_fc(State(state), None).await;
+        server.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(resp).await,
+            json!({ "sent": true, "verified": false })
+        );
     }
 
     #[tokio::test]

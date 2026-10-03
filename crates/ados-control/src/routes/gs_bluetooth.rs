@@ -6,8 +6,9 @@
 //! - **`POST /api/v1/ground-station/bluetooth/scan`** — run a BlueZ scan for
 //!   nearby controllers. The body is `{"duration_s"?}` (default 10); returns
 //!   `{"devices": [{mac, name, rssi}]}` (rssi is always null — `bluetoothctl
-//!   devices` does not surface it). A failed `devices` listing degrades to an
-//!   empty list.
+//!   devices` does not surface it). A failed `devices` listing is a `503
+//!   E_BT_SCAN_FAILED`, never an empty list, and a scan requested while another
+//!   runs is a `409 E_BT_SCAN_IN_PROGRESS`.
 //! - **`POST /api/v1/ground-station/bluetooth/pair`** — pair + trust + connect a
 //!   device by MAC; returns the pair-outcome dict (`{paired, connected?, error}`).
 //! - **`DELETE /api/v1/ground-station/bluetooth/{mac}`** — forget (disconnect +
@@ -77,14 +78,19 @@ fn profile_mismatch() -> Response {
         .into_response()
 }
 
-// Note on the FastAPI `500 E_BT_*_FAILED` arm: the Python Bluetooth routes wrap
-// their `_input_manager()` call in a try/except that raises a 500 error object
-// only when the call itself raises. The Python `_btctl` already swallows every
-// spawn / timeout / runtime fault into a return code (127 / 124 / the exit code),
-// so the manager method never raises and that 500 arm is unreachable. The Rust
-// `btctl` below reproduces the same swallow-into-rc contract, so each handler
-// always returns the 200 result dict (a failure rides in the dict's `error`
-// field, not an HTTP error). There is therefore no 5xx error helper here.
+// Pair and forget report a `bluetoothctl` failure inside their 200 result dict
+// (`error`), the shape their callers read. A scan has no such field: an empty
+// device list is a real answer ("nothing nearby"), so a failed listing is an
+// HTTP error instead.
+
+/// The `503` a failed scan answers with, carrying the tool's own message.
+fn scan_failed(message: String) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"detail": {"error": {"code": "E_BT_SCAN_FAILED", "message": message}}})),
+    )
+        .into_response()
+}
 
 // ---------------------------------------------------------------------------
 // bluetoothctl seam (mirrors the Python `_btctl` return-code conventions).
@@ -208,13 +214,18 @@ pub struct BluetoothScanRequest {
 /// The longest discovery scan a request may hold the radio (and the request) for.
 const MAX_SCAN_SECONDS: i64 = 60;
 
+/// Held for the whole power-on / scan-on / sleep / list / scan-off sequence, so
+/// two requests never interleave `scan on` and `scan off` on the one adapter.
+static SCAN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// `POST /api/v1/ground-station/bluetooth/scan` → `{"devices": [...]}`.
 ///
-/// `404 E_PROFILE_MISMATCH` off a ground station. Otherwise runs the Python scan
-/// sequence — `power on`, `scan on`, sleep `max(1, duration)`, `devices`, then
-/// always `scan off` — and returns the discovered devices as `[{mac, name, rssi}]`
-/// (rssi always null). A non-zero `devices` exit degrades to an empty list,
-/// matching the Python `if rc != 0: return []`.
+/// `404 E_PROFILE_MISMATCH` off a ground station; `409 E_BT_SCAN_IN_PROGRESS`
+/// while another scan runs. Otherwise runs the scan sequence — `power on`,
+/// `scan on`, sleep `duration`, `devices`, then always `scan off` — and returns
+/// the discovered devices as `[{mac, name, rssi}]` (rssi always null). A failed
+/// `devices` listing (no `bluetoothctl`, BlueZ down, a timeout) is a `503
+/// E_BT_SCAN_FAILED`.
 pub async fn post_bluetooth_scan(
     State(state): State<AppState>,
     Json(req): Json<BluetoothScanRequest>,
@@ -229,30 +240,47 @@ pub async fn post_bluetooth_scan(
             format!("duration_s must be between 1 and {MAX_SCAN_SECONDS}"),
         );
     }
-    let devices = scan_bluetooth(duration_s).await;
-    Json(json!({ "devices": devices })).into_response()
+    let Ok(_scanning) = SCAN_LOCK.try_lock() else {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"detail": {"error": {"code": "E_BT_SCAN_IN_PROGRESS"}}})),
+        )
+            .into_response();
+    };
+    match scan_bluetooth(duration_s).await {
+        Ok(devices) => Json(json!({ "devices": devices })).into_response(),
+        Err(message) => scan_failed(message),
+    }
 }
 
-/// Run the Python `scan_bluetooth` sequence and return the device records. The
-/// scan is always stopped before returning (the Python `finally`), even when the
-/// `devices` listing fails. RSSI is always null (the Python sets `"rssi": None`).
-async fn scan_bluetooth(duration_s: i64) -> Vec<Value> {
+/// Run the scan sequence and return the device records, or the failure of the
+/// `devices` listing. The scan is always stopped before returning, even when
+/// the listing fails. RSSI is always null.
+async fn scan_bluetooth(duration_s: i64) -> Result<Vec<Value>, String> {
     let _ = btctl(&["power", "on"], Duration::from_secs(5)).await;
     let _ = btctl(&["scan", "on"], Duration::from_secs(5)).await;
-    // The Python sleeps max(1, int(duration_s)); the listing happens after.
     let sleep_secs = duration_s.max(1) as u64;
     tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
-    let (rc, stdout, _err) = btctl(&["devices"], Duration::from_secs(5)).await;
-    // Always stop scanning before returning (the Python `finally`).
+    let (rc, stdout, stderr) = btctl(&["devices"], Duration::from_secs(5)).await;
+    // Always stop scanning before returning.
     let _ = btctl(&["scan", "off"], Duration::from_secs(5)).await;
+    scan_result(rc, &stdout, &stderr)
+}
 
+/// The scan outcome from the `devices` listing's exit code and output.
+fn scan_result(rc: i32, stdout: &str, stderr: &str) -> Result<Vec<Value>, String> {
     if rc != 0 {
-        return Vec::new();
+        let detail = stderr.trim();
+        return Err(if detail.is_empty() {
+            format!("bluetoothctl devices rc={rc}")
+        } else {
+            format!("bluetoothctl devices rc={rc}: {detail}")
+        });
     }
-    parse_bt_device_lines(&stdout)
+    Ok(parse_bt_device_lines(stdout)
         .into_iter()
         .map(|(mac, name)| json!({"mac": mac, "name": name, "rssi": Value::Null}))
-        .collect()
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -482,13 +510,23 @@ mod tests {
 
     #[test]
     fn scan_records_carry_mac_name_and_null_rssi() {
-        let records: Vec<Value> = parse_bt_device_lines("Device AA:BB Pad\n")
-            .into_iter()
-            .map(|(mac, name)| json!({"mac": mac, "name": name, "rssi": Value::Null}))
-            .collect();
         assert_eq!(
-            records,
-            vec![json!({"mac": "AA:BB", "name": "Pad", "rssi": null})]
+            scan_result(0, "Device AA:BB Pad\n", ""),
+            Ok(vec![json!({"mac": "AA:BB", "name": "Pad", "rssi": null})])
+        );
+        // Nothing nearby is an empty list, which only a successful listing says.
+        assert_eq!(scan_result(0, "", ""), Ok(vec![]));
+    }
+
+    #[test]
+    fn a_failed_listing_is_an_error_not_an_empty_scan() {
+        assert_eq!(
+            scan_result(127, "", "No such file or directory "),
+            Err("bluetoothctl devices rc=127: No such file or directory".to_string())
+        );
+        assert_eq!(
+            scan_result(124, "Device AA:BB Pad\n", ""),
+            Err("bluetoothctl devices rc=124".to_string())
         );
     }
 

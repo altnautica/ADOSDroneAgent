@@ -26,6 +26,11 @@
 //!   not paired. Gated by the auth middleware (it is not in the public set). An
 //!   unreadable pairing file is cleared too: the gate already restricts it to the
 //!   on-box operator, and this is how that operator recovers the node.
+//! - **`POST /api/pairing/accept`** — accept a code Mission Control generated:
+//!   register this device against it at the pairing backend's
+//!   `/pairing/register`, then claim locally under the key it registered.
+//!   Always `200 {ok, error, message, owner_id, paired_at, device_id}` with the
+//!   outcome in `ok`; never served to a request that crossed the radio relay.
 //!
 //! Every write happens under `pairing_store::lock_writers`, with the
 //! already-paired check re-read inside the lock, so two concurrent claims cannot
@@ -35,10 +40,10 @@
 //! proxy or tunnel, or a public-WAN host): `info` reports it as null and `code`
 //! refuses. It is a claim credential for the device's own networks only.
 //!
-//! `mdns_host` is the RESOLVABLE reach name — the system hostname avahi
-//! publishes (`<hostname>.local`, or the name verbatim when it already carries
-//! a domain), resolved through [`ados_protocol::reach::mdns_hostname`], the same
-//! rule `DiscoveryService.mdns_hostname` applies on the Python side. It is
+//! `mdns_host` is the RESOLVABLE reach name — the host name avahi actually
+//! publishes (including a collision rename like `<hostname>-2.local`), else the
+//! system hostname's first label under `.local`, resolved through
+//! [`ados_protocol::reach::mdns_hostname`]. It is
 //! deliberately NOT a constructed `ados-<6hex>.local`: nothing publishes an
 //! A-record for that name, so a GCS that stores it as a node's canonical reach
 //! stores a name that resolves nowhere. A host with no usable hostname has no
@@ -61,15 +66,16 @@ use crate::profile::current_profile_and_role_at;
 use crate::routes::detail;
 use crate::state::{AppState, PairingPaths};
 
-/// The `503` for a pairing file that exists but cannot be read or parsed. The
-/// node refuses to act as unpaired (which would open the claim) and names the
-/// recovery.
+/// What an operator is told when the pairing file exists but cannot be read or
+/// parsed: the node refuses to act as unpaired (which would open the claim) and
+/// names the recovery.
+const UNREADABLE_MESSAGE: &str =
+    "The pairing state on this device is unreadable. Unpair it on the device itself to recover.";
+
+/// The `503` for a pairing file that cannot be read or parsed.
 fn pairing_unreadable(reason: &str) -> Response {
     tracing::error!(reason, "pairing_state_unreadable");
-    detail(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "The pairing state on this device is unreadable. Unpair it on the device itself to recover.",
-    )
+    detail(StatusCode::SERVICE_UNAVAILABLE, UNREADABLE_MESSAGE)
 }
 
 /// Whether the caller may see the pairing code: anyone on the device's own
@@ -139,10 +145,10 @@ pub async fn get_pairing_info(
     // The same live code `/code` serves. One that cannot be minted or persisted
     // is reported as absent here rather than failing the whole identity probe;
     // `/code` says why.
-    let pairing_code = if may_see_code(caller) && !doc.is_paired() {
-        live_code(paths).await.ok().flatten()
-    } else {
+    let pairing_code = if doc.is_paired() {
         None
+    } else {
+        code_for_caller(paths, caller).await
     };
 
     Json(json!({
@@ -251,6 +257,20 @@ async fn live_code(paths: &PairingPaths) -> Result<Option<String>, CodeError> {
     pairing_store::ensure_code(&paths.pairing_json, now)
         .map(Some)
         .map_err(CodeError::Persist)
+}
+
+/// The pairing code `caller` may be shown: the live code of an unpaired node,
+/// for a caller on the device's own networks. `None` for a remote caller, a
+/// paired node, or a code that could not be minted or persisted (`/code` says
+/// why), so a read that merely displays the code never fails on it.
+pub(crate) async fn code_for_caller(
+    paths: &PairingPaths,
+    caller: Option<Extension<CallerClass>>,
+) -> Option<String> {
+    if !may_see_code(caller) {
+        return None;
+    }
+    live_code(paths).await.ok().flatten()
 }
 
 /// The `POST /api/pairing/claim` request body: a single `user_id` string.
@@ -420,6 +440,306 @@ pub async fn unpair(State(state): State<AppState>) -> Response {
         .into_response()
 }
 
+/// The `POST /api/pairing/accept` request body: the code Mission Control
+/// generated.
+#[derive(serde::Deserialize)]
+pub struct AcceptCodeRequest {
+    pub code: String,
+}
+
+/// The `POST /api/pairing/accept` reply. Every field is always present, null
+/// where it does not apply: `ok` carries the outcome, `error` + `message` a
+/// failure, the other three a success.
+#[derive(serde::Serialize, Default)]
+struct AcceptCodeResponse {
+    ok: bool,
+    error: Option<String>,
+    message: Option<String>,
+    owner_id: Option<String>,
+    paired_at: Option<f64>,
+    device_id: Option<String>,
+}
+
+impl AcceptCodeResponse {
+    fn failure(error: &str, message: impl Into<String>) -> Self {
+        tracing::warn!(error, "pairing_accept_failed");
+        Self {
+            ok: false,
+            error: Some(error.to_string()),
+            message: Some(message.into()),
+            ..Self::default()
+        }
+    }
+}
+
+/// How long the backend register call may take.
+const ACCEPT_REGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `POST /api/pairing/accept` → `{ok, error, message, owner_id, paired_at,
+/// device_id}`, always 200.
+///
+/// Lets an operator pre-allocate a code on the Mission Control side and type it
+/// into this device, instead of typing the device's code into Mission Control.
+/// The device registers itself against that code at the pairing backend with a
+/// freshly minted key; when the backend confirms the match it claims locally
+/// under that same key, so the key the backend froze is the key the device
+/// validates. Every failure (a malformed code, an already-paired node, no
+/// backend configured, an unreachable or refusing backend, an unknown code) is
+/// `ok: false` with a stable `error` code and an operator-facing `message`.
+///
+/// A request that crossed the radio relay is refused, as `/claim` refuses one:
+/// accepting a code mints the master LAN key.
+pub async fn accept_pairing_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<AcceptCodeRequest>,
+) -> Response {
+    if headers.contains_key(crate::auth::RELAYED_HEADER) {
+        tracing::warn!("pairing_accept_relayed_refused");
+        return detail(
+            StatusCode::FORBIDDEN,
+            "A pairing code cannot be accepted over the radio relay.",
+        );
+    }
+    Json(accept_external_code(&state, &req.code).await).into_response()
+}
+
+async fn accept_external_code(state: &AppState, code: &str) -> AcceptCodeResponse {
+    let cleaned: String = code
+        .to_uppercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    if cleaned.chars().count() != pairing_store::CODE_LENGTH {
+        return AcceptCodeResponse::failure("invalid_code", "Pairing code must be 6 characters.");
+    }
+
+    let paths = &state.pairing_paths;
+    let config = match crate::routes::config_rw::effective_config(&paths.config) {
+        Ok(config) => config,
+        Err(reason) => {
+            return AcceptCodeResponse::failure(
+                "agent_not_ready",
+                format!("The agent config could not be read: {reason}"),
+            );
+        }
+    };
+    match PairingDoc::read(&paths.pairing_json) {
+        Ok(doc) if doc.is_paired() => {
+            return AcceptCodeResponse::failure(
+                "already_paired",
+                "This device is already paired. Unpair first.",
+            );
+        }
+        Ok(_) => {}
+        Err(reason) => {
+            tracing::error!(reason = %reason, "pairing_state_unreadable");
+            return AcceptCodeResponse::failure("agent_not_ready", UNREADABLE_MESSAGE);
+        }
+    }
+
+    // The self-hosted posture registers at the operator's deployment; every
+    // other posture at the managed backend.
+    let mode = config
+        .pointer("/server/mode")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let url_pointer = if mode == "self_hosted" {
+        "/server/self_hosted/url"
+    } else {
+        "/server/cloud/url"
+    };
+    let site = convex_site_url(
+        config
+            .pointer(url_pointer)
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    if site.is_empty() {
+        return AcceptCodeResponse::failure(
+            "no_backend",
+            "No cloud backend is configured. This agent is in local mode — \
+             pair it directly from Mission Control by hostname or IP instead.",
+        );
+    }
+
+    let identity = PairingConfig::load_from(&paths.config);
+    let device_id = identity.agent.device_id.clone();
+    tracing::info!(convex_url = %site, mode, device_id = %device_id, "pairing_accept_attempt");
+
+    let api_key = match pairing_store::generate_api_key() {
+        Ok(key) => key,
+        Err(e) => {
+            tracing::error!(error = %e, "pairing accept key mint failed");
+            return AcceptCodeResponse::failure("agent_not_ready", "Failed to mint pairing key");
+        }
+    };
+    let board = crate::routes::status::read_board(&state.board_path);
+    let body = json!({
+        "deviceId": device_id,
+        "pairingCode": cleaned,
+        "apiKey": api_key,
+        "name": identity.agent.name,
+        "version": state.agent_version(),
+        "board": crate::state::board_name(&state.board_path),
+        "tier": board.get("tier").and_then(Value::as_i64).unwrap_or(0),
+        "mdnsHost": ados_protocol::reach::mdns_hostname().unwrap_or_default(),
+        "localIp": "",
+    });
+
+    let (status, reply) = match post_register(&format!("{site}/pairing/register"), &body).await {
+        Ok(answer) => answer,
+        Err(e) => {
+            return AcceptCodeResponse::failure(
+                "network",
+                format!("Could not reach the cloud backend: {e}"),
+            );
+        }
+    };
+    if status != 200 {
+        return AcceptCodeResponse::failure("backend_error", format!("Backend returned {status}."));
+    }
+    let Ok(result) = serde_json::from_slice::<Value>(&reply) else {
+        return AcceptCodeResponse::failure("bad_response", "Backend response was not JSON.");
+    };
+    if let Some(err) = result.get("error").filter(|e| truthy(e)) {
+        let err = err
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| err.to_string());
+        let message = match err.as_str() {
+            "device_pending_with_different_code" => {
+                "This device is already pending a different code. Unpair first.".to_string()
+            }
+            "pairing_code_expired" => {
+                "The pairing code has expired. Generate a fresh one.".to_string()
+            }
+            other => other.to_string(),
+        };
+        return AcceptCodeResponse::failure(&err, message);
+    }
+    let matched = ["autoMatched", "alreadyClaimed"]
+        .iter()
+        .any(|k| result.get(k).is_some_and(truthy));
+    if !matched {
+        return AcceptCodeResponse::failure(
+            "code_unknown",
+            "No Mission Control session is waiting on that code yet. \
+             Ask Mission Control to generate a code and try again.",
+        );
+    }
+    let owner_id = ["userId", "ownerId"]
+        .iter()
+        .find_map(|k| {
+            result.get(k).filter(|v| truthy(v)).map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.to_string())
+            })
+        })
+        .unwrap_or_else(|| "cloud".to_string());
+
+    // Persist under the writer lock, re-checking the pair state inside it: a
+    // local claim that landed while the backend call was in flight wins.
+    let _lock = match pairing_store::lock_writers(&paths.pairing_json).await {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::error!(error = %e, "pairing accept lock failed");
+            return AcceptCodeResponse::failure(
+                "agent_not_ready",
+                "The pairing state is busy. Retry shortly.",
+            );
+        }
+    };
+    match PairingDoc::read(&paths.pairing_json) {
+        Ok(doc) if doc.is_paired() => {
+            return AcceptCodeResponse::failure(
+                "already_paired",
+                "This device is already paired. Unpair first.",
+            );
+        }
+        Ok(_) => {}
+        Err(reason) => {
+            tracing::error!(reason = %reason, "pairing_state_unreadable");
+            return AcceptCodeResponse::failure("agent_not_ready", UNREADABLE_MESSAGE);
+        }
+    }
+    let paired_at = now_unix_seconds();
+    if let Err(e) =
+        pairing_store::claim_with_key(&paths.pairing_json, &owner_id, &api_key, paired_at)
+    {
+        tracing::error!(error = %e, "pairing accept persist failed");
+        let message = match e {
+            pairing_store::ClaimError::Unreadable(_) => UNREADABLE_MESSAGE.to_string(),
+            other => format!("Failed to persist pairing: {other}"),
+        };
+        return AcceptCodeResponse::failure("agent_not_ready", message);
+    }
+    tracing::info!(owner_id = %owner_id, device_id = %device_id, "pairing_accept_succeeded");
+    AcceptCodeResponse {
+        ok: true,
+        owner_id: Some(owner_id),
+        paired_at: Some(paired_at),
+        device_id: Some(device_id),
+        ..AcceptCodeResponse::default()
+    }
+}
+
+/// POST the register body and return the status with the raw reply. Plain-HTTP
+/// URLs (a self-hosted deployment on the LAN) are dialled as given; HTTPS
+/// verifies against the bundled webpki roots.
+async fn post_register(url: &str, body: &Value) -> Result<(u16, bytes::Bytes), reqwest::Error> {
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("rustls accepts the default protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let client = reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .timeout(ACCEPT_REGISTER_TIMEOUT)
+        .build()?;
+    let resp = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_string())
+        .send()
+        .await?;
+    let status = resp.status().as_u16();
+    Ok((status, resp.bytes().await?))
+}
+
+/// Normalize an operator-entered Convex URL toward the SITE (HTTP-actions)
+/// origin where `/pairing/register` is served. A self-hosted backend on `:3210`
+/// maps to its site on `:3211`, and the managed backend host to its `-site`
+/// sibling. Any other URL (already a site origin, or one that cannot be
+/// rewritten with confidence) is returned unchanged, minus trailing slashes.
+fn convex_site_url(url: &str) -> String {
+    let cleaned = url.trim().trim_end_matches('/');
+    if cleaned.contains(":3210") {
+        return cleaned.replace(":3210", ":3211");
+    }
+    if cleaned.contains("://convex.altnautica.com") {
+        return cleaned.replace("://convex.altnautica.com", "://convex-site.altnautica.com");
+    }
+    cleaned.to_string()
+}
+
+/// JSON truthiness as the backend's reply is read: false, null, zero and empty
+/// strings, arrays and objects are false.
+fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
+}
+
 // --- helpers ---
 
 /// Fold the WFB bind-session snapshot from the cross-process sentinel. Absent
@@ -469,7 +789,7 @@ fn read_bind_state(paths: &PairingPaths) -> Value {
 /// route's `fc_status()`: a connected FC reports a string port + int baud, an
 /// absent / disconnected one reports `false` + JSON `null` + JSON `null` (the
 /// pairing-info defaults are `None`, unlike the status route's `""`/`0`).
-fn fc_from_snapshot(snapshot: Option<&Value>) -> (Value, Value, Value) {
+pub(crate) fn fc_from_snapshot(snapshot: Option<&Value>) -> (Value, Value, Value) {
     let obj = snapshot.and_then(Value::as_object);
     let connected = obj
         .and_then(|m| m.get("fc_connected"))
@@ -738,6 +1058,85 @@ mod tests {
         let doc = PairingDoc::read(&pairing).unwrap();
         assert_eq!(doc.pairing_code.as_deref(), Some("LIVE23"));
         assert!(doc.pending_api_key.unwrap().starts_with("ados_"));
+    }
+
+    async fn accept_body(resp: Response) -> (StatusCode, Value) {
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    fn accept_req(code: &str) -> Json<AcceptCodeRequest> {
+        Json(AcceptCodeRequest {
+            code: code.to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_malformed_accept_code_is_refused_with_every_field_and_no_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        // Separators are dropped before the length check, so a 5-character
+        // code is refused however it is punctuated.
+        let resp = accept_pairing_code(State(state), HeaderMap::new(), accept_req("ab-c 23")).await;
+        let (status, body) = accept_body(resp).await;
+        assert_eq!(status, StatusCode::OK, "the outcome travels in `ok`");
+        assert_eq!(
+            body,
+            json!({
+                "ok": false,
+                "error": "invalid_code",
+                "message": "Pairing code must be 6 characters.",
+                "owner_id": null,
+                "paired_at": null,
+                "device_id": null,
+            })
+        );
+        assert!(!dir.path().join("pairing.json").exists());
+    }
+
+    #[tokio::test]
+    async fn a_relayed_accept_is_refused_before_anything_is_minted() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let mut headers = HeaderMap::new();
+        headers.insert(crate::auth::RELAYED_HEADER, "1".parse().unwrap());
+        let resp = accept_pairing_code(State(state), headers, accept_req("ABC234")).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(!dir.path().join("pairing.json").exists());
+    }
+
+    #[tokio::test]
+    async fn a_paired_node_refuses_an_accept_and_keeps_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let pairing = dir.path().join("pairing.json");
+        let before = r#"{"paired":true,"api_key":"ados_k","owner_id":"u1","paired_at":1.0}"#;
+        std::fs::write(&pairing, before).unwrap();
+        let resp = accept_pairing_code(State(state), HeaderMap::new(), accept_req("ABC234")).await;
+        let (_status, body) = accept_body(resp).await;
+        assert_eq!(body["ok"], json!(false));
+        assert_eq!(body["error"], json!("already_paired"));
+        assert_eq!(std::fs::read_to_string(&pairing).unwrap(), before);
+    }
+
+    #[test]
+    fn a_backend_url_is_mapped_to_its_site_origin() {
+        assert_eq!(
+            convex_site_url("http://192.168.1.50:3210/"),
+            "http://192.168.1.50:3211"
+        );
+        assert_eq!(
+            convex_site_url("https://convex.altnautica.com"),
+            "https://convex-site.altnautica.com"
+        );
+        assert_eq!(
+            convex_site_url("https://convex-site.altnautica.com"),
+            "https://convex-site.altnautica.com"
+        );
+        assert_eq!(convex_site_url("   "), "");
     }
 
     fn test_paths(dir: &std::path::Path) -> PairingPaths {

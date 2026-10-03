@@ -9,10 +9,8 @@
 //! pair-state config, drops the setup-complete sentinel, and restarts the receive
 //! unit), so the front can forward them.
 //!
-//! The `POST .../wfb/pair/local-bind` + `.../auto-pair` lifecycle and the
-//! captive-token-gated `POST .../factory-reset` stay on the residual surface (the
-//! bind orchestrator + the in-process captive-token store have no command-socket
-//! seam).
+//! The station-wide factory reset, which also unpairs, is
+//! [`crate::routes::gs_factory_reset`].
 //!
 //! ## The fleet gate
 //!
@@ -73,8 +71,8 @@ fn profile_mismatch() -> Response {
     nested_detail(StatusCode::NOT_FOUND, json!({"code": "E_PROFILE_MISMATCH"}))
 }
 
-/// True when the resolved profile is a ground station. Mirrors the Python
-/// `is_ground_station` (config `agent.profile` + the on-disk sentinels).
+/// True when the resolved profile is a ground station (config `agent.profile`
+/// plus the on-disk sentinels).
 fn is_ground_station() -> bool {
     let cfg = crate::config::PairingConfig::load();
     let (profile, _role) = crate::profile::current_profile_and_role(&cfg.agent.profile);

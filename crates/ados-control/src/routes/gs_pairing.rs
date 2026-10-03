@@ -73,9 +73,8 @@ fn run_dir() -> PathBuf {
 }
 
 /// `true` when the node's RESOLVED profile (read from `config_path` + the on-disk
-/// profile/role sentinels) is a ground station. Mirrors the FastAPI
-/// `is_ground_station` gate: an explicit config value wins, `"auto"`/empty falls
-/// back to `/etc/ados/profile.conf`.
+/// profile/role sentinels) is a ground station: an explicit config value wins,
+/// `"auto"`/empty falls back to `/etc/ados/profile.conf`.
 fn is_ground_station() -> bool {
     is_ground_station_at(&config_path(), &profile_conf_path(), &mesh_role_path())
 }
@@ -346,13 +345,22 @@ async fn pair_approve_at(socket: &Path, device_id: &str) -> Response {
         return gs_error(StatusCode::GONE, "E_PAIR_WINDOW_EXPIRED");
     }
     match pairing_rpc(socket, "approve", json!({"device_id": device_id})).await {
-        Ok(r) => Json(json!({
-            "device_id": device_id,
-            "invite_blob_hex": r.get("invite_blob_hex").and_then(Value::as_str).unwrap_or(""),
-            "issued_at_ms": as_i64(r.get("issued_at_ms")),
-            "expires_at_ms": as_i64(r.get("expires_at_ms")),
-        }))
-        .into_response(),
+        // An approval without an invite is one the relay cannot use: report the
+        // daemon as failing rather than a success with an empty blob.
+        Ok(r) => match r
+            .get("invite_blob_hex")
+            .and_then(Value::as_str)
+            .filter(|hex| !hex.is_empty())
+        {
+            Some(invite) => Json(json!({
+                "device_id": device_id,
+                "invite_blob_hex": invite,
+                "issued_at_ms": as_i64(r.get("issued_at_ms")),
+                "expires_at_ms": as_i64(r.get("expires_at_ms")),
+            }))
+            .into_response(),
+            None => daemon_unavailable("approval returned no invite".to_string()),
+        },
         Err(e) if e.contains("not found") || e.contains("window closed") => {
             gs_error(StatusCode::NOT_FOUND, "E_PAIR_REQUEST_NOT_FOUND")
         }
@@ -737,6 +745,19 @@ mod tests {
         assert_eq!(
             body["detail"]["error"]["code"],
             json!("E_PAIR_REQUEST_NOT_FOUND")
+        );
+
+        let c = dir.path().join("c");
+        std::fs::create_dir(&c).unwrap();
+        let no_invite = fake_daemon(&c, |op| match op {
+            "is_window_open" => json!({"ok": true, "result": {"open": true}}),
+            _ => json!({"ok": true, "result": {"invite_blob_hex": "", "issued_at_ms": 1}}),
+        });
+        let (status, body) = body_json(pair_approve_at(&no_invite, "relay-1").await).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body["detail"]["error"]["code"],
+            json!("E_PAIR_DAEMON_UNAVAILABLE")
         );
     }
 

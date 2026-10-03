@@ -127,17 +127,17 @@ struct ServiceSummary {
 /// carry it and an operator does not need it. What an operator needs is how many
 /// are healthy, how many are broken, and WHICH are broken.
 ///
-/// `systemd` reports a stopped unit through several sub-states (`dead`,
-/// `exited`, `failed`), and only `failed` is a fault. `exited` in particular is
-/// the normal terminal state of a successful one-shot, so folding it into the
-/// failed count would report a healthy node as broken.
+/// Each row's `status` is already the rendered vocabulary the enrichment
+/// producer maps systemd into (`running`, `starting`, `stopped`, `error`,
+/// `degraded`): a finished one-shot is `running`, and only `error` (a failed or
+/// crash-looping unit) is a fault.
 fn summarize_services(services: &[Value]) -> ServiceSummary {
     let mut out = ServiceSummary::default();
     for svc in services {
         let status = svc.get("status").and_then(Value::as_str).unwrap_or("");
         match status {
             "running" => out.running = out.running.saturating_add(1),
-            "failed" => {
+            "error" => {
                 out.failed = out.failed.saturating_add(1);
                 if let Some(name) = svc.get("name").and_then(Value::as_str) {
                     out.failed_names.push(name.to_string());
@@ -540,23 +540,25 @@ mod tests {
     }
 
     #[test]
-    fn exited_units_are_not_counted_as_failures() {
-        // The trap: `exited` is the normal terminal state of a successful
-        // one-shot. Folding it into the failed count would report a healthy node
-        // as broken, which is exactly the false alarm this surface must not
-        // raise.
-        let services = vec![
-            json!({"name": "ados-control", "status": "running"}),
-            json!({"name": "ados-video", "status": "running"}),
-            json!({"name": "ados-macpin", "status": "exited"}),
-            json!({"name": "ados-net", "status": "dead"}),
-            json!({"name": "ados-vision", "status": "failed"}),
-        ];
+    fn only_failed_or_crash_looping_units_count_as_failures() {
+        // A stopped unit is not a fault, and a finished one-shot reads running
+        // from the producer; only `error` is broken.
+        let out = "\
+ados-control.service loaded active running ADOS control
+ados-macpin.service loaded active exited ADOS MAC pinning
+ados-net.service loaded inactive dead ADOS uplink
+ados-vision.service loaded failed failed ADOS vision
+ados-video.service loaded activating auto-restart ADOS video
+";
+        let services = crate::loops::enrichment::parse_systemctl_units(out);
         let s = summarize_services(&services);
         assert_eq!(s.running, 2);
-        assert_eq!(s.failed, 1);
-        assert_eq!(s.other, 2);
-        assert_eq!(s.failed_names, vec!["ados-vision".to_string()]);
+        assert_eq!(s.failed, 2);
+        assert_eq!(s.other, 1);
+        assert_eq!(
+            s.failed_names,
+            vec!["ados-vision".to_string(), "ados-video".to_string()]
+        );
     }
 
     #[test]

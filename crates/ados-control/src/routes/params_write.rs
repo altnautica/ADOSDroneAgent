@@ -30,32 +30,34 @@
 //! the MAVLink bytes the FastAPI route's `PARAM_SET` send WOULD have produced, plus
 //! the FastAPI route's exact guard order and response shapes.
 //!
-//! ## Guard order (matches the FastAPI route)
+//! ## Guard order
 //!
 //! 1. The value must be a finite number → 400 `"value must be a finite number"`.
-//! 2. The parameter must be one the agent has already observed (present in the
-//!    cached param blob) → 404 with the FastAPI message when it is not. This
-//!    guards against typos pushing garbage params into the FC.
-//! 3. The FC must be connected → 503 `"FC not connected"`.
-//! 4. The frame send must succeed → 503 `"FC connection unavailable"` when the
-//!    MAVLink socket cannot be reached (the native equivalent of the FastAPI
-//!    route's `conn is None` / send-raise paths; the command is never silently
-//!    dropped).
+//! 2. The parameter must not be the vehicle's own MAVLink identity → 409.
+//! 3. The parameter must be one the agent has already observed (present in the
+//!    router's parameter cache) → 404 when it is not. This guards against typos
+//!    pushing garbage params into the FC.
+//! 4. The cache must record the parameter's `MAV_PARAM_TYPE` → 409
+//!    `E_PARAM_TYPE_UNKNOWN` when it does not. The type decides the encoding,
+//!    and a guessed type corrupts integer parameters on PX4.
+//! 5. The FC must be connected → 503 `"FC not connected"`.
+//! 6. The value must fit the parameter's type → 400 (an INT8 cannot hold 300,
+//!    and wrapping it would write a different number than the operator typed).
+//! 7. The frame send must succeed → 503 `"FC connection unavailable"` when the
+//!    MAVLink socket cannot be reached; the command is never silently dropped.
+//!
+//! The armed interlock in front of every route refuses this write while the
+//! vehicle is armed unless the caller forces it.
 //!
 //! ## The `PARAM_SET` frame
 //!
-//! The FastAPI route resolves a per-name `param_type`: it reads the type from the
-//! in-process param cache when present, else falls back to `0` for a param it has
-//! only seen a value for. The native front sits in front of the standalone API
-//! process and holds no in-process param cache with type metadata — it projects the
-//! router's cache as a `{name: value}` map with no type. So the only reachable
-//! known-param path here is the value-only fallback (the FastAPI `known_type = 0`
-//! branch). MAVLink's `MAV_PARAM_TYPE` enum has no `0` member (values run
-//! `UINT8 = 1 .. REAL64 = 10`),
-//! and ArduPilot ignores the field on a `PARAM_SET` — it infers the canonical type
-//! from its own param table. The frame therefore carries `MAV_PARAM_TYPE_REAL32`
-//! (the float type, the same type the router stamps when it re-emits a
-//! `PARAM_VALUE`), which the FC accepts and treats identically.
+//! The frame carries the type the FC itself declared in its last `PARAM_VALUE`
+//! for the name, read from the router's cache. The 4-byte value field is
+//! encoded for the firmware named by the vehicle's HEARTBEAT: PX4 takes an
+//! integer parameter as its integer bytes, ArduPilot takes every value as a
+//! float (see [`ados_protocol::param_codec`]). The ack compares the echo with
+//! the value the vehicle will actually hold (the rounded integer, or the
+//! nearest 32-bit float), at 32-bit float precision.
 //!
 //! ## Source + target identity
 //!
@@ -74,6 +76,7 @@ use serde_json::{json, Value};
 
 use ados_protocol::mavlink::ardupilotmega::{MavMessage, MavParamType, PARAM_SET_DATA};
 use ados_protocol::mavlink::{self, MavHeader};
+use ados_protocol::param_codec;
 
 use crate::routes::detail;
 use crate::state::AppState;
@@ -111,10 +114,6 @@ const ACK_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// One poll interval between cache reads while waiting for the echo, matching the
 /// FastAPI route's `await asyncio.sleep(0.1)`.
 const ACK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// The tolerance the cached echo must land within to count as an `ack`, matching
-/// the FastAPI route's `abs(cached_value - target) < 1e-6`.
-const ACK_TOLERANCE: f64 = 1e-6;
 
 /// The message the route reports when the FC did not echo a `PARAM_VALUE` within
 /// the poll window, byte-identical to the FastAPI route's text.
@@ -186,7 +185,11 @@ pub async fn set_param(
         return ParamError {
             status: StatusCode::CONFLICT,
             detail: format!(
-                "Refusing to write '{name}': this agent addresses vehicle                  system id 1 only, so changing the vehicle's MAVLink identity                  would make it unreachable by this surface — including the                  write that would undo it, and arm/disarm/mode/rtl. Use a                  direct USB parameter tool if you need a non-default system id."
+                "Refusing to write '{name}': this agent addresses vehicle \
+                 system id 1 only, so changing the vehicle's MAVLink identity \
+                 would make it unreachable by this surface — including the \
+                 write that would undo it, and arm/disarm/mode/rtl. Use a \
+                 direct USB parameter tool if you need a non-default system id."
             ),
         }
         .into_response();
@@ -194,8 +197,11 @@ pub async fn set_param(
 
     // 3. The parameter must be one the agent has already observed. The native
     //    front's only param source is the router's on-disk cache; a name absent
-    //    from it is refused with the FastAPI 404 message.
-    if !param_known(&state, &name) {
+    //    from it (or an unreadable cache) is refused with the FastAPI 404.
+    let Some(cached) = crate::param_store::read_param(&state.params_path, &name)
+        .ok()
+        .flatten()
+    else {
         return ParamError {
             status: StatusCode::NOT_FOUND,
             detail: format!(
@@ -204,10 +210,22 @@ pub async fn set_param(
             ),
         }
         .into_response();
-    }
+    };
 
-    // 3. The FC must be connected (the FastAPI `fc.connected` guard) → 503.
-    if !state.fc_connected() {
+    // 4. The FC's declared type decides the encoding; without it the write
+    //    would be a guess, and a wrong guess corrupts an integer on PX4.
+    let Some(param_type) = cached.param_type else {
+        return type_unknown(&name);
+    };
+
+    // 5. The FC must be connected (the FastAPI `fc.connected` guard) → 503.
+    let snapshot = state.state.snapshot();
+    let connected = snapshot
+        .as_ref()
+        .and_then(|s| s.get("fc_connected"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !connected {
         return ParamError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             detail: "FC not connected".to_string(),
@@ -215,8 +233,27 @@ pub async fn set_param(
         .into_response();
     }
 
+    // 6. Encode for the firmware the HEARTBEAT named; a value the type cannot
+    //    hold is refused rather than wrapped.
+    let autopilot = snapshot
+        .as_ref()
+        .and_then(|s| s.get("autopilot"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let encoded =
+        match param_codec::encode(target, param_type, param_codec::uses_bytewise(autopilot)) {
+            Ok(e) => e,
+            Err(why) => {
+                return ParamError {
+                    status: StatusCode::BAD_REQUEST,
+                    detail: why,
+                }
+                .into_response()
+            }
+        };
+
     // Build the PARAM_SET frame and serialize it with the source identity.
-    let msg = build_param_set(&name, target);
+    let msg = build_param_set(&name, encoded.wire, param_type);
     let header = MavHeader {
         system_id: SOURCE_SYSTEM_ID,
         component_id: SOURCE_COMPONENT_ID,
@@ -236,7 +273,7 @@ pub async fn set_param(
         }
     };
 
-    // 4. Send the frame. An absent or broken MAVLink socket means no live FC link
+    // 7. Send the frame. An absent or broken MAVLink socket means no live FC link
     //    from this surface's view → 503 (the native equivalent of the FastAPI
     //    `conn is None` / send-raise paths); the write is never silently dropped.
     if let Err(e) = state.mavlink.send(&frame).await {
@@ -252,43 +289,62 @@ pub async fn set_param(
     // The router rewrites its cache file as PARAM_VALUE frames land; this re-reads
     // it each tick, the native equivalent of the FastAPI route polling its
     // in-process cache.
-    let (ack, cached_value) = poll_for_ack(&state, &name, target).await;
+    let (ack, cached_value) = poll_for_ack(&state, &name, encoded.stored).await;
 
-    tracing::info!(param = %name, value = target, ack, "param_set");
+    tracing::info!(param = %name, value = target, param_type, ack, "param_set");
     Json(build_set_response(&name, target, ack, cached_value)).into_response()
 }
 
-/// Whether the agent has already observed `name` (it is present in the router's
-/// on-disk parameter cache). A missing, unreadable, or malformed cache reads as
-/// "not known", mirroring the FastAPI route's refusal to write a param it has never
-/// seen.
-fn param_known(state: &AppState, name: &str) -> bool {
-    crate::param_store::read_param_blob(&state.params_path)
-        .is_ok_and(|params| params.contains_key(name))
+/// The 409 for a cached parameter whose `MAV_PARAM_TYPE` the cache does not
+/// record. A fresh parameter download from the FC records it.
+fn type_unknown(name: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "E_PARAM_TYPE_UNKNOWN",
+            "detail": format!(
+                "The type of '{name}' is not known yet; refresh the parameter list \
+                 from the flight controller before writing it"
+            ),
+        })),
+    )
+        .into_response()
 }
 
-/// Build the `PARAM_SET` message for a known param + a finite value.
+/// The dialect enum member for a `MAV_PARAM_TYPE` value the cache validated as
+/// defined (1 through 10).
+fn mav_param_type(param_type: u8) -> MavParamType {
+    match param_type {
+        param_codec::MAV_PARAM_TYPE_UINT8 => MavParamType::MAV_PARAM_TYPE_UINT8,
+        param_codec::MAV_PARAM_TYPE_INT8 => MavParamType::MAV_PARAM_TYPE_INT8,
+        param_codec::MAV_PARAM_TYPE_UINT16 => MavParamType::MAV_PARAM_TYPE_UINT16,
+        param_codec::MAV_PARAM_TYPE_INT16 => MavParamType::MAV_PARAM_TYPE_INT16,
+        param_codec::MAV_PARAM_TYPE_UINT32 => MavParamType::MAV_PARAM_TYPE_UINT32,
+        param_codec::MAV_PARAM_TYPE_INT32 => MavParamType::MAV_PARAM_TYPE_INT32,
+        param_codec::MAV_PARAM_TYPE_UINT64 => MavParamType::MAV_PARAM_TYPE_UINT64,
+        param_codec::MAV_PARAM_TYPE_INT64 => MavParamType::MAV_PARAM_TYPE_INT64,
+        param_codec::MAV_PARAM_TYPE_REAL64 => MavParamType::MAV_PARAM_TYPE_REAL64,
+        _ => MavParamType::MAV_PARAM_TYPE_REAL32,
+    }
+}
+
+/// Build the `PARAM_SET` message for a known param, its encoded value field and
+/// its declared type.
 ///
 /// The `param_id` is the name as 16-byte null-padded ASCII (a name longer than 16
-/// bytes is truncated, as the wire field is fixed-width). The `param_type` is
-/// `MAV_PARAM_TYPE_REAL32`: the only reachable known-param path here is the
-/// value-only fallback (the FastAPI `known_type = 0` branch), and MAVLink's
-/// `MAV_PARAM_TYPE` enum has no `0` member, so the frame carries the float type
-/// (the same type the router stamps on a re-emitted `PARAM_VALUE`); ArduPilot
-/// ignores the field on a `PARAM_SET` and infers the canonical type from its own
-/// table. The value is written as an `f32`, the MAVLink `param_value` width.
-fn build_param_set(name: &str, value: f64) -> MavMessage {
+/// bytes is truncated, as the wire field is fixed-width).
+fn build_param_set(name: &str, wire_value: f32, param_type: u8) -> MavMessage {
     let mut param_id = [0u8; PARAM_ID_LEN];
     let bytes = name.as_bytes();
     let copy = bytes.len().min(PARAM_ID_LEN);
     param_id[..copy].copy_from_slice(&bytes[..copy]);
 
     MavMessage::PARAM_SET(PARAM_SET_DATA {
-        param_value: value as f32,
+        param_value: wire_value,
         target_system: TARGET_SYSTEM,
         target_component: TARGET_COMPONENT,
         param_id: param_id.into(),
-        param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
+        param_type: mav_param_type(param_type),
     })
 }
 
@@ -296,17 +352,17 @@ fn build_param_set(name: &str, value: f64) -> MavMessage {
 /// returning `(ack, cached_value)`.
 ///
 /// Each tick re-reads the router's cache file; the echo counts as an `ack` once the
-/// cached value lands within [`ACK_TOLERANCE`] of the target. Mirrors the FastAPI
-/// route's `while ... < deadline` loop: the cached value is reported even when the
+/// cached value matches `stored`, the value the vehicle holds after applying the
+/// write, at 32-bit float precision. The cached value is reported even when the
 /// ack times out (so the caller sees the last value seen), and the loop sleeps
 /// [`ACK_POLL_INTERVAL`] between reads.
-async fn poll_for_ack(state: &AppState, name: &str, target: f64) -> (bool, Option<f64>) {
+async fn poll_for_ack(state: &AppState, name: &str, stored: f64) -> (bool, Option<f64>) {
     let deadline = tokio::time::Instant::now() + ACK_POLL_TIMEOUT;
     let mut cached_value: Option<f64> = None;
     loop {
         cached_value = cached_param_value(state, name).or(cached_value);
         if let Some(v) = cached_value {
-            if (v - target).abs() < ACK_TOLERANCE {
+            if param_codec::echo_matches(v, stored) {
                 return (true, Some(v));
             }
         }
@@ -318,13 +374,12 @@ async fn poll_for_ack(state: &AppState, name: &str, target: f64) -> (bool, Optio
 }
 
 /// Read the cached value of `name` as a number, or `None` when the cache is
-/// missing / unreadable or the param is absent or non-numeric. Mirrors the FastAPI
-/// route reading the cached value back.
+/// missing / unreadable or the param is absent or non-numeric.
 fn cached_param_value(state: &AppState, name: &str) -> Option<f64> {
-    crate::param_store::read_param_blob(&state.params_path)
-        .ok()?
-        .get(name)
-        .and_then(Value::as_f64)
+    crate::param_store::read_param(&state.params_path, name)
+        .ok()
+        .flatten()
+        .map(|p| p.value)
 }
 
 /// Build the success body, mirroring the FastAPI `ParamSetResponse`. The message
@@ -405,9 +460,14 @@ mod tests {
     /// test primes its snapshot directly), a MAVLink client pointed at an absent
     /// socket (so a send fails → the 503 path), and inert paths for the rest.
     fn test_state(dir: &std::path::Path) -> AppState {
+        test_state_with_socket(dir, dir.join("absent-mavlink.sock"))
+    }
+
+    /// [`test_state`] with the MAVLink client pointed at `mavlink_sock`.
+    fn test_state_with_socket(dir: &std::path::Path, mavlink_sock: std::path::PathBuf) -> AppState {
         let pairing = Arc::new(PairingState::with_path(dir.join("pairing.json")));
         let state = StateIpcClient::disconnected();
-        let mavlink = MavlinkIpcClient::new(dir.join("absent-mavlink.sock"));
+        let mavlink = MavlinkIpcClient::new(mavlink_sock);
         let logd = LogdQueryClient::new(dir.join("absent-logd.sock"));
         let pairing_paths = PairingPaths {
             config: dir.join("config.yaml"),
@@ -437,14 +497,21 @@ mod tests {
 
     /// Write a router-shaped parameter cache at the path `test_state` reads — the
     /// `{name: {value, param_type, last_updated}}` document the MAVLink router
-    /// persists.
+    /// persists. Every entry is REAL32.
     fn write_cache(dir: &std::path::Path, entries: &[(&str, f64)]) {
+        let typed: Vec<(&str, f64, Value)> =
+            entries.iter().map(|(n, v)| (*n, *v, json!(9))).collect();
+        write_typed_cache(dir, &typed);
+    }
+
+    /// [`write_cache`] with an explicit `param_type` per entry (`null` for none).
+    fn write_typed_cache(dir: &std::path::Path, entries: &[(&str, f64, Value)]) {
         let doc: serde_json::Map<String, Value> = entries
             .iter()
-            .map(|(name, value)| {
+            .map(|(name, value, param_type)| {
                 (
                     (*name).to_string(),
-                    json!({ "value": value, "param_type": 9, "last_updated": 1.0 }),
+                    json!({ "value": value, "param_type": param_type, "last_updated": 1.0 }),
                 )
             })
             .collect();
@@ -453,6 +520,22 @@ mod tests {
             serde_json::to_vec(&Value::Object(doc)).unwrap(),
         )
         .unwrap();
+    }
+
+    /// A Unix socket that reads one framed MAVLink message and hands it back.
+    fn one_frame_socket(sock: &std::path::Path) -> tokio::task::JoinHandle<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::UnixListener::bind(sock).unwrap();
+        tokio::spawn(async move {
+            use ados_protocol::frame::{decode_len, HEADER_SIZE, MAVLINK_MAX_FRAME};
+            let (mut conn, _addr) = listener.accept().await.unwrap();
+            let mut header = [0u8; HEADER_SIZE];
+            conn.read_exact(&mut header).await.unwrap();
+            let len = decode_len(header, MAVLINK_MAX_FRAME, false).unwrap();
+            let mut body = vec![0u8; len];
+            conn.read_exact(&mut body).await.unwrap();
+            body
+        })
     }
 
     /// Decode a built PARAM_SET message back into its data for the parity asserts.
@@ -483,20 +566,25 @@ mod tests {
     // ── the built frame ──────────────────────────────────────────────────────
 
     #[test]
-    fn builds_a_param_set_for_a_known_param_and_value() {
-        let msg = build_param_set("WPNAV_SPEED", 750.0);
+    fn builds_a_param_set_carrying_the_declared_type() {
+        let msg = build_param_set("WPNAV_SPEED", 750.0, param_codec::MAV_PARAM_TYPE_REAL32);
         let d = round_trip(&msg);
         assert_eq!(param_name(&d), "WPNAV_SPEED");
         assert_eq!(d.param_value, 750.0);
         assert_eq!(d.target_system, 1);
         assert_eq!(d.target_component, 1);
-        // The value-only path carries the float type; ArduPilot infers the real type.
         assert_eq!(d.param_type, MavParamType::MAV_PARAM_TYPE_REAL32);
+        let d = round_trip(&build_param_set(
+            "FRAME_CLASS",
+            1.0,
+            param_codec::MAV_PARAM_TYPE_INT8,
+        ));
+        assert_eq!(d.param_type, MavParamType::MAV_PARAM_TYPE_INT8);
     }
 
     #[test]
     fn the_frame_header_carries_the_source_identity() {
-        let msg = build_param_set("ATC_RAT_RLL_P", 0.135);
+        let msg = build_param_set("ATC_RAT_RLL_P", 0.135, param_codec::MAV_PARAM_TYPE_REAL32);
         let header = MavHeader {
             system_id: SOURCE_SYSTEM_ID,
             component_id: SOURCE_COMPONENT_ID,
@@ -514,7 +602,11 @@ mod tests {
     #[test]
     fn a_long_param_name_is_truncated_to_sixteen_bytes() {
         // The wire param_id is fixed at 16 bytes; a longer name is truncated.
-        let msg = build_param_set("THIS_NAME_IS_WAY_TOO_LONG_FOR_THE_FIELD", 1.0);
+        let msg = build_param_set(
+            "THIS_NAME_IS_WAY_TOO_LONG_FOR_THE_FIELD",
+            1.0,
+            param_codec::MAV_PARAM_TYPE_REAL32,
+        );
         let d = round_trip(&msg);
         assert_eq!(param_name(&d), "THIS_NAME_IS_WAY");
     }
@@ -551,28 +643,143 @@ mod tests {
         );
     }
 
-    // ── param_known / cached_param_value ─────────────────────────────────────
+    // ── cached_param_value + the cache-backed guards ─────────────────────────
 
-    #[test]
-    fn param_known_reads_the_on_disk_cache() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state(dir.path());
-        // No cache file yet: nothing is known, so no write is allowed.
-        assert!(!param_known(&state, "WPNAV_SPEED"));
-
-        write_cache(dir.path(), &[("WPNAV_SPEED", 500.0)]);
-        assert!(param_known(&state, "WPNAV_SPEED"));
-        assert!(!param_known(&state, "DOES_NOT_EXIST"));
-    }
-
-    #[test]
-    fn param_known_treats_a_corrupt_cache_as_nothing_known() {
-        // A truncated write must never be read as "this param exists" — that would
-        // let a PARAM_SET through for a name the agent has never actually seen.
+    /// A truncated cache must never be read as "this param exists": that would
+    /// let a PARAM_SET through for a name the agent has never actually seen.
+    #[tokio::test]
+    async fn a_corrupt_cache_is_a_404_not_a_write() {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
         std::fs::write(dir.path().join("params.json"), b"{ truncated").unwrap();
-        assert!(!param_known(&state, "WPNAV_SPEED"));
+        state
+            .state
+            .set_snapshot_for_test(json!({ "fc_connected": true }));
+        let resp = set_param(
+            Path("WPNAV_SPEED".to_string()),
+            State(state),
+            Json(ParamSetRequest { value: 1.0 }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A cached name with no recorded type is refused rather than guessed: a
+    /// guessed float would corrupt an integer parameter on PX4.
+    #[tokio::test]
+    async fn a_param_without_a_cached_type_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        write_typed_cache(dir.path(), &[("COM_FLTMODE1", 5.0, Value::Null)]);
+        state
+            .state
+            .set_snapshot_for_test(json!({ "fc_connected": true, "autopilot": 12 }));
+        let resp = set_param(
+            Path("COM_FLTMODE1".to_string()),
+            State(state),
+            Json(ParamSetRequest { value: 7.0 }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(resp).await["error"],
+            json!("E_PARAM_TYPE_UNKNOWN")
+        );
+    }
+
+    /// A value its type cannot hold is a 400, never a wrapped write.
+    #[tokio::test]
+    async fn a_value_outside_the_params_type_is_a_400() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        write_typed_cache(dir.path(), &[("FRAME_CLASS", 1.0, json!(2))]);
+        state
+            .state
+            .set_snapshot_for_test(json!({ "fc_connected": true, "autopilot": 3 }));
+        let resp = set_param(
+            Path("FRAME_CLASS".to_string()),
+            State(state),
+            Json(ParamSetRequest { value: 300.0 }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// PX4 takes an integer parameter as its integer bytes. Sent as the float
+    /// 5.0, the vehicle would store 1084227584.
+    #[tokio::test]
+    async fn a_px4_integer_write_sends_the_integer_bytes_and_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let server = one_frame_socket(&sock);
+        let state = test_state_with_socket(dir.path(), sock);
+        // The cache already holds the decoded target, so the first poll acks.
+        write_typed_cache(dir.path(), &[("COM_FLTMODE1", 5.0, json!(6))]);
+        state
+            .state
+            .set_snapshot_for_test(json!({ "fc_connected": true, "autopilot": 12 }));
+        let resp = set_param(
+            Path("COM_FLTMODE1".to_string()),
+            State(state),
+            Json(ParamSetRequest { value: 5.0 }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let (_h, decoded) = mavlink::parse_v2(&server.await.unwrap()).unwrap();
+        let MavMessage::PARAM_SET(d) = decoded else {
+            panic!("expected PARAM_SET on the socket");
+        };
+        assert_eq!(d.param_value.to_le_bytes(), 5i32.to_le_bytes());
+        assert_eq!(d.param_type, MavParamType::MAV_PARAM_TYPE_INT32);
+        assert_eq!(body_json(resp).await["ack"], json!(true));
+    }
+
+    /// ArduPilot takes the same integer as a float, with its declared type.
+    #[tokio::test]
+    async fn an_ardupilot_integer_write_sends_the_float_and_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let server = one_frame_socket(&sock);
+        let state = test_state_with_socket(dir.path(), sock);
+        write_typed_cache(dir.path(), &[("FLTMODE1", 5.0, json!(2))]);
+        state
+            .state
+            .set_snapshot_for_test(json!({ "fc_connected": true, "autopilot": 3 }));
+        let resp = set_param(
+            Path("FLTMODE1".to_string()),
+            State(state),
+            Json(ParamSetRequest { value: 5.0 }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let (_h, decoded) = mavlink::parse_v2(&server.await.unwrap()).unwrap();
+        let MavMessage::PARAM_SET(d) = decoded else {
+            panic!("expected PARAM_SET on the socket");
+        };
+        assert_eq!(d.param_value, 5.0);
+        assert_eq!(d.param_type, MavParamType::MAV_PARAM_TYPE_INT8);
+    }
+
+    /// A float write whose f32 echo differs from the f64 request in the seventh
+    /// digit still acks: the vehicle holds exactly what it was sent.
+    #[tokio::test]
+    async fn a_landed_float_write_acks_at_f32_precision() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let server = one_frame_socket(&sock);
+        let state = test_state_with_socket(dir.path(), sock);
+        write_cache(dir.path(), &[("WPNAV_SPEED", f64::from(100.1f32))]);
+        state
+            .state
+            .set_snapshot_for_test(json!({ "fc_connected": true, "autopilot": 3 }));
+        let resp = set_param(
+            Path("WPNAV_SPEED".to_string()),
+            State(state),
+            Json(ParamSetRequest { value: 100.1 }),
+        )
+        .await;
+        server.await.unwrap();
+        assert_eq!(body_json(resp).await["ack"], json!(true));
     }
 
     #[test]

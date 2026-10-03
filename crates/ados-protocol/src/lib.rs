@@ -83,6 +83,7 @@ pub mod nonce_cache;
 pub mod offload_link;
 pub mod pair_proof;
 pub mod pairing_posture;
+pub mod param_codec;
 pub mod plugin;
 pub mod plugin_loopback_guard;
 pub mod plugin_mdns;

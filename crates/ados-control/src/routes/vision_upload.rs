@@ -2,8 +2,8 @@
 //!
 //! `POST /api/vision/models/upload` is a multipart upload carrying two parts:
 //!
-//! - a **file** part — the raw model bytes (`.rknn` / `.onnx` / `.tflite` /
-//!   `.engine`), streamed straight to disk under the models directory;
+//! - a **file** part — the raw model bytes (`.rknn` / `.onnx` / `.tflite`),
+//!   streamed straight to disk under the models directory;
 //! - a **metadata** part — a JSON object describing the model the engine needs to
 //!   run it: `{id, name, classes[], head, input_w, input_h, runtime,
 //!   board_match}`.
@@ -18,7 +18,10 @@
 //!
 //! A request with no metadata `id`, or no file (or an empty file), is a 400 — a
 //! catalog entry with no id, or pointing at a zero-byte file, would describe a
-//! model that cannot load. Everything else is tolerated: unknown metadata fields
+//! model that cannot load. A file part named `*.engine` is a 400 too: no
+//! inference backend on this agent runs serialized engine files, so accepting
+//! one would catalog a model that reports installed but never detects.
+//! Everything else is tolerated: unknown metadata fields
 //! are ignored, an absent `name`/`classes`/`head` default to empty, and a re-used
 //! `id` replaces the prior catalog entry (and overwrites its file), so a
 //! corrected re-upload is idempotent on the id.
@@ -26,8 +29,8 @@
 //! ## Why the file name is derived, not trusted
 //!
 //! The on-disk file name is `<id><suffix>`, where the suffix comes from the
-//! declared `runtime` (rknn → `.rknn`, tensorrt → `.engine`, tflite → `.tflite`,
-//! else `.onnx`). The client-supplied multipart filename is NOT used for the path.
+//! declared `runtime` (rknn → `.rknn`, tflite → `.tflite`, else `.onnx`). The
+//! client-supplied multipart filename is NOT used for the path.
 //! The `id` itself is attacker-influenced (it comes from the metadata JSON), so it
 //! is validated against a strict `[A-Za-z0-9._-]` charset with no `..` component
 //! before it can become a path: an `id` carrying a `/` or `..` would otherwise let
@@ -142,12 +145,17 @@ pub struct UploadMeta {
 ///
 /// Returns `{status:"ok", id, filename, sha256, size_bytes}` on success, a 400
 /// when the metadata id is missing/empty/invalid or the file is missing/empty,
-/// and a 500 when the file or the catalog cannot be written.
+/// a 413 when the file exceeds [`MAX_MODEL_BYTES`], a 507 when storing it would
+/// leave less than [`MIN_FREE_AFTER_UPLOAD`] free on the models filesystem, and
+/// a 500 when the file or the catalog cannot be written.
 ///
 /// The file part is streamed straight to a tmp file in the models dir (hashing as
 /// it goes) rather than buffered in RAM, so a multi-megabyte detector does not sit
 /// in memory on a 1-4 GB SBC. The default 2 MB multipart cap is lifted on this
-/// route at registration; the on-disk size is bounded only by the partition.
+/// route at registration; the stream itself enforces the size and free-space
+/// limits, aborting and deleting the partial file the moment either is crossed,
+/// so an upload can never fill the filesystem the config and pairing files
+/// live on.
 pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipart) -> Response {
     let dir = models_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -192,10 +200,24 @@ pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipa
                     }
                 }
             }
-            "file" => match stream_field_to_tmp(&dir, field).await {
-                Ok(s) => staged = Some(s),
-                Err(msg) => return detail(StatusCode::BAD_REQUEST, msg),
-            },
+            "file" => {
+                if field.file_name().is_some_and(is_unsupported_model_file) {
+                    return detail(
+                        StatusCode::BAD_REQUEST,
+                        "`.engine` models are not supported: no inference backend on this \
+                         agent runs them; upload an .rknn, .onnx or .tflite model",
+                    );
+                }
+                let budget = match upload_budget(available_bytes(&dir)) {
+                    Ok(b) => b,
+                    Err(refusal) => return refusal.into_response(),
+                };
+                match stream_field_to_tmp(&dir, field, budget).await {
+                    Ok(s) => staged = Some(s),
+                    Err(StreamFailure::Refused(refusal)) => return refusal.into_response(),
+                    Err(StreamFailure::Fault(msg)) => return detail(StatusCode::BAD_REQUEST, msg),
+                }
+            }
             // Ignore any other part — the contract is the two named parts.
             _ => {}
         }
@@ -233,6 +255,100 @@ pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipa
     }
 }
 
+/// The largest model file the route accepts.
+const MAX_MODEL_BYTES: u64 = 512 * 1024 * 1024;
+
+/// The free space an upload must leave on the models filesystem. The models dir
+/// usually shares a partition with the config, pairing and log files, and a full
+/// partition breaks their atomic writes.
+const MIN_FREE_AFTER_UPLOAD: u64 = 1024 * 1024 * 1024;
+
+/// How many bytes one upload may write: the size cap, and, when the
+/// filesystem's free space is known, never more than leaves
+/// [`MIN_FREE_AFTER_UPLOAD`] behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UploadBudget {
+    max_bytes: u64,
+    /// Whether `max_bytes` is set by the free-space floor rather than the cap.
+    space_bound: bool,
+}
+
+/// An upload refused for its size or for the space it would leave.
+#[derive(Debug, PartialEq, Eq)]
+enum SizeRefusal {
+    /// Over [`MAX_MODEL_BYTES`]: 413.
+    TooLarge,
+    /// Storing it would drop free space below [`MIN_FREE_AFTER_UPLOAD`]: 507.
+    NoSpace,
+}
+
+impl IntoResponse for SizeRefusal {
+    fn into_response(self) -> Response {
+        match self {
+            Self::TooLarge => detail(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "model file is larger than the {} MiB limit",
+                    MAX_MODEL_BYTES / (1024 * 1024)
+                ),
+            ),
+            Self::NoSpace => detail(
+                StatusCode::INSUFFICIENT_STORAGE,
+                format!(
+                    "not enough free space: storing this model would leave less than {} MiB \
+                     free on the models filesystem",
+                    MIN_FREE_AFTER_UPLOAD / (1024 * 1024)
+                ),
+            ),
+        }
+    }
+}
+
+/// The budget for an upload given the models filesystem's free bytes. Unknown
+/// free space leaves only the size cap.
+fn upload_budget(available: Option<u64>) -> Result<UploadBudget, SizeRefusal> {
+    let Some(available) = available else {
+        return Ok(UploadBudget {
+            max_bytes: MAX_MODEL_BYTES,
+            space_bound: false,
+        });
+    };
+    let room = available.saturating_sub(MIN_FREE_AFTER_UPLOAD);
+    if room == 0 {
+        return Err(SizeRefusal::NoSpace);
+    }
+    Ok(UploadBudget {
+        max_bytes: room.min(MAX_MODEL_BYTES),
+        space_bound: room < MAX_MODEL_BYTES,
+    })
+}
+
+impl UploadBudget {
+    /// Whether `size_bytes` written so far is still inside the budget.
+    fn admit(self, size_bytes: u64) -> Result<(), SizeRefusal> {
+        if size_bytes <= self.max_bytes {
+            Ok(())
+        } else if self.space_bound {
+            Err(SizeRefusal::NoSpace)
+        } else {
+            Err(SizeRefusal::TooLarge)
+        }
+    }
+}
+
+/// Free bytes on the filesystem holding `dir`: the mounted volume whose mount
+/// point is the longest prefix of the path. `None` when no volume matches.
+fn available_bytes(dir: &Path) -> Option<u64> {
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    disks
+        .list()
+        .iter()
+        .filter(|d| dir.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .map(sysinfo::Disk::available_space)
+}
+
 /// A model file streamed to a tmp path in the models dir, with its sha256 + size
 /// accumulated during the stream. Dropping it removes the tmp file, so an upload
 /// that fails validation or write leaves nothing behind.
@@ -250,15 +366,25 @@ impl Drop for StagedFile {
     }
 }
 
+/// Why a file part did not stage.
+enum StreamFailure {
+    /// Over the size cap or the free-space floor.
+    Refused(SizeRefusal),
+    /// A read or write fault: a 400-worthy message.
+    Fault(String),
+}
+
 /// Stream a multipart file field to a uniquely-named tmp file in `dir`, hashing
 /// the bytes as they land. The tmp name carries the process id + a random suffix
 /// so concurrent uploads never collide; the file is renamed to its id-derived
-/// name only on finalize. Returns the staged file (with its digest + size) or a
-/// 400-worthy message on a read / write fault.
+/// name only on finalize. The stream stops, and the partial file is removed, as
+/// soon as the bytes received leave `budget`. Returns the staged file (with its
+/// digest + size) or why it did not stage.
 async fn stream_field_to_tmp(
     dir: &Path,
     mut field: axum::extract::multipart::Field<'_>,
-) -> Result<StagedFile, String> {
+    budget: UploadBudget,
+) -> Result<StagedFile, StreamFailure> {
     use tokio::io::AsyncWriteExt;
 
     let tmp_path = dir.join(format!(
@@ -268,30 +394,35 @@ async fn stream_field_to_tmp(
     ));
     let mut file = tokio::fs::File::create(&tmp_path)
         .await
-        .map_err(|e| format!("staging file not writable: {e}"))?;
+        .map_err(|e| StreamFailure::Fault(format!("staging file not writable: {e}")))?;
 
     let mut hasher = Sha256::new();
     let mut size_bytes: u64 = 0;
     loop {
         match field.chunk().await {
             Ok(Some(chunk)) => {
-                hasher.update(&chunk);
                 size_bytes += chunk.len() as u64;
+                if let Err(refusal) = budget.admit(size_bytes) {
+                    drop(file);
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                    return Err(StreamFailure::Refused(refusal));
+                }
+                hasher.update(&chunk);
                 if let Err(e) = file.write_all(&chunk).await {
                     let _ = tokio::fs::remove_file(&tmp_path).await;
-                    return Err(format!("staging write failed: {e}"));
+                    return Err(StreamFailure::Fault(format!("staging write failed: {e}")));
                 }
             }
             Ok(None) => break,
             Err(e) => {
                 let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(format!("file read failed: {e}"));
+                return Err(StreamFailure::Fault(format!("file read failed: {e}")));
             }
         }
     }
     if let Err(e) = file.flush().await {
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Err(format!("staging flush failed: {e}"));
+        return Err(StreamFailure::Fault(format!("staging flush failed: {e}")));
     }
     drop(file);
 
@@ -384,15 +515,22 @@ fn store_upload(dir: &Path, meta: &UploadMeta, staged: StagedFile) -> Result<Val
 }
 
 /// The on-disk suffix for a declared runtime, matching the model-manager fetch
-/// path's mapping (rknn → `.rknn`, tensorrt → `.engine`, tflite → `.tflite`, else
-/// `.onnx`). A blank/unknown runtime defaults to ONNX (the CPU portable form).
+/// path's mapping (rknn → `.rknn`, tflite → `.tflite`, else `.onnx`). A
+/// blank/unknown runtime defaults to ONNX (the CPU portable form).
 fn suffix_for_runtime(runtime: &str) -> &'static str {
     match runtime.to_ascii_lowercase().as_str() {
         "rknn" => ".rknn",
-        "tensorrt" => ".engine",
         "tflite" => ".tflite",
         _ => ".onnx",
     }
+}
+
+/// A model file name whose format no backend on this agent can run: a
+/// serialized `.engine` file. Case-insensitive on the extension.
+fn is_unsupported_model_file(file_name: &str) -> bool {
+    Path::new(file_name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("engine"))
 }
 
 /// Read the catalog (a JSON array of entry objects), replace any entry with the
@@ -462,6 +600,30 @@ fn write_catalog(path: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn the_size_cap_holds_on_a_roomy_filesystem() {
+        let budget = upload_budget(Some(100 * GIB)).unwrap();
+        assert_eq!(budget.admit(512 * MIB), Ok(()));
+        assert_eq!(budget.admit(512 * MIB + 1), Err(SizeRefusal::TooLarge));
+        // Unknown free space still enforces the cap.
+        let unknown = upload_budget(None).unwrap();
+        assert_eq!(unknown.admit(512 * MIB + 1), Err(SizeRefusal::TooLarge));
+    }
+
+    #[test]
+    fn an_upload_never_leaves_less_than_a_gibibyte_free() {
+        // 1 GiB + 100 MiB free: a 100 MiB model fits exactly, one byte more does not.
+        let budget = upload_budget(Some(GIB + 100 * MIB)).unwrap();
+        assert_eq!(budget.admit(100 * MIB), Ok(()));
+        assert_eq!(budget.admit(100 * MIB + 1), Err(SizeRefusal::NoSpace));
+        // At or below the floor nothing is accepted before a byte is written.
+        assert_eq!(upload_budget(Some(GIB)), Err(SizeRefusal::NoSpace));
+        assert_eq!(upload_budget(Some(10 * MIB)), Err(SizeRefusal::NoSpace));
+    }
+
     fn meta(id: &str, runtime: &str) -> UploadMeta {
         UploadMeta {
             id: id.to_string(),
@@ -501,11 +663,29 @@ mod tests {
     fn suffix_maps_each_runtime() {
         assert_eq!(suffix_for_runtime("rknn"), ".rknn");
         assert_eq!(suffix_for_runtime("RKNN"), ".rknn");
-        assert_eq!(suffix_for_runtime("tensorrt"), ".engine");
         assert_eq!(suffix_for_runtime("tflite"), ".tflite");
         assert_eq!(suffix_for_runtime("onnx"), ".onnx");
         assert_eq!(suffix_for_runtime(""), ".onnx");
         assert_eq!(suffix_for_runtime("anything-else"), ".onnx");
+    }
+
+    #[test]
+    fn an_engine_file_upload_is_refused() {
+        assert!(is_unsupported_model_file("detector.engine"));
+        assert!(is_unsupported_model_file("DETECTOR.ENGINE"));
+        assert!(is_unsupported_model_file("dir/yolo.Engine"));
+        // Every format a backend runs is accepted, as is a name with no
+        // extension (the runtime then decides the on-disk suffix).
+        for ok in [
+            "m.rknn",
+            "m.onnx",
+            "m.tflite",
+            "engine",
+            "m.engine.onnx",
+            "",
+        ] {
+            assert!(!is_unsupported_model_file(ok), "{ok} must be accepted");
+        }
     }
 
     #[test]

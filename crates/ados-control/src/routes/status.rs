@@ -149,11 +149,11 @@ const AGENT_DIAGNOSTIC_KEYS: [&str; 18] = [
     "video_profile",
 ];
 
-/// External binaries the video pipeline may use, checked by presence on `PATH`.
-/// Name + whether it is required, mirroring `check_video_dependencies`. The
-/// status surface emits only `{name: found}`; the required flag is carried for
-/// parity with the Python check list and is otherwise unused on this route.
-const VIDEO_DEPENDENCIES: [&str; 5] = [
+/// External binaries the video pipeline may use, checked by presence on `PATH`:
+/// the media server, then the encoder and capture tools. `/api/status` reports
+/// `{name: found}`; `/api/video` reports `{name: {found, path}}` over the same
+/// list.
+pub(crate) const VIDEO_DEPENDENCIES: [&str; 5] = [
     "mediamtx",
     "ffmpeg",
     "rpicam-vid",
@@ -739,19 +739,21 @@ pub(crate) fn derive_fc_reachable(liveness: &FcLiveness) -> bool {
             && (!liveness.fc_variant.is_null() || liveness.fc_link_hint == json!("msp_detected")))
 }
 
-/// True when `name` is found as an executable on `PATH`. Mirrors
+/// True when `name` is found as an executable on `PATH` (see [`binary_path`]).
+fn binary_on_path(name: &str) -> bool {
+    binary_path(name).is_some()
+}
+
+/// The first executable named `name` on `PATH`, or `None`. Mirrors
 /// `shutil.which(name)` for the no-explicit-path case (the dependency names are
 /// bare command names, never absolute paths): walk each `PATH` entry, join the
 /// name, and accept the first regular file that is executable. Off Unix the
 /// executable-bit check is skipped (existence is the signal).
-fn binary_on_path(name: &str) -> bool {
-    let Ok(path_var) = std::env::var("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|dir| {
-        let candidate = dir.join(name);
-        is_executable_file(&candidate)
-    })
+pub(crate) fn binary_path(name: &str) -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
 }
 
 /// True when `path` is a file that is executable by the current user. On Unix the

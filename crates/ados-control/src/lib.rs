@@ -13,6 +13,7 @@
 //! functional but ships dark — no supervisor registration and no systemd unit
 //! enable it yet — until the install layer wires it.
 
+pub mod armed_guard;
 pub mod auth;
 pub mod battery;
 pub mod config;
@@ -23,6 +24,7 @@ pub mod hw_local;
 pub mod ipc;
 pub mod mcp;
 pub mod mdns;
+pub(crate) mod mediamtx_probe;
 pub mod pairing_store;
 pub mod param_store;
 pub mod probe;

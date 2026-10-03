@@ -2,7 +2,7 @@
 //!
 //! - **`GET /api/v1/ground-station/crsf`** — the RC lane's state sidecar
 //!   (`crsf-stats.json`), staleness-gated: the lane daemon rewrites it ~1 Hz
-//!   while running and every ~10 s while idling, so a file older than the
+//!   while running and every 5 s while idling, so a file older than the
 //!   window is an orphan of a dead service and reads `404`, never a stale
 //!   reading served as current.
 //! - **`POST /api/v1/ground-station/crsf/channels`** — programmatic channel
@@ -14,8 +14,9 @@
 //! - **`POST /api/v1/ground-station/crsf/params`** — an RC-module
 //!   configuration parameter write (the packet-rate / TX-power / telemetry
 //!   surface), forwarded as a `param_write` op; the daemon frames it and
-//!   queues it on the transmit lane. Refused while the vehicle is armed unless
-//!   the body says `"force": true`: a rate or power change mid-flight can break
+//!   queues it on the transmit lane. The front's armed interlock
+//!   ([`crate::armed_guard`]) refuses it while the vehicle is armed unless the
+//!   body says `"force": true`: a rate or power change mid-flight can break
 //!   the RC link.
 //!
 //! ## Why the writes forward to the lane's command socket
@@ -54,10 +55,12 @@ const SIDECAR_FILE: &str = "crsf-stats.json";
 /// The lane daemon's command socket filename under the run dir.
 const CMD_SOCK_FILE: &str = "crsf-cmd.sock";
 
-/// How stale the sidecar may be before the route treats it as absent. The
-/// daemon rewrites it ~1 Hz while running and every ~10 s while idling
-/// disabled; beyond this window it is no longer reporting.
-const STALE_AFTER: Duration = Duration::from_secs(30);
+/// How stale the sidecar may be before a reader treats it as absent. The lane
+/// rewrites it ~1 Hz while transmitting and every 5 s while idling, so 10 s is
+/// two idle refreshes; beyond it the lane is no longer reporting. Every reader
+/// of the sidecar (this route and the consolidated status) uses this one window
+/// so the two surfaces never disagree about whether the lane is up.
+pub(crate) const CRSF_STATS_STALE: Duration = Duration::from_secs(10);
 
 /// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override
 /// the sibling sockets + sidecars resolve under.
@@ -111,7 +114,7 @@ pub async fn get_crsf_status(State(state): State<AppState>) -> Response {
 /// and never a stale body served as current.
 fn read_status(path: &Path, now: SystemTime) -> Response {
     // Absent, stale, or future-dated (an unprovable age) all read as no status.
-    if !crate::freshness::is_fresh(path, now, STALE_AFTER) {
+    if !crate::freshness::is_fresh(path, now, CRSF_STATS_STALE) {
         return status_not_found();
     }
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -240,23 +243,6 @@ pub struct CrsfParamWriteBody {
     pub field_index: u8,
     #[serde(default)]
     pub data: Vec<u8>,
-    /// Write even though the vehicle is armed.
-    #[serde(default)]
-    pub force: bool,
-}
-
-/// How old the vehicle state may be before the vehicle is assumed armed.
-const ARMED_STATE_MAX_AGE: Duration = Duration::from_secs(3);
-
-/// Whether the vehicle should be treated as armed: the latest state says so,
-/// or there is no state newer than [`ARMED_STATE_MAX_AGE`] to say otherwise.
-fn vehicle_treated_as_armed(snapshot: Option<(std::time::Instant, Value)>) -> bool {
-    match snapshot {
-        Some((at, state)) if at.elapsed() <= ARMED_STATE_MAX_AGE => {
-            state.get("armed").and_then(Value::as_bool) != Some(false)
-        }
-        _ => true,
-    }
 }
 
 /// `POST /api/v1/ground-station/crsf/params` → queue an RC-module parameter
@@ -267,17 +253,6 @@ pub async fn post_crsf_param_write(
 ) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
-    }
-    if !body.force && vehicle_treated_as_armed(state.state.snapshot_at()) {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": "E_ARMED",
-                "message": "Vehicle is armed",
-                "override": "force",
-            })),
-        )
-            .into_response();
     }
     let request = json!({
         "op": "param_write",
@@ -376,7 +351,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("crsf-stats.json");
         std::fs::write(&path, r#"{"v":1,"state":"link_ok","flyable":true}"#).unwrap();
-        let future = SystemTime::now() + STALE_AFTER + Duration::from_secs(5);
+        let future = SystemTime::now() + CRSF_STATS_STALE + Duration::from_secs(5);
         let resp = read_status(&path, future);
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
@@ -466,25 +441,5 @@ mod tests {
             client_ticket: Some("issued-at-claim".into()),
         });
         assert_eq!(attested["client_ticket"], "issued-at-claim");
-    }
-
-    #[test]
-    fn rf_writes_treat_an_armed_or_unknown_vehicle_as_armed() {
-        let now = std::time::Instant::now();
-        assert!(vehicle_treated_as_armed(None), "no state fails closed");
-        assert!(vehicle_treated_as_armed(Some((
-            now,
-            json!({"armed": true})
-        ))));
-        assert!(!vehicle_treated_as_armed(Some((
-            now,
-            json!({"armed": false})
-        ))));
-        assert!(vehicle_treated_as_armed(Some((now, json!({})))));
-        let stale = now - ARMED_STATE_MAX_AGE - Duration::from_secs(1);
-        assert!(
-            vehicle_treated_as_armed(Some((stale, json!({"armed": false})))),
-            "state older than the bound proves nothing"
-        );
     }
 }

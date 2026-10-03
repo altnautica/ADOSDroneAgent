@@ -33,8 +33,8 @@ fn live_sidecar_body() -> &'static str {
         "version": 1,
         "state": "active",
         "interface": "wlan1",
-        "channel": 149,
-        "frequency_mhz": 5745,
+        "actual_channel": 157,
+        "frequency_mhz": 5785,
         "bandwidth_mhz": 20,
         "adapter_chipset": "rtl8812eu",
         "adapter_injection_ok": true,
@@ -111,8 +111,9 @@ fn the_derived_block_round_trips_through_the_struct_unchanged() {
     // is merely self-consistent cannot pass while carrying nothing.
     assert_eq!(block.state.as_deref(), Some("active"));
     assert_eq!(block.iface.as_deref(), Some("wlan1"));
-    assert_eq!(block.channel, Some(149));
-    assert_eq!(block.freq_mhz, Some(5745));
+    // The live channel, distinct from the configured default of 149.
+    assert_eq!(block.channel, Some(157));
+    assert_eq!(block.freq_mhz, Some(5785));
     assert_eq!(block.rssi_dbm, Some(-40.0));
     assert_eq!(block.bitrate_kbps, Some(4057));
     assert!(block.paired);

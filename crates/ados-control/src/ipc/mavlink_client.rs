@@ -6,9 +6,8 @@
 //! raw MAVLink frame the router then forwards to the serial link. It is the
 //! command routes' only path to the FC.
 //!
-//! The frame contract is the same `ados.core.ipc` framing the Python
-//! `MavlinkIPCClient.send` uses: a 4-byte big-endian length prefix followed by
-//! exactly that many raw MAVLink v2 bytes (`struct.pack("!I", len(data)) + data`).
+//! The frame contract is the router's MAVLink-socket framing: a 4-byte
+//! big-endian length prefix followed by exactly that many raw MAVLink v2 bytes.
 //! The router reads the prefix, then the payload, and forwards the payload
 //! verbatim to the FC.
 //!

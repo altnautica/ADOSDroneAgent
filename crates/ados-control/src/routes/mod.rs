@@ -5,8 +5,8 @@
 //! either. This surface registers `/healthz`, `/api/version`, `/api/status`,
 //! `/api/telemetry`, `/api/time`, `/api/params`, `/api/services`, the two
 //! `/api/fleet/*` routes, the three `/api/mavlink/signing/*` reads, the four
-//! `/api/wfb*` reads, the four `/api/pairing/*` routes, and the two
-//! `/api/command{,s}` routes. Every other path falls through to the proxy.
+//! `/api/wfb*` reads, the five `/api/pairing/*` routes, and the two
+//! `/api/command{,s}` routes. Every other path goes to the fallback dispatch.
 //!
 //! Error bodies use FastAPI's `{"detail": "..."}` shape on 4xx/5xx, NOT the
 //! logd read-API's `{"error": {...}}` envelope, because the GCS already parses
@@ -26,6 +26,7 @@ pub mod cloud_link;
 pub mod command;
 pub mod config_rw;
 pub mod config_schema;
+pub mod dashboard;
 pub mod dashboard_pin;
 pub mod diag_storage;
 pub mod diagnostics;
@@ -35,6 +36,7 @@ pub mod gs_bluetooth;
 pub mod gs_camera_write;
 pub mod gs_cmd;
 pub mod gs_crsf;
+pub mod gs_factory_reset;
 pub mod gs_fleet_enroll;
 pub mod gs_fleet_hero;
 pub mod gs_fleet_slot;
@@ -57,6 +59,7 @@ pub mod gs_ui_write;
 pub mod gs_wfb_pair;
 pub mod gs_wfb_write;
 pub mod gs_ws;
+pub mod hls;
 pub mod logs;
 pub mod logs_write;
 pub mod mac_adapters;
@@ -82,13 +85,17 @@ pub mod service_control;
 pub mod services;
 pub mod signing;
 pub mod signing_write;
+pub mod static_ui;
 pub mod status;
 pub mod status_full;
 pub mod swarm;
 pub mod system;
 pub mod system_resources;
 pub mod video;
+pub mod video_config_write;
 pub mod video_profile;
+pub mod video_snapshot;
+pub mod video_status;
 pub mod vision;
 pub mod vision_detector;
 pub mod vision_upload;
@@ -105,7 +112,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde_json::json;
 
-use crate::proxy::proxy_to_residual;
+use crate::proxy::non_native_fallback;
 use crate::state::AppState;
 
 /// Build a FastAPI-shaped error response: `(status, {"detail": message})`. Every
@@ -121,11 +128,12 @@ pub fn detail(status: StatusCode, message: impl Into<String>) -> Response {
 /// both edges; the auth/rate-limit layer is added per edge by the serve loop.
 /// `/healthz` sits at the root; everything else is mounted under `/api`.
 ///
-/// Any path not registered here falls through to the reverse-proxy fallback,
-/// which forwards it to the residual Python over its internal Unix socket (and
-/// degrades cleanly to a FastAPI-shaped `{"detail"}` when that upstream is
-/// absent), so the front serves the migrated routes natively and proxies the
-/// rest while the migration is in flight.
+/// Any path not registered here goes to the fallback
+/// ([`crate::proxy::non_native_fallback`]), which dispatches on
+/// [`crate::routing::classify`]: only the permanent-Python prefixes are
+/// forwarded to the residual app over its internal Unix socket; `/hls/*` is
+/// relayed to mediamtx, the operator UI is served from its bundles, and any
+/// other `/api` path is a FastAPI-shaped 404.
 pub fn build_router(state: AppState, hid_native: bool) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(system::healthz))
@@ -162,6 +170,9 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route("/api/pairing/code", get(pairing::get_pairing_code))
         .route("/api/pairing/claim", post(pairing::claim_pairing))
         .route("/api/pairing/unpair", post(pairing::unpair))
+        // External-code accept: registers against a Mission Control code at the
+        // pairing backend, then claims locally. Requires the key when paired.
+        .route("/api/pairing/accept", post(pairing::accept_pairing_code))
         // Command: the fire-and-forget text-command executor (auth-gated when
         // paired) + the catalog. The executor builds a MAVLink frame and writes
         // it to the mavlink socket; the catalog is the static command list.
@@ -432,6 +443,11 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // The consolidated status: agent info, services, resources, video,
         // telemetry, radio, and mesh in one round-trip.
         .route("/api/status/full", get(status_full::get_full_status))
+        // The agent webapp's one-pager poll: video, FC and cloud slices.
+        .route(
+            "/api/v1/dashboard/snapshot",
+            get(dashboard::get_dashboard_snapshot),
+        )
         // The swarm neighbour table: every node in this fleet whose beacon this node
         // currently hears. PROFILE-AGNOSTIC on purpose — a drone answering this with
         // the ground station powered off is what makes the bus decentralized rather
@@ -461,18 +477,31 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
             "/api/diag/storage",
             get(diag_storage::get_storage_diagnostics),
         )
-        // Video reads: glass-to-glass latency and the encoder/radio config (the
-        // snapshot/record/switch writes + the camera-enumeration route stay
-        // proxied).
+        // Video pipeline: the composite status (cameras, mediamtx `main`
+        // readiness, tool dependencies, WHEP/HLS URLs), the discovered-camera
+        // enumeration, a one-shot still from the live primary stream,
+        // glass-to-glass latency, and the encoder/radio config read + the
+        // link-tuning write (forwarded to the radio's data-plane socket).
+        .route("/api/video", get(video_status::get_video_status))
+        .route(
+            "/api/video/cameras",
+            get(video_status::get_video_camera_list),
+        )
+        .route(
+            "/api/video/snapshot",
+            get(video_snapshot::get_video_snapshot),
+        )
         .route("/api/video/latency", get(video::get_video_latency))
-        .route("/api/video/config", get(video::get_video_config))
+        .route(
+            "/api/video/config",
+            get(video::get_video_config).post(video_config_write::post_video_config),
+        )
         // Camera roster: the reconciled per-node camera list (declared legs +
         // discovered devices + live stream state) the Cameras management surface
         // renders (GET, guaranteed 200), plus the operator write that persists the
         // leg list (PUT → the supervisor's merge-by-owner persist + restart). This
-        // lives at /api/video/roster, distinct from the legacy /api/video/cameras
-        // switchable-camera enumeration ({cameras, assignments}) which the ground
-        // station's camera switch still serves from the residual API.
+        // lives at /api/video/roster, distinct from the flat /api/video/cameras
+        // enumeration ({cameras, assignments}).
         .route(
             "/api/video/roster",
             get(camera_config::get_video_cameras).put(camera_config::put_video_cameras),
@@ -653,11 +682,16 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route("/api/v1/ground-station/ws/buttons", get(gs_ws::ws_buttons))
         // Wi-Fi client saved-profile read (profile-agnostic): a read-only nmcli
         // listing. The live station status is registered below with the writes,
-        // because it reads the same uplink-daemon socket they drive. The scan stays
-        // proxied (its rescan is a side effect with no daemon-socket op).
+        // because it reads the same uplink-daemon socket they drive.
         .route(
             "/api/v1/network/client/configured",
             get(network_client_read::get_client_configured),
+        )
+        // Nearby-network scan on the station interface, through the same Wi-Fi
+        // command socket.
+        .route(
+            "/api/v1/network/client/scan",
+            get(network_client_read::get_client_scan),
         )
         // MAC-pin read: the per-adapter stable-MAC verdicts from the on-disk state
         // file (a pure read, the same file the pin write resolves a candidate from).
@@ -711,6 +745,11 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route(
             "/api/v1/ground-station/wfb/pair/:device_id",
             delete(gs_wfb_pair::delete_fleet_slot),
+        )
+        // Return the station to first-boot posture. On-box callers only.
+        .route(
+            "/api/v1/ground-station/factory-reset",
+            post(gs_factory_reset::post_factory_reset),
         )
         // Ground-station video writes: recording start/stop + the camera-source switch.
         .route(
@@ -859,8 +898,15 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
             );
     }
 
-    // Everything else: reverse-proxy to the residual Python.
-    router.fallback(proxy_to_residual).with_state(state)
+    // Everything else: the fallback dispatch. The armed interlock wraps the
+    // native routes and the fallback alike, so it runs before either.
+    router
+        .fallback(non_native_fallback)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::armed_guard::armed_guard,
+        ))
+        .with_state(state)
 }
 
 #[cfg(test)]

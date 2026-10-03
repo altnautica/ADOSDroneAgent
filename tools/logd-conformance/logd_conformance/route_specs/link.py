@@ -15,7 +15,6 @@ _WFB_STATUS_COMMON = [
     "state",
     "link_state",
     "interface",
-    "channel",
     "actual_channel",
     "rendezvous_channel",
     "operating_channel",

@@ -281,7 +281,7 @@ fn default_screens() -> Map<String, Value> {
 fn default_display() -> Map<String, Value> {
     json_object(json!({
         "resolution": "auto",
-        "kiosk_enabled": false,
+        "kiosk_enabled": true,
         "kiosk_target_url": Value::Null,
     }))
 }
@@ -776,6 +776,10 @@ const ALLOWED_RESOLUTIONS: [&str; 3] = ["auto", "720p", "1080p"];
 /// `ground_station.kiosk` section, applies the supplied fields, persists the merged
 /// config back into `ground_station.kiosk`, and echoes the merged config. A persist
 /// fault is a `500 E_UI_SAVE_FAILED`.
+///
+/// A kiosk that is disabled exits and stays down, so turning it back on
+/// restarts `ados-kiosk`. Disabling it and changing the resolution need no
+/// restart: the running kiosk watches the config and applies both itself.
 pub async fn put_display(
     State(state): State<AppState>,
     Json(update): Json<DisplayUpdate>,
@@ -783,7 +787,19 @@ pub async fn put_display(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    put_display_at(&config_yaml_path(&state), &update)
+    let path = config_yaml_path(&state);
+    let was_enabled = display_wire_from_kiosk(&read_gs_kiosk_section(&path))
+        .get("kiosk_enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let response = put_display_at(&path, &update);
+    if response.status().is_success() && update.kiosk_enabled == Some(true) && !was_enabled {
+        let outcome = crate::routes::service_control::restart_unit("ados-kiosk").await;
+        if outcome.get("status").and_then(Value::as_str) == Some("error") {
+            tracing::warn!(outcome = %outcome, "kiosk enabled but its restart failed");
+        }
+    }
+    response
 }
 
 /// The display-write logic against an explicit YAML config path. Seeds the current
@@ -1252,7 +1268,7 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["resolution"], json!("720p"));
         // The unset fields keep their defaults.
-        assert_eq!(body["kiosk_enabled"], json!(false));
+        assert_eq!(body["kiosk_enabled"], json!(true));
         assert_eq!(body["kiosk_target_url"], json!(null));
     }
 
@@ -1279,7 +1295,7 @@ mod tests {
         // kiosk_enabled falls to the default (the stored section had no `enabled`).
         assert_eq!(body["resolution"], json!("720p"));
         assert_eq!(body["kiosk_target_url"], json!("http://old/hud"));
-        assert_eq!(body["kiosk_enabled"], json!(false));
+        assert_eq!(body["kiosk_enabled"], json!(true));
 
         let parsed: serde_norway::Value =
             serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();

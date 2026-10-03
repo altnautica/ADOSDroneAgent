@@ -17,7 +17,9 @@
 //!   store, which preserves every other key and the file's 0600 mode.
 //!
 //! Response shapes match the handlers they replace: the write answers
-//! `{status, key, value, persisted[, persist_error]}`, a key the model does not
+//! `{status: "ok", key, value, persisted: true}`, or a 500 `{status: "error",
+//! key, value, persisted: false, persist_error}` when the file write failed (the
+//! route has no other effect, so nothing was taken), a key the model does not
 //! have is a 200 `{"error": "Key not found: <key>"}`, a string that does not
 //! coerce is a 200 `{"error": "Invalid value: …"}`, a value the field rejects is a
 //! 422 `E_VALIDATION`, and writing the `***` sentinel to a secret is a 400
@@ -165,7 +167,7 @@ fn merge(node: &Value, base: Value, overlay: &Value) -> Value {
 /// The effective config: schema defaults overlaid with `config.yaml`. An absent
 /// file is the defaults; an unreadable or unparseable one is an error, never a
 /// silent fall back to defaults the node is not running.
-fn effective_config(config_path: &Path) -> Result<Value, String> {
+pub(crate) fn effective_config(config_path: &Path) -> Result<Value, String> {
     let defaults = default_of(&SCHEMA).unwrap_or_else(|| json!({}));
     let text = match std::fs::read_to_string(config_path) {
         Ok(text) => text,
@@ -335,13 +337,26 @@ fn put_config_at(config_path: &Path, update: &ConfigUpdate) -> Response {
             .insert(serde_norway::Value::String(last[0].to_string()), yaml_value);
         Ok(())
     });
-    let mut body =
-        json!({ "status": "ok", "key": key, "value": value, "persisted": persisted.is_ok() });
-    if let Err(e) = persisted {
-        tracing::warn!(error = %e, key, "config write failed");
-        body["persist_error"] = json!(e.to_string());
+    // The route has no live-apply leg, so a value that did not reach the file
+    // took no effect at all: that is a server error, not a success.
+    match persisted {
+        Ok(_) => Json(json!({ "status": "ok", "key": key, "value": value, "persisted": true }))
+            .into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, key, "config write failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "key": key,
+                    "value": value,
+                    "persisted": false,
+                    "persist_error": e.to_string(),
+                })),
+            )
+                .into_response()
+        }
     }
-    Json(body).into_response()
 }
 
 /// Coerce a string to the type the field currently holds (text callers can only
@@ -551,6 +566,11 @@ mod tests {
             ("ui.theme", json!("purple")),
             ("agent.name", json!(5)),
             ("mavlink.endpoints", json!("x")),
+            // Past the native readers' integer widths: the router and the radio
+            // would otherwise drop their whole section to defaults at start.
+            ("mavlink.system_id", json!(300)),
+            ("video.wfb.fec_n", json!(300)),
+            ("video.wfb.tx_power_dbm", json!(200)),
         ] {
             let (status, body) = body_of(put_config_at(&cfg, &update(key, value))).await;
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{key}");

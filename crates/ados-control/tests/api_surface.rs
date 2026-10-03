@@ -23,8 +23,8 @@ const REGENERATE: &str =
 /// Every `(METHOD, path)` row in one `##` section of the committed table.
 ///
 /// Section-aware, because a path alone does not identify which half serves
-/// it: `GET /api/video/config` is native and `POST /api/video/config` is
-/// residual. Keying on the path collapses those two into one, which is the
+/// it: a native `GET` and a residual `POST` can share one path. Keying on the
+/// path collapses those two into one, which is the
 /// same `(method, path)`-vs-`path` confusion that had the generator erasing
 /// the residual row outright.
 fn rows_in_section(heading_prefix: &str) -> BTreeSet<(String, String)> {

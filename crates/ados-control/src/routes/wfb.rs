@@ -37,7 +37,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use ados_protocol::wfb_status::{
-    build_status_from_stats_file_at, derive_wfb_status, WfbStatusConfig,
+    build_status_from_stats_file_at, derive_wfb_status, now_unix_micros, WfbStatusConfig,
+    WFB_STALE_AGE_US,
 };
 use axum::extract::{Query, State};
 use axum::Json;
@@ -84,25 +85,43 @@ fn wfb_failover_path() -> PathBuf {
 /// `GET /api/wfb` → the current WFB-ng link status.
 ///
 /// Reads the radio's full status body from the store's most-recent
-/// `link.wfb_status` event, falling back to the `wfb-stats.json` sidecar when the
-/// store is unreachable or has captured no event yet. Both paths produce a
+/// `link.wfb_status` event while that row is fresh, else from the
+/// `wfb-stats.json` sidecar (see [`choose_wfb_status`]). Both paths produce a
 /// byte-identical body: the config-seeded base, the producer payload merged over
 /// it, the live `regulatory_domain` re-asserted, the frequency/bandwidth
 /// re-derived from the channel, and the `bitrate_mbps` shim. Guaranteed 200.
 pub async fn get_wfb_status(State(state): State<AppState>) -> Json<Value> {
     let cfg = WfbStatusConfig::load(&status_config_path());
+    let store = latest_wfb_status(&state).await;
+    Json(choose_wfb_status(
+        store,
+        &cfg,
+        &wfb_stats_path(),
+        now_unix_micros(),
+    ))
+}
 
-    // Store-first: the radio ships the full status body to the durable store each
-    // heartbeat as a `link.wfb_status` event. The base regulatory domain (one live
-    // `iw reg get`) is the value both paths carry; the stored body's `reg_domain`
-    // (a different key) never overwrites it.
-    if let Some((detail, ts_us)) = latest_wfb_status(&state).await {
-        return Json(derive_wfb_status(&detail, ts_us, &cfg));
+/// Pick the WFB status source.
+///
+/// A fresh store row wins: the radio ships its full status body there each
+/// heartbeat. A store row older than the staleness window does not: the radio
+/// rewrites `wfb-stats.json` about once a second independently of the store, so
+/// when its event emission lags or stops the sidecar still carries the live
+/// link. The stale row is used only when there is no sidecar at all, where it
+/// reports `state: "stale"` rather than nothing.
+pub(crate) fn choose_wfb_status(
+    store: Option<(Map<String, Value>, i64)>,
+    cfg: &WfbStatusConfig,
+    sidecar: &Path,
+    now_us: i64,
+) -> Value {
+    match store {
+        Some((detail, ts_us)) if ts_us > 0 && now_us - ts_us <= WFB_STALE_AGE_US => {
+            derive_wfb_status(&detail, ts_us, cfg)
+        }
+        Some((detail, ts_us)) if !sidecar.exists() => derive_wfb_status(&detail, ts_us, cfg),
+        _ => build_status_from_stats_file_at(cfg, sidecar),
     }
-
-    // Sidecar fallback: read `wfb-stats.json`, merge over the base, flip to
-    // `"stale"` when the file mtime is older than 10 s.
-    Json(build_status_from_stats_file_at(&cfg, &wfb_stats_path()))
 }
 
 /// The most-recent full wfb-status snapshot + its emit timestamp, or `None`.
@@ -461,12 +480,13 @@ mod tests {
             );
         }
 
-        // The 27-field key set, pinned as a whole so a field cannot appear or
+        // The 28-field key set, pinned as a whole so a field cannot appear or
         // vanish from the served body unnoticed.
         let want = json!({
             "state": "disabled",
             "interface": "",
             "channel": 0,
+            "actual_channel": null,
             "frequency_mhz": 0,
             "bandwidth_mhz": 0,
             "adapter": {"driver": "", "chipset": "", "supports_monitor": false},
@@ -515,9 +535,10 @@ mod tests {
 
     #[test]
     fn finalize_derives_frequency_bandwidth_and_bitrate_mbps() {
-        // A merged body on channel 149 with 5000 kbps must re-derive 5745/20 and a 5.0 mbps shim.
+        // A merged body live on channel 149 with 5000 kbps must re-derive 5745/20
+        // and a 5.0 mbps shim.
         let mut merged = Map::new();
-        merged.insert("channel".to_string(), json!(149));
+        merged.insert("actual_channel".to_string(), json!(149));
         merged.insert("bitrate_kbps".to_string(), json!(5000));
         let out = finalize_wfb_status(merged);
         assert_eq!(out["frequency_mhz"], json!(5745));
@@ -530,7 +551,7 @@ mod tests {
         // An unknown channel does not re-derive freq/bandwidth (stay as merged in),
         // and a zero/absent bitrate yields a 0.0 shim.
         let mut merged = Map::new();
-        merged.insert("channel".to_string(), json!(7)); // not a standard WFB channel
+        merged.insert("actual_channel".to_string(), json!(7)); // not a standard WFB channel
         merged.insert("frequency_mhz".to_string(), json!(2442));
         merged.insert("bandwidth_mhz".to_string(), json!(40));
         let out = finalize_wfb_status(merged);
@@ -546,7 +567,7 @@ mod tests {
         let cfg = WfbStatusConfig::default();
         let mut detail = Map::new();
         detail.insert("state".to_string(), json!("active"));
-        detail.insert("channel".to_string(), json!(149));
+        detail.insert("actual_channel".to_string(), json!(149));
         detail.insert("rssi_dbm".to_string(), json!(-55.0));
         detail.insert("bitrate_kbps".to_string(), json!(8000));
         detail.insert("reg_domain".to_string(), json!("XX")); // different key, ignored
@@ -569,11 +590,36 @@ mod tests {
         let cfg = WfbStatusConfig::default();
         let mut detail = Map::new();
         detail.insert("state".to_string(), json!("active"));
-        detail.insert("channel".to_string(), json!(36));
+        detail.insert("actual_channel".to_string(), json!(36));
         // An event 20 s old (> the 10 s threshold) flips to "stale".
         let ts_us = now_unix_micros() - 20_000_000;
         let out = derive_wfb_status(&detail, ts_us, &cfg);
         assert_eq!(out["state"], json!("stale"));
+    }
+
+    #[test]
+    fn a_stale_store_row_yields_to_a_live_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("wfb-stats.json");
+        let cfg = WfbStatusConfig::default();
+        let now = now_unix_micros();
+        let mut detail = Map::new();
+        detail.insert("state".to_string(), json!("from_store"));
+
+        // A fresh row wins even with a sidecar present.
+        std::fs::write(&sidecar, r#"{"state":"from_sidecar"}"#).unwrap();
+        let fresh = choose_wfb_status(Some((detail.clone(), now)), &cfg, &sidecar, now);
+        assert_eq!(fresh["state"], json!("from_store"));
+
+        // A row past the window yields to the live sidecar.
+        let old = now - 20_000_000;
+        let live = choose_wfb_status(Some((detail.clone(), old)), &cfg, &sidecar, now);
+        assert_eq!(live["state"], json!("from_sidecar"));
+
+        // With no sidecar at all the old row still reports, as stale.
+        std::fs::remove_file(&sidecar).unwrap();
+        let only = choose_wfb_status(Some((detail, old)), &cfg, &sidecar, now);
+        assert_eq!(only["state"], json!("stale"));
     }
 
     #[test]
@@ -667,7 +713,7 @@ mod tests {
         let stats = dir.path().join("wfb-stats.json");
         let cfg = WfbStatusConfig::default();
         let out = build_status_from_stats_file_at(&cfg, &stats);
-        // The bare base carries the 27 keys with no `bitrate_mbps` shim (the
+        // The bare base carries the 28 keys with no `bitrate_mbps` shim (the
         // FastAPI absent-file path skips finalize).
         assert_eq!(out["state"], json!("disabled"));
         assert_eq!(out["channel"], json!(0));

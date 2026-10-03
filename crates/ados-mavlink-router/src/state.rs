@@ -42,6 +42,9 @@ pub struct BatteryPack {
     pub consumed_wh: Option<f64>,
     /// `MAV_BATTERY_FUNCTION` as its numeric value.
     pub function: u8,
+    /// When this id's last BATTERY_STATUS arrived. Published as `age_ms`, so a
+    /// pack whose stream stopped is told apart from one still reporting.
+    pub received_at: Option<std::time::Instant>,
 }
 
 impl BatteryPack {
@@ -55,10 +58,16 @@ impl BatteryPack {
             consumed_mah: (m.current_consumed != -1).then_some(m.current_consumed as i64),
             consumed_wh: (m.energy_consumed != -1).then(|| m.energy_consumed as f64 / 36.0),
             function: m.battery_function as u8,
+            received_at: Some(std::time::Instant::now()),
         }
     }
 
     fn to_wire(&self) -> Value {
+        let age_ms = self.received_at.map(|at| {
+            std::time::Instant::now()
+                .saturating_duration_since(at)
+                .as_millis() as u64
+        });
         json!({
             "id": self.id,
             "cell_voltages": self.cell_voltages,
@@ -68,6 +77,7 @@ impl BatteryPack {
             "consumed_mah": self.consumed_mah,
             "consumed_wh": self.consumed_wh,
             "function": self.function,
+            "age_ms": age_ms,
         })
     }
 }
@@ -370,12 +380,14 @@ impl VehicleState {
     /// Returns `Some((name, value, param_type))` when the message was a
     /// `PARAM_VALUE`, so the caller can persist it to the param cache (the
     /// Python producer writes the cache inline; keeping it I/O-free here lets
-    /// the caller own persistence).
+    /// the caller own persistence). The value is decoded for the vehicle's
+    /// firmware: a PX4 integer parameter arrives as its integer bytes in the
+    /// float field, and its float reading would be garbage.
     pub fn update_from_message(
         &mut self,
         msg: &MavMessage,
         now_iso: &str,
-    ) -> Option<(String, f32, i64)> {
+    ) -> Option<(String, f64, i64)> {
         self.last_update = now_iso.to_string();
         match msg {
             MavMessage::HEARTBEAT(m) => {
@@ -502,7 +514,13 @@ impl VehicleState {
             MavMessage::PARAM_VALUE(m) => {
                 let name = param_id_to_string(&m.param_id[..]);
                 self.param_count = m.param_count as i64;
-                Some((name, m.param_value, m.param_type as i64))
+                let param_type = m.param_type as u8;
+                let value = ados_protocol::param_codec::decode(
+                    m.param_value,
+                    param_type,
+                    ados_protocol::param_codec::uses_bytewise(self.autopilot),
+                );
+                Some((name, value, i64::from(param_type)))
             }
             _ => None,
         }
@@ -981,6 +999,57 @@ mod tests {
         assert_eq!(name, "WPNAV");
         assert_eq!(value, 1234.5);
         assert_eq!(s.param_count, 700);
+    }
+
+    #[test]
+    fn a_px4_integer_param_is_decoded_from_its_bytes() {
+        use ados_protocol::mavlink::ardupilotmega::MavParamType;
+        let mut s = VehicleState::default();
+        s.update_from_message(&heartbeat_px4(MavType::MAV_TYPE_QUADROTOR, 0), TS);
+        let mut param_id = [0u8; 16];
+        param_id[..8].copy_from_slice(b"COM_RC_L");
+        let value_frame = |raw: f32, param_type: MavParamType| {
+            MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                param_value: raw,
+                param_count: 1,
+                param_index: 0,
+                param_id: param_id.into(),
+                param_type,
+            })
+        };
+        let r = s.update_from_message(
+            &value_frame(
+                f32::from_le_bytes(5i32.to_le_bytes()),
+                MavParamType::MAV_PARAM_TYPE_INT32,
+            ),
+            TS,
+        );
+        let (_name, value, ptype) = r.unwrap();
+        assert_eq!(value, 5.0, "PX4 packs INT32 bytewise");
+        assert_eq!(ptype, 6);
+        // A float param on the same vehicle is the float itself.
+        let (_n, value, _t) = s
+            .update_from_message(&value_frame(0.25, MavParamType::MAV_PARAM_TYPE_REAL32), TS)
+            .unwrap();
+        assert_eq!(value, 0.25);
+    }
+
+    #[test]
+    fn an_ardupilot_integer_param_is_the_float_it_sent() {
+        use ados_protocol::mavlink::ardupilotmega::MavParamType;
+        let mut s = VehicleState::default();
+        s.update_from_message(&heartbeat(MavType::MAV_TYPE_QUADROTOR, 0, false), TS);
+        let r = s.update_from_message(
+            &MavMessage::PARAM_VALUE(PARAM_VALUE_DATA {
+                param_value: 5.0,
+                param_count: 1,
+                param_index: 0,
+                param_id: [0u8; 16].into(),
+                param_type: MavParamType::MAV_PARAM_TYPE_INT32,
+            }),
+            TS,
+        );
+        assert_eq!(r.unwrap().1, 5.0);
     }
 
     #[test]

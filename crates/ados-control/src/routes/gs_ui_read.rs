@@ -16,7 +16,7 @@
 //! - **`GET /api/v1/ground-station/display`** — the persisted HDMI kiosk display
 //!   config: `{resolution, kiosk_enabled, kiosk_target_url}`, the
 //!   `ground_station.kiosk` section of the agent config projected over the defaults
-//!   (`resolution "auto"`, `kiosk_enabled false`, `kiosk_target_url null`). Same
+//!   (`resolution "auto"`, `kiosk_enabled true`, `kiosk_target_url null`). Same
 //!   fault-tolerant read.
 //!
 //! Both reads source the YAML agent config, the single source of truth the
@@ -195,7 +195,7 @@ fn default_screens() -> Map<String, Value> {
 fn default_display() -> Map<String, Value> {
     json_object(json!({
         "resolution": "auto",
-        "kiosk_enabled": false,
+        "kiosk_enabled": true,
         "kiosk_target_url": Value::Null,
     }))
 }
@@ -367,7 +367,7 @@ mod tests {
         let got = build_display_config(&kiosk);
         let want = json!({
             "resolution": "auto",
-            "kiosk_enabled": false,
+            "kiosk_enabled": true,
             "kiosk_target_url": null,
         });
         assert_eq!(got, want);
@@ -423,7 +423,7 @@ mod tests {
         // Which projects to the all-defaults display.
         assert_eq!(
             build_display_config(&read_gs_kiosk_section(&cfg)),
-            json!({"resolution": "auto", "kiosk_enabled": false, "kiosk_target_url": null})
+            json!({"resolution": "auto", "kiosk_enabled": true, "kiosk_target_url": null})
         );
     }
 }

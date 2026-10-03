@@ -82,20 +82,26 @@ enum NetCmd {
     /// The socket was unreachable / did not reply / replied unparseably: the
     /// FastAPI command-socket-unavailable case the front maps to a 503.
     Unavailable,
+    /// The daemon accepted the command but had not answered by the deadline. The
+    /// operation may still complete (a join waits on NetworkManager), so this is
+    /// a 504 telling the caller to poll the station status, never "not running".
+    TimedOut,
 }
 
 /// Send one newline-terminated JSON request to the Wi-Fi command socket and read
 /// one newline-terminated JSON reply, branching on the transport `ok` flag.
 ///
-/// Mirrors the FastAPI Wi-Fi command client's round-trip + strip-ok: a reachable
-/// socket that replies with `ok:true` yields [`NetCmd::Reply`] with the `ok` key
-/// removed; `ok:false` yields [`NetCmd::Error`] with the reply's `error` code; an
-/// unreachable socket / a read error / an unparseable or non-object reply all
-/// yield [`NetCmd::Unavailable`] so the caller can take the front's no-fallback
-/// 503 posture. The read is bounded so a runaway reply cannot exhaust memory.
+/// A reachable socket that replies with `ok:true` yields [`NetCmd::Reply`] with
+/// the `ok` key removed; `ok:false` yields [`NetCmd::Error`] with the reply's
+/// `error` code; a daemon that accepted but did not answer in time yields
+/// [`NetCmd::TimedOut`]; an unreachable socket / a read error / an unparseable
+/// or non-object reply yield [`NetCmd::Unavailable`] so the caller can take the
+/// front's no-fallback 503 posture. The read is bounded so a runaway reply
+/// cannot exhaust memory.
 async fn wifi_cmd(sock: &std::path::Path, request: &Value) -> NetCmd {
     match crate::ipc::cmd::roundtrip_line(sock, request, WIFI_CMD_TIMEOUT).await {
         Ok(first) => classify_reply(&first),
+        Err(crate::ipc::cmd::CmdFailure::Timeout) => NetCmd::TimedOut,
         Err(_) => NetCmd::Unavailable,
     }
 }
@@ -160,6 +166,17 @@ fn socket_unavailable(code: &str) -> Response {
     )
 }
 
+/// The 504 for a command the daemon accepted but had not finished by the
+/// deadline. It may still complete, so the caller polls the station status
+/// instead of retrying into the in-flight operation.
+fn command_in_progress(code: &str) -> Response {
+    wifi_error(
+        StatusCode::GATEWAY_TIMEOUT,
+        code,
+        "The Wi-Fi change is still in progress. Poll /api/v1/network/client/status for the result.",
+    )
+}
+
 // ---------------------------------------------------------------------------
 // PUT /api/v1/network/client/join
 // ---------------------------------------------------------------------------
@@ -204,6 +221,7 @@ async fn put_client_join_at(sock: &std::path::Path, req: WifiJoinRequest) -> Res
             return wifi_error(StatusCode::INTERNAL_SERVER_ERROR, "E_WIFI_JOIN_FAILED", msg);
         }
         NetCmd::Unavailable => return socket_unavailable("E_WIFI_JOIN_FAILED"),
+        NetCmd::TimedOut => return command_in_progress("E_WIFI_JOIN_IN_PROGRESS"),
     };
 
     // The AP-mutex conflict: a join refused because the AP is up and `force` was
@@ -246,6 +264,62 @@ fn join_response(reply: &Map<String, Value>) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Nearby-network scan (shared by the station and ground-station scan reads)
+// ---------------------------------------------------------------------------
+
+/// Why a scan produced no network list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WifiScanError {
+    /// Nothing serves the Wi-Fi command socket.
+    Unavailable,
+    /// The daemon accepted the scan but had not answered by the deadline.
+    TimedOut,
+    /// The daemon ran the scan and it failed (no station radio, `iw` error).
+    Failed(String),
+}
+
+/// Run a nearby-network scan through the Wi-Fi command socket's `wifi_scan`
+/// op. The daemon owns the station radio, so the scan runs there (serialized
+/// with joins) rather than in this process. Each row is
+/// `{ssid, bssid, signal (dBm), frequency_mhz, channel, security, in_use}`,
+/// strongest first.
+pub(crate) async fn wifi_scan() -> Result<Vec<Value>, WifiScanError> {
+    wifi_scan_at(&wifi_cmd_sock()).await
+}
+
+/// The path-injectable core of [`wifi_scan`], for tests.
+pub(crate) async fn wifi_scan_at(sock: &std::path::Path) -> Result<Vec<Value>, WifiScanError> {
+    match wifi_cmd(sock, &json!({"op": "wifi_scan"})).await {
+        NetCmd::Reply(mut r) => Ok(match r.remove("networks") {
+            Some(Value::Array(rows)) => rows,
+            _ => Vec::new(),
+        }),
+        NetCmd::Error(msg) => Err(WifiScanError::Failed(msg)),
+        NetCmd::Unavailable => Err(WifiScanError::Unavailable),
+        NetCmd::TimedOut => Err(WifiScanError::TimedOut),
+    }
+}
+
+/// The HTTP answer for a scan outcome: `{"networks": [...]}`, a 503
+/// `E_SCAN_UNAVAILABLE` when nothing serves the socket, a 504 when the scan
+/// outlived the deadline, or a 500 `E_WIFI_SCAN_FAILED` carrying the daemon's
+/// reason.
+pub(crate) fn wifi_scan_response(result: Result<Vec<Value>, WifiScanError>) -> Response {
+    match result {
+        Ok(networks) => Json(json!({ "networks": networks })).into_response(),
+        Err(WifiScanError::Unavailable) => socket_unavailable("E_SCAN_UNAVAILABLE"),
+        Err(WifiScanError::TimedOut) => wifi_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "E_WIFI_SCAN_TIMEOUT",
+            "The scan did not finish in time. Try again.",
+        ),
+        Err(WifiScanError::Failed(msg)) => {
+            wifi_error(StatusCode::INTERNAL_SERVER_ERROR, "E_WIFI_SCAN_FAILED", msg)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DELETE /api/v1/network/client
 // ---------------------------------------------------------------------------
 
@@ -268,6 +342,7 @@ async fn delete_client_at(sock: &std::path::Path) -> Response {
             msg,
         ),
         NetCmd::Unavailable => socket_unavailable("E_WIFI_LEAVE_FAILED"),
+        NetCmd::TimedOut => command_in_progress("E_WIFI_LEAVE_IN_PROGRESS"),
     }
 }
 
@@ -298,6 +373,7 @@ async fn delete_client_configured_at(sock: &std::path::Path, name: String) -> Re
             );
         }
         NetCmd::Unavailable => return socket_unavailable("E_WIFI_FORGET_FAILED"),
+        NetCmd::TimedOut => return command_in_progress("E_WIFI_FORGET_IN_PROGRESS"),
     };
 
     // A processed-but-failed forget (forgot:false) is the FastAPI 400, with the
@@ -364,6 +440,7 @@ async fn put_client_autoconnect_at(
             );
         }
         NetCmd::Unavailable => return socket_unavailable("E_WIFI_AUTOCONNECT_FAILED"),
+        NetCmd::TimedOut => return command_in_progress("E_WIFI_AUTOCONNECT_IN_PROGRESS"),
     };
 
     // A processed-but-failed toggle carries a truthy `error` (the manager reports

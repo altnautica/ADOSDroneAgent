@@ -781,7 +781,7 @@ impl FcConnection {
                             // Same off-reactor persistence as the live read loop:
                             // serialise under the lock, then write off the reactor.
                             if let Some((path, body)) = self
-                                .record_param(&name, value as f64, ptype, &mut since_save)
+                                .record_param(&name, value, ptype, &mut since_save)
                                 .await
                             {
                                 self.param_persister.persist(path, body);
@@ -946,7 +946,7 @@ impl FcConnection {
                         // write off-reactor so neither the params lock nor a
                         // worker thread is held across blocking I/O.
                         if let Some((path, body)) = self
-                            .record_param(&name, value as f64, ptype, &mut since_save)
+                            .record_param(&name, value, ptype, &mut since_save)
                             .await
                         {
                             self.param_persister.persist(path, body);

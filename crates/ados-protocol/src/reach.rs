@@ -17,11 +17,16 @@
 //!
 //! # The rule
 //!
-//! Read the system hostname, trim a trailing dot, and reject the values that
-//! cannot be another machine's reach (`localhost`, a bare `127.*` literal,
-//! empty). Return it verbatim when it already carries a domain, else append
-//! `.local`. When no usable hostname exists, there is no resolvable reach:
-//! callers get `None` and must say so rather than substituting a name.
+//! When avahi is running, ask it for the host name it actually publishes
+//! (`GetHostNameFqdn` over D-Bus). That is the only name proven to resolve to
+//! this machine: on a collision (two boards flashed from one image) avahi
+//! renames this host to `<host>-2.local`, and `<host>.local` then answers for
+//! the OTHER board. Without avahi, read the system hostname, trim a trailing
+//! dot, reject the values that cannot be another machine's reach
+//! (`localhost`, a bare `127.*` literal, empty), and name its first label under
+//! `.local`, which is what an mDNS responder publishes for it. When no usable
+//! hostname exists, there is no resolvable reach: callers get `None` and must
+//! say so rather than substituting a name.
 
 /// The system hostname, unadorned, or `None` when the host has none usable.
 ///
@@ -71,10 +76,21 @@ fn probed_hostname_at(
     ttl: std::time::Duration,
     probe: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
+    probed_at(&HOSTNAME_PROBE, now, ttl, probe)
+}
+
+/// A probe result held in `slot` while it is younger than `ttl`, else a fresh
+/// one.
+fn probed_at(
+    slot: &std::sync::Mutex<Option<(std::time::Instant, Option<String>)>>,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+    probe: impl FnOnce() -> Option<String>,
+) -> Option<String> {
     // A poisoned lock means an earlier holder panicked mid-update. Fall through
     // to a fresh probe rather than propagate the panic: the pairing routes
     // behind this are required to answer.
-    if let Ok(held) = HOSTNAME_PROBE.lock() {
+    if let Ok(held) = slot.lock() {
         if let Some((at, value)) = held.as_ref() {
             if now.duration_since(*at) < ttl {
                 return value.clone();
@@ -83,9 +99,9 @@ fn probed_hostname_at(
     }
     // Deliberately outside the lock: the probe spawns a process, and holding
     // the mutex across it would queue every concurrent pairing request behind
-    // one `hostname`.
+    // one spawn.
     let fresh = probe();
-    if let Ok(mut held) = HOSTNAME_PROBE.lock() {
+    if let Ok(mut held) = slot.lock() {
         *held = Some((now, fresh.clone()));
     }
     fresh
@@ -104,11 +120,54 @@ fn read_hostname_command() -> Option<String> {
 /// The resolvable `.local` reach name for this host, or `None` when the host
 /// has no hostname that could be another machine's reach.
 ///
-/// `None` is a real answer: a node whose hostname is `localhost` has no mDNS
-/// reach, and a caller must emit an empty/absent value rather than a name it
-/// cannot prove.
+/// avahi's own published name wins, so every surface names the host avahi
+/// answers for even after a collision rename. `None` is a real answer: a node
+/// whose hostname is `localhost` has no mDNS reach, and a caller must emit an
+/// empty/absent value rather than a name it cannot prove.
 pub fn mdns_hostname() -> Option<String> {
-    system_hostname().map(|h| mdns_name_from(&h))
+    let published = probed_at(
+        &AVAHI_PROBE,
+        std::time::Instant::now(),
+        HOSTNAME_PROBE_TTL,
+        read_avahi_host_fqdn,
+    );
+    published.or_else(|| system_hostname().map(|h| mdns_name_from(&h)))
+}
+
+/// The last avahi host-name probe.
+static AVAHI_PROBE: std::sync::Mutex<Option<(std::time::Instant, Option<String>)>> =
+    std::sync::Mutex::new(None);
+
+/// avahi's published host name, read over D-Bus. `None` when avahi is not
+/// running, D-Bus is unavailable, or the answer is not a usable `.local` name.
+fn read_avahi_host_fqdn() -> Option<String> {
+    let out = std::process::Command::new("busctl")
+        .args([
+            "--system",
+            "--timeout=1",
+            "call",
+            "org.freedesktop.Avahi",
+            "/",
+            "org.freedesktop.Avahi.Server",
+            "GetHostNameFqdn",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_busctl_string(&String::from_utf8(out.stdout).ok()?)
+}
+
+/// The name in a `busctl call` string reply (`s "skynode-2.local"`), kept only
+/// when it is a usable `.local` reach.
+fn parse_busctl_string(reply: &str) -> Option<String> {
+    let quoted = reply.trim().strip_prefix("s ")?.trim();
+    let name = quoted.strip_prefix('"')?.strip_suffix('"')?;
+    let name = normalize_hostname(name)?;
+    name.to_ascii_lowercase()
+        .ends_with(".local")
+        .then_some(name)
 }
 
 /// The whole rule applied to a hostname a caller already holds: reject the
@@ -123,16 +182,14 @@ pub fn mdns_name_for(hostname: &str) -> Option<String> {
     normalize_hostname(hostname).map(|h| mdns_name_from(&h))
 }
 
-/// The reach name for an already-normalized hostname. Split out so the rule is
-/// unit-testable without a host read, and so a caller that already holds a
-/// hostname (the installer reads one at a different point in its run) applies
-/// the identical rule.
+/// The mDNS name for an already-normalized hostname: its first label under
+/// `.local`. An mDNS responder publishes only that, so a host named
+/// `skynode.lan` answers as `skynode.local`, and `skynode.lan` (a unicast DNS
+/// name) is not something multicast DNS resolves. Split out so the rule is
+/// unit-testable without a host read.
 pub fn mdns_name_from(hostname: &str) -> String {
-    if hostname.contains('.') {
-        hostname.to_string()
-    } else {
-        format!("{hostname}.local")
-    }
+    let label = hostname.split('.').next().unwrap_or(hostname);
+    format!("{label}.local")
 }
 
 /// Trim and validate a raw hostname read. `None` for anything that cannot be a
@@ -164,11 +221,30 @@ mod tests {
     }
 
     #[test]
-    fn a_hostname_that_already_carries_a_domain_is_returned_verbatim() {
-        // Appending `.local` to a DNS name produces a third name that resolves
-        // nowhere — exactly the defect this module exists to prevent.
-        assert_eq!(mdns_name_from("skynode.lan"), "skynode.lan");
+    fn a_dotted_hostname_is_named_by_its_first_label_as_mdns_publishes_it() {
+        // An mDNS responder publishes `<first label>.local`; a unicast DNS name
+        // is not something a multicast browser resolves.
+        assert_eq!(mdns_name_from("skynode.lan"), "skynode.local");
         assert_eq!(mdns_name_from("skynode.local"), "skynode.local");
+    }
+
+    #[test]
+    fn avahis_published_name_is_read_from_the_busctl_reply() {
+        // A collision rename is exactly what this read exists to see.
+        assert_eq!(
+            parse_busctl_string("s \"skynode-2.local\"\n").as_deref(),
+            Some("skynode-2.local")
+        );
+        for bad in [
+            "",
+            "s \"\"",
+            "s \"localhost\"",
+            "s \"skynode.lan\"",
+            "u 5",
+            "skynode.local",
+        ] {
+            assert!(parse_busctl_string(bad).is_none(), "{bad:?} is not a reach");
+        }
     }
 
     #[test]

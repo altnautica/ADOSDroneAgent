@@ -19,7 +19,7 @@
 //! link after the MAVLink-router cutover. So the FastAPI route always returns 503
 //! "No MAVLink connection". This native route is the working replacement: it
 //! builds the MAVLink frame itself and writes it to the socket the router reads,
-//! the same socket the Python `MavlinkIPCClient.send` writes to. The parity
+//! the router's MAVLink socket. The parity
 //! target is therefore NOT the broken 503 — it is the MAVLink bytes the
 //! `commands.py` pymavlink calls WOULD have produced (`arducopter_arm()`,
 //! `command_long_send(...)`, `set_mode_apm(...)`).

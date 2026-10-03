@@ -76,6 +76,45 @@ impl std::fmt::Display for ParamCacheError {
 /// matching the router's own loader: one corrupt entry must not discard the other
 /// 699.
 pub fn read_param_blob(path: &Path) -> Result<Map<String, Value>, ParamCacheError> {
+    Ok(read_document(path)?
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            let value = entry.get("value")?;
+            value.as_f64().map(|_| (name, value.clone()))
+        })
+        .collect())
+}
+
+/// One cached parameter with the type the flight controller declared for it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CachedParam {
+    pub value: f64,
+    /// The `MAV_PARAM_TYPE` from the FC's last `PARAM_VALUE` for this name, or
+    /// `None` when the cache recorded no defined type for it.
+    pub param_type: Option<u8>,
+}
+
+/// One parameter from the cache, with its declared type. `Ok(None)` when the
+/// name is not cached (or the file is absent); a non-numeric entry counts as
+/// not cached, matching [`read_param_blob`].
+pub fn read_param(path: &Path, name: &str) -> Result<Option<CachedParam>, ParamCacheError> {
+    let doc = read_document(path)?;
+    let Some(entry) = doc.get(name) else {
+        return Ok(None);
+    };
+    let Some(value) = entry.get("value").and_then(Value::as_f64) else {
+        return Ok(None);
+    };
+    let param_type = entry
+        .get("param_type")
+        .and_then(Value::as_u64)
+        .and_then(|t| u8::try_from(t).ok())
+        .filter(|&t| ados_protocol::param_codec::is_known_type(t));
+    Ok(Some(CachedParam { value, param_type }))
+}
+
+/// The router's cache document as an object; an absent file is an empty one.
+fn read_document(path: &Path) -> Result<Map<String, Value>, ParamCacheError> {
     let body = match std::fs::read(path) {
         Ok(body) => body,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
@@ -84,13 +123,7 @@ pub fn read_param_blob(path: &Path) -> Result<Map<String, Value>, ParamCacheErro
     let Ok(Value::Object(parsed)) = serde_json::from_slice::<Value>(&body) else {
         return Err(ParamCacheError::Malformed);
     };
-    Ok(parsed
-        .into_iter()
-        .filter_map(|(name, entry)| {
-            let value = entry.get("value")?;
-            value.as_f64().map(|_| (name, value.clone()))
-        })
-        .collect())
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -176,6 +209,37 @@ mod tests {
         let blob = read_param_blob(&path).unwrap();
         assert_eq!(blob.len(), 1, "only the well-formed entry survives");
         assert_eq!(blob.get("GOOD"), Some(&json!(1.5)));
+    }
+
+    #[test]
+    fn a_single_param_carries_its_declared_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("params.json");
+        assert_eq!(read_param(&path, "ANY").unwrap(), None);
+        write_cache(
+            &path,
+            &json!({
+                "COM_RC_LOSS_T": { "value": 5.0, "param_type": 6 },
+                "UNTYPED": { "value": 1.0, "param_type": 0 },
+                "NO_TYPE": { "value": 1.0 },
+            }),
+        );
+        assert_eq!(
+            read_param(&path, "COM_RC_LOSS_T").unwrap(),
+            Some(CachedParam {
+                value: 5.0,
+                param_type: Some(6)
+            })
+        );
+        assert_eq!(
+            read_param(&path, "UNTYPED").unwrap().unwrap().param_type,
+            None
+        );
+        assert_eq!(
+            read_param(&path, "NO_TYPE").unwrap().unwrap().param_type,
+            None
+        );
+        assert_eq!(read_param(&path, "MISSING").unwrap(), None);
     }
 
     #[test]

@@ -67,14 +67,12 @@
 
 use std::path::{Path, PathBuf};
 
-use ados_protocol::wfb_status::{
-    build_radio_block, build_status_from_stats_file_at, derive_wfb_status, get_or_null,
-    json_truthy, WfbStatusConfig,
-};
+use ados_protocol::wfb_status::{build_radio_block, get_or_null, json_truthy, WfbStatusConfig};
 use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Map, Value};
 
+use crate::mediamtx_probe::http_get_local;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -140,9 +138,6 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     // --- Mesh (ground-station profile, non-direct role only) ---
     let mesh = build_mesh_block(&config_profile);
 
-    // --- Capabilities: retired per-agent catalog; an empty dict for forward-compat ---
-    let capabilities: Value = json!({});
-
     // The perception capability + tier, before `board` is moved into the payload.
     // Same canonical ados_offload::pick_tier decision the LAN /api/status uses,
     // fed the same live backend-capability read, so the GCS Perception hub
@@ -188,6 +183,9 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     // controller" over a working link.
     payload.insert("fcReachable".to_string(), json!(fc_reachable));
     payload.insert("fcVariant".to_string(), fc_variant);
+    // The firmware family, named the same way `/api/status` and the cloud
+    // heartbeat name it, so a LAN-only node carries its ArduPilot/PX4 badge.
+    payload.insert("fcFirmware".to_string(), fc_liveness.fc_firmware);
     payload.insert(
         "fcCommandDownGated".to_string(),
         json!(fc_liveness.fc_command_down_gated),
@@ -196,7 +194,6 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     payload.insert("resources".to_string(), resources);
     payload.insert("video".to_string(), video);
     payload.insert("telemetry".to_string(), telemetry);
-    payload.insert("capabilities".to_string(), capabilities);
     payload.insert("mesh".to_string(), mesh);
     payload.insert("radio".to_string(), radio);
     payload.insert("profile".to_string(), json!(resolved_profile));
@@ -504,21 +501,20 @@ fn parse_fallback_line(line: &str) -> Option<Value> {
 /// The WFB-ng link status the video gate + the radio block both read.
 ///
 /// This daemon has no in-process WFB manager, so the status is read the same way
-/// `/api/wfb` does: store-first (the radio ships its full status body to the
-/// durable store as a `link.wfb_status` event each heartbeat), falling back to the
-/// `/run/ados/wfb-stats.json` sidecar. Returns the finalized `/api/wfb` body as a
-/// map, or `None` when neither source has a usable body — matching the FastAPI
-/// `wfb_status = _build_status_from_stats_file(...)` (and its `except: None`).
+/// `/api/wfb` does: a fresh store row (the radio ships its full status body to
+/// the durable store as a `link.wfb_status` event each heartbeat), else the
+/// `/run/ados/wfb-stats.json` sidecar ([`crate::routes::wfb::choose_wfb_status`]).
+/// Returns the finalized `/api/wfb` body as a map, or `None` when no source has
+/// a usable body.
 async fn wfb_status_view(state: &AppState) -> Option<Map<String, Value>> {
     let cfg = WfbStatusConfig::load(&state.pairing_paths.config);
-
-    if let Some((detail, ts_us)) = latest_wfb_status(state).await {
-        if let Value::Object(map) = derive_wfb_status(&detail, ts_us, &cfg) {
-            return Some(map);
-        }
-    }
-
-    match build_status_from_stats_file_at(&cfg, &run_dir().join("wfb-stats.json")) {
+    let store = latest_wfb_status(state).await;
+    match crate::routes::wfb::choose_wfb_status(
+        store,
+        &cfg,
+        &run_dir().join("wfb-stats.json"),
+        ados_protocol::wfb_status::now_unix_micros(),
+    ) {
         Value::Object(map) if !map.is_empty() => Some(map),
         _ => None,
     }
@@ -717,7 +713,7 @@ fn read_video_streams() -> Vec<Value> {
                 "id": id,
                 "role": leg.get("role").and_then(|r| r.as_str()).unwrap_or(""),
                 "codec": leg.get("codec").and_then(|c| c.as_str()).unwrap_or(""),
-                "whep": format!("/whep?camera={id}"),
+                "whepUrl": format!("/whep?camera={id}"),
                 "hls": format!("/hls/{id}/index.m3u8"),
                 // Per-leg liveness (null when the agent has not sampled it yet).
                 "live": leg.get("live").cloned().unwrap_or(Value::Null),
@@ -900,29 +896,18 @@ fn mtx_ready(mtx: &Value) -> bool {
 /// Probe mediamtx's management API (`/v3/paths/list`) for an active stream.
 ///
 /// Returns a small result dict (`running`, `stream_name`, `ready`, `tracks`,
-/// `readers`, `webrtc_port`) for the first path, or `None` when mediamtx is
-/// unreachable / returns non-200 / has no active streams. Mirrors `_probe_mediamtx`.
+/// `readers`, `webrtc_port`) for the `main` path, or `None` when mediamtx is
+/// unreachable / returns non-200 / lists no `main` path.
 async fn probe_mediamtx() -> Option<Value> {
-    let url = format!("http://127.0.0.1:{MEDIAMTX_API_PORT}/v3/paths/list");
-    let (status, body) = http_get_local(&url).await.ok()?;
-    if status != 200 {
-        return None;
-    }
-    let data: Value = serde_json::from_slice(&body).ok()?;
-    let items = data.get("items").and_then(Value::as_array)?;
-    // Look the primary `main` path up BY NAME — never `items.first()`. With
-    // multiple named paths (main / eo_wide / ir) the first-listed may be an idle
-    // secondary `sourceOnDemand` leg (ready only while a reader is attached),
-    // which would collapse the whole video block to not-ready even while /main
-    // is live and serving.
-    let path = items
-        .iter()
-        .find(|p| p.get("name").and_then(Value::as_str) == Some("main"))
-        .or_else(|| items.first())?;
+    let data = crate::mediamtx_probe::read_paths_list().await?;
+    // The primary `main` path BY NAME, with no fallback to whichever path is
+    // listed first: with several named paths (main / eo_wide / ir) another leg's
+    // state says nothing about the stream the advertised URLs address.
+    let path = crate::mediamtx_probe::main_path(&data)?;
     Some(json!({
         "running": true,
-        "stream_name": path.get("name").cloned().unwrap_or_else(|| json!("main")),
-        "ready": path.get("ready").and_then(Value::as_bool).unwrap_or(false),
+        "stream_name": "main",
+        "ready": crate::mediamtx_probe::path_ready(path),
         "tracks": path.get("tracks").cloned().unwrap_or_else(|| json!([])),
         "readers": path.get("readers").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0),
         "webrtc_port": MEDIAMTX_WEBRTC_PORT,
@@ -933,7 +918,7 @@ async fn probe_mediamtx() -> Option<Value> {
 /// (which puts auth on the management API). A GET on the POST-only WHEP path
 /// returns 200/204/405 when bound — the "endpoint exists and mediamtx is up"
 /// signal, no credentials needed. Returns the same result shape with `ready: true`
-/// (the fanout exposes no separate readiness here). Mirrors `_probe_mediamtx_via_whep`.
+/// (the fanout exposes no separate readiness here).
 async fn probe_mediamtx_via_whep() -> Option<Value> {
     let url = format!("http://127.0.0.1:{MEDIAMTX_WEBRTC_PORT}/main/whep");
     let (status, _body) = http_get_local(&url).await.ok()?;
@@ -981,55 +966,6 @@ pub(crate) async fn mediamtx_main_bytes_received() -> Option<i64> {
 /// ingest hop when the management API is auth-gated).
 pub(crate) async fn mediamtx_whep_serving() -> bool {
     probe_mediamtx_via_whep().await.is_some()
-}
-
-/// A minimal HTTP/1.1 `GET` over a local TCP endpoint, returning the status code +
-/// the decoded body. Used for the mediamtx probes (which speak HTTP on a loopback
-/// TCP port, not a Unix socket). `Connection: close` reads the body to EOF; a
-/// chunked body is de-chunked. Bounded so a runaway response cannot exhaust memory.
-/// A 2 s timeout matches the Python `httpx.AsyncClient(timeout=2.0)`.
-async fn http_get_local(url: &str) -> std::io::Result<(u16, Vec<u8>)> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::time::{timeout, Duration};
-
-    const MAX_READ_BYTES: usize = 4 * 1024 * 1024;
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-
-    // Parse `http://host:port/path` into the connect target + the request path.
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| std::io::Error::other("non-http url"))?;
-    let (authority, path) = match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
-        None => (rest, "/"),
-    };
-    let path = if path.is_empty() { "/" } else { path };
-
-    let fut = async {
-        let mut stream = tokio::net::TcpStream::connect(authority).await?;
-        let head = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
-        stream.write_all(head.as_bytes()).await?;
-        stream.flush().await?;
-
-        let mut raw = Vec::new();
-        let mut buf = [0u8; 64 * 1024];
-        loop {
-            let n = stream.read(&mut buf).await?;
-            if n == 0 {
-                break;
-            }
-            if raw.len() + n > MAX_READ_BYTES {
-                return Err(std::io::Error::other("probe response too large"));
-            }
-            raw.extend_from_slice(&buf[..n]);
-        }
-        crate::ipc::logd_client::parse_http_response(&raw)
-    };
-
-    match timeout(PROBE_TIMEOUT, fut).await {
-        Ok(res) => res,
-        Err(_) => Err(std::io::Error::other("probe timed out")),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1386,19 +1322,10 @@ fn read_versioned_sidecar(path: &Path, contract_id: &str) -> Option<Map<String, 
 }
 
 /// True when `path`'s mtime is within `max_age` of now. For a sidecar that carries
-/// no in-body timestamp; a file from the future counts as fresh (a clock step must
-/// not blank a live reading).
+/// no in-body timestamp. A future mtime is an unprovable age and reads stale
+/// (see [`crate::freshness`]).
 fn sidecar_mtime_fresh(path: &Path, max_age: std::time::Duration) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    let Ok(mtime) = meta.modified() else {
-        return false;
-    };
-    match std::time::SystemTime::now().duration_since(mtime) {
-        Ok(age) => age <= max_age,
-        Err(_) => true,
-    }
+    crate::freshness::is_fresh(path, std::time::SystemTime::now(), max_age)
 }
 
 /// Read + parse a sidecar file into an object, or `None` on any gap (absent /
@@ -1411,11 +1338,18 @@ fn read_sidecar_object(path: &Path) -> Option<Map<String, Value>> {
     }
 }
 
+/// How far ahead of `now` an in-body timestamp may sit and still count. Writer
+/// and reader share one clock, so anything beyond rounding is a clock step and
+/// the age is unprovable.
+const SIDECAR_FUTURE_SKEW_S: f64 = 2.0;
+
 /// True when a sidecar's `updated_at_unix` is a number within `max_age_s` of
-/// `now`. Mirrors the Python freshness gate.
+/// `now`. A timestamp further than [`SIDECAR_FUTURE_SKEW_S`] in the future is
+/// not fresh: after a backward clock step a dead writer's last file would
+/// otherwise read as live until something overwrote it.
 fn sidecar_fresh(obj: &Map<String, Value>, now: f64, max_age_s: f64) -> bool {
     match obj.get("updated_at_unix").and_then(Value::as_f64) {
-        Some(updated) => (now - updated) <= max_age_s,
+        Some(updated) => (-SIDECAR_FUTURE_SKEW_S..=max_age_s).contains(&(now - updated)),
         None => false,
     }
 }
@@ -1429,12 +1363,8 @@ const CRSF_STATS_SIDECAR: &str = "crsf-stats.json";
 
 /// A CRSF sidecar not re-written within this window reads as absent, so a dead
 /// lane's lingering tmpfs file never keeps the status carrying a frozen state.
-/// The lane rewrites it ~1 Hz while transmitting and every
-/// 5 s while idling; 10 s is the canonical consumer window that idle refresh
-/// cadence was sized to be half of, so a live idle lane never flaps to absent.
-/// The sidecar body carries no write time, so the gate keys on the file mtime
-/// (the same source the cloud heartbeat's crsf gate uses).
-const CRSF_STATS_STALE: std::time::Duration = std::time::Duration::from_secs(10);
+/// One window for every reader of the sidecar: the ground-station CRSF route's.
+const CRSF_STATS_STALE: std::time::Duration = crate::routes::gs_crsf::CRSF_STATS_STALE;
 
 /// The CRSF RC-lane status block for the consolidated body, or `None` (the key
 /// omitted) when the lane service is not running, its sidecar is stale, or the
@@ -1453,19 +1383,11 @@ fn read_crsf_status() -> Option<Value> {
 
 /// The path + now injectable core of [`read_crsf_status`], so a test drives the
 /// mtime staleness gate deterministically against a tempdir. Absent / unreadable
-/// / unparseable / non-object / stale all read `None`. A future mtime (clock
-/// skew) counts as fresh. Emits the shared best-effort version-drift warning
-/// (never rejects), then serves the object verbatim.
+/// / unparseable / non-object / stale / future-dated all read `None`. Emits the
+/// shared best-effort version-drift warning (never rejects), then serves the
+/// object verbatim.
 fn read_crsf_status_in(path: &Path, now: std::time::SystemTime) -> Option<Value> {
-    let fresh = std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map(|mtime| {
-            now.duration_since(mtime)
-                .map(|age| age <= CRSF_STATS_STALE)
-                .unwrap_or(true)
-        })
-        .unwrap_or(false);
-    if !fresh {
+    if !crate::freshness::is_fresh(path, now, CRSF_STATS_STALE) {
         return None;
     }
     let text = std::fs::read_to_string(path).ok()?;
@@ -1972,7 +1894,7 @@ mod tests {
         let status = signals(&[
             ("state", json!("active")),
             ("interface", json!("wlan1")),
-            ("channel", json!(149)),
+            ("actual_channel", json!(149)),
             ("rssi_dbm", json!(-55.0)),
             ("bitrate_kbps", json!(8000)),
             ("paired", json!(true)),
@@ -2062,7 +1984,7 @@ mod tests {
     fn radio_falsey_channel_and_bitrate_become_null() {
         let status = signals(&[
             ("state", json!("disabled")),
-            ("channel", json!(0)),
+            ("actual_channel", json!(0)),
             ("bitrate_kbps", json!(0)),
         ]);
         let block = build_radio_block(Some(&status));
@@ -2287,8 +2209,8 @@ mod tests {
     #[test]
     fn video_block_advertises_per_leg_streams_when_present() {
         let streams = vec![
-            json!({ "id": "main", "role": "eo", "codec": "h265", "whep": "/whep?camera=main" }),
-            json!({ "id": "ir", "role": "ir", "codec": "h264", "whep": "/whep?camera=ir" }),
+            json!({ "id": "main", "role": "eo", "codec": "h265", "whepUrl": "/whep?camera=main" }),
+            json!({ "id": "ir", "role": "ir", "codec": "h264", "whepUrl": "/whep?camera=ir" }),
         ];
         let v = build_video_block_with(
             "drone",
@@ -2301,7 +2223,7 @@ mod tests {
         let legs = v["streams"].as_array().unwrap();
         assert_eq!(legs.len(), 2);
         assert_eq!(legs[1]["id"], json!("ir"));
-        assert_eq!(legs[1]["whep"], json!("/whep?camera=ir"));
+        assert_eq!(legs[1]["whepUrl"], json!("/whep?camera=ir"));
     }
 
     #[test]
@@ -2951,105 +2873,64 @@ mod tests {
         assert!(read_linked_peers_in(&path, 1_700_000_000.0).is_empty());
     }
 
-    // -------- golden fixture (envelope shape) --------
-
-    /// Golden-fixture parity: the consolidated body carries exactly the 17 stable
-    /// top-level keys (the camera keys, the `crsf` RC-lane block, AND the
-    /// linked-WFB-peers keys are conditionally folded in from their sidecars, so
-    /// they are not part of the always-present envelope). This pins the envelope
-    /// the GCS reads.
-    ///
-    /// ```json
-    /// {
-    ///   "version": "<str>", "uptime_seconds": <num>, "board": {}, "health": {...},
-    ///   "fc_connected": false, "fc_port": "", "fc_baud": 0,
-    ///   "services": [], "resources": {}, "video": {...}, "telemetry": {},
-    ///   "capabilities": {}, "mesh": {}, "radio": {...},
-    ///   "profile": "drone", "role": null, "runtimeMode": "packaged"
-    /// }
-    /// ```
-    ///
-    /// Assembled here from the very block builders the route runs (each in its
-    /// degraded no-source state, the only state available on a dev host) so the
-    /// envelope + per-block shape is asserted deterministically.
     #[test]
-    fn consolidated_envelope_matches_the_golden_shape() {
-        // Build the all-degraded payload the same way the handler composes it, but
-        // without the AppState wiring (each block in its no-source default).
-        let mut payload = Map::new();
-        payload.insert("version".to_string(), json!("0.0.0"));
-        payload.insert("uptime_seconds".to_string(), json!(1.0));
-        payload.insert("board".to_string(), json!({}));
-        payload.insert(
-            "health".to_string(),
-            crate::routes::status::derive_health(None),
+    fn a_sidecar_stamped_in_the_future_is_not_fresh() {
+        let now = 1_000_000.0;
+        let at = |t: f64| json!({ "updated_at_unix": t }).as_object().unwrap().clone();
+        assert!(sidecar_fresh(&at(now - 5.0), now, 60.0));
+        assert!(
+            sidecar_fresh(&at(now + 1.0), now, 60.0),
+            "rounding is not a clock step"
         );
-        payload.insert("fc_connected".to_string(), json!(false));
-        payload.insert("fc_port".to_string(), json!(""));
-        payload.insert("fc_baud".to_string(), json!(0));
-        payload.insert("services".to_string(), json!([]));
-        payload.insert("resources".to_string(), derive_resources_subset(None));
-        payload.insert(
-            "video".to_string(),
-            json!({
-                "state": "not_initialized", "whep_url": null,
-                "recording": false, "recording_filename": null, "recording_started_at": null,
-            }),
-        );
-        payload.insert("telemetry".to_string(), json!({}));
-        payload.insert("capabilities".to_string(), json!({}));
-        payload.insert("mesh".to_string(), json!({}));
-        payload.insert("radio".to_string(), radio_to_camel(build_radio_block(None)));
-        payload.insert("profile".to_string(), json!("drone"));
-        payload.insert("role".to_string(), Value::Null);
-        payload.insert("runtimeMode".to_string(), json!("packaged"));
+        assert!(!sidecar_fresh(&at(now + 3600.0), now, 60.0));
+        assert!(!sidecar_fresh(&at(now - 61.0), now, 60.0));
+    }
 
-        let obj = &payload;
-        // Exactly the 17 stable top-level keys.
-        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            [
-                "board",
-                "capabilities",
-                "fc_baud",
-                "fc_connected",
-                "fc_port",
-                "health",
-                "mesh",
-                "profile",
-                "radio",
-                "resources",
-                "role",
-                "runtimeMode",
-                "services",
-                "telemetry",
-                "uptime_seconds",
-                "version",
-                "video",
-            ]
-        );
+    // -------- envelope --------
 
-        // Types + degraded defaults.
-        assert!(obj["version"].is_string());
-        assert!(obj["board"].is_object());
-        assert!(obj["health"].is_object());
-        assert_eq!(obj["fc_connected"], json!(false));
-        assert_eq!(obj["fc_port"], json!(""));
-        assert_eq!(obj["fc_baud"], json!(0));
-        assert!(obj["services"].is_array());
-        assert_eq!(obj["resources"], json!({}));
-        assert!(obj["video"].is_object());
-        assert_eq!(obj["telemetry"], json!({}));
-        assert_eq!(obj["capabilities"], json!({}));
-        assert_eq!(obj["mesh"], json!({}));
-        // The radio block is the camelCase absent skeleton.
-        assert_eq!(obj["radio"]["state"], json!("absent"));
-        assert_eq!(obj["radio"]["freqMhz"], Value::Null);
-        assert_eq!(obj["profile"], json!("drone"));
-        assert_eq!(obj["role"], Value::Null);
-        assert_eq!(obj["runtimeMode"], json!("packaged"));
+    /// The handler names the FC firmware family the way `/api/status` does and
+    /// carries no `capabilities` block: the GCS derives compute capability from
+    /// the top-level perception fields instead.
+    #[tokio::test]
+    async fn the_full_status_names_the_firmware_and_carries_no_capabilities_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let state = AppState::new(
+            std::sync::Arc::new(crate::auth::PairingState::with_path(d.join("pairing.json"))),
+            crate::ipc::StateIpcClient::disconnected(),
+            crate::ipc::MavlinkIpcClient::new(d.join("absent-mavlink.sock")),
+            crate::ipc::LogdQueryClient::new(d.join("absent-logd.sock")),
+            d.join("board.json"),
+            crate::state::PairingPaths {
+                config: d.join("config.yaml"),
+                pairing_json: d.join("pairing.json"),
+                wfb_key_dir: d.join("wfb"),
+                bind_state: d.join("bind-state.json"),
+                profile_conf: d.join("profile.conf"),
+                mesh_role: d.join("mesh-role"),
+                relay_secret: d.join("relay-peer-secret"),
+            },
+            std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                d.join("dashboard-pin.json"),
+            )),
+            std::sync::Arc::new(crate::mcp::McpTokenStore::with_path(
+                d.join("mcp-token.json"),
+            )),
+        );
+        state
+            .state
+            .set_snapshot_for_test(json!({"fc_firmware": "ardupilot", "armed": false}));
+        let Json(body) = get_full_status(State(state)).await;
+        assert_eq!(body["fcFirmware"], json!("ardupilot"));
+        assert!(body.get("capabilities").is_none());
+        for key in [
+            "npuTops",
+            "hasAccelerator",
+            "perceptionTier",
+            "perceptionOffloadTarget",
+        ] {
+            assert!(body.get(key).is_some(), "{key} is the capability source");
+        }
     }
 
     // -------- macStability --------

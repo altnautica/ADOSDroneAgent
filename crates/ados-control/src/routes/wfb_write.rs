@@ -109,8 +109,9 @@ fn radio_cmd_sock() -> PathBuf {
 }
 
 /// The native radio's data-plane command socket (`/run/ados/wfb-cmd.sock`). The
-/// tx-power route forwards a `{"op":"set_tx_power","tx_power_dbm":N}` request here.
-fn wfb_cmd_sock() -> PathBuf {
+/// tx-power route forwards a `{"op":"set_tx_power","tx_power_dbm":N}` request
+/// here, and the video-config write its FEC / MCS / preset / link-tier ops.
+pub(crate) fn wfb_cmd_sock() -> PathBuf {
     run_dir().join("wfb-cmd.sock")
 }
 
@@ -373,7 +374,7 @@ fn tx_power_effective_from_reply(reply: &Value) -> Result<Value, TxPowerRefusal>
 
 /// The agent config path (`ADOS_CONFIG`, default `/etc/ados/config.yaml`), the
 /// same resolution the sibling read routes use. Mirrors the Python `CONFIG_YAML`.
-fn config_yaml_path() -> PathBuf {
+pub(crate) fn config_yaml_path() -> PathBuf {
     PathBuf::from(
         std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string()),
     )

@@ -111,6 +111,7 @@ mod tests {
             keys(pack),
             BTreeSet::from([
                 "id",
+                "stale",
                 "cells_plausible",
                 "cell_voltages_v",
                 "weakest_cell_index",

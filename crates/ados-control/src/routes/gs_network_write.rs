@@ -135,6 +135,9 @@ enum NetCmd {
     /// The socket was unreachable / did not reply / replied unparseably: the
     /// command-socket-unavailable case mapped to a 503.
     Unavailable,
+    /// The daemon accepted the command but had not answered by the deadline. The
+    /// change may still complete, so a Wi-Fi client op reports it in progress.
+    TimedOut,
 }
 
 /// Send one newline-terminated JSON request to the command socket and read one
@@ -157,6 +160,7 @@ async fn net_cmd_at(sock: &std::path::Path, request: &Value) -> NetCmd {
     .await
     {
         Ok(first) => classify_reply(&first),
+        Err(crate::ipc::cmd::CmdFailure::Timeout) => NetCmd::TimedOut,
         Err(_) => NetCmd::Unavailable,
     }
 }
@@ -224,6 +228,30 @@ fn socket_unavailable(code: &str) -> Response {
     )
 }
 
+/// The 504 for a Wi-Fi client change the daemon accepted but had not finished by
+/// the deadline. It may still complete, so the caller polls the network view
+/// instead of retrying into the in-flight operation.
+fn command_in_progress(code: &str) -> Response {
+    error_body(
+        StatusCode::GATEWAY_TIMEOUT,
+        code,
+        "The Wi-Fi change is still in progress. Poll /api/v1/ground-station/network for the result.",
+    )
+}
+
+/// Check the AP settings before they reach the daemon, with the same rules the
+/// daemon applies before they reach `hostapd.conf`: SSID 1-32 bytes with no
+/// control characters, passphrase 8-63 printable ASCII, channel 1-13. An empty
+/// string means "unchanged", as it does to the daemon.
+fn validate_ap_update(update: &ApUpdate) -> Result<(), String> {
+    let channel = update.channel.map(|c| u32::try_from(c).unwrap_or(0));
+    ados_net::managers::validate_ap_settings(
+        update.ssid.as_deref().filter(|s| !s.is_empty()),
+        update.passphrase.as_deref().filter(|p| !p.is_empty()),
+        channel,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // PUT /api/v1/ground-station/network/priority — set the uplink priority list.
 // ---------------------------------------------------------------------------
@@ -240,7 +268,7 @@ pub struct UplinkPriorityUpdate {
 /// `PUT .../network/priority` → `{"priority": [...]}`.
 ///
 /// Gates on the ground-station profile (404 on a drone), validates the requested
-/// order (a non-empty list of strings, else the FastAPI 400
+/// order (a non-empty list of distinct uplinks the router manages, else 400
 /// `E_UPLINK_PRIORITY_INVALID`), atomically persists `{"priority": [...]}` to the
 /// uplink file, and echoes the persisted list. The `ados-net` daemon reads the
 /// same file, so the persist is the whole effect. A file-write failure degrades
@@ -271,35 +299,60 @@ pub async fn put_network_priority(
     Json(json!({ "priority": strings })).into_response()
 }
 
-/// Validate the requested priority list, returning the list of strings on success.
+/// Validate the requested priority list, returning the list of strings on
+/// success. Each entry must be an uplink the router manages (its default chain
+/// names every one) and may appear once.
 fn validate_priority(priority: &[Value]) -> Result<Vec<String>, String> {
-    const INVALID: &str = "priority must be a non-empty list of strings";
+    use ados_net::router::failover::DEFAULT_PRIORITY;
     if priority.is_empty() {
-        return Err(INVALID.to_string());
+        return Err("priority must be a non-empty list of strings".to_string());
     }
-    let mut out = Vec::with_capacity(priority.len());
+    let mut out: Vec<String> = Vec::with_capacity(priority.len());
     for entry in priority {
-        match entry.as_str() {
-            Some(s) => out.push(s.to_string()),
-            None => return Err(INVALID.to_string()),
+        let Some(name) = entry.as_str() else {
+            return Err("priority must be a non-empty list of strings".to_string());
+        };
+        if !DEFAULT_PRIORITY.contains(&name) {
+            return Err(format!(
+                "unknown uplink {name:?}; expected one of {}",
+                DEFAULT_PRIORITY.join(", ")
+            ));
         }
+        if out.iter().any(|seen| seen == name) {
+            return Err(format!("uplink {name:?} is listed twice"));
+        }
+        out.push(name.to_string());
     }
     Ok(out)
 }
 
-/// Atomically persist the priority list to `path`, mirroring the Python
-/// `save_priority`: create the parent dir, write `{"priority": [...]}` to a
-/// `.json.tmp` sibling, then `rename` it over the target. The JSON is
-/// `{"priority": ["a","b"]}` with no spaces, matching the Python
-/// `json.dumps({"priority": priority})` output the read side parses back.
+/// Atomically and durably persist the priority list to `path` as
+/// `{"priority": [...]}`: write a tmp sibling unique to this write, fsync it,
+/// then rename it over the target, so concurrent PUTs never share or rename
+/// each other's half-written file.
 fn save_priority(path: &Path, priority: &[String]) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = path.with_file_name(tmp_name);
     let body = json!({ "priority": priority }).to_string();
-    std::fs::write(&tmp, body.as_bytes()).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    let written = std::fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(body.as_bytes()).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
     Ok(())
 }
 
@@ -322,9 +375,12 @@ pub struct ApUpdate {
 
 /// `PUT .../network/ap` → the `_ap_view` body.
 ///
-/// Gates on the ground-station profile (404 on a drone), forwards an `ap_config`
-/// op to the `ados-net` command socket (the daemon applies it through its live
-/// hostapd manager, honours the start/stop `enabled` hint, and replies with the
+/// Gates on the ground-station profile (404 on a drone), refuses an SSID,
+/// passphrase or channel hostapd cannot take with 400 `E_AP_INVALID_CONFIG`
+/// (a newline would inject a hostapd directive; a short passphrase or a bad
+/// channel would stop the AP on restart), forwards an `ap_config` op to the
+/// `ados-net` command socket (the daemon applies it through its live hostapd
+/// manager, honours the start/stop `enabled` hint, and replies with the
 /// `_ap_view` body), persists the channel/ssid into the agent config for reboot
 /// survival (best-effort, matching the FastAPI `_save_config`), and returns the
 /// view. A failed apply maps to the FastAPI 500 `E_AP_APPLY_FAILED`; an
@@ -335,6 +391,10 @@ pub async fn put_network_ap(
 ) -> Response {
     if !is_ground_station() {
         return profile_mismatch();
+    }
+
+    if let Err(msg) = validate_ap_update(&update) {
+        return error_body(StatusCode::BAD_REQUEST, "E_AP_INVALID_CONFIG", &msg);
     }
 
     let request = json!({
@@ -349,7 +409,7 @@ pub async fn put_network_ap(
         NetCmd::Error(msg) => {
             return error_body(StatusCode::INTERNAL_SERVER_ERROR, "E_AP_APPLY_FAILED", &msg)
         }
-        NetCmd::Unavailable => return socket_unavailable("E_AP_APPLY_FAILED"),
+        NetCmd::Unavailable | NetCmd::TimedOut => return socket_unavailable("E_AP_APPLY_FAILED"),
     };
 
     // Persist channel / SSID back to the agent config for reboot survival (only
@@ -477,7 +537,7 @@ pub async fn put_network_ethernet(
         NetCmd::Error(msg) => {
             return error_body(StatusCode::INTERNAL_SERVER_ERROR, transport_code, &msg)
         }
-        NetCmd::Unavailable => return socket_unavailable(transport_code),
+        NetCmd::Unavailable | NetCmd::TimedOut => return socket_unavailable(transport_code),
     };
 
     // A processed-but-failed apply (`applied:false`) is the FastAPI
@@ -541,6 +601,14 @@ pub async fn put_network_modem(
         return profile_mismatch();
     }
 
+    // The APN is spliced into an AT command line on the modem's fallback path,
+    // so only the APN charset is ever forwarded.
+    if let Some(apn) = update.apn.as_deref() {
+        if let Err(msg) = ados_net::managers::validate_apn(apn) {
+            return error_body(StatusCode::BAD_REQUEST, "E_INVALID_APN", &msg);
+        }
+    }
+
     // cap_gb wins; otherwise convert cap_mb → cap_gb (mirrors the Python
     // `update.cap_mb / 1024.0`).
     let cap_gb = update
@@ -562,7 +630,9 @@ pub async fn put_network_modem(
                 &msg,
             )
         }
-        NetCmd::Unavailable => return socket_unavailable("E_MODEM_CONFIGURE_FAILED"),
+        NetCmd::Unavailable | NetCmd::TimedOut => {
+            return socket_unavailable("E_MODEM_CONFIGURE_FAILED")
+        }
     }
 
     // The configure persisted the sidecar; the response is the modem view over the
@@ -629,6 +699,12 @@ fn share_uplink_body(enabled: bool, reply: NetCmd) -> Value {
             "apply_error": "network daemon unreachable; the saved setting applies when it starts",
             "backend": Value::Null,
         }),
+        NetCmd::TimedOut => json!({
+            "enabled": enabled,
+            "applied": false,
+            "apply_error": "network daemon did not answer in time; the saved setting applies when it starts",
+            "backend": Value::Null,
+        }),
     }
 }
 
@@ -685,7 +761,8 @@ pub struct GsWifiJoinRequest {
 /// A reply with `joined:false` and the AP-busy error code is the `409`
 /// (`E_WLAN0_BUSY_AP_ACTIVE` + `needs_force:true`) — the ground station's AP and
 /// its client mode contend for `wlan0`, so stealing it has to be deliberate. An
-/// unreachable socket → 503; an `ok:false` reply → `E_WIFI_JOIN_FAILED` 500.
+/// unreachable socket → 503; a daemon that has not answered by the deadline →
+/// 504 `E_WIFI_JOIN_IN_PROGRESS`; an `ok:false` reply → `E_WIFI_JOIN_FAILED` 500.
 pub async fn put_gs_network_client_join(Json(req): Json<GsWifiJoinRequest>) -> Response {
     if !is_ground_station() {
         return profile_mismatch();
@@ -719,6 +796,7 @@ async fn put_gs_network_client_join_at(sock: &Path, req: GsWifiJoinRequest) -> R
             );
         }
         NetCmd::Unavailable => return socket_unavailable("E_WIFI_JOIN_FAILED"),
+        NetCmd::TimedOut => return command_in_progress("E_WIFI_JOIN_IN_PROGRESS"),
     };
 
     let joined = reply
@@ -755,8 +833,9 @@ async fn put_gs_network_client_join_at(sock: &Path, req: GsWifiJoinRequest) -> R
 /// `DELETE /api/v1/ground-station/network/client` → `{"left", "previous_ssid"}`.
 ///
 /// Forwards a `wifi_leave` op and returns the reply verbatim (the transport `ok`
-/// already stripped). An unreachable socket → 503; an `ok:false` reply →
-/// `E_WIFI_LEAVE_FAILED` 500.
+/// already stripped). An unreachable socket → 503; a daemon that has not
+/// answered by the deadline → 504 `E_WIFI_LEAVE_IN_PROGRESS`; an `ok:false`
+/// reply → `E_WIFI_LEAVE_FAILED` 500.
 pub async fn delete_gs_network_client() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
@@ -774,6 +853,7 @@ async fn delete_gs_network_client_at(sock: &Path) -> Response {
             &msg,
         ),
         NetCmd::Unavailable => socket_unavailable("E_WIFI_LEAVE_FAILED"),
+        NetCmd::TimedOut => command_in_progress("E_WIFI_LEAVE_IN_PROGRESS"),
     }
 }
 
@@ -813,6 +893,14 @@ mod tests {
         assert_eq!(err, "priority must be a non-empty list of strings");
     }
 
+    #[test]
+    fn validate_rejects_an_unknown_or_repeated_uplink() {
+        let unknown = validate_priority(&[json!("eth0"), json!("wlan1")]).unwrap_err();
+        assert!(unknown.starts_with("unknown uplink \"wlan1\""), "{unknown}");
+        let twice = validate_priority(&[json!("eth0"), json!("wwan0"), json!("eth0")]).unwrap_err();
+        assert_eq!(twice, "uplink \"eth0\" is listed twice");
+    }
+
     // ── save_priority + the persisted JSON shape ────────────────────────────
 
     #[test]
@@ -827,7 +915,12 @@ mod tests {
 
         let parsed: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed["priority"], json!(["wlan0_client", "eth0"]));
-        assert!(!path.with_extension("json.tmp").exists());
+        // Only the target remains; no tmp sibling is left behind.
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["ground-station-uplink.json"]);
     }
 
     #[test]
@@ -1266,6 +1359,61 @@ mod tests {
         assert_eq!(
             body_json(resp).await,
             json!({"left": true, "previous_ssid": "BenchNet"})
+        );
+    }
+
+    /// A newline in the SSID or passphrase would inject a hostapd directive, and
+    /// a short passphrase or an off-band channel would stop the AP on restart.
+    #[test]
+    fn ap_settings_hostapd_cannot_take_are_refused_before_the_daemon() {
+        let ap = |ssid: Option<&str>, passphrase: Option<&str>, channel: Option<i64>| ApUpdate {
+            enabled: None,
+            ssid: ssid.map(str::to_string),
+            passphrase: passphrase.map(str::to_string),
+            channel,
+        };
+        assert!(validate_ap_update(&ap(Some("ADOS-GS"), Some("correct-horse"), Some(6))).is_ok());
+        // Empty strings mean "unchanged", as they do to the daemon.
+        assert!(validate_ap_update(&ap(Some(""), Some(""), None)).is_ok());
+        for bad in [
+            ap(Some("ap\nctrl_interface=/tmp"), None, None),
+            ap(Some(&"x".repeat(33)), None, None),
+            ap(None, Some("x\nwpa=0xxxxx"), None),
+            ap(None, Some("short"), None),
+            ap(None, None, Some(14)),
+            ap(None, None, Some(36)),
+            ap(None, None, Some(-1)),
+            ap(None, None, Some(0)),
+        ] {
+            assert!(validate_ap_update(&bad).is_err(), "{bad:?} must be refused");
+        }
+    }
+
+    /// A daemon that accepted a join but is still waiting on NetworkManager has
+    /// not failed; the change is in flight.
+    #[tokio::test(start_paused = true)]
+    async fn a_join_or_leave_the_daemon_has_not_answered_is_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wifi-cmd.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let _held = tokio::spawn(async move {
+            let mut conns = Vec::new();
+            while let Ok((conn, _)) = listener.accept().await {
+                conns.push(conn);
+            }
+        });
+
+        let resp = put_gs_network_client_join_at(&path, join("BenchNet", None)).await;
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            body_json(resp).await["detail"]["error"]["code"],
+            json!("E_WIFI_JOIN_IN_PROGRESS")
+        );
+        let resp = delete_gs_network_client_at(&path).await;
+        assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            body_json(resp).await["detail"]["error"]["code"],
+            json!("E_WIFI_LEAVE_IN_PROGRESS")
         );
     }
 }

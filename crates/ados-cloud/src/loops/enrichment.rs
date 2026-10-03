@@ -457,10 +457,12 @@ fn fold_services(obj: &mut Map<String, Value>) {
 
 /// Parse `systemctl list-units --no-legend` output into the heartbeat service
 /// objects. Columns are `UNIT LOAD ACTIVE SUB DESCRIPTION`; the name is the unit
-/// minus `.service`, the status is `running` when SUB is `running` else the SUB
-/// verbatim. `list-units` carries no per-unit accounting, so `uptimeSeconds`,
-/// `memoryMb` and `cpuPercent` are omitted (the receiver declares them
-/// optional) rather than asserted as a fabricated `0`. Pure for unit testing.
+/// minus `.service` and the status is [`service_status`] of ACTIVE and SUB, in
+/// the vocabulary the GCS renders (the cloud row carries only `name` and
+/// `status`, so raw systemd words would all read as unknown). `list-units`
+/// carries no per-unit accounting, so `uptimeSeconds`, `memoryMb` and
+/// `cpuPercent` are omitted (the receiver declares them optional) rather than
+/// asserted as a fabricated `0`. Pure for unit testing.
 pub fn parse_systemctl_units(out: &str) -> Vec<Value> {
     let mut services = Vec::new();
     for line in out.lines() {
@@ -480,18 +482,35 @@ pub fn parse_systemctl_units(out: &str) -> Vec<Value> {
             continue;
         }
         // Columns from the unit: UNIT(+0) LOAD(+1) ACTIVE(+2) SUB(+3).
-        let sub = match cols.get(offset + 3) {
-            Some(s) => s.trim(),
-            None => continue,
+        let (Some(active), Some(sub)) = (cols.get(offset + 2), cols.get(offset + 3)) else {
+            continue;
         };
         let name = &unit[..unit.len() - ".service".len()];
-        let status = if sub == "running" { "running" } else { sub };
         services.push(json!({
             "name": name,
-            "status": status,
+            "status": service_status(active.trim(), sub.trim()),
         }));
     }
     services
+}
+
+/// One unit's systemd ACTIVE + SUB state as a GCS service status (`running`,
+/// `starting`, `stopped`, `error`, `degraded`). A unit systemd keeps restarting
+/// is crash-looping (`error`) whatever its ACTIVE state reads between attempts;
+/// an `active` oneshot that ran to completion (`exited`) did its job and is
+/// `running`; an ACTIVE state not listed here is `degraded`, never a guessed
+/// `stopped`.
+pub fn service_status(active: &str, sub: &str) -> &'static str {
+    if sub == "auto-restart" {
+        return "error";
+    }
+    match active {
+        "active" => "running",
+        "activating" | "reloading" => "starting",
+        "failed" => "error",
+        "inactive" | "deactivating" => "stopped",
+        _ => "degraded",
+    }
 }
 
 /// Round a float to two decimals so the wire carries `12.34`, not the full f64
@@ -672,23 +691,33 @@ Filesystem     1024-blocks    Used Available Capacity Mounted on
     }
 
     #[test]
-    fn parse_systemctl_units_lifts_name_and_status() {
+    fn parse_systemctl_units_reports_the_rendered_status_vocabulary() {
         // The --no-legend output: UNIT LOAD ACTIVE SUB DESCRIPTION.
         let out = "\
 ados-supervisor.service loaded active running ADOS process supervisor
-ados-video.service      loaded active running ADOS video pipeline
+ados-setup.service      loaded active exited  ADOS first-boot setup
 ados-cloud.service      loaded inactive dead   ADOS cloud relay
+ados-video.service      loaded activating auto-restart ADOS video pipeline
 ";
         let svcs = parse_systemctl_units(out);
-        assert_eq!(svcs.len(), 3);
-        assert_eq!(svcs[0]["name"], "ados-supervisor");
-        assert_eq!(svcs[0]["status"], "running");
+        let status: Vec<(&str, &str)> = svcs
+            .iter()
+            .map(|s| (s["name"].as_str().unwrap(), s["status"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            status,
+            [
+                ("ados-supervisor", "running"),
+                // A oneshot that finished did its job.
+                ("ados-setup", "running"),
+                ("ados-cloud", "stopped"),
+                // A unit systemd keeps restarting is crash-looping.
+                ("ados-video", "error"),
+            ]
+        );
         // list-units measures no per-unit accounting, so none is asserted.
         assert!(svcs[0].get("uptimeSeconds").is_none());
         assert!(svcs[0].get("memoryMb").is_none());
-        // A non-running SUB carries through verbatim, not "running".
-        assert_eq!(svcs[2]["name"], "ados-cloud");
-        assert_eq!(svcs[2]["status"], "dead");
     }
 
     #[test]
@@ -702,9 +731,14 @@ ados-mavlink-router.service loaded active running ADOS MAVLink router
         let svcs = parse_systemctl_units(out);
         assert_eq!(svcs.len(), 2);
         assert_eq!(svcs[0]["name"], "ados-net");
-        assert_eq!(svcs[0]["status"], "failed");
+        assert_eq!(svcs[0]["status"], "error");
         assert_eq!(svcs[1]["name"], "ados-mavlink-router");
         assert_eq!(svcs[1]["status"], "running");
+    }
+
+    #[test]
+    fn an_unknown_active_state_is_degraded_not_stopped() {
+        assert_eq!(service_status("maintenance", "running"), "degraded");
     }
 
     #[test]

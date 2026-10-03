@@ -1,11 +1,13 @@
-//! The reverse-proxy passthrough to the residual Python.
+//! The router fallback for every request that matches no native route, and the
+//! reverse-proxy passthrough to the residual Python.
 //!
-//! While the migration is in flight a single CPython + FastAPI process serves
-//! behind the native front: the front owns the LAN port and answers the routes
-//! it has taken over ([`crate::routing::is_native`]); every other route falls
-//! through to this proxy, which forwards it byte-faithfully to the residual API
-//! over its internal Unix socket (`ADOS_API_INTERNAL_SOCKET`, default
-//! `/run/ados/api-internal.sock`).
+//! The front owns the LAN port and answers the routes it has taken over
+//! ([`crate::routing::is_native`]). Everything else lands in
+//! [`non_native_fallback`], which dispatches on [`crate::routing::classify`]:
+//! only the permanent-Python prefixes are forwarded byte-faithfully to the
+//! residual API over its internal Unix socket (`ADOS_API_INTERNAL_SOCKET`,
+//! default `/run/ados/api-internal.sock`); the HLS plane, the operator UI and
+//! unknown API paths are answered here.
 //!
 //! The forward is transparent: the same method, the same path + query, every
 //! request header verbatim (the `X-ADOS-Key` / `Origin` / `Referer` / `Cookie` /
@@ -37,7 +39,7 @@ use hyper_util::rt::TokioIo;
 use tokio::net::UnixStream;
 
 use crate::routes::detail;
-use crate::routing;
+use crate::routing::{self, RouteMode};
 use crate::state::AppState;
 
 /// The env var that points the proxy at the residual API's internal Unix socket.
@@ -76,14 +78,25 @@ pub fn default_internal_socket() -> PathBuf {
     Path::new(&run_dir).join(API_INTERNAL_SOCKET_NAME)
 }
 
-/// The axum fallback handler: reverse-proxy any non-native route to the residual
-/// Python over its internal Unix socket. Resolves the socket path from the
-/// environment, then forwards. The socket path is resolved here (not held in the
-/// app state) so a unit override of the env is honoured per request, matching the
-/// other env-resolved seams.
-pub async fn proxy_to_residual(State(_state): State<AppState>, request: Request) -> Response {
-    let socket = default_internal_socket();
-    proxy_with_socket(&socket, request).await
+/// The axum fallback handler. Forwards a permanent-Python path to the residual
+/// app (resolving the socket path from the environment per request, so a unit
+/// override is honoured), relays `/hls/*` to mediamtx, serves the operator UI,
+/// and answers anything else with a FastAPI-shaped 404 or 405.
+pub async fn non_native_fallback(State(_state): State<AppState>, request: Request) -> Response {
+    match routing::classify(request.method(), request.uri().path()) {
+        RouteMode::Residual => proxy_with_socket(&default_internal_socket(), request).await,
+        RouteMode::Hls => crate::routes::hls::proxy_hls(request).await,
+        RouteMode::OperatorUi => crate::routes::static_ui::serve(request).await,
+        RouteMode::Unrouted { other_method: true } => {
+            detail(StatusCode::METHOD_NOT_ALLOWED, "Method Not Allowed")
+        }
+        // A native template this node did not register (a profile-gated
+        // route), or an API path nothing serves.
+        RouteMode::Native
+        | RouteMode::Unrouted {
+            other_method: false,
+        } => detail(StatusCode::NOT_FOUND, "Not Found"),
+    }
 }
 
 /// The testable core: forward `request` to the residual API at `socket`. Split

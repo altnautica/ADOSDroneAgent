@@ -926,8 +926,7 @@ pub fn bind_unix(path: &Path) -> std::io::Result<OperatorListener> {
 /// the first thing the inert dual-run must rule out). The AF_INET6 leg is
 /// best-effort: on a kernel built without IPv6, or one that rejects the `::`
 /// bind, the v6 socket is dropped and the function returns the v4 listener alone,
-/// so the front still serves IPv4 clients. Mirrors the Python
-/// `make_dual_stack_sockets` helper.
+/// so the front still serves IPv4 clients.
 pub async fn bind_tcp(port: u16) -> Result<Vec<TcpListener>> {
     let v4 = bind_one(Domain::IPV4, port, false)
         .with_context(|| format!("bind control TCP port {port} (IPv4)"))?;

@@ -25,8 +25,8 @@
 //!   (`iw dev <iface> station dump`) while running. `wifi_client` from the `ados-net` Wi-Fi
 //!   command socket's `wifi_status` op (+ the on-boot flag from the client config
 //!   file), degrading to the all-default shape when the socket is unreachable.
-//!   `ethernet` to `null` (no live seam on the front — not a fabricated
-//!   no-connection shape). `modem_4g` from the modem config file (enabled / apn
+//!   `ethernet` from the board's physical wired port, resolved by device class
+//!   (`null` only when the board has none). `modem_4g` from the modem config file (enabled / apn
 //!   / cap) with every connectivity leg `null` (this front has no modem-status
 //!   seam) and the cumulative-usage legs overlaid from the store's most-recent
 //!   `net.modem_usage` event. `active_uplink` from the store's most-recent
@@ -34,10 +34,11 @@
 //!   `priority` from the uplink priority file (the default chain when absent).
 //!   `share_uplink` from the config flag.
 //! - **`GET .../network/ethernet`** — `connection_name` from a read-only `nmcli`
-//!   connection list (the active ethernet profile's name, else `null`); every
-//!   other leg `null`, because nothing here probes the link.
-//! - **`GET .../network/client/scan`** — `503 E_SCAN_UNAVAILABLE`: this front has
-//!   no scan seam, and an empty list would claim a scan that never ran.
+//!   connection list (the active ethernet profile's name, else `null`) plus the
+//!   wired port's live carrier, speed, address and gateway.
+//! - **`GET .../network/client/scan`** — a fresh nearby-network scan run by the
+//!   Wi-Fi command socket's `wifi_scan` op (see
+//!   [`crate::routes::network_write::wifi_scan`]).
 //! - **`GET .../network/modem`** — the modem view (same leg as `modem_4g`).
 //! - **`GET .../network/priority`** — the uplink priority list.
 //! - **`GET .../modem-status`** — the cellular detail snapshot; the front has no
@@ -170,15 +171,7 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
     let body = json!({
         "ap": ap_view(&cfg).await,
         "wifi_client": wifi_client_view().await,
-        // No live ethernet seam exists on this front (the `ados-net` command
-        // socket has an `eth_config` write and no status op), so the honest leg
-        // is `null` = not probed. It used to be a fabricated
-        // `{link:false, speed_mbps:null, ip:null, gateway:null}`, and `link:
-        // false` is a measurement: it tells an operator the cable is unplugged.
-        // Chasing a phantom cable fault is the cheap version of that mistake; the
-        // expensive one is concluding the uplink cannot be ethernet and
-        // re-planning around a modem that is not needed.
-        "ethernet": Value::Null,
+        "ethernet": ethernet_view().await,
         "modem_4g": modem_view(&state).await,
         "active_uplink": active_uplink,
         "priority": priority_list(),
@@ -540,50 +533,155 @@ fn modem_body(cfg: &Map<String, Value>, usage: Option<&Map<String, Value>>) -> V
 // ---------------------------------------------------------------------------
 
 /// `GET .../network/ethernet` → the discovered ethernet connection name plus the
-/// link legs. 404s on a drone.
+/// live link legs. 404s on a drone.
 ///
-/// `connection_name` is real: the Python `config()` reports the discovered NM
-/// connection name, and the front reproduces that source with a read-only
-/// `nmcli` connection list (`discover_primary_connection_name`), reporting the
-/// active ethernet profile's name (e.g. `"netplan-eth0"`) and `null` only when no
-/// NM-managed ethernet profile exists.
-///
-/// Every other leg is `null`, because this front has no live ethernet IPv4 / link
-/// seam to read (the `ados-net` command socket carries an `eth_config` write and
-/// no status op). They used to be a no-connection default — `mode: "dhcp"`,
-/// `link: false`, `dns: []` — which are all assertions: "DHCP is configured",
-/// "the cable is out", "no resolvers are set". An operator debugging an uplink
-/// acts on each of those differently than on "not probed".
+/// `connection_name` is the active ethernet NM profile's name (e.g.
+/// `"netplan-eth0"`) from a read-only `nmcli` connection list, `null` only when
+/// no NM-managed ethernet profile exists. `link`, `speed_mbps`, `current_ip` and
+/// `current_gateway` are read live from the board's wired port, resolved by
+/// device class (see [`wired_link`]); every leg is `null` when the board has no
+/// wired port. The configured legs (`mode`, `ip`, `gateway`, `dns`) stay `null`:
+/// nothing here reads the saved profile's settings, and a default would be an
+/// assertion ("DHCP is configured") rather than a reading.
 pub async fn get_network_ethernet() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    let connection_name = discover_primary_connection_name(ETH_IFACE)
+    let wired = wired_link().await;
+    let iface = wired
+        .as_ref()
+        .map(|w| w.iface.clone())
+        .unwrap_or_else(|| ETH_IFACE_FALLBACK.to_string());
+    let connection_name = discover_primary_connection_name(&iface)
         .await
         .map(Value::String)
         .unwrap_or(Value::Null);
-    Json(ethernet_body(connection_name)).into_response()
+    Json(ethernet_body(connection_name, wired.as_ref())).into_response()
 }
 
-/// Compose the `.../network/ethernet` body: the one discovered field, and `null`
-/// for every leg nothing on this front probes.
-fn ethernet_body(connection_name: Value) -> Value {
+/// Compose the `.../network/ethernet` body.
+fn ethernet_body(connection_name: Value, wired: Option<&WiredLink>) -> Value {
     json!({
         "connection_name": connection_name,
         "mode": Value::Null,
         "ip": Value::Null,
         "gateway": Value::Null,
         "dns": Value::Null,
-        "link": Value::Null,
-        "speed_mbps": Value::Null,
-        "current_ip": Value::Null,
-        "current_gateway": Value::Null,
+        "link": wired.and_then(|w| w.link),
+        "speed_mbps": wired.and_then(|w| w.speed_mbps),
+        "current_ip": wired.and_then(|w| w.ip.clone()),
+        "current_gateway": wired.and_then(|w| w.gateway.clone()),
     })
 }
 
-/// The ethernet interface the connection discovery prefers, mirroring the Python
-/// `EthernetManager` default (`eth0`).
-const ETH_IFACE: &str = "eth0";
+/// The `ethernet` leg of the aggregate network view:
+/// `{available, iface, link, speed_mbps, ip, gateway}` for the board's wired
+/// port, or `null` when the board has none.
+async fn ethernet_view() -> Value {
+    match wired_link().await {
+        None => Value::Null,
+        Some(w) => json!({
+            "available": true,
+            "iface": w.iface,
+            "link": w.link,
+            "speed_mbps": w.speed_mbps,
+            "ip": w.ip,
+            "gateway": w.gateway,
+        }),
+    }
+}
+
+/// The live state of the board's wired port.
+#[derive(Debug, Clone, PartialEq)]
+struct WiredLink {
+    iface: String,
+    /// Carrier present. `None` when the kernel would not say.
+    link: Option<bool>,
+    /// Negotiated speed; `None` without a link or when the driver reports none.
+    speed_mbps: Option<u32>,
+    ip: Option<String>,
+    gateway: Option<String>,
+}
+
+/// Read the first physical wired port (by device class, never by name) and
+/// its carrier, speed, IPv4 address and default gateway. `None` when the board
+/// has no wired port.
+async fn wired_link() -> Option<WiredLink> {
+    let iface = crate::probe::offload(|| ados_protocol::netif::list_wired().into_iter().next())
+        .await
+        .flatten()?;
+    let sys = Path::new("/sys/class/net").join(&iface);
+    let (link, speed_mbps) = crate::probe::offload(move || (read_carrier(&sys), read_speed(&sys)))
+        .await
+        .unwrap_or((None, None));
+    let addr_args = ["-4", "-o", "addr", "show", "dev", iface.as_str()];
+    let route_args = ["-4", "route", "show", "default", "dev", iface.as_str()];
+    let (addr, route) = tokio::join!(
+        crate::probe::capture("ip", &addr_args, crate::probe::PROBE_TIMEOUT),
+        crate::probe::capture("ip", &route_args, crate::probe::PROBE_TIMEOUT),
+    );
+    Some(WiredLink {
+        ip: parse_inet_addr(addr.text()),
+        gateway: parse_default_via(route.text()),
+        iface,
+        link,
+        speed_mbps,
+    })
+}
+
+/// Carrier from sysfs. The `carrier` file refuses to read while the interface
+/// is administratively down, which is then reported as no link.
+fn read_carrier(sys: &Path) -> Option<bool> {
+    match std::fs::read_to_string(sys.join("carrier")) {
+        Ok(v) => match v.trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            _ => None,
+        },
+        Err(_) => std::fs::read_to_string(sys.join("operstate"))
+            .ok()
+            .filter(|s| s.trim() == "down")
+            .map(|_| false),
+    }
+}
+
+/// Negotiated speed in Mb/s; the kernel reports `-1` (or refuses) with no link.
+fn read_speed(sys: &Path) -> Option<u32> {
+    std::fs::read_to_string(sys.join("speed"))
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .filter(|&s| s > 0)
+        .and_then(|s| u32::try_from(s).ok())
+}
+
+/// The first IPv4 address in `ip -4 -o addr show` output, without its prefix.
+fn parse_inet_addr(text: &str) -> Option<String> {
+    let mut words = text.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "inet" {
+            return words
+                .next()
+                .and_then(|a| a.split('/').next())
+                .map(str::to_string);
+        }
+    }
+    None
+}
+
+/// The gateway of the first default route in `ip -4 route show default` output.
+fn parse_default_via(text: &str) -> Option<String> {
+    let mut words = text.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "via" {
+            return words.next().map(str::to_string);
+        }
+    }
+    None
+}
+
+/// The interface the NM connection discovery falls back to when the board
+/// reports no wired port, mirroring the Python `EthernetManager` default.
+const ETH_IFACE_FALLBACK: &str = "eth0";
 
 /// Discover the primary ethernet NM connection NAME, mirroring the Python
 /// `_discover_primary_connection`. Reads the saved + active NM connection lists
@@ -723,29 +821,19 @@ fn parse_nmcli_terse_line(line: &str) -> Vec<String> {
 // GET /api/v1/ground-station/network/client/scan — nearby-network scan.
 // ---------------------------------------------------------------------------
 
-/// `GET .../network/client/scan` → `503 E_SCAN_UNAVAILABLE`. 404s on a drone.
+/// `GET .../network/client/scan` → `{"networks": [...]}`. 404s on a drone.
 ///
-/// This front has no scan seam. It must not drive `nmcli dev wifi list` on
-/// `wlan0` itself — that races the `ados-net` daemon which owns the interface,
-/// and on a ground station `wlan0` may be the AP carrying the operator's own
-/// session — and the daemon's command socket exposes no scan op to forward to.
-///
-/// So the route reports that it cannot answer. It used to return
-/// `{"networks": []}`, described as "the same body the Python route returns when
-/// the scan finds nothing" — but the two are not the same claim: the Python
-/// route scanned and found nothing, this one never scanned. An operator reading
-/// "no networks found" concludes the band is empty or the antenna is dead and
-/// stops looking for their SSID; the honest 503 sends them to the surface that
-/// can actually scan.
+/// The scan runs in the daemon that owns the station radio (the `wifi_scan`
+/// op), never here: driving the radio from this process would race the
+/// daemon's joins, and on a ground station the same radio may be the AP
+/// carrying the operator's own session. An unreachable daemon is a 503
+/// `E_SCAN_UNAVAILABLE`, never an empty list that claims a scan ran.
 pub async fn get_network_client_scan() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"detail": {"error": {"code": "E_SCAN_UNAVAILABLE"}}})),
-    )
-        .into_response()
+    let result = crate::routes::network_write::wifi_scan().await;
+    crate::routes::network_write::wifi_scan_response(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -971,8 +1059,6 @@ mod tests {
         // tested separately).
         let body = json!({
             "ap": ap,
-            // Nothing on this front probes ethernet, so the leg is null.
-            "ethernet": Value::Null,
             "priority": priority,
             "share_uplink": share,
         });
@@ -992,7 +1078,6 @@ mod tests {
                 "gateway": null,
                 "connected_clients": [],
             },
-            "ethernet": null,
             "priority": ["eth0", "wlan0_client", "wwan0", "usb0"],
             "share_uplink": false,
         });
@@ -1342,34 +1427,46 @@ mod tests {
         ));
     }
 
-    /// Only the discovered connection name is a claim; every link leg is `null`.
-    ///
-    /// The old expectation was `mode: "dhcp"`, `link: false`, `dns: []` — three
-    /// assertions ("DHCP is configured", "the cable is out", "no resolvers") from
-    /// a route that probes none of them. It also compared against a copy of the
-    /// route body written inside the test, so it could not have failed if the
-    /// route drifted.
+    /// With no wired port nothing is claimed: the cable state stays unknown
+    /// rather than reading as unplugged. A live port's legs are the readings.
     #[test]
-    fn ethernet_body_claims_only_the_discovered_connection_name() {
-        assert_eq!(
-            ethernet_body(json!("netplan-eth0")),
-            json!({
-                "connection_name": "netplan-eth0",
-                "mode": null,
-                "ip": null,
-                "gateway": null,
-                "dns": null,
-                "link": null,
-                "speed_mbps": null,
-                "current_ip": null,
-                "current_gateway": null,
-            })
-        );
-        // No NM ethernet profile found: even the name is null, and `link` still
-        // does not claim the cable is out.
-        let none = ethernet_body(Value::Null);
+    fn ethernet_body_reports_the_live_port_and_claims_nothing_without_one() {
+        let none = ethernet_body(Value::Null, None);
         assert_eq!(none["connection_name"], Value::Null);
         assert_eq!(none["link"], Value::Null);
+        assert_eq!(none["current_ip"], Value::Null);
+
+        let port = WiredLink {
+            iface: "end1".into(),
+            link: Some(true),
+            speed_mbps: Some(1000),
+            ip: Some("192.168.1.50".into()),
+            gateway: Some("192.168.1.1".into()),
+        };
+        let body = ethernet_body(json!("netplan-end1"), Some(&port));
+        assert_eq!(body["link"], json!(true));
+        assert_eq!(body["speed_mbps"], json!(1000));
+        assert_eq!(body["current_ip"], json!("192.168.1.50"));
+        assert_eq!(body["current_gateway"], json!("192.168.1.1"));
+        assert_eq!(body["mode"], Value::Null, "the saved profile is not read");
+    }
+
+    #[test]
+    fn ip_output_parses_to_address_and_gateway() {
+        assert_eq!(
+            parse_inet_addr(
+                "2: end1    inet 192.168.1.50/24 brd 192.168.1.255 scope global dynamic end1\n"
+            )
+            .as_deref(),
+            Some("192.168.1.50")
+        );
+        assert_eq!(parse_inet_addr(""), None);
+        assert_eq!(
+            parse_default_via("default via 192.168.1.1 proto dhcp src 192.168.1.50 metric 100\n")
+                .as_deref(),
+            Some("192.168.1.1")
+        );
+        assert_eq!(parse_default_via(""), None);
     }
 
     #[test]

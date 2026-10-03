@@ -2,33 +2,27 @@
 //!
 //! Joining an upstream Wi-Fi network only needs a `wlan` interface, not a
 //! particular operator profile, so a drone and a ground station both expose
-//! these reads. The matching writes (join / leave / forget) live in
-//! `network_write`; the saved-profile autoconnect toggle stays proxied.
-//!
-//! Two of the three Python reads (`network.py`) are served here:
+//! these reads. The matching writes (join / leave / forget / autoconnect) live
+//! in `network_write`.
 //!
 //! - **`GET /api/v1/network/client/status`** — the live station connection
-//!   state `{connected, ssid, bssid, signal, ip, gateway, security}`, served
-//!   natively where the `ados-net` uplink daemon runs (a ground station): the
-//!   front reads the station state off that daemon's Wi-Fi command socket's
-//!   `wifi_status` op and reshapes the reply to the seven-key body. An
-//!   unreachable socket is a `503 E_WIFI_STATUS_UNAVAILABLE`: the station state
-//!   is unknown, and `connected:false` would claim a fact nobody measured. On a
-//!   drone the route is not registered here and the residual's packaged Wi-Fi
-//!   manager answers it.
+//!   state `{connected, ssid, bssid, signal, ip, gateway, security}`, read off
+//!   the Wi-Fi command socket's `wifi_status` op and reshaped to the seven-key
+//!   body. An unreachable socket is a `503 E_WIFI_STATUS_UNAVAILABLE`: the
+//!   station state is unknown, and `connected:false` would claim a fact nobody
+//!   measured.
 //! - **`GET /api/v1/network/client/configured`** — the saved NetworkManager
 //!   Wi-Fi profiles `{connections:[{name, type, device, autoconnect}, …]}`.
 //!   A read-only `nmcli -t -f NAME,TYPE,DEVICE,AUTOCONNECT connection show`
 //!   (the same read-only `nmcli connection show` seam the ground-station
-//!   ethernet view uses), filtered to the wireless connection types, matching
-//!   the Python `configured_connections()` field-for-field. An absent / failing
-//!   `nmcli` degrades to the empty list, the same body the Python route returns
-//!   when the listing fails.
-//!
-//! `GET /api/v1/network/client/scan` is NOT served here: the Python `scan()`
-//! runs `nmcli device wifi list --rescan yes`, which TRIGGERS a fresh active
-//! scan (a side effect), and there is no scan op on the daemon command socket.
-//! That route stays proxied.
+//!   ethernet view uses), filtered to the wireless connection types. An absent
+//!   / failing `nmcli` degrades to the empty list.
+//! - **`GET /api/v1/network/client/scan`** — nearby networks
+//!   `{networks:[{ssid, bssid, signal, security, in_use}, …]}`, strongest first,
+//!   from the Wi-Fi command socket's `wifi_scan` op on the station interface.
+//!   `signal` is a 0-100 quality and `security` the NetworkManager-style label
+//!   (`--` for an open network), the scale every client of this route renders.
+//!   A failed scan is an error status, never an empty list.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -36,6 +30,7 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use crate::routes::gs_network::{json_truthy, nmcli_connections, wifi_status};
+use crate::routes::network_write::{wifi_scan, wifi_scan_response};
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/network/client/status — live station connection state.
@@ -119,6 +114,68 @@ fn configured_connections_from(rows: &[Vec<String>]) -> Value {
         }));
     }
     Value::Array(out)
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/network/client/scan — nearby networks.
+// ---------------------------------------------------------------------------
+
+/// `GET /api/v1/network/client/scan` → the nearby networks, strongest first.
+/// A scan the daemon could not run is answered with its error status
+/// (`503`/`504`/`500`), so "no networks" always means the radio found none.
+pub async fn get_client_scan() -> Response {
+    match wifi_scan().await {
+        Ok(rows) => Json(json!({ "networks": client_scan_rows(rows) })).into_response(),
+        Err(e) => wifi_scan_response(Err(e)),
+    }
+}
+
+/// NetworkManager's signal-quality mapping: -40 dBm or better is 100, -100 dBm
+/// or worse is 0, linear between.
+fn dbm_to_quality(dbm: i64) -> i64 {
+    let clamped = dbm.clamp(-100, -40);
+    100 - ((clamped + 40).abs() * 100) / 60
+}
+
+/// The NetworkManager-style security label for a scan row's security class.
+fn security_label(class: &str) -> &'static str {
+    match class {
+        "wpa3" => "WPA3",
+        "wpa2" => "WPA2",
+        "wpa" => "WPA1",
+        "wep" => "WEP",
+        _ => "--",
+    }
+}
+
+/// Reshape the daemon's scan rows (`signal` in dBm, `security` as a class) into
+/// the client contract, dropping hidden networks and sorting strongest first.
+fn client_scan_rows(rows: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let ssid = row
+                .get("ssid")?
+                .as_str()
+                .filter(|s| !s.is_empty())?
+                .to_owned();
+            let signal = row
+                .get("signal")
+                .and_then(Value::as_i64)
+                .map_or(0, dbm_to_quality);
+            Some(json!({
+                "ssid": ssid,
+                "bssid": row.get("bssid").and_then(Value::as_str).unwrap_or(""),
+                "signal": signal,
+                "security": security_label(
+                    row.get("security").and_then(Value::as_str).unwrap_or("open"),
+                ),
+                "in_use": row.get("in_use").and_then(Value::as_bool).unwrap_or(false),
+            }))
+        })
+        .collect();
+    out.sort_by_key(|r| std::cmp::Reverse(r["signal"].as_i64().unwrap_or(0)));
+    out
 }
 
 #[cfg(test)]
@@ -244,5 +301,33 @@ mod tests {
         ]];
         let v = configured_connections_from(&rows);
         assert_eq!(v[0]["autoconnect"], json!(true));
+    }
+
+    #[test]
+    fn scan_rows_use_the_quality_scale_and_open_label_clients_render() {
+        let rows = vec![
+            json!({"ssid": "Weak", "bssid": "aa", "signal": -95, "security": "open", "in_use": false}),
+            json!({"ssid": "", "bssid": "bb", "signal": -30, "security": "wpa2"}),
+            json!({"ssid": "Strong", "bssid": "cc", "signal": -30, "security": "wpa2", "in_use": true}),
+            json!({"ssid": "Mid", "bssid": "dd", "signal": -70, "security": "wpa3"}),
+        ];
+        let out = client_scan_rows(rows);
+        let names: Vec<&str> = out.iter().map(|r| r["ssid"].as_str().unwrap()).collect();
+        // Hidden networks are dropped; strongest first.
+        assert_eq!(names, ["Strong", "Mid", "Weak"]);
+        assert_eq!(out[0]["signal"], json!(100));
+        assert_eq!(out[0]["security"], json!("WPA2"));
+        assert_eq!(out[0]["in_use"], json!(true));
+        assert_eq!(out[1]["signal"], json!(50));
+        assert_eq!(out[2]["signal"], json!(9));
+        assert_eq!(out[2]["security"], json!("--"));
+    }
+
+    #[test]
+    fn signal_quality_is_bounded_at_both_ends() {
+        assert_eq!(dbm_to_quality(-20), 100);
+        assert_eq!(dbm_to_quality(-40), 100);
+        assert_eq!(dbm_to_quality(-100), 0);
+        assert_eq!(dbm_to_quality(-120), 0);
     }
 }

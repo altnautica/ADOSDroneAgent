@@ -419,6 +419,30 @@ fn load_discovered(path: &Path) -> Vec<DiscoveredCamera> {
         .unwrap_or_default()
 }
 
+/// The discovery sidecar's camera entries exactly as the HAL enumeration wrote
+/// them (one object per device: `name`, `type`, `device_path`, `width`,
+/// `height`, `capabilities`, `hardware_role`, `match`), for the routes that list
+/// what is plugged in rather than reconcile it into the roster. Empty on any
+/// read/parse failure, like [`load_discovered`].
+pub(crate) fn discovered_camera_entries() -> Vec<Map<String, Value>> {
+    let Ok(text) = std::fs::read_to_string(discovered_path()) else {
+        return Vec::new();
+    };
+    let Ok(Value::Object(mut doc)) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    match doc.remove("cameras") {
+        Some(Value::Array(items)) => items
+            .into_iter()
+            .filter_map(|v| match v {
+                Value::Object(m) => Some(m),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Read + parse the live-streams sidecar into an `id -> live` map, or an empty map
 /// on any failure (an absent sidecar — the single-stream path never writes one).
 fn load_live(path: &Path) -> HashMap<String, Option<bool>> {

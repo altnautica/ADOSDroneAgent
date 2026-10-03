@@ -57,7 +57,7 @@ use crate::state::AppState;
 /// (`crate::profile`), so a node installed with `profile: auto` that resolves to
 /// `ground-station` passes the gate even though its raw config field is `"auto"`.
 /// Threaded so a test drives the gate against a tempdir without mutating the
-/// process environment. Mirrors the FastAPI `is_ground_station`.
+/// process environment.
 fn resolved_profile_at(config: &Path, profile_conf: &Path, role_path: &Path) -> String {
     let config_profile = config_agent_profile_at(config);
     let (profile, _role) =

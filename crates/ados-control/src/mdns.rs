@@ -19,22 +19,24 @@
 //! # The SRV target is a name that resolves
 //!
 //! Publishing a record with an arbitrary `server=` does not create a matching
-//! A/AAAA record — avahi publishes exactly one resolvable `<hostname>.local`,
-//! the system hostname. So the SRV target is
-//! [`ados_protocol::reach::mdns_hostname`], the identical name
+//! A/AAAA record that avahi answers for. So the SRV target is
+//! [`ados_protocol::reach::mdns_hostname`]: avahi's own published host name
+//! when avahi runs (which follows a collision rename to `<host>-2.local`), else
+//! the hostname's first label under `.local`, the identical name
 //! `/api/pairing/info` and the claim response report as `mdns_host`. A host
 //! with no usable hostname has no reach to advertise and publishes nothing
 //! rather than a name the GCS would store and fail to dial. (`enable_addr_auto`
 //! still attaches every interface address, so a browser that prefers the A
 //! record reaches the node regardless.)
 //!
-//! # TXT is refreshed, not poked
+//! # The record is refreshed, not poked
 //!
-//! `paired` and `code` change when an operator claims or releases the node. The
-//! refresh task re-reads `pairing.json` on a fixed cadence and re-registers only
-//! when a value actually changed, rather than being called from the claim
-//! handler: a claim is the write path an operator is waiting on, and it must not
-//! be able to block on an mDNS daemon.
+//! `paired` and `code` change when an operator claims or releases the node;
+//! the profile and role change on a role transition; the host name changes on
+//! a rename or an avahi collision. The refresh task re-reads all three on a
+//! fixed cadence and re-registers only when something actually changed, rather
+//! than being called from the write handlers: a claim is the write path an
+//! operator is waiting on, and it must not be able to block on an mDNS daemon.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -79,8 +81,8 @@ impl Drop for NodeAdvert {
     }
 }
 
-/// The identity half of the advert: everything that cannot change without the
-/// daemon restarting.
+/// The identity half of the advert: the node's name, board and version, and
+/// the profile and role, which a role transition changes while the daemon runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdvertIdentity {
     pub device_id: String,
@@ -245,7 +247,7 @@ pub fn advertise(paths: &PairingPaths, board_path: PathBuf, port: u16) -> Option
     };
 
     let id = read_identity(paths, &board_path);
-    let mut pairing = read_pairing(&paths.pairing_json);
+    let pairing = read_pairing(&paths.pairing_json);
     let info = match build_info(&server, &id, &pairing, port) {
         Some(i) => i,
         None => {
@@ -269,39 +271,71 @@ pub fn advertise(paths: &PairingPaths, board_path: PathBuf, port: u16) -> Option
         "mdns_published"
     );
 
-    // Re-announce when the pairing half changes. Re-registering the same
-    // fullname replaces the record in place (mdns-sd documents this as the
-    // update path), so the GCS sees `paired=true` and the code disappear
+    // Re-announce when the pairing half, the identity half or the host name
+    // changes. Re-registering the same fullname replaces the record in place
+    // (mdns-sd documents this as the update path), so the GCS sees the change
     // without the record ever going away.
     let refresh_cancel = ados_protocol::shutdown::Shutdown::new();
     {
         let cancel = refresh_cancel.clone();
         let daemon = daemon.clone();
-        let pairing_json = paths.pairing_json.clone();
-        let id = id.clone();
-        let server = server.clone();
+        let paths = paths.clone();
+        let mut published = Published {
+            server,
+            identity: id,
+            pairing,
+        };
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel.wait() => return,
                     _ = tokio::time::sleep(TXT_REFRESH_INTERVAL) => {}
                 }
-                let next = read_pairing(&pairing_json);
-                if next == pairing {
+                let read = {
+                    let paths = paths.clone();
+                    let board_path = board_path.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let server = ados_protocol::reach::mdns_hostname()
+                            .map(|h| format!("{}.", h.trim_end_matches('.')));
+                        (
+                            server,
+                            read_identity(&paths, &board_path),
+                            read_pairing(&paths.pairing_json),
+                        )
+                    })
+                    .await
+                };
+                let Ok((server, identity, pairing)) = read else {
+                    continue;
+                };
+                // A host that lost its name keeps its last record: withdrawing it
+                // would hide a node that is still reachable by its address.
+                let next = Published {
+                    server: server.unwrap_or_else(|| published.server.clone()),
+                    identity,
+                    pairing,
+                };
+                if next == published {
                     continue;
                 }
-                // The published half only advances once the record is actually
+                // The published state only advances once the record is actually
                 // re-registered, so a failed refresh is retried next tick rather
-                // than leaving a stale paired flag or pairing code on the LAN.
-                let Some(info) = build_info(&server, &id, &next, port) else {
+                // than leaving a stale name, role, paired flag or code on the LAN.
+                let Some(info) = build_info(&next.server, &next.identity, &next.pairing, port)
+                else {
                     continue;
                 };
                 match daemon.register(info) {
                     Ok(()) => {
-                        pairing = next;
-                        tracing::info!(paired = pairing.paired, "mdns_txt_refreshed");
+                        published = next;
+                        tracing::info!(
+                            server = %published.server,
+                            profile = %published.identity.profile,
+                            paired = published.pairing.paired,
+                            "mdns_record_refreshed"
+                        );
                     }
-                    Err(e) => tracing::warn!(error = %e, "mdns_txt_refresh_failed"),
+                    Err(e) => tracing::warn!(error = %e, "mdns_record_refresh_failed"),
                 }
             }
         });
@@ -312,6 +346,14 @@ pub fn advertise(paths: &PairingPaths, board_path: PathBuf, port: u16) -> Option
         fullname,
         refresh_cancel,
     })
+}
+
+/// What the advert currently carries: the SRV target and both TXT halves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Published {
+    server: String,
+    identity: AdvertIdentity,
+    pairing: AdvertPairing,
 }
 
 #[cfg(test)]

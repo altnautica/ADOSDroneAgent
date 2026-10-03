@@ -612,7 +612,8 @@ REGISTRY: list[RouteCase] = [
     # Push a 32-byte signing key to the FC (one-shot SETUP_SIGNING). A side effect
     # (it writes to the FC), so sandboxed by default. The body is a 64-hex-char
     # key + the target/link fields; the response carries a volatile `enrolled_at`
-    # timestamp + a per-key `key_id` fingerprint, masked when the bench opts in.
+    # timestamp, a per-key `key_id` fingerprint and `verified` (whether the FC was
+    # seen signing with the key), masked when the bench opts in.
     RouteCase(
         name="signing-enroll-fc",
         method="POST",
@@ -625,17 +626,18 @@ REGISTRY: list[RouteCase] = [
         ),
         content_type="application/json",
         require_sandbox=True,
-        extra_volatile=("enrolled_at", "key_id"),
+        extra_volatile=("enrolled_at", "key_id", "verified"),
     ),
     # Clear the FC's signing store (SETUP_SIGNING with an all-zero key). A side
-    # effect, so sandboxed. No request body; the response is the static
-    # {"success": true}.
+    # effect, so sandboxed. No request body; the response is {"sent": true,
+    # "verified": <whether the FC was seen sending unsigned>}.
     RouteCase(
         name="signing-disable-on-fc",
         method="POST",
         path="/api/mavlink/signing/disable-on-fc",
         paired_headers={"authorization": PAIRED_AUTH_PLACEHOLDER},
         require_sandbox=True,
+        extra_volatile=("verified",),
     ),
     # Restart a single agent unit. A write with side effects, so it is sandboxed
     # (skipped by default). The path carries a concrete allowlisted unit name; the

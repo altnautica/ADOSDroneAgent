@@ -26,19 +26,15 @@
 //!
 //! Only an `ados-*` unit can be restarted. A request name is normalized to
 //! `ados-<name>` when it lacks the prefix, then checked against a fixed allowlist
-//! of agent + ground-station units; anything outside the list is rejected with an
+//! of the units the install ships; anything outside the list is rejected with an
 //! `Unknown service` error before any `systemctl` runs, so an arbitrary unit
-//! (e.g. `sshd`, `nginx`) can never be restarted through this route. The
-//! allowlist mirrors the FastAPI set verbatim.
+//! (e.g. `sshd`, `nginx`) can never be restarted through this route. A test
+//! holds the allowlist to the shipped unit files, so a unit that is not shipped
+//! cannot be listed and a shipped one cannot be forgotten.
 //!
-//! ## The `ados-wfb` → `ados-wfb-rx` profile alias
-//!
-//! On a ground-station profile the drone-side `ados-wfb` unit is a no-op and the
-//! real receive work lives in `ados-wfb-rx`. The GCS calls `ados-wfb` regardless
-//! of profile, so a request for `ados-wfb` on a ground station is mapped onto
-//! `ados-wfb-rx` before touching systemd (with the original name carried back in
-//! `aliased_from`). The profile is read from the agent config's raw
-//! `agent.profile` field, exactly as the FastAPI route does.
+//! The caller names the real unit. Each profile lists its own units on
+//! `/api/services`, so a ground station's receive stack is `ados-wfb-rx`, never
+//! the drone-side `ados-wfb`.
 //!
 //! ## The restart confirmation
 //!
@@ -66,32 +62,55 @@ use axum::Json;
 use serde_json::{json, Value};
 use tokio::process::Command;
 
-/// The set of units the restart route may touch. A request name is normalized to
-/// `ados-<name>` and must land in this set or it is rejected. Mirrors the FastAPI
-/// `allowed` set verbatim, including the ground-station receive-side units so the
-/// GS rig's Hardware tab can restart the receive WFB stack.
+/// The set of units the restart route may touch: every shipped `ados-*.service`
+/// except those in [`NOT_RESTARTABLE`]. A request name is normalized to
+/// `ados-<name>` and must land in this set or it is rejected.
 const ALLOWED_UNITS: &[&str] = &[
     "ados-api",
+    "ados-batman",
     "ados-cloud",
+    "ados-crsf",
     "ados-discovery",
-    "ados-ethernet",
+    "ados-dnsmasq-gs",
+    "ados-gpio",
     "ados-health",
     "ados-hostapd",
     "ados-input",
+    "ados-kiosk",
+    "ados-logd",
     "ados-mavlink",
     "ados-mediamtx-gs",
     "ados-mesh-pairing",
     "ados-oled",
-    "ados-peripherals",
+    "ados-oled-i2c",
     "ados-pic",
+    "ados-plugin-host",
+    "ados-power",
+    "ados-setup-captive",
+    "ados-swarmbus",
+    "ados-tunnel-config",
     "ados-uplink-router",
     "ados-video",
     "ados-vision",
+    "ados-vision-rknn",
     "ados-wfb",
-    "ados-wfb-rx",
-    "ados-wfb-relay",
     "ados-wfb-receiver",
+    "ados-wfb-relay",
+    "ados-wfb-rx",
     "ados-wifi-client",
+];
+
+/// Shipped units the restart route refuses: this process itself (the reply
+/// could never be delivered), the supervisor (it has its own route), and the
+/// boot-time probes and one-time fixups that have nothing to restart.
+#[cfg(test)]
+const NOT_RESTARTABLE: &[&str] = &[
+    "ados-control",
+    "ados-supervisor",
+    "ados-camera-probe",
+    "ados-display-probe",
+    "ados-fbcon-detach",
+    "ados-usb-otg-host",
 ];
 
 /// The supervisor unit `POST /api/v1/system/restart-supervisor` restarts. It owns
@@ -113,12 +132,11 @@ const RESTART_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `POST /api/services/{name}/restart` → `{"status": ...}` at HTTP 200.
 ///
-/// Validates the unit name against the `ados-*` allowlist, applies the
-/// ground-station `ados-wfb`→`ados-wfb-rx` alias, then restarts the unit and
-/// confirms the restart actually executed before reporting `status:ok`. Every
-/// outcome is a 200 with the verdict in the body, matching the FastAPI handler:
-/// an unknown name, a failed restart, an unconfirmed restart, and a timeout are
-/// all `{"status":"error", ...}` bodies, never an HTTP error.
+/// Validates the unit name against the `ados-*` allowlist, then restarts the
+/// unit and confirms the restart actually executed before reporting
+/// `status:ok`. Every outcome is a 200 with the verdict in the body: an unknown
+/// name, a failed restart, an unconfirmed restart, and a timeout are all
+/// `{"status":"error", ...}` bodies, never an HTTP error.
 pub async fn restart_service(Path(name): Path<String>) -> Json<Value> {
     Json(restart_service_result(&name).await)
 }
@@ -126,10 +144,10 @@ pub async fn restart_service(Path(name): Path<String>) -> Json<Value> {
 /// Restart one allowlisted `ados-*` unit and return the same verdict body the
 /// service-restart route produces, for the routes that need a restart as a side
 /// effect of another write (e.g. the vision-detector selection restarting
-/// `ados-vision`). The name flows through the identical allowlist guard +
-/// GS-alias + restart-confirmation path, so a unit outside the fixed set is
-/// refused here too; the caller folds the returned `{status, ...}` into its own
-/// response without trusting an arbitrary unit name. `async` because the systemd
+/// `ados-vision`). The name flows through the identical allowlist guard and
+/// restart-confirmation path, so a unit outside the fixed set is refused here
+/// too; the caller folds the returned `{status, ...}` into its own response
+/// without trusting an arbitrary unit name. `async` because the systemd
 /// shell-outs underneath are bounded `tokio::process` spawns; a caller already
 /// inside an axum handler awaits it.
 pub async fn restart_unit(name: &str) -> Value {
@@ -138,12 +156,10 @@ pub async fn restart_unit(name: &str) -> Value {
 
 /// The pure restart logic + the systemd shell-outs, factored out of the axum
 /// handler so the name guard and the body shapes are testable without the HTTP
-/// layer. Returns the exact JSON body the FastAPI route returns for the same
-/// input.
+/// layer.
 async fn restart_service_result(name: &str) -> Value {
     // Normalize to the `ados-<name>` form, then gate on the allowlist. The error
-    // body echoes the *original* request name, matching the FastAPI
-    // `f"Unknown service: {name}"`.
+    // body echoes the *original* request name.
     let svc_name = if name.starts_with("ados-") {
         name.to_string()
     } else {
@@ -155,37 +171,13 @@ async fn restart_service_result(name: &str) -> Value {
             "message": format!("Unknown service: {name}"),
         });
     }
-
-    // Preserve the GCS-side contract: on a ground-station profile, a request for
-    // the drone-side `ados-wfb` (a no-op unit there) is mapped onto the real
-    // receive unit `ados-wfb-rx`. The original name is carried back in
-    // `aliased_from`; it is null on every non-aliased path.
-    let mut svc_name = svc_name;
-    let mut aliased_from: Option<String> = None;
-    if svc_name == "ados-wfb" && profile_is_ground_station() {
-        aliased_from = Some(svc_name.clone());
-        svc_name = "ados-wfb-rx".to_string();
-    }
-
-    perform_restart(&svc_name, aliased_from.as_deref()).await
+    perform_restart(&svc_name).await
 }
 
-/// Whether the agent config's raw `agent.profile` is a ground-station value.
-/// Reads the same field the FastAPI route reads (`app.config.agent.profile`) and
-/// checks against the two spellings it checks (`ground_station` /
-/// `ground-station`). A config read error degrades to "not a ground station"
-/// (the drone default), matching the FastAPI `except` branch that falls back to
-/// `profile = "auto"`.
-fn profile_is_ground_station() -> bool {
-    let profile = crate::config::PairingConfig::load().agent.profile;
-    matches!(profile.as_str(), "ground_station" | "ground-station")
-}
-
-/// Run the restart for an already-validated, already-aliased unit and confirm it
-/// executed. Returns the `status:ok` body on a confirmed restart, an error body
-/// on a non-zero `systemctl` return, an unconfirmed restart, or a subprocess
-/// fault. `aliased_from` is folded into every body verbatim (null when absent).
-async fn perform_restart(svc_name: &str, aliased_from: Option<&str>) -> Value {
+/// Run the restart for an already-validated unit and confirm it executed.
+/// Returns the `status:ok` body on a confirmed restart, an error body on a
+/// non-zero `systemctl` return, an unconfirmed restart, or a subprocess fault.
+async fn perform_restart(svc_name: &str) -> Value {
     let unit_type = show_value(svc_name, "Type").await;
     let unit_type = if unit_type.is_empty() {
         "simple".to_string()
@@ -222,7 +214,7 @@ async fn perform_restart(svc_name: &str, aliased_from: Option<&str>) -> Value {
         }
     }
 
-    confirm_restart(svc_name, aliased_from, &unit_type, pid_before, &ts_before).await
+    confirm_restart(svc_name, &unit_type, pid_before, &ts_before).await
 }
 
 /// Poll for the unit's restart signal after a `systemctl restart` returned 0.
@@ -239,7 +231,6 @@ async fn perform_restart(svc_name: &str, aliased_from: Option<&str>) -> Value {
 /// ~5 s window, which a thread sleep would take out of a reactor worker.
 async fn confirm_restart(
     svc_name: &str,
-    aliased_from: Option<&str>,
     unit_type: &str,
     pid_before: i64,
     ts_before: &str,
@@ -258,7 +249,6 @@ async fn confirm_restart(
                     "status": "ok",
                     "message": format!("Restarted {svc_name}"),
                     "unit": svc_name,
-                    "aliased_from": aliased_from,
                     "pid_before": pid_before,
                     "pid_after": pid_after,
                 });
@@ -271,7 +261,6 @@ async fn confirm_restart(
                 "status": "ok",
                 "message": format!("Restarted {svc_name}"),
                 "unit": svc_name,
-                "aliased_from": aliased_from,
                 "active_enter_before": ts_before,
                 "active_enter_after": ts_after,
             });
@@ -288,7 +277,6 @@ async fn confirm_restart(
             window = CONFIRM_ITERATIONS / 10
         ),
         "unit": svc_name,
-        "aliased_from": aliased_from,
     })
 }
 
@@ -492,10 +480,8 @@ mod tests {
         let body = restart_service_result("sshd").await;
         assert_eq!(body["status"], json!("error"));
         assert_eq!(body["message"], json!("Unknown service: sshd"));
-        // No `unit` / `aliased_from` keys on the unknown-name branch (matching the
-        // FastAPI early return shape).
+        // No `unit` key on the unknown-name branch.
         assert!(body.as_object().unwrap().get("unit").is_none());
-        assert!(body.as_object().unwrap().get("aliased_from").is_none());
     }
 
     #[tokio::test]
@@ -557,45 +543,25 @@ mod tests {
             // error-status shape. Skip the spawn-error assertion there.
             return;
         }
-        let body = perform_restart("ados-api", None).await;
+        let body = perform_restart("ados-api").await;
         assert_eq!(body["status"], json!("error"));
         assert!(body["message"].is_string());
     }
 
     #[test]
-    fn the_ok_body_shape_for_a_pid_based_unit() {
-        // Pin the success-body shape for a simple/notify/dbus/exec unit: it must
-        // carry status/message/unit/aliased_from/pid_before/pid_after. Built from
-        // the same confirm path the route runs, with a synthetic confirmed PID via
-        // the shared json! shape so the contract is asserted field-by-field.
-        let body = json!({
-            "status": "ok",
-            "message": format!("Restarted {}", "ados-mavlink"),
-            "unit": "ados-mavlink",
-            "aliased_from": Value::Null,
-            "pid_before": 100,
-            "pid_after": 200,
-        });
-        assert_eq!(body["status"], json!("ok"));
-        assert_eq!(body["message"], json!("Restarted ados-mavlink"));
-        assert_eq!(body["unit"], json!("ados-mavlink"));
-        assert_eq!(body["aliased_from"], Value::Null);
-        assert_eq!(body["pid_before"], json!(100));
-        assert_eq!(body["pid_after"], json!(200));
-    }
-
-    #[tokio::test]
-    async fn aliased_from_is_null_in_the_body_when_no_alias_applies() {
-        // The non-aliased path always serializes `aliased_from` as JSON null (not
-        // an absent key), matching the FastAPI `aliased_from: None` field that is
-        // always present in the ok/timeout-confirm bodies.
-        let body = confirm_restart("ados-api", None, "simple", 0, "").await;
-        // On a dev host the confirm loop exhausts (no real restart), so the body
-        // is the unconfirmed-error shape — which still carries `aliased_from`.
-        assert!(body.as_object().unwrap().contains_key("aliased_from"));
-        assert_eq!(body["aliased_from"], Value::Null);
-        assert_eq!(body["status"], json!("error"));
-        assert_eq!(body["unit"], json!("ados-api"));
+    fn the_allowlist_is_exactly_the_shipped_restartable_units() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
+        let mut shipped: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the shipped unit directory")
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|name| name.strip_suffix(".service").map(str::to_string))
+            .filter(|name| name.starts_with("ados-"))
+            .filter(|name| !NOT_RESTARTABLE.contains(&name.as_str()))
+            .collect();
+        shipped.sort();
+        let mut allowed: Vec<String> = ALLOWED_UNITS.iter().map(|s| s.to_string()).collect();
+        allowed.sort();
+        assert_eq!(allowed, shipped, "the allowlist drifted from data/systemd");
     }
 
     #[test]
