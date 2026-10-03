@@ -274,6 +274,19 @@ class GpioOutput(BaseModel):
     function: str
 
 
+class GpioButton(BaseModel):
+    """One front-panel button input a board declares (BCM numbering).
+
+    A declaration says where the board's button wiring goes, not that a
+    button is fitted: an unconnected pin with a pull-up reads the same as an
+    idle button."""
+
+    id: str
+    pin: int
+    header_pin: int | None = None
+    function: str = ""
+
+
 class BoardVariantMatch(BaseModel):
     """The host facts a board variant can be discriminated on.
 
@@ -313,6 +326,7 @@ class BoardProfile(BaseModel):
     default_tier: int = 2
     gpio_pins: list[int] = []
     gpio_outputs: list[GpioOutput] = Field(default_factory=list)
+    gpio_buttons: list[GpioButton] = Field(default_factory=list)
     uart_paths: list[str] = []
     hw_video_codecs: list[str] = []
 

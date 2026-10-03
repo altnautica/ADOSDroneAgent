@@ -10,7 +10,7 @@ from ados.api.deps import get_agent_app
 from ados.core.profile import _read_profile_conf_value
 from ados.setup import hardware_state
 from ados.setup.hardware_check import (
-    run_hardware_check,
+    run_hardware_check_cached,
     run_hardware_check_fresh,
 )
 from ados.setup.models import HardwareCheckStatus
@@ -47,7 +47,7 @@ async def get_hardware_check() -> HardwareCheckStatus:
     profile, role = _resolve_profile(runtime.config)
     # The sweep probes USB, V4L2, radios and the FC link; run it off the loop.
     return await asyncio.to_thread(
-        run_hardware_check, runtime, profile=profile, ground_role=role
+        run_hardware_check_cached, runtime, profile=profile, ground_role=role
     )
 
 

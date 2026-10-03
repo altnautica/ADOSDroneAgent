@@ -8,17 +8,19 @@ from pydantic import BaseModel, Field
 
 from ados.core.paths import CLOUDFLARE_TUNNEL_TOKEN_PATH
 
+from ._bounds import U16_MAX
+
 
 class CloudServerConfig(BaseModel):
     url: str = "https://convex-site.altnautica.com"
     mqtt_broker: str = "mqtt.altnautica.com"
-    mqtt_port: int = 443
+    mqtt_port: int = Field(default=443, ge=0, le=U16_MAX)
 
 
 class SelfHostedServerConfig(BaseModel):
     url: str = ""
     mqtt_broker: str = ""
-    mqtt_port: int = 8883
+    mqtt_port: int = Field(default=8883, ge=0, le=U16_MAX)
     api_key: str = ""
 
 

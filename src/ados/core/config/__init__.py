@@ -184,8 +184,7 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     Search order:
     1. Explicit path argument
     2. /etc/ados/config.yaml
-    3. ./config.yaml
-    4. Pure defaults (no file)
+    3. Pure defaults (no file)
 
     **This function never writes.** It is on the startup path of every unit
     on the node, and they start concurrently; a read-modify-write here is
@@ -203,10 +202,7 @@ def load_config(path: str | Path | None = None) -> ADOSConfig:
     candidates: list[Path] = []
     if path:
         candidates.append(Path(path))
-    candidates.extend([
-        CONFIG_YAML,
-        Path("config.yaml"),
-    ])
+    candidates.append(CONFIG_YAML)
 
     raw: dict[str, Any] = {}
     with shared_config_lock():

@@ -1,7 +1,7 @@
 """Tests for the mDNS ``DiscoveryService``.
 
 The real ``zeroconf.asyncio`` symbols are mocked at the module level
-inside the ``register`` / ``update_txt`` paths so the test does not
+inside the ``register`` / ``refresh`` paths so the test does not
 bind a real socket or hit the network. The local-IP probe is also
 short-circuited so behavior is the same on macOS dev hosts and Linux
 CI runners.
@@ -67,6 +67,12 @@ def _patched_zeroconf(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, Magic
     return info_class, az_class
 
 
+@pytest.fixture(autouse=True)
+def _no_avahi(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No avahi on the test host: the naming falls back to the system hostname."""
+    monkeypatch.setattr("ados.services.discovery._avahi_host_fqdn", lambda: None)
+
+
 # ---------------------------------------------------------------------------
 # Constructor + computed properties
 # ---------------------------------------------------------------------------
@@ -86,11 +92,39 @@ def test_mdns_hostname_uses_the_real_system_hostname() -> None:
         assert svc.mdns_hostname == "drone-rig.local"
 
 
+def test_a_dotted_hostname_is_named_by_its_first_label() -> None:
+    # An mDNS responder publishes `<first label>.local`; a unicast DNS name
+    # such as `drone-rig.lan` is not something multicast DNS resolves.
+    svc = DiscoveryService(device_id=_DEVICE_ID)
+    for dotted in ("drone-rig.lan", "drone-rig.local", "drone-rig.lan."):
+        with patch("ados.services.discovery.socket.gethostname", return_value=dotted):
+            assert svc.mdns_hostname == "drone-rig.local"
+
+
+def test_avahis_published_name_wins_over_the_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    # After a collision avahi renames this host to `<host>-2.local`; the plain
+    # hostname then answers for the other board.
+    monkeypatch.setattr(
+        "ados.services.discovery._avahi_host_fqdn", lambda: "drone-rig-2.local"
+    )
+    svc = DiscoveryService(device_id=_DEVICE_ID)
+    with patch("ados.services.discovery.socket.gethostname", return_value="drone-rig"):
+        assert svc.mdns_hostname == "drone-rig-2.local"
+
+
+def test_avahis_name_is_read_from_the_busctl_reply() -> None:
+    from ados.services.discovery import _parse_busctl_string
+
+    assert _parse_busctl_string('s "drone-rig-2.local"\n') == "drone-rig-2.local"
+    for bad in ("", 's ""', 's "localhost"', 's "drone-rig.lan"', "u 5"):
+        assert _parse_busctl_string(bad) is None
+
+
 def test_mdns_hostname_falls_back_to_device_id_when_hostname_unusable() -> None:
     # Only an unusable hostname (empty / localhost / loopback literal) falls
     # back to the device-id form.
     svc = DiscoveryService(device_id=_DEVICE_ID)
-    for bad in ("", "localhost", "127.0.0.1"):
+    for bad in ("", "localhost", "localhost.localdomain", "127.0.0.1"):
         with patch("ados.services.discovery.socket.gethostname", return_value=bad):
             assert svc.mdns_hostname == f"ados-{_EXPECTED_SHORT}.local"
 
@@ -104,12 +138,36 @@ def test_default_port_and_name() -> None:
     assert svc._board == "unknown"
 
 
-def test_local_ip_falls_back_to_loopback_on_oserror() -> None:
-    """A network-down host (CI sandbox) must still get a usable string."""
+def test_local_addresses_come_from_the_interfaces_and_never_loopback() -> None:
+    """An AP-only node has no default route; its AP address is still advertised,
+    and loopback never is."""
+    adapters = [
+        SimpleNamespace(ips=[SimpleNamespace(ip="127.0.0.1"), SimpleNamespace(ip=("::1", 0, 0))]),
+        SimpleNamespace(ips=[SimpleNamespace(ip="192.168.4.1")]),
+    ]
     svc = DiscoveryService(device_id=_DEVICE_ID)
-    with patch("socket.socket") as sock_factory:
-        sock_factory.return_value.connect.side_effect = OSError("no route")
-        assert svc._get_local_ip() == "127.0.0.1"
+    with patch("ifaddr.get_adapters", return_value=adapters):
+        assert svc._local_addresses() == ["192.168.4.1"]
+
+
+@pytest.mark.asyncio
+async def test_a_node_without_an_address_registers_once_one_appears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Registration is retried by refresh: a node whose network came up after
+    the service started becomes discoverable without a restart."""
+    info_class, az_class = _patched_zeroconf(monkeypatch)
+    svc = DiscoveryService(device_id=_DEVICE_ID)
+
+    with patch.object(svc, "_local_addresses", return_value=[]):
+        assert await svc.register(paired=False, code="123456") is False
+    assert info_class.call_count == 0
+    assert svc.registered is False
+
+    with patch.object(svc, "_local_addresses", return_value=["192.168.4.1"]):
+        assert await svc.refresh(paired=False, code="123456") is True
+    assert svc.registered is True
+    az_class.return_value.async_register_service.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +223,7 @@ async def test_register_uses_configured_port_and_service_type(
     )
 
     with (
-        patch.object(svc, "_get_local_ip", return_value="192.168.1.10"),
+        patch.object(svc, "_local_addresses", return_value=["192.168.1.10"]),
         patch("ados.services.discovery.socket.gethostname", return_value="drone-rig"),
     ):
         await svc.register(paired=False, code="654321", profile="drone")
@@ -207,12 +265,12 @@ async def test_register_zeroconf_failure_does_not_raise(
     )
 
     svc = DiscoveryService(device_id=_DEVICE_ID)
-    with patch.object(svc, "_get_local_ip", return_value="10.0.0.5"):
+    with patch.object(svc, "_local_addresses", return_value=["10.0.0.5"]):
         # Must not raise.
         await svc.register(paired=False, code="111111")
 
     # On failure the internal handles are cleared so a follow-up
-    # update_txt / unregister is a no-op.
+    # refresh retries the registration and unregister is a no-op.
     assert svc._zeroconf is None
     assert svc._info is None
 
@@ -243,31 +301,39 @@ async def test_register_missing_zeroconf_module_is_swallowed(
 
 
 @pytest.mark.asyncio
-async def test_update_txt_noop_when_not_registered() -> None:
-    """Without a prior register, update_txt is a silent no-op."""
+async def test_refresh_keeps_the_srv_target_on_the_resolvable_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every refresh publishes the same resolvable SRV target as registration,
+    never a constructed name nothing publishes an A-record for."""
+    info_class, _ = _patched_zeroconf(monkeypatch)
     svc = DiscoveryService(device_id=_DEVICE_ID)
-    # No exception, nothing patched: the early return keeps it cheap.
-    await svc.update_txt(paired=True, owner="x")
+
+    with (
+        patch.object(svc, "_local_addresses", return_value=["10.0.0.1"]),
+        patch("ados.services.discovery.socket.gethostname", return_value="gs-rig"),
+    ):
+        await svc.register(paired=False, code="123456")
+        await svc.refresh(paired=True, owner="owner-1")
+
+    servers = [kwargs["server"] for _args, kwargs in info_class.call_args_list]
+    assert servers == ["gs-rig.local.", "gs-rig.local."]
 
 
 @pytest.mark.asyncio
-async def test_update_txt_swaps_in_paired_records(
+async def test_refresh_swaps_in_paired_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After pairing flips, the new ServiceInfo carries ``owner`` not ``code``."""
     info_class, az_class = _patched_zeroconf(monkeypatch)
     svc = DiscoveryService(device_id=_DEVICE_ID)
 
-    with patch.object(svc, "_get_local_ip", return_value="10.0.0.1"):
+    with patch.object(svc, "_local_addresses", return_value=["10.0.0.1"]):
         await svc.register(paired=False, code="123456")
 
-        original_info = svc._info
         info_class.reset_mock()
 
-        # The mocked info objects need a ``.name`` so update_txt can reuse it.
-        original_info.name = f"ADOS-{_EXPECTED_SHORT}.{SERVICE_TYPE}"
-
-        await svc.update_txt(paired=True, owner="owner-1", role="direct")
+        await svc.refresh(paired=True, owner="owner-1", role="direct")
 
     assert info_class.call_count == 1
     _args, kwargs = info_class.call_args

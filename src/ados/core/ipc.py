@@ -1,10 +1,8 @@
-"""IPC clients for the native MAVLink router's Unix sockets.
+"""IPC client for the native MAVLink router's state socket.
 
-Two Unix socket channels, both served by the native router:
-1. MAVLink socket (/run/ados/mavlink.sock) — binary MAVLink frames, bidirectional
-2. State socket (/run/ados/state.sock) — vehicle state snapshots, server→clients
-
-This module holds the Python clients and the state-wire decoder they share.
+The state socket (/run/ados/state.sock) streams vehicle state snapshots,
+server→clients. This module holds the Python state reader and the state-wire
+decoder its callers share.
 """
 
 from __future__ import annotations
@@ -36,12 +34,10 @@ assert STATE_V2_VERSION is not None, "state.v2 contract version missing from reg
 # Allow tests and dev rigs to override the runtime root via env var.
 # Defaults to the canonical /run/ados/ from `ados.core.paths`.
 ADOS_RUN_DIR = Path(os.environ.get("ADOS_RUN_DIR", str(_paths.ADOS_RUN_DIR)))
-MAVLINK_SOCK = ADOS_RUN_DIR / "mavlink.sock"
 STATE_SOCK = ADOS_RUN_DIR / "state.sock"
 
 # Frame protocol: 4-byte length prefix (network order) + payload
 HEADER_SIZE = 4
-MAX_FRAME_SIZE = 65536
 
 # State v2 wire: length-prefixed msgpack (the same 4-byte big-endian frame the
 # MAVLink socket uses). A state snapshot with the full parameter dict is larger
@@ -168,163 +164,55 @@ def _read_state_frame_from_socket(sock, deadline: float) -> dict | None:
     return _decode_state_v1_line(line)
 
 
-# ── MAVLink IPC Client ────────────────────────────────────────────
-
-
-class MavlinkIPCClient:
-    """Connects to the MAVLink IPC server to receive/send MAVLink frames."""
-
-    def __init__(self, sock_path: Path = MAVLINK_SOCK) -> None:
-        self._sock_path = sock_path
-        self._reader: asyncio.StreamReader | None = None
-        self._writer: asyncio.StreamWriter | None = None
-        self._connected = False
-        self._on_data: Callable[[bytes], None] | None = None
-
-    @property
-    def connected(self) -> bool:
-        return self._connected
-
-    def set_data_handler(self, handler: Callable[[bytes], None]) -> None:
-        """Register callback for incoming MAVLink frames from FC."""
-        self._on_data = handler
-
-    async def connect(self, retries: int = 10, delay: float = 1.0) -> None:
-        """Connect to MAVLink IPC server with retry."""
-        for attempt in range(retries):
-            try:
-                self._reader, self._writer = await asyncio.open_unix_connection(
-                    str(self._sock_path)
-                )
-                self._connected = True
-                log.info("mavlink_ipc_connected", path=str(self._sock_path))
-                return
-            except (FileNotFoundError, ConnectionRefusedError, OSError) as exc:
-                if attempt < retries - 1:
-                    log.debug(
-                        "mavlink_ipc_retry",
-                        attempt=attempt + 1,
-                        error=str(exc),
-                    )
-                    await asyncio.sleep(delay)
-                else:
-                    raise ConnectionError(
-                        f"Failed to connect to {self._sock_path} after {retries} attempts"
-                    ) from exc
-
-    async def disconnect(self) -> None:
-        """Disconnect from server."""
-        self._connected = False
-        if self._writer:
-            self._writer.close()
-            self._writer = None
-        self._reader = None
-
-    def send(self, data: bytes) -> None:
-        """Send MAVLink frame (command) to the server.
-
-        Synchronous so the paho and WebSocket uplink callers can call it
-        directly. The write is followed by a scheduled drain so kernel
-        send-buffer backpressure is honored instead of letting the
-        transport buffer grow unbounded. When the underlying buffer is
-        already past its high-water mark the frame is still queued (a
-        command must not be silently dropped) but the saturation is
-        logged so a stalled IPC consumer is visible.
-        """
-        if self._writer and self._connected:
-            frame = struct.pack("!I", len(data)) + data
-            try:
-                transport = self._writer.transport
-                if transport is not None:
-                    buffered = transport.get_write_buffer_size()
-                    high, _low = transport.get_write_buffer_limits()
-                    if high and buffered >= high:
-                        # Past the high-water mark: the consumer is
-                        # draining too slowly. Surface it rather than
-                        # dropping the command silently. The frame is
-                        # still queued below; drain() then applies
-                        # backpressure on the next loop turn.
-                        log.warning(
-                            "mavlink_ipc_send_backpressure",
-                            buffered=buffered,
-                            high_water=high,
-                        )
-                self._writer.write(frame)
-                # Schedule a drain so the producer awaits kernel-buffer
-                # backpressure on the next loop turn without blocking
-                # this synchronous caller.
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._drain())
-                except RuntimeError:
-                    # No running loop (e.g. a paho callback thread): the
-                    # write is already queued on the transport and will
-                    # flush on the loop's next pass.
-                    pass
-            except (ConnectionResetError, BrokenPipeError, OSError):
-                self._connected = False
-
-    async def _drain(self) -> None:
-        """Await the writer's send buffer so backpressure is honored."""
-        writer = self._writer
-        if writer is None:
-            return
-        try:
-            await writer.drain()
-        except (ConnectionResetError, BrokenPipeError, OSError):
-            self._connected = False
-
-    async def read_loop(self) -> None:
-        """Read frames from server and dispatch to handler. Runs until disconnect."""
-        if not self._reader:
-            raise RuntimeError("Not connected")
-        try:
-            while self._connected:
-                # self._reader can become None during a shutdown race
-                # (disconnect() sets it to None while this loop is between
-                # reads). Snapshot locally and guard.
-                reader = self._reader
-                if reader is None:
-                    break
-                header = await reader.readexactly(HEADER_SIZE)
-                (length,) = struct.unpack("!I", header)
-                if length > MAX_FRAME_SIZE:
-                    log.warning("mavlink_ipc_oversized_frame", length=length)
-                    break
-                reader = self._reader
-                if reader is None:
-                    break
-                data = await reader.readexactly(length)
-                if self._on_data:
-                    self._on_data(data)
-        except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
-            self._connected = False
-        except AttributeError:
-            # Reader dropped mid-read during shutdown race
-            self._connected = False
-
-
 # ── State IPC Client ──────────────────────────────────────────────
+
+
+# A snapshot older than this is not vehicle state any more. The router
+# publishes several times a second, so three seconds of silence means it died
+# or restarted; reporting its last frame past that point would describe an FC
+# link (connected, maybe armed) that nobody is observing.
+STATE_STALE_AFTER_S = 3.0
 
 
 class StateIPCClient:
     """Connects to state server and receives JSON vehicle state updates."""
 
-    def __init__(self, sock_path: Path = STATE_SOCK) -> None:
+    def __init__(
+        self,
+        sock_path: Path = STATE_SOCK,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._sock_path = sock_path
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._connected = False
         self._state: dict = {}
+        self._state_at: float | None = None
         self._on_state: Callable[[dict], None] | None = None
+        # The staleness clock. Its own seam so a test can age the snapshot
+        # without freezing the event loop's clock, which also reads monotonic.
+        self._clock = clock
 
     @property
     def connected(self) -> bool:
         return self._connected
 
     @property
+    def stale(self) -> bool:
+        """True when no snapshot arrived within :data:`STATE_STALE_AFTER_S`."""
+        at = self._state_at
+        return at is None or (self._clock() - at) > STATE_STALE_AFTER_S
+
+    @property
     def state(self) -> dict:
+        """The latest snapshot, or ``{}`` once it is stale."""
+        if self.stale:
+            return {}
         return self._state
+
+    def _clear_state(self) -> None:
+        self._state = {}
+        self._state_at = None
 
     def set_state_handler(self, handler: Callable[[dict], None]) -> None:
         """Register callback for state updates."""
@@ -350,6 +238,7 @@ class StateIPCClient:
 
     async def disconnect(self) -> None:
         self._connected = False
+        self._clear_state()
         if self._writer:
             self._writer.close()
             self._writer = None
@@ -378,6 +267,7 @@ class StateIPCClient:
                     # Malformed / undecodable frame — skip it and keep reading.
                     continue
                 self._state = state
+                self._state_at = self._clock()
                 if self._on_state:
                     self._on_state(state)
         except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
@@ -386,4 +276,7 @@ class StateIPCClient:
             # Reader dropped mid-read during a shutdown race.
             pass
         finally:
+            # A closed connection publishes nothing: the last snapshot no
+            # longer describes the vehicle.
             self._connected = False
+            self._clear_state()

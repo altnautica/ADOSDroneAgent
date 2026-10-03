@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from ._bounds import U8_MAX, U16_MAX, U32_MAX
+
 
 class EndpointConfig(BaseModel):
     type: str = "websocket"
@@ -17,7 +19,7 @@ class EndpointConfig(BaseModel):
     # alone is unreliable across kernels (uvicorn's IPv6-only fallback
     # left IPv4 unreachable on the bench Pi).
     host: str = "0.0.0.0"
-    port: int = 8765
+    port: int = Field(default=8765, ge=0, le=U16_MAX)
     enabled: bool = True
 
 
@@ -31,9 +33,9 @@ class MavlinkConfig(BaseModel):
     # Default `auto` so an un-upgraded config behaves exactly as before.
     source: Literal["auto", "serial", "udp", "tcp"] = "auto"
     serial_port: str = ""
-    baud_rate: int = 57600
-    system_id: int = 1
-    component_id: int = 191
+    baud_rate: int = Field(default=57600, ge=0, le=U32_MAX)
+    system_id: int = Field(default=1, ge=0, le=U8_MAX)
+    component_id: int = Field(default=191, ge=0, le=U8_MAX)
     endpoints: list[EndpointConfig] = Field(default_factory=lambda: [
         EndpointConfig(type="websocket", port=8765, enabled=True),
     ])

@@ -333,6 +333,44 @@ def test_a_deliberate_enforce_false_survives_a_later_migration_pass(
     assert load_config(cfg).mavlink.ws_proxy_enforce_auth is False
 
 
+def test_kiosk_off_residue_is_cleared_once_and_an_operator_off_is_kept(
+    monkeypatch, tmp_path
+):
+    """Older builds wrote ``kiosk.enabled: false`` while the kiosk ignored the
+    key, so a node that showed the kiosk carries ``false``. The upgrade pass
+    removes it so the screen stays on; an operator who turns the kiosk off
+    afterwards keeps it off on every later pass."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {"ground_station": {"kiosk": {"enabled": False, "resolution": "1080p"}}},
+            sort_keys=False,
+        )
+    )
+    _point_lock(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "ados.core.config._migrators._LEGACY_GS_UI_PATH", tmp_path / "absent.json"
+    )
+    ledger = _ledger(tmp_path)
+
+    first = migrate_config_file(cfg, ledger_path=ledger)
+
+    assert "kiosk_enabled_default" in first.applied
+    on_disk = yaml.safe_load(cfg.read_text())
+    assert on_disk["ground_station"]["kiosk"] == {"resolution": "1080p"}
+    assert load_config(cfg).ground_station.kiosk.enabled is True
+
+    raw = yaml.safe_load(cfg.read_text())
+    raw["ground_station"]["kiosk"]["enabled"] = False
+    cfg.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    second = migrate_config_file(cfg, ledger_path=ledger)
+
+    assert "kiosk_enabled_default" not in second.applied
+    assert yaml.safe_load(cfg.read_text())["ground_station"]["kiosk"]["enabled"] is False
+    assert load_config(cfg).ground_station.kiosk.enabled is False
+
+
 def test_a_failed_config_write_does_not_record_the_one_shot(
     monkeypatch, tmp_path
 ):

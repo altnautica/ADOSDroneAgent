@@ -405,24 +405,29 @@ def _check_display() -> HardwareCheckItem:
 
 def _check_buttons() -> HardwareCheckItem:
     try:
-        from ados.bootstrap.profile_detect import probe_gpio_buttons
+        from ados.bootstrap.profile_detect import board_button_pins
 
-        _g, _a, detected = probe_gpio_buttons()
+        pins = board_button_pins()
     except Exception:
-        detected = False
-    if detected:
+        pins = []
+    if pins:
+        pin_list = ", ".join(str(pin) for pin in pins)
         return HardwareCheckItem(
             id="buttons",
             label="Front-panel buttons",
-            state="ok",
-            detail="Four buttons read idle-high on default GPIOs.",
+            state="unknown",
+            detail=(
+                f"This board declares front-panel buttons on BCM pins {pin_list}. "
+                "Whether buttons are wired to them cannot be checked."
+            ),
+            fix_hint="Optional. Press each button and watch the OLED menu respond.",
         )
     return HardwareCheckItem(
         id="buttons",
         label="Front-panel buttons",
-        state="warning",
-        detail="Buttons not detected on default GPIOs.",
-        fix_hint="Optional. Wire buttons to BCM pins 5, 6, 13, 19 for OLED nav.",
+        state="unknown",
+        detail="This board declares no front-panel buttons.",
+        fix_hint="Optional. The status webapp works without them.",
     )
 
 
@@ -689,20 +694,6 @@ def run_hardware_check_cached(
     )
     hardware_state.write(fresh)
     return fresh
-
-
-# Backwards-compat wrapper so callers that haven't been updated keep
-# working. The default is now the cached path. Tests + the explicit
-# refresh route call ``run_hardware_check_fresh`` directly.
-def run_hardware_check(
-    runtime: Any | None,
-    *,
-    profile: str,
-    ground_role: str | None = None,
-) -> HardwareCheckStatus:
-    return run_hardware_check_cached(
-        runtime, profile=profile, ground_role=ground_role
-    )
 
 
 def derive_step_state(check: HardwareCheckStatus) -> tuple[str, str]:

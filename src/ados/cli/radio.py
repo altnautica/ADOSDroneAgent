@@ -176,7 +176,7 @@ def _print_status_table(data: dict[str, Any], bind: dict[str, Any] | None = None
     adapter = data.get("adapter") or {}
     driver = adapter.get("driver") or "—"
     chipset = adapter.get("chipset") or "—"
-    channel = data.get("channel") or 0
+    channel = data.get("actual_channel") or 0
     freq = data.get("frequency_mhz") or 0
     rssi = data.get("rssi_dbm")
     if rssi == -100.0:
@@ -427,9 +427,25 @@ def radio_test() -> None:
         )
         raise click.exceptions.Exit(code=1)
 
+    # The restore value is the one the radio reported; with none reported the
+    # sweep refuses to run rather than leaving a power level nobody set.
     original_tx = status_data.get("tx_power_dbm")
-    if original_tx is None:
-        original_tx = 5
+    if not isinstance(original_tx, int) or isinstance(original_tx, bool):
+        click.echo(
+            click.style(
+                "The radio did not report its current TX power, so the sweep "
+                "could not restore it afterwards. Not starting.",
+                fg="red",
+            )
+        )
+        raise click.exceptions.Exit(code=1)
+
+    # A drone only transmits; the RSSI it reports is not a measurement of
+    # its own downlink, so the sweep does not print one there.
+    from ados.core.config import load_config
+    from ados.core.profile import current_profile_and_role
+
+    rssi_measured = current_profile_and_role(load_config())[0] != "drone"
 
     click.echo(
         click.style(
@@ -438,48 +454,59 @@ def radio_test() -> None:
         )
     )
 
-    sweep = [1, 5, 10]
-    for dbm in sweep:
+    try:
+        for dbm in (1, 5, 10):
+            click.echo("")
+            click.echo(click.style(f"→ Setting TX power to {dbm} dBm", fg="cyan"))
+            code, body = _request(
+                "PUT",
+                "/api/wfb/tx-power",
+                json={"tx_power_dbm": dbm},
+                raise_for_status=False,
+            )
+            if code >= 400:
+                click.echo(
+                    click.style(f"  Refused: HTTP {code}: {body}", fg="red")
+                )
+                continue
+
+            time.sleep(3.0)
+
+            if rssi_measured:
+                _, post_status = _request("GET", "/api/wfb")
+                rssi = post_status.get("rssi_dbm")
+                if rssi == -100.0:
+                    rssi = None
+                rssi_text = _format_rssi(rssi)
+            else:
+                rssi_text = "not measured on a drone (read it on the ground station)"
+            click.echo(f"  effective={body.get('effective_dbm')} dBm   RSSI={rssi_text}")
+
+            kernel_tail = _read_kernel_log_tail()
+            flagged = [line for line in kernel_tail if "undervoltage" in line.lower()]
+            if flagged:
+                click.echo(click.style("  Kernel undervoltage warnings:", fg="yellow"))
+                for line in flagged:
+                    click.echo(f"    {line}")
+    finally:
+        # Runs on an HTTP error and on Ctrl-C too: a bench sweep must never
+        # leave a test power level persisted on the node.
         click.echo("")
-        click.echo(click.style(f"→ Setting TX power to {dbm} dBm", fg="cyan"))
+        click.echo(click.style(f"Restoring TX power to {original_tx} dBm", fg="cyan"))
         code, body = _request(
             "PUT",
             "/api/wfb/tx-power",
-            json={"tx_power_dbm": dbm},
+            json={"tx_power_dbm": original_tx},
             raise_for_status=False,
         )
         if code >= 400:
             click.echo(
-                click.style(f"  Refused: HTTP {code}: {body}", fg="red")
+                click.style(
+                    f"  Restore refused: HTTP {code}: {body}. Set it back with "
+                    f"`ados radio set-tx-power {original_tx}`.",
+                    fg="red",
+                )
             )
-            continue
-
-        time.sleep(3.0)
-
-        _, post_status = _request("GET", "/api/wfb")
-        rssi = post_status.get("rssi_dbm")
-        if rssi == -100.0:
-            rssi = None
-        click.echo(
-            f"  effective={body.get('effective_dbm')} dBm   "
-            f"RSSI={_format_rssi(rssi)}"
-        )
-
-        kernel_tail = _read_kernel_log_tail()
-        flagged = [line for line in kernel_tail if "undervoltage" in line.lower()]
-        if flagged:
-            click.echo(click.style("  Kernel undervoltage warnings:", fg="yellow"))
-            for line in flagged:
-                click.echo(f"    {line}")
-
-    click.echo("")
-    click.echo(click.style(f"Restoring TX power to {original_tx} dBm", fg="cyan"))
-    _request(
-        "PUT",
-        "/api/wfb/tx-power",
-        json={"tx_power_dbm": int(original_tx)},
-        raise_for_status=False,
-    )
     click.echo("Done.")
 
 

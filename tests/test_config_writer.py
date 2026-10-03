@@ -23,11 +23,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ados.core.config import ADOSConfig, load_config
+from ados.core.config import ADOSConfig
 from ados.core.config.writer import (
     ConfigWriteResult,
     merge_into_config,
-    persist_config_model,
     set_config_values,
     update_config,
 )
@@ -70,19 +69,17 @@ def _read(cfg: Path) -> dict:
     return yaml.safe_load(cfg.read_text(encoding="utf-8"))
 
 
-def test_a_model_write_preserves_keys_the_model_does_not_declare(tmp_path):
+def test_a_leaf_write_preserves_keys_the_model_does_not_declare(tmp_path):
     """The blocker, pinned.
 
     `ADOSConfig` declares none of these four keys and drops them at load
-    (`extra: "ignore"`). A write derived from the model must therefore never
-    be a whole-document replace, or an operator toggling one unrelated setting
-    silently disarms the FC-write arbiter and the hardware watchdog.
+    (`extra: "ignore"`). A write must therefore never be a whole-document
+    replace, or an operator toggling one unrelated setting silently disarms
+    the FC-write arbiter and the hardware watchdog.
     """
     cfg = _write_doc(tmp_path)
-    config = load_config(cfg)
-    config.video.camera.hflip = False
 
-    assert persist_config_model(config, path=cfg)
+    assert set_config_values({"video.camera.hflip": False}, path=cfg, model=ADOSConfig)
 
     after = _read(cfg)
     assert after["mavlink"]["injector_arbitration"] is True
@@ -91,19 +88,12 @@ def test_a_model_write_preserves_keys_the_model_does_not_declare(tmp_path):
     assert after["network"]["watchdog"] == {"enabled": True, "timeout_s": 30}
 
 
-def test_a_model_write_lands_only_the_leaves_the_caller_changed(tmp_path):
-    """A node must keep tracking a shipped default it never set.
-
-    `model_dump()` materialises every defaulted field, so the old write froze
-    the whole model into the document and no future default change could reach
-    that node again. The merge writes one leaf.
-    """
+def test_a_leaf_write_lands_only_the_leaf_the_caller_named(tmp_path):
+    """A node must keep tracking a shipped default it never set."""
     cfg = _write_doc(tmp_path)
     before = _read(cfg)
-    config = load_config(cfg)
-    config.video.camera.hflip = False
 
-    result = persist_config_model(config, path=cfg)
+    result = set_config_values({"video.camera.hflip": False}, path=cfg, model=ADOSConfig)
 
     assert result.changed == ("video.camera.hflip",)
     after = _read(cfg)
@@ -115,20 +105,30 @@ def test_a_model_write_lands_only_the_leaves_the_caller_changed(tmp_path):
     assert "logging" not in after and "security" not in after
 
 
-def test_a_model_write_that_changes_nothing_writes_nothing(tmp_path):
-    """A caller that mutated no field must not rewrite the document.
-
-    Reporting success is right — the file already says this — but touching the
-    bytes is not: it would be an unnecessary rewrite of the document holding
-    the radio pairing key on every no-op PUT.
-    """
+def test_a_leaf_write_that_changes_nothing_writes_nothing(tmp_path):
+    """Reporting success is right — the file already says this — but touching
+    the bytes is not: it would be an unnecessary rewrite of the document
+    holding the radio pairing key."""
     cfg = _write_doc(tmp_path)
     before = cfg.read_bytes()
 
-    result = persist_config_model(load_config(cfg), path=cfg)
+    result = set_config_values({"video.camera.hflip": True}, path=cfg)
 
     assert result.ok is True
     assert result.wrote is False
+    assert cfg.read_bytes() == before
+
+
+def test_a_validated_write_refuses_a_value_the_daemons_cannot_parse(tmp_path):
+    """A system id past a u8 would make the router drop its whole section at
+    the next start; the write is refused and the document left as it was."""
+    cfg = _write_doc(tmp_path)
+    before = cfg.read_bytes()
+
+    result = set_config_values({"mavlink.system_id": 300}, path=cfg, model=ADOSConfig)
+
+    assert result.ok is False
+    assert result.error and "system_id" in result.error
     assert cfg.read_bytes() == before
 
 
@@ -174,11 +174,11 @@ def test_a_free_form_dict_field_is_replaced_so_a_removal_lands(tmp_path):
         "      wlan0: aa:bb:cc:dd:ee:ff\n"
         "      wlan1: 11:22:33:44:55:66\n",
     )
-    config = load_config(cfg)
-    assert set(config.network.mac_pin.overrides) == {"wlan0", "wlan1"}
+    assert set(_read(cfg)["network"]["mac_pin"]["overrides"]) == {"wlan0", "wlan1"}
 
-    config.network.mac_pin.overrides = {"wlan1": "11:22:33:44:55:66"}
-    assert persist_config_model(config, path=cfg)
+    assert set_config_values(
+        {"network.mac_pin.overrides": {"wlan1": "11:22:33:44:55:66"}}, path=cfg
+    )
 
     after = _read(cfg)
     assert after["network"]["mac_pin"]["overrides"] == {"wlan1": "11:22:33:44:55:66"}
@@ -254,10 +254,8 @@ def test_a_write_creates_a_minimal_document_when_none_exists(tmp_path):
     """A fresh node's first write must record what differs from the shipped
     defaults, not a snapshot of every default."""
     cfg = tmp_path / "config.yaml"
-    config = ADOSConfig()
-    config.agent.name = "fresh-node"
 
-    assert persist_config_model(config, path=cfg)
+    assert set_config_values({"agent.name": "fresh-node"}, path=cfg, model=ADOSConfig)
 
     after = _read(cfg)
     assert after["agent"]["name"] == "fresh-node"
@@ -281,8 +279,8 @@ def test_a_mutator_that_raises_is_a_failed_write_not_a_partial_one(tmp_path):
 
 
 def test_the_write_result_is_falsy_only_on_failure():
-    """Every historical callsite reads `bool(save_config())`; the richer return
-    type must not change what those callsites conclude."""
+    """Callsites read `bool(result)`; the richer return type must not change
+    what they conclude."""
     assert bool(ConfigWriteResult(ok=True))
     assert not bool(ConfigWriteResult(ok=False, error="nope"))
 

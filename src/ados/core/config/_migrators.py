@@ -238,6 +238,25 @@ def apply_mqtt_username_device_id(raw: dict[str, Any]) -> bool:
     return True
 
 
+def apply_kiosk_enabled_default(raw: dict[str, Any]) -> bool:
+    """Drop a persisted ``ground_station.kiosk.enabled: false``.
+
+    The kiosk used to ignore this key and run on every HDMI ground station,
+    while ``false`` was the model default, so a whole-model config write
+    recorded ``false`` on nodes whose kiosk was in fact running. Now that the
+    kiosk honours the key (default ``true``), that residue would switch the
+    screen off. Removed rather than rewritten, and one-shot, for the same
+    reasons as :func:`apply_ws_proxy_enforce_default`: a ``false`` an operator
+    records after the cleanup turns the kiosk off on purpose.
+    """
+    gs = raw.get("ground_station")
+    kiosk = gs.get("kiosk") if isinstance(gs, dict) else None
+    if not isinstance(kiosk, dict) or kiosk.get("enabled") is not False:
+        return False
+    kiosk.pop("enabled", None)
+    return True
+
+
 Migration = Callable[[dict[str, Any]], bool]
 
 # Idempotent shape translations. Each backfills a destination from a legacy
@@ -260,6 +279,7 @@ ONE_SHOTS: tuple[tuple[str, Migration], ...] = (
     ("ws_proxy_enforce_default", apply_ws_proxy_enforce_default),
     ("raw_proxy_enforce_default", apply_raw_proxy_enforce_default),
     ("mqtt_username_device_id", apply_mqtt_username_device_id),
+    ("kiosk_enabled_default", apply_kiosk_enabled_default),
 )
 
 ALL_MIGRATION_IDS: tuple[str, ...] = tuple(

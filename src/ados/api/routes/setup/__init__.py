@@ -10,7 +10,6 @@ lives in per-domain sub-modules alongside this barrel:
 * ``display.py`` — display options, install, calibrate
 * ``cloud.py`` — cloudflare tunnel + cloud posture + reboot + log stream
 * ``apply.py`` — batch /apply + snapshot/rollback
-* ``_restorers.py`` — per-section restore helpers used by apply
 * ``_common.py`` — shared constants + helpers
 * ``_models.py`` — shared request/response models
 

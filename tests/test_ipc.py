@@ -1,7 +1,8 @@
-"""Tests for the IPC clients (MAVLink + State sockets) and the state-wire decoder.
+"""Tests for the state IPC client and the state-wire decoder.
 
-The native router serves both sockets; the doubles in ``tests.state_ipc_utils``
-speak the same wire so the clients can be exercised without it.
+The native router serves the state socket; the doubles in
+``tests.state_ipc_utils`` speak the same wire so the client can be exercised
+without it.
 """
 
 from __future__ import annotations
@@ -14,9 +15,8 @@ from pathlib import Path
 import pytest
 
 import ados.core.ipc as ipc_mod
-from ados.core.ipc import MavlinkIPCClient, StateIPCClient
+from ados.core.ipc import StateIPCClient
 from tests.state_ipc_utils import (
-    MavlinkSocketServer,
     StateSocketServer,
     encode_state_frame,
     encode_state_frame_v1,
@@ -37,23 +37,6 @@ async def _wait_for(predicate, timeout: float = 2.0) -> None:
             return
         await asyncio.sleep(0.02)
     raise AssertionError("condition not met within timeout")
-
-
-@pytest.mark.asyncio
-async def test_mavlink_client_sends_length_prefixed_frames(tmp_sock_dir):
-    """Frames sent by the client arrive whole and in order on the socket."""
-    server = MavlinkSocketServer(tmp_sock_dir / "mavlink.sock")
-    await server.start()
-    try:
-        client = MavlinkIPCClient(sock_path=tmp_sock_dir / "mavlink.sock")
-        await client.connect(retries=5, delay=0.1)
-        client.send(b"command-1")
-        client.send(b"command-2")
-        await _wait_for(lambda: len(server.received) == 2)
-        assert server.received == [b"command-1", b"command-2"]
-        await client.disconnect()
-    finally:
-        await server.stop()
 
 
 @pytest.mark.asyncio

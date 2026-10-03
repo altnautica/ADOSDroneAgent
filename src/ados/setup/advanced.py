@@ -4,7 +4,7 @@ Persists the two advanced controls the operator can change:
 
 * ``log_level`` is written to ``config.logging.level`` (the field every
   service reads through ``configure_logging`` at start) and saved to
-  ``/etc/ados/config.yaml`` via the runtime's ``save_config``. It takes
+  ``/etc/ados/config.yaml`` via the runtime's ``write_config``. It takes
   effect the next time a service (re)starts.
 * ``board_override`` is written to ``/etc/ados/board_override`` (the file
   ``ados.hal.detect`` and the Rust board-sidecar writer both read to force a
@@ -26,6 +26,7 @@ from typing import Any
 
 from ados.core.paths import ADOS_ETC_DIR
 from ados.hal.detect import known_board_stems
+from ados.setup._persist import persist_config
 from ados.setup.models import AdvancedApplyRequest, SetupActionResult
 
 _VALID_LOG_LEVELS: frozenset[str] = frozenset(
@@ -101,7 +102,7 @@ def apply_advanced(
 
     config = runtime.config
     logging_cfg = getattr(config, "logging", None)
-    config_changed = False
+    values: dict[str, object] = {}
 
     if request.log_level is not None:
         level = str(request.log_level).strip().lower()
@@ -119,29 +120,15 @@ def apply_advanced(
                 message="Logging configuration is not available on this agent.",
             )
         if str(getattr(logging_cfg, "level", "")).lower() != level:
-            logging_cfg.level = level
-            config_changed = True
+            values["logging.level"] = level
         fields.append("log_level")
         notes.append(f"log level set to {level} (applies on service restart)")
 
     # Persist the config-backed changes (log_level) to disk. A failed save
-    # is surfaced, not swallowed: reporting a persist that never reached
-    # /etc/ados/config.yaml as success is the exact bug this fix removes.
-    if config_changed:
-        saver = getattr(getattr(runtime, "raw_runtime", None), "save_config", None)
-        if callable(saver):
-            try:
-                persisted = bool(saver())
-            except Exception as exc:  # noqa: BLE001 (surface, don't swallow)
-                return SetupActionResult(
-                    ok=False,
-                    message=f"Log level not saved: config write failed: {exc}",
-                )
-            if not persisted:
-                return SetupActionResult(
-                    ok=False,
-                    message="Log level not saved: config could not be written to disk.",
-                )
+    # is surfaced, not swallowed.
+    failed = persist_config(runtime, values, what="Log level")
+    if failed is not None:
+        return failed
 
     if request.board_override is not None:
         override = str(request.board_override).strip()

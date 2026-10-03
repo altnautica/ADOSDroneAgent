@@ -21,18 +21,19 @@ Rust-owned key (``mavlink.injector_arbitration``, ``network.watchdog.enabled``,
 materialises defaults, froze that release's defaults into the node's file so no
 later default change could ever reach it.
 
-**Only what the caller set is written.** :func:`persist_config_model` diffs the
-live model against a baseline rebuilt from the on-disk document the same way
-:func:`ados.core.config.load_config` builds the live one — same normalisers,
-same packaged defaults. A field the caller never touched compares equal to the
-baseline and is not written, so an untouched default stays absent from the file
-and keeps tracking the shipped value.
+**Only what the caller set is written.** Callers name the leaves they change as
+dotted paths (:func:`set_config_values`) or a nested change mapping
+(:func:`merge_into_config`). Nothing is diffed against an in-memory model: a
+model loaded earlier in a long-lived process is a stale copy of a file other
+writers (the native routes, the CLI) change underneath it, and writing its
+values back would revert theirs. An untouched default stays absent from the
+file and keeps tracking the shipped value.
 
 **Legacy shapes are not normalised here.** The in-memory normalisers
-(``_migrators.NORMALISERS``) run on the baseline only. Persisting them is
-:mod:`ados.core.config.maintenance`'s job, which owns the one-shot ledger. A
-config write must not silently land a migration whose ledger row it does not
-write.
+(``_migrators.NORMALISERS``) run only to validate a candidate document.
+Persisting them is :mod:`ados.core.config.maintenance`'s job, which owns the
+one-shot ledger. A config write must not silently land a migration whose
+ledger row it does not write.
 """
 
 from __future__ import annotations
@@ -43,8 +44,7 @@ import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import UnionType
-from typing import Any, Union, get_args, get_origin
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ValidationError
@@ -57,23 +57,17 @@ from ._lock import WRITE_LOCK_TIMEOUT_S, exclusive_config_lock
 from ._migrators import _deep_merge, apply_migrations
 from ._yaml import dump_mapping, read_mapping
 
-# A field written ``X | None`` is a ``types.UnionType``, not a ``typing.Union``;
-# both shapes appear across the config models, so both are unwrapped below.
-
 # The document carries secrets (mqtt_password, api_key, hmac_secret, the AP
 # passphrase, pair fingerprints). A file this writer creates, or one whose mode
 # it could not read, gets the restrictive mode rather than the umask default.
 SECRET_MODE = 0o600
-
-_MISSING = object()
 
 
 @dataclass(frozen=True)
 class ConfigWriteResult:
     """Outcome of one config write, in the shape a surface can report.
 
-    Truthy when the write landed, so the historical ``bool(save_config())``
-    callsites keep reading correctly, while a caller that owes the operator a
+    Truthy when the write landed, while a caller that owes the operator a
     reason reads :attr:`error`. ``ok`` with an empty :attr:`changed` means the
     document already said what the caller wanted — nothing was written and
     nothing failed.
@@ -285,11 +279,17 @@ def set_config_values(
     *,
     path: str | Path | None = None,
     timeout_s: float = WRITE_LOCK_TIMEOUT_S,
+    model: type[BaseModel] | None = None,
 ) -> ConfigWriteResult:
     """Set dotted-path leaves (``{"video.wfb.fec_k": 8}``) in the document.
 
     Each value is assigned to its leaf, not merged into it, and missing parent
     mappings are materialised. Siblings of the leaf are untouched.
+
+    With ``model``, the resulting document must still validate as that model
+    (built exactly as the loader builds it) or nothing is written. An
+    out-of-range value would otherwise land on disk and make a daemon that
+    parses the section strictly fall back to defaults for all of it.
     """
     leaves = [(tuple(dotted.split(".")), value) for dotted, value in values.items()]
     if not leaves:
@@ -298,6 +298,11 @@ def set_config_values(
     def _mutate(document: dict[str, Any]) -> None:
         for leaf, value in leaves:
             _assign(document, leaf, value)
+        if model is not None:
+            try:
+                baseline_model(model, document)
+            except ValidationError as exc:
+                raise ValueError(f"the resulting config does not validate: {exc}") from exc
 
     return update_config(
         _mutate,
@@ -319,72 +324,6 @@ def _dotted_paths(changes: Mapping[str, Any], prefix: str = "") -> list[str]:
     return out
 
 
-def _nested_model(annotation: Any) -> type[BaseModel] | None:
-    """The model class to recurse into for a field, or ``None`` for a value.
-
-    A ``BaseModel``-typed field is a *section*: its keys are merged and a key
-    the model does not declare survives. Anything else — a scalar, a list, a
-    free-form ``dict[str, str]`` like ``network.mac_pin.overrides`` — is a
-    *value*: it is replaced wholesale, which is what makes removing an entry
-    from such a dict actually remove it from the file.
-    """
-    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-        return annotation
-    origin = get_origin(annotation)
-    if origin is Union or origin is UnionType:
-        members = [
-            arg
-            for arg in get_args(annotation)
-            if isinstance(arg, type) and issubclass(arg, BaseModel)
-        ]
-        if len(members) == 1:
-            return members[0]
-    return None
-
-
-def _subtree_changes(
-    model_cls: type[BaseModel],
-    base: dict[str, Any],
-    current: dict[str, Any],
-    path: tuple[str, ...],
-    out: list[tuple[tuple[str, ...], Any]],
-) -> None:
-    for name, model_field in model_cls.model_fields.items():
-        if name not in current:
-            continue
-        cur_value = current[name]
-        base_value = base.get(name, _MISSING) if isinstance(base, dict) else _MISSING
-        here = (*path, name)
-        section = _nested_model(model_field.annotation)
-        if (
-            section is not None
-            and isinstance(cur_value, dict)
-            and isinstance(base_value, dict)
-        ):
-            _subtree_changes(section, base_value, cur_value, here, out)
-        elif base_value is _MISSING or base_value != cur_value:
-            out.append((here, cur_value))
-
-
-def config_model_changes(
-    current: BaseModel, baseline: BaseModel
-) -> list[tuple[tuple[str, ...], Any]]:
-    """Leaf assignments where ``current`` differs from ``baseline``.
-
-    Each entry is the key path down to one leaf plus its new value. Sections
-    recurse, so a section never appears as a leaf and its unknown keys are
-    never in the write set; values (scalars, lists, free-form ``dict``
-    fields) compare and land whole, which is what makes removing an entry
-    from ``network.mac_pin.overrides`` actually remove it from the file.
-
-    A field neither side changed produces no entry, which is what keeps an
-    untouched default out of the written document.
-    """
-    out: list[tuple[tuple[str, ...], Any]] = []
-    _subtree_changes(type(current), baseline.model_dump(), current.model_dump(), (), out)
-    return out
-
-
 def _assign(document: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     """Set one leaf in ``document``, materialising missing parent mappings."""
     cursor = document
@@ -401,63 +340,19 @@ def baseline_model(model_cls: type[BaseModel], document: Mapping[str, Any]) -> B
     """What ``document`` means to ``model_cls``, built exactly as the loader does.
 
     ``load_config`` normalises the raw mapping in memory and merges it over the
-    packaged defaults before validating. The baseline has to do the same or the
-    diff would report every normalised and every defaulted field as a caller
-    change and write it.
+    packaged defaults before validating. Validation of a candidate document has
+    to do the same, or a legacy shape the loader accepts would be refused here.
     """
     raw = copy.deepcopy(dict(document))
     apply_migrations(raw)
     return model_cls(**_deep_merge(packaged_defaults(), raw))
 
 
-def persist_config_model(
-    model: BaseModel,
-    *,
-    path: str | Path | None = None,
-    timeout_s: float = WRITE_LOCK_TIMEOUT_S,
-) -> ConfigWriteResult:
-    """Persist the fields a caller changed on ``model``, and nothing else.
-
-    The baseline is rebuilt from the document read inside the write lock, so
-    the diff is against what is on disk right now — not against whatever the
-    file said when this process started.
-    """
-    changed_paths: list[str] = []
-
-    def _mutate(document: dict[str, Any]) -> None:
-        try:
-            baseline = baseline_model(type(model), document)
-        except ValidationError as exc:
-            raise ValueError(
-                f"the on-disk config no longer validates, refusing to write over it: {exc}"
-            ) from exc
-        changes = config_model_changes(model, baseline)
-        changed_paths.clear()
-        changed_paths.extend(".".join(leaf) for leaf, _ in changes)
-        # Leaf-by-leaf assignment, not a deep merge of the change mapping: a
-        # free-form ``dict`` field is one leaf, and merging it would resurrect
-        # the entry the caller just removed.
-        for leaf, value in changes:
-            _assign(document, leaf, value)
-
-    result = update_config(_mutate, path=path, timeout_s=timeout_s)
-    if result.ok and changed_paths:
-        return ConfigWriteResult(
-            ok=True,
-            locked=result.locked,
-            wrote=result.wrote,
-            changed=tuple(changed_paths),
-        )
-    return result
-
-
 __all__ = [
     "SECRET_MODE",
     "ConfigWriteResult",
     "baseline_model",
-    "config_model_changes",
     "merge_into_config",
-    "persist_config_model",
     "read_config_mapping",
     "set_config_values",
     "update_config",

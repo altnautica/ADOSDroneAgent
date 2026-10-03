@@ -10,6 +10,7 @@ import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ados.api.deps import get_agent_app
+from ados.api.ws_downlink import send_until_disconnect
 from ados.setup.models import SetupActionResult
 from ados.setup.service import apply_cloud_choice, install_cloudflare_token
 
@@ -201,10 +202,11 @@ class _JournalTail:
         self._task = asyncio.create_task(self._reader())
 
     async def _reader(self) -> None:
-        assert self._proc is not None and self._proc.stdout is not None
+        proc = self._proc
+        assert proc is not None and proc.stdout is not None
         try:
             while True:
-                raw = await self._proc.stdout.readline()
+                raw = await proc.stdout.readline()
                 if not raw:
                     break
                 # Defensive: drop lines that look like JWT-prefixed bearer
@@ -214,8 +216,20 @@ class _JournalTail:
                 if "eyJ" in text and "." in text:
                     text = "(token-shaped value redacted)"
                 await self._broadcast(text)
-        finally:
-            await self._broadcast("(journal stream ended)")
+        except (OSError, ValueError) as exc:  # e.g. a line over the stream limit
+            log.warning("cloudflare_journal_read_failed", unit=self.unit, error=str(exc))
+        await self._broadcast("(journal stream ended)")
+        # The stream is over (journalctl exited, or its output became
+        # unreadable). Reap it and forget it so the next subscribe spawns a
+        # fresh journalctl instead of waiting on this dead one forever.
+        # (A cancellation from _terminate_proc never reaches here.)
+        if proc.returncode is None:
+            with suppress(ProcessLookupError):
+                proc.kill()
+        await proc.wait()
+        if self._proc is proc:
+            self._proc = None
+            self._task = None
 
     async def _broadcast(self, line: str) -> None:
         for queue in list(self._subscribers):
@@ -282,10 +296,16 @@ async def stream_cloudflare_logs(websocket: WebSocket) -> None:
     unit = (getattr(cf, "service_name", "") or "cloudflared").strip() or "cloudflared"
     tail = _journal_tail_for(unit)
     queue = await tail.subscribe()
-    try:
+
+    async def _forward() -> None:
         while True:
             line = await queue.get()
             await websocket.send_text(line)
+
+    try:
+        # Racing the send loop against the peer's disconnect ends this
+        # handler on a closed tab even while cloudflared logs nothing.
+        await send_until_disconnect(websocket, _forward())
     except WebSocketDisconnect:
         return
     except Exception as exc:  # pragma: no cover — defensive

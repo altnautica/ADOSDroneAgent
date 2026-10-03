@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SetupStepState = Literal[
     "complete", "needs_action", "optional", "blocked", "not_applicable"
@@ -293,10 +293,28 @@ class DisplayInstallRequest(BaseModel):
 
     ``display_id="none"`` is the explicit-skip path — the route writes a
     minimal ``display.conf`` with ``display_id=none`` and does not spawn
-    the overlay installer.
+    the overlay installer. Any other id must be one the board's HAL
+    profile declares: it is handed to a root script that builds paths
+    from it. An empty id passes through so the callers report it as
+    missing.
     """
 
     display_id: str
+
+    @field_validator("display_id")
+    @classmethod
+    def _declared_by_the_board(cls, value: str) -> str:
+        if value in ("", "none"):
+            return value
+        from ados.setup.display_install import supported_display_ids
+
+        supported = supported_display_ids()
+        if value not in supported:
+            raise ValueError(
+                f"display_id {value!r} is not a display this board supports "
+                f"(supported: {sorted(supported) or 'none'})"
+            )
+        return value
 
 
 DisplayJobStatus = Literal["queued", "running", "done", "failed"]

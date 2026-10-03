@@ -8,7 +8,11 @@ require no hardware.
 
 from __future__ import annotations
 
+import os
+import sys
+import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -70,13 +74,13 @@ def test_argmax_picks_ground_station_on_ground_dominance(monkeypatch) -> None:
     _stub_probes(
         monkeypatch,
         probe_i2c_oled=(3, 0, True),
-        probe_gpio_buttons=(2, 0, True),
+        probe_gpio_buttons=(0, 0, True),
         probe_uplink_type=(1, 0, True),
     )
     result = profile_detect.detect_profile(config_override=None)
     assert result["profile"] == "ground_station"
     assert result["source"] == "detected"
-    assert result["ground_score"] == 6
+    assert result["ground_score"] == 4
     assert result["air_score"] == 0
 
 
@@ -393,15 +397,15 @@ def test_mavlink_serial_zero_when_no_ports(monkeypatch) -> None:
 
 def test_mavlink_serial_uart_with_no_usb_metadata(monkeypatch) -> None:
     """SoC UART (e.g. /dev/ttyAMA0) has no /sys/class/tty/<n>/device
-    USB ancestor. The helper returns None and the probe falls back to
-    the +3 baseline rather than swallowing the signal entirely."""
+    USB ancestor. It exists on every Pi whether or not an FC is wired, so
+    without a heartbeat it earns no air points and is not a detection."""
     monkeypatch.setattr(
         profile_detect, "Path", _FakeSerialPath("/dev/ttyAMA0")
     )
     monkeypatch.setattr(
         profile_detect, "_read_usb_vendor_for_tty", lambda _p: None
     )
-    assert profile_detect.probe_mavlink_serial() == (0, 3, True)
+    assert profile_detect.probe_mavlink_serial() == (0, 0, False)
 
 
 # ---- probe_rtl8812: USB vendor IDs of the RTL8812 family ------------------
@@ -495,7 +499,7 @@ def test_hostname_still_resolves_genuine_ground_station(monkeypatch) -> None:
     _stub_probes(
         monkeypatch,
         probe_i2c_oled=(3, 0, True),
-        probe_gpio_buttons=(2, 0, True),
+        probe_gpio_buttons=(0, 0, True),
         probe_rtl8812=(1, 1, True),
         probe_uplink_type=(1, 0, True),
     )
@@ -504,9 +508,9 @@ def test_hostname_still_resolves_genuine_ground_station(monkeypatch) -> None:
     )
     result = profile_detect.detect_profile(config_override=None)
     assert result["profile"] == "ground_station"
-    # ground = oled(3) + buttons(2) + rtl(1) + uplink(1) + hostname(2) = 9
+    # ground = oled(3) + rtl(1) + uplink(1) + hostname(2) = 7
     # air    = rtl(1)
-    assert result["ground_score"] == 9
+    assert result["ground_score"] == 7
     assert result["air_score"] == 1
 
 
@@ -521,6 +525,143 @@ def test_hostname_tiebreak_when_hardware_is_silent(monkeypatch) -> None:
     assert result["profile"] == "ground_station"
     assert result["ground_score"] == 2
     assert result["air_score"] == 0
+
+
+# ---- probe_gpio_buttons / probe_gps_serial -----------------------------------
+
+
+def test_declared_buttons_are_reported_but_earn_no_points(monkeypatch) -> None:
+    """Idle pull-ups read the same with or without a button, so a board's
+    button declaration must not tip the profile vote."""
+    board = SimpleNamespace(gpio_buttons=[SimpleNamespace(pin=5), SimpleNamespace(pin=6)])
+    monkeypatch.setattr("ados.hal.detect.detect_board_profile", lambda: board)
+    assert profile_detect.probe_gpio_buttons() == (0, 0, True)
+
+    monkeypatch.setattr(
+        "ados.hal.detect.detect_board_profile", lambda: SimpleNamespace(gpio_buttons=[])
+    )
+    assert profile_detect.probe_gpio_buttons() == (0, 0, False)
+
+
+class _FakeSerialModule(types.ModuleType):
+    """Stands in for pyserial and records every port opened."""
+
+    def __init__(self) -> None:
+        super().__init__("serial")
+        self.opened: list[str] = []
+        opened = self.opened
+
+        class SerialException(Exception):
+            pass
+
+        class Serial:
+            def __init__(self, path, **_kwargs) -> None:
+                opened.append(path)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc) -> None:
+                return None
+
+            def read(self, _n: int) -> bytes:
+                return b"$GPGGA,,,,"
+
+        self.Serial = Serial
+        self.SerialException = SerialException
+
+
+def _gps_bench(tmp_path: Path, monkeypatch, *, claimed: str | None = None):
+    """Two candidate UARTs (one reached through a symlink), a fake procfs and a
+    fake pyserial. Returns (fake serial module, fake proc root, port paths)."""
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    uart_a = dev / "ttyAMA1"
+    uart_b = dev / "ttyS1"
+    uart_a.write_text("")
+    uart_b.write_text("")
+    alias_a = dev / "serial1"
+    alias_a.symlink_to(uart_a)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+
+    monkeypatch.setattr(profile_detect, "_GPS_CANDIDATE_PATHS", [str(alias_a), str(uart_b)])
+    monkeypatch.setattr(profile_detect, "_MAVLINK_SERIAL_PATHS", [])
+    config = SimpleNamespace(
+        mavlink=SimpleNamespace(serial_port=claimed or ""),
+        radio=SimpleNamespace(crsf=SimpleNamespace(device=None)),
+    )
+    monkeypatch.setattr("ados.core.config.load_config", lambda: config)
+    original_held = profile_detect._serial_paths_held_open
+    monkeypatch.setattr(
+        profile_detect,
+        "_serial_paths_held_open",
+        lambda paths: original_held(paths, proc_root=str(proc)),
+    )
+    fake_serial = _FakeSerialModule()
+    monkeypatch.setitem(sys.modules, "serial", fake_serial)
+    return fake_serial, proc, os.path.realpath(uart_a), os.path.realpath(uart_b)
+
+
+def test_gps_probe_skips_a_port_another_process_holds(tmp_path, monkeypatch) -> None:
+    fake_serial, proc, uart_a, uart_b = _gps_bench(tmp_path, monkeypatch)
+    fd_dir = proc / "4242" / "fd"
+    fd_dir.mkdir(parents=True)
+    (fd_dir / "7").symlink_to(uart_a)
+
+    assert profile_detect.probe_gps_serial() == (0, 3, True)
+    assert fake_serial.opened == [uart_b]
+
+
+def test_gps_probe_skips_the_config_assigned_port_through_an_alias(
+    tmp_path, monkeypatch
+) -> None:
+    fake_serial, _proc, uart_a, uart_b = _gps_bench(
+        tmp_path, monkeypatch, claimed=str(tmp_path / "dev" / "serial1")
+    )
+
+    profile_detect.probe_gps_serial()
+
+    assert uart_a not in fake_serial.opened
+    assert fake_serial.opened == [uart_b]
+
+
+def test_gps_probe_opens_nothing_when_holders_cannot_be_read(
+    tmp_path, monkeypatch
+) -> None:
+    fake_serial, _proc, _a, _b = _gps_bench(tmp_path, monkeypatch)
+    monkeypatch.setattr(profile_detect, "_serial_paths_held_open", lambda paths: None)
+
+    assert profile_detect.probe_gps_serial() == (0, 0, False)
+    assert fake_serial.opened == []
+
+
+def test_gps_probe_opens_nothing_when_the_config_is_unreadable(
+    tmp_path, monkeypatch
+) -> None:
+    fake_serial, _proc, _a, _b = _gps_bench(tmp_path, monkeypatch)
+
+    def _broken():
+        raise OSError("config unreadable")
+
+    monkeypatch.setattr("ados.core.config.load_config", _broken)
+
+    assert profile_detect.probe_gps_serial() == (0, 0, False)
+    assert fake_serial.opened == []
+
+
+def test_a_process_whose_descriptors_are_unreadable_makes_holders_unknown(
+    tmp_path,
+) -> None:
+    proc = tmp_path / "proc"
+    (proc / "77" / "fd").mkdir(parents=True)
+    (proc / "77" / "fd").chmod(0)
+    try:
+        if os.access(proc / "77" / "fd", os.R_OK):
+            pytest.skip("running with privileges that bypass directory permissions")
+        assert profile_detect._serial_paths_held_open({"/dev/ttyS1"}, proc_root=str(proc)) is None
+    finally:
+        (proc / "77" / "fd").chmod(0o700)
 
 
 # ---- _detect_ethernet_iface: predictable network name handling -------------

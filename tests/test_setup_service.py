@@ -275,15 +275,10 @@ def test_cloud_choice_status_self_hosted_reports_url() -> None:
     assert cs.backend_url == "https://convex.example.com"
 
 
-class _RawRuntime:
-    def save_config(self) -> None:
-        pass
+def _Runtime():
+    from tests.api_runtime_utils import build_api_runtime
 
-
-class _Runtime:
-    def __init__(self) -> None:
-        self.config = _CloudChoiceConfig()
-        self.raw_runtime = _RawRuntime()
+    return build_api_runtime()
 
 
 def test_apply_cloud_choice_local_clears_mqtt_password() -> None:
@@ -513,10 +508,14 @@ class _ProfileConfig:
         self.ground_station = _GroundStationCfg(role)
 
 
-class _ProfileRuntime:
-    def __init__(self, profile: str = "auto", role: str = "direct") -> None:
-        self.config = _ProfileConfig(profile, role)
-        self.raw_runtime = _RawRuntime()
+def _ProfileRuntime(profile: str = "auto", role: str = "direct"):
+    from ados.core.config import ADOSConfig
+    from tests.api_runtime_utils import build_api_runtime
+
+    config = ADOSConfig()
+    config.agent.profile = profile
+    config.ground_station.role = role  # type: ignore[assignment]
+    return build_api_runtime(config=config)
 
 
 def test_apply_profile_accepts_drone() -> None:
@@ -598,7 +597,7 @@ def test_build_profile_suggestion_unconfirmed_when_profile_auto(monkeypatch) -> 
 
 from ados.setup.hardware_check import (  # noqa: E402
     derive_step_state,
-    run_hardware_check,
+    run_hardware_check_fresh,
 )
 from ados.setup.models import HardwareCheckItem, HardwareCheckStatus  # noqa: E402
 
@@ -656,7 +655,7 @@ def test_run_hardware_check_drone_emits_required_items(monkeypatch) -> None:
     monkeypatch.setattr("ados.hal.usb.discover_usb_devices", lambda: [])
     monkeypatch.setattr("ados.hal.modem.detect_modem", lambda: None)
 
-    snap = run_hardware_check(None, profile="drone")
+    snap = run_hardware_check_fresh(None, profile="drone")
     ids = [item.id for item in snap.items]
     assert "board" in ids
     assert "fc" in ids
@@ -689,15 +688,14 @@ def test_run_hardware_check_ground_relay_requires_mesh_dongle(monkeypatch) -> No
         "ados.bootstrap.profile_detect.probe_i2c_oled", lambda bus=1: (0, 0, False)
     )
     monkeypatch.setattr(
-        "ados.bootstrap.profile_detect.probe_gpio_buttons",
-        lambda pins=None: (0, 0, False),
+        "ados.bootstrap.profile_detect.board_button_pins", lambda: []
     )
     monkeypatch.setattr(
         "ados.bootstrap.profile_detect.probe_uplink_type", lambda: (0, 0, False)
     )
     monkeypatch.setattr("ados.hal.modem.detect_modem", lambda: None)
 
-    snap = run_hardware_check(None, profile="ground_station", ground_role="relay")
+    snap = run_hardware_check_fresh(None, profile="ground_station", ground_role="relay")
     item_ids = {item.id for item in snap.items}
     assert "radio_wfb" in item_ids
     assert "mesh_dongle" in item_ids
@@ -866,22 +864,21 @@ class _NoPipelineRuntime:
 
 
 async def _video(monkeypatch, tmp_path, *, ready: bool):
+    import importlib
+
     import ados.core.paths as _paths
-    from ados.setup.service._access_urls import _video_access
+
+    # The package re-exports a function named `_access_urls`, which shadows the
+    # submodule attribute; fetch the module itself to patch its readiness probe.
+    _access_urls = importlib.import_module("ados.setup.service._access_urls")
 
     monkeypatch.setattr(_paths, "ADOS_RUN_DIR", tmp_path)
 
-    async def _probe():
-        return {"ready": ready, "webrtc_port": 8889, "hls_port": 8888}
+    async def _ready():
+        return ready
 
-    async def _probe_whep():
-        return None
-
-    import ados.api.routes.video as _video_routes
-
-    monkeypatch.setattr(_video_routes, "_probe_mediamtx", _probe)
-    monkeypatch.setattr(_video_routes, "_probe_mediamtx_via_whep", _probe_whep)
-    return await _video_access(_NoPipelineRuntime(), None)
+    monkeypatch.setattr(_access_urls, "_main_stream_ready", _ready)
+    return await _access_urls._video_access(_NoPipelineRuntime(), None)
 
 
 @pytest.mark.asyncio

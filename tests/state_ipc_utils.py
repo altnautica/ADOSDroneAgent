@@ -1,7 +1,7 @@
-"""A stand-in for the native router's state and MAVLink sockets.
+"""A stand-in for the native router's state socket.
 
-The router serves both sockets in production; these doubles speak the same
-wire so the Python clients can be exercised without it.
+The router serves the socket in production; this double speaks the same wire
+so the Python state client can be exercised without it.
 """
 
 from __future__ import annotations
@@ -64,32 +64,4 @@ class StateSocketServer:
             pass
         finally:
             self._writers.discard(writer)
-            writer.close()
-
-
-class MavlinkSocketServer:
-    """Collects the length-prefixed frames clients send over the MAVLink socket."""
-
-    def __init__(self, sock_path: Path) -> None:
-        self._sock_path = sock_path
-        self._server: asyncio.AbstractServer | None = None
-        self.received: list[bytes] = []
-
-    async def start(self) -> None:
-        self._server = await asyncio.start_unix_server(self._handle, path=str(self._sock_path))
-
-    async def stop(self) -> None:
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-        self._sock_path.unlink(missing_ok=True)
-
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            while True:
-                (length,) = struct.unpack("!I", await reader.readexactly(4))
-                self.received.append(await reader.readexactly(length))
-        except (asyncio.IncompleteReadError, ConnectionResetError, OSError):
-            pass
-        finally:
             writer.close()

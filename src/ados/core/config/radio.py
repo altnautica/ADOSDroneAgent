@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ._bounds import I8_MAX, I8_MIN, U16_MAX
 
 
 class CrsfConfig(BaseModel):
@@ -86,8 +88,8 @@ class CrsfConfig(BaseModel):
     enabled: bool = False
     device: str | None = None
     band: Literal["dual", "900", "2p4"] = "dual"
-    packet_rate_hz: int = 150
-    tx_power_dbm: int | None = None
+    packet_rate_hz: int = Field(default=150, ge=0, le=U16_MAX)
+    tx_power_dbm: int | None = Field(default=None, ge=I8_MIN, le=I8_MAX)
     mode: Literal["crsf_rc", "mavlink", "airport"] = "crsf_rc"
     channel_source: Literal["hid", "inject", "hybrid"] = "hid"
     mavlink_transport: Literal["serial", "backpack_wifi"] = "serial"
@@ -133,7 +135,7 @@ class TunnelConfig(BaseModel):
 
     enabled: bool = False
     command_enabled: bool = False
-    rx_port: int = 5820
+    rx_port: int = Field(default=5820, ge=0, le=U16_MAX)
 
 
 class RadioConfig(BaseModel):

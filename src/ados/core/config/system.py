@@ -4,17 +4,19 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from ados.core.paths import FLIGHT_LOGS_DIR, PAIRING_JSON
+
+from ._bounds import I64_MAX, I64_MIN, U32_MAX
 
 
 class VisionConfig(BaseModel):
     enabled: bool = False
-    backend: str = "auto"  # auto, rknn, tensorrt, opencv_dnn, tflite
+    backend: str = "auto"  # auto, rknn, hailo, onnx, mock
     confidence_threshold: float = 0.5
     models_dir: str = "/opt/ados/models/vision"
-    models_cache_max_mb: int = 500
+    models_cache_max_mb: int = Field(default=500, ge=0, le=U32_MAX)
     registry_url: str = "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json"
 
 
@@ -42,8 +44,8 @@ class LogStoreConfig(BaseModel):
 
 class LoggingConfig(BaseModel):
     level: str = "info"
-    max_size_mb: int = 50
-    keep_count: int = 5
+    max_size_mb: int = Field(default=50, ge=0, le=U32_MAX)
+    keep_count: int = Field(default=5, ge=0, le=U32_MAX)
     flight_log_dir: str = str(FLIGHT_LOGS_DIR)
     store: LogStoreConfig = LogStoreConfig()
 
@@ -51,8 +53,8 @@ class LoggingConfig(BaseModel):
 class PairingConfig(BaseModel):
     state_path: str = str(PAIRING_JSON)
     convex_url: str = ""  # Convex HTTP endpoint for cloud pairing
-    beacon_interval: int = 30  # seconds
-    heartbeat_interval: int = 60  # seconds
+    beacon_interval: int = Field(default=30, ge=0, le=U32_MAX)  # seconds
+    heartbeat_interval: int = Field(default=60, ge=0, le=U32_MAX)  # seconds
     # Cloud pair beacon publishes the unpaired agent's short-lived
     # pair code to ``convex_url`` so a GCS reached from any network
     # (e.g. command.altnautica.com) can claim by code. Loop runs only
@@ -82,14 +84,14 @@ class SwarmFlockConfig(BaseModel):
     one validation path on both sides. A consumer divides by 100.
     """
 
-    cohesion: int = 40
-    alignment: int = 60
-    separation_gain: int = 150
+    cohesion: int = Field(default=40, ge=I64_MIN, le=I64_MAX)
+    alignment: int = Field(default=60, ge=I64_MIN, le=I64_MAX)
+    separation_gain: int = Field(default=150, ge=I64_MIN, le=I64_MAX)
     # Neighbours beyond this range contribute nothing to the flocking
     # terms; ``neighbors`` further caps how many of the nearest ones
     # are weighted, so a dense cluster cannot dominate the solution.
-    radius_m: int = 30
-    neighbors: int = 7
+    radius_m: int = Field(default=30, ge=I64_MIN, le=I64_MAX)
+    neighbors: int = Field(default=7, ge=I64_MIN, le=I64_MAX)
 
 
 class SwarmSeparationConfig(BaseModel):
@@ -102,8 +104,8 @@ class SwarmSeparationConfig(BaseModel):
     before the hard floor does.
     """
 
-    radius_m: int = 8
-    hard_m: int = 4
+    radius_m: int = Field(default=8, ge=I64_MIN, le=I64_MAX)
+    hard_m: int = Field(default=4, ge=I64_MIN, le=I64_MAX)
 
     @model_validator(mode="after")
     def _hard_below_radius(self) -> SwarmSeparationConfig:
@@ -128,7 +130,7 @@ class SwarmTasksConfig(BaseModel):
 
     enabled: bool = False
     assigned_task_id: str | None = None
-    bundle_position: int | None = None
+    bundle_position: int | None = Field(default=None, ge=I64_MIN, le=I64_MAX)
 
 
 class SwarmConfig(BaseModel):
@@ -141,7 +143,7 @@ class SwarmConfig(BaseModel):
     default_formation: Literal[
         "line", "column", "wedge", "grid", "circle"
     ] = "line"
-    default_spacing: int = 10
+    default_spacing: int = Field(default=10, ge=I64_MIN, le=I64_MAX)
     # The operator-commandable behaviour mode, set per node or fanned
     # across a selection from the GCS. Hard separation and operator
     # direct command are precedence LEVELS the runtime arbitrates into,

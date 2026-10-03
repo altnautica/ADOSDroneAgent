@@ -100,19 +100,11 @@ def test_applying_a_regulatory_posture_records_exactly_one_decision(
     from ados.core.config import ADOSConfig
     from ados.setup.models import RegulatoryApplyRequest
     from ados.setup.profile import apply_regulatory
+    from tests.api_runtime_utils import build_api_runtime
 
-    config = ADOSConfig()
+    runtime = build_api_runtime(config=ADOSConfig())
 
-    class _Raw:
-        def save_config(self) -> None:
-            pass
-
-    class _Runtime:
-        def __init__(self) -> None:
-            self.config = config
-            self.raw_runtime = _Raw()
-
-    result = apply_regulatory(_Runtime(), RegulatoryApplyRequest(mode="region", region="IN"))
+    result = apply_regulatory(runtime, RegulatoryApplyRequest(mode="region", region="IN"))
     assert result.ok
 
     recs = _records(tmp_path / "audit.jsonl")
@@ -124,7 +116,7 @@ def test_applying_a_regulatory_posture_records_exactly_one_decision(
     assert recs[0]["detail"]["restart_required"] is True
 
     # Idempotent: re-applying the same posture is not a decision.
-    apply_regulatory(_Runtime(), RegulatoryApplyRequest(mode="region", region="IN"))
+    apply_regulatory(runtime, RegulatoryApplyRequest(mode="region", region="IN"))
     assert len(_records(tmp_path / "audit.jsonl")) == 1
 
 

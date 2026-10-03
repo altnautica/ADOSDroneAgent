@@ -12,6 +12,7 @@ from __future__ import annotations
 import socket
 from typing import Any
 
+from ados.setup._persist import persist_config
 from ados.setup.models import (
     ProfileSuggestion,
     RegulatoryApplyRequest,
@@ -86,20 +87,10 @@ def build_profile_suggestion(config: Any) -> ProfileSuggestion:
     if source not in ("detected", "tiebreaker", "override", "default"):
         source = "detected"
 
-    # Auto-persist the detected profile to /etc/ados/profile.conf when
-    # the operator hasn't picked an explicit value yet AND detection
-    # had a clear winner (source != "default" — that path means tied
-    # scores and would lock in a coin-flip). Without this the agent
-    # silently reports "drone" forever even when probes are unanimous;
-    # `core.profile.current_profile_and_role` reads profile.conf as a
-    # fallback so persisting here makes the whole chain self-healing.
-    if not confirmed and source != "default":
-        try:
-            from ados.bootstrap.profile_detect import write_profile_conf
-
-            write_profile_conf({"profile": detected, "source": source})
-        except Exception:
-            pass
+    # Read-only: the suggestion never writes profile.conf. Recording a
+    # detected profile is the boot seed's job (merge of the one key, only
+    # while profile.conf names none); a status poll rewriting that file
+    # would drop the installer's channel and version pin.
 
     ground_role = str(getattr(config.ground_station, "role", "direct") or "direct")
     if ground_role not in ("direct", "relay", "receiver"):
@@ -160,6 +151,19 @@ def _restart_supervisor() -> tuple[bool, str]:
         return False, f"supervisor restart unavailable: {exc}"
 
 
+def _effective_profile(config: Any) -> str:
+    """The profile the node is running now, underscore form.
+
+    ``agent.profile: auto`` resolves through profile.conf exactly as the
+    services do at start, so a change away from an auto-detected profile is
+    recognised as a change that needs a restart.
+    """
+    from ados.core.profile import current_profile_and_role
+
+    profile, _role = current_profile_and_role(config)
+    return profile.replace("-", "_")
+
+
 def apply_profile(
     runtime: Any,
     *,
@@ -178,10 +182,12 @@ def apply_profile(
     re-derives every step's state from the live config, so a stale skip
     flag for the now-hidden step does no harm.
 
-    When ``auto_restart`` is true and the profile actually changed,
-    dispatch a supervisor restart so the new profile's services come up
-    without the operator having to SSH in. The restart is non-blocking,
-    so the route response lands before the agent goes down.
+    ``restart_required`` compares against the profile the node is running
+    (``auto`` resolved), not the literal config value. When ``auto_restart``
+    is true and a restart is required, dispatch a supervisor restart so the
+    new profile's services come up without the operator having to SSH in.
+    The restart is non-blocking, so the route response lands before the
+    agent goes down.
     """
     if profile not in ("drone", "ground_station"):
         return SetupActionResult(
@@ -202,27 +208,26 @@ def apply_profile(
     config = runtime.config
     previous_profile = str(getattr(config.agent, "profile", "") or "")
     previous_role = str(getattr(config.ground_station, "role", "") or "")
+    running_profile = _effective_profile(config)
 
-    config.agent.profile = profile
-    if profile == "ground_station" and role is not None:
-        config.ground_station.role = role  # type: ignore[assignment]
+    values: dict[str, object] = {}
+    if previous_profile != profile:
+        values["agent.profile"] = profile
+    if profile == "ground_station" and previous_role != role:
+        values["ground_station.role"] = role
+    failed = persist_config(runtime, values, what="Profile")
+    if failed is not None:
+        return failed
 
-    saver = getattr(runtime.raw_runtime, "save_config", None)
-    if callable(saver):
-        try:
-            saver()
-        except Exception:
-            pass
-
-    changed = previous_profile != profile or (
-        profile == "ground_station" and previous_role != role
-    )
+    changed = bool(values)
     data: dict[str, object] = {
         "profile": profile,
         "ground_role": role or "",
         "changed": changed,
     }
-    if changed and previous_profile not in ("", "auto"):
+    if running_profile != profile or (
+        profile == "ground_station" and previous_role != role
+    ):
         data["restart_required"] = True
 
     # Advisory: hostname carries a strong signal about expected
@@ -262,18 +267,25 @@ def apply_profile(
         message = f"Profile set to ground station ({role})."
 
     if auto_restart and data.get("restart_required"):
-        ok_restart, restart_msg = _restart_supervisor()
-        data["auto_restart_attempted"] = True
-        data["auto_restart_ok"] = ok_restart
-        data["auto_restart_message"] = restart_msg
-        if ok_restart:
-            message += " Restarting agent."
-        else:
-            message += f" Restart failed: {restart_msg}."
+        message += dispatch_profile_restart(data)
     elif data.get("restart_required"):
         message += " Restart the agent to apply."
 
     return SetupActionResult(ok=True, message=message, data=data)
+
+
+def dispatch_profile_restart(data: dict[str, object]) -> str:
+    """Restart the supervisor for a profile change; record the outcome in ``data``.
+
+    Returns the sentence to append to the operator-facing message.
+    """
+    ok_restart, restart_msg = _restart_supervisor()
+    data["auto_restart_attempted"] = True
+    data["auto_restart_ok"] = ok_restart
+    data["auto_restart_message"] = restart_msg
+    if ok_restart:
+        return " Restarting agent."
+    return f" Restart failed: {restart_msg}."
 
 
 def apply_ui(
@@ -305,7 +317,8 @@ def apply_ui(
             message="UI configuration is not available on this agent.",
         )
 
-    changed_fields: list[str] = []
+    values: dict[str, object] = {}
+    theme = str(ui.theme)
 
     if request.theme is not None:
         new_theme = str(request.theme)
@@ -314,21 +327,19 @@ def apply_ui(
                 ok=False,
                 message="theme must be 'dark' or 'light'.",
             )
-        if str(ui.theme) != new_theme:
-            ui.theme = new_theme  # type: ignore[assignment]
-            changed_fields.append("theme")
+        if theme != new_theme:
+            values["ui.theme"] = new_theme
+            theme = new_theme
 
-    saver = getattr(getattr(runtime, "raw_runtime", None), "save_config", None)
-    if changed_fields and callable(saver):
-        try:
-            saver()
-        except Exception:
-            pass
+    failed = persist_config(runtime, values, what="UI settings")
+    if failed is not None:
+        return failed
 
+    changed_fields = [path.rsplit(".", 1)[-1] for path in values]
     data: dict[str, object] = {
         "changed": bool(changed_fields),
         "fields": changed_fields,
-        "theme": str(ui.theme),
+        "theme": theme,
     }
     if changed_fields:
         message = f"UI updated ({', '.join(changed_fields)})."
@@ -369,7 +380,7 @@ def apply_wfb(
             message="WFB configuration is not available on this agent.",
         )
 
-    changed_fields: list[str] = []
+    values: dict[str, object] = {}
     restart_required = False
 
     if request.channel is not None:
@@ -391,8 +402,7 @@ def apply_wfb(
         except ImportError:
             pass
         if int(getattr(wfb, "channel", 0)) != new_channel:
-            wfb.channel = new_channel
-            changed_fields.append("channel")
+            values["video.wfb.channel"] = new_channel
             restart_required = True
 
     if request.tx_power_dbm is not None:
@@ -411,8 +421,7 @@ def apply_wfb(
                 ),
             )
         if int(getattr(wfb, "tx_power_dbm", 0)) != requested:
-            wfb.tx_power_dbm = requested
-            changed_fields.append("tx_power_dbm")
+            values["video.wfb.tx_power_dbm"] = requested
 
     if request.mcs_index is not None:
         new_mcs = int(request.mcs_index)
@@ -424,8 +433,7 @@ def apply_wfb(
                 message=f"mcs_index must be 0..7, got {new_mcs}",
             )
         if int(getattr(wfb, "mcs_index", 0)) != new_mcs:
-            wfb.mcs_index = new_mcs
-            changed_fields.append("mcs_index")
+            values["video.wfb.mcs_index"] = new_mcs
             restart_required = True
 
     if request.topology is not None:
@@ -439,16 +447,14 @@ def apply_wfb(
                 ),
             )
         if str(getattr(wfb, "topology", "")) != new_topo:
-            wfb.topology = new_topo  # type: ignore[assignment]
-            changed_fields.append("topology")
+            values["video.wfb.topology"] = new_topo
             restart_required = True
 
-    saver = getattr(getattr(runtime, "raw_runtime", None), "save_config", None)
-    if changed_fields and callable(saver):
-        try:
-            saver()
-        except Exception:
-            pass
+    failed = persist_config(runtime, values, what="WFB settings")
+    if failed is not None:
+        return failed
+
+    changed_fields = [path.rsplit(".", 1)[-1] for path in values]
 
     data: dict[str, object] = {
         "changed": bool(changed_fields),
@@ -543,33 +549,27 @@ def apply_regulatory(
 
     changed = previous_mode != target_mode or previous_region != target_region
 
-    reg.mode = target_mode  # type: ignore[assignment]
-    reg.region = target_region
     if changed:
         # Record who made the choice and when, for the audit trail. The
         # operator id falls back to the device name when no explicit
         # operator is supplied (the webapp/CLI run unattended on-box).
-        operator = ""
-        try:
-            operator = str(getattr(config.agent, "name", "") or "")
-        except Exception:
-            operator = ""
-        reg.ack_operator = operator or "operator"
-        try:
-            from ados.api.routes.setup._common import now_iso
+        operator = str(getattr(config.agent, "name", "") or "") or "operator"
+        from ados.api.routes.setup._common import now_iso
 
-            reg.ack_at = now_iso()
-        except Exception:
-            reg.ack_at = None
+        ack_at = now_iso()
+        failed = persist_config(
+            runtime,
+            {
+                "network.regulatory.mode": target_mode,
+                "network.regulatory.region": target_region,
+                "network.regulatory.ack_operator": operator,
+                "network.regulatory.ack_at": ack_at,
+            },
+            what="Operating region",
+        )
+        if failed is not None:
+            return failed
 
-    saver = getattr(getattr(runtime, "raw_runtime", None), "save_config", None)
-    if changed and callable(saver):
-        try:
-            saver()
-        except Exception:
-            pass
-
-    if changed:
         # The audit trail: a regulatory posture is a decision that outlives the
         # request, and the operator + timestamp recorded above are exactly what
         # an after-the-fact "who set this region" question needs.
@@ -583,8 +583,8 @@ def apply_regulatory(
                 "region": target_region,
                 "previous_mode": previous_mode,
                 "previous_region": previous_region,
-                "ack_operator": reg.ack_operator,
-                "ack_at": reg.ack_at,
+                "ack_operator": operator,
+                "ack_at": ack_at,
                 "restart_required": True,
             },
         )

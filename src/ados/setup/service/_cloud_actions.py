@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from ados.setup._persist import persist_config
 from ados.setup.models import CloudChoiceStatus, SetupActionResult
 
 from ._constants import _TOKEN_RE
@@ -95,26 +96,19 @@ def apply_cloud_choice(  # noqa: C901
             message="self_hosted block is only valid when mode is 'self_hosted'",
         )
 
-    config = runtime.config
-    config.server.mode = mode
-
-    api_key_written = False
+    # Validate everything before any side effect, so a refused request
+    # leaves neither a config change nor a key file behind.
+    values: dict[str, object] = {"server.mode": mode}
+    api_key = ""
+    backend_url = ""
     if mode == "self_hosted":
-        sh = config.server.self_hosted
-        sh.url = str(self_hosted.get("url") or "").strip()
-        sh.mqtt_broker = str(self_hosted.get("mqtt_broker") or "").strip()
-        # Mirror the backend URL onto pairing.convex_url as the Convex SITE
-        # (HTTP-actions) origin: the native ados-cloud beacon reads
-        # pairing.convex_url ONLY, so without this a self-hosted pair would never
-        # beacon even though the relay is enabled (the "pairs but never beacons"
-        # bug). The accept/register POST normalizes the same way, so the two
-        # agree on which origin /pairing/register lives on. Guarded so a config
-        # object without a pairing section (a partial runtime) never raises.
-        pairing = getattr(config, "pairing", None)
-        if pairing is not None:
-            from ados.core.pairing import _normalize_convex_site_url
-
-            pairing.convex_url = _normalize_convex_site_url(sh.url)
+        assert self_hosted is not None
+        url = str(self_hosted.get("url") or "").strip()
+        backend_url = url
+        values["server.self_hosted.url"] = url
+        values["server.self_hosted.mqtt_broker"] = str(
+            self_hosted.get("mqtt_broker") or ""
+        ).strip()
         port_raw = self_hosted.get("mqtt_port")
         if port_raw is not None:
             try:
@@ -127,45 +121,55 @@ def apply_cloud_choice(  # noqa: C901
                 return SetupActionResult(
                     ok=False, message="self_hosted.mqtt_port must be 1-65535"
                 )
-            sh.mqtt_port = port_int
-        api_key = self_hosted.get("api_key")
+            values["server.self_hosted.mqtt_port"] = port_int
+        # Mirror the backend URL onto pairing.convex_url as the Convex SITE
+        # (HTTP-actions) origin: the native ados-cloud beacon reads
+        # pairing.convex_url ONLY, so without this a self-hosted pair would never
+        # beacon even though the relay is enabled. The accept/register POST
+        # normalizes the same way, so the two agree on which origin
+        # /pairing/register lives on.
+        from ados.core.pairing import _normalize_convex_site_url
+
+        values["pairing.convex_url"] = _normalize_convex_site_url(url)
+        api_key = str(self_hosted.get("api_key") or "").strip()
         if api_key:
-            try:
-                from ados.core.paths import SERVER_API_KEY_PATH
-                SERVER_API_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-                fd = os.open(
-                    str(SERVER_API_KEY_PATH),
-                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                    0o600,
-                )
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    fh.write(str(api_key).strip())
-                    fh.write("\n")
-                api_key_written = True
-                sh.api_key = ""  # never echo back through config
-            except OSError as exc:
-                return SetupActionResult(
-                    ok=False, message=f"Could not write API key: {exc}"
-                )
+            # The key lives in a root-owned secret file, never in config.
+            values["server.self_hosted.api_key"] = ""
+    elif mode == "cloud":
+        backend_url = str(runtime.config.server.cloud.url)
+    else:
+        values["server.mqtt_password"] = ""
 
-    if mode == "local":
-        config.server.mqtt_password = ""
-
-    saver = getattr(runtime.raw_runtime, "save_config", None)
-    if callable(saver):
+    api_key_written = False
+    if api_key:
         try:
-            saver()
-        except Exception:
-            pass
+            from ados.core.paths import SERVER_API_KEY_PATH
+
+            SERVER_API_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                str(SERVER_API_KEY_PATH),
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(api_key)
+                fh.write("\n")
+            api_key_written = True
+        except OSError as exc:
+            return SetupActionResult(
+                ok=False, message=f"Could not write API key: {exc}"
+            )
+
+    failed = persist_config(runtime, values, what="Cloud posture")
+    if failed is not None:
+        return failed
 
     data: dict[str, object] = {
         "mode": mode,
         "api_key_written": api_key_written,
     }
-    if mode == "cloud":
-        data["backend_url"] = config.server.cloud.url
-    elif mode == "self_hosted":
-        data["backend_url"] = config.server.self_hosted.url
+    if mode != "local":
+        data["backend_url"] = backend_url
 
     if mode == "local":
         message = "Cloud posture set to local-only. Mission Control connects directly."
@@ -191,14 +195,16 @@ def install_cloudflare_token(runtime: Any, token_or_script: str) -> SetupActionR
     except OSError as exc:
         return SetupActionResult(ok=False, message=f"Could not write token: {exc}")
 
-    runtime.config.remote_access.provider = "cloudflare"
-    cf.enabled = True
-    saver = getattr(runtime.raw_runtime, "save_config", None)
-    if callable(saver):
-        try:
-            saver()
-        except Exception:
-            pass
+    failed = persist_config(
+        runtime,
+        {
+            "remote_access.provider": "cloudflare",
+            "remote_access.cloudflare.enabled": True,
+        },
+        what="Cloudflare remote access",
+    )
+    if failed is not None:
+        return failed
 
     data: dict[str, object] = {
         "token_path": str(token_path),

@@ -1,10 +1,8 @@
 """Persistent hardware-check snapshot.
 
-The agent re-probes hardware (rpicam-hello, v4l2-ctl, lsusb, modem
-detection, GPIO) on every call to ``run_hardware_check()``. The
-dashboard polls ``/api/v1/setup/status`` every 8 s, which means the
-agent was burning measurable CPU + USB enumeration cycles on data
-that almost never changes between polls.
+A full hardware sweep (rpicam-hello, v4l2-ctl, lsusb, modem detection,
+GPIO) is too expensive to re-run on every ``/api/v1/setup/status`` poll,
+and its answer almost never changes between polls.
 
 This module owns a single JSON snapshot at
 ``/var/ados/setup/hardware-state.json``. The cached runner in

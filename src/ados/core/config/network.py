@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ._bounds import U8_MAX, U32_MAX
 
 
 class WifiClientConfig(BaseModel):
@@ -42,7 +44,7 @@ class HotspotConfig(BaseModel):
     #
     # Set this in config.yaml only to pin a deliberate shared passphrase.
     password: str = ""
-    channel: int = 6
+    channel: int = Field(default=6, ge=0, le=U8_MAX)
     # Which radio the access point binds. Empty means "resolve it by driver",
     # which is what the agent does -- interface names are not stable across
     # boots, so naming one here pins the AP to whatever that name happens to
@@ -64,7 +66,9 @@ class MacPinConfig(BaseModel):
     # Re-tagging the LIVE interface (fixes the IP this session without a reboot)
     # drops any connection over that interface, so it stays opt-in.
     apply_live_allowed: bool = False
-    # Operator overrides keyed by "vvvv:pppp" USB id or interface name -> MAC.
+    # Operator overrides -> MAC, keyed by a stable adapter identity: the adapter
+    # key "vvvv:pppp@<usb_path>" (one adapter in one port) or a bare "vvvv:pppp"
+    # USB id (every adapter of that model). Interface names are not identities.
     overrides: dict[str, str] = {}
 
 
@@ -79,10 +83,10 @@ class WifiSelfHealConfig(BaseModel):
     enabled: bool = True
     # Consecutive failing checks before a re-association fires (a single failing
     # check can be a momentarily-busy gateway).
-    fail_threshold: int = 2
+    fail_threshold: int = Field(default=2, ge=0, le=U32_MAX)
     # Quiet period after a heal, per connection, so a re-association in progress
     # is never re-fired on (anti-flap).
-    cooldown_s: int = 60
+    cooldown_s: int = Field(default=60, ge=0, le=U32_MAX)
 
 
 class RegulatoryConfig(BaseModel):

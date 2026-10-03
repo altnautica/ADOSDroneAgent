@@ -1,22 +1,15 @@
 """Tests for the Connectivity step's data sources.
 
-Covers the two backend gaps that previously left the Step 2 summary
-tiles stuck on the warn-state fallback strings even when the lower
-Hardware-detail panel showed everything green:
-
-* ``NetworkStatus`` now carries ``uplink_kind`` / ``wifi_ssid`` /
-  ``rssi_dbm`` / ``ip_addresses`` so the Network tile renders the
-  same reality the hardware-check uplink row uses.
-* ``_video_slice`` no longer hard-codes ``state="unknown"``; it
-  picks between ``running``, ``ready``, and ``no_camera`` based on a
-  MediaMTX liveness probe plus a kernel-side V4L2 enumeration.
+``NetworkStatus`` carries ``uplink_kind`` / ``wifi_ssid`` / ``rssi_dbm`` /
+``ip_addresses`` so the Step 2 Network tile renders the same reality the
+hardware-check uplink row uses, rather than sticking on the warn-state
+fallback strings while the lower Hardware-detail panel shows everything green.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ados.api.routes import dashboard as dashboard_route
 from ados.setup.models import NetworkStatus
 from ados.setup.service import _net_helpers
 
@@ -113,147 +106,3 @@ class TestProbeWifiRssi:
         )
         monkeypatch.setattr(_net_helpers, "Path", lambda *a, **k: proc)
         assert _net_helpers._probe_wifi_rssi_dbm() == -54
-
-
-# ---- _video_slice runtime probe -----------------------------------------
-
-
-class _FakeConfig:
-    """Minimal AgentApp-shaped config for the dashboard slice."""
-
-    def __init__(self) -> None:
-        self.encoder = SimpleNamespace(
-            codec="h264",
-            width=1920,
-            height=1080,
-            fps=30,
-            bitrate_kbps=4000,
-        )
-
-
-class _FakeApp:
-    def __init__(self) -> None:
-        self.config = SimpleNamespace(video=_FakeConfig())
-
-
-class TestVideoSlice:
-    def test_running_when_mediamtx_ready(self, monkeypatch) -> None:
-        # Readiness is now the authoritative paths-list verdict (ready, track).
-        ready = True
-        monkeypatch.setattr(
-            dashboard_route, "_video_devices_present", lambda: True
-        )
-        slice_ = dashboard_route._video_slice(_FakeApp(), ready, None)
-        assert slice_["state"] == "running"
-        assert slice_["codec"] == "h264"
-        assert slice_["width"] == 1920
-
-    def test_ready_when_camera_present_but_mediamtx_not_ready(self, monkeypatch) -> None:
-        # mediamtx bound but no publisher streaming → not ready, but a camera
-        # device exists → "ready" (the prior 405-only gate would have flipped
-        # this incorrectly under load).
-        ready = False
-        monkeypatch.setattr(
-            dashboard_route, "_video_devices_present", lambda: True
-        )
-        slice_ = dashboard_route._video_slice(_FakeApp(), ready, None)
-        assert slice_["state"] == "ready"
-
-    def test_no_camera_when_v4l2_empty(self, monkeypatch) -> None:
-        ready = False
-        monkeypatch.setattr(
-            dashboard_route, "_video_devices_present", lambda: False
-        )
-        slice_ = dashboard_route._video_slice(_FakeApp(), ready, None)
-        assert slice_["state"] == "no_camera"
-
-    def test_glass_to_glass_default_preserved(self, monkeypatch) -> None:
-        ready = True
-        monkeypatch.setattr(
-            dashboard_route, "_video_devices_present", lambda: True
-        )
-        slice_ = dashboard_route._video_slice(_FakeApp(), ready, None)
-        assert slice_["glass_to_glass_ms"] is None
-
-
-    def test_configured_bitrate_is_never_reported_as_live(self, monkeypatch) -> None:
-        # A camera is present but nothing is publishing: the 4000 kbps target
-        # from config must not appear as the measured stream rate.
-        monkeypatch.setattr(
-            dashboard_route, "_video_devices_present", lambda: True
-        )
-        slice_ = dashboard_route._video_slice(_FakeApp(), False, None)
-        assert slice_["bitrate_kbps"] is None
-        assert slice_["target_bitrate_kbps"] == 4000
-
-class TestVideoDevicesPresent:
-    def test_true_when_sysfs_has_entries(self, tmp_path, monkeypatch) -> None:
-        v4l = tmp_path / "video4linux"
-        v4l.mkdir()
-        (v4l / "video0").mkdir()
-        monkeypatch.setattr(
-            dashboard_route,
-            "Path",
-            lambda *a, **k: v4l if a == ("/sys/class/video4linux",) else None,
-        )
-        assert dashboard_route._video_devices_present() is True
-
-    def test_false_when_sysfs_missing(self, monkeypatch) -> None:
-        def _explode(*_a, **_k):
-            raise OSError("no such directory")
-
-        # Make iterdir blow up — the helper must swallow it.
-        monkeypatch.setattr(
-            dashboard_route,
-            "Path",
-            lambda *_a, **_kw: SimpleNamespace(iterdir=_explode),
-        )
-        assert dashboard_route._video_devices_present() is False
-
-
-class TestSnapshotHonesty:
-    def test_unreported_armed_state_and_relay_link_are_unknown(self) -> None:
-        from ados.api.runtime import ApiRuntimeFacade
-        from tests.api_runtime_utils import build_api_runtime
-
-        # The FC link is up but no heartbeat has carried an armed flag yet, and
-        # this process cannot see the cloud relay's link state.
-        app = ApiRuntimeFacade(
-            build_api_runtime(state={"fc_connected": True, "armed": False, "last_heartbeat": ""})
-        )
-        fc = dashboard_route._fc_slice(app)
-        assert fc["connected"] is True
-        assert fc["armed"] is None
-        cloud = dashboard_route._cloud_slice(app)
-        assert cloud["mqtt_state"] is None
-        assert cloud["http_state"] is None
-        assert cloud["pairing_code"] == "ABC234"
-
-
-class TestFcSliceReadsRouterWire:
-    def test_gps_block_maps_the_router_keys(self) -> None:
-        from ados.api.runtime import ApiRuntimeFacade
-        from tests.api_runtime_utils import build_api_runtime
-
-        state = {
-            "fc_connected": True,
-            "armed": True,
-            "mode": "LOITER",
-            "last_heartbeat": "2026-09-24T10:00:00Z",
-            "gps": {"fix_type": 3, "satellites": 14, "eph": 0.8, "epv": 1.2},
-        }
-        fc = dashboard_route._fc_slice(ApiRuntimeFacade(build_api_runtime(state=state)))
-        assert fc["gps"] == {"fix_type": 3, "satellites_visible": 14, "hdop": 0.8}
-        assert fc["armed"] is True
-        assert fc["mode"] == "LOITER"
-
-    def test_unknown_hdop_sentinel_is_not_a_reading(self) -> None:
-        from ados.api.runtime import ApiRuntimeFacade
-        from tests.api_runtime_utils import build_api_runtime
-
-        state = {
-            "last_heartbeat": "2026-09-24T10:00:00Z",
-            "gps": {"fix_type": 2, "satellites": 5, "eph": 655.35},
-        }
-        fc = dashboard_route._fc_slice(ApiRuntimeFacade(build_api_runtime(state=state)))
-        assert fc["gps"]["hdop"] is None

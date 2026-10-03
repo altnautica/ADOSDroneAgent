@@ -306,6 +306,7 @@ def test_list_installed_filters_by_extension(tmp_path: Path) -> None:
     (models_dir / "a.rknn").write_bytes(b"x" * 32)
     (models_dir / "b.tflite").write_bytes(b"x" * 64)
     (models_dir / "c.onnx").write_bytes(b"x" * 16)
+    # No backend runs a serialized .engine file, so it is not listed as a model.
     (models_dir / "d.engine").write_bytes(b"x" * 8)
     (models_dir / "ignore.txt").write_bytes(b"nope")
     (models_dir / ".registry_etag").write_text("etag")
@@ -314,9 +315,9 @@ def test_list_installed_filters_by_extension(tmp_path: Path) -> None:
     installed = mgr.list_installed()
 
     formats = sorted(item["format"] for item in installed)
-    assert formats == ["engine", "onnx", "rknn", "tflite"]
+    assert formats == ["onnx", "rknn", "tflite"]
     ids = sorted(item["id"] for item in installed)
-    assert ids == ["a", "b", "c", "d"]
+    assert ids == ["a", "b", "c"]
 
 
 # ---------------------------------------------------------------------------

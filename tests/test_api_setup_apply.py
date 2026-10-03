@@ -311,56 +311,90 @@ def test_apply_ui_then_failing_advanced_rolls_back_theme(
 
 
 class _FailingSaveRuntime:
-    """Minimal runtime whose save_config reports the given persist outcome.
+    """Minimal runtime whose write_config reports the given persist outcome.
 
-    Lets the setter unit tests exercise the loud-fail path: a save that
-    returns False (or raises) must surface ok=False, never a phantom
-    success.
+    Lets the setter unit tests exercise the loud-fail path: a write that
+    fails (or raises) must surface ok=False, never a phantom success.
     """
 
     def __init__(self, config, *, save_result=True, raise_on_save=False) -> None:
         self.config = config
         self._save_result = save_result
         self._raise_on_save = raise_on_save
-        self.raw_runtime = self
 
-    def save_config(self):
+    def write_config(self, values):
+        from ados.core.config.writer import ConfigWriteResult
+
         if self._raise_on_save:
             raise OSError("disk full")
-        return self._save_result
+        if self._save_result:
+            return ConfigWriteResult(ok=True, changed=tuple(values))
+        return ConfigWriteResult(ok=False, error="config lock unavailable")
+
+
+def _facade(**kwargs):
+    from ados.api.runtime import ApiRuntimeFacade
+    from ados.core.config import ADOSConfig
+
+    return ApiRuntimeFacade(_FailingSaveRuntime(ADOSConfig(), **kwargs))
 
 
 def test_apply_network_surfaces_a_failed_persist() -> None:
-    from ados.core.config import ADOSConfig
     from ados.setup.models import NetworkApplyRequest
     from ados.setup.network import apply_network
 
     req = NetworkApplyRequest(hotspot_enabled=True)
 
-    # A save that returns falsy must surface ok=False, not a phantom success.
-    runtime = _FailingSaveRuntime(ADOSConfig(), save_result=False)
-    result = apply_network(runtime, req)
+    # A failed write must surface ok=False with its reason, not a phantom success.
+    result = apply_network(_facade(save_result=False), req)
     assert result.ok is False
     assert "not saved" in result.message.lower()
+    assert "lock" in result.message
 
-    # A save that raises must also surface ok=False.
-    runtime = _FailingSaveRuntime(ADOSConfig(), raise_on_save=True)
-    result = apply_network(runtime, NetworkApplyRequest(hotspot_enabled=True))
+    # A write that raises must also surface ok=False.
+    result = apply_network(_facade(raise_on_save=True), NetworkApplyRequest(hotspot_enabled=True))
     assert result.ok is False
 
-    # A successful save reports ok=True and the persisted change.
-    runtime = _FailingSaveRuntime(ADOSConfig(), save_result=True)
-    result = apply_network(runtime, NetworkApplyRequest(hotspot_enabled=True))
+    # A successful write reports ok=True and the persisted change.
+    result = apply_network(_facade(save_result=True), NetworkApplyRequest(hotspot_enabled=True))
     assert result.ok is True
     assert "hotspot_enabled" in result.data["fields"]
 
 
 def test_apply_advanced_surfaces_a_failed_log_level_persist() -> None:
-    from ados.core.config import ADOSConfig
     from ados.setup.advanced import apply_advanced
     from ados.setup.models import AdvancedApplyRequest
 
-    runtime = _FailingSaveRuntime(ADOSConfig(), save_result=False)
-    result = apply_advanced(runtime, AdvancedApplyRequest(log_level="debug"))
+    result = apply_advanced(_facade(save_result=False), AdvancedApplyRequest(log_level="debug"))
     assert result.ok is False
     assert "not saved" in result.message.lower()
+
+
+def test_setters_report_a_failed_write_instead_of_success() -> None:
+    from ados.setup.models import UiApplyRequest, WfbApplyRequest
+    from ados.setup.profile import apply_profile, apply_ui, apply_wfb
+    from ados.setup.service import apply_cloud_choice
+
+    failing = _facade(save_result=False)
+    for result in (
+        apply_profile(failing, profile="ground_station", ground_role="relay"),
+        apply_cloud_choice(failing, mode="local"),
+        apply_ui(failing, UiApplyRequest(theme="light")),
+        apply_wfb(failing, WfbApplyRequest(mcs_index=3)),
+    ):
+        assert result.ok is False
+        assert "not saved" in result.message
+
+
+def test_a_refused_cloud_choice_changes_nothing() -> None:
+    from ados.setup.service import apply_cloud_choice
+
+    runtime = _facade()
+    before = runtime.config.server.mode
+    result = apply_cloud_choice(
+        runtime,
+        mode="self_hosted",
+        self_hosted={"url": "https://example.com", "mqtt_port": 70000},
+    )
+    assert result.ok is False
+    assert runtime.config.server.mode == before

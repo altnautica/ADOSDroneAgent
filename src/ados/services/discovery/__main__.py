@@ -44,35 +44,25 @@ async def main() -> None:
         version=__version__,
     )
 
-    # Register mDNS service
-    profile, role = current_profile_and_role(config)
-    await discovery.register(
-        paired=pairing.is_paired,
-        code=pairing.get_info().get("pairing_code"),
-        owner=pairing.get_info().get("owner_id"),
-        profile=profile,
-        role=role,
-    )
-
-    log.info("discovery_service_ready", hostname=discovery.mdns_hostname)
-
-    # Keep running until shutdown, periodically updating TXT records.
-    # Role can transition at runtime on a ground-station node (direct ↔
-    # relay ↔ receiver), so re-read on each refresh.
+    # Register, then keep the record current. Role can transition at runtime
+    # on a ground-station node (direct ↔ relay ↔ receiver) and the pairing
+    # state and addresses change, so each tick re-reads them. Until the first
+    # registration lands (the network may not be up at boot) the tick is a
+    # short fixed retry; after that it is the 30 s refresh.
     while not shutdown.is_set():
+        info = pairing.get_info()
+        profile, role = current_profile_and_role(config)
+        registered = await discovery.refresh(
+            paired=pairing.is_paired,
+            code=info.get("pairing_code"),
+            owner=info.get("owner_id"),
+            profile=profile,
+            role=role,
+        )
         try:
-            await asyncio.wait_for(shutdown.wait(), timeout=30.0)
+            await asyncio.wait_for(shutdown.wait(), timeout=30.0 if registered else 5.0)
         except TimeoutError:
-            # Refresh TXT records (pairing state and role may have changed)
-            info = pairing.get_info()
-            profile, role = current_profile_and_role(config)
-            await discovery.update_txt(
-                paired=pairing.is_paired,
-                code=info.get("pairing_code"),
-                owner=info.get("owner_id"),
-                profile=profile,
-                role=role,
-            )
+            pass
 
     log.info("discovery_service_stopping")
     await discovery.unregister()

@@ -110,14 +110,8 @@ ADOS_RUN_DIR = _run_base()
 CONFIG_LOCK = ADOS_RUN_DIR / "config.yaml.lock"
 
 # IPC sockets
-MAVLINK_SOCK = ADOS_RUN_DIR / "mavlink.sock"
 STATE_SOCK = ADOS_RUN_DIR / "state.sock"
 PAIRING_SOCK = ADOS_RUN_DIR / "pairing.sock"
-# Operator radio-knob command socket served by the native transmit plane
-# (ados-radio). The REST layer forwards FEC/MCS/TX-power/link-tier changes
-# here when the native radio is the running implementation; the packaged
-# Python manager owns the same knobs in-process otherwise.
-WFB_CMD_SOCK = ADOS_RUN_DIR / "wfb-cmd.sock"
 
 
 # Ingest socket for the local logging and telemetry store. The store's
@@ -264,7 +258,6 @@ GS_UI_JSON = ADOS_ETC_DIR / "ground-station-ui.json"
 GS_WIFI_CLIENT_JSON = ADOS_ETC_DIR / "ground-station-wifi-client.json"
 
 # Peripherals
-PERIPHERALS_DIR = ADOS_ETC_DIR / "peripherals"
 PERIPHERALS_GLOB = "/etc/ados/peripherals/*.yaml"
 
 # Plugins

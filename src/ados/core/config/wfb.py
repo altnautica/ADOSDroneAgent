@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
+
+from ._bounds import I8_MAX, I8_MIN, U8_MAX, U16_MAX, U32_MAX
 
 
 class WfbConfig(BaseModel):
@@ -15,20 +17,20 @@ class WfbConfig(BaseModel):
     # wfb-ng 24-bit link_id space exactly (link_id = fleet_id << 8 |
     # fleet_slot), so two fleets can share one channel with no
     # channel_id collision.
-    fleet_id: int = 1
+    fleet_id: int = Field(default=1, ge=0, le=U16_MAX)
     # This node's slot within the fleet. 0 = ground station, 1..24 =
     # drones. Every drone's slot MUST be unique within a fleet: two
     # transmitters sharing a channel_id re-init each other's FEC decoder
     # about once a second, which presents as unexplained link loss.
     # Issued by the ground station's fleet registry at pair time and
     # written into this config; never negotiated at runtime.
-    fleet_slot: int = 0
+    fleet_slot: int = Field(default=0, ge=0, le=U8_MAX)
     # Home / rendezvous channel. Both drone and ground start here and
     # return here on link loss, so the two sides deterministically meet
     # before any hopping. 149 (U-NII-3) is non-DFS and enabled under
     # essentially every regulatory domain, unlike U-NII-1 (36-48) which
     # many domains disable for injection.
-    channel: int = 149
+    channel: int = Field(default=149, ge=0, le=U8_MAX)
     # Regulatory domain applied via ``iw reg set`` on both rigs BEFORE the
     # radio comes up in monitor mode, so the drone and ground enable the
     # same channel set at usable TX power. Defaults to a domain that
@@ -44,19 +46,19 @@ class WfbConfig(BaseModel):
     # the dongle above ~18 dBm sustained. Default is the floor for
     # bench bring-up; raise via PUT /api/wfb/tx-power once the link is
     # validated. Hard ceiling is enforced at validation time.
-    tx_power_dbm: int = 5
-    tx_power_max_dbm: int = 15
+    tx_power_dbm: int = Field(default=5, ge=I8_MIN, le=I8_MAX)
+    tx_power_max_dbm: int = Field(default=15, ge=I8_MIN, le=I8_MAX)
     # MCS index passed to wfb_tx -M. Default 1 (low-bitrate, robust).
     # Distinct from tx_power_dbm — earlier code conflated the two.
-    mcs_index: int = 1
+    mcs_index: int = Field(default=1, ge=0, le=U8_MAX)
     # Power-supply topology hint for the WFB radio. Drives the brownout
     # warning in GCS/LCD. host_vbus = USB-A VBUS straight to dongle
     # VDD5.0 (default; what most bench rigs do). powered_hub = external
     # 5 V hub between SBC and dongle. external_5v = dongle has its own
     # 5 V rail wired directly.
     topology: Literal["host_vbus", "powered_hub", "external_5v"] = "host_vbus"
-    fec_k: int = 8
-    fec_n: int = 12
+    fec_k: int = Field(default=8, ge=0, le=U8_MAX)
+    fec_n: int = Field(default=12, ge=0, le=U8_MAX)
     # Frequency-band whitelist used by ``select_quietest_channel`` when
     # ``auto_channel_enabled`` is true and for post-link hop candidates.
     # Default U-NII-3 (5745-5825, channels 149-165): non-DFS and enabled
@@ -157,7 +159,7 @@ class WfbConfig(BaseModel):
     # ships a profile table that tops out at MCS 2 in the field.
     # Anything above 3 is bench-only until an MCS characterisation sweep
     # measures which rungs this driver actually applies and holds.
-    adaptive_mcs_max: int = 3
+    adaptive_mcs_max: int = Field(default=3, ge=0, le=U8_MAX)
     # Periodic + reactive coordinated frequency hopping. Operator
     # picks a band (the existing `band` field above) and the agent
     # autonomously moves the WFB-ng link to the quietest channel
@@ -174,7 +176,7 @@ class WfbConfig(BaseModel):
     # channel?" rescans. Tuned for the bench: 60 s feels invisible
     # to the operator (one ~300 ms freeze per minute of flight)
     # without sitting on a degraded channel for too long.
-    hop_period_seconds: int = 60
+    hop_period_seconds: int = Field(default=60, ge=0, le=U32_MAX)
     # Reactive hop thresholds. The supervisor triggers an
     # off-schedule migration when the live link quality sample
     # crosses either threshold AND the link has been stable on

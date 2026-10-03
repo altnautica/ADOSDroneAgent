@@ -2,40 +2,80 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter
 
 from ados.api.deps import get_agent_app
 from ados.setup import display_install
-from ados.setup.advanced import apply_advanced
+from ados.setup.advanced import apply_advanced, read_board_override, write_board_override
 from ados.setup.models import SetupActionResult
 from ados.setup.network import apply_network
-from ados.setup.profile import apply_profile, apply_regulatory, apply_ui, apply_wfb
+from ados.setup.profile import (
+    apply_profile,
+    apply_regulatory,
+    apply_ui,
+    apply_wfb,
+    dispatch_profile_restart,
+)
 from ados.setup.service import apply_cloud_choice
 
 from ._common import log
 from ._models import ApplyRequest, ApplyResponse, ApplyResultSection
-from ._restorers import (
-    restore_advanced,
-    restore_cloud,
-    restore_network,
-    restore_profile,
-    restore_regulatory,
-    restore_ui,
-    restore_wfb,
-)
 
 router = APIRouter()
+
+# The config leaves each section writes. A rollback restores exactly these, as
+# they read before the section ran, in one write.
+_SECTION_LEAVES: dict[str, tuple[str, ...]] = {
+    "profile": ("agent.profile", "ground_station.role"),
+    "network": (
+        "network.wifi_client.ssid",
+        "network.wifi_client.password",
+        "network.hotspot.enabled",
+    ),
+    "cloud": (
+        "server.mode",
+        "server.mqtt_password",
+        "server.self_hosted.url",
+        "server.self_hosted.mqtt_broker",
+        "server.self_hosted.mqtt_port",
+        "server.self_hosted.api_key",
+        "pairing.convex_url",
+    ),
+    "ui": ("ui.theme",),
+    "wfb": (
+        "video.wfb.channel",
+        "video.wfb.tx_power_dbm",
+        "video.wfb.mcs_index",
+        "video.wfb.topology",
+    ),
+    "regulatory": (
+        "network.regulatory.mode",
+        "network.regulatory.region",
+        "network.regulatory.ack_operator",
+        "network.regulatory.ack_at",
+    ),
+    "advanced": ("logging.level",),
+}
 
 
 @router.post("/apply", response_model=ApplyResponse)
 async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
     """Apply a batch settings delta in one shot.
 
-    Iterates the present sections in a fixed dependency order
-    (profile, network, cloud, display, advanced), calls each per-
-    section setter, and rolls back completed sections in reverse
-    order if a later section fails. Returns a structured per-section
-    result so the UI can show partial-success cleanly.
+    Iterates the present sections in a fixed dependency order, calls each
+    per-section setter, and rolls back completed sections if a later section
+    fails. Returns a structured per-section result so the UI can show
+    partial-success cleanly.
+
+    Every config-writing section runs before anything a rollback could not
+    undo: the profile's supervisor restart is dispatched only after every
+    section succeeded, and the display install (a root job) runs last. A
+    rollback therefore restores the config and the board override and leaves
+    nothing running that the restored config does not describe. The one
+    exception is the self-hosted API key file, which is a secret the cloud
+    section writes and a rollback does not rewrite.
     """
     runtime = get_agent_app()
 
@@ -50,8 +90,8 @@ async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
         ("ui", request.ui),
         ("wfb", request.wfb),
         ("regulatory", request.regulatory),
-        ("display", request.display),
         ("advanced", request.advanced),
+        ("display", request.display),
     ]
 
     overall_ok = True
@@ -77,8 +117,20 @@ async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
             completed.append((name, snapshot))
         else:
             overall_ok = False
-            rolled_back = _rollback_completed(runtime, completed)
+            rolled_back = await asyncio.to_thread(_rollback_completed, runtime, completed)
             break
+
+    profile_section = sections.get("profile")
+    if (
+        overall_ok
+        and request.profile is not None
+        and request.profile.auto_restart
+        and profile_section is not None
+        and profile_section.data.get("restart_required")
+    ):
+        profile_section.message += await asyncio.to_thread(
+            dispatch_profile_restart, profile_section.data
+        )
 
     return ApplyResponse(
         overall=overall_ok,
@@ -90,29 +142,39 @@ async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
 async def _apply_single_section(
     runtime, name: str, payload
 ) -> SetupActionResult:
-    """Dispatch one section to its setter."""
+    """Dispatch one section to its setter.
+
+    The setters shell out and take the config lock, so they run on a worker
+    thread and the residual API keeps serving meanwhile.
+    """
     if name == "profile":
-        return apply_profile(
-            runtime,
-            profile=payload.profile,
-            ground_role=payload.ground_role,
-            auto_restart=payload.auto_restart,
+        # The restart is dispatched by the batch only once every section
+        # succeeded; a restart cannot be rolled back.
+        return await asyncio.to_thread(
+            lambda: apply_profile(
+                runtime,
+                profile=payload.profile,
+                ground_role=payload.ground_role,
+                auto_restart=False,
+            )
         )
     if name == "network":
-        return apply_network(runtime, payload)
+        return await asyncio.to_thread(apply_network, runtime, payload)
     if name == "cloud":
         self_hosted = payload.self_hosted.model_dump() if payload.self_hosted else None
-        return apply_cloud_choice(
-            runtime,
-            mode=payload.mode,
-            self_hosted=self_hosted,
+        return await asyncio.to_thread(
+            lambda: apply_cloud_choice(
+                runtime,
+                mode=payload.mode,
+                self_hosted=self_hosted,
+            )
         )
     if name == "ui":
-        return apply_ui(runtime, payload)
+        return await asyncio.to_thread(apply_ui, runtime, payload)
     if name == "wfb":
-        return apply_wfb(runtime, payload)
+        return await asyncio.to_thread(apply_wfb, runtime, payload)
     if name == "regulatory":
-        return apply_regulatory(runtime, payload)
+        return await asyncio.to_thread(apply_regulatory, runtime, payload)
     if name == "display":
         if not payload.display_id:
             return SetupActionResult(
@@ -147,113 +209,71 @@ async def _apply_single_section(
             data={"job_id": handle.job_id, "display_id": payload.display_id},
         )
     if name == "advanced":
-        return apply_advanced(runtime, payload)
+        return await asyncio.to_thread(apply_advanced, runtime, payload)
     return SetupActionResult(
         ok=False,
         message=f"Unknown section: {name}",
     )
 
 
-def _capture_section_snapshot(runtime, name: str) -> dict[str, object]:
-    """Best-effort snapshot of the live config slice a section touches.
+def _read_leaf(config: object, dotted: str) -> object:
+    value: object = config
+    for part in dotted.split("."):
+        value = getattr(value, part)
+    return value
 
-    Used to revert that slice when a later section fails. Sections
-    that have no clean undo (display install kicks off a subprocess)
-    record an empty snapshot and are skipped on rollback.
+
+def _capture_section_snapshot(runtime, name: str) -> dict[str, object]:
+    """The config leaves (and side files) a section writes, as they read now.
+
+    Used to revert that section when a later section fails. The display
+    section has no undo (it starts a root install job) and runs last, so it
+    is never rolled back and records an empty snapshot.
     """
-    config = getattr(runtime, "config", None)
     snap: dict[str, object] = {}
-    if config is None:
-        return snap
-    try:
-        if name == "profile":
-            agent = getattr(config, "agent", None)
-            ground = getattr(config, "ground_station", None)
-            snap["profile"] = str(getattr(agent, "profile", "") or "")
-            snap["ground_role"] = str(getattr(ground, "role", "") or "")
-        elif name == "cloud":
-            server = getattr(config, "server", None)
-            snap["mode"] = str(getattr(server, "mode", "") or "")
-            sh = getattr(server, "self_hosted", None)
-            snap["self_hosted_url"] = str(getattr(sh, "url", "") or "")
-            snap["self_hosted_mqtt_broker"] = str(
-                getattr(sh, "mqtt_broker", "") or ""
-            )
-            snap["self_hosted_mqtt_port"] = int(
-                getattr(sh, "mqtt_port", 0) or 0
-            )
-        elif name == "network":
-            net = getattr(config, "network", None)
-            wifi = getattr(net, "wifi_client", None)
-            hotspot = getattr(net, "hotspot", None)
-            snap["wifi_ssid"] = str(getattr(wifi, "ssid", "") or "")
-            snap["wifi_password"] = str(getattr(wifi, "password", "") or "")
-            snap["hotspot_enabled"] = bool(
-                getattr(hotspot, "enabled", False)
-            )
-        elif name == "ui":
-            ui = getattr(config, "ui", None)
-            snap["theme"] = str(getattr(ui, "theme", "") or "")
-        elif name == "wfb":
-            video = getattr(config, "video", None)
-            wfb = getattr(video, "wfb", None) if video is not None else None
-            if wfb is not None:
-                snap["channel"] = int(getattr(wfb, "channel", 0) or 0)
-                snap["tx_power_dbm"] = int(getattr(wfb, "tx_power_dbm", 0) or 0)
-                snap["mcs_index"] = int(getattr(wfb, "mcs_index", 0) or 0)
-                snap["topology"] = str(getattr(wfb, "topology", "") or "")
-        elif name == "regulatory":
-            net = getattr(config, "network", None)
-            reg = getattr(net, "regulatory", None) if net is not None else None
-            if reg is not None:
-                snap["mode"] = str(getattr(reg, "mode", "") or "")
-                snap["region"] = getattr(reg, "region", None)
-                snap["ack_operator"] = getattr(reg, "ack_operator", None)
-                snap["ack_at"] = getattr(reg, "ack_at", None)
-        elif name == "advanced":
-            logging_cfg = getattr(config, "logging", None)
-            snap["log_level"] = str(getattr(logging_cfg, "level", "") or "")
-    except Exception as exc:  # noqa: BLE001 (defensive)
-        log.warning("snapshot_failed", section=name, error=str(exc))
+    leaves = _SECTION_LEAVES.get(name, ())
+    if leaves:
+        config = runtime.config
+        for dotted in leaves:
+            try:
+                snap[dotted] = _read_leaf(config, dotted)
+            except AttributeError as exc:
+                log.warning("snapshot_failed", section=name, leaf=dotted, error=str(exc))
+    if name == "advanced":
+        snap["__board_override__"] = read_board_override()
     return snap
 
 
 def _rollback_completed(
     runtime, completed: list[tuple[str, dict[str, object]]]
 ) -> list[str]:
-    """Restore sections in reverse order. Returns the list of sections
-    that were successfully reverted.
+    """Restore the completed sections' config leaves in one write.
 
-    Display installs cannot be undone trivially; the snapshot for
-    display is empty and the section is skipped here. The returned
-    list mirrors that behaviour.
+    Returns the sections that were reverted: all of them when the write
+    landed, none when it failed (the failure is logged).
     """
-    reverted: list[str] = []
-    for name, snap in reversed(completed):
-        try:
-            if name == "profile":
-                restore_profile(runtime, snap)
-            elif name == "cloud":
-                restore_cloud(runtime, snap)
-            elif name == "network":
-                restore_network(runtime, snap)
-            elif name == "ui":
-                restore_ui(runtime, snap)
-            elif name == "wfb":
-                restore_wfb(runtime, snap)
-            elif name == "regulatory":
-                restore_regulatory(runtime, snap)
-            elif name == "advanced":
-                restore_advanced(runtime, snap)
+    values: dict[str, object] = {}
+    board_override: str | None = None
+    names: list[str] = []
+    for name, snap in completed:
+        if name not in _SECTION_LEAVES:
+            continue
+        names.append(name)
+        for dotted, value in snap.items():
+            if dotted == "__board_override__":
+                board_override = str(value)
             else:
-                continue
-            reverted.append(name)
-        except Exception as exc:  # noqa: BLE001 (best-effort rollback)
-            log.warning("rollback_failed", section=name, error=str(exc))
-    saver = getattr(getattr(runtime, "raw_runtime", None), "save_config", None)
-    if reverted and callable(saver):
+                values[dotted] = value
+    if not names:
+        return []
+    result = runtime.write_config(values)
+    if not result:
+        log.warning("rollback_failed", sections=names, error=result.error)
+        return []
+    if board_override is not None:
         try:
-            saver()
-        except Exception:
-            pass
-    return reverted
+            write_board_override(board_override)
+        except OSError as exc:
+            log.warning("rollback_board_override_failed", error=str(exc))
+            names.remove("advanced")
+    return list(reversed(names))

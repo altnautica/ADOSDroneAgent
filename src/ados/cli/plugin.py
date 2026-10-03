@@ -26,6 +26,8 @@ Exit code map:
 from __future__ import annotations
 
 import json
+import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -58,6 +60,10 @@ KIND_BY_CODE = {
     EXIT_RESOURCE_LIMIT: "resource_limit",
     EXIT_COMPATIBILITY: "compatibility_failed",
 }
+
+# A signer id names the agent's trusted key file `<signer-id>.pem`, so it is a
+# plain file stem: no path separators and no leading dot.
+_SIGNER_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 # The agent's lifecycle error envelope ``{ok: false, code, kind, detail}``
 # numbers its codes; this maps them onto the CLI exit codes above.
@@ -794,6 +800,10 @@ def sign_plugin(
     )
     from ados.plugins.manifest import PluginManifest
 
+    if not _SIGNER_ID_RE.fullmatch(signer_id):
+        _emit_err(as_json, EXIT_GENERIC, f"invalid signer id {signer_id!r}")
+        sys.exit(EXIT_GENERIC)
+
     plugin_root = Path(plugin_dir)
     manifest_path = plugin_root / "manifest.yaml"
     if not manifest_path.is_file():
@@ -820,8 +830,6 @@ def sign_plugin(
     tmp_handle, tmp_name = tempfile.mkstemp(
         suffix=".adosplug", dir=str(output.parent)
     )
-    import os
-
     os.close(tmp_handle)
     tmp_archive = Path(tmp_name)
     try:
@@ -852,9 +860,10 @@ def sign_plugin(
 
         payload_hash = _canonical_payload_hash(entries)
 
-        # Load the Ed25519 private key. PEM is the canonical format; we
-        # also accept the raw 32-byte form for parity with the legacy
-        # signing shell script so existing keys keep working.
+        # Load the Ed25519 private key: an unencrypted PKCS#8 PEM, which is
+        # what `ados plugin keygen` writes. Anything else is refused with the
+        # reason; a public key or an arbitrary file must never be read as a
+        # private seed and produce a signature under a key nobody enrolled.
         try:
             from cryptography.hazmat.primitives.asymmetric.ed25519 import (
                 Ed25519PrivateKey,
@@ -874,18 +883,22 @@ def sign_plugin(
         key_bytes = Path(key_path).read_bytes()
         try:
             private = load_pem_private_key(key_bytes, password=None)
-        except ValueError:
-            try:
-                private = Ed25519PrivateKey.from_private_bytes(
-                    key_bytes[:32]
-                )
-            except Exception as exc:  # noqa: BLE001
-                _emit_err(
-                    as_json,
-                    EXIT_GENERIC,
-                    f"could not load private key from {key_path}: {exc}",
-                )
-                sys.exit(EXIT_GENERIC)
+        except TypeError:
+            _emit_err(
+                as_json,
+                EXIT_GENERIC,
+                f"{key_path} is an encrypted private key; signing needs an "
+                "unencrypted PKCS#8 PEM",
+            )
+            sys.exit(EXIT_GENERIC)
+        except ValueError as exc:
+            _emit_err(
+                as_json,
+                EXIT_GENERIC,
+                f"{key_path} is not a PEM private key: {exc}",
+                hint="Pass the <signer-id>.priv.pem written by `ados plugin keygen`.",
+            )
+            sys.exit(EXIT_GENERIC)
 
         if not isinstance(private, Ed25519PrivateKey):
             _emit_err(
@@ -1003,6 +1016,16 @@ def keygen(
         )
         sys.exit(EXIT_GENERIC)
 
+    if not _SIGNER_ID_RE.fullmatch(signer_id):
+        _emit_err(
+            as_json,
+            EXIT_GENERIC,
+            f"invalid signer id {signer_id!r}",
+            hint="Use letters, digits, '.', '_' and '-' (up to 64), starting "
+            "with a letter or digit.",
+        )
+        sys.exit(EXIT_GENERIC)
+
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     pub_path = out_dir / f"{signer_id}.pem"
@@ -1033,8 +1056,14 @@ def keygen(
 
     pub_path.write_bytes(pub_pem)
     pub_path.chmod(0o644)
-    priv_path.write_bytes(priv_pem)
-    priv_path.chmod(0o600)
+    # Created 0600 from the first byte: writing first and chmod-ing after
+    # leaves the private key readable under the umask in between. An
+    # existing file (--force) is replaced, not rewritten in place, so its
+    # old mode never applies either.
+    priv_path.unlink(missing_ok=True)
+    fd = os.open(str(priv_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(priv_pem)
 
     # Fingerprint = SHA-256 of the raw public-key bytes, base64 encoded
     # short-form. Stable, copy-pasteable identifier for the operator to

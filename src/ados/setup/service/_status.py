@@ -11,7 +11,7 @@ import asyncio
 from typing import Any
 
 from ados import __version__
-from ados.setup.hardware_check import run_hardware_check
+from ados.setup.hardware_check import run_hardware_check_cached
 from ados.setup.models import (
     MavlinkAccess,
     NetworkStatus,
@@ -134,7 +134,7 @@ def _assemble_status(  # noqa: C901
     if profile_for_check == "auto":
         profile_for_check = profile_suggestion.detected
     ground_role = str(getattr(config.ground_station, "role", "direct") or "direct")
-    hardware_check = run_hardware_check(
+    hardware_check = run_hardware_check_cached(
         runtime,
         profile=profile_for_check,
         ground_role=ground_role,

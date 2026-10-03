@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ados.core.paths import RECORDINGS_DIR
 
+from ._bounds import U32_MAX
 from .wfb import WfbConfig
 
 
@@ -38,19 +39,19 @@ class CameraThumbnailProfile(BaseModel):
     Mirrors the Rust ``CameraProfile`` in ``ados-video/src/config.rs``.
     """
 
-    width: int = 320
-    height: int = 180
-    fps: int = 1
-    bitrate_kbps: int = 50
+    width: int = Field(default=320, ge=0, le=U32_MAX)
+    height: int = Field(default=180, ge=0, le=U32_MAX)
+    fps: int = Field(default=1, ge=0, le=U32_MAX)
+    bitrate_kbps: int = Field(default=50, ge=0, le=U32_MAX)
 
 
 class CameraConfig(BaseModel):
     source: str = "csi"
     codec: str = "h264"
-    width: int = 1280
-    height: int = 720
-    fps: int = 30
-    bitrate_kbps: int = 4000
+    width: int = Field(default=1280, ge=0, le=U32_MAX)
+    height: int = Field(default=720, ge=0, le=U32_MAX)
+    fps: int = Field(default=30, ge=0, le=U32_MAX)
+    bitrate_kbps: int = Field(default=4000, ge=0, le=U32_MAX)
     # Whether a primary camera is expected on this rig, for the supervisor's
     # camera USB-recovery reconciler. "auto" (default) treats a camera as
     # expected once one has enumerated successfully at least once (a persisted
@@ -66,7 +67,7 @@ class CameraConfig(BaseModel):
     # Clockwise image rotation in degrees — 0 | 90 | 180 | 270, default 0. This
     # is an IMAGE transform applied before encode, distinct from the coarse
     # physical-mount ``orientation`` metadata (which the pipeline ignores).
-    rotation: int = 0
+    rotation: int = Field(default=0, ge=0, le=U32_MAX)
     # Mirror the image horizontally before encode (default False).
     hflip: bool = False
     # Mirror the image vertically before encode (default False).
@@ -78,7 +79,7 @@ class CameraConfig(BaseModel):
     # Keyframe (GOP) interval in frames; 0 (default) lets the encoder pick a
     # short low-latency GOP (0.5 s at the configured fps) so radio FEC recovers
     # fast. An explicit value is honoured as ``-g`` / ``key-int-max``.
-    keyframe_interval: int = 0
+    keyframe_interval: int = Field(default=0, ge=0, le=30)
 
 
 class CameraMatch(BaseModel):
@@ -92,7 +93,7 @@ class CameraMatch(BaseModel):
 
     usb: str | None = None
     csi_sensor: str | None = None
-    csi_port: int | None = None
+    csi_port: int | None = Field(default=None, ge=0, le=U32_MAX)
 
 
 class CameraLeg(BaseModel):
@@ -119,10 +120,10 @@ class CameraLeg(BaseModel):
     # leg is the primary.
     role: str | None = None
     codec: str = "h264"
-    width: int = 1280
-    height: int = 720
-    fps: int = 30
-    bitrate_kbps: int = 4000
+    width: int = Field(default=1280, ge=0, le=U32_MAX)
+    height: int = Field(default=720, ge=0, le=U32_MAX)
+    fps: int = Field(default=30, ge=0, le=U32_MAX)
+    bitrate_kbps: int = Field(default=4000, ge=0, le=U32_MAX)
     # --- Camera-roster management metadata (consumed by the roster + plugins,
     # never by the encode/radio pipeline; additive and default-safe). ---
     # Operator-facing display name for the roster.
@@ -155,11 +156,11 @@ class CameraLeg(BaseModel):
     # + default-safe (mirror the Rust CameraLeg).
     # Clockwise image rotation in degrees — 0 | 90 | 180 | 270, default 0
     # (distinct from the coarse-mount ``orientation`` metadata above).
-    rotation: int = 0
+    rotation: int = Field(default=0, ge=0, le=U32_MAX)
     hflip: bool = False
     vflip: bool = False
     encoder: Literal["auto", "omx", "v4l2m2m", "software"] = "auto"
-    keyframe_interval: int = 0
+    keyframe_interval: int = Field(default=0, ge=0, le=30)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -167,7 +168,7 @@ class CameraLeg(BaseModel):
 class RecordingConfig(BaseModel):
     enabled: bool = False
     path: str = str(RECORDINGS_DIR)
-    max_duration_minutes: int = 30
+    max_duration_minutes: int = Field(default=30, ge=0, le=U32_MAX)
 
 
 class UsbRecoveryConfig(BaseModel):
@@ -177,7 +178,7 @@ class UsbRecoveryConfig(BaseModel):
     detect + alert; destructive actions stay gated."""
 
     enabled: bool = True
-    debounce_s: int = Field(default=20, ge=1)
+    debounce_s: int = Field(default=20, ge=1, le=U32_MAX)
     # Fixed wait between recovery attempts. There is deliberately no attempt
     # ceiling: `max_attempts` used to gate an `exhausted` latch in the Rust
     # reconciler that could not clear without the attempts it stopped, so a
@@ -185,20 +186,16 @@ class UsbRecoveryConfig(BaseModel):
     # rest of the boot. Both `max_attempts` and the escalating
     # `cooldown_schedule_s: [10, 30, 60]` are gone from the schema.
     #
-    # Absent from the model is the point, not an oversight: the save path
-    # re-serialises the whole merged model, so a key left declared here would
-    # be written back into every node's config file as an explicit value the
-    # reconciler no longer honours. A node whose file still carries either key
-    # loads fine (unknown keys are ignored) and the Rust parser reads a legacy
-    # `cooldown_schedule_s` for its largest value, so an operator who tuned
-    # that schedule keeps the pacing they asked for.
-    cooldown_s: int = Field(default=60, ge=1)
-    healthy_reset_s: int = Field(default=120, ge=1)
-    tick_interval_s: int = Field(default=5, ge=1)
+    # A node whose file still carries either key loads fine (unknown keys are
+    # ignored). Neither side reads them any more: the Rust reconciler reads
+    # only `cooldown_s`, so a leftover `cooldown_schedule_s` has no effect.
+    cooldown_s: int = Field(default=60, ge=1, le=U32_MAX)
+    healthy_reset_s: int = Field(default=120, ge=1, le=U32_MAX)
+    tick_interval_s: int = Field(default=5, ge=1, le=U32_MAX)
     # Opt-in: allow a shared-hub reset (boot-time-only, guard-gated) to recover a
     # camera that failed to enumerate on a hub it shares with the radio/FC.
     allow_hub_reset: bool = False
-    boot_reset_window_s: int = Field(default=180, ge=1)
+    boot_reset_window_s: int = Field(default=180, ge=1, le=U32_MAX)
     # Allow a clean per-port re-enable on an external hub that exposes per-port
     # power switching.
     allow_ppps: bool = True

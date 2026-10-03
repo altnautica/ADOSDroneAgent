@@ -221,7 +221,7 @@ class VisionModelRef(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
     id: str
-    runtime: str = "onnx"            # onnx | rknn | tensorrt | tflite | pytorch
+    runtime: str = "onnx"            # onnx | rknn | hailo | tflite | pytorch
     board_match: str = "generic"     # board family this variant targets (e.g. rk3588, orin, generic)
     sha256: str | None = None        # pinned hex digest the fetched model is verified against
     source: str | None = None        # where to fetch (registry ref / url); None ⇒ bundled or cache-only

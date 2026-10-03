@@ -145,11 +145,15 @@ def _installed_manifest_path(plugin_id: str) -> Path:
 
 
 def _board_hint(app: Any) -> str | None:
-    board = getattr(app, "board", None)
+    """Board name, SoC and model joined, so ``board_family`` can match any of them.
+
+    The SoC is the reliable token: display names ("Orange Pi 5", "Raspberry Pi
+    CM5") vary by vendor, while ``rk3588``/``bcm2712``/``a733`` do not.
+    """
     parts = (
         getattr(app, "board_name", None),
-        getattr(board, "soc", None),
-        getattr(board, "model", None),
+        getattr(app, "board_soc", None),
+        getattr(app, "board_model", None),
     )
     return " ".join(str(x) for x in parts if x) or None
 

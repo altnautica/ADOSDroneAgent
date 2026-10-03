@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from unittest.mock import MagicMock
 
 from ados.core.config import ADOSConfig
 from ados.core.config.writer import ConfigWriteResult
+
+
+def apply_dotted_values(config: ADOSConfig, values: Mapping[str, Any]) -> ADOSConfig:
+    """``config`` with each dotted-path leaf in ``values`` set, re-validated."""
+    document = config.model_dump()
+    for dotted, value in values.items():
+        cursor = document
+        *parents, leaf = dotted.split(".")
+        for part in parents:
+            cursor = cursor.setdefault(part, {})
+        cursor[leaf] = value
+    return ADOSConfig(**document)
 
 
 class _StateClientStub:
@@ -36,9 +49,10 @@ class ApiRuntimeTestDouble:
         # string here, so the double must too or model validation fails.
         self.pairing_manager.get_or_create_code.return_value = "ABC234"
 
-    def save_config(self) -> ConfigWriteResult:
-        """Successful no-op persist so route tests drive the full flow off disk."""
-        return ConfigWriteResult(ok=True)
+    def write_config(self, values: Mapping[str, Any]) -> ConfigWriteResult:
+        """Apply the write to the in-memory config, as a re-read of disk would."""
+        self.config = apply_dotted_values(self.config, values)
+        return ConfigWriteResult(ok=True, changed=tuple(values))
 
 
 def build_api_runtime(**kwargs: Any) -> ApiRuntimeTestDouble:

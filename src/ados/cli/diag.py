@@ -147,28 +147,26 @@ _WRITE_SOURCE = {
 def link_loss(data: dict[str, Any]) -> tuple[float | None, str]:
     """Resolve the link's packet loss and which side measured it.
 
-    A transmit-only drone has no local loss figure and never will: it injects
-    its own downlink and a single radio in monitor mode cannot capture its own
-    frames, so ``packets_received`` is a permanent zero and ``loss_percent`` is
-    the matching sentinel. Gating the loss verdict on that counter made it dead
-    code on the node type that most needs it.
-
-    The measurement does exist — the receiving ground station counts exactly
-    what arrived and sends it back up the link — so prefer whatever the radio
-    resolved as its live sample (``measured_loss_percent`` alongside the
-    ``sample_source`` naming who took it). Fall back to the local counters only
-    when this node really did decode something itself.
+    A drone's own receive counters measure the uplink, the other direction:
+    it injects its own downlink and a single radio in monitor mode cannot
+    capture its own frames. The downlink measurement comes from the receiving
+    ground station, which counts exactly what arrived and sends it back up the
+    link; the drone's radio publishes it as ``measured_loss_percent`` with
+    ``sample_source`` naming who took it, and ``none`` when there is no usable
+    report. A ground station's view carries no ``sample_source``: its own
+    counters are the downlink it receives, so they are used once it has decoded
+    something.
 
     Returns ``(None, "none")`` when nobody measured, which is deliberately
     distinct from a measured zero.
     """
-    source = data.get("sample_source")
-    resolved = data.get("measured_loss_percent")
-    if source in _MEASURED_BY and isinstance(resolved, (int, float)):
-        return float(resolved), source
+    if "sample_source" in data:
+        source = data.get("sample_source")
+        resolved = data.get("measured_loss_percent")
+        if source in _MEASURED_BY and isinstance(resolved, (int, float)):
+            return float(resolved), str(source)
+        return None, "none"
 
-    # Older radio build with no resolved-sample fields: fall back to the local
-    # counters, which are only meaningful once this node has decoded something.
     local = data.get("loss_percent")
     decoded = isinstance(data.get("packets_received"), (int, float)) and (
         data.get("packets_received") or 0
@@ -308,7 +306,7 @@ def diag_link(as_json: bool) -> None:
     rssi_str = f"{rssi:.0f} dBm" if isinstance(rssi, (int, float)) else "— (no decode)"
     rows = [
         ("RSSI", rssi_str),
-        ("Channel", _num("channel")),
+        ("Channel", _num("actual_channel")),
         ("Decoded pkt/s", _num("packets_received")),
         ("RF frames (all)", _num("packets_all")),
         ("Decrypt errors", _num("decrypt_errors")),

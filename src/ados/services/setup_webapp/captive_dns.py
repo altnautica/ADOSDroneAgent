@@ -6,14 +6,19 @@ vendors detect captivity by probing specific URLs. This service:
 
 1. Answers DNS A queries for those probe hostnames with the AP
    gateway address 192.168.4.1.
-2. Answers HTTP GET for the probe paths with the exact status code
-   the OS expects.
+2. Answers every HTTP request on port 80 with a redirect to the setup
+   webapp on the agent's API port.
 
-Probe strategy. OS-specific probe URLs are all served with a 204
-No Content to signal 'no real internet' and trigger the captive
-portal UI. Android/Chrome `/generate_204`,
-Apple `/hotspot-detect.html`, Windows `/connecttest.txt` all receive
-204. No redirects, no HTML body.
+Probe strategy. Each OS decides "captive" when its probe does NOT get
+the answer the open internet gives: Android/ChromeOS expect 204 from
+`/generate_204`, Apple expects a `Success` page from
+`/hotspot-detect.html`, Windows expects fixed text from
+`/connecttest.txt`. Answering 204 would tell Android the network is
+validated and suppress the sign-in sheet, so every probe gets a 302 to
+the setup webapp instead, which is what each OS opens in its sign-in
+view. The redirect target is on the API port, never this port 80
+server, so a browser that follows it lands on the wizard rather than
+redirecting to itself.
 
 Lifecycle:
 - If `/var/lib/ados/setup-complete` exists at start, the service
@@ -30,7 +35,7 @@ Dependency choice:
 - HTTP: stdlib `http.server.BaseHTTPRequestHandler` in a background
   thread pool. `aiohttp` is not an agent dep (pyproject uses
   fastapi + uvicorn). Avoids pulling in extra transitive deps for
-  a handful of 204 responses.
+  a handful of redirects.
 """
 
 from __future__ import annotations
@@ -77,7 +82,9 @@ CAPTURED_HOSTS: set[str] = {
     "ados.local",
 }
 
-# HTTP probe paths. All receive 204 per spec.
+# The OS connectivity probe paths. Listed for the log: every path on this
+# server gets the same redirect, but a probe hit is what proves the OS saw
+# the portal.
 PROBE_PATHS: set[str] = {
     "/generate_204",
     "/gen_204",
@@ -187,41 +194,49 @@ class _DnsProtocol(asyncio.DatagramProtocol):
             log.debug("dns_send_failed", error=str(exc))
 
 
+def setup_url(api_port: int) -> str:
+    """The setup webapp the portal sends every client to."""
+    return f"http://{AP_GATEWAY_IP}:{api_port}/"
+
+
 class _ProbeHandler(BaseHTTPRequestHandler):
-    """HTTP 1.1 handler that returns 204 to every probe path."""
+    """Redirects every request to the setup webapp."""
+
+    # Set by `_run_http_server` from the configured API port.
+    target_url: str = setup_url(8080)
 
     # Silence BaseHTTPRequestHandler's default stderr logging.
     def log_message(self, format: str, *args: Any) -> None:
         return
 
-    def _respond_204(self) -> None:
-        self.send_response(204)
-        self.send_header("Content-Length", "0")
+    def _redirect(self, with_body: bool) -> None:
+        body = (
+            f'<!doctype html><title>ADOS setup</title>'
+            f'<a href="{self.target_url}">Open ADOS setup</a>\n'
+        ).encode()
+        self.send_response(302)
+        self.send_header("Location", self.target_url)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-
-    def _respond_root_redirect(self) -> None:
-        # Unknown path. Redirect to the setup landing so phones that
-        # open the probe URL in a browser still land somewhere sensible.
-        self.send_response(302)
-        self.send_header("Location", f"http://{AP_GATEWAY_IP}/")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
+        if with_body:
+            self.wfile.write(body)
 
     def do_GET(self) -> None:  # noqa: N802 (stdlib contract)
-        path = self.path.split("?", 1)[0]
-        if path in PROBE_PATHS:
-            self._respond_204()
-            return
-        self._respond_root_redirect()
+        if self.path.split("?", 1)[0] in PROBE_PATHS:
+            log.debug("captive_probe_redirected", path=self.path)
+        self._redirect(with_body=True)
 
     def do_HEAD(self) -> None:  # noqa: N802
-        self.do_GET()
+        self._redirect(with_body=False)
 
 
-def _run_http_server(stop_evt: threading.Event) -> None:
+def _run_http_server(stop_evt: threading.Event, api_port: int) -> None:
+    target_url = setup_url(api_port)
+    handler = type("_ConfiguredProbeHandler", (_ProbeHandler,), {"target_url": target_url})
     try:
-        httpd = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), _ProbeHandler)
+        httpd = ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), handler)
     except OSError as exc:
         # Another HTTP listener already owns port 80 (e.g. the agent's
         # setup REST itself, an operator nginx, or a stale process).
@@ -234,7 +249,7 @@ def _run_http_server(stop_evt: threading.Event) -> None:
             error=str(exc),
         )
         return
-    log.info("captive_http_bound", port=HTTP_PORT)
+    log.info("captive_http_bound", port=HTTP_PORT, redirect=target_url)
     httpd.timeout = 0.5
     while not stop_evt.is_set():
         httpd.handle_request()
@@ -330,9 +345,20 @@ async def _amain() -> int:
         )
         return 0
 
+    try:
+        from ados.core.config import load_config
+
+        api_port = int(load_config().api.rest.port)
+    except Exception as exc:  # noqa: BLE001 — first-boot aid; fall back to the shipped port
+        log.warning("captive_api_port_unreadable", error=str(exc))
+        api_port = 8080
+
     http_stop = threading.Event()
     http_thread = threading.Thread(
-        target=_run_http_server, args=(http_stop,), name="captive-http", daemon=True
+        target=_run_http_server,
+        args=(http_stop, api_port),
+        name="captive-http",
+        daemon=True,
     )
     http_thread.start()
 

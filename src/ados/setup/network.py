@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ados.setup._persist import persist_config
 from ados.setup.models import NetworkApplyRequest, SetupActionResult
 
 
@@ -48,31 +49,26 @@ def apply_network(
             message="Network configuration is not available on this agent.",
         )
 
+    values: dict[str, object] = {}
     changed_fields: list[str] = []
 
-    if request.wifi_ssid is not None:
+    if request.wifi_ssid is not None or request.wifi_password is not None:
         wifi = getattr(network, "wifi_client", None)
         if wifi is None:
             return SetupActionResult(
                 ok=False,
                 message="WiFi client configuration is not available.",
             )
-        ssid = str(request.wifi_ssid).strip()
-        if wifi.ssid != ssid:
-            wifi.ssid = ssid
-            changed_fields.append("wifi_ssid")
-
-    if request.wifi_password is not None:
-        wifi = getattr(network, "wifi_client", None)
-        if wifi is None:
-            return SetupActionResult(
-                ok=False,
-                message="WiFi client configuration is not available.",
-            )
-        password = str(request.wifi_password)
-        if wifi.password != password:
-            wifi.password = password
-            changed_fields.append("wifi_password")
+        if request.wifi_ssid is not None:
+            ssid = str(request.wifi_ssid).strip()
+            if wifi.ssid != ssid:
+                values["network.wifi_client.ssid"] = ssid
+                changed_fields.append("wifi_ssid")
+        if request.wifi_password is not None:
+            password = str(request.wifi_password)
+            if wifi.password != password:
+                values["network.wifi_client.password"] = password
+                changed_fields.append("wifi_password")
 
     if request.hotspot_enabled is not None:
         hotspot = getattr(network, "hotspot", None)
@@ -83,26 +79,14 @@ def apply_network(
             )
         flag = bool(request.hotspot_enabled)
         if hotspot.enabled != flag:
-            hotspot.enabled = flag
+            values["network.hotspot.enabled"] = flag
             changed_fields.append("hotspot_enabled")
 
     # Surface a failed persist rather than swallowing it: a change that did
     # not reach /etc/ados/config.yaml must not be reported as success.
-    if changed_fields:
-        saver = getattr(getattr(runtime, "raw_runtime", None), "save_config", None)
-        if callable(saver):
-            try:
-                persisted = bool(saver())
-            except Exception as exc:  # noqa: BLE001 (surface, don't swallow)
-                return SetupActionResult(
-                    ok=False,
-                    message=f"Network settings not saved: config write failed: {exc}",
-                )
-            if not persisted:
-                return SetupActionResult(
-                    ok=False,
-                    message="Network settings not saved: config could not be written to disk.",
-                )
+    failed = persist_config(runtime, values, what="Network settings")
+    if failed is not None:
+        return failed
 
     data: dict[str, object] = {
         "changed": bool(changed_fields),

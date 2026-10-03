@@ -8,7 +8,9 @@ facade advertises to operators.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ._bounds import U16_MAX
 
 
 class RestApiConfig(BaseModel):
@@ -17,7 +19,7 @@ class RestApiConfig(BaseModel):
     # listener binds dual-stack via a separate helper that creates
     # both AF_INET and AF_INET6 sockets at startup.
     host: str = "0.0.0.0"
-    port: int = 8080
+    port: int = Field(default=8080, ge=0, le=U16_MAX)
 
 
 class ApiConfig(BaseModel):

@@ -20,6 +20,43 @@ from ados.setup.models import (
 
 from ._constants import _HOTSPOT_IP, _HOTSPOT_URL, _USB_GADGET_IP
 
+# The local mediamtx management API. Loopback only; the ground-station
+# mediamtx puts credentials on it, so there it answers non-200 and the verdict
+# is not-ready.
+_MEDIAMTX_PATHS_LIST = "http://127.0.0.1:9997/v3/paths/list"
+
+
+async def _main_stream_ready() -> bool:
+    """True when mediamtx's ``main`` path has a live publisher.
+
+    ``main`` is the path the advertised ``/whep`` and HLS URLs address, so it is
+    looked up by name and nothing else stands in for it: a ready secondary leg
+    says nothing about whether the primary URL plays. Ready means ``ready`` AND a
+    non-null ``source``. Unreachable, non-200, malformed, or no ``main`` listed
+    all read as not ready.
+    """
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.get(_MEDIAMTX_PATHS_LIST)
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+    except Exception:  # noqa: BLE001 — any transport or parse failure is not ready
+        return False
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return False
+    main = next(
+        (p for p in items if isinstance(p, dict) and p.get("name") == "main"),
+        None,
+    )
+    if main is None:
+        return False
+    return main.get("ready") is True and main.get("source") is not None
+
+
 
 def _stream_legs(config: Any) -> list[VideoStreamAccess]:
     """The per-leg video streams a node exposes, from the declared
@@ -130,23 +167,7 @@ async def _video_access(
             encoder_hw=encoder_hw,
         )
 
-    ready = False
-    try:
-        from ados.api.routes.video import (
-            _probe_mediamtx,
-            _probe_mediamtx_via_whep,
-        )
-
-        mtx = await _probe_mediamtx()
-        if mtx is None or not mtx.get("ready"):
-            # Ground-station-profile MediaMTX gates its management API
-            # behind auth, so the JSON probe fails. The WHEP probe is
-            # auth-blind and confirms the surface is serving frames.
-            mtx = await _probe_mediamtx_via_whep() or mtx
-        if mtx and mtx.get("ready"):
-            ready = True
-    except Exception:
-        pass
+    ready = await _main_stream_ready()
 
     def running() -> VideoAccess:
         return VideoAccess(

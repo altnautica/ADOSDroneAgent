@@ -141,6 +141,8 @@
       "properties": {
         "bitrate_kbps": {
           "default": 4000,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Bitrate Kbps",
           "type": "integer"
         },
@@ -172,11 +174,15 @@
         },
         "fps": {
           "default": 30,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Fps",
           "type": "integer"
         },
         "height": {
           "default": 720,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Height",
           "type": "integer"
         },
@@ -187,11 +193,15 @@
         },
         "keyframe_interval": {
           "default": 0,
+          "maximum": 30,
+          "minimum": 0,
           "title": "Keyframe Interval",
           "type": "integer"
         },
         "rotation": {
           "default": 0,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Rotation",
           "type": "integer"
         },
@@ -216,6 +226,8 @@
         },
         "width": {
           "default": 1280,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Width",
           "type": "integer"
         }
@@ -228,6 +240,8 @@
       "properties": {
         "bitrate_kbps": {
           "default": 4000,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Bitrate Kbps",
           "type": "integer"
         },
@@ -278,11 +292,15 @@
         },
         "fps": {
           "default": 30,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Fps",
           "type": "integer"
         },
         "height": {
           "default": 720,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Height",
           "type": "integer"
         },
@@ -298,6 +316,8 @@
         },
         "keyframe_interval": {
           "default": 0,
+          "maximum": 30,
+          "minimum": 0,
           "title": "Keyframe Interval",
           "type": "integer"
         },
@@ -381,6 +401,8 @@
         },
         "rotation": {
           "default": 0,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Rotation",
           "type": "integer"
         },
@@ -396,6 +418,8 @@
         },
         "width": {
           "default": 1280,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Width",
           "type": "integer"
         }
@@ -409,6 +433,8 @@
         "csi_port": {
           "anyOf": [
             {
+              "maximum": 4294967295,
+              "minimum": 0,
               "type": "integer"
             },
             {
@@ -451,21 +477,29 @@
       "properties": {
         "bitrate_kbps": {
           "default": 50,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Bitrate Kbps",
           "type": "integer"
         },
         "fps": {
           "default": 1,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Fps",
           "type": "integer"
         },
         "height": {
           "default": 180,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Height",
           "type": "integer"
         },
         "width": {
           "default": 320,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Width",
           "type": "integer"
         }
@@ -498,6 +532,8 @@
         },
         "mqtt_port": {
           "default": 443,
+          "maximum": 65535,
+          "minimum": 0,
           "title": "Mqtt Port",
           "type": "integer"
         },
@@ -617,6 +653,8 @@
         },
         "packet_rate_hz": {
           "default": 150,
+          "maximum": 65535,
+          "minimum": 0,
           "title": "Packet Rate Hz",
           "type": "integer"
         },
@@ -633,6 +671,8 @@
         "tx_power_dbm": {
           "anyOf": [
             {
+              "maximum": 127,
+              "minimum": -128,
               "type": "integer"
             },
             {
@@ -694,6 +734,8 @@
         },
         "port": {
           "default": 8765,
+          "maximum": 65535,
+          "minimum": 0,
           "title": "Port",
           "type": "integer"
         },
@@ -821,6 +863,8 @@
       "properties": {
         "channel": {
           "default": 6,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Channel",
           "type": "integer"
         },
@@ -850,10 +894,10 @@
       "type": "object"
     },
     "KioskConfig": {
-      "description": "HDMI kiosk (Chromium-under-cage) configuration.\n\nThe single source of truth for the kiosk. The kiosk service reads\n``target_url`` (the page it points the browser at) and ``minimal_layer``\n(append ``?layer=minimal`` on low-RAM boards); the ``PUT\n/api/v1/ground-station/display`` write route and ``PUT /api/config``\npersist ``enabled`` / ``resolution`` / ``target_url`` here. Living in the\nPydantic model means it validates, round-trips through save cycles, shows\nup in config dumps, and is read from exactly one place instead of the old\n``ground-station-ui.json`` side-file the kiosk service never read.",
+      "description": "HDMI kiosk (Chromium-under-cage) configuration.\n\nThe single source of truth for the kiosk. The kiosk service reads\n``enabled`` (stands down when false), ``resolution`` (``auto`` |\n``720p`` | ``1080p``), ``target_url`` (the page it points the browser at)\nand ``minimal_layer`` (append ``?layer=minimal`` on low-RAM boards); the\n``PUT /api/v1/ground-station/display`` write route and ``PUT /api/config``\npersist ``enabled`` / ``resolution`` / ``target_url`` here.\n\n``enabled`` defaults on: an HDMI ground station shows the kiosk unless the\noperator turns it off.",
       "properties": {
         "enabled": {
-          "default": false,
+          "default": true,
           "title": "Enabled",
           "type": "boolean"
         },
@@ -904,6 +948,8 @@
         },
         "keep_count": {
           "default": 5,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Keep Count",
           "type": "integer"
         },
@@ -914,6 +960,8 @@
         },
         "max_size_mb": {
           "default": 50,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Max Size Mb",
           "type": "integer"
         },
@@ -960,11 +1008,15 @@
         },
         "baud_rate": {
           "default": 57600,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Baud Rate",
           "type": "integer"
         },
         "component_id": {
           "default": 191,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Component Id",
           "type": "integer"
         },
@@ -1008,6 +1060,8 @@
         },
         "system_id": {
           "default": 1,
+          "maximum": 255,
+          "minimum": 0,
           "title": "System Id",
           "type": "integer"
         },
@@ -1039,6 +1093,8 @@
         },
         "channel": {
           "default": 1,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Channel",
           "type": "integer"
         },
@@ -1140,6 +1196,8 @@
         },
         "beacon_interval": {
           "default": 30,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Beacon Interval",
           "type": "integer"
         },
@@ -1150,6 +1208,8 @@
         },
         "heartbeat_interval": {
           "default": 60,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Heartbeat Interval",
           "type": "integer"
         },
@@ -1200,6 +1260,8 @@
         },
         "max_duration_minutes": {
           "default": 30,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Max Duration Minutes",
           "type": "integer"
         },
@@ -1311,6 +1373,8 @@
         },
         "port": {
           "default": 8080,
+          "maximum": 65535,
+          "minimum": 0,
           "title": "Port",
           "type": "integer"
         }
@@ -1369,6 +1433,8 @@
         },
         "mqtt_port": {
           "default": 8883,
+          "maximum": 65535,
+          "minimum": 0,
           "title": "Mqtt Port",
           "type": "integer"
         },
@@ -1451,6 +1517,8 @@
         },
         "default_spacing": {
           "default": 10,
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775808,
           "title": "Default Spacing",
           "type": "integer"
         },
@@ -1515,26 +1583,36 @@
       "properties": {
         "alignment": {
           "default": 60,
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775808,
           "title": "Alignment",
           "type": "integer"
         },
         "cohesion": {
           "default": 40,
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775808,
           "title": "Cohesion",
           "type": "integer"
         },
         "neighbors": {
           "default": 7,
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775808,
           "title": "Neighbors",
           "type": "integer"
         },
         "radius_m": {
           "default": 30,
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775808,
           "title": "Radius M",
           "type": "integer"
         },
         "separation_gain": {
           "default": 150,
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775808,
           "title": "Separation Gain",
           "type": "integer"
         }
@@ -1547,11 +1625,15 @@
       "properties": {
         "hard_m": {
           "default": 4,
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775808,
           "title": "Hard M",
           "type": "integer"
         },
         "radius_m": {
           "default": 8,
+          "maximum": 9223372036854775807,
+          "minimum": -9223372036854775808,
           "title": "Radius M",
           "type": "integer"
         }
@@ -1577,6 +1659,8 @@
         "bundle_position": {
           "anyOf": [
             {
+              "maximum": 9223372036854775807,
+              "minimum": -9223372036854775808,
               "type": "integer"
             },
             {
@@ -1610,6 +1694,8 @@
         },
         "rx_port": {
           "default": 5820,
+          "maximum": 65535,
+          "minimum": 0,
           "title": "Rx Port",
           "type": "integer"
         }
@@ -1648,6 +1734,7 @@
         },
         "boot_reset_window_s": {
           "default": 180,
+          "maximum": 4294967295,
           "minimum": 1,
           "title": "Boot Reset Window S",
           "type": "integer"
@@ -1659,12 +1746,14 @@
         },
         "cooldown_s": {
           "default": 60,
+          "maximum": 4294967295,
           "minimum": 1,
           "title": "Cooldown S",
           "type": "integer"
         },
         "debounce_s": {
           "default": 20,
+          "maximum": 4294967295,
           "minimum": 1,
           "title": "Debounce S",
           "type": "integer"
@@ -1676,12 +1765,14 @@
         },
         "healthy_reset_s": {
           "default": 120,
+          "maximum": 4294967295,
           "minimum": 1,
           "title": "Healthy Reset S",
           "type": "integer"
         },
         "tick_interval_s": {
           "default": 5,
+          "maximum": 4294967295,
           "minimum": 1,
           "title": "Tick Interval S",
           "type": "integer"
@@ -1818,6 +1909,8 @@
         },
         "models_cache_max_mb": {
           "default": 500,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Models Cache Max Mb",
           "type": "integer"
         },
@@ -1844,6 +1937,8 @@
         },
         "adaptive_mcs_max": {
           "default": 3,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Adaptive Mcs Max",
           "type": "integer"
         },
@@ -1874,26 +1969,36 @@
         },
         "channel": {
           "default": 149,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Channel",
           "type": "integer"
         },
         "fec_k": {
           "default": 8,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Fec K",
           "type": "integer"
         },
         "fec_n": {
           "default": 12,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Fec N",
           "type": "integer"
         },
         "fleet_id": {
           "default": 1,
+          "maximum": 65535,
+          "minimum": 0,
           "title": "Fleet Id",
           "type": "integer"
         },
         "fleet_slot": {
           "default": 0,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Fleet Slot",
           "type": "integer"
         },
@@ -1904,6 +2009,8 @@
         },
         "hop_period_seconds": {
           "default": 60,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Hop Period Seconds",
           "type": "integer"
         },
@@ -1919,6 +2026,8 @@
         },
         "mcs_index": {
           "default": 1,
+          "maximum": 255,
+          "minimum": 0,
           "title": "Mcs Index",
           "type": "integer"
         },
@@ -1975,11 +2084,15 @@
         },
         "tx_power_dbm": {
           "default": 5,
+          "maximum": 127,
+          "minimum": -128,
           "title": "Tx Power Dbm",
           "type": "integer"
         },
         "tx_power_max_dbm": {
           "default": 15,
+          "maximum": 127,
+          "minimum": -128,
           "title": "Tx Power Max Dbm",
           "type": "integer"
         },
@@ -2007,6 +2120,8 @@
         },
         "listen_port": {
           "default": 5800,
+          "maximum": 65535,
+          "minimum": 0,
           "title": "Listen Port",
           "type": "integer"
         }
@@ -2024,6 +2139,8 @@
         },
         "receiver_port": {
           "default": 5800,
+          "maximum": 65535,
+          "minimum": 0,
           "title": "Receiver Port",
           "type": "integer"
         }
@@ -2073,6 +2190,8 @@
       "properties": {
         "cooldown_s": {
           "default": 60,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Cooldown S",
           "type": "integer"
         },
@@ -2083,6 +2202,8 @@
         },
         "fail_threshold": {
           "default": 2,
+          "maximum": 4294967295,
+          "minimum": 0,
           "title": "Fail Threshold",
           "type": "integer"
         }
@@ -2140,7 +2261,7 @@
           "type": "auto"
         },
         "kiosk": {
-          "enabled": false,
+          "enabled": true,
           "minimal_layer": false,
           "resolution": "auto",
           "target_url": null

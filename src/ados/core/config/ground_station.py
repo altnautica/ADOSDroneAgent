@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 from ados.core.paths import MESH_PSK_PATH
 
+from ._bounds import U8_MAX, U16_MAX
+
 # ground_station fields live in the Pydantic model so they validate,
 # round-trip through save cycles, and show up in config dumps. An earlier
 # layout wrote `paired_drone_id` and `paired_at` to `/etc/ados/config.yaml`
@@ -39,16 +41,17 @@ class KioskConfig(BaseModel):
     """HDMI kiosk (Chromium-under-cage) configuration.
 
     The single source of truth for the kiosk. The kiosk service reads
-    ``target_url`` (the page it points the browser at) and ``minimal_layer``
-    (append ``?layer=minimal`` on low-RAM boards); the ``PUT
-    /api/v1/ground-station/display`` write route and ``PUT /api/config``
-    persist ``enabled`` / ``resolution`` / ``target_url`` here. Living in the
-    Pydantic model means it validates, round-trips through save cycles, shows
-    up in config dumps, and is read from exactly one place instead of the old
-    ``ground-station-ui.json`` side-file the kiosk service never read.
+    ``enabled`` (stands down when false), ``resolution`` (``auto`` |
+    ``720p`` | ``1080p``), ``target_url`` (the page it points the browser at)
+    and ``minimal_layer`` (append ``?layer=minimal`` on low-RAM boards); the
+    ``PUT /api/v1/ground-station/display`` write route and ``PUT /api/config``
+    persist ``enabled`` / ``resolution`` / ``target_url`` here.
+
+    ``enabled`` defaults on: an HDMI ground station shows the kiosk unless the
+    operator turns it off.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     resolution: str = "auto"
     target_url: str | None = None
     minimal_layer: bool = False
@@ -62,7 +65,7 @@ class WfbRelayConfig(BaseModel):
     """
 
     receiver_mdns_service: str = "_ados-receiver._tcp"
-    receiver_port: int = 5800
+    receiver_port: int = Field(default=5800, ge=0, le=U16_MAX)
 
 
 class WfbReceiverConfig(BaseModel):
@@ -73,7 +76,7 @@ class WfbReceiverConfig(BaseModel):
     `accept_local_nic` is true.
     """
 
-    listen_port: int = 5800
+    listen_port: int = Field(default=5800, ge=0, le=U16_MAX)
     accept_local_nic: bool = True
 
 
@@ -118,7 +121,7 @@ class MeshConfig(BaseModel):
     carrier: Literal["802.11s", "ibss"] = "802.11s"
     mesh_id: str | None = None
     shared_key_path: str = str(MESH_PSK_PATH)
-    channel: int = 1  # 2.4 GHz ch 1 default for mesh dongle
+    channel: int = Field(default=1, ge=0, le=U8_MAX)  # 2.4 GHz ch 1 default for mesh dongle
     bat_iface: str = "bat0"
 
 

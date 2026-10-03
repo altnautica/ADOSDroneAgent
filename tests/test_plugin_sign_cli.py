@@ -286,3 +286,44 @@ def test_sign_rejects_missing_manifest(tmp_path: Path) -> None:
     assert result.exit_code == 2  # EXIT_MANIFEST_INVALID
     payload = json.loads(result.output.strip().splitlines()[-1])
     assert payload["kind"] == "manifest_invalid"
+
+
+def test_sign_refuses_a_public_key_instead_of_signing_with_it(tmp_path: Path) -> None:
+    runner = CliRunner()
+    keys_dir = tmp_path / "keys"
+    keys_dir.mkdir()
+    runner.invoke(plugin_group, ["keygen", "pub-only", "--output-dir", str(keys_dir), "--json"])
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    _write_plugin(plugin_dir)
+    out = tmp_path / "out.adosplug"
+
+    result = runner.invoke(
+        plugin_group,
+        [
+            "sign",
+            str(plugin_dir),
+            "--key",
+            str(keys_dir / "pub-only.pem"),
+            "--signer-id",
+            "pub-only",
+            "--output",
+            str(out),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "not a PEM private key" in result.output
+    assert not out.exists()
+
+
+def test_keygen_refuses_a_signer_id_that_escapes_the_output_dir(tmp_path: Path) -> None:
+    out_dir = tmp_path / "keys"
+    result = CliRunner().invoke(
+        plugin_group, ["keygen", "../escape", "--output-dir", str(out_dir), "--json"]
+    )
+
+    assert result.exit_code == 1
+    assert not (tmp_path / "escape.priv.pem").exists()
+    assert not (tmp_path / "escape.pem").exists()

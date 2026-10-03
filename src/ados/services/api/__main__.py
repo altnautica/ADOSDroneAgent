@@ -1,7 +1,7 @@
 """Standalone REST API service.
 
-Runs the FastAPI server with uvicorn, connecting to state IPC for live
-telemetry data on status endpoints.
+Runs the residual FastAPI app with uvicorn on the internal Unix socket the
+native control front proxies to, connecting to state IPC for live telemetry.
 
 Run: python -m ados.services.api
 """
@@ -77,11 +77,14 @@ async def _state_ipc_reader(
 
 
 async def _seed_profile_conf_if_unset(config, log) -> None:
-    """Auto-detect the agent profile and persist to profile.conf at boot.
+    """Auto-detect the agent profile and record it in profile.conf at boot.
 
-    No-op when ``agent.profile`` is already an explicit value or when
-    profile.conf is already populated. Runs the detection in a worker
-    thread so probes never stall the event loop.
+    Runs only for ``agent.profile: auto`` (or unset) on a node whose
+    profile.conf names no profile yet; an explicit profile, including
+    ``workstation`` and ``compute``, is never overridden by a probe guess.
+    Only the ``profile`` key is written; the installer's ``channel`` and
+    ``version`` keys are kept. Runs the detection in a worker thread so
+    probes never stall the event loop.
 
     Some probes (i2c, gpio) flake at the moment systemd brings the API
     service up — a transient i2c byte-read on an empty bus can land at
@@ -95,7 +98,7 @@ async def _seed_profile_conf_if_unset(config, log) -> None:
     """
     try:
         explicit = str(getattr(getattr(config, "agent", None), "profile", "") or "")
-        if explicit in ("drone", "ground_station"):
+        if explicit not in ("", "auto"):
             return
 
         from ados.core.paths import PROFILE_CONF
@@ -118,7 +121,9 @@ async def _seed_profile_conf_if_unset(config, log) -> None:
             result = await asyncio.to_thread(detect_profile, None)
             source = str(result.get("source") or "")
             if source != "default":
-                ok = await asyncio.to_thread(write_profile_conf, result)
+                ok = await asyncio.to_thread(
+                    write_profile_conf, str(result.get("profile") or "")
+                )
                 if ok:
                     log.info(
                         "profile_conf_seeded",
@@ -219,15 +224,12 @@ async def main() -> int:
         name="profile-seed",
     )
 
-    api_config = config.api.rest
-    # Bind explicit AF_INET + AF_INET6 sockets so both IPv4 and IPv6
-    # clients reach the agent regardless of which family the browser's
-    # mDNS resolver returns first. uvicorn alone with `host="::"` did
-    # not produce a working IPv4 listener on some Pi kernels. When the
-    # native front owns the LAN port, ADOS_API_INTERNAL_SOCKET redirects
-    # this to a single Unix socket the front proxies to instead.
-    from ados.api.dual_bind import make_listen_sockets
-    sockets = make_listen_sockets(api_config.host, api_config.port)
+    # The only listener is the internal Unix socket the native front proxies
+    # to. This app has no auth layer of its own, so it never binds TCP.
+    from ados.api.internal_socket import bind_internal_socket, internal_socket_path
+
+    socket_path = internal_socket_path()
+    sockets = [bind_internal_socket(socket_path)]
     uvi_config = uvicorn.Config(
         app,
         log_level="warning",
@@ -245,7 +247,7 @@ async def main() -> int:
         profile_seed,
     ]
 
-    log.info("api_service_ready", host=api_config.host, port=api_config.port)
+    log.info("api_service_ready", socket=str(socket_path))
 
     # Wait for a shutdown signal, or for the HTTP server to die on its own (a
     # bind failure, an unhandled startup error). A process left running with

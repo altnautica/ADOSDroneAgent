@@ -6,9 +6,9 @@ probes, with a stable tiebreaker on the last persisted profile and a
 final `drone` default so a fresh-flashed board with no signals still
 boots into a known state.
 
-This module has no hard runtime dependencies beyond the stdlib. `smbus2`,
-`gpiozero`, and `pyserial` are used when available; otherwise the
-matching probes silently contribute zero points.
+This module has no hard runtime dependencies beyond the stdlib. `smbus2`
+and `pyserial` are used when available; otherwise the matching probes
+silently contribute zero points.
 
 Run a dry-run from a shell:
 
@@ -57,10 +57,8 @@ _RTL8812_IDS: set[tuple[int, int]] = {
     (0x0BDA, 0xB812),
 }
 
-# Default I2C bus for OLED and default BCM GPIO pin set for the four buttons.
-# HAL board profile (when available) can override both.
+# Default I2C bus for the OLED.
 _DEFAULT_I2C_BUS = 1
-_DEFAULT_BUTTON_GPIOS = [5, 6, 13, 19]
 
 # Paths we probe for an FC serial link.
 _MAVLINK_SERIAL_PATHS = [
@@ -179,43 +177,31 @@ def probe_i2c_oled(bus: int = _DEFAULT_I2C_BUS) -> tuple[int, int, bool]:
     return (3, 0, detected) if detected else (0, 0, False)
 
 
-def probe_gpio_buttons(
-    pins: list[int] | None = None,
-) -> tuple[int, int, bool]:
-    """Confirm four GPIOs are idle-high with internal pull-up (buttons wired).
+def board_button_pins() -> list[int]:
+    """BCM pins the matched HAL board profile declares as front-panel buttons.
 
-    Returns (ground_points, air_points, detected). If gpiozero is not
-    available the probe is skipped and contributes zero points.
+    Empty when the board declares none or the HAL is unavailable.
     """
-    pins = pins or _DEFAULT_BUTTON_GPIOS
-
     try:
-        from gpiozero import Button  # type: ignore
-        from gpiozero.exc import BadPinFactory, GPIOZeroError  # type: ignore
-    except ImportError:
-        return 0, 0, False
+        from ados.hal.detect import detect_board_profile
 
-    buttons: list[Any] = []
-    all_idle_high = True
-    try:
-        for pin in pins:
-            try:
-                btn = Button(pin, pull_up=True)
-                buttons.append(btn)
-                # is_pressed is True when the pin reads LOW (pull-up idle is HIGH).
-                if btn.is_pressed:
-                    all_idle_high = False
-            except (GPIOZeroError, BadPinFactory, OSError, ValueError):
-                all_idle_high = False
-                break
-    finally:
-        for btn in buttons:
-            try:
-                btn.close()
-            except Exception:
-                pass
+        profile = detect_board_profile()
+    except Exception:
+        return []
+    if profile is None:
+        return []
+    return [button.pin for button in profile.gpio_buttons]
 
-    return (2, 0, True) if all_idle_high and len(buttons) == len(pins) else (0, 0, False)
+
+def probe_gpio_buttons() -> tuple[int, int, bool]:
+    """Report whether the board declares front-panel buttons.
+
+    Returns (ground_points, air_points, detected). Wiring cannot be read
+    back: an unconnected GPIO with a pull-up reads the same as an idle
+    button, and the native input service holds the lines once it runs. A
+    declaration is therefore reported but earns no profile points.
+    """
+    return 0, 0, bool(board_button_pins())
 
 
 def probe_rtl8812() -> tuple[int, int, bool]:
@@ -257,7 +243,12 @@ def probe_mavlink_serial() -> tuple[int, int, bool]:
         if not Path(path).exists():
             continue
         vid = _read_usb_vendor_for_tty(path)
-        if vid is not None and vid in _FC_USB_VENDOR_IDS:
+        if vid is None:
+            # An onboard SoC UART (serial0/ttyAMA0) exists on every Pi
+            # whether or not an FC is wired to it; without a heartbeat it is
+            # no evidence of a drone.
+            continue
+        if vid in _FC_USB_VENDOR_IDS:
             return 0, 6, True
         return 0, 3, True
     return 0, 0, False
@@ -278,31 +269,93 @@ _NMEA_PREFIXES = (b"$GP", b"$GN", b"$GL", b"$GA", b"$GB")
 _UBX_SYNC = b"\xb5\x62"
 
 
-def probe_gps_serial(timeout: float = 2.0) -> tuple[int, int, bool]:
-    """Sample candidate UARTs for an NMEA or UBX frame.
+def _config_claimed_serial_paths() -> set[str]:
+    """Resolved device paths the node config assigns to a service.
 
-    Walks plausible serial devices that are not already in use as the
-    primary FC link, opens each at 9600 baud, samples for up to a few
-    hundred milliseconds, and returns on the first match. A receiver
-    that is talking at a non-default baud will not match here, which
-    is acceptable: the probe is one signal in a seven-signal vote, not
-    a full GPS configurator.
+    Raises when the config cannot be read, so the caller can refuse to probe
+    rather than guess which ports are free.
+    """
+    from ados.core.config import load_config
+
+    config = load_config()
+    claimed: set[str] = set()
+    mavlink_port = str(config.mavlink.serial_port or "")
+    if mavlink_port.startswith("/"):
+        claimed.add(os.path.realpath(mavlink_port))
+    crsf_device = config.radio.crsf.device
+    if crsf_device:
+        claimed.add(os.path.realpath(crsf_device))
+    return claimed
+
+
+def _serial_paths_held_open(paths: set[str], proc_root: str = "/proc") -> set[str] | None:
+    """Subset of resolved ``paths`` some other process has open.
+
+    Returns None when the holders cannot be established (no procfs, or a
+    process whose descriptors this caller may not read).
+    """
+    proc = Path(proc_root)
+    if not proc.is_dir():
+        return None
+    own_pid = str(os.getpid())
+    held: set[str] = set()
+    for entry in proc.iterdir():
+        if not entry.name.isdigit() or entry.name == own_pid:
+            continue
+        try:
+            fds = list((entry / "fd").iterdir())
+        except PermissionError:
+            return None
+        except OSError:
+            # The process exited between listing and reading.
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target in paths:
+                held.add(target)
+    return held
+
+
+def probe_gps_serial(timeout: float = 2.0) -> tuple[int, int, bool]:
+    """Sample free candidate UARTs for an NMEA or UBX frame.
+
+    Opening a port reprograms its line speed, so a port is sampled only
+    when nothing can be using it: it is not a flight-controller path, the
+    config does not assign it to a service, and no other process has it
+    open. When that cannot be established the probe samples nothing. A free
+    port is opened at 9600 baud; a receiver talking at another baud will not
+    match, which is acceptable for one signal in the profile vote.
     """
     try:
         import serial  # type: ignore
     except ImportError:
         return 0, 0, False
 
-    fc_paths = {p for p in _MAVLINK_SERIAL_PATHS if Path(p).exists()}
-    candidates = [
-        p for p in _GPS_CANDIDATE_PATHS if Path(p).exists() and p not in fc_paths
-    ]
+    candidates = {
+        os.path.realpath(p) for p in _GPS_CANDIDATE_PATHS if Path(p).exists()
+    }
+    candidates -= {
+        os.path.realpath(p) for p in _MAVLINK_SERIAL_PATHS if Path(p).exists()
+    }
     if not candidates:
         return 0, 0, False
+    try:
+        candidates -= _config_claimed_serial_paths()
+    except Exception:
+        return 0, 0, False
+    held = _serial_paths_held_open(candidates)
+    if held is None:
+        return 0, 0, False
+    free = sorted(candidates - held)
+    if not free:
+        return 0, 0, False
 
-    per_port_timeout = max(timeout / len(candidates), 0.15)
+    per_port_timeout = max(timeout / len(free), 0.15)
 
-    for path in candidates:
+    for path in free:
         try:
             with serial.Serial(
                 path,
@@ -744,14 +797,23 @@ def _read_last_known_profile(path: str = str(PROFILE_CONF)) -> str | None:
 
 
 def write_profile_conf(
-    result: dict[str, Any],
+    profile: str,
     path: str = str(PROFILE_CONF),
 ) -> bool:
-    """Write the fingerprint snapshot to /etc/ados/profile.conf (YAML).
+    """Record a detected ``profile`` in /etc/ados/profile.conf.
 
-    Returns True on success. Failures are logged and swallowed because
-    this runs early in boot when logging may not be wired yet.
+    The file is co-owned: the installer writes ``profile``, ``channel`` and
+    ``version`` there, and the upgrade path resolves the release channel
+    from it. Only the ``profile`` key is set; every other key the file
+    holds is kept. A file that already names a recognised profile is left
+    untouched — detection only fills a gap, it never overrides a choice.
+
+    Returns True when the file says ``profile`` afterwards. Failures are
+    logged and swallowed because this runs early in boot when logging may
+    not be wired yet.
     """
+    if profile not in ("drone", "ground_station"):
+        return False
     try:
         import yaml  # local import so dry-run without pyyaml fails loudly
     except ImportError:
@@ -763,10 +825,27 @@ def write_profile_conf(
 
     target = Path(path)
     try:
+        existing: dict[str, Any] = {}
+        if target.is_file():
+            try:
+                loaded = yaml.safe_load(target.read_text(encoding="utf-8"))
+            except yaml.YAMLError:
+                # Never replace a file this reader cannot parse: it may hold
+                # the release channel in a shape only the installer knows.
+                return False
+            if isinstance(loaded, dict):
+                existing = loaded
+        current = existing.get("profile")
+        if isinstance(current, str) and current.replace("-", "_") in (
+            "drone",
+            "ground_station",
+        ):
+            return current.replace("-", "_") == profile
+        existing["profile"] = profile
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
         with open(tmp, "w") as f:
-            yaml.safe_dump(result, f, sort_keys=True)
+            yaml.safe_dump(existing, f, sort_keys=True)
         os.replace(tmp, target)
         try:
             log.info("profile_conf_written", path=str(target))
