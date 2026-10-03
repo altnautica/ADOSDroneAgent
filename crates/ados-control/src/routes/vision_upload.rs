@@ -439,7 +439,7 @@ fn random_token() -> String {
     let mut buf = [0u8; 8];
     // getrandom is already a crate dep (the pairing-key source); a failure here is
     // implausible, but fall back to a time-derived token rather than panicking.
-    if getrandom::getrandom(&mut buf).is_err() {
+    if getrandom::fill(&mut buf).is_err() {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

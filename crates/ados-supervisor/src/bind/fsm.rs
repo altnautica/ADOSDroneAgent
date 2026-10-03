@@ -225,7 +225,7 @@ fn new_session_id() -> String {
     let mut bytes = [0u8; 16];
     // Best-effort: a fallback to a monotonic-derived seed keeps the id unique
     // even if the OS RNG is briefly unavailable (it never is on the target).
-    if getrandom::getrandom(&mut bytes).is_err() {
+    if getrandom::fill(&mut bytes).is_err() {
         let seed = now_monotonic().to_bits().to_le_bytes();
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = seed[i % seed.len()] ^ (i as u8);

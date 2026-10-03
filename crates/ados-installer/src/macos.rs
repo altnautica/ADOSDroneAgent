@@ -1324,7 +1324,7 @@ fn print_summary(paths: &Paths, device_id: &str, uid: u32, report: &HealthReport
 /// Generate a fresh 12-hex device id from `getrandom` (no `/proc` on macOS).
 fn mint_device_id() -> String {
     let mut bytes = [0u8; 6];
-    if getrandom::getrandom(&mut bytes).is_ok() {
+    if getrandom::fill(&mut bytes).is_ok() {
         return hex::encode(bytes);
     }
     let pid = std::process::id();

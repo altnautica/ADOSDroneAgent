@@ -249,7 +249,7 @@ impl DashboardPin {
             return Err(PinError::InvalidPin);
         }
         let mut salt = [0u8; SALT_LEN];
-        getrandom::getrandom(&mut salt).map_err(PinError::SaltGen)?;
+        getrandom::fill(&mut salt).map_err(PinError::SaltGen)?;
         let doc = DashboardPinDoc {
             pin_hash: hash_pin(&salt, pin),
             salt: hex::encode(salt),

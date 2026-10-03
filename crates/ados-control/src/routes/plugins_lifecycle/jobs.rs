@@ -220,7 +220,7 @@ pub(crate) async fn run_job_stream(
                     .and_then(Value::as_str)
                     .is_some_and(|s| TERMINAL_STAGES.contains(&s));
                 if socket
-                    .send(Message::Text(payload.to_string()))
+                    .send(Message::Text(payload.to_string().into()))
                     .await
                     .is_err()
                 {
@@ -239,7 +239,7 @@ pub(crate) async fn run_job_stream(
             let cancelled =
                 json!({"stage": "cancelled", "jobId": job_id, "reason": "idle_timeout"});
             if socket
-                .send(Message::Text(cancelled.to_string()))
+                .send(Message::Text(cancelled.to_string().into()))
                 .await
                 .is_ok()
             {

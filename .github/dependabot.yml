@@ -26,6 +26,11 @@ updates:
     groups:
       dashboard-minor:
         update-types: [minor, patch]
+    ignore:
+      # typescript-eslint supports typescript <6.1 and TypeScript 7 ships no
+      # JS compiler API, so the lint gate cannot load its parser on 7.x.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /cockpit

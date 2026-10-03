@@ -102,8 +102,8 @@ pub fn atomic_write(path: &Path, data: &[u8], mode: u32) -> std::io::Result<()> 
 /// Both rigs of a pair compute the same value, so a heartbeat cross-check is a
 /// string compare. Mirrors `read_public_fingerprint`.
 pub fn read_public_fingerprint(path: &Path) -> Result<String, String> {
-    use blake2::digest::{Update, VariableOutput};
-    use blake2::Blake2bVar;
+    use blake2::digest::{consts::U8, Digest};
+    use blake2::Blake2b;
 
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
     if data.len() != WFB_KEY_FILE_BYTES {
@@ -113,14 +113,9 @@ pub fn read_public_fingerprint(path: &Path) -> Result<String, String> {
             data.len()
         ));
     }
-    let pub_half = &data[WFB_PUBLIC_HALF_OFFSET..];
-    let mut hasher = Blake2bVar::new(8).map_err(|e| e.to_string())?;
-    hasher.update(pub_half);
-    let mut out = [0u8; 8];
-    hasher
-        .finalize_variable(&mut out)
-        .map_err(|e| e.to_string())?;
-    Ok(hex::encode(out))
+    Ok(hex::encode(Blake2b::<U8>::digest(
+        &data[WFB_PUBLIC_HALF_OFFSET..],
+    )))
 }
 
 /// Load the config mapping for a WRITE, distinguishing an absent file (a fresh

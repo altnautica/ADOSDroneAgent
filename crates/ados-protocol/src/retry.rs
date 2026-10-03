@@ -103,7 +103,7 @@ impl RetryPace {
         }
         let span = self.jitter.as_millis().saturating_add(1);
         let mut byte = [0u8; 8];
-        let offset_ms = match getrandom::getrandom(&mut byte) {
+        let offset_ms = match getrandom::fill(&mut byte) {
             Ok(()) => (u64::from_le_bytes(byte) as u128 % span) as u64,
             Err(_) => 0,
         };

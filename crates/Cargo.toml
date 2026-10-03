@@ -30,11 +30,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rmp-serde = "1.3"
 rmpv = { version = "1.3", features = ["with-serde"] }
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 # base64 sig decode: the plugin SIGNATURE blob carries a base64-encoded raw
 # 64-byte Ed25519 signature over the canonical payload hash.
-base64 = "0.22"
+base64 = "0.23"
 # Ed25519 verify over the canonical payload hash. The `pem` feature reads the
 # same PEM/SPKI public-key files the agent ships under /etc/ados/plugin-keys.
 ed25519-dalek = { version = "2", features = ["pem"] }
@@ -50,11 +50,11 @@ ed25519-dalek = { version = "2", features = ["pem"] }
 # vulnerable resolve on any host with a cold or pinned registry cache.
 zip = { version = "2.3", default-features = false, features = ["deflate"] }
 # blake2b-8 → the 16-hex WFB key fingerprint (peer-public-half digest).
-blake2 = "0.10"
+blake2 = "0.11"
 hex = "0.4"
 thiserror = "2"
-getrandom = "0.2"
-toml = "0.8"
+getrandom = "0.4"
+toml = "1.1"
 # Non-poisoning sync primitives. `lock()` yields the guard directly, so a call
 # site reads as locking rather than as error handling; already in the tree
 # transitively. Async coordination stays on `tokio::sync`.
@@ -81,7 +81,7 @@ futures-core = "0.3"
 # Linux-only deps (systemd notify + journald). Declared here; the consuming
 # crate pulls them in only under `[target.'cfg(target_os = "linux")'.dependencies]`
 # so the pure-logic core still builds and tests on a non-Linux host.
-sd-notify = "0.4"
+sd-notify = "0.5"
 tracing-journald = "0.3"
 # Unix process-group management (setsid + killpg) — the structural fix for
 # the orphaned-wfb_tx bug class. Linux-only; consuming crates target-gate it.
@@ -114,9 +114,9 @@ png = "0.17"
 rusqlite = { version = "0.31", features = ["bundled"] }
 # Native HTTP framework for the local query API. Pure Rust over tokio/hyper;
 # the same listener Router is served on a unix socket and a TCP port.
-axum = "0.7"
+axum = "0.8"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 # hyper 1 + the tokio glue serve the same axum Router on the trusted unix
 # socket (a per-connection accept loop) and the LAN TCP port. The http /
 # http-body-util / bytes crates carry the request/response and streaming-body

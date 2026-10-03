@@ -215,7 +215,7 @@ impl McpTokenStore {
         // is preserved (a salt rotation is an explicit `revoke_all`, not a re-mint).
         if doc.salt.is_empty() {
             let mut salt = [0u8; SALT_LEN];
-            getrandom::getrandom(&mut salt).map_err(MintError::RandGen)?;
+            getrandom::fill(&mut salt).map_err(MintError::RandGen)?;
             doc.salt = hex::encode(salt);
         }
         let salt = hex::decode(&doc.salt).unwrap_or_default();
@@ -309,7 +309,7 @@ impl Default for McpTokenStore {
 /// the revocation-denylist key.
 fn new_token_id() -> Result<String, getrandom::Error> {
     let mut raw = [0u8; 12];
-    getrandom::getrandom(&mut raw)?;
+    getrandom::fill(&mut raw)?;
     Ok(format!("mct_{}", hex::encode(raw)))
 }
 

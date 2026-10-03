@@ -1730,7 +1730,7 @@ mod tests {
         let app = axum::Router::new()
             .route("/api/pairing/claim", axum::routing::post(ok))
             .route("/api/v1/setup/apply", axum::routing::post(ok))
-            .route("/api/plugins/:id/enable", axum::routing::post(ok))
+            .route("/api/plugins/{id}/enable", axum::routing::post(ok))
             .layer(axum::middleware::from_fn_with_state(edge.clone(), tcp_edge))
             .with_state(edge);
         let relayed = |uri: &str| {

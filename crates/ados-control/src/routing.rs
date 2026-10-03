@@ -581,11 +581,10 @@ mod tests {
         }
     }
 
-    /// No table entry may use axum's `:param` form. `segments_match` treats only
-    /// `{name}` as a wildcard, so a colon segment is compared literally: the route
-    /// is still served by axum (0.7 is where `:param` is correct) but classified
-    /// non-native, which silently drops it off the native auth lane — rate
-    /// limiter, pairing gate, MCP-scope admission.
+    /// No table entry may use axum 0.7's `:param` form. `segments_match` treats
+    /// only `{name}` as a wildcard, so a colon segment is compared literally: the
+    /// route would be classified non-native, which silently drops it off the
+    /// native auth lane — rate limiter, pairing gate, MCP-scope admission.
     ///
     /// `every_native_route_is_native` above cannot catch this: a literal template
     /// matches itself, so the malformed entry passes there. That is why the

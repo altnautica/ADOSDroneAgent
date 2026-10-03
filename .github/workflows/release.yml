@@ -88,7 +88,7 @@ jobs:
           mkdir -p installer
           cp crates/target/aarch64-unknown-linux-musl/release/ados-installer installer/ados-installer-aarch64
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installer
           path: installer/ados-installer-aarch64
@@ -121,7 +121,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -305,7 +305,7 @@ jobs:
           ( cd "${OUT}" && sha256sum -c SHA256SUMS )
           ls -l "${OUT}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-assets
           path: release-assets/**
@@ -333,7 +333,7 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ADOS Drone Agent ${{ steps.meta.outputs.tag }}

@@ -1515,7 +1515,7 @@ mod tests {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(bytes);
-        format!("{:x}  {name}\n", h.finalize())
+        format!("{}  {name}\n", hex::encode(h.finalize()))
     }
 
     /// Drop `bytes` into `dir` as `name`, with the `sha256sum`-format sidecar a

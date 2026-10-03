@@ -250,7 +250,7 @@ impl SwarmCipher {
     /// randomness must still be able to tell its neighbours where it is.
     pub fn new(key: &[u8; 32]) -> Self {
         let mut prefix = [0u8; 8];
-        if getrandom::getrandom(&mut prefix).is_err() {
+        if getrandom::fill(&mut prefix).is_err() {
             let mut h = Sha256::new();
             h.update(b"ados/swarm/v1/nonce-prefix\n");
             h.update(key);
@@ -265,7 +265,7 @@ impl SwarmCipher {
             tracing::warn!("swarm_nonce_prefix_fallback: OS randomness unavailable");
         }
         Self {
-            cipher: ChaCha20Poly1305::new(Key::from_slice(key)),
+            cipher: ChaCha20Poly1305::new(&Key::from(*key)),
             prefix,
             counter: AtomicU32::new(0),
         }
@@ -281,7 +281,7 @@ impl SwarmCipher {
     /// sealed twice under either key.
     pub fn rekeyed(&self, key: &[u8; 32]) -> Self {
         Self {
-            cipher: ChaCha20Poly1305::new(Key::from_slice(key)),
+            cipher: ChaCha20Poly1305::new(&Key::from(*key)),
             prefix: self.prefix,
             counter: AtomicU32::new(self.counter.load(Ordering::Relaxed)),
         }
@@ -319,7 +319,7 @@ impl SwarmCipher {
         let sealed = self
             .cipher
             .encrypt(
-                Nonce::from_slice(&nonce_bytes),
+                &Nonce::from(nonce_bytes),
                 Payload {
                     msg: &plaintext,
                     aad: &[],
@@ -338,11 +338,13 @@ impl SwarmCipher {
         if wire.len() < PAYLOAD_OVERHEAD {
             return Err(SealError::TooShort);
         }
-        let (nonce, sealed) = wire.split_at(NONCE_LEN);
+        let (nonce, sealed) = wire
+            .split_first_chunk::<NONCE_LEN>()
+            .ok_or(SealError::TooShort)?;
         let plaintext = self
             .cipher
             .decrypt(
-                Nonce::from_slice(nonce),
+                &Nonce::from(*nonce),
                 Payload {
                     msg: sealed,
                     aad: &[],
@@ -469,7 +471,7 @@ mod tests {
     fn an_authenticated_frame_with_an_unknown_version_or_kind_is_rejected() {
         let k = key();
         let c = SwarmCipher::new(&k);
-        let raw = ChaCha20Poly1305::new(Key::from_slice(&k));
+        let raw = ChaCha20Poly1305::new(&Key::from(k));
         let nonce = [0u8; NONCE_LEN];
 
         let forge = |header: [u8; 2]| {
@@ -477,7 +479,7 @@ mod tests {
             plaintext.extend_from_slice(&[0u8; BEACON_WIRE_LEN]);
             let sealed = raw
                 .encrypt(
-                    Nonce::from_slice(&nonce),
+                    &Nonce::from(nonce),
                     Payload {
                         msg: &plaintext,
                         aad: &[],

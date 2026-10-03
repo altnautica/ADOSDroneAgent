@@ -36,17 +36,15 @@ const WFB_PUBLIC_HALF_OFFSET: usize = 32;
 /// file is absent or not exactly 64 bytes. The fingerprint is
 /// `blake2b(public_half, digest_size=8)` rendered as lowercase hex.
 pub(crate) fn read_public_fingerprint(path: &Path) -> Option<String> {
-    use blake2::digest::{Update, VariableOutput};
-    use blake2::Blake2bVar;
+    use blake2::digest::{consts::U8, Digest};
+    use blake2::Blake2b;
     let data = std::fs::read(path).ok()?;
     if data.len() != WFB_KEY_FILE_BYTES {
         return None;
     }
-    let mut hasher = Blake2bVar::new(8).ok()?;
-    hasher.update(&data[WFB_PUBLIC_HALF_OFFSET..]);
-    let mut out = [0u8; 8];
-    hasher.finalize_variable(&mut out).ok()?;
-    Some(hex::encode(out))
+    Some(hex::encode(Blake2b::<U8>::digest(
+        &data[WFB_PUBLIC_HALF_OFFSET..],
+    )))
 }
 
 /// The one radio-pair predicate: the role's own key file — `tx.key` on a drone,
@@ -327,15 +325,8 @@ mod tests {
         }
         std::fs::write(&path, &bytes).unwrap();
 
-        let expected = {
-            use blake2::digest::{Update, VariableOutput};
-            use blake2::Blake2bVar;
-            let mut h = Blake2bVar::new(8).unwrap();
-            h.update(&bytes[32..]);
-            let mut out = [0u8; 8];
-            h.finalize_variable(&mut out).unwrap();
-            hex::encode(out)
-        };
+        // Python `hashlib.blake2b(bytes(range(32, 64)), digest_size=8)`.
+        let expected = "e054fa6440b441f9";
         let got = read_public_fingerprint(&path).unwrap();
         assert_eq!(got, expected);
         assert_eq!(got.len(), 16);

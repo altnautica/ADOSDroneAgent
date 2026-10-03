@@ -155,7 +155,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route("/api/config/schema", get(config_schema::get_config_schema))
         // The logging store query API forwarded over its local socket.
         .route(
-            "/api/v2/observability/*upstream_path",
+            "/api/v2/observability/{*upstream_path}",
             get(observability::observability_proxy),
         )
         // The agent config itself: the effective values (secrets redacted) and
@@ -223,7 +223,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // 503 when the plugin host is not up. The GET reads the live store back
         // so a reloaded GCS can hand the plugin's UI its current settings.
         .route(
-            "/api/plugins/:plugin_id/config",
+            "/api/plugins/{plugin_id}/config",
             get(plugins_config::get_plugin_config).put(plugins_config::put_plugin_config),
         )
         // Plugin MCP-tool invocation: an MCP client runs a plugin's declared tool
@@ -231,14 +231,14 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // write; 503 when the plugin host is not up. The connector gates the
         // tool's safety class; the plugin host gates on the plugin's mcp.expose.
         .route(
-            "/api/plugins/:plugin_id/tools/:tool/invoke",
+            "/api/plugins/{plugin_id}/tools/{tool}/invoke",
             post(plugins_tools::invoke_plugin_tool),
         )
         // Plugin published-state read: a plugin's latest state per topic, read
         // from the plugin host's per-plugin state sidecar so a LAN-paired GCS can
         // poll the plugin's own published state (a follow read-back, etc.).
         .route(
-            "/api/plugins/:plugin_id/state",
+            "/api/plugins/{plugin_id}/state",
             get(plugins_state::get_plugin_state),
         )
         // The plugin lifecycle (see routes/plugins_lifecycle): the bundled
@@ -279,61 +279,61 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
             post(plugins_lifecycle::mint_capability_token),
         )
         .route(
-            "/api/plugins/jobs/:job_id",
+            "/api/plugins/jobs/{job_id}",
             get(plugins_lifecycle::stream_install_job),
         )
         .route(
-            "/api/plugins/:plugin_id",
+            "/api/plugins/{plugin_id}",
             get(plugins_lifecycle::get_plugin).delete(plugins_lifecycle::remove_plugin),
         )
         .route(
-            "/api/plugins/:plugin_id/gcs/*asset_path",
+            "/api/plugins/{plugin_id}/gcs/{*asset_path}",
             get(plugins_lifecycle::get_gcs_asset),
         )
         .route(
-            "/api/plugins/:plugin_id/manifest",
+            "/api/plugins/{plugin_id}/manifest",
             get(plugins_lifecycle::get_manifest),
         )
         .route(
-            "/api/plugins/:plugin_id/attestation",
+            "/api/plugins/{plugin_id}/attestation",
             get(plugins_lifecycle::get_attestation),
         )
         .route(
-            "/api/plugins/:plugin_id/readiness",
+            "/api/plugins/{plugin_id}/readiness",
             get(plugins_lifecycle::get_readiness),
         )
         .route(
-            "/api/plugins/:plugin_id/grant",
+            "/api/plugins/{plugin_id}/grant",
             post(plugins_lifecycle::grant_permission),
         )
         .route(
-            "/api/plugins/:plugin_id/perms/:permission_id",
+            "/api/plugins/{plugin_id}/perms/{permission_id}",
             delete(plugins_lifecycle::revoke_permission),
         )
         .route(
-            "/api/plugins/:plugin_id/enable",
+            "/api/plugins/{plugin_id}/enable",
             post(plugins_lifecycle::enable_plugin),
         )
         .route(
-            "/api/plugins/:plugin_id/disable",
+            "/api/plugins/{plugin_id}/disable",
             post(plugins_lifecycle::disable_plugin),
         )
         .route(
-            "/api/plugins/:plugin_id/pin",
+            "/api/plugins/{plugin_id}/pin",
             post(plugins_lifecycle::pin_plugin),
         )
         .route(
-            "/api/plugins/:plugin_id/unpin",
+            "/api/plugins/{plugin_id}/unpin",
             post(plugins_lifecycle::unpin_plugin),
         )
         .route(
-            "/api/plugins/:plugin_id/auto-update",
+            "/api/plugins/{plugin_id}/auto-update",
             post(plugins_lifecycle::set_auto_update),
         )
         // A plugin's own HTTP API (`agent.http: true`), every method and a
         // WebSocket upgrade, forwarded to its `plugin-http/<id>/http.sock`.
         .route(
-            "/api/plugins/:plugin_id/x/*rest",
+            "/api/plugins/{plugin_id}/x/{*rest}",
             get(plugins_proxy::plugin_http)
                 .post(plugins_proxy::plugin_http)
                 .put(plugins_proxy::plugin_http)
@@ -375,10 +375,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // frame and sends it to the FC, the read projects the one cached param).
         .route("/api/params", get(params::get_all_params))
         .route(
-            // axum 0.7 path params use the `:name` form; the `{name}` form is a
-            // literal segment here and would never match a real value (the
-            // request would fall through to the reverse-proxy fallback).
-            "/api/params/:name",
+            "/api/params/{name}",
             get(params_single::get_param).post(params_write::set_param),
         )
         // Services: the live `ados-*.service` unit inventory + the per-unit restart
@@ -386,7 +383,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // cycles the whole agent process tree.
         .route("/api/services", get(services::list_services))
         .route(
-            "/api/services/:name/restart",
+            "/api/services/{name}/restart",
             post(service_control::restart_service),
         )
         .route(
@@ -608,11 +605,11 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
             post(gs_pairing::post_pair_close),
         )
         .route(
-            "/api/v1/ground-station/pair/approve/:device_id",
+            "/api/v1/ground-station/pair/approve/{device_id}",
             post(gs_pairing::post_pair_approve),
         )
         .route(
-            "/api/v1/ground-station/pair/revoke/:device_id",
+            "/api/v1/ground-station/pair/revoke/{device_id}",
             post(gs_pairing::post_pair_revoke),
         )
         .route(
@@ -643,7 +640,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
             get(gs_recording_list::get_recording_clip),
         )
         .route(
-            "/api/v1/ground-station/recording/:segment",
+            "/api/v1/ground-station/recording/{segment}",
             delete(gs_recording_list::delete_recording_segment),
         )
         // Ground-station persisted-UI reads (profile-gated): the OLED/button/screen
@@ -704,7 +701,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // and drives the shared mac-pin engine for the .link removal + gated re-tag.
         .route("/api/v1/network/mac/pin", post(mac_pin::post_mac_pin))
         .route(
-            "/api/v1/network/mac/:iface",
+            "/api/v1/network/mac/{iface}",
             delete(mac_pin::delete_mac_pin),
         )
         // Ground-station network writes: AP config + share-uplink toggle
@@ -743,7 +740,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // radio keys and drops every member; retiring a single airframe needed a
         // scalpel, and without one a bench edited the registry file by hand.
         .route(
-            "/api/v1/ground-station/wfb/pair/:device_id",
+            "/api/v1/ground-station/wfb/pair/{device_id}",
             delete(gs_wfb_pair::delete_fleet_slot),
         )
         // Return the station to first-boot posture. On-box callers only.
@@ -824,7 +821,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         // 405s anything else before the handler runs. The body limit is the
         // relay's own request ceiling; the handler answers 413 past it.
         .route(
-            "/api/v1/ground-station/relay-proxy/:peer_device_id/*path",
+            "/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}",
             get(gs_relay_proxy::handle)
                 .post(gs_relay_proxy::handle)
                 .put(gs_relay_proxy::handle)
@@ -851,11 +848,11 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
             delete(network_write::delete_client),
         )
         .route(
-            "/api/v1/network/client/configured/:name",
+            "/api/v1/network/client/configured/{name}",
             delete(network_write::delete_client_configured),
         )
         .route(
-            "/api/v1/network/client/configured/:name/autoconnect",
+            "/api/v1/network/client/configured/{name}/autoconnect",
             put(network_write::put_client_autoconnect),
         );
 
@@ -893,7 +890,7 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
                 post(gs_bluetooth::post_bluetooth_pair),
             )
             .route(
-                "/api/v1/ground-station/bluetooth/:mac",
+                "/api/v1/ground-station/bluetooth/{mac}",
                 delete(gs_bluetooth::delete_bluetooth),
             );
     }
@@ -911,22 +908,21 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
 
 #[cfg(test)]
 mod param_syntax_tests {
-    /// axum 0.7 path parameters use the `:name` form. A `{name}` literal in a
-    /// `.route(...)` path is matched verbatim and never binds a real value, so
-    /// the request silently falls through to the reverse-proxy fallback — the
-    /// route is registered for auth but never served natively. Guard against
-    /// reintroducing the 0.8 `{param}` form until the crate moves to axum 0.8.
+    /// axum 0.8 path parameters use the `{name}` / `{*name}` form. The 0.7
+    /// `:name` / `*name` form is rejected by axum 0.8 when the router is built,
+    /// and the native route table in `routing.rs` matches only the brace form,
+    /// so keep every `.route(...)` path in it.
     #[test]
-    fn route_paths_use_axum_07_param_syntax() {
+    fn route_paths_use_axum_08_param_syntax() {
         let src = include_str!("mod.rs");
         let offenders: Vec<&str> = src
             .lines()
             .map(str::trim_start)
-            .filter(|l| l.starts_with("\"/api") && l.contains('{'))
+            .filter(|l| l.starts_with("\"/api") && (l.contains("/:") || l.contains("/*")))
             .collect();
         assert!(
             offenders.is_empty(),
-            "route path(s) use {{param}} (axum 0.8) syntax; axum 0.7 needs :param: {offenders:?}"
+            "route path(s) use the :param / *param (axum 0.7) syntax; axum 0.8 needs {{param}}: {offenders:?}"
         );
     }
 

@@ -227,7 +227,7 @@ pub fn generate_code() -> Result<String, getrandom::Error> {
     let limit = (256u16 - (256u16 % n as u16)) as u8;
     while out.len() < CODE_LENGTH {
         let mut b = [0u8; 1];
-        getrandom::getrandom(&mut b)?;
+        getrandom::fill(&mut b)?;
         if b[0] < limit {
             out.push(SAFE_CHARSET[(b[0] % n) as usize] as char);
         }
@@ -247,7 +247,7 @@ pub fn generate_code() -> Result<String, getrandom::Error> {
 pub fn generate_api_key() -> Result<String, getrandom::Error> {
     use base64::Engine as _;
     let mut bytes = [0u8; API_KEY_RANDOM_BYTES];
-    getrandom::getrandom(&mut bytes)?;
+    getrandom::fill(&mut bytes)?;
     let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     Ok(format!("ados_{body}"))
 }

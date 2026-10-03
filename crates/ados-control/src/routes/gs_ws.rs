@@ -155,7 +155,7 @@ async fn send_bounded(socket: &mut WebSocket, msg: Message) -> bool {
 /// Serialize `value` and send it as one bounded text frame.
 async fn send_json(socket: &mut WebSocket, value: &Value) -> bool {
     match serde_json::to_string(value) {
-        Ok(text) => send_bounded(socket, Message::Text(text)).await,
+        Ok(text) => send_bounded(socket, Message::Text(text.into())).await,
         // A value that cannot serialize is skipped, not a dead client.
         Err(_) => true,
     }
@@ -168,8 +168,8 @@ async fn keepalive_beat(socket: &mut WebSocket, last_heard: Instant) -> bool {
     if last_heard.elapsed() > PEER_SILENCE_LIMIT {
         return false;
     }
-    send_bounded(socket, Message::Text(KEEPALIVE_FRAME.to_owned())).await
-        && send_bounded(socket, Message::Ping(Vec::new())).await
+    send_bounded(socket, Message::Text(KEEPALIVE_FRAME.into())).await
+        && send_bounded(socket, Message::Ping(Default::default())).await
 }
 
 /// Whether an inbound read leaves the client connected. Any frame, a Pong
@@ -798,7 +798,7 @@ impl JournalTail {
 // ---------------------------------------------------------------------------
 
 /// Build a WebSocket close frame with the given code + reason.
-fn close_frame(code: u16, reason: &str) -> axum::extract::ws::CloseFrame<'static> {
+fn close_frame(code: u16, reason: &str) -> axum::extract::ws::CloseFrame {
     axum::extract::ws::CloseFrame {
         code,
         reason: reason.to_string().into(),

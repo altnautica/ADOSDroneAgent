@@ -67,7 +67,7 @@ fn init_logging() {
 /// Notify systemd of readiness (no-op off Linux / outside a notify unit).
 #[cfg(target_os = "linux")]
 fn notify_ready() {
-    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+    let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
 }
 
 #[cfg(not(target_os = "linux"))]

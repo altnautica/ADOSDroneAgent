@@ -89,7 +89,7 @@ pub struct KeyPair {
 /// (matching Python's `public_bytes(Encoding.Raw, PublicFormat.Raw)`).
 pub fn generate_keypair() -> KeyPair {
     let mut seed = [0u8; 32];
-    getrandom::getrandom(&mut seed).expect("OS RNG for X25519 keygen");
+    getrandom::fill(&mut seed).expect("OS RNG for X25519 keygen");
     let secret = StaticSecret::from(seed);
     let public = PublicKey::from(&secret).to_bytes();
     KeyPair { secret, public }
@@ -103,15 +103,16 @@ pub fn generate_keypair() -> KeyPair {
 /// 1. `prk = HMAC-SHA256(key = 0x00 * 32, msg = shared)`
 /// 2. `okm = HMAC-SHA256(key = prk, msg = context || 0x01)`
 pub fn session_key(shared: &[u8], context: &[u8]) -> [u8; 32] {
-    // Step 1: extract with an all-zero 32-byte salt. The fully-qualified
-    // `Mac::` disambiguates from chacha's `KeyInit::new_from_slice`.
+    // Step 1: extract with an all-zero 32-byte salt. `KeyInit` is the one key
+    // constructor trait shared by the HMAC and the chacha cipher.
     let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(&[0u8; 32]).expect("HMAC accepts any key length");
+        <HmacSha256 as KeyInit>::new_from_slice(&[0u8; 32]).expect("HMAC accepts any key length");
     mac.update(shared);
     let prk = mac.finalize().into_bytes();
 
     // Step 2: expand with the context and a single 0x01 counter byte.
-    let mut mac2 = <HmacSha256 as Mac>::new_from_slice(&prk).expect("HMAC accepts any key length");
+    let mut mac2 =
+        <HmacSha256 as KeyInit>::new_from_slice(&prk).expect("HMAC accepts any key length");
     mac2.update(context);
     mac2.update(&[0x01]);
     mac2.finalize().into_bytes().into()
@@ -134,10 +135,10 @@ pub fn encrypt_invite(
     let key = session_key(shared.as_bytes(), &context);
 
     let mut nonce_bytes = [0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes).expect("OS RNG for nonce");
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    getrandom::fill(&mut nonce_bytes).expect("OS RNG for nonce");
+    let cipher = ChaCha20Poly1305::new(&Key::from(key));
     let ct = cipher
-        .encrypt(Nonce::from_slice(&nonce_bytes), bundle.pack().as_slice())
+        .encrypt(&Nonce::from(nonce_bytes), bundle.pack().as_slice())
         .map_err(|_| CryptoError::DecryptFailed)?;
 
     let receiver_pub = PublicKey::from(receiver_secret).to_bytes();
@@ -169,9 +170,10 @@ pub fn decrypt_invite(
 
     let shared = relay_secret.diffie_hellman(&receiver_pub);
     let key = session_key(shared.as_bytes(), &context);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let cipher = ChaCha20Poly1305::new(&Key::from(key));
+    let nonce = Nonce::try_from(nonce).map_err(|_| CryptoError::BlobTooShort)?;
     let plaintext = cipher
-        .decrypt(Nonce::from_slice(nonce), ct)
+        .decrypt(&nonce, ct)
         .map_err(|_| CryptoError::DecryptFailed)?;
 
     let bundle = InviteBundle::unpack(&plaintext).map_err(CryptoError::BadBundle)?;
@@ -239,13 +241,11 @@ mod tests {
         let key = session_key(&shared, INVITE_CONTEXT);
 
         // Recompute the 2-step construction independently here to lock the exact
-        // wiring (salt = 0x00*32, then HMAC(prk, context || 0x01)). The
-        // fully-qualified `Mac::` disambiguates from the chacha `KeyInit` trait,
-        // which also exposes a `new_from_slice` once both are glob-imported.
-        let mut m1 = <HmacSha256 as Mac>::new_from_slice(&[0u8; 32]).unwrap();
+        // wiring (salt = 0x00*32, then HMAC(prk, context || 0x01)).
+        let mut m1 = <HmacSha256 as KeyInit>::new_from_slice(&[0u8; 32]).unwrap();
         m1.update(&shared);
         let prk = m1.finalize().into_bytes();
-        let mut m2 = <HmacSha256 as Mac>::new_from_slice(&prk).unwrap();
+        let mut m2 = <HmacSha256 as KeyInit>::new_from_slice(&prk).unwrap();
         m2.update(INVITE_CONTEXT);
         m2.update(&[0x01]);
         let expected: [u8; 32] = m2.finalize().into_bytes().into();
