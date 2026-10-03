@@ -64,15 +64,16 @@ jobs:
         if: matrix.python-version == '3.11'
         run: |
           set -uo pipefail
-          FILES='tests/test_adaptive_keys_agree_across_transports.py
-          tests/test_mavlink_proxy_flag_defaults_agree.py
-          tests/test_conformance_cases_are_served.py'
+          FILES='tests/test_mavlink_proxy_flag_defaults_agree.py
+          tests/test_conformance_cases_are_served.py
+          tests/test_board_sidecar.py
+          tests/test_recorder_crash_safety.py'
           # `|| true` is load-bearing, not decoration. A `run:` step executes
           # under `bash -e`, and an assignment from a failing command takes
           # that command's status, so a non-zero pytest (including exit 5, "no
           # tests collected") would abort the step before any line below runs —
           # and the stale-file-list message would never print.
-          # shellcheck disable=SC2086
+          # shellcheck disable=SC2086,SC2046  # FILES is a newline list split on purpose
           out="$(pytest -q -rs $(printf '%s ' $FILES) 2>&1 || true)"
           printf '%s\n' "$out" | tail -20
           if printf '%s' "$out" | grep -qE '[0-9]+ skipped'; then
@@ -227,7 +228,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Every published artifact carries a signature
+      - name: Install minisign
+        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+
+      - name: Every published artifact carries a signature that verifies against the release key
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/check-release-signatures.sh
@@ -249,3 +253,14 @@ jobs:
       # whatever landed.
       - name: Shipped behaviour carries a version bump
         run: bash scripts/check-version-bumped.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
+
+  # The Rust binaries report the crates/Cargo.toml workspace version and the
+  # wheel reports __version__. Both are the agent's version, so they must be
+  # one number; the release workflow runs the same check against the tag.
+  version-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cargo workspace version equals __version__
+        run: bash scripts/check-version-sync.sh

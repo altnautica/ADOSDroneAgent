@@ -13,6 +13,14 @@ on:
       # which one a UI reload signals). Without this, deleting a unit and
       # touching no crate never runs the gate written to catch exactly that.
       - "data/systemd/**"
+      # Compiled into the binaries through include_str!. A change to any of
+      # them must rebuild, retest and republish the prebuilt binaries, and
+      # release.yml's RUST_PATHS must list the same set.
+      - "src/ados/hal/boards/**"
+      - "src/ados/data/plugin-catalog.json"
+      - "src/ados/plugins/builtin/**/manifest.yaml"
+      - "schemas/agent-config.schema.json"
+      - "docs/api-surface.md"
       - ".github/workflows/rust.yml"
   pull_request:
     branches: [main]
@@ -26,6 +34,12 @@ on:
       # which one a UI reload signals). Without this, deleting a unit and
       # touching no crate never runs the gate written to catch exactly that.
       - "data/systemd/**"
+      # Compiled into the binaries through include_str! (see the push filter).
+      - "src/ados/hal/boards/**"
+      - "src/ados/data/plugin-catalog.json"
+      - "src/ados/plugins/builtin/**/manifest.yaml"
+      - "schemas/agent-config.schema.json"
+      - "docs/api-surface.md"
       - ".github/workflows/rust.yml"
 
 # Default to read-only so the build-test job (which runs on pull requests, i.e.
@@ -201,6 +215,32 @@ jobs:
       - name: The whole workspace compiles on the declared minimum
         run: cargo check --workspace --all-targets
 
+  # The Mac workstation path (`ados-installer` dispatching to its macOS
+  # uninstall/status, and `ados-control`'s sysctl-backed hardware read) sits
+  # behind `#[cfg(target_os = "macos")]`, which no Linux job compiles. Without
+  # this a change that breaks it merges green and is found on a developer's Mac.
+  macos-check:
+    name: macOS-only code compiles
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: macos-cargo-${{ hashFiles('crates/Cargo.lock') }}
+          restore-keys: macos-cargo-
+
+      - name: Check ados-installer and ados-control (all targets)
+        run: cargo check -p ados-installer -p ados-control --all-targets
+
   # Every publish job below uploads with the `gh` CLI rather than the release
   # action. That action replaces a rolling tag's contents by deleting all of its
   # existing assets in parallel and then re-uploading them, and on a multi-asset
@@ -223,7 +263,7 @@ jobs:
   # Build the terminal dashboard as a static arm64 binary and publish it to a
   # rolling prerelease the installer fetches. Static (musl) so one binary runs
   # on every supported board regardless of its glibc. Runs only on pushes to
-  # main, not pull requests. Artifact carries a SHA256; a minisign .minisig is signed when ADOS_DRIVER_SIGNING_KEY is set.
+  # main, not pull requests. Artifact carries a SHA256 and a mandatory minisign .minisig.
   publish-tui:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -253,14 +293,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-tui rel/ados-tui-aarch64
           ( cd rel && sha256sum ados-tui-aarch64 > ados-tui-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -291,7 +331,7 @@ jobs:
   # Build the orchestrator as a static arm64 binary and publish it to a rolling
   # prerelease the installer fetches. Static (musl) so one binary runs on every
   # supported board regardless of its glibc. Runs only on pushes to main, not
-  # pull requests. Artifact carries a SHA256; a minisign .minisig is signed when ADOS_DRIVER_SIGNING_KEY is set.
+  # pull requests. Artifact carries a SHA256 and a mandatory minisign .minisig.
   publish-supervisor:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -321,14 +361,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-supervisor rel/ados-supervisor-aarch64
           ( cd rel && sha256sum ados-supervisor-aarch64 > ados-supervisor-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -388,14 +428,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-mavlink-router rel/ados-mavlink-router-aarch64
           ( cd rel && sha256sum ados-mavlink-router-aarch64 > ados-mavlink-router-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -452,14 +492,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-radio rel/ados-radio-aarch64
           ( cd rel && sha256sum ados-radio-aarch64 > ados-radio-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -522,14 +562,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-swarmbus rel/ados-swarmbus-aarch64
           ( cd rel && sha256sum ados-swarmbus-aarch64 > ados-swarmbus-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -586,14 +626,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-gpio rel/ados-gpio-aarch64
           ( cd rel && sha256sum ados-gpio-aarch64 > ados-gpio-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -650,14 +690,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-crsf rel/ados-crsf-aarch64
           ( cd rel && sha256sum ados-crsf-aarch64 > ados-crsf-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -714,14 +754,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-tunnel-config rel/ados-tunnel-config-aarch64
           ( cd rel && sha256sum ados-tunnel-config-aarch64 > ados-tunnel-config-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -784,14 +824,14 @@ jobs:
           ( cd rel && sha256sum ados-video-aarch64 > ados-video-aarch64.sha256 )
           ( cd rel && sha256sum ados-camera-probe-aarch64 > ados-camera-probe-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -857,14 +897,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-plugin-host rel/ados-plugin-host-aarch64
           ( cd rel && sha256sum ados-plugin-host-aarch64 > ados-plugin-host-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -934,14 +974,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-control rel/ados-control-aarch64
           ( cd rel && sha256sum ados-control-aarch64 > ados-control-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1003,14 +1043,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-cloud rel/ados-cloud-aarch64
           ( cd rel && sha256sum ados-cloud-aarch64 > ados-cloud-aarch64.sha256 )
 
-      - name: Sign artifacts (only when the signing key is present)
+      - name: Sign artifacts (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1079,14 +1119,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-groundlink rel/ados-groundlink-aarch64
           ( cd rel && sha256sum ados-groundlink-aarch64 > ados-groundlink-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1146,14 +1186,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-net rel/ados-net-aarch64
           ( cd rel && sha256sum ados-net-aarch64 > ados-net-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1216,14 +1256,14 @@ jobs:
           ( cd rel && sha256sum ados-pic-aarch64 > ados-pic-aarch64.sha256 )
           ( cd rel && sha256sum ados-input-aarch64 > ados-input-aarch64.sha256 )
 
-      - name: Sign artifacts (only when the signing key is present)
+      - name: Sign artifacts (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1289,14 +1329,14 @@ jobs:
           ( cd rel && sha256sum ados-display-probe-aarch64 > ados-display-probe-aarch64.sha256 )
           ( cd rel && sha256sum ados-oled-i2c-aarch64 > ados-oled-i2c-aarch64.sha256 )
 
-      - name: Sign artifacts (only when the signing key is present)
+      - name: Sign artifacts (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1360,14 +1400,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-vision rel/ados-vision-aarch64
           ( cd rel && sha256sum ados-vision-aarch64 > ados-vision-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1497,14 +1537,14 @@ jobs:
           name: vision-onnx-rel
           path: crates/rel
 
-      - name: Sign artifacts (only when the signing key is present)
+      - name: Sign artifacts (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1586,14 +1626,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-installer rel/ados-installer-aarch64
           ( cd rel && sha256sum ados-installer-aarch64 > ados-installer-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1648,14 +1688,14 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/ados-logd rel/ados-logd-aarch64
           ( cd rel && sha256sum ados-logd-aarch64 > ados-logd-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
@@ -1710,14 +1750,14 @@ jobs:
           install -m 0755 work/mediamtx rel/mediamtx-aarch64
           ( cd rel && sha256sum mediamtx-aarch64 > mediamtx-aarch64.sha256 )
 
-      - name: Sign artifact (only when the signing key is present)
+      - name: Sign artifact (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
           fi
           sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
           printf '%s' "${SIGNING_KEY}" > /tmp/sign.key

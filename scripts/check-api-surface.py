@@ -96,11 +96,70 @@ MODULE_SPECIFIER = re.compile(r"""["'`][@.][\w@/.-]*$""")
 # placeholder and is still checked, because that one IS the agent.
 EXTERNAL_URL = re.compile(r"""https?://[^\s"'`{}]*$""")
 
-# A path fragment a client builds by concatenation cannot be resolved as
-# written and is not a finding — but a fragment ending mid-segment usually IS
-# one half of a split literal, which is the shape that hides a rename. Those
-# are reported separately as unresolvable rather than silently skipped.
+# A literal that stops at a separator (`"/api/" + x`, `"/api/plugins/"` handed
+# to a builder) is half of a path the client assembles elsewhere. It cannot be
+# resolved as written, and it is exactly the shape that hides a one-sided
+# rename, so it is reported as unresolvable rather than skipped. Write the
+# whole path as one template literal instead.
 TRAILING_JUNK = "/-_."
+
+# Base-URL constants a client appends sub-paths to. Only these may resolve as a
+# proper prefix of a served route; any other literal must name a route exactly,
+# so an unserved `GET /api/vision` cannot pass because `/api/vision/status`
+# exists. Each entry is the normalised literal, and must still be a prefix of
+# something the agent serves.
+BASE_PREFIXES = {
+    # Android's ground-station base and the CLI's recording base.
+    "/api/v1/ground-station",
+    "/api/v1/ground-station/recording",
+    # Mission Control's relayed-node base (per peer and bare).
+    "/api/v1/ground-station/relay-proxy",
+    "/api/v1/ground-station/relay-proxy/{}",
+    # Mission Control's observability proxy base.
+    "/api/v2/observability",
+}
+
+# Client helpers that build an agent path from a fixed prefix plus a sub-path
+# passed as an argument (`pluginUrl(pluginId, "attestation")`). The sub-path
+# literal is joined to the prefix and resolved like any other literal; a call
+# whose sub-path is not a literal cannot be checked and is reported.
+HELPERS = {
+    "pluginUrl": "/api/plugins/{}",
+}
+HELPER_CALL = re.compile(
+    r"""(?<![\w.])(?:this\.)?(?P<name>""" + "|".join(HELPERS) + r""")\(\s*"""
+    r"""[A-Za-z_][\w.]*\s*"""
+    r"""(?:,\s*(?P<q>["'`])(?P<sub>(?:\$\{[^{}]*\}|(?!(?P=q))[^$\\])*)(?P=q)\s*)?\)"""
+)
+HELPER_USE = re.compile(r"""(?<![\w.])(?:this\.)?(?P<name>""" + "|".join(HELPERS) + r""")\(""")
+HELPER_DECL = re.compile(r"""\b(?:private|public|protected|function|def|fun)\s+(?:async\s+)?$""")
+
+# Test sources hold deliberately fake and malformed paths (traversal probes,
+# `/api/x` placeholders) that no client ever sends; they are not call sites.
+TEST_DIRS = {"__tests__", "__mocks__", "test", "tests", "androidTest"}
+TEST_FILE = re.compile(r"(\.(test|spec)\.[cm]?[jt]sx?$)|(^test_.*\.py$)|(Test\.(kt|java)$)")
+
+
+def is_test_source(file: Path, root: Path) -> bool:
+    """Whether ``file`` is a test, by name or by a test directory under ``root``."""
+    if TEST_FILE.search(file.name):
+        return True
+    return any(part in TEST_DIRS for part in file.relative_to(root).parts[:-1])
+
+
+def logical_line(lines: list[str], index: int) -> tuple[str, int]:
+    """``lines[index]`` joined with the lines an open interpolation spills onto.
+
+    `` `/api/plugins/${encodeURIComponent(`` continued on the next lines is one
+    path; read alone, the literal stops at the open ``${`` and looks truncated.
+    Returns the joined text and the 1-based number of the last line it took.
+    """
+    text = lines[index]
+    j = index
+    while "${" in INTERPOLATION.sub("{}", text) and j + 1 < len(lines) and j - index < METHOD_WINDOW_LINES:
+        j += 1
+        text += lines[j].strip()
+    return text, j + 1
 
 
 def served_paths() -> list[tuple[str, list[str]]]:
@@ -166,15 +225,16 @@ def _segments(actual: list[str], template: list[str]) -> bool:
 def resolves(path: str, table: list[tuple[str, list[str]]]) -> bool:
     """Whether a client literal names something the agent serves.
 
-    Exact template match, or — for a base-URL constant like Android's
-    ``api/v1/ground-station`` and the CLI's ``/api/v1/ground-station/recording``
-    — a proper prefix of a served path. A prefix is enough to prove the family
-    exists, which is the rename this check exists to catch; a path renamed out
-    from under a client is a prefix of nothing.
+    Exact template match, or — only for a listed base-URL constant
+    (``BASE_PREFIXES``) — a proper prefix of a served path. A prefix proves the
+    family exists, which is enough for a base the client appends to; for any
+    other literal it would let an unserved route pass beside a served child.
     """
     segs = path.split("/")
     if any(matches(segs, t) for _, t in table):
         return True
+    if path not in BASE_PREFIXES:
+        return False
     return any(len(t) > len(segs) and _segments(segs, t[: len(segs)]) for _, t in table)
 
 
@@ -262,9 +322,35 @@ def own_server_routes(root: Path) -> list[list[str]]:
     return out
 
 
+def unserved_method(
+    path: str,
+    before: str,
+    rest: str,
+    lines: list[str],
+    lineno: int,
+    line: str,
+    tail: str,
+    table: list[tuple[str, list[str]]],
+) -> str | None:
+    """The method a call site uses when ``path`` is not served for it, else None."""
+    method = stated_method(before, rest + "\n" + tail)
+    # A call that states no method is a plain fetch (GET) unless the site opens
+    # a socket (the hint may sit a few lines either side: a
+    # `subscribeWebSocket({` opener, a scheme chosen above the URL, a
+    # `.replace(/^http/, "ws")`), which a WebSocket-only route needs.
+    if method is None and websocket_only(path, table):
+        head = "\n".join(lines[max(0, lineno - 1 - METHOD_WINDOW_LINES) : lineno - 1])
+        site = head + "\n" + line + "\n" + tail
+        method = "WS" if SOCKET_HINT.search(site) else "GET"
+    if method and not method_served(path, method, table):
+        return method
+    return None
+
+
 def main() -> int:
     table = served_paths()
     failures: list[tuple[str, Path, int, str]] = []
+    fragments: list[tuple[str, Path, int, str]] = []
     method_failures: list[tuple[str, Path, int, str, str]] = []
     scanned = 0
     for name, root, exts in CLIENTS:
@@ -274,49 +360,86 @@ def main() -> int:
         seen = 0
         own_routes = own_server_routes(root)
         for file in sorted(root.rglob("*")):
-            if not file.is_file() or file.suffix not in exts:
+            if not file.is_file() or file.suffix not in exts or is_test_source(file, root):
                 continue
             try:
                 text = file.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
             lines = text.splitlines()
-            for lineno, line in enumerate(lines, 1):
-                if COMMENT.match(line) or IMPORT.search(line):
+            consumed = 0
+            for lineno, raw_line in enumerate(lines, 1):
+                # A line already read as the continuation of an open
+                # interpolation above belongs to that call, not a new one.
+                if lineno <= consumed:
                     continue
-                line = INTERPOLATION.sub("{}", line)
+                if COMMENT.match(raw_line) or IMPORT.search(raw_line):
+                    continue
+                joined, consumed = logical_line(lines, lineno - 1)
+                line = INTERPOLATION.sub("{}", joined)
                 tail = INTERPOLATION.sub(
-                    "{}", "\n".join(lines[lineno : lineno + METHOD_WINDOW_LINES])
+                    "{}", "\n".join(lines[consumed : consumed + METHOD_WINDOW_LINES])
                 )
+
+                # Paths built by a helper from a prefix and a sub-path argument.
+                # Read from the line before interpolations collapse, because the
+                # call usually sits inside one (`${this.pluginUrl(id, "x")}`).
+                helper_spans: list[tuple[int, int]] = []
+                for h in HELPER_CALL.finditer(joined):
+                    helper_spans.append(h.span())
+                    sub = h.group("sub") or ""
+                    path = normalise(HELPERS[h.group("name")] + ("/" + sub if sub else ""))
+                    seen += 1
+                    if sub.endswith(tuple(TRAILING_JUNK)):
+                        fragments.append((name, file, lineno, path + "/"))
+                        continue
+                    if not resolves(path, table):
+                        failures.append((name, file, lineno, path))
+                        continue
+                    bad = unserved_method(
+                        path,
+                        joined[: h.start()],
+                        INTERPOLATION.sub("{}", joined[h.end() :]),
+                        lines,
+                        lineno,
+                        line,
+                        tail,
+                        table,
+                    )
+                    if bad:
+                        method_failures.append((name, file, lineno, bad, path))
+                for u in HELPER_USE.finditer(joined):
+                    if HELPER_DECL.search(joined[: u.start()]):
+                        continue
+                    if not any(s <= u.start() < e for s, e in helper_spans):
+                        seen += 1
+                        fragments.append(
+                            (name, file, lineno, f"{HELPERS[u.group('name')]}/<non-literal sub-path>")
+                        )
+
                 for m in LITERAL.finditer(line):
                     before = line[: m.start()]
                     if MODULE_SPECIFIER.search(before) or EXTERNAL_URL.search(before):
                         continue
-                    path = normalise(m.group(0))
-                    if path == "/api" or not path.startswith(("/api/", "/whep", "/hls/")):
+                    raw = m.group(0)
+                    path = normalise(raw)
+                    if not path.startswith(("/api", "/whep", "/hls/")):
                         continue
                     if own_routes and owns(path, own_routes):
                         continue
                     seen += 1
+                    # Half of a path assembled elsewhere: `"/api/" + x`, or a
+                    # literal that stops at a separator or an interpolation
+                    # that never closes. It names no route as written.
+                    if path == "/api" or raw.endswith(tuple(TRAILING_JUNK)) or line[m.end() :].startswith("$"):
+                        fragments.append((name, file, lineno, raw))
+                        continue
                     if not resolves(path, table):
                         failures.append((name, file, lineno, path))
                         continue
-                    # A literal cut short by an interpolation that spills onto
-                    # the next line (`/perms/${fn(` ...) names a longer path
-                    # than it shows, so its method cannot be judged here.
-                    if m.group(0).endswith(tuple(TRAILING_JUNK)) or line[m.end() :].startswith("$"):
-                        continue
-                    method = stated_method(before, line[m.end() :] + "\n" + tail)
-                    # A call that states no method is a plain fetch (GET) unless
-                    # the site opens a socket (the hint may sit a few lines
-                    # either side: a `subscribeWebSocket({` opener, a scheme
-                    # chosen above the URL), which a WebSocket-only route needs.
-                    if method is None and websocket_only(path, table):
-                        head = "\n".join(lines[max(0, lineno - 1 - METHOD_WINDOW_LINES) : lineno - 1])
-                        site = head + "\n" + line + "\n" + tail
-                        method = "WS" if SOCKET_HINT.search(site) else "GET"
-                    if method and not method_served(path, method, table):
-                        method_failures.append((name, file, lineno, method, path))
+                    bad = unserved_method(path, before, line[m.end() :], lines, lineno, line, tail, table)
+                    if bad:
+                        method_failures.append((name, file, lineno, bad, path))
         scanned += seen
         print(f"  {name}: {seen} path literals")
 
@@ -335,7 +458,17 @@ def main() -> int:
             "a surface the agent has never served. Fix the caller, add the route, "
             "or regenerate docs/api-surface.md if the agent side just changed."
         )
-    if failures or method_failures:
+    if fragments:
+        print(f"\n{len(fragments)} client path(s) are assembled in pieces and cannot be resolved:\n")
+        for name, file, lineno, path in fragments:
+            rel = file.relative_to(MONOREPO) if MONOREPO in file.parents else file
+            print(f"  {path}\n    {name} — {rel}:{lineno}")
+        print(
+            "\nWrite each agent path as one literal (a template literal with "
+            "placeholders is fine) so a one-sided rename fails here, or, for a "
+            "base the client appends to, add the base to BASE_PREFIXES."
+        )
+    if failures or fragments or method_failures:
         return 1
 
     print(f"\nall {scanned} client path literals resolve against docs/api-surface.md")

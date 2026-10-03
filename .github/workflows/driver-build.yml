@@ -32,16 +32,15 @@
 # rows into drivers-manifest.json and ships everything as Release assets.
 #
 # Triggers:
-#   - tag 'drivers-v*'   -> permanent stable Release (signed when the key
-#                           secret is present; SHA256-only otherwise)
+#   - tag 'drivers-v*'   -> permanent stable Release (signed)
 #   - workflow_dispatch  -> manual run for matrix iteration
 #   - schedule (daily)   -> refresh the rolling 'prebuilt-drivers' prerelease
 #                           as distro kernels advance
 #
-# Artifacts carry a SHA256 always; an Ed25519/minisign signature is added when
-# ADOS_DRIVER_SIGNING_KEY is set (forks / unset key skip signing cleanly). The
-# agent accepts SHA256-only in its dev posture and requires signatures only
-# when a self-hoster provisions a key.
+# Every artifact carries a SHA256 and an Ed25519/minisign signature from the
+# release key (ADOS_DRIVER_SIGNING_KEY). The on-device driver fetch refuses a
+# module or manifest without a signature that verifies against that key, so a
+# run without the secret fails rather than publishing modules no board installs.
 name: driver-build
 
 on:
@@ -367,14 +366,14 @@ jobs:
           ( cd rel && sha256sum drivers-manifest.json > drivers-manifest.json.sha256 )
           cat rel/drivers-manifest.json
 
-      - name: Sign artifacts (only when the signing key is present)
+      - name: Sign artifacts (mandatory)
         env:
           SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
         run: |
           set -euo pipefail
           if [ -z "${SIGNING_KEY}" ]; then
-            echo "No ADOS_DRIVER_SIGNING_KEY set; publishing SHA256-only (dev posture)."
-            exit 0
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. The driver fetch refuses unsigned modules, so nothing unsigned is published." >&2
+            exit 1
           fi
           printf '%s' "${SIGNING_KEY}" > /tmp/driver.key
           for f in rel/*.ko rel/drivers-manifest.json; do

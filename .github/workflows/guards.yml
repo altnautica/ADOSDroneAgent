@@ -281,20 +281,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Seven `#[ignore]`d Rust tests. Six are the entire real-model and
-      # real-hardware proof surface in this repository, and no workflow
-      # scheduled any of them, so adding an ignore was a free way to make a
-      # test stop mattering. Pinning the count makes the set a reviewed
-      # decision: removing an ignore is always fine, adding one requires
-      # updating this number and saying why in the same change.
+      # Four `#[ignore]`d Rust tests. Adding an ignore used to be a free way to
+      # make a test stop mattering, so the count is pinned and the set is a
+      # reviewed decision: removing an ignore is always fine, adding one
+      # requires updating this number and saying why in the same change.
       #
-      # The seventh is not a proof surface at all: it is
-      # `encoder::tests::regenerate_encoder_fixtures`, the writer for
-      # `crates/ados-video/tests/encoder_fixtures.json`. It is ignored because
-      # it WRITES that file, so running it by default would make the fixture
-      # gate pass by rewriting its own expectation. Its companion,
-      # `fixture_table_matches_the_file`, is NOT ignored and is what actually
-      # holds the argv contract in both directions.
+      # The four, and why each is ignored:
+      #   - ados-vision/tests/onnx_coco_infer.rs (two cases): need the COCO
+      #     ONNX model sideloaded; deep-tests.yml runs them with --ignored.
+      #   - ados-vision/tests/tracker_adversarial.rs
+      #     `sparse_two_in_three_sighting_does_not_confirm_a_lock`: the recorded
+      #     robustness limit of the tracker's confirm rule (identity-safe; its
+      #     no-mis-identification companion is NOT ignored).
+      #   - ados-video `encoder::tests::regenerate_encoder_fixtures`: the writer
+      #     for `crates/ados-video/tests/encoder_fixtures.json`. Running it by
+      #     default would make the fixture gate pass by rewriting its own
+      #     expectation; its companion `fixture_table_matches_the_file` is NOT
+      #     ignored and holds the argv contract in both directions.
       #
       # This measures source text on purpose. The thing being asserted IS the
       # presence of an attribute, and reading it any other way would require
@@ -302,7 +305,7 @@ jobs:
       - name: Ignored-test count matches the reviewed inventory
         run: |
           set -uo pipefail
-          EXPECTED=7
+          EXPECTED=4
 
           # Attribute position only: a doc comment that mentions the attribute
           # is prose, not an ignored test.

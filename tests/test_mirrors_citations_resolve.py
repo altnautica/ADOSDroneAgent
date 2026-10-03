@@ -81,7 +81,15 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: 118 -> 117: the WebSocket handshake gained caller-class rules and one shared
 #: credential check that the Python `authenticate_websocket` order never had,
 #: so the Rust no longer mirrors it and its comment says what it does instead.
-MIN_CITATIONS = 117
+#:
+#: 117 -> 100: the Python video routes, the residual mediamtx probes, the
+#: ground-station profile gate, the dual-stack socket helper and the FEC setter
+#: were deleted when the front and the radio took them over; the Rust
+#: service-restart allowlist, mesh bring-up and gateway mode, AP apply and
+#: station leave changed behaviour (secure mesh join, restart outcome checked, AP
+#: always restored), so they no longer copy their Python predecessors and their
+#: comments say what they do.
+MIN_CITATIONS = 100
 
 
 def _rust_sources() -> list[Path]:

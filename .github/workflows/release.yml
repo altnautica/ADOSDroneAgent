@@ -25,7 +25,9 @@
 # stable channel refuses any artifact without a signature from that key, so a
 # release that cannot be signed fails here instead of publishing something no
 # board will install. Each artifact gets a .sha256 and a .minisig sidecar; a
-# single SHA256SUMS lists them all. The wheel is also published to PyPI.
+# single SHA256SUMS lists them all and is itself signed (SHA256SUMS.minisig).
+# The tag must equal both __version__ and the Cargo workspace version
+# (scripts/check-version-sync.sh). The wheel is also published to PyPI.
 #
 # The edge channel (the installer default) needs no artifact from this
 # workflow: edge clones the branch and builds from source on the device.
@@ -52,6 +54,13 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+
+      # The installer requests `ados_drone_agent-<tag version>-py3-none-any.whl`
+      # and the deploy bundle by the same version, while the wheel takes its
+      # version from __version__ and the Rust binaries from the Cargo
+      # workspace. All three must equal the tag before anything is built.
+      - name: Tag, __version__ and Cargo workspace version agree
+        run: bash scripts/check-version-sync.sh "${GITHUB_REF_NAME}"
 
       - name: Install Rust toolchain (musl target)
         uses: dtolnay/rust-toolchain@stable
@@ -192,7 +201,22 @@ jobs:
           # the ones in the nearest ancestor's rev release — provided nothing
           # the Rust workflow builds from changed between that commit and the
           # tag. Refuse otherwise rather than ship binaries from another tree.
-          RUST_PATHS="crates src/ados/plugins/_capabilities_generated.py src/ados/plugins/_dispatch_generated.py src/ados/services/wfb/_wfb_tables_generated.py src/ados/core/_contracts_generated.py data/systemd .github/workflows/rust.yml"
+          # This list must equal rust.yml's `paths` filter, including every
+          # file the binaries compile in through include_str!.
+          RUST_PATHS=(
+            crates
+            src/ados/plugins/_capabilities_generated.py
+            src/ados/plugins/_dispatch_generated.py
+            src/ados/services/wfb/_wfb_tables_generated.py
+            src/ados/core/_contracts_generated.py
+            data/systemd
+            src/ados/hal/boards
+            src/ados/data/plugin-catalog.json
+            ':(glob)src/ados/plugins/builtin/**/manifest.yaml'
+            schemas/agent-config.schema.json
+            docs/api-surface.md
+            .github/workflows/rust.yml
+          )
           found=""
           for sha in $(git rev-list --max-count=200 HEAD); do
             if gh release view "rev-${sha}" >/dev/null 2>&1; then
@@ -204,11 +228,9 @@ jobs:
             echo "No rev-<sha> release among the last 200 commits; the tag has no published binaries." >&2
             exit 1
           fi
-          # shellcheck disable=SC2086
-          if ! git diff --quiet "$found" HEAD -- $RUST_PATHS; then
+          if ! git diff --quiet "$found" HEAD -- "${RUST_PATHS[@]}"; then
             echo "rev-${found} is the nearest published binary set, but the Rust tree changed after it:" >&2
-            # shellcheck disable=SC2086
-            git diff --stat "$found" HEAD -- $RUST_PATHS >&2
+            git diff --stat "$found" HEAD -- "${RUST_PATHS[@]}" >&2
             echo "Wait for the Rust workflow to publish rev-$(git rev-parse HEAD), then re-run." >&2
             exit 1
           fi
@@ -244,6 +266,19 @@ jobs:
             done )
           ls -l "${OUT}"
 
+      # Built before signing so the list itself is signed: a checksum list
+      # fetched from the same place as the files proves nothing on its own.
+      - name: Build SHA256SUMS
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          rm -f SHA256SUMS
+          for f in *; do
+            case "$f" in *.sha256|*.minisig|SHA256SUMS) continue ;; esac
+            sha256sum "$f" >> SHA256SUMS
+          done
+          cat SHA256SUMS
+
       - name: Sign artifacts (minisign Ed25519, mandatory)
         run: |
           set -euo pipefail
@@ -254,7 +289,7 @@ jobs:
           OUT="release-assets"
           KEY_FILE="$(mktemp)"
           printf '%s' "${MINISIGN_KEY}" > "${KEY_FILE}"
-          for f in "${OUT}"/*.whl "${OUT}"/*.tar.gz "${OUT}/ados-installer-aarch64"; do
+          for f in "${OUT}"/*.whl "${OUT}"/*.tar.gz "${OUT}/ados-installer-aarch64" "${OUT}/SHA256SUMS"; do
             minisign -S -s "${KEY_FILE}" -m "$f" -x "$f.minisig"
           done
           shred -u "${KEY_FILE}"
@@ -266,18 +301,9 @@ jobs:
             ( cd "${OUT}" && sha256sum -c "$(basename "$f").sha256" )
             minisign -V -q -P "${RELEASE_PUBKEY}" -m "$f" -x "$f.minisig"
           done
+          minisign -V -q -P "${RELEASE_PUBKEY}" -m "${OUT}/SHA256SUMS" -x "${OUT}/SHA256SUMS.minisig"
+          ( cd "${OUT}" && sha256sum -c SHA256SUMS )
           ls -l "${OUT}"
-
-      - name: Build SHA256SUMS
-        working-directory: release-assets
-        run: |
-          set -euo pipefail
-          rm -f SHA256SUMS
-          for f in *; do
-            case "$f" in *.sha256|*.minisig|SHA256SUMS) continue ;; esac
-            sha256sum "$f" >> SHA256SUMS
-          done
-          cat SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
@@ -321,9 +347,11 @@ jobs:
             Install (stable, signed, pinned to this tag):
               curl -sSL https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/scripts/install.sh | sudo bash -s -- --channel stable --version ${{ steps.meta.outputs.tag }} --pair CODE
 
-            Verify before installing:
-              minisign -V -P RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN -m <artifact>
+            Verify before installing (the checksum list is itself signed):
+              minisign -V -P RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN -m SHA256SUMS -x SHA256SUMS.minisig
               sha256sum -c SHA256SUMS
+            or per artifact:
+              minisign -V -P RWQ/CJ1+gk7rjVfGSoy6MOL50e8TmO30KD/J+goaEj+WMI1uzEf92rHN -m <artifact>
 
             The default (edge) channel still installs from source and needs
             no artifact from this release.

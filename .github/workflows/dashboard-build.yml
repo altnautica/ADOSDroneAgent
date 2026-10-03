@@ -20,6 +20,7 @@ on:
       - "dashboard/**"
       - "src/ados/dashboard/static/**"
       - "scripts/build-dashboard.sh"
+      - ".github/workflows/dashboard-build.yml"
 
 jobs:
   build:
@@ -57,8 +58,9 @@ jobs:
 
       - name: Verify dist
         run: |
+          set -euo pipefail
           test -f dashboard/dist/index.html
-          test -d dashboard/dist/assets || true
+          test -d dashboard/dist/assets
           ls -la dashboard/dist
           du -sh dashboard/dist
 

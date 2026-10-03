@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fail when a published binary in the prebuilt catalog has no signature.
+# Fail when a published binary in the prebuilt catalog has no signature, or a
+# signature that does not verify against the release key.
 #
 # Signature verification is only worth enabling if the catalog is actually
 # signed end to end. It was not: the onnx pair published unsigned for months
@@ -10,14 +11,28 @@
 # it from.
 #
 # Every one of those was invisible until someone listed the assets by hand.
-# This makes the catalog's signing coverage a checked fact.
+# This makes the catalog's signing coverage a checked fact. A .minisig that is
+# only present proves nothing (a junk file or one made with a rotated key reads
+# as "signed" by name), so each artifact is downloaded and verified with
+# minisign against the same public key the installer vendors.
 #
 # Usage:
 #   scripts/check-release-signatures.sh              # every prebuilt-* tag
 #   scripts/check-release-signatures.sh prebuilt-tui # one tag
 #
-# Requires the GitHub CLI, authenticated.
+# Requires the GitHub CLI, authenticated, and minisign.
 set -uo pipefail
+
+cd "$(dirname "$0")/.." || exit 2
+
+# The trust anchor the bootstrap installer verifies against. Read from there
+# rather than restated, so this audit checks exactly what a board accepts.
+# shellcheck disable=SC2016  # the `$` is part of the sed pattern, not an expansion
+RELEASE_PUBKEY=$(sed -n 's/^: "\${ADOS_INSTALLER_PUBKEY:=\([^}]*\)}"$/\1/p' scripts/install.sh | head -1)
+if [ -z "$RELEASE_PUBKEY" ]; then
+  echo "could not read the release public key from scripts/install.sh" >&2
+  exit 2
+fi
 
 # Files that are not themselves artifacts and so are not expected to carry a
 # signature of their own.
@@ -41,6 +56,10 @@ allowlisted() {
 }
 
 command -v gh >/dev/null || { echo "gh CLI not found; cannot check the catalog" >&2; exit 2; }
+command -v minisign >/dev/null || { echo "minisign not found; cannot verify the catalog's signatures" >&2; exit 2; }
+
+WORK=$(mktemp -d) || exit 2
+trap 'rm -rf "$WORK"' EXIT
 
 # `mapfile` is bash 4+; this has to run on a stock macOS bash 3.2 too, and a
 # missing builtin previously made the script report "nothing to check" and exit
@@ -65,6 +84,7 @@ if [ ${#tags[@]} -eq 0 ]; then
 fi
 
 unsigned=0
+badsig=0
 checked=0
 for tag in "${tags[@]}"; do
   assets=()
@@ -83,6 +103,17 @@ for tag in "${tags[@]}"; do
     is_sidecar "$name" && continue
     checked=$((checked + 1))
     if printf '%s\n' "${assets[@]}" | grep -qxF "${name}.minisig"; then
+      rm -f "${WORK:?}"/*
+      if ! gh release download "$tag" --dir "$WORK" --pattern "$name" --pattern "${name}.minisig" >/dev/null 2>&1 \
+        || [ ! -f "$WORK/$name" ] || [ ! -f "$WORK/${name}.minisig" ]; then
+        echo "ERROR: could not download ${tag}/${name} and its signature" >&2
+        exit 2
+      fi
+      if minisign -V -q -P "$RELEASE_PUBKEY" -m "$WORK/$name" -x "$WORK/${name}.minisig" >/dev/null 2>&1; then
+        continue
+      fi
+      echo "BADSIG ${tag}/${name} (does not verify against the release key)"
+      badsig=$((badsig + 1))
       continue
     fi
     if allowlisted "$tag" "$name"; then
@@ -94,7 +125,7 @@ for tag in "${tags[@]}"; do
   done
 done
 
-echo "checked ${checked} artifact(s) across ${#tags[@]} tag(s); ${unsigned} unsigned"
+echo "checked ${checked} artifact(s) across ${#tags[@]} tag(s); ${unsigned} unsigned, ${badsig} with a bad signature"
 # Checking nothing is not the same as finding nothing wrong. A rate-limited or
 # 5xx API run would otherwise print "0 unsigned" and exit 0 — the silent success
 # this check exists to prevent, reported by the check itself.
@@ -102,10 +133,11 @@ if [ "$checked" -eq 0 ]; then
     echo "ERROR: inspected 0 artifacts; refusing to report success" >&2
     exit 2
 fi
-if [ "$unsigned" -gt 0 ]; then
+if [ "$unsigned" -gt 0 ] || [ "$badsig" -gt 0 ]; then
   cat >&2 <<'EOF'
 
-An artifact in the prebuilt catalog has no .minisig.
+An artifact in the prebuilt catalog has no .minisig, or one that does not
+verify against the release key vendored in scripts/install.sh.
 
 Either the publishing job did not sign it (check that the signing secret is
 available on that job's runner and that the sign step is not degrading to a

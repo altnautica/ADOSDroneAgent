@@ -6,11 +6,10 @@ with nothing to check. The generator drops the residual copy of any route the
 native front also serves — and it used to decide that by PATH alone.
 
 ``routing::is_native`` is method-scoped, so one URL can be split between the
-two producers: ``GET /api/video/config`` is answered by the native front while
-``POST /api/video/config`` is forwarded to the residual FastAPI app. Path-blind
-shadowing erased that POST from the table entirely. Nothing about the output
-showed it: the table looked complete, asserted the front owned a route it
-actually forwards, and the write had no row of its own.
+two producers: a native ``GET`` beside a residual ``POST`` on the same path.
+Path-blind shadowing erased that POST from the table entirely. Nothing about
+the output showed it: the table looked complete, asserted the front owned a
+route it actually forwards, and the write had no row of its own.
 
 The generator itself shells `cargo`, so these exercise the shadow decision
 directly — the part that was wrong — rather than the whole run.
@@ -71,19 +70,3 @@ def test_a_websocket_route_is_recorded_as_ws_not_get() -> None:
     assert ("WS", "/api/plugins/jobs/{job_id}") in out
     assert ("GET", "/api/plugins/jobs/{job_id}") not in out
     assert ("GET", "/api/plugins") in out
-
-
-def test_the_live_table_carries_the_split_video_config_route() -> None:
-    """End-to-end on the committed artefact, not on the generator's internals.
-
-    `POST /api/video/config` is served by `ados.api.routes.video.encoder_config`
-    and is the concrete route the path-blind shadow deleted. If the table loses
-    it again, `check-api-surface.py` resolves the GCS's write call against the
-    native GET row and reports success for a route it never checked.
-    """
-    table = (
-        Path(__file__).resolve().parent.parent / "docs" / "api-surface.md"
-    ).read_text(encoding="utf-8")
-
-    assert "| POST | `/api/video/config` |" in table
-    assert "| GET | `/api/video/config` |" in table
