@@ -59,19 +59,41 @@ const NO_EFFECTIVE_POWER: i8 = i8::MIN;
 /// a live change survives a watchdog kill (the next bring-up applies the
 /// requested value, not the boot config) and the heartbeat reports the power the
 /// radio is actually running rather than the value it came up with.
+///
+/// It also owns the power budget: no request outside
+/// [`TX_POWER_MIN_DBM`]`..=tx_power_max_dbm` is ever recorded or applied, so a
+/// socket client or a hand-edited config cannot drive the adapter past the
+/// configured ceiling.
 #[derive(Debug)]
 pub struct TxPowerState {
     requested: AtomicI8,
     effective: AtomicI8,
+    max_dbm: i8,
 }
 
+/// The lowest TX power the radio accepts, matching the REST route's floor.
+pub const TX_POWER_MIN_DBM: i8 = 1;
+
 impl TxPowerState {
-    /// Start from the configured power with nothing applied yet.
-    pub fn new(requested_dbm: i8) -> Self {
+    /// Start from the configured power, held inside `1..=max_dbm`, with nothing
+    /// applied yet.
+    pub fn new(requested_dbm: i8, max_dbm: i8) -> Self {
+        let max_dbm = max_dbm.max(TX_POWER_MIN_DBM);
         Self {
-            requested: AtomicI8::new(requested_dbm),
+            requested: AtomicI8::new(requested_dbm.clamp(TX_POWER_MIN_DBM, max_dbm)),
             effective: AtomicI8::new(NO_EFFECTIVE_POWER),
+            max_dbm,
         }
+    }
+
+    /// The configured power ceiling.
+    pub fn max_dbm(&self) -> i8 {
+        self.max_dbm
+    }
+
+    /// True when `dbm` lies inside the power budget.
+    pub fn admits(&self, dbm: i8) -> bool {
+        (TX_POWER_MIN_DBM..=self.max_dbm).contains(&dbm)
     }
 
     /// The operator's requested power: what every bring-up and PHY recovery
@@ -285,6 +307,16 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
             }
         }
         Command::SetTxPower { tx_power_dbm } => {
+            // The budget is enforced here, not only by the REST route: any
+            // client of this socket reaches the adapter through this arm.
+            if !state.tx_power.admits(tx_power_dbm) {
+                return json!({
+                    "ok": false,
+                    "error": "E_TX_POWER_RANGE",
+                    "min": TX_POWER_MIN_DBM,
+                    "max": state.tx_power.max_dbm(),
+                });
+            }
             // TX power retunes the live adapter in place (no respawn). A driver
             // that rejects every ramp step yields null; the REST layer still
             // persists the operator's preference on that path. The request is
@@ -366,7 +398,7 @@ mod tests {
     /// rejected set leaves the radio on its previous power.
     #[test]
     fn tx_power_state_reports_what_the_driver_accepted() {
-        let s = TxPowerState::new(5);
+        let s = TxPowerState::new(5, 15);
         assert_eq!(s.requested(), 5);
         assert_eq!(s.effective(), None);
         s.record_applied(Some(5));
@@ -379,6 +411,20 @@ mod tests {
 
         s.record_applied(Some(12));
         assert_eq!(s.effective(), Some(12));
+    }
+
+    /// The power budget is `1..=tx_power_max_dbm`, and a boot request outside it
+    /// is pulled inside rather than applied.
+    #[test]
+    fn tx_power_stays_inside_the_configured_budget() {
+        let s = TxPowerState::new(30, 15);
+        assert_eq!(s.requested(), 15);
+        assert!(!s.admits(0));
+        assert!(s.admits(1));
+        assert!(s.admits(15));
+        assert!(!s.admits(16));
+        assert!(!s.admits(-5));
+        assert_eq!(TxPowerState::new(-3, 15).requested(), 1);
     }
 
     /// Extract the early-reply `Value` from a parse, or panic if the parse
@@ -448,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn set_tx_power_requires_the_dbm_and_accepts_negative() {
+    fn set_tx_power_requires_the_dbm() {
         assert_eq!(
             reply(br#"{"op":"set_tx_power"}"#)["error"],
             "E_MISSING_TX_POWER"
@@ -456,11 +502,6 @@ mod tests {
         assert_eq!(
             cmd(br#"{"op":"set_tx_power","tx_power_dbm":10}"#),
             Command::SetTxPower { tx_power_dbm: 10 }
-        );
-        // A signed dBm parses (the field is i8, so a negative request is valid).
-        assert_eq!(
-            cmd(br#"{"op":"set_tx_power","tx_power_dbm":-5}"#),
-            Command::SetTxPower { tx_power_dbm: -5 }
         );
     }
 

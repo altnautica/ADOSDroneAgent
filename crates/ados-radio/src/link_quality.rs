@@ -14,10 +14,33 @@
 //! Fields drive the `wfb-stats.json` link-quality block and the reactive hop
 //! trigger. Parsing is tab/colon split (no regex dependency).
 
+use std::time::{Duration, Instant};
+
 use serde::Serialize;
 
 /// Default stats interval (the `-l 1000` ms → 1 s) used for the bitrate divisor.
 const STATS_INTERVAL_S: f64 = 1.0;
+
+/// How long a decoded uplink interval keeps standing for the link block once the
+/// receivers stop decoding. The ground station's control-plane presence beacon
+/// arrives every 10 s, so a hold just past that keeps a beacon-only link
+/// continuously measured, while a link that has really gone quiet reverts to the
+/// no-measurement block instead of reporting an old reading forever.
+pub const UPLINK_HOLD_MAX: Duration = Duration::from_secs(12);
+
+/// Two decoded intervals from different receivers count as the same stats
+/// interval when they arrive within this window; the busier one then wins.
+const SAME_INTERVAL: Duration = Duration::from_millis(1500);
+
+/// The drone-side receiver a link measurement came from. Both decode the ground
+/// station's one shared uplink transmitter: the control receiver hears its
+/// presence beacons and hop acks, the aux receiver the continuous GCS stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UplinkPlane {
+    Control,
+    Aux,
+}
 
 /// A one-glance verdict on WHY the RX link is or is not carrying data, derived
 /// from the `wfb_rx` PKT counters. `all` (packets captured off-air, pre-decrypt)
@@ -85,6 +108,14 @@ pub struct LinkStats {
     /// jammed / healthy / searching).
     pub link_diag: LinkDiag,
     pub timestamp: String,
+    /// The uplink receiver whose decoded interval this block reports. `None`
+    /// for the no-measurement block and on a ground station.
+    pub uplink_plane: Option<UplinkPlane>,
+    /// When the decoded interval behind this block arrived. A block held across
+    /// intervals that decoded nothing keeps its original instant, so its age is
+    /// visible rather than passed off as current.
+    #[serde(skip)]
+    pub measured_at: Option<Instant>,
 }
 
 impl LinkStats {
@@ -114,6 +145,13 @@ impl LinkStats {
     pub fn valid_packets_per_s(&self) -> f64 {
         self.packets_received.max(0) as f64 / STATS_INTERVAL_S
     }
+
+    /// Milliseconds since the decoded interval behind this block, or `None` when
+    /// the block carries no timed measurement.
+    pub fn age_ms(&self, now: Instant) -> Option<u64> {
+        self.measured_at
+            .map(|at| now.saturating_duration_since(at).as_millis() as u64)
+    }
 }
 
 impl Default for LinkStats {
@@ -138,6 +176,8 @@ impl Default for LinkStats {
             loss_percent: 0.0,
             link_diag: LinkDiag::Searching,
             timestamp: String::new(),
+            uplink_plane: None,
+            measured_at: None,
         }
     }
 }
@@ -335,9 +375,87 @@ impl LinkQualityMonitor {
             loss_percent: (loss_pct * 100.0).round() / 100.0,
             link_diag,
             timestamp: now_iso.to_string(),
+            uplink_plane: None,
+            measured_at: None,
         };
         self.latest = stats.clone();
         stats
+    }
+}
+
+/// Folds every drone-side uplink receiver's stats into the one link block.
+///
+/// The block reports whichever receiver decoded packets most recently: the
+/// control receiver alone decodes a packet only every few seconds (presence
+/// beacons, hop acks) while the aux receiver decodes the continuous GCS stream,
+/// so measuring from one plane alone left the block empty most of the time. A
+/// decoded interval is then held, with its age, across intervals that decode
+/// nothing, until [`UPLINK_HOLD_MAX`] passes.
+#[derive(Debug, Default)]
+pub struct UplinkAggregator {
+    held: Option<LinkStats>,
+}
+
+impl UplinkAggregator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Fold one receiver snapshot and return the block to publish.
+    pub fn observe(&mut self, plane: UplinkPlane, stats: LinkStats, now: Instant) -> LinkStats {
+        self.expire(now);
+        if stats.is_measured() && self.supersedes_held(plane, &stats, now) {
+            let block = LinkStats {
+                uplink_plane: Some(plane),
+                measured_at: Some(now),
+                ..stats
+            };
+            self.held = Some(block.clone());
+            return block;
+        }
+        match &self.held {
+            Some(h) => h.clone(),
+            None => stats,
+        }
+    }
+
+    /// Whether a decoded interval from `plane` replaces the held measurement: it
+    /// does when nothing is held, when it is the same receiver's newer interval,
+    /// when the held one is from an earlier interval, or when it decoded at least
+    /// as much in the same interval.
+    fn supersedes_held(&self, plane: UplinkPlane, stats: &LinkStats, now: Instant) -> bool {
+        match &self.held {
+            None => true,
+            Some(h) => {
+                h.uplink_plane == Some(plane)
+                    || h.age_ms(now)
+                        .is_none_or(|age| age > SAME_INTERVAL.as_millis() as u64)
+                    || stats.packets_received >= h.packets_received
+            }
+        }
+    }
+
+    /// A receiver's stats stream ended (process death). A measurement it took is
+    /// no longer held; the returned block is what remains.
+    pub fn plane_closed(&mut self, plane: UplinkPlane, now: Instant) -> LinkStats {
+        self.expire(now);
+        if self
+            .held
+            .as_ref()
+            .is_some_and(|h| h.uplink_plane == Some(plane))
+        {
+            self.held = None;
+        }
+        self.held.clone().unwrap_or_default()
+    }
+
+    fn expire(&mut self, now: Instant) {
+        if self.held.as_ref().is_some_and(|h| {
+            h.measured_at
+                .is_none_or(|at| now.saturating_duration_since(at) > UPLINK_HOLD_MAX)
+        }) {
+            self.held = None;
+        }
     }
 }
 
@@ -553,5 +671,87 @@ mod tests {
         let m = LinkQualityMonitor::new();
         assert_eq!(m.current().rssi_dbm, -100.0);
         assert_eq!(m.current().packets_received, 0);
+    }
+
+    fn interval(decoded: i64, rssi: f64) -> LinkStats {
+        LinkStats {
+            packets_received: decoded,
+            packets_all: decoded,
+            rssi_dbm: rssi,
+            timestamp: TS.to_string(),
+            ..LinkStats::default()
+        }
+    }
+
+    #[test]
+    fn the_aux_uplink_measures_the_link_while_the_control_plane_is_quiet() {
+        let t0 = Instant::now();
+        let mut agg = UplinkAggregator::new();
+        // The control receiver's interval between presence beacons decodes nothing.
+        let s = agg.observe(UplinkPlane::Control, interval(0, -100.0), t0);
+        assert!(!s.is_measured());
+        // The aux receiver decodes the continuous GCS stream in the same second.
+        let s = agg.observe(
+            UplinkPlane::Aux,
+            interval(48, -52.0),
+            t0 + Duration::from_millis(200),
+        );
+        assert!(s.is_measured());
+        assert_eq!(s.uplink_plane, Some(UplinkPlane::Aux));
+        assert_eq!(s.rssi_dbm, -52.0);
+        // The next quiet control interval does not blank the block: the aux
+        // measurement is held, and its age shows how old it is.
+        let now = t0 + Duration::from_millis(1200);
+        let s = agg.observe(UplinkPlane::Control, interval(0, -100.0), now);
+        assert_eq!(s.packets_received, 48);
+        assert_eq!(s.uplink_plane, Some(UplinkPlane::Aux));
+        assert_eq!(s.age_ms(now), Some(1000));
+    }
+
+    #[test]
+    fn a_held_measurement_expires_after_the_hold_window() {
+        let t0 = Instant::now();
+        let mut agg = UplinkAggregator::new();
+        agg.observe(UplinkPlane::Control, interval(1, -60.0), t0);
+        let inside = t0 + UPLINK_HOLD_MAX;
+        assert!(agg
+            .observe(UplinkPlane::Control, interval(0, -100.0), inside)
+            .is_measured());
+        let past = inside + Duration::from_millis(1);
+        let s = agg.observe(UplinkPlane::Control, interval(0, -100.0), past);
+        assert!(!s.is_measured());
+        assert_eq!(s.uplink_plane, None);
+        assert_eq!(s.age_ms(past), None);
+    }
+
+    #[test]
+    fn the_busier_receiver_wins_within_one_interval() {
+        let t0 = Instant::now();
+        let mut agg = UplinkAggregator::new();
+        agg.observe(UplinkPlane::Aux, interval(40, -50.0), t0);
+        // A lone beacon on the control plane in the same second does not displace
+        // the aux interval's richer measurement.
+        let s = agg.observe(
+            UplinkPlane::Control,
+            interval(1, -58.0),
+            t0 + Duration::from_millis(300),
+        );
+        assert_eq!(s.uplink_plane, Some(UplinkPlane::Aux));
+        // A later interval from the control plane is newer and replaces it.
+        let s = agg.observe(
+            UplinkPlane::Control,
+            interval(1, -58.0),
+            t0 + Duration::from_millis(2000),
+        );
+        assert_eq!(s.uplink_plane, Some(UplinkPlane::Control));
+    }
+
+    #[test]
+    fn a_closed_receiver_stops_standing_for_the_link() {
+        let t0 = Instant::now();
+        let mut agg = UplinkAggregator::new();
+        agg.observe(UplinkPlane::Aux, interval(40, -50.0), t0);
+        let s = agg.plane_closed(UplinkPlane::Aux, t0 + Duration::from_millis(100));
+        assert!(!s.is_measured());
     }
 }

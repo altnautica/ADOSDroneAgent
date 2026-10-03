@@ -42,6 +42,12 @@
 //! ingress, which `wfb_tx` radiates. `publish` is the INBOUND direction, and it
 //! is a separate op because this service does not own the receive side.
 //!
+//! On a drone `send` accepts only `AppStream` (8) frames that decode. The
+//! downlink also carries the vehicle's MAVLink, relay RPC responses, status,
+//! identity and the config tunnel; the services that produce those write their
+//! frames straight to the transmit ingress after an `open`, so `send` is only
+//! ever a plugin's path and never needs any other channel.
+//!
 //! The aux-RX loopback port that `wfb_rx -p3` decodes onto is owned by
 //! `ados-mavlink-router`'s aux-uplink consumer, which needs it for the MAVLink,
 //! relay-RPC, link-feedback and config-tunnel channels on that same lane. This
@@ -441,10 +447,13 @@ async fn apply(cmd: Command, state: &AuxCmdState) -> Value {
             }
             match &state.lane {
                 AuxLane::Radio { proc, cfg } => {
+                    if let Some(refusal) = downlink_send_refusal(&frame) {
+                        return refusal;
+                    }
                     if !proc.lock().await.aux_active() {
                         return json!({"ok": false, "error": "E_AUX_NOT_OPEN"});
                     }
-                    // Write the already-aux-framed datagram to the local aux
+                    // Write the validated aux-framed datagram to the local aux
                     // transmit ingress; wfb_tx radiates it and the paired node's
                     // aux-rx re-emits it to its own subscribers. A fresh socket
                     // per send (bound to an ephemeral port) is dropped after the
@@ -470,6 +479,21 @@ async fn apply(cmd: Command, state: &AuxCmdState) -> Value {
             }
         }
         Command::Publish { channel, payload } => state.publish(channel, payload),
+    }
+}
+
+/// Why a `send` frame may not go onto a drone's aux downlink, or `None` when it
+/// may.
+///
+/// That downlink also carries the vehicle's MAVLink, relay RPC responses and the
+/// config tunnel, which the ground station trusts as coming from the drone's own
+/// services. A socket client may only emit application stream traffic; anything
+/// else, and any frame that does not decode, is refused rather than radiated.
+fn downlink_send_refusal(frame: &[u8]) -> Option<Value> {
+    match aux_mux::decode(frame) {
+        Ok((AuxChannel::AppStream, _)) => None,
+        Ok(_) => Some(json!({"ok": false, "error": "E_BAD_CHANNEL"})),
+        Err(e) => Some(json!({"ok": false, "error": format!("E_BAD_FRAME: {e:?}")})),
     }
 }
 
@@ -844,5 +868,37 @@ mod tests {
             "E_AUX_DISABLED"
         );
         assert_nothing_radiated(&wire).await;
+    }
+
+    #[test]
+    fn the_drone_downlink_accepts_only_application_stream_frames() {
+        // The downlink carries the vehicle's MAVLink, relay RPC responses and the
+        // config tunnel; a socket client must not be able to forge any of them.
+        for channel in [
+            AuxChannel::Mavlink,
+            AuxChannel::Request,
+            AuxChannel::Response,
+            AuxChannel::Status,
+            AuxChannel::Identity,
+            AuxChannel::LinkFeedback,
+            AuxChannel::ConfigTunnel,
+            AuxChannel::AppCommand,
+        ] {
+            let frame = aux_mux::encode(channel, &[0xFD, 0x09]).unwrap();
+            assert_eq!(
+                downlink_send_refusal(&frame).unwrap()["error"],
+                "E_BAD_CHANNEL",
+                "channel {}",
+                channel as u8
+            );
+        }
+        let mut truncated = aux_mux::encode(AuxChannel::AppStream, b"hello").unwrap();
+        truncated.pop();
+        assert!(downlink_send_refusal(&truncated).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("E_BAD_FRAME"));
+        let ok = aux_mux::encode(AuxChannel::AppStream, b"hello").unwrap();
+        assert_eq!(downlink_send_refusal(&ok), None);
     }
 }

@@ -61,17 +61,19 @@ pub(crate) async fn ensure_monitor_and_channel(iface: &str, channel: u8) -> bool
 /// configured floor un-mutes once the interface cycle precedes the set).
 const PHY_RADIATE_MAX_ATTEMPTS: u32 = 4;
 
-/// Apply TX power AND confirm the PHY is actually radiating — i.e. the txpower
-/// readback is off the muted not-permitted floor. Under the unrestricted posture
+/// Apply TX power AND confirm the PHY is actually radiating on `channel` — i.e.
+/// the channel reads back as `channel` and the txpower readback is off the muted
+/// not-permitted floor. Under the unrestricted posture
 /// `set_tx_power_modal` returns `Some` even on a muted readback (it surfaces the
 /// honest rf_unverified signal and lets bring-up continue), so a bare call
 /// cannot distinguish a radiating PHY from a muted one. wfb_tx injecting into a
 /// muted PHY fails every `sendmsg` with ENOBUFS (tx_bytes frozen) and the
 /// liveness watchdog then kills + respawns wfb_tx forever with no effect. Each
 /// attempt re-runs the proven down -> monitor -> up -> channel cycle right before
-/// the txpower set, then verifies the readback. Returns the effective dBm once
-/// the readback is non-muted, or `None` if it stays muted after every attempt —
-/// the caller must NOT start wfb_tx on a `None` (park and retry bring-up).
+/// the txpower set, then verifies both readbacks: the interface cycle can drop
+/// the channel, and a mis-tuned interface radiates nothing the peer can decode.
+/// Returns the effective dBm once both hold, or `None` if they do not after
+/// every attempt — the caller must NOT start (or keep) wfb_tx on a `None`.
 pub(crate) async fn ensure_radiating(
     iface: &str,
     channel: u8,
@@ -86,7 +88,15 @@ pub(crate) async fn ensure_radiating(
         // right before the txpower set. set_monitor_mode_verified refuses the
         // operator's control interface, so this can never sever management.
         ados_radio::adapter::set_monitor_mode_verified(iface, 2).await;
-        set_channel(iface, channel).await;
+        if !set_channel(iface, channel).await {
+            tracing::warn!(
+                iface,
+                channel,
+                attempt,
+                "wfb_phy_channel_unverified_retry: re-cycling interface"
+            );
+            continue;
+        }
         let applied = ados_radio::adapter::set_tx_power_modal(iface, dbm, unrestricted).await;
         let live = ados_radio::adapter::read_tx_power(iface).await;
         if let Some(dbm_live) = live {

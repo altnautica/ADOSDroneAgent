@@ -28,7 +28,7 @@ def _healthy_but_lossy() -> dict:
         "link_diag": "healthy",
         "state": "active",
         "rssi_dbm": -36.0,
-        "channel": 149,
+        "actual_channel": 149,
         "packets_received": 485,
         "packets_all": 486,
         "decrypt_errors": 0,
@@ -99,7 +99,7 @@ def _transmit_only_drone() -> dict:
     return {
         "link_diag": "healthy",
         "state": "active",
-        "channel": 149,
+        "actual_channel": 149,
         # Every local counter is the sentinel. This never changes in flight.
         "packets_received": 0,
         "packets_all": 0,

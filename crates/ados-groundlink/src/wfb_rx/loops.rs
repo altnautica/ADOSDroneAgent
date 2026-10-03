@@ -355,7 +355,7 @@ mod tests {
             "state": "searching",
             "link_state": "searching",
             "interface": "wlan1",
-            "channel": 149,
+            "actual_channel": 149,
             "packets_received": 0,
             "packets_all": 0,
             "bitrate_kbps": 0,
@@ -434,7 +434,7 @@ mod tests {
         assert!(gate.admit(&idle_snapshot(0), 0.0));
         assert!(!gate.admit(&idle_snapshot(1), 1.0));
         let mut moved = idle_snapshot(2);
-        moved["channel"] = json!(165);
+        moved["actual_channel"] = json!(165);
         assert!(gate.admit(&moved, 2.0));
     }
 

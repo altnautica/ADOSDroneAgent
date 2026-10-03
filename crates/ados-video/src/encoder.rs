@@ -391,15 +391,22 @@ impl std::fmt::Display for EncoderError {
 
 impl std::error::Error for EncoderError {}
 
-/// The effective GOP (keyframe) interval for a camera. An explicit
-/// `keyframe_interval` (frames) wins; the default 0 yields a short low-latency
-/// GOP of half a second at the configured fps so radio FEC recovers fast.
+/// The longest GOP (keyframe interval, in frames) any encoder arm is given. At
+/// the default 30 fps that is one second, the most a radio FEC recovery or a
+/// late joiner should ever wait for the next keyframe.
+pub const MAX_GOP_FRAMES: u32 = 30;
+
+/// The effective GOP (keyframe) interval for a camera, always in
+/// `1..=MAX_GOP_FRAMES`. An explicit `keyframe_interval` (frames) wins; the
+/// default 0 yields a short low-latency GOP of half a second at the configured
+/// fps so radio FEC recovers fast.
 fn gop_interval(params: &EncoderParams) -> u32 {
-    if params.keyframe_interval > 0 {
+    let gop = if params.keyframe_interval > 0 {
         params.keyframe_interval
     } else {
-        (params.fps / 2).max(1)
-    }
+        params.fps / 2
+    };
+    gop.clamp(1, MAX_GOP_FRAMES)
 }
 
 /// The H.264 quantizer floor handed to the `h264_v4l2m2m` hardware encoder.
@@ -496,24 +503,21 @@ fn use_omx_encoder(params: &EncoderParams, env: &EncoderEnv) -> bool {
 /// * "auto" (default) → GStreamer-OMX on an Allwinner vendor board (the whole
 ///   point: a USB camera there must hit the HW OMX encoder, not ffmpeg
 ///   libx264), else the probed base kind.
-fn resolve_kind(base: EncoderKind, params: &EncoderParams, env: &EncoderEnv) -> EncoderKind {
+///
+/// A network source never takes the OMX path: that pipeline starts with
+/// `v4l2src`, which cannot open a URL, so it keeps the probed base kind.
+fn resolve_kind(
+    base: EncoderKind,
+    params: &EncoderParams,
+    env: &EncoderEnv,
+    network_source: bool,
+) -> EncoderKind {
+    let omx = !network_source && env.encoder_api == "vendor" && env.has_omxh264videoenc;
     match params.encoder.as_str() {
         "v4l2m2m" => EncoderKind::Ffmpeg,
         "software" => base,
-        "omx" => {
-            if env.encoder_api == "vendor" && env.has_omxh264videoenc {
-                EncoderKind::Gstreamer
-            } else {
-                base
-            }
-        }
-        _ => {
-            if env.encoder_api == "vendor" && env.has_omxh264videoenc {
-                EncoderKind::Gstreamer
-            } else {
-                base
-            }
-        }
+        _ if omx => EncoderKind::Gstreamer,
+        _ => base,
     }
 }
 
@@ -538,7 +542,12 @@ pub fn build_encoder_command(
     validate_codec(&params.codec)?;
     // Apply the per-camera encoder override + board HAL encoder_api before
     // dispatching (builder-private; the probed base kind stays on `params.kind`).
-    let kind = resolve_kind(params.kind, params, env);
+    let kind = resolve_kind(
+        params.kind,
+        params,
+        env,
+        crate::config::is_network_url(source),
+    );
     let cmd = match kind {
         EncoderKind::RpicamVid => build_rpicam_command(params, source, output, env),
         EncoderKind::Ffmpeg => build_ffmpeg_command(params, source, output, camera, env),
@@ -756,7 +765,7 @@ fn build_ffmpeg_command(
 
     let mut cmd: Vec<String> = vec!["ffmpeg".into(), "-y".into()];
 
-    if source.starts_with("rtsp://") || source.starts_with("http://") {
+    if crate::config::is_network_url(source) {
         // Network / IP camera source. Low-latency input; force TCP for RTSP so a
         // lossy link cannot drop RTP packets and truncate frames. UDP is the
         // ffmpeg default for RTSP and a single lost packet shreds an H.264 frame
@@ -767,7 +776,7 @@ fn build_ffmpeg_command(
                 .iter()
                 .map(|s| s.to_string()),
         );
-        if source.starts_with("rtsp://") {
+        if source.starts_with("rtsp://") || source.starts_with("rtsps://") {
             cmd.push("-rtsp_transport".into());
             cmd.push("tcp".into());
         }
@@ -2448,10 +2457,10 @@ mod tests {
             0,
             false,
             false,
-            45,
+            20,
         );
         let got = build(&p, "/dev/video0", RTSP_OUT, &csi(), &rockchip(), false);
-        assert_eq!(flag_value(&got, "--intra").as_deref(), Some("45"));
+        assert_eq!(flag_value(&got, "--intra").as_deref(), Some("20"));
     }
 
     #[test]
@@ -4154,5 +4163,112 @@ mod tests {
         for cmd in [&four, &two] {
             assert!(!cmd.join(" ").contains("intra-refresh"));
         }
+    }
+
+    /// No configured or derived GOP exceeds the ceiling, and none is zero.
+    #[test]
+    fn the_gop_never_leaves_its_bounds() {
+        let long = params_cfg(
+            EncoderKind::Ffmpeg,
+            1280,
+            720,
+            30,
+            4000,
+            "auto",
+            0,
+            false,
+            false,
+            300,
+        );
+        assert_eq!(gop_interval(&long), MAX_GOP_FRAMES);
+        let got = build(
+            &long,
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &rockchip(),
+            false,
+        );
+        assert_eq!(flag_value(&got, "-g").as_deref(), Some("30"));
+        // The derived half-second GOP at a high frame rate is held too.
+        assert_eq!(
+            gop_interval(&params(EncoderKind::Ffmpeg, 1280, 720, 120, 4000)),
+            MAX_GOP_FRAMES
+        );
+        assert_eq!(
+            gop_interval(&params(EncoderKind::Ffmpeg, 1280, 720, 1, 4000)),
+            1
+        );
+    }
+
+    /// A TLS camera URL is a network input like its plain form: ffmpeg reads it
+    /// directly over TCP and never through the V4L2 demuxer.
+    #[test]
+    fn a_tls_network_source_is_read_as_a_network_stream() {
+        for src in ["rtsps://10.0.0.9:322/live", "https://10.0.0.9/live.m3u8"] {
+            let got = build(
+                &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+                src,
+                RTSP_OUT,
+                &ip_cam(),
+                &rockchip(),
+                false,
+            );
+            assert!(!got.join(" ").contains("v4l2 "), "{src}: {got:?}");
+            assert_eq!(flag_value(&got, "-i").as_deref(), Some(src));
+        }
+        let rtsps = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "rtsps://10.0.0.9:322/live",
+            RTSP_OUT,
+            &ip_cam(),
+            &rockchip(),
+            false,
+        );
+        assert_eq!(
+            flag_value(&rtsps, "-rtsp_transport").as_deref(),
+            Some("tcp")
+        );
+    }
+
+    /// On a board whose default route is the OMX GStreamer encoder, a network
+    /// camera still gets the probed ffmpeg builder: the OMX pipeline opens its
+    /// input with `v4l2src`, which cannot read a URL.
+    #[test]
+    fn a_network_source_never_takes_the_omx_capture_pipeline() {
+        for encoder in ["auto", "omx"] {
+            let p = params_cfg(
+                EncoderKind::Ffmpeg,
+                1280,
+                720,
+                30,
+                4000,
+                encoder,
+                0,
+                false,
+                false,
+                0,
+            );
+            let got = build(
+                &p,
+                "rtsp://10.0.0.9:554/live",
+                RTSP_OUT,
+                &ip_cam(),
+                &allwinner_omx(),
+                false,
+            );
+            assert_eq!(got[0], "ffmpeg", "{encoder}: {got:?}");
+            assert!(!got.join(" ").contains("v4l2src"));
+        }
+        // A local camera on the same board still takes the OMX path.
+        let local = build(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            &usb_mjpeg(),
+            &allwinner_omx(),
+            false,
+        );
+        assert!(local.join(" ").contains("omxh264videoenc"));
     }
 }

@@ -130,11 +130,6 @@ pub fn read_config_from(text: &str) -> UsbRehomeConfig {
         enabled: bool,
         #[serde(default)]
         cooldown_s: Option<u64>,
-        /// Legacy. Read so a node that tuned the old escalating schedule keeps
-        /// the pacing it asked for; the fixed cooldown becomes the largest
-        /// value in it, which was that schedule's steady state.
-        #[serde(default)]
-        cooldown_schedule_s: Option<Vec<u64>>,
         #[serde(default)]
         healthy_reset_s: Option<u64>,
         #[serde(default)]
@@ -146,15 +141,7 @@ pub fn read_config_from(text: &str) -> UsbRehomeConfig {
     match serde_norway::from_str::<Raw>(text) {
         Ok(raw) => match raw.network.usb_rehome {
             Some(r) => {
-                let cooldown_s = r
-                    .cooldown_s
-                    .or_else(|| {
-                        r.cooldown_schedule_s
-                            .as_deref()
-                            .and_then(|v| v.iter().copied().max())
-                    })
-                    .unwrap_or(DEFAULT_COOLDOWN_S)
-                    .max(1);
+                let cooldown_s = r.cooldown_s.unwrap_or(DEFAULT_COOLDOWN_S).max(1);
                 UsbRehomeConfig {
                     enabled: r.enabled,
                     cooldown: Duration::from_secs(cooldown_s),
@@ -207,9 +194,11 @@ pub struct UsbRehome {
     trigger: RehomeTrigger,
     machine: RehomeMachine,
     last_tick: Option<Instant>,
-    /// True once the guard has refused the current fault episode, so the
-    /// supervisor stops re-resolving the topology every tick. Cleared when the
-    /// adapter verifies healthy.
+    /// True while the guard is refusing the current fault episode. Only damps
+    /// the `guard_blocked` event to once per episode: every armed attempt
+    /// still re-resolves the topology and re-runs the guard, because what the
+    /// guard refused on (a management link sharing the radio's USB path) can
+    /// change without the radio ever becoming healthy.
     guard_blocked: bool,
     last_result: &'static str,
     events: EventEmitter,
@@ -328,15 +317,11 @@ impl UsbRehome {
                 None
             }
             RehomeStep::Attempt { index } => {
-                if self.guard_blocked {
-                    // Already refused for this fault: do not re-attempt or
-                    // re-resolve the topology; refund the budget and hold.
-                    self.machine.refund_attempt();
-                    None
-                } else {
-                    self.authorize_attempt(unit, &sig, index, cfg.cooldown.as_secs())
-                        .await
-                }
+                // Re-resolved every attempt (the cooldown bounds the cadence):
+                // the radio can only verify healthy after a rehome, so a latch
+                // cleared only by health would never clear.
+                self.authorize_attempt(unit, &sig, index, cfg.cooldown.as_secs())
+                    .await
             }
         };
 
@@ -357,9 +342,11 @@ impl UsbRehome {
         let Some(target) = topo::resolve_usb_topo(&sig.iface).await else {
             // The WFB interface is not USB-backed: nothing to rebind.
             self.machine.refund_attempt();
+            if !self.guard_blocked {
+                self.emit_guard_blocked(&sig.iface, "", "not_usb", cooldown_s);
+            }
             self.guard_blocked = true;
             self.last_result = "guard_blocked";
-            self.emit_guard_blocked(&sig.iface, "", "not_usb", cooldown_s);
             return None;
         };
         let default_iface = crate::mgmt_link_guardian::detection::default_route_iface().await;
@@ -367,16 +354,19 @@ impl UsbRehome {
         let verdict = topo::guard_verdict(&target, &control);
         if verdict != GuardVerdict::Allow {
             self.machine.refund_attempt();
+            if !self.guard_blocked {
+                self.emit_guard_blocked(
+                    &sig.iface,
+                    &target.bind_id,
+                    verdict.reason().unwrap_or("blocked"),
+                    cooldown_s,
+                );
+            }
             self.guard_blocked = true;
             self.last_result = "guard_blocked";
-            self.emit_guard_blocked(
-                &sig.iface,
-                &target.bind_id,
-                verdict.reason().unwrap_or("blocked"),
-                cooldown_s,
-            );
             return None;
         }
+        self.guard_blocked = false;
         self.last_result = "rehoming";
         self.events.emit(
             machine::USB_REHOME_KIND,
@@ -626,41 +616,9 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_escalating_schedule_becomes_its_steady_state_value() {
-        // A node in the field that tuned the old `[10, 30, 60]`-style schedule
-        // asked for a particular steady-state pacing. There is no schedule any
-        // more, so honour that intent by taking the largest rung rather than
-        // silently reverting the node to the shipped default.
-        let cfg =
-            read_config_from("network:\n  usb_rehome:\n    cooldown_schedule_s: [5, 15, 45]\n");
-        assert_eq!(cfg.cooldown, Duration::from_secs(45));
-    }
-
-    #[test]
-    fn an_explicit_cooldown_beats_a_legacy_schedule() {
-        let cfg = read_config_from(
-            "network:\n  usb_rehome:\n    cooldown_s: 7\n    cooldown_schedule_s: [5, 15, 45]\n",
-        );
-        assert_eq!(cfg.cooldown, Duration::from_secs(7));
-    }
-
-    #[test]
-    fn a_zero_or_empty_cooldown_floors_rather_than_hot_looping() {
+    fn a_zero_cooldown_floors_rather_than_hot_looping() {
         let cfg = read_config_from("network:\n  usb_rehome:\n    cooldown_s: 0\n");
         assert_eq!(cfg.cooldown, Duration::from_secs(1));
-        let empty = read_config_from("network:\n  usb_rehome:\n    cooldown_schedule_s: []\n");
-        assert_eq!(empty.cooldown, Duration::from_secs(DEFAULT_COOLDOWN_S));
-    }
-
-    #[test]
-    fn a_stale_max_attempts_key_is_ignored_rather_than_rejected() {
-        // The key is gone from the model. A node that still carries it must
-        // load, not fail: an unparseable config would take the supervisor down
-        // on exactly the nodes this change is for.
-        let cfg =
-            read_config_from("network:\n  usb_rehome:\n    max_attempts: 5\n    cooldown_s: 12\n");
-        assert!(cfg.enabled);
-        assert_eq!(cfg.cooldown, Duration::from_secs(12));
     }
 
     #[test]

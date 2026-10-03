@@ -22,11 +22,11 @@ use std::sync::Arc;
 
 use crate::config::WfbConfig;
 
-// Every plane's stderr goes to a truncated log file. A piped stderr that nobody
-// reads fills its 64 KiB kernel buffer and `wfb_tx` then blocks inside
-// `fprintf(stderr)`: it prints a dropped-packets line every stats interval while
-// the link is congested, so an undrained pipe wedges the transmitter within the
-// hour.
+// Every plane's stderr goes to a log file, emptied at spawn and capped by
+// `cap_plane_logs`. A piped stderr that nobody reads fills its 64 KiB kernel
+// buffer and `wfb_tx` then blocks inside `fprintf(stderr)`: it prints a
+// dropped-packets line every stats interval while the link is congested, so an
+// undrained pipe wedges the transmitter within the hour.
 const DATA_TX_LOG: &str = "/run/ados/wfb-drone-data-tx.log";
 const TX_CONTROL_LOG: &str = "/run/ados/wfb-drone-tx-control.log";
 const RX_CONTROL_LOG: &str = "/run/ados/wfb-drone-rx-control.log";
@@ -82,8 +82,7 @@ impl TxPlaneCounters {
 }
 
 /// True when a Reed-Solomon `(k, n)` ratio is valid for `wfb_tx`: a positive
-/// data-shard count and at least one parity shard (`n > k`). Mirrors the Python
-/// `set_fec` guard `fec_k <= 0 or fec_n <= fec_k`.
+/// data-shard count and at least one parity shard (`n > k`).
 pub fn fec_ratio_valid(fec_k: u8, fec_n: u8) -> bool {
     fec_k != 0 && fec_n > fec_k
 }
@@ -327,7 +326,7 @@ impl WfbProcess {
         key_path: &Path,
         link_id: u32,
     ) -> std::io::Result<Self> {
-        Self::spawn_in_group_piped_stdout(
+        Self::spawn_in_group(
             "wfb_rx",
             &rx_control_args(iface, key_path, link_id),
             RX_CONTROL_LOG,
@@ -356,18 +355,32 @@ impl WfbProcess {
     /// Spawn the **auxiliary rx** `wfb_rx` (radio_id 3, re-emit decoded frames on
     /// 127.0.0.1:`aux_rx_port`). stderr → truncated log file. `link_id` is the
     /// ground station's — the shared aux uplink.
+    ///
+    /// stdout is piped and drained by an owned reader that folds the receiver's
+    /// `-l 1000` stats into the uplink link block: this receiver carries the
+    /// continuous GCS uplink, so it is the drone's busiest uplink measurement.
     pub async fn spawn_aux_rx(
         iface: &str,
         cfg: &WfbConfig,
         key_path: &Path,
         link_id: u32,
+        uplink: Arc<UplinkFeed>,
     ) -> std::io::Result<Self> {
-        Self::spawn_in_group(
+        let mut p = Self::spawn_in_group(
             "wfb_rx",
             &aux_rx_args(iface, cfg, key_path, link_id),
             AUX_RX_LOG,
         )
-        .await
+        .await?;
+        p.stats_task = p.take_stdout().map(|out| {
+            tokio::spawn(stats_reader_loop(
+                out,
+                uplink,
+                crate::link_quality::UplinkPlane::Aux,
+                None,
+            ))
+        });
+        Ok(p)
     }
 
     /// Take the child's stdout handle (for the stats reader). Returns `None` if
@@ -384,31 +397,18 @@ impl WfbProcess {
         stderr_log: &str,
         stats: Arc<TxPlaneCounters>,
     ) -> std::io::Result<Self> {
-        let mut p = Self::spawn_in_group_piped_stdout("wfb_tx", args, stderr_log).await?;
+        let mut p = Self::spawn_in_group("wfb_tx", args, stderr_log).await?;
         p.stats_task = p
             .take_stdout()
             .map(|out| tokio::spawn(tx_stats_reader_loop(out, stats)));
         Ok(p)
     }
 
-    /// Spawn `program` with `args` as a process-group leader (setsid), stderr
-    /// redirected to the truncated `stderr_log` file and stdout discarded.
+    /// Spawn `program` with `args` as a process-group leader (setsid), stdout
+    /// piped for the plane's stats reader and stderr redirected to the plane's
+    /// `stderr_log` file. The caller MUST take and drain stdout: an unread pipe
+    /// fills at 64 KiB and the wfb binary then blocks in `fprintf(stdout)`.
     async fn spawn_in_group(
-        program: &str,
-        args: &[String],
-        stderr_log: &str,
-    ) -> std::io::Result<Self> {
-        let mut cmd = tokio::process::Command::new(program);
-        cmd.args(args)
-            .stdout(std::process::Stdio::null())
-            .stderr(truncated_log(stderr_log)?);
-        Self::finish_spawn(cmd)
-    }
-
-    /// Like [`spawn_in_group`] but pipes stdout (for a stats reader). stderr
-    /// still goes to the truncated `stderr_log` file; setsid + killpg discipline
-    /// is identical.
-    async fn spawn_in_group_piped_stdout(
         program: &str,
         args: &[String],
         stderr_log: &str,
@@ -489,14 +489,53 @@ impl Drop for WfbProcess {
     }
 }
 
-/// Open (create + truncate) a plane's stderr log file.
+/// Open a plane's stderr log file, emptied at spawn. The child gets an
+/// `O_APPEND` descriptor so [`cap_plane_logs`] can truncate the file under a
+/// running process: every write lands at the current end, so the file restarts
+/// small rather than growing a hole up to the child's old write offset.
 fn truncated_log(path: &str) -> std::io::Result<std::process::Stdio> {
     let file = std::fs::OpenOptions::new()
-        .write(true)
+        .append(true)
         .create(true)
-        .truncate(true)
         .open(path)?;
+    file.set_len(0)?;
     Ok(std::process::Stdio::from(file))
+}
+
+/// Size at which a plane's stderr log is emptied. The files live on the RAM
+/// backed `/run`, and a congested `wfb_tx` prints a dropped-packets line every
+/// stats interval for as long as the process runs.
+pub const PLANE_LOG_CAP_BYTES: u64 = 1024 * 1024;
+
+/// Empty every plane stderr log that has grown past [`PLANE_LOG_CAP_BYTES`].
+/// Called on the heartbeat cadence; a missing file is skipped.
+pub async fn cap_plane_logs() {
+    for path in [
+        DATA_TX_LOG,
+        TX_CONTROL_LOG,
+        RX_CONTROL_LOG,
+        AUX_TX_LOG,
+        AUX_RX_LOG,
+    ] {
+        if let Err(e) = cap_log(Path::new(path), PLANE_LOG_CAP_BYTES).await {
+            tracing::debug!(path, error = %e, "plane_log_cap_failed");
+        }
+    }
+}
+
+/// Empty `path` when it is larger than `cap` bytes. Returns whether it did.
+async fn cap_log(path: &Path, cap: u64) -> std::io::Result<bool> {
+    let len = match tokio::fs::metadata(path).await {
+        Ok(m) => m.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if len <= cap {
+        return Ok(false);
+    }
+    let file = tokio::fs::OpenOptions::new().write(true).open(path).await?;
+    file.set_len(0).await?;
+    Ok(true)
 }
 
 /// The wfb-ng radio port (`-p`) the video data plane occupies. Also selects its
@@ -535,9 +574,13 @@ pub struct RadioProcesses {
     pub tx_control: WfbProcess,
     pub rx_control: WfbProcess,
     /// The task reading the rx-control receiver's stdout stats stream into the
-    /// shared `LinkStats`. `None` only when the stdout handle could not be
-    /// taken, which would leave the link block at its no-measurement defaults.
+    /// uplink link block. `None` only when the stdout handle could not be
+    /// taken, which would leave the control plane unmeasured.
     stats_reader: Option<tokio::task::JoinHandle<()>>,
+    /// The uplink link block both uplink receivers (rx-control and aux rx) feed.
+    /// Replaced on a whole-group respawn: a hop moves to a new channel, so a
+    /// measurement held from the old one no longer describes the link.
+    uplink: Arc<UplinkFeed>,
     /// Each transmit plane's cumulative stats totals, fed by the reader every
     /// `WfbProcess` of that plane owns. Process-lifetime handles: a hop respawn,
     /// a retune respawn or an aux restart keeps counting on the same totals, so
@@ -652,7 +695,9 @@ impl RadioProcesses {
             WfbProcess::spawn_tx_control(iface, cfg, key_path, own_link_id, control_stats.clone())
                 .await?;
         let mut rx_control = WfbProcess::spawn_rx_control(iface, key_path, uplink_link_id).await?;
-        let stats_reader = Self::spawn_stats_reader(&mut rx_control, link, rx_stats_lines.clone());
+        let uplink = UplinkFeed::new(link);
+        let stats_reader =
+            Self::spawn_stats_reader(&mut rx_control, uplink.clone(), rx_stats_lines.clone());
 
         tracing::info!(
             fleet_id = cfg.fleet_id,
@@ -667,6 +712,7 @@ impl RadioProcesses {
             tx_control,
             rx_control,
             stats_reader,
+            uplink,
             data_stats,
             control_stats,
             aux_stats: Arc::new(TxPlaneCounters::default()),
@@ -687,8 +733,8 @@ impl RadioProcesses {
         })
     }
 
-    /// Take the rx-control receiver's stdout and spawn the reader that feeds the
-    /// shared `LinkStats` from its `-l 1000` stats stream.
+    /// Take the rx-control receiver's stdout and spawn the reader that folds its
+    /// `-l 1000` stats stream into the uplink link block.
     ///
     /// The handle MUST be taken, not left: that pipe has a 64 KiB kernel buffer
     /// and `wfb_rx` prints its stats with a blocking `fprintf(stdout)`, so an
@@ -697,13 +743,18 @@ impl RadioProcesses {
     /// two can never diverge on which stream the link block is measured from.
     fn spawn_stats_reader(
         rx_control: &mut WfbProcess,
-        link: std::sync::Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
+        uplink: Arc<UplinkFeed>,
         rx_stats_lines: Arc<AtomicU64>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         match rx_control.take_stdout() {
-            Some(out) => Some(tokio::spawn(stats_reader_loop(out, link, rx_stats_lines))),
+            Some(out) => Some(tokio::spawn(stats_reader_loop(
+                out,
+                uplink,
+                crate::link_quality::UplinkPlane::Control,
+                Some(rx_stats_lines),
+            ))),
             None => {
-                tracing::warn!("rx_control_stdout_unavailable: link stats will stay unmeasured");
+                tracing::warn!("rx_control_stdout_unavailable: control plane stays unmeasured");
                 None
             }
         }
@@ -1035,6 +1086,7 @@ impl RadioProcesses {
             cfg,
             &key_path,
             self.uplink_link_id,
+            self.uplink.clone(),
         )
         .await
         {
@@ -1109,8 +1161,14 @@ impl RadioProcesses {
             self.aux_stats.clone(),
         )
         .await;
-        let aux_rx =
-            WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path, self.uplink_link_id).await;
+        let aux_rx = WfbProcess::spawn_aux_rx(
+            &self.iface,
+            &aux_cfg,
+            &key_path,
+            self.uplink_link_id,
+            self.uplink.clone(),
+        )
+        .await;
         match (aux_tx, aux_rx) {
             (Ok(tx), Ok(rx)) => {
                 self.aux_tx = Some(tx);
@@ -1196,8 +1254,12 @@ impl RadioProcesses {
                     return false;
                 }
             };
-        let stats_reader =
-            Self::spawn_stats_reader(&mut rx_control, link, self.rx_stats_lines.clone());
+        self.uplink = UplinkFeed::new(link);
+        let stats_reader = Self::spawn_stats_reader(
+            &mut rx_control,
+            self.uplink.clone(),
+            self.rx_stats_lines.clone(),
+        );
         self.data_tx = data_tx;
         self.tx_control = tx_control;
         self.rx_control = rx_control;
@@ -1218,9 +1280,14 @@ impl RadioProcesses {
                 self.aux_stats.clone(),
             )
             .await;
-            let aux_rx =
-                WfbProcess::spawn_aux_rx(&self.iface, &aux_cfg, &key_path, self.uplink_link_id)
-                    .await;
+            let aux_rx = WfbProcess::spawn_aux_rx(
+                &self.iface,
+                &aux_cfg,
+                &key_path,
+                self.uplink_link_id,
+                self.uplink.clone(),
+            )
+            .await;
             match (aux_tx, aux_rx) {
                 (Ok(tx), Ok(rx)) => {
                     self.aux_tx = Some(tx);
@@ -1307,15 +1374,50 @@ impl RadioProcesses {
     }
 }
 
-/// Read `wfb_rx` stdout line-by-line, feed the link-quality monitor, and update
-/// the shared `LinkStats` the sidecar + reactive-hop logic read. Every stats
-/// line also advances `rx_stats_lines`. Ends on EOF (process death) or task
-/// abort; on EOF the link block returns to its no-measurement defaults so a
-/// dead receiver's last reading is never reported as live.
+/// The drone's uplink link block, fed by every uplink receiver's stats reader.
+/// The aggregator lock is held while the block is published, so two readers can
+/// never publish out of order.
+pub struct UplinkFeed {
+    agg: tokio::sync::Mutex<crate::link_quality::UplinkAggregator>,
+    link: Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
+}
+
+impl UplinkFeed {
+    fn new(link: Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>) -> Arc<Self> {
+        Arc::new(Self {
+            agg: tokio::sync::Mutex::new(crate::link_quality::UplinkAggregator::new()),
+            link,
+        })
+    }
+
+    async fn observe(
+        &self,
+        plane: crate::link_quality::UplinkPlane,
+        stats: crate::link_quality::LinkStats,
+    ) {
+        let mut agg = self.agg.lock().await;
+        let block = agg.observe(plane, stats, std::time::Instant::now());
+        *self.link.lock().await = block;
+    }
+
+    async fn plane_closed(&self, plane: crate::link_quality::UplinkPlane) {
+        let mut agg = self.agg.lock().await;
+        let block = agg.plane_closed(plane, std::time::Instant::now());
+        *self.link.lock().await = block;
+    }
+}
+
+/// Read one uplink `wfb_rx`'s stdout line-by-line, feed its link-quality
+/// monitor, and fold every snapshot into the shared uplink block the sidecar and
+/// reactive-hop logic read. Every stats line also advances `rx_stats_lines` when
+/// given (the control plane's watchdog counter). Ends on EOF (process death) or
+/// task abort; on EOF this receiver's measurement stops standing for the link,
+/// so a dead receiver's last reading is never reported as live.
 async fn stats_reader_loop(
     stdout: tokio::process::ChildStdout,
-    link: std::sync::Arc<tokio::sync::Mutex<crate::link_quality::LinkStats>>,
-    rx_stats_lines: Arc<AtomicU64>,
+    uplink: Arc<UplinkFeed>,
+    plane: crate::link_quality::UplinkPlane,
+    rx_stats_lines: Option<Arc<AtomicU64>>,
 ) {
     use tokio::io::AsyncBufReadExt;
     let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -1323,11 +1425,13 @@ async fn stats_reader_loop(
     while let Ok(Some(line)) = lines.next_line().await {
         let now_iso = now_iso();
         if let Some(stats) = mon.feed_line(&line, &now_iso) {
-            rx_stats_lines.fetch_add(1, Ordering::Relaxed);
-            *link.lock().await = stats;
+            if let Some(n) = &rx_stats_lines {
+                n.fetch_add(1, Ordering::Relaxed);
+            }
+            uplink.observe(plane, stats).await;
         }
     }
-    *link.lock().await = crate::link_quality::LinkStats::default();
+    uplink.plane_closed(plane).await;
 }
 
 /// Drain a `wfb_tx` plane's stdout and fold every stats line into its plane's
@@ -1374,6 +1478,44 @@ mod tests {
             .expect("a plane writing 256 KiB of stderr must not block");
         assert!(exited.unwrap().success());
         assert_eq!(std::fs::metadata(&log).unwrap().len(), 262_144);
+    }
+
+    /// Capping a running plane's log empties it for good: the plane keeps
+    /// writing at the new end of the file rather than at its old offset, which
+    /// would leave the file as large as before with a hole at the front.
+    #[tokio::test]
+    async fn a_capped_log_restarts_small_under_a_running_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("plane.log");
+        let go = dir.path().join("go");
+        let script = format!(
+            "head -c 4096 /dev/zero >&2; while [ ! -e '{}' ]; do sleep 0.02; done; \
+             head -c 10 /dev/zero >&2",
+            go.display()
+        );
+        let args = vec!["-c".to_string(), script];
+        let mut p = WfbProcess::spawn_in_group("sh", &args, log.to_str().unwrap())
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::metadata(&log).unwrap().len() < 4096 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the plane never wrote"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !cap_log(&log, 4096).await.unwrap(),
+            "at the cap is not over it"
+        );
+        assert!(cap_log(&log, 1024).await.unwrap());
+        std::fs::write(&go, b"").unwrap();
+        let exited = tokio::time::timeout(std::time::Duration::from_secs(10), p.inner.wait())
+            .await
+            .expect("the plane finishes");
+        assert!(exited.unwrap().success());
+        assert_eq!(std::fs::metadata(&log).unwrap().len(), 10);
     }
 
     /// A transmitter's own per-second stats lines accumulate into its plane's

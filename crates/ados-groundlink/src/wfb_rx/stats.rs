@@ -385,8 +385,8 @@ pub fn build_gs_stats(
         // "not degraded" is a health claim only a real enumeration can back.
         "adapter_usb_speed_mbps": adapter.usb_speed_mbps,
         "adapter_usb_degraded": adapter.usb_speed_mbps.map(|_| adapter.usb_degraded),
-        // Back-compat alias: `channel` now reflects the LIVE interface channel.
-        "channel": channels.actual,
+        // The LIVE interface channel, the rendezvous home and the channel the
+        // pair is operating on after any committed hop.
         "actual_channel": channels.actual,
         "rendezvous_channel": channels.rendezvous,
         "operating_channel": channels.operating,
@@ -556,8 +556,6 @@ mod tests {
         assert_eq!(v["interface"], "wlan1");
         assert_eq!(v["adapter_chipset"], "rtl88x2eu");
         assert_eq!(v["adapter_injection_ok"], true);
-        // `channel` is the back-compat alias for the LIVE actual channel.
-        assert_eq!(v["channel"], 157);
         assert_eq!(v["actual_channel"], 157);
         assert_eq!(v["rendezvous_channel"], 149);
         assert_eq!(v["operating_channel"], 149);

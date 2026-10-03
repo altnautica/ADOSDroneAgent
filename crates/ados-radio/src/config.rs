@@ -657,6 +657,7 @@ impl WfbConfig {
         ados_config::write_config_status("radio", cfg_err.as_deref());
         let mut cfg = raw.video.wfb;
         cfg.guard_aux_ports();
+        cfg.guard_tx_power();
         cfg
     }
 
@@ -674,6 +675,24 @@ impl WfbConfig {
                 "aux_port_collision: auxiliary stream disabled (port collides with a data/control plane or itself)"
             );
             self.aux_enable = false;
+        }
+    }
+
+    /// Hold the boot TX power inside `1..=tx_power_max_dbm`. A hand-edited power
+    /// above the ceiling would bring the adapter up past the budget the ceiling
+    /// exists to enforce (host-VBUS brownout, regulatory limit), so it is pulled
+    /// down to the ceiling and logged. Idempotent.
+    pub fn guard_tx_power(&mut self) {
+        let max = self.tx_power_max_dbm.max(1);
+        let bounded = self.tx_power_dbm.clamp(1, max);
+        if bounded != self.tx_power_dbm {
+            tracing::warn!(
+                tx_power_dbm = self.tx_power_dbm,
+                tx_power_max_dbm = self.tx_power_max_dbm,
+                applied_dbm = bounded,
+                "tx_power_out_of_budget: boot power held inside the configured ceiling"
+            );
+            self.tx_power_dbm = bounded;
         }
     }
 

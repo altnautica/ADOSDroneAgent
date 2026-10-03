@@ -57,6 +57,11 @@ pub const MCS_STEP_DOWN_REQUIRED_BAD_SAMPLES: u32 = 2;
 /// The lowest rung the ladder will select.
 pub const MCS_FLOOR: u8 = 1;
 
+/// Consecutive controller ticks with no usable link sample before the ladder
+/// falls back to [`MCS_FLOOR`]. A sample already counts as unusable once the
+/// peer report is stale, so this only absorbs a single missed tick.
+pub const NO_SAMPLE_FLOOR_TICKS: u32 = 2;
+
 /// The highest rung the ladder will select regardless of configuration or SNR.
 /// MCS 6/7 are 64-QAM 3/4 and 5/6: they need 21+ dB and buy little over MCS 5 on
 /// a 20 MHz channel, and nothing in this tree has measured them on the RTL8812EU.
@@ -168,6 +173,8 @@ pub struct McsLadder {
     last_down_at: Option<Instant>,
     last_up_at: Option<Instant>,
     last_reason: String,
+    /// Consecutive ticks with no usable link sample. Reset by any real sample.
+    no_sample_streak: u32,
 }
 
 impl McsLadder {
@@ -186,6 +193,7 @@ impl McsLadder {
             last_down_at: None,
             last_up_at: None,
             last_reason: "initial".to_string(),
+            no_sample_streak: 0,
         }
     }
 
@@ -231,6 +239,7 @@ impl McsLadder {
     /// (past the step-up cooldown) climb exactly one rung. A sample supporting
     /// exactly the live rung decays both streaks and holds.
     pub fn decide(&mut self, snr_db: f64, now: Instant) -> Option<u8> {
+        self.no_sample_streak = 0;
         let target = target_mcs(snr_db, self.cap);
 
         if target < self.current {
@@ -271,6 +280,28 @@ impl McsLadder {
         self.bad_streak = self.bad_streak.saturating_sub(1);
         self.good_streak = self.good_streak.saturating_sub(1);
         None
+    }
+
+    /// Fold one tick that had no usable link sample and return the rung to
+    /// apply, or `None` to hold.
+    ///
+    /// Link feedback most often stops because the link got worse, and a peer
+    /// that decodes nothing reports exactly that. Holding a high rung then keeps
+    /// the downlink dead at range, so after [`NO_SAMPLE_FLOOR_TICKS`] such ticks
+    /// in a row the ladder drops straight to [`MCS_FLOOR`], ignoring the
+    /// step-down cooldown. It stays there until real samples earn a climb.
+    pub fn decide_no_sample(&mut self, now: Instant) -> Option<u8> {
+        self.no_sample_streak = self.no_sample_streak.saturating_add(1);
+        self.bad_streak = 0;
+        self.good_streak = 0;
+        if self.no_sample_streak < NO_SAMPLE_FLOOR_TICKS || self.current <= MCS_FLOOR {
+            return None;
+        }
+        let from = self.current;
+        self.current = MCS_FLOOR;
+        self.last_down_at = Some(now);
+        self.last_reason = format!("no_sample_down_{from}_to_{MCS_FLOOR}");
+        Some(MCS_FLOOR)
     }
 }
 
@@ -536,6 +567,42 @@ mod tests {
             now += STEP_UP_COOLDOWN;
         }
         assert_eq!(l.current(), 1);
+    }
+
+    /// A climbed ladder whose link feedback goes stale falls to the floor rather
+    /// than holding the high rung the link can no longer carry, and stays there
+    /// until real samples earn a climb.
+    #[test]
+    fn losing_every_link_sample_drops_the_ladder_to_the_floor() {
+        let t0 = Instant::now();
+        let mut l = McsLadder::new(3, 3);
+        // The step-down cooldown is running from a recent drop; the fail-safe
+        // does not wait for it.
+        l.last_down_at = Some(t0);
+        for _ in 1..NO_SAMPLE_FLOOR_TICKS {
+            assert_eq!(l.decide_no_sample(t0), None);
+        }
+        assert_eq!(l.decide_no_sample(t0), Some(MCS_FLOOR));
+        assert_eq!(l.current(), MCS_FLOOR);
+        assert_eq!(l.decide_no_sample(t0), None, "already on the floor");
+        // A fresh strong sample starts the climb from the floor, one rung at a time.
+        let mut now = t0 + STEP_UP_COOLDOWN;
+        for _ in 1..STEP_UP_REQUIRED_CLEAN_SAMPLES {
+            assert_eq!(l.decide(35.0, now), None);
+        }
+        now += Duration::from_millis(1);
+        assert_eq!(l.decide(35.0, now), Some(2));
+    }
+
+    /// One missed tick between real samples does not reset a healthy rung.
+    #[test]
+    fn a_single_missed_sample_holds_the_rung() {
+        let t0 = Instant::now();
+        let mut l = McsLadder::new(3, 3);
+        assert_eq!(l.decide_no_sample(t0), None);
+        assert_eq!(l.decide(22.0, t0), None);
+        assert_eq!(l.decide_no_sample(t0), None);
+        assert_eq!(l.current(), 3);
     }
 
     /// Every rung's trip threshold clears its own required SNR with real margin,

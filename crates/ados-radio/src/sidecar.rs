@@ -247,11 +247,8 @@ pub(crate) fn build_stats_value(
         // state-machine value never collides with the legacy `state` consumers.
         "link_state": state,
         "interface": interface,
-        // Back-compat alias: `channel` now reflects the LIVE interface channel
-        // (was the configured value). Readers that only know the old key still
-        // get reality. The split-out actual/rendezvous/operating fields below
-        // carry the full truth.
-        "channel": channels.actual,
+        // The LIVE interface channel, the rendezvous home and the channel the
+        // pair is operating on after any committed hop.
         "actual_channel": channels.actual,
         "rendezvous_channel": channels.rendezvous,
         "operating_channel": channels.operating,
@@ -347,26 +344,21 @@ pub(crate) fn build_stats_value(
         // position alongside the live FEC so an adaptive step is legible).
         "recommended_tier_idx": bitrate.tier_idx,
         "recommended_tier_name": bitrate.tier_name,
-        // Which measurement drove the rung: "local" (this node's own receiver),
-        // "peer" (the receiving station's report of what it decoded, the only
-        // honest source for a transmit-only node), or "none" (no usable sample,
-        // so the rung is held or driven by queue congestion). Without this a
-        // rung held for want of any signal is indistinguishable from one chosen
-        // on a good sample — which is exactly how a permanently top-rung ladder
-        // read as healthy.
+        // Which measurement drove the rung: "peer" (the receiving station's
+        // report of what it decoded, the only measurement of this node's
+        // downlink) or "none" (no usable sample, so the modulation rung falls to
+        // its floor and the bitrate rung follows queue congestion). Without this
+        // a rung chosen for want of any signal is indistinguishable from one
+        // chosen on a good sample.
         "sample_source": bitrate.sample_source,
-        // The loss the `sample_source` measurement actually carries, or null
+        // The downlink loss the `sample_source` measurement carries, or null
         // when there is no usable sample.
         //
-        // `loss_percent` below is this node's OWN counter, and on a drone that
-        // is permanently zero: it transmits its own downlink and a single radio
-        // in monitor mode cannot capture its own injected frames. So every
-        // delivery verdict keyed on the local counter was structurally dead on
-        // the one node type that most needs it, while the ground station's
-        // measurement of that same downlink arrived, fed the ladder, and was
-        // never surfaced. This is that measurement, published beside the source
-        // that identifies who took it — a loss figure whose provenance is
-        // invisible is one an operator cannot act on.
+        // `loss_percent` below is this node's OWN receive counter, which
+        // measures the uplink, the other direction. The ground station's
+        // measurement of the downlink is published here beside the source that
+        // identifies who took it — a loss figure whose provenance is invisible
+        // is one an operator cannot act on.
         "measured_loss_percent": bitrate.sample_loss_percent,
         // How the live FEC/MCS retunes were applied. `tx_cmd_applies` went over
         // the running transmitter's wfb-ng 24.08 management socket (no video
@@ -405,6 +397,12 @@ pub(crate) fn build_stats_value(
         "bitrate_kbps": link.bitrate_kbps,
         "loss_percent": link.loss_percent,
         "timestamp": link.timestamp,
+        // Which uplink receiver (control or aux) decoded the interval behind this
+        // block, and how old that interval is. A block held across intervals that
+        // decoded nothing keeps its reading and shows its age instead of
+        // flapping to null between the control plane's sparse beacons.
+        "uplink_plane": link.uplink_plane,
+        "age_ms": link.age_ms(std::time::Instant::now()),
     });
     v
 }
@@ -685,8 +683,6 @@ mod tests {
         );
         let v = read_sidecar(dir.path());
 
-        // The back-compat `channel` alias now equals the LIVE actual channel.
-        assert_eq!(v["channel"], 161);
         assert_eq!(v["actual_channel"], 161);
         assert_eq!(v["rendezvous_channel"], 149);
         assert_eq!(v["operating_channel"], 157);
@@ -765,7 +761,7 @@ mod tests {
         let body = serde_json::json!({
             "pinnedRegion": serde_json::Value::Null,
             "enabled_channels": [149, 153, 157, 161, 165],
-            "channel": 161,
+            "actual_channel": 161,
             "rssi_dbm": -53.0,
             "paired": true,
             "adapter_chipset": "RTL8812EU",
@@ -797,7 +793,7 @@ mod tests {
             serde_json::json!([149, 153, 157, 161, 165])
         );
         // The integer channel stays an integer (a float would render 161.0).
-        assert_eq!(back["channel"], serde_json::json!(161));
+        assert_eq!(back["actual_channel"], serde_json::json!(161));
     }
 
     #[test]

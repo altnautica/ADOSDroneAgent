@@ -271,7 +271,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
     // The operator's TX power request and the power the driver last accepted,
     // shared with the command socket. Process-lifetime like the adaptive flag, so
     // a live change survives a respawn and the heartbeat reports what is applied.
-    let tx_power = Arc::new(TxPowerState::new(cfg.tx_power_dbm));
+    let tx_power = Arc::new(TxPowerState::new(cfg.tx_power_dbm, cfg.tx_power_max_dbm));
     // The data-plane trio the previous radio group was running (an operator
     // manual tier or preset, or an adaptive step). Every respawn brings the new
     // group up on it rather than on the boot config; `None` until a group ran.
@@ -909,6 +909,10 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                 tokio::select! {
                     _ = tick.tick() => {
                         tx_live.observe(hb_data_stats.totals().bytes_injected);
+                        // The plane stderr logs live on the RAM-backed /run and a
+                        // congested transmitter writes one line a second for as
+                        // long as it runs; keep each under its cap.
+                        ados_radio::process::cap_plane_logs().await;
                         // Live PHY-mute readback: the TX PHY pinned at the muted
                         // not-permitted floor injects frames but radiates nothing
                         // (the RTL8812EU `set type monitor` mute). Surfaced on the
@@ -1251,7 +1255,6 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // the respawn-trigger select arm — it's aborted alongside the other
         // siblings on respawn/shutdown.
         let bc_cancel = task_cancel.clone();
-        let bc_link = link.clone();
         let bc_proc = proc.clone();
         let bc_snapshot = bitrate_snapshot.clone();
         let bc_enabled = adaptive_enabled.clone();
@@ -1260,12 +1263,12 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let bc_mcs_cap = cfg.adaptive_mcs_max;
         let bc_mcs_start = spawn_cfg.mcs_index;
         // The watchdog counters carry the transmit-queue congestion flag, which
-        // is the ladder's only feedback on a drone: it cannot hear its own
-        // downlink, so it never gets a link sample to fold in.
+        // drives the bitrate ladder whenever the receiving peer's link report
+        // is missing or stale.
         let bc_counters = counters.clone();
         let bitrate_ctrl = tokio::spawn(async move {
             BitrateController::new(bc_enabled, bc_mcs_cap, bc_mcs_start)
-                .run(bc_link, bc_proc, bc_snapshot, bc_counters, bc_cancel)
+                .run(bc_proc, bc_snapshot, bc_counters, bc_cancel)
                 .await;
         });
 
@@ -1485,10 +1488,20 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     // never respawn into a stopping service.
                     match result {
                         Ok(WatchdogFired::PhyMuted) => {
-                            tracing::warn!(iface, "watchdog_phy_muted: attempting in-place PHY recovery");
+                            // Recover on the channel the pair is running on now,
+                            // not the rendezvous home: after a committed hop the
+                            // peer is on the hopped channel, and retuning home
+                            // here would split the pair while the hop state still
+                            // claims the hopped channel.
+                            let live_ch = operating_channel.load(Ordering::Relaxed) as u8;
+                            tracing::warn!(
+                                iface,
+                                channel = live_ch,
+                                "watchdog_phy_muted: attempting in-place PHY recovery"
+                            );
                             if let Some(dbm) = ensure_radiating(
                                 iface,
-                                rendezvous_ch,
+                                live_ch,
                                 tx_power.requested(),
                                 unrestricted,
                             )

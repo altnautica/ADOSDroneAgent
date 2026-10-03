@@ -42,6 +42,30 @@ fn default_keyframe_interval() -> u32 {
     0
 }
 
+/// The largest `keyframe_interval` (frames) the config accepts; matches the
+/// encoder's GOP ceiling so a configured value can never stretch the radio
+/// leg's keyframe spacing past one second at the default 30 fps.
+pub const MAX_KEYFRAME_INTERVAL: u32 = crate::encoder::MAX_GOP_FRAMES;
+
+/// Deserialize `keyframe_interval`, holding it to `0..=MAX_KEYFRAME_INTERVAL`
+/// (0 = the encoder's half-second default). A larger value is pulled down to
+/// the ceiling and logged rather than handed to the encoder.
+fn bounded_keyframe_interval<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = u32::deserialize(deserializer)?;
+    if v > MAX_KEYFRAME_INTERVAL {
+        tracing::warn!(
+            keyframe_interval = v,
+            max = MAX_KEYFRAME_INTERVAL,
+            "keyframe_interval_out_of_range: held at the ceiling"
+        );
+        return Ok(MAX_KEYFRAME_INTERVAL);
+    }
+    Ok(v)
+}
+
 /// True when a source string is a network capture URL — a stream mediamtx pulls
 /// (or ffmpeg reads) rather than a local V4L2/CSI device. Recognises plain and
 /// TLS forms of RTSP and HTTP (`rtsp://`, `rtsps://`, `http://`, `https://`).
@@ -138,10 +162,13 @@ pub struct CameraConfig {
     /// back to the probed ffmpeg/gstreamer path.
     #[serde(default = "default_encoder")]
     pub encoder: String,
-    /// Keyframe (GOP) interval in frames; 0 (default) lets the encoder pick a
-    /// short low-latency GOP (0.5 s at the configured fps) so radio FEC
+    /// Keyframe (GOP) interval in frames, `0..=30`; 0 (default) lets the encoder
+    /// pick a short low-latency GOP (0.5 s at the configured fps) so radio FEC
     /// recovers fast. An explicit value is honoured as `-g` / `key-int-max`.
-    #[serde(default = "default_keyframe_interval")]
+    #[serde(
+        default = "default_keyframe_interval",
+        deserialize_with = "bounded_keyframe_interval"
+    )]
     pub keyframe_interval: u32,
 }
 
@@ -322,8 +349,12 @@ pub struct CameraLeg {
     /// Encoder override: "auto" | "omx" | "v4l2m2m" | "software" (default "auto").
     #[serde(default = "default_encoder")]
     pub encoder: String,
-    /// Keyframe interval in frames; 0 ⇒ encoder picks a short low-latency GOP.
-    #[serde(default = "default_keyframe_interval")]
+    /// Keyframe interval in frames, `0..=30`; 0 ⇒ encoder picks a short
+    /// low-latency GOP.
+    #[serde(
+        default = "default_keyframe_interval",
+        deserialize_with = "bounded_keyframe_interval"
+    )]
     pub keyframe_interval: u32,
 }
 
@@ -1556,5 +1587,41 @@ video:
         assert!(cam.hflip);
         assert_eq!(cam.encoder, "omx");
         assert_eq!(cam.keyframe_interval, 5);
+    }
+
+    /// A configured keyframe interval past the GOP ceiling is held at the
+    /// ceiling on both the single-camera block and a leg; the ceiling itself and
+    /// the 0 default pass unchanged.
+    #[test]
+    fn keyframe_interval_is_held_at_the_gop_ceiling() {
+        let yaml = "\
+video:
+  camera:
+    keyframe_interval: 300
+  cameras:
+    - id: eo
+      source: /dev/video0
+      role: primary
+      keyframe_interval: 31
+    - id: belly
+      source: /dev/video1
+      keyframe_interval: 30
+";
+        let (_dir, path) = write_tmp(yaml);
+        assert_eq!(
+            CameraConfig::load_from(&path).keyframe_interval,
+            MAX_KEYFRAME_INTERVAL
+        );
+        let cfg = AgentVideoConfig::load_from(&path);
+        let by_id = |id: &str| {
+            cfg.cameras
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .keyframe_interval
+        };
+        assert_eq!(by_id("eo"), MAX_KEYFRAME_INTERVAL);
+        assert_eq!(by_id("belly"), 30);
+        assert_eq!(CameraConfig::default().keyframe_interval, 0);
     }
 }
