@@ -23,7 +23,7 @@ jobs:
     name: Tree and commit hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -131,7 +131,7 @@ jobs:
     name: CHANGELOG is newest-first
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 3,700+ lines, newest-first. At that size an entry appended at the
       # bottom is invisible to every reader.
@@ -191,11 +191,11 @@ jobs:
       # The two repositories are pushed together, so cross-repo drift is a real
       # and currently unproven state: the agent enforces a contract the GCS may
       # not be honouring.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: ADOSDroneAgent
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: altnautica/ADOSMissionControl
           path: ADOSMissionControl
@@ -240,11 +240,11 @@ jobs:
       # the residual FastAPI app via its OpenAPI schema) and must come out
       # byte-identical. The client check then scans Mission Control beside this
       # repo, the layout the two checkouts below reproduce.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: ADOSDroneAgent
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: altnautica/ADOSMissionControl
           path: ADOSMissionControl
@@ -279,7 +279,7 @@ jobs:
     name: The ignored-test set is a decision, not a drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Four `#[ignore]`d Rust tests. Adding an ignore used to be a free way to
       # make a test stop mattering, so the count is pinned and the set is a
