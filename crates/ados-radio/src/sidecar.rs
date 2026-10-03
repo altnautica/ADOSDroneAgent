@@ -162,19 +162,17 @@ pub(crate) fn write_adapters_sidecar(adapters: &[ados_radio::adapter::WifiAdapte
 /// cross-checks reduce to a string compare. Byte-identical to
 /// `key_mgr.read_public_fingerprint`.
 pub(crate) fn read_public_fingerprint(path: &Path) -> Option<String> {
-    use blake2::digest::{Update, VariableOutput};
-    use blake2::Blake2bVar;
+    use blake2::digest::{consts::U8, Digest};
+    use blake2::Blake2b;
     const WFB_KEY_FILE_BYTES: usize = 64;
     const WFB_PUBLIC_HALF_OFFSET: usize = 32;
     let data = std::fs::read(path).ok()?;
     if data.len() != WFB_KEY_FILE_BYTES {
         return None;
     }
-    let mut hasher = Blake2bVar::new(8).ok()?;
-    hasher.update(&data[WFB_PUBLIC_HALF_OFFSET..]);
-    let mut out = [0u8; 8];
-    hasher.finalize_variable(&mut out).ok()?;
-    Some(hex::encode(out))
+    Some(hex::encode(Blake2b::<U8>::digest(
+        &data[WFB_PUBLIC_HALF_OFFSET..],
+    )))
 }
 
 /// Build the `wfb-stats.json` Contract E body (the full schema the REST handler
@@ -593,8 +591,6 @@ mod tests {
 
     #[test]
     fn fingerprint_is_16_hex_of_blake2b_8_over_public_half() {
-        use blake2::digest::{Update, VariableOutput};
-        use blake2::Blake2bVar;
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("tx.key");
         // 64-byte key: first 32 are the secret half, second 32 the public half.
@@ -604,12 +600,8 @@ mod tests {
         }
         std::fs::write(&key, &data).unwrap();
         let got = read_public_fingerprint(&key).unwrap();
-        // Recompute independently over the second 32 bytes.
-        let mut h = Blake2bVar::new(8).unwrap();
-        h.update(&data[32..]);
-        let mut out = [0u8; 8];
-        h.finalize_variable(&mut out).unwrap();
-        assert_eq!(got, hex::encode(out));
+        // Python `hashlib.blake2b(bytes(range(32, 64)), digest_size=8)`.
+        assert_eq!(got, "e054fa6440b441f9");
         assert_eq!(got.len(), 16);
         assert!(got
             .chars()

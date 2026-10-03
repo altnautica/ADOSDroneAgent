@@ -412,14 +412,14 @@ mod tests {
 
         let t0 = Instant::now();
         let mut table = NeighborTable::new(1);
-        let raw = ChaCha20Poly1305::new(Key::from_slice(&key()));
+        let raw = ChaCha20Poly1305::new(&Key::from(key()));
         let seal_with_header = |header: [u8; 2], counter: u8| {
             let nonce = [9, 9, 9, 9, 9, 9, 9, 9, counter, 0, 0, 0];
             let mut plaintext = header.to_vec();
             plaintext.extend_from_slice(&beacon(3).encode());
             let sealed = raw
                 .encrypt(
-                    Nonce::from_slice(&nonce),
+                    &Nonce::from(nonce),
                     Payload {
                         msg: &plaintext,
                         aad: &[],

@@ -26,7 +26,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::{Method, StatusCode};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use ados_protocol::pairing_posture::{constant_time_eq, Pairing};

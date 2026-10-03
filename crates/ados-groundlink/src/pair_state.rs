@@ -101,17 +101,15 @@ fn pair_paths() -> PairPaths {
 /// lowercase hex chars. Byte-identical to `key_mgr.read_public_fingerprint` and
 /// the native `wfb` read route's fingerprint.
 fn read_public_fingerprint(path: &Path) -> Option<String> {
-    use blake2::digest::{Update, VariableOutput};
-    use blake2::Blake2bVar;
+    use blake2::digest::{consts::U8, Digest};
+    use blake2::Blake2b;
     let data = std::fs::read(path).ok()?;
     if data.len() != WFB_KEY_FILE_BYTES {
         return None;
     }
-    let mut hasher = Blake2bVar::new(8).ok()?;
-    hasher.update(&data[WFB_PUBLIC_HALF_OFFSET..]);
-    let mut out = [0u8; 8];
-    hasher.finalize_variable(&mut out).ok()?;
-    Some(hex::encode(out))
+    Some(hex::encode(Blake2b::<U8>::digest(
+        &data[WFB_PUBLIC_HALF_OFFSET..],
+    )))
 }
 
 /// The current UTC timestamp in ISO 8601 form (seconds resolution), matching the
@@ -435,14 +433,9 @@ mod tests {
         assert!(fp
             .chars()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
-        // Independent blake2b-8 over the public half (bytes 32..64 = all 7s).
-        use blake2::digest::{Update, VariableOutput};
-        use blake2::Blake2bVar;
-        let mut h = Blake2bVar::new(8).unwrap();
-        h.update(&[7u8; 32]);
-        let mut out = [0u8; 8];
-        h.finalize_variable(&mut out).unwrap();
-        assert_eq!(fp, hex::encode(out));
+        // Python `hashlib.blake2b(bytes([7] * 32), digest_size=8)` over the
+        // public half (bytes 32..64 = all 7s).
+        assert_eq!(fp, "0574f1613c2bca8f");
         // A short file has no fingerprint.
         std::fs::write(&key, b"short").unwrap();
         assert!(read_public_fingerprint(&key).is_none());
