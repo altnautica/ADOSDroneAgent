@@ -89,7 +89,7 @@ pub struct KeyPair {
 /// (matching Python's `public_bytes(Encoding.Raw, PublicFormat.Raw)`).
 pub fn generate_keypair() -> KeyPair {
     let mut seed = [0u8; 32];
-    getrandom::getrandom(&mut seed).expect("OS RNG for X25519 keygen");
+    getrandom::fill(&mut seed).expect("OS RNG for X25519 keygen");
     let secret = StaticSecret::from(seed);
     let public = PublicKey::from(&secret).to_bytes();
     KeyPair { secret, public }
@@ -134,7 +134,7 @@ pub fn encrypt_invite(
     let key = session_key(shared.as_bytes(), &context);
 
     let mut nonce_bytes = [0u8; 12];
-    getrandom::getrandom(&mut nonce_bytes).expect("OS RNG for nonce");
+    getrandom::fill(&mut nonce_bytes).expect("OS RNG for nonce");
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
     let ct = cipher
         .encrypt(Nonce::from_slice(&nonce_bytes), bundle.pack().as_slice())

@@ -268,7 +268,7 @@ fn quarantine(path: &Path) -> Option<String> {
 /// one, which is worse than having none.
 fn generate_relay_secret_opt() -> Option<String> {
     let mut secret = [0u8; ados_protocol::relay_ticket::RELAY_SECRET_LEN];
-    getrandom::getrandom(&mut secret).ok()?;
+    getrandom::fill(&mut secret).ok()?;
     Some(secret.iter().map(|b| format!("{b:02x}")).collect())
 }
 

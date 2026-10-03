@@ -506,7 +506,7 @@ fn random_hex_16() -> String {
     // getrandom only fails on a platform without an entropy source, which the
     // agent targets never are; fall back to a time-seeded mix rather than
     // panicking inside the arbiter.
-    if getrandom::getrandom(&mut buf).is_err() {
+    if getrandom::fill(&mut buf).is_err() {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

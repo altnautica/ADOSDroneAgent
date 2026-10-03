@@ -100,7 +100,7 @@ impl NonceCache {
 /// should be minted at all.
 pub fn random_nonce_hex() -> Option<String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).ok()?;
+    getrandom::fill(&mut bytes).ok()?;
     Some(hex::encode(bytes))
 }
 

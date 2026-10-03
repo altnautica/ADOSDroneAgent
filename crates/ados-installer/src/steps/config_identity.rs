@@ -212,7 +212,7 @@ pub fn pairing_json(code: &str, created_at: u64, pending_api_key: Option<&str>) 
 pub fn mint_pending_api_key() -> Option<String> {
     use base64::Engine as _;
     let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes).ok()?;
+    getrandom::fill(&mut bytes).ok()?;
     Some(format!(
         "ados_{}",
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -254,7 +254,7 @@ fn mint_device_id() -> String {
         }
     }
     let mut bytes = [0u8; 6];
-    if getrandom::getrandom(&mut bytes).is_ok() {
+    if getrandom::fill(&mut bytes).is_ok() {
         return hex::encode(bytes);
     }
     // Last-ditch deterministic-ish fallback (should never be reached): derive

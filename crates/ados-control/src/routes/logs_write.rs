@@ -353,7 +353,7 @@ fn write_request(req: &PushRequest, run_dir: &Path, now_us: i64) -> Result<Strin
 fn new_request_id() -> String {
     let mut bytes = [0u8; 16];
     // getrandom is already a crate dep (the pairing key/code minting use it).
-    if getrandom::getrandom(&mut bytes).is_err() {
+    if getrandom::fill(&mut bytes).is_err() {
         // A fall-back so the id is still 32 hex chars even if the OS RNG balks; the
         // cloud-service match only needs uniqueness within this process's run.
         let nanos = std::time::SystemTime::now()

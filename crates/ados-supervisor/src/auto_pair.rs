@@ -69,7 +69,7 @@ pub const RETRY_BACKOFF_JITTER_SECS: u64 = 4;
 /// which it never does on the target).
 fn retry_backoff() -> Duration {
     let mut b = [0u8; 1];
-    let jitter = getrandom::getrandom(&mut b)
+    let jitter = getrandom::fill(&mut b)
         .map(|_| (b[0] as u64) % (RETRY_BACKOFF_JITTER_SECS + 1))
         .unwrap_or(0);
     RETRY_BACKOFF + Duration::from_secs(jitter)

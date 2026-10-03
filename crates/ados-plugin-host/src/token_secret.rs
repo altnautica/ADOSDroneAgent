@@ -105,7 +105,7 @@ pub fn load_or_create_secret(path: &Path) -> std::io::Result<Vec<u8>> {
         Err(e) => return Err(e),
     }
     let mut secret = vec![0u8; SECRET_LEN];
-    getrandom::getrandom(&mut secret).map_err(|e| std::io::Error::other(e.to_string()))?;
+    getrandom::fill(&mut secret).map_err(|e| std::io::Error::other(e.to_string()))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         set_dir_mode(parent);

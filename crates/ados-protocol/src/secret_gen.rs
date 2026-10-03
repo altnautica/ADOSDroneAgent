@@ -50,7 +50,7 @@ pub fn generate(len: usize) -> Result<String, getrandom::Error> {
     let mut out = String::with_capacity(len);
     while out.len() < len {
         let mut b = [0u8; 1];
-        getrandom::getrandom(&mut b)?;
+        getrandom::fill(&mut b)?;
         if b[0] < limit {
             out.push(UNAMBIGUOUS_CHARSET[(b[0] % n) as usize] as char);
         }

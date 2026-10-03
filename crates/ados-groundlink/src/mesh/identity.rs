@@ -129,7 +129,7 @@ pub fn ensure_mesh_identity_at(
         trimmed.to_vec()
     } else if role == "receiver" {
         let mut psk = vec![0u8; 32];
-        getrandom::getrandom(&mut psk).expect("OS RNG for mesh PSK");
+        getrandom::fill(&mut psk).expect("OS RNG for mesh PSK");
         if let Some(parent) = psk_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -148,7 +148,7 @@ pub fn ensure_mesh_identity_at(
 
 fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    getrandom::getrandom(&mut buf).expect("OS RNG");
+    getrandom::fill(&mut buf).expect("OS RNG");
     hex::encode(buf)
 }
 

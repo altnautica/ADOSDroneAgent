@@ -250,7 +250,7 @@ impl SwarmCipher {
     /// randomness must still be able to tell its neighbours where it is.
     pub fn new(key: &[u8; 32]) -> Self {
         let mut prefix = [0u8; 8];
-        if getrandom::getrandom(&mut prefix).is_err() {
+        if getrandom::fill(&mut prefix).is_err() {
             let mut h = Sha256::new();
             h.update(b"ados/swarm/v1/nonce-prefix\n");
             h.update(key);

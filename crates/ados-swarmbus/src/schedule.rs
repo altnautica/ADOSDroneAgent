@@ -51,7 +51,7 @@ pub fn beacon_delay(random: u64) -> Duration {
 /// is uncorrelated enough between two independently-booted aircraft to do that job.
 pub fn random_word() -> u64 {
     let mut buf = [0u8; 8];
-    if getrandom::getrandom(&mut buf).is_ok() {
+    if getrandom::fill(&mut buf).is_ok() {
         return u64::from_le_bytes(buf);
     }
     std::time::SystemTime::now()

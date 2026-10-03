@@ -215,7 +215,7 @@ impl TokenIssuer {
     /// New issuer with a fresh 32-byte random secret (`secrets.token_bytes(32)`).
     pub fn new_random() -> Self {
         let mut secret = vec![0u8; 32];
-        getrandom::getrandom(&mut secret).expect("OS RNG unavailable");
+        getrandom::fill(&mut secret).expect("OS RNG unavailable");
         Self { secret }
     }
 
@@ -233,7 +233,7 @@ impl TokenIssuer {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let mut session_bytes = [0u8; 8];
-        getrandom::getrandom(&mut session_bytes).expect("OS RNG unavailable");
+        getrandom::fill(&mut session_bytes).expect("OS RNG unavailable");
         let session_id = hex::encode(session_bytes);
         self.mint_at(plugin_id, granted_caps, ttl_seconds, now, &session_id)
     }
