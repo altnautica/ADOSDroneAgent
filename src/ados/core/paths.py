@@ -234,6 +234,10 @@ TUNNEL_ENABLED_PATH = ADOS_ETC_DIR / "tunnel-enabled"
 # the installer, never hand-managed.
 HOTSPOT_ENABLED_PATH = ADOS_ETC_DIR / "hotspot-enabled"
 AP_PASSPHRASE_PATH = ADOS_ETC_DIR / "ap-passphrase"
+# Stable-MAC pin verdicts per USB WiFi adapter. Written by the installer's
+# mac-pin step and the supervisor reconciler (``ados-macpin``); read by the
+# CLI, the cloud heartbeat and the config migrator that rekeys overrides.
+MAC_PINS_STATE_PATH = ADOS_ETC_DIR / "mac-pins.state"
 
 # Touchscreen calibration matrix saved by the LCD calibration wizard.
 # JSON-serialized affine + metadata. Loaded by the touch input bridge

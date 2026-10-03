@@ -10,7 +10,7 @@
 //! The dependency chain (→ means "must run after"):
 //!
 //! ```text
-//!   preflight ── purge_residue (independent, optional)
+//!   preflight ── purge_residue, legacy_nat (independent, optional)
 //!       │
 //!      deps
 //!       ├── venv_agent ── config_identity ─┐
@@ -41,6 +41,7 @@ pub mod fetch_binaries;
 pub mod gpu_provision;
 pub mod health;
 pub mod i2c_enable;
+pub mod legacy_nat;
 pub mod network_mac_pin;
 pub mod npu_provision;
 pub mod portable_python;
@@ -63,6 +64,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
     vec![
         Box::new(preflight::Preflight),
         Box::new(purge_residue::PurgeResidue),
+        Box::new(legacy_nat::LegacyNat),
         Box::new(deps::Deps),
         // Watermark the WFB radios as NM-unmanaged from the first boot, before
         // any network service (and NM itself) can autoconnect a client profile
@@ -77,11 +79,11 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(fetch_binaries::FetchBinaries),
         Box::new(dkms::Dkms),
         Box::new(config_identity::ConfigIdentity),
-        Box::new(network_mac_pin::NetworkMacPin),
         // Right after the config exists and before `systemd`/`start` bring any
         // unit up: migration is an install-time action, never a per-process
         // boot action, and no unit has loaded config yet at this point.
         Box::new(config_migrate::ConfigMigrate),
+        Box::new(network_mac_pin::NetworkMacPin),
         Box::new(wifi_join::WifiJoin),
         Box::new(rtl_regulatory::RtlRegulatory),
         Box::new(aic8800_tune::Aic8800Tune),
@@ -118,7 +120,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 25);
+        assert_eq!(order.len(), 26);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -134,8 +136,11 @@ mod tests {
         // The NPU runtime provisioning installs its wheel into the agent venv,
         // so it must run after the venv exists.
         assert!(pos("venv_agent") < pos("npu_provision"));
-        // The MAC pin runs after config (machine-id + /etc/ados exist).
+        // The MAC pin runs after config (machine-id + /etc/ados exist) and
+        // after the config migration, so interface-named overrides are already
+        // translated to adapter keys before the reconcile sweeps stale links.
         assert!(pos("config_identity") < pos("network_mac_pin"));
+        assert!(pos("config_migrate") < pos("network_mac_pin"));
         assert!(pos("deps") < pos("venv_agent"));
         assert!(pos("deps") < pos("fetch_binaries"));
         assert!(pos("deps") < pos("dkms"));

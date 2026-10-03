@@ -27,9 +27,7 @@ from typing import Any
 import click
 
 from ados.cli.radio import _request
-from ados.core.paths import AP_PASSPHRASE_PATH, CONFIG_YAML
-
-_STATE_PATH = Path("/etc/ados/mac-pins.state")
+from ados.core.paths import AP_PASSPHRASE_PATH, CONFIG_YAML, MAC_PINS_STATE_PATH
 
 
 @click.group("network", help="Inspect and manage network adapter settings.")
@@ -42,11 +40,12 @@ def mac_group() -> None:
     pass
 
 
-def _read_state() -> dict:
+def _read_state() -> dict[str, Any]:
     try:
-        return json.loads(_STATE_PATH.read_text())
+        data = json.loads(MAC_PINS_STATE_PATH.read_text())
     except (OSError, ValueError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 @mac_group.command("status", help="Show per-adapter stable-MAC verdicts.")

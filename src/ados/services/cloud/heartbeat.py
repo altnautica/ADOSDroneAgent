@@ -13,17 +13,19 @@ blocks.
 from __future__ import annotations
 
 import json
+from typing import Any
+
+from ados.core.paths import MAC_PINS_STATE_PATH
 
 
-def read_mac_pins_state() -> dict | None:
-    """Read ``/etc/ados/mac-pins.state``.
+def read_mac_pins_state() -> dict[str, Any] | None:
+    """Read the stable-MAC pin state (:data:`MAC_PINS_STATE_PATH`).
 
     Returns the parsed document, or ``None`` when the file is absent or
     malformed — a node with no pinned adapters is the normal case, not a fault.
     """
-    from ados.core.paths import ADOS_ETC_DIR
-
     try:
-        return json.loads((ADOS_ETC_DIR / "mac-pins.state").read_text())
+        data = json.loads(MAC_PINS_STATE_PATH.read_text())
     except (OSError, ValueError):
         return None
+    return data if isinstance(data, dict) else None

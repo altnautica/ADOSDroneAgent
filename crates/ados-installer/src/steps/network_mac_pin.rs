@@ -66,8 +66,10 @@ impl Step for NetworkMacPin {
     }
     fn requires(&self) -> &[&str] {
         // After config_identity so /etc/ados exists (for the state file) and
-        // config.yaml has been written (for the enabled flag).
-        &["config_identity"]
+        // config.yaml has been written (for the enabled flag), and after
+        // config_migrate so interface-named overrides are already rewritten
+        // to adapter keys when the reconcile sweeps the old links.
+        &["config_identity", "config_migrate"]
     }
     fn checkpoint(&self) -> Option<&str> {
         // No checkpoint: the reconcile is idempotent, so re-running on every

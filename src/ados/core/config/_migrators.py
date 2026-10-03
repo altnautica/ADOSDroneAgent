@@ -28,14 +28,19 @@ rollback, so "already migrated" is the steady state, not a rare one.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ados.core.paths import GS_UI_JSON
+from ados.core.paths import GS_UI_JSON, MAC_PINS_STATE_PATH
 
 _LEGACY_GS_UI_PATH = GS_UI_JSON
 _GS_UI_KEYS = ("oled", "buttons", "screens")
+
+# An override key already in a stable form: a bare ``vvvv:pppp`` USB id (the
+# whole model) or an adapter key ``vvvv:pppp@<usb path>``.
+_VIDPID_KEY = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{4}$")
 
 
 def _read_legacy_gs_ui() -> dict[str, Any] | None:
@@ -44,6 +49,17 @@ def _read_legacy_gs_ui() -> dict[str, Any] | None:
         if not _LEGACY_GS_UI_PATH.is_file():
             return None
         data = json.loads(_LEGACY_GS_UI_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_mac_pins_state() -> dict[str, Any] | None:
+    """Parse the stable-MAC pin state file, or ``None``."""
+    try:
+        if not MAC_PINS_STATE_PATH.is_file():
+            return None
+        data = json.loads(MAC_PINS_STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -257,6 +273,60 @@ def apply_kiosk_enabled_default(raw: dict[str, Any]) -> bool:
     return True
 
 
+def apply_mac_pin_overrides_to_adapter_keys(raw: dict[str, Any]) -> bool:
+    """Rekey interface-named MAC overrides to their adapter key.
+
+    ``network.mac_pin.overrides`` used to be keyed by kernel interface name
+    (``wlan1``). The reconciler now keys an override by the adapter's stable
+    identity, ``<vidpid>@<usb_path>`` (or a bare ``vidpid`` for a whole
+    model), because an interface name can flip between boots, so an
+    interface-named override is ignored at runtime. The pin state file
+    records which adapter each interface name belonged to; this moves each
+    override it can resolve to that adapter's key. A key it cannot resolve is
+    left as it is. One-shot: after the move, an interface-named key is one an
+    operator wrote against the current build.
+    """
+    network = raw.get("network")
+    mac_pin = network.get("mac_pin") if isinstance(network, dict) else None
+    overrides = mac_pin.get("overrides") if isinstance(mac_pin, dict) else None
+    if not isinstance(overrides, dict):
+        return False
+    legacy = [
+        key
+        for key in overrides
+        if isinstance(key, str) and "@" not in key and not _VIDPID_KEY.match(key)
+    ]
+    if not legacy:
+        return False
+
+    state = _read_mac_pins_state()
+    adapters = state.get("adapters") if state is not None else None
+    if not isinstance(adapters, list):
+        return False
+    by_name: dict[str, str] = {}
+    for entry in adapters:
+        if not isinstance(entry, dict):
+            continue
+        name, vidpid, usb_path = (
+            entry.get("name"), entry.get("vidpid"), entry.get("usb_path")
+        )
+        if (
+            isinstance(name, str)
+            and isinstance(vidpid, str) and vidpid
+            and isinstance(usb_path, str) and usb_path
+        ):
+            by_name.setdefault(name, f"{vidpid}@{usb_path}")
+
+    moved = False
+    for old in legacy:
+        new = by_name.get(old)
+        if new is None or new in overrides:
+            continue
+        overrides[new] = overrides.pop(old)
+        moved = True
+    return moved
+
+
 Migration = Callable[[dict[str, Any]], bool]
 
 # Idempotent shape translations. Each backfills a destination from a legacy
@@ -280,6 +350,7 @@ ONE_SHOTS: tuple[tuple[str, Migration], ...] = (
     ("raw_proxy_enforce_default", apply_raw_proxy_enforce_default),
     ("mqtt_username_device_id", apply_mqtt_username_device_id),
     ("kiosk_enabled_default", apply_kiosk_enabled_default),
+    ("mac_pin_overrides_adapter_keys", apply_mac_pin_overrides_to_adapter_keys),
 )
 
 ALL_MIGRATION_IDS: tuple[str, ...] = tuple(
