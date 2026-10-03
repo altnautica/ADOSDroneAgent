@@ -88,7 +88,7 @@ jobs:
           mkdir -p installer
           cp crates/target/aarch64-unknown-linux-musl/release/ados-installer installer/ados-installer-aarch64
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installer
           path: installer/ados-installer-aarch64
@@ -305,7 +305,7 @@ jobs:
           ( cd "${OUT}" && sha256sum -c SHA256SUMS )
           ls -l "${OUT}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-assets
           path: release-assets/**
