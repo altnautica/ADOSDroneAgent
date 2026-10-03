@@ -3,7 +3,7 @@ resolver = "2"
 members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-offload", "ados-swarmbus", "ados-swarm-control"]
 
 [workspace.package]
-version = "0.101.0"
+version = "0.102.0"
 edition = "2021"
 # Minimum supported Rust. `slice::as_chunks` / `as_chunks_mut`, which the
 # protocol decode, the display blitter and the vision crop use to state a

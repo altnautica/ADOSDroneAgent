@@ -4,6 +4,87 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.102.0] - 2026-10-03
+
+### Security
+
+- Relay tickets are bound to the request's method, path and body hash, carry a
+  single-use nonce, and tolerate up to 300 s of clock skew. Every refusal
+  answers 401 with `{"error":"E_RELAY_TICKET","reason":…}`. The relay denylist
+  now holds only trust-root and credential changes; pairing claims refuse any
+  relayed request.
+- WebSocket tickets are single-use. Pairing writes are serialised across the
+  Rust and Python writers with a shared file lock.
+- The configured API key is accepted the same way on native routes,
+  WebSockets and the dashboard PIN. `/api/v1/setup/status` needs a credential
+  once the node is paired.
+- Each plugin runs as its own system user in group `ados-plugins`, receives
+  its capability token through a systemd credential, and cannot reach any
+  node-local address except its own declared ports. Plugin units cannot
+  execute outside their install directory and start only after the network
+  guard is loaded.
+- A plugin update must come from the signer of the installed version. A
+  revoked signer disables its plugins at startup and when the revocation list
+  changes. The download allowlist no longer admits S3 or `localhost`.
+- Release assets without a signature are refused on every channel; only a
+  local `--artifacts` install may skip the signature. CI refuses to publish
+  unsigned binaries.
+- The residual Python API listens only on its internal Unix socket. Mesh
+  networks join with SAE (802.11s) or IBSS-RSN and refuse an open join.
+
+### Changed
+
+- **Armed interlock.** Reboot, shutdown, factory reset, profile change,
+  ground-station unpair, radio channel and TX power writes, parameter writes,
+  CRSF parameter writes, and restarts of the MAVLink, radio, WFB, groundlink
+  and supervisor services answer 409 `E_ARMED` while the vehicle is armed or
+  its state is older than 3 s. Send `"force": true` (or `?force=1`) to
+  override.
+- **RC loss.** When no stick source is live, the CRSF lane stops sending RC
+  frames, so the receiver and flight controller run their own failsafe.
+  Gamepad liveness is checked by polling the device state.
+- **Fleet MAVLink identity.** A drone drops uplink frames addressed to another
+  system id. A ground station reports each slot's flight-controller system id,
+  flags two aircraft sharing one, and blocks commands to that id until it is
+  resolved.
+- Radio hops are confirmed in two phases with a relative delay, and a ground
+  station that can't follow refuses the hop. A fleet ground station refuses
+  drone-initiated hops.
+- Python now serves only its permanent route prefixes. Video status, camera
+  listing, video config, snapshots, pairing accept, the dashboard snapshot,
+  Wi-Fi client scan, HLS and ground-station factory reset are native.
+- `/api/status/full` drops `capabilities`, adds `fcFirmware`, and names each
+  stream leg's WHEP URL `whepUrl`. The ground-station WFB view reports
+  `tx_power_dbm` and the live channel (or `null`). The radio sidecars drop the
+  `channel` alias in favour of `actual_channel`.
+- Parameter writes use the cached parameter type (integer bytes on PX4) and
+  refuse an unknown type with 409 `E_PARAM_TYPE_UNKNOWN`. Signing enrol and
+  disable report whether the flight controller confirmed the change.
+- The Rust workspace version now matches the agent version.
+- `ados rust` is removed; nothing remains to switch.
+
+### Fixed
+
+- The supervisor judges the MAVLink router on frames decoded from the flight
+  controller, so a wedged serial reader is restarted.
+- Swarm setpoints target the learned flight-controller system id. The swarm
+  replay window persists across restarts.
+- A failed upgrade restores every replaced binary and restarts its units.
+- Cloud commands run once even when delivered twice. WebRTC signaling is
+  correlated by session and tears down its WHEP session on close.
+- Status, telemetry and resource surfaces report `null` instead of zeros when
+  a reading is unavailable, and the uplink stream works with the log store off.
+- Hostapd, APN, uplink priority and TX power inputs are validated before they
+  are applied.
+- Many smaller fixes across the radio, video, networking, display, installer
+  and Python setup paths.
+
+### Removed
+
+- The attitude-setpoint rung, the `ados-rate-control` crate, the TensorRT
+  sidecar, the peripherals service, and the TCP listener of the residual
+  Python API.
+
 ## [0.99.381] - 2026-09-24
 
 ### Fixed
