@@ -227,6 +227,16 @@ fn user_uid(name: &str) -> Option<u32> {
 /// drift into different recovery policies.
 const ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
+/// Kernel send buffer requested on every accepted broadcast client.
+///
+/// A stalled consumer is evicted once its kernel send buffer AND its
+/// outbound queue are full. Unpinned, the kernel buffer is
+/// `net.core.wmem_default`, which the installer raises to 4 MiB for video,
+/// so a stalled MAVLink, MSP or state reader buffered megabytes of stale
+/// frames before eviction. Linux doubles the request and caps it at
+/// `wmem_max`, so the effective buffer is at most 512 KiB.
+const IPC_CLIENT_SEND_BUFFER_BYTES: usize = 256 * 1024;
+
 /// Where an accept loop gets its client connections.
 ///
 /// The real implementation is the bound [`UnixListener`]. It is a trait purely
@@ -415,6 +425,7 @@ impl IpcBroadcast {
         last: Arc<Mutex<Option<Bytes>>>,
         inbound_tx: Option<mpsc::Sender<InboundCommand>>,
     ) {
+        pin_send_buffer(&stream);
         let peer = peer_identity(&stream);
         let (mut read_half, mut write_half) = stream.into_split();
         let (tx, mut rx) = mpsc::channel::<Bytes>(queue_depth);
@@ -759,6 +770,35 @@ fn peer_supplementary_groups(stream: &UnixStream) -> Vec<u32> {
         groups.resize(needed, 0);
     }
     Vec::new()
+}
+
+/// Pin the kernel send buffer of an accepted broadcast client to
+/// [`IPC_CLIENT_SEND_BUFFER_BYTES`], so how much a stalled reader can hold
+/// before eviction does not follow the system-wide `wmem_default`. A failure
+/// leaves the system default in place; the client is still served.
+fn pin_send_buffer(stream: &UnixStream) {
+    use nix::libc;
+    use std::os::fd::AsRawFd;
+
+    let size = IPC_CLIENT_SEND_BUFFER_BYTES as libc::c_int;
+    // SAFETY: the pointer refers to a live `c_int` and the length passed is
+    // exactly its size; the kernel only reads from it.
+    let rc = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            std::ptr::from_ref(&size).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        tracing::warn!(
+            error = %io::Error::last_os_error(),
+            requested = IPC_CLIENT_SEND_BUFFER_BYTES,
+            "ipc_client_sndbuf_set_failed"
+        );
+    }
 }
 
 /// Bind a command-plane socket: create the parent directory, remove a stale

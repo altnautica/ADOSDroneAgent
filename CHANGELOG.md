@@ -4,6 +4,16 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.102.5] - 2026-10-07
+
+### Fixed
+
+- A stalled consumer of the MAVLink, MSP or state socket is now evicted after
+  a bounded backlog. Each accepted client's kernel send buffer is pinned at
+  256 KiB instead of following the system default, which the installer raises
+  to 4 MiB for video, so a reader that stopped draining held up to megabytes of
+  stale frames before the slow-client eviction fired.
+
 ## [0.102.4] - 2026-10-05
 
 ### Added
