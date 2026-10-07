@@ -96,6 +96,15 @@ fn is_full_object_name(rev: &str) -> bool {
     rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// The failure text when the host arch has no published release binaries and
+/// no `--artifacts` directory was given.
+fn no_release_assets(arch: &str) -> String {
+    format!(
+        "no prebuilt release binaries are published for {arch}; build the \
+         workspace and pass --channel edge --artifacts <dir>"
+    )
+}
+
 /// The failure text when a pin reaches the fetch still abbreviated.
 ///
 /// Reachable in one narrow case: a RESUMED fresh install whose `venv`
@@ -259,13 +268,16 @@ pub enum AssetSource<'a> {
     Release {
         /// The pinned release tag, from [`pinned_release`].
         pin: Option<&'a str>,
+        /// The host architecture the fetched binary has to run on, checked
+        /// against the downloaded ELF header before it is placed.
+        host_arch: &'a str,
     },
     /// A directory of locally-built artifacts (`--artifacts <dir>`).
     Local {
         /// The directory holding `<service>` (or `<asset>`) plus its `.sha256`.
         dir: &'a Path,
-        /// The host architecture the placed binary has to run on, used for the
-        /// ELF gate the release path does not need (CI only publishes aarch64).
+        /// The host architecture the placed binary has to run on, checked
+        /// against the artifact's ELF header before it is placed.
         host_arch: &'a str,
     },
 }
@@ -332,7 +344,7 @@ fn source_for<'a>(
 ) -> AssetSource<'a> {
     match artifacts {
         Some(dir) if local_artifact(dir, b).is_some() => AssetSource::Local { dir, host_arch },
-        _ => AssetSource::Release { pin },
+        _ => AssetSource::Release { pin, host_arch },
     }
 }
 
@@ -369,12 +381,17 @@ fn stage_asset(
     sink: &ProgressSink,
 ) -> anyhow::Result<()> {
     match *source {
-        AssetSource::Release { pin } => {
+        AssetSource::Release { pin, host_arch } => {
             let asset_url = format!("{}/{}", asset_base(pin, b.release_tag), b.asset);
             // Stream byte progress so the live pane shows "<service> 4.2/8.1 MB".
             net::fetch_with_progress(&asset_url, dl_bin, |done, total| {
                 sink.byte_progress("fetch_binaries", done, total, b.service);
             })?;
+            // Refuse a release asset this host cannot run (the release only
+            // publishes aarch64) before it replaces a working binary.
+            if let Some(why) = artifact_arch_error(&read_header(dl_bin), host_arch) {
+                anyhow::bail!("{}: release asset {} {why}", b.service, b.asset);
+            }
             net::fetch(&format!("{asset_url}.sha256"), dl_sha)?;
             // The signature is mandatory for a release asset, but its fetch is
             // allowed to fail here so the refusal comes from the verifier, which
@@ -392,11 +409,10 @@ fn stage_asset(
                 anyhow::bail!(local_sha_missing(b.service, &src));
             }
             // Refuse a binary this host cannot run BEFORE it replaces a working
-            // one. The release path does not need this (CI publishes aarch64
-            // only); a local directory is exactly where a Mach-O build from the
-            // developer's laptop, or an x86_64 build from the wrong target dir,
-            // gets picked up. Cheap and side-effect-free: 20 bytes of header, no
-            // exec.
+            // one. A local directory is exactly where a Mach-O build from the
+            // developer's laptop, or a build for the wrong target from the
+            // wrong target dir, gets picked up. Cheap and side-effect-free: 20
+            // bytes of header, no exec.
             if let Some(why) = artifact_arch_error(&read_header(&src), host_arch) {
                 anyhow::bail!("{}: {} {why}", b.service, src.display());
             }
@@ -462,7 +478,7 @@ fn artifact_arch_error(header: &[u8], host_arch: &str) -> Option<String> {
         return Some(format!(
             "is not an ELF executable, so it cannot run on this {host_arch} host \
              (a macOS build of the same crate looks like this). Build it for the \
-             node, e.g. cargo build --release --target aarch64-unknown-linux-gnu."
+             node, e.g. cargo build --release --target {host_arch}-unknown-linux-gnu."
         ));
     }
     if header[4] != 2 {
@@ -481,7 +497,7 @@ fn artifact_arch_error(header: &[u8], host_arch: &str) -> Option<String> {
     Some(format!(
         "is built for ELF machine {machine:#x}, not the {host_arch} this node \
          runs ({want:#x}). Build it for the node, e.g. cargo build --release \
-         --target aarch64-unknown-linux-gnu."
+         --target {host_arch}-unknown-linux-gnu."
     ))
 }
 
@@ -581,7 +597,7 @@ fn validate_artifacts_dir(dir: &Path) -> Result<Vec<String>, String> {
 ///
 /// | check | release asset | local artifact |
 /// |---|---|---|
-/// | ELF machine matches this host | not applied (CI publishes aarch64 only) | **applied** |
+/// | ELF machine matches this host | applied | **applied** |
 /// | SHA256 against the `.sha256` sidecar | applied (sidecar fetched) | **applied** (sidecar copied from the build host; a missing one is fatal) |
 /// | minisign against the vendored trust anchor | **mandatory**: a missing `.minisig` or `minisign` is fatal on every channel | applied when a `.minisig` exists; a missing one warns (the signing key is a CI secret) |
 /// | chmod 0755, atomic rename, `<dest>.prev` retention, Hard/BestEffort gate | applied | applied |
@@ -724,14 +740,14 @@ fn install_service(
     sink: &ProgressSink,
     source: &AssetSource<'_>,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    if let AssetSource::Release { pin } = *source {
+    if let AssetSource::Release { pin, host_arch } = *source {
         if b.service == "ados-vision" && binaries::board_prefers_onnx_vision(board_model) {
             // The onnx binary links the ONNX Runtime dynamically, so the binary AND
             // its shared library are installed together — either both land or the
             // install falls back to the default (musl, no-onnx) build. Installing the
             // onnx binary without its runtime would leave a vision service that
             // cannot dlopen ORT at start.
-            match install_onnx_vision(tmp_dir, sink, pin) {
+            match install_onnx_vision(tmp_dir, sink, pin, host_arch) {
                 Ok(replaced) => return Ok(replaced),
                 Err(e) => {
                     tracing::warn!(
@@ -867,10 +883,11 @@ fn install_onnx_vision(
     tmp_dir: &Path,
     sink: &ProgressSink,
     pin: Option<&str>,
+    host_arch: &str,
 ) -> anyhow::Result<Vec<PathBuf>> {
     // Both halves of the variant come from the release: this path is only
     // reached for a release-sourced `ados-vision` (see `install_service`).
-    let source = AssetSource::Release { pin };
+    let source = AssetSource::Release { pin, host_arch };
     let mut replaced: Vec<PathBuf> =
         install_one_with_retry(&binaries::PREBUILT_VISION_ONNX, tmp_dir, sink, &source)?
             .into_iter()
@@ -1033,14 +1050,23 @@ impl Step for FetchBinaries {
         StepKind::Required
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
-        // Prebuilt assets target aarch64 only. On a non-aarch64 dev host there
-        // is nothing to fetch; skip cleanly (the bash path does the same).
+        // Linux supports aarch64 and x86_64 (preflight). Any other arch has no
+        // binaries at all; skip cleanly (the bash path refuses it earlier).
         if !ctx.env.supported_arch {
             tracing::warn!(
                 arch = %ctx.env.arch,
                 "no prebuilt binaries for this arch; skipping fetch"
             );
             return StepOutcome::Skipped;
+        }
+
+        // The release publishes aarch64 binaries only. Any other supported arch
+        // (x86_64) installs entirely from a locally built `--artifacts` dir, and
+        // an entry missing from it is never fetched from the release (it would
+        // land an aarch64 binary that cannot run here).
+        let release_assets = env::arch_has_release_assets(&ctx.env.arch);
+        if !release_assets && ctx.artifacts.is_none() {
+            return StepOutcome::Failed(no_release_assets(&ctx.env.arch));
         }
 
         let tmp_dir: PathBuf = match tempdir() {
@@ -1077,7 +1103,7 @@ impl Step for FetchBinaries {
                 return StepOutcome::Failed(msg);
             }
         };
-        if let Some(pin) = pin.as_deref() {
+        if let Some(pin) = pin.as_deref().filter(|_| release_assets) {
             let sample = bins
                 .iter()
                 .find(|b| b.gate == Gate::Hard)
@@ -1152,7 +1178,15 @@ impl Step for FetchBinaries {
         sink.sub_progress(self.id(), 0, total);
         for (i, (b, source)) in bins.iter().zip(&sources).enumerate() {
             sink.activity(self.id(), format!("installing {}", b.service));
-            let ok = match install_service(b, &board_model, &tmp_dir, &sink, source) {
+            let result = if !release_assets && matches!(source, AssetSource::Release { .. }) {
+                Err(anyhow::anyhow!(
+                    "not in the --artifacts directory, and no {} release asset exists",
+                    ctx.env.arch
+                ))
+            } else {
+                install_service(b, &board_model, &tmp_dir, &sink, source)
+            };
+            let ok = match result {
                 Ok(replaced) => {
                     // Recorded as each lands, so a later Hard-gate miss in this
                     // same loop still rolls back what was already swapped.
@@ -1253,12 +1287,17 @@ mod tests {
         // origin. Only `--artifacts` bytes, which cannot carry the CI signature,
         // may fall back to their build host's SHA256.
         assert_eq!(
-            AssetSource::Release { pin: None }.signature_policy(),
+            AssetSource::Release {
+                pin: None,
+                host_arch: "aarch64"
+            }
+            .signature_policy(),
             SignaturePolicy::Required
         );
         assert_eq!(
             AssetSource::Release {
-                pin: Some("v0.101.0")
+                pin: Some("v0.101.0"),
+                host_arch: "aarch64"
             }
             .signature_policy(),
             SignaturePolicy::Required
@@ -1790,13 +1829,14 @@ mod tests {
         ));
         assert!(matches!(
             source_for(supervisor, Some(dir.path()), "aarch64", None),
-            AssetSource::Release { pin: None }
+            AssetSource::Release { pin: None, .. }
         ));
         // With no flag every entry is a release fetch, pin and all.
         assert!(matches!(
             source_for(video, None, "aarch64", Some("rev-abc")),
             AssetSource::Release {
-                pin: Some("rev-abc")
+                pin: Some("rev-abc"),
+                ..
             }
         ));
         // The release asset name is accepted as well as the service name.
@@ -1835,7 +1875,14 @@ mod tests {
         // The retry loop exists for a dropping link. A missing file or a bad
         // digest is terminal, so retrying it only puts the backoff between the
         // operator and the message naming what to fix.
-        assert_eq!(AssetSource::Release { pin: None }.max_attempts(), 3);
+        assert_eq!(
+            AssetSource::Release {
+                pin: None,
+                host_arch: "aarch64"
+            }
+            .max_attempts(),
+            3
+        );
         assert_eq!(
             AssetSource::Local {
                 dir: Path::new("/tmp"),
@@ -1844,5 +1891,53 @@ mod tests {
             .max_attempts(),
             1
         );
+    }
+
+    /// A test context posing as an x86_64 Linux host, whatever the build host.
+    fn x86_64_ctx() -> Ctx {
+        let mut ctx = Ctx::for_test(Checkpoint::new());
+        ctx.env.arch = "x86_64".to_string();
+        ctx.env.supported_arch = true;
+        ctx
+    }
+
+    #[test]
+    fn an_x86_64_host_without_artifacts_fails_before_fetching() {
+        let mut ctx = x86_64_ctx();
+        ctx.artifacts = None;
+        match FetchBinaries.run(&mut ctx) {
+            StepOutcome::Failed(msg) => {
+                assert_eq!(msg, no_release_assets("x86_64"));
+                assert!(msg.contains("--channel edge --artifacts <dir>"), "{msg}");
+            }
+            other => panic!("expected a failure naming --artifacts: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_x86_64_host_never_falls_back_to_the_release_for_a_missing_hard_entry() {
+        // The directory carries only the BestEffort relay (last in the catalog),
+        // so every Hard entry resolves to the release. On a host without release
+        // assets that is a failed entry, never a download: the first Hard one
+        // aborts the step before anything is placed.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mediamtx"), b"local").unwrap();
+        let mut ctx = x86_64_ctx();
+        ctx.artifacts = Some(dir.path().to_path_buf());
+        let first_hard = binaries::for_profile(&ctx.profile)
+            .into_iter()
+            .find(|b| b.gate == Gate::Hard)
+            .expect("the catalog has a Hard entry");
+        match FetchBinaries.run(&mut ctx) {
+            StepOutcome::Failed(msg) => assert_eq!(
+                msg,
+                format!(
+                    "required prebuilt binary {} could not be installed",
+                    first_hard.service
+                )
+            ),
+            other => panic!("expected the missing Hard entry to fail: {other:?}"),
+        }
+        assert!(ctx.replaced_binaries.is_empty(), "nothing was placed");
     }
 }

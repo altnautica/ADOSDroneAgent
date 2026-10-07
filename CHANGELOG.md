@@ -4,6 +4,25 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.102.4] - 2026-10-05
+
+### Added
+
+- **x86_64 Linux installs from local builds.** The installer now accepts an
+  x86_64 Linux host. No release binaries are published for x86_64, so the
+  install needs `--channel edge --artifacts <dir>` pointing at a workspace
+  built on the host; without it the binary step fails with that instruction,
+  and a service missing from the directory is never fetched from the release.
+  `install.sh` still refuses x86_64 and names the build-from-source route.
+- A `generic-x86_64` board profile, used by both HAL halves for an x86_64
+  host with no board identity (CPU-only video, USB UVC navigation camera).
+
+### Fixed
+
+- A downloaded release binary is now checked against the host architecture
+  before it is placed, as a local artifact already was, and the rebuild hint
+  names the host's own target triple.
+
 ## [0.102.3] - 2026-10-03
 
 ### Changed

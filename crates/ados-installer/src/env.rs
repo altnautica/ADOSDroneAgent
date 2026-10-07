@@ -286,7 +286,8 @@ pub struct EnvInfo {
     pub arch: String,
     /// `std::env::consts::OS` (`linux` on an SBC, `macos` on a dev host).
     pub os: String,
-    /// Whether the host arch is one the prebuilt binaries target.
+    /// Whether the installer supports this host arch on Linux (`aarch64` with
+    /// release binaries, `x86_64` with locally built `--artifacts`).
     pub supported_arch: bool,
 }
 
@@ -301,9 +302,9 @@ impl EnvInfo {
     }
 }
 
-/// Normalized architecture string. The prebuilt assets are all `*-aarch64`, so
-/// `arm64` (the macOS/Apple-silicon spelling) collapses to `aarch64`; anything
-/// else passes through unchanged for reporting.
+/// Normalized architecture string. `arm64` (the macOS/Apple-silicon spelling)
+/// collapses to `aarch64`, the name the release assets and ELF table use;
+/// anything else passes through unchanged for reporting.
 pub fn arch() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" | "arm64" => "aarch64",
@@ -311,10 +312,22 @@ pub fn arch() -> &'static str {
     }
 }
 
-/// True when the running architecture is one the prebuilt binaries target.
-/// The agent ships `*-aarch64` assets only.
+/// True when the running architecture is one the installer supports: `aarch64`
+/// (published release binaries) or `x86_64` (locally built binaries passed with
+/// `--channel edge --artifacts <dir>`).
 pub fn is_supported_arch() -> bool {
-    arch() == "aarch64"
+    matches!(arch(), "aarch64" | "x86_64")
+}
+
+/// True when the release host publishes prebuilt binaries for the running
+/// architecture. Only `*-aarch64` assets are published.
+pub fn has_release_assets() -> bool {
+    arch_has_release_assets(arch())
+}
+
+/// [`has_release_assets`] for a given normalized arch (pure).
+pub fn arch_has_release_assets(arch: &str) -> bool {
+    arch == "aarch64"
 }
 
 /// Write `contents` to `path` atomically AND durably: a temp sibling, written,
@@ -619,6 +632,18 @@ mod tests {
         if std::env::consts::ARCH == "arm64" || std::env::consts::ARCH == "aarch64" {
             assert_eq!(a, "aarch64");
             assert!(is_supported_arch());
+        }
+    }
+
+    #[test]
+    fn x86_64_is_supported_without_release_assets() {
+        assert!(arch_has_release_assets("aarch64"));
+        assert!(!arch_has_release_assets("x86_64"));
+        assert!(!arch_has_release_assets("riscv64"));
+        assert_eq!(has_release_assets(), arch_has_release_assets(arch()));
+        if std::env::consts::ARCH == "x86_64" {
+            assert!(is_supported_arch());
+            assert!(!has_release_assets());
         }
     }
 

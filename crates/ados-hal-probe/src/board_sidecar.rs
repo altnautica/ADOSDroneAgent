@@ -166,6 +166,10 @@ pub const BOARD_PROFILE_YAML: &[(&str, &str)] = &[
         include_str!("../../../src/ados/hal/boards/generic-arm64.yaml"),
     ),
     (
+        "generic-x86_64",
+        include_str!("../../../src/ados/hal/boards/generic-x86_64.yaml"),
+    ),
+    (
         "jetson-nano",
         include_str!("../../../src/ados/hal/boards/jetson-nano.yaml"),
     ),
@@ -859,6 +863,17 @@ mod tests {
         assert_eq!(fp.model, "ACME Unheard Of");
         // Tiered from what it actually has, not from the generic placeholder.
         assert_eq!(fp.tier, detect_tier(8192));
+        assert_eq!(fp.npu_tops, 0.0);
+        assert!(!fp.has_accelerator);
+    }
+
+    #[test]
+    fn an_unknown_x86_64_host_resolves_to_the_generic_x86_64_profile() {
+        let profiles = load_profiles();
+        let mut f = facts("", "");
+        f.machine = "x86_64".to_string();
+        let fp = resolve(&profiles, &f);
+        assert_eq!(fp.name, "generic-x86_64", "{fp:?}");
         assert_eq!(fp.npu_tops, 0.0);
         assert!(!fp.has_accelerator);
     }

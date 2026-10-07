@@ -129,7 +129,7 @@ class TestBoardProfiles:
         assert profile.name
         assert profile.vendor
         assert profile.soc
-        assert profile.arch in ("aarch64", "armhf", "armv7l")
+        assert profile.arch in ("aarch64", "armhf", "armv7l", "x86_64")
         assert isinstance(profile.default_tier, int)
         assert isinstance(profile.gpio_pins, list)
         assert isinstance(profile.uart_paths, list)
@@ -156,10 +156,10 @@ class TestBoardProfiles:
             assert isinstance(p, BoardProfile)
 
     def test_non_generic_profiles_have_codecs(self):
-        """Every board except generic-arm64 should list at least one hw video codec."""
+        """Every board except the generic profiles should list at least one hw video codec."""
         profiles = _load_board_profiles()
         for p in profiles:
-            if p.name != "generic-arm64":
+            if p.name not in ("generic-arm64", "generic-x86_64"):
                 assert len(p.hw_video_codecs) > 0, f"{p.name} has no hw_video_codecs"
 
 
@@ -511,6 +511,29 @@ class TestCpuinfoFallback:
             profile = detect_board_profile(force=True)
             assert profile is not None
             assert profile.stem == "generic-arm64"
+            assert profile.uart_paths, "the generic profile must carry fallback UARTs"
+
+    def test_an_unknown_x86_64_host_resolves_through_the_generic_x86_64_profile(self):
+        """An x86_64 host with no board identity loads the generic-x86_64 profile."""
+        invalidate_board_info_cache()
+        with (
+            patch("ados.hal.detect._read_board_override", return_value=""),
+            patch("ados.hal.detect._read_device_compatible", return_value=""),
+            patch("ados.hal.detect._read_device_model", return_value=""),
+            patch("ados.hal.detect._read_cpuinfo_model", return_value=""),
+            patch("ados.hal.detect.platform.machine", return_value="x86_64"),
+            patch("ados.hal.detect.platform.system", return_value="Linux"),
+            patch("psutil.virtual_memory") as mock_mem,
+            patch("psutil.cpu_count", return_value=8),
+        ):
+            mock_mem.return_value = type("VMem", (), {"total": 8 * 1024**3})()
+            board = detect_board(force=True)
+            assert board.name == "generic-x86_64"
+
+            profile = detect_board_profile(force=True)
+            assert profile is not None
+            assert profile.stem == "generic-x86_64"
+            assert profile.arch == "x86_64"
             assert profile.uart_paths, "the generic profile must carry fallback UARTs"
 
 
