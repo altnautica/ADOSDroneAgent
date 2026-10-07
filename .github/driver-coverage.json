@@ -30,6 +30,7 @@
   "builds_on_device": [
     "beagley-ai",
     "generic-arm64",
+    "generic-x86_64",
     "jetson-nano",
     "jetson-orin-nano",
     "rdk-x3",
