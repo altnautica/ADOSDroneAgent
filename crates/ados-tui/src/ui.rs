@@ -990,4 +990,232 @@ mod tests {
         assert!(hung.contains("STALE"), "{hung}");
         assert!(!hung.contains("HEALTHY"), "{hung}");
     }
+
+    /// A fully linked drone (sample's links + live telemetry) for the frame export.
+    fn flying(armed: bool, battery: f64, alt: f64) -> Dashboard {
+        let mut data = json!({
+            "version": "0.99.108",
+            "device_name": "ados-x",
+            "profile": "drone",
+            "paired": true,
+            "mavlink": {"connected": true},
+            "video": {"state": "running"},
+            "telemetry": {
+                "mode": if armed { "LOITER" } else { "STABILIZE" },
+                "armed": armed,
+                "battery": {"remaining": battery},
+                "gps": {"fix_type": 3, "satellites": 14},
+                "position": {"alt_rel": alt}
+            },
+            "steps": [{"label": "Profile", "state": "complete"}],
+            "services": [{"state": "running"}, {"state": "running"}]
+        });
+        // Reuse sample()'s synthetic link list verbatim.
+        let links = json!([
+            {"kind": "setup", "label": "mDNS setup", "url": "http://ados-x.local:8080/setup", "primary": true},
+            {"kind": "setup", "label": "LAN setup", "url": "http://192.168.1.5:8080/setup"},
+            {"kind": "mission_control", "label": "Mission Control", "url": "https://command.altnautica.com"},
+            {"kind": "video", "label": "viewer", "url": "http://ados-x.local:8889/main/"},
+            {"kind": "mavlink", "label": "MAVLink WS", "url": "ws://ados-x.local:8765/"}
+        ]);
+        data["access_urls"] = links;
+        Dashboard::from_status(&data)
+    }
+
+    /// xterm RGB for a ratatui colour; `None` for the terminal default.
+    fn color_rgb(c: Color) -> Option<(u8, u8, u8)> {
+        const BASE: [(u8, u8, u8); 16] = [
+            (0, 0, 0),
+            (205, 0, 0),
+            (0, 205, 0),
+            (205, 205, 0),
+            (0, 0, 238),
+            (205, 0, 205),
+            (0, 205, 205),
+            (229, 229, 229),
+            (127, 127, 127),
+            (255, 0, 0),
+            (0, 255, 0),
+            (255, 255, 0),
+            (92, 92, 255),
+            (255, 0, 255),
+            (0, 255, 255),
+            (255, 255, 255),
+        ];
+        let idx = match c {
+            Color::Reset => return None,
+            Color::Rgb(r, g, b) => return Some((r, g, b)),
+            Color::Black => 0,
+            Color::Red => 1,
+            Color::Green => 2,
+            Color::Yellow => 3,
+            Color::Blue => 4,
+            Color::Magenta => 5,
+            Color::Cyan => 6,
+            Color::Gray => 7,
+            Color::DarkGray => 8,
+            Color::LightRed => 9,
+            Color::LightGreen => 10,
+            Color::LightYellow => 11,
+            Color::LightBlue => 12,
+            Color::LightMagenta => 13,
+            Color::LightCyan => 14,
+            Color::White => 15,
+            Color::Indexed(i) => i,
+        };
+        Some(match idx {
+            0..=15 => BASE[idx as usize],
+            16..=231 => {
+                let n = idx - 16;
+                let step = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+                (step(n / 36), step((n / 6) % 6), step(n % 6))
+            }
+            _ => {
+                let v = 8 + (idx - 232) * 10;
+                (v, v, v)
+            }
+        })
+    }
+
+    fn color_json(c: Color) -> serde_json::Value {
+        match color_rgb(c) {
+            Some((r, g, b)) => json!(format!("#{r:02X}{g:02X}{b:02X}")),
+            None => serde_json::Value::Null,
+        }
+    }
+
+    /// Render one state and serialise it as rows of merged same-style spans.
+    fn export_frame(
+        dash: Option<&Dashboard>,
+        history: &History,
+        actions_selected: Option<usize>,
+        hold_ms: u64,
+    ) -> serde_json::Value {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal
+            .draw(|f| {
+                render(
+                    f,
+                    dash,
+                    history,
+                    Some("12:00:00"),
+                    false,
+                    None,
+                    actions_selected,
+                    Some("0.99.108"),
+                    false,
+                )
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut lines = Vec::new();
+        for y in 0..buf.area.height {
+            let mut spans: Vec<serde_json::Value> = Vec::new();
+            let mut text = String::new();
+            let mut style: Option<(Color, Color, bool, bool)> = None;
+            let flush = |spans: &mut Vec<serde_json::Value>,
+                         text: &mut String,
+                         s: (Color, Color, bool, bool)| {
+                spans.push(json!({
+                    "text": std::mem::take(text),
+                    "fg": color_json(s.0),
+                    "bg": color_json(s.1),
+                    "bold": s.2,
+                    "dim": s.3,
+                }));
+            };
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                let s = (
+                    cell.fg,
+                    cell.bg,
+                    cell.modifier.contains(Modifier::BOLD),
+                    cell.modifier.contains(Modifier::DIM),
+                );
+                if let Some(prev) = style {
+                    if prev != s {
+                        flush(&mut spans, &mut text, prev);
+                    }
+                }
+                style = Some(s);
+                text.push_str(cell.symbol());
+            }
+            if let Some(prev) = style {
+                flush(&mut spans, &mut text, prev);
+            }
+            lines.push(serde_json::Value::Array(spans));
+        }
+        json!({ "hold_ms": hold_ms, "lines": lines })
+    }
+
+    /// Writes `$ADOS_TUI_EXPORT_DIR/frames.json`: a scripted session of the
+    /// cockpit (synthetic data) for the website's terminal replay.
+    #[test]
+    #[ignore]
+    fn export_frames() {
+        let dir = std::env::var("ADOS_TUI_EXPORT_DIR").expect("set ADOS_TUI_EXPORT_DIR");
+        let mut frames = Vec::new();
+        let mut history = History::default();
+
+        // Connecting, then the first snapshot (no FC yet), then healthy idle.
+        frames.push(export_frame(None, &history, None, 1200));
+        let first = sample();
+        frames.push(export_frame(Some(&first), &history, None, 1400));
+        // live_drone()'s healthy disarmed snapshot, then the fully linked one.
+        frames.push(export_frame(Some(&live_drone()), &history, None, 900));
+        let idle = flying(false, 82.0, 0.0);
+        history.record(&idle);
+        frames.push(export_frame(Some(&idle), &history, None, 1600));
+
+        // Armed and climbing: three successive sparkline updates.
+        let climb = [(81.0, 4.0), (80.0, 9.5), (79.0, 15.0)];
+        for (i, (battery, alt)) in climb.iter().enumerate() {
+            let step = flying(true, *battery, *alt);
+            history.record(&step);
+            let hold = if i == 2 { 1400 } else { 700 };
+            frames.push(export_frame(Some(&step), &history, None, hold));
+        }
+        let armed = flying(true, 79.0, 15.0);
+
+        // Actions overlay, first item, then 'Radio status' selected.
+        frames.push(export_frame(Some(&armed), &history, Some(0), 1200));
+        let radio = ACTIONS
+            .iter()
+            .position(|a| a.label == "Radio status")
+            .expect("Radio status action");
+        for sel in 1..=radio {
+            let hold = if sel == radio { 2000 } else { 250 };
+            frames.push(export_frame(Some(&armed), &history, Some(sel), hold));
+        }
+
+        // The Links panel (left column), from its top border down to the row
+        // above where the Actions overlay starts, in cell coords.
+        let full = Rect::new(0, 0, 120, 40);
+        let rows = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(full);
+        let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(rows[2]);
+        let links = cols[0];
+        let overlay = centered_rect(60, ACTIONS.len() as u16 + 4, full);
+        let crop_bottom = overlay.y.min(links.bottom());
+        let out = json!({
+            "width": 120,
+            "height": 40,
+            "mobile_crop": {
+                "x": links.x,
+                "y": links.y,
+                "w": links.width,
+                "h": crop_bottom - links.y,
+            },
+            "frames": frames,
+        });
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = std::path::Path::new(&dir).join("frames.json");
+        std::fs::write(&path, serde_json::to_string(&out).unwrap()).unwrap();
+    }
 }
