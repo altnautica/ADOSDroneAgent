@@ -86,6 +86,8 @@ export interface GsStatus {
   /** Where detections come from (`local` / `offload` / `hybrid`), or `none`
    *  when the node has no working vision path; absent when not reported. */
   perception_tier?: string | null;
+  /** Seconds since the FC's last heartbeat (a drone's own link). */
+  heartbeat_age_s?: number | null;
   paired_drone: PairedDrone;
   link: LinkView;
   /** Connected GCS clients and the pilot-in-command, or null when the node
@@ -128,6 +130,7 @@ export interface StatusFull {
   radio?: Record<string, unknown> | null;
   profile?: string | null;
   perceptionTier?: string | null;
+  heartbeatAgeS?: number | null;
 }
 
 /** One battery pack from `GET /api/v1/battery`. */
@@ -286,25 +289,6 @@ export interface RosterCamera {
   /** Per-leg HLS endpoint (relative, e.g. `/hls/<id>/index.m3u8`), when the
    *  agent advertises one. Absent for single-stream nodes. */
   hls_url?: string;
-}
-
-/** A minimal, tolerant view of `GET /api/video/config` — only the blocks the
- *  status strip's video zone reads. `encoder` is the box's OWN configured
- *  encoder (honest as "the feed" only on a drone, the video source); `link`
- *  carries the receiver's measured inbound video byte rate (honest on a ground
- *  station). Unknown extra keys are tolerated. */
-export interface VideoConfigResponse {
-  encoder?: {
-    bitrate_kbps?: number | null;
-    width?: number | null;
-    height?: number | null;
-    fps?: number | null;
-    codec?: string | null;
-  };
-  link?: {
-    video_inbound_bytes_per_s?: number | null;
-    channel?: number | null;
-  };
 }
 
 /** The agent config is a nested JSON object (`GET /api/config`, sanitized

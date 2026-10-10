@@ -93,6 +93,13 @@ export function useFlightTelemetryPoll(): void {
             home,
             lastLiveAt: live ? nowMs : prev.lastLiveAt,
             armedAtLastLive: live ? telemetry.armed === true : prev.armedAtLastLive,
+            armedSince: !live
+              ? prev.armedSince
+              : telemetry.armed !== true
+                ? null
+                : prev.armedAtLastLive || prev.armedSince !== null
+                  ? prev.armedSince
+                  : Date.now(),
           });
         } catch {
           if (signal.aborted) return;
@@ -109,7 +116,7 @@ export function useFlightTelemetryPoll(): void {
       // A stale "live" must never linger after the Feed unmounts. Home stays:
       // it belongs to the flight, not to the screen. The live clock restarts,
       // since nothing was being watched while the Feed was away.
-      useFlightStore.setState((s) => ({ ...INITIAL_FLIGHT_STATE, home: s.home, armedAtLastLive: s.armedAtLastLive }));
+      useFlightStore.setState((s) => ({ ...INITIAL_FLIGHT_STATE, home: s.home, armedAtLastLive: s.armedAtLastLive, armedSince: s.armedSince }));
     };
   }, []);
 }

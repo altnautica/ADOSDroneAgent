@@ -6,14 +6,15 @@
 //
 // Feed request budget with no extensions enabled (drone): /api/telemetry 5/s,
 // /api/status/full 1/s (shell), /api/v1/battery 0.2/s (shell), /api/wfb 0.1/s
-// (shell), /api/video/config 0.1/s, /api/video/roster 1/30 s — about 6.4/s.
+// (shell), /api/video/roster 1/30 s — about 6.3/s.
 
 import { useEffect, useMemo } from "react";
 
 import { AlertStack } from "@/components/feed/alert-stack";
 import { DetectionOverlay } from "@/components/feed/detection-overlay";
 import { FeedActionBar } from "@/components/feed/feed-action-bar";
-import { FeedHud } from "@/components/feed/feed-hud";
+import { HudCanvas } from "@/components/feed/hud-canvas";
+import { SafetyBand } from "@/components/feed/safety-band";
 import { MiniMap } from "@/components/feed/mini-map";
 import { ProximityRadar } from "@/components/feed/proximity-radar";
 import { SkillBar } from "@/components/feed/skill-bar";
@@ -31,7 +32,9 @@ import { resolveActiveCameraId } from "@/lib/overlay-geometry";
 import type { RosterCamera, StatusStream } from "@/lib/types";
 import { useProfile } from "@/shared/use-profile";
 import { whepUrlFor } from "@/shared/whep";
+import { cn } from "@/lib/utils";
 import { useFeedStore } from "@/stores/feed-store";
+import { useNavStore } from "@/stores/nav-store";
 import { useStatusStore } from "@/stores/status-store";
 
 /** The relative WHEP + HLS endpoints for a leg, same-origin against whatever
@@ -72,6 +75,7 @@ export function FeedScreen() {
   const activeCameraId = useFeedStore((s) => s.activeCameraId);
   const streamNonce = useFeedStore((s) => s.streamNonce);
   const setActiveStreamLabel = useFeedStore((s) => s.setActiveStreamLabel);
+  const menuCollapsed = useNavStore((s) => s.menuCollapsed);
 
   useFlightTelemetryPoll();
   useExtensionStatePoll();
@@ -113,14 +117,39 @@ export function FeedScreen() {
         />
       ) : null}
       <ExtensionFeedMounts />
-      <FeedHud />
-      {cameras.length > 1 ? <StreamTabs cameras={cameras} /> : null}
-      {flightNavCapable ? <MiniMap /> : null}
-      {flightNavCapable ? <ProximityRadar /> : null}
-      <AlertStack />
-      <div className="pointer-events-none absolute inset-x-[0.5rem] bottom-[3rem] z-30 flex items-end justify-between gap-[0.6rem]">
-        <SkillBar />
-        <FeedActionBar />
+      {/* Everything the pilot reads or touches sits inside the region the
+          shell's chrome leaves free (status strip above, utility bar below,
+          menu rail to the left), stacked so nothing overlaps at any size. */}
+      <div
+        className={cn(
+          "pointer-events-none absolute bottom-[3rem] right-[0.4rem] top-[3.1rem] z-30 flex flex-col gap-[0.3rem] portrait:bottom-[6.6rem]",
+          menuCollapsed ? "left-[0.4rem]" : "left-[0.4rem] landscape:left-[7rem]",
+        )}
+      >
+        <SafetyBand />
+        <div className="flex min-h-0 flex-1 gap-[0.3rem]">
+          <div className="relative min-w-0 flex-1">
+            <HudCanvas />
+            <div className="absolute inset-x-0 top-0 z-40 flex flex-col items-center gap-[0.3rem]">
+              <AlertStack />
+            </div>
+            {cameras.length > 1 ? (
+              <div className="absolute left-0 top-0 z-20">
+                <StreamTabs cameras={cameras} />
+              </div>
+            ) : null}
+          </div>
+          {flightNavCapable ? (
+            <div className="z-20 flex shrink-0 flex-col justify-end gap-[0.3rem]">
+              <ProximityRadar />
+              <MiniMap />
+            </div>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 items-end justify-between gap-[0.6rem]">
+          <SkillBar />
+          <FeedActionBar />
+        </div>
       </div>
       <SkillConfirmSheet />
     </div>

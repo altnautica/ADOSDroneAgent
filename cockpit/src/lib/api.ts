@@ -10,7 +10,6 @@ import type {
   RosterCamera,
   StatusFull,
   VehicleState,
-  VideoConfigResponse,
 } from "@/lib/types";
 
 /** The composite ground-station status snapshot (`/api/v1/ground-station/status`).
@@ -86,6 +85,7 @@ export function droneStatusFromFull(full: StatusFull, diag: LinkDiagnosis | null
     profile: "drone",
     fc_connected: full.fc_connected === true,
     perception_tier: str(full.perceptionTier),
+    heartbeat_age_s: num(full.heartbeatAgeS),
     paired_drone: {
       device_id: radioPaired ? str(radio.pairedWithDeviceId) : null,
       key_fingerprint: str(radio.publicKeyFingerprint),
@@ -130,11 +130,6 @@ export function getStatusFull(signal?: AbortSignal): Promise<StatusFull> {
 /** The whole sanitized config tree (`GET /api/config`), the Settings source. */
 export function getConfig(signal?: AbortSignal): Promise<AgentConfig> {
   return apiFetch<AgentConfig>("/api/config", { signal });
-}
-
-/** The encoder + radio + link video snapshot (`GET /api/video/config`). */
-export function getVideoConfig(signal?: AbortSignal): Promise<VideoConfigResponse> {
-  return apiFetch<VideoConfigResponse>("/api/video/config", { signal });
 }
 
 /** The live vehicle state (`GET /api/telemetry`), `{}` when none is heard. */

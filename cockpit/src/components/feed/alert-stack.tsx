@@ -79,7 +79,7 @@ export function AlertStack() {
   };
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-[2.9rem] z-40 flex flex-col items-center gap-[0.3rem] px-[1rem]">
+    <div className="pointer-events-none flex flex-col items-center gap-[0.3rem]">
       <div role="alert" aria-live="assertive" className="flex flex-col items-center gap-[0.3rem]">
         {critical.map(row)}
       </div>

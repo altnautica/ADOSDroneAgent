@@ -3,7 +3,7 @@
 // extensions' skills after them. Each slot shows its disabled reason as text
 // under the button (a tooltip is unreachable on a touch panel), every non-tap
 // skill opens the shared confirm sheet, and Kill is always present behind its
-// guard.
+// guard in the safety band.
 
 import { memo, useState } from "react";
 import {
@@ -191,7 +191,6 @@ export function SkillBar() {
                 ) : null}
               </div>
               {slots(extensionSkills, ctx, busy, onPress)}
-              {slots([CORE_BY_ID.kill], ctx, busy, onPress)}
             </>
           )}
         </div>

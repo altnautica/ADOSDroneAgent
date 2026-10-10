@@ -30,6 +30,9 @@ export interface FlightState {
   /** The arm state at the last live sample. The agent withholds `armed` once
    *  heartbeats stop, so link-loss rules read this instead. */
   armedAtLastLive: boolean;
+  /** `Date.now()` of the disarmed→armed edge, null while disarmed or before
+   *  an arming has been seen (the flight timer shows a dash then). */
+  armedSince: number | null;
 }
 
 export const INITIAL_FLIGHT_STATE: FlightState = {
@@ -40,6 +43,7 @@ export const INITIAL_FLIGHT_STATE: FlightState = {
   home: null,
   lastLiveAt: null,
   armedAtLastLive: false,
+  armedSince: null,
 };
 
 export const useFlightStore = create<FlightState>(() => ({ ...INITIAL_FLIGHT_STATE }));

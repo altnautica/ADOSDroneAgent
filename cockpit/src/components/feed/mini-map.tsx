@@ -116,7 +116,7 @@ export function MiniMap() {
 
   return (
     <div
-      className="pointer-events-none absolute bottom-[3.6rem] right-[0.6rem] z-[8] h-[5.6rem] w-[5.6rem]"
+      className="pointer-events-none relative h-[5.6rem] w-[5.6rem] shrink-0"
       aria-hidden
     >
       <div

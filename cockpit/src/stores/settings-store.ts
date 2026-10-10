@@ -75,7 +75,21 @@ function persistBindings(b: Record<string, number>): void {
   }
 }
 
+const ALT_REF_KEY = "ados-cockpit-alt-ref";
+export type AltRef = "rel" | "msl";
+
+function loadAltRef(): AltRef {
+  try {
+    return typeof localStorage !== "undefined" && localStorage.getItem(ALT_REF_KEY) === "msl" ? "msl" : "rel";
+  } catch {
+    return "rel";
+  }
+}
+
 interface SettingsState {
+  /** Altitude tape reference: home-relative or above mean sea level. */
+  altRef: AltRef;
+  setAltRef: (ref: AltRef) => void;
   uiScale: number;
   setUiScale: (value: number) => void;
   nudgeUiScale: (delta: number) => void;
@@ -87,6 +101,15 @@ interface SettingsState {
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   uiScale: loadScale(),
+  altRef: loadAltRef(),
+  setAltRef: (ref) => {
+    try {
+      localStorage.setItem(ALT_REF_KEY, ref);
+    } catch {
+      // Storage disabled: the choice lasts for this session.
+    }
+    set({ altRef: ref });
+  },
   setUiScale: (value) => {
     const v = clampScale(value);
     persistScale(v);

@@ -7,8 +7,6 @@
 //           + channel + bitrate. The leading dot and verdict are driven by the
 //           agent's link_diag, so a link that is "connected" but actually deaf
 //           reads red, not green.
-//   CENTRE— ACTIVE VIDEO (only over the Feed): which stream, live/connecting/no
-//           source, its decoded resolution, and the honest data rate.
 //   RIGHT — BOX / REACH: role, uplink + reachability, pair state, CPU, a
 //           threshold-coloured temperature, a wall clock, a recording dot, and a
 //           stale badge when the poll is failing.
@@ -24,15 +22,11 @@ import type { ReactNode } from "react";
 import { SignalBars } from "@/components/shell/signal-bars";
 import { WallClock } from "@/components/shell/wall-clock";
 import { Dot, toneClass, type Tone } from "@/components/ui/data";
-import { useProfile } from "@/shared/use-profile";
 import { useStatusStore } from "@/stores/status-store";
-import { useVideoInfo } from "@/hooks/use-video-info";
 import { fmtChannel, fmtDbm, fmtMbps, fmtPct, fmtTemp, DASH } from "@/shared/format";
 import { fmtDb, fmtKbpsAsMbps, fmtLossPct } from "@/lib/format-status";
 import { linkDiagView, type LinkDiagView } from "@/lib/link-diag";
 import type { GsStatus } from "@/lib/types";
-import { useFeedStore } from "@/stores/feed-store";
-import type { VideoFeedState } from "@/shared/video-transport";
 import { cn } from "@/lib/utils";
 
 /** Map a bare link state string to a tone, the fallback when the agent has not
@@ -128,69 +122,6 @@ function LinkZone({ link }: { link: GsStatus["link"] | undefined }) {
   );
 }
 
-/** CENTRE zone — the active video, honest about what is on screen. Rendered only
- *  over the Feed, where the video layer is mounted and its state is live. */
-function VideoZone() {
-  const profile = useProfile();
-  const video = useFeedStore((s) => s.video);
-  const label = useFeedStore((s) => s.activeStreamLabel);
-  const { width, height } = video;
-  const info = useVideoInfo(profile);
-
-  const tone = videoTone(video.state);
-  const stateLabel =
-    video.state === "live"
-      ? "live"
-      : video.state === "frozen"
-        ? "frozen"
-        : video.state === "connecting"
-          ? "connecting"
-          : "no source";
-
-  return (
-    <div className="flex min-w-0 items-center gap-[0.45rem]">
-      <Dot tone={tone} />
-      <span className="truncate text-[0.8rem] text-surface-foreground">{label ?? "Feed"}</span>
-      <span className={cn("text-[0.75rem]", toneClass(tone))}>{stateLabel}</span>
-      {video.highLatency && video.state === "live" ? (
-        <span className="rounded bg-warn/15 px-[0.3rem] text-[0.75rem] font-medium uppercase text-warn">
-          High latency
-        </span>
-      ) : video.transport === "hls" && video.state === "live" ? (
-        <span className="text-[0.75rem] uppercase text-muted-foreground">HLS</span>
-      ) : null}
-      {width && height ? (
-        <span className="hidden font-mono text-[0.75rem] text-muted-foreground md:inline">
-          {width}×{height}
-        </span>
-      ) : null}
-      {info.rateMbps != null ? (
-        <span className="hidden font-mono text-[0.75rem] text-muted-foreground lg:inline">
-          {info.rateMbps.toFixed(1)} Mbps
-        </span>
-      ) : null}
-      {info.fps != null ? (
-        <span className="hidden font-mono text-[0.75rem] text-muted-foreground lg:inline">
-          {info.fps} fps
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-function videoTone(state: VideoFeedState): Tone {
-  switch (state) {
-    case "live":
-      return "ok";
-    case "connecting":
-      return "muted";
-    case "frozen":
-      return "warn";
-    default:
-      return "err";
-  }
-}
-
 /** RIGHT zone — the box + reach state. */
 function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean }) {
   const role = status?.role?.current;
@@ -262,13 +193,7 @@ export function StatusStrip({ floating = false }: { floating?: boolean }) {
       )}
     >
       <LinkZone link={status?.link} />
-      {floating ? (
-        <div className="flex min-w-0 flex-1 justify-center">
-          <VideoZone />
-        </div>
-      ) : (
-        <div className="flex-1" />
-      )}
+      <div className="flex-1" />
       <BoxZone status={status} stale={stale} />
     </div>
   );
