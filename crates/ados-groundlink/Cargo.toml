@@ -32,9 +32,9 @@ ados-config = { path = "../ados-config" }
 # upgrade-mixed pair is surfaced instead of silently misreading the plugin wire.
 ados-plugin-host = { path = "../ados-plugin-host" }
 # The ONE mediamtx config generator (air, ground and cloud-relay profiles) plus
-# the shared port defaults. Linked for the `--emit-mediamtx-config` one-shot
-# that the ground mediamtx unit renders its config through, so the ground
-# station cannot drift from the air side the way two generators did.
+# the shared port defaults and the managed mediamtx process. `--ground-video`
+# renders and runs the ground media server through it, so the ground station
+# cannot drift from the air side the way two generators did.
 ados-video = { path = "../ados-video" }
 
 tokio = { workspace = true }

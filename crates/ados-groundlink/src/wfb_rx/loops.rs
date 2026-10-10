@@ -250,8 +250,8 @@ pub async fn stats_reader_loop(
             // Fold the cumulative fan-out totals onto the sidecar so the
             // video-pipeline harness can attribute the fan-out hop (decoded
             // packets climbing but `fanout_forwarded` flat isolates the fault to
-            // the fan-out; both climbing but the ingest byte-rate flat isolates
-            // it to the mediamtx-gs ingest ffmpeg).
+            // the fan-out; both climbing but the media server's bytesReceived
+            // flat isolates it to the mediamtx-gs `udp+rtp` source).
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("fanout_forwarded".to_string(), fanout.forwarded().into());
                 obj.insert("fanout_drops".to_string(), fanout.drops().into());

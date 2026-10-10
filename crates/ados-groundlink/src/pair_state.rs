@@ -1,6 +1,6 @@
 //! WFB radio-link pair state for the ground station.
 //!
-//! Ports the `gs` legs of `pair_manager.py`: install a 64-byte rx-side wfb-ng
+//! Owns the `gs` pair legs: install a 64-byte rx-side wfb-ng
 //! key, persist the pair state, drop the setup-complete sentinel, restart the
 //! node role's WFB plane; and the unpair path that wipes both key files and
 //! clears the persisted pair state. The drone legs stay where they are (the
@@ -127,7 +127,7 @@ fn iso_now() -> String {
 }
 
 /// Atomically write `data` to `path` with a specific mode (tmp + chmod + rename).
-/// Mirrors `pair_manager._atomic_write`.
+/// The parent dir is created when absent.
 fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -151,8 +151,7 @@ fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
-/// Install a 64-byte rx-side key on the GS. Mirrors
-/// `PairManager.apply_keypair(blob, "gs", peer_device_id)`:
+/// Install a 64-byte rx-side key on the GS:
 /// decode + validate the blob, write `rx.key` (0600), persist the pair state
 /// (`auto_pair_enabled=false`), drop the setup-complete sentinel, restart the
 /// receive unit, and return `{paired, paired_with_device_id, paired_at,
@@ -215,8 +214,8 @@ async fn apply_keypair_gs_at(
     }))
 }
 
-/// Wipe both key files and clear the persisted pair state. Mirrors
-/// `PairManager.unpair("gs")`: leaves `auto_pair_enabled=false`, restarts the
+/// Wipe both key files and clear the persisted pair state. Leaves
+/// `auto_pair_enabled=false`, restarts the
 /// receive unit, returns `{paired: false, role: "gs"}`.
 pub async fn unpair_gs() -> Result<Value, String> {
     unpair_gs_at(&pair_paths()).await
@@ -273,8 +272,7 @@ where
 }
 
 /// Merge the persisted pair fields under `video.wfb` (canonical) and mirror onto
-/// `ground_station.{paired_drone_id,paired_at}` for the GS profile. Mirrors
-/// `pair_manager._persist_pair_state` for `role == "gs"`. A `None` peer/paired-at
+/// `ground_station.{paired_drone_id,paired_at}` for the GS profile. A `None` peer/paired-at
 /// clears the field; `auto_pair_enabled` is set when supplied. The merge
 /// preserves every other config key and is atomic (tmp + rename), 0600.
 fn persist_pair_state_at(
@@ -370,8 +368,8 @@ fn section_path_mut<'a>(
 }
 
 /// Serialize + atomically write the config (tmp + rename), 0600 (the file carries
-/// secrets). Mirrors `pair_manager._save_config_dict`'s atomic write (without the
-/// flock, which the front's single-writer position makes unnecessary).
+/// secrets). No flock: the front's single-writer position makes one
+/// unnecessary.
 fn write_config_atomic(path: &Path, data: &serde_norway::Value) -> Result<(), String> {
     let body = serde_norway::to_string(data).map_err(|e| e.to_string())?;
     atomic_write(path, body.as_bytes(), 0o600)
@@ -465,7 +463,7 @@ mod tests {
         let reply = apply_keypair_gs_at(&e.paths, &b64_64_bytes(9), Some("drone-7"))
             .await
             .unwrap();
-        // The reply shape matches the Python apply_keypair return.
+        // The reply shape the native front forwards to its callers.
         assert_eq!(reply["paired"], true);
         assert_eq!(reply["paired_with_device_id"], "drone-7");
         assert_eq!(reply["role"], "gs");

@@ -22,6 +22,8 @@
 //! forwarder/aggregator. The rx-key pairing gate and regulatory-domain/tx-power
 //! application stay where they were.
 
+mod ground_video;
+
 use ados_protocol::shutdown::Shutdown;
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
@@ -161,104 +163,39 @@ fn init_logging() {
         .try_init();
 }
 
-/// Render the ground profile's `mediamtx.yml` on stdout and exit, when asked.
-///
-/// There is ONE mediamtx config generator for the whole fleet
-/// ([`ados_video::mediamtx::mediamtx_config_yaml`]), and this is how the ground
-/// station reaches it. The ground `mediamtx` process is still supervised by the
-/// Python `ados-mediamtx-gs` unit, which used to render its own YAML — a second
-/// generator that had silently drifted from the Rust one on `writeQueueSize`,
-/// `udpMaxPayloadSize`, the WebRTC handshake/STUN timeouts, the STUN list, the
-/// TCP ICE candidate and `rtspTransports`, with no gate able to see it. That
-/// unit now shells out to this subcommand for the document and owns only the
-/// disk write and the process lifecycle.
-///
-/// Ports are taken from the caller so the Python side stays the single owner of
-/// its port configuration; anything omitted falls back to the shared defaults.
-/// A parse failure exits non-zero with a message on stderr rather than emitting
-/// a half-formed config, because the caller writes whatever it gets straight
-/// into the file mediamtx is started with.
-///
-/// Returns `None` when the flag is absent, so the service continues normally.
-fn emit_mediamtx_config(args: &[String]) -> Option<i32> {
-    if !args.iter().any(|a| a == "--emit-mediamtx-config") {
-        return None;
-    }
-    let value_of = |name: &str| -> Option<&String> {
-        let mut it = args.iter();
-        while let Some(a) = it.next() {
-            if a == name {
-                return it.next();
-            }
-        }
-        None
-    };
-    let port = |name: &str, default: u16| -> Result<u16, String> {
-        match value_of(name) {
-            None => Ok(default),
-            Some(raw) => raw
-                .parse::<u16>()
-                .map_err(|e| format!("{name} {raw:?} is not a port: {e}")),
-        }
-    };
-    let ports = (
-        port("--api-port", ados_video::mediamtx::DEFAULT_API_PORT),
-        port("--rtsp-port", ados_video::mediamtx::DEFAULT_RTSP_PORT),
-        port("--webrtc-port", ados_video::mediamtx::DEFAULT_WEBRTC_PORT),
-        port("--hls-port", ados_video::mediamtx::DEFAULT_HLS_PORT),
-        port(
-            "--playback-port",
-            ados_video::mediamtx::DEFAULT_PLAYBACK_PORT,
-        ),
-    );
-    let (api, rtsp, webrtc, hls, playback) = match ports {
-        (Ok(a), Ok(r), Ok(w), Ok(h), Ok(p)) => (a, r, w, h, p),
-        (a, r, w, h, p) => {
-            let err = [a.err(), r.err(), w.err(), h.err(), p.err()]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("; ");
-            eprintln!("ados-groundlink --emit-mediamtx-config: {err}");
-            return Some(2);
-        }
-    };
+/// Whether this process runs the ground media server (`--ground-video`, the
+/// `ados-mediamtx-gs` unit) instead of a receive-plane role.
+fn wants_ground_video(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--ground-video")
+}
 
-    // The ground station publishes the radio-decoded stream into `main` from
-    // its ffmpeg ingest, so `main` is a publisher path exactly as on the air
-    // side. LAN IPs are advertised as WebRTC host-candidate hints.
-    let lan_ips = ados_video::mediamtx::detect_lan_ips();
-    let streams = [(
-        ados_video::mediamtx::MAIN_PATH.to_string(),
-        "publisher".to_string(),
-    )];
-    let yaml = ados_video::mediamtx::mediamtx_config_yaml(&ados_video::mediamtx::ConfigParams {
-        profile: ados_video::mediamtx::MediamtxProfile::Ground,
-        api_port: api,
-        rtsp_port: rtsp,
-        webrtc_port: webrtc,
-        hls_port: hls,
-        playback_port: playback,
-        lan_ips: &lan_ips,
-        streams: &streams,
-        recording: ados_video::mediamtx::RecordingParams::default(),
-    });
-    print!("{yaml}");
-    Some(0)
+/// Run the ground mediamtx until SIGTERM/SIGINT.
+async fn run_ground_video() -> Result<()> {
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let shutdown = Shutdown::new();
+    let run_dir = std::path::PathBuf::from(ados_groundlink::paths::run_dir());
+    let task = tokio::spawn(ground_video::run(shutdown.clone(), run_dir));
+    tokio::select! {
+        _ = sigterm.recv() => tracing::info!("received SIGTERM"),
+        _ = sigint.recv() => tracing::info!("received SIGINT"),
+    }
+    shutdown.trigger();
+    let _ = task.await;
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // One-shot modes run BEFORE any logging is initialised: the fmt layer
-    // writes to stdout on a non-journald host, and stdout here is the emitted
-    // document.
+    // The ground media server is its own unit and carries no role.
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(code) = emit_mediamtx_config(&args) {
-        std::process::exit(code);
+    if wants_ground_video(&args) {
+        init_logging();
+        tracing::info!("ground media server starting");
+        return run_ground_video().await;
     }
 
     init_logging();
-
     // Resolved before readiness: a unit started without a usable role must fail
     // its start, never report ready and run a guessed role on the adapter.
     let role = match resolve_role() {
@@ -1338,6 +1275,12 @@ mod tests {
 
     fn args(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ground_video_flag_selects_media_server() {
+        assert!(wants_ground_video(&args(&["--ground-video"])));
+        assert!(!wants_ground_video(&args(&["--role", "direct"])));
     }
 
     #[test]

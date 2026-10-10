@@ -3,7 +3,8 @@
 //! The receive-side wfb decoder outputs the FEC-decoded RTP H.264 stream to a
 //! single internal UDP port. Two consumers want to read it:
 //!
-//! 1. The mediamtx-gs ffmpeg ingest sidecar — for the browser WHEP stream.
+//! 1. The mediamtx-gs media server's native `udp+rtp` source — for the
+//!    browser WHEP stream.
 //! 2. The on-device LCD video tap — for the local screen.
 //!
 //! Only one process can bind a UDP port at a time, and `SO_REUSEPORT`
@@ -40,7 +41,7 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
-/// Downstream port for the mediamtx-gs ffmpeg ingest.
+/// Downstream port for the mediamtx-gs native `udp+rtp` source.
 pub const MEDIAMTX_PORT: u16 = 5600;
 /// Downstream port for the on-device LCD video tap.
 pub const LCD_PORT: u16 = 5605;
@@ -48,12 +49,12 @@ pub const LCD_PORT: u16 = 5605;
 /// Shared cumulative fan-out counters, cloneable across the tasks that need to
 /// read them.
 ///
-/// The fan-out sits BETWEEN the wfb_rx decode and the mediamtx-gs ingest — a hop
+/// The fan-out sits BETWEEN the wfb_rx decode and the mediamtx-gs source — a hop
 /// that was otherwise blind to the cross-process diagnostics. The stats reader
 /// folds these totals onto the `wfb-stats.json` sidecar so the video-pipeline
 /// harness can confirm the fan-out is actually forwarding (decoded packets
 /// climbing but `fanout_forwarded` flat isolates the fault to the fan-out; both
-/// climbing but the ingest byte-rate flat isolates it to the ingest ffmpeg).
+/// climbing but the media server's bytesReceived flat isolates it to mediamtx-gs).
 /// `forwarded` counts datagrams read from the decoder; `drops` counts per-target
 /// `send_to` failures.
 #[derive(Clone, Default)]

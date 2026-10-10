@@ -79,8 +79,8 @@ pub const GROUNDLINK_CMD_SOCK: &str = "/run/ados/groundlink-cmd.sock";
 /// redirect stands down. Persistent (under `/var/lib/ados`), mode 0644.
 pub const SETUP_COMPLETE_PATH: &str = "/var/lib/ados/setup-complete";
 
-/// The hotspot passphrase file. Wiped on factory-reset so `hostapd_manager`
-/// regenerates a fresh key on the next boot.
+/// The hotspot passphrase file. Wiped on factory-reset so the AP owner
+/// (`ados-net`) regenerates a fresh key on the next boot.
 pub const AP_PASSPHRASE_PATH: &str = "/etc/ados/ap-passphrase";
 
 /// The agent config file the role/pair persist paths round-trip.
