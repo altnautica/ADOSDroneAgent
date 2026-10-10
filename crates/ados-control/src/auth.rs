@@ -228,6 +228,14 @@ impl PairingState {
         fresh
     }
 
+    /// Drop the cached posture so the next read goes to the file. The pairing
+    /// writers (claim, accept, unpair) call this after a successful write, so
+    /// the browser that just claimed is served with its new key at once and an
+    /// unpaired key stops working at once, rather than up to one TTL later.
+    pub fn invalidate(&self) {
+        self.cache.lock().unwrap_or_else(|p| p.into_inner()).primed = false;
+    }
+
     /// Decide a request: `true` to pass, `false` to reject with 401. A public
     /// path is always allowed; an unpaired agent allows everything (the
     /// unpaired caller gate, [`unpaired_decision`], has already run); a paired

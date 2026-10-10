@@ -16,7 +16,10 @@
 //! - **`services`** — the systemd-fallback inventory (`systemctl list-units
 //!   ados-*.service`), one object per unit shaped `{name, state, sub_state,
 //!   task_done, memory_mb}`. There is no per-unit transition log, so no uptime
-//!   is reported (a consumer shows it as unknown rather than a fabricated 0).
+//!   is reported (a consumer shows it as unknown rather than a fabricated 0). An
+//!   inactive unit whose last start systemd skipped on an unmet unit condition
+//!   reads `state: "idle"` with `reason: "condition_unmet"`, as the supervisor
+//!   holds it.
 //! - **`resources`** — CPU / memory / swap / disk / temperature derived from the
 //!   store's most-recent hardware snapshots, the same 13-field subset the FastAPI
 //!   `/api/status/full` selects from `derive_resources`. An unreachable store (or
@@ -524,16 +527,84 @@ fn round_int(v: f64) -> i64 {
 ///
 /// This daemon has no in-process service tracker, so it serves the systemd
 /// inventory: one object per `ados-*.service` unit, shaped `{name, state,
-/// sub_state, task_done, memory_mb}`. `state` is the systemd ActiveState and
-/// `sub_state` the unit's sub-state (each `"unknown"` when absent); `task_done`
+/// sub_state, task_done, memory_mb}`. `state` is the systemd ActiveState
+/// (`idle` plus `reason: "condition_unmet"` for a condition-skipped unit, see
+/// [`mark_condition_unmet`]) and `sub_state` the unit's sub-state (each
+/// `"unknown"` when absent); `task_done`
 /// is `sub_state != "running"`; no uptime is emitted (this daemon carries no
 /// transition log, and a 0 would read as a just-restarted unit); `memory_mb` is
 /// the unit's grouped PSS. An absent / failing `systemctl` degrades to an empty
 /// list.
 async fn build_services_list() -> Value {
     let mut services = systemd_services_fallback().await;
+    mark_condition_unmet(&mut services).await;
     crate::routes::services::attach_service_memory(&mut services).await;
     Value::Array(services)
+}
+
+/// Relabel every inactive unit whose last start systemd skipped on an unmet
+/// unit condition (`ConditionPathExists=/dev/hailo0` on a board without the
+/// accelerator) as `state: "idle"`, `reason: "condition_unmet"`: the
+/// supervisor holds such a row idle, not stopped or failed, and a bare
+/// `inactive` would not say why. One `systemctl show` covers every inactive row.
+async fn mark_condition_unmet(services: &mut [Value]) {
+    let units: Vec<String> = services
+        .iter()
+        .filter(|s| s["state"] == "inactive")
+        .filter_map(|s| s["name"].as_str().map(|n| format!("{n}.service")))
+        .collect();
+    if units.is_empty() {
+        return;
+    }
+    let mut args = vec![
+        "show",
+        "-p",
+        "Id,ConditionResult,ConditionTimestampMonotonic",
+    ];
+    args.extend(units.iter().map(String::as_str));
+    let out = crate::probe::capture_systemctl(&args, crate::probe::PROBE_TIMEOUT).await;
+    apply_condition_unmet(services, &condition_unmet_units(out.text()));
+}
+
+/// The unit names (without `.service`) in `systemctl show -p
+/// Id,ConditionResult,ConditionTimestampMonotonic` output (one blank-line
+/// separated block per unit) whose condition was evaluated and failed. A unit
+/// whose condition was never evaluated reads `ConditionResult=no` with a zero
+/// timestamp, and is not one of them.
+fn condition_unmet_units(text: &str) -> std::collections::HashSet<String> {
+    text.split("\n\n")
+        .filter_map(|block| {
+            let (mut id, mut result, mut evaluated) = (None, None, false);
+            for line in block.lines() {
+                match line.split_once('=') {
+                    Some(("Id", v)) => id = Some(v.trim()),
+                    Some(("ConditionResult", v)) => result = Some(v.trim()),
+                    Some(("ConditionTimestampMonotonic", v)) => {
+                        evaluated = v.trim().parse::<u64>().is_ok_and(|t| t > 0);
+                    }
+                    _ => {}
+                }
+            }
+            if result == Some("no") && evaluated {
+                id?.strip_suffix(".service").map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Set `state: "idle"`, `reason: "condition_unmet"` on each inactive row named
+/// in `unmet`.
+fn apply_condition_unmet(services: &mut [Value], unmet: &std::collections::HashSet<String>) {
+    for svc in services.iter_mut() {
+        let hit =
+            svc["state"] == "inactive" && svc["name"].as_str().is_some_and(|n| unmet.contains(n));
+        if hit {
+            svc["state"] = json!("idle");
+            svc["reason"] = json!("condition_unmet");
+        }
+    }
 }
 
 /// Enumerate `ados-*.service` units via `systemctl list-units`, returning the
@@ -1903,6 +1974,36 @@ mod tests {
         );
         // Nothing measured this unit, so its memory is unknown, not zero.
         assert!(obj["memory_mb"].is_null());
+    }
+
+    #[test]
+    fn condition_skipped_unit_reads_idle_condition_unmet() {
+        let show = "Id=ados-vision-hailo.service\nConditionResult=no\n\
+                    ConditionTimestampMonotonic=65848616590\n\n\
+                    Id=ados-oled.service\nConditionResult=no\nConditionTimestampMonotonic=0\n\n\
+                    Id=ados-cloud.service\nConditionResult=yes\n\
+                    ConditionTimestampMonotonic=5032496\n";
+        let unmet = condition_unmet_units(show);
+        // Never evaluated (timestamp 0) and a met condition are not unmet.
+        assert_eq!(unmet.len(), 1);
+        assert!(unmet.contains("ados-vision-hailo"));
+
+        let mut rows: Vec<Value> = [
+            "ados-vision-hailo.service loaded inactive dead Hailo",
+            "ados-oled.service loaded inactive dead OLED",
+            "ados-cloud.service loaded inactive dead Cloud",
+        ]
+        .iter()
+        .map(|r| parse_fallback_line(r).unwrap())
+        .collect();
+        apply_condition_unmet(&mut rows, &unmet);
+        assert_eq!(rows[0]["state"], json!("idle"));
+        assert_eq!(rows[0]["reason"], json!("condition_unmet"));
+        assert_eq!(rows[0]["sub_state"], json!("dead"));
+        for row in &rows[1..] {
+            assert_eq!(row["state"], json!("inactive"));
+            assert!(row.get("reason").is_none());
+        }
     }
 
     // -------- radio --------

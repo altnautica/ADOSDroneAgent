@@ -146,8 +146,16 @@ security:
     assert!(s.setup_token_required);
 }
 
+/// Held by the tests here that reach the config parse-failure log callsite. A
+/// callsite first hit while no scoped subscriber exists caches the interest of
+/// the hitting thread's default (none, so disabled); when that registration
+/// races the counting test's subscriber coming up, the rebuild misses it and the
+/// counted event is dropped. Serialized, the rebuild always sees the callsite.
+static PARSE_LOG_CALLSITE: Mutex<()> = Mutex::new(());
+
 #[test]
 fn a_malformed_config_reports_the_security_slice_unreadable() {
+    let _serial = PARSE_LOG_CALLSITE.lock();
     let (_dir, path) = temp_yaml("security: {hmac_enabled: [unclosed\n");
     let snap = config_snapshot(&path, Duration::ZERO);
     assert!(snap.security.is_err());
@@ -198,6 +206,7 @@ impl std::io::Write for Captured {
 
 #[test]
 fn a_malformed_config_logs_its_parse_error_once() {
+    let _serial = PARSE_LOG_CALLSITE.lock();
     let (_dir, path) = temp_yaml("agent: {profile: [unclosed\n");
     let captured = Captured::default();
     let writer = captured.clone();

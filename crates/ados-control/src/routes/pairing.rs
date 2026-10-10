@@ -348,6 +348,9 @@ pub async fn claim_pairing(
             );
         }
     };
+    // The edge gate reads the same file through a short-TTL cache that still
+    // holds "unpaired"; the caller's first keyed request follows at once.
+    state.pairing.invalidate();
 
     let cfg = PairingConfig::load_from(&paths.config);
     let device_id = cfg.agent.device_id.clone();
@@ -413,6 +416,7 @@ pub async fn unpair(State(state): State<AppState>) -> Response {
             format!("Failed to clear pairing: {e}"),
         );
     }
+    state.pairing.invalidate();
 
     // Mint + persist the fresh code, mirroring the FastAPI route's
     // `get_or_create_code()` after the unpair. A code that could not be
@@ -672,6 +676,7 @@ async fn accept_external_code(state: &AppState, code: &str) -> AcceptCodeRespons
         };
         return AcceptCodeResponse::failure("agent_not_ready", message);
     }
+    state.pairing.invalidate();
     tracing::info!(owner_id = %owner_id, device_id = %device_id, "pairing_accept_succeeded");
     AcceptCodeResponse {
         ok: true,
@@ -1006,6 +1011,33 @@ mod tests {
             !dir.path().join("pairing.json").exists(),
             "nothing was minted"
         );
+    }
+
+    #[tokio::test]
+    async fn the_gate_sees_a_claim_and_an_unpair_at_once() {
+        // The edge gate's pairing posture is TTL-cached. Primed as unpaired, it
+        // used to answer the claiming browser's first keyed request (sent
+        // straight after the claim) with the unpaired 403.
+        use ados_protocol::pairing_posture::Pairing;
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        assert_eq!(state.pairing.current(), Pairing::Unpaired);
+        let resp = claim_pairing(State(state.clone()), HeaderMap::new(), claim_body("u")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let key = serde_json::from_slice::<Value>(&body).unwrap()["api_key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(state.pairing.current(), Pairing::Paired(key.clone()));
+        assert!(state.pairing.credential_valid(Some(&key)));
+
+        let resp = unpair(State(state.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(state.pairing.current(), Pairing::Unpaired);
+        assert!(!state.pairing.credential_valid(Some(&key)));
     }
 
     #[tokio::test]
