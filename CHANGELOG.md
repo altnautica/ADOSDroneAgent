@@ -17,7 +17,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 - HDMI cockpit: Kill, Pause and Resume skills; confirm tiers (hold, slide,
   guarded Kill) usable by touch, panel buttons and gamepad; takeoff sends the
   chosen altitude; extension skills, video overlays, panels and widgets with a
-  sandboxed host that checks granted capabilities; alerts by level.
+  sandboxed host that checks granted capabilities; alerts by level. The Feed
+  gains a safety band (reach, arm, mode, battery with time to reserve, GPS,
+  link, video, preflight, recording and flight timers, guarded Kill) and a
+  canvas HUD (5° pitch ladder, roll arc, flight-path marker, heading tape,
+  speed and altitude tapes with REL/MSL, vertical speed).
 - Extension manifests may omit the GCS entrypoint when they contribute only
   skills or parameters; map overlays and mission templates are accepted.
 - GCS capabilities `ui.slot.cockpit-widget` and `vision.track.designate`.
