@@ -29,8 +29,8 @@ use ados_mavlink_router::connection::FcConnection;
 use ados_mavlink_router::frame_ingest::{self, IngestCounters, INGEST_QUEUE_DEPTH};
 use ados_mavlink_router::param_cache::ParamCache;
 use ados_mavlink_router::proxies::{
-    proxy_bind_addr, run_tcp_proxy, run_udp_proxy, run_ws_proxy, ws_bind_addr, ProxyAuth,
-    WsProxyAuth,
+    proxy_bind_addr, run_tcp_proxy, run_udp_proxy, run_ws_proxy, ws_bind_addr, ListenFlag,
+    ProxyAuth, WsProxyAuth,
 };
 use ados_mavlink_router::relayed::RelayedVehicle;
 use ados_mavlink_router::state::{firmware_family, VehicleState};
@@ -112,15 +112,57 @@ fn ws_proxy_bind(cfg: &MavlinkConfig) -> String {
 /// What the direct-GCS proxies are bound to and who they serve, carried on the
 /// state snapshot as `mavlink_proxy_posture` so an operator surface can say
 /// whether a desktop ground station can reach this node's raw MAVLink ports.
-/// `ws_bind` is null when no WebSocket endpoint is enabled.
-fn proxy_posture(cfg: &MavlinkConfig) -> Value {
-    json!({
-        "ws_bind": ws_proxy_port(cfg).map(|_| ws_proxy_bind(cfg)),
+/// The configured part is fixed for the process; the `*_listening` flags are
+/// read live from the proxy tasks, so a bind that failed (and is being
+/// retried) reads `false` rather than as a configured address.
+#[derive(Clone, Default)]
+struct ProxyPosture {
+    configured: Map<String, Value>,
+    tcp: ListenFlag,
+    udp: Vec<ListenFlag>,
+    /// `None` when no WebSocket endpoint is enabled.
+    ws: Option<ListenFlag>,
+}
+
+impl ProxyPosture {
+    /// The posture as published: the configured fields plus `tcp_listening`,
+    /// `udp_listening` (one bool per UDP port, in port order) and
+    /// `ws_listening` (null with no WebSocket endpoint).
+    fn to_value(&self) -> Value {
+        let mut out = self.configured.clone();
+        out.insert("tcp_listening".into(), json!(self.tcp.get()));
+        out.insert(
+            "udp_listening".into(),
+            Value::Array(self.udp.iter().map(|f| json!(f.get())).collect()),
+        );
+        out.insert(
+            "ws_listening".into(),
+            self.ws.as_ref().map_or(Value::Null, |f| json!(f.get())),
+        );
+        Value::Object(out)
+    }
+}
+
+/// The proxy posture for `cfg`, with one fresh listening flag per edge. `ws_bind`
+/// is null when no WebSocket endpoint is enabled.
+fn proxy_posture(cfg: &MavlinkConfig) -> ProxyPosture {
+    let ws_port = ws_proxy_port(cfg);
+    let configured = json!({
+        "ws_bind": ws_port.map(|_| ws_proxy_bind(cfg)),
         "ws_enforce_auth": cfg.ws_proxy_enforce_auth,
         "raw_bind": proxy_bind_addr(),
         "raw_enforce_auth": cfg.raw_proxy_enforce_auth,
         "raw_lan_access": cfg.raw_proxy_lan_access,
-    })
+    });
+    ProxyPosture {
+        configured: configured.as_object().cloned().unwrap_or_default(),
+        tcp: ListenFlag::new(),
+        udp: udp_proxy_ports()
+            .iter()
+            .map(|_| ListenFlag::new())
+            .collect(),
+        ws: ws_port.map(|_| ListenFlag::new()),
+    }
 }
 /// How often the attitude-cadence distribution is shipped to the store.
 ///
@@ -542,7 +584,7 @@ async fn main() {
                         // rather than the socket's.
                         Some(cmd) => {
                             let origin = ClientOrigin::from_ipc_peer(&cmd.peer);
-                            fc.send_client_bytes(&cmd.payload, origin, cmd.peer.injector.as_ref()).await
+                            let _ = fc.send_client_bytes(&cmd.payload, origin, cmd.peer.injector.as_ref()).await;
                         }
                         None => break,
                     },
@@ -601,6 +643,22 @@ async fn main() {
         }));
     }
 
+    // The proxy posture, shared by the state publish (which reads the live
+    // listening flags) and the proxy tasks (which set them).
+    let posture = proxy_posture(&cfg);
+
+    // The PIC sidecar and pairing feed the injector gate and the swarm loop
+    // read, so neither ever reads those files on a command path.
+    {
+        let fc = fc.clone();
+        let cancel = cancel.clone();
+        tasks.push(tokio::spawn(async move { fc.run_gate_feed(cancel).await }));
+    }
+    tracing::info!(
+        injector_arbitration = fc.injector_arbitration_state(),
+        "mavlink_injector_arbitration"
+    );
+
     // 10 Hz state publish: vehicle snapshot + the service runtime extras.
     // Onboard swarm autonomy. The loop reads the swarm neighbour table off
     // `/run/ados/swarm.sock`, runs the control laws at 10 Hz and commands the FC
@@ -643,7 +701,7 @@ async fn main() {
         let frame_ingest_counters = frame_ingest_counters.clone();
         let relayed_vehicle = relayed_vehicle.clone();
         let uplink_sender = uplink_sender.clone();
-        let proxy_posture = proxy_posture(&cfg);
+        let proxy_posture = posture.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -714,21 +772,25 @@ async fn main() {
         // `config::default_raw_proxy_lan_access`.
         let auth = ProxyAuth::from_config(cfg.raw_proxy_enforce_auth)
             .with_raw_lan_access(cfg.raw_proxy_lan_access);
+        let listening = posture.tcp.clone();
         tasks.push(tokio::spawn(async move {
-            run_tcp_proxy(fc, &bind, port, auth, cancel).await
+            run_tcp_proxy(fc, &bind, port, auth, listening, cancel).await
         }));
     }
-    for port in udp_proxy_ports() {
+    for (port, listening) in udp_proxy_ports()
+        .into_iter()
+        .zip(posture.udp.iter().cloned())
+    {
         let fc = fc.clone();
         let cancel = cancel.clone();
         let auth = ProxyAuth::from_config(cfg.raw_proxy_enforce_auth)
             .with_raw_lan_access(cfg.raw_proxy_lan_access);
         let bind = proxy_bind_addr();
         tasks.push(tokio::spawn(async move {
-            run_udp_proxy(fc, &bind, port, auth, cancel).await
+            run_udp_proxy(fc, &bind, port, auth, listening, cancel).await
         }));
     }
-    if let Some(ws_port) = ws_proxy_port(&cfg) {
+    if let (Some(ws_port), Some(listening)) = (ws_proxy_port(&cfg), posture.ws.clone()) {
         let fc = fc.clone();
         let cancel = cancel.clone();
         // The direct WebSocket proxy carries raw MAVLink to/from the FC, so a
@@ -740,7 +802,7 @@ async fn main() {
         let auth = WsProxyAuth::from_config(cfg.ws_proxy_enforce_auth);
         let bind = ws_proxy_bind(&cfg);
         tasks.push(tokio::spawn(async move {
-            run_ws_proxy(fc, &bind, ws_port, auth, cancel).await
+            run_ws_proxy(fc, &bind, ws_port, auth, listening, cancel).await
         }));
     }
 
@@ -790,7 +852,7 @@ async fn build_extras(
     swarm: Option<&Arc<SwarmSetpointStatus>>,
     uplink: Option<&aux_uplink::AuxUplinkSender>,
     relayed_vehicle: Option<&Arc<StdMutex<RelayedVehicle>>>,
-    proxy_posture: &Value,
+    proxy_posture: &ProxyPosture,
 ) -> Map<String, Value> {
     // The cached param count and the map's change counter, read under one lock.
     let (cached, param_generation) = {
@@ -829,6 +891,24 @@ async fn build_extras(
             .unwrap_or(Value::Null),
     );
     extras.insert("fc_source".into(), json!(fc.source()));
+    // The canonical device of the open serial FC link (symlinks resolved), so
+    // the plugin sandbox can mask the port the router actually latched. Null
+    // for a network source or no link.
+    extras.insert("fc_device".into(), json!(fc.fc_device().await));
+    // Whether declared autonomous injectors are gated here: `active`,
+    // `inactive_no_local_arbiter` (the flag is on but this profile runs no
+    // PIC arbiter) or `off`.
+    extras.insert(
+        "injector_arbitration".into(),
+        json!(fc.injector_arbitration_state()),
+    );
+    // The FC answers signed on a link where it enforces signing, so the
+    // router's own unsigned frames (stream rates, the parameter sweep, swarm
+    // setpoints) are likely dropped. Null with no serial link to judge.
+    extras.insert(
+        "agent_commands_unsigned_rejected_risk".into(),
+        json!(fc.agent_commands_unsigned_rejected_risk().await),
+    );
     // The flight controller's own (system, component) id, latched from its
     // HEARTBEAT. Absent until latched so a consumer never addresses a guess.
     if let Some((system_id, component_id)) = fc.learned_fc_identity() {
@@ -964,9 +1044,9 @@ async fn build_extras(
             serde_json::to_value(counters.snapshot()).unwrap_or(Value::Null),
         );
     }
-    // Who the direct-GCS proxies serve (see `proxy_posture`). Static for the
-    // life of the process, so a clone of the value built at startup.
-    extras.insert("mavlink_proxy_posture".into(), proxy_posture.clone());
+    // Who the direct-GCS proxies serve (see `proxy_posture`), with each edge's
+    // live listening flag.
+    extras.insert("mavlink_proxy_posture".into(), proxy_posture.to_value());
     // The drone's video attention profile, so the swarm beacon's hero bit and the
     // fleet view read one source of truth. Owned by `ados-video`, which stamps
     // the sidecar on every encoder profile apply; this republishes it.
@@ -993,6 +1073,16 @@ async fn build_extras(
         extras.insert(
             "uplink_blocked_sysid_conflict".into(),
             json!(u.blocked_sysid_conflict()),
+        );
+        // Client frames the uplink dropped: queue full (the radio lane is
+        // falling behind), or a trailing partial frame too large to carry.
+        extras.insert(
+            "aux_uplink_queue_full_dropped".into(),
+            json!(u.queue_full_dropped()),
+        );
+        extras.insert(
+            "aux_uplink_partial_dropped".into(),
+            json!(u.partial_dropped()),
         );
     }
     extras
@@ -1108,12 +1198,16 @@ mod extras_key_set_tests {
     /// vehicle fields up in place of the withheld local ones. So it appears here
     /// but in neither classification list, which is correct rather than an
     /// omission.
-    const EXPECTED_EXTRAS_KEYS: [&str; 31] = [
+    const EXPECTED_EXTRAS_KEYS: [&str; 36] = [
+        "agent_commands_unsigned_rejected_risk",
         "aux_mavlink_tee",
         "aux_rpc",
+        "aux_uplink_partial_dropped",
+        "aux_uplink_queue_full_dropped",
         "fc_baud",
         "fc_command_down_gated",
         "fc_connected",
+        "fc_device",
         "fc_firmware",
         "fc_frames_decoded",
         "fc_link_hint",
@@ -1122,6 +1216,7 @@ mod extras_key_set_tests {
         "fc_source",
         "fc_variant",
         "heartbeat_age_s",
+        "injector_arbitration",
         "ipc_mavlink_drops",
         "ipc_state_drops",
         "mavlink_alive",
@@ -1297,7 +1392,7 @@ mod extras_key_set_tests {
             None,
             None,
             Some(&relayed),
-            &Value::Null,
+            &ProxyPosture::default(),
         )
         .await;
 
@@ -1339,7 +1434,7 @@ mod extras_key_set_tests {
             None,
             None,
             Some(&never),
-            &Value::Null,
+            &ProxyPosture::default(),
         )
         .await;
 
@@ -1389,7 +1484,7 @@ mod extras_key_set_tests {
             None,
             None,
             None,
-            &Value::Null,
+            &ProxyPosture::default(),
         )
         .await;
         let empty_len = sized_without_clocks(empty);
@@ -1414,7 +1509,7 @@ mod extras_key_set_tests {
             None,
             None,
             None,
-            &Value::Null,
+            &ProxyPosture::default(),
         )
         .await;
 
@@ -1453,5 +1548,20 @@ mod extras_key_set_tests {
              the wrong thing",
             pre_diet_len - full_len
         );
+    }
+
+    /// The posture reports each edge's live bind, not the configured address:
+    /// before any proxy has bound, every edge reads not-listening.
+    #[test]
+    fn posture_reports_the_listening_flags() {
+        let posture = proxy_posture(&MavlinkConfig::default());
+        let v = posture.to_value();
+        assert_eq!(v["tcp_listening"], json!(false));
+        let udp = v["udp_listening"].as_array().expect("one flag per port");
+        assert_eq!(udp.len(), posture.udp.len());
+        assert!(udp.iter().all(|b| *b == json!(false)));
+        // The default config enables the WebSocket endpoint.
+        assert_eq!(v["ws_listening"], json!(false));
+        assert!(v.get("raw_bind").is_some());
     }
 }

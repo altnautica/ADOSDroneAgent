@@ -9,6 +9,14 @@
 //! or onto the aux uplink toward a relayed drone when this node is a ground
 //! station relaying one instead. The WebSocket proxy ([`run_ws_proxy`]) carries
 //! MAVLink in binary WebSocket frames, the way a browser GCS connects.
+//!
+//! Every edge retries a failed bind on a fixed interval with no cap and
+//! reports whether it holds its socket ([`ListenFlag`]); a failed `accept`
+//! backs off instead of spinning; the TCP and WebSocket edges forward whole
+//! MAVLink frames only and re-check each live session's admission
+//! periodically.
+
+mod edge;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -25,15 +33,20 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
 };
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::connection::{ClientOrigin, FcConnection};
+pub use edge::ListenFlag;
+use edge::{
+    bind_until, forward_client_bytes, AcceptErrors, ClientFramer, ListeningGuard, UdpPeers,
+    UdpVerdicts,
+};
 
 /// The data-path auth header a paired GCS presents to the direct WebSocket
 /// proxy, matching the HTTP control surface's `X-ADOS-Key`.
@@ -266,6 +279,52 @@ impl WsProxyAuth {
         let presented = headers.get(WS_KEY_HEADER).and_then(|v| v.to_str().ok());
         self.should_admit(caller, presented, &offered_subprotocols(headers))
     }
+
+    /// What a live WebSocket session needs to re-check its admission: the
+    /// caller class and key it presented, and, for a ticket-admitted session,
+    /// the pairing posture the ticket was verified under. A ticket is spent on
+    /// use, so it cannot be verified again; the session stays admitted while
+    /// that posture is unchanged.
+    fn ws_session(
+        &self,
+        peer: std::net::IpAddr,
+        local: Option<std::net::IpAddr>,
+        headers: &tokio_tungstenite::tungstenite::http::HeaderMap,
+        access: Access,
+    ) -> WsSession {
+        let caller = classify_caller(Some(peer), local, |h| headers.contains_key(h));
+        let key = headers
+            .get(WS_KEY_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let by_ticket =
+            access == Access::Accept && self.decide(caller, key.as_deref()) == Access::Unauthorized;
+        WsSession {
+            caller,
+            key,
+            ticket_posture: by_ticket.then(|| self.current()),
+        }
+    }
+
+    /// Whether a live WebSocket session would still be admitted now.
+    fn ws_still_admitted(&self, session: &WsSession) -> bool {
+        let pairing = self.current();
+        let mut access = direct_access(&pairing, session.caller, session.key.as_deref());
+        if access == Access::Unauthorized && session.ticket_posture.as_ref() == Some(&pairing) {
+            access = Access::Accept;
+        }
+        match access {
+            Access::Accept => true,
+            Access::Unauthorized => !self.enforce,
+        }
+    }
+}
+
+/// A WebSocket session's admission inputs, kept for the periodic re-check.
+struct WsSession {
+    caller: CallerClass,
+    key: Option<String>,
+    ticket_posture: Option<Pairing>,
 }
 
 /// Pull the ticket value that follows the `ados-ws-ticket` marker in the offered
@@ -342,24 +401,44 @@ fn admit_raw_peer(
     port: u16,
     edge: RawEdge,
 ) -> Option<ClientOrigin> {
-    let (admit, access) = auth.classify(peer, local);
+    let (origin, access) = raw_peer_verdict(auth, peer, local);
     if access != Access::Accept {
-        match edge {
-            RawEdge::Tcp => tracing::warn!(
-                port,
-                peer = %peer,
-                admitted = admit,
-                "tcp_proxy_unauthorized"
-            ),
-            RawEdge::Udp => tracing::warn!(
-                port,
-                peer = %peer,
-                admitted = admit,
-                "udp_proxy_unauthorized"
-            ),
-        }
+        log_unauthorized_raw_peer(port, peer, origin.is_some(), edge, 0);
     }
-    admit.then(|| origin_of(access))
+    origin
+}
+
+/// The raw-peer verdict without the log line: `(Some(origin), access)` to serve
+/// it, `(None, access)` to refuse it. The UDP loop caches this per source
+/// address and rate-limits the log itself.
+fn raw_peer_verdict(
+    auth: &ProxyAuth,
+    peer: std::net::IpAddr,
+    local: Option<std::net::IpAddr>,
+) -> (Option<ClientOrigin>, Access) {
+    let (admit, access) = auth.classify(peer, local);
+    (admit.then(|| origin_of(access)), access)
+}
+
+/// The one log line per edge for an unauthorized raw peer. `suppressed` counts
+/// datagrams from the same peer since its previous line (UDP only).
+fn log_unauthorized_raw_peer(
+    port: u16,
+    peer: std::net::IpAddr,
+    admitted: bool,
+    edge: RawEdge,
+    suppressed: u64,
+) {
+    match edge {
+        RawEdge::Tcp => tracing::warn!(port, peer = %peer, admitted, "tcp_proxy_unauthorized"),
+        RawEdge::Udp => tracing::warn!(
+            port,
+            peer = %peer,
+            admitted,
+            suppressed,
+            "udp_proxy_unauthorized"
+        ),
+    }
 }
 
 /// Bind address for the direct-GCS proxies when nothing overrides it.
@@ -403,52 +482,77 @@ pub fn ws_bind_addr(configured_host: &str) -> String {
         .unwrap_or_else(|| DEFAULT_PROXY_BIND_ADDR.to_string())
 }
 
-/// TCP MAVLink proxy. Binds `<bind_addr>:<port>` and serves each admitted
-/// client a copy of the FC frame stream while forwarding its bytes to the FC.
+/// TCP MAVLink proxy. Binds `<bind_addr>:<port>`, retrying every
+/// [`crate::connection::RECONNECT_INTERVAL`] with no cap while the bind fails,
+/// and serves each admitted client a copy of the FC frame stream while
+/// forwarding its whole frames to the FC. `listening` reads true exactly while
+/// the socket is bound.
 pub async fn run_tcp_proxy(
     fc: Arc<FcConnection>,
     bind_addr: &str,
     port: u16,
     auth: ProxyAuth,
+    listening: ListenFlag,
     cancel: Shutdown,
 ) {
-    let listener = match TcpListener::bind((bind_addr, port)).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::warn!(bind_addr, port, error = %e, "tcp_proxy_bind_failed");
-            return;
-        }
+    let bound = bind_until(
+        &cancel,
+        || TcpListener::bind((bind_addr, port)),
+        |e| tracing::warn!(bind_addr, port, error = %e, "tcp_proxy_bind_failed"),
+    )
+    .await;
+    let Some(listener) = bound else {
+        return;
     };
+    let _listening = ListeningGuard::new(&listening);
     tracing::info!(bind_addr, port, "tcp_proxy_listening");
+    let mut accept_errors = AcceptErrors::default();
     loop {
         tokio::select! {
-            accepted = listener.accept() => {
-                if let Ok((stream, addr)) = accepted {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, addr)) => {
                     // The peer address is the only thing this socket knows
                     // about its caller: MAVLink is a raw byte stream, so there
                     // is no header to carry a credential and no handshake to
                     // hang one on. So on a paired node an off-box peer is
                     // served only when the operator opened the raw edges to
-                    // the LAN (the QGroundControl / Mission Planner path) and
-                    // left enforcement off. A refused connection is dropped
-                    // before a single byte is read, so no client bytes ever
-                    // reach the flight controller.
-                    let Some(origin) = admit_raw_peer(&auth, addr.ip(), stream.local_addr().ok().map(|a| a.ip()), port, RawEdge::Tcp) else {
+                    // the LAN (the QGroundControl / Mission Planner path). A
+                    // refused connection is dropped before a single byte is
+                    // read, so no client bytes ever reach the flight
+                    // controller.
+                    let local = stream.local_addr().ok().map(|a| a.ip());
+                    let Some(origin) = admit_raw_peer(&auth, addr.ip(), local, port, RawEdge::Tcp) else {
                         // `stream` drops here, closing the connection.
                         continue;
                     };
-                    tokio::spawn(handle_tcp_client(fc.clone(), stream, origin));
+                    tokio::spawn(handle_tcp_client(
+                        fc.clone(),
+                        stream,
+                        origin,
+                        auth.clone(),
+                        addr.ip(),
+                        local,
+                    ));
                 }
-            }
+                Err(e) => {
+                    accept_errors.on_error(port, &e).await;
+                }
+            },
             _ = cancel.wait() => return,
         }
     }
 }
 
+/// Serve one admitted TCP client until it disconnects or stops passing the
+/// admission check, which is re-run every [`edge::AUTH_RECHECK`] so a pair,
+/// unpair or key change reaches a session that is already open.
 async fn handle_tcp_client(
     fc: Arc<FcConnection>,
     stream: tokio::net::TcpStream,
-    origin: ClientOrigin,
+    mut origin: ClientOrigin,
+    auth: ProxyAuth,
+    peer: std::net::IpAddr,
+    local: Option<std::net::IpAddr>,
 ) {
     let (mut rd, mut wr) = stream.into_split();
     let mut rx = fc.subscribe();
@@ -478,46 +582,77 @@ async fn handle_tcp_client(
         }
     });
 
-    // client -> FC.
+    // client -> FC, whole frames only.
     let mut buf = [0u8; 4096];
+    let mut framer = ClientFramer::default();
+    let mut recheck = recheck_interval();
     loop {
-        match rd.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => fc.send_client_bytes(&buf[..n], origin, None).await,
+        tokio::select! {
+            read = rd.read(&mut buf) => match read {
+                Ok(0) | Err(_) => break,
+                Ok(n) => forward_client_bytes(&fc, &mut framer, &buf[..n], origin).await,
+            },
+            _ = recheck.tick() => match raw_peer_verdict(&auth, peer, local) {
+                (Some(now), _) => origin = now,
+                (None, _) => {
+                    tracing::warn!(peer = %peer, "tcp_proxy_session_revoked");
+                    break;
+                }
+            },
         }
     }
     writer.abort();
 }
 
-/// UDP MAVLink proxy. Binds `<bind_addr>:<port>`, learns each admitted GCS peer from its
-/// inbound datagrams, forwards peer bytes to the FC, and sends FC frames to
-/// every learned peer.
+/// The admission re-check cadence, first tick one period from now.
+fn recheck_interval() -> tokio::time::Interval {
+    let mut interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + edge::AUTH_RECHECK,
+        edge::AUTH_RECHECK,
+    );
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    interval
+}
+
+/// UDP MAVLink proxy. Binds `<bind_addr>:<port>` (retrying like
+/// [`run_tcp_proxy`]), learns each admitted GCS peer from its inbound
+/// datagrams, forwards peer bytes to the FC, and sends FC frames to every
+/// learned peer.
 pub async fn run_udp_proxy(
     fc: Arc<FcConnection>,
     bind_addr: &str,
     port: u16,
     auth: ProxyAuth,
+    listening: ListenFlag,
     cancel: Shutdown,
 ) {
-    let sock = match UdpSocket::bind((bind_addr, port)).await {
-        Ok(s) => Arc::new(s),
-        Err(e) => {
-            tracing::warn!(bind_addr, port, error = %e, "udp_proxy_bind_failed");
-            return;
-        }
+    let bound = bind_until(
+        &cancel,
+        || UdpSocket::bind((bind_addr, port)),
+        |e| tracing::warn!(bind_addr, port, error = %e, "udp_proxy_bind_failed"),
+    )
+    .await;
+    let Some(sock) = bound else {
+        return;
     };
+    let sock = Arc::new(sock);
+    let _listening = ListeningGuard::new(&listening);
     tracing::info!(port, "udp_proxy_listening");
-    // Tracks each learned GCS peer and when it was last heard from. Stale peers
-    // are evicted on a TTL so a connectionless UDP fan-out never grows without
+    // Each learned GCS peer and when it was last heard from. Stale peers are
+    // evicted on a TTL so a connectionless UDP fan-out never grows without
     // bound or wastes air-side bandwidth on a peer that has gone away.
-    let peers: Arc<Mutex<HashMap<SocketAddr, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    let peers = Arc::new(UdpPeers::default());
 
-    // FC -> peers.
+    // FC -> peers. The target list is rebuilt only when the peer set changes,
+    // and quiet peers are evicted once a second rather than per frame.
     let send_sock = sock.clone();
     let send_peers = peers.clone();
     let mut rx = fc.subscribe();
     let mut raw_rx = fc.subscribe_raw();
     let sender = tokio::spawn(async move {
+        let mut targets: Vec<SocketAddr> = Vec::with_capacity(UDP_MAX_PEERS);
+        let mut targets_generation = u64::MAX;
+        let mut evicted_at = Instant::now();
         loop {
             // Forward whichever lane produces bytes: the MAVLink frame lane for a
             // MAVLink FC, the raw byte lane for an MSP FC. Exactly one lane is
@@ -534,50 +669,58 @@ pub async fn run_udp_proxy(
                     Err(RecvError::Closed) => break,
                 },
             };
-            // Evict peers that have gone quiet, then fan the frame out
-            // only to the survivors.
-            let targets: Vec<SocketAddr> = {
-                let mut map = send_peers.lock().await;
-                evict_stale_peers(&mut map, Instant::now());
-                map.keys().copied().collect()
-            };
-            for peer in targets {
-                let _ = send_sock.send_to(&frame, peer).await;
+            let now = Instant::now();
+            if now.saturating_duration_since(evicted_at) >= edge::UDP_EVICT_EVERY {
+                send_peers.evict(now);
+                evicted_at = now;
+            }
+            let generation = send_peers.generation();
+            if generation != targets_generation {
+                send_peers.fill(&mut targets);
+                targets_generation = generation;
+            }
+            for peer in &targets {
+                let _ = send_sock.send_to(&frame, *peer).await;
             }
         }
     });
 
     // peers -> FC.
+    let mut verdicts = UdpVerdicts::new(PAIRING_TTL, UDP_MAX_PEERS);
     let mut buf = [0u8; 4096];
     loop {
         tokio::select! {
             recv = sock.recv_from(&mut buf) => {
                 if let Ok((n, addr)) = recv {
                     // UDP has no handshake, so this is the only point at which
-                    // the sender is ever considered. Note what the insert below
-                    // does: an unrecognised source both injects bytes into the
-                    // flight controller AND enrols itself into the fan-out, so
-                    // the FC's whole telemetry stream is mirrored back to it.
-                    //
-                    // The same verdict as TCP. A refused sender skips BOTH
-                    // halves: refusing the injection while still enrolling the
-                    // peer would leave the telemetry mirror open, which is the
-                    // half of this that reaches furthest.
-                    // A wildcard-bound UDP socket has no per-datagram local
-                    // address; the route toward the sender names the interface
-                    // it sits on.
-                    let local = ados_protocol::pairing_posture::local_addr_toward(addr.ip());
-                    let Some(origin) = admit_raw_peer(&auth, addr.ip(), local, port, RawEdge::Udp) else {
+                    // the sender is ever considered. An admitted source both
+                    // injects bytes into the flight controller AND enrols
+                    // itself into the fan-out, so a refused sender skips BOTH
+                    // halves. The verdict is cached per source address for the
+                    // pairing TTL, so the route lookup and the pairing read run
+                    // once per peer per window, and an unauthorized peer is
+                    // logged once per minute with a suppressed count.
+                    let admission = verdicts.admit(addr, Instant::now(), || {
+                        // A wildcard-bound UDP socket has no per-datagram local
+                        // address; the route toward the sender names the
+                        // interface it sits on.
+                        let local = ados_protocol::pairing_posture::local_addr_toward(addr.ip());
+                        raw_peer_verdict(&auth, addr.ip(), local)
+                    });
+                    if let Some(suppressed) = admission.warn {
+                        log_unauthorized_raw_peer(
+                            port,
+                            addr.ip(),
+                            admission.origin.is_some(),
+                            RawEdge::Udp,
+                            suppressed,
+                        );
+                    }
+                    let Some(origin) = admission.origin else {
                         continue;
                     };
-                    {
-                        let mut map = peers.lock().await;
-                        map.insert(addr, Instant::now());
-                        // Backstop: if the set has somehow grown past the cap,
-                        // drop the least-recently-seen entries.
-                        cap_peers(&mut map, UDP_MAX_PEERS);
-                    }
-                    fc.send_client_bytes(&buf[..n], origin, None).await;
+                    peers.touch(addr, Instant::now(), UDP_MAX_PEERS);
+                    let _ = fc.send_client_bytes(&buf[..n], origin, None).await;
                 }
             }
             _ = cancel.wait() => {
@@ -611,9 +754,21 @@ fn cap_peers(peers: &mut HashMap<SocketAddr, Instant>, max: usize) {
     }
 }
 
-/// WebSocket MAVLink proxy. Binds `<bind_addr>:<port>` ([`ws_bind_addr`]) and
-/// bridges binary WebSocket frames to/from the FC, the way a browser GCS
-/// connects. Text/ping frames are ignored; only binary frames carry MAVLink.
+/// The WebSocket limits: messages and frames capped at
+/// [`edge::WS_MAX_MESSAGE`], so an admitted client cannot make the router
+/// buffer tens of megabytes per socket for writes the FC path would refuse.
+fn ws_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(edge::WS_MAX_MESSAGE),
+        max_frame_size: Some(edge::WS_MAX_MESSAGE),
+        ..WebSocketConfig::default()
+    }
+}
+
+/// WebSocket MAVLink proxy. Binds `<bind_addr>:<port>` ([`ws_bind_addr`],
+/// retrying like [`run_tcp_proxy`]) and bridges binary WebSocket frames to/from
+/// the FC, the way a browser GCS connects. Text/ping frames are ignored; only
+/// binary frames carry MAVLink.
 ///
 /// `auth` gates the handshake by the agent's pairing posture (see
 /// [`WsProxyAuth`]).
@@ -622,28 +777,36 @@ pub async fn run_ws_proxy(
     bind_addr: &str,
     port: u16,
     auth: WsProxyAuth,
+    listening: ListenFlag,
     cancel: Shutdown,
 ) {
-    let listener = match TcpListener::bind((bind_addr, port)).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::warn!(bind_addr, port, error = %e, "ws_proxy_bind_failed");
-            return;
-        }
+    let bound = bind_until(
+        &cancel,
+        || TcpListener::bind((bind_addr, port)),
+        |e| tracing::warn!(bind_addr, port, error = %e, "ws_proxy_bind_failed"),
+    )
+    .await;
+    let Some(listener) = bound else {
+        return;
     };
+    let _listening = ListeningGuard::new(&listening);
     tracing::info!(
         bind_addr,
         port,
         enforce_auth = auth.enforce,
         "ws_proxy_listening"
     );
+    let mut accept_errors = AcceptErrors::default();
     loop {
         tokio::select! {
-            accepted = listener.accept() => {
-                if let Ok((stream, addr)) = accepted {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, addr)) => {
                     tokio::spawn(handle_ws_client(fc.clone(), stream, addr, auth.clone()));
                 }
-            }
+                Err(e) => {
+                    accept_errors.on_error(port, &e).await;
+                }
+            },
             _ = cancel.wait() => return,
         }
     }
@@ -654,6 +817,7 @@ pub async fn run_ws_proxy(
 struct HandshakeDecision {
     admit: bool,
     access: Access,
+    session: WsSession,
 }
 
 // The handshake-rejection callback returns the WebSocket library's
@@ -676,12 +840,16 @@ async fn handle_ws_client(
     let decision: Arc<StdMutex<Option<HandshakeDecision>>> = Arc::new(StdMutex::new(None));
     let callback_decision = decision.clone();
     let callback_auth = auth.clone();
-    let ws = tokio_tungstenite::accept_hdr_async(
+    let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         move |req: &HandshakeRequest, mut response: HandshakeResponse| {
             let (admit, access) = callback_auth.handshake_decision(peer.ip(), local, req.headers());
-            *callback_decision.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some(HandshakeDecision { admit, access });
+            let session = callback_auth.ws_session(peer.ip(), local, req.headers(), access);
+            *callback_decision.lock().unwrap_or_else(|p| p.into_inner()) = Some(HandshakeDecision {
+                admit,
+                access,
+                session,
+            });
             if admit {
                 // If the client offered the ticket subprotocol, the server MUST
                 // select one of the offered subprotocols (RFC 6455 §4.2.2) or a
@@ -717,6 +885,7 @@ async fn handle_ws_client(
                 Err(err)
             }
         },
+        Some(ws_config()),
     )
     .await;
 
@@ -726,8 +895,10 @@ async fn handle_ws_client(
     // Carried into the send path so the relay fallback can record when the
     // bytes it radiates came from a caller that did not clear the gate.
     let mut ws_origin = ClientOrigin::Trusted;
+    let mut session = None;
     if let Some(d) = decision.lock().unwrap_or_else(|p| p.into_inner()).take() {
         ws_origin = origin_of(d.access);
+        session = Some(d.session);
         if d.access == Access::Unauthorized {
             tracing::warn!(
                 peer = %peer,
@@ -776,12 +947,27 @@ async fn handle_ws_client(
         }
     });
 
-    // client -> FC (binary frames only; ignore text/ping/pong).
-    while let Some(msg) = read.next().await {
-        match msg {
-            Ok(Message::Binary(data)) => fc.send_client_bytes(&data, ws_origin, None).await,
-            Ok(Message::Close(_)) | Err(_) => break,
-            _ => {}
+    // client -> FC (binary frames only; ignore text/ping/pong), whole MAVLink
+    // frames only. A message over the size cap ends the stream with an error.
+    // The admission is re-checked every `AUTH_RECHECK`, so a pair, unpair or
+    // key rotation closes a session that no longer passes.
+    let mut framer = ClientFramer::default();
+    let mut recheck = recheck_interval();
+    loop {
+        tokio::select! {
+            msg = read.next() => match msg {
+                Some(Ok(Message::Binary(data))) => {
+                    forward_client_bytes(&fc, &mut framer, &data, ws_origin).await
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+            _ = recheck.tick() => {
+                if session.as_ref().is_some_and(|s| !auth.ws_still_admitted(s)) {
+                    tracing::warn!(peer = %peer, "ws_proxy_session_revoked");
+                    break;
+                }
+            }
         }
     }
     writer.abort();
@@ -1433,5 +1619,170 @@ mod tests {
             peers.contains_key(&addr(14550)),
             "a refreshed peer must not be evicted"
         );
+    }
+
+    /// Age the pairing cache so the next read re-loads `pairing.json`.
+    fn expire_pairing_cache(auth: &WsProxyAuth) {
+        let mut c = auth.cache.lock().unwrap();
+        c.at = Instant::now() - (PAIRING_TTL + Duration::from_secs(1));
+    }
+
+    fn test_fc(dir: &std::path::Path) -> Arc<FcConnection> {
+        FcConnection::new(
+            crate::config::MavlinkConfig::default(),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::state::VehicleState::default(),
+            )),
+            Arc::new(tokio::sync::Mutex::new(
+                crate::param_cache::ParamCache::new(dir.join("params.json")),
+            )),
+        )
+    }
+
+    /// A session admitted as a lifeline on an unpaired node loses the lane
+    /// once the node is paired.
+    #[test]
+    fn a_lifeline_ws_session_is_revoked_by_pairing() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = WsProxyAuth::new(true, dir.path().join("pairing.json"));
+        let ap: std::net::IpAddr = "192.168.4.20".parse().unwrap();
+        let headers = handshake_headers(&[]);
+        let (admit, access) = auth.handshake_decision(ap, lifeline_local("192.168.4.20"), &headers);
+        assert!(admit);
+        let session = auth.ws_session(ap, lifeline_local("192.168.4.20"), &headers, access);
+        assert!(auth.ws_still_admitted(&session));
+        write_pairing(dir.path(), r#"{"paired": true, "api_key": "k"}"#);
+        expire_pairing_cache(&auth);
+        assert!(!auth.ws_still_admitted(&session));
+    }
+
+    /// A ticket is spent on use, so a ticket session is kept while the key it
+    /// was verified under stands, and dropped when the key rotates.
+    #[test]
+    fn a_ticket_ws_session_ends_when_the_key_rotates() {
+        use ados_protocol::ws_ticket::{WsTicketIssuer, SCOPE_MAVLINK_WS};
+        let (dir, auth) = paired_auth(true, "k1");
+        let token = WsTicketIssuer::from_api_key("k1")
+            .mint(SCOPE_MAVLINK_WS, 30)
+            .unwrap()
+            .token;
+        let headers = handshake_headers(&[(
+            "sec-websocket-protocol",
+            &format!("ados-ws-ticket, {token}"),
+        )]);
+        let lan: std::net::IpAddr = "192.168.1.50".parse().unwrap();
+        let (admit, access) = auth.handshake_decision(lan, None, &headers);
+        assert!(admit);
+        let session = auth.ws_session(lan, None, &headers, access);
+        assert!(session.ticket_posture.is_some());
+        assert!(auth.ws_still_admitted(&session));
+        write_pairing(dir.path(), r#"{"paired": true, "api_key": "k2"}"#);
+        expire_pairing_cache(&auth);
+        assert!(!auth.ws_still_admitted(&session));
+    }
+
+    /// A TCP session opened as a lifeline while unpaired closes within one
+    /// re-check period of the node being paired.
+    #[tokio::test]
+    async fn a_lifeline_tcp_session_closes_after_pairing() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = ProxyAuth::new(true, dir.path().join("pairing.json"));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (stream, _) = listener.accept().await.unwrap();
+        let ap: std::net::IpAddr = "192.168.4.20".parse().unwrap();
+        let local = lifeline_local("192.168.4.20");
+        let (admit, _) = auth.classify(ap, local);
+        assert!(admit, "a lifeline is served while unpaired");
+        let server = tokio::spawn(handle_tcp_client(
+            test_fc(dir.path()),
+            stream,
+            ClientOrigin::Trusted,
+            auth.clone(),
+            ap,
+            local,
+        ));
+        write_pairing(dir.path(), r#"{"paired": true, "api_key": "k"}"#);
+        expire_pairing_cache(&auth);
+        let mut buf = [0u8; 16];
+        let closed = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                match client.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "the session must close after pairing");
+        server.await.unwrap();
+    }
+
+    /// A message far over the FC write cap ends the WebSocket session instead
+    /// of being buffered.
+    #[tokio::test]
+    async fn an_oversize_ws_message_closes_the_socket() {
+        let (dir, auth) = unpaired_auth(true);
+        let fc = test_fc(dir.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_ws_client(fc, stream, peer, auth).await;
+        });
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let url = format!("ws://{addr}/");
+        let (mut ws, _) = tokio_tungstenite::client_async(url.as_str(), tcp)
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            ws.send(Message::Binary(vec![0u8; 1024 * 1024])),
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("the server must end the oversize session")
+            .unwrap();
+    }
+
+    #[test]
+    fn the_ws_limits_are_set() {
+        let cfg = ws_config();
+        assert_eq!(cfg.max_message_size, Some(64 * 1024));
+        assert_eq!(cfg.max_frame_size, Some(64 * 1024));
+    }
+
+    /// A port held by something else is retried until it frees, and the
+    /// listening flag tells the truth throughout.
+    #[tokio::test]
+    async fn a_busy_port_is_retried_until_it_frees() {
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = holder.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        let listening = ListenFlag::new();
+        let cancel = Shutdown::new();
+        let task = tokio::spawn({
+            let fc = test_fc(dir.path());
+            let auth = ProxyAuth::new(true, dir.path().join("pairing.json"));
+            let listening = listening.clone();
+            let cancel = cancel.clone();
+            async move { run_tcp_proxy(fc, "127.0.0.1", port, auth, listening, cancel).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!listening.get(), "a failed bind must not read as listening");
+        drop(holder);
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !listening.get() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(listening.get(), "the retry binds once the port frees");
+        assert!(tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok());
+        cancel.trigger();
+        task.await.unwrap();
+        assert!(!listening.get(), "the flag clears when the proxy returns");
     }
 }

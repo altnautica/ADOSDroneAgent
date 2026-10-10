@@ -126,7 +126,7 @@ const FC_WRITE_BUDGET: Duration = Duration::from_millis(500);
 /// reconnect for one malformed client write. 4 KiB is comfortably above every
 /// legitimate producer and is ~0.7 s of wire time on the slowest supported
 /// link.
-const FC_MAX_SINGLE_WRITE: usize = 4096;
+pub(crate) const FC_MAX_SINGLE_WRITE: usize = 4096;
 
 /// How long the flight-controller TX byte counter may stay flat, on a link with
 /// a writer installed, before the writer is declared dead.
@@ -242,22 +242,26 @@ impl FcConnection {
                 true
             }
             Ok(Err(e)) => {
+                // The generation is read under the writer lock, so it names
+                // the link this write actually failed on.
+                let failed_gen = self.link_gen();
                 *guard = None;
                 drop(guard);
                 tracing::warn!(error = %e, "fc_write_failed");
-                self.reconnect.notify_one();
+                self.request_reconnect(failed_gen);
                 false
             }
             Err(_) => {
                 // The stream may carry a partial frame. Re-open rather than
                 // write the next frame onto it.
+                let failed_gen = self.link_gen();
                 *guard = None;
                 drop(guard);
                 tracing::warn!(
                     budget_ms = budget.as_millis() as u64,
                     "fc_write_timed_out_reconnecting"
                 );
-                self.reconnect.notify_one();
+                self.request_reconnect(failed_gen);
                 false
             }
         }
@@ -302,13 +306,17 @@ impl FcConnection {
             return;
         }
 
-        *self.writer.lock().await = None;
+        let failed_gen = {
+            let mut writer = self.writer.lock().await;
+            *writer = None;
+            self.link_gen()
+        };
         tracing::warn!(
             stall_ms = FC_TX_STALL.as_millis() as u64,
             tx_bytes = bytes,
             "fc_tx_stalled_reconnecting"
         );
-        self.reconnect.notify_one();
+        self.request_reconnect(failed_gen);
         // Re-arm so the replacement writer gets its own full window instead of
         // being torn down again on the next tick.
         self.tx_liveness.lock().await.rearm(bytes, now);
@@ -368,9 +376,9 @@ impl FcConnection {
         data: &[u8],
         caller: ClientOrigin,
         injector: Option<&ados_protocol::ipc::InjectorClaim>,
-    ) {
+    ) -> bool {
         self.send_client_bytes_with_budget(data, caller, injector, None)
-            .await;
+            .await
     }
 
     /// [`Self::send_client_bytes`] with a wall bound on the local-FC write.
@@ -416,15 +424,10 @@ impl FcConnection {
         // credentials, whatever it declared (see `ados_protocol::ipc::IpcPeer`)
         // — is refused whenever a human holds manual control (or the arbiter is
         // not reporting — fail closed). An operator writer (injector = None) is
-        // the human path and is NEVER gated. A poisoned lock is recovered: the
-        // cache inside is valid, and a panic here would take the FC path down.
+        // the human path and is NEVER gated. Where no local arbiter runs the
+        // gate is not built and nothing is refused.
         if let Some(claim) = injector {
-            if self
-                .injector_gate
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .refused(claim)
-            {
+            if self.injector_refused_now(claim) {
                 tracing::warn!(
                     injector = %claim.client_id,
                     len = data.len(),
@@ -476,8 +479,7 @@ impl FcConnection {
                 }
                 ClientOrigin::Trusted => {}
             }
-            uplink.send(data);
-            return true;
+            return uplink.send(data);
         }
         false
     }
@@ -503,12 +505,7 @@ impl FcConnection {
         // Same PIC-arbiter gate as send_client_bytes; MSP is a second way to
         // command an airframe, so it is gated identically.
         if let Some(claim) = injector {
-            if self
-                .injector_gate
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .refused(claim)
-            {
+            if self.injector_refused_now(claim) {
                 tracing::warn!(
                     injector = %claim.client_id,
                     len = data.len(),
@@ -563,7 +560,7 @@ impl FcConnection {
         if !self.transport_open() {
             return;
         }
-        let idle = self.last_msg_at.lock().await.elapsed();
+        let idle = self.last_msg_idle();
         {
             let mut interval = self.stream_interval.lock().await;
             *interval = if idle >= STREAM_STALL {
@@ -876,12 +873,47 @@ mod tests {
             "send_bytes must not latch the transport closed on a transient write error"
         );
 
-        // The reconnect signal must have been raised so run() rebuilds the link.
-        // notify_one() leaves a permit, so notified() resolves immediately.
-        let signalled = tokio::time::timeout(Duration::from_millis(100), conn.reconnect.notified())
-            .await
-            .is_ok();
+        // The reconnect signal must have been raised, tagged with the link
+        // generation the write failed on, so run() rebuilds that link.
+        let signalled = tokio::time::timeout(
+            Duration::from_millis(100),
+            conn.reconnect_requested(conn.link_gen()),
+        )
+        .await
+        .is_ok();
         assert!(signalled, "a write failure must signal a reconnect");
+    }
+
+    /// A write failure recorded against a link that is already gone must not
+    /// tear down its replacement: the run loop waits on the CURRENT
+    /// generation only.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_generation_failure_does_not_tear_down_the_new_link() {
+        let conn = test_connection();
+        conn.connected.store(true, Ordering::Relaxed);
+        *conn.writer.lock().await = Some(Box::pin(FailingWriter));
+        let old = conn.link_gen();
+        conn.send_bytes(b"\xfd\x00").await;
+        // The run loop re-opens: a fresh writer under a new generation.
+        let fresh = conn.next_link_gen();
+        assert_ne!(old, fresh);
+        let torn_down = tokio::time::timeout(
+            super::super::RECONNECT_INTERVAL * 2,
+            conn.reconnect_requested(fresh),
+        )
+        .await
+        .is_ok();
+        assert!(
+            !torn_down,
+            "the new link must survive the old link's write failure"
+        );
+        // A failure on the new link still signals.
+        conn.request_reconnect(fresh);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), conn.reconnect_requested(fresh))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -889,9 +921,12 @@ mod tests {
         let conn = test_connection();
         // No writer installed: send_bytes does nothing and raises no reconnect.
         conn.send_bytes(b"\xfd\x00").await;
-        let signalled = tokio::time::timeout(Duration::from_millis(50), conn.reconnect.notified())
-            .await
-            .is_ok();
+        let signalled = tokio::time::timeout(
+            Duration::from_millis(50),
+            conn.reconnect_requested(conn.link_gen()),
+        )
+        .await
+        .is_ok();
         assert!(
             !signalled,
             "no writer means nothing to fail and no reconnect to raise"
@@ -1077,6 +1112,26 @@ mod tests {
             }
             _ => false,
         }
+    }
+
+    /// A frame the aux uplink dropped on a full queue is not reported as sent.
+    #[tokio::test]
+    async fn a_full_uplink_queue_makes_send_client_bytes_return_false() {
+        let conn = conn_with_origin_gate(false);
+        let (sender, _rx) = crate::aux_uplink::AuxUplinkSender::detached(1);
+        conn.set_aux_uplink(sender.clone()).await;
+        let frame = command_long_bytes();
+        assert!(
+            conn.send_client_bytes(&frame, ClientOrigin::Trusted, None)
+                .await
+        );
+        assert!(
+            !conn
+                .send_client_bytes(&frame, ClientOrigin::Trusted, None)
+                .await,
+            "a dropped frame must not be counted as injected"
+        );
+        assert_eq!(sender.queue_full_dropped(), 1);
     }
 
     /// A linked ground agent holds full authority over the node it relays, so

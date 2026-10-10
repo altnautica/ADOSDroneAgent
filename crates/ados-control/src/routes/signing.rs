@@ -23,6 +23,13 @@
 //! `SIGNING_*` parameter. Once its store holds a key it rejects unsigned traffic
 //! on every link but channel 0 (normally USB), and it reports nothing about it.
 //!
+//! The agent never signs, so once the FC holds a key, the agent's own frames
+//! (stream-rate requests, the parameter sweep, swarm setpoints) are dropped on
+//! any link but channel 0. Capability carries the MAVLink service's
+//! `agent_commands_unsigned_rejected_risk` observation for that case: `true`
+//! when the FC answers signed on a serial link other than its USB port,
+//! `false` when it does not, `null` when there is no serial link to judge.
+//!
 //! With no agent running (an empty snapshot), capability reports
 //! `fc_not_connected` and counters report unmeasured, each a valid,
 //! GCS-parseable body rather than a failure.
@@ -46,7 +53,8 @@ const MAV_AUTOPILOT_PX4: i64 = 12;
 ///
 /// Reads the FC connection flag and the autopilot id from the live state snapshot
 /// and runs the capability check. Returns
-/// `{supported, reason, firmware_name, firmware_version, signing_params_present}`.
+/// `{supported, reason, firmware_name, firmware_version, signing_params_present,
+/// agent_commands_unsigned_rejected_risk}`.
 /// `signing_params_present` is informational only (whether the cached param tree
 /// carries any `SIGNING_*` name); it does not gate support. The `reason` enum:
 /// `ok | fc_not_connected | firmware_not_supported |
@@ -59,11 +67,20 @@ pub async fn capability(State(state): State<AppState>) -> Json<Value> {
     // `signing_params_present` is informational; an unreadable cache reads as
     // "no SIGNING_* names seen", which never changes `supported`.
     let params = crate::param_store::read_param_blob(&state.params_path).unwrap_or_default();
-    Json(detect_capability(
-        connected,
-        autopilot,
-        signing_params_present(&params),
-    ))
+    let mut body = detect_capability(connected, autopilot, signing_params_present(&params));
+    let risk = unsigned_risk_from_snapshot(snapshot.as_ref());
+    body["agent_commands_unsigned_rejected_risk"] = risk;
+    Json(body)
+}
+
+/// The MAVLink service's unsigned-command risk observation from a snapshot:
+/// a bool when measured, `null` when absent or unmeasured.
+fn unsigned_risk_from_snapshot(snapshot: Option<&Value>) -> Value {
+    snapshot
+        .and_then(Value::as_object)
+        .and_then(|m| m.get("agent_commands_unsigned_rejected_risk"))
+        .and_then(Value::as_bool)
+        .map_or(Value::Null, Value::Bool)
 }
 
 /// `GET /api/mavlink/signing/counters` → the observational signed-frame counters.
@@ -286,6 +303,19 @@ mod tests {
             autopilot_from_snapshot(Some(&json!({"autopilot": null}))),
             0
         );
+    }
+
+    #[test]
+    fn the_unsigned_command_risk_is_read_from_the_snapshot() {
+        let snap = json!({ "agent_commands_unsigned_rejected_risk": true });
+        assert_eq!(unsigned_risk_from_snapshot(Some(&snap)), json!(true));
+        let snap = json!({ "agent_commands_unsigned_rejected_risk": false });
+        assert_eq!(unsigned_risk_from_snapshot(Some(&snap)), json!(false));
+        // Unmeasured (null), absent, or no snapshot at all read as null.
+        let snap = json!({ "agent_commands_unsigned_rejected_risk": null });
+        assert_eq!(unsigned_risk_from_snapshot(Some(&snap)), Value::Null);
+        assert_eq!(unsigned_risk_from_snapshot(Some(&json!({}))), Value::Null);
+        assert_eq!(unsigned_risk_from_snapshot(None), Value::Null);
     }
 
     /// A `{name: value}` param map, the shape `crate::param_store` projects.

@@ -247,10 +247,27 @@ impl ParamPersister {
     }
 }
 
-/// Open a serial port at the given baud as an async stream.
+/// Open a serial port at the given baud as an async stream, claimed
+/// exclusively (TIOCEXCL) so no other process can open the FC port while this
+/// router holds it.
 pub(crate) fn open_serial(port: &str, baud: u32) -> Option<SerialStream> {
-    tokio_serial::new(port, baud).open_native_async().ok()
+    let mut stream = tokio_serial::new(port, baud).open_native_async().ok()?;
+    claim_exclusive(&mut stream, port);
+    Some(stream)
 }
+
+/// Set TIOCEXCL on an open port. A failure is logged and the link is kept: an
+/// FC link without the exclusive flag still works, it is just not protected
+/// from a second opener.
+#[cfg(unix)]
+fn claim_exclusive(stream: &mut SerialStream, port: &str) {
+    if let Err(e) = stream.set_exclusive(true) {
+        tracing::warn!(port, error = %e, "fc_serial_exclusive_failed");
+    }
+}
+
+#[cfg(not(unix))]
+fn claim_exclusive(_stream: &mut SerialStream, _port: &str) {}
 
 /// Split a serial stream into the boxed read/write halves the run loop expects.
 pub(crate) fn split_serial(

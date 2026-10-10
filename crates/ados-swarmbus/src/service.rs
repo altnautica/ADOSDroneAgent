@@ -237,6 +237,18 @@ async fn replay_persist_loop(
     }
 }
 
+/// Drop every neighbour row on a re-key, keeping the counters' history and the
+/// replay marks. A row accepted under the old key (the publicly derivable
+/// cold-start key, before a bind) must not be published under the new key's
+/// `fleet_key_bound` flag and steered on until it ages out; the table refills
+/// from beacons sealed with the new key. The replay marks stay, so a captured
+/// old beacon cannot be replayed into the fresh table. Returns how many rows
+/// were dropped (counted as stale drops).
+fn forget_neighbors_on_rekey(table: &mut NeighborTable, now: Instant) -> usize {
+    // Every row is stale relative to an instant far past the staleness window.
+    table.prune(now + Duration::from_secs(3600))
+}
+
 /// Why the radio-bound loops were torn down.
 enum Reopen {
     Stop,
@@ -278,6 +290,7 @@ async fn radio_supervisor(
         // A key that changed while the radio was down is picked up before reopening.
         if let Some(key) = keys.poll() {
             cipher = Arc::new(cipher.rekeyed(&key));
+            forget_neighbors_on_rekey(&mut table.lock(), Instant::now());
         }
         let bus = match open_bus(&cfg, &cipher, &cancel).await {
             Some(b) => Arc::new(b),
@@ -340,7 +353,10 @@ async fn radio_supervisor(
         }
         match outcome {
             Reopen::Stop => return,
-            Reopen::Rekeyed => tracing::info!("swarm fleet key changed; reopening the bus"),
+            Reopen::Rekeyed => {
+                let dropped = forget_neighbors_on_rekey(&mut table.lock(), Instant::now());
+                tracing::info!(dropped, "swarm fleet key changed; reopening the bus");
+            }
             Reopen::RadioLost | Reopen::TxFailed => {
                 if matches!(outcome, Reopen::RadioLost) {
                     tracing::warn!("swarm radio receive ended; reopening");
@@ -987,10 +1003,48 @@ mod tests {
             counter: 0,
         };
         table.lock().record(beacon, sender, None, Instant::now());
-        let unwritable = dir.path().join("missing-dir/replay.json");
+        // A regular file where the parent directory should be: the atomic
+        // writer creates missing parents, so only a non-directory parent fails.
+        std::fs::write(dir.path().join("blocker"), b"").unwrap();
+        let unwritable = dir.path().join("blocker/replay.json");
         persist_replay(&unwritable, &table);
         assert!(!unwritable.exists());
         persist_replay(&path, &table);
         assert!(path.exists(), "the failed write was retried");
+    }
+
+    /// A row accepted under the old key is gone after a re-key, nothing is
+    /// published until a beacon under the new key arrives, and the replay marks
+    /// survive so the old frame cannot be replayed back in.
+    #[test]
+    fn a_rekey_drops_rows_from_the_old_key_but_keeps_replay_marks() {
+        use crate::beacon::SwarmBeacon;
+        use crate::crypto::SenderNonce;
+        use crate::neighbors::Recorded;
+
+        let t0 = Instant::now();
+        let beacon = SwarmBeacon {
+            slot: 3,
+            ..SwarmBeacon::default()
+        };
+        let run = |counter| SenderNonce {
+            prefix: [0x5A; 8],
+            counter,
+        };
+        let mut table = NeighborTable::new(1);
+        assert_eq!(table.record(beacon, run(40), None, t0), Recorded::Accepted);
+        assert_eq!(table.len(), 1);
+
+        assert_eq!(forget_neighbors_on_rekey(&mut table, t0), 1);
+        assert!(table.is_empty(), "no neighbour survives the re-key");
+        assert_eq!(
+            table.record(beacon, run(40), None, t0),
+            Recorded::Replayed,
+            "the replay marks are kept"
+        );
+        assert!(table.is_empty());
+        // A fresh beacon after the re-key repopulates the table.
+        assert_eq!(table.record(beacon, run(41), None, t0), Recorded::Accepted);
+        assert_eq!(table.len(), 1);
     }
 }

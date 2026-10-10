@@ -34,8 +34,10 @@
 
 mod framing;
 pub mod injector_gate;
+mod link_state;
 mod send_scheduler;
 pub use send_scheduler::ClientOrigin;
+pub(crate) use send_scheduler::FC_MAX_SINGLE_WRITE;
 pub mod swarm_setpoint;
 pub(crate) mod transport;
 
@@ -55,7 +57,8 @@ use crate::param_cache::ParamCache;
 use crate::state::{VehicleSource, VehicleState};
 
 use ados_protocol::hwcaps::is_rc_bridge_usb_id;
-use framing::{count_msp_frame_starts, extract_frames};
+use framing::count_msp_frame_starts;
+pub(crate) use framing::extract_frames;
 use send_scheduler::STREAM_DEFAULT;
 use transport::{
     fc_variant_for_port, is_candidate_port, now_iso, open_serial, open_udp_listen, parse_net_spec,
@@ -73,7 +76,7 @@ use transport::{
 /// was slow. The 3 s floor is what keeps a persistently unwritable port (one
 /// that opens but never accepts a write, so the 1 Hz companion heartbeat fails
 /// every time) from pinning the loop in a hot re-open cycle.
-const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
 
 /// A decoded HEARTBEAT older than this means the FC link is open but the
 /// autopilot is no longer talking: the transport may still be up (the serial
@@ -151,11 +154,15 @@ pub struct FcConnection {
     // send_bytes actually wrote, the same way connection::send_scheduler's
     // own tests already do from inside this module.
     pub(crate) writer: Mutex<Option<BoxedWriteHalf>>,
-    /// Raised by a write/flush failure to ask the run loop to tear down the
-    /// current link and re-open it (installing a fresh writer). A transient FC
-    /// write error must not permanently declare the FC disconnected, so the run
-    /// loop owns recovery rather than latching the writer to `None`.
-    reconnect: tokio::sync::Notify,
+    /// Raised by a write/flush failure or the TX watchdog to ask the run loop
+    /// to tear down the current link and re-open it (installing a fresh
+    /// writer). Carries the link generation the failure happened on, so a
+    /// failure recorded against a link that is already gone cannot tear down
+    /// its healthy replacement. `None` until the first failure.
+    reconnect: tokio::sync::watch::Sender<Option<u64>>,
+    /// Generation of the installed writer, bumped under the writer lock each
+    /// time the run loop installs one. See [`Self::reconnect`].
+    link_gen: AtomicU64,
     /// Monotonic count of bytes successfully written to the flight controller.
     ///
     /// The quantity the TX watchdog takes deltas of. A live writer and an
@@ -208,7 +215,19 @@ pub struct FcConnection {
     /// open, cleared on teardown.
     fc_variant: Mutex<Option<String>>,
     baud: AtomicU32,
-    last_msg_at: Mutex<Instant>,
+    /// Monotonic nanoseconds since [`Self::epoch`] of the last inbound frame.
+    /// An atomic rather than a mutex: it is stamped once per read on the
+    /// hottest path and read by the stream cadence.
+    last_msg_at: AtomicU64,
+    /// The monotonic origin `last_msg_at` counts from.
+    epoch: Instant,
+    /// Whether the vehicle's most recent frame carried a MAVLink 2 signature:
+    /// the FC answers signed, so it has a signing key and drops the unsigned
+    /// frames this router originates on every link but channel 0.
+    fc_signed: AtomicBool,
+    /// The canonical device path of the open serial FC link (symlinks such as
+    /// `/dev/serial0` resolved). `None` for a network source or no link.
+    fc_device: Mutex<Option<String>>,
     /// How evenly ATTITUDE arrives from the flight controller.
     ///
     /// ATTITUDE specifically because it is the fastest thing the autopilot
@@ -254,11 +273,14 @@ pub struct FcConnection {
     /// [`Self::send_bytes`] for how this becomes the fallback destination for
     /// a client's outbound MAVLink.
     aux_uplink: Mutex<Option<crate::aux_uplink::AuxUplinkSender>>,
-    /// Hot-path cache for the PIC-arbiter injector gate. A `std::sync::Mutex`
-    /// (not the async one) held only for the synchronous verdict, so the blocking
-    /// pairing/PIC reads + HMAC verify are cached off the router loop and the
-    /// lock never spans an `.await`. Inert until a producer arms the gate.
-    injector_gate: std::sync::Mutex<injector_gate::InjectorGateCache>,
+    /// The PIC-arbiter injector gate, built only where the arbiter runs (see
+    /// `MavlinkConfig::injector_arbitration_active`); `None` means declared
+    /// injectors are not gated on this node. A `std::sync::Mutex` held only
+    /// for the synchronous verdict, which does no file I/O.
+    injector_gate: Option<std::sync::Mutex<injector_gate::InjectorGateCache>>,
+    /// Background reader of the PIC sidecar and pairing file the gate and the
+    /// swarm loop consume. Started by [`Self::run_gate_feed`].
+    gate_feed: std::sync::Arc<injector_gate::GateFeed>,
     /// The single writer the parameter cache is persisted through, newest
     /// snapshot wins.
     param_persister: ParamPersister,
@@ -273,6 +295,10 @@ impl FcConnection {
     ) -> std::sync::Arc<Self> {
         let (frame_tx, _) = broadcast::channel(FRAME_CHANNEL_CAP);
         let (raw_tx, _) = broadcast::channel(FRAME_CHANNEL_CAP);
+        let gate_feed = std::sync::Arc::new(injector_gate::GateFeed::new());
+        let injector_gate = cfg
+            .injector_arbitration_active()
+            .then(|| std::sync::Mutex::new(injector_gate::InjectorGateCache::new(&gate_feed)));
         std::sync::Arc::new(Self {
             cfg,
             state,
@@ -280,7 +306,8 @@ impl FcConnection {
             frame_tx,
             raw_tx,
             writer: Mutex::new(None),
-            reconnect: tokio::sync::Notify::new(),
+            reconnect: tokio::sync::watch::channel(None).0,
+            link_gen: AtomicU64::new(0),
             tx_bytes: AtomicU64::new(0),
             tx_liveness: Mutex::new(send_scheduler::TxLiveness::new()),
             seq: AtomicU8::new(0),
@@ -295,7 +322,10 @@ impl FcConnection {
             port: Mutex::new(String::new()),
             fc_variant: Mutex::new(None),
             baud: AtomicU32::new(0),
-            last_msg_at: Mutex::new(Instant::now()),
+            last_msg_at: AtomicU64::new(0),
+            epoch: Instant::now(),
+            fc_signed: AtomicBool::new(false),
+            fc_device: Mutex::new(None),
             attitude_cadence: Mutex::new(crate::cadence::InboundCadence::new(ATTITUDE_DEADLINE)),
             last_heartbeat_at: Mutex::new(None),
             last_msp_at: Mutex::new(None),
@@ -309,7 +339,8 @@ impl FcConnection {
             param_sweep_started: Mutex::new(None),
             param_last_cached_count: AtomicUsize::new(0),
             aux_uplink: Mutex::new(None),
-            injector_gate: std::sync::Mutex::new(injector_gate::InjectorGateCache::new()),
+            injector_gate,
+            gate_feed,
             param_persister: ParamPersister::new(),
         })
     }
@@ -656,6 +687,8 @@ impl FcConnection {
             // polled blind spot of the byte sniff.
             *self.fc_variant.lock().await = fc_variant_for_port(&port);
             self.baud.store(baud, Ordering::Relaxed);
+            *self.fc_device.lock().await = link_state::canonical_fc_device(&port).await;
+            self.fc_signed.store(false, Ordering::Relaxed);
             if self.command_down_gated() {
                 // MAVLink-over-ELRS, telemetry-only: install NO writer. With no
                 // writer every send path is a no-op (send_bytes early-returns),
@@ -669,14 +702,23 @@ impl FcConnection {
                 // command marker restores the writer (the else branch) for the
                 // bench-validated command lane.
                 drop(write_half);
-                *self.writer.lock().await = None;
+                let mut writer = self.writer.lock().await;
+                *writer = None;
+                self.next_link_gen();
+                drop(writer);
                 tracing::info!(port = %port, baud, "fc_connected_crsf_mavlink_command_down_gated");
             } else {
-                *self.writer.lock().await = Some(write_half);
+                let mut writer = self.writer.lock().await;
+                *writer = Some(write_half);
+                self.next_link_gen();
+                drop(writer);
                 tracing::info!(port = %port, baud, "fc_connected");
             }
+            // Captured once the writer is installed: only a failure recorded
+            // against THIS link's generation tears it down.
+            let link_gen = self.link_gen();
             self.connected.store(true, Ordering::Relaxed);
-            *self.last_msg_at.lock().await = Instant::now();
+            self.stamp_last_msg();
             self.link_proven.store(false, Ordering::Relaxed);
             // A board identified as MSP by its USB descriptor is proven by
             // identity: it stays silent until a ground station polls it.
@@ -689,7 +731,7 @@ impl FcConnection {
                 // the read half and fall through to the re-open below, which
                 // installs a fresh writer; do not declare the FC disconnected
                 // permanently for what may be a transient write error.
-                _ = self.reconnect.notified() => {
+                _ = self.reconnect_requested(link_gen) => {
                     tracing::warn!("fc_write_failed_reconnecting");
                 }
                 _ = self.unproven_link_expired(), if unproven => {
@@ -710,6 +752,8 @@ impl FcConnection {
             *self.last_heartbeat_at.lock().await = None;
             *self.last_msp_at.lock().await = None;
             *self.fc_variant.lock().await = None;
+            *self.fc_device.lock().await = None;
+            self.fc_signed.store(false, Ordering::Relaxed);
             self.msp_warned.store(false, Ordering::Relaxed);
             *self.writer.lock().await = None;
             self.param_priming.store(false, Ordering::Relaxed);
@@ -752,7 +796,7 @@ impl FcConnection {
         *self.port.lock().await = "demo".to_string();
         self.baud.store(0, Ordering::Relaxed);
         self.connected.store(true, Ordering::Relaxed);
-        *self.last_msg_at.lock().await = Instant::now();
+        self.stamp_last_msg();
         tracing::info!("fc_demo_started");
 
         let start = Instant::now();
@@ -792,7 +836,7 @@ impl FcConnection {
                             }
                         }
                     }
-                    *self.last_msg_at.lock().await = Instant::now();
+                    self.stamp_last_msg();
                 }
                 _ = cancel.wait() => {
                     self.connected.store(false, Ordering::Relaxed);
@@ -897,7 +941,7 @@ impl FcConnection {
                 // socket) receives every frame, including a TUNNEL one, and
                 // filters for its own private payload_type on its side.
                 let _ = self.frame_tx.send(frame.clone());
-                *self.last_msg_at.lock().await = Instant::now();
+                self.stamp_last_msg();
                 // Classify a TUNNEL (385) carrying a private (application)
                 // payload_type. The typed parser below rejects an unregistered
                 // payload_type as an unknown enum value, so this reads the type
@@ -923,6 +967,7 @@ impl FcConnection {
                     if !vehicle.admit(header.system_id, header.component_id, &msg) {
                         continue;
                     }
+                    self.note_vehicle_frame(&frame);
                     if let MavMessage::HEARTBEAT(_) = &msg {
                         self.latch_fc_identity(header.system_id, header.component_id);
                         self.link_proven.store(true, Ordering::Relaxed);
@@ -1561,9 +1606,12 @@ mod command_gate_tests {
             c.writer.lock().await.is_none(),
             "no send path creates a writer for a gated source"
         );
-        let signalled = tokio::time::timeout(Duration::from_millis(50), c.reconnect.notified())
-            .await
-            .is_ok();
+        let signalled = tokio::time::timeout(
+            Duration::from_millis(50),
+            c.reconnect_requested(c.link_gen()),
+        )
+        .await
+        .is_ok();
         assert!(
             !signalled,
             "a gated source with no writer raises no reconnect"

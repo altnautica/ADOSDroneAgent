@@ -65,11 +65,13 @@ fn default_endpoints() -> Vec<EndpointConfig> {
 /// the published documentation described an endpoint that authenticates. The
 /// gap between the two was the exposure.
 ///
-/// Turning it on does not close the unpaired posture: an unpaired node still
-/// admits any caller, because it has no credential to check against and refusing
-/// would lock an operator out of a node they have not yet claimed. What changes
-/// is that a PAIRED node now requires either the key or a ticket, which every
-/// first-party client already presents.
+/// The rule it enforces, on either pairing state:
+///
+/// - **unpaired:** on-box callers and the first-boot lifelines (the AP and USB
+///   gateway addresses) only; every other caller is refused, because a node
+///   with no key has nothing to check a remote caller against;
+/// - **paired:** on-box callers, or any caller presenting the pairing key
+///   (`X-ADOS-Key`) or a valid WebSocket ticket.
 fn default_ws_proxy_enforce_auth() -> bool {
     true
 }
@@ -204,6 +206,14 @@ pub struct MavlinkConfig {
     /// that made it a flag.
     #[serde(default = "default_legacy_stream_request")]
     pub legacy_stream_request: bool,
+    /// Whether the FC-write PIC arbiter gates declared autonomous injectors
+    /// (`mavlink.injector_arbitration`). The arbiter (`ados-pic`) runs only on
+    /// a ground station, so the gate is built only there; on any other profile
+    /// the flag is reported as `inactive_no_local_arbiter` and no injector is
+    /// gated, because a gate with no local arbiter would refuse every command
+    /// forever. See [`MavlinkConfig::injector_arbitration_state`].
+    #[serde(default)]
+    pub injector_arbitration: bool,
     /// The serial device an ExpressLRS / CRSF RC module is pinned to
     /// (`radio.crsf.device` in the config — the top-level `radio:` section, NOT
     /// the `mavlink:` block, so it is skipped by the section deserializer and
@@ -300,6 +310,7 @@ impl Default for MavlinkConfig {
             raw_proxy_lan_access: default_raw_proxy_lan_access(),
             aux_uplink_enforce_origin: default_aux_uplink_enforce_origin(),
             legacy_stream_request: default_legacy_stream_request(),
+            injector_arbitration: false,
             crsf_device: String::new(),
             crsf_enabled: false,
             crsf_mode: "crsf_rc".to_string(),
@@ -459,6 +470,26 @@ impl MavlinkConfig {
     /// profiles are neither, and must not pick up either side's paths.
     pub fn is_ground_station(&self) -> bool {
         self.profile == "ground-station"
+    }
+
+    /// Whether the PIC injector gate runs on this node: the flag is on AND the
+    /// profile is a ground station, the only profile that runs the arbiter.
+    pub fn injector_arbitration_active(&self) -> bool {
+        self.injector_arbitration
+            && ados_config::normalize_profile(Some(self.profile.as_str())) == "ground-station"
+    }
+
+    /// The `injector_arbitration` state extra: `active` (gate built),
+    /// `inactive_no_local_arbiter` (flag on, but this profile runs no arbiter),
+    /// or `off` (flag off).
+    pub fn injector_arbitration_state(&self) -> &'static str {
+        if !self.injector_arbitration {
+            "off"
+        } else if self.injector_arbitration_active() {
+            "active"
+        } else {
+            "inactive_no_local_arbiter"
+        }
     }
 
     /// Resolve the MAVLink-over-ELRS ingest source from the `radio.crsf`
@@ -923,5 +954,35 @@ mod tests {
             "mavlink:\n  source: serial\n  serial_port: /dev/ttyACM0\n",
         );
         assert_eq!(MavlinkConfig::load_from(&cfg2).source, "serial");
+    }
+
+    #[test]
+    fn arbitration_inactive_on_drone() {
+        // The arbiter runs only on a ground station; a drone with the flag on
+        // must not build a gate that refuses every injector forever.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        write(
+            &cfg,
+            "agent:\n  profile: drone\nmavlink:\n  injector_arbitration: true\n",
+        );
+        let c = MavlinkConfig::load_from(&cfg);
+        assert!(c.injector_arbitration);
+        assert!(!c.injector_arbitration_active());
+        assert_eq!(c.injector_arbitration_state(), "inactive_no_local_arbiter");
+
+        write(
+            &cfg,
+            "agent:\n  profile: ground_station\nmavlink:\n  injector_arbitration: true\n",
+        );
+        let gs = MavlinkConfig::load_from(&cfg);
+        assert!(gs.injector_arbitration_active());
+        assert_eq!(gs.injector_arbitration_state(), "active");
+
+        write(&cfg, "agent:\n  profile: ground_station\nmavlink: {}\n");
+        assert_eq!(
+            MavlinkConfig::load_from(&cfg).injector_arbitration_state(),
+            "off"
+        );
     }
 }

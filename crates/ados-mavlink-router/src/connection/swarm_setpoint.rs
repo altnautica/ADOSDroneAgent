@@ -41,6 +41,22 @@
 //! holds on its own terms. Setpoints are addressed to that latched id, never
 //! to a conventional 1/1: a fleet drone flies with its slot as its system id.
 //!
+//! # Human pilot in command
+//!
+//! The loop is an autonomous injector. Where the PIC arbiter runs and its
+//! sidecar is present and fresh, every tick asks the same verdict the FC-write
+//! injector gate uses (as injector `swarm`); while anyone else holds the claim
+//! the loop emits nothing and publishes `swarm_precedence = "operator"`, so the
+//! beacon shows a human is flying. Where no sidecar exists (a drone, which runs
+//! no arbiter) the loop keeps the gates above alone.
+//!
+//! # Signed flight controllers
+//!
+//! This router does not sign. When the FC answers signed on a link where it
+//! enforces signing, every setpoint would be dropped by the autopilot while the
+//! counters said it was sent, so the layer is not eligible while
+//! `agent_commands_unsigned_rejected_risk` is set (logged once per episode).
+//!
 //! # Config changes
 //!
 //! The `swarm:` block is re-read while the router runs. The loop checks the
@@ -91,6 +107,9 @@ pub struct SwarmSetpointStatus {
     setpoints_emitted: AtomicU64,
     ticks_suppressed: AtomicU64,
     hard_engagements: AtomicU64,
+    /// Set while the layer is held off for the unsigned-command risk, so the
+    /// hold is logged once per episode rather than every poll.
+    signing_hold_logged: AtomicBool,
 }
 
 impl SwarmSetpointStatus {
@@ -141,6 +160,14 @@ impl SwarmSetpointStatus {
     fn stand_down(&self) {
         self.precedence
             .store(ModePrecedence::Hold as u8, Ordering::Relaxed);
+        self.emergency.store(false, Ordering::Relaxed);
+    }
+
+    /// A human holds the PIC claim: nothing is flown from here, and the beacon
+    /// says the operator is flying.
+    fn stand_down_for_operator(&self) {
+        self.precedence
+            .store(ModePrecedence::Operator as u8, Ordering::Relaxed);
         self.emergency.store(false, Ordering::Relaxed);
     }
 }
@@ -205,6 +232,19 @@ fn eligible(cfg: &SwarmControlConfig) -> bool {
         return false;
     }
     true
+}
+
+/// Whether the unsigned-command risk holds the layer off. Logs once when the
+/// hold starts and once when it clears.
+async fn signing_holds(fc: &FcConnection, status: &SwarmSetpointStatus) -> bool {
+    let holds = fc.agent_commands_unsigned_rejected_risk().await == Some(true);
+    let was = status.signing_hold_logged.swap(holds, Ordering::Relaxed);
+    if holds && !was {
+        tracing::warn!("swarm_setpoint_held_fc_rejects_unsigned_commands");
+    } else if !holds && was {
+        tracing::info!("swarm_setpoint_signing_hold_cleared");
+    }
+    holds
 }
 
 /// The running controller and the block it was built from.
@@ -284,7 +324,7 @@ pub async fn run(
     let mut source = SwarmConfigSource::new(PathBuf::from(config_path));
     let mut cfg = source.poll().unwrap_or_default();
     loop {
-        while !eligible(&cfg) {
+        while !eligible(&cfg) || signing_holds(&fc, &status).await {
             tokio::select! {
                 _ = cancel.wait() => return,
                 _ = tokio::time::sleep(CONFIG_POLL) => {}
@@ -400,6 +440,9 @@ async fn control_loop(
                     }
                     live.reconfigure(cfg);
                 }
+                if signing_holds(&fc, &status).await {
+                    return LoopExit::Ineligible(live.cfg.clone());
+                }
                 continue;
             }
             _ = tick.tick() => {}
@@ -449,6 +492,11 @@ async fn control_loop(
             status.stand_down();
             continue;
         };
+        // A human holds PIC on the arbiter: stand down and say so.
+        if fc.swarm_refused_by_pic() {
+            status.stand_down_for_operator();
+            continue;
+        }
         let out = live.tick(own, &fixes, now);
         status.publish(out.precedence, out.emergency, live.controller.counters());
         if let Some(setpoint) = out.setpoint {
@@ -762,5 +810,46 @@ mod tests {
         s.stand_down();
         assert_eq!(s.precedence_wire(), "hold");
         assert!(!s.emergency());
+    }
+
+    /// A fresh sidecar claimed by an operator holds the layer off, and the
+    /// beacon says the operator is flying.
+    #[test]
+    fn a_fresh_operator_claim_stands_the_layer_down() {
+        use super::super::link_state::pic_refuses_swarm;
+        use ados_hid::pic_view::PicView;
+        let held = PicView {
+            claimed: true,
+            holder: Some("op-a".into()),
+        };
+        assert!(pic_refuses_swarm(Some(&held)));
+        let s = SwarmSetpointStatus::default();
+        s.publish(ModePrecedence::Formation, false, Default::default());
+        s.stand_down_for_operator();
+        assert_eq!(s.precedence_wire(), "operator");
+        // Unclaimed, or no sidecar at all, keeps today's behaviour.
+        assert!(!pic_refuses_swarm(Some(&PicView::default())));
+        assert!(!pic_refuses_swarm(None));
+    }
+
+    #[tokio::test]
+    async fn the_unsigned_command_risk_holds_the_layer_off_once() {
+        let fc = FcConnection::new(
+            crate::config::MavlinkConfig::default(),
+            Arc::new(Mutex::new(VehicleState::default())),
+            Arc::new(Mutex::new(crate::param_cache::ParamCache::new(
+                std::env::temp_dir().join("ados-swarm-signing-test-params.json"),
+            ))),
+        );
+        let s = SwarmSetpointStatus::default();
+        // No open link: unmeasured, so no hold.
+        assert!(!signing_holds(&fc, &s).await);
+        assert!(!s.signing_hold_logged.load(Ordering::Relaxed));
+        // A signing FC on a UART: the layer is not eligible.
+        fc.connected.store(true, Ordering::Relaxed);
+        *fc.fc_device.lock().await = Some("/dev/ttyAMA0".into());
+        fc.note_vehicle_frame(&[0xFD, 9, 0x01, 0]);
+        assert!(signing_holds(&fc, &s).await);
+        assert!(s.signing_hold_logged.load(Ordering::Relaxed));
     }
 }

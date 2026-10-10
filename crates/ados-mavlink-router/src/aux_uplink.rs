@@ -71,24 +71,54 @@ const CONFLICT_DOC_STALE_AFTER_S: f64 = 20.0;
 pub struct AuxUplinkSender {
     tx: mpsc::Sender<Vec<u8>>,
     blocked_sysid_conflict: Arc<AtomicU64>,
+    queue_full_dropped: Arc<AtomicU64>,
+    partial_dropped: Arc<AtomicU64>,
 }
 
 impl AuxUplinkSender {
-    /// Queue `data` for the aux uplink. Best-effort: a full queue means the
-    /// uplink is genuinely falling behind the client, and blocking the
-    /// caller here would stall the connection handler that owns this byte
-    /// stream, so an over-full queue drops the frame rather than back
-    /// pressuring the caller.
-    pub fn send(&self, data: &[u8]) {
+    /// Queue `data` for the aux uplink. Returns whether it was queued.
+    /// Best-effort: a full queue means the uplink is genuinely falling behind
+    /// the client, and blocking the caller here would stall the connection
+    /// handler that owns this byte stream, so an over-full queue drops the
+    /// frame, counts it, and reports `false` rather than back pressuring the
+    /// caller.
+    pub fn send(&self, data: &[u8]) -> bool {
         if self.tx.try_send(data.to_vec()).is_err() {
+            self.queue_full_dropped.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(len = data.len(), "aux_uplink_queue_full_dropped_frame");
+            return false;
         }
+        true
     }
 
     /// Frames dropped because they were addressed to a system id two linked
     /// aircraft share. Cumulative.
     pub fn blocked_sysid_conflict(&self) -> u64 {
         self.blocked_sysid_conflict.load(Ordering::Relaxed)
+    }
+
+    /// Chunks dropped because the outbound queue was full. Cumulative.
+    pub fn queue_full_dropped(&self) -> u64 {
+        self.queue_full_dropped.load(Ordering::Relaxed)
+    }
+
+    /// Trailing partial frames dropped because they could not fit one aux
+    /// datagram. Cumulative.
+    pub fn partial_dropped(&self) -> u64 {
+        self.partial_dropped.load(Ordering::Relaxed)
+    }
+
+    /// A sender whose queue nothing drains, for tests that need a full queue.
+    #[cfg(test)]
+    pub(crate) fn detached(depth: usize) -> (Self, mpsc::Receiver<Vec<u8>>) {
+        let (tx, rx) = mpsc::channel(depth);
+        let sender = Self {
+            tx,
+            blocked_sysid_conflict: Arc::new(AtomicU64::new(0)),
+            queue_full_dropped: Arc::new(AtomicU64::new(0)),
+            partial_dropped: Arc::new(AtomicU64::new(0)),
+        };
+        (sender, rx)
     }
 }
 
@@ -110,11 +140,14 @@ pub fn spawn(target_port: u16) -> AuxUplinkSender {
 fn spawn_with(target_port: u16, conflict_sidecar: PathBuf) -> AuxUplinkSender {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(QUEUE_DEPTH);
     let blocked_sysid_conflict = Arc::new(AtomicU64::new(0));
+    let partial_dropped = Arc::new(AtomicU64::new(0));
     let filter = ConflictFilter::new(conflict_sidecar, blocked_sysid_conflict.clone());
-    tokio::spawn(run(rx, target_port, filter));
+    tokio::spawn(run(rx, target_port, filter, partial_dropped.clone()));
     AuxUplinkSender {
         tx,
         blocked_sysid_conflict,
+        queue_full_dropped: Arc::new(AtomicU64::new(0)),
+        partial_dropped,
     }
 }
 
@@ -230,27 +263,28 @@ impl ConflictFilter {
 
 /// Break a chunk that cannot fit one datagram into pieces that can.
 ///
-/// A client's bytes arrive as raw TCP reads of up to several KB, so a mission
-/// or parameter burst can exceed the aux payload ceiling. Such a chunk used to
-/// be handed to the encoder whole, rejected, and dropped with a warning and no
-/// counter — a silent loss of exactly the traffic an operator is most likely to
-/// be watching.
+/// A client's bytes can exceed the aux payload ceiling (a mission or parameter
+/// burst), and such a chunk used to be handed to the encoder whole, rejected,
+/// and dropped with a warning and no counter.
 ///
 /// The split is on MAVLink frame boundaries, not arbitrary byte offsets: the
 /// receiver splits an aux payload back into frames by their own headers, so
 /// cutting mid-frame would deliver two fragments that each fail CRC and read as
-/// line noise. A chunk that yields no whole frame is passed through unchanged
-/// and left for the encoder to reject, because guessing at a boundary is worse
-/// than an honest failure.
-fn split_oversize(chunk: &[u8]) -> Vec<&[u8]> {
+/// line noise. Returns the pieces plus the trailing bytes after the last whole
+/// frame, which the caller carries as its own piece when it fits a datagram
+/// and otherwise drops and counts. A chunk that yields no whole frame is passed
+/// through unchanged and left for the encoder to reject, because guessing at a
+/// boundary is worse than an honest failure.
+fn split_oversize(chunk: &[u8]) -> (Vec<&[u8]>, &[u8]) {
     if chunk.len() <= AUX_MAX_PAYLOAD {
-        return vec![chunk];
+        return (vec![chunk], &[]);
     }
     let frames = aux_mux::split_frames(chunk);
     if frames.is_empty() {
-        return vec![chunk];
+        return (vec![chunk], &[]);
     }
-    frames
+    let whole: usize = frames.iter().map(|f| f.len()).sum();
+    (frames, &chunk[whole..])
 }
 
 async fn flush(sock: &UdpSocket, target: SocketAddr, batch: &mut Vec<u8>) {
@@ -268,7 +302,28 @@ async fn flush(sock: &UdpSocket, target: SocketAddr, batch: &mut Vec<u8>) {
     batch.clear();
 }
 
-async fn run(mut rx: mpsc::Receiver<Vec<u8>>, target_port: u16, mut filter: ConflictFilter) {
+/// The pieces of `chunk` to batch: the frame-boundary split plus the trailing
+/// remainder carried as its own piece when it fits one datagram. A remainder
+/// too large to carry is dropped and counted in `partial_dropped`.
+fn pieces_to_send<'a>(chunk: &'a [u8], partial_dropped: &AtomicU64) -> Vec<&'a [u8]> {
+    let (mut pieces, remainder) = split_oversize(chunk);
+    if !remainder.is_empty() {
+        if remainder.len() <= AUX_MAX_PAYLOAD {
+            pieces.push(remainder);
+        } else {
+            partial_dropped.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(len = remainder.len(), "aux_uplink_partial_dropped");
+        }
+    }
+    pieces
+}
+
+async fn run(
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    target_port: u16,
+    mut filter: ConflictFilter,
+    partial_dropped: Arc<AtomicU64>,
+) {
     let sock = match UdpSocket::bind(("127.0.0.1", 0)).await {
         Ok(s) => s,
         Err(e) => {
@@ -300,7 +355,7 @@ async fn run(mut rx: mpsc::Receiver<Vec<u8>>, target_port: u16, mut filter: Conf
                     if f.is_empty() {
                         continue;
                     }
-                    for piece in split_oversize(&f) {
+                    for piece in pieces_to_send(&f, &partial_dropped) {
                         if batch.len() + piece.len() > AUX_MAX_PAYLOAD {
                             flush(&sock, target, &mut batch).await;
                             batch_deadline = None;
@@ -340,7 +395,8 @@ mod tests {
     #[test]
     fn a_chunk_that_fits_is_passed_through_whole() {
         let c = mav2(10, 1);
-        assert_eq!(split_oversize(&c), vec![c.as_slice()]);
+        let empty: &[u8] = &[];
+        assert_eq!(split_oversize(&c), (vec![c.as_slice()], empty));
     }
 
     #[test]
@@ -355,7 +411,8 @@ mod tests {
             chunk.extend_from_slice(&mav2(200, expected as u8));
             expected += 1;
         }
-        let pieces = split_oversize(&chunk);
+        let (pieces, remainder) = split_oversize(&chunk);
+        assert!(remainder.is_empty());
         assert_eq!(pieces.len(), expected, "every frame must survive the split");
         for p in &pieces {
             assert!(
@@ -367,12 +424,48 @@ mod tests {
     }
 
     #[test]
+    fn an_oversize_chunk_carries_its_partial_tail_instead_of_losing_it() {
+        let mut chunk = Vec::new();
+        while chunk.len() <= AUX_MAX_PAYLOAD {
+            chunk.extend_from_slice(&mav2(200, 0));
+        }
+        let next = mav2(200, 1);
+        let tail = &next[..20];
+        chunk.extend_from_slice(tail);
+        let partial = AtomicU64::new(0);
+        let pieces = pieces_to_send(&chunk, &partial);
+        assert_eq!(pieces.last().copied(), Some(tail), "the tail is carried");
+        assert_eq!(partial.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_tail_too_large_for_one_datagram_is_dropped_and_counted() {
+        let mut chunk = mav2(10, 0);
+        chunk.extend(std::iter::repeat_n(0x00u8, AUX_MAX_PAYLOAD + 10));
+        let partial = AtomicU64::new(0);
+        let pieces = pieces_to_send(&chunk, &partial);
+        assert_eq!(pieces, vec![&chunk[..mav2(10, 0).len()]]);
+        assert_eq!(partial.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_reports_the_drop() {
+        let (sender, _rx) = AuxUplinkSender::detached(2);
+        assert!(sender.send(b"a"));
+        assert!(sender.send(b"b"));
+        assert!(!sender.send(b"c"), "a full queue must report the drop");
+        assert_eq!(sender.queue_full_dropped(), 1);
+    }
+
+    #[test]
     fn an_unparseable_oversize_chunk_is_passed_through_rather_than_guessed_at() {
         // Cutting at an arbitrary offset would deliver two halves that each
         // fail CRC on the far side and read as line noise. An honest encoder
         // rejection is better than a fabricated boundary.
         let chunk = vec![0x00u8; AUX_MAX_PAYLOAD + 50];
-        assert_eq!(split_oversize(&chunk).len(), 1);
+        let (pieces, remainder) = split_oversize(&chunk);
+        assert_eq!(pieces.len(), 1);
+        assert!(remainder.is_empty());
     }
 
     /// `start_paused` drives virtual time, so a steady stream can be simulated
