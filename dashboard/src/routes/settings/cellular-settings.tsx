@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useConfig } from "@/hooks/use-config";
-import { useStatus } from "@/hooks/use-status";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { putConfigChecked } from "@/lib/apply-actions";
 import {
   getModemStatus,
@@ -411,13 +411,11 @@ function ConfigOnlyCellular() {
 }
 
 export function CellularSettings() {
-  // Branch on the resolved profile the agent reports (the underscore form
-  // "ground_station"), the same source the sidebar and route gates use, rather
-  // than the raw config profile whose "auto" default misreads an as-yet
-  // uncommitted ground station as a non-GS node and hides its live modem view.
-  const status = useStatus();
+  // Branch on the resolved profile from the pairing-info probe, the same source
+  // the sidebar and route gates use, rather than the raw config profile whose
+  // "auto" default misreads an uncommitted ground station as a non-GS node.
+  const { profile } = useNodeIdentity();
   const config = useConfig();
-  const profile = status.data?.profile;
 
   // Surface the config read state before the profile branch. The config-backed
   // branch otherwise renders a blank page on a read error and empty fields
@@ -435,6 +433,6 @@ export function CellularSettings() {
     );
   }
 
-  if (!profile) return null;
+  if (profile === "auto") return null;
   return profile === "ground_station" ? <GsCellular /> : <ConfigOnlyCellular />;
 }

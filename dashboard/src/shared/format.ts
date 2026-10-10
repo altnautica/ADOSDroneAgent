@@ -121,4 +121,59 @@ export function bearingDeg(lat1: number, lon1: number, lat2: number, lon2: numbe
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
+/** A bitrate in kbps → "850 kbps" / "4.2 Mbps". Zero or negative reads a dash
+ *  (no stream), never "0 kbps". */
+export function fmtBitrate(kbps: number | null | undefined): string {
+  if (kbps == null || kbps <= 0) return DASH;
+  if (kbps >= 1000) return `${(kbps / 1000).toFixed(1)} Mbps`;
+  return `${kbps.toFixed(0)} kbps`;
+}
+
+/** A number with a fixed count of decimals, or a dash. */
+export function fmtNum(v: number | null | undefined, digits = 1): string {
+  if (v == null || Number.isNaN(v)) return DASH;
+  return v.toFixed(digits);
+}
+
+export function fmtVoltage(v: number | null | undefined): string {
+  return v == null ? DASH : `${v.toFixed(2)} V`;
+}
+
+/** Compact relative time: "12s ago", "3m ago", "2h ago", "1d ago". */
+export function fmtRelativeTime(timestampMs: number): string {
+  const s = Math.floor(Math.max(0, Date.now() - timestampMs) / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+export type Severity = "ok" | "warn" | "err" | "info" | "idle";
+
+/** A service/stream state string → a display severity. */
+export function severityFromState(state: string | null | undefined): Severity {
+  if (!state) return "idle";
+  const s = state.toLowerCase();
+  if (s === "running" || s === "active" || s === "online" || s === "ok") return "ok";
+  if (s === "degraded" || s === "warn" || s === "warning") return "warn";
+  if (s === "failed" || s === "error" || s === "err" || s === "offline") return "err";
+  if (s === "unknown" || s === "idle") return "idle";
+  return "info";
+}
+
+const SEVERITY_CLASSES: Record<Severity, { text: string; dot: string; bg: string }> = {
+  ok: { text: "text-ok", dot: "bg-ok", bg: "bg-ok/10" },
+  warn: { text: "text-warn", dot: "bg-warn", bg: "bg-warn/10" },
+  err: { text: "text-destructive", dot: "bg-destructive", bg: "bg-destructive/10" },
+  info: { text: "text-info", dot: "bg-info", bg: "bg-info/10" },
+  idle: { text: "text-muted-foreground", dot: "bg-muted-foreground", bg: "bg-muted/30" },
+};
+
+/** Tailwind classes for a severity's text, status dot and tinted background. */
+export function severityClasses(sev: Severity): { text: string; dot: string; bg: string } {
+  return SEVERITY_CLASSES[sev] ?? SEVERITY_CLASSES.idle;
+}
+
 export { DASH };

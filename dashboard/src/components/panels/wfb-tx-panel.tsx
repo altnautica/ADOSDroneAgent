@@ -8,7 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useWfb } from "@/hooks/use-wfb";
-import { fmtBitrate, fmtNum } from "@/lib/format";
+import { fmtBitrate, fmtNum } from "@/shared/format";
 
 export function WfbTxPanel() {
   const wfb = useWfb();
@@ -48,9 +48,9 @@ export function WfbTxPanel() {
       <CardContent>
         {adapterMissing ? (
           <p className="text-xs text-muted-foreground">
-            WFB-tx is not running. Plug in an RTL8812EU dongle and set the
-            channel + tx power in Settings — the agent starts the
-            transmit pipeline automatically when both are present.
+            WFB-tx is not running. Plug in an RTL8812EU adapter; the agent
+            starts the transmit pipeline once it detects one. Channel and TX
+            power come from <code>video.wfb</code> in /etc/ados/config.yaml.
           </p>
         ) : (
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">

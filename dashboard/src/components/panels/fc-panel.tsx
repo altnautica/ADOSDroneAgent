@@ -9,7 +9,7 @@ import {
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { mspVariant, mspVariantLabel } from "@/lib/fc-firmware";
-import { fmtNum, fmtPercent, fmtVoltage } from "@/lib/format";
+import { fmtNum, fmtPct, fmtVoltage } from "@/shared/format";
 
 function Row({
   label,
@@ -143,11 +143,11 @@ export function FcPanel() {
           label="battery"
           value={
             fc.battery.voltage != null
-              ? `${fmtVoltage(fc.battery.voltage)} · ${fmtPercent(fc.battery.remaining)}`
+              ? `${fmtVoltage(fc.battery.voltage)} · ${fmtPct(fc.battery.remaining)}`
               : "—"
           }
         />
-        <Row label="rc" value={fmtPercent(fc.rc)} />
+        <Row label="rc" value={fmtPct(fc.rc)} />
         <Row label="port" value={fc.fc_port ? `${fc.fc_port} @ ${fc.fc_baud ?? "—"}` : "—"} />
       </CardContent>
     </Card>

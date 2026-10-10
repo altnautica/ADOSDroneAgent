@@ -6,25 +6,7 @@ import {
 } from "@/components/settings/config-fields";
 import { Card, CardContent } from "@/components/ui/card";
 import { useConfig } from "@/hooks/use-config";
-
-const BACKEND_OPTIONS: ReadonlyArray<{
-  value: string;
-  label: string;
-  description?: string;
-}> = [
-  {
-    value: "auto",
-    label: "Auto",
-    description: "Pick the best available accelerator (NPU or CPU).",
-  },
-  { value: "rknn", label: "RKNN", description: "Rockchip NPU." },
-  {
-    value: "opencv_dnn",
-    label: "OpenCV DNN",
-    description: "CPU inference via OpenCV.",
-  },
-  { value: "tflite", label: "TFLite", description: "TensorFlow Lite." },
-];
+import { VISION_BACKEND_OPTIONS } from "@/lib/vision-backends";
 
 export function VisionSettings() {
   const config = useConfig();
@@ -80,7 +62,7 @@ export function VisionSettings() {
               <ConfigEnumField
                 configKey="vision.backend"
                 value={vision.backend}
-                options={BACKEND_OPTIONS}
+                options={VISION_BACKEND_OPTIONS}
                 columns={2}
               />
             </CardContent>

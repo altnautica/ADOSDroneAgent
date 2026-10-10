@@ -15,7 +15,7 @@ import { Radio } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { useMspTelemetry } from "@/hooks/use-msp-telemetry";
 import type { MspVariant } from "@/lib/fc-firmware";
-import { fmtNum, fmtPercent, fmtRelativeTime, fmtVoltage } from "@/lib/format";
+import { fmtNum, fmtPct, fmtRelativeTime, fmtVoltage } from "@/shared/format";
 import { gpsFixLabel } from "@/lib/msp/telemetry-decoders";
 import { cn } from "@/lib/utils";
 
@@ -120,7 +120,7 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
           <Field label="voltage" value={t?.analog ? fmtVoltage(t.analog.voltage) : "—"} />
           <Field label="current" value={t?.analog ? `${fmtNum(t.analog.amperage, 2)} A` : "—"} />
           <Field label="drawn" value={t?.analog ? `${t.analog.mAhDrawn} mAh` : "—"} />
-          <Field label="rssi" value={t?.analog ? fmtPercent(rssiPercent(t.analog.rssi)) : "—"} />
+          <Field label="rssi" value={t?.analog ? fmtPct(rssiPercent(t.analog.rssi)) : "—"} />
         </Panel>
 
         {/* GPS */}
@@ -167,7 +167,7 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
               )
             }
           />
-          <Field label="cpu load" value={t?.status ? fmtPercent(t.status.cpuLoad) : "—"} />
+          <Field label="cpu load" value={t?.status ? fmtPct(t.status.cpuLoad) : "—"} />
           <Field label="cycle time" value={t?.status ? `${t.status.cycleTime} µs` : "—"} />
           <Field label="i2c errors" value={t?.status ? String(t.status.i2cErrors) : "—"} />
           {t?.status?.hardwareFailure != null && (

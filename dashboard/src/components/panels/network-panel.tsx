@@ -7,7 +7,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useStatus } from "@/hooks/use-status";
-import { fmtRssi } from "@/lib/format";
+import { fmtDbm } from "@/shared/format";
 
 export function NetworkPanel() {
   const status = useStatus();
@@ -32,7 +32,7 @@ export function NetworkPanel() {
         </div>
         <div className="flex items-baseline justify-between text-sm">
           <span className="text-xs text-muted-foreground">rssi</span>
-          <span className="font-mono">{fmtRssi(rssi)}</span>
+          <span className="font-mono">{fmtDbm(rssi)}</span>
         </div>
 
         {interfaces.length > 0 ? (

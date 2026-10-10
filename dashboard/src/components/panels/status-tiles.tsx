@@ -1,163 +1,10 @@
-import {
-  type LucideIcon,
-  Cloud,
-  Cpu,
-  KeyRound,
-  Radio,
-  Video,
-  Wifi,
-} from "lucide-react";
-
 import { useHeartbeat } from "@/hooks/use-heartbeat";
+import { usePairingInfo } from "@/hooks/use-pairing";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useStatus } from "@/hooks/use-status";
-import { mspVariant } from "@/lib/fc-firmware";
-import { fmtBitrate, severityClasses, severityFromState } from "@/lib/format";
-import { summarizeHardware } from "@/lib/hardware-summary";
-import type { Severity } from "@/lib/types";
+import { buildTiles, type Tile } from "@/lib/status-tiles";
 import { cn } from "@/lib/utils";
-
-interface Tile {
-  label: string;
-  icon: LucideIcon;
-  value: string;
-  sub: string;
-  severity: Severity;
-  title?: string;
-}
-
-function tiles(
-  snap: ReturnType<typeof useSnapshot>,
-  status: ReturnType<typeof useStatus>,
-  heartbeat: ReturnType<typeof useHeartbeat>,
-): Tile[] {
-  const s = snap.data;
-  const cfg = status.data;
-
-  // FC — tile reflects the flight-controller link. A MAVLink FC shows sats
-  // once GPS reports; before that the link state so a connected-but-unlocked
-  // rig doesn't look dead. A Betaflight/iNav FC speaks MSP (no MAVLink
-  // heartbeat), so `fc.connected` is false while the agent has identified it —
-  // read the variant off the heartbeat and show it as linked (live values
-  // arrive on the Sensors tab via the browser MSP poller).
-  const fcConnected = s?.fc?.connected ?? false;
-  const variant = mspVariant(heartbeat.data?.fcVariant);
-  const sats = s?.fc?.gps?.satellites_visible ?? null;
-  let mav: Tile;
-  if (!fcConnected && variant) {
-    mav = {
-      label: "FC",
-      icon: Radio,
-      value: "linked",
-      sub: variant === "betaflight" ? "betaflight · msp" : "inav · msp",
-      severity: "ok",
-    };
-  } else {
-    mav = {
-      label: "MAV",
-      icon: Radio,
-      value:
-        sats != null && sats > 0
-          ? String(sats)
-          : fcConnected
-            ? "linked"
-            : "off",
-      sub: fcConnected
-        ? sats != null && sats > 0
-          ? "sats"
-          : "waiting for fix"
-        : "no fc",
-      severity: fcConnected ? "ok" : "idle",
-    };
-  }
-
-  // HW — required-component summary from /api/v1/setup/status
-  const hwItems = cfg?.hardware_check?.items ?? [];
-  const hwSum = summarizeHardware(hwItems);
-  const hwSev: Severity =
-    hwItems.length === 0
-      ? "idle"
-      : hwSum.worstState === "missing"
-        ? "err"
-        : hwSum.worstState === "warning" || hwSum.worstState === "checking"
-          ? "warn"
-          : "ok";
-  const failingNames = hwItems
-    .filter((i) => i.required && i.state !== "ok")
-    .map((i) => i.label)
-    .join(", ");
-  const hw: Tile = {
-    label: "HW",
-    icon: Cpu,
-    value:
-      hwItems.length === 0
-        ? "—"
-        : `${hwSum.requiredOk}/${hwSum.requiredTotal}`,
-    sub: hwItems.length === 0 ? "scanning" : failingNames || "all required ok",
-    severity: hwSev,
-    title: failingNames ? `Failing required: ${failingNames}` : undefined,
-  };
-
-  // VID
-  const vState = s?.video?.state ?? "unknown";
-  const vBitrate = s?.video?.bitrate_kbps ?? 0;
-  const vid: Tile = {
-    label: "VID",
-    icon: Video,
-    value: vBitrate > 0 ? fmtBitrate(vBitrate) : vState,
-    sub: vBitrate > 0 ? "live" : vState,
-    severity: severityFromState(vState),
-  };
-
-  // NET
-  const uplink = cfg?.network?.uplink_kind ?? "—";
-  const rssi = cfg?.network?.rssi_dbm ?? null;
-  const net: Tile = {
-    label: "NET",
-    icon: Wifi,
-    value: typeof uplink === "string" ? uplink : "—",
-    sub: rssi != null ? `${rssi} dBm` : uplink && uplink !== "—" ? "online" : "—",
-    severity: uplink && uplink !== "—" ? "ok" : "idle",
-  };
-
-  // CLD — the operator's chosen cloud posture. The relay's live link state is
-  // not reported to this dashboard, so the tile states the posture and nothing
-  // it cannot see.
-  const cloudMode = s?.cloud?.mode ?? cfg?.cloud_choice?.mode ?? null;
-  const cld: Tile = {
-    label: "CLD",
-    icon: Cloud,
-    value: cloudMode ?? "—",
-    sub: cloudMode === "local" ? "no relay" : cloudMode ? "relay configured" : "—",
-    severity: "idle",
-  };
-
-  // PAIR — in local mode there's nothing to pair with; the tile reads
-  // "n/a · local mode" instead of inheriting the historical paired
-  // state from setup-status.
-  const code = s?.cloud?.pairing_code ?? "";
-  const finalized = cfg?.setup_finalized ?? false;
-  let pair: Tile;
-  if (cloudMode === "local") {
-    pair = {
-      label: "PAIR",
-      icon: KeyRound,
-      value: "n/a",
-      sub: "local mode",
-      severity: "idle",
-    };
-  } else {
-    pair = {
-      label: "PAIR",
-      icon: KeyRound,
-      value: code ? code : finalized ? "paired" : "—",
-      sub: code ? "code rotates" : finalized ? "linked" : "unpaired",
-      severity: code ? "info" : finalized ? "ok" : "idle",
-    };
-  }
-
-  return [mav, hw, vid, net, cld, pair];
-}
+import { severityClasses } from "@/shared/format";
 
 function StatusTile({ tile, isLoading }: { tile: Tile; isLoading: boolean }) {
   const Icon = tile.icon;
@@ -189,8 +36,15 @@ export function StatusTiles() {
   const snap = useSnapshot();
   const status = useStatus();
   const heartbeat = useHeartbeat();
+  const pairing = usePairingInfo();
   const isLoading = snap.isLoading && !snap.data;
-  const ts = tiles(snap, status, heartbeat);
+  const ts = buildTiles({
+    snapshot: snap.data,
+    status: status.data,
+    fcVariant: heartbeat.data?.fcVariant,
+    fcReachable: heartbeat.data?.fcReachable,
+    pairing: pairing.data,
+  });
 
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">

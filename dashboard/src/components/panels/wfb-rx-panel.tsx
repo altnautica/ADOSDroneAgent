@@ -8,7 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useWfb } from "@/hooks/use-wfb";
-import { fmtBitrate, fmtNum, fmtRssi } from "@/lib/format";
+import { fmtBitrate, fmtNum, fmtDbm } from "@/shared/format";
 
 export function WfbRxPanel() {
   const wfb = useWfb();
@@ -50,9 +50,9 @@ export function WfbRxPanel() {
       <CardContent>
         {adapterMissing ? (
           <p className="text-xs text-muted-foreground">
-            WFB-rx is not running. Plug in an RTL8812EU dongle and set the
-            channel in Settings — the agent starts the receive pipeline
-            automatically when an adapter and channel are both present.
+            WFB-rx is not running. Plug in an RTL8812EU adapter; the agent
+            starts the receive pipeline once it detects one. Channel and TX
+            power come from <code>video.wfb</code> in /etc/ados/config.yaml.
           </p>
         ) : (
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
@@ -67,7 +67,7 @@ export function WfbRxPanel() {
             </div>
 
             <div className="text-xs text-muted-foreground">rssi</div>
-            <div className="font-mono">{fmtRssi(rssi)}</div>
+            <div className="font-mono">{fmtDbm(rssi)}</div>
 
             {snr != null && (
               <>
@@ -79,7 +79,7 @@ export function WfbRxPanel() {
             {noise != null && (
               <>
                 <div className="text-xs text-muted-foreground">noise</div>
-                <div className="font-mono">{fmtRssi(noise)}</div>
+                <div className="font-mono">{fmtDbm(noise)}</div>
               </>
             )}
 

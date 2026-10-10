@@ -6,7 +6,7 @@ import type {
   BatteryPredictionState,
   BatteryRuleId,
 } from "@/hooks/use-battery-health";
-import { fmtNum, fmtRelativeTime, fmtVoltage } from "@/lib/format";
+import { fmtNum, fmtRelativeTime, fmtVoltage } from "@/shared/format";
 import { cn } from "@/lib/utils";
 
 const RULE_LABEL: Record<BatteryRuleId, string> = {

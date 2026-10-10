@@ -13,6 +13,11 @@ export interface PairingInfo {
   owner_id: string | null;
   /** Unix seconds. */
   paired_at: number | null;
+  /** Resolved node profile (`drone`, `ground_station`, `workstation`, ...). */
+  profile?: string | null;
+  /** Ground-station mesh role; null on every other profile. */
+  role?: string | null;
+  mdns_host?: string | null;
 }
 
 export function usePairingInfo() {

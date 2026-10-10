@@ -60,15 +60,18 @@ export function DashboardAccessGate({ children }: { children: ReactNode }) {
     return () => setAuthChallengeHandler(null);
   }, [probe]);
 
+  const recheck = () => {
+    setState("checking");
+    void probe();
+  };
+
   if (state === "checking") return <GateChecking />;
   if (state === "locked") {
     return (
       <PinSplash
         status={pinStatus}
-        onUnlocked={() => {
-          setState("checking");
-          void probe();
-        }}
+        onUnlocked={recheck}
+        onRetry={recheck}
       />
     );
   }

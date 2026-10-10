@@ -39,7 +39,7 @@ export function ExtensionsRoute() {
   const list = useResource<PluginsListResponse>("plugins", "/api/plugins", 8000);
 
   const installs = list.data?.installs ?? [];
-  const installedIds = new Set(installs.map((i) => i.plugin_id));
+  const installedVersions = new Map(installs.map((i) => [i.plugin_id, i.version] as const));
 
   const [confirm, setConfirm] = useState<{
     plugin: InstallEntry;
@@ -243,7 +243,7 @@ export function ExtensionsRoute() {
       </div>
 
       <RegistryGrid
-        installedIds={installedIds}
+        installedVersions={installedVersions}
         busy={parsing}
         onInstall={(entry) =>
           void beginInstall({

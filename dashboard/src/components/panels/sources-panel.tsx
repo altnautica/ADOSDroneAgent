@@ -7,7 +7,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
-import { fmtBitrate } from "@/lib/format";
+import { fmtBitrate } from "@/shared/format";
 
 // GET /api/v1/ground-station/wfb/receiver/combined — the receiver's combined
 // FEC output. Every counter is null under `stale: true` (nothing is reporting).

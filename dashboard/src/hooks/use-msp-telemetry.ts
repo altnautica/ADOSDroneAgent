@@ -5,6 +5,7 @@
  *
  * Returns null until a session is requested (firmware === null) and while the
  * first snapshot is being taken; otherwise a rolling snapshot flushed at ~5 Hz.
+ * The session is closed while the tab is hidden and reopened when it is shown.
  *
  * @module hooks/use-msp-telemetry
  */
@@ -20,16 +21,31 @@ import {
   type MspTelemetrySnapshot,
 } from "@/lib/msp/msp-telemetry-poller";
 
+/** True while the tab is visible; flips on `visibilitychange`. */
+function usePageVisible(): boolean {
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const onChange = () => setVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onChange);
+    return () => document.removeEventListener("visibilitychange", onChange);
+  }, []);
+  return visible;
+}
+
 export function useMspTelemetry(firmware: MspVariant | null): MspTelemetrySnapshot | null {
   const [snap, setSnap] = useState<MspTelemetrySnapshot | null>(null);
   // Bumped to redial after the session closes or fails to open.
   const [attempt, setAttempt] = useState(0);
+  // A hidden tab closes the MSP session (no polling the FC for nobody) and
+  // reopens it when the tab is shown again; the last snapshot stays on screen.
+  const visible = usePageVisible();
 
   useEffect(() => {
     if (!firmware) {
       setSnap(null);
       return;
     }
+    if (!visible) return;
     let cancelled = false;
     let redial: ReturnType<typeof setTimeout> | null = null;
     const ac = new AbortController();
@@ -62,7 +78,7 @@ export function useMspTelemetry(firmware: MspVariant | null): MspTelemetrySnapsh
       ac.abort();
       void client.disconnect();
     };
-  }, [firmware, attempt]);
+  }, [firmware, attempt, visible]);
 
   return snap;
 }

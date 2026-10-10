@@ -14,7 +14,7 @@ import {
   usePhoneInvites,
   useUnpair,
 } from "@/hooks/use-pairing";
-import { useStatus } from "@/hooks/use-status";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 
 function MaskedCode({ code }: { code: string }) {
   return (
@@ -143,9 +143,8 @@ function AcceptCodeForm() {
 export function PairingRoute() {
   const info = usePairingInfo();
   const unpair = useUnpair();
-  const status = useStatus();
+  const { profile } = useNodeIdentity();
   const [confirmUnpair, setConfirmUnpair] = useState(false);
-  const profile = status.data?.profile;
   const subject = profile === "ground_station" ? "ground station" : "drone";
   const paired = info.data?.paired === true;
 

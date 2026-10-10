@@ -13,10 +13,9 @@
  * @license GPL-3.0-only
  */
 
-import { ungzip } from "pako";
 import type { ParamMetadata, ParamSnapshot } from "./types";
 import { deserializeMetaMap } from "./types";
-import { loadBundled } from "./bundled";
+import { gunzipText, loadBundled } from "./bundled";
 import { mergeMetaMaps } from "./merge";
 
 const BASE_PATH = "/param-metadata";
@@ -54,8 +53,7 @@ async function fetchCatalog(key: string): Promise<Map<string, ParamMetadata>> {
       catalogCache.set(key, EMPTY);
       return EMPTY;
     }
-    const buf = new Uint8Array(await res.arrayBuffer());
-    const snap = JSON.parse(ungzip(buf, { to: "string" })) as ParamSnapshot;
+    const snap = JSON.parse(await gunzipText(res)) as ParamSnapshot;
     const map = deserializeMetaMap(snap.params ?? []);
     catalogCache.set(key, map);
     return map;

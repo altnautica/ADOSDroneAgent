@@ -1,57 +1,29 @@
 import { AlertCircle, AlertTriangle } from "lucide-react";
+import { useLocation } from "react-router-dom";
 
-import { useStatus } from "@/hooks/use-status";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useSnapshot } from "@/hooks/use-snapshot";
+import { buildBanners } from "@/lib/banners";
 import { cn } from "@/lib/utils";
-import type { Severity } from "@/lib/types";
 
-interface Banner {
-  id: string;
-  severity: Severity;
-  message: string;
-}
-
-function buildBanners(
-  status: ReturnType<typeof useStatus>,
-  heartbeat: ReturnType<typeof useHeartbeat>,
-  snapshot: ReturnType<typeof useSnapshot>,
-): Banner[] {
-  const banners: Banner[] = [];
-
-  if (heartbeat.isError) {
-    banners.push({
-      id: "agent-offline",
-      severity: "err",
-      message: "Agent is unreachable. Reconnecting…",
-    });
-  }
-
-  if (status.isSuccess && snapshot.isSuccess) {
-    // An MSP flight controller never sends a MAVLink heartbeat, so
-    // `fc.connected` stays false for it; `fcReachable` covers both.
-    if (
-      status.data.profile === "drone" &&
-      snapshot.data.fc?.connected === false &&
-      heartbeat.data?.fcReachable !== true
-    ) {
-      banners.push({
-        id: "fc-disconnected",
-        severity: "warn",
-        message: "Flight controller is disconnected.",
-      });
-    }
-  }
-
-  return banners;
-}
+/** The FC-link banner reads the snapshot, so it polls (every 3 s) only on the
+ *  drone Home page; every other page shows just the agent-offline banner. */
+const BANNER_SNAPSHOT_MS = 3_000;
 
 export function BannerHost() {
-  const status = useStatus();
+  const { profile } = useNodeIdentity();
   const heartbeat = useHeartbeat();
-  const snapshot = useSnapshot();
+  const { pathname } = useLocation();
+  const onDroneHome = profile === "drone" && pathname === "/home";
+  const snapshot = useSnapshot({ intervalMs: BANNER_SNAPSHOT_MS, enabled: onDroneHome });
 
-  const banners = buildBanners(status, heartbeat, snapshot);
+  const banners = buildBanners({
+    agentUnreachable: heartbeat.isError,
+    profile,
+    fcConnected: onDroneHome && snapshot.isSuccess ? (snapshot.data.fc?.connected ?? null) : null,
+    fcReachable: heartbeat.data?.fcReachable,
+  });
 
   if (banners.length === 0) return null;
 

@@ -7,9 +7,9 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
-import { useStatus } from "@/hooks/use-status";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { ApiError } from "@/shared/api-fetch";
-import { fmtPercent } from "@/lib/format";
+import { fmtPct } from "@/shared/format";
 
 // GET /api/v1/ground-station/mesh — the relay/receiver poll loop's mesh-state
 // snapshot (crates/ados-groundlink mesh/state.rs), served only while fresh; the
@@ -34,7 +34,7 @@ interface MeshState {
 }
 
 export function MeshPanel() {
-  const status = useStatus();
+  const identity = useNodeIdentity();
   const mesh = useResource<MeshState>("gs-mesh", "/api/v1/ground-station/mesh", 2_000);
 
   const m = mesh.data;
@@ -42,7 +42,7 @@ export function MeshPanel() {
   // reporting, which is not the same as "no peers".
   const current = m != null && m.up !== undefined;
   const notInMesh = mesh.error instanceof ApiError && mesh.error.status === 404;
-  const role = m?.role || status.data?.ground_role || "—";
+  const role = m?.role || identity.role;
   const neighbors = m?.neighbors ?? [];
 
   return (
@@ -93,7 +93,7 @@ export function MeshPanel() {
                 {neighbors.map((n) => (
                   <li key={n.mac} className="flex justify-between gap-2 text-muted-foreground">
                     <span className="truncate">{n.mac}</span>
-                    <span>{fmtPercent((n.tq / 255) * 100)}</span>
+                    <span>{fmtPct((n.tq / 255) * 100)}</span>
                   </li>
                 ))}
               </ul>

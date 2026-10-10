@@ -8,10 +8,35 @@
 
 import { setSession } from "@/shared/session";
 
+export type LockScope = "peer" | "node";
+
 export interface PinStatus {
   pin_set: boolean;
   locked: boolean;
   locked_until: number | null;
+  /** `node` when the node-wide failure budget tripped (every caller is locked
+   *  out); `peer` for this caller's own lockout; null when not locked. */
+  scope?: LockScope | null;
+}
+
+/** What the splash shows for a PIN status. A null status (the read failed) is
+ *  `unknown`, never `set`: offering to set a PIN on a node that may already
+ *  have one would fail confusingly on submit. */
+export type SplashMode = "unknown" | "set" | "enter" | "locked";
+
+export function splashMode(status: PinStatus | null): SplashMode {
+  if (!status) return "unknown";
+  if (status.locked) return "locked";
+  return status.pin_set ? "enter" : "set";
+}
+
+/** The locked-state message for a lockout scope and the seconds remaining. */
+export function lockMessage(scope: LockScope, remainingS: number): string {
+  if (scope === "node") {
+    const min = Math.max(1, Math.ceil(remainingS / 60));
+    return `Too many wrong PINs on this node; locked for ${min} min. Clear it from the node console or with the pairing key.`;
+  }
+  return "Too many attempts. Try again in";
 }
 
 export interface NodeIdentity {
@@ -55,7 +80,7 @@ export async function fetchNodeIdentity(signal?: AbortSignal): Promise<NodeIdent
 export type PinSubmitResult =
   | { ok: true }
   | { ok: false; kind: "wrong"; remaining: number }
-  | { ok: false; kind: "locked"; lockedUntil: number }
+  | { ok: false; kind: "locked"; lockedUntil: number; scope: LockScope }
   | { ok: false; kind: "invalid"; message: string }
   | { ok: false; kind: "error"; message: string };
 
@@ -80,11 +105,17 @@ async function submit(path: string, body: object): Promise<PinSubmitResult> {
     setSession(data.session, typeof data.expires_at === "number" ? data.expires_at : 0);
     return { ok: true };
   }
+  if (res.status === 423) {
+    // The node-wide failure budget tripped: every caller is locked out.
+    const retryS = typeof data?.retry_after_s === "number" ? data.retry_after_s : 0;
+    return { ok: false, kind: "locked", lockedUntil: Date.now() / 1000 + retryS, scope: "node" };
+  }
   if (res.status === 429) {
     return {
       ok: false,
       kind: "locked",
       lockedUntil: typeof data?.locked_until === "number" ? data.locked_until : 0,
+      scope: data?.scope === "node" ? "node" : "peer",
     };
   }
   if (res.status === 401) {

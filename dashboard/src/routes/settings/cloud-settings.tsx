@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
+import { CloudflareTokenCard } from "@/components/settings/cloudflare-token-card";
 import { RiskBadge } from "@/components/settings/risk-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -216,6 +217,8 @@ export function CloudSettings() {
           </CardContent>
         </Card>
       )}
+
+      <CloudflareTokenCard />
 
       <div className="flex items-center justify-end gap-3">
         {dirty && (

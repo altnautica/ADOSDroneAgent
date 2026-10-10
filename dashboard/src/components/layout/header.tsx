@@ -10,9 +10,9 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useStatus } from "@/hooks/use-status";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
-import { fmtUptime } from "@/lib/format";
+import { fmtUptime } from "@/shared/format";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 
@@ -23,7 +23,7 @@ function profileVariant(profile?: string) {
 }
 
 /** The node's mDNS reach name — only the name the agent reports avahi as
- *  publishing (`network.mdns_host`, already `.local`-qualified), never one
+ *  publishing (`/api/pairing/info.mdns_host`, already `.local`-qualified), never one
  *  built from the operator's device label. */
 function CopyHost({ host }: { host: string }) {
   const [copied, setCopied] = useState(false);
@@ -60,16 +60,16 @@ function CopyHost({ host }: { host: string }) {
 }
 
 export function Header() {
-  const status = useStatus();
+  const identity = useNodeIdentity();
   const heartbeat = useHeartbeat();
   const toggleMobileNav = useUiStore((s) => s.toggleMobileNav);
 
-  const deviceName = status.data?.device_name || null;
-  const mdnsHost = status.data?.network?.mdns_host?.trim() || null;
-  const profile = status.data?.profile ?? "auto";
-  const role = status.data?.ground_role;
+  const deviceName = identity.name;
+  const mdnsHost = identity.mdnsHost;
+  const profile = identity.profile;
+  const role = identity.role;
   const board = heartbeat.data?.board?.name ?? "";
-  const version = heartbeat.data?.version ?? status.data?.version ?? "";
+  const version = heartbeat.data?.version ?? "";
   const uptime = fmtUptime(heartbeat.data?.uptime_seconds);
   const online = !heartbeat.isError && heartbeat.data != null;
 

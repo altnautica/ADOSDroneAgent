@@ -9,7 +9,7 @@
 import { z } from "zod";
 
 import { apiFetch } from "@/shared/api-fetch";
-import type { GroundRole, Profile } from "./types";
+import type { Profile } from "./types";
 
 // ---- request shapes ------------------------------------------------
 
@@ -115,20 +115,11 @@ export async function putConfigChecked(
   return res;
 }
 
-// Helpers used by section pages to read suggested defaults from the
-// existing setup status payload.
-
+// Narrows a resolved profile to one the apply form can submit.
 export function profileFromStatus(
   profile: Profile | undefined,
   fallback: "drone" | "ground_station" = "drone",
 ): "drone" | "ground_station" {
   if (!profile || profile === "auto" || profile === "unknown") return fallback;
   return profile;
-}
-
-export function groundRoleFromStatus(
-  role: GroundRole | undefined,
-  fallback: GroundRole = "direct",
-): GroundRole {
-  return role ?? fallback;
 }

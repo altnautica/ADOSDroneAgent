@@ -8,7 +8,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { apiFetch } from "@/shared/api-fetch";
-import { severityClasses, severityFromState } from "@/lib/format";
+import { severityClasses, severityFromState } from "@/shared/format";
 import { cn } from "@/lib/utils";
 
 interface ServiceDescriptor {

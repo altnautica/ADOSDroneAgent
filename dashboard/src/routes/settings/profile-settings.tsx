@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
@@ -7,16 +8,13 @@ import { Card, CardContent } from "@/components/ui/card";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { Switch } from "@/components/ui/switch";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
 import { toast, toastFromError } from "@/lib/toast";
-import {
-  type ApplyPayload,
-  groundRoleFromStatus,
-  postApply,
-  profileFromStatus,
-} from "@/lib/apply-actions";
+import { type ApplyPayload, postApply, profileFromStatus } from "@/lib/apply-actions";
 import { withArmedRetry } from "@/lib/armed-retry";
 import type { GroundRole } from "@/lib/types";
+import { apiFetch } from "@/shared/api-fetch";
 import { invalidateProfile } from "@/shared/use-profile";
 
 type ApplyProfile = "drone" | "ground_station";
@@ -56,23 +54,26 @@ const ROLE_OPTIONS = [
 
 export function ProfileSettings() {
   const status = useStatus();
+  const identity = useNodeIdentity();
+  const qc = useQueryClient();
 
   const [profile, setProfile] = useState<ApplyProfile>("drone");
   const [role, setRole] = useState<GroundRole>("direct");
   const [autoRestart, setAutoRestart] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [redetecting, setRedetecting] = useState(false);
   // The pending armed-override question: its text and the answer's resolver.
   const [armedPrompt, setArmedPrompt] = useState<{
     message: string;
     resolve: (ok: boolean) => void;
   } | null>(null);
 
-  const initialProfile = profileFromStatus(status.data?.profile);
-  const initialRole = groundRoleFromStatus(status.data?.ground_role);
+  const initialProfile = profileFromStatus(identity.profile);
+  const initialRole = identity.role;
 
   // Re-seed the draft only when the agent's value itself changes. Keyed on the
-  // whole status object this ran on every 8 s poll that moved any field, and
+  // whole status object this ran on every poll that moved any field, and
   // threw away the operator's unsaved selection.
   useEffect(() => {
     setProfile(initialProfile);
@@ -82,6 +83,19 @@ export function ProfileSettings() {
     profile !== initialProfile ||
     (profile === "ground_station" && role !== initialRole);
   useDirtyGuard(dirty || busy);
+
+  async function handleRedetect() {
+    setRedetecting(true);
+    try {
+      await apiFetch("/api/v1/setup/profile/redetect", { method: "POST" });
+      await qc.invalidateQueries({ queryKey: ["setup-status"] });
+      toast.ok("Hardware detection refreshed.");
+    } catch (err) {
+      toastFromError(err, "Re-detect failed.");
+    } finally {
+      setRedetecting(false);
+    }
+  }
 
   async function handleApply() {
     setBusy(true);
@@ -110,6 +124,7 @@ export function ProfileSettings() {
         toast.ok(section.message || "Profile saved.");
         // The node may now serve a different page set; probe it again.
         invalidateProfile();
+        void qc.invalidateQueries({ queryKey: ["pairing-info"] });
       } else {
         toast.err(section?.message ?? "Apply failed.");
       }
@@ -143,6 +158,16 @@ export function ProfileSettings() {
             <span className="font-mono">
               {status.data?.profile_source ?? "unknown"}
             </span>
+          </div>
+          <div className="pt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={redetecting}
+              onClick={handleRedetect}
+            >
+              {redetecting ? "Detecting…" : "Re-detect hardware"}
+            </Button>
           </div>
         </CardContent>
       </Card>

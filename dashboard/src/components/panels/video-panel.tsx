@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useStatus } from "@/hooks/use-status";
 import { useWfb } from "@/hooks/use-wfb";
-import { fmtBitrate, fmtNum } from "@/lib/format";
+import { fmtBitrate, fmtNum } from "@/shared/format";
 import { capturedLabel, fetchSnapshot } from "@/lib/snapshot";
 import { cn } from "@/lib/utils";
 import { useProfile } from "@/shared/use-profile";

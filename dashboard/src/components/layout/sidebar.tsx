@@ -18,8 +18,7 @@ import { NavLink } from "react-router-dom";
 
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { useNodeProfile } from "@/hooks/use-node-profile";
-import { useStatus } from "@/hooks/use-status";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import type { GroundRole, Profile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
@@ -106,13 +105,10 @@ function SidebarLink({ item, collapsed }: SidebarLinkProps) {
 }
 
 export function Sidebar() {
-  const status = useStatus();
+  const { profile, role } = useNodeIdentity();
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const mobileNavOpen = useUiStore((s) => s.mobileNavOpen);
   const closeMobileNav = useUiStore((s) => s.closeMobileNav);
-
-  const profile = useNodeProfile();
-  const role: GroundRole = status.data?.ground_role ?? "direct";
 
   const profileItems = itemsForProfile(profile, role);
 

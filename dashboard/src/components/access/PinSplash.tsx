@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Lock, ShieldCheck } from "lucide-react";
+import { Loader2, Lock, RotateCw, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
   PIN_MAX_LENGTH,
   fetchNodeIdentity,
   isValidPin,
+  lockMessage,
   setDashboardPin,
+  splashMode,
   verifyDashboardPin,
+  type LockScope,
   type NodeIdentity,
   type PinStatus,
 } from "@/lib/pin";
@@ -79,19 +82,25 @@ function formatMMSS(total: number): string {
 /**
  * Full-screen, ADOS-branded dashboard access gate. Shown by
  * `DashboardAccessGate` when a paired agent is reached off-box without a
- * credential. Three modes off the PIN status:
- *  - `set`   — no PIN yet: the first LAN visitor picks one (trust-on-first-use).
- *  - `enter` — a PIN exists: enter it to unlock.
- *  - locked  — too many wrong attempts: a countdown until the next try.
+ * credential. Modes off the PIN status:
+ *  - `set`     — no PIN yet: the first LAN visitor picks one (trust-on-first-use).
+ *  - `enter`   — a PIN exists: enter it to unlock.
+ *  - locked    — too many wrong attempts: a countdown (this caller), or the
+ *                node-wide lock that needs a console or pairing-key clear.
+ *  - `unknown` — the status read failed: say so and offer a retry.
  */
 export function PinSplash({
   status,
   onUnlocked,
+  onRetry,
 }: {
   status: PinStatus | null;
   onUnlocked: () => void;
+  /** Re-read the access state after a failed status read. */
+  onRetry: () => void;
 }) {
-  const setMode = !status?.pin_set;
+  const mode = splashMode(status);
+  const setMode = mode === "set";
   const [pin, setPin] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
@@ -99,6 +108,7 @@ export function PinSplash({
   const [lockedUntil, setLockedUntil] = useState<number | null>(
     status?.locked ? (status.locked_until ?? null) : null,
   );
+  const [lockScope, setLockScope] = useState<LockScope>(status?.scope === "node" ? "node" : "peer");
   const [node, setNode] = useState<NodeIdentity | null>(null);
 
   useEffect(() => {
@@ -136,6 +146,7 @@ export function PinSplash({
     setConfirm("");
     if (res.kind === "locked") {
       setLockedUntil(res.lockedUntil);
+      setLockScope(res.scope);
       setError(null);
     } else if (res.kind === "wrong") {
       setError(
@@ -173,12 +184,20 @@ export function PinSplash({
           )}
         </div>
 
-        {locked ? (
+        {mode === "unknown" ? (
           <div className="flex flex-col items-center gap-4 text-center">
-            <p className="text-sm text-muted-foreground">
-              Too many attempts. Try again in
-            </p>
-            <p className="font-mono text-4xl tabular-nums">{formatMMSS(remaining)}</p>
+            <p className="text-sm text-muted-foreground">Could not read access state.</p>
+            <Button variant="outline" onClick={onRetry}>
+              <RotateCw className="h-4 w-4" />
+              Retry
+            </Button>
+          </div>
+        ) : locked ? (
+          <div className="flex flex-col items-center gap-4 text-center">
+            <p className="text-sm text-muted-foreground">{lockMessage(lockScope, remaining)}</p>
+            {lockScope === "peer" && (
+              <p className="font-mono text-4xl tabular-nums">{formatMMSS(remaining)}</p>
+            )}
           </div>
         ) : (
           <div className="space-y-6">

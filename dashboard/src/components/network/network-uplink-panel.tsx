@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
-import { useStatus } from "@/hooks/use-status";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import {
   getGsNetwork,
   setShareUplink,
@@ -371,14 +371,12 @@ function GsUplinkMatrix() {
  * ground-station uplink daemon's surface; other profiles have no such daemon,
  * so the panel says so honestly instead of showing an empty matrix. */
 export function NetworkUplinkPanel() {
-  // Gate on the resolved profile the agent reports (the underscore form
-  // "ground_station"), the same source the sidebar and route gates use. The
-  // raw config profile is a tri-state whose default is "auto", which misreads
-  // an as-yet-uncommitted ground station as a non-GS node and hides its matrix.
-  const status = useStatus();
-  const profile = status.data?.profile;
+  // Gate on the resolved profile from the pairing-info probe, the same source
+  // the sidebar and route gates use (never the raw config value, whose "auto"
+  // default misreads an uncommitted ground station as a non-GS node).
+  const { profile } = useNodeIdentity();
 
-  if (!profile) return null;
+  if (profile === "auto") return null;
   if (profile !== "ground_station") {
     return (
       <Card>

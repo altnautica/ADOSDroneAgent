@@ -19,7 +19,7 @@ import { useResource } from "@/hooks/use-resource";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { ApiError, apiFetch } from "@/shared/api-fetch";
 import { resolveFirmwareType } from "@/lib/fc-firmware";
-import { fmtNum, fmtPercent, fmtVoltage } from "@/lib/format";
+import { fmtNum, fmtPct, fmtVoltage } from "@/shared/format";
 import { loadParamMetadata, type ParamMetadata } from "@/lib/param-metadata";
 import {
   buildRows,
@@ -649,7 +649,7 @@ function MavlinkSensors() {
             label="current"
             value={v?.battery?.current != null ? `${fmtNum(v.battery.current, 2)} A` : "—"}
           />
-          <SensorField label="remaining" value={fmtPercent(v?.battery?.remaining ?? null)} />
+          <SensorField label="remaining" value={fmtPct(v?.battery?.remaining ?? null)} />
         </CardContent>
       </Card>
       <Card>

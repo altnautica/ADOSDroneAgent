@@ -23,6 +23,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import type { AllowedProfile } from "@/components/profile-gate";
 import { RouteFallback } from "@/components/route-fallback";
 import { useNodeProfile } from "@/hooks/use-node-profile";
+import { useStatus } from "@/hooks/use-status";
 import type { Profile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -208,6 +209,9 @@ const SECTIONS: SectionLink[] = [
 
 export function SettingsLayout() {
   const profile = useNodeProfile();
+  // Settings sections read the setup status; the layout keeps it fresh while
+  // any settings page is open.
+  useStatus({ poll: true });
 
   return (
     <div className="container mx-auto px-4 py-6 max-w-5xl">

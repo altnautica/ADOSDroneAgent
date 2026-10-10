@@ -17,6 +17,7 @@ import { WfbTxPanel } from "@/components/panels/wfb-tx-panel";
 import { Button } from "@/components/ui/button";
 import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
 import { refusalDetail } from "@/lib/refusal";
 import { cn } from "@/lib/utils";
@@ -24,10 +25,9 @@ import { modeFromStatus, regionFromStatus } from "@/lib/region";
 import type { SetupStatus } from "@/lib/types";
 
 export function HomeRoute() {
-  const status = useStatus();
+  const status = useStatus({ poll: true });
   const heartbeat = useHeartbeat();
-  const profile = status.data?.profile ?? "auto";
-  const role = status.data?.ground_role ?? "direct";
+  const { profile, role } = useNodeIdentity();
   // One-shot prompt for agents still on the legacy `cloud` posture.
   // The hook self-gates and runs at most once per agent.
   useCloudPostureNudge(status.data?.cloud_choice?.mode);

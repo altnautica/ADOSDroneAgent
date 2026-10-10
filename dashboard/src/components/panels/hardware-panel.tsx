@@ -12,7 +12,7 @@ import { HardwareItemList } from "@/components/panels/hardware-item-list";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useStatus } from "@/hooks/use-status";
-import { fmtRelativeTime } from "@/lib/format";
+import { fmtRelativeTime } from "@/shared/format";
 import { refreshHardwareCheck } from "@/lib/setup-actions";
 import { toast, toastFromError } from "@/lib/toast";
 import { cn } from "@/lib/utils";

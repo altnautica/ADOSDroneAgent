@@ -10,11 +10,17 @@
  * @license GPL-3.0-only
  */
 
-import { ungzip } from "pako";
 import type { FirmwareType, ParamMetadata, ParamSnapshot } from "./types";
 import { deserializeMetaMap } from "./types";
 
 const BASE_PATH = "/param-metadata";
+
+/** Gunzip a fetched `.json.gz` body to text with the browser's native
+ *  `DecompressionStream`. */
+export async function gunzipText(res: Response): Promise<string> {
+  if (!res.body) throw new Error("empty response body");
+  return new Response(res.body.pipeThrough(new DecompressionStream("gzip"))).text();
+}
 
 /** Per-firmware bundled file basename. ArduPilot splits per vehicle. */
 export function bundledKeyFor(ft: FirmwareType): string | null {
@@ -46,8 +52,7 @@ export async function loadBundled(ft: FirmwareType): Promise<Map<string, ParamMe
       bundledCache.set(key, EMPTY);
       return EMPTY;
     }
-    const buf = new Uint8Array(await res.arrayBuffer());
-    const snap = JSON.parse(ungzip(buf, { to: "string" })) as ParamSnapshot;
+    const snap = JSON.parse(await gunzipText(res)) as ParamSnapshot;
     const map = deserializeMetaMap(snap.params ?? []);
     bundledCache.set(key, map);
     return map;

@@ -39,10 +39,9 @@ export function DisplaySettings() {
           </div>
           <p className="text-xs text-muted-foreground">
             HDMI and SPI displays for the local kiosk renderer. Installing an
-            overlay edits the boot config and requires a reboot, so the actual
-            install is driven from the CLI with{" "}
-            <code className="text-xs">ados display install</code> (with live
-            progress).
+            overlay edits the boot config and needs a reboot; run it from the
+            installer with{" "}
+            <code className="text-xs">--upgrade --display &lt;id&gt;</code>.
           </p>
 
           <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">

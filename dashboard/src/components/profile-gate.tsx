@@ -2,12 +2,11 @@ import { Ban } from "lucide-react";
 import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { useNodeProfile } from "@/hooks/use-node-profile";
-import { useStatus } from "@/hooks/use-status";
+import { useNodeIdentity } from "@/hooks/use-node-identity";
+import { gateDecision, type AllowedProfile } from "@/lib/node-identity";
 import type { GroundRole, Profile } from "@/lib/types";
 
-export type AllowedProfile = "drone" | "ground_station";
+export type { AllowedProfile };
 
 interface ProfileGateProps {
   allow: AllowedProfile[];
@@ -19,7 +18,7 @@ function profileLabel(p: AllowedProfile | Profile): string {
   if (p === "drone") return "Drone";
   if (p === "ground_station") return "Ground station";
   if (p === "auto") return "Auto-detecting";
-  return "Unknown";
+  return "non-flight (workstation or compute)";
 }
 
 function roleLabel(r: GroundRole): string {
@@ -67,50 +66,10 @@ function ProfileMismatchPanel({
   );
 }
 
-function LoadingPlaceholder() {
-  return (
-    <div className="p-6 space-y-3">
-      <Skeleton className="h-6 w-40" />
-      <Skeleton className="h-4 w-64" />
-      <Skeleton className="h-32 w-full" />
-    </div>
-  );
-}
-
 export function ProfileGate({ allow, roles, children }: ProfileGateProps) {
-  const status = useStatus();
-  const profile = useNodeProfile();
-  const role: GroundRole = status.data?.ground_role ?? "direct";
+  const { profile, role } = useNodeIdentity();
 
-  if (profile === "auto" && status.isPending && !status.data) {
-    return <LoadingPlaceholder />;
-  }
-
-  // Pre-detect (profile=auto) and unknown profiles are transitional:
-  // the agent is running on a fresh image before the profile is
-  // committed. Don't gate during this phase — let the operator explore
-  // every screen. Gating only kicks in once a concrete profile is set.
-  if (profile === "auto" || profile === "unknown") {
-    return <>{children}</>;
-  }
-
-  if (!allow.includes(profile as AllowedProfile)) {
-    return (
-      <ProfileMismatchPanel
-        current={profile}
-        currentRole={role}
-        allow={allow}
-        roles={roles}
-      />
-    );
-  }
-
-  if (
-    profile === "ground_station" &&
-    roles &&
-    roles.length > 0 &&
-    !roles.includes(role)
-  ) {
+  if (gateDecision(profile, role, allow, roles) === "mismatch") {
     return (
       <ProfileMismatchPanel
         current={profile}

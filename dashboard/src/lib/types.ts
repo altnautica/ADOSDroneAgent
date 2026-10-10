@@ -6,7 +6,7 @@
 
 export type Profile = "drone" | "ground_station" | "auto" | "unknown";
 export type GroundRole = "direct" | "relay" | "receiver";
-export type Severity = "ok" | "warn" | "err" | "info" | "idle";
+export type { Severity } from "@/shared/format";
 
 // Operating-region / RF regulatory posture.
 //   "unrestricted" — the radio brings up and transmits on the
@@ -34,6 +34,9 @@ export interface SetupStatus {
   ground_role?: GroundRole;
   setup_complete: boolean;
   setup_finalized: boolean;
+  /** Real cloud-pair state (not the wizard's `setup_finalized` flag). */
+  paired?: boolean;
+  pairing_code?: string | null;
   setup_skipped?: boolean;
   setup_state?: string;
   profile_source?: string;
