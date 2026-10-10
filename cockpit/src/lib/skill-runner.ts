@@ -29,9 +29,12 @@ export async function executeSkill(
   skill: Skill,
   opts: { altitudeM?: number; active?: boolean } = {},
 ): Promise<void> {
+  // Kill never waits behind another command's acknowledgement, and never
+  // holds the others off while it is in flight.
+  const exempt = skill.gesture === "guarded";
   const store = useConfirmStore.getState();
-  if (store.busy) return;
-  store.setBusy(true);
+  if (store.busy && !exempt) return;
+  if (!exempt) store.setBusy(true);
   try {
     if (skill.extension) {
       const { pluginId, configKey, toggle } = skill.extension;
@@ -55,7 +58,7 @@ export async function executeSkill(
   } catch (e) {
     report({ text: `${skill.label}: ${failureText(e)}`, kind: "err" });
   } finally {
-    useConfirmStore.getState().setBusy(false);
+    if (!exempt) useConfirmStore.getState().setBusy(false);
   }
 }
 
@@ -69,7 +72,7 @@ export function requestSkill(
 ): boolean {
   const state = resolveSkillState(skill, ctx);
   const store = useConfirmStore.getState();
-  if (!state.enabled || store.busy) return false;
+  if (!state.enabled || (store.busy && skill.gesture !== "guarded")) return false;
   if (skill.gesture === "tap") {
     void executeSkill(skill, { active: state.active });
     return true;

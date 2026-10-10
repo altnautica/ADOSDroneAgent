@@ -8,7 +8,9 @@
 // Policy, per failure exactly one step:
 //   - dial `order[0]`; a dial failure, a lost session or no first frame moves
 //     to the next transport; when the last one fails the state is `failed` and
-//     the cascade restarts from the top after `retryMs`;
+//     the cascade restarts from the top after `retryMs`, doubling on each
+//     consecutive full failure up to `maxRetryMs` (reset by a presented frame),
+//     so a node with no video costs a few requests a minute, not a tight loop;
 //   - a freeze re-dials the current transport once; a second freeze within
 //     `freezeWindowMs` moves to the next transport (flagged `highLatency` when
 //     that step trades WHEP for HLS);
@@ -59,6 +61,7 @@ export interface VideoTransportOptions {
   noFrameMs?: number;
   firstFrameMs?: number;
   retryMs?: number;
+  maxRetryMs?: number;
   freezeWindowMs?: number;
   primaryRetryMs?: number;
   onChange?: (snapshot: VideoTransportSnapshot) => void;
@@ -141,6 +144,7 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
     noFrameMs = VIDEO_NO_FRAME_MS,
     firstFrameMs = Math.max(8000, noFrameMs * 3),
     retryMs = 3000,
+    maxRetryMs = 30_000,
     freezeWindowMs = 60_000,
     primaryRetryMs = 60_000,
     onChange,
@@ -169,6 +173,7 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
   let sessionStartedAt = 0;
   let sawFrame = false;
   let freezes: number[] = [];
+  let fullFailures = 0;
   let watchdog: ReturnType<typeof setInterval> | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let primaryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -207,6 +212,7 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
   const onFrame = () => {
     lastFrameAt = Date.now();
     sawFrame = true;
+    fullFailures = 0;
     const w = video.videoWidth > 0 ? video.videoWidth : null;
     const h = video.videoHeight > 0 ? video.videoHeight : null;
     if (snap.state !== "live" || snap.width !== w || snap.height !== h) {
@@ -266,11 +272,13 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
     teardown();
     gen += 1;
     emit({ state: "failed", error, width: null, height: null });
+    const delay = Math.min(maxRetryMs, retryMs * 2 ** fullFailures);
+    fullFailures += 1;
     retryTimer = setTimeout(() => {
       retryTimer = null;
       freezes = [];
       if (running) void dialIndex(0);
-    }, retryMs);
+    }, delay);
   }
 
   function onFreeze(myGen: number) {

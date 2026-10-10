@@ -92,6 +92,7 @@ export function useFlightTelemetryPoll(): void {
             relayed: isRelayed(telemetry),
             home,
             lastLiveAt: live ? nowMs : prev.lastLiveAt,
+            armedAtLastLive: live ? telemetry.armed === true : prev.armedAtLastLive,
           });
         } catch {
           if (signal.aborted) return;
@@ -108,7 +109,7 @@ export function useFlightTelemetryPoll(): void {
       // A stale "live" must never linger after the Feed unmounts. Home stays:
       // it belongs to the flight, not to the screen. The live clock restarts,
       // since nothing was being watched while the Feed was away.
-      useFlightStore.setState((s) => ({ ...INITIAL_FLIGHT_STATE, home: s.home }));
+      useFlightStore.setState((s) => ({ ...INITIAL_FLIGHT_STATE, home: s.home, armedAtLastLive: s.armedAtLastLive }));
     };
   }, []);
 }

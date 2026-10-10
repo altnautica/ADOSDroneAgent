@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from "react";
 
+import { ReconnectBackoff } from "@/lib/reconnect-backoff";
 import { useConfirmStore } from "@/stores/confirm-store";
 import { useNavStore } from "@/stores/nav-store";
 import { useProfile } from "@/shared/use-profile";
@@ -20,13 +21,9 @@ import { WS_TICKET_PROTOCOL, mintWsTicket } from "@/shared/ws-ticket";
 const BUTTON_SCOPE = "gs.button_events";
 
 /** Redial backoff for a dropped button stream: 1 s, doubling to a 10 s cap,
- *  reset once a connection opens. */
-export const RECONNECT_MIN_MS = 1000;
-export const RECONNECT_MAX_MS = 10_000;
-
-export function nextReconnectDelay(previousMs: number | null): number {
-  return previousMs === null ? RECONNECT_MIN_MS : Math.min(RECONNECT_MAX_MS, previousMs * 2);
-}
+ *  reset only after a session that delivered an event or stayed open. */
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 10_000;
 
 /** Default binding from a raw button identity to a folded command. The panel
  *  owns this table; on-rig the exact identity strings the `ados-pic` reader
@@ -92,7 +89,7 @@ export function useButtons(): ButtonsState {
   useEffect(() => {
     if (!isGround) return;
     let closed = false;
-    let delay: number | null = null;
+    const backoff = new ReconnectBackoff(RECONNECT_MIN_MS, RECONNECT_MAX_MS);
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
@@ -108,11 +105,10 @@ export function useButtons(): ButtonsState {
       // `lib/vision-detections-ws.ts` has always had this shape; this one did
       // not.
       if (closed || reconnectTimer) return;
-      delay = nextReconnectDelay(delay);
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         void connect();
-      }, delay);
+      }, backoff.next());
     };
 
     const connect = async () => {
@@ -138,10 +134,11 @@ export function useButtons(): ButtonsState {
 
       socket.onopen = () => {
         setConnected(true);
-        delay = null;
+        backoff.opened();
       };
 
       socket.onmessage = (msg) => {
+        backoff.message();
         let frame: unknown;
         try {
           frame = JSON.parse(typeof msg.data === "string" ? msg.data : "");

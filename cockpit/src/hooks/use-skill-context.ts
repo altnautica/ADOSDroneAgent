@@ -1,29 +1,29 @@
 // The inputs every skill gate reads, assembled from the status and flight
-// stores. "Commandable" means a flight-controller link this node's
-// `POST /api/command` reaches: a drone's own FC (`fc_connected`), or on a
-// ground station a relayed aircraft whose lane the agent reports fresh (the
-// station's router carries the command over the radio to it).
+// stores. "Commandable" means the node's own flight controller link
+// (`fc_connected`): `POST /api/command` writes only the local MAVLink socket,
+// so a ground station relaying another aircraft cannot command it from here,
+// and its skills say so.
 
 import { useShallow } from "zustand/react/shallow";
 
 import type { SkillContext } from "@/lib/skills";
-import { useProfile } from "@/shared/use-profile";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useStatusStore } from "@/stores/status-store";
 
+export const RELAYED_LINK_REASON = "Commands go through the drone's link";
+
 export function useSkillContext(): SkillContext {
-  const profile = useProfile();
-  const droneFc = useStatusStore((s) => s.status?.fc_connected === true);
-  const { live, armed, relayedFresh } = useFlightStore(
-    useShallow((s) => ({
-      live: s.live,
-      armed: s.telemetry?.armed === true,
-      relayedFresh: s.relayed && s.telemetry?.relayed_link?.fresh !== false,
-    })),
+  const fcConnected = useStatusStore((s) => s.status?.fc_connected === true);
+  const { live, armed, relayed } = useFlightStore(
+    useShallow((s) => ({ live: s.live, armed: s.telemetry?.armed === true, relayed: s.relayed })),
   );
   const reported = useExtensionsStore((s) => s.reported);
-  const fcConnected =
-    profile === "drone" ? droneFc : profile === "ground_station" ? relayedFresh : false;
-  return { fcConnected, live, armed, reported };
+  return {
+    fcConnected,
+    live,
+    armed,
+    reported,
+    linkReason: !fcConnected && relayed ? RELAYED_LINK_REASON : undefined,
+  };
 }

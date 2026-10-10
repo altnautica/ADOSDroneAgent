@@ -1,4 +1,4 @@
-// Pair — local-first pairing over the LAN/RF. Two facets, both honest reads:
+// Pair — local-first pairing over the LAN/RF. Three facets, all honest reads:
 //   1. This ground station: whether a GCS has claimed the box, and the pairing
 //      code + mDNS reach a GCS uses to claim it (from `GET /api/pairing/info`).
 //   2. The drone RF link: the WFB pair state (peer device, key fingerprint,
@@ -7,9 +7,12 @@
 //      (`POST /api/wfb/pair/unpair`, two-tap confirmed — it wipes the key and
 //      disables auto-bind). The open mesh pair window (`GET .../pair/pending`)
 //      surfaces as a countdown strip while a window is open.
+//   3. Phone receivers: phones with their own radio waiting for the fleet
+//      receive keys (`GET /api/v1/ground-station/wfb/invite`), approved or
+//      rejected after the operator compares the fingerprint with the phone's.
 
 import { useCallback, useState } from "react";
-import { Link2, Unlink } from "lucide-react";
+import { Check, Link2, Smartphone, Unlink, X } from "lucide-react";
 
 import { Panel, PanelHeader } from "@/components/ui/panel";
 import {
@@ -23,6 +26,7 @@ import {
   type Tone,
 } from "@/components/ui/data";
 import { SetUpAccess } from "@/components/shell/set-up-access";
+import { useProfile } from "@/shared/use-profile";
 import { useResource } from "@/shared/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
 import { DASH } from "@/shared/format";
@@ -65,7 +69,86 @@ function bindPhase(b: BindSession | null): string | null {
   return typeof p === "string" && p ? p : null;
 }
 
+interface PhoneInvite {
+  invite_id: string;
+  label: string;
+  phone_fingerprint: string;
+  expires_at_ms: number;
+}
+
+function PhoneReceivers() {
+  const invites = useResource<{ pending: PhoneInvite[] }>(
+    useCallback((s) => apiFetch<{ pending: PhoneInvite[] }>("/api/v1/ground-station/wfb/invite", { signal: s }), []),
+    2000,
+  );
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  const decide = async (id: string, decision: "approve" | "reject") => {
+    if (busyId) return;
+    setBusyId(id);
+    setFailed(false);
+    try {
+      await apiFetch(`/api/v1/ground-station/wfb/invite/${encodeURIComponent(id)}/${decision}`, {
+        method: "POST",
+        body: {},
+      });
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusyId(null);
+      invites.refresh();
+    }
+  };
+
+  const pending = invites.data?.pending ?? [];
+  return (
+    <>
+      <SectionHeader>Phone receivers</SectionHeader>
+      {pending.length === 0 ? (
+        <EmptyNote>No phone is waiting for approval.</EmptyNote>
+      ) : (
+        pending.map((p) => (
+          <div key={p.invite_id} className="flex flex-col gap-[0.3rem] rounded-md bg-input/40 px-[0.6rem] py-[0.5rem]">
+            <div className="flex items-center gap-[0.4rem]">
+              <Smartphone className="h-[1rem] w-[1rem] text-muted-foreground" aria-hidden />
+              <span className="text-[0.85rem] text-surface-foreground">{p.label}</span>
+            </div>
+            <span className="select-text font-mono text-[1rem] tracking-[0.08em] text-hud-primary">
+              {p.phone_fingerprint}
+            </span>
+            <div className="flex gap-[0.4rem]">
+              <ActionButton
+                label="Reject"
+                icon={X}
+                onClick={() => void decide(p.invite_id, "reject")}
+                disabled={busyId !== null}
+                full
+              />
+              <ActionButton
+                label="Approve"
+                icon={Check}
+                variant="primary"
+                onClick={() => void decide(p.invite_id, "approve")}
+                busy={busyId === p.invite_id}
+                disabled={busyId !== null}
+                full
+              />
+            </div>
+          </div>
+        ))
+      )}
+      {failed ? <Row label="Last decision" value="refused (invite expired?)" tone="warn" mono={false} /> : null}
+      <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">
+        Approve only when this fingerprint matches the one on the phone. A phone receives video and
+        telemetry; it never transmits.
+      </p>
+    </>
+  );
+}
+
 export function PairScreen() {
+  const isGroundStation = useProfile() === "ground_station";
   const info = useResource<PairingInfo>(
     useCallback((s) => apiFetch<PairingInfo>("/api/pairing/info", { signal: s }), []),
     2000,
@@ -187,6 +270,8 @@ export function PairScreen() {
             </div>
           </>
         )}
+
+        {isGroundStation ? <PhoneReceivers /> : null}
 
         <SectionHeader>This ground station</SectionHeader>
         <Row

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link2, Unlink, Plus } from "lucide-react";
+import { Link2, Unlink, Plus, Smartphone } from "lucide-react";
 
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -9,7 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
   useAcceptCode,
+  useDecidePhoneInvite,
   usePairingInfo,
+  usePhoneInvites,
   useUnpair,
 } from "@/hooks/use-pairing";
 import { useStatus } from "@/hooks/use-status";
@@ -17,6 +19,76 @@ import { useStatus } from "@/hooks/use-status";
 function MaskedCode({ code }: { code: string }) {
   return (
     <div className="font-mono text-3xl tracking-[0.4em] py-2 select-all">{code}</div>
+  );
+}
+
+/** Phones with their own radio asking this ground station for the fleet
+ *  receive keys. Nothing is shared until the operator approves one. */
+function PhoneReceiversCard() {
+  const invites = usePhoneInvites();
+  const decide = useDecidePhoneInvite();
+  const pending = invites.data?.pending ?? [];
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Smartphone className="h-3.5 w-3.5" />
+          Phone receivers
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          Approve a phone only when the fingerprint below matches the one on its
+          screen. A phone receives video and telemetry; it never transmits.
+        </p>
+        {invites.isError && !invites.data && (
+          <p className="text-xs text-destructive">Could not read the waiting phones.</p>
+        )}
+        {invites.data && pending.length === 0 && (
+          <p className="text-sm text-muted-foreground">No phone is waiting for approval.</p>
+        )}
+        <ul className="space-y-2">
+          {pending.map((p) => (
+            <li
+              key={p.invite_id}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-sm">{p.label}</div>
+                <div className="font-mono text-sm tracking-wider select-all">
+                  {p.phone_fingerprint}
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={decide.isPending}
+                  onClick={() => decide.mutate({ id: p.invite_id, decision: "reject" })}
+                  aria-label={`Reject ${p.label}`}
+                >
+                  Reject
+                </Button>
+                <Button
+                  variant="default"
+                  size="sm"
+                  disabled={decide.isPending}
+                  onClick={() => decide.mutate({ id: p.invite_id, decision: "approve" })}
+                  aria-label={`Approve ${p.label}`}
+                >
+                  Approve
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+        {decide.isError && (
+          <p className="text-xs text-destructive">
+            The ground station refused that decision. The invite may have expired.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -161,6 +233,8 @@ export function PairingRoute() {
           </CardContent>
         </Card>
       )}
+
+      {profile === "ground_station" && <PhoneReceiversCard />}
 
       <ConfirmDialog
         open={confirmUnpair}

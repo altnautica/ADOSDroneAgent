@@ -10,13 +10,12 @@ import { Minus, Plus, ShieldAlert, X } from "lucide-react";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { executeSkill } from "@/lib/skill-runner";
 import { holdMsFor, resolveSkillState } from "@/lib/skills";
+import { SLIDE_START_MAX, slideCompletes } from "@/lib/slide";
 import { cn } from "@/lib/utils";
 import { useConfirmStore } from "@/stores/confirm-store";
 
 const ALT_MIN_M = 2;
 const ALT_MAX_M = 120;
-/** Fraction of the track the slide thumb must cross to confirm. */
-const SLIDE_COMPLETE = 0.92;
 
 export function SkillConfirmSheet() {
   const pending = useConfirmStore((s) => s.pending);
@@ -214,18 +213,16 @@ function Sheet() {
 function SlideTrack({ onComplete, label }: { onComplete: () => void; label: string }) {
   const trackRef = useRef<HTMLDivElement>(null);
   const [frac, setFrac] = useState(0);
-  const dragging = useRef(false);
+  const startFrac = useRef<number | null>(null);
 
-  const update = (clientX: number) => {
-    const el = trackRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const f = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-    setFrac(f);
-    if (f >= SLIDE_COMPLETE) {
-      dragging.current = false;
-      onComplete();
-    }
+  const fracAt = (clientX: number) => {
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return 0;
+    return Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  };
+  const reset = () => {
+    startFrac.current = null;
+    setFrac(0);
   };
 
   return (
@@ -238,27 +235,29 @@ function SlideTrack({ onComplete, label }: { onComplete: () => void; label: stri
       aria-valuenow={Math.round(frac * 100)}
       className="relative h-[3.4rem] w-full touch-none select-none rounded-lg bg-hud-hair-2"
       onPointerDown={(e) => {
-        dragging.current = true;
+        // A drag counts only when it starts on the thumb; pressing never confirms.
+        const f = fracAt(e.clientX);
+        if (f >= SLIDE_START_MAX) return;
+        startFrac.current = f;
         e.currentTarget.setPointerCapture?.(e.pointerId);
-        update(e.clientX);
       }}
       onPointerMove={(e) => {
-        if (dragging.current) update(e.clientX);
+        if (startFrac.current === null) return;
+        const f = fracAt(e.clientX);
+        setFrac(f);
+        if (slideCompletes(startFrac.current, f)) {
+          startFrac.current = null;
+          onComplete();
+        }
       }}
-      onPointerUp={() => {
-        dragging.current = false;
-        setFrac(0);
-      }}
-      onPointerCancel={() => {
-        dragging.current = false;
-        setFrac(0);
-      }}
+      onPointerUp={reset}
+      onPointerCancel={reset}
     >
       <span className="absolute inset-0 flex items-center justify-center text-[0.85rem] text-hud-ink-2">
         Slide to {label.toLowerCase()} →
       </span>
       <span
-        className="absolute inset-y-[0.3rem] left-[0.3rem] w-[3rem] rounded-md bg-primary"
+        className="absolute inset-y-[0.3rem] w-[3rem] rounded-md bg-primary"
         style={{ left: `calc(0.3rem + ${frac} * (100% - 3.6rem))` }}
         aria-hidden
       />

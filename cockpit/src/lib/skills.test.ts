@@ -92,3 +92,14 @@ describe("extension skills", () => {
     });
   });
 });
+
+describe("relaying ground station", () => {
+  it("names why commands are unavailable when only a relayed aircraft is heard", () => {
+    const ctx = { fcConnected: false, live: true, armed: true, linkReason: "Commands go through the drone's link" };
+    expect(resolveSkillState(CORE_BY_ID.land, ctx)).toEqual({
+      enabled: false,
+      reason: "Commands go through the drone's link",
+    });
+    expect(resolveSkillState(modePresetsFor(null)[0], ctx).reason).toBe("Commands go through the drone's link");
+  });
+});

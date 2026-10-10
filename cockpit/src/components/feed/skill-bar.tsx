@@ -62,8 +62,9 @@ const SkillSlot = memo(function SkillSlot({
   busy: boolean;
   onPress: (skill: Skill) => void;
 }) {
-  const enabled = state.enabled && !busy;
   const danger = skill.gesture === "guarded";
+  // Kill stays available while another command awaits its acknowledgement.
+  const enabled = state.enabled && (!busy || danger);
   return (
     <div className="flex w-[4.4rem] flex-col items-center gap-[0.15rem]">
       <button
@@ -177,11 +178,17 @@ export function SkillBar() {
                   type="button"
                   onClick={() => setPage("mode")}
                   disabled={!modeGate.enabled || busy}
+                  aria-label={modeGate.enabled ? "Mode" : `Mode: ${modeGate.reason ?? "unavailable"}`}
                   className="flex min-h-[max(3.2rem,48px)] w-full flex-col items-center justify-center gap-[0.15rem] rounded-lg border border-hud-hair bg-hud-glass text-hud-ink backdrop-blur-hud disabled:opacity-45"
                 >
                   <Sliders className="h-[1.35rem] w-[1.35rem]" aria-hidden />
                   <span className="text-[0.75rem] font-medium leading-none">Mode</span>
                 </button>
+                {!modeGate.enabled && modeGate.reason ? (
+                  <span className="w-full truncate text-center text-[0.75rem] leading-tight text-hud-ink-2">
+                    {modeGate.reason}
+                  </span>
+                ) : null}
               </div>
               {slots(extensionSkills, ctx, busy, onPress)}
               {slots([CORE_BY_ID.kill], ctx, busy, onPress)}

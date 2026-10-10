@@ -144,6 +144,9 @@ export interface SkillContext {
   /** Fresh vehicle telemetry is arriving (attitude moving). */
   live: boolean;
   armed: boolean;
+  /** Why commands are unavailable when there is no FC link, when there is a
+   *  more specific reason than "No flight controller link". */
+  linkReason?: string;
   /** Extension skills: the plugin's last reported state, by skill id. */
   reported?: Record<string, ReportedSkillState | undefined>;
 }
@@ -164,11 +167,12 @@ export interface SkillState {
  */
 export function resolveSkillState(skill: Skill, ctx: SkillContext): SkillState {
   const vehicleKnown = ctx.fcConnected && ctx.live;
+  const noLink = ctx.linkReason ?? "No flight controller link";
   if (skill.command && !vehicleKnown) {
-    return { enabled: false, reason: "No flight controller link" };
+    return { enabled: false, reason: noLink };
   }
   if (skill.armRequirement !== "any") {
-    if (!vehicleKnown) return { enabled: false, reason: "No flight controller link" };
+    if (!vehicleKnown) return { enabled: false, reason: noLink };
     if (skill.armRequirement === "armed" && !ctx.armed) return { enabled: false, reason: "Not armed" };
     if (skill.armRequirement === "disarmed" && ctx.armed) {
       return { enabled: false, reason: "Already armed" };

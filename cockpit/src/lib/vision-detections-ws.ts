@@ -18,6 +18,7 @@ import type {
   CockpitDetectionBatch,
   LockState,
 } from "@/stores/detections-store";
+import { ReconnectBackoff } from "@/lib/reconnect-backoff";
 import { useDetectionsStore } from "@/stores/detections-store";
 import { WS_TICKET_PROTOCOL, mintWsTicket } from "@/shared/ws-ticket";
 
@@ -172,7 +173,7 @@ export function connectVisionDetections(
 
   let closed = false;
   let socket: WebSocket | null = null;
-  let reconnectMs = RECONNECT_MIN_MS;
+  const backoff = new ReconnectBackoff(RECONNECT_MIN_MS, RECONNECT_MAX_MS);
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   const controller = new AbortController();
 
@@ -181,9 +182,8 @@ export function connectVisionDetections(
     onState?.("reconnecting");
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      reconnectMs = Math.min(reconnectMs * 2, RECONNECT_MAX_MS);
       void connect();
-    }, reconnectMs);
+    }, backoff.next());
   };
 
   const connect = async () => {
@@ -209,11 +209,14 @@ export function connectVisionDetections(
     }
 
     socket.onopen = () => {
-      reconnectMs = RECONNECT_MIN_MS;
+      // Not a reset: a route with no engine behind it accepts and closes at
+      // once. The backoff resets only after a message or a stable session.
+      backoff.opened();
       onState?.("connected");
     };
 
     socket.onmessage = (msg) => {
+      backoff.message();
       const batch = parseWireDetectionJson(
         typeof msg.data === "string" ? msg.data : "",
       );

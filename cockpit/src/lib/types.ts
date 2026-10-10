@@ -83,6 +83,9 @@ export interface GsStatus {
   /** A drone's own MAVLink FC link (from `/api/status/full`); absent on a
    *  ground station, which has no flight controller of its own. */
   fc_connected?: boolean;
+  /** Where detections come from (`local` / `offload` / `hybrid`), or `none`
+   *  when the node has no working vision path; absent when not reported. */
+  perception_tier?: string | null;
   paired_drone: PairedDrone;
   link: LinkView;
   /** Connected GCS clients and the pilot-in-command, or null when the node
@@ -124,6 +127,7 @@ export interface StatusFull {
   telemetry?: VehicleState | null;
   radio?: Record<string, unknown> | null;
   profile?: string | null;
+  perceptionTier?: string | null;
 }
 
 /** One battery pack from `GET /api/v1/battery`. */

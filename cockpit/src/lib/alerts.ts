@@ -92,6 +92,9 @@ export interface AlertInputs {
   msSinceLive: number | null;
   /** The video state, or null where no video is mounted. */
   video: VideoFeedState | null;
+  /** The arm state at the last live sample (the snapshot drops `armed` once
+   *  the link goes quiet). Defaults to the snapshot's own value. */
+  armedAtLastLive?: boolean;
 }
 
 const LEVEL_RANK: Record<AlertLevel, number> = { critical: 0, warning: 1, advisory: 2 };
@@ -100,7 +103,8 @@ export function computeAlerts(i: AlertInputs): CockpitAlert[] {
   const out: CockpitAlert[] = [];
   const armed = i.telemetry?.armed === true;
 
-  if (i.msSinceLive != null && i.msSinceLive > LINK_LOST_MS && armed) {
+  const armedAtLoss = i.armedAtLastLive ?? armed;
+  if (i.msSinceLive != null && i.msSinceLive > LINK_LOST_MS && armedAtLoss) {
     out.push({
       id: "link-lost",
       level: "critical",

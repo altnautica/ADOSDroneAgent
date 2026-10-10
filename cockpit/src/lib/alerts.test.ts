@@ -114,3 +114,16 @@ describe("ordering", () => {
     expect(alerts.map((a) => a.level)).toEqual(["critical", "warning", "warning", "advisory"]);
   });
 });
+
+describe("link lost while armed", () => {
+  it("uses the arm state at the last live sample, since the snapshot drops `armed`", () => {
+    const quiet: VehicleState = {};
+    expect(computeAlerts(inputs({ telemetry: quiet, msSinceLive: 12_000, armedAtLastLive: true }))[0]).toMatchObject({
+      id: "link-lost",
+      level: "critical",
+    });
+    expect(computeAlerts(inputs({ telemetry: quiet, msSinceLive: 12_000, armedAtLastLive: false }))[0]).toMatchObject({
+      id: "link-stale",
+    });
+  });
+});

@@ -38,20 +38,28 @@ export function pollLoop(
   const controller = new AbortController();
   const hidden = () => typeof document !== "undefined" && document.hidden;
 
+  let inFlight = false;
+  let pending = false;
+
   const tick = async () => {
+    pending = false;
     if (cancelled || hidden()) return;
+    inFlight = true;
     try {
       await run(controller.signal);
     } catch {
       // `run` records its own failure; the loop keeps its cadence.
     }
-    if (!cancelled) timer = setTimeout(tick, intervalMs());
-  };
-  const onVisibility = () => {
-    if (!hidden()) {
-      clearTimeout(timer);
-      void tick();
+    inFlight = false;
+    if (!cancelled) {
+      pending = true;
+      timer = setTimeout(tick, intervalMs());
     }
+  };
+  // Resume a loop the hidden page paused. A request in flight or a tick
+  // already scheduled keeps the one chain; a quick hide/show never forks it.
+  const onVisibility = () => {
+    if (!hidden() && !inFlight && !pending) void tick();
   };
 
   void tick();

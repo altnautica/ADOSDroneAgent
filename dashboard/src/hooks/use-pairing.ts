@@ -62,3 +62,33 @@ export function useUnpair() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["pairing-info"] }),
   });
 }
+
+/** One phone receiver waiting for approval on a ground station
+ *  (`GET /api/v1/ground-station/wfb/invite`). */
+export interface PhoneInvite {
+  invite_id: string;
+  label: string;
+  /** SHA-256 prefix of the phone's key, also shown on the phone. */
+  phone_fingerprint: string;
+  expires_at_ms: number;
+}
+
+export function usePhoneInvites() {
+  return useQuery<{ pending: PhoneInvite[] }>({
+    queryKey: ["phone-invites"],
+    queryFn: ({ signal }) =>
+      apiFetch<{ pending: PhoneInvite[] }>("/api/v1/ground-station/wfb/invite", { signal }),
+    refetchInterval: 2_000,
+  });
+}
+
+export function useDecidePhoneInvite() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, decision }: { id: string; decision: "approve" | "reject" }) =>
+      apiFetch(`/api/v1/ground-station/wfb/invite/${encodeURIComponent(id)}/${decision}`, {
+        method: "POST",
+      }),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["phone-invites"] }),
+  });
+}

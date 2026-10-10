@@ -151,6 +151,24 @@ describe("createVideoTransport", () => {
     expect(h.dials.map((d) => d.kind)).toEqual(["whep", "hls", "whep"]);
   });
 
+  it("backs off between full failures and resets once a frame is presented", async () => {
+    const h = harness(["whep", "hls"], { whep: [false, false, false, false], hls: [false, false, false] });
+    h.transport.start();
+    await flush();
+    const dialsAt = () => h.dials.length;
+    expect(dialsAt()).toBe(2);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(dialsAt()).toBe(4);
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(dialsAt()).toBe(4);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(dialsAt()).toBe(6);
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(dialsAt()).toBe(8);
+    h.frame();
+    expect(h.snap().state).toBe("live");
+  });
+
   it("counts a session that never presents a frame as a failure", async () => {
     const h = harness(["whep", "hls"], {});
     h.transport.start();

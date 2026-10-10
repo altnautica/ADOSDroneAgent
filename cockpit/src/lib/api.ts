@@ -85,6 +85,7 @@ export function droneStatusFromFull(full: StatusFull, diag: LinkDiagnosis | null
   return {
     profile: "drone",
     fc_connected: full.fc_connected === true,
+    perception_tier: str(full.perceptionTier),
     paired_drone: {
       device_id: radioPaired ? str(radio.pairedWithDeviceId) : null,
       key_fingerprint: str(radio.publicKeyFingerprint),

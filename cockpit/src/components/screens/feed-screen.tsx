@@ -79,7 +79,11 @@ export function FeedScreen() {
 
   // A companion node runs a local vision engine; a ground station receives the
   // linked drone's detections over the relay instead. Both feed one overlay.
-  const localVisionCapable = isDrone || profile === "workstation" || profile === "compute";
+  // A drone opens its detection socket only when it reports a working vision
+  // path: with none, the route accepts and closes, and dialling it is pure churn.
+  const perceptionTier = useStatusStore((s) => s.status?.perception_tier ?? null);
+  const droneVision = isDrone && perceptionTier !== null && perceptionTier !== "none";
+  const localVisionCapable = droneVision || profile === "workstation" || profile === "compute";
   const visionCapable = localVisionCapable || profile === "ground_station";
   useVisionDetections(localVisionCapable);
   useGroundDetectionPoll();

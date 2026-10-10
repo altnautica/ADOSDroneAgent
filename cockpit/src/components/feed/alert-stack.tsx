@@ -33,6 +33,7 @@ export function AlertStack() {
   const live = useFlightStore((s) => s.live);
   const video = useFeedStore((s) => (s.videoMounted ? s.video.state : null));
   const lastLiveAt = useFlightStore((s) => s.lastLiveAt);
+  const armedAtLastLive = useFlightStore((s) => s.armedAtLastLive);
   const [now, setNow] = useState(() => performance.now());
 
   // One shared 1 Hz tick ages the link timers.
@@ -47,6 +48,7 @@ export function AlertStack() {
     battery,
     msSinceLive: live ? 0 : lastLiveAt === null ? null : Math.max(0, now - lastLiveAt),
     video,
+    armedAtLastLive,
   });
   const visible = alerts.slice(0, MAX_VISIBLE);
   const critical = visible.filter((a) => a.level === "critical");
