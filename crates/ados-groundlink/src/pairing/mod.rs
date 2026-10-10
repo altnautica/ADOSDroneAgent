@@ -23,7 +23,10 @@ pub mod crypto;
 pub mod invite;
 pub mod revocations;
 
-pub use crypto::{decrypt_invite, encrypt_invite, generate_keypair, session_key, KeyPair};
+pub use crypto::{
+    decrypt_invite, encrypt_invite, generate_keypair, open_from_peer, seal_to_peer,
+    seal_to_peer_with, session_key, KeyPair, SealedToPeer,
+};
 pub use invite::InviteBundle;
 
 /// The UDP port the receiver binds on `bat0` for relay join requests.

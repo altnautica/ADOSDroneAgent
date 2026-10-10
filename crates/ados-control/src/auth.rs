@@ -364,6 +364,7 @@ pub const RELAY_FORBIDDEN_PATHS: &[&str] = &[
     "/api/wfb/pair/local-bind",
     "/api/wfb/pair/unpair",
     "/api/v1/ground-station/wfb/pair",
+    "/api/v1/ground-station/wfb/invite",
     "/api/mavlink/signing/disable-on-fc",
     "/api/v1/setup/reset",
     "/api/v1/setup/cloud-choice",

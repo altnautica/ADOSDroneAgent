@@ -355,6 +355,12 @@ fn native_routes() -> Vec<NativeRoute> {
         delete("/api/v1/ground-station/wfb/pair"),
         // Release one drone's fleet slot, without touching the shared radio keys.
         delete("/api/v1/ground-station/wfb/pair/{device_id}"),
+        // Phone-receiver invites (relay-forbidden; sealed bundle fetched once).
+        get("/api/v1/ground-station/wfb/invite"),
+        post("/api/v1/ground-station/wfb/invite"),
+        get("/api/v1/ground-station/wfb/invite/{id}"),
+        post("/api/v1/ground-station/wfb/invite/{id}/approve"),
+        post("/api/v1/ground-station/wfb/invite/{id}/reject"),
         // Return the station to first-boot posture (on-box callers only).
         post("/api/v1/ground-station/factory-reset"),
         // Ground-station video writes: recording start/stop (ados-video) + the
@@ -887,7 +893,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            199,
+            204,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -1013,6 +1019,11 @@ mod tests {
         assert!(has(Method::PUT, "/api/v1/ground-station/mesh/config"));
         assert!(has(Method::POST, "/api/v1/ground-station/wfb/pair"));
         assert!(has(Method::DELETE, "/api/v1/ground-station/wfb/pair"));
+        assert!(has(Method::GET, "/api/v1/ground-station/wfb/invite"));
+        assert!(has(Method::POST, "/api/v1/ground-station/wfb/invite"));
+        assert!(has(Method::GET, "/api/v1/ground-station/wfb/invite/{id}"));
+        assert!(has(Method::POST, "/api/v1/ground-station/wfb/invite/{id}/approve"));
+        assert!(has(Method::POST, "/api/v1/ground-station/wfb/invite/{id}/reject"));
         assert!(has(Method::POST, "/api/v1/ground-station/recording/start"));
         assert!(has(Method::POST, "/api/v1/ground-station/recording/stop"));
         assert!(has(Method::POST, "/api/v1/ground-station/camera/switch"));

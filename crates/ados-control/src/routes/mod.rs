@@ -56,6 +56,7 @@ pub mod gs_status;
 pub mod gs_tunnel_config;
 pub mod gs_ui_read;
 pub mod gs_ui_write;
+pub mod gs_wfb_invite;
 pub mod gs_wfb_pair;
 pub mod gs_wfb_write;
 pub mod gs_ws;
@@ -742,6 +743,24 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         .route(
             "/api/v1/ground-station/wfb/pair/{device_id}",
             delete(gs_wfb_pair::delete_fleet_slot),
+        )
+        // Phone-receiver invites: an operator approves a phone, which then
+        // collects the sealed receive bundle once. Relay-forbidden.
+        .route(
+            "/api/v1/ground-station/wfb/invite",
+            get(gs_wfb_invite::list_invites).post(gs_wfb_invite::post_invite),
+        )
+        .route(
+            "/api/v1/ground-station/wfb/invite/{id}",
+            get(gs_wfb_invite::get_invite),
+        )
+        .route(
+            "/api/v1/ground-station/wfb/invite/{id}/approve",
+            post(gs_wfb_invite::approve_invite),
+        )
+        .route(
+            "/api/v1/ground-station/wfb/invite/{id}/reject",
+            post(gs_wfb_invite::reject_invite),
         )
         // Return the station to first-boot posture. On-box callers only.
         .route(

@@ -172,6 +172,11 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/v1/ground-station/ui/screens` |  |
 | GET | `/api/v1/ground-station/wfb` |  |
 | PUT | `/api/v1/ground-station/wfb` |  |
+| GET | `/api/v1/ground-station/wfb/invite` | relay-forbidden |
+| POST | `/api/v1/ground-station/wfb/invite` | relay-forbidden |
+| GET | `/api/v1/ground-station/wfb/invite/{id}` |  |
+| POST | `/api/v1/ground-station/wfb/invite/{id}/approve` |  |
+| POST | `/api/v1/ground-station/wfb/invite/{id}/reject` |  |
 | DELETE | `/api/v1/ground-station/wfb/pair` | relay-forbidden |
 | POST | `/api/v1/ground-station/wfb/pair` | relay-forbidden |
 | DELETE | `/api/v1/ground-station/wfb/pair/{device_id}` |  |

@@ -190,6 +190,77 @@ fn pubkey_from_bytes(bytes: &[u8]) -> Result<PublicKey, CryptoError> {
     Ok(PublicKey::from(arr))
 }
 
+/// A payload sealed to a peer's X25519 public key under a fresh ephemeral key:
+/// the peer recovers the session key from `eph_pub` and its own secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedToPeer {
+    pub eph_pub: [u8; 32],
+    pub nonce: [u8; 12],
+    /// ChaCha20Poly1305 ciphertext with the 16-byte tag appended.
+    pub ciphertext: Vec<u8>,
+}
+
+/// Seal `plaintext` to `peer_pub` with a fresh ephemeral key and nonce, using
+/// the same ECDH + [`session_key`] + ChaCha20Poly1305 (empty AD) construction
+/// as the mesh invite, under the caller's `context`.
+pub fn seal_to_peer(
+    peer_pub: &[u8],
+    context: &[u8],
+    plaintext: &[u8],
+) -> Result<SealedToPeer, CryptoError> {
+    let mut eph_seed = [0u8; 32];
+    getrandom::fill(&mut eph_seed).expect("OS RNG for X25519 keygen");
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce).expect("OS RNG for nonce");
+    seal_to_peer_with(eph_seed, nonce, peer_pub, context, plaintext)
+}
+
+/// [`seal_to_peer`] with a caller-supplied ephemeral secret and nonce. Only for
+/// reproducible test vectors: reusing either in production breaks the AEAD.
+pub fn seal_to_peer_with(
+    eph_secret: [u8; 32],
+    nonce: [u8; 12],
+    peer_pub: &[u8],
+    context: &[u8],
+    plaintext: &[u8],
+) -> Result<SealedToPeer, CryptoError> {
+    let peer = pubkey_from_bytes(peer_pub)?;
+    let secret = StaticSecret::from(eph_secret);
+    let shared = secret.diffie_hellman(&peer);
+    if !shared.was_contributory() {
+        return Err(CryptoError::BadPublicKey);
+    }
+    let key = session_key(shared.as_bytes(), context);
+    let ciphertext = ChaCha20Poly1305::new(&Key::from(key))
+        .encrypt(&Nonce::from(nonce), plaintext)
+        .map_err(|_| CryptoError::DecryptFailed)?;
+    Ok(SealedToPeer {
+        eph_pub: PublicKey::from(&secret).to_bytes(),
+        nonce,
+        ciphertext,
+    })
+}
+
+/// Open a [`SealedToPeer`] payload with the recipient's 32-byte secret.
+pub fn open_from_peer(
+    secret: &[u8; 32],
+    eph_pub: &[u8],
+    nonce: &[u8],
+    ciphertext: &[u8],
+    context: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let peer = pubkey_from_bytes(eph_pub)?;
+    let shared = StaticSecret::from(*secret).diffie_hellman(&peer);
+    if !shared.was_contributory() {
+        return Err(CryptoError::BadPublicKey);
+    }
+    let key = session_key(shared.as_bytes(), context);
+    let nonce = Nonce::try_from(nonce).map_err(|_| CryptoError::BlobTooShort)?;
+    ChaCha20Poly1305::new(&Key::from(key))
+        .decrypt(&nonce, ciphertext)
+        .map_err(|_| CryptoError::DecryptFailed)
+}
+
 /// Wall-clock unix milliseconds (the invite issued/expiry timeline).
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -347,5 +418,33 @@ mod tests {
     fn public_key_is_raw_32_bytes() {
         let kp = generate_keypair();
         assert_eq!(kp.public.len(), 32);
+    }
+
+    #[test]
+    fn sealed_to_peer_opens_only_with_the_peer_secret_and_context() {
+        let phone = generate_keypair();
+        let sealed = seal_to_peer(&phone.public, b"ctx-a", b"payload").unwrap();
+        let secret = phone.secret.to_bytes();
+        let opened = open_from_peer(
+            &secret,
+            &sealed.eph_pub,
+            &sealed.nonce,
+            &sealed.ciphertext,
+            b"ctx-a",
+        )
+        .unwrap();
+        assert_eq!(opened, b"payload");
+        assert!(matches!(
+            open_from_peer(&secret, &sealed.eph_pub, &sealed.nonce, &sealed.ciphertext, b"ctx-b"),
+            Err(CryptoError::DecryptFailed)
+        ));
+        let other = generate_keypair().secret.to_bytes();
+        assert!(open_from_peer(&other, &sealed.eph_pub, &sealed.nonce, &sealed.ciphertext, b"ctx-a")
+            .is_err());
+        // An all-zero (low-order) peer key is refused rather than sealed to.
+        assert!(matches!(
+            seal_to_peer(&[0u8; 32], b"ctx-a", b"p"),
+            Err(CryptoError::BadPublicKey)
+        ));
     }
 }

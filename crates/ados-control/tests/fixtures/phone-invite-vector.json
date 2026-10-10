@@ -1,0 +1,11 @@
+{
+  "ciphertext_hex": "b418fd3a0a0e2a352d9e7b81dccc97c2c7181cf44efa2c32135b4905aef3c75b39eb376985a951f395191bdf6975eafb922d5478aef9ca5aa32f6ef41ffc211b2d0ae8ae82eab9f928c585f8eb3310f7921e5ea6b02c8179f2a418543076f4f6fa1816e9471a166906e85ad792fbb38c7a5d208ba0534ebdd33ba0d0565f90398148c38dea4bd0eb2b8488477a9fab15abfb2368a426751b4cf2e5df94cd5a5b482492c0bd3edc7e693958d79e9e67745ea59e7de8c6ee9ce8b5531de6eb39fcbaaf2049e589b8d6ea3d24ea6bab8a0d1fa722957ff2056b33eea120c06876be5cf48931137213faa197b28989e56b5fc9465c426f48a39fbd87fa8258467096d33f5b892acff11f3ac1c2d381ee904a87362edae6835b7d250061fcec08e99d936c6bab393324b1c54762e1f8003b483e69aab2ae6ca499e54e34563375304bcbe4e61129d5ec2a2c8f79813c0d19c8fca81f4ebea37e2ee13395a0ff3a24ee93d8d092e6cf9d44c903881bd1bb643fd7c3d3c921f7f9d7e9a958a191cc820fbdaac6563ac77043286380ed4253c3f3adae6709f3e6cc8b08d32d6b3145a780db02a3ab356ba55502da685c88db92b13bd9cbd5300c602a9afae6bf7d040c2923",
+  "context_hex": "61646f732f7766622f70686f6e652d696e766974652f76313031323334353637383961626364656630313233343536373839616263646566",
+  "expected_plaintext_json": "{\"aux_fec\":{\"k\":1,\"n\":2},\"bandwidth_mhz\":20,\"channel\":149,\"fleet_id\":7,\"hop_key_b64\":\"9xb7sCZLDkOf2HfnSmXUbAnpb334LBpdbRlUMtSPKOs=\",\"mcs\":1,\"ports\":{\"aux_down\":2,\"control\":1,\"video\":0},\"rendezvous_channel\":149,\"rx_key_b64\":\"AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tng5+71/AMKERgfJi00O0JJUFdeZWxzeoGIj5adpKuyuQ==\",\"slots\":[{\"device_id\":\"drone-a1b2c3\",\"slot\":1},{\"device_id\":\"drone-d4e5f6\",\"slot\":2}],\"v\":1,\"video_fec\":{\"k\":8,\"n\":12}}",
+  "gs_ephemeral_public_hex": "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a",
+  "invite_id": "0123456789abcdef0123456789abcdef",
+  "nonce_hex": "a0a1a2a3a4a5a6a7a8a9aaab",
+  "phone_fingerprint": "AAA8-FFF7-03B5-0B22",
+  "phone_public_key_hex": "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c",
+  "phone_secret_key_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+}
