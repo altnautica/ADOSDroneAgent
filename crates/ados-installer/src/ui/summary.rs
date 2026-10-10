@@ -91,6 +91,9 @@ pub fn plain_lines(s: &SummaryData) -> Vec<String> {
         if !s.required_failures.is_empty() {
             out.push(format!("  failed step: {}", s.required_failures.join(", ")));
         }
+        for reason in &s.failure_reasons {
+            out.push(format!("  reason:      {reason}"));
+        }
         out.push("  full log:    journalctl -t ados-installer".to_string());
         out.push("  retry:       re-run the install one-liner".to_string());
         return out;
@@ -309,6 +312,9 @@ fn failure_panel(
     if !s.required_failures.is_empty() {
         body.push(format!("failed step: {}", s.required_failures.join(", ")));
     }
+    for reason in &s.failure_reasons {
+        body.push(format!("reason:      {reason}"));
+    }
     if !logs.is_empty() {
         body.push(String::new());
         body.push("recent log".to_string());
@@ -452,8 +458,24 @@ mod tests {
             ap_ssid: None,
             ap_passphrase: None,
             required_failures: vec![],
+            failure_reasons: vec![],
             pending_reboot: vec![],
         }
+    }
+
+    #[test]
+    fn a_failed_install_names_the_reason_of_the_failed_step() {
+        // An armed-vehicle refusal must tell the operator why and how to
+        // proceed, not only which step failed.
+        let mut s = sample("failed");
+        s.required_failures = vec!["preflight".to_string()];
+        s.failure_reasons = vec![
+            "preflight: refusing to upgrade: the vehicle is armed (pass --force-armed)".to_string(),
+        ];
+        let body = plain_lines(&s).join("\n");
+        assert!(body.contains("failed step: preflight"), "{body}");
+        assert!(body.contains("the vehicle is armed"), "{body}");
+        assert!(body.contains("--force-armed"), "{body}");
     }
 
     #[test]

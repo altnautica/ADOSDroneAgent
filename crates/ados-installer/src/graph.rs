@@ -257,7 +257,7 @@ pub fn run_graph(steps: Vec<Box<dyn Step>>, ctx: &mut Ctx) -> Vec<StepReport> {
             StepOutcome::Failed(msg) => {
                 let required = step.kind() == StepKind::Required;
                 tracing::error!(step = %id, required, reason = %msg, "step failed");
-                ctx.failures.record(id, required);
+                ctx.failures.record_with_reason(id, required, msg);
                 if required {
                     aborting = true;
                 }

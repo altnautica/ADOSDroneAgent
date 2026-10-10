@@ -138,6 +138,10 @@ fn summary(status: &str, required: &[&str]) -> SummaryData {
         ap_ssid: Some("ADOS-GS-9F2C".to_string()),
         ap_passphrase: Some("KM7QRT4XPN29".to_string()),
         required_failures: required.iter().map(|s| s.to_string()).collect(),
+        failure_reasons: required
+            .iter()
+            .map(|s| format!("{s}: example reason"))
+            .collect(),
         pending_reboot: Vec::new(),
     }
 }

@@ -89,6 +89,11 @@ pub struct FailureAccumulator {
     pub failed: Vec<String>,
     /// The subset of `failed` that were Required.
     pub required: Vec<String>,
+    /// Why each required step failed, as `<step>: <reason>`, in order. Shown on
+    /// the closing card so a refusal the operator must act on (an armed vehicle,
+    /// `--force-armed`) is not hidden behind "failed step"; not part of the
+    /// install-result contract.
+    pub required_reasons: Vec<String>,
 }
 
 impl FailureAccumulator {
@@ -102,6 +107,14 @@ impl FailureAccumulator {
         self.failed.push(step.to_string());
         if required {
             self.required.push(step.to_string());
+        }
+    }
+
+    /// Record one failed step with the reason it gave.
+    pub fn record_with_reason(&mut self, step: &str, required: bool, reason: &str) {
+        self.record(step, required);
+        if required {
+            self.required_reasons.push(format!("{step}: {reason}"));
         }
     }
 
@@ -205,6 +218,22 @@ mod tests {
         acc.record("systemd", true);
         assert_eq!(acc.derive_status(), "failed");
         assert_eq!(acc.required, vec!["systemd".to_string()]);
+        assert_eq!(acc.failed.len(), 2);
+    }
+
+    #[test]
+    fn accumulator_keeps_the_reason_of_a_required_failure() {
+        let mut acc = FailureAccumulator::new();
+        acc.record_with_reason("radio-driver", false, "no dkms");
+        acc.record_with_reason(
+            "preflight",
+            true,
+            "refusing to upgrade: the vehicle is armed",
+        );
+        assert_eq!(
+            acc.required_reasons,
+            vec!["preflight: refusing to upgrade: the vehicle is armed".to_string()]
+        );
         assert_eq!(acc.failed.len(), 2);
     }
 

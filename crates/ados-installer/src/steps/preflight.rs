@@ -210,20 +210,26 @@ pub fn profile_carries_vehicle(profile: &str) -> bool {
 }
 
 /// Read one vehicle-state snapshot from `state_socket` and apply the shared
-/// armed rule. A runtime that cannot be built proves nothing, so it fails
-/// closed like an absent socket.
+/// armed rule. Steps run synchronously on the installer's `#[tokio::main]`
+/// thread, where a nested `block_on` panics, so the read runs on a thread of
+/// its own with its own runtime. A runtime that cannot be built, or a read
+/// thread that dies, proves nothing, so it fails closed like an absent socket.
 fn vehicle_armed(state_socket: &Path) -> bool {
-    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        return true;
-    };
-    let snapshot = rt.block_on(ados_protocol::armed::read_state_snapshot(
-        state_socket,
-        STATE_READ_TIMEOUT,
-    ));
-    ados_protocol::armed::vehicle_treated_as_armed(snapshot)
+    let path = state_socket.to_path_buf();
+    let read = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?;
+        Some(rt.block_on(ados_protocol::armed::read_state_snapshot(
+            &path,
+            STATE_READ_TIMEOUT,
+        )))
+    });
+    match read.join() {
+        Ok(Some(snapshot)) => ados_protocol::armed::vehicle_treated_as_armed(snapshot),
+        _ => true,
+    }
 }
 
 /// The refusal for an upgrade while the vehicle is, or may be, armed, or
@@ -348,5 +354,15 @@ mod tests {
         let sock = dir.path().join("state.sock");
         assert_eq!(armed_refusal(true, true, "drone", &sock), None);
         assert_eq!(armed_refusal(true, true, "ground_station", &sock), None);
+    }
+
+    /// The installer drives its steps from `#[tokio::main]`: the armed check
+    /// must not nest a runtime (a nested `block_on` panicked every upgrade).
+    #[tokio::test]
+    async fn armed_check_runs_inside_a_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("state.sock");
+        assert!(armed_refusal(true, false, "drone", &sock).is_some());
+        assert_eq!(armed_refusal(true, true, "drone", &sock), None);
     }
 }

@@ -123,6 +123,9 @@ pub struct SummaryData {
     pub failed_steps: Vec<String>,
     /// The subset that were Required (hard failures).
     pub required_failures: Vec<String>,
+    /// Why each required step failed (`<step>: <reason>`), named on the failure
+    /// card: a refusal the operator acts on must not read as a bare step name.
+    pub failure_reasons: Vec<String>,
     /// Provisioning that is staged but needs a reboot to take effect (a camera
     /// or display overlay, an I2C dtparam), one reason per entry.
     ///

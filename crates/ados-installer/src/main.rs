@@ -468,6 +468,7 @@ fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
         ap_passphrase: read_ap_passphrase(),
         failed_steps: ctx.failures.failed.clone(),
         required_failures: ctx.failures.required.clone(),
+        failure_reasons: ctx.failures.required_reasons.clone(),
         pending_reboot: ctx.pending_reboot.clone(),
     }
 }
