@@ -219,37 +219,8 @@ fn now_iso8601() -> String {
         .unwrap_or_default()
 }
 
-/// Atomically write `value` as JSON to `path` with the given Unix `mode`
-/// (serialize → tmp sibling → fsync → rename). Mirrors the management-link sidecar
-/// helper to keep this crate dependency-minimal.
 #[cfg(any(target_os = "linux", test))]
-fn write_json_atomic<T: serde::Serialize>(
-    path: &std::path::Path,
-    value: &T,
-    mode: u32,
-) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let body = serde_json::to_vec(value).map_err(std::io::Error::other)?;
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&tmp)?;
-        f.write_all(&body)?;
-        f.sync_all()?;
-    }
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
+use ados_protocol::sidecar::write_json_atomic;
 
 // ---------------------------------------------------------------------------
 // Linux OS edges
@@ -324,8 +295,8 @@ mod tests {
         );
         assert_eq!(reloaded["interfaces"]["wlan0"]["signal_dbm"], -52);
         assert_eq!(reloaded["interfaces"]["wlan0"]["link_state"], "connected");
-        // No leftover tmp sibling.
-        assert!(!dir.path().join("wifi-powersave.tmp").exists());
+        // No leftover temp sibling.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

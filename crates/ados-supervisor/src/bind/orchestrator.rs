@@ -1020,7 +1020,8 @@ fn write_sentinel(snap: Option<&BindSession>) {
         );
     }
     if let Ok(body) = serde_json::to_vec(&v) {
-        if let Err(e) = keys::atomic_write(Path::new(super::BIND_STATE_SENTINEL), &body, 0o644) {
+        let sentinel = Path::new(super::BIND_STATE_SENTINEL);
+        if let Err(e) = ados_protocol::sidecar::write_atomic(sentinel, &body, 0o644) {
             tracing::debug!(error = %e, "bind_sentinel_write_failed");
         }
     }

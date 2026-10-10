@@ -59,19 +59,9 @@ const ROLE_STATE_FILES: [&str; 3] = ["mesh-state.json", "wfb-relay.json", "wfb-r
 /// The mesh-event kind a transition publishes.
 const KIND_ROLE_CHANGED: &str = "role_changed";
 
-/// Atomically write the role sentinel (`temp` + rename, 0o644).
+/// Atomically write the role sentinel (0o644).
 fn write_role_file(path: &Path, role: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, format!("{role}\n"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644))?;
-    }
-    std::fs::rename(&tmp, path)
+    ados_protocol::sidecar::write_atomic(path, format!("{role}\n").as_bytes(), 0o644)
 }
 
 /// Apply `role` at supervisor boot: write the sentinel, stop every role unit

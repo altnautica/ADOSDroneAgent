@@ -156,7 +156,6 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     )),
     def("ados-api", Core, None, None),
     def("ados-cloud", Core, None, None),
-    def("ados-health", Core, None, None),
     // The durable logging + telemetry store. Registered so it gets the
     // monitor's liveness check, the auto-restart, the parked retry and — the
     // one that matters most — the `systemctl reset-failed` that clears a
@@ -187,6 +186,11 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // link), so it is NOT in the headless KEEP set. The unit self-gates on the
     // NPU runtime library, so it is a clean no-op on a board without the NPU.
     def("ados-vision-rknn", Hardware, Some("drone"), None),
+    // NPU inference sidecar (Hailo): serves the engine's `backend: hailo`
+    // socket. Drone-only and outside the headless KEEP set like the RKNN
+    // sidecar. The unit's `ConditionPathExists=/dev/hailo0` skips the start on a
+    // board without the accelerator, and the row then idles (`condition_unmet`).
+    def("ados-vision-hailo", Hardware, Some("drone"), None),
     // Drone-side WFB-ng TX manager. Profile-gated to drone so a ground station
     // does not bring up wfb_tx and fight the GS wfb_rx for the same adapter.
     def_keep("ados-wfb", Hardware, Some("drone"), None),
@@ -201,7 +205,6 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     // ados-vision-rknn sidecar.
     def("ados-vision", Hardware, Some("drone"), None),
     // On-demand.
-    def("ados-discovery", OnDemand, None, None),
     // The native HTTP control surface: the LAN front on `:8080` on every
     // profile, the operator's API. systemd owns its lifecycle, as it does the
     // plugin host's: the installer enables it (it writes the front marker on
@@ -272,10 +275,9 @@ pub const SERVICE_REGISTRY: &[ServiceDef] = &[
     def("ados-uplink-router", Hardware, Some("ground_station"), None),
     // No rows for ados-modem, ados-wifi-client or ados-ethernet. ados-net owns
     // the modem, the WiFi station and the wired link in-process; their packaged
-    // units are torn down on every profile (the first and last are retired
-    // outright, the station is subsumed on a ground station and disabled on a
-    // drone). A row here would have the supervisor report, and try to
-    // reconcile, a service no install ever leaves running.
+    // units are retired and pruned on every profile. A row here would have the
+    // supervisor report, and try to reconcile, a service no install ever leaves
+    // running.
     // Distributed-receive role-gated services.
     idle_ok(def(
         "ados-batman",
@@ -377,7 +379,8 @@ mod tests {
     #[test]
     fn registry_has_expected_shape() {
         let specs = build_specs();
-        assert_eq!(specs.len(), 29, "service count drifted from the catalog");
+        // ados-discovery and ados-health were removed; ados-vision-hailo added.
+        assert_eq!(specs.len(), 28, "service count drifted from the catalog");
         // Core tier members. ados-mavlink/api/cloud/health/logd are the
         // cross-profile always-on core (the single cloud unit serves the gateway
         // + heartbeat on both profiles, spawning the ground-station bridge when
@@ -394,7 +397,6 @@ mod tests {
                 "ados-swarmbus",
                 "ados-api",
                 "ados-cloud",
-                "ados-health",
                 "ados-logd"
             ]
         );
@@ -436,6 +438,25 @@ mod tests {
         assert_eq!(tunnel.profile_gate, Some("drone|ground_station"));
         assert_eq!(tunnel.category, Category::Hardware);
         assert!(!tunnel.headless_keep);
+    }
+
+    #[test]
+    fn registry_has_hailo_and_no_deleted_units() {
+        let specs = build_specs();
+        let hailo = specs
+            .iter()
+            .find(|s| s.name == "ados-vision-hailo")
+            .expect("hailo sidecar registered");
+        assert_eq!(hailo.category, Category::Hardware);
+        assert_eq!(hailo.profile_gate, Some("drone"));
+        assert_eq!(hailo.role_gate, None);
+        assert!(!hailo.headless_keep);
+        for gone in ["ados-discovery", "ados-health", "ados-wifi-client"] {
+            assert!(
+                !specs.iter().any(|s| s.name == gone),
+                "{gone} was removed and must not be registered"
+            );
+        }
     }
 
     #[test]

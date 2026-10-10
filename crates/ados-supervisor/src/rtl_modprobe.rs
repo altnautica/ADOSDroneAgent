@@ -185,7 +185,7 @@ pub fn reconcile_live_driver(_reload_allowed: bool) -> bool {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use std::io::Write;
+    use ados_protocol::sidecar::write_atomic;
     use std::path::Path;
 
     /// The canonical agent config path the operating-region posture is read from.
@@ -229,7 +229,7 @@ mod linux {
         if unchanged {
             return Ok(false);
         }
-        atomic_write(path, body.as_bytes())?;
+        write_atomic(path, body.as_bytes(), 0o644)?;
         if reload_allowed {
             reload_module();
         } else {
@@ -326,22 +326,6 @@ mod linux {
             tracing::warn!(live_country = %nc, live_regd_src = %nr, "rtl_live_driver_still_stale_after_reload");
         }
         ok
-    }
-
-    /// Write `bytes` to `path` atomically (tmp + rename) with 0644 perms.
-    fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("conf.tmp");
-        {
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(bytes)?;
-            f.flush()?;
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644));
-        }
-        std::fs::rename(&tmp, path)
     }
 }
 

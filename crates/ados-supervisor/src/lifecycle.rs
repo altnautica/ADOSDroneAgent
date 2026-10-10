@@ -339,6 +339,13 @@ impl Supervisor {
     /// Start a unit, honoring profile/role gates. A crash-looping unit is
     /// started like any other: the label never stretches the retry cadence.
     /// Returns true only when the unit reached `active`.
+    ///
+    /// A gated-off row goes to `Stopped` (reason `gated_off`), so a Failed or
+    /// CrashLooping row whose gate closed (a role switch) leaves the parked
+    /// retry set instead of being re-tried forever. A start that systemd
+    /// skipped on an unmet unit condition (`ConditionPathExists` and kin exit
+    /// the start verb 0) goes to `Idle` (reason `condition_unmet`) with no
+    /// failure recorded; the config-change wake path tries it again.
     pub async fn start_service(&mut self, name: &str) -> bool {
         let Some(i) = self.index_of(name) else {
             tracing::warn!(service = name, "unknown service");
@@ -346,7 +353,11 @@ impl Supervisor {
         };
 
         if !gate_allows(&self.services[i], &self.config) {
-            tracing::info!(service = name, "service gated off for this profile/role");
+            if self.services[i].state != ServiceState::Stopped {
+                tracing::info!(service = name, "service gated off for this profile/role");
+                self.work_proof.forget(name);
+                self.set_state(i, ServiceState::Stopped, "gated_off");
+            }
             return false;
         }
 
@@ -356,6 +367,14 @@ impl Supervisor {
         self.pm.reset_failed(name).await;
 
         if self.pm.start(name).await {
+            if self.pm.condition_result(name).await == Some(false) {
+                self.set_state(i, ServiceState::Idle, "condition_unmet");
+                tracing::info!(
+                    service = name,
+                    "service start skipped: unit condition unmet"
+                );
+                return false;
+            }
             self.set_state(i, ServiceState::Running, "start_ok");
             tracing::info!(service = name, "service started");
             true
@@ -1120,11 +1139,11 @@ mod tests {
         assert!(gate_allows(&spec("ados-wfb"), &c));
         assert!(gate_allows(&spec("ados-control"), &c));
         // Everything else gates off even though the profile/role gates alone
-        // would permit it on a full drone: the HTTP front, cloud, health, and a
-        // cross-profile Hardware unit that is not in the keep set.
+        // would permit it on a full drone: the HTTP front, cloud, an NPU
+        // sidecar, and a cross-profile Hardware unit that is not in the keep set.
         assert!(!gate_allows(&spec("ados-api"), &c));
         assert!(!gate_allows(&spec("ados-cloud"), &c));
-        assert!(!gate_allows(&spec("ados-health"), &c));
+        assert!(!gate_allows(&spec("ados-vision-hailo"), &c));
         assert!(!gate_allows(&spec("ados-gpio"), &c));
         // The full-agent gate is unchanged: with headless off, ados-api runs.
         assert!(gate_allows(&spec("ados-api"), &cfg("drone")));
@@ -1248,6 +1267,8 @@ mod tests {
         supervisor_job_pending: std::sync::atomic::AtomicBool,
         /// When set, every unit's last run reads as a clean `exit 0`.
         clean_exit: std::sync::atomic::AtomicBool,
+        /// When set, every start is skipped on an unmet unit condition.
+        condition_unmet: std::sync::atomic::AtomicBool,
     }
 
     impl MockProcessManager {
@@ -1261,6 +1282,7 @@ mod tests {
                 probes_fail: std::sync::atomic::AtomicBool::new(false),
                 supervisor_job_pending: std::sync::atomic::AtomicBool::new(false),
                 clean_exit: std::sync::atomic::AtomicBool::new(false),
+                condition_unmet: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn record(&self, verb: &str, unit: &str) {
@@ -1299,6 +1321,10 @@ mod tests {
         }
         fn exit_cleanly(&self) {
             self.clean_exit
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn unmet_condition(&self) {
+            self.condition_unmet
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -1349,6 +1375,13 @@ mod tests {
         async fn exited_cleanly(&self, unit: &str) -> Option<bool> {
             self.record("exited_cleanly", unit);
             Some(self.clean_exit.load(std::sync::atomic::Ordering::Relaxed))
+        }
+        async fn condition_result(&self, _unit: &str) -> Option<bool> {
+            Some(
+                !self
+                    .condition_unmet
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
         }
         async fn mask(&self, unit: &str) {
             self.record("mask", unit);
@@ -1805,6 +1838,54 @@ mod tests {
             calls.contains(&"reset_failed:ados-control".to_string()),
             "the retry must clear the start-limit latch; calls={calls:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_start_skipped_on_an_unmet_condition_goes_idle_without_a_failure() {
+        let mock = Arc::new(MockProcessManager::new());
+        mock.unmet_condition();
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, mock.clone());
+        assert!(!sup.start_service("ados-mavlink").await);
+        let i = sup.index_of("ados-mavlink").unwrap();
+        // The unit is absent, not dead: two monitor passes start nothing more.
+        mock.deactivate_all();
+        sup.reconcile_services().await;
+        sup.reconcile_services().await;
+        assert_eq!(sup.services[i].state, ServiceState::Idle);
+        assert!(sup.services[i].failure_times.is_empty());
+        let starts = mock
+            .calls()
+            .iter()
+            .filter(|c| c.as_str() == "start:ados-mavlink")
+            .count();
+        assert_eq!(starts, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_row_whose_gate_closes_is_stopped_and_not_retried() {
+        let pm = Arc::new(MockProcessManager::new());
+        pm.fail_starts();
+        let bind = Arc::new(BindOrchestrator::new());
+        let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+        // A ground-station-only unit forced into Failed, as after a role switch
+        // away from ground station.
+        let name = sup
+            .services
+            .iter()
+            .find(|s| !gate_allows(s, &sup.config))
+            .map(|s| s.name)
+            .expect("a unit gated off on a drone");
+        let i = sup.index_of(name).unwrap();
+        sup.services[i].state = ServiceState::Failed;
+        assert!(sup.parked_retries_due(Instant::now()).contains(&name));
+
+        assert!(!sup.start_service(name).await);
+        assert_eq!(sup.services[i].state, ServiceState::Stopped);
+        assert!(!sup.parked_retries_due(Instant::now()).contains(&name));
+        let want = format!("start:{name}");
+        let starts = pm.calls().iter().filter(|c| **c == want).count();
+        assert_eq!(starts, 0);
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@
 pub mod auto_pair;
 pub mod bind;
 pub mod config;
+pub mod fc_state;
 pub mod hardware;
 pub mod hotplug;
 pub mod janitor;
@@ -23,6 +24,7 @@ pub mod process_manager;
 pub mod reg_reconciler;
 pub mod registry;
 pub mod role;
+pub mod role_persist;
 pub mod rtl_modprobe;
 pub mod sdnotify;
 pub mod service_memory;

@@ -330,7 +330,7 @@ impl CameraUsbRecovery {
         // state), so this can never fire in flight. The radio re-pairs and the FC
         // reconnects on their own self-heal paths after the reset.
         if cfg.allow_shared_hub_reset && !hub.is_empty() {
-            if matches!(os::read_fc_armed().await, Some(false)) {
+            if matches!(crate::fc_state::read_fc_armed().await, Some(false)) {
                 self.case = "hub_reset".to_string();
                 self.state = "hub_resetting".to_string();
                 self.emit_reason("hub_resetting", "shared_hub_aggressive", cfg, index);
@@ -441,8 +441,8 @@ impl CameraUsbRecovery {
             },
             updated_at_unix: os::now_unix(),
         };
-        if let Err(e) = os::write_json_atomic(std::path::Path::new(os::SIDECAR_PATH), &snap, 0o644)
-        {
+        let path = std::path::Path::new(os::SIDECAR_PATH);
+        if let Err(e) = ados_protocol::sidecar::write_json_atomic(path, &snap, 0o644) {
             tracing::debug!(error = %e, "camera recovery sidecar write failed");
         }
     }
@@ -521,8 +521,8 @@ impl CameraUsbRecovery {
             pid,
             updated_at_unix: os::now_unix(),
         };
-        if let Err(e) = os::write_json_atomic(std::path::Path::new(os::LAST_GOOD_PATH), &lg, 0o644)
-        {
+        let path = std::path::Path::new(os::LAST_GOOD_PATH);
+        if let Err(e) = ados_protocol::sidecar::write_json_atomic(path, &lg, 0o644) {
             tracing::debug!(error = %e, "camera last-good write failed");
         }
     }

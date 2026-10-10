@@ -135,14 +135,20 @@ pub fn failover_after_failure(attempt: u32, cloud_relay_enabled: bool) -> Option
 }
 
 /// Whether a bind runs this tick. The cloud-relay signal deliberately does not
-/// appear here: signalling the fallback never stops the local loop. Pure for
-/// testing.
+/// appear here: signalling the fallback never stops the local loop.
+///
+/// A re-arm window stops the normal radio unit, so it opens only while the FC
+/// is provably disarmed (`fc_armed == Some(false)`); an armed or unknown FC
+/// keeps the video link up. The explicit arm-flag path is not gated: it only
+/// fires on an unpaired rig, which has no link to lose. Pure for testing.
 pub fn bind_this_tick(
     armed: bool,
     already_paired: bool,
     rearm: bool,
+    fc_armed: Option<bool>,
     adapter_present: bool,
 ) -> bool {
+    let rearm = rearm && matches!(fc_armed, Some(false));
     should_attempt_or_rearm(armed, already_paired, rearm) && adapter_ready_to_bind(adapter_present)
 }
 
@@ -235,7 +241,7 @@ impl FailoverWriter {
             WFB_FAILOVER_SIDECAR_VERSION,
             state.as_str()
         );
-        match crate::bind::keys::atomic_write(&self.path, body.as_bytes(), 0o644) {
+        match ados_protocol::sidecar::write_atomic(&self.path, body.as_bytes(), 0o644) {
             Ok(()) => {
                 self.last = Some(state);
                 true
@@ -463,7 +469,21 @@ async fn run_with_failover(
         } else {
             false
         };
-        if bind_this_tick(armed, paired, rearm, adapter_present) {
+        // The re-arm path is gated on a disarmed FC; only read the state socket
+        // when the latch actually asks for a window.
+        let fc_armed = if rearm {
+            crate::fc_state::read_fc_armed().await
+        } else {
+            None
+        };
+        if rearm && fc_armed != Some(false) {
+            tracing::info!(
+                role = role.as_str(),
+                ?fc_armed,
+                "auto_pair_rearm_deferred_fc_not_disarmed"
+            );
+        }
+        if bind_this_tick(armed, paired, rearm, fc_armed, adapter_present) {
             // Tear down an in-flight bind if the supervisor shuts down.
             let mut cancel_rx = shutdown.clone();
             let cancel = async move {
@@ -648,7 +668,7 @@ mod tests {
         let mut binds = 0u32;
         let mut signalled = None;
         for _ in 0..(MAX_LOCAL_BIND_ATTEMPTS + 20) {
-            if bind_this_tick(true, false, false, true) {
+            if bind_this_tick(true, false, false, None, true) {
                 binds += 1;
                 attempt += 1;
                 if let Some(state) = failover_after_failure(attempt, true) {
@@ -676,7 +696,19 @@ mod tests {
             None
         );
         // No adapter, no bind — and no attempt counted toward the signal.
-        assert!(!bind_this_tick(true, false, false, false));
+        assert!(!bind_this_tick(true, false, false, None, false));
+    }
+
+    #[test]
+    fn rearm_opens_a_window_only_while_the_fc_is_disarmed() {
+        // Paired rig, arm flag off: only the re-arm latch can open a window.
+        assert!(bind_this_tick(false, true, true, Some(false), true));
+        // Armed FC: a window would stop video TX in flight.
+        assert!(!bind_this_tick(false, true, true, Some(true), true));
+        // Unknown FC state is unsafe.
+        assert!(!bind_this_tick(false, true, true, None, true));
+        // The explicit arm-flag path on an unpaired rig is not FC-gated.
+        assert!(bind_this_tick(true, false, false, Some(true), true));
     }
 
     #[test]
@@ -913,8 +945,8 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(parsed["state"], "local");
 
-        // No torn tmp left behind.
-        assert!(!dir.path().join("wfb_failover.json.tmp").exists());
+        // No torn temp left behind.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -1,11 +1,10 @@
 //! Local-radio WFB bind orchestrator.
 //!
-//! Ports `services/wfb/bind_orchestrator.py` + the key-apply half of
-//! `services/ground_station/pair_manager.py` to Rust, hosted in the supervisor
-//! because the bind sequence `systemctl stop`s the very `ados-wfb` unit the
-//! radio service runs under — it cannot live inside the radio service without
-//! killing its own host. The supervisor already orchestrates systemd and
-//! survives every service restart, so it owns the bind FSM.
+//! Hosted in the supervisor because the bind sequence `systemctl stop`s the
+//! very `ados-wfb` unit the radio service runs under — it cannot live inside
+//! the radio service without killing its own host. The supervisor already
+//! orchestrates systemd and survives every service restart, so it owns the
+//! bind FSM and the WFB key apply.
 //!
 //! What stays C/shell (Rust *supervises*, never rewrites): `socat`,
 //! `wfb_keygen`, `systemctl`, `pkill`, `ip`, and the upstream

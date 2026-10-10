@@ -342,7 +342,7 @@ mod tests {
         // A cgroup with no smaps_rollup file at all is skipped.
         let dir = root.join("11");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("cgroup"), "0::/system.slice/ados-health.service").unwrap();
+        fs::write(dir.join("cgroup"), "0::/system.slice/ados-mavlink.service").unwrap();
 
         let out = scan_pss_by_unit_in(root);
         assert!(out.is_empty(), "no unit should appear: {out:?}");

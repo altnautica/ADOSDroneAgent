@@ -1,5 +1,5 @@
-//! WFB key-apply + persisted pair-state. Ports the key half of
-//! `ground_station/pair_manager.py` + the fingerprint from `wfb/key_mgr.py`.
+//! WFB key-apply + persisted pair-state, plus the key fingerprint that
+//! `wfb/key_mgr.py` also computes.
 //!
 //! Parity-critical, called once at `RESTARTING_SERVICES`:
 //!   1. validate the inbound blob is exactly 64 bytes (libsodium crypto_box);
@@ -16,10 +16,12 @@
 //!     fresh key → pairings evaporated across reboot);
 //!   - the config rewrite is flock-serialised + atomic + 0600 + euid-0 so a
 //!     non-locked writer racing a GCS PUT cannot silently lose a write;
-//!   - the key write is atomic (tmp + fsync + chmod + rename).
+//!   - the key write is atomic (unique temp + fsync + chmod + rename + dir fsync).
 
 use std::path::Path;
 use std::sync::Arc;
+
+use ados_protocol::sidecar::write_atomic;
 
 use serde_norway::{Mapping, Value};
 
@@ -57,8 +59,8 @@ pub struct PairResult {
     pub role: BindRole,
 }
 
-/// Reject anything that is not exactly a 64-byte key file. Mirrors
-/// `_validate_blob` — wfb-ng silently fails decryption on a wrong-shaped key.
+/// Reject anything that is not exactly a 64-byte key file: wfb-ng silently
+/// fails decryption on a wrong-shaped key.
 pub fn validate_blob(blob: &[u8]) -> Result<(), String> {
     if blob.len() != WFB_KEY_FILE_BYTES {
         return Err(format!(
@@ -66,35 +68,6 @@ pub fn validate_blob(blob: &[u8]) -> Result<(), String> {
             blob.len()
         ));
     }
-    Ok(())
-}
-
-/// Atomic write with an explicit mode: tmp sibling (`<path>.tmp`) + fsync +
-/// chmod + rename. Creates the parent. Mirrors `_atomic_write`.
-pub fn atomic_write(path: &Path, data: &[u8], mode: u32) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
-
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    // Re-chmod in case a umask altered the create-time mode (matches Python).
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
-    std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
@@ -163,9 +136,9 @@ fn set_str(map: &mut Mapping, key: &str, val: &str) {
 }
 
 /// Apply the pair fields to an in-memory config mapping. Pure — split out from
-/// the I/O so it is unit-testable without root / a real config path. Mirrors
-/// `_persist_pair_state`'s field logic exactly (set vs pop, the GS mirror), plus
-/// the fleet addressing the bind assigned.
+/// the I/O so it is unit-testable without root / a real config path. Sets or
+/// pops each pair field, mirrors it onto the ground-station keys on a GS, and
+/// writes the fleet addressing the bind assigned.
 ///
 /// `fleet` is `None` when the caller has no assignment to write, and the
 /// existing `video.wfb.fleet_id` / `fleet_slot` are then left untouched rather
@@ -304,7 +277,7 @@ pub fn persist_pair_state(
             return false;
         }
     };
-    match atomic_write(config_path, body.as_bytes(), 0o600) {
+    match write_atomic(config_path, body.as_bytes(), 0o600) {
         Ok(()) => true,
         Err(e) => {
             tracing::error!(error = %e, path = %config_path.display(), "config_write_failed");
@@ -539,7 +512,7 @@ pub fn persist_video_cameras(
             return CamerasPersist::Failed;
         }
     };
-    match atomic_write(config_path, body.as_bytes(), 0o600) {
+    match write_atomic(config_path, body.as_bytes(), 0o600) {
         Ok(()) => CamerasPersist::Written,
         Err(e) => {
             tracing::error!(error = %e, path = %config_path.display(), "config_write_failed");
@@ -624,7 +597,7 @@ async fn apply_keypair_inner(
     }
 
     let target = Path::new(role.key_path());
-    atomic_write(target, blob, 0o600).map_err(|e| format!("key write failed: {e}"))?;
+    write_atomic(target, blob, 0o600).map_err(|e| format!("key write failed: {e}"))?;
     let fingerprint = read_public_fingerprint(target).ok();
     let paired_at = iso_now();
 
@@ -643,7 +616,7 @@ async fn apply_keypair_inner(
 
     // Best-effort setup-complete sentinel (captive_dns stops redirecting).
     let body = format!("{paired_at}\n");
-    if let Err(e) = atomic_write(
+    if let Err(e) = write_atomic(
         Path::new(super::SETUP_COMPLETE_PATH),
         body.as_bytes(),
         0o644,
@@ -721,16 +694,20 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_sets_mode_and_content() {
+    fn write_atomic_sets_mode_and_content() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("sub").join("tx.key");
-        atomic_write(&p, &[7u8; 64], 0o600).unwrap();
+        write_atomic(&p, &[7u8; 64], 0o600).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), vec![7u8; 64]);
         let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         // No leftover temp file.
-        assert!(!dir.path().join("sub").join("tx.key.tmp").exists());
+        let names: Vec<_> = std::fs::read_dir(dir.path().join("sub"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
     }
 
     #[test]
@@ -742,8 +719,8 @@ mod tests {
         key_b[32..].copy_from_slice(&[2u8; 32]); // pub half = all 2s
         let pa = dir.path().join("a.key");
         let pb = dir.path().join("b.key");
-        atomic_write(&pa, &key_a, 0o600).unwrap();
-        atomic_write(&pb, &key_b, 0o600).unwrap();
+        write_atomic(&pa, &key_a, 0o600).unwrap();
+        write_atomic(&pb, &key_b, 0o600).unwrap();
         let fa = read_public_fingerprint(&pa).unwrap();
         let fb = read_public_fingerprint(&pb).unwrap();
         assert_eq!(fa.len(), 16);
@@ -754,7 +731,7 @@ mod tests {
         assert_ne!(fa, fb); // sensitive to the pub half
                             // A wrong-sized file is rejected.
         let pbad = dir.path().join("bad.key");
-        atomic_write(&pbad, &[0u8; 10], 0o600).unwrap();
+        write_atomic(&pbad, &[0u8; 10], 0o600).unwrap();
         assert!(read_public_fingerprint(&pbad).is_err());
     }
 

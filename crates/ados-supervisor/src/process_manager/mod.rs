@@ -79,6 +79,15 @@ pub trait ProcessManager: Send + Sync {
         None
     }
 
+    /// Whether the unit's start conditions held on its last start:
+    /// `Some(false)` when the service manager skipped the start on an unmet
+    /// condition (systemd `ConditionResult=no`; the start verb still exits 0),
+    /// `Some(true)` when they held, `None` when this backend cannot tell.
+    /// Defaulted to `None`, which a caller reads as "conditions held".
+    async fn condition_result(&self, _unit: &str) -> Option<bool> {
+        None
+    }
+
     /// Mask the unit so a stray `start` cannot bring it up (idempotent).
     async fn mask(&self, unit: &str);
 

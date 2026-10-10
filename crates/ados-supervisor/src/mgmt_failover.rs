@@ -503,35 +503,8 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Atomically write `value` as JSON to `path` (tmp → fsync → rename).
 #[cfg(target_os = "linux")]
-fn write_json_atomic<T: serde::Serialize>(
-    path: &std::path::Path,
-    value: &T,
-    mode: u32,
-) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let body = serde_json::to_vec(value).map_err(std::io::Error::other)?;
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&tmp)?;
-        f.write_all(&body)?;
-        f.sync_all()?;
-    }
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
+use ados_protocol::sidecar::write_json_atomic;
 
 #[cfg(test)]
 mod tests {

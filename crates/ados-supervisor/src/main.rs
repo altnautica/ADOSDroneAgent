@@ -181,9 +181,7 @@ async fn main() -> Result<()> {
             }
             Some(req) = role_rx.recv() => {
                 tokio::select! {
-                    outcome = supervisor.apply_role(&req.target, &req.reason) => {
-                        let _ = req.reply.send(role::role_reply(outcome));
-                    }
+                    _ = supervisor.handle_role_request(req) => {}
                     s = stop_signal(&mut sigterm, &mut sigint) => break s,
                 }
             }

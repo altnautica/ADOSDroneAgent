@@ -180,47 +180,6 @@ pub(super) async fn read_radio_topo() -> Option<topo::UsbTopo> {
     topo::resolve_usb_topo(&iface).await
 }
 
-/// Extract the FC armed flag from one state-socket snapshot, reading whichever
-/// wire form the producer emits (v1 newline JSON or v2 length-prefixed msgpack)
-/// via the shared auto-detecting state reader. `None` on a clean EOF / framing
-/// error / a snapshot with no `armed` field. Not cfg-gated so it builds + tests
-/// on every host; the socket-connect wrapper stays Linux-only.
-// The only non-test caller is `read_fc_armed`, which is Linux-only, so on other
-// hosts this is exercised solely by its unit test — allow it to be otherwise
-// unused there.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(super) async fn armed_from_state<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut R,
-) -> Option<bool> {
-    ados_protocol::state::read_state_value(reader)
-        .await
-        .ok()
-        .flatten()
-        .and_then(|v| v.get("armed").and_then(|x| x.as_bool()))
-}
-
-/// Read the FC armed state from the vehicle-state socket (the MAVLink service
-/// pushes a snapshot on connect, then a fresh one at ~10 Hz). `Some(armed)` on a
-/// fresh read; `None` when the socket is absent / unreadable / carries no armed
-/// field (an idle agent, no FC). The aggressive-hub-reset caller treats `None` as
-/// unsafe (fail-closed): never reset the shared hub unless the FC is provably
-/// disarmed, so the reset can never fire in flight.
-#[cfg(target_os = "linux")]
-pub(super) async fn read_fc_armed() -> Option<bool> {
-    const STATE_SOCK: &str = "/run/ados/state.sock";
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(1),
-        tokio::net::UnixStream::connect(STATE_SOCK),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    tokio::time::timeout(Duration::from_secs(1), armed_from_state(&mut stream))
-        .await
-        .ok()
-        .flatten()
-}
-
 /// Build the protected set: the management link AND the WFB radio AND the FC. A
 /// hub reset must disturb none of them.
 #[cfg(target_os = "linux")]
@@ -333,35 +292,6 @@ pub(super) fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(target_os = "linux")]
-pub(super) fn write_json_atomic<T: serde::Serialize>(
-    path: &std::path::Path,
-    value: &T,
-    mode: u32,
-) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let body = serde_json::to_vec(value).map_err(std::io::Error::other)?;
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&tmp)?;
-        f.write_all(&body)?;
-        f.sync_all()?;
-    }
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,31 +317,5 @@ mod tests {
             name_ancestors("2-1.4.3"),
             vec!["2-1.4".to_string(), "2-1".to_string(), "usb2".to_string()]
         );
-    }
-
-    #[tokio::test]
-    async fn armed_from_state_reads_both_wire_forms_fail_closed() {
-        use ados_protocol::state::{encode_v1, encode_v2};
-        use serde_json::json;
-
-        // v2 (length-prefixed msgpack), the form the producer actually emits.
-        let mut armed_v2 = std::io::Cursor::new(encode_v2(&json!({"armed": true})).unwrap());
-        assert_eq!(armed_from_state(&mut armed_v2).await, Some(true));
-
-        let mut disarmed_v2 =
-            std::io::Cursor::new(encode_v2(&json!({"armed": false, "mode": "GUIDED"})).unwrap());
-        assert_eq!(armed_from_state(&mut disarmed_v2).await, Some(false));
-
-        // v1 (newline JSON), the legacy form, still read via the auto-detect.
-        let mut armed_v1 = std::io::Cursor::new(encode_v1(&json!({"armed": true})).unwrap());
-        assert_eq!(armed_from_state(&mut armed_v1).await, Some(true));
-
-        // Fail-closed: an empty reader (clean EOF) yields None.
-        let mut empty = std::io::Cursor::new(Vec::<u8>::new());
-        assert_eq!(armed_from_state(&mut empty).await, None);
-
-        // Fail-closed: a snapshot with no `armed` field yields None.
-        let mut no_field = std::io::Cursor::new(encode_v2(&json!({"mode": "STABILIZE"})).unwrap());
-        assert_eq!(armed_from_state(&mut no_field).await, None);
     }
 }

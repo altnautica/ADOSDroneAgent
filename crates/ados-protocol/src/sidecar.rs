@@ -61,29 +61,61 @@ pub struct Versioned {
 }
 
 /// Replace `path` with `data` so a power cut leaves either the old file or the
-/// new one, never a truncated mix: write a sibling temp file, fsync it, rename
-/// it over `path`, then fsync the directory so the rename itself is durable.
-/// The temp file keeps the target's permissions when the target exists.
+/// new one, never a truncated mix. The replacement keeps the target's
+/// permissions when the target exists and is created 0644 otherwise. See
+/// [`write_atomic`] for the write sequence.
 pub fn write_durable(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)
+        .map(|m| m.permissions().mode() & 0o7777)
+        .unwrap_or(0o644);
+    write_atomic(path, data, mode)
+}
+
+/// Serialize `value` as JSON and write it through [`write_atomic`].
+pub fn write_json_atomic<T: Serialize + ?Sized>(
+    path: &std::path::Path,
+    value: &T,
+    mode: u32,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(value).map_err(std::io::Error::other)?;
+    write_atomic(path, &body, mode)
+}
+
+/// Atomically replace `path` with `data` at file mode `mode`.
+///
+/// Creates the parent directory, then writes a sibling temp file named
+/// `<name>.tmp-<8 random hex>` opened `create_new` with `mode` (so two
+/// concurrent writers, threads or processes, never share a temp file), sets
+/// the exact mode regardless of umask, fsyncs it, renames it over `path`, and
+/// fsyncs the directory so the rename itself survives a power cut. On any
+/// error the temp file is removed.
+pub fn write_atomic(path: &std::path::Path, data: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut suffix = [0u8; 4];
+    getrandom::fill(&mut suffix).map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-    tmp_name.push(format!(".tmp-{}", std::process::id()));
+    tmp_name.push(format!(".tmp-{}", hex::encode(suffix)));
     let tmp = parent.join(tmp_name);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(&tmp)?;
     let result = (|| {
-        let mut f = std::fs::File::create(&tmp)?;
+        f.set_permissions(std::fs::Permissions::from_mode(mode))?;
         f.write_all(data)?;
-        if let Ok(meta) = std::fs::metadata(path) {
-            f.set_permissions(meta.permissions())?;
-        }
         f.sync_all()?;
-        drop(f);
         std::fs::rename(&tmp, path)?;
         std::fs::File::open(parent)?.sync_all()
     })();
+    drop(f);
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -125,6 +157,48 @@ mod tests {
         std::fs::write(&p, b"old").unwrap();
         write_durable(&p, b"new contents").unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"new contents");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+    }
+
+    #[test]
+    fn write_atomic_sets_mode_and_creates_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("sub").join("key.bin");
+        write_atomic(&p, &[7u8; 8], 0o600).unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        // write_durable keeps the existing mode across a rewrite.
+        write_durable(&p, b"x").unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn concurrent_write_atomic_always_parses_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = std::sync::Arc::new(dir.path().join("state.json"));
+        let handles: Vec<_> = (0..8u32)
+            .map(|i| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    for j in 0..50u32 {
+                        let v =
+                            serde_json::json!({ "writer": i, "seq": j, "pad": "x".repeat(512) });
+                        write_json_atomic(&p, &v, 0o644).unwrap();
+                        let raw = std::fs::read(&*p).unwrap();
+                        let _: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
         let names: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name())
