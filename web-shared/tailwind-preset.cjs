@@ -58,6 +58,7 @@ module.exports = {
         "on-status": "hsl(var(--on-status) / <alpha-value>)",
         letterbox: "hsl(var(--letterbox) / <alpha-value>)",
         scrim: "var(--scrim)",
+        overlay: "var(--overlay-panel)",
         hud: {
           primary: "var(--hud-primary)",
           dim: "var(--hud-dim)",

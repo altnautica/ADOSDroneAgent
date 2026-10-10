@@ -104,8 +104,15 @@ function PhoneReceivers() {
   const pending = invites.data?.pending ?? [];
   return (
     <>
-      <SectionHeader>Phone receivers</SectionHeader>
-      {pending.length === 0 ? (
+      <div className="flex items-center justify-between">
+        <SectionHeader>Phone receivers</SectionHeader>
+        <StaleBadge stale={invites.stale && invites.data !== null} />
+      </div>
+      {invites.data === null && invites.error ? (
+        <EmptyNote>Could not read waiting phones: {invites.error}</EmptyNote>
+      ) : invites.data === null ? (
+        <EmptyNote>Reading waiting phones…</EmptyNote>
+      ) : pending.length === 0 ? (
         <EmptyNote>No phone is waiting for approval.</EmptyNote>
       ) : (
         pending.map((p) => (

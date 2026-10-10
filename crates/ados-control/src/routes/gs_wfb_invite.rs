@@ -11,7 +11,10 @@
 //! (`GET .../wfb/invite/{id}`), after which it is gone.
 //!
 //! The bundle carries the fleet's `rx.key` and the DERIVED hop HMAC key, never
-//! the raw shared key file. The phone receives only: it holds no transmit key.
+//! the raw shared key file. The phone is receive-only by design (it never
+//! transmits on the ground slot), but the material is not receive-only: wfb-ng's
+//! key pair also authenticates frames, so an approved phone is trusted by the
+//! fleet as fully as the ground station itself. Approve only a phone you own.
 //!
 //! Every route is ground-station only (404 `E_PROFILE_MISMATCH` elsewhere) and
 //! listed in [`crate::auth::RELAY_FORBIDDEN_PATHS`], so no relayed request can
@@ -272,6 +275,11 @@ impl InviteStore {
             .ok()
             .and_then(|b| b.try_into().ok())
             .ok_or(InviteError::PhonePubInvalid)?;
+        // A low-order key yields an all-zero shared secret, which would make the
+        // sealed bundle readable by anyone. Refuse it before it is stored.
+        if seal_to_peer(&phone_pub, b"", b"").is_err() {
+            return Err(InviteError::PhonePubInvalid);
+        }
         let pending = self
             .invites
             .iter()
@@ -792,6 +800,18 @@ mod tests {
         let mut store = InviteStore::new();
         let resp = create(&mut store, &[1u8; 31], "x", T0);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // Low-order points (u = 0, u = 1) are refused before anything is stored.
+        let mut one = [0u8; 32];
+        one[0] = 1;
+        for low_order in [[0u8; 32], one] {
+            let resp = create(&mut store, &low_order, "lo", T0);
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body_json(resp).await["detail"]["error"]["code"],
+                "E_PHONE_PUB_INVALID"
+            );
+        }
+        assert!(store.invites.is_empty());
         let req = CreateInviteRequest {
             phone_pub_b64: b64(&[9u8; 32]),
             label: None,

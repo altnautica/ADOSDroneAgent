@@ -94,7 +94,7 @@ export interface AlertInputs {
   video: VideoFeedState | null;
   /** The arm state at the last live sample (the snapshot drops `armed` once
    *  the link goes quiet). Defaults to the snapshot's own value. */
-  armedAtLastLive?: boolean;
+  armedAtLastLive?: boolean | null;
 }
 
 const LEVEL_RANK: Record<AlertLevel, number> = { critical: 0, warning: 1, advisory: 2 };

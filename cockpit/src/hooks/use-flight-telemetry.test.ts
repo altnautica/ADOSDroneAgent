@@ -14,6 +14,7 @@ import {
   hasUsableAttitude,
   isLive,
   isRelayed,
+  nextArmedSince,
   nextHome,
   vehicleStamp,
 } from "@/hooks/use-flight-telemetry";
@@ -139,5 +140,22 @@ describe("nextHome", () => {
   it("never invents a home without a position fix", () => {
     expect(nextHome(null, false, { armed: true })).toBeNull();
     expect(nextHome(null, false, at(0, 0, true))).toBeNull();
+  });
+});
+
+describe("nextArmedSince", () => {
+  it("starts the flight timer only on an observed disarmed-to-armed edge", () => {
+    expect(nextArmedSince(false, null, true, true, 1000)).toBe(1000);
+    expect(nextArmedSince(true, 1000, true, true, 5000)).toBe(1000);
+  });
+
+  it("leaves the start unknown when the vehicle was already armed at first sight", () => {
+    expect(nextArmedSince(null, null, true, true, 1000)).toBeNull();
+    expect(nextArmedSince(true, null, true, true, 2000)).toBeNull();
+  });
+
+  it("clears on disarm and holds through a non-live sample", () => {
+    expect(nextArmedSince(true, 1000, true, false, 3000)).toBeNull();
+    expect(nextArmedSince(true, 1000, false, false, 3000)).toBe(1000);
   });
 });

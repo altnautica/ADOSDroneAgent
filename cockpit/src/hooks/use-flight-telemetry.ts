@@ -63,6 +63,25 @@ export function nextHome(
   return prevHome;
 }
 
+/**
+ * When the current flight started, for the band's flight timer. Set only on an
+ * observed disarmed→armed edge: a vehicle already armed when the cockpit
+ * opened has an unknown start, so the timer shows a dash rather than the time
+ * since page load. `prevArmed` is the arm state at the last live sample, null
+ * until one has been seen.
+ */
+export function nextArmedSince(
+  prevArmed: boolean | null,
+  prevSince: number | null,
+  live: boolean,
+  armed: boolean,
+  nowMs: number,
+): number | null {
+  if (!live) return prevSince;
+  if (!armed) return null;
+  return prevArmed === false ? nowMs : prevSince;
+}
+
 export function useFlightTelemetryPoll(): void {
   useEffect(() => {
     let lastStamp: string | null = null;
@@ -93,13 +112,13 @@ export function useFlightTelemetryPoll(): void {
             home,
             lastLiveAt: live ? nowMs : prev.lastLiveAt,
             armedAtLastLive: live ? telemetry.armed === true : prev.armedAtLastLive,
-            armedSince: !live
-              ? prev.armedSince
-              : telemetry.armed !== true
-                ? null
-                : prev.armedAtLastLive || prev.armedSince !== null
-                  ? prev.armedSince
-                  : Date.now(),
+            armedSince: nextArmedSince(
+              prev.armedAtLastLive,
+              prev.armedSince,
+              live,
+              telemetry.armed === true,
+              Date.now(),
+            ),
           });
         } catch {
           if (signal.aborted) return;

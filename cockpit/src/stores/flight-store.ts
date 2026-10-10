@@ -28,8 +28,9 @@ export interface FlightState {
    *  when the vehicle has not been live this session. */
   lastLiveAt: number | null;
   /** The arm state at the last live sample. The agent withholds `armed` once
-   *  heartbeats stop, so link-loss rules read this instead. */
-  armedAtLastLive: boolean;
+   *  heartbeats stop, so link-loss rules read this instead. Null until a live
+   *  sample has been seen. */
+  armedAtLastLive: boolean | null;
   /** `Date.now()` of the disarmed→armed edge, null while disarmed or before
    *  an arming has been seen (the flight timer shows a dash then). */
   armedSince: number | null;
@@ -42,7 +43,7 @@ export const INITIAL_FLIGHT_STATE: FlightState = {
   relayed: false,
   home: null,
   lastLiveAt: null,
-  armedAtLastLive: false,
+  armedAtLastLive: null,
   armedSince: null,
 };
 
