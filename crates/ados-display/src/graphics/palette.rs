@@ -1,8 +1,9 @@
 //! Color palette for the LCD dashboards.
 //!
 //! Two named sets — dark (default) and light — name every color a page can
-//! paint. The values match the on-device theme one-for-one so a render is
-//! pixel-identical regardless of which side produces it. Colors are stored as
+//! paint. The values come from the generated brand tokens
+//! (`palette_generated.rs`: brand-dark and brand-light roles), so the panels
+//! share one palette with every other ADOS surface. Colors are stored as
 //! `embedded_graphics` `Rgb888` so primitives can hand them straight to the
 //! draw target without a per-call conversion.
 //!
@@ -13,6 +14,16 @@
 //! operator reads "no data" rather than a misleading status color.
 
 use embedded_graphics::pixelcolor::Rgb888;
+
+#[path = "palette_generated.rs"]
+mod palette_generated;
+
+use palette_generated as tokens;
+
+/// A generated `(r, g, b)` token as an `Rgb888`.
+const fn rgb(c: (u8, u8, u8)) -> Rgb888 {
+    Rgb888::new(c.0, c.1, c.2)
+}
 
 /// Which theme a palette represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,42 +60,42 @@ pub enum ThresholdDirection {
     LowerIsBetter,
 }
 
-/// The dark theme — a true-black ground with near-white primary text. This is
-/// the default; a fresh rig with an unreadable or absent theme config falls
-/// back here.
+/// The dark theme (brand-dark) — a navy ground with near-white primary text.
+/// This is the default; a fresh rig with an unreadable or absent theme config
+/// falls back here.
 pub const DARK: Palette = Palette {
     name: ThemeName::Dark,
-    bg_primary: Rgb888::new(0x00, 0x00, 0x00),
-    bg_secondary: Rgb888::new(0x0A, 0x0A, 0x0A),
-    bg_tertiary: Rgb888::new(0x14, 0x14, 0x14),
-    text_primary: Rgb888::new(0xFA, 0xFA, 0xFA),
-    text_secondary: Rgb888::new(0xA0, 0xA0, 0xA0),
-    text_tertiary: Rgb888::new(0x66, 0x66, 0x66),
-    accent_primary: Rgb888::new(0x3A, 0x82, 0xFF),
-    accent_secondary: Rgb888::new(0xDF, 0xF1, 0x40),
-    border_default: Rgb888::new(0x1A, 0x1A, 0x1A),
-    border_strong: Rgb888::new(0x2A, 0x2A, 0x2A),
-    status_success: Rgb888::new(0x22, 0xC5, 0x5E),
-    status_warning: Rgb888::new(0xF5, 0x9E, 0x0B),
-    status_error: Rgb888::new(0xEF, 0x44, 0x44),
+    bg_primary: rgb(tokens::BRAND_DARK_BG_CANVAS),
+    bg_secondary: rgb(tokens::BRAND_DARK_BG_SURFACE),
+    bg_tertiary: rgb(tokens::BRAND_DARK_BG_HOVER),
+    text_primary: rgb(tokens::BRAND_DARK_FG_PRIMARY),
+    text_secondary: rgb(tokens::BRAND_DARK_FG_SECONDARY),
+    text_tertiary: rgb(tokens::BRAND_DARK_FG_TERTIARY),
+    accent_primary: rgb(tokens::BRAND_DARK_ACCENT_PRIMARY),
+    accent_secondary: rgb(tokens::BRAND_DARK_ACCENT_SECONDARY),
+    border_default: rgb(tokens::BRAND_DARK_BORDER_DEFAULT),
+    border_strong: rgb(tokens::BRAND_DARK_BORDER_STRONG),
+    status_success: rgb(tokens::BRAND_DARK_STATUS_SUCCESS),
+    status_warning: rgb(tokens::BRAND_DARK_STATUS_WARNING),
+    status_error: rgb(tokens::BRAND_DARK_STATUS_ERROR),
 };
 
-/// The light theme — a white ground with near-black primary text.
+/// The light theme (brand-light) — a white ground with near-black primary text.
 pub const LIGHT: Palette = Palette {
     name: ThemeName::Light,
-    bg_primary: Rgb888::new(0xFF, 0xFF, 0xFF),
-    bg_secondary: Rgb888::new(0xF8, 0xF8, 0xF8),
-    bg_tertiary: Rgb888::new(0xEC, 0xEC, 0xEC),
-    text_primary: Rgb888::new(0x0A, 0x0A, 0x0A),
-    text_secondary: Rgb888::new(0x4A, 0x4A, 0x4A),
-    text_tertiary: Rgb888::new(0x8A, 0x8A, 0x8A),
-    accent_primary: Rgb888::new(0x14, 0x5A, 0xE0),
-    accent_secondary: Rgb888::new(0xB8, 0xCC, 0x10),
-    border_default: Rgb888::new(0xE2, 0xE2, 0xE2),
-    border_strong: Rgb888::new(0xC9, 0xC9, 0xC9),
-    status_success: Rgb888::new(0x16, 0xA3, 0x4A),
-    status_warning: Rgb888::new(0xC2, 0x6F, 0x00),
-    status_error: Rgb888::new(0xC4, 0x1E, 0x3A),
+    bg_primary: rgb(tokens::BRAND_LIGHT_BG_CANVAS),
+    bg_secondary: rgb(tokens::BRAND_LIGHT_BG_SURFACE),
+    bg_tertiary: rgb(tokens::BRAND_LIGHT_BG_HOVER),
+    text_primary: rgb(tokens::BRAND_LIGHT_FG_PRIMARY),
+    text_secondary: rgb(tokens::BRAND_LIGHT_FG_SECONDARY),
+    text_tertiary: rgb(tokens::BRAND_LIGHT_FG_TERTIARY),
+    accent_primary: rgb(tokens::BRAND_LIGHT_ACCENT_PRIMARY),
+    accent_secondary: rgb(tokens::BRAND_LIGHT_ACCENT_SECONDARY),
+    border_default: rgb(tokens::BRAND_LIGHT_BORDER_DEFAULT),
+    border_strong: rgb(tokens::BRAND_LIGHT_BORDER_STRONG),
+    status_success: rgb(tokens::BRAND_LIGHT_STATUS_SUCCESS),
+    status_warning: rgb(tokens::BRAND_LIGHT_STATUS_WARNING),
+    status_error: rgb(tokens::BRAND_LIGHT_STATUS_ERROR),
 };
 
 /// Return the palette for a theme name string. An unknown name resolves to
@@ -153,9 +164,10 @@ mod tests {
     }
 
     #[test]
-    fn dark_primary_text_is_near_white() {
-        assert_eq!(DARK.text_primary, Rgb888::new(0xFA, 0xFA, 0xFA));
-        assert_eq!(DARK.bg_primary, Rgb888::new(0x00, 0x00, 0x00));
+    fn dark_is_the_brand_navy_ground() {
+        assert_eq!(DARK.text_primary, Rgb888::new(0xF8, 0xFA, 0xFC));
+        assert_eq!(DARK.bg_primary, Rgb888::new(0x0A, 0x0A, 0x0F));
+        assert_eq!(DARK.accent_primary, Rgb888::new(0x3A, 0x82, 0xFF));
     }
 
     #[test]

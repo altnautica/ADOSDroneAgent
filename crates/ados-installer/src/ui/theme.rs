@@ -19,35 +19,16 @@
 /// An RGB color for the truecolor tier.
 type Rgb = (u8, u8, u8);
 
-// --- palette ---------------------------------------------------------------
+// --- palette (generated; shared with the ados-tui theme) --------------------
 
-/// Charcoal screen background.
-const CHARCOAL: Rgb = (31, 31, 31);
-const CHARCOAL_256: u8 = 234;
-/// Amber accent (selected / acted-on).
-const AMBER: Rgb = (235, 193, 87);
-const AMBER_256: u8 = 179;
-/// Lighter and deeper amber for the wordmark's vertical gradient.
-const AMBER_LIGHT: Rgb = (242, 214, 138);
-const AMBER_DEEP: Rgb = (201, 155, 62);
-/// Near-white heading text.
-const HEADING: Rgb = (233, 233, 233);
-const HEADING_256: u8 = 254;
-/// Muted gray body / description text.
-const MUTED: Rgb = (138, 138, 138);
-const MUTED_256: u8 = 245;
-/// Destructive salmon red.
-const DANGER: Rgb = (224, 108, 90);
-const DANGER_256: u8 = 209;
-/// Success green.
-const SUCCESS: Rgb = (121, 200, 121);
-const SUCCESS_256: u8 = 114;
-/// Warning yellow.
-const WARNING: Rgb = (227, 199, 102);
-const WARNING_256: u8 = 179;
-/// Dark text drawn on top of the amber selection bar.
-const ON_AMBER: Rgb = (26, 26, 26);
-const ON_AMBER_256: u8 = 235;
+#[path = "palette_generated.rs"]
+mod palette_generated;
+
+use palette_generated::{
+    AMBER, AMBER_256, AMBER_DEEP, AMBER_LIGHT, CHARCOAL, CHARCOAL_256, DANGER, DANGER_256, HEADING,
+    HEADING_256, MUTED, MUTED_256, ON_AMBER, ON_AMBER_256, SUCCESS, SUCCESS_256, WARNING,
+    WARNING_256,
+};
 
 /// The braille spinner frames (the modern gold standard).
 const SPIN_UNICODE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

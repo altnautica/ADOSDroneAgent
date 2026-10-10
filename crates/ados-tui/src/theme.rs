@@ -29,24 +29,15 @@ enum Tier {
     None,
 }
 
-// --- palette (matches the installer's amber-on-charcoal values) -------------
+// --- palette (generated; shared with the installer's amber-on-charcoal theme) -
 
-/// Amber accent (selected / acted-on / the word-mark).
-const AMBER: (u8, u8, u8) = (235, 193, 87);
-/// Muted grey body / label text.
-const MUTED: (u8, u8, u8) = (138, 138, 138);
-/// Near-white heading / value text.
-const HEADING: (u8, u8, u8) = (233, 233, 233);
-/// Charcoal screen background.
-const CHARCOAL: (u8, u8, u8) = (31, 31, 31);
-/// Dark text drawn on top of an amber chip / gauge.
-const ON_AMBER: (u8, u8, u8) = (26, 26, 26);
-/// Success green.
-const SUCCESS: (u8, u8, u8) = (121, 200, 121);
-/// Warning yellow.
-const WARNING: (u8, u8, u8) = (227, 199, 102);
-/// Destructive salmon red.
-const DANGER: (u8, u8, u8) = (224, 108, 90);
+#[path = "palette_generated.rs"]
+mod palette_generated;
+
+use palette_generated::{
+    AMBER, AMBER_256, CHARCOAL, CHARCOAL_256, DANGER, DANGER_256, HEADING, HEADING_256, MUTED,
+    MUTED_256, ON_AMBER, ON_AMBER_256, SUCCESS, SUCCESS_256, WARNING, WARNING_256,
+};
 
 static TIER: OnceLock<Tier> = OnceLock::new();
 
@@ -91,31 +82,31 @@ fn color_for(tier: Tier, rgb: (u8, u8, u8), idx: u8, basic: Color) -> Color {
 
 /// The amber accent.
 pub fn accent() -> Color {
-    color_for(tier(), AMBER, 179, Color::Yellow)
+    color_for(tier(), AMBER, AMBER_256, Color::Yellow)
 }
 /// Muted grey for labels, dim text, and inactive dots.
 pub fn muted() -> Color {
-    color_for(tier(), MUTED, 245, Color::DarkGray)
+    color_for(tier(), MUTED, MUTED_256, Color::DarkGray)
 }
 /// Near-white for headings and bright values.
 pub fn heading() -> Color {
-    color_for(tier(), HEADING, 254, Color::White)
+    color_for(tier(), HEADING, HEADING_256, Color::White)
 }
 /// Dark text on an amber chip / gauge.
 pub fn on_amber() -> Color {
-    color_for(tier(), ON_AMBER, 235, Color::Black)
+    color_for(tier(), ON_AMBER, ON_AMBER_256, Color::Black)
 }
 /// Success green.
 pub fn success() -> Color {
-    color_for(tier(), SUCCESS, 114, Color::Green)
+    color_for(tier(), SUCCESS, SUCCESS_256, Color::Green)
 }
 /// Warning yellow.
 pub fn warning() -> Color {
-    color_for(tier(), WARNING, 179, Color::Yellow)
+    color_for(tier(), WARNING, WARNING_256, Color::Yellow)
 }
 /// Destructive salmon red.
 pub fn danger() -> Color {
-    color_for(tier(), DANGER, 209, Color::Red)
+    color_for(tier(), DANGER, DANGER_256, Color::Red)
 }
 
 /// The charcoal screen background, painted once per frame — but only on tiers
@@ -124,7 +115,7 @@ pub fn danger() -> Color {
 pub fn background() -> Option<Color> {
     match tier() {
         Tier::Truecolor => Some(Color::Rgb(CHARCOAL.0, CHARCOAL.1, CHARCOAL.2)),
-        Tier::Ansi256 => Some(Color::Indexed(234)),
+        Tier::Ansi256 => Some(Color::Indexed(CHARCOAL_256)),
         _ => None,
     }
 }
