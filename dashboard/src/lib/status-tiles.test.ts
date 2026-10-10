@@ -3,10 +3,10 @@ import { describe, expect, it } from "vitest";
 import { buildTiles, type TileInputs } from "./status-tiles";
 import type { DashboardSnapshot, SetupStatus } from "./types";
 
-function snapshot(fcConnected: boolean, pairingCode = ""): DashboardSnapshot {
+function snapshot(fcConnected: boolean, pairingCode = "", mode = "cloud"): DashboardSnapshot {
   return {
     fc: { connected: fcConnected },
-    cloud: { mode: "cloud", drone_id: "d1", pairing_code: pairingCode },
+    cloud: { mode, drone_id: "d1", pairing_code: pairingCode },
   } as unknown as DashboardSnapshot;
 }
 
@@ -56,6 +56,24 @@ describe("PAIR tile", () => {
     const t = tile({ snapshot: snapshot(false), status: finalized(true) }, "PAIR");
     expect(t.value).toBe("—");
     expect(t.severity).toBe("idle");
+  });
+
+  it("reads paired for a LAN-paired node in local mode", () => {
+    const t = tile(
+      { snapshot: snapshot(false, "", "local"), pairing: { paired: true, pairing_code: null } },
+      "PAIR",
+    );
+    expect(t.value).toBe("paired");
+    expect(t.severity).toBe("ok");
+  });
+
+  it("reads n/a for an unpaired node in local mode with no code", () => {
+    const t = tile(
+      { snapshot: snapshot(false, "", "local"), pairing: { paired: false, pairing_code: null } },
+      "PAIR",
+    );
+    expect(t.value).toBe("n/a");
+    expect(t.sub).toBe("local mode");
   });
 });
 

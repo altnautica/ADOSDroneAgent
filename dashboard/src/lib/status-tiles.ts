@@ -80,12 +80,13 @@ function hwTile(status: SetupStatus | undefined): Tile {
 }
 
 function pairTile(cloudMode: string | null, code: string, pairing: TileInputs["pairing"]): Tile {
-  // In local mode there is nothing to pair with.
-  if (cloudMode === "local") {
-    return { label: "PAIR", icon: KeyRound, value: "n/a", sub: "local mode", severity: "idle" };
-  }
+  // LAN pairing works in every cloud mode, so a paired node reads paired first.
   if (pairing?.paired === true) {
     return { label: "PAIR", icon: KeyRound, value: "paired", sub: "linked", severity: "ok" };
+  }
+  // In local mode with no pairing code there is nothing to show.
+  if (cloudMode === "local" && !code) {
+    return { label: "PAIR", icon: KeyRound, value: "n/a", sub: "local mode", severity: "idle" };
   }
   if (pairing?.paired === false) {
     return code
