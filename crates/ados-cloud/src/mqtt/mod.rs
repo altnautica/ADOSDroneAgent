@@ -35,7 +35,9 @@ pub mod msp_relay;
 pub mod transport;
 pub mod webrtc_signaling;
 
-pub use mavlink_relay::{BoundedPublishQueue, MavlinkMqttRelay, INFLIGHT_LIMIT, QUEUE_MAXSIZE};
+pub use mavlink_relay::{
+    BoundedPublishQueue, MavlinkMqttRelay, BATCH_MAX_BYTES, BATCH_WINDOW, QUEUE_MAXSIZE,
+};
 pub use msp_relay::MspMqttRelay;
 pub use transport::{
     BrokerWire, IncomingMessage, MqttQos, MqttTransport, RumqttcTransport, TransportConfig,

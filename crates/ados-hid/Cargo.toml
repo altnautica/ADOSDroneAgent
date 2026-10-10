@@ -49,3 +49,5 @@ evdev = "0.12"
 
 [dev-dependencies]
 tempfile = "3"
+# The paused-clock harness for the PIC sidecar watchdog test.
+tokio = { workspace = true, features = ["test-util"] }

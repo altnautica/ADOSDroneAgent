@@ -56,8 +56,9 @@ pub const LOGD_QUERY_SOCK: &str = "/run/ados/logd-query.sock";
 pub const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The per-window upload cap. One upload is bounded so a constrained uplink is
-/// never flooded; a larger backlog is sent as several consecutive windows.
-pub const MAX_WINDOW_BYTES: usize = 32 * 1024 * 1024;
+/// never flooded, and the response buffer stays small on a 1 GB board; a larger
+/// backlog is sent as several consecutive windows.
+pub const MAX_WINDOW_BYTES: usize = 8 * 1024 * 1024;
 
 /// Slack over [`MAX_WINDOW_BYTES`] for the response framing (status line,
 /// headers, and chunk-size lines) when bounding the socket read. The export body
@@ -674,68 +675,64 @@ async fn uds_request(
         }
         raw.extend_from_slice(&buf[..n]);
     }
-    parse_http_response(&raw)
+    parse_http_response(raw)
 }
 
-/// Split a raw HTTP/1.1 response into the status code and the decoded body bytes.
-/// De-chunks a `Transfer-Encoding: chunked` body; otherwise returns the body
-/// after the header terminator as-is.
-fn parse_http_response(raw: &[u8]) -> std::io::Result<(u16, Vec<u8>)> {
+/// Split a raw HTTP/1.1 response into the status code and the decoded body
+/// bytes, reusing `raw`'s allocation: the header is drained off the front and a
+/// `Transfer-Encoding: chunked` body is de-chunked in place, so a window is
+/// never held twice.
+fn parse_http_response(mut raw: Vec<u8>) -> std::io::Result<(u16, Vec<u8>)> {
     let sep = b"\r\n\r\n";
     let split = raw
         .windows(sep.len())
         .position(|w| w == sep)
         .ok_or_else(|| std::io::Error::other("malformed http response (no header terminator)"))?;
-    let head = &raw[..split];
-    let body = &raw[split + sep.len()..];
-
-    let head_str = String::from_utf8_lossy(head);
-    let status = head_str
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| std::io::Error::other("malformed http status line"))?;
-
-    let chunked = head_str
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked");
-    let body = if chunked {
-        de_chunk(body)
-    } else {
-        body.to_vec()
+    let (status, chunked) = {
+        let head_str = String::from_utf8_lossy(&raw[..split]);
+        let status = head_str
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .ok_or_else(|| std::io::Error::other("malformed http status line"))?;
+        let chunked = head_str
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked");
+        (status, chunked)
     };
-    Ok((status, body))
+    raw.drain(..split + sep.len());
+    if chunked {
+        de_chunk_in_place(&mut raw);
+    }
+    Ok((status, raw))
 }
 
-/// De-chunk a `Transfer-Encoding: chunked` body byte-safely:
-/// `<hexlen>\r\n<data>\r\n` repeated until a zero-length chunk.
-fn de_chunk(body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut rest = body;
+/// De-chunk a `Transfer-Encoding: chunked` body byte-safely and in place:
+/// `<hexlen>\r\n<data>\r\n` repeated until a zero-length chunk. The decoded
+/// data is compacted toward the front of `body`, which is then truncated.
+fn de_chunk_in_place(body: &mut Vec<u8>) {
+    let mut read = 0;
+    let mut write = 0;
     // The chunk-size line ends at the first CRLF; an absent CRLF ends the body.
-    while let Some(crlf) = rest.windows(2).position(|w| w == b"\r\n") {
-        let len_line = &rest[..crlf];
+    while let Some(crlf) = body[read..].windows(2).position(|w| w == b"\r\n") {
+        let len_line = &body[read..read + crlf];
         let len = usize::from_str_radix(String::from_utf8_lossy(len_line).trim(), 16).unwrap_or(0);
         if len == 0 {
             break;
         }
-        let data_start = crlf + 2;
-        if rest.len() < data_start + len {
-            // Truncated; take what is present and stop.
-            out.extend_from_slice(&rest[data_start..]);
+        let data_start = read + crlf + 2;
+        // A truncated final chunk keeps what is present and stops.
+        let data_end = (data_start + len).min(body.len());
+        body.copy_within(data_start..data_end, write);
+        write += data_end - data_start;
+        if data_end < data_start + len {
             break;
         }
-        out.extend_from_slice(&rest[data_start..data_start + len]);
         // Skip the trailing CRLF after the chunk data.
-        let next = data_start + len;
-        rest = if rest.len() >= next + 2 {
-            &rest[next + 2..]
-        } else {
-            &[]
-        };
+        read = (data_end + 2).min(body.len());
     }
-    out
+    body.truncate(write);
 }
 
 /// Write the result file atomically (write a temp sibling, then rename) so a
@@ -1033,7 +1030,7 @@ mod tests {
     #[test]
     fn parse_http_response_reads_content_length_body() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
-        let (status, body) = parse_http_response(raw).unwrap();
+        let (status, body) = parse_http_response(raw.to_vec()).unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, b"hello");
     }
@@ -1043,7 +1040,7 @@ mod tests {
         // Two chunks ("ab" then "cde") then the terminator, binary-safe.
         let raw =
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nab\r\n3\r\ncde\r\n0\r\n\r\n";
-        let (status, body) = parse_http_response(raw).unwrap();
+        let (status, body) = parse_http_response(raw.to_vec()).unwrap();
         assert_eq!(status, 200);
         assert_eq!(body, b"abcde");
     }
@@ -1051,9 +1048,40 @@ mod tests {
     #[test]
     fn parse_http_response_surfaces_non_2xx_status() {
         let raw = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 2\r\n\r\nno";
-        let (status, body) = parse_http_response(raw).unwrap();
+        let (status, body) = parse_http_response(raw.to_vec()).unwrap();
         assert_eq!(status, 403);
         assert_eq!(body, b"no");
+    }
+
+    #[test]
+    fn log_push_body_no_realloc() {
+        // The parsed body reuses the response buffer: same allocation, same
+        // capacity, for both a plain and a chunked body.
+        let mut raw = b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n".to_vec();
+        raw.extend_from_slice(&[7u8; 4096]);
+        let (ptr, cap) = (raw.as_ptr(), raw.capacity());
+        let (_, body) = parse_http_response(raw).unwrap();
+        assert_eq!(body.len(), 4096);
+        assert_eq!((body.as_ptr(), body.capacity()), (ptr, cap));
+
+        let mut raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        for _ in 0..4 {
+            raw.extend_from_slice(b"400\r\n");
+            raw.extend_from_slice(&[9u8; 0x400]);
+            raw.extend_from_slice(b"\r\n");
+        }
+        raw.extend_from_slice(b"0\r\n\r\n");
+        let (ptr, cap) = (raw.as_ptr(), raw.capacity());
+        let (_, body) = parse_http_response(raw).unwrap();
+        assert_eq!(body, vec![9u8; 4 * 0x400]);
+        assert_eq!((body.as_ptr(), body.capacity()), (ptr, cap));
+    }
+
+    #[test]
+    fn a_truncated_chunk_keeps_what_arrived() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nab";
+        let (_, body) = parse_http_response(raw.to_vec()).unwrap();
+        assert_eq!(body, b"ab");
     }
 
     // ── jsonl.zst row count (the real X-ADOS-Row-Count source) ──────────────
@@ -1170,7 +1198,7 @@ mod tests {
     /// A window that fits is uploaded once, unsplit.
     #[tokio::test]
     async fn a_window_at_the_cap_is_not_split() {
-        let mut s = sink((0..32).collect());
+        let mut s = sink((0..8).collect());
         push_kind_windows(&mut s, Some(0), 100).await.unwrap();
         assert_eq!(s.uploads, vec![(Some(0), 100, MAX_WINDOW_BYTES)]);
     }

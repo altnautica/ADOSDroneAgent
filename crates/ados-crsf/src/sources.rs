@@ -534,4 +534,48 @@ mod tests {
         assert!(HID_LIVENESS_INTERVAL < HID_STALE_AFTER);
         assert_eq!(HID_STALE_AFTER, HID_LIVENESS_INTERVAL * 3);
     }
+
+    #[test]
+    fn hybrid_unclaimed_injection_survives_30s_without_ops() {
+        use ados_hid::pic::{PicArbiter, WATCHDOG_INTERVAL_SECONDS};
+        use std::time::SystemTime;
+
+        // An idle arbiter whose daemon refreshes the sidecar on every watchdog
+        // tick, and an injector refreshing its set inside the TTL. No PIC op
+        // happens in the whole window.
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("pic-state.json");
+        let arbiter = PicArbiter::new();
+        let mut merge = SourceMerge::new(ChannelSourceMode::Hybrid);
+        let values = [CHANNEL_MID; CHANNEL_COUNT];
+        let start = t0();
+        let wall0 = SystemTime::now();
+        let tick = Duration::from_secs_f64(WATCHDOG_INTERVAL_SECONDS);
+        let mut next_watchdog = Duration::ZERO;
+
+        for ms in (0..=30_000u64).step_by(250) {
+            let elapsed = Duration::from_millis(ms);
+            let now = start + elapsed;
+            let wall = wall0 + elapsed;
+            if elapsed >= next_watchdog {
+                ados_hid::pic_sidecar::write_snapshot(&sidecar, &arbiter.get_state()).unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(&sidecar)
+                    .unwrap()
+                    .set_modified(wall)
+                    .unwrap();
+                next_watchdog += tick;
+            }
+            merge
+                .inject_all(values, DEFAULT_INJECT_TTL, now, None)
+                .unwrap();
+            merge.set_pic(read_pic_view(&sidecar, wall));
+            assert_eq!(
+                merge.current(now),
+                Some((values, ChannelSource::Inject)),
+                "lane went silent at {ms} ms"
+            );
+        }
+    }
 }

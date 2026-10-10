@@ -44,7 +44,9 @@ pub mod loops;
 pub mod mqtt;
 pub mod pairing;
 pub mod plugin_publish;
+pub mod plugin_revocations;
 pub mod plugin_update;
+pub mod relay_lifecycle;
 pub mod tls;
 
 pub use config::CloudConfig;

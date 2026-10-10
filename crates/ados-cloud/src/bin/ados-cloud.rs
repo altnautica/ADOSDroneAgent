@@ -12,6 +12,7 @@
 //! `/etc/ados/pairing.json`) and the effective convex URL (empty when
 //! `server.mode == "local"`, which keeps a LAN-only agent off the cloud relay).
 
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +29,7 @@ use ados_cloud::config::CloudConfig;
 use ados_cloud::ground_station::{bridge as gs_bridge, CloudRelayBridge};
 use ados_cloud::loops::{aux_status, beacon, command_poll, enrichment, heartbeat};
 use ados_cloud::mqtt::{run_webrtc_signaling, MavlinkMqttRelay, MspMqttRelay};
-use ados_cloud::{dispatch, pairing::PairingState, plugin_publish, plugin_update};
+use ados_cloud::{dispatch, pairing::PairingState, plugin_publish, plugin_update, relay_lifecycle};
 use ados_plugin_host::download::DownloadSource;
 
 /// The shared, single-instance plugin supervisor handle. Its lifecycle methods
@@ -133,9 +134,7 @@ async fn main() -> Result<()> {
         // `supported_boards` gate nor the `min_tier` floor, so a plugin refused
         // over LAN installed cleanly when pushed through the cloud command
         // queue and then crash-looped on hardware it was never built for.
-        let (board_name, board_tier, ..) = board_base();
-        let board_id = (board_name != "unknown").then_some(board_name);
-        let tier = (1..=4).contains(&board_tier).then_some(board_tier as u8);
+        let (board_id, tier) = PluginSupervisor::board_identity(Path::new(BOARD_SIDECAR));
         let mut sup =
             PluginSupervisor::production(Paths::from_env(), board_id, env!("CARGO_PKG_VERSION"))
                 .with_profile(ados_config::node_profile())
@@ -231,6 +230,15 @@ async fn main() -> Result<()> {
             supervisor.clone(),
             shutdown_rx.clone(),
         ),
+        // ── Plugin revocation list ─────────────────────────────
+        // Daily, alongside the update cycle: fetch the registry's revocation
+        // list and merge it add-only into the local one the plugin host
+        // enforces. A failure is logged and retried at the next cycle.
+        tokio::spawn(ados_cloud::plugin_revocations::run_daily_loop(
+            convex_url.clone(),
+            std::path::PathBuf::from(ados_cloud::plugin_revocations::LOCAL_REVOCATIONS),
+            shutdown_rx.clone(),
+        )),
         // ── Plugin cloud publish ───────────────────────────────
         // Serve the root-only cloud-publish socket the plugin host forwards
         // gated `cloud.publish` / `cloud.records.put` calls to: stream messages
@@ -303,12 +311,25 @@ fn spawn_plugin_auto_update(
         notices,
         shutdown.clone(),
     ));
-    let (board_name, ..) = board_base();
-    let board = (board_name != "unknown").then_some(board_name);
+    let (board, _tier) = PluginSupervisor::board_identity(Path::new(BOARD_SIDECAR));
+    // Unattended updates stop and restart plugin services, so they wait while
+    // the vehicle is (or cannot be shown not to be) armed. Only a node that
+    // carries or links a vehicle reads the state socket.
+    let profile = ados_config::node_profile();
+    let vehicle_profile = matches!(
+        profile.as_str(),
+        "drone" | "ground_station" | "ground-station"
+    );
+    let probe: Arc<dyn ados_protocol::armed::ArmedProbe> =
+        ados_protocol::armed::StateSocketProbe::spawn(
+            std::path::PathBuf::from(gs_bridge::STATE_SOCK),
+            vehicle_profile,
+        );
     tokio::spawn(ados_plugin_host::auto_update::run_daily_loop(
         supervisor,
         Arc::new(source),
         board,
+        probe,
         shutdown,
     ))
 }
@@ -916,33 +937,31 @@ fn dispatch_plugin_blocking(
 /// Spawn the drone-side relay supervisor: while paired and a broker is
 /// configured for this posture, keep the MAVLink relay, the MSP byte plane and
 /// the WebRTC signaling lane connected over MQTT; on exit, restart them after a
-/// short fixed delay. The relays own the bounded-queue + in-flight gate on the
-/// hot publish path.
+/// short fixed delay. Each run stops when the pairing key changes or is
+/// removed, so an unpair stops the relay and a re-pair dials with the new key.
 fn spawn_drone_relay(
     config: Arc<CloudConfig>,
     link: watch::Sender<Option<Arc<AtomicBool>>>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            if *shutdown.borrow() {
-                break;
-            }
-            let pairing = PairingState::load();
-            // Unpaired, or a posture with no broker: nothing to relay; the loop
-            // polls for a pair transition.
-            if let Some(transport) = pairing
-                .api_key()
-                .and_then(|key| config.relay_transport(None, key))
-            {
-                let device_id = config.agent.device_id.clone();
+    let link = Arc::new(link);
+    tokio::spawn(relay_lifecycle::supervise(
+        shutdown,
+        current_pairing_key,
+        relay_lifecycle::PAIRING_POLL_INTERVAL,
+        relay_lifecycle::RELAY_SETTLE,
+        move |key, run_shutdown| {
+            // A posture with no broker: nothing to relay.
+            let transport = config.relay_transport(None, &key)?;
+            let device_id = config.agent.device_id.clone();
+            let link = link.clone();
+            Some(async move {
                 // The MSP byte plane and the WebRTC signaling lane run alongside
                 // the MAVLink frame plane on the same broker, each on its own
-                // ClientID. They share the loop's shutdown watch and are stopped
-                // when the MAVLink relay returns so each iteration spawns a clean
-                // set.
+                // ClientID. They share the run's shutdown watch and are stopped
+                // when the MAVLink relay returns so each run spawns a clean set.
                 let msp_relay = MspMqttRelay::new(device_id.clone(), transport.clone());
-                let msp_shutdown = shutdown.clone();
+                let msp_shutdown = run_shutdown.clone();
                 let msp_task = tokio::spawn(async move {
                     if let Err(e) = msp_relay.run(gs_bridge::MSP_SOCK, msp_shutdown).await {
                         tracing::warn!(error = %e, "drone msp relay exited");
@@ -950,7 +969,7 @@ fn spawn_drone_relay(
                 });
                 let signaling_cfg = transport.clone();
                 let signaling_id = device_id.clone();
-                let signaling_shutdown = shutdown.clone();
+                let signaling_shutdown = run_shutdown.clone();
                 let signaling_task = tokio::spawn(async move {
                     // A drone has no data cap: every offer is served.
                     let video_allowed = Arc::new(AtomicBool::new(true));
@@ -968,31 +987,31 @@ fn spawn_drone_relay(
                 let relay = MavlinkMqttRelay::new(device_id, transport);
                 tracing::info!("drone mavlink relay connecting");
                 if let Err(e) = relay
-                    .run_observed(gs_bridge::MAVLINK_SOCK, shutdown.clone(), Some(&link))
+                    .run_observed(gs_bridge::MAVLINK_SOCK, run_shutdown, Some(&*link))
                     .await
                 {
                     tracing::warn!(error = %e, "drone mavlink relay exited");
                 }
-                // The MAVLink relay returned (shutdown or exit): stop the sibling
-                // lanes too so a fresh loop iteration spawns a clean set.
+                // The MAVLink relay returned (shutdown, pairing change or exit):
+                // stop the sibling lanes too.
                 msp_task.abort();
                 signaling_task.abort();
                 // The session ended with the relay; report no session.
                 let _ = link.send(None);
-            }
-            // Restart / re-poll after a short settle, unless shutting down.
-            tokio::select! {
-                _ = shutdown.changed() => { if *shutdown.borrow() { break; } }
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-            }
-        }
-    })
+            })
+        },
+    ))
+}
+
+/// The pairing key the relays authenticate with, re-read from disk.
+fn current_pairing_key() -> Option<String> {
+    PairingState::load().api_key().map(str::to_string)
 }
 
 /// Spawn the ground-station cloud relay bridge: uplink-aware MQTT supervision
 /// (explicit teardown/reconnect on every uplink change), data-cap downshift, and
-/// the 30 s relay-state republish. Runs only while paired; re-checks the pair
-/// state between bridge runs.
+/// the 30 s relay-state republish. Runs only while paired; each bridge run ends
+/// when the pairing key changes or is removed, then the pair state is re-checked.
 ///
 /// The bridge does NOT POST `/agent/status`: it publishes its relay state on
 /// `relay_state_tx` and the heartbeat loop — the node's single producer — folds
@@ -1001,7 +1020,7 @@ fn spawn_drone_relay(
 fn spawn_gs_bridge(
     config: Arc<CloudConfig>,
     relay_state_tx: watch::Sender<Option<gs_bridge::GsHeartbeat>>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // The live vehicle-state reader enriches the GS relay telemetry.
@@ -1009,30 +1028,24 @@ fn spawn_gs_bridge(
             std::path::PathBuf::from(gs_bridge::STATE_SOCK),
             shutdown.clone(),
         ));
-        loop {
-            if *shutdown.borrow() {
-                break;
-            }
-            let pairing = PairingState::load();
-            // Unpaired: idle; re-poll for a pair transition between runs.
-            if let Some(transport) = pairing
-                .api_key()
-                .and_then(|key| config.relay_transport(None, key))
-            {
+        relay_lifecycle::supervise(
+            shutdown,
+            current_pairing_key,
+            relay_lifecycle::PAIRING_POLL_INTERVAL,
+            relay_lifecycle::RELAY_SETTLE,
+            move |key, run_shutdown| {
+                let transport = config.relay_transport(None, &key)?;
                 let mut bridge = CloudRelayBridge::new(
                     config.agent.device_id.clone(),
-                    pairing.owner_id.clone(),
+                    PairingState::load().owner_id,
                     transport,
                 )
                 .with_state_source(state_reader.clone())
                 .with_relay_state_sink(relay_state_tx.clone());
-                bridge.run(shutdown.clone()).await;
-            }
-            tokio::select! {
-                _ = shutdown.changed() => { if *shutdown.borrow() { break; } }
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-            }
-        }
+                Some(async move { bridge.run(run_shutdown).await })
+            },
+        )
+        .await
     })
 }
 

@@ -93,3 +93,5 @@ tempfile = "3"
 # Build a signed-free `.adosplug` in the plugin-command dispatch tests so the
 # install path runs end-to-end against a real PluginSupervisor.
 zip = { workspace = true }
+# The paused-clock harness for the relay lifecycle and batching tests.
+tokio = { workspace = true, features = ["test-util"] }

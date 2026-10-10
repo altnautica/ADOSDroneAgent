@@ -12,11 +12,10 @@
 //! claimed(A) --claim(B, confirm_token)-> claimed(B)
 //! claimed(A) --claim(B, force=true)----> claimed(B)
 //! claimed(A) --release(A)--------------> unclaimed
-//! claimed(A) --on_pic_disconnected()---> unclaimed
+//! claimed(A) --on_pic_disconnected(A)-> unclaimed
 //! ```
 //!
-//! Originally ported from the Python PIC arbiter, which has since been
-//! deleted. Covers the five claim cases with their exact outcome shapes (the REST layer maps `needs_confirm` /
+//! Covers the five claim cases with their exact outcome shapes (the REST layer maps `needs_confirm` /
 //! `status` to HTTP 409 / 403 / 410), the confirm-token TTL, the heartbeat
 //! session watchdog auto-release, gamepad auto-claim, and the monotonic claim
 //! counter. Time comes from an injectable [`Clock`] so the TTL and watchdog are
@@ -35,8 +34,10 @@ pub const CONFIRM_TTL_SECONDS: f64 = 2.0;
 /// without calling release.
 pub const HEARTBEAT_TIMEOUT_SECONDS: f64 = 30.0;
 
-/// Cadence at which the session watchdog checks the last heartbeat age.
-pub const WATCHDOG_INTERVAL_SECONDS: f64 = 5.0;
+/// Cadence at which the session watchdog checks the last heartbeat age and
+/// refreshes the PIC state sidecar. A tenth of the sidecar staleness window,
+/// so a reader never sees an idle-but-healthy arbiter as unavailable.
+pub const WATCHDOG_INTERVAL_SECONDS: f64 = 2.0;
 
 /// A monotonic, injectable time source.
 ///
@@ -189,6 +190,18 @@ pub enum HeartbeatOutcome {
     },
 }
 
+/// Outcome of [`PicArbiter::on_pic_disconnected`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum DisconnectOutcome {
+    /// The named client held PIC and it was cleared, or PIC was already free.
+    Disconnected,
+    /// Another client holds PIC; nothing changed. -> HTTP 409.
+    NotHolder {
+        current_pic: Option<String>,
+        status: u16,
+    },
+}
+
 /// A point-in-time snapshot of the arbiter state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PicStateSnapshot {
@@ -215,6 +228,9 @@ pub struct PicArbiter {
     claimed_since: Option<f64>,
     claim_counter: u64,
     primary_gamepad_id: Option<String>,
+    /// The client id the primary gamepad's auto-claim was issued for. A claim
+    /// by any other holder unbinds the gamepad.
+    primary_gamepad_hint: Option<String>,
     last_heartbeat_ts: Option<f64>,
     confirm_tokens: HashMap<String, ConfirmToken>,
     bus: PicEventBus,
@@ -235,6 +251,7 @@ impl PicArbiter {
             claimed_since: None,
             claim_counter: 0,
             primary_gamepad_id: None,
+            primary_gamepad_hint: None,
             last_heartbeat_ts: None,
             confirm_tokens: HashMap::new(),
             bus: PicEventBus::new(),
@@ -260,8 +277,13 @@ impl PicArbiter {
         self.confirm_tokens.retain(|_, t| t.expires_at >= now);
     }
 
-    /// Transition to claimed(client_id). Bumps the monotonic counter.
+    /// Transition to claimed(client_id). Bumps the monotonic counter. A new
+    /// holder other than the one the primary gamepad was bound for unbinds the
+    /// gamepad, so its later unplug cannot drop someone else's claim.
     fn issue_claim(&mut self, client_id: &str) -> u64 {
+        if self.primary_gamepad_hint.as_deref() != Some(client_id) {
+            self.clear_primary_gamepad();
+        }
         let now = self.now();
         self.state = PicState::Claimed;
         self.claimed_by = Some(client_id.to_string());
@@ -269,6 +291,11 @@ impl PicArbiter {
         self.last_heartbeat_ts = Some(now);
         self.claim_counter += 1;
         self.claim_counter
+    }
+
+    fn clear_primary_gamepad(&mut self) {
+        self.primary_gamepad_id = None;
+        self.primary_gamepad_hint = None;
     }
 
     fn emit(&self, kind: PicEventKind, client_id: Option<String>, claim_counter: u64) {
@@ -375,6 +402,7 @@ impl PicArbiter {
         self.state = PicState::Unclaimed;
         self.claimed_by = None;
         self.claimed_since = None;
+        self.clear_primary_gamepad();
         let counter = self.claim_counter;
         self.emit(PicEventKind::Released, previous.clone(), counter);
         ReleaseOutcome::Released {
@@ -456,6 +484,7 @@ impl PicArbiter {
     /// primary bound to this PIC. No-op if PIC is already held.
     pub fn on_gamepad_connected(&mut self, device_id: &str, client_id_hint: &str) {
         if self.state == PicState::Unclaimed {
+            self.primary_gamepad_hint = Some(client_id_hint.to_string());
             let counter = self.issue_claim(client_id_hint);
             self.primary_gamepad_id = Some(device_id.to_string());
             self.emit(
@@ -466,23 +495,32 @@ impl PicArbiter {
         }
     }
 
-    /// Clear the primary-gamepad binding (e.g. when that gamepad is removed).
+    /// The gamepad bound to the current claim, if any.
     pub fn primary_gamepad_id(&self) -> Option<&str> {
         self.primary_gamepad_id.as_deref()
     }
 
-    /// Handle a PIC client disconnect (WS drop or gamepad removal). Clears PIC
-    /// state and publishes a disconnected event. FC failsafe is configured on
-    /// the FC itself; this hook is where an explicit RTL trigger would layer in
-    /// a later chunk. No-op if PIC is not held.
-    pub fn on_pic_disconnected(&mut self) {
+    /// Handle a PIC client disconnect (WS drop or gamepad removal) for
+    /// `client_id`, the holder the caller believes it is dropping. Clears PIC
+    /// only when `client_id` holds it; another holder gets
+    /// [`DisconnectOutcome::NotHolder`] and keeps the claim. FC failsafe is
+    /// configured on the FC itself. No-op when PIC is not held.
+    pub fn on_pic_disconnected(&mut self, client_id: &str) -> DisconnectOutcome {
         if self.state != PicState::Claimed {
-            return;
+            self.clear_primary_gamepad();
+            return DisconnectOutcome::Disconnected;
+        }
+        if self.claimed_by.as_deref() != Some(client_id) {
+            return DisconnectOutcome::NotHolder {
+                current_pic: self.claimed_by.clone(),
+                status: 409,
+            };
         }
         let previous = self.claimed_by.clone();
         self.state = PicState::Unclaimed;
         self.claimed_by = None;
         self.claimed_since = None;
+        self.clear_primary_gamepad();
         let counter = self.claim_counter;
         tracing::warn!(
             previous_pic = ?previous,
@@ -490,6 +528,7 @@ impl PicArbiter {
             "pic disconnected; FC failsafe config governs RC_LOSS"
         );
         self.emit(PicEventKind::Disconnected, previous, counter);
+        DisconnectOutcome::Disconnected
     }
 }
 
@@ -798,12 +837,58 @@ mod tests {
     fn pic_disconnect_clears_state() {
         let (mut a, _c) = arbiter();
         a.claim("op-a", None, false);
-        a.on_pic_disconnected();
+        assert_eq!(
+            a.on_pic_disconnected("op-a"),
+            DisconnectOutcome::Disconnected
+        );
         assert_eq!(a.get_state().state, PicState::Unclaimed);
         assert!(a.get_state().claimed_by.is_none());
         // Idempotent when already unclaimed.
-        a.on_pic_disconnected();
+        assert_eq!(
+            a.on_pic_disconnected("op-a"),
+            DisconnectOutcome::Disconnected
+        );
         assert_eq!(a.get_state().state, PicState::Unclaimed);
+    }
+
+    #[test]
+    fn disconnect_requires_holder() {
+        let (mut a, _c) = arbiter();
+        a.claim("op-a", None, false);
+        assert_eq!(
+            a.on_pic_disconnected("op-b"),
+            DisconnectOutcome::NotHolder {
+                current_pic: Some("op-a".into()),
+                status: 409,
+            }
+        );
+        assert_eq!(a.get_state().claimed_by.as_deref(), Some("op-a"));
+    }
+
+    #[test]
+    fn force_claim_then_kiosk_disconnect_keeps_holder() {
+        let (mut a, _c) = arbiter();
+        a.on_gamepad_connected("evdev-0", "hdmi-kiosk");
+        assert_eq!(a.primary_gamepad_id(), Some("evdev-0"));
+        a.claim("op-b", None, true);
+        // The takeover unbinds the kiosk gamepad.
+        assert_eq!(a.primary_gamepad_id(), None);
+        assert!(matches!(
+            a.on_pic_disconnected("hdmi-kiosk"),
+            DisconnectOutcome::NotHolder { .. }
+        ));
+        assert_eq!(a.get_state().claimed_by.as_deref(), Some("op-b"));
+    }
+
+    #[test]
+    fn release_and_disconnect_unbind_the_primary_gamepad() {
+        let (mut a, _c) = arbiter();
+        a.on_gamepad_connected("evdev-0", "hdmi-kiosk");
+        a.release("hdmi-kiosk");
+        assert_eq!(a.primary_gamepad_id(), None);
+        a.on_gamepad_connected("evdev-1", "hdmi-kiosk");
+        a.on_pic_disconnected("hdmi-kiosk");
+        assert_eq!(a.primary_gamepad_id(), None);
     }
 
     #[test]

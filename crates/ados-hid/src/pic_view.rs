@@ -29,8 +29,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 /// How fresh the PIC arbiter's state sidecar must be to count as a live view.
-/// The arbiter daemon rewrites it on every transition and each watchdog tick
-/// (~5 s); beyond this window the arbiter is not reporting and the view is
+/// The arbiter daemon rewrites it on every transition and on each watchdog
+/// tick (every `WATCHDOG_INTERVAL_SECONDS`, 2 s, even while idle); beyond this
+/// window the arbiter is not reporting and the view is
 /// treated as unavailable, NOT as an affirmative unclaimed — so hybrid mode
 /// fails safe to a human/neutral hold rather than handing the programmatic
 /// lane authority on a missing verdict.

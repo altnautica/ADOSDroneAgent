@@ -11,7 +11,6 @@
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use anyhow::Result;
 use tokio::signal::unix::{signal, SignalKind};
@@ -21,7 +20,7 @@ use ados_hid::buttons::{self, default_button_mapping};
 use ados_hid::buttons_ipc::{self, BUTTONS_SOCK};
 use ados_hid::eventbus::ButtonEventBus;
 use ados_hid::paths::pic_state_json;
-use ados_hid::pic::{PicArbiter, WATCHDOG_INTERVAL_SECONDS};
+use ados_hid::pic::PicArbiter;
 use ados_hid::pic_ipc::{self, PIC_SOCK};
 
 fn init_logging() {
@@ -86,9 +85,10 @@ async fn main() -> Result<()> {
 
     // The PIC state sidecar (`/run/ados/pic-state.json`): the IPC server mirrors
     // the arbiter snapshot here after every state-changing op, and the watchdog
-    // branch below mirrors it after an auto-release, so a reader (the native
-    // status route, the residual `/pic/events` consumer, the display layer) sees
-    // the live holder without a socket round-trip.
+    // below rewrites it on every tick (idle included), so a reader (the native
+    // status route, the crsf hybrid merge, the injector gates, the display
+    // layer) sees the live holder without a socket round-trip and never ages
+    // a healthy idle arbiter past the staleness window.
     let sidecar_path = Arc::new(pic_state_json());
 
     // The IPC seam: the FastAPI /pic/* routes + the kiosk reach the arbiter
@@ -137,10 +137,9 @@ async fn main() -> Result<()> {
     sd_ready();
     tracing::info!(sock = PIC_SOCK, "ados-pic ready");
 
-    // Session watchdog: auto-release a stale PIC after the heartbeat timeout.
-    let watchdog_interval = Duration::from_secs_f64(WATCHDOG_INTERVAL_SECONDS);
-    let mut tick = tokio::time::interval(watchdog_interval);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Session watchdog: auto-release a stale PIC after the heartbeat timeout and
+    // refresh the state sidecar on every tick.
+    let mut tick = pic_ipc::watchdog_interval();
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -149,16 +148,8 @@ async fn main() -> Result<()> {
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                let released = {
-                    let mut arb = arbiter.lock().await;
-                    arb.watchdog_tick()
-                };
-                if let Some(client) = released {
+                if let Some(client) = pic_ipc::watchdog_pass(&sidecar_path, &arbiter).await {
                     tracing::info!(client_id = %client, "pic auto-released on heartbeat timeout");
-                    // The auto-release moved the arbiter; mirror the fresh
-                    // (unclaimed) snapshot to the sidecar so a reader sees the
-                    // drop, matching the post-op mirror the IPC server does.
-                    pic_ipc::write_sidecar(&sidecar_path, &arbiter).await;
                 }
                 sd_watchdog();
             }
@@ -224,13 +215,18 @@ fn spawn_button_reader(
     mapping: Arc<RwLock<std::collections::HashMap<String, String>>>,
     button_bus: ButtonEventBus,
 ) {
-    use ados_hid::buttons::{gpio_subsystem_present, ButtonEvent, PressClassifier, BUTTON_PINS};
+    use ados_hid::buttons::{
+        board_pins_or_default, gpio_subsystem_present, ButtonEvent, PressClassifier, BOARD_SIDECAR,
+    };
     use ados_hid::eventbus::ButtonBusEvent;
 
     if !gpio_subsystem_present() {
         tracing::info!("button reader skipped: no /dev/gpiochip*");
         return;
     }
+    // The board sidecar's `buttons` block wins; boards without one use the
+    // fixed fallback pins.
+    let pins = board_pins_or_default(std::path::Path::new(BOARD_SIDECAR));
     tokio::task::spawn_blocking(move || {
         let mut classifier = PressClassifier::with_mapping(mapping);
         let on_event = |ev: ButtonEvent| {
@@ -249,8 +245,7 @@ fn spawn_button_reader(
             });
         };
         // gpiochip0 is the conventional primary chip on the supported boards.
-        if let Err(e) =
-            buttons::run_event_loop("/dev/gpiochip0", &BUTTON_PINS, &mut classifier, on_event)
+        if let Err(e) = buttons::run_event_loop("/dev/gpiochip0", &pins, &mut classifier, on_event)
         {
             // A read error here is not fatal to the PIC seam; log and let the
             // daemon stay up serving the socket.

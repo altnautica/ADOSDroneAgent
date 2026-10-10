@@ -9,10 +9,11 @@
 //! * GCS->FC: payloads received on `ados/{id}/msp/rx` (q0) are written back to
 //!   the IPC socket toward the flight controller.
 //!
-//! The hot-path design — a bounded drop-oldest queue plus an in-flight gate — is
-//! shared with the MAVLink relay via [`BoundedPublishQueue`] and is unchanged
-//! here. The socket is a transparent byte pipe (no MSP is parsed), so the same
-//! [`FrameLink`] byte link reads it.
+//! The hot-path design — a bounded drop-oldest queue drained only while the
+//! client takes publishes, in batches of concatenated bytes — is shared with
+//! the MAVLink relay via [`BoundedPublishQueue`]. The socket is a transparent
+//! byte pipe (no MSP is parsed), so the same [`FrameLink`] byte link reads it
+//! and a concatenated batch is the same byte stream.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -26,8 +27,9 @@ use super::{msp_client_id, relay_username, topic_msp_rx, topic_msp_tx};
 use crate::mqtt::transport::TransportConfig;
 
 /// The MSP-over-MQTT relay. Structurally identical to the MAVLink relay (owns its
-/// own rumqttc client plus the bounded-queue + in-flight gate on the hot publish
-/// path); only the topics and the byte plane it bridges differ.
+/// own rumqttc client plus the bounded queue on the hot publish path); only the
+/// topics and the byte plane it bridges differ. It drains after every event
+/// rather than on the batch window, keeping MSP request/response latency low.
 pub struct MspMqttRelay {
     device_id: String,
     topic_tx: String,

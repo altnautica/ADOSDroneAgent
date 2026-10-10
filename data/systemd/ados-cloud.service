@@ -47,7 +47,7 @@ CapabilityBoundingSet=CAP_CHOWN
 # The heartbeat, MQTT and log-push loops are small. The cap is set by a remote
 # plugin install, which holds the archive (at most 50 MiB) and its decompressed
 # entries (at most 100 MiB) in memory while it verifies them, plus a log-push
-# window of up to 32 MiB.
+# window of up to 8 MiB.
 MemoryMax=256M
 
 StandardOutput=journal

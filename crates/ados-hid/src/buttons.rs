@@ -16,8 +16,31 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// Fallback pin list (BCM). Future revisions pull this from the HAL profile.
+/// Fallback pin list (BCM), used when the board sidecar declares no buttons.
 pub const BUTTON_PINS: [u32; 4] = [5, 6, 13, 19];
+
+/// HAL board sidecar the installer writes for the detected board.
+pub const BOARD_SIDECAR: &str = "/run/ados/board.json";
+
+/// Parse the optional `buttons` block of the board sidecar JSON, top level or
+/// under a `board` object. All four roles (`up`, `down`, `select`, `back`) must
+/// be present as BCM line numbers.
+pub fn board_button_pins(sidecar_json: &str) -> Option<[u32; 4]> {
+    let v: serde_json::Value = serde_json::from_str(sidecar_json).ok()?;
+    let block = v
+        .get("buttons")
+        .or_else(|| v.get("board").and_then(|b| b.get("buttons")))?;
+    let pin = |role: &str| -> Option<u32> { u32::try_from(block.get(role)?.as_u64()?).ok() };
+    Some([pin("up")?, pin("down")?, pin("select")?, pin("back")?])
+}
+
+/// The board's button pins from `sidecar`, else [`BUTTON_PINS`].
+pub fn board_pins_or_default(sidecar: &std::path::Path) -> [u32; 4] {
+    std::fs::read_to_string(sidecar)
+        .ok()
+        .and_then(|text| board_button_pins(&text))
+        .unwrap_or(BUTTON_PINS)
+}
 
 /// Held >= this fires a "long" press (on release, never at the mark).
 pub const LONG_PRESS_SECONDS: f64 = 2.0;

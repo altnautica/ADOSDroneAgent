@@ -249,16 +249,57 @@ async fn forward_gamepad_connected(device_id: &str) -> std::io::Result<()> {
 }
 
 /// When `device_id` is the arbiter's PIC-bound primary, forward a `disconnect`
-/// op so PIC is dropped, and return `true`. Returns `false` when the removed
-/// device is not the primary (no PIC change). The arbiter owns
-/// `primary_gamepad_id`, so this reads it from `get_state` rather than keeping a
-/// local copy that could drift across the process boundary.
+/// op carrying the holder read in the same `get_state`, and return `true` when
+/// the arbiter dropped PIC. Returns `false` when the removed device is not the
+/// primary or the claim has since moved to another holder (the arbiter answers
+/// `E_NOT_HOLDER`). The arbiter owns `primary_gamepad_id`, so this reads it
+/// from `get_state` rather than keeping a local copy that could drift across the
+/// process boundary.
 async fn forward_primary_disconnect(device_id: &str) -> std::io::Result<bool> {
     let state = pic_request(&serde_json::json!({"op": "get_state"})).await?;
+    let Some(req) = primary_disconnect_request(&state, device_id) else {
+        return Ok(false);
+    };
+    let reply = pic_request(&req).await?;
+    Ok(reply.get("ok").and_then(|v| v.as_bool()) == Some(true))
+}
+
+/// The `disconnect` op for a removed gamepad, or `None` when the device is not
+/// the primary bound to a live claim.
+fn primary_disconnect_request(
+    state: &serde_json::Value,
+    device_id: &str,
+) -> Option<serde_json::Value> {
     let primary = state.get("primary_gamepad_id").and_then(|v| v.as_str());
     if primary != Some(device_id) {
-        return Ok(false);
+        return None;
     }
-    let _ = pic_request(&serde_json::json!({"op": "disconnect"})).await?;
-    Ok(true)
+    let holder = state.get("claimed_by").and_then(|v| v.as_str())?;
+    Some(serde_json::json!({"op": "disconnect", "client_id": holder}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::primary_disconnect_request;
+    use serde_json::json;
+
+    #[test]
+    fn primary_removal_carries_the_holder() {
+        let state = json!({"primary_gamepad_id": "evdev-0", "claimed_by": "hdmi-kiosk"});
+        assert_eq!(
+            primary_disconnect_request(&state, "evdev-0"),
+            Some(json!({"op": "disconnect", "client_id": "hdmi-kiosk"}))
+        );
+    }
+
+    #[test]
+    fn unbound_or_unclaimed_primary_sends_no_disconnect() {
+        // The claim moved to an operator: the arbiter unbound the gamepad.
+        let moved = json!({"primary_gamepad_id": null, "claimed_by": "op-b"});
+        assert_eq!(primary_disconnect_request(&moved, "evdev-0"), None);
+        let other = json!({"primary_gamepad_id": "evdev-1", "claimed_by": "hdmi-kiosk"});
+        assert_eq!(primary_disconnect_request(&other, "evdev-0"), None);
+        let free = json!({"primary_gamepad_id": "evdev-0", "claimed_by": null});
+        assert_eq!(primary_disconnect_request(&free, "evdev-0"), None);
+    }
 }

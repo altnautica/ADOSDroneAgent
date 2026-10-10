@@ -26,7 +26,9 @@
 //! {"op":"get_state"}                     -> {"ok":true,"state":"...","claimed_by":...,...}
 //! {"op":"confirm_token","client_id":"..."} -> {"ok":true,"token":"<32hex>"}
 //! {"op":"heartbeat","client_id":"..."}   -> {"ok":true,"ok_heartbeat":<bool>,...}
-//! {"op":"disconnect"}                    -> {"ok":true}   (PIC client drop hook)
+//! {"op":"disconnect","client_id":"..."}  -> {"ok":true}   (PIC client drop hook;
+//!   clears only when client_id holds PIC, else
+//!   {"ok":false,"error":"E_NOT_HOLDER","current_pic":"...","status":409})
 //! {"op":"gamepad_connected","device_id":"...","client_id_hint":"..."}
 //!   -> {"ok":true}   (auto-claim PIC for the hint + bind the gamepad as the
 //!      primary if nobody holds PIC; no-op when already claimed)
@@ -50,7 +52,10 @@ use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 use crate::eventbus::{ButtonEventBus, PicEventKind};
-use crate::pic::{ClaimOutcome, HeartbeatOutcome, PicArbiter, PicState, ReleaseOutcome};
+use crate::pic::{
+    ClaimOutcome, DisconnectOutcome, HeartbeatOutcome, PicArbiter, PicState, ReleaseOutcome,
+    WATCHDOG_INTERVAL_SECONDS,
+};
 
 /// PIC control socket path (sibling to supervisor.sock / mavlink.sock).
 pub const PIC_SOCK: &str = "/run/ados/pic.sock";
@@ -148,6 +153,27 @@ pub async fn write_sidecar(path: &Path, arbiter: &SharedArbiter) {
     if let Err(e) = crate::pic_sidecar::write_snapshot(path, &snapshot) {
         tracing::debug!(error = %e, path = %path.display(), "pic state sidecar write failed");
     }
+}
+
+/// The session watchdog cadence as a tokio interval (missed ticks skipped).
+pub fn watchdog_interval() -> tokio::time::Interval {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs_f64(
+        WATCHDOG_INTERVAL_SECONDS,
+    ));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tick
+}
+
+/// One watchdog pass: auto-release a stale claim, then mirror the snapshot to
+/// the sidecar on every pass so its mtime stays inside the reader's staleness
+/// window while the arbiter sits idle. Returns the auto-released client, if any.
+pub async fn watchdog_pass(sidecar_path: &Path, arbiter: &SharedArbiter) -> Option<String> {
+    let released = {
+        let mut arb = arbiter.lock().await;
+        arb.watchdog_tick()
+    };
+    write_sidecar(sidecar_path, arbiter).await;
+    released
 }
 
 /// Read one newline-terminated request and either write one newline-terminated
@@ -249,9 +275,20 @@ async fn dispatch(line: &[u8], arbiter: &SharedArbiter) -> Value {
             heartbeat_to_json(&arb.heartbeat(cid))
         }
         "disconnect" => {
+            let Some(cid) = req.client_id.as_deref() else {
+                return json!({"ok": false, "error": "E_MISSING_CLIENT_ID"});
+            };
             let mut arb = arbiter.lock().await;
-            arb.on_pic_disconnected();
-            json!({"ok": true})
+            match arb.on_pic_disconnected(cid) {
+                DisconnectOutcome::Disconnected => json!({"ok": true}),
+                DisconnectOutcome::NotHolder {
+                    current_pic,
+                    status,
+                } => json!({
+                    "ok": false, "error": "E_NOT_HOLDER",
+                    "current_pic": current_pic, "status": status,
+                }),
+            }
         }
         "gamepad_connected" => {
             let Some(device_id) = req.device_id.as_deref() else {
@@ -737,5 +774,61 @@ mod tests {
         assert_eq!(after["claim_counter"], 1);
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn dispatch_disconnect_requires_the_holder() {
+        let arbiter = fresh();
+        dispatch(br#"{"op":"claim","client_id":"op-a"}"#, &arbiter).await;
+        let v = dispatch(br#"{"op":"disconnect"}"#, &arbiter).await;
+        assert_eq!(v["error"], "E_MISSING_CLIENT_ID");
+        let v = dispatch(br#"{"op":"disconnect","client_id":"hdmi-kiosk"}"#, &arbiter).await;
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"], "E_NOT_HOLDER");
+        assert_eq!(v["status"], 409);
+        assert_eq!(v["current_pic"], "op-a");
+        let v = dispatch(br#"{"op":"disconnect","client_id":"op-a"}"#, &arbiter).await;
+        assert_eq!(v["ok"], true);
+        let v = dispatch(br#"{"op":"get_state"}"#, &arbiter).await;
+        assert!(v["claimed_by"].is_null());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sidecar_fresh_after_25s_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("pic-state.json");
+        let arbiter = fresh();
+        write_sidecar(&sidecar, &arbiter).await;
+        // Drop the seed so only a watchdog pass can recreate it.
+        std::fs::remove_file(&sidecar).unwrap();
+
+        let task = tokio::spawn({
+            let arbiter = arbiter.clone();
+            let sidecar = sidecar.clone();
+            async move {
+                let mut tick = watchdog_interval();
+                loop {
+                    tick.tick().await;
+                    watchdog_pass(&sidecar, &arbiter).await;
+                }
+            }
+        });
+        // 25 s idle with no IPC op, past the 20 s reader staleness window.
+        for _ in 0..25 {
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        std::fs::remove_file(&sidecar).unwrap();
+        tokio::time::advance(std::time::Duration::from_secs_f64(
+            WATCHDOG_INTERVAL_SECONDS,
+        ))
+        .await;
+        tokio::task::yield_now().await;
+
+        let view = crate::pic_view::read_pic_view(&sidecar, std::time::SystemTime::now())
+            .expect("idle arbiter still reports through the sidecar");
+        assert!(!view.claimed);
+        assert!(view.holder.is_none());
+        task.abort();
     }
 }

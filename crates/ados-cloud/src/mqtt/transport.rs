@@ -74,6 +74,13 @@ pub enum TransportError {
 #[derive(Debug, Default)]
 struct SubscriptionSet {
     topics: Mutex<Vec<(String, MqttQos)>>,
+    /// The replay still owed to the current accepted session: `Some` from a
+    /// `SessionUp` until every entry has been enqueued on the client, `None`
+    /// otherwise. The replay is enqueued without awaiting, from the task that
+    /// is the event loop's only poller, so an entry the full request channel
+    /// refused waits here for the next polled event instead of wedging the
+    /// loop that would drain the channel.
+    pending_replay: Mutex<Option<Vec<(String, MqttQos)>>>,
 }
 
 impl SubscriptionSet {
@@ -87,10 +94,44 @@ impl SubscriptionSet {
         }
     }
 
-    /// Every tracked subscription, in the order it was first taken. Clones out
-    /// so the lock is never held across the replay's awaits.
-    fn snapshot(&self) -> Vec<(String, MqttQos)> {
-        self.topics.lock().clone()
+    /// Start the replay for a freshly accepted session: every tracked topic is
+    /// owed to it.
+    fn begin_replay(&self) {
+        let all = self.topics.lock().clone();
+        *self.pending_replay.lock() = Some(all);
+    }
+
+    /// The session is gone: nothing is owed to it any more.
+    fn cancel_replay(&self) {
+        *self.pending_replay.lock() = None;
+    }
+
+    /// Enqueue as much of the owed replay as the client takes right now. Stops
+    /// at the first refusal (a full request channel) and keeps the rest for
+    /// the next call. Returns `true` when a replay was owed and is now fully
+    /// enqueued.
+    fn drive_replay<I: SubscribeIssuer + ?Sized>(&self, issuer: &I) -> bool {
+        let mut pending = self.pending_replay.lock();
+        let Some(owed) = pending.as_mut() else {
+            return false;
+        };
+        let mut done = 0;
+        for (topic, qos) in owed.iter() {
+            match issuer.try_issue(topic, *qos) {
+                Ok(()) => done += 1,
+                Err(e) => {
+                    tracing::debug!(topic = %topic, error = %e, "mqtt resubscribe deferred");
+                    break;
+                }
+            }
+        }
+        owed.drain(..done);
+        if owed.is_empty() {
+            *pending = None;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -138,17 +179,15 @@ fn classify_event(event: &Event) -> SessionEvent {
 }
 
 /// The seam a subscription replay is issued through. [`AsyncClient`] is the
-/// production impl; a test recorder proves the replay without a broker.
-#[async_trait]
+/// production impl; a test recorder proves the replay without a broker. The
+/// call never awaits: it runs on the event loop's only poller.
 trait SubscribeIssuer: Send + Sync {
-    async fn issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError>;
+    fn try_issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError>;
 }
 
-#[async_trait]
 impl SubscribeIssuer for AsyncClient {
-    async fn issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
-        self.subscribe(topic.to_string(), qos.into())
-            .await
+    fn try_issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
+        self.try_subscribe(topic.to_string(), qos.into())
             .map_err(|e| TransportError::Client(e.to_string()))
     }
 }
@@ -157,6 +196,10 @@ impl SubscribeIssuer for AsyncClient {
 /// subscription set onto a freshly accepted session, and fan an inbound publish
 /// out to the consumer. Returns `false` when the event loop must stop (the
 /// consumer dropped its receiver).
+///
+/// Every call is one successfully polled event, so an owed replay is retried
+/// here first. The link reads connected only once the whole replay has been
+/// enqueued, so a lane never sees a session whose subscriptions are missing.
 async fn apply_session_event<I: SubscribeIssuer + ?Sized>(
     event: SessionEvent,
     connected: &AtomicBool,
@@ -165,30 +208,34 @@ async fn apply_session_event<I: SubscribeIssuer + ?Sized>(
     tx: &mpsc::Sender<IncomingMessage>,
 ) -> bool {
     match event {
-        SessionEvent::Message(msg) => return tx.send(msg).await.is_ok(),
         SessionEvent::SessionUp => {
-            connected.store(true, Ordering::Release);
             // The broker granted a fresh session with no subscriptions, so
-            // every topic this transport holds is re-issued now. Best-effort
-            // per topic: one failed re-issue must not abandon the rest.
-            for (topic, qos) in subs.snapshot() {
-                if let Err(e) = issuer.issue(&topic, qos).await {
-                    tracing::warn!(topic = %topic, error = %e, "mqtt resubscribe failed");
-                }
-            }
+            // every topic this transport holds is owed to it.
+            connected.store(false, Ordering::Release);
+            subs.begin_replay();
             tracing::debug!("mqtt broker connack success");
         }
         SessionEvent::SessionRefused => {
             connected.store(false, Ordering::Release);
+            subs.cancel_replay();
             tracing::warn!("mqtt broker connack refused");
+            return true;
         }
         SessionEvent::SessionDown => {
             connected.store(false, Ordering::Release);
+            subs.cancel_replay();
             tracing::debug!("mqtt broker session down");
+            return true;
         }
-        SessionEvent::Ignored => {}
+        SessionEvent::Message(_) | SessionEvent::Ignored => {}
     }
-    true
+    if subs.drive_replay(issuer) {
+        connected.store(true, Ordering::Release);
+    }
+    match event {
+        SessionEvent::Message(msg) => tx.send(msg).await.is_ok(),
+        _ => true,
+    }
 }
 
 /// The async broker surface. `publish` and `subscribe` are request-shaped; the
@@ -414,7 +461,10 @@ impl MqttTransport for RumqttcTransport {
         // must still be replayed on the next accepted session, otherwise the
         // topic is lost even though the caller saw an Ok.
         self.subs.record(topic, qos);
-        self.client.issue(topic, qos).await
+        self.client
+            .subscribe(topic.to_string(), qos.into())
+            .await
+            .map_err(|e| TransportError::Client(e.to_string()))
     }
 }
 
@@ -577,10 +627,12 @@ mod tests {
     }
 
     /// A [`SubscribeIssuer`] that records what was re-issued, so the replay is
-    /// observable without a broker.
+    /// observable without a broker. `refuse` makes the next N calls fail the
+    /// way a full client request channel does.
     #[derive(Default)]
     struct RecordingIssuer {
         issued: Mutex<Vec<(String, MqttQos)>>,
+        refuse: std::sync::atomic::AtomicUsize,
     }
 
     impl RecordingIssuer {
@@ -590,12 +642,74 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl SubscribeIssuer for RecordingIssuer {
-        async fn issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
+        fn try_issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
+            let refused = self
+                .refuse
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .is_ok();
+            if refused {
+                return Err(TransportError::Client("request channel full".into()));
+            }
             self.issued.lock().push((topic.to_string(), qos));
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn apply_session_event_does_not_await_issuer() {
+        // The client request channel is full when the session comes up: the
+        // replay must not park the event loop's only poller on it.
+        let subs = SubscriptionSet::default();
+        subs.record("ados/dev1/mavlink/rx", MqttQos::AtMostOnce);
+        subs.record("ados/dev1/webrtc/offer", MqttQos::AtLeastOnce);
+        let issuer = RecordingIssuer::default();
+        issuer.refuse.store(1, Ordering::Release);
+        let connected = AtomicBool::new(false);
+        let (tx, _rx) = mpsc::channel::<IncomingMessage>(4);
+
+        let alive = tokio::time::timeout(
+            Duration::from_secs(1),
+            apply_session_event(SessionEvent::SessionUp, &connected, &subs, &issuer, &tx),
+        )
+        .await
+        .expect("the session-up event returns without waiting on the channel");
+        assert!(alive);
+        // Nothing enqueued yet, so the link does not read up.
+        assert!(issuer.taken().is_empty());
+        assert!(!connected.load(Ordering::Acquire));
+
+        // The next polled event drained the channel: the owed replay goes out
+        // and only then does the link read connected.
+        apply_session_event(SessionEvent::Ignored, &connected, &subs, &issuer, &tx).await;
+        assert_eq!(
+            issuer.taken(),
+            vec![
+                ("ados/dev1/mavlink/rx".to_string(), MqttQos::AtMostOnce),
+                ("ados/dev1/webrtc/offer".to_string(), MqttQos::AtLeastOnce),
+            ]
+        );
+        assert!(connected.load(Ordering::Acquire));
+
+        // Later events owe nothing and issue nothing.
+        apply_session_event(SessionEvent::Ignored, &connected, &subs, &issuer, &tx).await;
+        assert!(issuer.taken().is_empty());
+        assert!(connected.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn a_session_drop_cancels_the_owed_replay() {
+        let subs = SubscriptionSet::default();
+        subs.record("ados/dev1/mavlink/rx", MqttQos::AtMostOnce);
+        let issuer = RecordingIssuer::default();
+        issuer.refuse.store(1, Ordering::Release);
+        let connected = AtomicBool::new(false);
+        let (tx, _rx) = mpsc::channel::<IncomingMessage>(4);
+        apply_session_event(SessionEvent::SessionUp, &connected, &subs, &issuer, &tx).await;
+        apply_session_event(SessionEvent::SessionDown, &connected, &subs, &issuer, &tx).await;
+        apply_session_event(SessionEvent::Ignored, &connected, &subs, &issuer, &tx).await;
+        assert!(issuer.taken().is_empty());
+        assert!(!connected.load(Ordering::Acquire));
     }
 
     fn connack(code: ConnectReturnCode) -> Event {
