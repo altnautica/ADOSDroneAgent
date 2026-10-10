@@ -414,7 +414,7 @@ fn short_id(device_id: &str) -> String {
 /// `{enabled_on_boot, connected, ssid, signal, ip}`. An unreachable socket
 /// degrades to the full default the Python `except` returns.
 async fn wifi_client_view() -> Value {
-    let status = wifi_status().await;
+    let status = wifi_status(&wifi_cmd_sock()).await;
     let enabled_on_boot = load_json_object(&gs_wifi_client_json())
         .and_then(|m| m.get("enabled_on_boot").map(json_truthy))
         .unwrap_or(false);
@@ -923,23 +923,16 @@ fn modem_status_body(mmcli_present: bool) -> Value {
 /// socket / a malformed reply / `ok:false` all yield `None`, so the caller
 /// degrades to the manager-absent default shape. Mirrors the framing the radio /
 /// Wi-Fi command sockets use (one newline-terminated JSON each way).
-pub(crate) async fn wifi_status() -> Option<Map<String, Value>> {
-    let reply = wifi_cmd_roundtrip(&json!({"op": "wifi_status"})).await?;
+pub(crate) async fn wifi_status(sock: &std::path::Path) -> Option<Map<String, Value>> {
+    let request = json!({"op": "wifi_status"});
+    let reply = crate::ipc::cmd::roundtrip(sock, &request, crate::ipc::cmd::QUICK)
+        .await
+        .ok()?;
     let obj = reply.as_object()?;
     if obj.get("ok").map(json_truthy) != Some(true) {
         return None;
     }
     Some(obj.clone())
-}
-
-/// Send one newline-terminated JSON request to the Wi-Fi command socket and read
-/// one newline-terminated JSON reply. Bounded so a runaway reply cannot exhaust
-/// memory. `None` on an unreachable socket, a read error, or an unparseable
-/// reply.
-async fn wifi_cmd_roundtrip(request: &Value) -> Option<Value> {
-    crate::ipc::cmd::roundtrip(&wifi_cmd_sock(), request, crate::ipc::cmd::QUICK)
-        .await
-        .ok()
 }
 
 // ---------------------------------------------------------------------------

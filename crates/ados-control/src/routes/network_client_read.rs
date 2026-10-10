@@ -24,6 +24,7 @@
 //!   (`--` for an open network), the scale every client of this route renders.
 //!   A failed scan is an error status, never an empty list.
 
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -31,6 +32,7 @@ use serde_json::{json, Value};
 
 use crate::routes::gs_network::{json_truthy, nmcli_connections, wifi_status};
 use crate::routes::network_write::{wifi_scan, wifi_scan_response};
+use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/network/client/status — live station connection state.
@@ -40,8 +42,9 @@ use crate::routes::network_write::{wifi_scan, wifi_scan_response};
 /// state, off the `ados-net` daemon's Wi-Fi command socket's `wifi_status` op,
 /// reshaped to the seven-key body. An unreachable socket / a `wifi_status`
 /// failure is a `503`: the station state is unknown.
-pub async fn get_client_status() -> Response {
-    match client_status_view(wifi_status().await) {
+pub async fn get_client_status(State(state): State<AppState>) -> Response {
+    let sock = crate::routes::network_write::wifi_cmd_sock_in(&state.run_dir);
+    match client_status_view(wifi_status(&sock).await) {
         Some(view) => Json(view).into_response(),
         None => (
             StatusCode::SERVICE_UNAVAILABLE,

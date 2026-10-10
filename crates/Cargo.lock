@@ -188,6 +188,7 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_json",
+ "serde_norway",
  "tempfile",
  "time",
  "tokio",

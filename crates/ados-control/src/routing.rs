@@ -1022,8 +1022,14 @@ mod tests {
         assert!(has(Method::GET, "/api/v1/ground-station/wfb/invite"));
         assert!(has(Method::POST, "/api/v1/ground-station/wfb/invite"));
         assert!(has(Method::GET, "/api/v1/ground-station/wfb/invite/{id}"));
-        assert!(has(Method::POST, "/api/v1/ground-station/wfb/invite/{id}/approve"));
-        assert!(has(Method::POST, "/api/v1/ground-station/wfb/invite/{id}/reject"));
+        assert!(has(
+            Method::POST,
+            "/api/v1/ground-station/wfb/invite/{id}/approve"
+        ));
+        assert!(has(
+            Method::POST,
+            "/api/v1/ground-station/wfb/invite/{id}/reject"
+        ));
         assert!(has(Method::POST, "/api/v1/ground-station/recording/start"));
         assert!(has(Method::POST, "/api/v1/ground-station/recording/stop"));
         assert!(has(Method::POST, "/api/v1/ground-station/camera/switch"));

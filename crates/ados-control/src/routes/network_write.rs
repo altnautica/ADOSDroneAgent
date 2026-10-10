@@ -45,7 +45,9 @@
 //! it as a `500` with the FastAPI `E_WIFI_*_FAILED` error-object body, matching
 //! the FastAPI server-reported-failure arm.
 
-use axum::extract::Path;
+use axum::extract::{Path, State};
+
+use crate::state::AppState;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -68,7 +70,12 @@ fn run_dir() -> std::path::PathBuf {
 /// applies the `wifi_join` / `wifi_leave` / `wifi_forget` ops through the daemon's
 /// single Wi-Fi-client manager (the owner of the `wlan0` AP/STA lock).
 pub(crate) fn wifi_cmd_sock() -> std::path::PathBuf {
-    run_dir().join("wifi-cmd.sock")
+    wifi_cmd_sock_in(&run_dir())
+}
+
+/// The Wi-Fi command socket under an explicit runtime directory.
+pub(crate) fn wifi_cmd_sock_in(run_dir: &std::path::Path) -> std::path::PathBuf {
+    run_dir.join("wifi-cmd.sock")
 }
 
 /// The outcome of a command-socket round-trip.
@@ -201,8 +208,11 @@ pub struct WifiJoinRequest {
 /// `{joined, ip, gateway, error}` success body the FastAPI route composes (each
 /// field defaulting to false/null when absent). An unreachable socket → 503; an
 /// `ok:false` reply → the FastAPI `E_WIFI_JOIN_FAILED` 500.
-pub async fn put_client_join(Json(req): Json<WifiJoinRequest>) -> Response {
-    put_client_join_at(&wifi_cmd_sock(), req).await
+pub async fn put_client_join(
+    State(state): State<AppState>,
+    Json(req): Json<WifiJoinRequest>,
+) -> Response {
+    put_client_join_at(&wifi_cmd_sock_in(&state.run_dir), req).await
 }
 
 /// The path-injectable core of [`put_client_join`]: forward against an explicit
@@ -328,8 +338,8 @@ pub(crate) fn wifi_scan_response(result: Result<Vec<Value>, WifiScanError>) -> R
 /// Forwards a `wifi_leave` op to the `ados-net` command socket and returns the
 /// reply verbatim (the `ok` flag already stripped). An unreachable socket → 503;
 /// an `ok:false` reply → the FastAPI `E_WIFI_LEAVE_FAILED` 500.
-pub async fn delete_client() -> Response {
-    delete_client_at(&wifi_cmd_sock()).await
+pub async fn delete_client(State(state): State<AppState>) -> Response {
+    delete_client_at(&wifi_cmd_sock_in(&state.run_dir)).await
 }
 
 /// The path-injectable core of [`delete_client`], for tests.
@@ -357,8 +367,11 @@ async fn delete_client_at(sock: &std::path::Path) -> Response {
 /// `forgot:false` maps to the FastAPI `400` (`E_WIFI_FORGET_FAILED` carrying the
 /// reply's `error`); a `forgot:true` reply is returned verbatim. An unreachable
 /// socket → 503; an `ok:false` reply → the FastAPI `E_WIFI_FORGET_FAILED` 500.
-pub async fn delete_client_configured(Path(name): Path<String>) -> Response {
-    delete_client_configured_at(&wifi_cmd_sock(), name).await
+pub async fn delete_client_configured(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Response {
+    delete_client_configured_at(&wifi_cmd_sock_in(&state.run_dir), name).await
 }
 
 /// The path-injectable core of [`delete_client_configured`], for tests.
@@ -416,10 +429,11 @@ pub struct AutoconnectRequest {
 /// `error:null` reply is returned verbatim. An unreachable socket → 503; an
 /// `ok:false` reply → the FastAPI `E_WIFI_AUTOCONNECT_FAILED` 500.
 pub async fn put_client_autoconnect(
+    State(state): State<AppState>,
     Path(name): Path<String>,
     Json(req): Json<AutoconnectRequest>,
 ) -> Response {
-    put_client_autoconnect_at(&wifi_cmd_sock(), name, req).await
+    put_client_autoconnect_at(&wifi_cmd_sock_in(&state.run_dir), name, req).await
 }
 
 /// The path-injectable core of [`put_client_autoconnect`], for tests.

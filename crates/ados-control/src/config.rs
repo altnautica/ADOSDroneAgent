@@ -11,13 +11,25 @@
 //! snapshot rather than an error, so the guaranteed-200 pairing-info contract
 //! holds on a fresh, partially-configured agent.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 /// Canonical config location, overridable via the `ADOS_CONFIG` env var the
 /// systemd unit sets — the same convention the sibling crates use.
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
+
+/// The identity file for the node whose config is at `config`:
+/// `$ADOS_DEVICE_ID_PATH` when set, else `device-id` beside the config, which
+/// for the canonical config is `/etc/ados/device-id`. Deriving it from the
+/// config path keeps a reader pointed at a test config off the host's file.
+pub fn device_id_file_for(config: &Path) -> PathBuf {
+    std::env::var(ados_protocol::identity::ENV_DEVICE_ID_PATH)
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| config.with_file_name("device-id"))
+}
 
 /// The `agent:` section: the device identity the pairing-info route reports.
 /// Defaults mirror the Python `AgentConfig` field defaults so an absent section
@@ -96,7 +108,10 @@ impl PairingConfig {
             Ok(text) => ados_config::yaml_or_default(&text, "control"),
             Err(_) => PairingConfig::default(),
         };
-        cfg.agent.device_id = ados_protocol::identity::device_id(Some(&cfg.agent.device_id));
+        cfg.agent.device_id = ados_protocol::identity::device_id_at(
+            &device_id_file_for(path),
+            Some(&cfg.agent.device_id),
+        );
         cfg
     }
 

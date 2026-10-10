@@ -19,6 +19,7 @@ pub mod battery;
 pub mod config;
 pub mod config_store;
 pub mod dashboard_pin;
+pub mod fc_target;
 pub mod freshness;
 pub mod hw_local;
 pub mod ipc;
@@ -130,6 +131,10 @@ pub struct DaemonPaths {
     /// unpair removes, the ground station delivers, and full status reports
     /// the presence of. Injectable for tests.
     pub relay_secret_path: PathBuf,
+    /// The runtime directory (`$ADOS_RUN_DIR`, default `/run/ados`) the status
+    /// and Wi-Fi client routes read live sidecars and sockets under.
+    /// Injectable for tests.
+    pub run_dir: PathBuf,
 }
 
 impl Default for DaemonPaths {
@@ -212,6 +217,7 @@ impl Default for DaemonPaths {
             profile_conf_path,
             mesh_role_path,
             relay_secret_path: PathBuf::from(ados_protocol::relay_ticket::RELAY_SECRET_PATH),
+            run_dir: PathBuf::from(run_dir),
         }
     }
 }
@@ -370,6 +376,7 @@ where
         Arc::clone(&mcp_tokens),
     )
     .with_params_path(paths.params_path.clone())
+    .with_run_dir(paths.run_dir.clone())
     .with_swarm(swarm_client)
     .with_battery(battery);
 
@@ -404,6 +411,14 @@ where
                 tracing::error!(path = %sock.display(), error = %e, "wifi_client_socket_bind_failed");
             }
         });
+    }
+
+    // Flight-controller identity reconciler: reports every minute whether this
+    // aircraft's SYSID_THISMAV matches its fleet slot, and writes it only when
+    // the operator switched the write on and the vehicle is disarmed. A ground
+    // station drives no flight controller of its own, so it does not run one.
+    if !is_ground_station {
+        crate::routes::fc_identity::spawn_reconciler(state.clone());
     }
 
     // Build the relay-proxy caller on ground-station-profile nodes only. The

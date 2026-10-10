@@ -47,6 +47,7 @@
 //!   so a loop that was busy when the stop arrived still sees it.
 
 pub mod ap_country;
+pub mod armed;
 pub mod aux_egress;
 pub mod aux_mux;
 pub mod aux_ports;

@@ -118,7 +118,13 @@ pub fn bundle_plaintext(m: &InviteMaterial) -> Vec<u8> {
 pub fn phone_fingerprint(phone_pub: &[u8; 32]) -> String {
     let digest = Sha256::digest(phone_pub);
     let hex = hex::encode_upper(&digest[..8]);
-    format!("{}-{}-{}-{}", &hex[0..4], &hex[4..8], &hex[8..12], &hex[12..16])
+    format!(
+        "{}-{}-{}-{}",
+        &hex[0..4],
+        &hex[4..8],
+        &hex[8..12],
+        &hex[12..16]
+    )
 }
 
 /// Why the receive material could not be read.
@@ -154,8 +160,7 @@ fn load_material() -> Result<InviteMaterial, MaterialError> {
         return Err(MaterialError::NotPaired);
     }
     let shared = ados_radio::paths::load_shared_key();
-    let hop_key =
-        ados_radio::hop::pair_key_for(&shared).ok_or(MaterialError::HopKeyUnavailable)?;
+    let hop_key = ados_radio::hop::pair_key_for(&shared).ok_or(MaterialError::HopKeyUnavailable)?;
     let cfg = ados_radio::config::WfbConfig::load_from(&config_yaml_path());
     let registry = crate::routes::gs_wfb_pair::load_registry();
     let slots = registry
@@ -448,17 +453,21 @@ fn error_response(err: InviteError) -> Response {
             "E_INVITE_LIMIT",
             "too many invites are already waiting for approval",
         ),
-        InviteError::NotFound => {
-            nested_detail(StatusCode::NOT_FOUND, "E_INVITE_NOT_FOUND", "no such invite")
-        }
+        InviteError::NotFound => nested_detail(
+            StatusCode::NOT_FOUND,
+            "E_INVITE_NOT_FOUND",
+            "no such invite",
+        ),
         InviteError::NotPending => nested_detail(
             StatusCode::CONFLICT,
             "E_INVITE_NOT_PENDING",
             "the invite has already been decided",
         ),
-        InviteError::Expired => {
-            nested_detail(StatusCode::GONE, "E_INVITE_EXPIRED", "the invite has expired")
-        }
+        InviteError::Expired => nested_detail(
+            StatusCode::GONE,
+            "E_INVITE_EXPIRED",
+            "the invite has expired",
+        ),
         InviteError::Material(MaterialError::NotPaired) => nested_detail(
             StatusCode::CONFLICT,
             "E_GS_NOT_PAIRED",
@@ -726,8 +735,14 @@ mod tests {
         assert_eq!(bundle["v"], 1);
         assert_eq!(bundle["fleet_id"], 7);
         assert_eq!(bundle["bandwidth_mhz"], 20);
-        assert_eq!(bundle["ports"], json!({"video": 0, "control": 1, "aux_down": 2}));
-        assert_eq!(bundle["slots"][1], json!({"slot": 2, "device_id": "drone-d4e5f6"}));
+        assert_eq!(
+            bundle["ports"],
+            json!({"video": 0, "control": 1, "aux_down": 2})
+        );
+        assert_eq!(
+            bundle["slots"][1],
+            json!({"slot": 2, "device_id": "drone-d4e5f6"})
+        );
         assert_eq!(b64d(&bundle["rx_key_b64"]), material().rx_key);
         // The hop key is the derived HMAC key, never the raw shared key.
         assert_eq!(b64d(&bundle["hop_key_b64"]), material().hop_key.to_vec());
@@ -744,7 +759,10 @@ mod tests {
         let mut store = InviteStore::new();
         let id = "aa";
         create(&mut store, &phone.public, id, T0);
-        assert_eq!(reject_with(true, &mut store, id, T0 + 1).status(), StatusCode::OK);
+        assert_eq!(
+            reject_with(true, &mut store, id, T0 + 1).status(),
+            StatusCode::OK
+        );
         let resp = fetch_with(true, &mut store, id, T0 + 2);
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(body_json(resp).await, json!({"state": "rejected"}));
@@ -769,7 +787,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::GONE);
 
         // Long after, the tombstones are forgotten.
-        let resp = fetch_with(true, &mut store, "p", T0 + 10 * INVITE_TTL_MS + TOMBSTONE_MS);
+        let resp = fetch_with(
+            true,
+            &mut store,
+            "p",
+            T0 + 10 * INVITE_TTL_MS + TOMBSTONE_MS,
+        );
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
@@ -825,7 +848,13 @@ mod tests {
 
         let phone = generate_keypair();
         create(&mut store, &phone.public, "z", T0);
-        let resp = approve_with(true, &mut store, "z", || Err(MaterialError::NotPaired), T0 + 1);
+        let resp = approve_with(
+            true,
+            &mut store,
+            "z",
+            || Err(MaterialError::NotPaired),
+            T0 + 1,
+        );
         assert_eq!(resp.status(), StatusCode::CONFLICT);
         let resp = approve_with(
             true,
@@ -836,8 +865,14 @@ mod tests {
         );
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         // A failed approval leaves the invite pending.
-        assert_eq!(fetch_with(true, &mut store, "z", T0 + 2).status(), StatusCode::ACCEPTED);
-        assert_eq!(fetch_with(true, &mut store, "nope", T0 + 2).status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            fetch_with(true, &mut store, "z", T0 + 2).status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            fetch_with(true, &mut store, "nope", T0 + 2).status(),
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]
@@ -871,7 +906,10 @@ mod tests {
             "/api/v1/ground-station/wfb/invite/0011/reject",
             "/api/v1/ground-station/wfb/invite/0011",
         ] {
-            assert!(crate::auth::relay_forbidden(path), "{path} must be relay-forbidden");
+            assert!(
+                crate::auth::relay_forbidden(path),
+                "{path} must be relay-forbidden"
+            );
         }
     }
 

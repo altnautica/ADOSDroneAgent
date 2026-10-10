@@ -128,7 +128,7 @@ On a device the agent installs as a set of systemd services plus a Python virtua
 
 ## Hardware Support
 
-The agent auto-detects the board on boot and scales features to available resources. Profiles for 17 boards ship in `src/ados/hal/boards/`, and any ARM64 or x86_64 Linux board with a serial port and systemd should work through the `generic-arm64` profile.
+The agent auto-detects the board on boot and scales features to available resources. Profiles for 21 boards ship in `src/ados/hal/boards/`, and any ARM64 or x86_64 Linux board with a serial port and systemd should work through the `generic-arm64` profile.
 
 | Class | Example boards | Capabilities |
 |-------|----------------|--------------|

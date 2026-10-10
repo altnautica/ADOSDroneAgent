@@ -208,6 +208,10 @@ pub struct AppState {
     /// Set from [`crate::param_store::default_params_path`] at startup and
     /// overridable with [`AppState::with_params_path`].
     pub params_path: PathBuf,
+    /// The runtime directory (`$ADOS_RUN_DIR`, default `/run/ados`) the routes
+    /// read live sidecars and command sockets under. Overridable with
+    /// [`AppState::with_run_dir`].
+    pub run_dir: PathBuf,
     /// The on-disk paths the pairing routes read + write.
     pub pairing_paths: PairingPaths,
     /// The dashboard-access PIN store the `pin/*` routes read + write, and the
@@ -304,6 +308,7 @@ impl AppState {
             dashboard_pin,
             mcp_tokens,
             params_path: crate::param_store::default_params_path(),
+            run_dir: crate::routes::status_full::run_dir(),
             started: Instant::now(),
             swarm: SwarmIpcClient::disconnected(),
             aux_rpc_proxy: None,
@@ -319,6 +324,14 @@ impl AppState {
     /// with the resolved `DaemonPaths` entry; a test points it at a tempdir.
     pub fn with_params_path(mut self, path: PathBuf) -> Self {
         self.params_path = path;
+        self
+    }
+
+    /// Point the live sidecar and command-socket reads at an explicit runtime
+    /// directory. The daemon passes its resolved `DaemonPaths` entry; a test
+    /// points it at a tempdir.
+    pub fn with_run_dir(mut self, dir: PathBuf) -> Self {
+        self.run_dir = dir;
         self
     }
 
@@ -422,6 +435,10 @@ impl AppState {
                 .and_then(|m| m.get("vehicle_firmware"))
                 .and_then(serde_json::Value::as_str)
                 .and_then(ados_protocol::flight_modes::ArduPilotFirmware::from_name),
+            q_enabled: crate::param_store::read_param(&self.params_path, "Q_ENABLE")
+                .ok()
+                .flatten()
+                .is_some_and(|p| p.value >= 1.0),
         }
     }
 
@@ -451,6 +468,9 @@ pub struct FcIdentity {
     pub autopilot: i64,
     pub mav_type: i64,
     pub firmware: Option<ados_protocol::flight_modes::ArduPilotFirmware>,
+    /// ArduPlane `Q_ENABLE` from the param cache: a QuadPlane may report a
+    /// fixed-wing MAV_TYPE (a `Q_OPTIONS` choice), so the type alone misses it.
+    pub q_enabled: bool,
 }
 
 /// The pure half of [`AppState::fc_speaks_msp`], over a state snapshot.

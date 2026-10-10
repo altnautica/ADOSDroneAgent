@@ -1031,13 +1031,7 @@ mod param_syntax_tests {
         // reached on. Held report-only on purpose: the failure it describes is
         // fixed on the affected machines rather than papered over in the
         // product, so nothing consumes its verdict.
-        //
-        // `fc_identity` decides what identity an aircraft should carry from its
-        // issued slot. Its write is gated off behind config, but nothing calls
-        // it at all, so the observation half is not running either — worth
-        // stating plainly, because "ships inert with the observation on" is what
-        // it was believed to be doing.
-        const DELIBERATELY_UNCALLED: [&str; 2] = ["reachable_addr", "fc_identity"];
+        const DELIBERATELY_UNCALLED: [&str; 1] = ["reachable_addr"];
 
         let unreached: Vec<&String> = declared
             .iter()
@@ -1120,7 +1114,13 @@ mod recording_route_tests {
             std::sync::Arc::new(crate::mcp::McpTokenStore::with_path(
                 dir.path().join("mcp-token.json"),
             )),
-        );
+        )
+        .with_run_dir(dir.path().join("run"));
+        // A disarmed vehicle: the armed guard fails closed on a drone with no
+        // fresh state, and these tests exercise routing, not the interlock.
+        state
+            .state
+            .set_snapshot_for_test(serde_json::json!({"armed": false}));
         (dir, state)
     }
 

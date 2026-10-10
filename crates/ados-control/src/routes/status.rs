@@ -254,13 +254,13 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
     // present only when their sidecars are fresh + valid. Mirrors the FastAPI
     // status route folding `_read_camera_status()` into the body.
     if let Some(obj) = body.as_object_mut() {
-        for (key, value) in crate::routes::status_full::read_camera_status() {
+        for (key, value) in crate::routes::status_full::read_camera_status(&state.run_dir) {
             obj.insert(key, value);
         }
         // The reconciler verdicts ride the same seam: `managementLink`,
         // `mgmtLinkMode`, `usbRehomeState`, `wifiPowersave`. Both status routes
         // fold them so a GCS on either endpoint sees the same reading.
-        for (key, value) in crate::routes::status_full::read_reconciler_status() {
+        for (key, value) in crate::routes::status_full::read_reconciler_status(&state.run_dir) {
             obj.insert(key, value);
         }
     }

@@ -121,8 +121,16 @@ pub fn decode_exact_frame(frame: &[u8]) -> Result<MavMessage, MavlinkError> {
         return Err(bad("message id is not in the dialect"));
     };
     // A v1 serialize never truncates, so it reports the full encoded length.
+    // The dialect is generated without extension fields, so a MAVLink 2
+    // payload may legitimately run past that base length up to the
+    // message's extended length; parse reads the base fields and ignores the
+    // rest, and CRC_EXTRA covers base fields only.
     let mut scratch = [0u8; 255];
-    let max_len = rust_mavlink::Message::ser(&template, MavlinkVersion::V1, &mut scratch);
+    let base_len = rust_mavlink::Message::ser(&template, MavlinkVersion::V1, &mut scratch);
+    let max_len = match version {
+        MavlinkVersion::V2 => v2_extended_len(msg_id).map_or(base_len, |ext| ext.max(base_len)),
+        MavlinkVersion::V1 => base_len,
+    };
     if payload_len > max_len {
         return Err(bad("payload is longer than the message"));
     }
@@ -139,6 +147,17 @@ pub fn decode_exact_frame(frame: &[u8]) -> Result<MavMessage, MavlinkError> {
     }
     <MavMessage as rust_mavlink::Message>::parse(version, msg_id, &frame[header_len..crc_at])
         .map_err(|e| MavlinkError::Read(e.to_string()))
+}
+
+/// Full MAVLink 2 payload length (base plus extension fields) for messages the
+/// agent receives with extensions. The generated dialect omits extension
+/// fields, so their length is not derivable from it.
+fn v2_extended_len(msg_id: u32) -> Option<usize> {
+    match msg_id {
+        // OPTICAL_FLOW: 26 base bytes + flow_rate_x/flow_rate_y (2 x f32).
+        100 => Some(34),
+        _ => None,
+    }
 }
 
 /// Whether a complete MAVLink v1/v2 frame carries a valid checksum: the X.25
@@ -1714,6 +1733,16 @@ mod tests {
         let mut trailing = whole.clone();
         trailing.push(0);
         assert!(decode_exact_frame(&trailing).is_err());
+    }
+
+    #[test]
+    fn exact_decode_accepts_v2_extension_length_only_up_to_extended_size() {
+        // OPTICAL_FLOW #100: 26 base bytes, 34 with its extension fields.
+        assert!(matches!(
+            decode_exact_frame(&v2_frame_with(100, &[0; 34], 0)),
+            Ok(MavMessage::OPTICAL_FLOW(_))
+        ));
+        assert!(decode_exact_frame(&v2_frame_with(100, &[0; 35], 0)).is_err());
     }
 
     #[test]

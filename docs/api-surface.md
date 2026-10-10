@@ -172,8 +172,8 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/v1/ground-station/ui/screens` |  |
 | GET | `/api/v1/ground-station/wfb` |  |
 | PUT | `/api/v1/ground-station/wfb` |  |
-| GET | `/api/v1/ground-station/wfb/invite` | relay-forbidden |
-| POST | `/api/v1/ground-station/wfb/invite` | relay-forbidden |
+| GET | `/api/v1/ground-station/wfb/invite` |  |
+| POST | `/api/v1/ground-station/wfb/invite` |  |
 | GET | `/api/v1/ground-station/wfb/invite/{id}` |  |
 | POST | `/api/v1/ground-station/wfb/invite/{id}/approve` |  |
 | POST | `/api/v1/ground-station/wfb/invite/{id}/reject` |  |
@@ -229,7 +229,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-199 native routes.
+204 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

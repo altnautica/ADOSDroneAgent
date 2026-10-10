@@ -312,12 +312,11 @@ SETUP_STATE_PATH = SETUP_STATE_DIR / "state.json"
 # cached runner. Owned by the agent; readable by the GCS.
 HARDWARE_STATE_PATH = SETUP_STATE_DIR / "hardware-state.json"
 
-# Plugins (installed bundles, plugin data, plugin logs). The native plugin
+# Plugins (installed bundles, plugin data) and the agent log root. The native plugin
 # host owns install state; the runner and the CLI read these.
 PLUGINS_INSTALL_DIR = ADOS_VAR_DIR / "plugins"
 PLUGIN_DATA_DIR = ADOS_VAR_DIR / "plugin-data"
 ADOS_LOG_DIR = Path("/var/log/ados")
-PLUGIN_LOG_DIR = ADOS_LOG_DIR / "plugins"
 
 # Install-result record. Written atomically by the install pipeline with the
 # outcome of the last install/upgrade (status, version, profile, board, kernel
