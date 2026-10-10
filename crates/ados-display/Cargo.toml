@@ -32,6 +32,9 @@ ados-hid = { path = "../ados-hid" }
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The agent config (`ground_station.ui.*`) the OLED contrast and the button
+# mapping are read from.
+serde_norway = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
@@ -62,3 +65,5 @@ evdev = { version = "0.12", features = ["tokio"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Paused-clock tests for the touch recovery and the render-loop select bounds.
+tokio = { workspace = true, features = ["test-util"] }

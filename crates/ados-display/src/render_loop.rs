@@ -13,8 +13,17 @@
 //! seam here lets the page composers and the panel write path develop and test
 //! independently.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
+use crate::fb_writer::{hash_bytes, FbWriter, Frame, SnapshotJob};
 use crate::graphics::primitives::Canvas;
 use crate::pack::pack_for_bpp;
+
+/// Render-loop tick granularity. The render period derives from the active
+/// page's refresh rate; this is the resolution the loop wakes at to decide
+/// whether a render is due.
+pub const TICK_GRANULARITY: Duration = Duration::from_millis(100);
 
 /// Pack a finished page canvas into the panel's framebuffer bytes for `bpp`.
 ///
@@ -166,6 +175,76 @@ pub fn pack_frame_fitted(
     pack_for_bpp(&rgb, bpp).map(|packed| (packed, xf))
 }
 
+/// Presents finished canvases through the off-thread writer without redoing
+/// work for an unchanged frame.
+///
+/// The canvas is hashed once. When the writer already holds that frame (written
+/// or pending) the bilinear scale and pack are skipped entirely; a snapshot is
+/// requested only when the canvas differs from the last snapshot, and the PNG
+/// encode happens on the writer thread.
+pub struct FramePresenter {
+    bpp: u32,
+    xres: u32,
+    yres: u32,
+    last_snapshot_hash: Option<u64>,
+    packs: u64,
+    snapshots: u64,
+}
+
+impl FramePresenter {
+    pub fn new(bpp: u32, xres: u32, yres: u32) -> Self {
+        Self {
+            bpp,
+            xres,
+            yres,
+            last_snapshot_hash: None,
+            packs: 0,
+            snapshots: 0,
+        }
+    }
+
+    /// Present `canvas`; when `snapshot_to` is set (the snapshot cadence is
+    /// due) also queue a PNG of it there unless that exact canvas was the last
+    /// snapshot.
+    pub fn present(&mut self, writer: &FbWriter, canvas: &Canvas, snapshot_to: Option<PathBuf>) {
+        let raw = canvas.as_rgb888();
+        let hash = hash_bytes(raw);
+        if !writer.is_last(hash) {
+            match pack_frame_fitted(canvas, self.bpp, self.xres, self.yres) {
+                Some((packed, _xf)) => {
+                    self.packs += 1;
+                    writer.present(Frame::with_hash(packed, hash));
+                }
+                None => {
+                    tracing::warn!(bpp = self.bpp, "unsupported panel bit depth; frame dropped")
+                }
+            }
+        }
+        if let Some(path) = snapshot_to {
+            if self.last_snapshot_hash != Some(hash) {
+                writer.request_snapshot(SnapshotJob {
+                    path,
+                    rgb888: raw.to_vec(),
+                    width: canvas.width(),
+                    height: canvas.height(),
+                });
+                self.last_snapshot_hash = Some(hash);
+                self.snapshots += 1;
+            }
+        }
+    }
+
+    /// Frames scaled and packed so far.
+    pub fn packs(&self) -> u64 {
+        self.packs
+    }
+
+    /// Snapshot PNGs requested so far.
+    pub fn snapshots(&self) -> u64 {
+        self.snapshots
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +303,39 @@ mod tests {
             LetterboxTransform::fit(480, 320, 480, 320),
             LetterboxTransform::identity(480, 320)
         );
+    }
+
+    struct CountingSink(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl crate::fb_writer::FrameSink for CountingSink {
+        fn write_frame(&mut self, _buf: &[u8]) -> std::io::Result<()> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn static_page_packs_once_png_once() {
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut writer = FbWriter::spawn(CountingSink(writes.clone()));
+        let mut presenter = FramePresenter::new(16, 480, 320);
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("lcd-snapshot.png");
+        let canvas = blank_panel(&DARK);
+
+        // Twenty renders of an unchanging page, each with the snapshot due.
+        for _ in 0..20 {
+            presenter.present(&writer, &canvas, Some(png.clone()));
+        }
+        assert_eq!(presenter.packs(), 1, "an unchanged frame is packed once");
+        assert_eq!(
+            presenter.snapshots(),
+            1,
+            "an unchanged frame is snapshotted once"
+        );
+
+        writer.cleanup();
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(png.exists(), "the writer thread encoded the snapshot");
     }
 }

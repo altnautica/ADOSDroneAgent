@@ -242,7 +242,14 @@ impl TouchTransformHandle {
         self.inner.present.store(true, Ordering::Relaxed);
     }
 
-    /// Whether a touch node was discovered. False on a panel with no touch chip.
+    /// Mark the touch node gone (absent at discovery, or lost mid-read), so the
+    /// calibration auto-prompt does not fire for a panel that is not there.
+    pub fn mark_absent(&self) {
+        self.inner.present.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether a touch node is currently open. False on a panel with no touch
+    /// chip, and while the reader is rediscovering a lost one.
     pub fn touch_present(&self) -> bool {
         self.inner.present.load(Ordering::Relaxed)
     }
@@ -295,9 +302,12 @@ impl TouchTransformHandle {
     }
 }
 
-/// Discover, open, and drain the touchscreen evdev node, classifying strokes and
-/// sending each completed [`TouchEvent`] on `tx`. Runs until the device errors
-/// or the channel closes (the render loop dropped its receiver on shutdown).
+/// Discover, open, and drain the touchscreen evdev node for the life of the
+/// process, sending each completed [`TouchEvent`] on `tx`. A missing node or a
+/// read error never ends the reader: [`crate::touch_supervisor::supervise_touch`]
+/// marks touch absent, waits the fixed local-socket pace and rediscovers, so a
+/// late-loading driver or a replugged panel comes back without a restart. It
+/// returns only once the render loop dropped its receiver.
 ///
 /// Discovery prefers a device whose name contains "ADS7846" or "Touchscreen",
 /// then any device that advertises both ABS_X and ABS_Y and is not a gamepad,
@@ -313,16 +323,31 @@ impl TouchTransformHandle {
 pub async fn run_touch_reader(
     handle: TouchTransformHandle,
     tx: tokio::sync::mpsc::Sender<TouchEvent>,
-) -> std::io::Result<()> {
+) {
+    crate::touch_supervisor::supervise_touch(
+        handle,
+        tx,
+        discover_touch_device,
+        |(path, device), handle, tx| drain_touch_device(path, device, handle, tx),
+    )
+    .await
+}
+
+/// One open device's lifetime: adopt its ranges, then classify strokes until
+/// the device errors or the render loop is gone.
+#[cfg(target_os = "linux")]
+async fn drain_touch_device(
+    path: String,
+    device: evdev::Device,
+    handle: TouchTransformHandle,
+    tx: tokio::sync::mpsc::Sender<TouchEvent>,
+) -> crate::touch_supervisor::SessionEnd {
     use std::time::Instant;
 
     use ados_hid::touch::StrokeFsm;
     use evdev::{AbsoluteAxisType, InputEventKind, Key};
 
-    let Some((path, device)) = discover_touch_device() else {
-        tracing::info!("ados-display: no touchscreen evdev node found; touch input disabled");
-        return Ok(());
-    };
+    use crate::touch_supervisor::SessionEnd;
 
     let (x_range, y_range) = abs_ranges(&device);
     // Adopt the panel's real ABS ranges and mark the chip present so the render
@@ -341,7 +366,10 @@ pub async fn run_touch_reader(
         "touchscreen opened; reading"
     );
 
-    let mut stream = device.into_event_stream()?;
+    let mut stream = match device.into_event_stream() {
+        Ok(s) => s,
+        Err(e) => return SessionEnd::Lost(e),
+    };
     let mut fsm = StrokeFsm::new();
     let base = Instant::now();
 
@@ -357,10 +385,7 @@ pub async fn run_touch_reader(
     loop {
         let ev = match stream.next_event().await {
             Ok(ev) => ev,
-            Err(e) => {
-                tracing::warn!(error = %e, "touchscreen read error; stopping touch reader");
-                return Err(e);
-            }
+            Err(e) => return SessionEnd::Lost(e),
         };
         let now_ms = base.elapsed().as_millis() as i64;
         match ev.kind() {
@@ -385,8 +410,7 @@ pub async fn run_touch_reader(
                             raw: last_raw,
                         };
                         if tx.send(event).await.is_err() {
-                            tracing::info!("touch gesture channel closed; stopping reader");
-                            return Ok(());
+                            return SessionEnd::ChannelClosed;
                         }
                     }
                     pending_x = None;

@@ -5,10 +5,12 @@
 //! in [`crate::routes::gs_ui_read`]; this module serves the four writes the front
 //! can reproduce faithfully:
 //!
-//! - **`PUT /api/v1/ground-station/ui/oled`** — apply the supplied OLED fields
-//!   (`brightness` / `auto_dim_enabled` / `screen_cycle_seconds`), persist the
-//!   merged section into `ground_station.ui.oled` of the agent config, signal the
-//!   OLED display service to reload, and echo the full UI config blob.
+//! - **`PUT /api/v1/ground-station/ui/oled`** — apply the supplied OLED
+//!   `brightness` (the SSD1306 contrast, 0-255), persist the merged section into
+//!   `ground_station.ui.oled` of the agent config, signal the OLED display
+//!   service to reload, and echo the full UI config blob. Any other key in the
+//!   body (including the retired `auto_dim_enabled` / `screen_cycle_seconds`,
+//!   which no renderer ever applied) is a `422`.
 //! - **`PUT /api/v1/ground-station/ui/buttons`** — replace the button mapping
 //!   wholesale (when supplied), persist it into `ground_station.ui.buttons`,
 //!   signal the button service to reload, and echo the full UI config blob.
@@ -192,29 +194,10 @@ fn check_brightness(v: Option<i64>) -> Option<Response> {
     }
 }
 
-/// Validate an OLED `screen_cycle_seconds` (Pydantic `ge=1, le=60`). `None` when in
-/// range or absent; `Some(response)` carries the FastAPI 422 for the bound.
-fn check_screen_cycle(v: Option<i64>) -> Option<Response> {
-    match v {
-        Some(n) if n < 1 => Some(validation_error_422(
-            "screen_cycle_seconds",
-            "greater_than_equal",
-            "Input should be greater than or equal to 1",
-            "ge",
-            1,
-            n,
-        )),
-        Some(n) if n > 60 => Some(validation_error_422(
-            "screen_cycle_seconds",
-            "less_than_equal",
-            "Input should be less than or equal to 60",
-            "le",
-            60,
-            n,
-        )),
-        _ => None,
-    }
-}
+/// OLED keys earlier releases accepted and persisted although no renderer applied
+/// them. They are rejected on write and stripped from a persisted section so a
+/// stale config stops advertising them.
+const RETIRED_OLED_KEYS: [&str; 2] = ["auto_dim_enabled", "screen_cycle_seconds"];
 
 // ---------------------------------------------------------------------------
 // On-disk seam: the agent config.
@@ -246,12 +229,10 @@ fn merge_over_defaults(
     out
 }
 
-/// The default OLED block (the Python `_DEFAULT_OLED`).
+/// The default OLED block: the SSD1306 contrast on the native 0-255 scale.
 fn default_oled() -> Map<String, Value> {
     json_object(json!({
         "brightness": 204,
-        "auto_dim_enabled": true,
-        "screen_cycle_seconds": 5,
     }))
 }
 
@@ -554,16 +535,13 @@ async fn signal_buttons_reload() {
 // PUT /api/v1/ground-station/ui/oled
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../ui/oled` request body (the FastAPI `OledUpdate`): three optional
-/// fields, each applied only when present.
+/// The `PUT .../ui/oled` request body: the optional OLED contrast. Unknown keys
+/// are a deserialization error, which the axum `Json` extractor answers `422`.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OledUpdate {
     #[serde(default)]
     pub brightness: Option<i64>,
-    #[serde(default)]
-    pub auto_dim_enabled: Option<bool>,
-    #[serde(default)]
-    pub screen_cycle_seconds: Option<i64>,
 }
 
 /// `PUT .../ui/oled` → the full UI config blob with the OLED section mutated.
@@ -584,9 +562,7 @@ pub async fn put_ui_oled(
     if let Some(resp) = check_brightness(update.brightness) {
         return resp;
     }
-    if let Some(resp) = check_screen_cycle(update.screen_cycle_seconds) {
-        return resp;
-    }
+    // `deny_unknown_fields` already rejected any retired key during extraction.
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
@@ -607,14 +583,11 @@ fn put_ui_oled_at(config_path: &Path, update: &OledUpdate) -> Response {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),
     };
+    for key in RETIRED_OLED_KEYS {
+        oled.remove(key);
+    }
     if let Some(b) = update.brightness {
         oled.insert("brightness".to_string(), json!(b));
-    }
-    if let Some(d) = update.auto_dim_enabled {
-        oled.insert("auto_dim_enabled".to_string(), json!(d));
-    }
-    if let Some(s) = update.screen_cycle_seconds {
-        oled.insert("screen_cycle_seconds".to_string(), json!(s));
     }
     let oled_value = Value::Object(oled);
     data.insert("oled".to_string(), oled_value.clone());
@@ -932,23 +905,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn screen_cycle_under_range_is_the_fastapi_422_envelope() {
-        let resp = check_screen_cycle(Some(0)).unwrap();
-        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        let body = body_json(resp).await;
-        assert_eq!(
-            body,
-            json!({
-                "detail": [{
-                    "type": "greater_than_equal",
-                    "loc": ["body", "screen_cycle_seconds"],
-                    "msg": "Input should be greater than or equal to 1",
-                    "input": 0,
-                    "ctx": {"ge": 1},
-                    "url": "https://errors.pydantic.dev/2.11/v/greater_than_equal",
-                }]
-            })
-        );
+    async fn gs_ui_write_rejects_auto_dim_key() {
+        // The retired keys are no longer part of the body: the axum extractor the
+        // route uses answers 422 before the handler runs.
+        use axum::extract::FromRequest;
+        for body in [
+            r#"{"auto_dim_enabled": true}"#,
+            r#"{"brightness": 100, "screen_cycle_seconds": 5}"#,
+        ] {
+            let req = axum::http::Request::builder()
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap();
+            let rejection = Json::<OledUpdate>::from_request(req, &())
+                .await
+                .expect_err("retired key must be rejected");
+            assert_eq!(
+                rejection.into_response().status(),
+                StatusCode::UNPROCESSABLE_ENTITY
+            );
+        }
+        let ok: OledUpdate = serde_json::from_str(r#"{"brightness": 100}"#).unwrap();
+        assert_eq!(ok.brightness, Some(100));
     }
 
     #[test]
@@ -956,9 +935,6 @@ mod tests {
         assert!(check_brightness(None).is_none());
         assert!(check_brightness(Some(0)).is_none());
         assert!(check_brightness(Some(255)).is_none());
-        assert!(check_screen_cycle(None).is_none());
-        assert!(check_screen_cycle(Some(1)).is_none());
-        assert!(check_screen_cycle(Some(60)).is_none());
     }
 
     // ── /ui/oled ──────────────────────────────────────────────────────────────
@@ -971,17 +947,13 @@ mod tests {
 
         let update = OledUpdate {
             brightness: Some(120),
-            auto_dim_enabled: Some(false),
-            screen_cycle_seconds: None,
         };
         let resp = put_ui_oled_at(&cfg, &update);
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_json(resp).await;
-        // The full UI blob, with the oled section mutated. brightness + auto_dim
-        // take the request; screen_cycle keeps the default (5).
-        assert_eq!(body["oled"]["brightness"], json!(120));
-        assert_eq!(body["oled"]["auto_dim_enabled"], json!(false));
-        assert_eq!(body["oled"]["screen_cycle_seconds"], json!(5));
+        // The full UI blob, with the oled section mutated, and nothing but the
+        // contrast in it.
+        assert_eq!(body["oled"], json!({"brightness": 120}));
         // The untouched sections are the full defaults.
         assert_eq!(
             body["buttons"]["mapping"]["B1_short"],
@@ -1004,17 +976,8 @@ mod tests {
             oled.get("brightness").and_then(serde_norway::Value::as_i64),
             Some(120)
         );
-        assert_eq!(
-            oled.get("auto_dim_enabled")
-                .and_then(serde_norway::Value::as_bool),
-            Some(false)
-        );
-        // screen_cycle_seconds = 5 (the default that came through _load_ui_config).
-        assert_eq!(
-            oled.get("screen_cycle_seconds")
-                .and_then(serde_norway::Value::as_i64),
-            Some(5)
-        );
+        assert!(oled.get("auto_dim_enabled").is_none());
+        assert!(oled.get("screen_cycle_seconds").is_none());
         assert_eq!(
             parsed
                 .get("agent")
@@ -1025,29 +988,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn put_oled_overlays_the_persisted_section() {
-        // The stored oled section in the config is the base; the request
-        // overrides only the supplied field; the rest of the stored value stands.
+    async fn put_oled_strips_retired_keys_from_the_persisted_section() {
+        // A config written by an earlier release still carries the retired keys;
+        // the next write keeps the stored brightness and drops them on disk too.
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         std::fs::write(
             &cfg,
-            "ground_station:\n  ui:\n    oled:\n      brightness: 40\n      screen_cycle_seconds: 9\n",
+            "ground_station:\n  ui:\n    oled:\n      brightness: 40\n      screen_cycle_seconds: 9\n      auto_dim_enabled: false\n",
         )
         .unwrap();
 
-        let update = OledUpdate {
-            brightness: None,
-            auto_dim_enabled: Some(true),
-            screen_cycle_seconds: None,
-        };
-        let resp = put_ui_oled_at(&cfg, &update);
+        let resp = put_ui_oled_at(&cfg, &OledUpdate::default());
         let body = body_json(resp).await;
-        // brightness keeps the persisted value (40); screen_cycle keeps 9;
-        // auto_dim takes the request.
-        assert_eq!(body["oled"]["brightness"], json!(40));
-        assert_eq!(body["oled"]["screen_cycle_seconds"], json!(9));
-        assert_eq!(body["oled"]["auto_dim_enabled"], json!(true));
+        assert_eq!(body["oled"], json!({"brightness": 40}));
+        let read = crate::routes::gs_ui_read::read_gs_section(&cfg, "ui");
+        assert_eq!(read["oled"], json!({"brightness": 40}));
     }
 
     #[tokio::test]
@@ -1057,16 +1013,11 @@ mod tests {
         std::fs::write(&cfg, "agent:\n  name: gs-1\n").unwrap();
         let first = OledUpdate {
             brightness: Some(90),
-            ..Default::default()
         };
         assert_eq!(put_ui_oled_at(&cfg, &first).status(), StatusCode::OK);
-        let second = OledUpdate {
-            auto_dim_enabled: Some(false),
-            ..Default::default()
-        };
+        let second = OledUpdate::default();
         let body = body_json(put_ui_oled_at(&cfg, &second)).await;
         assert_eq!(body["oled"]["brightness"], json!(90));
-        assert_eq!(body["oled"]["auto_dim_enabled"], json!(false));
         // The read route serves the same persisted section.
         let read = crate::routes::gs_ui_read::read_gs_section(&cfg, "ui");
         assert_eq!(read["oled"]["brightness"], json!(90));
@@ -1085,7 +1036,6 @@ mod tests {
             &cfg,
             &OledUpdate {
                 brightness: Some(50),
-                ..Default::default()
             },
         );
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);

@@ -19,12 +19,18 @@
 //!   reader retries at the fixed local-socket pace and the UI never notices.
 //!
 //! Decoding deliberately does NOT happen here. Short/long/cancel and the
-//! action mapping are owned by `ados-hid`; duplicating any of that would give the
-//! panel a second, drifting opinion about what a press means.
+//! action mapping are owned by `ados-hid`. The one exception is a press that
+//! arrives with no action because its pin is a board-declared button outside the
+//! fixed pin set: [`ButtonLayout`] resolves it through the same mapping slots.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-use ados_hid::buttons::{ButtonEvent, PressKind};
+pub use ados_hid::buttons::board_button_pins;
+use ados_hid::buttons::{
+    board_pins_or_default, default_button_mapping, merge_mapping, ButtonEvent, PressKind,
+    BUTTON_PINS,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -36,6 +42,72 @@ pub const BUTTONS_SOCK: &str = "/run/ados/buttons.sock";
 /// human-rate event; anything beyond a handful queued means the UI is wedged, and
 /// dropping the excess is better than growing without bound.
 const CHANNEL_DEPTH: usize = 16;
+
+/// The board's four front-panel buttons and the action map they resolve
+/// through.
+///
+/// The pins come from the HAL board sidecar's optional `buttons` block
+/// (`{"up","down","select","back"}` BCM lines) when the board declares one, else
+/// the fixed [`BUTTON_PINS`]. They are matched in that order to the `B1`..`B4`
+/// mapping slots. An event that arrives without an action (its pin is not one
+/// of the fixed lines, so the publisher had no slot for it) is resolved here
+/// through the configured mapping; an event that already carries an action is
+/// passed through untouched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ButtonLayout {
+    pub pins: [u32; 4],
+    mapping: HashMap<String, String>,
+}
+
+impl Default for ButtonLayout {
+    fn default() -> Self {
+        Self {
+            pins: BUTTON_PINS,
+            mapping: default_button_mapping(),
+        }
+    }
+}
+
+impl ButtonLayout {
+    /// Read the pins from `board_sidecar` and the mapping from the agent config
+    /// (`$ADOS_CONFIG`, default `/etc/ados/config.yaml`). Any missing or
+    /// malformed source falls back to the built-in default for that part.
+    pub fn load(board_sidecar: &Path) -> Self {
+        let pins = board_pins_or_default(board_sidecar);
+        let config =
+            std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".to_string());
+        let mapping = std::fs::read_to_string(config)
+            .ok()
+            .and_then(|text| serde_norway::from_str::<serde_norway::Value>(&text).ok())
+            .and_then(|root| {
+                root.get("ground_station")?
+                    .get("ui")?
+                    .get("buttons")?
+                    .get("mapping")
+                    .cloned()
+            })
+            .map(|block| merge_mapping(&block))
+            .unwrap_or_else(default_button_mapping);
+        Self { pins, mapping }
+    }
+
+    /// Fill in the action of an event that arrived unmapped, when its pin is one
+    /// of this board's buttons.
+    pub fn resolve(&self, mut event: ButtonEvent) -> ButtonEvent {
+        if event.action.is_some() {
+            return event;
+        }
+        if let Some(slot) = self.pins.iter().position(|&p| p == event.pin) {
+            let kind = match event.kind {
+                PressKind::Short => "short",
+                PressKind::Long => "long",
+            };
+            let key = format!("B{}_{kind}", slot + 1);
+            event.action = self.mapping.get(&key).cloned();
+        }
+        event
+    }
+}
 
 /// Parse one line of the `buttons.sock` stream into a [`ButtonEvent`].
 ///
@@ -79,16 +151,20 @@ pub fn parse_button_line(line: &str) -> Option<ButtonEvent> {
     })
 }
 
-/// Connect to `sock_path`, subscribe, and forward each decoded press.
+/// Connect to `sock_path`, subscribe, and forward each decoded press, resolved
+/// through `layout`.
 ///
 /// Returns immediately with the receiving half; the reader runs as a task and
 /// reconnects at the fixed local-socket pace for the lifetime of the process. The channel
 /// closes only if the caller drops the receiver.
-pub fn spawn_button_reader(sock_path: PathBuf) -> mpsc::Receiver<ButtonEvent> {
+pub fn spawn_button_reader(
+    sock_path: PathBuf,
+    layout: ButtonLayout,
+) -> mpsc::Receiver<ButtonEvent> {
     let (tx, rx) = mpsc::channel(CHANNEL_DEPTH);
     tokio::spawn(async move {
         loop {
-            match read_until_disconnect(&sock_path, &tx).await {
+            match read_until_disconnect(&sock_path, &layout, &tx).await {
                 Ok(()) => tracing::debug!("button stream closed; reconnecting"),
                 Err(e) => tracing::debug!(error = %e, "button stream unavailable"),
             }
@@ -104,6 +180,7 @@ pub fn spawn_button_reader(sock_path: PathBuf) -> mpsc::Receiver<ButtonEvent> {
 /// One connection's lifetime: subscribe, then pump lines until EOF or error.
 async fn read_until_disconnect(
     sock_path: &PathBuf,
+    layout: &ButtonLayout,
     tx: &mpsc::Sender<ButtonEvent>,
 ) -> std::io::Result<()> {
     let mut stream = UnixStream::connect(sock_path).await?;
@@ -117,7 +194,7 @@ async fn read_until_disconnect(
             // a future field addition must not take the panel's input away.
             continue;
         };
-        if tx.send(event).await.is_err() {
+        if tx.send(layout.resolve(event)).await.is_err() {
             // The render loop is gone; stop cleanly.
             return Ok(());
         }
@@ -190,5 +267,40 @@ mod tests {
             .expect("timestamp is not load-bearing for dispatch");
         assert_eq!(ev.timestamp_ms, 0);
         assert_eq!(ev.action.as_deref(), Some("back"));
+    }
+
+    #[test]
+    fn board_buttons_block_overrides_the_fixed_pins() {
+        assert_eq!(
+            board_button_pins(
+                r#"{"name":"example-oem board","buttons":{"up":17,"down":27,"select":22,"back":23}}"#
+            ),
+            Some([17, 27, 22, 23])
+        );
+        assert_eq!(
+            board_button_pins(r#"{"board":{"buttons":{"up":1,"down":2,"select":3,"back":4}}}"#),
+            Some([1, 2, 3, 4])
+        );
+        // No block, or an incomplete one, keeps the fixed pins.
+        assert_eq!(board_button_pins(r#"{"name":"x"}"#), None);
+        assert_eq!(board_button_pins(r#"{"buttons":{"up":17}}"#), None);
+        assert_eq!(ButtonLayout::default().pins, BUTTON_PINS);
+    }
+
+    #[test]
+    fn unmapped_press_on_a_board_pin_resolves_through_its_slot() {
+        let layout = ButtonLayout {
+            pins: [17, 27, 22, 23],
+            mapping: default_button_mapping(),
+        };
+        let back = parse_button_line(r#"{"button":23,"kind":"short","action":null}"#).unwrap();
+        assert_eq!(layout.resolve(back).action.as_deref(), Some("back"));
+        let pair = parse_button_line(r#"{"button":22,"kind":"long"}"#).unwrap();
+        assert_eq!(layout.resolve(pair).action.as_deref(), Some("pair_drone"));
+        // A pin outside the board's set stays unmapped; a mapped press is kept.
+        let stray = parse_button_line(r#"{"button":4,"kind":"short"}"#).unwrap();
+        assert_eq!(layout.resolve(stray).action, None);
+        let mapped = parse_button_line(r#"{"button":23,"kind":"short","action":"menu"}"#).unwrap();
+        assert_eq!(layout.resolve(mapped).action.as_deref(), Some("menu"));
     }
 }

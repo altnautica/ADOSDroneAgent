@@ -186,7 +186,6 @@ async fn run_page_ui(
         take_recalibrate_flag, CalibrationController, CalibrationOutcome, RECALIBRATE_FLAG_PATH,
         TOUCH_CALIB_SKIPPED_PATH,
     };
-    use ados_display::fb_writer::{FbWriter, Frame};
     use ados_display::graphics::palette::{self, Palette};
     use ados_display::graphics::primitives::Canvas;
     use ados_display::navigator::{Dispatch, PageNavigator};
@@ -194,10 +193,11 @@ async fn run_page_ui(
     use ados_display::pages::plugin::PLUGIN_PAGE_ID;
     use ados_display::pages::{PageContext, PanelAction};
     use ados_display::panel_action::{AgentWriter, Outcome};
-    use ados_display::render_loop::pack_frame_fitted;
+    use ados_display::render_loop::{FramePresenter, TICK_GRANULARITY};
     use ados_display::sidecar::{
-        write_plugin_tap, write_snapshot_png, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
+        write_plugin_tap, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
     };
+    use ados_display::state_poller::StatePoller;
     use ados_display::state_source::StateSource;
     use ados_display::touch_input::{TouchTransformHandle, TOUCH_CALIB_PATH};
     use ados_display::widgets::draw_ack_line;
@@ -207,10 +207,6 @@ async fn run_page_ui(
     const STATE_POLL_PERIOD: Duration = Duration::from_secs(5);
     // Idle render floor — matches IDLE_LCD_FLOOR_HZ (0.5 Hz → 2 s).
     const IDLE_RENDER_PERIOD: Duration = Duration::from_millis(2000);
-    // Render-loop tick granularity. The render period derives from the active
-    // page's refresh_hz; this is the polling resolution the loop wakes at to
-    // re-evaluate whether a render or a state poll is due.
-    const TICK_GRANULARITY: Duration = Duration::from_millis(100);
     // After any touch the panel repaints at this rate for BOOST_WINDOW so a drag
     // or tab switch tracks the finger, then settles back to the page cadence so
     // a quiet panel does not pin a core.
@@ -282,20 +278,6 @@ async fn run_page_ui(
         }
     }
 
-    // Pack + present a finished canvas through the off-thread writer. The blit
-    // is off-thread, so this returns immediately.
-    fn present_frame(writer: &FbWriter, bpp: u32, canvas: &Canvas, xres: u32, yres: u32) {
-        // The native canvas's RGB is the dedup key (it uniquely identifies the
-        // frame; the letterbox is a pure function of it), while the WRITTEN bytes
-        // are the canvas scaled-to-fit the probed panel.
-        let raw = canvas.as_rgb888();
-        if let Some((packed, _xf)) = pack_frame_fitted(canvas, bpp, xres, yres) {
-            writer.present(Frame::new(packed, raw));
-        } else {
-            tracing::warn!(bpp, "unsupported panel bit depth; frame dropped");
-        }
-    }
-
     // The theme drives the palette. It is re-read on SIGHUP so a GCS or captive
     // portal config edit (`PUT /ui/oled`) takes effect without a unit restart.
     fn palette_from_conf(conf: &std::collections::BTreeMap<String, String>) -> Palette {
@@ -309,8 +291,14 @@ async fn run_page_ui(
     let mut palette: Palette = palette_from_conf(conf_blob);
 
     let mut navigator = PageNavigator::new(all_pages());
-    let mut source = StateSource::new();
-    let mut ctx = source.build_context();
+    // The agent state is read on its own thread; the loop only ever borrows the
+    // latest context, so a wedged agent never stalls touch, render or watchdog.
+    let poller = StatePoller::spawn(StateSource::new(), STATE_POLL_PERIOD);
+    let mut ctx_rx = poller.subscribe();
+    let mut ctx: PageContext = ctx_rx.borrow_and_update().clone();
+    // Cleared if the poller thread ever ends so its select arm cannot spin.
+    let mut ctx_open = true;
+    let mut presenter = FramePresenter::new(bpp, xres, yres);
 
     // Panel actions run off the loop; their outcomes come back here and are
     // painted for ACK_LINGER, then the state is re-polled so the page shows
@@ -331,21 +319,27 @@ async fn run_page_ui(
     let (touch_tx, mut touch_rx) =
         tokio::sync::mpsc::channel::<ados_display::touch_input::TouchEvent>(16);
     {
+        // The reader rediscovers a missing or lost panel for the life of the
+        // process and returns only once this loop drops its receiver.
         let handle = touch_transform.clone();
-        tokio::spawn(async move {
-            if let Err(e) = ados_display::touch_input::run_touch_reader(handle, touch_tx).await {
-                tracing::warn!(error = %e, "touch reader exited");
-            }
-        });
+        tokio::spawn(ados_display::touch_input::run_touch_reader(
+            handle, touch_tx,
+        ));
     }
+    // Cleared if the touch channel ever closes so its select arm cannot spin.
+    let mut touch_open = true;
 
     // Front-panel buttons. `ados-hid` already classifies and publishes them; this
     // is the transport that lets a press reach the navigator, which has always
     // known what to do with one. A node whose `ados-pic` is absent or down simply
     // never yields an event — the reader retries quietly and the UI is unaffected.
-    let mut button_rx = ados_display::button_source::spawn_button_reader(std::path::PathBuf::from(
-        ados_display::button_source::BUTTONS_SOCK,
+    let button_layout = ados_display::button_source::ButtonLayout::load(Path::new(
+        ados_display::host_identity::BOARD_SIDECAR_PATH,
     ));
+    let mut button_rx = ados_display::button_source::spawn_button_reader(
+        std::path::PathBuf::from(ados_display::button_source::BUTTONS_SOCK),
+        button_layout,
+    );
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -364,7 +358,6 @@ async fn run_page_ui(
     const SNAPSHOT_PERIOD: Duration = Duration::from_secs(1);
 
     let now = Instant::now();
-    let mut last_state_poll = now;
     let mut last_render: Option<Instant> = None;
     let mut last_latency_write = now;
     let mut last_snapshot: Option<Instant> = None;
@@ -410,18 +403,8 @@ async fn run_page_ui(
                     tracing::info!("touch calibration idle; closing the wizard");
                     calibration = None;
                     calibration_idle_closed = true;
-                    ctx = source.build_context();
-                    last_state_poll = now;
+                    poller.refresh_now();
                     last_render = None;
-                }
-
-                // Re-poll the agent state on the slow cadence (the wizard reads
-                // no agent state, so skip it while calibrating).
-                if calibration.is_none()
-                    && now.duration_since(last_state_poll) >= STATE_POLL_PERIOD
-                {
-                    ctx = source.build_context();
-                    last_state_poll = now;
                 }
 
                 // Apply a remote page switch (mirrors the sidecar watcher), but
@@ -455,25 +438,19 @@ async fn run_page_ui(
                 if render_due {
                     let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
 
-                    // Mirror the freshly rendered frame to the snapshot PNG so the
-                    // REST snapshot endpoint serves the live panel without PIL.
-                    // Throttled to ~1 Hz independent of the render cadence.
+                    // Mirror the frame to the snapshot PNG so the REST snapshot
+                    // endpoint serves the live panel. Throttled to ~1 Hz, skipped
+                    // for an unchanged canvas, encoded on the writer thread.
                     let snapshot_due = last_snapshot
                         .map(|t| now.duration_since(t) >= SNAPSHOT_PERIOD)
                         .unwrap_or(true);
-                    if snapshot_due {
-                        if let Err(e) = write_snapshot_png(
-                            Path::new(LCD_SNAPSHOT_PATH),
-                            canvas.as_rgb888(),
-                            canvas.width(),
-                            canvas.height(),
-                        ) {
-                            tracing::debug!(error = %e, "lcd-snapshot write failed");
-                        }
+                    let snapshot_to = if snapshot_due {
                         last_snapshot = Some(now);
-                    }
-
-                    present_frame(&writer, bpp, &canvas, xres, yres);
+                        Some(std::path::PathBuf::from(LCD_SNAPSHOT_PATH))
+                    } else {
+                        None
+                    };
+                    presenter.present(&writer, &canvas, snapshot_to);
                     last_render = Some(now);
                 }
 
@@ -496,10 +473,14 @@ async fn run_page_ui(
                     sd_watchdog();
                 }
             }
-            maybe_event = touch_rx.recv() => {
-                // A completed stroke arrived from the reader task. A `None`
-                // closes the channel only when the reader is gone; keep looping
-                // so the rest of the UI (signals, render, latency) survives.
+            maybe_event = touch_rx.recv(), if touch_open => {
+                // A completed stroke arrived from the reader task. `None` means
+                // the reader is gone: disable this arm so the loop does not spin
+                // on a closed channel, and keep the rest of the UI running.
+                if maybe_event.is_none() {
+                    touch_open = false;
+                    tracing::warn!("touch reader ended; touch input disabled");
+                }
                 if let Some(event) = maybe_event {
                     let now = Instant::now();
                     last_interaction = Some(now);
@@ -533,14 +514,13 @@ async fn run_page_ui(
                             if outcome != CalibrationOutcome::Continue {
                                 calibration = None;
                                 // Re-poll so the resumed UI shows fresh state.
-                                ctx = source.build_context();
-                                last_state_poll = now;
+                                poller.refresh_now();
                             }
                         }
                         // Repaint immediately: the next target, or the resumed
                         // UI when the fit just landed.
                         let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
-                        present_frame(&writer, bpp, &canvas, xres, yres);
+                        presenter.present(&writer, &canvas, None);
                         last_render = Some(now);
                     } else {
                         // Normal UI: route the gesture through the navigator
@@ -551,13 +531,12 @@ async fn run_page_ui(
                         if matches!(dispatch, Dispatch::RouteChanged(_) | Dispatch::ModalChanged(_))
                         {
                             // A tab switch or modal push/pop moves the active
-                            // surface: pull fresh state for the new page, then
-                            // repaint immediately instead of waiting out the
-                            // previous page's refresh period.
-                            ctx = source.build_context();
-                            last_state_poll = now;
+                            // surface: ask for fresh state for the new page (it
+                            // repaints again when that lands), and repaint now
+                            // instead of waiting out the previous page's period.
+                            poller.refresh_now();
                             let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
-                            present_frame(&writer, bpp, &canvas, xres, yres);
+                            presenter.present(&writer, &canvas, None);
                             last_render = Some(now);
                         }
                         // A page-defined custom key: a plugin zone tap, an overlay
@@ -566,7 +545,7 @@ async fn run_page_ui(
                         if let Dispatch::Custom(key) = dispatch {
                             if handle_custom(&key, &navigator, &ctx, &agent_writer, &ack_tx, now_ms) {
                                 let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
-                                present_frame(&writer, bpp, &canvas, xres, yres);
+                                presenter.present(&writer, &canvas, None);
                                 last_render = Some(now);
                             }
                         }
@@ -591,12 +570,11 @@ async fn run_page_ui(
                             Dispatch::RouteChanged(_) | Dispatch::ModalChanged(_)
                         ) {
                             // Same handling as a touch: the active surface moved,
-                            // so pull fresh state for the new page and repaint now
-                            // rather than waiting out the old page's period.
-                            ctx = source.build_context();
-                            last_state_poll = now;
+                            // so ask for fresh state for the new page and repaint
+                            // now rather than waiting out the old page's period.
+                            poller.refresh_now();
                             let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
-                            present_frame(&writer, bpp, &canvas, xres, yres);
+                            presenter.present(&writer, &canvas, None);
                             last_render = Some(now);
                         }
                         // A custom key (including an unmapped-button fallback to an
@@ -608,7 +586,7 @@ async fn run_page_ui(
                                 .unwrap_or(0);
                             if handle_custom(&key, &navigator, &ctx, &agent_writer, &ack_tx, ts_ms) {
                                 let canvas = build_canvas(&calibration, &navigator, &ctx, &palette, &ack, touch_clock);
-                                present_frame(&writer, bpp, &canvas, xres, yres);
+                                presenter.present(&writer, &canvas, None);
                                 last_render = Some(now);
                             }
                         }
@@ -627,10 +605,20 @@ async fn run_page_ui(
                     let now = Instant::now();
                     ack = Some((outcome, now));
                     if calibration.is_none() {
-                        ctx = source.build_context();
-                        last_state_poll = now;
+                        poller.refresh_now();
                     }
                     last_render = None;
+                }
+            }
+            changed = ctx_rx.changed(), if ctx_open => {
+                // A fresh agent-state context landed from the poller thread:
+                // adopt it and repaint on the next tick.
+                if changed.is_ok() {
+                    ctx = ctx_rx.borrow_and_update().clone();
+                    last_render = None;
+                } else {
+                    ctx_open = false;
+                    tracing::warn!("state poller ended; panel keeps the last context");
                 }
             }
             _ = sighup.recv() => {

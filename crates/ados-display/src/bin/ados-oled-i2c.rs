@@ -11,11 +11,14 @@
 //! device acknowledges at the configured address, the service logs the reason
 //! and exits cleanly (rc 0) — a board with no OLED never churns.
 //!
-//! Reuse: status comes from [`ados_display::state_source::StateSource`] (the
-//! same agent REST + sidecars the framebuffer UI reads); text is rendered with
+//! Reuse: status comes from [`ados_display::state_source::StateSource::status_only`]
+//! (one GET of the ground-station status every 2 s); text is rendered with
 //! [`ados_display::graphics::fonts::LoadedFont`] (grayscale coverage thresholded
-//! to 1bpp); the frame is packed + uploaded by [`ados_display::oled`]. The frame
-//! builder is pure and unit-tested; only the I2C open/write is Linux-gated.
+//! to 1bpp); the frame is packed + uploaded by [`ados_display::oled`], which
+//! re-initialises the panel after repeated upload failures (a brownout). The
+//! configured `ground_station.ui.oled.brightness` is applied as the controller
+//! contrast whenever it changes. The frame builder is pure and unit-tested; only
+//! the I2C open/write is Linux-gated.
 
 use ados_display::graphics::fonts::LoadedFont;
 use ados_display::oled::{self, Controller, OledGeometry};
@@ -89,6 +92,80 @@ fn primary_ip() -> String {
         })
         .map(|a| a.ip().to_string())
         .unwrap_or_else(|_| "no network".to_string())
+}
+
+/// How long a resolved LAN IP is reused before the UDP-socket lookup reruns.
+const IP_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// [`primary_ip`] cached for [`IP_CACHE_TTL`].
+struct CachedIp {
+    value: String,
+    at: Option<std::time::Instant>,
+}
+
+impl CachedIp {
+    fn new() -> Self {
+        Self {
+            value: String::new(),
+            at: None,
+        }
+    }
+
+    fn get(&mut self) -> &str {
+        if self.at.is_none_or(|t| t.elapsed() >= IP_CACHE_TTL) {
+            self.value = primary_ip();
+            self.at = Some(std::time::Instant::now());
+        }
+        &self.value
+    }
+}
+
+/// The persisted OLED contrast (`ground_station.ui.oled.brightness`, 0-255) from
+/// the agent config text, or the API default (204) when unset or unparseable.
+fn configured_brightness(config_yaml: Option<&str>) -> i64 {
+    const DEFAULT_BRIGHTNESS: i64 = 204;
+    config_yaml
+        .and_then(|text| serde_norway::from_str::<serde_norway::Value>(text).ok())
+        .and_then(|root| {
+            root.get("ground_station")?
+                .get("ui")?
+                .get("oled")?
+                .get("brightness")?
+                .as_i64()
+        })
+        .unwrap_or(DEFAULT_BRIGHTNESS)
+}
+
+/// Re-reads the agent config only when its modification time changes.
+struct BrightnessWatch {
+    path: std::path::PathBuf,
+    mtime: Option<std::time::SystemTime>,
+    value: i64,
+    loaded: bool,
+}
+
+impl BrightnessWatch {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            mtime: None,
+            value: configured_brightness(None),
+            loaded: false,
+        }
+    }
+
+    fn current(&mut self) -> i64 {
+        let mtime = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok();
+        if !self.loaded || mtime != self.mtime {
+            let text = std::fs::read_to_string(&self.path).ok();
+            self.value = configured_brightness(text.as_deref());
+            self.mtime = mtime;
+            self.loaded = true;
+        }
+        self.value
+    }
 }
 
 /// Format the link line from the paired-link state + RSSI.
@@ -224,16 +301,25 @@ fn run() {
     let title_font = LoadedFont::new(FontFace::SansBold, 13);
     let body_font = LoadedFont::new(FontFace::SansRegular, 11);
     let mut src = StateSource::new();
+    let mut ip = CachedIp::new();
+    let mut link = ados_display::oled_link::OledLink::new();
+    let mut brightness = BrightnessWatch::new(std::path::PathBuf::from(
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".to_string()),
+    ));
 
     loop {
-        let ctx = src.build_context();
-        let ip = primary_ip();
-        let packed = build_frame(&ctx, &ip, geom, &title_font, &body_font);
-        if let Err(e) = oled::render_frame(&mut dev, &packed, geom, controller) {
-            // A transient bus error should not kill the service; log and retry.
+        let contrast = ados_display::oled_link::brightness_to_contrast(brightness.current());
+        if let Err(e) = link.apply_contrast(&mut dev, contrast) {
+            tracing::debug!(error = %e, "OLED contrast write failed; retrying next tick");
+        }
+        let ctx = src.status_only();
+        let packed = build_frame(&ctx, ip.get(), geom, &title_font, &body_font);
+        if let Err(e) = link.upload(&mut dev, &packed, geom, controller) {
+            // A transient bus error should not kill the service; the link
+            // re-initialises the panel after repeated failures.
             tracing::warn!(error = %e, "OLED frame upload failed; retrying");
         }
-        std::thread::sleep(Duration::from_millis(700));
+        std::thread::sleep(Duration::from_secs(2));
     }
 }
 
@@ -246,11 +332,14 @@ fn run() {
     let geom = geometry_from_env();
     let _ = controller_from_env();
     let _ = addresses_to_probe();
+    let mut brightness = BrightnessWatch::new(std::path::PathBuf::from("/etc/ados/config.yaml"));
+    let _ = ados_display::oled_link::brightness_to_contrast(brightness.current());
+    let mut ip = CachedIp::new();
     let title_font = LoadedFont::new(FontFace::SansBold, 13);
     let body_font = LoadedFont::new(FontFace::SansRegular, 11);
     let frame = build_frame(
         &PageContext::default(),
-        &primary_ip(),
+        ip.get(),
         geom,
         &title_font,
         &body_font,
@@ -355,6 +444,15 @@ mod tests {
         assert_eq!(parse_u16("0X3D"), Some(0x3d));
         assert_eq!(parse_u16(" 60 "), Some(60));
         assert_eq!(parse_u16("nonsense"), None);
+    }
+
+    #[test]
+    fn configured_brightness_reads_the_ui_oled_block() {
+        let yaml = "ground_station:\n  ui:\n    oled:\n      brightness: 90\n";
+        assert_eq!(configured_brightness(Some(yaml)), 90);
+        assert_eq!(configured_brightness(Some("agent:\n  name: gs\n")), 204);
+        assert_eq!(configured_brightness(Some(": not yaml")), 204);
+        assert_eq!(configured_brightness(None), 204);
     }
 
     #[test]

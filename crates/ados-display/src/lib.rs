@@ -28,6 +28,8 @@
 //! * [`touch_input`] — the touchscreen evdev reader: raw ADS7846 ABS samples ->
 //!   rotated LCD pixels -> classified gestures posted to the render loop. The
 //!   coordinate transform is pure; only the node drain is Linux-gated.
+//! * [`touch_supervisor`] — the never-give-up discover/drain loop around it.
+//! * [`state_poller`] — the off-loop agent-state poller the render loop reads.
 //!
 //! mDNS and the FastAPI display routes stay in Python; the byte-level write path
 //! and the page render both live here.
@@ -42,12 +44,15 @@ pub mod host_identity;
 pub mod log_tail;
 pub mod navigator;
 pub mod oled;
+pub mod oled_link;
 pub mod pack;
 pub mod pages;
 pub mod panel_action;
 pub mod probe;
 pub mod render_loop;
 pub mod sidecar;
+pub mod state_poller;
 pub mod state_source;
 pub mod touch_input;
+pub mod touch_supervisor;
 pub mod widgets;

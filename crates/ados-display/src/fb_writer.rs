@@ -51,11 +51,25 @@ pub struct Frame {
 impl Frame {
     /// Build a frame, hashing `raw_input` for the dup-skip key.
     pub fn new(packed: Vec<u8>, raw_input: &[u8]) -> Self {
-        Self {
-            packed,
-            input_hash: hash_bytes(raw_input),
-        }
+        Self::with_hash(packed, hash_bytes(raw_input))
     }
+
+    /// Build a frame whose raw-input hash the caller already computed (the
+    /// render loop hashes the canvas once to ask [`FbWriter::is_last`] before
+    /// paying for the pack).
+    pub fn with_hash(packed: Vec<u8>, input_hash: u64) -> Self {
+        Self { packed, input_hash }
+    }
+}
+
+/// A PNG snapshot of a rendered canvas, encoded on the writer thread so the
+/// compression never runs on the render loop.
+#[derive(Debug, Clone)]
+pub struct SnapshotJob {
+    pub path: std::path::PathBuf,
+    pub rgb888: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Hash raw input bytes for the duplicate-skip comparison.
@@ -165,6 +179,8 @@ struct Shared {
 struct PendingState {
     frame: Option<Frame>,
     last_written_hash: Option<u64>,
+    /// Single-slot latest-wins snapshot request, independent of the frame slot.
+    snapshot: Option<SnapshotJob>,
 }
 
 const NO_LAST_WRITE: u64 = u64::MAX;
@@ -185,6 +201,7 @@ impl FbWriter {
             pending: Mutex::new(PendingState {
                 frame: None,
                 last_written_hash: None,
+                snapshot: None,
             }),
             cv: Condvar::new(),
             writes: AtomicU64::new(0),
@@ -217,6 +234,22 @@ impl FbWriter {
             }
             p.frame = Some(frame);
         }
+        self.shared.cv.notify_one();
+    }
+
+    /// True when `input_hash` is the frame already on the panel or the one
+    /// waiting to be written, so the caller can skip packing a duplicate. A
+    /// frame whose write failed is not "last", so it is packed and retried.
+    pub fn is_last(&self, input_hash: u64) -> bool {
+        let p = self.shared.pending.lock().unwrap();
+        p.frame.as_ref().map(|f| f.input_hash) == Some(input_hash)
+            || p.last_written_hash == Some(input_hash)
+    }
+
+    /// Queue a PNG snapshot for the writer thread to encode. A request not yet
+    /// picked up is replaced (latest wins). Returns immediately.
+    pub fn request_snapshot(&self, job: SnapshotJob) {
+        self.shared.pending.lock().unwrap().snapshot = Some(job);
         self.shared.cv.notify_one();
     }
 
@@ -264,72 +297,75 @@ impl Drop for FbWriter {
     }
 }
 
-/// The dedicated-thread loop. Waits for a frame (waking periodically so cleanup
-/// breaks it out), drains latest-wins, skips duplicates by raw-input hash, and
-/// writes — updating the last-written hash only after a successful write.
+/// The dedicated-thread loop. Waits for a frame or a snapshot request (waking
+/// periodically so cleanup breaks it out), drains latest-wins, skips duplicate
+/// frames by raw-input hash, writes — updating the last-written hash only after
+/// a successful write — and encodes any pending snapshot PNG.
 fn writer_loop<S: FrameSink>(shared: Arc<Shared>, mut sink: S) {
     loop {
         let stop = shared.stop.load(Ordering::SeqCst);
-        // Pull the pending frame (latest-wins), waiting if none and not stopping.
-        let (frame, last_hash) = {
+        let (frame, snapshot, last_hash) = {
             let mut p = shared.pending.lock().unwrap();
-            if p.frame.is_none() && !stop {
-                // Wait for a frame or a stop, with a periodic wake.
+            if p.frame.is_none() && p.snapshot.is_none() && !stop {
+                // Wait for work or a stop, with a periodic wake.
                 let (guard, _timeout) = shared
                     .cv
                     .wait_timeout(p, std::time::Duration::from_millis(500))
                     .unwrap();
                 p = guard;
             }
-            let frame = p.frame.take();
-            (frame, p.last_written_hash)
+            (p.frame.take(), p.snapshot.take(), p.last_written_hash)
         };
 
-        let Some(frame) = frame else {
+        if frame.is_none() && snapshot.is_none() {
             // No pending work. Exit if stopping; else loop back to wait.
             if shared.stop.load(Ordering::SeqCst) {
                 return;
             }
             continue;
-        };
-
-        // Duplicate-skip: identical raw input as the last successful write skips
-        // the device write entirely.
-        if last_hash == Some(frame.input_hash) {
-            shared.skipped.fetch_add(1, Ordering::Relaxed);
-            // A drained-on-stop duplicate still counts as handled; exit if
-            // stopping so a present-before-cleanup duplicate does not spin.
-            if shared.stop.load(Ordering::SeqCst) {
-                return;
-            }
-            continue;
         }
 
-        let t0 = Instant::now();
-        match sink.write_frame(&frame.packed) {
-            Ok(()) => {
-                let ms = t0.elapsed().as_secs_f64() * 1000.0;
-                shared
-                    .last_write_ms_bits
-                    .store(ms.to_bits(), Ordering::Relaxed);
-                shared.writes.fetch_add(1, Ordering::Relaxed);
-                // Update the last-written hash ONLY after a successful write.
-                shared.pending.lock().unwrap().last_written_hash = Some(frame.input_hash);
+        if let Some(frame) = frame {
+            if last_hash == Some(frame.input_hash) {
+                // Duplicate-skip: identical raw input as the last successful
+                // write skips the device write entirely.
+                shared.skipped.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let t0 = Instant::now();
+                match sink.write_frame(&frame.packed) {
+                    Ok(()) => {
+                        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                        shared
+                            .last_write_ms_bits
+                            .store(ms.to_bits(), Ordering::Relaxed);
+                        shared.writes.fetch_add(1, Ordering::Relaxed);
+                        // Update the last-written hash ONLY after a successful write.
+                        shared.pending.lock().unwrap().last_written_hash = Some(frame.input_hash);
+                    }
+                    Err(e) => {
+                        // A failed write (an SPI hiccup, a driver rebind) must not
+                        // freeze the panel on its last image for the life of the
+                        // service: log it and keep serving. The last-written hash is
+                        // left alone, so the next frame is written even if its input
+                        // matches the one that just failed.
+                        tracing::warn!(error = %e, "framebuffer write failed");
+                    }
+                }
             }
-            Err(e) => {
-                // A failed write (an SPI hiccup, a driver rebind) must not
-                // freeze the panel on its last image for the life of the
-                // service: log it and keep serving. The last-written hash is
-                // left alone, so the next frame is written even if its input
-                // matches the one that just failed.
-                tracing::warn!(error = %e, "framebuffer write failed");
+        }
+
+        if let Some(job) = snapshot {
+            if let Err(e) =
+                crate::sidecar::write_snapshot_png(&job.path, &job.rgb888, job.width, job.height)
+            {
+                tracing::debug!(error = %e, "lcd-snapshot write failed");
             }
         }
 
         if shared.stop.load(Ordering::SeqCst) {
-            // Drained the present-before-cleanup frame; now exit.
-            // (Loop back once more only if another frame is already pending so a
-            // burst right before stop is not silently dropped.)
+            // Drained the present-before-cleanup work; now exit. (Loop back once
+            // more only if another frame is already pending so a burst right
+            // before stop is not silently dropped.)
             let has_more = shared.pending.lock().unwrap().frame.is_some();
             if !has_more {
                 return;

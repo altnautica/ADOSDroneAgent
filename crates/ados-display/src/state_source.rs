@@ -22,7 +22,9 @@
 //!
 //! The history buffers the sparkline surfaces read (RSSI, CPU, temperature,
 //! battery) are not carried in any one snapshot; the source keeps a rolling
-//! 60-sample ring per series and pushes the freshest reading each refresh.
+//! 60-sample ring per series and pushes the freshest reading only on the timed
+//! poll, so the x-axis is a regular 60 x poll-period window no matter how often
+//! a route change asks for a refresh.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -161,8 +163,10 @@ impl StateSource {
     /// The status snapshot and the setup snapshot come from the agent's local
     /// API; the hop-supervisor sidecar, the log tail and the host identity are
     /// read on-box. Each source is independent — a missing one degrades only the
-    /// surfaces that read it, never the whole frame.
-    pub fn build_context(&mut self) -> PageContext {
+    /// surfaces that read it, never the whole frame. `advance_history` is true
+    /// only for the timed poll; a refresh-now (route change, ack) re-reads the
+    /// state but leaves the trend buffers on their regular time base.
+    pub fn build_context(&mut self, advance_history: bool) -> PageContext {
         let status = self.get_json("/api/v1/ground-station/status");
         let setup = self.get_json("/api/v1/setup/status");
         let hop = read_run_json(&self.hop_path)
@@ -177,12 +181,26 @@ impl StateSource {
                 ados_protocol::sidecar::check_sidecar_version("hop-supervisor", got, ours);
             }
         }
-        let mut ctx = self.compose(status.as_ref(), setup.as_ref(), hop.as_ref());
+        let mut ctx = self.map_sources(status.as_ref(), setup.as_ref(), hop.as_ref());
+        if advance_history {
+            self.advance_history(&ctx);
+        }
+        self.attach_history(&mut ctx);
         ctx.paired_drone.auto_pair_enabled =
             auto_pair_enabled(self.get_json("/api/wfb/pair").as_ref());
         apply_host_identity(&mut ctx.device, HostIdentity::read(&self.host_paths));
         ctx.diagnostics.agent_logs = crate::log_tail::fetch(&self.logd_socket).unwrap_or_default();
         ctx
+    }
+
+    /// The narrow read the small status OLED needs: one GET of the
+    /// ground-station status snapshot (the only endpoint carrying the link,
+    /// pairing, role and network blocks the OLED lines show). No setup or
+    /// radio-pair call, no log-tail query, no host-identity reads, and no
+    /// trend-buffer advance.
+    pub fn status_only(&mut self) -> PageContext {
+        let status = self.get_json("/api/v1/ground-station/status");
+        self.map_sources(status.as_ref(), None, None)
     }
 
     /// Map the three already-fetched JSON sources into a [`PageContext`],
@@ -191,6 +209,19 @@ impl StateSource {
     /// live agent.
     pub fn compose(
         &mut self,
+        status: Option<&Value>,
+        setup: Option<&Value>,
+        hop: Option<&Value>,
+    ) -> PageContext {
+        let mut ctx = self.map_sources(status, setup, hop);
+        self.advance_history(&ctx);
+        self.attach_history(&mut ctx);
+        ctx
+    }
+
+    /// Map the fetched sources into a context with empty trend series.
+    fn map_sources(
+        &self,
         status: Option<&Value>,
         setup: Option<&Value>,
         hop: Option<&Value>,
@@ -222,20 +253,24 @@ impl StateSource {
 
         ctx.hopping = hopping_ctx(hop, ctx.link.channel);
         ctx.device = self.device_ctx(setup, &ctx.system);
+        ctx
+    }
 
-        // Advance the rolling trend buffers from this tick's fresh readings.
-        // Each series breaks its line on a missing reading (None push).
+    /// Push this poll's fresh readings onto the rolling trend buffers. Each
+    /// series breaks its line on a missing reading (None push).
+    fn advance_history(&mut self, ctx: &PageContext) {
         self.rssi_history.push(ctx.link.rssi_dbm);
         self.cpu_history.push(ctx.system.cpu_pct);
         self.temp_history.push(ctx.system.temp_c);
         self.battery_history.push(ctx.fc.battery_remaining);
+    }
 
+    /// Copy the current trend buffers into the context.
+    fn attach_history(&self, ctx: &mut PageContext) {
         ctx.link.rssi_history = self.rssi_history.to_vec();
         ctx.system.cpu_history = self.cpu_history.to_vec();
         ctx.system.temp_history = self.temp_history.to_vec();
         ctx.fc.battery_history = self.battery_history.to_vec();
-
-        ctx
     }
 
     /// Compose the setup-status identity fields (id, name, version) with the
@@ -993,7 +1028,7 @@ mod tests {
             Path::new("/nonexistent/pairing.json"),
             hop_path.clone(),
         );
-        assert!(src.build_context().hopping.present);
+        assert!(src.build_context(true).hopping.present);
 
         let old = std::time::SystemTime::now() - HOP_SIDECAR_FRESH - Duration::from_secs(5);
         std::fs::File::options()
@@ -1002,7 +1037,7 @@ mod tests {
             .unwrap()
             .set_modified(old)
             .unwrap();
-        let ctx = src.build_context();
+        let ctx = src.build_context(true);
         assert!(!ctx.hopping.present);
         assert!(ctx.hopping.band.is_none());
     }

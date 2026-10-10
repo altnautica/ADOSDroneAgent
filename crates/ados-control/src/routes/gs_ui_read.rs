@@ -9,8 +9,10 @@
 //!
 //! - **`GET /api/v1/ground-station/ui`** — the full persisted UI config blob:
 //!   `{oled, buttons, screens}`, each section the persisted `ground_station.ui`
-//!   value merged over the built-in defaults (`oled.brightness 204` / `auto_dim_enabled true` /
-//!   `screen_cycle_seconds 5`, the six-action button mapping, the six-screen
+//!   value merged over the built-in defaults (`oled.brightness 204`, the SSD1306
+//!   contrast; the retired `auto_dim_enabled` / `screen_cycle_seconds` keys are
+//!   never served, even from an older persisted section), the six-action button
+//!   mapping, the six-screen
 //!   order/enabled lists). An absent / unreadable / unparseable config degrades
 //!   to the all-defaults shape, never a 500.
 //! - **`GET /api/v1/ground-station/display`** — the persisted HDMI kiosk display
@@ -157,14 +159,28 @@ fn merge_over_defaults(defaults: Map<String, Value>, section: Option<&Value>) ->
 // The built-in default blobs (mirror the Python `_DEFAULT_*`).
 // ---------------------------------------------------------------------------
 
-/// The default OLED block, mirroring the Python `_DEFAULT_OLED` (the 0-255 native
-/// brightness scale, `204` ≈ 80%).
+/// The default OLED block: the SSD1306 contrast on the native 0-255 scale
+/// (`204` ≈ 80%).
 fn default_oled() -> Map<String, Value> {
     json_object(json!({
         "brightness": 204,
-        "auto_dim_enabled": true,
-        "screen_cycle_seconds": 5,
     }))
+}
+
+/// OLED keys earlier releases persisted although no renderer applied them. A
+/// stale config may still carry them; the read strips them.
+const RETIRED_OLED_KEYS: [&str; 2] = ["auto_dim_enabled", "screen_cycle_seconds"];
+
+/// The OLED section: the defaults merged with the stored section, minus the
+/// retired keys.
+fn oled_section(stored: Option<&Value>) -> Value {
+    let mut oled = merge_over_defaults(default_oled(), stored);
+    if let Value::Object(map) = &mut oled {
+        for key in RETIRED_OLED_KEYS {
+            map.remove(key);
+        }
+    }
+    oled
 }
 
 /// The default button mapping, mirroring the Python `_DEFAULT_BUTTONS` (the six
@@ -231,7 +247,7 @@ pub async fn get_ui(State(state): State<AppState>) -> Response {
 /// are unit-tested without filesystem IO.
 fn build_ui_config(blob: &Map<String, Value>) -> Value {
     json!({
-        "oled": merge_over_defaults(default_oled(), blob.get("oled")),
+        "oled": oled_section(blob.get("oled")),
         "buttons": merge_over_defaults(default_buttons(), blob.get("buttons")),
         "screens": merge_over_defaults(default_screens(), blob.get("screens")),
     })
@@ -301,8 +317,6 @@ mod tests {
         let want = json!({
             "oled": {
                 "brightness": 204,
-                "auto_dim_enabled": true,
-                "screen_cycle_seconds": 5,
             },
             "buttons": {
                 "mapping": {
@@ -329,14 +343,11 @@ mod tests {
         let mut blob = Map::new();
         blob.insert(
             "oled".to_string(),
-            json!({"brightness": 120, "auto_dim_enabled": false}),
+            json!({"brightness": 120, "auto_dim_enabled": false, "screen_cycle_seconds": 9}),
         );
         let got = build_ui_config(&blob);
-        // Overridden keys win.
-        assert_eq!(got["oled"]["brightness"], json!(120));
-        assert_eq!(got["oled"]["auto_dim_enabled"], json!(false));
-        // The default key the stored section did not carry stands.
-        assert_eq!(got["oled"]["screen_cycle_seconds"], json!(5));
+        // The stored contrast wins; the retired keys are not served.
+        assert_eq!(got["oled"], json!({"brightness": 120}));
         // Untouched sections are the full defaults.
         assert_eq!(got["buttons"]["mapping"]["B1_short"], json!("cycle_screen"));
         assert_eq!(
