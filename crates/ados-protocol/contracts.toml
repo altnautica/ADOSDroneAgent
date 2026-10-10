@@ -119,7 +119,7 @@ status = "active"
 # The id names the FRAMING generation (length-prefixed msgpack, superseding the
 # newline-JSON state.v1); the integer is the registry version of the body shape
 # and moves independently of it.
-description = "Length-prefixed msgpack vehicle-state frame (the current state-socket format). v3 added position_age_ms (how long since the flight controller's last decoded POSITION, read by the swarm beacon's suppression gate). v4 publishes a not-reported reading (battery voltage/current/remaining/temperature, GPS eph/epv, RC rssi) as null instead of the MAVLink sentinel."
+description = "Length-prefixed msgpack vehicle-state frame (the current state-socket format). v3 added position_age_ms (how long since the flight controller's last decoded POSITION, read by the swarm beacon's suppression gate). v4 publishes a not-reported reading (battery voltage/current/remaining/temperature, GPS eph/epv, RC rssi) as null instead of the MAVLink sentinel. The runtime extras carry `fc_system_id`/`fc_component_id` once the FC heartbeat is latched."
 
 [[contract]]
 id = "frame"
@@ -361,3 +361,10 @@ id = "config-status"
 version = 1
 path = "/run/ados/config-status-<service>.json"
 description = "Per-service config-load status: a loud-fail record written when a service's config is malformed."
+
+[[sidecar]]
+id = "fc-identity"
+version = 1
+path = "/run/ados/fc-identity.json"
+rust_const = "ados_control::routes::fc_identity::SIDECAR_VERSION"
+description = "Flight-controller identity reconciler outcome: whether the write is enabled, the last tick's outcome, the wanted and current system id."

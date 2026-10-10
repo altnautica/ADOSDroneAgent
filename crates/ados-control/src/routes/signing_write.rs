@@ -72,11 +72,6 @@ const VERIFY_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 const SOURCE_SYSTEM_ID: u8 = 255;
 const SOURCE_COMPONENT_ID: u8 = 190;
 
-/// The default target the Python signing helpers use when the body omits the
-/// target fields: system 1, component 1.
-const DEFAULT_TARGET_SYSTEM: u8 = 1;
-const DEFAULT_TARGET_COMPONENT: u8 = 1;
-
 /// The 32-byte signing-key length the FC's signing store expects.
 const SIGNING_KEY_LEN: usize = 32;
 
@@ -100,20 +95,12 @@ pub struct EnrollRequest {
     /// The signing link id. Carried in the response log only; not on the wire.
     #[serde(default)]
     pub link_id: i64,
-    /// The target system id. Defaults to 1.
-    #[serde(default = "default_target_system")]
-    pub target_system: i64,
-    /// The target component id. Defaults to 1.
-    #[serde(default = "default_target_component")]
-    pub target_component: i64,
-}
-
-fn default_target_system() -> i64 {
-    DEFAULT_TARGET_SYSTEM as i64
-}
-
-fn default_target_component() -> i64 {
-    DEFAULT_TARGET_COMPONENT as i64
+    /// The target system id. Defaults to the resolved FC target.
+    #[serde(default)]
+    pub target_system: Option<i64>,
+    /// The target component id. Defaults to the resolved FC target.
+    #[serde(default)]
+    pub target_component: Option<i64>,
 }
 
 /// `POST /api/mavlink/signing/enroll-fc` → push a 32-byte signing key to the FC.
@@ -134,11 +121,13 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
 
     // Parse + validate the field bounds (the Pydantic ge/le validators), then the
     // hex. A bad body is a 400 before any send, matching the Python validators.
-    let target_system = match bounded_u8(req.target_system, 1, 255) {
+    let fc = crate::fc_target::fc_target(&state);
+    let target_system = match bounded_u8(req.target_system.unwrap_or(i64::from(fc.0)), 1, 255) {
         Ok(v) => v,
         Err(()) => return detail(StatusCode::BAD_REQUEST, "target_system out of range"),
     };
-    let target_component = match bounded_u8(req.target_component, 0, 255) {
+    let target_component = match bounded_u8(req.target_component.unwrap_or(i64::from(fc.1)), 0, 255)
+    {
         Ok(v) => v,
         Err(()) => return detail(StatusCode::BAD_REQUEST, "target_component out of range"),
     };
@@ -241,16 +230,17 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
 /// so an FC enrolled at a system id other than 1 is the one that gets cleared.
 #[derive(Debug, Deserialize)]
 pub struct DisableRequest {
-    #[serde(default = "default_target_system")]
-    pub target_system: i64,
-    #[serde(default = "default_target_component")]
-    pub target_component: i64,
+    #[serde(default)]
+    pub target_system: Option<i64>,
+    #[serde(default)]
+    pub target_component: Option<i64>,
 }
 
 /// `POST /api/mavlink/signing/disable-on-fc` → clear the FC's signing store.
 ///
-/// Takes an optional `{target_system, target_component}` body (default 1/1, the
-/// same defaults and bounds enrolment uses). Gates on the FC being connected
+/// Takes an optional `{target_system, target_component}` body (defaulting to the
+/// resolved FC target, with the same bounds enrolment uses). Gates on the FC
+/// being connected
 /// (`503` when not), then sends `SETUP_SIGNING` with an all-zero key + a zero
 /// timestamp (ArduPilot reads this as "disable signing") and returns `{sent:
 /// true, verified}`, `verified` being whether an unsigned frame from the target
@@ -266,7 +256,8 @@ pub async fn disable_on_fc(
     if !state.fc_connected() {
         return detail(StatusCode::SERVICE_UNAVAILABLE, "FC not connected");
     }
-    let (target_system, target_component) = match disable_target(body.map(|Json(b)| b)) {
+    let fc = crate::fc_target::fc_target(&state);
+    let (target_system, target_component) = match disable_target(body.map(|Json(b)| b), fc) {
         Ok(t) => t,
         Err(msg) => return detail(StatusCode::BAD_REQUEST, msg),
     };
@@ -381,15 +372,16 @@ fn unsigned_from(frame: &[u8], system: u8) -> bool {
     }
 }
 
-/// The disable target: the body's system/component (bounded like enrolment), or
-/// 1/1 when no body is sent.
-fn disable_target(body: Option<DisableRequest>) -> Result<(u8, u8), &'static str> {
+/// The disable target: the body's system/component (bounded like enrolment),
+/// each falling back to the resolved FC target `fc` when omitted.
+fn disable_target(body: Option<DisableRequest>, fc: (u8, u8)) -> Result<(u8, u8), &'static str> {
     let Some(b) = body else {
-        return Ok((DEFAULT_TARGET_SYSTEM, DEFAULT_TARGET_COMPONENT));
+        return Ok(fc);
     };
-    let system = bounded_u8(b.target_system, 1, 255).map_err(|()| "target_system out of range")?;
-    let component =
-        bounded_u8(b.target_component, 0, 255).map_err(|()| "target_component out of range")?;
+    let system = bounded_u8(b.target_system.unwrap_or(i64::from(fc.0)), 1, 255)
+        .map_err(|()| "target_system out of range")?;
+    let component = bounded_u8(b.target_component.unwrap_or(i64::from(fc.1)), 0, 255)
+        .map_err(|()| "target_component out of range")?;
     Ok((system, component))
 }
 
@@ -537,19 +529,23 @@ mod tests {
     #[test]
     fn disable_clears_the_fc_the_caller_names() {
         let named = DisableRequest {
-            target_system: 7,
-            target_component: 1,
+            target_system: Some(7),
+            target_component: Some(1),
         };
-        assert_eq!(disable_target(Some(named)), Ok((7, 1)));
-        assert_eq!(
-            disable_target(None),
-            Ok((DEFAULT_TARGET_SYSTEM, DEFAULT_TARGET_COMPONENT))
-        );
+        assert_eq!(disable_target(Some(named), (1, 1)), Ok((7, 1)));
+        // No body: the resolved FC target.
+        assert_eq!(disable_target(None, (9, 1)), Ok((9, 1)));
+        // A partial body falls back field by field.
+        let partial = DisableRequest {
+            target_system: None,
+            target_component: Some(2),
+        };
+        assert_eq!(disable_target(Some(partial), (9, 1)), Ok((9, 2)));
         let bad = DisableRequest {
-            target_system: 0,
-            target_component: 1,
+            target_system: Some(0),
+            target_component: Some(1),
         };
-        assert!(disable_target(Some(bad)).is_err());
+        assert!(disable_target(Some(bad), (1, 1)).is_err());
     }
     use serde_json::Value;
     use tokio::io::AsyncReadExt;
@@ -810,8 +806,8 @@ mod tests {
         EnrollRequest {
             key_hex: key.iter().map(|b| format!("{b:02x}")).collect(),
             link_id: 0,
-            target_system: 1,
-            target_component: 1,
+            target_system: Some(1),
+            target_component: Some(1),
         }
     }
 
@@ -902,8 +898,8 @@ mod tests {
         let body = EnrollRequest {
             key_hex: "00".repeat(32),
             link_id: 0,
-            target_system: 1,
-            target_component: 1,
+            target_system: Some(1),
+            target_component: Some(1),
         };
         let resp = enroll_fc(State(state), Json(body)).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -919,8 +915,8 @@ mod tests {
         let body = EnrollRequest {
             key_hex: "deadbeef".to_string(), // too short
             link_id: 0,
-            target_system: 1,
-            target_component: 1,
+            target_system: Some(1),
+            target_component: Some(1),
         };
         let resp = enroll_fc(State(state), Json(body)).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -940,8 +936,8 @@ mod tests {
         let body = EnrollRequest {
             key_hex: "00".repeat(32),
             link_id: 0,
-            target_system: 1,
-            target_component: 1,
+            target_system: Some(1),
+            target_component: Some(1),
         };
         let resp = enroll_fc(State(state), Json(body)).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);

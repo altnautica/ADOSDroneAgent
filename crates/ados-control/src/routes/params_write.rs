@@ -65,7 +65,8 @@
 //! header), so the header identity matters. `system_id = 1, component_id = 191`
 //! is the agent/companion identity the router uses on its own FC send path, so a
 //! write from this surface is wire-identical to one the router sent. The target is
-//! the single-vehicle ArduPilot default `1/1`.
+//! the flight controller's own id as resolved by [`crate::fc_target::fc_target`]:
+//! the system id latched from its HEARTBEAT, once per request.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -87,20 +88,16 @@ use crate::state::AppState;
 const SOURCE_SYSTEM_ID: u8 = 1;
 const SOURCE_COMPONENT_ID: u8 = 191;
 
-/// The target identity: the single-vehicle ArduPilot default (1/1). The state
-/// socket carries no target system, so this surface targets 1/1.
-const TARGET_SYSTEM: u8 = 1;
-const TARGET_COMPONENT: u8 = 1;
-
 /// Parameters that change the vehicle's own MAVLink identity.
 ///
-/// Writing one of these through this surface is irreversible: [`TARGET_SYSTEM`]
-/// is fixed, so the vehicle stops answering the very route that would restore
-/// it. Matched case-insensitively because operators type parameter names.
+/// Refused because a REST write would re-address the vehicle under an
+/// operator's feet; the fleet reconciler is the only writer. Matched
+/// case-insensitively because operators type parameter names.
 fn is_identity_param(name: &str) -> bool {
     matches!(
         name.trim().to_ascii_uppercase().as_str(),
-        "SYSID_THISMAV" | "MAV_SYS_ID"
+        // ArduPilot before 4.7, ArduPilot 4.7+, PX4.
+        "SYSID_THISMAV" | "MAV_SYSID" | "MAV_SYS_ID"
     )
 }
 
@@ -165,57 +162,64 @@ pub async fn set_param(
         .into_response();
     }
 
-    // 2. Refuse a write that would put the vehicle beyond this surface's reach.
-    //
-    //    `TARGET_SYSTEM` below is fixed at 1, so changing the vehicle's own
-    //    MAVLink system id makes every subsequent PARAM_SET from this agent
-    //    addressed to a system that no longer exists — including the write that
-    //    would put it back. ArduPilot drops them, and `arm`/`disarm`/`mode`/
-    //    `rtl` stop reaching the aircraft too, because the command path carries
-    //    the same constant. There is no reboot route on this surface either, so
-    //    an operator cannot even cycle out of it.
-    //
-    //    One request, irreversible, and nothing about it looks unusual at the
-    //    time. Refused with the reason named rather than accepted. Lifting the
-    //    limit properly means discovering the vehicle's system id from its
-    //    HEARTBEAT and carrying it through both paths per vehicle; merely
-    //    widening the constant would replace an obvious failure with a subtle
-    //    one, where a command silently reaches the wrong airframe.
+    // 2. Refuse a write to the vehicle's own MAVLink identity. A REST write
+    //    would re-address the vehicle under an operator's feet; the fleet
+    //    reconciler is the only writer.
     if is_identity_param(&name) {
         return ParamError {
             status: StatusCode::CONFLICT,
             detail: format!(
-                "Refusing to write '{name}': this agent addresses vehicle \
-                 system id 1 only, so changing the vehicle's MAVLink identity \
-                 would make it unreachable by this surface — including the \
-                 write that would undo it, and arm/disarm/mode/rtl. Use a \
-                 direct USB parameter tool if you need a non-default system id."
+                "Refusing to write '{name}': the vehicle's MAVLink identity is \
+                 owned by the fleet identity reconciler, and a write here would \
+                 re-address the vehicle under every other operator's commands."
             ),
         }
         .into_response();
     }
 
+    match send_param_set(&state, &name, target).await {
+        Ok((ack, cached_value)) => {
+            Json(build_set_response(&name, target, ack, cached_value)).into_response()
+        }
+        Err(resp) => resp,
+    }
+}
+
+/// The shared PARAM_SET path: guards 3-7, the send, and the ack poll.
+///
+/// Returns `(ack, cached_value)` on a sent frame, or the 4xx/5xx response a
+/// guard raised. The REST route calls it after its own value and identity
+/// guards; the fleet identity reconciler calls it directly, as the one writer
+/// of the identity parameter.
+// The error is the ready-to-send HTTP response; boxing it would only add an
+// allocation on a cold refusal path.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn send_param_set(
+    state: &AppState,
+    name: &str,
+    target: f64,
+) -> Result<(bool, Option<f64>), Response> {
     // 3. The parameter must be one the agent has already observed. The native
     //    front's only param source is the router's on-disk cache; a name absent
     //    from it (or an unreadable cache) is refused with the FastAPI 404.
-    let Some(cached) = crate::param_store::read_param(&state.params_path, &name)
+    let Some(cached) = crate::param_store::read_param(&state.params_path, name)
         .ok()
         .flatten()
     else {
-        return ParamError {
+        return Err(ParamError {
             status: StatusCode::NOT_FOUND,
             detail: format!(
                 "Parameter '{name}' not in cache; agent must observe a \
                  PARAM_VALUE for it before writes are allowed"
             ),
         }
-        .into_response();
+        .into_response());
     };
 
     // 4. The FC's declared type decides the encoding; without it the write
     //    would be a guess, and a wrong guess corrupts an integer on PX4.
     let Some(param_type) = cached.param_type else {
-        return type_unknown(&name);
+        return Err(type_unknown(name));
     };
 
     // 5. The FC must be connected (the FastAPI `fc.connected` guard) → 503.
@@ -226,11 +230,11 @@ pub async fn set_param(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     if !connected {
-        return ParamError {
+        return Err(ParamError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             detail: "FC not connected".to_string(),
         }
-        .into_response();
+        .into_response());
     }
 
     // 6. Encode for the firmware the HEARTBEAT named; a value the type cannot
@@ -244,16 +248,22 @@ pub async fn set_param(
         match param_codec::encode(target, param_type, param_codec::uses_bytewise(autopilot)) {
             Ok(e) => e,
             Err(why) => {
-                return ParamError {
+                return Err(ParamError {
                     status: StatusCode::BAD_REQUEST,
                     detail: why,
                 }
-                .into_response()
+                .into_response())
             }
         };
 
-    // Build the PARAM_SET frame and serialize it with the source identity.
-    let msg = build_param_set(&name, encoded.wire, param_type);
+    // Build the PARAM_SET frame for the FC this request resolved, and
+    // serialize it with the source identity.
+    let msg = build_param_set(
+        name,
+        encoded.wire,
+        param_type,
+        crate::fc_target::fc_target(state),
+    );
     let header = MavHeader {
         system_id: SOURCE_SYSTEM_ID,
         component_id: SOURCE_COMPONENT_ID,
@@ -266,10 +276,10 @@ pub async fn set_param(
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::error!(error = %e, param = %name, "param_set frame serialize failed");
-            return detail(
+            return Err(detail(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to send PARAM_SET: {e}"),
-            );
+            ));
         }
     };
 
@@ -278,21 +288,21 @@ pub async fn set_param(
     //    `conn is None` / send-raise paths); the write is never silently dropped.
     if let Err(e) = state.mavlink.send(&frame).await {
         tracing::warn!(error = %e, param = %name, "param_set send to the mavlink socket failed");
-        return ParamError {
+        return Err(ParamError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             detail: "FC connection unavailable".to_string(),
         }
-        .into_response();
+        .into_response());
     }
 
     // Poll the cached params for up to two seconds for the FC's PARAM_VALUE echo.
     // The router rewrites its cache file as PARAM_VALUE frames land; this re-reads
     // it each tick, the native equivalent of the FastAPI route polling its
     // in-process cache.
-    let (ack, cached_value) = poll_for_ack(&state, &name, encoded.stored).await;
+    let (ack, cached_value) = poll_for_ack(state, name, encoded.stored).await;
 
     tracing::info!(param = %name, value = target, param_type, ack, "param_set");
-    Json(build_set_response(&name, target, ack, cached_value)).into_response()
+    Ok((ack, cached_value))
 }
 
 /// The 409 for a cached parameter whose `MAV_PARAM_TYPE` the cache does not
@@ -328,12 +338,17 @@ fn mav_param_type(param_type: u8) -> MavParamType {
     }
 }
 
-/// Build the `PARAM_SET` message for a known param, its encoded value field and
-/// its declared type.
+/// Build the `PARAM_SET` message for a known param, its encoded value field, its
+/// declared type, and the FC `(system, component)` it is addressed to.
 ///
 /// The `param_id` is the name as 16-byte null-padded ASCII (a name longer than 16
 /// bytes is truncated, as the wire field is fixed-width).
-fn build_param_set(name: &str, wire_value: f32, param_type: u8) -> MavMessage {
+fn build_param_set(
+    name: &str,
+    wire_value: f32,
+    param_type: u8,
+    (target_system, target_component): (u8, u8),
+) -> MavMessage {
     let mut param_id = [0u8; PARAM_ID_LEN];
     let bytes = name.as_bytes();
     let copy = bytes.len().min(PARAM_ID_LEN);
@@ -341,8 +356,8 @@ fn build_param_set(name: &str, wire_value: f32, param_type: u8) -> MavMessage {
 
     MavMessage::PARAM_SET(PARAM_SET_DATA {
         param_value: wire_value,
-        target_system: TARGET_SYSTEM,
-        target_component: TARGET_COMPONENT,
+        target_system,
+        target_component,
         param_id: param_id.into(),
         param_type: mav_param_type(param_type),
     })
@@ -407,6 +422,8 @@ mod tests {
             "sysid_thismav",
             " SysId_ThisMav ",
             "MAV_SYS_ID",
+            "MAV_SYSID",
+            "mav_sysid",
         ] {
             assert!(
                 is_identity_param(name),
@@ -431,11 +448,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn writing_the_vehicle_identity_is_refused_rather_than_stranding_it() {
-        // TARGET_SYSTEM is fixed at 1, so a successful write here would make the
-        // aircraft stop answering the very route that would undo it — and
-        // arm/disarm/mode/rtl with it. One request, irreversible, and nothing
-        // about it looks unusual at the time.
+    async fn identity_param_still_refused() {
+        // The fleet reconciler is the only writer of the vehicle's identity; a
+        // REST write would re-address it under every other operator.
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
         // Even with the parameter present in the cache (so the 404 guard would
@@ -563,11 +578,21 @@ mod tests {
         String::from_utf8_lossy(&d.param_id[..end]).to_string()
     }
 
+    /// The default FC target the frame-builder tests address.
+    fn target() -> (u8, u8) {
+        crate::fc_target::DEFAULT_TARGET
+    }
+
     // ── the built frame ──────────────────────────────────────────────────────
 
     #[test]
     fn builds_a_param_set_carrying_the_declared_type() {
-        let msg = build_param_set("WPNAV_SPEED", 750.0, param_codec::MAV_PARAM_TYPE_REAL32);
+        let msg = build_param_set(
+            "WPNAV_SPEED",
+            750.0,
+            param_codec::MAV_PARAM_TYPE_REAL32,
+            target(),
+        );
         let d = round_trip(&msg);
         assert_eq!(param_name(&d), "WPNAV_SPEED");
         assert_eq!(d.param_value, 750.0);
@@ -578,13 +603,19 @@ mod tests {
             "FRAME_CLASS",
             1.0,
             param_codec::MAV_PARAM_TYPE_INT8,
+            target(),
         ));
         assert_eq!(d.param_type, MavParamType::MAV_PARAM_TYPE_INT8);
     }
 
     #[test]
     fn the_frame_header_carries_the_source_identity() {
-        let msg = build_param_set("ATC_RAT_RLL_P", 0.135, param_codec::MAV_PARAM_TYPE_REAL32);
+        let msg = build_param_set(
+            "ATC_RAT_RLL_P",
+            0.135,
+            param_codec::MAV_PARAM_TYPE_REAL32,
+            target(),
+        );
         let header = MavHeader {
             system_id: SOURCE_SYSTEM_ID,
             component_id: SOURCE_COMPONENT_ID,
@@ -606,6 +637,7 @@ mod tests {
             "THIS_NAME_IS_WAY_TOO_LONG_FOR_THE_FIELD",
             1.0,
             param_codec::MAV_PARAM_TYPE_REAL32,
+            target(),
         );
         let d = round_trip(&msg);
         assert_eq!(param_name(&d), "THIS_NAME_IS_WAY");
@@ -758,6 +790,36 @@ mod tests {
         };
         assert_eq!(d.param_value, 5.0);
         assert_eq!(d.param_type, MavParamType::MAV_PARAM_TYPE_INT8);
+    }
+
+    /// The PARAM_SET goes to the system id the router latched from the FC's
+    /// HEARTBEAT, not to the 1/1 convention.
+    #[tokio::test]
+    async fn param_set_targets_latched_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let server = one_frame_socket(&sock);
+        let state = test_state_with_socket(dir.path(), sock);
+        write_cache(dir.path(), &[("WPNAV_SPEED", 750.0)]);
+        state.state.set_snapshot_for_test(json!({
+            "fc_connected": true,
+            "autopilot": 3,
+            "fc_system_id": 7,
+            "fc_component_id": 1,
+        }));
+        let resp = set_param(
+            Path("WPNAV_SPEED".to_string()),
+            State(state),
+            Json(ParamSetRequest { value: 750.0 }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let (_h, decoded) = mavlink::parse_v2(&server.await.unwrap()).unwrap();
+        let MavMessage::PARAM_SET(d) = decoded else {
+            panic!("expected PARAM_SET on the socket");
+        };
+        assert_eq!(d.target_system, 7);
+        assert_eq!(d.target_component, 1);
     }
 
     /// A float write whose f32 echo differs from the f64 request in the seventh

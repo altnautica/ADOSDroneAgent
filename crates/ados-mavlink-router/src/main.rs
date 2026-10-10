@@ -829,6 +829,12 @@ async fn build_extras(
             .unwrap_or(Value::Null),
     );
     extras.insert("fc_source".into(), json!(fc.source()));
+    // The flight controller's own (system, component) id, latched from its
+    // HEARTBEAT. Absent until latched so a consumer never addresses a guess.
+    if let Some((system_id, component_id)) = fc.learned_fc_identity() {
+        extras.insert("fc_system_id".into(), json!(system_id));
+        extras.insert("fc_component_id".into(), json!(component_id));
+    }
     // A human-actionable hint for the not-alive case: msp_detected (the FC speaks
     // MSP, not MAVLink, on this port), no_heartbeat (open but silent), or none.
     let fc_link_hint = fc.link_hint().await;
@@ -1178,6 +1184,53 @@ mod extras_key_set_tests {
              or AGENT_DIAGNOSTIC_KEYS (or neither, if it is vehicle-sourced, or \
              consumed-and-transformed like relayed_vehicle) before updating this pin"
         );
+    }
+
+    #[tokio::test]
+    async fn extras_carry_latched_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(Mutex::new(VehicleState::default()));
+        let params = Arc::new(Mutex::new(ParamCache::new(dir.path().join("params.json"))));
+        let fc = FcConnection::new(MavlinkConfig::default(), state.clone(), params.clone());
+        let posture = proxy_posture(&MavlinkConfig::default());
+        let before = build_extras(
+            &fc,
+            &state,
+            &params,
+            Instant::now(),
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &posture,
+        )
+        .await;
+        assert!(!before.contains_key("fc_system_id"));
+        assert!(!before.contains_key("fc_component_id"));
+
+        fc.latch_fc_identity(7, 1);
+        let after = build_extras(
+            &fc,
+            &state,
+            &params,
+            Instant::now(),
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &posture,
+        )
+        .await;
+        assert_eq!(after["fc_system_id"], 7);
+        assert_eq!(after["fc_component_id"], 1);
     }
 
     /// A relayed projection that has decoded exactly one frame.

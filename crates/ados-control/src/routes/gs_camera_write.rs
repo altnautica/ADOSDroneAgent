@@ -75,11 +75,6 @@ const MAV_CMD_SET_CAMERA_SOURCE: u16 = 534;
 const SOURCE_SYSTEM_ID: u8 = 255;
 const SOURCE_COMPONENT_ID: u8 = 190;
 
-/// The target identity: the primary autopilot (`1`/`1`), the standard
-/// COMMAND_LONG target on the single-vehicle bench.
-const TARGET_SYSTEM: u8 = 1;
-const TARGET_COMPONENT: u8 = 1;
-
 /// How stale the relayed-status sidecar may be before its contents stop counting
 /// as current.
 ///
@@ -167,7 +162,7 @@ pub async fn post_camera_switch(
     // Build the 534 COMMAND_LONG (param2 = the source index) and write it to the
     // MAVLink socket. An absent / broken socket is the FastAPI
     // E_MAVLINK_IPC_UNAVAILABLE 503 — the command is never silently dropped.
-    let frame = build_set_camera_source_frame(index);
+    let frame = build_set_camera_source_frame(index, crate::fc_target::fc_target(&state));
     if let Err(e) = state.mavlink.send(&frame).await {
         tracing::warn!(error = %e, camera_id = %req.camera_id, "camera switch mavlink send failed");
         return mavlink_ipc_unavailable(&e.to_string());
@@ -286,12 +281,15 @@ fn unsupported(reason: &str) -> Response {
 /// source `camera_index`, returning the raw bytes ready to write to the MAVLink
 /// socket. `param1` is 0 (broadcast to the camera component, per the spec),
 /// `param2` carries the source index, every other param is 0. The source
-/// identity is `255`/`190` and the target is `1`/`1`. The sequence is 0 (the
-/// router stamps its own; a client-written command does not require a specific
-/// value), matching the fire-and-forget posture. Built through the protocol
-/// crate's raw COMMAND_LONG builder because the generated enum has no 534
-/// variant.
-fn build_set_camera_source_frame(camera_index: u32) -> Vec<u8> {
+/// identity is `255`/`190` and the target is the FC `(system, component)` the
+/// request resolved. The sequence is 0 (the router stamps its own; a
+/// client-written command does not require a specific value), matching the
+/// fire-and-forget posture. Built through the protocol crate's raw COMMAND_LONG
+/// builder because the generated enum has no 534 variant.
+fn build_set_camera_source_frame(
+    camera_index: u32,
+    (target_system, target_component): (u8, u8),
+) -> Vec<u8> {
     let header = MavHeader {
         system_id: SOURCE_SYSTEM_ID,
         component_id: SOURCE_COMPONENT_ID,
@@ -300,8 +298,8 @@ fn build_set_camera_source_frame(camera_index: u32) -> Vec<u8> {
     mavlink::build_command_long_v2(
         header,
         MAV_CMD_SET_CAMERA_SOURCE,
-        TARGET_SYSTEM,
-        TARGET_COMPONENT,
+        target_system,
+        target_component,
         [0.0, camera_index as f32, 0.0, 0.0, 0.0, 0.0, 0.0],
     )
 }
@@ -384,6 +382,11 @@ fn mavlink_ipc_unavailable(message: &str) -> Response {
 mod tests {
     use super::*;
 
+    /// The default FC target the golden frame is addressed to.
+    fn target() -> (u8, u8) {
+        crate::fc_target::DEFAULT_TARGET
+    }
+
     /// Read a response body as JSON.
     async fn body_json(resp: Response) -> Value {
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -405,7 +408,7 @@ mod tests {
         // The exact 44-byte frame the reference encoder produces for
         // SET_CAMERA_SOURCE (534) with camera_index=2, source 255/190, target
         // 1/1, sequence 0. param2 carries the index (2.0); every other param 0.
-        let frame = build_set_camera_source_frame(2);
+        let frame = build_set_camera_source_frame(2, target());
         let golden = hex_to_bytes(
             "fd20000000ffbe4c000000000000000000400000000000000000000000000000000000000000160201019b45",
         );
@@ -429,7 +432,7 @@ mod tests {
         // fields straight off the wire bytes instead: the v2 header carries the
         // 255/190 source identity, and param2 (the second f32 in the payload,
         // bytes 14..18) carries the index as a little-endian f32.
-        let frame = build_set_camera_source_frame(3);
+        let frame = build_set_camera_source_frame(3, target());
         // v2 header: STX, len, incompat, compat, seq, sysid, compid, msgid×3.
         assert_eq!(frame[0], 0xFD, "v2 start-of-frame");
         assert_eq!(frame[5], 255, "source system id 255");

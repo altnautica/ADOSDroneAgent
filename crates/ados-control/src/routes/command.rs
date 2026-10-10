@@ -36,7 +36,7 @@
 //! | arm           | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=1.0, rest 0                   |
 //! | disarm        | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=0.0, rest 0                   |
 //! | takeoff       | MAV_CMD_NAV_TAKEOFF 22          | p7=alt (default 10.0), rest 0    |
-//! | land          | MAV_CMD_NAV_LAND 21             | all 0                            |
+//! | land          | multicopter / PX4: MAV_CMD_NAV_LAND 21, all 0 · ArduPlane QuadPlane: DO_SET_MODE QLAND (20) · ArduPlane fixed-wing: MAV_CMD_DO_LAND_START 189, all 0 |
 //! | rtl           | MAV_CMD_DO_SET_MODE 176         | ArduPilot: p1=1, p2=RTL of the vehicle's table (Copter 6, Plane/Rover 11) · PX4: p1=1, p2=4, p3=5 |
 //! | mode N        | MAV_CMD_DO_SET_MODE 176         | ArduPilot: p1=1, p2=custom_mode · PX4: p1=1, p2=main, p3=sub |
 //! | killSwitch    | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=0.0, p2=21196 (force), rest 0 |
@@ -108,10 +108,10 @@
 //!   router itself stamps on its own FC send path (`mavlink.system_id` /
 //!   `mavlink.component_id`, defaults 1/191), so a command from this surface looks
 //!   identical on the wire to one the router sent.
-//! - **Target** `target_system=1, target_component=1`: the state socket carries no
-//!   `target_system`, so this surface defaults to 1/1, correct for the
-//!   single-vehicle bench. The ACK's source system is correlated against this
-//!   target so an ACK from the addressed vehicle is the one that resolves.
+//! - **Target**: the flight controller's own `(system, component)` as resolved
+//!   per request by [`crate::fc_target::fc_target`] (the system id latched from
+//!   its HEARTBEAT). The ACK's source system is correlated against this target
+//!   so an ACK from the addressed vehicle is the one that resolves.
 
 use std::time::{Duration, Instant};
 
@@ -159,11 +159,6 @@ const SIMPLE_COMMANDS: &[(&str, &str)] = &[
 /// command from this surface is wire-identical to one the router sent.
 const SOURCE_SYSTEM_ID: u8 = 1;
 const SOURCE_COMPONENT_ID: u8 = 191;
-
-/// The target identity: single-vehicle defaults. The state socket carries no
-/// target system, so this surface targets 1/1.
-const TARGET_SYSTEM: u8 = 1;
-const TARGET_COMPONENT: u8 = 1;
 
 /// Default takeoff altitude in metres when the request carries no `args[0]`,
 /// matching the FastAPI route's `float(req.args[0]) if req.args else 10.0`.
@@ -351,6 +346,9 @@ pub async fn execute_command(
         Ok(built) => built,
         Err(err) => return err.into_response(),
     };
+    // Address it to the flight controller this request resolved: the system id
+    // latched from its HEARTBEAT. The ACK is correlated against the same id.
+    let base_long = addressed(base_long, crate::fc_target::fc_target(&state));
 
     // Send the command and correlate the FC's COMMAND_ACK on a dedicated socket
     // connection. An absent MAVLink socket or a broken write means no live FC
@@ -417,10 +415,7 @@ fn build_command(
                 json!({"status": "ok", "cmd": "takeoff", "altitude": alt}),
             ))
         }
-        "land" => Ok((
-            command_long(MavCmd::MAV_CMD_NAV_LAND, [0.0; 7]),
-            json!({"status": "ok", "cmd": "land"}),
-        )),
+        "land" => Ok((land_command(fc), json!({"status": "ok", "cmd": "land"}))),
         "rtl" => {
             // The `rtl` shortcut commands Return-to-Launch, the same frame the
             // `mode RTL` path produces for this vehicle.
@@ -474,6 +469,29 @@ fn build_command(
             status: StatusCode::BAD_REQUEST,
             detail: format!("Unknown command: {other}"),
         }),
+    }
+}
+
+/// The landing command for the connected vehicle.
+///
+/// ArduPlane answers `NAV_LAND` with UNSUPPORTED, so a Plane lands by type: a
+/// QuadPlane (a VTOL or multirotor MAV_TYPE, or `Q_ENABLE` set) switches to
+/// QLAND, a plain fixed-wing starts its landing sequence with `DO_LAND_START`.
+/// Copter, PX4 and anything unidentified keep `NAV_LAND`.
+fn land_command(fc: FcIdentity) -> COMMAND_LONG_DATA {
+    let plane = fc.autopilot != MAV_AUTOPILOT_PX4
+        && (fc.q_enabled
+            || ArduPilotFirmware::resolve(fc.firmware, fc.mav_type)
+                == Some(ArduPilotFirmware::Plane));
+    if !plane {
+        return command_long(MavCmd::MAV_CMD_NAV_LAND, [0.0; 7]);
+    }
+    let vtol_type = fc.mav_type != 1;
+    match ArduPilotFirmware::Plane.custom_mode("QLAND") {
+        Some(qland) if fc.q_enabled || vtol_type => {
+            command_long(MavCmd::MAV_CMD_DO_SET_MODE, do_set_mode_ardupilot(qland))
+        }
+        _ => command_long(MavCmd::MAV_CMD_DO_LAND_START, [0.0; 7]),
     }
 }
 
@@ -548,13 +566,13 @@ fn do_set_mode_px4(main_mode: u8, sub_mode: u8) -> [f32; 7] {
     ]
 }
 
-/// Build a `COMMAND_LONG` to the default single-vehicle target with the given
-/// opcode and the seven params (confirmation is 0; the send path bumps it on a
-/// resend).
+/// Build an unaddressed `COMMAND_LONG` with the given opcode and the seven
+/// params (confirmation is 0; the send path bumps it on a resend). The caller
+/// addresses it with [`addressed`] once the request's FC target is resolved.
 fn command_long(command: MavCmd, params: [f32; 7]) -> COMMAND_LONG_DATA {
     COMMAND_LONG_DATA {
-        target_system: TARGET_SYSTEM,
-        target_component: TARGET_COMPONENT,
+        target_system: 0,
+        target_component: 0,
         command,
         confirmation: 0,
         param1: params[0],
@@ -565,6 +583,16 @@ fn command_long(command: MavCmd, params: [f32; 7]) -> COMMAND_LONG_DATA {
         param6: params[5],
         param7: params[6],
     }
+}
+
+/// Address a built `COMMAND_LONG` to the FC `(system, component)`.
+fn addressed(
+    mut long: COMMAND_LONG_DATA,
+    (target_system, target_component): (u8, u8),
+) -> COMMAND_LONG_DATA {
+    long.target_system = target_system;
+    long.target_component = target_component;
+    long
 }
 
 /// The takeoff altitude from `args[0]`, defaulting to [`DEFAULT_TAKEOFF_ALT_M`]
@@ -872,12 +900,24 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
 
+    /// The default FC target the frame tests address and answer from.
+    fn target() -> (u8, u8) {
+        crate::fc_target::DEFAULT_TARGET
+    }
+
+    /// [`build_command`] addressed to [`target`], as the route sends it.
+    fn build_addressed(cmd: &str, args: &[Value], fc: FcIdentity) -> (COMMAND_LONG_DATA, Value) {
+        let (long, body) = build_command(cmd, args, fc).unwrap();
+        (addressed(long, target()), body)
+    }
+
     /// An ArduCopter quadrotor (`MAV_AUTOPILOT_ARDUPILOTMEGA` 3, `MAV_TYPE_QUADROTOR` 2)
     /// whose banner has been seen.
     const COPTER: FcIdentity = FcIdentity {
         autopilot: 3,
         mav_type: 2,
         firmware: Some(ArduPilotFirmware::Copter),
+        q_enabled: false,
     };
 
     /// A PX4 quadrotor; the vehicle type does not select PX4's mode encoding.
@@ -885,6 +925,7 @@ mod tests {
         autopilot: MAV_AUTOPILOT_PX4,
         mav_type: 2,
         firmware: None,
+        q_enabled: false,
     };
 
     // ── G6: command building + PX4 mode encoding ────────────────────────────
@@ -894,7 +935,9 @@ mod tests {
         let (d, body) = build_command("arm", &[], COPTER).unwrap();
         assert_eq!(d.command, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM);
         assert_eq!(d.param1, 1.0);
-        assert_eq!(d.target_system, 1);
+        assert_eq!((d.target_system, d.target_component), (0, 0), "unaddressed");
+        let d = addressed(d, (7, 1));
+        assert_eq!(d.target_system, 7);
         assert_eq!(d.target_component, 1);
         assert_eq!(body["cmd"], json!("arm"));
         assert_eq!(body["status"], json!("ok"));
@@ -984,6 +1027,43 @@ mod tests {
     }
 
     #[test]
+    fn land_is_vehicle_aware() {
+        // PX4 keeps NAV_LAND.
+        let (d, _b) = build_command("land", &[], PX4).unwrap();
+        assert_eq!(d.command, MavCmd::MAV_CMD_NAV_LAND);
+        // A QuadPlane by VTOL type, by quadrotor type with a Plane banner, or
+        // by Q_ENABLE on a fixed-wing type: QLAND (Plane custom mode 20).
+        let vtol = FcIdentity {
+            autopilot: 3,
+            mav_type: 20,
+            firmware: None,
+            q_enabled: false,
+        };
+        let quad_typed = FcIdentity {
+            mav_type: 2,
+            firmware: Some(ArduPilotFirmware::Plane),
+            ..vtol
+        };
+        let fw_typed_q = FcIdentity {
+            mav_type: 1,
+            q_enabled: true,
+            ..quad_typed
+        };
+        for fc in [vtol, quad_typed, fw_typed_q] {
+            let (d, _b) = build_command("land", &[], fc).unwrap();
+            assert_eq!(d.command, MavCmd::MAV_CMD_DO_SET_MODE, "{fc:?}");
+            assert_eq!((d.param1, d.param2), (1.0, 20.0), "{fc:?}");
+        }
+        // A plain fixed-wing starts its landing sequence.
+        let plane = FcIdentity {
+            q_enabled: false,
+            ..fw_typed_q
+        };
+        let (d, _b) = build_command("land", &[], plane).unwrap();
+        assert_eq!(d.command, MavCmd::MAV_CMD_DO_LAND_START);
+    }
+
+    #[test]
     fn copter_rtl_is_do_set_mode_param2_six() {
         // On ArduCopter the `rtl` shortcut sends DO_SET_MODE custom_mode=6.
         let (d, _b) = build_command("rtl", &[], COPTER).unwrap();
@@ -1017,6 +1097,7 @@ mod tests {
             autopilot: 3,
             mav_type: 2,
             firmware: Some(ArduPilotFirmware::Plane),
+            q_enabled: false,
         };
         let (d, _b) = build_command("rtl", &[], quadplane).unwrap();
         assert_eq!(d.param2, 11.0, "Plane RTL, never the copter 6 (FBWB)");
@@ -1237,7 +1318,7 @@ mod tests {
         let n = bytes.len().min(50);
         buf[..n].copy_from_slice(&bytes[..n]);
         let header = MavHeader {
-            system_id: TARGET_SYSTEM,
+            system_id: target().0,
             component_id: 1,
             sequence: 0,
         };
@@ -1254,18 +1335,18 @@ mod tests {
     #[test]
     fn match_command_ack_correlates_on_command_and_source() {
         let frame = ack_frame(
-            TARGET_SYSTEM,
+            target().0,
             MavCmd::MAV_CMD_DO_SET_MODE,
             MavResult::MAV_RESULT_ACCEPTED,
         );
         // Matching command + source → the result.
         assert_eq!(
-            match_command_ack(&frame, MavCmd::MAV_CMD_DO_SET_MODE, TARGET_SYSTEM),
+            match_command_ack(&frame, MavCmd::MAV_CMD_DO_SET_MODE, target().0),
             Some(0)
         );
         // Wrong command id → no match.
         assert_eq!(
-            match_command_ack(&frame, MavCmd::MAV_CMD_NAV_TAKEOFF, TARGET_SYSTEM),
+            match_command_ack(&frame, MavCmd::MAV_CMD_NAV_TAKEOFF, target().0),
             None
         );
         // Wrong source system → no match.
@@ -1278,7 +1359,7 @@ mod tests {
             match_command_ack(
                 &statustext_frame("hi"),
                 MavCmd::MAV_CMD_DO_SET_MODE,
-                TARGET_SYSTEM
+                target().0
             ),
             None
         );
@@ -1287,12 +1368,12 @@ mod tests {
     #[test]
     fn match_command_ack_reads_the_result_value() {
         let denied = ack_frame(
-            TARGET_SYSTEM,
+            target().0,
             MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
             MavResult::MAV_RESULT_DENIED,
         );
         assert_eq!(
-            match_command_ack(&denied, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM, TARGET_SYSTEM),
+            match_command_ack(&denied, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM, target().0),
             Some(2)
         );
     }
@@ -1306,7 +1387,7 @@ mod tests {
         // A COMMAND_ACK is not a STATUSTEXT.
         assert_eq!(
             statustext_of(&ack_frame(
-                TARGET_SYSTEM,
+                target().0,
                 MavCmd::MAV_CMD_DO_SET_MODE,
                 MavResult::MAV_RESULT_ACCEPTED
             )),
@@ -1402,14 +1483,14 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         // IN_PROGRESS, then the stream closes before any final result.
         let responses = vec![ack_frame(
-            TARGET_SYSTEM,
+            target().0,
             MavCmd::MAV_CMD_NAV_TAKEOFF,
             MavResult::MAV_RESULT_IN_PROGRESS,
         )];
         let server = tokio::spawn(fake_fc(listener, responses, Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("takeoff", &[json!(15.0)], COPTER).unwrap();
+        let (long, _b) = build_addressed("takeoff", &[json!(15.0)], COPTER);
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1471,14 +1552,14 @@ mod tests {
         let path = dir.path().join("mavlink.sock");
         let listener = UnixListener::bind(&path).unwrap();
         let ack = ack_frame(
-            TARGET_SYSTEM,
+            target().0,
             MavCmd::MAV_CMD_DO_SET_MODE,
             MavResult::MAV_RESULT_ACCEPTED,
         );
         let server = tokio::spawn(fake_fc(listener, vec![ack], Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("rtl", &[], PX4).unwrap();
+        let (long, _b) = build_addressed("rtl", &[], PX4);
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1501,7 +1582,7 @@ mod tests {
         let responses = vec![
             statustext_frame("PreArm: 3D accel calibration needed"),
             ack_frame(
-                TARGET_SYSTEM,
+                target().0,
                 MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
                 MavResult::MAV_RESULT_DENIED,
             ),
@@ -1509,7 +1590,7 @@ mod tests {
         let server = tokio::spawn(fake_fc(listener, responses, Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("arm", &[], COPTER).unwrap();
+        let (long, _b) = build_addressed("arm", &[], COPTER);
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1530,12 +1611,12 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let responses = vec![
             ack_frame(
-                TARGET_SYSTEM,
+                target().0,
                 MavCmd::MAV_CMD_NAV_TAKEOFF,
                 MavResult::MAV_RESULT_IN_PROGRESS,
             ),
             ack_frame(
-                TARGET_SYSTEM,
+                target().0,
                 MavCmd::MAV_CMD_NAV_TAKEOFF,
                 MavResult::MAV_RESULT_ACCEPTED,
             ),
@@ -1543,7 +1624,7 @@ mod tests {
         let server = tokio::spawn(fake_fc(listener, responses, Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("takeoff", &[json!(15.0)], COPTER).unwrap();
+        let (long, _b) = build_addressed("takeoff", &[json!(15.0)], COPTER);
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1566,7 +1647,7 @@ mod tests {
         let server = tokio::spawn(fake_fc(listener, vec![], Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("rtl", &[], COPTER).unwrap();
+        let (long, _b) = build_addressed("rtl", &[], COPTER);
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1585,14 +1666,14 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         // The FC acks a DIFFERENT command; our command gets no matching ack.
         let responses = vec![ack_frame(
-            TARGET_SYSTEM,
+            target().0,
             MavCmd::MAV_CMD_NAV_LAND,
             MavResult::MAV_RESULT_ACCEPTED,
         )];
         let server = tokio::spawn(fake_fc(listener, responses, Duration::ZERO));
 
         let client = MavlinkIpcClient::new(path.clone());
-        let (long, _b) = build_command("arm", &[], COPTER).unwrap();
+        let (long, _b) = build_addressed("arm", &[], COPTER);
         let outcome = send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .unwrap();
@@ -1604,10 +1685,122 @@ mod tests {
     async fn send_awaiting_ack_absent_socket_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let client = MavlinkIpcClient::new(dir.path().join("absent.sock"));
-        let (long, _b) = build_command("arm", &[], COPTER).unwrap();
+        let (long, _b) = build_addressed("arm", &[], COPTER);
         // No socket → Err (the route maps this to a 503), not a fake outcome.
         assert!(send_awaiting_ack(&client, &long, &test_cfg())
             .await
             .is_err());
+    }
+
+    /// An `AppState` whose MAVLink client points at `sock`; every other path is
+    /// inert under `dir`.
+    fn state_with_socket(dir: &std::path::Path, sock: std::path::PathBuf) -> AppState {
+        use crate::auth::PairingState;
+        use crate::ipc::{LogdQueryClient, StateIpcClient};
+        use crate::state::PairingPaths;
+        use std::sync::Arc;
+        let pairing_paths = PairingPaths {
+            config: dir.join("config.yaml"),
+            pairing_json: dir.join("pairing.json"),
+            wfb_key_dir: dir.join("wfb"),
+            bind_state: dir.join("bind-state.json"),
+            profile_conf: dir.join("profile.conf"),
+            mesh_role: dir.join("mesh-role"),
+            relay_secret: dir.join("relay-peer-secret"),
+        };
+        AppState::new(
+            Arc::new(PairingState::with_path(dir.join("pairing.json"))),
+            StateIpcClient::disconnected(),
+            MavlinkIpcClient::new(sock),
+            LogdQueryClient::new(dir.join("absent-logd.sock")),
+            dir.join("board.json"),
+            pairing_paths,
+            Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                dir.join("dashboard-pin.json"),
+            )),
+            Arc::new(crate::mcp::McpTokenStore::with_path(
+                dir.join("mcp-token.json"),
+            )),
+        )
+        .with_params_path(dir.join("params.json"))
+    }
+
+    #[tokio::test]
+    async fn targets_the_latched_fc_system_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mavlink.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        // A fake FC that records the first command's target and answers from
+        // system 7, the id it heartbeats with.
+        let server = tokio::spawn(async move {
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let (mut rd, mut wr) = stream.into_split();
+            let mut hdr = [0u8; 4];
+            rd.read_exact(&mut hdr).await.unwrap();
+            let mut body = vec![0u8; u32::from_be_bytes(hdr) as usize];
+            rd.read_exact(&mut body).await.unwrap();
+            let ack = ack_frame(
+                7,
+                MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
+                MavResult::MAV_RESULT_ACCEPTED,
+            );
+            let framed = encode_frame(&ack, MAVLINK_MAX_FRAME).unwrap();
+            wr.write_all(&framed).await.unwrap();
+            let _ = wr.flush().await;
+            tokio::spawn(async move {
+                let mut sink = [0u8; 256];
+                while rd.read(&mut sink).await.is_ok_and(|n| n > 0) {}
+            });
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            body
+        });
+
+        let state = state_with_socket(dir.path(), path);
+        state.state.set_snapshot_for_test(json!({
+            "fc_connected": true,
+            "autopilot": 3,
+            "fc_system_id": 7,
+            "fc_component_id": 1,
+        }));
+        let resp = execute_command(
+            State(state),
+            Json(CommandRequest {
+                cmd: "arm".to_string(),
+                args: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let (_h, decoded) = mavlink::parse_v2(&server.await.unwrap()).unwrap();
+        let MavMessage::COMMAND_LONG(sent) = decoded else {
+            panic!("expected COMMAND_LONG on the socket");
+        };
+        assert_eq!(sent.target_system, 7);
+        assert_eq!(sent.target_component, 1);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["ack"]["accepted"], json!(true), "{body}");
+
+        // An ACK from system 1 does not correlate with a command to 7.
+        let from_one = ack_frame(
+            1,
+            MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
+            MavResult::MAV_RESULT_ACCEPTED,
+        );
+        assert_eq!(
+            match_command_ack(&from_one, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM, 7),
+            None
+        );
+        let from_seven = ack_frame(
+            7,
+            MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
+            MavResult::MAV_RESULT_ACCEPTED,
+        );
+        assert_eq!(
+            match_command_ack(&from_seven, MavCmd::MAV_CMD_COMPONENT_ARM_DISARM, 7),
+            Some(0)
+        );
     }
 }

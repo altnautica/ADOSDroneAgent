@@ -401,7 +401,11 @@ impl FcConnection {
     }
 
     /// Record the autopilot's identity from one of its HEARTBEATs.
-    pub(crate) fn latch_fc_identity(&self, system_id: u8, component_id: u8) {
+    ///
+    /// Once latched, the router publishes the pair as `fc_system_id` /
+    /// `fc_component_id` in the state snapshot extras, so the control plane
+    /// addresses the vehicle by the id it actually heartbeats with.
+    pub fn latch_fc_identity(&self, system_id: u8, component_id: u8) {
         self.target_system.store(system_id, Ordering::Relaxed);
         self.target_component.store(component_id, Ordering::Relaxed);
         self.fc_identity_latched.store(true, Ordering::Release);
