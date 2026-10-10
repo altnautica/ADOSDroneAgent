@@ -1,8 +1,8 @@
 """Plugin subprocess runner.
 
 This is the program systemd starts inside the per-plugin
-``ados-plugin-<id>.service`` unit. The plugin host binds a Unix-domain
-socket for the plugin and writes a 0600 ``KEY=VALUE`` file carrying the
+``ados-plugin-<id-dashed>-<hash8>.service`` unit. The plugin host binds a
+Unix-domain socket for the plugin and writes a 0600 ``KEY=VALUE`` file carrying the
 capability token, which the unit loads with ``LoadCredential=`` so it appears
 only as ``$CREDENTIALS_DIRECTORY/ados-plugin-token``, readable by the plugin's
 own user; the runner reads it, connects, builds a :class:`PluginContext` bound

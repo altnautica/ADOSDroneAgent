@@ -22,14 +22,14 @@
 //! | 13 | `archive_too_large` | 413 |
 //! | 14 | `not_found` | 404 |
 //! | 17 | `ados_version_skew` | 409 |
-//! | 18 | `incompatible` (target profile or host binary) | 409 |
-//! | 19 | `refused` (a first-party-only gate) | 403 |
+//! | 18 | `incompatible` (target profile or host binary) / `board_mismatch` | 409 |
+//! | 19 | `refused` (a first-party-only or revocation gate) / `revocation_list_unreadable` | 403 |
 //! | 20 | `host_io_error` (500) / `download_failed` (502) | |
 //!
 //! Codes 18 and 19 are new: the Python supervisor had neither the profile gate
 //! nor the first-party-only gates, and folded every other supervisor refusal
 //! into `20 host_io_error`, which these routes still do for the refusals it
-//! shared (board, tier, downgrade).
+//! shared (tier, downgrade).
 //!
 //! Lifecycle writes are serialized on one [`tokio::sync::Mutex`] and run on a
 //! blocking thread (archive unpack, signature check, service backend calls,
@@ -267,20 +267,47 @@ impl Refusal {
     }
 
     /// A supervisor refusal on a lifecycle operation (enable, disable, grant,
-    /// remove...): a missing plugin is `14 not_found`, anything else
-    /// `20 host_io_error`, as the Python routes mapped them.
+    /// remove...): a missing plugin is `14 not_found`, a revocation or board
+    /// refusal its own kind, any other `refused:` gate `19 refused`, anything
+    /// else `20 host_io_error`, as the Python routes mapped them.
     pub(crate) fn from_operation(err: &LifecycleError) -> Self {
         let msg = err.to_string();
-        if msg.contains("not installed") {
+        if let Some(r) = Self::from_reason(&msg) {
+            r
+        } else if msg.contains("not installed") {
             Self::not_found(msg)
+        } else if msg.starts_with("refused:") {
+            Self::new(19, "refused", msg, StatusCode::FORBIDDEN)
         } else {
             Self::host_io(msg)
+        }
+    }
+
+    /// The refusals with a wire kind of their own: `board_mismatch` (the
+    /// manifest's `supported_boards` excludes this board) and
+    /// `revocation_list_unreadable` (a signed plugin while the revocation list
+    /// cannot be read).
+    fn from_reason(msg: &str) -> Option<Self> {
+        if msg.starts_with("refused: board_mismatch") {
+            Some(Self::new(18, "board_mismatch", msg, StatusCode::CONFLICT))
+        } else if msg.starts_with("refused: revocation_list_unreadable") {
+            Some(Self::new(
+                19,
+                "revocation_list_unreadable",
+                msg,
+                StatusCode::FORBIDDEN,
+            ))
+        } else {
+            None
         }
     }
 
     /// An install refusal: signature, manifest and archive faults by type,
     /// supervisor refusals by their stable message prefix.
     pub(crate) fn from_install(err: LifecycleError) -> Self {
+        if let Some(r) = Self::from_reason(&err.to_string()) {
+            return r;
+        }
         match err {
             LifecycleError::Signature(e) => Self::new(
                 10,

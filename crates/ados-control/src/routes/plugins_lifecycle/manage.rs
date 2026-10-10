@@ -220,8 +220,16 @@ pub async fn disable_plugin(
     respond(result.map(|()| ok()))
 }
 
+#[derive(Serialize)]
+struct RemoveResponse {
+    ok: bool,
+    /// Why the manifest could not be read when the install was removed
+    /// without it; `null` on a normal remove.
+    warning: Option<String>,
+}
+
 /// `DELETE /api/plugins/{plugin_id}?keep_data=`: disable, remove the units and
-/// files, and (unless `keep_data`) the plugin's log.
+/// files, and (unless `keep_data`) the plugin's logs. `{ok, warning}`.
 pub async fn remove_plugin(
     State(state): State<AppState>,
     AxumPath(plugin_id): AxumPath<String>,
@@ -246,7 +254,15 @@ pub async fn remove_plugin(
         })
         .await
         .and_then(|r| r);
-    respond(result.map(|()| ok()))
+    respond(result.map(|outcome| {
+        json_response(
+            StatusCode::OK,
+            &RemoveResponse {
+                ok: true,
+                warning: outcome.warning,
+            },
+        )
+    }))
 }
 
 #[derive(Serialize)]

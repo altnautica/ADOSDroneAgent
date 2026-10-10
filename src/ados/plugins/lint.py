@@ -251,7 +251,7 @@ def lint_archive(path: str | Path) -> LintReport:
         {p.id for p in (manifest.gcs.permissions if manifest.gcs else [])}
     )
     has_network = "network.outbound" in declared_perms
-    has_vendor_binary = bool(getattr(manifest, "contains_vendor_binary", False))
+    has_vendor_binary = bool(manifest.agent and manifest.agent.contains_vendor_binary)
 
     zf = zipfile.ZipFile(io.BytesIO(raw))
     try:

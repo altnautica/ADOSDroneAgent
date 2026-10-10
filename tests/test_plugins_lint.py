@@ -206,3 +206,33 @@ agent:
     report = lint_archive(archive)
     rules = {f.rule_id for f in report.findings}
     assert "PERM001-high-risk" in rules
+
+
+def test_vendor_binary_manifest_reports_vnd001(tmp_path: Path) -> None:
+    manifest = """\
+schema_version: 2
+id: com.example.vendor
+version: 0.1.0
+name: Vendor
+license: GPL-3.0-or-later
+risk: low
+compatibility:
+  ados_version: ">=0.9.0,<1.0.0"
+agent:
+  entrypoint: agent/plugin.py
+  isolation: subprocess
+  contains_vendor_binary: true
+  vendor_attribution:
+    - name: example-vendor-lib
+      license: MIT
+      source_url: https://cloud.example.com/src.tar.gz
+      upstream_version: 1.0.0
+  permissions:
+    - event.publish
+"""
+    archive = _build_archive(
+        tmp_path,
+        {MANIFEST_FILENAME: manifest, "agent/plugin.py": "x = 1\n"},
+    )
+    report = lint_archive(archive)
+    assert "VND001-vendor-binary" in {f.rule_id for f in report.findings}

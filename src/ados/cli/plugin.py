@@ -494,19 +494,54 @@ def perms(
     is_flag=True,
     help="Follow the log (like tail -f). Ctrl-C to stop.",
 )
+@click.option(
+    "--service",
+    "service",
+    default=None,
+    help="Read a declared service's log instead of the main runner's.",
+)
 @click.option("--json", "as_json", is_flag=True)
-def logs(plugin_id: str, lines: int, follow: bool, as_json: bool) -> None:
-    from ados.core.paths import PLUGIN_LOG_DIR
-
-    log_path = PLUGIN_LOG_DIR / f"{plugin_id.replace('.', '-')}.log"
-    if not log_path.exists():
-        _emit_err(
+def logs(
+    plugin_id: str, lines: int, follow: bool, service: str | None, as_json: bool
+) -> None:
+    # The host owns the unit and log naming; ask it rather than re-deriving.
+    detail = _agent("GET", f"/api/plugins/{_seg(plugin_id)}", as_json)
+    detail = detail if isinstance(detail, dict) else {}
+    if service is not None:
+        service_logs = detail.get("service_logs") or {}
+        if service not in service_logs:
+            known = ", ".join(sorted(service_logs)) or "none"
+            _fail(
+                as_json,
+                EXIT_MANIFEST_INVALID,
+                f"{plugin_id} declares no service {service!r}",
+                hint=f"Declared services: {known}.",
+            )
+        raw_path = service_logs[service]
+    else:
+        raw_path = detail.get("log_path")
+    if not raw_path:
+        _fail(as_json, EXIT_GENERIC, f"agent reported no log path for {plugin_id}")
+    log_path = Path(raw_path)
+    try:
+        present = log_path.exists()
+    except PermissionError:
+        # The log directory is closed to this user; the access check below says so.
+        present = True
+    if not present:
+        _fail(
             as_json,
             EXIT_NOT_FOUND,
             f"no log file at {log_path}",
             hint="Plugin may never have started, or logs rotated out.",
         )
-        sys.exit(EXIT_NOT_FOUND)
+    if not os.access(log_path, os.R_OK):
+        _fail(
+            as_json,
+            EXIT_PERMISSION_DENIED,
+            f"cannot read {log_path}: plugin logs are readable by root only",
+            hint=f"Run it as root: sudo ados plugin logs {plugin_id}",
+        )
     if follow:
         # Delegate to system tail -f for the follow case so we don't
         # reinvent line buffering.

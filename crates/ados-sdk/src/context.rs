@@ -268,7 +268,9 @@ impl MdnsClient {
 /// A driver is registered by an opaque reference id; the driver itself keeps
 /// running in the plugin process. The host records the claim and routes the
 /// driver kind through its registry. This mirrors `_driver_ref`: the host never
-/// sees the live driver object.
+/// sees the live driver object. Each kind needs the catalog cap from
+/// [`crate::client::driver_kind_capability`]. A host with no consumer for
+/// registered drivers answers `not_implemented`, surfaced as `ClientError::Rpc`.
 #[derive(Clone)]
 pub struct PeripheralClient {
     ipc: Arc<PluginIpcClient>,

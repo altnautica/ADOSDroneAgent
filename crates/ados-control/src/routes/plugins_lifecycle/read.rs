@@ -12,8 +12,10 @@ use serde_json::Value;
 
 use ados_plugin_host::attestation::Attestation;
 use ados_plugin_host::manifest::{gcs_block_json, PluginManifest};
+use ados_plugin_host::services::declared_services;
 use ados_plugin_host::state::PluginInstall;
 use ados_plugin_host::supervisor::PluginSupervisor;
+use ados_plugin_host::systemd::{log_path_for, service_log_path_for, unit_name_for};
 
 use super::install::{enrich_permissions, PermissionDto};
 use super::{is_plugin_id, json_response, respond, Refusal};
@@ -62,6 +64,7 @@ pub(crate) struct InstallDto {
     installed_at: i64,
     enabled_at: Option<i64>,
     permissions: BTreeMap<String, GrantDto>,
+    revocation_pending: bool,
 }
 
 impl From<&PluginInstall> for InstallDto {
@@ -89,6 +92,7 @@ impl From<&PluginInstall> for InstallDto {
                     )
                 })
                 .collect(),
+            revocation_pending: install.revocation_pending,
         }
     }
 }
@@ -138,6 +142,12 @@ struct DetailDto {
     install: InstallDto,
     granted_capabilities: Vec<String>,
     manifest: ManifestDto,
+    /// The host-computed systemd unit name, so no client re-derives it.
+    unit: String,
+    /// The main runner's append-log path.
+    log_path: String,
+    /// Each declared service's append-log path, by service name.
+    service_logs: BTreeMap<String, String>,
 }
 
 /// The halves a manifest carries, agent first.
@@ -207,7 +217,8 @@ fn installed_manifest(sup: &PluginSupervisor, plugin_id: &str) -> Result<PluginM
 }
 
 /// `GET /api/plugins/{plugin_id}`: the install record, the granted capability
-/// ids, and the manifest summary with the GCS block and MCP contributions.
+/// ids, the manifest summary with the GCS block and MCP contributions, and the
+/// host-computed unit name and log paths (main and per declared service).
 pub async fn get_plugin(
     State(state): State<AppState>,
     AxumPath(plugin_id): AxumPath<String>,
@@ -228,6 +239,15 @@ pub async fn get_plugin(
                     .filter(|(_, g)| g.granted)
                     .map(|(id, _)| id.clone())
                     .collect();
+                let log_dir = &sup.paths().log_dir;
+                let service_logs = declared_services(&manifest)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| {
+                        let path = service_log_path_for(log_dir, &plugin_id, &s.name);
+                        (s.name, path.to_string_lossy().into_owned())
+                    })
+                    .collect();
                 Ok(DetailDto {
                     install: InstallDto::from(install),
                     granted_capabilities,
@@ -242,6 +262,11 @@ pub async fn get_plugin(
                         permissions: enrich_permissions(&permission_ids, Some(&manifest), sup),
                         mcp: mcp_contributions(&manifest),
                     },
+                    unit: unit_name_for(&plugin_id),
+                    log_path: log_path_for(log_dir, &plugin_id)
+                        .to_string_lossy()
+                        .into_owned(),
+                    service_logs,
                 })
             })
             .await

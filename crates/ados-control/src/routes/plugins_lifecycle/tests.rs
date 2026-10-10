@@ -108,6 +108,9 @@ fn fixture_with(
         )),
     )
     .with_plugins(lifecycle);
+    // A disarmed vehicle: the armed guard fails closed on a drone with no
+    // fresh state, and these tests exercise the routes, not the interlock.
+    state.state.set_snapshot_for_test(json!({"armed": false}));
     Fixture { dir, state, paths }
 }
 
@@ -833,4 +836,113 @@ async fn pin_and_auto_update_persist_on_the_install() {
         post_json(&f.state, "/api/plugins/com.example.none/unpin", json!({})).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(envelope(&body), (14, "not_found"));
+}
+
+#[tokio::test]
+async fn plugin_detail_includes_unit_and_log_paths() {
+    let f = fixture();
+    let manifest = "id: com.example.rustplug\nversion: 1.0.0\nname: Rust Plug\nlicense: MIT\n\
+compatibility:\n  ados_version: \">=0.1.0\"\n\
+agent:\n  entrypoint: agent/bin/com.example.rustplug\n  runtime: rust\n  permissions:\n    - event.publish\n\
+  \x20 contributes:\n    services:\n      - name: helper\n        command: agent/bin/helper\n";
+    let bytes = archive(&[
+        ("manifest.yaml", manifest.as_bytes()),
+        ("agent/bin/com.example.rustplug", b"\x7fELF"),
+        ("agent/bin/helper", b"\x7fELF"),
+    ]);
+    let (status, body) = upload(
+        &f.state,
+        "/api/plugins/install?requested_permissions=event.publish",
+        &bytes,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = get(&f.state, "/api/plugins/com.example.rustplug").await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        body["unit"],
+        json!("ados-plugin-com-example-rustplug-3bb2d8d0.service")
+    );
+    let log_dir = f.paths.log_dir.clone();
+    assert_eq!(
+        body["log_path"],
+        json!(log_dir
+            .join("com-example-rustplug-3bb2d8d0.log")
+            .to_string_lossy())
+    );
+    assert_eq!(
+        body["service_logs"]["helper"],
+        json!(log_dir
+            .join("com-example-rustplug-3bb2d8d0-helper.log")
+            .to_string_lossy())
+    );
+    assert_eq!(body["install"]["revocation_pending"], json!(false));
+}
+
+async fn delete(state: &AppState, uri: &str) -> (StatusCode, Value) {
+    let (status, bytes) = send(
+        state,
+        Request::builder()
+            .method("DELETE")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn remove_answers_a_warning_only_when_the_manifest_was_unreadable() {
+    let f = fixture();
+    install_web(&f).await;
+    let (status, body) = delete(&f.state, "/api/plugins/com.example.web").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"ok": true, "warning": null}));
+
+    // A tampered manifest no longer blocks the remove; the reason comes back.
+    install_web(&f).await;
+    std::fs::write(
+        f.paths.install_dir.join(WEB_ID).join("manifest.yaml"),
+        "id: tampered\n",
+    )
+    .unwrap();
+    let (status, body) = delete(&f.state, "/api/plugins/com.example.web").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], json!(true));
+    assert!(
+        body["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("manifest hash mismatch")),
+        "{body}"
+    );
+    let (status, _) = get(&f.state, "/api/plugins/com.example.web").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[test]
+fn board_and_revocation_refusals_carry_their_own_kind() {
+    use ados_plugin_host::errors::{
+        LifecycleError, SignatureError, SignatureErrorKind, SupervisorError,
+    };
+    let board = LifecycleError::from(SupervisorError(
+        "refused: board_mismatch: plugin com.example.x does not support board rpi4b".into(),
+    ));
+    let r = super::Refusal::from_install(board);
+    assert_eq!((r.code, r.kind.as_str()), (18, "board_mismatch"));
+    let unreadable = LifecycleError::from(SignatureError::new(
+        SignatureErrorKind::Revoked,
+        "refused: revocation_list_unreadable: revocation list is not JSON",
+    ));
+    let r = super::Refusal::from_install(unreadable);
+    assert_eq!(
+        (r.code, r.kind.as_str()),
+        (19, "revocation_list_unreadable")
+    );
+    let revoked = LifecycleError::from(SupervisorError(
+        "refused: signer_revoked: plugin com.example.x may not be enabled".into(),
+    ));
+    let r = super::Refusal::from_operation(&revoked);
+    assert_eq!((r.code, r.kind.as_str()), (19, "refused"));
 }

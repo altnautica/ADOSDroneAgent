@@ -392,20 +392,23 @@ impl PluginIpcClient {
     // ---- Peripheral manager ------------------------------------------
 
     /// Register a driver of the given kind, referenced by an opaque id the host
-    /// records. The required cap is `sensor.<kind>.register`. Mirrors
+    /// records. The required cap comes from [`driver_kind_capability`]
+    /// (camera, lidar, or the payload cap for gimbal/gps/esc/payload-actuator);
+    /// an unknown kind is refused here and nothing is sent. Mirrors
     /// `peripheral_register_driver`.
     pub async fn peripheral_register_driver(
         &self,
         kind: &str,
         driver_ref: &str,
     ) -> Result<Value, ClientError> {
+        let cap = driver_kind_capability(kind)
+            .ok_or_else(|| ClientError::Rpc(format!("unknown driver kind: {kind}")))?;
         let args = Value::Map(vec![
             (Value::from("kind"), Value::from(kind)),
             (Value::from("driver_ref"), Value::from(driver_ref)),
         ]);
-        let cap = format!("sensor.{kind}.register");
         Ok(self
-            .send_request("peripheral.register_driver", &cap, args)
+            .send_request("peripheral.register_driver", cap, args)
             .await?
             .args)
     }
@@ -1516,6 +1519,19 @@ fn map_get_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     }
 }
 
+/// The catalog capability a `peripheral.register_driver` call of `kind` needs:
+/// camera and lidar have their own register caps; gimbal, GPS, ESC and payload
+/// actuators register as payload devices. `None` for a kind the host has no
+/// capability for.
+pub fn driver_kind_capability(kind: &str) -> Option<&'static str> {
+    match kind {
+        "camera" => Some("sensor.camera.register"),
+        "lidar" => Some("sensor.lidar.register"),
+        "gimbal" | "gps" | "esc" | "payload-actuator" => Some("sensor.payload.register"),
+        _ => None,
+    }
+}
+
 fn map_get_i64(args: &Value, key: &str) -> Option<i64> {
     match args {
         Value::Map(entries) => entries
@@ -1560,6 +1576,37 @@ fn fnmatch(pattern: &str, text: &str) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn driver_kinds_map_to_catalog_caps() {
+        for kind in [
+            "camera",
+            "lidar",
+            "gimbal",
+            "gps",
+            "esc",
+            "payload-actuator",
+        ] {
+            let cap = driver_kind_capability(kind).expect(kind);
+            assert!(
+                ados_protocol::capabilities::is_known_agent_capability(cap),
+                "{kind} maps to {cap}, which is not in the catalog"
+            );
+        }
+        assert_eq!(driver_kind_capability("sonar"), None);
+    }
+
+    #[tokio::test]
+    async fn driver_kind_unknown_is_refused_before_sending() {
+        // Not connected: a send would answer NotConnected, so an Rpc error
+        // proves the refusal came first.
+        let client = PluginIpcClient::new("com.example.demo", "tok", "/run/ados/plugins/x.sock");
+        let err = client
+            .peripheral_register_driver("sonar", "ref-1")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ClientError::Rpc(m) if m.contains("sonar")));
+    }
 
     fn batch_for(camera_id: &str) -> ados_protocol::framebus::DetectionBatch {
         ados_protocol::framebus::DetectionBatch {

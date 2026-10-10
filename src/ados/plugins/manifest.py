@@ -253,8 +253,8 @@ class ServiceSpec(_StrictModel):
     Fields:
 
     * ``name`` — short identifier, unique within the plugin. Used to
-      build the unit name (``ados-plugin-<id>-<name>.service``, with
-      dots and underscores sanitized to hyphens) and to key the
+      build the unit name (``ados-plugin-<id-dashed>-<hash8>-<service>.service``,
+      dots in the id and service sanitized to hyphens) and to key the
       readiness entry. Lowercase alnum plus ``.``, ``_``, ``-``.
     * ``command`` — the exec line the unit runs, as an argv (POSIX quoting,
       never a shell). The renderer re-quotes each word for systemd and

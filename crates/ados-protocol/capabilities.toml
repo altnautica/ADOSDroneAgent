@@ -167,7 +167,7 @@ description = "Lets the plugin declare a camera device the rest of the agent and
 category = "hardware"
 risk = "medium"
 risk_reason = "Camera streams may be recorded and uploaded; sensor identity matters for safety."
-enforced = true
+enforced = false
 
 [[agent]]
 id = "sensor.depth.register"
@@ -398,7 +398,7 @@ enforced = true
 id = "vision.track.designate"
 label = "Set the vision engine's follow target"
 description = "Lets the plugin choose which object the vision engine's single-object tracker locks onto (the follow target), by naming the box to track. This selects a target for downstream follow / framing logic; designation alone does not command the vehicle."
-category = "data_network"
+category = "flight_control"
 risk = "medium"
 risk_reason = "Choosing the follow target steers downstream follow/framing behaviour, though designation alone does not command flight."
 enforced = true
@@ -662,7 +662,7 @@ risk_reason = "Read-only on the cloud rows the user is authorised for."
 [[gcs]]
 id = "perception.read"
 label = "Read perception state in the GCS"
-description = "Lets the plugin read the drone's perception state — where detection runs (on the drone or offloaded to a compute node), the bound compute node, and the live session health (feed freshness, throughput). Read-only on derived data; it does not open or read the camera."
+description = "Lets the plugin read the drone's perception state: where detection runs (on the drone or offloaded to a compute node), the bound compute node, and the live session health (feed freshness, throughput). Read-only on derived data; it does not open or read the camera."
 category = "data_network"
 risk = "low"
 risk_reason = "Read-only on derived detection metadata; no camera access."

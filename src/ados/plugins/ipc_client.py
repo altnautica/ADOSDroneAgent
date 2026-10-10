@@ -91,6 +91,25 @@ DELIVERY_QUEUE_MAX = 1024
 #: visible without one log line per frame.
 DELIVERY_DROP_LOG_EVERY = 100
 
+#: The catalog capability each ``peripheral.register_driver`` kind needs.
+_DRIVER_KIND_CAPS = {
+    "camera": "sensor.camera.register",
+    "lidar": "sensor.lidar.register",
+    "gimbal": "sensor.payload.register",
+    "gps": "sensor.payload.register",
+    "esc": "sensor.payload.register",
+    "payload-actuator": "sensor.payload.register",
+}
+
+
+def _driver_kind_capability(kind: str) -> str:
+    """The catalog cap for a driver kind; ``ValueError`` for an unknown kind."""
+    try:
+        return _DRIVER_KIND_CAPS[kind]
+    except KeyError:
+        raise ValueError(f"unknown driver kind: {kind}") from None
+
+
 
 class PluginIpcClient:
     """Async client. One instance per plugin runner process."""
@@ -350,10 +369,11 @@ class PluginIpcClient:
     # ---- Peripheral manager ------------------------------------------
 
     async def peripheral_register_driver(self, kind: str, driver_ref: str) -> dict:
+        capability = _driver_kind_capability(kind)
         return (
             await self._send_request(
                 "peripheral.register_driver",
-                capability=f"sensor.{kind}.register",
+                capability=capability,
                 args={"kind": kind, "driver_ref": driver_ref},
             )
         ).args

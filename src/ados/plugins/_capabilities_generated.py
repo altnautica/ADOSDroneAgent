@@ -77,7 +77,6 @@ ENFORCED_AGENT_CAPABILITIES: frozenset[str] = frozenset(
         "estimator.pose.inject",
         "telemetry.read",
         "telemetry.extend",
-        "sensor.camera.register",
         "hardware.uart",
         "hardware.i2c",
         "hardware.spi",
@@ -399,7 +398,7 @@ CAPABILITY_CATALOG: dict[str, dict[str, str]] = {
     "vision.track.designate": {
         "label": "Set the vision engine's follow target",
         "description": "Lets the plugin choose which object the vision engine's single-object tracker locks onto (the follow target), by naming the box to track. This selects a target for downstream follow / framing logic; designation alone does not command the vehicle.",
-        "category": "data_network",
+        "category": "flight_control",
         "risk": "medium",
         "risk_reason": "Choosing the follow target steers downstream follow/framing behaviour, though designation alone does not command flight.",
     },

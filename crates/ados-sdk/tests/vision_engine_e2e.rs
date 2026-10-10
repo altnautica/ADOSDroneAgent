@@ -560,10 +560,14 @@ async fn infer_runs_the_engines_model_on_the_named_frame() {
         .await
         .expect("register");
     let pixels = [0x5Au8; 48];
+    // The real engine keeps this ring in the host's /dev/shm on Linux, where a
+    // running agent's engine (or a parallel test) may own the default camera's
+    // ring name; a camera id unique to this process keeps the frame ours.
+    let camera = format!("uvc-e2e-{}", std::process::id());
     let descriptor = engine
         .engine
         .publish_frame(
-            CAMERA,
+            &camera,
             3,
             1_700_000_000_000,
             4,
