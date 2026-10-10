@@ -56,6 +56,8 @@ export interface ApplyPayload {
   network?: NetworkSection;
   cloud?: CloudSection;
   advanced?: AdvancedSection;
+  /** Override the armed interlock after the operator confirmed. */
+  force?: boolean;
 }
 
 // ---- response shapes ----------------------------------------------

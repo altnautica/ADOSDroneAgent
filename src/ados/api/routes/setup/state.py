@@ -23,22 +23,21 @@ async def get_setup_status(request: Request) -> SetupStatus:
     )
 
 
-@router.post("/finish", response_model=SetupStatus)
-async def finalize_setup(request: Request) -> SetupStatus:
+@router.post("/finish")
+async def finalize_setup() -> dict:
     """Mark the onboarding wizard complete.
 
     Sets ``setup_finalized=true`` in persistent state. The universal
-    webapp uses this flag to gate the rest of the app surface.
+    webapp uses this flag to gate the rest of the app surface. Returns only
+    ``{"ok": true}``; a client re-reads ``/status`` for the new state, which
+    applies the status route's own exposure rules.
     """
     setup_state.mark_finalized()
-    return await build_setup_status(
-        get_agent_app(),
-        host_header=request.headers.get("host"),
-    )
+    return {"ok": True}
 
 
-@router.post("/skip", response_model=SetupStatus)
-async def skip_setup(request: Request) -> SetupStatus:
+@router.post("/skip")
+async def skip_setup() -> dict:
     """Mark the entire setup wizard dismissed via Skip to Home.
 
     Sets ``setup_skipped=true`` so the webapp's index redirect routes
@@ -47,38 +46,29 @@ async def skip_setup(request: Request) -> SetupStatus:
     banner is shown on Home until they either finalize or reset.
     """
     setup_state.mark_setup_skipped()
-    return await build_setup_status(
-        get_agent_app(),
-        host_header=request.headers.get("host"),
-    )
+    return {"ok": True}
 
 
-@router.post("/step/{step_id}/skip", response_model=SetupStatus)
-async def skip_setup_step(step_id: str, request: Request) -> SetupStatus:
+@router.post("/step/{step_id}/skip")
+async def skip_setup_step(step_id: str) -> dict:
     """Mark a step as deferred ("Skip for now")."""
     if step_id not in VALID_STEP_IDS:
         raise HTTPException(status_code=404, detail=f"Unknown step id: {step_id}")
     if step_id in {"welcome", "finish"}:
         raise HTTPException(status_code=400, detail=f"Step '{step_id}' cannot be skipped")
     setup_state.mark_skipped(step_id)
-    return await build_setup_status(
-        get_agent_app(),
-        host_header=request.headers.get("host"),
-    )
+    return {"ok": True}
 
 
-@router.post("/reset", response_model=SetupStatus)
-async def reset_setup(request: Request) -> SetupStatus:
+@router.post("/reset")
+async def reset_setup() -> dict:
     """Clear setup_finalized and the skipped-step set.
 
     Used by the Setup page's "Re-run setup" action so the wizard
     re-engages the operator with the full step list.
     """
     setup_state.reset_state()
-    return await build_setup_status(
-        get_agent_app(),
-        host_header=request.headers.get("host"),
-    )
+    return {"ok": True}
 
 
 @router.get("/nudges")
@@ -96,5 +86,5 @@ async def ack_nudge(nudge_id: str) -> dict:
     """Mark a one-shot prompt as acknowledged so it never re-renders."""
     if nudge_id not in VALID_NUDGE_IDS:
         raise HTTPException(status_code=404, detail=f"Unknown nudge id: {nudge_id}")
-    state = setup_state.ack_nudge(nudge_id)
-    return {"status": "ok", "acked": sorted(state.acked_nudges)}
+    setup_state.ack_nudge(nudge_id)
+    return {"ok": True}

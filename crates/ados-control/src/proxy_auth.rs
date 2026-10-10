@@ -341,14 +341,16 @@ impl ProxiedAuth {
             );
         }
         // 5. Cosmetic setup-wizard mutations under the same-origin trust model,
-        //    with the token escalation knob.
+        //    with the token escalation knob. The same-origin shortcut holds only
+        //    on an unpaired node: Origin and Host are caller-chosen, so once
+        //    paired a wizard mutation needs the key like every other route.
         let is_setup_mutation = contains(SAME_ORIGIN_SETUP_PATHS, path)
             || SAME_ORIGIN_SETUP_PREFIXES
                 .iter()
                 .any(|p| path.starts_with(p));
         if is_setup_mutation {
             let require_token = self.config.setup_token_required;
-            if !require_token && is_same_origin(headers) {
+            if !require_token && matches!(pairing, Pairing::Unpaired) && is_same_origin(headers) {
                 return Decision::Accept;
             }
             if require_token {
@@ -1126,6 +1128,27 @@ mod tests {
         let auth = auth_basic();
         let p = paired("k");
         let headers = RequestHeaders::default(); // no origin → not same-origin
+        let d = auth.decide_api_key(&Method::POST, "/api/v1/setup/finish", &headers, false, &p);
+        assert_eq!(
+            d,
+            reject(
+                StatusCode::UNAUTHORIZED,
+                BodyField::Detail,
+                messages::MISSING_KEY
+            )
+        );
+    }
+
+    #[test]
+    fn paired_same_origin_without_key_is_401() {
+        // Origin and Host are caller-chosen; once paired they grant nothing.
+        let auth = auth_basic();
+        let p = paired("k");
+        let headers = RequestHeaders {
+            origin: Some("http://192.168.4.1:8080".to_string()),
+            host: Some("192.168.4.1:8080".to_string()),
+            ..Default::default()
+        };
         let d = auth.decide_api_key(&Method::POST, "/api/v1/setup/finish", &headers, false, &p);
         assert_eq!(
             d,

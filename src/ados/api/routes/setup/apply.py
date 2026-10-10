@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from ados.api.deps import get_agent_app
 from ados.setup import display_install
@@ -21,9 +21,38 @@ from ados.setup.profile import (
 from ados.setup.service import apply_cloud_choice
 
 from ._common import log
-from ._models import ApplyRequest, ApplyResponse, ApplyResultSection
+from ._models import ApplyRequest as _ApplySections
+from ._models import ApplyResponse, ApplyResultSection
 
 router = APIRouter()
+
+# The sections that restart the supervisor or retune a link. The control
+# surface's interlock refuses the same set first; this is the in-process
+# mirror for a caller that reaches this API directly.
+_LINK_DROPPING_SECTIONS: tuple[str, ...] = ("profile", "wfb", "network", "regulatory")
+
+
+class ApplyRequest(_ApplySections):
+    """The batch-apply payload plus the armed override."""
+
+    force: bool = False
+
+
+def raise_if_armed(runtime, force: bool) -> None:
+    """Refuse a link-dropping action while the vehicle counts as armed.
+
+    The vehicle counts as armed unless the router's state says ``armed`` is
+    ``False``: no state proves nothing, so it fails closed. ``force``
+    overrides.
+    """
+    if force:
+        return
+    if runtime.state_ipc_state().get("armed") is not False:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "E_ARMED", "message": "Vehicle is armed", "override": "force"},
+        )
+
 
 # The config leaves each section writes. A rollback restores exactly these, as
 # they read before the section ran, in one write.
@@ -78,6 +107,8 @@ async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
     section writes and a rollback does not rewrite.
     """
     runtime = get_agent_app()
+    if any(getattr(request, name) is not None for name in _LINK_DROPPING_SECTIONS):
+        raise_if_armed(runtime, request.force is True)
 
     sections: dict[str, ApplyResultSection] = {}
     completed: list[tuple[str, dict[str, object]]] = []

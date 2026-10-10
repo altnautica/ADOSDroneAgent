@@ -34,6 +34,8 @@ class PeripheralActionRequest(BaseModel):
 
     action_id: str
     body: dict[str, Any] = Field(default_factory=dict)
+    # The armed override for an action that drops a link.
+    force: bool = False
 
 
 def _not_found(peripheral_id: str) -> HTTPException:
@@ -136,16 +138,22 @@ def _wfb_unit() -> str:
     return "ados-wfb-rx" if profile == "ground-station" else "ados-wfb"
 
 
-async def _dispatch_restart_radio() -> dict:
+async def _dispatch_restart_radio(request: PeripheralActionRequest) -> dict:
     """Restart the WFB radio service via systemctl.
 
-    Pre-flight ``systemctl is-active <unit>`` so a profile that doesn't run
+    Refused while the vehicle counts as armed (a radio restart drops the
+    link) unless the action body sets ``force: true``. Pre-flight
+    ``systemctl is-active <unit>`` so a profile that doesn't run
     the unit (drone-only without an RTL8812EU adapter) surfaces a clean 409
     instead of pretending to succeed. The unit follows the node's profile:
     a ground station restarts ``ados-wfb-rx``. Both systemctl calls run as
     subprocesses awaited off the event loop, so the rest of the API keeps
     serving while the radio restarts.
     """
+    from ados.api.deps import get_agent_app
+    from ados.api.routes.setup.apply import raise_if_armed
+
+    raise_if_armed(get_agent_app(), request.force is True)
     if shutil.which("systemctl") is None:
         raise HTTPException(
             status_code=409,
@@ -263,7 +271,7 @@ async def invoke_peripheral_action(
             },
         )
 
-    result = await dispatcher()
+    result = await dispatcher(request)
     log.info(
         "peripheral_action_dispatched",
         peripheral_id=peripheral_id,

@@ -10,10 +10,12 @@ import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useStatus } from "@/hooks/use-status";
 import { toast, toastFromError } from "@/lib/toast";
 import {
+  type ApplyPayload,
   groundRoleFromStatus,
   postApply,
   profileFromStatus,
 } from "@/lib/apply-actions";
+import { withArmedRetry } from "@/lib/armed-retry";
 import type { GroundRole } from "@/lib/types";
 import { invalidateProfile } from "@/shared/use-profile";
 
@@ -60,6 +62,11 @@ export function ProfileSettings() {
   const [autoRestart, setAutoRestart] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // The pending armed-override question: its text and the answer's resolver.
+  const [armedPrompt, setArmedPrompt] = useState<{
+    message: string;
+    resolve: (ok: boolean) => void;
+  } | null>(null);
 
   const initialProfile = profileFromStatus(status.data?.profile);
   const initialRole = groundRoleFromStatus(status.data?.ground_role);
@@ -79,13 +86,25 @@ export function ProfileSettings() {
   async function handleApply() {
     setBusy(true);
     try {
-      const res = await postApply({
-        profile: {
-          profile,
-          ground_role: profile === "ground_station" ? role : undefined,
-          auto_restart: autoRestart,
+      const res = await withArmedRetry(
+        (force) => {
+          const payload: ApplyPayload = {
+            profile: {
+              profile,
+              ground_role: profile === "ground_station" ? role : undefined,
+              auto_restart: autoRestart,
+            },
+            force: force || undefined,
+          };
+          return postApply(payload);
         },
-      });
+        (message) => {
+          setConfirmOpen(false);
+          return new Promise<boolean>((resolve) =>
+            setArmedPrompt({ message, resolve }),
+          );
+        },
+      );
       const section = res.sections.profile;
       if (res.overall && section?.ok) {
         toast.ok(section.message || "Profile saved.");
@@ -217,6 +236,21 @@ export function ProfileSettings() {
         confirmLabel="Apply"
         destructive
         onConfirm={handleApply}
+      />
+
+      <ConfirmDialog
+        open={armedPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            armedPrompt?.resolve(false);
+            setArmedPrompt(null);
+          }
+        }}
+        title="Vehicle is armed"
+        description={armedPrompt?.message ?? ""}
+        confirmLabel="Apply anyway"
+        destructive
+        onConfirm={() => armedPrompt?.resolve(true)}
       />
     </div>
   );
