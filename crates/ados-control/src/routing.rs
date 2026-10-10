@@ -223,9 +223,12 @@ fn native_routes() -> Vec<NativeRoute> {
         // Distinct path from the flat /api/video/cameras enumeration.
         get("/api/video/roster"),
         put("/api/video/roster"),
-        // Drone attention-profile write: hero / thumbnail. Retargets the local
-        // encoder through ados-video's command socket.
+        // Drone attention profile: the state read, the hero / thumbnail base
+        // set or hero-lease create/renew/release, and the lease release.
+        // Retargets the local encoder through ados-video's command socket.
+        get("/api/video/profile"),
         post("/api/video/profile"),
+        delete("/api/video/profile"),
         // Node-local recording (any profile), the ground-station recorder.
         post("/api/video/record/start"),
         post("/api/video/record/stop"),
@@ -893,7 +896,7 @@ mod tests {
         let routes = native_routes();
         assert_eq!(
             routes.len(),
-            204,
+            206,
             "native route count drifted from build_router"
         );
         let has = |m: Method, p: &str| routes.iter().any(|r| r.method == m && r.path == p);
@@ -976,8 +979,11 @@ mod tests {
         assert!(has(Method::DELETE, "/api/v1/network/mac/{iface}"));
         // The operator camera-roster write.
         assert!(has(Method::PUT, "/api/video/roster"));
-        // The drone attention-profile write (hero / thumbnail).
+        // The drone attention-profile read, write (hero / thumbnail / lease)
+        // and lease release.
+        assert!(has(Method::GET, "/api/video/profile"));
         assert!(has(Method::POST, "/api/video/profile"));
+        assert!(has(Method::DELETE, "/api/video/profile"));
         // The video link-tuning write.
         assert!(has(Method::POST, "/api/video/config"));
         assert!(has(Method::POST, "/api/video/record/start"));

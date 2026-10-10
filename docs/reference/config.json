@@ -11,6 +11,16 @@
       "type": "string"
     },
     {
+      "default": false,
+      "description": "Headless",
+      "enum": null,
+      "key": "agent.headless",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
       "default": "my-drone",
       "description": "Name",
       "enum": null,
@@ -23,7 +33,13 @@
     {
       "default": "auto",
       "description": "Profile",
-      "enum": null,
+      "enum": [
+        "auto",
+        "drone",
+        "ground_station",
+        "workstation",
+        "compute"
+      ],
       "key": "agent.profile",
       "maximum": null,
       "minimum": null,
@@ -277,8 +293,8 @@
       "description": "Channel",
       "enum": null,
       "key": "ground_station.mesh.channel",
-      "maximum": 255,
-      "minimum": 0,
+      "maximum": 13,
+      "minimum": 1,
       "secret": false,
       "type": "integer"
     },
@@ -427,6 +443,16 @@
       "type": "integer"
     },
     {
+      "default": true,
+      "description": "Gpio Out Enabled",
+      "enum": null,
+      "key": "hardware.gpio_out_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
       "default": "/var/ados/logs/flights",
       "description": "Flight Log Dir",
       "enum": null,
@@ -471,6 +497,26 @@
       "description": "Enabled",
       "enum": null,
       "key": "logging.store.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Adopt Slot System Id",
+      "enum": null,
+      "key": "mavlink.adopt_slot_system_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Agent Signing",
+      "enum": null,
+      "key": "mavlink.agent_signing",
       "maximum": null,
       "minimum": null,
       "secret": false,
@@ -565,6 +611,16 @@
     },
     {
       "default": false,
+      "description": "Injector Arbitration",
+      "enum": null,
+      "key": "mavlink.injector_arbitration",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
       "description": "Legacy Stream Request",
       "enum": null,
       "key": "mavlink.legacy_stream_request",
@@ -588,6 +644,16 @@
       "description": "Raw Proxy Lan Access",
       "enum": null,
       "key": "mavlink.raw_proxy_lan_access",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Route Aware",
+      "enum": null,
+      "key": "mavlink.route_aware",
       "maximum": null,
       "minimum": null,
       "secret": false,
@@ -633,6 +699,16 @@
       "description": "Ws Proxy Enforce Auth",
       "enum": null,
       "key": "mavlink.ws_proxy_enforce_auth",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Token Accept Enabled",
+      "enum": null,
+      "key": "mcp.token_accept_enabled",
       "maximum": null,
       "minimum": null,
       "secret": false,
@@ -739,6 +815,166 @@
       "type": "object"
     },
     {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.management_link_guardian.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 2,
+      "description": "Fail Threshold",
+      "enum": null,
+      "key": "network.management_link_guardian.fail_threshold",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 5,
+      "description": "Fast Initial Tick Interval S",
+      "enum": null,
+      "key": "network.management_link_guardian.fast_initial_tick_interval_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 60,
+      "description": "Fast Initial Window S",
+      "enum": null,
+      "key": "network.management_link_guardian.fast_initial_window_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 600,
+      "description": "Repair Window S",
+      "enum": null,
+      "key": "network.management_link_guardian.repair_window_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 5,
+      "description": "Repairs Per Window",
+      "enum": null,
+      "key": "network.management_link_guardian.repairs_per_window",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 30,
+      "description": "Tick Interval S",
+      "enum": null,
+      "key": "network.management_link_guardian.tick_interval_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 20,
+      "description": "Down Debounce S",
+      "enum": null,
+      "key": "network.mgmt_failover.down_debounce_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.mgmt_failover.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 15,
+      "description": "Recover Debounce S",
+      "enum": null,
+      "key": "network.mgmt_failover.recover_debounce_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 5,
+      "description": "Tick Interval S",
+      "enum": null,
+      "key": "network.mgmt_failover.tick_interval_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Domain",
+      "enum": null,
+      "key": "network.reg_reconciler.domain",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.reg_reconciler.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 5,
+      "description": "Fast Initial Tick Interval S",
+      "enum": null,
+      "key": "network.reg_reconciler.fast_initial_tick_interval_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 60,
+      "description": "Fast Initial Window S",
+      "enum": null,
+      "key": "network.reg_reconciler.fast_initial_window_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 30,
+      "description": "Tick Interval S",
+      "enum": null,
+      "key": "network.reg_reconciler.tick_interval_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
       "default": null,
       "description": "Ack At",
       "enum": null,
@@ -782,6 +1018,66 @@
       "type": "string|null"
     },
     {
+      "default": 0,
+      "description": "Tx Pwr By Rate",
+      "enum": null,
+      "key": "network.regulatory.tx_pwr_by_rate",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 60,
+      "description": "Cooldown S",
+      "enum": null,
+      "key": "network.usb_rehome.cooldown_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.usb_rehome.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 120,
+      "description": "Healthy Reset S",
+      "enum": null,
+      "key": "network.usb_rehome.healthy_reset_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 5,
+      "description": "Tick Interval S",
+      "enum": null,
+      "key": "network.usb_rehome.tick_interval_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.watchdog.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
       "default": false,
       "description": "Enabled",
       "enum": null,
@@ -810,6 +1106,46 @@
       "minimum": null,
       "secret": false,
       "type": "string"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.wifi_powersave.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 5,
+      "description": "Fast Initial Tick Interval S",
+      "enum": null,
+      "key": "network.wifi_powersave.fast_initial_tick_interval_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 60,
+      "description": "Fast Initial Window S",
+      "enum": null,
+      "key": "network.wifi_powersave.fast_initial_window_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 30,
+      "description": "Tick Interval S",
+      "enum": null,
+      "key": "network.wifi_powersave.tick_interval_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
     },
     {
       "default": 60,
@@ -1239,6 +1575,16 @@
       "type": "string"
     },
     {
+      "default": false,
+      "description": "Cloud Logs Enabled",
+      "enum": null,
+      "key": "server.cloud_logs_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
       "default": "local",
       "description": "Mode",
       "enum": [
@@ -1253,40 +1599,10 @@
       "type": "string"
     },
     {
-      "default": "",
-      "description": "Mqtt Password",
-      "enum": null,
-      "key": "server.mqtt_password",
-      "maximum": null,
-      "minimum": null,
-      "secret": true,
-      "type": "string"
-    },
-    {
-      "default": false,
-      "description": "Mqtt Plaintext Dev",
-      "enum": null,
-      "key": "server.mqtt_plaintext_dev",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "boolean"
-    },
-    {
       "default": "websockets",
       "description": "Mqtt Transport",
       "enum": null,
       "key": "server.mqtt_transport",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string"
-    },
-    {
-      "default": "",
-      "description": "Mqtt Username",
-      "enum": null,
-      "key": "server.mqtt_username",
       "maximum": null,
       "minimum": null,
       "secret": false,
@@ -1331,6 +1647,226 @@
       "minimum": null,
       "secret": false,
       "type": "string"
+    },
+    {
+      "default": 4,
+      "description": "Audit Keep Mb",
+      "enum": null,
+      "key": "storage.janitor.audit_keep_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 16,
+      "description": "Audit Max Mb",
+      "enum": null,
+      "key": "storage.janitor.audit_max_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 5120,
+      "description": "Budget Mb",
+      "enum": null,
+      "key": "storage.janitor.budget_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 400,
+      "description": "Apt Mb",
+      "enum": null,
+      "key": "storage.janitor.caps.apt_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 64,
+      "description": "Audit Log Mb",
+      "enum": null,
+      "key": "storage.janitor.caps.audit_log_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 400,
+      "description": "Journal Mb",
+      "enum": null,
+      "key": "storage.janitor.caps.journal_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 1200,
+      "description": "Log Store Mb",
+      "enum": null,
+      "key": "storage.janitor.caps.log_store_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 256,
+      "description": "Plugin Logs Mb",
+      "enum": null,
+      "key": "storage.janitor.caps.plugin_logs_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 400,
+      "description": "Quarantined Stores Mb",
+      "enum": null,
+      "key": "storage.janitor.caps.quarantined_stores_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 2400,
+      "description": "Recordings Mb",
+      "enum": null,
+      "key": "storage.janitor.caps.recordings_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 10.0,
+      "description": "Critical Free Pct",
+      "enum": null,
+      "key": "storage.janitor.critical_free_pct",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "storage.janitor.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 3600,
+      "description": "Interval S",
+      "enum": null,
+      "key": "storage.janitor.interval_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 64,
+      "description": "Journal Floor Mb",
+      "enum": null,
+      "key": "storage.janitor.journal_floor_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 128,
+      "description": "Journal Pressure Mb",
+      "enum": null,
+      "key": "storage.janitor.journal_pressure_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 8,
+      "description": "Plugin Log Keep Mb",
+      "enum": null,
+      "key": "storage.janitor.plugin_log_keep_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 32,
+      "description": "Plugin Log Max Mb",
+      "enum": null,
+      "key": "storage.janitor.plugin_log_max_mb",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 20.0,
+      "description": "Pressure Free Pct",
+      "enum": null,
+      "key": "storage.janitor.pressure_free_pct",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": 1,
+      "description": "Quarantine Keep Newest",
+      "enum": null,
+      "key": "storage.janitor.quarantine_keep_newest",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 3,
+      "description": "Recording Keep Newest",
+      "enum": null,
+      "key": "storage.janitor.recording_keep_newest",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 14,
+      "description": "Recording Pressure Retention Days",
+      "enum": null,
+      "key": "storage.janitor.recording_pressure_retention_days",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 90,
+      "description": "Recording Retention Days",
+      "enum": null,
+      "key": "storage.janitor.recording_retention_days",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
     },
     {
       "default": "line",
@@ -1613,6 +2149,16 @@
       "minimum": 0,
       "secret": false,
       "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Passthrough",
+      "enum": null,
+      "key": "video.camera.passthrough",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
     },
     {
       "default": 0,
@@ -1990,6 +2536,16 @@
       "type": "boolean"
     },
     {
+      "default": null,
+      "description": "Profile",
+      "enum": null,
+      "key": "video.profile",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
       "default": false,
       "description": "Enabled",
       "enum": null,
@@ -2020,6 +2576,16 @@
       "type": "string"
     },
     {
+      "default": "24h",
+      "description": "Retention",
+      "enum": null,
+      "key": "video.recording.retention",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
       "default": false,
       "description": "Allow Hub Reset",
       "enum": null,
@@ -2034,6 +2600,16 @@
       "description": "Allow Ppps",
       "enum": null,
       "key": "video.usb_recovery.allow_ppps",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Allow Shared Hub Reset",
+      "enum": null,
+      "key": "video.usb_recovery.allow_shared_hub_reset",
       "maximum": null,
       "minimum": null,
       "secret": false,
@@ -2110,6 +2686,66 @@
       "type": "integer"
     },
     {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "video.vision.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "rgb24",
+      "description": "Format",
+      "enum": null,
+      "key": "video.vision.format",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 10,
+      "description": "Fps",
+      "enum": null,
+      "key": "video.vision.fps",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 480,
+      "description": "Height",
+      "enum": null,
+      "key": "video.vision.height",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "/run/ados/vision-tap-main.sock",
+      "description": "Sink",
+      "enum": null,
+      "key": "video.vision.sink",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 640,
+      "description": "Width",
+      "enum": null,
+      "key": "video.vision.width",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
       "default": true,
       "description": "Adaptive Bitrate Enabled",
       "enum": null,
@@ -2160,6 +2796,106 @@
       "type": "boolean"
     },
     {
+      "default": true,
+      "description": "Aux Enable",
+      "enum": null,
+      "key": "video.wfb.aux_enable",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 1,
+      "description": "Aux Fec K",
+      "enum": null,
+      "key": "video.wfb.aux_fec_k",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 2,
+      "description": "Aux Fec N",
+      "enum": null,
+      "key": "video.wfb.aux_fec_n",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 10.0,
+      "description": "Aux Identity Interval S",
+      "enum": null,
+      "key": "video.wfb.aux_identity_interval_s",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": null,
+      "description": "Aux Mcs Index",
+      "enum": null,
+      "key": "video.wfb.aux_mcs_index",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": 5603,
+      "description": "Aux Rx Port",
+      "enum": null,
+      "key": "video.wfb.aux_rx_port",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Aux Status Enabled",
+      "enum": null,
+      "key": "video.wfb.aux_status_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 1.0,
+      "description": "Aux Status Interval S",
+      "enum": null,
+      "key": "video.wfb.aux_status_interval_s",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": 5602,
+      "description": "Aux Tx Port",
+      "enum": null,
+      "key": "video.wfb.aux_tx_port",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "auto",
+      "description": "Backend",
+      "enum": null,
+      "key": "video.wfb.backend",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
       "default": "u-nii-3",
       "description": "Band",
       "enum": [
@@ -2182,6 +2918,16 @@
       "minimum": 0,
       "secret": false,
       "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Dfs Allowed",
+      "enum": null,
+      "key": "video.wfb.dfs_allowed",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
     },
     {
       "default": 8,
@@ -2274,6 +3020,46 @@
       "type": "integer"
     },
     {
+      "default": 600,
+      "description": "Confirm Hold S",
+      "enum": null,
+      "key": "video.wfb.pair_rearm.confirm_hold_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 1800,
+      "description": "Cooldown S",
+      "enum": null,
+      "key": "video.wfb.pair_rearm.cooldown_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "video.wfb.pair_rearm.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 30,
+      "description": "Stats Fresh Ceiling S",
+      "enum": null,
+      "key": "video.wfb.pair_rearm.stats_fresh_ceiling_s",
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
       "default": null,
       "description": "Paired At",
       "enum": null,
@@ -2294,6 +3080,16 @@
       "type": "string|null"
     },
     {
+      "default": false,
+      "description": "Periodic Hop Enabled",
+      "enum": null,
+      "key": "video.wfb.periodic_hop_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
       "default": "US",
       "description": "Reg Domain",
       "enum": null,
@@ -2302,6 +3098,26 @@
       "minimum": null,
       "secret": false,
       "type": "string|null"
+    },
+    {
+      "default": true,
+      "description": "Reg Gate Strict",
+      "enum": null,
+      "key": "video.wfb.reg_gate_strict",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": null,
+      "description": "Rendezvous Channel",
+      "enum": null,
+      "key": "video.wfb.rendezvous_channel",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
     },
     {
       "default": false,
@@ -2364,12 +3180,68 @@
     {
       "default": "auto",
       "description": "Backend",
-      "enum": null,
+      "enum": [
+        "auto",
+        "rknn",
+        "hailo",
+        "onnx",
+        "mock"
+      ],
       "key": "vision.backend",
       "maximum": null,
       "minimum": null,
       "secret": false,
       "type": "string"
+    },
+    {
+      "default": [],
+      "description": "Cameras",
+      "enum": null,
+      "key": "vision.cameras",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Device Path",
+      "enum": null,
+      "key": "vision.cameras[].device_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": "",
+      "description": "Id",
+      "enum": null,
+      "key": "vision.cameras[].id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "tap",
+      "description": "Kind",
+      "enum": null,
+      "key": "vision.cameras[].kind",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Tap Socket",
+      "enum": null,
+      "key": "vision.cameras[].tap_socket",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
     },
     {
       "default": 0.5,
@@ -2382,10 +3254,130 @@
       "type": "number"
     },
     {
+      "default": null,
+      "description": "Designate Camera",
+      "enum": null,
+      "key": "vision.designate_camera",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Class Labels",
+      "enum": null,
+      "key": "vision.detector.class_labels",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": "",
+      "description": "Head",
+      "enum": null,
+      "key": "vision.detector.head",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 640,
+      "description": "Input Height",
+      "enum": null,
+      "key": "vision.detector.input_height",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 640,
+      "description": "Input Width",
+      "enum": null,
+      "key": "vision.detector.input_width",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "",
+      "description": "Model Id",
+      "enum": null,
+      "key": "vision.detector.model_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Model Path",
+      "enum": null,
+      "key": "vision.detector.model_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Priority",
+      "enum": null,
+      "key": "vision.detector.priority",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Rate Hz",
+      "enum": null,
+      "key": "vision.detector.rate_hz",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": 480,
+      "description": "Downscale Height",
+      "enum": null,
+      "key": "vision.downscale_height",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 640,
+      "description": "Downscale Width",
+      "enum": null,
+      "key": "vision.downscale_width",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
       "default": false,
       "description": "Enabled",
       "enum": null,
       "key": "vision.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Mock Target",
+      "enum": null,
+      "key": "vision.mock_target",
       "maximum": null,
       "minimum": null,
       "secret": false,
@@ -2412,6 +3404,16 @@
       "type": "string"
     },
     {
+      "default": null,
+      "description": "Profile",
+      "enum": null,
+      "key": "vision.profile",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
       "default": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json",
       "description": "Registry Url",
       "enum": null,
@@ -2420,6 +3422,106 @@
       "minimum": null,
       "secret": false,
       "type": "string"
+    },
+    {
+      "default": 256,
+      "description": "Input Height",
+      "enum": null,
+      "key": "vision.reid.input_height",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 128,
+      "description": "Input Width",
+      "enum": null,
+      "key": "vision.reid.input_width",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "",
+      "description": "Model Id",
+      "enum": null,
+      "key": "vision.reid.model_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Model Path",
+      "enum": null,
+      "key": "vision.reid.model_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Reid Enabled",
+      "enum": null,
+      "key": "vision.reid_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": null,
+      "description": "Reid Model Id",
+      "enum": null,
+      "key": "vision.reid_model_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": 64,
+      "description": "Shm Budget Mb",
+      "enum": null,
+      "key": "vision.shm_budget_mb",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 4,
+      "description": "Slot Count",
+      "enum": null,
+      "key": "vision.slot_count",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "/run/ados",
+      "description": "Socket Dir",
+      "enum": null,
+      "key": "vision.socket_dir",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Tracker Enabled",
+      "enum": null,
+      "key": "vision.tracker_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
     }
   ],
   "schema": 1

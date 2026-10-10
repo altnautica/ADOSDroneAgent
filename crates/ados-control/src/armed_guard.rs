@@ -243,9 +243,10 @@ fn body_forces(body: Option<&Value>) -> bool {
 }
 
 /// Whether this node's profile carries a vehicle (and so runs the router whose
-/// state the guard reads).
+/// state the guard reads). The profile comes from the cached config snapshot,
+/// so a guarded request does not parse `config.yaml` on the reactor.
 fn profile_has_vehicle(state: &AppState) -> bool {
-    let cfg = crate::config::PairingConfig::load_from(&state.pairing_paths.config);
+    let cfg = crate::config::PairingConfig::cached(&state.pairing_paths.config);
     let (profile, _role) = crate::profile::current_profile_and_role_at(
         &cfg.agent.profile,
         &state.pairing_paths.profile_conf,

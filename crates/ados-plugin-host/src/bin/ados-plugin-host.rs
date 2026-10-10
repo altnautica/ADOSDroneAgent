@@ -478,9 +478,11 @@ fn production_supervisor(paths: &Paths) -> PluginSupervisor {
         .with_accounts(ados_plugin_host::plugin_account::local_accounts())
 }
 
-/// `guard-load`: ensure the plugin groups exist, load the guard, record the
-/// verdict, and exit non-zero when it did not load, so the plugin unit whose
-/// pre-start this is fails closed.
+/// `guard-load`: ensure the plugin groups exist, reload the guard, and exit
+/// non-zero when it did not load, so the plugin unit whose pre-start this is
+/// fails closed. The verdict is not recorded here: this runs in the plugin
+/// unit's mount namespace, where the run dir is the unit's read-only tmpfs
+/// (see [`loopback_guard::reload`]); the daemon's record stands.
 fn guard_load() -> Result<()> {
     let paths = Paths::from_env();
     if let Err(e) = ados_plugin_host::plugin_account::ensure_groups() {
@@ -490,7 +492,7 @@ fn guard_load() -> Result<()> {
     if let Err(e) = supervisor.discover() {
         tracing::warn!(error = %e, "plugin discovery failed; loading the guard without listener exceptions");
     }
-    let state = loopback_guard::install(&guard_ruleset(&supervisor), &paths.loopback_guard_state);
+    let state = loopback_guard::reload(&guard_ruleset(&supervisor));
     if !state.active {
         anyhow::bail!("plugin loopback guard did not load: {}", state.reason);
     }

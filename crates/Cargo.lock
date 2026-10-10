@@ -71,11 +71,13 @@ dependencies = [
 name = "ados-config"
 version = "0.102.6"
 dependencies = [
+ "parking_lot",
  "serde",
  "serde_json",
  "serde_norway",
  "tempfile",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

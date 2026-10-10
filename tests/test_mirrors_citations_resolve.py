@@ -89,7 +89,14 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: station leave changed behaviour (secure mesh join, restart outcome checked, AP
 #: always restored), so they no longer copy their Python predecessors and their
 #: comments say what they do.
-MIN_CITATIONS = 100
+#:
+#: 100 -> 87: the Python WFB pair manager, the ground-station hostapd and WiFi
+#: client managers, the WFB adapter scanner, the MAC-pin state reader and the
+#: hop-supervisor path constant were deleted when the native ground link,
+#: supervisor bind keys, network service and radio adapter probe became the
+#: only owners; the Rust comments that cited them now say what the code does.
+#: One citation of a sibling Rust item was reworded off the word.
+MIN_CITATIONS = 87
 
 
 def _rust_sources() -> list[Path]:

@@ -154,8 +154,10 @@ pub fn render_systemd(spec: &UnitSpec) -> String {
         service.push(format!("BindPaths={}", path.display()));
     }
     if let Some(loader) = &spec.guard_loader {
-        // `+` runs it with full privileges, outside the sandbox below; a
-        // non-zero exit fails the start, so the plugin never runs unguarded.
+        // `+` runs it with full privileges, free of the unit's privilege and
+        // path restrictions, though still inside the unit's temporary
+        // filesystems and bind mounts; a non-zero exit fails the start, so
+        // the plugin never runs unguarded.
         service.push(format!("ExecStartPre=+{} guard-load", loader.display()));
     }
     let exec: Vec<String> = spec.argv.iter().map(|w| exec_word(w)).collect();

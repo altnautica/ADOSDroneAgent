@@ -506,10 +506,13 @@ pub fn build_router(state: AppState, hid_native: bool) -> Router {
         )
         // Attention profile: which of hero (full video) / thumbnail (320x180 at
         // 1 fps) this drone's encoder runs. One fleet shares one 20 MHz channel,
-        // so exactly one drone streams full video at a time.
+        // so exactly one drone streams full video at a time. GET reads the
+        // state, POST sets the base or a hero lease, DELETE releases a lease.
         .route(
             "/api/video/profile",
-            post(video_profile::post_video_profile),
+            get(video_profile::get_video_profile)
+                .post(video_profile::post_video_profile)
+                .delete(video_profile::delete_video_profile),
         )
         // Node-local recording on any profile, over the same recorder the
         // ground-station routes drive.
@@ -1086,7 +1089,8 @@ mod recording_route_tests {
     use tower::util::ServiceExt;
 
     /// A state whose config resolves to `profile`, under a private tempdir.
-    fn state_for_profile(profile: &str) -> (tempfile::TempDir, AppState) {
+    /// Shared with the other route modules' router-level tests.
+    pub(crate) fn state_for_profile(profile: &str) -> (tempfile::TempDir, AppState) {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.yaml");
         std::fs::write(&config, format!("agent:\n  profile: {profile}\n")).unwrap();

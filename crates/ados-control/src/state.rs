@@ -18,6 +18,7 @@ use crate::battery::{BatteryConfig, BatteryEngine};
 use crate::dashboard_pin::DashboardPin;
 use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient, SwarmIpcClient};
 use crate::routes::status::process_uptime_seconds;
+use crate::security_state::SecurityState;
 
 /// The agent version string, resolved live on each call (through
 /// [`AppState::agent_version`]), so the native surface reports the exact same
@@ -102,48 +103,6 @@ fn board_name_at(path: &std::path::Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The native-vs-packaged runtime badge the pairing-info route reports. The
-/// native surface has no in-process port of the Python `compute_runtime_mode`, so
-/// the Python API writes the computed value to the `runtime-mode` sidecar at
-/// startup and this reads it live. Resolution order:
-/// 1. the `runtime-mode` sidecar under `ADOS_RUN_DIR` (`/run/ados/runtime-mode`),
-///    the value the Python API computed for this node's profile;
-/// 2. the `ADOS_RUNTIME_MODE` env, when a caller/unit pins it explicitly;
-/// 3. the `"packaged"` fallback, correct for a pre-cutover agent (and this
-///    surface is itself inert until the cutover), matching the FastAPI default.
-pub fn runtime_mode() -> String {
-    let run_dir = std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string());
-    if let Some(mode) = runtime_mode_at(&std::path::Path::new(&run_dir).join("runtime-mode")) {
-        return mode;
-    }
-    if let Ok(v) = std::env::var("ADOS_RUNTIME_MODE") {
-        if !v.is_empty() {
-            return v;
-        }
-    }
-    "packaged".to_string()
-}
-
-/// Read the runtime-mode string out of the sidecar file, or `None` when the file
-/// is absent / unreadable / empty. The Python API writes a single line of plain
-/// text (no trailing structure), so the body is trimmed and taken whole. Pure
-/// (path in), so it is unit-testable without mutating the process environment.
-fn runtime_mode_at(path: &std::path::Path) -> Option<String> {
-    // The sidecar is one short word; bound the read so a corrupt file can never
-    // balloon memory on the pairing-info hot path.
-    const MAX_BYTES: u64 = 4096;
-    if std::fs::metadata(path).ok()?.len() > MAX_BYTES {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
 /// The on-disk paths the pairing routes read and write. Cloned per connection
 /// (it is small + cheap). The pairing-info route reads the config, the pairing
 /// document, the radio key dir, and the bind-state sidecar live on each request
@@ -214,6 +173,14 @@ pub struct AppState {
     pub run_dir: PathBuf,
     /// The on-disk paths the pairing routes read + write.
     pub pairing_paths: PairingPaths,
+    /// The live `security:` posture (configured key, HMAC, CORS, MCP flag),
+    /// shared with the LAN edge. Defaults to a reader over
+    /// [`PairingPaths::config`]; the daemon attaches its shared one with
+    /// [`AppState::with_security`].
+    pub security: Arc<SecurityState>,
+    /// Where the native service binaries are installed, swept for the runtime
+    /// badge. Overridable with [`AppState::with_bin_dir`].
+    pub bin_dir: PathBuf,
     /// The dashboard-access PIN store the `pin/*` routes read + write, and the
     /// `pairing-info` route reads `pin_set` from. Shared (same `Arc`) with the
     /// LAN-edge auth so the routes and the gate read one record.
@@ -304,6 +271,8 @@ impl AppState {
             mavlink,
             logd,
             board_path,
+            security: Arc::new(SecurityState::new(pairing_paths.config.clone())),
+            bin_dir: PathBuf::from(crate::runtime_mode::DEFAULT_BIN_DIR),
             pairing_paths,
             dashboard_pin,
             mcp_tokens,
@@ -369,6 +338,18 @@ impl AppState {
     /// Attach the battery engine the daemon's battery task feeds.
     pub fn with_battery(mut self, battery: Arc<parking_lot::Mutex<BatteryEngine>>) -> Self {
         self.battery = battery;
+        self
+    }
+
+    /// Attach the security posture the LAN edge shares.
+    pub fn with_security(mut self, security: Arc<SecurityState>) -> Self {
+        self.security = security;
+        self
+    }
+
+    /// Point the runtime-badge sweep at an explicit binary directory.
+    pub fn with_bin_dir(mut self, dir: PathBuf) -> Self {
+        self.bin_dir = dir;
         self
     }
 
@@ -608,28 +589,5 @@ mod tests {
         let garbage = dir.path().join("garbage.json");
         std::fs::write(&garbage, "not json").unwrap();
         assert_eq!(board_name_at(&garbage), None);
-    }
-
-    #[test]
-    fn runtime_mode_reads_the_sidecar_value() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("runtime-mode");
-        // The Python API writes one line of plain text; a trailing newline is
-        // trimmed so the value matches `compute_runtime_mode` exactly.
-        std::fs::write(&path, "hybrid\n").unwrap();
-        assert_eq!(runtime_mode_at(&path), Some("hybrid".to_string()));
-        std::fs::write(&path, "native").unwrap();
-        assert_eq!(runtime_mode_at(&path), Some("native".to_string()));
-    }
-
-    #[test]
-    fn runtime_mode_sidecar_is_none_when_absent_or_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        // Absent file degrades to None (the caller then tries the env / default).
-        assert_eq!(runtime_mode_at(&dir.path().join("absent")), None);
-        // An empty / whitespace-only body is treated as no value.
-        let empty = dir.path().join("empty");
-        std::fs::write(&empty, "   \n").unwrap();
-        assert_eq!(runtime_mode_at(&empty), None);
     }
 }

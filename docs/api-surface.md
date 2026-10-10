@@ -205,6 +205,8 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/video/config` |  |
 | POST | `/api/video/config` |  |
 | GET | `/api/video/latency` |  |
+| DELETE | `/api/video/profile` |  |
+| GET | `/api/video/profile` |  |
 | POST | `/api/video/profile` |  |
 | POST | `/api/video/record/start` |  |
 | POST | `/api/video/record/stop` |  |
@@ -229,7 +231,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
 
-204 native routes.
+206 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 
@@ -265,6 +267,7 @@ known feature, not on this profile) rather than `404`.
 | GET | `/api/v1/setup/nudges` |  |
 | POST | `/api/v1/setup/nudges/{nudge_id}/ack` |  |
 | POST | `/api/v1/setup/profile` | relay-forbidden |
+| POST | `/api/v1/setup/profile/redetect` |  |
 | POST | `/api/v1/setup/reboot` |  |
 | POST | `/api/v1/setup/remote-access/cloudflare` | relay-forbidden |
 | POST | `/api/v1/setup/reset` | relay-forbidden |
@@ -281,7 +284,7 @@ known feature, not on this profile) rather than `404`.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-40 residual routes.
+41 residual routes.
 
 ## Front fallback — `ados-control` on :8080, outside the route table
 

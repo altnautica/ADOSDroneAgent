@@ -64,6 +64,13 @@
       "value_name": null
     },
     {
+      "help": "Proceed with an upgrade even when the vehicle is (or may be) armed",
+      "name": "--force-armed",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
       "help": "Install from a git branch (dev)",
       "name": "--branch",
       "short": null,

@@ -110,24 +110,6 @@
       "start_on_install": null
     },
     {
-      "api_restartable": true,
-      "category": "on_demand",
-      "condition_paths": [],
-      "description": "ADOS mDNS Discovery",
-      "drops_link": false,
-      "install": null,
-      "memory_max": "20M",
-      "name": "ados-discovery",
-      "profiles": [
-        "drone",
-        "ground_station",
-        "workstation",
-        "compute"
-      ],
-      "roles": [],
-      "start_on_install": null
-    },
-    {
       "api_restartable": false,
       "category": null,
       "condition_paths": [
@@ -184,24 +166,6 @@
       "install": null,
       "memory_max": "32M",
       "name": "ados-gpio",
-      "profiles": [
-        "drone",
-        "ground_station",
-        "workstation",
-        "compute"
-      ],
-      "roles": [],
-      "start_on_install": null
-    },
-    {
-      "api_restartable": true,
-      "category": "core",
-      "condition_paths": [],
-      "description": "ADOS Health Monitor",
-      "drops_link": false,
-      "install": null,
-      "memory_max": "20M",
-      "name": "ados-health",
       "profiles": [
         "drone",
         "ground_station",
@@ -299,7 +263,7 @@
       "api_restartable": true,
       "category": "hardware",
       "condition_paths": [],
-      "description": "ADOS mediamtx Manager (ground-station profile)",
+      "description": "ADOS ground-station media server (mediamtx)",
       "drops_link": true,
       "install": null,
       "memory_max": "256M",
@@ -535,6 +499,23 @@
       "api_restartable": true,
       "category": "hardware",
       "condition_paths": [
+        "/dev/hailo0"
+      ],
+      "description": "ADOS Vision NPU Inference Sidecar (Hailo)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "512M",
+      "name": "ados-vision-hailo",
+      "profiles": [
+        "drone"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
         "/usr/lib/librknnrt.so"
       ],
       "description": "ADOS Vision NPU Inference Sidecar (RKNN)",
@@ -609,19 +590,6 @@
       "profiles": [
         "ground_station"
       ],
-      "roles": [],
-      "start_on_install": null
-    },
-    {
-      "api_restartable": true,
-      "category": null,
-      "condition_paths": [],
-      "description": "ADOS WiFi Client Manager (ground-station profile)",
-      "drops_link": false,
-      "install": null,
-      "memory_max": "64M",
-      "name": "ados-wifi-client",
-      "profiles": null,
       "roles": [],
       "start_on_install": null
     }

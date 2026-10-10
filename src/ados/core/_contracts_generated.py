@@ -295,7 +295,7 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "wire": "json",
         "transport": "/run/ados/camera-state.json",
         "status": "sidecar",
-        "description": "Camera discovery readiness AND the streaming pipeline's outcome for that camera, so a detected camera can never read as a streaming one. Keys: version, state, primary_path, primary_name, total_cameras, pipeline_state (unknown|starting|streaming|error|stopped; streaming only once mediamtx holds the encoder's publisher on main, starting while the encoder is spawned but has not published), pipeline_reason (set only on error), encoder (rpicam-vid, or <ffmpeg|gstreamer>-<codec element> e.g. ffmpeg-h264_v4l2m2m / ffmpeg-libx264), encoder_hw, updated_at_unix.",
+        "description": "Camera discovery readiness AND the streaming pipeline's outcome for that camera, so a detected camera can never read as a streaming one. Keys: version, state, primary_path, primary_name, total_cameras, pipeline_state (unknown|starting|streaming|error|stopped; streaming only once mediamtx holds the encoder's publisher on main, starting while the encoder is spawned but has not published), pipeline_reason (set only on error), encoder (rpicam-vid, or <ffmpeg|gstreamer>-<codec element> e.g. ffmpeg-h264_v4l2m2m / ffmpeg-libx264), encoder_hw, encoder_forced_software (the hardware encoder failed and the next start is pinned to the software encoder), updated_at_unix.",
     },
     "video-streams": {
         "version": 2,

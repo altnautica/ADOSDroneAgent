@@ -798,6 +798,15 @@
           "help": "Override the profile to install. Defaults to whatever this box already is.",
           "required": false,
           "type": "choice"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--force-armed"
+          ],
+          "help": "Override the armed refusal (here and in the installer): update even while the vehicle is armed or its arm state is unknown. Can drop the link in flight.",
+          "required": false,
+          "type": "boolean"
         }
       ],
       "path": "update"

@@ -4,6 +4,20 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Hero leases on `/api/video/profile`: `POST {"profile":"hero","holder":"<id>","lease_s":N}`
+  holds a drone on the hero profile for 5-120 s (default 30) and renews on
+  repeat; `{"profile":"thumbnail","holder":"<id>"}` or
+  `DELETE /api/video/profile?holder=<id>` releases it, and an expired lease
+  reverts the encoder with no further request. A plain set (no holder) still
+  moves the base profile. `GET /api/video/profile` returns the state, and every
+  reply now carries `base_profile` and `leases`. While a vision engine is
+  attached to the frame tap the drone holds an internal `vision` lease, so the
+  tap never reads a thumbnail-rate stream.
+
 ## [0.102.6] - 2026-10-10
 
 ### Added

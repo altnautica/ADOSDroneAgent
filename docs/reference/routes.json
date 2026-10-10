@@ -1794,6 +1794,15 @@
     {
       "method": "POST",
       "notes": null,
+      "path": "/api/v1/setup/profile/redetect",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
       "path": "/api/v1/setup/reboot",
       "public": false,
       "relay_forbidden": false,
@@ -1912,6 +1921,24 @@
       "method": "GET",
       "notes": null,
       "path": "/api/video/latency",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/video/profile",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/video/profile",
       "public": false,
       "relay_forbidden": false,
       "served_by": "native",

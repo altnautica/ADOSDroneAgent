@@ -66,6 +66,7 @@ async fn start(dir: &Path, swarm_socket: PathBuf) -> (PathBuf, oneshot::Sender<(
         mesh_role_path: dir.join("mesh-role"),
         relay_secret_path: dir.join("relay-peer-secret"),
         run_dir: dir.join("run"),
+        bin_dir: dir.join("bin"),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     tokio::spawn(run_with_paths(paths, async move {

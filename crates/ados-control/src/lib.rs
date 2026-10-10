@@ -34,6 +34,8 @@ pub mod proxy;
 pub mod proxy_auth;
 pub mod routes;
 pub mod routing;
+pub mod runtime_mode;
+pub mod security_state;
 pub mod serve;
 pub mod state;
 mod wfb_pair_state;
@@ -135,6 +137,9 @@ pub struct DaemonPaths {
     /// and Wi-Fi client routes read live sidecars and sockets under.
     /// Injectable for tests.
     pub run_dir: PathBuf,
+    /// Where the native service binaries are installed (`/opt/ados/bin`), swept
+    /// for the runtime badge. Injectable for tests.
+    pub bin_dir: PathBuf,
 }
 
 impl Default for DaemonPaths {
@@ -218,6 +223,7 @@ impl Default for DaemonPaths {
             mesh_role_path,
             relay_secret_path: PathBuf::from(ados_protocol::relay_ticket::RELAY_SECRET_PATH),
             run_dir: PathBuf::from(run_dir),
+            bin_dir: PathBuf::from(runtime_mode::DEFAULT_BIN_DIR),
         }
     }
 }
@@ -307,13 +313,22 @@ pub async fn run_with_paths<F>(paths: DaemonPaths, shutdown: F) -> Result<()>
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    // One read of the security config, shared by the native credential check,
-    // the proxied-auth gate and the CORS allow-list, so they cannot be built
-    // from different snapshots.
-    let control_security = crate::config::ControlSecurityConfig::load_from(&paths.config_path);
+    // One live security posture, shared by the native credential check, the
+    // proxied-auth gate, the CORS allow-list and the routes, so they always read
+    // the same snapshot of `security:` (re-read when the file changes, the last
+    // good copy kept across a bad edit).
+    let security = Arc::new(crate::security_state::SecurityState::new(
+        paths.config_path.clone(),
+    ));
+    // Publish the startup parse result so a malformed config surfaces on the
+    // fleet Health view, not just in the log (per-service status sidecar).
+    let startup_error =
+        crate::config::config_snapshot(&paths.config_path, crate::config::CONFIG_CACHE_TTL)
+            .security
+            .err();
+    ados_config::write_config_status("control", startup_error.as_deref());
     let pairing = Arc::new(
-        PairingState::with_path(paths.pairing_path.clone())
-            .with_configured_key(control_security.security.api.api_key.clone()),
+        PairingState::with_path(paths.pairing_path.clone()).with_security(Arc::clone(&security)),
     );
 
     // The vehicle-state reader the status + telemetry routes project. Its
@@ -377,8 +392,10 @@ where
     )
     .with_params_path(paths.params_path.clone())
     .with_run_dir(paths.run_dir.clone())
+    .with_bin_dir(paths.bin_dir.clone())
     .with_swarm(swarm_client)
-    .with_battery(battery);
+    .with_battery(battery)
+    .with_security(Arc::clone(&security));
 
     // Native-vs-residual gate for the PIC / gamepad / Bluetooth writes, resolved
     // once at startup (the profile is fixed for the process). Those are served
@@ -386,7 +403,7 @@ where
     // binding their command sockets (ados-pic's pic.sock, ados-input's
     // hid-cmd.sock); on any other node they fall through to the residual.
     let is_ground_station = {
-        let cfg = crate::config::PairingConfig::load_from(&paths.config_path);
+        let cfg = crate::config::PairingConfig::cached(&paths.config_path);
         crate::profile::current_profile_and_role_at(
             &cfg.agent.profile,
             &paths.profile_conf_path,
@@ -506,13 +523,10 @@ where
 
     // The proxied-route auth decision: the ported Python auth + HMAC middlewares
     // the front runs on every forwarded (non-native) route, so the front is the
-    // single authenticator for the whole surface. The `security:` slice (read
-    // here from the same config the Python agent writes) supplies the configured
-    // key + HMAC settings the gate reads. Built once and shared across all
-    // connections (it holds the replay-detector nonce store).
-    let proxied_auth = Arc::new(crate::proxy_auth::ProxiedAuth::new(
-        control_security.security.clone(),
-    ));
+    // single authenticator for the whole surface. It reads the configured key +
+    // HMAC settings from the live security posture per request. Built once and
+    // shared across all connections (it holds the replay-detector nonce store).
+    let proxied_auth = Arc::new(crate::proxy_auth::ProxiedAuth::live(Arc::clone(&security)));
 
     // The Unix edge: the bare Router, no auth. The LAN edge: the same Router
     // wrapped with the rate-limit + auth layer keyed on the shared pairing
@@ -525,7 +539,7 @@ where
         Arc::clone(&dashboard_pin),
         Arc::clone(&mcp_tokens),
         paths.config_path.clone(),
-        &control_security,
+        security,
     );
 
     // Bind every listener up front so a bind failure surfaces here. The LAN front

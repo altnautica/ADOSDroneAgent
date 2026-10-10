@@ -83,8 +83,7 @@ use crate::state::AppState;
 /// The on-disk state file with the per-adapter verdicts + the learner's proposed
 /// MAC values (`/etc/ados/mac-pins.state`), the same file the installer step +
 /// supervisor reconciler write and the heartbeat reads. Overridable via
-/// `ADOS_MAC_PINS_STATE` for tests. Mirrors the Python `read_mac_pins_state`
-/// reading `ADOS_ETC_DIR / "mac-pins.state"`.
+/// `ADOS_MAC_PINS_STATE` for tests.
 fn state_file_path() -> PathBuf {
     PathBuf::from(std::env::var("ADOS_MAC_PINS_STATE").unwrap_or_else(|_| STATE_PATH.to_string()))
 }

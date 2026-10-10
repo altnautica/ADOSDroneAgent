@@ -238,6 +238,9 @@ async fn start_full_once(
         // resolve here; absent by default, so the host's runtime state never
         // leaks into the golden shapes.
         run_dir: dir.join("run"),
+        // No native binaries under it: the runtime badge reads "packaged"
+        // without consulting the host's install.
+        bin_dir: dir.join("bin"),
     };
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(run_with_paths(paths, async move {

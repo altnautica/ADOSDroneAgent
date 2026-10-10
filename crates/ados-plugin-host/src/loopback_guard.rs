@@ -36,9 +36,10 @@
 //! The daemon loads the table at startup, and every plugin unit reloads it in a
 //! privileged `ExecStartPre` (`ados-plugin-host guard-load`) before its process
 //! starts, so the guard is in place for every plugin start whatever the boot
-//! order, and a load failure fails the unit closed. The verdict is recorded in
-//! a run-dir sidecar every grant path and renderer reads. When the rule cannot
-//! load, `network.outbound` is refused at grant time and a unit rendered for an
+//! order, and a load failure fails the unit closed. The daemon records its
+//! verdict in a run-dir sidecar every grant path and renderer reads; the
+//! pre-start only reloads (see [`reload`]). When the rule cannot load,
+//! `network.outbound` is refused at grant time and a unit rendered for an
 //! earlier grant keeps `IPAddressDeny=any`: without the guard, the capability
 //! is not safe to hold.
 
@@ -180,12 +181,37 @@ pub fn configured_ws_port(yaml: &str) -> u16 {
 }
 
 /// Load the ruleset and record the verdict in the sidecar. Blocking; run at
-/// daemon startup and in every plugin unit's privileged pre-start.
+/// daemon startup, whose view of the run dir is the host's.
 pub fn install(ruleset: &str, sidecar: &Path) -> GuardState {
+    install_with(ruleset, sidecar, load)
+}
+
+/// Load the ruleset without recording the verdict. Blocking; run in every
+/// plugin unit's privileged pre-start.
+///
+/// The `+` prefix lifts the unit's privilege restrictions, but systemd still
+/// builds the pre-start's mount namespace from the unit's
+/// `TemporaryFileSystem=` and bind mounts, so the run dir it sees is the
+/// unit's private read-only tmpfs. A sidecar write there fails, and would
+/// reach no reader if it succeeded. The daemon's record stands; a failed
+/// reload fails the unit instead.
+pub fn reload(ruleset: &str) -> GuardState {
+    report(load(ruleset))
+}
+
+fn install_with(
+    ruleset: &str,
+    sidecar: &Path,
+    load: impl FnOnce(&str) -> GuardState,
+) -> GuardState {
     let state = load(ruleset);
     if let Err(e) = write_sidecar(sidecar, &state) {
         tracing::error!(path = %sidecar.display(), error = %e, "plugin_loopback_guard_sidecar_failed");
     }
+    report(state)
+}
+
+fn report(state: GuardState) -> GuardState {
     if state.active {
         tracing::info!(table = TABLE, "plugin_loopback_guard_active");
     } else {
@@ -236,16 +262,11 @@ fn load(ruleset: &str) -> GuardState {
     }
 }
 
+/// Atomic replace through a uniquely named temp file, so concurrent writers
+/// never share one; the parent dir is created. World-readable: the status and
+/// grant paths read it from other processes.
 fn write_sidecar(path: &Path, state: &GuardState) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::write(
-        &tmp,
-        serde_json::to_vec(state).map_err(std::io::Error::other)?,
-    )?;
-    std::fs::rename(&tmp, path)
+    ados_protocol::sidecar::write_json_atomic(path, state, 0o644)
 }
 
 #[cfg(test)]
@@ -346,5 +367,55 @@ mod tests {
         )
         .unwrap();
         assert!(read_state_at(&path).active);
+    }
+
+    fn loaded(_ruleset: &str) -> GuardState {
+        GuardState {
+            active: true,
+            reason: String::new(),
+        }
+    }
+
+    #[test]
+    fn install_records_the_verdict_under_a_run_dir_that_does_not_exist_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run").join("ados");
+        let path = run.join(SIDECAR_NAME);
+        let rules = render_ruleset(&[], &agent_tcp_ports(DEFAULT_MAVLINK_WS_PORT));
+        assert!(install_with(&rules, &path, loaded).active);
+        assert!(read_state_at(&path).active);
+        let names: Vec<_> = std::fs::read_dir(&run)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [SIDECAR_NAME], "no temp file left behind");
+    }
+
+    #[test]
+    fn concurrent_installs_never_share_a_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SIDECAR_NAME);
+        let rules = render_ruleset(&[], &agent_tcp_ports(DEFAULT_MAVLINK_WS_PORT));
+        let (rules, path) = (rules.as_str(), path.as_path());
+        std::thread::scope(|s| {
+            let writers: Vec<_> = (0..8)
+                .map(|_| s.spawn(move || install_with(rules, path, loaded)))
+                .collect();
+            for w in writers {
+                assert!(w.join().unwrap().active);
+            }
+        });
+        assert!(read_state_at(path).active);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn an_unavailable_verdict_is_recorded_as_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SIDECAR_NAME);
+        std::fs::write(&path, br#"{"active":true,"reason":""}"#).unwrap();
+        let state = install_with("", &path, |_| GuardState::unavailable("nft: missing"));
+        assert!(!state.active);
+        assert!(!read_state_at(&path).active);
     }
 }
