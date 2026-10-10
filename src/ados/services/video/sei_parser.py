@@ -2,8 +2,8 @@
 
 Pure-Python byte walker with no heavy dependencies (no PIL, no
 GStreamer, no third-party libs) so any agent service can import it.
-Mirror of the on-the-wire format produced by
-:mod:`ados.services.video.sei_injector`.
+Mirror of the on-the-wire format produced by the native injector in
+``crates/ados-video/src/sei.rs``.
 
 Extracted from the LCD-side tap that used to own it, so headless services that need the
 parser (e.g. the drone-side :class:`HeadlessSeiTap`) don't have to
@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 
-# Mirror of sei_injector.ADOS_LATENCY_SEI_UUID. Kept as a literal so
+# Mirror of ADOS_LATENCY_SEI_UUID in crates/ados-video/src/sei.rs. Kept as a literal so
 # this module imports cheaply.
 ADOS_LATENCY_SEI_UUID = bytes.fromhex("ad05140e9c2c4f6e8a31f0e5b7d4c8a2")
 assert len(ADOS_LATENCY_SEI_UUID) == 16
@@ -110,7 +110,7 @@ def _iter_nal_units(stream: bytes) -> Iterator[tuple[int, bytes]]:
 def _remove_emulation_prevention(ebsp: bytes) -> bytes:
     """Strip H.264 emulation-prevention escape bytes from an EBSP.
 
-    Exact inverse of ``sei_injector._emulation_prevent``. Idempotent on
+    Exact inverse of ``emulation_prevent`` in ``crates/ados-video/src/sei.rs``. Idempotent on
     streams that have no escape bytes (a no-op).
 
     Per H.264 §7.3.1 the decoder discards the ``0x03`` of a ``00 00 03``
@@ -144,7 +144,7 @@ def _remove_emulation_prevention(ebsp: bytes) -> bytes:
 def parse_sei_latency_ns(stream: bytes) -> int | None:
     """Extract the air-side wall-clock-time-ns from a SEI marker.
 
-    Returns the ns timestamp encoded by ``sei_injector.build_sei_nal``,
+    Returns the ns timestamp encoded by ``build_sei_nal`` in ``crates/ados-video/src/sei.rs``,
     or ``None`` if no matching SEI is present in the buffer.
     """
     for nal_type, raw_payload in _iter_nal_units(stream):

@@ -15,10 +15,18 @@
 //!   <path>.mp4` as its own process-group leader. The fragmented-MP4 muxer is
 //!   the point: whatever reached disk when the power went is playable.
 //! * [`stop`](GroundStationRecorder::stop) sends `SIGTERM` to the group, waits
-//!   up to 5s, escalates to `SIGKILL` on timeout, and reports duration + size.
+//!   up to 5s, escalates to `SIGKILL` on timeout, and reports duration + size,
+//!   every segment file and how many times the capture was interrupted.
 //! * [`is_active`](GroundStationRecorder::is_active) reports whether a capture is
-//!   in flight; the running process holds the child across the separate start and
+//!   wanted; the running process holds the child across the separate start and
 //!   stop HTTP requests.
+//!
+//! A capture is supervised. ffmpeg exits on RTSP EOF, which is exactly what a
+//! degrading link or a ground mediamtx restart produces, and that is the moment
+//! the recording matters most. While the capture is wanted, a supervisor task
+//! checks the child every [`SUPERVISE_INTERVAL`] and, when it has exited,
+//! starts the next segment `<name>_part<N>.mp4`, retrying at the same fixed
+//! cadence until the source is back.
 //!
 //! This module is a long-lived in-process owner of the ffmpeg child: the start
 //! and stop come on separate HTTP requests, so the running host process holds the
@@ -28,12 +36,16 @@
 //! on a ground station; this crate carries only the recorder lifecycle logic.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::process::ManagedProcess;
+
+/// How often the supervisor checks the capture while it is wanted.
+pub const SUPERVISE_INTERVAL: Duration = Duration::from_secs(2);
 
 /// The recordings directory the captures are written to. The Python recorder
 /// defaulted to `RECORDINGS_DIR` (`/var/ados/recordings`); the env override lets
@@ -92,14 +104,24 @@ impl std::fmt::Display for RecorderError {
 impl std::error::Error for RecorderError {}
 
 /// The mutable recorder state, held behind a `Mutex` so concurrent start/stop
-/// requests serialize the same way the Python recorder's `asyncio.Lock` did.
+/// requests (and the supervisor) serialize the same way the Python recorder's
+/// `asyncio.Lock` did.
+#[derive(Default)]
 struct Inner {
     /// The running ffmpeg child, `None` when no capture is in flight.
     process: Option<ManagedProcess>,
-    /// The output path of the in-flight (or last-completed) capture.
+    /// The output path of the first segment of the in-flight capture.
     current_path: Option<PathBuf>,
+    /// Every segment written by the in-flight capture, in order.
+    segments: Vec<PathBuf>,
+    /// Times the capture's ffmpeg exited while the capture was wanted.
+    interrupted_count: u32,
+    /// The operator wants this capture running (set by start, cleared by stop).
+    wanted: bool,
     /// The wall start instant of the in-flight capture, for the stop duration.
     started_at: Option<std::time::Instant>,
+    /// The supervisor task of the in-flight capture.
+    supervisor: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Captures the local mediamtx RTSP stream into MP4 files on disk.
@@ -109,7 +131,9 @@ struct Inner {
 pub struct GroundStationRecorder {
     dir: PathBuf,
     rtsp_url: String,
-    inner: Mutex<Inner>,
+    /// The ffmpeg program: `ffmpeg` resolved on `PATH`, or an explicit path.
+    ffmpeg: String,
+    inner: Arc<Mutex<Inner>>,
 }
 
 impl GroundStationRecorder {
@@ -118,12 +142,15 @@ impl GroundStationRecorder {
         Self {
             dir: dir.into(),
             rtsp_url: rtsp_url.into(),
-            inner: Mutex::new(Inner {
-                process: None,
-                current_path: None,
-                started_at: None,
-            }),
+            ffmpeg: "ffmpeg".to_string(),
+            inner: Arc::new(Mutex::new(Inner::default())),
         }
+    }
+
+    /// Use an explicit ffmpeg program instead of `ffmpeg` on `PATH`.
+    pub fn with_ffmpeg(mut self, program: impl Into<String>) -> Self {
+        self.ffmpeg = program.into();
+        self
     }
 
     /// Build a recorder at the default recordings directory + RTSP source,
@@ -134,13 +161,10 @@ impl GroundStationRecorder {
         Self::new(dir, DEFAULT_RTSP_URL)
     }
 
-    /// True if a recording subprocess is currently running.
+    /// True while a capture is wanted: from start until stop, including the
+    /// moments between an interrupted segment and the next one.
     pub async fn is_active(&self) -> bool {
-        let mut inner = self.inner.lock().await;
-        match inner.process.as_mut() {
-            Some(p) => p.is_running(),
-            None => false,
-        }
+        self.inner.lock().await.wanted
     }
 
     /// The file name of the in-flight capture, or `None` when idle.
@@ -166,17 +190,15 @@ impl GroundStationRecorder {
 
         // Already recording → 409, the same guard the Python recorder applied
         // under its lock.
-        if let Some(p) = inner.process.as_mut() {
-            if p.is_running() {
-                return Err(RecorderError::new(
-                    "E_RECORDING_ACTIVE",
-                    "a recording is already in progress",
-                ));
-            }
+        if inner.wanted {
+            return Err(RecorderError::new(
+                "E_RECORDING_ACTIVE",
+                "a recording is already in progress",
+            ));
         }
 
         // ffmpeg presence → 503 when absent (the Python `shutil.which` check).
-        if !ffmpeg_present() {
+        if !program_present(&self.ffmpeg) {
             return Err(RecorderError::new(
                 "E_FFMPEG_NOT_FOUND",
                 "ffmpeg binary not on PATH",
@@ -205,64 +227,25 @@ impl GroundStationRecorder {
 
         let filename = generate_filename(filename_hint);
         let output_path = self.dir.join(&filename);
-
-        // Read the local RTSP source over TCP and remux to MP4 with `-c copy`
-        // (no transcode).
-        //
-        // The muxer flags are the crash-safety contract, not tuning. A plain
-        // (or `+faststart`) MP4 writes its `moov` atom only on a clean exit, so
-        // a ground station that loses power, is SIGKILLed or fills its disk
-        // mid-capture leaves a file with no index at all — not a truncated
-        // recording, a zero-recoverable one. This is the recording an operator
-        // reaches for after an incident.
-        //
-        // `empty_moov` puts a valid (empty) index at byte 0 the moment the file
-        // is created; `frag_keyframe` closes a self-describing `moof`+`mdat`
-        // fragment at every IDR, so with the shipped 0.5 s GOP at most half a
-        // second of video is ever un-indexed; `default_base_moof` makes each
-        // fragment's offsets relative to its own `moof` so a demuxer never has
-        // to trust a byte offset written by a part of the file that may not
-        // exist. `-flush_packets 1` pushes each packet out of ffmpeg's AVIO
-        // buffer instead of holding a fragment's tail in userspace, which is
-        // what bounds the loss to the current GOP rather than the buffer.
-        //
-        // Spawned as a process-group leader so the whole pipeline is reaped on
-        // stop, never an orphaned child.
-        let args: Vec<String> = vec![
-            "-y".to_string(),
-            "-rtsp_transport".to_string(),
-            "tcp".to_string(),
-            "-i".to_string(),
-            self.rtsp_url.clone(),
-            "-c".to_string(),
-            "copy".to_string(),
-            "-movflags".to_string(),
-            RECORDER_MOVFLAGS.to_string(),
-            "-flush_packets".to_string(),
-            "1".to_string(),
-            output_path.to_string_lossy().to_string(),
-        ];
-
-        let mut process = match ManagedProcess::spawn("gs-recorder", "ffmpeg", &args) {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(RecorderError::new(
-                    "E_RECORDER_SPAWN_FAILED",
-                    format!("failed to spawn ffmpeg: {e}"),
-                ));
-            }
-        };
-        // ffmpeg writes its stats report and every timestamp / packet-loss
-        // warning to stderr for the whole capture. A pipe nobody reads fills at
-        // 64 KB and blocks the muxer's next write: the file stops growing while
-        // the recorder still reports a capture in flight.
-        if let Some(stderr) = process.take_stderr() {
-            tokio::spawn(crate::stderr_drain::drain_plain(stderr, "gs-recorder"));
-        }
+        let process = spawn_capture(&self.ffmpeg, &self.rtsp_url, &output_path).map_err(|e| {
+            RecorderError::new(
+                "E_RECORDER_SPAWN_FAILED",
+                format!("failed to spawn ffmpeg: {e}"),
+            )
+        })?;
 
         inner.process = Some(process);
         inner.current_path = Some(output_path.clone());
+        inner.segments = vec![output_path.clone()];
+        inner.interrupted_count = 0;
+        inner.wanted = true;
         inner.started_at = Some(std::time::Instant::now());
+        inner.supervisor = Some(tokio::spawn(supervise(
+            Arc::clone(&self.inner),
+            self.ffmpeg.clone(),
+            self.rtsp_url.clone(),
+            output_path.clone(),
+        )));
 
         tracing::info!(
             filename = %filename,
@@ -280,23 +263,24 @@ impl GroundStationRecorder {
 
     /// Gracefully stop the in-flight recording.
     ///
-    /// Sends `SIGTERM` to the ffmpeg process group, waits up to 5s, escalates to
-    /// `SIGKILL` on timeout. Returns `{filename, stopped_at, duration_seconds,
-    /// size_bytes}` (the same fields the Python `stop()` returned;
-    /// `duration_seconds` rounded to 2 decimals). Raises a [`RecorderError`]
-    /// (`E_RECORDING_NOT_ACTIVE`, 409) when no recording is active.
+    /// Stops the supervisor, then sends `SIGTERM` to the ffmpeg process group,
+    /// waits up to 5s and escalates to `SIGKILL` on timeout. Returns
+    /// `{filename, stopped_at, duration_seconds, size_bytes, segments,
+    /// interrupted_count}`: `filename` is the first segment, `size_bytes` the
+    /// total over every segment, `segments` every segment file name in order.
+    /// Raises a [`RecorderError`] (`E_RECORDING_NOT_ACTIVE`, 409) when no
+    /// recording is active.
     pub async fn stop(&self) -> Result<Value, RecorderError> {
         let mut inner = self.inner.lock().await;
-
-        let running = match inner.process.as_mut() {
-            Some(p) => p.is_running(),
-            None => false,
-        };
-        if !running {
+        if !inner.wanted {
             return Err(RecorderError::new(
                 "E_RECORDING_NOT_ACTIVE",
                 "no recording is currently active",
             ));
+        }
+        inner.wanted = false;
+        if let Some(h) = inner.supervisor.take() {
+            h.abort();
         }
 
         // SIGTERM → wait(grace) → SIGKILL of the whole process group.
@@ -311,6 +295,8 @@ impl GroundStationRecorder {
             .unwrap_or(0.0)
             .max(0.0);
         let path = inner.current_path.take();
+        let segments = std::mem::take(&mut inner.segments);
+        let interrupted_count = inner.interrupted_count;
 
         let filename = path
             .as_ref()
@@ -318,16 +304,22 @@ impl GroundStationRecorder {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown.mp4")
             .to_string();
-        let size_bytes = path
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
+        let size_bytes: u64 = segments
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
-            .unwrap_or(0);
+            .sum();
+        let segment_names: Vec<String> = segments
+            .iter()
+            .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_string))
+            .collect();
 
         tracing::info!(
             filename = %filename,
             duration_s = round2(duration),
             size_bytes,
+            segments = segment_names.len(),
+            interrupted_count,
             "recording stopped"
         );
 
@@ -336,22 +328,110 @@ impl GroundStationRecorder {
             "stopped_at": now_iso8601(),
             "duration_seconds": round2(duration),
             "size_bytes": size_bytes,
+            "segments": segment_names,
+            "interrupted_count": interrupted_count,
         }))
     }
 }
 
-/// True when an `ffmpeg` binary is on the `PATH`, mirroring the Python
-/// `shutil.which("ffmpeg")` check. Walks `$PATH` and tests each candidate for a
-/// regular file (executable-bit checks are best-effort on the rig; presence on
-/// PATH is the contract the Python used).
-fn ffmpeg_present() -> bool {
+/// Spawn one capture segment into `output_path`.
+///
+/// Reads the local RTSP source over TCP and remuxes to MP4 with `-c copy` (no
+/// transcode). The muxer flags are the crash-safety contract, not tuning. A
+/// plain (or `+faststart`) MP4 writes its `moov` atom only on a clean exit, so
+/// a ground station that loses power, is SIGKILLed or fills its disk
+/// mid-capture leaves a file with no index at all — not a truncated
+/// recording, a zero-recoverable one.
+///
+/// `empty_moov` puts a valid (empty) index at byte 0 the moment the file is
+/// created; `frag_keyframe` closes a self-describing `moof`+`mdat` fragment at
+/// every IDR, so with the shipped 0.5 s GOP at most half a second of video is
+/// ever un-indexed; `default_base_moof` makes each fragment's offsets relative
+/// to its own `moof`. `-flush_packets 1` pushes each packet out of ffmpeg's
+/// AVIO buffer, which bounds the loss to the current GOP.
+///
+/// Spawned as a process-group leader so the whole pipeline is reaped on stop.
+/// ffmpeg's stderr is drained: a pipe nobody reads fills at 64 KB and blocks
+/// the muxer's next write.
+fn spawn_capture(
+    ffmpeg: &str,
+    rtsp_url: &str,
+    output_path: &Path,
+) -> std::io::Result<ManagedProcess> {
+    let args: Vec<String> = vec![
+        "-y".to_string(),
+        "-rtsp_transport".to_string(),
+        "tcp".to_string(),
+        "-i".to_string(),
+        rtsp_url.to_string(),
+        "-c".to_string(),
+        "copy".to_string(),
+        "-movflags".to_string(),
+        RECORDER_MOVFLAGS.to_string(),
+        "-flush_packets".to_string(),
+        "1".to_string(),
+        output_path.to_string_lossy().to_string(),
+    ];
+    let mut process = ManagedProcess::spawn("gs-recorder", ffmpeg, &args)?;
+    if let Some(stderr) = process.take_stderr() {
+        tokio::spawn(crate::stderr_drain::drain_plain(stderr, "gs-recorder"));
+    }
+    Ok(process)
+}
+
+/// `<stem>_part<n>.mp4` beside `first`.
+fn segment_path(first: &Path, n: usize) -> PathBuf {
+    let stem = first
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("recording");
+    first.with_file_name(format!("{stem}_part{n}.mp4"))
+}
+
+/// Keep a wanted capture running: every [`SUPERVISE_INTERVAL`], if the ffmpeg
+/// child has exited (or a previous respawn failed), start the next segment.
+async fn supervise(inner: Arc<Mutex<Inner>>, ffmpeg: String, rtsp_url: String, first: PathBuf) {
+    loop {
+        tokio::time::sleep(SUPERVISE_INTERVAL).await;
+        let mut guard = inner.lock().await;
+        if !guard.wanted {
+            return;
+        }
+        let alive = guard.process.as_mut().is_some_and(|p| p.is_running());
+        if alive {
+            continue;
+        }
+        if guard.process.take().is_some() {
+            guard.interrupted_count += 1;
+            tracing::warn!(
+                interrupted_count = guard.interrupted_count,
+                "recording_interrupted: capture exited while wanted; starting a new segment"
+            );
+        }
+        let next = segment_path(&first, guard.segments.len() + 1);
+        match spawn_capture(&ffmpeg, &rtsp_url, &next) {
+            Ok(p) => {
+                tracing::info!(path = %next.display(), "recording_segment_started");
+                guard.process = Some(p);
+                guard.segments.push(next);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "recording_segment_spawn_failed; retrying");
+            }
+        }
+    }
+}
+
+/// True when `program` can be run: an explicit path must be a file; a bare
+/// name must resolve on `PATH` (the Python `shutil.which` check).
+fn program_present(program: &str) -> bool {
+    if program.contains('/') {
+        return Path::new(program).is_file();
+    }
     let Ok(path_var) = std::env::var("PATH") else {
         return false;
     };
-    std::env::split_paths(&path_var).any(|dir| {
-        let candidate = dir.join("ffmpeg");
-        candidate.is_file()
-    })
+    std::env::split_paths(&path_var).any(|dir| dir.join(program).is_file())
 }
 
 /// The free bytes on the volume holding `dir`, or `None` when the stat fails (a
@@ -729,5 +809,71 @@ mod tests {
             .position(|a| a == "-flush_packets")
             .expect("the recorder flushes each packet out of the AVIO buffer");
         assert_eq!(argv[flush + 1], "1");
+    }
+
+    #[test]
+    fn segments_are_numbered_beside_the_first_file() {
+        let first = Path::new("/rec/2026-01-01T00-00-00_flight.mp4");
+        assert_eq!(
+            segment_path(first, 2),
+            Path::new("/rec/2026-01-01T00-00-00_flight_part2.mp4")
+        );
+    }
+
+    /// A capture whose ffmpeg exits while the recording is wanted continues in
+    /// a new segment, and stop reports every segment and the interruption.
+    #[tokio::test]
+    async fn an_interrupted_capture_continues_in_a_new_segment() {
+        // The fake's own `sleep` resolves on PATH, which sibling tests mutate.
+        let _guard = PATH_LOCK.lock().await;
+        let bindir = tempfile::tempdir().unwrap();
+        let fake = bindir.path().join("fake-ffmpeg");
+        // The first segment ends at once (an RTSP EOF); later ones keep going.
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nfor out; do :; done\nprintf 'data' > \"$out\"\n\
+             case \"$out\" in *_part*) sleep 30 ;; *) exit 1 ;; esac\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let recdir = tempfile::tempdir().unwrap();
+        let rec = GroundStationRecorder::new(recdir.path(), DEFAULT_RTSP_URL)
+            .with_ffmpeg(fake.to_string_lossy().into_owned());
+
+        let mut busy_retries = 0;
+        let started = loop {
+            match rec.start(Some("seg")).await {
+                Ok(started) => break started,
+                Err(e) if e.message.contains("Text file busy") && busy_retries < 20 => {
+                    busy_retries += 1;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("start succeeds: {e:?}"),
+            }
+        };
+        let first = started["filename"].as_str().unwrap().to_string();
+        let second = format!("{}_part2.mp4", first.trim_end_matches(".mp4"));
+        let second_path = recdir.path().join(&second);
+        let mut seen = false;
+        for _ in 0..80 {
+            if second_path.exists() {
+                seen = true;
+                break;
+            }
+            // Still wanted between segments.
+            assert!(rec.is_active().await);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(seen, "a new segment starts after the capture exits");
+
+        let stopped = rec.stop().await.expect("stop succeeds");
+        assert_eq!(stopped["filename"].as_str().unwrap(), first);
+        assert_eq!(stopped["segments"], json!([first, second]));
+        assert_eq!(stopped["interrupted_count"], 1);
+        assert_eq!(stopped["size_bytes"].as_u64().unwrap(), 8);
+        assert!(!rec.is_active().await);
     }
 }

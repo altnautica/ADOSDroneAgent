@@ -124,6 +124,7 @@ async fn main() {
             preference: &config.backend,
             rknn_socket_path: config.rknn_socket_path(),
             hailo_socket_path: config.hailo_socket_path(),
+            mock_target: config.mock_target,
         },
     );
     tracing::info!(soc = %soc, backend = backend.name(), "vision backend selected");
@@ -440,7 +441,9 @@ async fn run_camera(
             // Default and "tap": read the video pipeline tap socket.
             _ => AnySource::Tap(TapSource::new(cam.id.clone(), cam.tap_socket.clone())),
         };
-
+        // Consumed frame buffers go back to this source's pool, so a steady
+        // stream reuses a few buffers instead of allocating one per frame.
+        let recycle = source.recycler();
         loop {
             tokio::select! {
                 frame = tokio::time::timeout(INPUT_SILENCE_TIMEOUT, source.next_frame()) => {
@@ -459,6 +462,8 @@ async fn run_camera(
                         Ok(raw) => {
                             input.frame();
                             frame_id = frame_id.wrapping_add(1);
+                            let mut spare = Some(raw.data);
+                            let data_ref = spare.as_deref().unwrap_or(&[]);
                             match engine
                                 .publish_frame(
                                     &cam.id,
@@ -467,7 +472,7 @@ async fn run_camera(
                                     raw.width,
                                     raw.height,
                                     raw.format,
-                                    &raw.data,
+                                    data_ref,
                                 )
                                 .await
                             {
@@ -485,7 +490,8 @@ async fn run_camera(
                                             let due = scheduler.take_due(now_ms() as u64);
                                             if !due.is_empty() {
                                                 let eng = engine.clone();
-                                                let data = raw.data;
+                                                let data = spare.take().unwrap_or_default();
+                                                let back = recycle.clone();
                                                 tokio::spawn(async move {
                                                     let _permit = permit;
                                                     for det in due {
@@ -496,6 +502,7 @@ async fn run_camera(
                                                             tracing::warn!(model = %det, error = %e, "detector_infer_failed");
                                                         }
                                                     }
+                                                    back.give(data);
                                                 });
                                             }
                                             // else: permit drops here, released; no
@@ -506,6 +513,9 @@ async fn run_camera(
                                 Err(e) => {
                                     tracing::warn!(camera = %cam.id, error = %e, "publish_frame_failed");
                                 }
+                            }
+                            if let Some(buf) = spare {
+                                recycle.give(buf);
                             }
                         }
                         Err(e) => {

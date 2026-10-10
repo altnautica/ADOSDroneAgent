@@ -213,6 +213,12 @@ pub struct VisionConfig {
     /// Backend preference: "auto" (pick by SoC) | "mock" | "onnx" | "rknn" | "hailo".
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// Bench aid for the mock backend: emit one synthetic `person` detection
+    /// that orbits the frame centre, so detection consumers can be exercised
+    /// without a real model. The backend still reports itself as not
+    /// inference-capable. Default off.
+    #[serde(default)]
+    pub mock_target: bool,
     /// Run the engine-side single-object tracker between inference and publish so
     /// every published detection carries a stable `track_id` + `lock_state`.
     /// Default off: the engine publishes raw detections, exactly as before.
@@ -254,6 +260,7 @@ impl Default for VisionConfig {
             slot_count: default_slot_count(),
             shm_budget_mb: default_shm_budget_mb(),
             backend: default_backend(),
+            mock_target: false,
             tracker_enabled: false,
             reid_enabled: false,
             reid_model_id: None,
@@ -301,6 +308,8 @@ impl VisionConfig {
             #[serde(default = "default_backend")]
             backend: String,
             #[serde(default)]
+            mock_target: bool,
+            #[serde(default)]
             tracker_enabled: bool,
             #[serde(default)]
             reid_enabled: bool,
@@ -337,6 +346,7 @@ impl VisionConfig {
             slot_count: v.slot_count,
             shm_budget_mb: v.shm_budget_mb,
             backend: v.backend,
+            mock_target: v.mock_target,
             tracker_enabled: v.tracker_enabled,
             reid_enabled: v.reid_enabled,
             reid_model_id: v.reid_model_id,

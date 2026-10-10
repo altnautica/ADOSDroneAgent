@@ -170,6 +170,12 @@ pub struct CameraConfig {
         deserialize_with = "bounded_keyframe_interval"
     )]
     pub keyframe_interval: u32,
+    /// `video.camera.passthrough`: for a network source that already publishes
+    /// H.264, copy it (`-c:v copy`) instead of decoding and re-encoding. The
+    /// camera's own GOP and bitrate then reach the radio leg unchanged, so it
+    /// is opt-in. Ignored for local cameras. Default false.
+    #[serde(default)]
+    pub passthrough: bool,
 }
 
 impl Default for CameraConfig {
@@ -187,6 +193,7 @@ impl Default for CameraConfig {
             vflip: default_flip(),
             encoder: default_encoder(),
             keyframe_interval: default_keyframe_interval(),
+            passthrough: false,
         }
     }
 }
@@ -418,6 +425,7 @@ impl ResolvedLeg {
             vflip: self.vflip,
             encoder: self.encoder.clone(),
             keyframe_interval: self.keyframe_interval,
+            passthrough: false,
         }
     }
 
@@ -460,9 +468,8 @@ fn default_vision_sink() -> String {
 /// The tap reads the local mediamtx RTSP `/main` stream with a third ffmpeg
 /// (`-c:v copy` is not used here — frames are decoded, downscaled, and emitted
 /// as `rawvideo`), so a crash or stall on this leg never reaches the encoder or
-/// the wfb radio fan-out. When `raw_tap` is set the tap instead rides a
-/// pre-encode `-filter_complex` split inside the encoder command itself, gated
-/// behind the flag and off by default.
+/// the wfb radio fan-out. The decoder runs only while a vision engine is
+/// connected to the tap socket.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VisionTapConfig {
     /// Master switch. `false` ⇒ no tap is ever spawned and the encoder command
@@ -482,12 +489,6 @@ pub struct VisionTapConfig {
     /// Raw pixel format of the emitted frames: "rgb24" | "nv12" | "yuv420p".
     #[serde(default = "default_vision_format")]
     pub format: String,
-    /// When `true`, ride a pre-encode filter split inside the encoder command
-    /// (lower latency, single decode) instead of the decoupled third-ffmpeg
-    /// tap. Off by default; the decoupled tap is the safe default because it
-    /// cannot perturb the encode output.
-    #[serde(default)]
-    pub raw_tap: bool,
     /// Filesystem path the vision engine reads raw frames from (a unix socket
     /// or fifo). The tap writes `rawvideo` here.
     #[serde(default = "default_vision_sink")]
@@ -502,7 +503,6 @@ impl Default for VisionTapConfig {
             width: default_vision_width(),
             height: default_vision_height(),
             format: default_vision_format(),
-            raw_tap: false,
             sink: default_vision_sink(),
         }
     }
@@ -874,6 +874,7 @@ fn primary_camera_from(cameras: &[CameraLeg], camera: CameraConfig) -> CameraCon
         vflip: leg.vflip,
         encoder: leg.encoder.clone(),
         keyframe_interval: leg.keyframe_interval,
+        passthrough: camera.passthrough,
     }
 }
 
@@ -1055,7 +1056,6 @@ mod tests {
         assert_eq!(c.vision.width, 640);
         assert_eq!(c.vision.height, 480);
         assert_eq!(c.vision.format, "rgb24");
-        assert!(!c.vision.raw_tap);
         assert_eq!(c.vision.sink, "/run/ados/vision-tap-main.sock");
     }
 
@@ -1069,7 +1069,6 @@ video:
     width: 1280
     height: 720
     format: nv12
-    raw_tap: true
     sink: /run/ados/custom.sock
 ";
         let (_dir, path) = write_tmp(yaml);
@@ -1079,7 +1078,6 @@ video:
         assert_eq!(c.vision.width, 1280);
         assert_eq!(c.vision.height, 720);
         assert_eq!(c.vision.format, "nv12");
-        assert!(c.vision.raw_tap);
         assert_eq!(c.vision.sink, "/run/ados/custom.sock");
         assert_eq!(c.vision.pixel_format(), "nv12");
     }
@@ -1095,7 +1093,6 @@ video:
         assert_eq!(c.vision.width, 640);
         assert_eq!(c.vision.height, 480);
         assert_eq!(c.vision.format, "rgb24");
-        assert!(!c.vision.raw_tap);
         assert_eq!(c.vision.sink, "/run/ados/vision-tap-main.sock");
     }
 

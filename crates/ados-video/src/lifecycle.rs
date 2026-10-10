@@ -11,19 +11,55 @@
 //! loop) lives in [`crate::orchestrator`]; this module is the mechanism those
 //! decisions actuate.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::discover;
 use crate::encoder::{
-    augment_encoder_with_raw_tap, binary_present, build_encoder_command, detect_encoder_for_camera,
-    wrap_with_sei_inject, CameraInfo, CameraType, EncoderParams,
+    binary_present, build_encoder_command, detect_encoder_for_camera, wrap_with_sei_inject,
+    CameraInfo, CameraType, EncoderParams, SeiSplit,
 };
 use crate::health::{PipelineState, StartError};
 use crate::mediamtx::MAIN_PATH;
 use crate::orchestrator::VideoOrchestrator;
 use crate::process::{kill_orphans, kill_publisher_orphans, ManagedProcess};
-use crate::tap::{self, spawn_vision_tap};
+use crate::tap::{self, spawn_vision_tap, ENGINE_IDLE_STOP};
+use crate::tap_lazy::{run_lazy_vision_tap, TapGeometry, TapLegState};
 use crate::wfb_tee::{drain_wfb_tee_stderr, orphan_pattern, spawn_wfb_tee, ProgressTracker};
+
+/// The primary encoder exactly as it will run: one command, or the encode and
+/// publish stages of an SEI split with the in-process injector between them.
+#[derive(Debug, Clone)]
+pub(crate) enum PrimaryCommand {
+    Single(Vec<String>),
+    Sei(SeiSplit),
+}
+
+impl PrimaryCommand {
+    /// Every token of the pipeline, for reading facts off it (the encoder
+    /// label, whether it emits the radio RTP).
+    pub(crate) fn tokens(&self) -> Vec<String> {
+        match self {
+            Self::Single(cmd) => cmd.clone(),
+            Self::Sei(split) => split.render(),
+        }
+    }
+
+    /// Spawn it as one process group.
+    fn spawn(&self) -> std::io::Result<ManagedProcess> {
+        match self {
+            Self::Single(cmd) => {
+                let (program, args) = cmd
+                    .split_first()
+                    .ok_or_else(|| std::io::Error::other("empty encoder command"))?;
+                ManagedProcess::spawn("encoder", program, args)
+            }
+            Self::Sei(split) => {
+                ManagedProcess::spawn_sei_pipeline("encoder", &split.encode, &split.publish)
+            }
+        }
+    }
+}
 
 impl VideoOrchestrator {
     /// Re-persist `camera-state.json` with the pipeline's outcome stamped on it.
@@ -46,7 +82,7 @@ impl VideoOrchestrator {
         outcome: crate::camera_state::PipelineOutcome,
     ) {
         // A retry is not a fresh start. The health loop re-enters `start_stream`
-        // on its backoff, and stamping `starting` there erased the standing
+        // on every retry tick, and stamping `starting` there erased the standing
         // failure: on a node with no usable encoder the surface flapped between
         // `error` with its reason and `connecting` with none, every few seconds,
         // for a pipeline that had not recovered at all. The last failure stands
@@ -74,7 +110,8 @@ impl VideoOrchestrator {
         let snapshot = self
             .last_cameras
             .camera_state_snapshot()
-            .with_pipeline(outcome, reason, encoder, encoder_hw);
+            .with_pipeline(outcome, reason, encoder, encoder_hw)
+            .with_forced_software(self.force_software);
         let path = self
             .camera_state_path
             .clone()
@@ -88,8 +125,8 @@ impl VideoOrchestrator {
     ///
     /// Exact order mirrors `pipeline.py::start_stream`: reap stale encoder →
     /// discover + persist camera-state → bail on no-primary → orphan sweeps →
-    /// detect encoder → build command → optional SEI wrap → mediamtx
-    /// config+start → spawn encoder + plain stderr drain → latch Running →
+    /// detect encoder → build command → optional SEI split → mediamtx
+    /// config+start → spawn encoder + encoder-error stderr drain → latch Running →
     /// best-effort wfb-tee → optional SEI tap. cloud_push is NOT started here.
     pub async fn start_stream(&mut self) -> bool {
         if self.state == PipelineState::Running {
@@ -130,26 +167,16 @@ impl VideoOrchestrator {
         // sequence (primary → encoder detect → command build) as a discovered
         // camera. Otherwise probe for a local V4L2/CSI camera as before.
         //
-        // /!\ This re-probe is LOAD-BEARING for camera format renegotiation and
-        // must never be cached across restarts. `select_input_format`
-        // (`encoder.rs`) resolves MJPEG-vs-YUYV from `CameraInfo::capabilities`
-        // at argv-build time, so a UVC camera that renegotiates or enumerates
-        // differently after a replug would otherwise be driven with the stale
-        // `-input_format` forever and ffmpeg would die on every attempt.
-        // Because the health-check recovery path is `stop_stream` →
-        // `start_stream`, every restart re-enumerates here and the argv is
-        // rebuilt from the CURRENT capabilities. Hoisting this out of
-        // `start_stream` (or memoising `last_cameras`) would turn recovery into
-        // a blind cold-start against a format the device no longer offers.
-        let net_source = self.camera_cfg.network_source().map(str::to_string);
-        let discovery = match net_source {
-            Some(url) => {
-                tracing::info!(source = %url, "video_streaming_from_network_source");
-                discover::DiscoveryResult::for_network_source(&url)
-            }
-            None => discover::discover(&self.python_executable, discover::DISCOVERY_TIMEOUT).await,
-        };
-        self.last_cameras = discovery;
+        // /!\ While a camera is present this re-probe is LOAD-BEARING for
+        // camera format renegotiation and must never be cached across
+        // restarts. `select_input_format` (`encoder.rs`) resolves MJPEG-vs-YUYV
+        // from `CameraInfo::capabilities` at argv-build time, so a UVC camera
+        // that renegotiates or enumerates differently after a replug would
+        // otherwise be driven with the stale `-input_format` forever. Only a
+        // camera-less node skips it, and only while the sysfs fingerprint is
+        // unchanged, no hotplug arrived and the last probe is under a minute
+        // old (see `crate::sysfs_fingerprint`).
+        self.refresh_discovery(false).await;
         // Publish the fresh discovery through the one writer. The bare
         // `persist_camera_state` this replaces rebuilt the snapshot from
         // discovery alone, so it reset the outcome to `unknown` and bypassed the
@@ -224,11 +251,12 @@ impl VideoOrchestrator {
                 return false;
             }
         };
-        self.encoder_label = Some(crate::encoder::encoder_label(kind, &cmd));
+        let tokens = cmd.tokens();
+        self.encoder_label = Some(crate::encoder::encoder_label(kind, &tokens));
         // Read the radio fan-out back off the argv that is about to run, so the
         // wfb-tap branches below (spawn, orphan sweep, health) key off what the
         // encoder actually does rather than re-deriving the decision.
-        self.encoder_emits_wfb_rtp = crate::wfb_tee::cmd_emits_wfb_rtp(&cmd);
+        self.encoder_emits_wfb_rtp = crate::wfb_tee::cmd_emits_wfb_rtp(&tokens);
 
         // Configure + start mediamtx (gates on the RTSP port internally). The
         // primary publishes into `main`; any secondary legs are added as their
@@ -257,9 +285,7 @@ impl VideoOrchestrator {
 
         // Spawn the encoder. A PLAIN rate-limited stderr drain (no progress
         // tracker — the encoder is the source, not the wfb tap).
-        let program = cmd[0].clone();
-        let args: Vec<String> = cmd[1..].to_vec();
-        let mut enc = match ManagedProcess::spawn("encoder", &program, &args) {
+        let mut enc = match cmd.spawn() {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(error = %e, encoder = ?kind, "encoder_spawn_failed");
@@ -270,8 +296,15 @@ impl VideoOrchestrator {
                 return false;
             }
         };
+        // A fresh run starts its encoder-error count from zero.
+        self.encoder_errors
+            .store(0, std::sync::atomic::Ordering::Release);
         if let Some(stderr) = enc.take_stderr() {
-            tokio::spawn(crate::stderr_drain::drain_plain(stderr, "encoder"));
+            tokio::spawn(crate::stderr_drain::drain_encoder(
+                stderr,
+                "encoder",
+                Arc::clone(&self.encoder_errors),
+            ));
         }
         self.encoder = Some(enc);
 
@@ -305,7 +338,8 @@ impl VideoOrchestrator {
         // clamp in full (it costs no extra respawn), so nothing is deferred here.
         let (desired, settings) = self.desired_encoder_settings();
         let state = self.encoder_state(desired.profile, desired.ceiling_kbps, settings, false);
-        self.encoder_control
+        let state = self
+            .encoder_control
             .note_applied(state, desired.generation, true);
         self.publish_encoder_state(&state).await;
 
@@ -329,14 +363,11 @@ impl VideoOrchestrator {
         if self.sei_latency_on() {
             self.start_sei_tap().await;
         }
-        // Optional additive vision frame tap. When raw_tap is on the frames are
-        // already produced by the spliced encoder output, so no separate
-        // process is spawned; otherwise spawn the decoupled third ffmpeg — but,
-        // exactly like the wfb tee above, only once the encoder's RTSP publisher
-        // exists. Starting it against a missing `/main` makes ffmpeg's first
-        // DESCRIBE fail and exit in ~1-2 s, and the tap then death-loops; the
+        // Optional additive vision frame tap: the socket is bound now and the
+        // decoder starts when the vision engine connects. Like the wfb tee
+        // above, only once the encoder's RTSP publisher exists; the
         // health-check ladder brings it up when the path is ready.
-        if self.vision_enabled() && !self.config.vision.raw_tap {
+        if self.vision_enabled() {
             if self.mediamtx.path_ready(MAIN_PATH).await {
                 self.start_vision_tap().await;
             } else {
@@ -346,27 +377,27 @@ impl VideoOrchestrator {
         true
     }
 
-    /// Build the primary leg's encoder argv from the CURRENT capture settings.
+    /// Build the primary leg's encoder pipeline from the CURRENT capture
+    /// settings.
     ///
     /// Factored out of [`Self::start_stream`] so the attention-switch respawn
-    /// ([`Self::restart_encoder_only`]) reuses the identical composition — the
-    /// optional SEI wrap and the opt-in pre-encode vision-tap splice included.
-    /// Duplicating it would let a hero switch silently drop the vision tap.
-    /// `Err(StartError)` on any build failure (already logged), tagged so the
-    /// camera-state sidecar names the real cause rather than the generic
-    /// "command could not be built".
+    /// ([`Self::restart_encoder_only`]) reuses the identical composition, the
+    /// optional SEI split included. `Err(StartError)` on any build failure
+    /// (already logged), tagged so the camera-state sidecar names the real
+    /// cause rather than the generic "command could not be built".
     fn build_primary_encoder_command(
         &self,
         primary: &CameraInfo,
         device_path: &str,
         kind: crate::encoder::EncoderKind,
-    ) -> Result<Vec<String>, StartError> {
+    ) -> Result<PrimaryCommand, StartError> {
         let pipe_uri = self.pipe_uri();
         let mut params = EncoderParams::from_camera_config(kind, &self.camera_cfg);
         if self.force_software {
-            // The hardware / GStreamer encoder was abandoned this session (it
-            // never produced a packet); force the always-runnable software path
-            // (ffmpeg libx264) so video keeps flowing instead of crash-looping.
+            // The hardware / GStreamer encoder failed to produce video; force
+            // the always-runnable software path (ffmpeg libx264) so video keeps
+            // flowing instead of crash-looping. Cleared on hotplug and after a
+            // healthy stretch on software (see the health tick).
             params.encoder = "software".to_string();
         }
         // Ask the builder for the radio's RTP copy as a second branch of this
@@ -375,13 +406,7 @@ impl VideoOrchestrator {
         // the `bash -c` pipeline arms (rpicam / GStreamer), and the caller
         // decides whether to spawn the tap by reading the built argv back
         // through `cmd_emits_wfb_rtp`, so there is no second source of truth.
-        //
-        // NOT requested when the opt-in pre-encode vision split is in force:
-        // both features rewrite the same output stage (the split needs its own
-        // `-map [enc]` on the primary output, the fan-out needs `-map 0:v` plus
-        // the tee spec), and the vision split is the narrower,
-        // explicitly-configured one. Such a node keeps the separate tap.
-        params.rtp_fanout = !self.raw_tap_splice_wanted();
+        params.rtp_fanout = true;
         let cmd = match build_encoder_command(
             &params,
             device_path,
@@ -404,52 +429,47 @@ impl VideoOrchestrator {
             }
         };
 
-        // Optional SEI wrap upstream of mediamtx so every consumer sees the
+        // Optional SEI split upstream of mediamtx so every consumer sees the
         // same wall-clock marker on the same frame.
-        let cmd = if self.sei_latency_on() {
-            tracing::info!(encoder = ?kind, "sei_inject_upstream_of_mediamtx");
-            wrap_with_sei_inject(&cmd, &pipe_uri, &self.env)
-        } else {
-            cmd
-        };
-
-        // Opt-in pre-encode vision tap: one decode, a `-filter_complex split`,
-        // and a second explicitly-mapped rawvideo output to the vision sink,
-        // with the existing encode/publish settings preserved. No-op (returns
-        // the command unchanged) unless the command is a raw ffmpeg invocation
-        // ending in the RTSP output — bash-pipeline / gstreamer / SEI-wrapped
-        // commands fall back to the decoupled third-ffmpeg tap, which never
-        // touches the encoder. Off by default.
-        if self.raw_tap_splice_wanted() {
-            let v = &self.config.vision;
-            let augmented = augment_encoder_with_raw_tap(
-                &cmd,
-                &pipe_uri,
-                v.fps,
-                v.width,
-                v.height,
-                v.pixel_format(),
-                &v.sink,
-            );
-            if augmented != cmd {
-                tracing::info!(sink = %v.sink, "vision_raw_tap_spliced_into_encoder");
-            } else {
-                tracing::info!(
-                    "vision_raw_tap_requested_but_command_not_eligible; using decoupled tap"
-                );
+        if self.sei_latency_on() {
+            if let Some(split) = wrap_with_sei_inject(&cmd, &pipe_uri) {
+                tracing::info!(encoder = ?kind, "sei_inject_upstream_of_mediamtx");
+                return Ok(PrimaryCommand::Sei(split));
             }
-            Ok(augmented)
-        } else {
-            Ok(cmd)
         }
+        Ok(PrimaryCommand::Single(cmd))
     }
 
-    /// Whether the opt-in pre-encode vision split is in force for the primary
-    /// leg. Read at both decision points — the fan-out request and the splice
-    /// itself — so the two can never disagree about which output stage the
-    /// encoder argv carries.
-    pub(crate) fn raw_tap_splice_wanted(&self) -> bool {
-        self.vision_enabled() && self.config.vision.raw_tap
+    /// Resolve the capture source into `last_cameras`.
+    ///
+    /// An explicit network source yields the synthetic single-camera result
+    /// with no probe. A local probe runs per
+    /// [`crate::sysfs_fingerprint::should_rediscover`]; `force` (and a pending
+    /// hotplug) always runs it.
+    pub(crate) async fn refresh_discovery(&mut self, force: bool) {
+        if let Some(url) = self.camera_cfg.network_source().map(str::to_string) {
+            tracing::info!(source = %url, "video_streaming_from_network_source");
+            self.last_cameras = discover::DiscoveryResult::for_network_source(&url);
+            return;
+        }
+        let fingerprint = crate::sysfs_fingerprint::fingerprint();
+        let hotplug = std::mem::take(&mut self.rediscover_requested);
+        let run = force
+            || crate::sysfs_fingerprint::should_rediscover(
+                self.last_cameras.primary_camera_info().is_some(),
+                self.last_fingerprint.as_deref(),
+                &fingerprint,
+                hotplug,
+                self.last_discovery_at.map(|at| at.elapsed()),
+            );
+        if !run {
+            tracing::debug!("camera_discovery_skipped: no video device change");
+            return;
+        }
+        self.last_fingerprint = Some(fingerprint);
+        self.last_discovery_at = Some(Instant::now());
+        self.last_cameras =
+            discover::discover(&self.python_executable, discover::DISCOVERY_TIMEOUT).await;
     }
 
     /// Respawn ONLY the encoder child against the current capture settings.
@@ -490,8 +510,9 @@ impl VideoOrchestrator {
         // An attention switch rebuilds the argv, so re-resolve the identity the
         // sidecar publishes from the command actually about to run, and with it
         // whether that command carries the radio fan-out.
-        self.encoder_label = Some(crate::encoder::encoder_label(kind, &cmd));
-        self.encoder_emits_wfb_rtp = crate::wfb_tee::cmd_emits_wfb_rtp(&cmd);
+        let tokens = cmd.tokens();
+        self.encoder_label = Some(crate::encoder::encoder_label(kind, &tokens));
+        self.encoder_emits_wfb_rtp = crate::wfb_tee::cmd_emits_wfb_rtp(&tokens);
 
         if let Some(mut enc) = self.encoder.take() {
             if enc.is_running() {
@@ -516,9 +537,7 @@ impl VideoOrchestrator {
             kill_orphans(&orphan_pattern()).await;
         }
 
-        let program = cmd[0].clone();
-        let args: Vec<String> = cmd[1..].to_vec();
-        let mut enc = match ManagedProcess::spawn("encoder", &program, &args) {
+        let mut enc = match cmd.spawn() {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(error = %e, encoder = ?kind, "encoder_respawn_failed");
@@ -526,8 +545,14 @@ impl VideoOrchestrator {
                 return false;
             }
         };
+        self.encoder_errors
+            .store(0, std::sync::atomic::Ordering::Release);
         if let Some(stderr) = enc.take_stderr() {
-            tokio::spawn(crate::stderr_drain::drain_plain(stderr, "encoder"));
+            tokio::spawn(crate::stderr_drain::drain_encoder(
+                stderr,
+                "encoder",
+                Arc::clone(&self.encoder_errors),
+            ));
         }
         self.encoder = Some(enc);
         // Count it: this is the event the adaptive ladder can storm on, and the
@@ -606,76 +631,61 @@ impl VideoOrchestrator {
         }
     }
 
-    /// Spawn the decoupled vision frame tap (idempotent). Best-effort and strictly
+    /// Bring up the vision frame tap leg (idempotent). Best-effort and strictly
     /// additive: a failure leaves the encode + radio path fully up.
+    ///
+    /// The serving socket is bound BEFORE anything else: a bind failure logs
+    /// and leaves the leg down with nothing spawned, and the ladder retries the
+    /// bind on its next tick. The decoder itself is spawned by the leg only
+    /// when a vision engine connects (see [`crate::tap_lazy`]).
     pub async fn start_vision_tap(&mut self) {
-        if !self.vision_enabled() || self.config.vision.raw_tap {
+        if !self.vision_enabled() {
             return;
         }
         if self.state != PipelineState::Running {
             tracing::warn!("vision_tap_skipped: pipeline not running");
             return;
         }
-        if let Some(p) = self.vision_tap.as_mut() {
-            if p.is_running() {
-                return;
-            }
-        }
-        // Abort a stale reframer from a prior (exited) tap before respawn.
-        if let Some(h) = self.vision_tap_reframer.take() {
-            h.abort();
+        if self.vision_tap.as_ref().is_some_and(|h| !h.is_finished()) {
+            return;
         }
         let v = &self.config.vision;
-        let mut t = match spawn_vision_tap(
-            self.mediamtx.rtsp_port(),
-            v.fps,
-            v.width,
-            v.height,
-            v.pixel_format(),
-        ) {
-            Ok(p) => p,
+        let listener = match tap::bind_vision_tap(&v.sink) {
+            Ok(l) => l,
             Err(e) => {
-                tracing::error!(error = %e, "vision_tap_start_failed");
-                return;
-            }
-        };
-        // Fresh tracker so the just-spawned tap gets the full progress window.
-        let tracker = ProgressTracker::new();
-        if let Some(stderr) = t.take_stderr() {
-            tokio::spawn(drain_wfb_tee_stderr(stderr, tracker.clone()));
-        }
-        // Bind the serving socket and start the reframer: read ffmpeg's raw
-        // frames off stdout, ADVT-header them (Contract F), and serve the
-        // connecting vision engine. A bind/stdout failure leaves the tap process
-        // up but with no consumer — surfaced loudly, never silent.
-        match (t.take_stdout(), tap::bind_vision_tap(&v.sink)) {
-            (Some(stdout), Ok(listener)) => {
-                let format = tap::frame_format_from_str(v.pixel_format());
-                let (w, h) = (v.width, v.height);
-                self.vision_tap_reframer = Some(tokio::spawn(tap::run_vision_tap_server(
-                    listener, stdout, format, w, h,
-                )));
-            }
-            (None, _) => {
-                tracing::error!("vision_tap_no_stdout; reframer not started");
-            }
-            (_, Err(e)) => {
                 tracing::error!(
                     error = %e,
                     sink = %v.sink,
-                    "vision_tap_bind_failed; reframer not started"
+                    "vision_tap_bind_failed; no decoder spawned"
                 );
+                self.vision_tap = None;
+                return;
             }
-        }
-        self.vision_tap_progress = tracker;
-        self.vision_tap = Some(t);
+        };
+        let geometry = TapGeometry {
+            format: tap::frame_format_from_str(v.pixel_format()),
+            width: v.width,
+            height: v.height,
+        };
+        let (port, fps, width, height) = (self.mediamtx.rtsp_port(), v.fps, v.width, v.height);
+        let pixel_format = v.pixel_format().to_string();
+        let spawn = move || spawn_vision_tap(port, fps, width, height, &pixel_format);
+        let state = Arc::new(TapLegState::default());
+        self.vision_tap = Some(tokio::spawn(run_lazy_vision_tap(
+            listener,
+            geometry,
+            ENGINE_IDLE_STOP,
+            spawn,
+            state,
+            Arc::clone(&self.encoder_control),
+        )));
         tracing::info!(
             sink = %v.sink,
             fps = v.fps,
             width = v.width,
             height = v.height,
             format = %v.pixel_format(),
-            "vision_tap_started"
+            "vision_tap_listening"
         );
     }
 
@@ -841,14 +851,14 @@ impl VideoOrchestrator {
         self.start_secondary_encoders().await;
     }
 
-    /// Stop the decoupled vision frame tap. Parallels
-    /// [`stop_wfb_tee`](Self::stop_wfb_tee).
+    /// Stop the vision frame tap leg (and its decoder, if one is running).
+    /// Parallels [`stop_wfb_tee`](Self::stop_wfb_tee).
     pub async fn stop_vision_tap(&mut self) {
-        if let Some(h) = self.vision_tap_reframer.take() {
+        if let Some(h) = self.vision_tap.take() {
+            // Aborting drops the leg's decoder handle, whose `Drop` kills the
+            // decoder's process group.
             h.abort();
-        }
-        if let Some(mut p) = self.vision_tap.take() {
-            p.terminate(Duration::from_secs(5)).await;
+            let _ = h.await;
         }
         // Remove the served socket so the next bind starts clean.
         let _ = std::fs::remove_file(&self.config.vision.sink);
@@ -856,8 +866,9 @@ impl VideoOrchestrator {
 
     /// Spawn the headless SEI latency tap as a one-shot Python subprocess,
     /// gated on the mediamtx path being ready. Mirrors the SEI-tap spawn but
-    /// runs `--once` so the Rust orchestrator owns the restart cadence (no
-    /// 2 s Python hot-loop — that was the deferred-respawn bug).
+    /// runs `--once` so the Rust orchestrator owns the restart cadence: one
+    /// session per retry tick at most, and none while `main` has no publisher
+    /// (a self-looping Python tap respawned against a dead source).
     pub async fn start_sei_tap(&mut self) {
         if let Some(p) = self.sei_tap.as_mut() {
             if p.is_running() {
@@ -1023,7 +1034,6 @@ mod tests {
             has_rtspclientsink: true,
             encoder_api: "unknown".into(),
             pi5_class: false,
-            python_executable: "/opt/ados/venv/bin/python3".into(),
             cpu_threads: 4,
         }
     }
@@ -1042,6 +1052,7 @@ mod tests {
             vflip: false,
             keyframe_interval: 0,
             rtp_fanout,
+            passthrough: false,
         }
     }
 
@@ -1116,9 +1127,11 @@ mod tests {
             &env(),
         )
         .unwrap();
-        // The SEI-spliced form the latency bench runs: a `bash -c` pipeline
-        // whose publish stage still names the URI as its destination.
-        let sei_spliced = wrap_with_sei_inject(&ffmpeg_fanout, &uri, &env());
+        // The SEI split the latency bench runs: its publish stage is a process
+        // of its own whose command line names the URI as its destination.
+        let sei_publish = wrap_with_sei_inject(&ffmpeg_fanout, &uri)
+            .expect("an ffmpeg publisher splits")
+            .publish;
         // The GStreamer arm on a board without `rtspclientsink`: gst → ffmpeg
         // publish, also a `bash -c` pipeline.
         let gst_via_ffmpeg = build_encoder_command(
@@ -1138,7 +1151,7 @@ mod tests {
             ("ffmpeg radio fan-out", &ffmpeg_fanout),
             ("rpicam bash pipeline", &rpicam),
             ("gstreamer rtspclientsink", &gstreamer),
-            ("sei-spliced bash pipeline", &sei_spliced),
+            ("sei-split publish stage", &sei_publish),
             ("gstreamer via ffmpeg publish", &gst_via_ffmpeg),
         ] {
             let line = cmdline(&argv[0], &argv[1..]);

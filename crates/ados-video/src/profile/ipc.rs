@@ -1,24 +1,37 @@
 //! The encoder command socket — the ONE cross-process entry point for changing
 //! what the encoder produces.
 //!
-//! `ados-video` owns the encoder, but the two controllers that steer it live in
-//! other processes: `ados-control` serves `POST /api/video/profile` (the
-//! operator's hero choice) and `ados-radio`'s adaptive-bitrate ladder applies a
-//! clamp. Both dial this socket rather than each inventing a transport, so the
-//! composition rule in [`super::resolve`] is enforced in exactly one place.
+//! `ados-video` owns the encoder, but the controllers that steer it live in
+//! other processes: `ados-control` serves `/api/video/profile` (the fleet's
+//! hero assignment and an operator's hero lease) and `ados-radio`'s
+//! adaptive-bitrate ladder applies a clamp. All of them dial this socket rather
+//! than each inventing a transport, so the composition rules in
+//! [`super::resolve`] and [`super::lease`] are enforced in exactly one place.
 //!
 //! Newline-delimited JSON, one request object and one reply object per
 //! connection — the same shape as the supervisor's `/run/ados/video-cmd.sock`.
 //!
 //! ```text
-//! {"op":"video.encoder.profile.set","profile":"hero"}
+//! {"op":"video.encoder.profile.set","profile":"hero"}       // moves the base
+//! {"op":"video.encoder.lease.set","holder":"gcs-1","lease_s":30}
+//! {"op":"video.encoder.lease.release","holder":"gcs-1"}     // unknown holder ok
 //! {"op":"video.encoder.ceiling.set","bitrate_kbps":1200}   // null / absent clears
 //! {"op":"video.encoder.get"}
 //!
-//! -> {"ok":true,"profile":"hero","ceiling_kbps":1200,"width":1280,"height":720,
-//!     "fps":30,"bitrate_kbps":1200,"restarted":true,"applied":true}
+//! -> {"ok":true,"profile":"hero","base_profile":"thumbnail","ceiling_kbps":1200,
+//!     "width":1280,"height":720,"fps":30,"bitrate_kbps":1200,
+//!     "ceiling_deferred":false,"encoder_respawns":3,
+//!     "leases":[{"holder":"gcs-1","expires_in_s":29.8},
+//!               {"holder":"vision","expires_in_s":null}],
+//!     "restarted":true,"applied":true}
 //! -> {"ok":false,"error":"E_ARGS","detail":"…"}
 //! ```
+//!
+//! `profile` is the effective profile: hero while any lease is live, else
+//! `base_profile`. A lease's `holder` is 1-64 characters of `[A-Za-z0-9._:-]`
+//! (`vision` is reserved for the internal vision-tap lease, which has no
+//! expiry) and `lease_s` is an integer in `5..=120`. `leases` is read live at
+//! reply time.
 //!
 //! `applied` is observed, never assumed: a set waits for the orchestrator to
 //! actually respawn the encoder before answering, and reports `false` if the
@@ -37,6 +50,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+use super::lease::{check_lease_holder, lease_seconds_in_range};
 use super::{EncoderControl, EncoderState, VideoProfile};
 
 /// The command socket `ados-video` serves and every other process dials.
@@ -125,7 +139,7 @@ pub async fn dispatch(request: &[u8], control: &EncoderControl) -> Value {
     match op {
         "video.encoder.get" => {
             let a = control.applied();
-            ok_reply(&a.state, a.restarted, true)
+            ok_reply(&a.state, control, a.restarted, true)
         }
         "video.encoder.profile.set" => {
             let Some(profile) = parsed
@@ -136,6 +150,28 @@ pub async fn dispatch(request: &[u8], control: &EncoderControl) -> Value {
                 return err("E_ARGS", "profile must be \"hero\" or \"thumbnail\"");
             };
             settle(control, control.request_profile(profile)).await
+        }
+        "video.encoder.lease.set" => {
+            let holder = match holder_arg(&parsed) {
+                Ok(holder) => holder,
+                Err(reply) => return reply,
+            };
+            let Some(lease_s) = parsed
+                .get("lease_s")
+                .and_then(Value::as_u64)
+                .filter(|n| lease_seconds_in_range(*n))
+            else {
+                return err("E_ARGS", "lease_s must be an integer from 5 to 120");
+            };
+            let generation = control.set_lease(holder, Duration::from_secs(lease_s));
+            settle(control, generation).await
+        }
+        "video.encoder.lease.release" => {
+            let holder = match holder_arg(&parsed) {
+                Ok(holder) => holder,
+                Err(reply) => return reply,
+            };
+            settle(control, control.release_lease(holder)).await
         }
         "video.encoder.ceiling.set" => {
             let ceiling = match parsed.get("bitrate_kbps") {
@@ -153,23 +189,39 @@ pub async fn dispatch(request: &[u8], control: &EncoderControl) -> Value {
     }
 }
 
+/// The validated `holder` of a lease verb, or the `E_ARGS` reply.
+fn holder_arg(parsed: &Value) -> Result<&str, Value> {
+    let holder = parsed.get("holder").and_then(Value::as_str).unwrap_or("");
+    check_lease_holder(holder).map_err(|detail| err("E_ARGS", detail))?;
+    Ok(holder)
+}
+
 /// Wait for the orchestrator to acknowledge `generation`, then answer with what
 /// it actually applied. A timeout answers with the resolved target and
 /// `applied: false` rather than claiming a switch that may not have happened.
 async fn settle(control: &EncoderControl, generation: u64) -> Value {
     match control.wait_applied(generation, APPLY_TIMEOUT).await {
-        Some(a) => ok_reply(&a.state, a.restarted, true),
+        Some(a) => ok_reply(&a.state, control, a.restarted, true),
         None => {
             let a = control.applied();
-            ok_reply(&a.state, false, false)
+            ok_reply(&a.state, control, false, false)
         }
     }
 }
 
-fn ok_reply(state: &EncoderState, restarted: bool, applied: bool) -> Value {
+fn ok_reply(
+    state: &EncoderState,
+    control: &EncoderControl,
+    restarted: bool,
+    applied: bool,
+) -> Value {
     json!({
         "ok": true,
         "profile": state.profile.as_str(),
+        // The base and the leases are read live, so `expires_in_s` is current
+        // and a release shows even when it left the encoder untouched.
+        "base_profile": control.base_profile().as_str(),
+        "leases": control.leases(),
         "ceiling_kbps": state.ceiling_kbps,
         "width": state.width,
         "height": state.height,
@@ -204,6 +256,40 @@ pub async fn set_profile_at(sock: &Path, profile: VideoProfile) -> anyhow::Resul
     request(
         sock,
         &json!({"op": "video.encoder.profile.set", "profile": profile.as_str()}),
+    )
+    .await
+}
+
+/// Create or renew `holder`'s hero lease for `lease_secs` seconds. The
+/// canonical socket path.
+pub async fn set_lease(holder: &str, lease_secs: u64) -> anyhow::Result<EncoderState> {
+    set_lease_at(Path::new(VIDEO_ENCODER_SOCK), holder, lease_secs).await
+}
+
+/// [`set_lease`] against an explicit socket path.
+pub async fn set_lease_at(
+    sock: &Path,
+    holder: &str,
+    lease_secs: u64,
+) -> anyhow::Result<EncoderState> {
+    request(
+        sock,
+        &json!({"op": "video.encoder.lease.set", "holder": holder, "lease_s": lease_secs}),
+    )
+    .await
+}
+
+/// Release `holder`'s hero lease (a no-op for an unknown holder). The
+/// canonical socket path.
+pub async fn release_lease(holder: &str) -> anyhow::Result<EncoderState> {
+    release_lease_at(Path::new(VIDEO_ENCODER_SOCK), holder).await
+}
+
+/// [`release_lease`] against an explicit socket path.
+pub async fn release_lease_at(sock: &Path, holder: &str) -> anyhow::Result<EncoderState> {
+    request(
+        sock,
+        &json!({"op": "video.encoder.lease.release", "holder": holder}),
     )
     .await
 }
@@ -286,162 +372,5 @@ pub fn read_state_from(path: &Path) -> Option<EncoderState> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::CameraConfig;
-    use crate::profile::{base_settings, resolve};
-
-    fn control() -> Arc<EncoderControl> {
-        let cfg = CameraConfig::default();
-        EncoderControl::new(VideoProfile::Thumbnail, cfg.thumbnail)
-    }
-
-    /// Stand in for the orchestrator: acknowledge every desired change by
-    /// resolving it against the default camera config. Subscribes on the
-    /// caller's thread so a request issued immediately after this returns can
-    /// never be missed.
-    fn spawn_applier(control: Arc<EncoderControl>) -> tokio::task::JoinHandle<()> {
-        let mut rx = control.subscribe_desired();
-        tokio::spawn(async move {
-            let cfg = CameraConfig::default();
-            while rx.changed().await.is_ok() {
-                let d = *rx.borrow_and_update();
-                let s = resolve(d.profile, d.ceiling_kbps, &cfg);
-                control.note_applied(
-                    EncoderState::new(d.profile, d.ceiling_kbps, s),
-                    d.generation,
-                    true,
-                );
-            }
-        })
-    }
-
-    #[tokio::test]
-    async fn a_profile_set_answers_with_the_settings_the_applier_confirmed() {
-        let ctl = control();
-        let _applier = spawn_applier(Arc::clone(&ctl));
-        let reply = dispatch(
-            br#"{"op":"video.encoder.profile.set","profile":"hero"}"#,
-            &ctl,
-        )
-        .await;
-        assert_eq!(reply["ok"], true);
-        assert_eq!(reply["applied"], true);
-        assert_eq!(reply["profile"], "hero");
-        assert_eq!(reply["width"], 1280);
-        assert_eq!(reply["height"], 720);
-        assert_eq!(reply["fps"], 30);
-        assert_eq!(reply["bitrate_kbps"], 4000);
-    }
-
-    #[tokio::test]
-    async fn a_ceiling_set_clamps_the_active_profile_and_null_clears_it() {
-        let ctl = control();
-        let _applier = spawn_applier(Arc::clone(&ctl));
-        dispatch(
-            br#"{"op":"video.encoder.profile.set","profile":"hero"}"#,
-            &ctl,
-        )
-        .await;
-        let clamped = dispatch(
-            br#"{"op":"video.encoder.ceiling.set","bitrate_kbps":1200}"#,
-            &ctl,
-        )
-        .await;
-        assert_eq!(clamped["bitrate_kbps"], 1200);
-        assert_eq!(clamped["ceiling_kbps"], 1200);
-        // Geometry is the profile's, untouched by the clamp.
-        assert_eq!(clamped["width"], 1280);
-        let cleared = dispatch(br#"{"op":"video.encoder.ceiling.set"}"#, &ctl).await;
-        assert_eq!(cleared["bitrate_kbps"], 4000);
-        assert!(cleared["ceiling_kbps"].is_null());
-    }
-
-    #[tokio::test]
-    async fn an_unconfirmed_set_reports_applied_false_instead_of_claiming_success() {
-        // No applier running: the orchestrator never acknowledges.
-        let ctl = control();
-        let generation = ctl.request_profile(VideoProfile::Hero);
-        // Drive `settle` directly with a short wait so the test stays fast; the
-        // production bound is APPLY_TIMEOUT.
-        assert!(ctl
-            .wait_applied(generation, Duration::from_millis(20))
-            .await
-            .is_none());
-        let a = ctl.applied();
-        let reply = ok_reply(&a.state, false, false);
-        assert_eq!(reply["ok"], true);
-        assert_eq!(reply["applied"], false);
-        // It reports what is actually live (still the boot thumbnail), not the
-        // hero settings it was asked for.
-        assert_eq!(reply["profile"], "thumbnail");
-    }
-
-    #[tokio::test]
-    async fn bad_requests_are_rejected_without_touching_the_encoder() {
-        let ctl = control();
-        let before = ctl.desired();
-        for body in [
-            br#"{"op":"video.encoder.profile.set","profile":"Hero"}"#.as_slice(),
-            br#"{"op":"video.encoder.profile.set"}"#.as_slice(),
-            br#"{"op":"video.encoder.ceiling.set","bitrate_kbps":-5}"#.as_slice(),
-            br#"{"op":"video.encoder.ceiling.set","bitrate_kbps":0}"#.as_slice(),
-            br#"not json"#.as_slice(),
-        ] {
-            let reply = dispatch(body, &ctl).await;
-            assert_eq!(reply["ok"], false, "body {}", String::from_utf8_lossy(body));
-            assert_eq!(reply["error"], "E_ARGS");
-        }
-        let unknown = dispatch(br#"{"op":"video.encoder.nope"}"#, &ctl).await;
-        assert_eq!(unknown["error"], "E_UNKNOWN_OP");
-        assert_eq!(ctl.desired(), before);
-    }
-
-    #[tokio::test]
-    async fn the_socket_round_trip_reaches_the_real_server() {
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("video-encoder.sock");
-        let ctl = control();
-        let _applier = spawn_applier(Arc::clone(&ctl));
-        let shutdown = ados_protocol::shutdown::Shutdown::new();
-        let server = {
-            let ctl = Arc::clone(&ctl);
-            let sock = sock.clone();
-            let shutdown = shutdown.clone();
-            tokio::spawn(async move { serve(ctl, &sock, shutdown).await })
-        };
-        // Wait for the bind.
-        for _ in 0..100 {
-            if sock.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
-        let st = set_profile_at(&sock, VideoProfile::Hero).await.unwrap();
-        assert_eq!(st.profile, VideoProfile::Hero);
-        assert_eq!(
-            st.settings(),
-            base_settings(VideoProfile::Hero, &CameraConfig::default())
-        );
-
-        let clamped = set_bitrate_ceiling_at(&sock, Some(900)).await.unwrap();
-        assert_eq!(clamped.bitrate_kbps, 900);
-        assert_eq!(clamped.ceiling_kbps, Some(900));
-
-        let read_back = state_at(&sock).await.unwrap();
-        assert_eq!(read_back, clamped);
-
-        shutdown.trigger();
-        let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
-    }
-
-    #[test]
-    fn an_absent_or_corrupt_sidecar_reads_as_none_not_a_panic() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(read_state_from(&dir.path().join("missing.json")).is_none());
-        let bad = dir.path().join("bad.json");
-        std::fs::write(&bad, b"{not json").unwrap();
-        assert!(read_state_from(&bad).is_none());
-    }
-}
+#[path = "ipc_tests.rs"]
+mod tests;

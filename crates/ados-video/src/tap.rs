@@ -19,21 +19,15 @@
 //! the same frozen-wire-contract discipline the mavlink, state, and plugin
 //! sockets already follow, now extended to the vision seam.
 //!
-//! Two modes:
-//! - **decoupled tap (default):** [`vision_tap_args`] builds the third-ffmpeg
-//!   `rtsp://localhost:8554/main → rawvideo → stdout` command; the reframer
-//!   serves the socket. This is the only path that ever spawns a process; it
-//!   cannot perturb the encoder.
-//! - **pre-encode split (opt-in, `raw_tap`):** the encoder command grows a
-//!   `-filter_complex` split with a second `rawvideo` output. NOTE: that leg is
-//!   not yet ADVT-framed (it predates Contract F); it is off by default and the
-//!   decoupled tap is the supported path to the engine.
+//! The tap is lazy: the serving socket is bound up front, but the decoding
+//! ffmpeg is spawned only once an engine connects, and stopped again after the
+//! engine has been gone for [`ENGINE_IDLE_STOP`] (see [`crate::tap_lazy`]). A
+//! node with vision enabled and no engine attached decodes nothing.
 //!
 //! Process-liveness alone is never proof of work here either: the third ffmpeg
-//! can hold the pipe open while pushing nothing, so the orchestrator drives the
-//! same `-progress` output-counter watchdog the wfb tap uses (the
-//! [`crate::wfb_tee::ProgressTracker`] primitives are reused — they are
-//! consumer-agnostic).
+//! can hold the pipe open while pushing nothing, so a session with an engine
+//! attached and no frame for [`VISION_TAP_PROGRESS_TIMEOUT`] ends as
+//! [`TapSessionEnd::Stalled`] and the decoder is restarted.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -163,26 +157,46 @@ pub fn bind_vision_tap(sink: &str) -> std::io::Result<UnixListener> {
     UnixListener::bind(sink)
 }
 
-/// The reframer: read fixed-size headerless frames off ffmpeg's stdout, prepend
-/// the frozen `ADVT` header, and serve them on `listener` to the connected
-/// vision engine (Contract F). Runs until ffmpeg's stdout hits EOF (ffmpeg
-/// exited — the orchestrator's process-exit watchdog then restarts the whole
-/// leg); the caller aborts this task on stop.
+/// Why one tap session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TapSessionEnd {
+    /// ffmpeg's stdout hit EOF: the source process exited.
+    SourceEnded,
+    /// The listener failed: the leg must be rebuilt from a fresh bind.
+    ListenerFailed,
+    /// No engine for the idle window: the decoder can be stopped.
+    EngineIdle,
+    /// An engine is attached but no frame arrived for the progress window: the
+    /// decoder is alive and pushing nothing.
+    Stalled,
+}
+
+/// How long the decoder keeps running after the last engine disconnects.
+pub const ENGINE_IDLE_STOP: Duration = Duration::from_secs(30);
+
+/// Serve one decoder run to the connected vision engine (Contract F): read
+/// fixed-size headerless frames off ffmpeg's stdout, prepend the frozen
+/// `ADVT` header, and write them to the engine.
 ///
 /// - A dedicated reader task owns `stdout` so `read_exact` (not cancel-safe)
 ///   never races the accept loop; it publishes the latest frame on a `watch`
 ///   channel (newest-frame-wins, so a slow engine transparently drops frames
 ///   rather than back-pressuring ffmpeg).
-/// - The server loop accepts the engine, forwards each new frame, and on a write
-///   error or a [`ENGINE_WRITE_TIMEOUT`] drops that engine and re-accepts — one
-///   bad consumer never wedges the tap.
-pub async fn run_vision_tap_server<R>(
-    listener: UnixListener,
+/// - A fresh connection always replaces the current engine. A write error or
+///   an [`ENGINE_WRITE_TIMEOUT`] drops that engine — one bad consumer never
+///   wedges the tap.
+/// - With `idle` set, the session ends [`TapSessionEnd::EngineIdle`] once no
+///   engine has been attached for that long.
+pub async fn serve_tap_session<R>(
+    listener: &UnixListener,
+    mut engine: Option<tokio::net::UnixStream>,
     stdout: R,
     format: FrameFormat,
     width: u32,
     height: u32,
-) where
+    idle: Option<Duration>,
+) -> TapSessionEnd
+where
     R: AsyncRead + Unpin + Send + 'static,
 {
     let frame_size = frame_size_bytes(format, width, height);
@@ -190,20 +204,17 @@ pub async fn run_vision_tap_server<R>(
         tracing::error!(
             width,
             height,
-            "vision_tap_zero_frame_size; reframer not started"
+            "vision_tap_zero_frame_size; session not started"
         );
-        return;
+        return TapSessionEnd::SourceEnded;
     }
 
     let (tx, mut rx) = watch::channel::<Option<Arc<Vec<u8>>>>(None);
 
-    // Reader owns ffmpeg stdout exclusively. read_exact is safe here because it
-    // is the only awaiter of the stream.
-    //
-    // Each frame is read into its own buffer and MOVED into the channel — no
-    // per-frame copy. The buffer the channel just released is reclaimed for
-    // the next read whenever the server has finished with it, so a steady tap
-    // allocates only when the engine is still writing the previous frame.
+    // Reader owns ffmpeg stdout exclusively. Each frame is read into its own
+    // buffer and MOVED into the channel — no per-frame copy. The buffer the
+    // channel just released is reclaimed for the next read whenever the server
+    // has finished with it.
     let reader = tokio::spawn(async move {
         let mut stdout = stdout;
         let mut spare: Option<Vec<u8>> = None;
@@ -213,7 +224,6 @@ pub async fn run_vision_tap_server<R>(
                 tracing::info!(error = %e, "vision_tap_source_eof");
                 return;
             }
-            // Newest-frame-wins: a slow engine simply misses frames.
             let previous = tx.send_replace(Some(Arc::new(buf)));
             if tx.is_closed() {
                 return; // server gone
@@ -222,57 +232,101 @@ pub async fn run_vision_tap_server<R>(
         }
     });
 
-    // One engine at a time (the vision engine is the only consumer). Accepting
-    // and forwarding share a select so a fresh connection ALWAYS wins immediately:
-    // when the engine restarts it reconnects here and replaces the stale stream
-    // (dropping the old one closes it), instead of being starved in the listener
-    // backlog until the dead connection's write finally fails.
-    let mut engine: Option<tokio::net::UnixStream> = None;
-    loop {
+    let now = tokio::time::Instant::now();
+    let mut engine_gone_at = if engine.is_some() { None } else { Some(now) };
+    let mut last_frame_at = now;
+    let end = loop {
+        let idle_deadline = match (idle, engine_gone_at) {
+            (Some(window), Some(gone)) => Some(gone + window),
+            _ => None,
+        };
+        let stall_deadline = engine
+            .as_ref()
+            .map(|_| last_frame_at + VISION_TAP_PROGRESS_TIMEOUT);
         tokio::select! {
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _)) => {
                         tracing::info!("vision_tap_engine_connected");
                         engine = Some(stream);
+                        engine_gone_at = None;
+                        // A fresh engine gets the full progress window.
+                        last_frame_at = tokio::time::Instant::now();
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "vision_tap_accept_failed");
-                        // A broken listener is fatal; bail so the leg restarts clean.
-                        break;
+                        break TapSessionEnd::ListenerFailed;
                     }
                 }
             }
             changed = rx.changed() => {
                 if changed.is_err() {
-                    // Reader ended (ffmpeg EOF) — the whole leg is done.
-                    break;
+                    break TapSessionEnd::SourceEnded;
                 }
+                last_frame_at = tokio::time::Instant::now();
                 let frame = rx.borrow_and_update().clone();
                 let Some(frame) = frame else { continue };
                 if let Some(e) = engine.as_mut() {
-                    match timeout(
+                    let failed = match timeout(
                         ENGINE_WRITE_TIMEOUT,
                         write_tap_frame(e, format, width, height, &frame),
                     )
                     .await
                     {
-                        Ok(Ok(())) => {}
+                        Ok(Ok(())) => false,
                         Ok(Err(err)) => {
                             tracing::warn!(error = %err, "vision_tap_engine_write_failed; dropping engine");
-                            engine = None;
+                            true
                         }
                         Err(_) => {
                             tracing::warn!("vision_tap_engine_write_timeout; dropping engine");
-                            engine = None;
+                            true
                         }
+                    };
+                    if failed {
+                        engine = None;
+                        engine_gone_at = Some(tokio::time::Instant::now());
                     }
                 }
             }
+            _ = sleep_until_opt(idle_deadline) => {
+                tracing::info!("vision_tap_engine_idle; stopping decoder");
+                break TapSessionEnd::EngineIdle;
+            }
+            _ = sleep_until_opt(stall_deadline) => {
+                tracing::warn!(
+                    threshold_s = VISION_TAP_PROGRESS_TIMEOUT.as_secs(),
+                    "vision_tap_zombie_detected: engine attached but no frames"
+                );
+                break TapSessionEnd::Stalled;
+            }
         }
-    }
-
+    };
     reader.abort();
+    end
+}
+
+/// Sleep until `deadline`, or forever when there is none.
+async fn sleep_until_opt(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Serve a decoder's frames on `listener` until its stdout ends or the
+/// listener fails, with no idle stop. The lazy leg ([`crate::tap_lazy`]) runs
+/// [`serve_tap_session`] directly; this form serves a single fixed source.
+pub async fn run_vision_tap_server<R>(
+    listener: UnixListener,
+    stdout: R,
+    format: FrameFormat,
+    width: u32,
+    height: u32,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let _ = serve_tap_session(&listener, None, stdout, format, width, height, None).await;
 }
 
 #[cfg(test)]

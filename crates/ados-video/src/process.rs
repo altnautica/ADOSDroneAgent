@@ -21,6 +21,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::process::{ChildStderr, ChildStdout, Command};
+use tokio::task::JoinHandle;
 
 /// A media subprocess (encoder bash pipeline, wfb_tee ffmpeg, cloud-push
 /// ffmpeg, mediamtx) running as its own process-group leader.
@@ -29,6 +30,10 @@ pub struct ManagedProcess {
     #[cfg(target_os = "linux")]
     pgid: nix::unistd::Pid,
     inner: tokio::process::Child,
+    /// The publish stage of an SEI-split encoder, in the same process group.
+    companion: Option<tokio::process::Child>,
+    /// The in-process SEI pump between the two stages.
+    pump: Option<JoinHandle<()>>,
 }
 
 impl ManagedProcess {
@@ -90,7 +95,64 @@ impl ManagedProcess {
             #[cfg(target_os = "linux")]
             pgid,
             inner: child,
+            companion: None,
+            pump: None,
         })
+    }
+
+    /// Spawn an SEI-split encoder: `encode` (Annex-B H.264 on stdout) and
+    /// `publish` (Annex-B on stdin) in ONE process group, with the in-process
+    /// [`crate::sei::pump`] stamping a latency SEI before every VCL NAL between
+    /// them. Teardown, liveness and the `Drop` backstop cover all three: the
+    /// group is killed as one, and the pipeline reads as exited as soon as
+    /// either stage or the pump ends. The publish stage's stderr goes to the
+    /// journal; the encode stage's is piped for the caller's drain.
+    pub fn spawn_sei_pipeline(
+        label: &str,
+        encode: &[String],
+        publish: &[String],
+    ) -> std::io::Result<Self> {
+        let (enc_prog, enc_args) = encode
+            .split_first()
+            .ok_or_else(|| std::io::Error::other("empty encode stage"))?;
+        let (pub_prog, pub_args) = publish
+            .split_first()
+            .ok_or_else(|| std::io::Error::other("empty publish stage"))?;
+        let mut leader = Self::spawn_with(label, enc_prog, enc_args, Stdio::piped())?;
+        let stdout = leader
+            .inner
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("encode stage has no stdout"))?;
+
+        let mut cmd = Command::new(pub_prog);
+        cmd.args(pub_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        #[cfg(target_os = "linux")]
+        {
+            let pgid = leader.pgid;
+            // Safety: setpgid() is async-signal-safe and is the only call in
+            // the hook. Joining the leader's group makes one killpg reap both.
+            unsafe {
+                cmd.pre_exec(move || {
+                    nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), pgid)
+                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+                    Ok(())
+                });
+            }
+        }
+        // On a spawn error `leader` drops here and its group is killed.
+        let mut publisher = cmd.spawn()?;
+        let stdin = publisher
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("publish stage has no stdin"))?;
+        leader.pump = Some(tokio::spawn(crate::sei::pump(stdout, stdin)));
+        leader.companion = Some(publisher);
+        Ok(leader)
     }
 
     /// Take the piped stdout handle (only present after
@@ -114,9 +176,16 @@ impl ManagedProcess {
         self.inner.stderr.take()
     }
 
-    /// True while the process has not yet exited.
+    /// True while the process (and, for an SEI pipeline, its publish stage
+    /// and the pump between them) has not yet exited.
     pub fn is_running(&mut self) -> bool {
-        matches!(self.inner.try_wait(), Ok(None))
+        let leader = matches!(self.inner.try_wait(), Ok(None));
+        let companion = self
+            .companion
+            .as_mut()
+            .is_none_or(|c| matches!(c.try_wait(), Ok(None)));
+        let pump = self.pump.as_ref().is_none_or(|p| !p.is_finished());
+        leader && companion && pump
     }
 
     /// Graceful teardown of the whole process group: `SIGTERM`, wait up to `grace`,
@@ -125,13 +194,22 @@ impl ManagedProcess {
     pub async fn terminate(&mut self, grace: Duration) {
         use nix::sys::signal::{killpg, Signal};
         let _ = killpg(self.pgid, Signal::SIGTERM);
-        if tokio::time::timeout(grace, self.inner.wait())
-            .await
-            .is_err()
-        {
+        let all_exited = async {
+            let _ = self.inner.wait().await;
+            if let Some(c) = self.companion.as_mut() {
+                let _ = c.wait().await;
+            }
+        };
+        if tokio::time::timeout(grace, all_exited).await.is_err() {
             tracing::warn!(label = %self.label, "process group did not exit on SIGTERM; SIGKILL");
             let _ = killpg(self.pgid, Signal::SIGKILL);
             let _ = self.inner.wait().await;
+            if let Some(c) = self.companion.as_mut() {
+                let _ = c.wait().await;
+            }
+        }
+        if let Some(p) = self.pump.take() {
+            p.abort();
         }
     }
 
@@ -140,6 +218,13 @@ impl ManagedProcess {
     pub async fn terminate(&mut self, _grace: Duration) {
         let _ = self.inner.start_kill();
         let _ = self.inner.wait().await;
+        if let Some(c) = self.companion.as_mut() {
+            let _ = c.start_kill();
+            let _ = c.wait().await;
+        }
+        if let Some(p) = self.pump.take() {
+            p.abort();
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -155,6 +240,9 @@ impl ManagedProcess {
 impl Drop for ManagedProcess {
     fn drop(&mut self) {
         self.killpg_now();
+        if let Some(p) = self.pump.take() {
+            p.abort();
+        }
     }
 }
 

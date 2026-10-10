@@ -107,6 +107,87 @@ impl VisionBackend for MockBackend {
     }
 }
 
+/// The mock backend with `vision.mock_target` on: every model it loads emits
+/// one synthetic `person` that orbits the frame centre, so detection consumers
+/// (overlays, follow-me) can be exercised on a bench with no real model. It is
+/// still not inference-capable: nothing it reports was measured.
+#[derive(Debug, Default, Clone)]
+pub struct MockTargetBackend;
+
+/// Track id the synthetic target always carries.
+pub const MOCK_TARGET_TRACK_ID: u64 = 1;
+/// Orbit frequency of the synthetic target, in revolutions per second.
+const MOCK_TARGET_HZ: f64 = 0.1;
+/// Orbit radius, as a fraction of the frame.
+const MOCK_TARGET_RADIUS: f64 = 0.25;
+/// Box size, as a fraction of the frame width and height.
+const MOCK_TARGET_W: f32 = 0.12;
+const MOCK_TARGET_H: f32 = 0.3;
+
+struct MockTargetModel {
+    started: Instant,
+}
+
+/// The synthetic target at `t` seconds after the model loaded, in pixels of a
+/// `width` x `height` frame. The centre orbits `(0.5, 0.5)` at radius 0.25.
+pub fn mock_target_at(t: f64, width: u32, height: u32) -> Detection {
+    let phase = 2.0 * std::f64::consts::PI * MOCK_TARGET_HZ * t;
+    let cx = (0.5 + MOCK_TARGET_RADIUS * phase.cos()) as f32;
+    let cy = (0.5 + MOCK_TARGET_RADIUS * phase.sin()) as f32;
+    let (fw, fh) = (width as f32, height as f32);
+    Detection {
+        bbox: Some(BoundingBox {
+            x: (cx - MOCK_TARGET_W / 2.0) * fw,
+            y: (cy - MOCK_TARGET_H / 2.0) * fh,
+            width: MOCK_TARGET_W * fw,
+            height: MOCK_TARGET_H * fh,
+        }),
+        class_label: "person".into(),
+        confidence: 0.9,
+        track_id: Some(MOCK_TARGET_TRACK_ID),
+        assoc_confidence: None,
+        lock_state: None,
+        attributes: None,
+        mask: None,
+        keypoints: None,
+        depth: None,
+        world_pos: None,
+    }
+}
+
+impl LoadedModel for MockTargetModel {
+    fn infer(&self, _frame: &[u8], w: u32, h: u32, _f: FrameFormat) -> Result<Vec<Detection>> {
+        Ok(vec![mock_target_at(
+            self.started.elapsed().as_secs_f64(),
+            w,
+            h,
+        )])
+    }
+}
+
+impl VisionBackend for MockTargetBackend {
+    fn load(&self, _meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>> {
+        Ok(Box::new(MockTargetModel {
+            started: Instant::now(),
+        }))
+    }
+    fn name(&self) -> &str {
+        "mock"
+    }
+    fn is_inference_capable(&self) -> bool {
+        false
+    }
+}
+
+/// The mock backend, with or without the synthetic target.
+fn mock_backend(mock_target: bool) -> Box<dyn VisionBackend> {
+    if mock_target {
+        Box::new(MockTargetBackend)
+    } else {
+        Box::new(MockBackend)
+    }
+}
+
 // --- onnx (opt-in) --------------------------------------------------------
 
 #[cfg(feature = "onnx")]
@@ -734,6 +815,9 @@ pub struct BackendPrefs<'a> {
     pub rknn_socket_path: String,
     /// The accelerator sidecar socket path for the hailo backend (Pi + AI HAT).
     pub hailo_socket_path: String,
+    /// `vision.mock_target`: a resolved mock backend emits the orbiting
+    /// synthetic target instead of no detections.
+    pub mock_target: bool,
 }
 
 /// Whether the build carries the ONNX CPU backend.
@@ -782,13 +866,13 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
             #[cfg(not(feature = "onnx"))]
             {
                 tracing::warn!("onnx backend requested but not compiled in; using mock");
-                Box::new(MockBackend)
+                mock_backend(prefs.mock_target)
             }
         }
-        "mock" => Box::new(MockBackend),
+        "mock" => mock_backend(prefs.mock_target),
         unknown => {
             tracing::warn!(backend = unknown, "unknown vision backend; using mock");
-            Box::new(MockBackend)
+            mock_backend(prefs.mock_target)
         }
     };
     if !backend.is_inference_capable() {
@@ -930,6 +1014,7 @@ mod tests {
             preference: "auto",
             rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
             hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
+            mock_target: false,
         };
         assert_eq!(select_backend("rk3576", &prefs).name(), "rknn");
         assert_eq!(select_backend("RK3588S2", &prefs).name(), "rknn");
@@ -1004,6 +1089,7 @@ mod tests {
             preference: "mock",
             rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
             hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
+            mock_target: false,
         };
         assert_eq!(select_backend("rk3576", &prefs).name(), "mock");
 
@@ -1012,11 +1098,68 @@ mod tests {
             preference: "onnx",
             rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
             hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
+            mock_target: false,
         };
         let name = select_backend("x86", &prefs_onnx).name().to_string();
         #[cfg(feature = "onnx")]
         assert_eq!(name, "onnx");
         #[cfg(not(feature = "onnx"))]
         assert_eq!(name, "mock");
+    }
+
+    #[test]
+    fn mock_target_orbits() {
+        let prefs = BackendPrefs {
+            preference: "mock",
+            rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
+            hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
+            mock_target: true,
+        };
+        let backend = select_backend("x86", &prefs);
+        assert_eq!(backend.name(), "mock");
+        assert!(!backend.is_inference_capable());
+        let model = backend.load(&meta()).unwrap();
+        let dets = model
+            .infer(&[0u8; 12], 1000, 500, FrameFormat::Rgb24)
+            .unwrap();
+        assert_eq!(dets.len(), 1);
+        assert_eq!(dets[0].class_label, "person");
+        assert!((dets[0].confidence - 0.9).abs() < 1e-6);
+        assert_eq!(dets[0].track_id, Some(MOCK_TARGET_TRACK_ID));
+
+        let centre = |d: &Detection| {
+            let b = d.bbox.unwrap();
+            (
+                (b.x + b.width / 2.0) / 1000.0,
+                (b.y + b.height / 2.0) / 500.0,
+            )
+        };
+        // t = 0: on the +x side of the orbit; a quarter period (2.5 s) later on +y.
+        let d0 = mock_target_at(0.0, 1000, 500);
+        let (x0, y0) = centre(&d0);
+        assert!((x0 - 0.75).abs() < 1e-4 && (y0 - 0.5).abs() < 1e-4);
+        let b0 = d0.bbox.unwrap();
+        assert!((b0.width - 120.0).abs() < 1e-3 && (b0.height - 150.0).abs() < 1e-3);
+        let (x1, y1) = centre(&mock_target_at(2.5, 1000, 500));
+        assert!((x1 - 0.5).abs() < 1e-4 && (y1 - 0.75).abs() < 1e-4);
+        // Every point stays on the radius-0.25 circle with the same track id.
+        for i in 0..40 {
+            let d = mock_target_at(f64::from(i) * 0.37, 1000, 500);
+            let (x, y) = centre(&d);
+            let r = ((x - 0.5).powi(2) + (y - 0.5).powi(2)).sqrt();
+            assert!((r - 0.25).abs() < 1e-4);
+            assert_eq!(d.track_id, Some(MOCK_TARGET_TRACK_ID));
+        }
+
+        // Without the flag the mock stays empty.
+        let plain = BackendPrefs {
+            mock_target: false,
+            ..prefs
+        };
+        let m = select_backend("x86", &plain).load(&meta()).unwrap();
+        assert!(m
+            .infer(&[0u8; 12], 2, 2, FrameFormat::Rgb24)
+            .unwrap()
+            .is_empty());
     }
 }

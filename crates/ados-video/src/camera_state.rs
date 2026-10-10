@@ -24,8 +24,9 @@ use serde::Serialize;
 pub const CAMERA_STATE_JSON: &str = "/run/ados/camera-state.json";
 
 /// How old a sidecar may be and still describe a LIVE pipeline. The orchestrator
-/// re-stamps it on every 5 s health tick, so six missed ticks means the writer
-/// is gone and its last word is no longer the camera's state.
+/// re-stamps it on every health tick (`crate::recovery::RETRY_INTERVAL`), so a
+/// stamp this old means many missed ticks: the writer is gone and its last
+/// word is no longer the camera's state.
 pub const CAMERA_STATE_LIVE_S: f64 = 30.0;
 
 /// Schema version of the `camera-state.json` sidecar. Bump on an incompatible
@@ -172,6 +173,11 @@ pub struct CameraStateSnapshot {
     /// thermal and latency problem the GCS should be able to show. `None`
     /// whenever `encoder` is `None`.
     pub encoder_hw: Option<bool>,
+    /// The pipeline is held on the software (libx264) encoder because the
+    /// hardware path failed to produce video. Cleared on a camera hotplug and
+    /// after a sustained healthy stretch, which re-arms the hardware path for
+    /// the next encoder start.
+    pub encoder_forced_software: bool,
     pub updated_at_unix: f64,
 }
 
@@ -198,6 +204,7 @@ impl CameraStateSnapshot {
             pipeline_reason: None,
             encoder: None,
             encoder_hw: None,
+            encoder_forced_software: false,
             updated_at_unix: now_unix(),
         }
     }
@@ -214,6 +221,7 @@ impl CameraStateSnapshot {
             pipeline_reason: Some("camera discovery failed".to_string()),
             encoder: None,
             encoder_hw: None,
+            encoder_forced_software: false,
             updated_at_unix: now_unix(),
         }
     }
@@ -236,6 +244,12 @@ impl CameraStateSnapshot {
         self.encoder_hw = if encoder.is_some() { encoder_hw } else { None };
         self.encoder = encoder;
         self.updated_at_unix = now_unix();
+        self
+    }
+
+    /// Stamp whether the software-encoder override is latched.
+    pub fn with_forced_software(mut self, forced: bool) -> Self {
+        self.encoder_forced_software = forced;
         self
     }
 
@@ -340,13 +354,15 @@ mod tests {
             "pipeline_reason",
             "encoder",
             "encoder_hw",
+            "encoder_forced_software",
             "updated_at_unix",
         ] {
             assert!(v.get(k).is_some(), "missing key {k}");
         }
-        // The v2 key set is exactly those ten; a consumer keying off the
+        // The key set is exactly those eleven; a consumer keying off the
         // sidecar is entitled to the drift signal an extra key would be.
-        assert_eq!(v.as_object().unwrap().len(), 10);
+        assert_eq!(v.as_object().unwrap().len(), 11);
+        assert_eq!(v["encoder_forced_software"], false);
         assert_eq!(v["state"], "ready");
         assert_eq!(v["total_cameras"], 1);
         assert!(v["updated_at_unix"].as_f64().unwrap() > 0.0);

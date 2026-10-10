@@ -110,7 +110,7 @@ const ADAPTIVE_KEYS: &[&str] = &[
 ];
 
 /// The hop-supervisor snapshot file (`/run/ados/hop-supervisor.json`), persisted
-/// by the frequency hopper. Mirrors `HOP_SUPERVISOR_JSON`.
+/// by the frequency hopper.
 fn hop_supervisor_path() -> PathBuf {
     run_dir().join("hop-supervisor.json")
 }
@@ -225,7 +225,8 @@ const LATENCY_STALE_AFTER_S: f64 = 10.0;
 /// SEI probe is disabled or `ados-video` restarts without it, so an ungated read
 /// kept serving the last number the probe ever produced as a current one — a
 /// surface reporting a known-false value, and one an operator could only
-/// disprove by going to the box and running `pgrep -af sei_injector`.
+/// disprove by going to the box and checking whether `ados-video` ran with the
+/// SEI injector enabled.
 ///
 /// `unexpected_shape` covers one live collision, not just a malformed file: on a
 /// node with an SPI LCD, `ados-display` writes its own framebuffer-writer stats
@@ -844,7 +845,7 @@ mod tests {
         // kept answering with the last number the probe ever wrote. A consumer
         // polling at 1 Hz saw a plausible live figure for a pipeline that had no
         // injector in its byte path at all, and the only way to disprove it was to
-        // SSH to the box and `pgrep -af sei_injector`.
+        // SSH to the box and inspect the `ados-video` configuration.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lcd-latency.json");
         let body =

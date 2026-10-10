@@ -11,8 +11,11 @@
 //!   recordings dir / spawn failure is a `503`; a full volume is a `507`.
 //! - **`POST /api/v1/ground-station/recording/stop`** — stops the in-flight
 //!   capture (`SIGTERM` → wait → `SIGKILL`) and returns
-//!   `{filename, stopped_at, duration_seconds, size_bytes}`. No active capture
-//!   is a `409`.
+//!   `{filename, stopped_at, duration_seconds, size_bytes, segments,
+//!   interrupted_count}`. A capture whose ffmpeg exited while wanted (an RTSP
+//!   EOF on a degrading link) continued in a new segment file; `segments`
+//!   lists every file in order and `interrupted_count` how often that
+//!   happened. No active capture is a `409`.
 //! - **`POST /api/video/record/{start,stop}`** — the same two legs on any
 //!   profile, with no ground-station gate: the recorder taps this node's own
 //!   mediamtx `main` path, which on a drone is its own camera.
@@ -215,7 +218,7 @@ async fn start_recording(req: Option<Json<RecordingStartRequest>>) -> Response {
 // ---------------------------------------------------------------------------
 
 /// `POST .../recording/stop` → `{filename, stopped_at, duration_seconds,
-/// size_bytes}`.
+/// size_bytes, segments, interrupted_count}`.
 ///
 /// `404` `E_PROFILE_MISMATCH` off a drone-profile node. On a ground station,
 /// stops the in-flight capture and returns the stop summary; no active capture
@@ -253,7 +256,8 @@ pub async fn post_video_record_start(req: Option<Json<RecordingStartRequest>>) -
 }
 
 /// `POST /api/video/record/stop` → `{filename, stopped_at, duration_seconds,
-/// size_bytes}`; `409 E_RECORDING_NOT_ACTIVE` when nothing is recording.
+/// size_bytes, segments, interrupted_count}`; `409 E_RECORDING_NOT_ACTIVE`
+/// when nothing is recording.
 pub async fn post_video_record_stop() -> Response {
     stop_recording().await
 }
@@ -465,6 +469,40 @@ mod tests {
         // After the stop the recorder still holds `current_path` for its own reply,
         // but the status surface must not render a finished capture as if live.
         assert_eq!(recording_view(&rec).await, (false, Value::Null));
+    }
+
+    /// The stop reply carries the segment list and the interruption count.
+    #[tokio::test]
+    async fn gs_recording_stop_reports_segments_and_interruptions() {
+        // The fake's own `sleep` resolves on PATH, which sibling tests mutate.
+        let _guard = PATH_LOCK.lock().await;
+        let bindir = tempfile::tempdir().unwrap();
+        let fake = bindir.path().join("fake-ffmpeg");
+        std::fs::write(&fake, "#!/bin/sh\nsleep 30\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let recdir = tempfile::tempdir().unwrap();
+        let rec = GroundStationRecorder::new(recdir.path(), "rtsp://127.0.0.1:8554/main")
+            .with_ffmpeg(fake.to_string_lossy().into_owned());
+        let mut busy_retries = 0;
+        let started = loop {
+            match rec.start(Some("segments")).await {
+                Ok(started) => break started,
+                Err(e) if e.message.contains("Text file busy") && busy_retries < 20 => {
+                    busy_retries += 1;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(e) => panic!("start succeeds: {e:?}"),
+            }
+        };
+        let body = body_json(json_ok(rec.stop().await.expect("stop succeeds"))).await;
+        assert_eq!(body["segments"], json!([started["filename"]]));
+        assert_eq!(body["interrupted_count"], json!(0));
+        for key in ["filename", "stopped_at", "duration_seconds", "size_bytes"] {
+            assert!(body.get(key).is_some(), "missing {key}");
+        }
     }
 
     /// The two surfaces that report a live capture must agree, in BOTH states.

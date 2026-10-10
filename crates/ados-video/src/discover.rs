@@ -22,7 +22,7 @@
 //! ```
 //! A discovery that times out, fails to spawn, or returns malformed output is
 //! treated as no-primary (an empty result), never an error: the orchestrator's
-//! no-primary backoff path then takes over cleanly.
+//! no-primary retry path then takes over cleanly.
 
 use std::time::Duration;
 

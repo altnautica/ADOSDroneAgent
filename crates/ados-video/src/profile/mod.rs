@@ -54,6 +54,21 @@
 //! NOT be raised to the rescue tier's 1200 kbps. Neither controller does a
 //! read-modify-write, so neither can lose a race against the other.
 //!
+//! # Base profile and hero leases
+//!
+//! The profile input is itself a composition, owned by [`EncoderControl`]:
+//!
+//! ```text
+//! effective profile = hero   while any hero lease is live
+//!                   = base   otherwise (the boot profile or the last plain set)
+//! ```
+//!
+//! A plain set (the ground station's fleet-hero assignment) moves the base. A
+//! lease is a holder's time-bounded claim on hero (an operator viewing this
+//! drone full-screen), dropped when released or when it expires, with no
+//! further request; the attached vision engine holds one with no expiry. See
+//! [`lease`].
+//!
 //! # Boot default
 //!
 //! A node that shares the WFB channel boots **thumbnail**, so a fleet powering
@@ -65,9 +80,10 @@
 //! byte-identical to what it does today. See [`boot_profile`].
 
 pub mod ipc;
+pub mod lease;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -77,9 +93,11 @@ use crate::config::CameraConfig;
 pub use crate::config::CameraProfile as EncoderSettings;
 
 pub use ipc::{
-    read_state, read_state_from, serve, set_bitrate_ceiling, set_bitrate_ceiling_at, set_profile,
-    set_profile_at, state, state_at, VIDEO_ENCODER_SOCK, VIDEO_PROFILE_SIDECAR,
+    read_state, read_state_from, release_lease, release_lease_at, serve, set_bitrate_ceiling,
+    set_bitrate_ceiling_at, set_lease, set_lease_at, set_profile, set_profile_at, state, state_at,
+    VIDEO_ENCODER_SOCK, VIDEO_PROFILE_SIDECAR,
 };
+use lease::{LeaseTable, LeaseView, MonotonicClock, SystemClock};
 
 /// Which attention profile the encoder is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -167,8 +185,9 @@ pub fn resolve(
 
 /// The full encoder attention state, as published on the sidecar and returned
 /// by every command-socket op.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EncoderState {
+    /// The effective profile: hero while any lease is live, else the base.
     pub profile: VideoProfile,
     /// The adaptive ladder's clamp, or `None` when unclamped. `ados-radio`
     /// self-heals off this field, so it must always be present in the sidecar
@@ -195,6 +214,14 @@ pub struct EncoderState {
     /// equivalent counter.
     #[serde(default)]
     pub encoder_respawns: u64,
+    /// The profile the node runs with no lease live: the boot profile or the
+    /// last plain set. `None` only in a sidecar written before leases existed.
+    #[serde(default)]
+    pub base_profile: Option<VideoProfile>,
+    /// The live hero leases. `expires_in_s` is `None` for an internal lease
+    /// with no expiry (the attached vision engine).
+    #[serde(default)]
+    pub leases: Vec<LeaseView>,
 }
 
 impl EncoderState {
@@ -208,6 +235,8 @@ impl EncoderState {
             bitrate_kbps: s.bitrate_kbps,
             ceiling_deferred: false,
             encoder_respawns: 0,
+            base_profile: Some(profile),
+            leases: Vec::new(),
         }
     }
 
@@ -237,13 +266,14 @@ impl EncoderState {
 /// waiter blocks on until the orchestrator has actually applied it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Desired {
+    /// The effective profile (see [`lease`]), not the base.
     pub profile: VideoProfile,
     pub ceiling_kbps: Option<u32>,
     pub generation: u64,
 }
 
 /// What the orchestrator last actually spawned the encoder with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Applied {
     pub state: EncoderState,
     /// The highest [`Desired::generation`] this reflects.
@@ -259,17 +289,28 @@ pub struct Applied {
 /// Deliberately two watch channels rather than one lock: a requester never
 /// reads-then-writes, it only publishes its own concern and waits for the
 /// applier's acknowledgement, so the profile setter and the ceiling setter can
-/// never clobber each other.
+/// never clobber each other. The base profile and the hero leases share one
+/// lock because the effective profile is a function of both.
 #[derive(Debug)]
 pub struct EncoderControl {
     desired: watch::Sender<Desired>,
     applied: watch::Sender<Applied>,
+    leases: Mutex<LeaseTable>,
 }
 
 impl EncoderControl {
     /// A control seeded with the boot state: `profile`, no ceiling, and the
     /// settings the orchestrator is about to cold-start the encoder with.
     pub fn new(profile: VideoProfile, settings: EncoderSettings) -> Arc<Self> {
+        Self::with_clock(profile, settings, Arc::new(SystemClock))
+    }
+
+    /// [`Self::new`] with lease expiry read from `clock` (tests inject one).
+    pub fn with_clock(
+        profile: VideoProfile,
+        settings: EncoderSettings,
+        clock: Arc<dyn MonotonicClock>,
+    ) -> Arc<Self> {
         let state = EncoderState::new(profile, None, settings);
         let (desired, _) = watch::channel(Desired {
             profile,
@@ -281,7 +322,11 @@ impl EncoderControl {
             generation: 0,
             restarted: false,
         });
-        Arc::new(Self { desired, applied })
+        Arc::new(Self {
+            desired,
+            applied,
+            leases: Mutex::new(LeaseTable::new(profile, clock)),
+        })
     }
 
     /// The currently requested profile + ceiling.
@@ -291,7 +336,7 @@ impl EncoderControl {
 
     /// The state the encoder is actually running.
     pub fn applied(&self) -> Applied {
-        *self.applied.borrow()
+        self.applied.borrow().clone()
     }
 
     /// Watch handle the orchestrator's run loop selects on.
@@ -299,9 +344,10 @@ impl EncoderControl {
         self.desired.subscribe()
     }
 
-    /// Request a base profile. Returns the generation to wait on.
+    /// Request a base profile. Returns the generation to wait on. A live
+    /// lease keeps the effective profile at hero until it ends.
     pub fn request_profile(&self, profile: VideoProfile) -> u64 {
-        self.bump(|d| d.profile = profile)
+        self.compose(|t| t.base = profile)
     }
 
     /// Request an adaptive bitrate clamp (`None` clears it). Returns the
@@ -321,13 +367,21 @@ impl EncoderControl {
     }
 
     /// Record what the orchestrator spawned, releasing any waiter blocked on a
-    /// generation at or below `generation`.
-    pub fn note_applied(&self, state: EncoderState, generation: u64, restarted: bool) {
+    /// generation at or below `generation`. Returns `state` stamped with the
+    /// base profile and the live leases, which is what the caller publishes.
+    pub fn note_applied(
+        &self,
+        state: EncoderState,
+        generation: u64,
+        restarted: bool,
+    ) -> EncoderState {
+        let state = self.stamp_attention(state);
         self.applied.send_replace(Applied {
-            state,
+            state: state.clone(),
             generation,
             restarted,
         });
+        state
     }
 
     /// Block until the orchestrator has applied a request at least as new as
@@ -337,14 +391,14 @@ impl EncoderControl {
     pub async fn wait_applied(&self, generation: u64, bound: Duration) -> Option<Applied> {
         let mut rx = self.applied.subscribe();
         if rx.borrow().generation >= generation {
-            return Some(*rx.borrow());
+            return Some(rx.borrow().clone());
         }
         tokio::time::timeout(bound, async {
             loop {
                 if rx.changed().await.is_err() {
                     return None;
                 }
-                let a = *rx.borrow();
+                let a = rx.borrow().clone();
                 if a.generation >= generation {
                     return Some(a);
                 }
@@ -383,143 +437,4 @@ pub async fn write_sidecar_async(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cfg() -> CameraConfig {
-        CameraConfig::default()
-    }
-
-    #[test]
-    fn hero_is_the_existing_camera_defaults_and_thumbnail_is_the_small_profile() {
-        let c = cfg();
-        assert_eq!(
-            base_settings(VideoProfile::Hero, &c),
-            EncoderSettings {
-                width: 1280,
-                height: 720,
-                fps: 30,
-                bitrate_kbps: 4000
-            }
-        );
-        assert_eq!(
-            base_settings(VideoProfile::Thumbnail, &c),
-            EncoderSettings {
-                width: 320,
-                height: 180,
-                fps: 1,
-                bitrate_kbps: 50
-            }
-        );
-    }
-
-    #[test]
-    fn a_wfb_node_boots_thumbnail_and_an_off_channel_node_boots_hero() {
-        // The fleet case: 24 aircraft powering up together must not each grab
-        // 48% airtime.
-        assert_eq!(boot_profile("wfb"), VideoProfile::Thumbnail);
-        // A rig that shares no channel keeps today's behaviour exactly.
-        assert_eq!(boot_profile("cloud"), VideoProfile::Hero);
-        assert_eq!(boot_profile("disabled"), VideoProfile::Hero);
-    }
-
-    #[test]
-    fn the_ceiling_only_ever_reduces_the_bitrate() {
-        let c = cfg();
-        // A hero on a bad link is clamped down to the rescue tier.
-        assert_eq!(
-            resolve(VideoProfile::Hero, Some(1200), &c).bitrate_kbps,
-            1200
-        );
-        // A thumbnail is NOT raised to the rescue tier.
-        assert_eq!(
-            resolve(VideoProfile::Thumbnail, Some(1200), &c).bitrate_kbps,
-            50
-        );
-        // A ceiling above the profile's nominal value is a no-op.
-        assert_eq!(
-            resolve(VideoProfile::Hero, Some(9000), &c).bitrate_kbps,
-            4000
-        );
-        // No ceiling is the profile's nominal value.
-        assert_eq!(resolve(VideoProfile::Hero, None, &c).bitrate_kbps, 4000);
-    }
-
-    #[test]
-    fn the_ceiling_never_touches_geometry_or_frame_rate() {
-        let c = cfg();
-        let clamped = resolve(VideoProfile::Hero, Some(200), &c);
-        assert_eq!(
-            (clamped.width, clamped.height, clamped.fps),
-            (1280, 720, 30)
-        );
-    }
-
-    #[test]
-    fn profile_wire_strings_round_trip_and_reject_typos() {
-        for p in [VideoProfile::Hero, VideoProfile::Thumbnail] {
-            assert_eq!(VideoProfile::parse(p.as_str()), Some(p));
-        }
-        assert_eq!(VideoProfile::parse("Hero"), None);
-        assert_eq!(VideoProfile::parse("thumb"), None);
-        assert_eq!(VideoProfile::parse(""), None);
-    }
-
-    #[test]
-    fn the_two_setters_compose_without_clobbering_each_other() {
-        let ctl = EncoderControl::new(VideoProfile::Thumbnail, cfg().thumbnail);
-        let g1 = ctl.request_ceiling(Some(1200));
-        let g2 = ctl.request_profile(VideoProfile::Hero);
-        assert!(g2 > g1);
-        let d = ctl.desired();
-        // The profile request did not wipe the ceiling, nor vice versa.
-        assert_eq!(d.profile, VideoProfile::Hero);
-        assert_eq!(d.ceiling_kbps, Some(1200));
-        assert_eq!(
-            resolve(d.profile, d.ceiling_kbps, &cfg()).bitrate_kbps,
-            1200
-        );
-    }
-
-    #[tokio::test]
-    async fn a_waiter_unblocks_only_once_its_own_generation_is_applied() {
-        let ctl = EncoderControl::new(VideoProfile::Thumbnail, cfg().thumbnail);
-        let g = ctl.request_profile(VideoProfile::Hero);
-        // Nothing applied yet: the wait must not resolve.
-        assert!(ctl
-            .wait_applied(g, Duration::from_millis(20))
-            .await
-            .is_none());
-        let hero = base_settings(VideoProfile::Hero, &cfg());
-        ctl.note_applied(EncoderState::new(VideoProfile::Hero, None, hero), g, true);
-        let applied = ctl
-            .wait_applied(g, Duration::from_millis(20))
-            .await
-            .unwrap();
-        assert_eq!(applied.state.profile, VideoProfile::Hero);
-        assert_eq!(applied.state.bitrate_kbps, 4000);
-        assert!(applied.restarted);
-    }
-
-    #[test]
-    fn the_sidecar_round_trips_and_always_carries_the_ceiling_field() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("video-profile.json");
-        let st = EncoderState::new(
-            VideoProfile::Hero,
-            None,
-            base_settings(VideoProfile::Hero, &cfg()),
-        );
-        write_sidecar(&path, &st).unwrap();
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw["profile"], "hero");
-        // `ados-radio` self-heals off this key; it must exist even when clear.
-        assert!(raw
-            .get("ceiling_kbps")
-            .is_some_and(serde_json::Value::is_null));
-        assert_eq!(read_state_from(&path).unwrap(), st);
-        // No temp file left behind.
-        assert!(!path.with_extension("json.tmp").exists());
-    }
-}
+mod tests;

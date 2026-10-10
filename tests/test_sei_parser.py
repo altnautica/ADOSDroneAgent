@@ -7,24 +7,47 @@ implementations exported the same names and the same UUID, which is why the
 divergence went unnoticed — so these tests assert behaviour on real byte
 streams rather than checking that symbols resolve.
 
-The stream under test is built by the injector that ships alongside it, so a
-change to either side that breaks the pair fails here.
+The stream under test is built by a byte-for-byte mirror of the injector the
+video pipeline runs in-process (`crates/ados-video/src/sei.rs`: the same UUID,
+layout and emulation-prevention rule), so a change to the wire format on
+either side fails here or in that crate's own layout test.
 """
 
 from __future__ import annotations
 
 import struct
 
-from ados.services.video.sei_injector import (
-    ADOS_LATENCY_SEI_UUID,
-    _emulation_prevent,
-    build_sei_nal,
-)
 from ados.services.video.sei_parser import (
     _iter_nal_units,
     _remove_emulation_prevention,
     parse_sei_latency_ns,
 )
+
+# The UUID the in-process injector stamps (`sei.rs` ADOS_LATENCY_SEI_UUID).
+ADOS_LATENCY_SEI_UUID = bytes.fromhex("ad05140e9c2c4f6e8a31f0e5b7d4c8a2")
+
+
+def _emulation_prevent(rbsp: bytes) -> bytes:
+    """H.264 §7.4.1.1 escaping, as the injector applies it: after two emitted
+    zeros, any byte <= 0x03 gets a 0x03 in front of it."""
+    out = bytearray()
+    zeros = 0
+    for b in rbsp:
+        if zeros >= 2 and b <= 0x03:
+            out.append(0x03)
+            zeros = 0
+        out.append(b)
+        zeros = zeros + 1 if b == 0x00 else 0
+    return bytes(out)
+
+
+def build_sei_nal(timestamp_ns: int) -> bytes:
+    """`00 00 00 01 | 06 | 05 18 | UUID | ts_ns (BE) | 80`, escaped after the
+    NAL header: the injector's exact output for `timestamp_ns`."""
+    payload = ADOS_LATENCY_SEI_UUID + struct.pack(">Q", timestamp_ns)
+    rbsp = bytes([0x05, len(payload)]) + payload + b"\x80"
+    return b"\x00\x00\x00\x01" + b"\x06" + _emulation_prevent(rbsp)
+
 
 # A realistic wall-clock nanosecond timestamp, used as the high bits so the
 # low-byte matrix below varies only the byte that regressed.
@@ -118,17 +141,12 @@ def test_finds_the_marker_after_a_non_matching_nal() -> None:
     assert parse_sei_latency_ns(stream) == ns
 
 
-def test_the_two_uuid_constants_are_the_same_bytes() -> None:
+def test_the_parser_uuid_matches_the_injector() -> None:
     """Pins the wire contract across the injector/parser pair.
 
-    Asserting only `len(...) == 16` cannot fail: both modules carry a
-    module-level `assert len(ADOS_LATENCY_SEI_UUID) == 16`, so a changed length
-    raises during collection and the test never runs. What is genuinely
-    unguarded is the two constants DIVERGING — they are separate literals in
-    separate files, and the injector's own comment says it keeps its copy so an
-    air-side rig can import it without pulling the parser's dependencies. Two
-    literals that must match is the same shape as the two same-named parsers
-    that cost this project 236 dropped samples.
+    The injector's UUID lives in the Rust video pipeline and the parser's here;
+    two literals that must match is the same shape as the two same-named
+    parsers that cost this project 236 dropped samples.
     """
     from ados.services.video import sei_parser as parser_mod
 

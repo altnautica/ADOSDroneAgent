@@ -176,8 +176,8 @@ pub enum MediamtxProfile {
     /// The drone. Encoder publishes locally; readers are browser WHEP clients
     /// on the LAN plus the wfb radio tap.
     Air,
-    /// The ground station. The ffmpeg ingest publishes the radio-decoded stream;
-    /// readers are browser WHEP clients on the LAN.
+    /// The ground station. The media server's native `udp+rtp` source takes the
+    /// radio-decoded stream; readers are browser WHEP clients on the LAN.
     Ground,
     /// Reached through a cloud relay rather than the LAN, so ICE actually needs
     /// STUN and a TCP candidate is a legitimate last resort.

@@ -80,8 +80,8 @@ async fn main() {
     let camera_plugged = orch.camera_plugged_handle();
 
     // Shutdown + signal wiring. SIGTERM / SIGINT trigger the shutdown handle;
-    // SIGUSR1 (a fresh /dev/video* node, per the udev rule) wakes the
-    // no-primary-camera backoff sleep.
+    // SIGUSR1 (a fresh /dev/video* node, per the udev rule) retries an
+    // error-state pipeline at once instead of on the next tick.
     let shutdown = Shutdown::new();
     #[cfg(target_os = "linux")]
     spawn_signal_handlers(shutdown.clone(), camera_plugged.clone());
@@ -108,6 +108,13 @@ async fn main() {
             .await;
         });
     }
+
+    // Hero lease expiry: an abandoned lease reverts the encoder to its base
+    // profile with no further request.
+    tokio::spawn(ados_video::profile::lease::run_lease_expiry(
+        orch.encoder_control(),
+        shutdown.clone(),
+    ));
 
     // Cold start. A failed start lands the orchestrator in Error; the run
     // loop's retry-from-error path then takes over (USB hotplug, late mediamtx,

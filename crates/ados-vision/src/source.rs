@@ -20,6 +20,8 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use ados_protocol::framebus::FrameFormat;
@@ -29,6 +31,93 @@ use serde::Deserialize;
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
+
+/// Buffers a source keeps in circulation. One is being filled, one sits in a
+/// published frame or an in-flight inference, and one is spare.
+pub const POOL_BUFFERS: usize = 3;
+
+/// Hands a frame buffer back to the source that filled it, so the next frame
+/// reuses its allocation. Cheap to clone; safe to move into an inference task.
+#[derive(Clone)]
+pub struct BufferReturn {
+    tx: mpsc::Sender<Vec<u8>>,
+    parked: Arc<AtomicUsize>,
+}
+
+impl BufferReturn {
+    /// Return a buffer. A buffer is dropped instead when the pool already
+    /// holds [`POOL_BUFFERS`] spares, or when its pool is gone.
+    pub fn give(&self, buf: Vec<u8>) {
+        if self.parked.fetch_add(1, Ordering::AcqRel) >= POOL_BUFFERS {
+            self.parked.fetch_sub(1, Ordering::AcqRel);
+            return;
+        }
+        if self.tx.send(buf).is_err() {
+            self.parked.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// A per-source pool of at most [`POOL_BUFFERS`] spare frame buffers. A
+/// multi-MB frame is filled into a recycled buffer instead of a fresh
+/// allocation, which would otherwise mmap and fault in a new region per frame.
+pub struct BufferPool {
+    tx: mpsc::Sender<Vec<u8>>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    parked: Arc<AtomicUsize>,
+    allocations: u64,
+}
+
+impl Default for BufferPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BufferPool {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            tx,
+            rx,
+            parked: Arc::new(AtomicUsize::new(0)),
+            allocations: 0,
+        }
+    }
+
+    /// A handle that returns buffers to this pool.
+    pub fn recycler(&self) -> BufferReturn {
+        BufferReturn {
+            tx: self.tx.clone(),
+            parked: self.parked.clone(),
+        }
+    }
+
+    /// A buffer of exactly `len` bytes. A returned buffer is reused (resized,
+    /// which reallocates only when it is too small); a fresh one is allocated
+    /// only when none is waiting.
+    pub fn take(&mut self, len: usize) -> Vec<u8> {
+        match self.rx.try_recv() {
+            Ok(mut buf) => {
+                self.parked.fetch_sub(1, Ordering::AcqRel);
+                if buf.capacity() < len {
+                    self.allocations += 1;
+                }
+                buf.resize(len, 0);
+                buf
+            }
+            Err(_) => {
+                self.allocations += 1;
+                vec![0u8; len]
+            }
+        }
+    }
+
+    /// How many times this pool had to allocate (or grow) a buffer.
+    pub fn allocations(&self) -> u64 {
+        self.allocations
+    }
+}
 
 /// One raw frame plus the metadata needed to size a ring and stamp a descriptor.
 #[derive(Debug, Clone)]
@@ -44,10 +133,13 @@ pub struct RawFrame {
 /// engine then re-opens the source after a backoff.
 #[allow(async_fn_in_trait)]
 pub trait FrameSource: Send {
-    /// Block until the next frame is available.
+    /// Block until the next frame is available. The frame's buffer comes from
+    /// the source's pool; hand it back through [`FrameSource::recycler`].
     async fn next_frame(&mut self) -> Result<RawFrame>;
     /// The camera id this source feeds.
     fn camera_id(&self) -> &str;
+    /// The handle that returns a consumed frame buffer to this source's pool.
+    fn recycler(&self) -> BufferReturn;
 }
 
 /// An owned, statically-dispatched source over the two source kinds. The
@@ -71,6 +163,12 @@ impl FrameSource for AnySource {
             AnySource::Capture(s) => s.camera_id(),
         }
     }
+    fn recycler(&self) -> BufferReturn {
+        match self {
+            AnySource::Tap(s) => s.recycler(),
+            AnySource::Capture(s) => s.recycler(),
+        }
+    }
 }
 
 // --- tap source -----------------------------------------------------------
@@ -84,6 +182,7 @@ pub struct TapSource {
     camera_id: String,
     socket_path: String,
     stream: Option<UnixStream>,
+    pool: BufferPool,
 }
 
 impl TapSource {
@@ -92,6 +191,7 @@ impl TapSource {
             camera_id: camera_id.into(),
             socket_path: socket_path.into(),
             stream: None,
+            pool: BufferPool::new(),
         }
     }
 
@@ -123,7 +223,7 @@ impl FrameSource for TapSource {
             }
         };
         let stream = self.stream.as_mut().expect("still connected");
-        let mut data = vec![0u8; byte_len];
+        let mut data = self.pool.take(byte_len);
         if byte_len > 0 {
             if let Err(e) = stream.read_exact(&mut data).await {
                 self.stream = None;
@@ -141,6 +241,9 @@ impl FrameSource for TapSource {
     fn camera_id(&self) -> &str {
         &self.camera_id
     }
+    fn recycler(&self) -> BufferReturn {
+        self.pool.recycler()
+    }
 }
 
 // --- capture source -------------------------------------------------------
@@ -156,6 +259,7 @@ pub struct CaptureSource {
     format: FrameFormat,
     child: Option<Child>,
     frame_bytes: usize,
+    pool: BufferPool,
 }
 
 impl CaptureSource {
@@ -174,6 +278,7 @@ impl CaptureSource {
             format,
             child: None,
             frame_bytes: format.frame_bytes(width, height),
+            pool: BufferPool::new(),
         }
     }
 
@@ -232,7 +337,7 @@ impl FrameSource for CaptureSource {
             .stdout
             .as_mut()
             .ok_or_else(|| anyhow!("capture child has no stdout"))?;
-        let mut data = vec![0u8; self.frame_bytes];
+        let mut data = self.pool.take(self.frame_bytes);
         if let Err(e) = stdout.read_exact(&mut data).await {
             // ffmpeg exited or the device went away; drop the child so the next
             // call respawns.
@@ -249,6 +354,9 @@ impl FrameSource for CaptureSource {
 
     fn camera_id(&self) -> &str {
         &self.camera_id
+    }
+    fn recycler(&self) -> BufferReturn {
+        self.pool.recycler()
     }
 }
 
@@ -412,5 +520,43 @@ mod tests {
         assert_eq!(got.data, frame.data);
         assert_eq!(src.camera_id(), "uvc-0");
         writer.abort();
+    }
+
+    #[test]
+    fn buffer_pool_flat_allocations() {
+        const FRAME: usize = 1920 * 1080 * 3 / 2;
+        let mut pool = BufferPool::new();
+        let back = pool.recycler();
+        // Steady state: one frame published (returned at once), one held by an
+        // in-flight inference that hands it back a frame later.
+        let mut in_flight: Option<Vec<u8>> = None;
+        for i in 0..300 {
+            let buf = pool.take(FRAME);
+            assert_eq!(buf.len(), FRAME);
+            if i % 2 == 0 {
+                if let Some(prev) = in_flight.replace(buf) {
+                    back.give(prev);
+                }
+            } else {
+                back.give(buf);
+            }
+        }
+        assert!(
+            pool.allocations() <= POOL_BUFFERS as u64,
+            "allocations stayed flat: {}",
+            pool.allocations()
+        );
+
+        // A burst of returns never parks more than the pool size.
+        for _ in 0..10 {
+            back.give(vec![0u8; 8]);
+        }
+        let before = pool.allocations();
+        for _ in 0..POOL_BUFFERS {
+            let _ = pool.take(8);
+        }
+        // Spares exhausted: the next take allocates.
+        let _ = pool.take(8);
+        assert_eq!(pool.allocations(), before + 1);
     }
 }

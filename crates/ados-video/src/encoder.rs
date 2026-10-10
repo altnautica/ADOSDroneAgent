@@ -107,10 +107,6 @@ pub struct EncoderEnv {
     /// `rpicam-vid` there is a software x264 encoder and must be given
     /// `--low-latency` or it buffers a constant 8-frame pipeline.
     pub pi5_class: bool,
-    /// Absolute path to the Python interpreter used to splice the SEI
-    /// injector (`<python> -m ados.services.video.sei_injector`). Equivalent
-    /// to Python's `sys.executable`.
-    pub python_executable: String,
     /// Usable CPU parallelism, as the kernel reports it
     /// ([`std::thread::available_parallelism`]).
     ///
@@ -167,7 +163,6 @@ impl EncoderEnv {
             has_rtspclientsink: gst_element_present("rtspclientsink"),
             encoder_api,
             pi5_class,
-            python_executable: current_python_executable(),
             cpu_threads: detect_cpu_threads(),
         }
     }
@@ -182,7 +177,6 @@ impl EncoderEnv {
             has_rtspclientsink: false,
             encoder_api: "unknown".to_string(),
             pi5_class: false,
-            python_executable: current_python_executable(),
             cpu_threads: detect_cpu_threads(),
         }
     }
@@ -207,7 +201,6 @@ impl EncoderEnv {
                 has_rtspclientsink: false,
                 encoder_api: "unknown".to_string(),
                 pi5_class: false,
-                python_executable: current_python_executable(),
                 cpu_threads: detect_cpu_threads(),
             })
     }
@@ -254,15 +247,6 @@ pub fn soc_is_pi5_class(compatibles: &[String]) -> bool {
     })
 }
 
-/// Best-effort resolution of the running interpreter for the SEI splice.
-/// Falls back to the installed venv interpreter path the agent ships with.
-fn current_python_executable() -> String {
-    std::env::var("ADOS_PYTHON")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/opt/ados/venv/bin/python3".to_string())
-}
-
 /// Encoder invocation parameters.
 #[derive(Debug, Clone)]
 pub struct EncoderParams {
@@ -291,6 +275,11 @@ pub struct EncoderParams {
     /// separate tap). The caller sets it explicitly;
     /// [`EncoderParams::from_camera_config`] leaves it off.
     pub rtp_fanout: bool,
+    /// `video.camera.passthrough`: on a network source, copy the camera's
+    /// H.264 as-is (`-c:v copy`) instead of decoding and re-encoding it. The
+    /// camera's own GOP and bitrate then reach the radio unchanged, which is
+    /// why it is opt-in. Ignored for local devices.
+    pub passthrough: bool,
 }
 
 impl EncoderParams {
@@ -310,6 +299,7 @@ impl EncoderParams {
             vflip: cfg.vflip,
             keyframe_interval: cfg.keyframe_interval,
             rtp_fanout: false,
+            passthrough: cfg.passthrough,
         }
     }
 }
@@ -524,8 +514,8 @@ fn resolve_kind(
 /// Build the full argv vector for the given encoder configuration.
 ///
 /// Returns the program plus its arguments. For the bash-pipeline cases (rpicam
-/// → RTSP, and the SEI-wrapped variants) the returned vector is
-/// `["bash", "-c", "<pipeline>"]`, exactly as the predecessor composes it.
+/// → RTSP) the returned vector is `["bash", "-c", "<pipeline>"]`, exactly as
+/// the predecessor composes it.
 pub fn build_encoder_command(
     params: &EncoderParams,
     source: &str,
@@ -728,6 +718,23 @@ fn select_input_format(camera: Option<&CameraInfo>) -> Option<&'static str> {
     }
 }
 
+/// Capture-queue depth (`-thread_queue_size`) for a V4L2 input.
+///
+/// Compressed MJPEG frames are tens of KB, so 128 packets (a >4 s stall at
+/// 30 fps) is a small transient. A raw frame is `w*h*2` bytes (YUYV), so the
+/// raw depth is capped to about 32 MiB of queued frames, never below 8 and
+/// never above 128. An unknown format is sized as raw: the safe assumption.
+pub fn input_queue_depth(input_format: Option<&str>, width: u32, height: u32) -> u32 {
+    const MJPEG_DEPTH: u32 = 128;
+    const RAW_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
+    if input_format == Some("mjpeg") {
+        return MJPEG_DEPTH;
+    }
+    let frame = u64::from(width) * u64::from(height) * 2;
+    let depth = RAW_BUDGET_BYTES.checked_div(frame).unwrap_or(128);
+    depth.clamp(8, 128) as u32
+}
+
 /// `ffmpeg` command for USB / IP camera encoding.
 ///
 /// Network sources skip the v4l2 wrapper. V4L2 sources prepend the
@@ -785,20 +792,15 @@ fn build_ffmpeg_command(
     } else {
         // V4L2 device — low-latency input flags then the selected format.
         //
-        // `-thread_queue_size 128`: this is queue DEPTH in packets between the
-        // kernel's V4L2 buffers and ffmpeg's demuxer thread, and it is NOT a
-        // latency knob. A queue only adds latency while it is actually
-        // occupied, and it is only occupied while the consumer is behind. The
-        // previous depth of 4 meant any scheduler hiccup longer than ~130ms at
-        // 30fps overran it, and an overrun on a capture input does not delay
-        // frames, it DROPS them outright — the one failure mode a video link
-        // cannot recover from. 128 packets covers a >4s stall at 30fps, far
-        // beyond any plausible hiccup on a loaded SBC, while staying bounded:
-        // this builder prefers the compressed `mjpeg` input format
-        // (see `select_input_format`), where 128 queued frames is tens of MB
-        // of transient buffer, and even the raw `yuyv` fallback stays in the
-        // low hundreds of MB in the pathological case where it fills at all.
+        // `-thread_queue_size` is queue DEPTH in packets between the kernel's
+        // V4L2 buffers and ffmpeg's demuxer thread, and it is NOT a latency
+        // knob: a queue only adds latency while it is occupied, which is only
+        // while the consumer is behind. Too shallow a queue makes a scheduler
+        // hiccup DROP capture frames outright. Too deep a queue of RAW frames
+        // is an OOM risk on a 1 GB board, so the depth is sized by format (see
+        // `input_queue_depth`).
         let input_fmt = select_input_format(camera);
+        let queue = input_queue_depth(input_fmt, params.width, params.height);
         cmd.extend(
             [
                 "-fflags",
@@ -810,13 +812,13 @@ fn build_ffmpeg_command(
                 "-analyzeduration",
                 "0",
                 "-thread_queue_size",
-                "128",
-                "-f",
-                "v4l2",
             ]
             .iter()
             .map(|s| s.to_string()),
         );
+        cmd.push(queue.to_string());
+        cmd.push("-f".into());
+        cmd.push("v4l2".into());
         if let Some(fmt) = input_fmt {
             cmd.push("-input_format".into());
             cmd.push(fmt.to_string());
@@ -827,6 +829,19 @@ fn build_ffmpeg_command(
         cmd.push(params.fps.to_string());
         cmd.push("-i".into());
         cmd.push(source.to_string());
+    }
+
+    // Passthrough: a network camera that already publishes H.264 is copied,
+    // not decoded and re-encoded. `dump_extra` still puts SPS/PPS in-band
+    // before every keyframe so a late joiner can bootstrap.
+    if params.passthrough && crate::config::is_network_url(source) {
+        cmd.extend(
+            ["-c:v", "copy", "-bsf:v", "dump_extra=freq=keyframe"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        cmd.extend(ffmpeg_output_stage(output, params.rtp_fanout));
+        return cmd;
     }
 
     // Output framerate cap — drops frames to target fps BEFORE encoding so the
@@ -1263,215 +1278,122 @@ fn gst_quote(s: &str) -> String {
     }
 }
 
-/// Splice the SEI injector into the encoder→publish pipeline.
+/// The encoder→publish split the in-process SEI injector sits in.
+///
+/// `encode` writes raw Annex-B H.264 to stdout; `publish` reads it from stdin
+/// and publishes it. The orchestrator runs both and pumps the bytes between
+/// them through [`crate::sei::SeiInjector`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeiSplit {
+    pub encode: Vec<String>,
+    pub publish: Vec<String>,
+}
+
+/// Separator token [`SeiSplit::render`] places between the two stages.
+pub const SEI_STAGE_TOKEN: &str = "|sei|";
+
+impl SeiSplit {
+    /// Both stages as one token list, joined by [`SEI_STAGE_TOKEN`]. Used to
+    /// read facts off the whole pipeline (encoder label, radio fan-out) and to
+    /// pin the split in fixtures.
+    pub fn render(&self) -> Vec<String> {
+        let mut out = self.encode.clone();
+        out.push(SEI_STAGE_TOKEN.to_string());
+        out.extend(self.publish.iter().cloned());
+        out
+    }
+}
+
+/// Split the encoder→publish pipeline for the SEI injector.
 ///
 /// The injector writes a wall-clock SEI NAL in front of every VCL slice so any
 /// downstream consumer sees the same timestamp on the same frame (this is what
 /// makes browser glass-to-glass measurement possible). Three cases:
-/// - bash pipeline (rpicam path): splice `| <python> -m injector |` before the
-///   final ffmpeg stage;
-/// - raw ffmpeg → RTSP/UDP/TCP: split into encode-to-stdout + injector +
-///   publish-stdin, rebuilding the publisher for the original URI;
-/// - GStreamer / unknown: returned unchanged (the wfb-tee injector stays the
-///   sole SEI source).
-pub fn wrap_with_sei_inject(cmd: &[String], output_uri: &str, env: &EncoderEnv) -> Vec<String> {
-    let inject_cmd = format!(
-        "{} -m ados.services.video.sei_injector",
-        shell_quote(&env.python_executable)
-    );
-
+/// - bash pipeline (rpicam path): the stage before the final `|` encodes, the
+///   final stage publishes;
+/// - raw ffmpeg → RTSP/UDP/TCP: split into encode-to-stdout and
+///   publish-from-stdin, rebuilding the publisher for the original URI;
+/// - GStreamer / unknown: `None`, the command runs unchanged.
+pub fn wrap_with_sei_inject(cmd: &[String], output_uri: &str) -> Option<SeiSplit> {
     // Case 1: rpicam path is already a bash pipeline.
     if cmd.len() >= 3 && cmd[0] == "bash" && cmd[1] == "-c" {
-        let bash_body = &cmd[2];
-        // The pipeline ends `... | ffmpeg ... <output>`. Splice the injector
-        // before the final stage (rsplit on '|' with maxsplit=1).
-        match bash_body.rsplit_once('|') {
-            Some((head, tail)) => {
-                let head = head.trim_end();
-                let tail = tail.trim_start();
-                vec![
-                    "bash".into(),
-                    "-c".into(),
-                    format!("{head} | {inject_cmd} | {tail}"),
-                ]
-            }
-            // No pipe stage to splice — leave unchanged.
-            None => cmd.to_vec(),
-        }
+        // The pipeline ends `... | ffmpeg ... <output>`. Split before the final
+        // stage (rsplit on '|' with maxsplit=1).
+        let (head, tail) = cmd[2].rsplit_once('|')?;
+        return Some(SeiSplit {
+            encode: vec!["bash".into(), "-c".into(), head.trim_end().to_string()],
+            publish: vec!["bash".into(), "-c".into(), tail.trim_start().to_string()],
+        });
+    }
+    // Case 3: gstreamer or unknown — run unchanged.
+    if cmd.first().map(String::as_str) != Some("ffmpeg") {
+        return None;
     }
     // Case 2: raw ffmpeg cmd publishing to RTSP/UDP/TCP. Split into two stages.
-    else if cmd.first().map(String::as_str) == Some("ffmpeg") {
-        // Did the builder append the radio fan-out? Then the output stage ends
-        // in the tee spec rather than the bare URI, and the rebuilt publish
-        // stage has to carry the same two branches — otherwise turning the SEI
-        // probe on would silently take the radio leg down.
-        let fanout = cmd
-            .last()
-            .is_some_and(|t| t.starts_with("[f=") && t.contains(output_uri));
-        let mut encoded: Vec<String> = cmd.to_vec();
-        // Strip the destination: the output URI, or the tee spec that carries
-        // it (both are the last token).
-        if fanout || encoded.last().map(String::as_str) == Some(output_uri) {
-            encoded.pop();
-        }
-        // Strip the output stage's muxer selection + flags, right-to-left, so
-        // the INPUT side's `-f v4l2` / `-fflags` are never touched.
-        strip_flag_with_value(&mut encoded, "-f");
-        if fanout {
-            strip_flag_with_value(&mut encoded, "-map");
-        }
-        strip_flag_with_value(&mut encoded, "-rtsp_transport");
-        strip_flag_with_value(&mut encoded, "-muxpreload");
-        strip_flag_with_value(&mut encoded, "-muxdelay");
-        strip_flag_with_value(&mut encoded, "-max_delay");
-        // Encode-only ffmpeg now emits raw Annex-B H.264 on stdout.
-        encoded.push("-f".into());
-        encoded.push("h264".into());
-        encoded.push("-".into());
-
-        // Publish-only ffmpeg pulls the SEI-stamped Annex-B from stdin and
-        // re-mounts exactly the destination(s) the builder had chosen, through
-        // the SAME output-stage builder — so the mux-delay strip and the radio
-        // fan-out cannot be present on one path and missing on the other.
-        if !(output_uri.starts_with("rtsp://")
-            || output_uri.starts_with("udp://")
-            || output_uri.starts_with("tcp://"))
-        {
-            // Unknown output URI — cannot rebuild the publisher; leave unchanged.
-            return cmd.to_vec();
-        }
-        let mut publish: Vec<String> = [
-            "ffmpeg",
-            "-loglevel",
-            "error",
-            "-fflags",
-            "nobuffer",
-            "-flags",
-            "low_delay",
-            "-f",
-            "h264",
-            "-i",
-            "-",
-            "-c",
-            "copy",
-            "-flush_packets",
-            "1",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-        publish.extend(ffmpeg_output_stage(output_uri, fanout));
-
-        let encode_str = join_shell(&encoded);
-        let publish_str = join_shell(&publish);
-        vec![
-            "bash".into(),
-            "-c".into(),
-            format!("{encode_str} | {inject_cmd} | {publish_str}"),
-        ]
-    }
-    // Case 3: gstreamer or unknown — skip unchanged (legacy wfb-tee SEI).
-    else {
-        cmd.to_vec()
-    }
-}
-
-/// Augment a raw `ffmpeg` encoder command with a second `rawvideo` output for
-/// the vision frame tap, keeping the existing encode/RTSP output settings.
-///
-/// This is the opt-in pre-encode split (gated by `video.vision.raw_tap`): one
-/// decode, one `-filter_complex split`, two outputs. `[enc]` carries the full-
-/// rate branch into the existing encoder + publish stage; `[vis]` is throttled
-/// and scaled and written as `rawvideo` to the sink.
-///
-/// # Every pad has to terminate
-///
-/// A labelled complex-filter output is NOT "left alone" when nothing maps it:
-/// ffmpeg fails filtergraph init with an unconnected output and the process
-/// exits before it opens the camera. The earlier form declared `[enc]` and
-/// mapped only `[visout]`, so enabling the tap took the encoder — and with it
-/// every downstream leg — off the air entirely. So `[enc]` is explicitly
-/// `-map`ped into the first output file, and the split's input pad is bound to
-/// `[0:v]` rather than left implicit.
-///
-/// # Why `-vf` moves into the graph
-///
-/// The orientation transform is a SIMPLE filtergraph (`-vf`), and ffmpeg
-/// refuses `-vf` on an output stream fed by a complex filtergraph. It is
-/// therefore lifted out of the argv and spliced in ahead of the split, which
-/// also means the tap sees the same orientation the operator sees.
-///
-/// Returns the command unchanged when it is not a raw `ffmpeg` command (the
-/// rpicam / gstreamer `bash -c` pipelines), when the output URI is not the last
-/// token (the `-f tee` radio fan-out form), or when the argv already maps or
-/// filters its streams. Those callers fall back to the decoupled third-ffmpeg
-/// tap, which never perturbs the encoder at all.
-pub fn augment_encoder_with_raw_tap(
-    cmd: &[String],
-    existing_output: &str,
-    fps: u32,
-    width: u32,
-    height: u32,
-    pixel_format: &str,
-    sink: &str,
-) -> Vec<String> {
-    // Only a raw ffmpeg command can carry a second mapped output. bash-pipeline
-    // (rpicam / gstreamer) and gst-launch commands are left untouched.
-    if cmd.first().map(String::as_str) != Some("ffmpeg") {
-        return cmd.to_vec();
-    }
-    // The existing output URI must be the last token; if the command does not
-    // end the way we expect, do not risk perturbing it — leave it unchanged.
-    // This is also what excludes the `-f tee` fan-out form, whose last token is
-    // the branch spec.
-    if cmd.last().map(String::as_str) != Some(existing_output) {
-        return cmd.to_vec();
-    }
-    // An argv that already routes its own streams owns its output stage; a
-    // second rewrite on top would double-map it. Refuse rather than emit a
-    // graph whose shape depends on which rewrite ran first.
-    if cmd
-        .iter()
-        .any(|t| t == "-map" || t == "-filter_complex" || t == "-filter:v")
+    if !(output_uri.starts_with("rtsp://")
+        || output_uri.starts_with("udp://")
+        || output_uri.starts_with("tcp://"))
     {
-        return cmd.to_vec();
+        // Unknown output URI — cannot rebuild the publisher.
+        return None;
     }
+    // Did the builder append the radio fan-out? Then the output stage ends in
+    // the tee spec rather than the bare URI, and the rebuilt publish stage has
+    // to carry the same two branches — otherwise turning the SEI probe on
+    // would silently take the radio leg down.
+    let fanout = cmd
+        .last()
+        .is_some_and(|t| t.starts_with("[f=") && t.contains(output_uri));
+    let mut encoded: Vec<String> = cmd.to_vec();
+    // Strip the destination: the output URI, or the tee spec that carries it
+    // (both are the last token).
+    if fanout || encoded.last().map(String::as_str) == Some(output_uri) {
+        encoded.pop();
+    }
+    // Strip the output stage's muxer selection + flags, right-to-left, so the
+    // INPUT side's `-f v4l2` / `-fflags` are never touched.
+    strip_flag_with_value(&mut encoded, "-f");
+    if fanout {
+        strip_flag_with_value(&mut encoded, "-map");
+    }
+    strip_flag_with_value(&mut encoded, "-rtsp_transport");
+    strip_flag_with_value(&mut encoded, "-muxpreload");
+    strip_flag_with_value(&mut encoded, "-muxdelay");
+    strip_flag_with_value(&mut encoded, "-max_delay");
+    // Encode-only ffmpeg now emits raw Annex-B H.264 on stdout.
+    encoded.push("-f".into());
+    encoded.push("h264".into());
+    encoded.push("-".into());
 
-    let fps = fps.max(1);
-    let mut out: Vec<String> = cmd.to_vec();
-
-    // Lift the simple `-vf` chain into the complex graph (see the doc above).
-    let vf = take_flag_value(&mut out, "-vf");
-    let split = match vf.as_deref() {
-        Some(chain) => format!("[0:v]{chain},split=2[enc][vis]"),
-        None => "[0:v]split=2[enc][vis]".to_string(),
-    };
-    let graph = format!("{split};[vis]fps={fps},scale={width}:{height}[visout]");
-
-    // `-map [enc]` is an option of the FIRST output file, so it goes before
-    // that file's URI — which is still the last token at this point.
-    let uri_idx = out.len() - 1;
-    out.splice(uri_idx..uri_idx, ["-map".to_string(), "[enc]".to_string()]);
-    // `-filter_complex` is a global option; emit it ahead of the input so the
-    // argv reads in ffmpeg's documented order.
-    out.splice(1..1, ["-filter_complex".to_string(), graph]);
-
-    // The tap's own output file.
-    out.extend(
-        [
-            "-map",
-            "[visout]",
-            "-an",
-            "-pix_fmt",
-            pixel_format,
-            "-f",
-            "rawvideo",
-            sink,
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
-    out
+    // Publish-only ffmpeg pulls the SEI-stamped Annex-B from stdin and
+    // re-mounts exactly the destination(s) the builder had chosen, through the
+    // SAME output-stage builder — so the mux-delay strip and the radio fan-out
+    // cannot be present on one path and missing on the other.
+    let mut publish: Vec<String> = [
+        "ffmpeg",
+        "-loglevel",
+        "error",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-f",
+        "h264",
+        "-i",
+        "-",
+        "-c",
+        "copy",
+        "-flush_packets",
+        "1",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    publish.extend(ffmpeg_output_stage(output_uri, fanout));
+    Some(SeiSplit {
+        encode: encoded,
+        publish,
+    })
 }
 
 /// Remove the last occurrence of `flag` and its following value from `args`,
@@ -1619,7 +1541,7 @@ pub fn encoder_label(kind: EncoderKind, cmd: &[String]) -> String {
         _ => "ffmpeg",
     };
     for token in cmd {
-        // The rpicam / gstreamer / SEI-wrapped forms are `bash -c "<pipeline>"`,
+        // The rpicam / gstreamer forms are `bash -c "<pipeline>"`,
         // which carries the whole command in one token, so argv position alone
         // cannot order the elements: match as a substring and take the earliest
         // hit within the token.
@@ -1667,9 +1589,6 @@ mod tests {
     /// reviewable diff. Every environment the cases use is fully pinned
     /// (including the CPU count), so the output is identical on any host.
     const FIXTURES: &str = include_str!("../tests/encoder_fixtures.json");
-
-    /// The pinned interpreter path the capture script used for `sys.executable`.
-    const PY_EXE: &str = "/opt/ados/venv/bin/python3";
 
     const RTSP_OUT: &str = "rtsp://127.0.0.1:8554/main";
     const UDP_OUT: &str = "udp://127.0.0.1:5600";
@@ -1755,7 +1674,6 @@ mod tests {
             has_rtspclientsink: true,
             encoder_api: "unknown".into(),
             pi5_class: false,
-            python_executable: PY_EXE.into(),
             cpu_threads: FIXTURE_CPUS,
         }
     }
@@ -1767,7 +1685,6 @@ mod tests {
             has_rtspclientsink: true,
             encoder_api: "unknown".into(),
             pi5_class: false,
-            python_executable: PY_EXE.into(),
             cpu_threads: FIXTURE_CPUS,
         }
     }
@@ -1779,7 +1696,6 @@ mod tests {
             has_rtspclientsink: true,
             encoder_api: "unknown".into(),
             pi5_class: false,
-            python_executable: PY_EXE.into(),
             cpu_threads: FIXTURE_CPUS,
         }
     }
@@ -1791,7 +1707,6 @@ mod tests {
             has_rtspclientsink: true,
             encoder_api: "rkmpp".into(),
             pi5_class: false,
-            python_executable: PY_EXE.into(),
             cpu_threads: FIXTURE_CPUS,
         }
     }
@@ -1810,7 +1725,6 @@ mod tests {
             has_rtspclientsink: true,
             encoder_api: "vendor".into(),
             pi5_class: false,
-            python_executable: PY_EXE.into(),
             cpu_threads: FIXTURE_CPUS,
         }
     }
@@ -1849,6 +1763,7 @@ mod tests {
             // out of this encoder rather than a second ffmpeg re-reading
             // mediamtx. Ignored by the rpicam / GStreamer arms.
             rtp_fanout: true,
+            passthrough: false,
         }
     }
 
@@ -1877,7 +1792,8 @@ mod tests {
         }
     }
 
-    /// Build (and optionally SEI-wrap) the way the capture script does.
+    /// Build (and optionally SEI-split) the way the capture script does. A
+    /// split renders as `encode ++ [SEI_STAGE_TOKEN] ++ publish`.
     fn build(
         p: &EncoderParams,
         src: &str,
@@ -1888,7 +1804,7 @@ mod tests {
     ) -> Vec<String> {
         let cmd = build_encoder_command(p, src, out, Some(cam), env).expect("builds");
         if sei {
-            wrap_with_sei_inject(&cmd, out, env)
+            wrap_with_sei_inject(&cmd, out).map_or(cmd, |s| s.render())
         } else {
             cmd
         }
@@ -2976,298 +2892,85 @@ mod tests {
         assert_eq!(shell_quote("a|b"), "'a|b'");
     }
 
-    // --- opt-in pre-encode raw tap ------------------------------------
-
-    const SINK: &str = "/run/ados/vision-tap-main.sock";
-
-    /// The pads of an ffmpeg `-filter_complex` string: `(inputs, outputs)`.
-    ///
-    /// Chains are `;`-separated. Bracketed labels before the first filter name
-    /// are that chain's inputs; bracketed labels after the last filter are its
-    /// outputs. Deriving them from the emitted string is what lets the tests
-    /// below assert graph well-formedness on real builder output instead of
-    /// eyeballing a literal.
-    fn graph_pads(graph: &str) -> (Vec<String>, Vec<String>) {
-        let mut ins: Vec<String> = Vec::new();
-        let mut outs: Vec<String> = Vec::new();
-        for chain in graph.split(';') {
-            let mut rest = chain.trim();
-            while let Some(stripped) = rest.strip_prefix('[') {
-                let end = stripped.find(']').expect("filter label is terminated");
-                ins.push(stripped[..end].to_string());
-                rest = &stripped[end + 1..];
-            }
-            let mut tail = rest;
-            let mut trailing: Vec<String> = Vec::new();
-            while tail.ends_with(']') {
-                let start = tail.rfind('[').expect("filter label is terminated");
-                trailing.push(tail[start + 1..tail.len() - 1].to_string());
-                tail = &tail[..start];
-            }
-            trailing.reverse();
-            outs.extend(trailing);
-        }
-        (ins, outs)
-    }
-
-    /// The label of every `-map` target in `cmd`, brackets stripped.
-    fn mapped_labels(cmd: &[String]) -> Vec<String> {
-        cmd.windows(2)
-            .filter(|w| w[0] == "-map")
-            .map(|w| {
-                w[1].trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_string()
-            })
-            .collect()
-    }
-
     fn has_pair(cmd: &[String], flag: &str, value: &str) -> bool {
         cmd.windows(2).any(|w| w[0] == flag && w[1] == value)
     }
 
-    /// `Ok(())` when the emitted graph is one ffmpeg will accept: every filter
-    /// output pad terminates (consumed by another chain or `-map`ped), every
-    /// filter input pad has a producer, every `-map` names a pad that exists,
-    /// and each output file is explicitly mapped. `Err(reason)` otherwise.
-    ///
-    /// A predicate rather than a bare assertion so the test below can feed it
-    /// the broken shape as a negative control.
-    fn graph_termination_check(cmd: &[String]) -> Result<(), String> {
-        let Some(fc) = cmd.iter().position(|t| t == "-filter_complex") else {
-            return Err("no -filter_complex emitted".into());
+    // --- capture queue depth --------------------------------------------
+
+    #[test]
+    fn capture_queue_is_sized_by_input_format() {
+        // MJPEG keeps the deep queue: its frames are small.
+        assert_eq!(input_queue_depth(Some("mjpeg"), 1920, 1080), 128);
+        // Raw YUYV at 720p: 32 MiB / 1.84 MB = 18 frames, not 128 (~235 MB).
+        assert_eq!(input_queue_depth(Some("yuyv"), 1280, 720), 18);
+        // Large raw frames hit the floor; tiny ones hit the ceiling.
+        assert_eq!(input_queue_depth(Some("yuyv"), 3840, 2160), 8);
+        assert_eq!(input_queue_depth(Some("yuyv"), 320, 240), 128);
+        // An unknown format is sized as raw.
+        assert_eq!(input_queue_depth(None, 1280, 720), 18);
+        // A zero-sized request cannot divide by zero.
+        assert_eq!(input_queue_depth(None, 0, 0), 128);
+
+        let yuyv = build_encoder_command(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            Some(&usb_yuyv()),
+            &rockchip(),
+        )
+        .unwrap();
+        assert!(has_pair(&yuyv, "-thread_queue_size", "18"));
+        let mjpeg = build_encoder_command(
+            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
+            "/dev/video1",
+            RTSP_OUT,
+            Some(&usb_mjpeg()),
+            &rockchip(),
+        )
+        .unwrap();
+        assert!(has_pair(&mjpeg, "-thread_queue_size", "128"));
+    }
+
+    // --- network passthrough --------------------------------------------
+
+    #[test]
+    fn passthrough_argv() {
+        let src = "rtsp://192.168.1.50:554/stream1";
+        let p = EncoderParams {
+            passthrough: true,
+            rotation: 90,
+            ..params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000)
         };
-        let graph = &cmd[fc + 1];
-        let (ins, outs) = graph_pads(graph);
-        let mapped = mapped_labels(cmd);
-
-        // Guard against a vacuous pass: the whole point is a fan-out.
-        if outs.len() < 2 {
-            return Err(format!("graph does not fan out: {graph}"));
+        let cmd = build_encoder_command(&p, src, RTSP_OUT, None, &non_rk_hw()).unwrap();
+        // Copied, never decoded or re-encoded: no encoder, no rate cap, no
+        // filter, no bitrate.
+        assert!(has_pair(&cmd, "-c:v", "copy"));
+        assert!(has_pair(&cmd, "-bsf:v", "dump_extra=freq=keyframe"));
+        for absent in ["-r", "-vf", "-b:v", "-g", "-pix_fmt"] {
+            assert!(!cmd.iter().any(|t| t == absent), "{absent} in {cmd:?}");
         }
-        for pad in &outs {
-            if !mapped.contains(pad) && !ins.contains(pad) {
-                return Err(format!(
-                    "filter output [{pad}] terminates nowhere. ffmpeg cannot bind the \
-                     graph and the encoder exits before it opens the camera, so the node \
-                     loses ALL video. graph={graph} maps={mapped:?}"
-                ));
-            }
-        }
-        for pad in &ins {
-            // A `file:stream` reference (`0:v`) is produced by the input file,
-            // not by the graph.
-            if !pad.contains(':') && !outs.contains(pad) {
-                return Err(format!(
-                    "filter input [{pad}] has no producer. graph={graph}"
-                ));
-            }
-        }
-        for label in &mapped {
-            if !outs.contains(label) {
-                return Err(format!(
-                    "-map [{label}] names no graph output. graph={graph}"
-                ));
-            }
-        }
-        // One `-map` per output file: the encode/publish file and the tap file.
-        // An unmapped output file falls back to ffmpeg's automatic stream
-        // selection, which claims the raw input stream, bypasses the split and
-        // leaves the split's own input pad unfed.
-        if mapped.len() != 2 {
-            return Err(format!("expected one -map per output file: {mapped:?}"));
-        }
-        Ok(())
-    }
-
-    /// The base argv the splice is defined against: no radio fan-out, because
-    /// the two features rewrite the same output stage and the orchestrator
-    /// requests exactly one of them (`lifecycle::raw_tap_splice_wanted`).
-    fn raw_tap_base(rotation: u32) -> Vec<String> {
-        build_encoder_command(
-            &EncoderParams {
-                rtp_fanout: false,
-                rotation,
-                ..params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000)
-            },
-            "/dev/video1",
-            RTSP_OUT,
-            Some(&usb_mjpeg()),
-            &rockchip(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn raw_tap_graph_terminates_every_branch() {
-        let cmd =
-            augment_encoder_with_raw_tap(&raw_tap_base(0), RTSP_OUT, 10, 640, 480, "rgb24", SINK);
-        graph_termination_check(&cmd).expect("emitted graph must be fully terminated");
-
-        // Negative control — the shape this replaced: `[enc]` declared, only
-        // `[visout]` mapped, the split's input pad left implicit and the first
-        // output file left to automatic stream selection. Measured on ffmpeg
-        // 9.0.1: "Cannot find an unused video input stream to feed the unlabeled
-        // input pad split:default / Error binding filtergraph inputs/outputs",
-        // exit 234, zero bytes on either output. The checker must reject it, or
-        // the assertion above proves nothing.
-        let unterminated: Vec<String> = [
-            "ffmpeg",
-            "-filter_complex",
-            "split=2[enc][vis];[vis]fps=10,scale=640:480[visout]",
-            "-i",
-            "/dev/video1",
-            "-f",
-            "rtsp",
-            RTSP_OUT,
-            "-map",
-            "[visout]",
-            "-f",
-            "rawvideo",
-            SINK,
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        assert!(!cmd.iter().any(|t| t == "libx264" || t == "h264_v4l2m2m"));
+        // Input side is the network source over TCP; output stage unchanged.
+        assert!(has_pair(&cmd, "-rtsp_transport", "tcp"));
+        assert!(has_pair(&cmd, "-i", src));
         assert!(
-            graph_termination_check(&unterminated).is_err(),
-            "the unterminated-[enc] form must be rejected"
+            cmd.last().unwrap().contains(RTSP_OUT),
+            "fan-out keeps the publish URI"
         );
-    }
 
-    #[test]
-    fn raw_tap_preserves_the_encode_and_publish_settings() {
-        // The wire output has to come out of the same encoder at the same
-        // settings — the tap adds a branch, it does not re-tune the stream.
-        let base = raw_tap_base(0);
-        let cmd = augment_encoder_with_raw_tap(&base, RTSP_OUT, 10, 640, 480, "rgb24", SINK);
-
-        for (flag, value) in [
-            ("-c:v", "libx264"),
-            ("-b:v", "4000k"),
-            ("-g", "15"),
-            ("-pix_fmt", "yuv420p"),
-            ("-bsf:v", "h264_mp4toannexb,dump_extra=freq=keyframe"),
-            ("-rtsp_transport", "tcp"),
-            ("-f", "rtsp"),
-        ] {
-            assert!(
-                has_pair(&base, flag, value) && has_pair(&cmd, flag, value),
-                "{flag} {value} must survive the splice"
-            );
-        }
-        // The publish destination is unchanged and is still the FIRST output
-        // file: it precedes the tap's sink.
-        let uri_at = cmd.iter().position(|t| t == RTSP_OUT).expect("publish URI");
-        let sink_at = cmd.iter().position(|t| t == SINK).expect("tap sink");
-        assert!(
-            uri_at < sink_at,
-            "publish output comes before the tap output"
-        );
-        // The tap's own output file: raw frames at the requested format.
-        assert!(has_pair(&cmd, "-pix_fmt", "rgb24"));
-        assert!(has_pair(&cmd, "-f", "rawvideo"));
-        assert_eq!(cmd.last().unwrap(), SINK);
-        // And the throttle/scale the tap asked for reached the graph.
-        let fc = cmd.iter().position(|t| t == "-filter_complex").unwrap();
-        assert!(cmd[fc + 1].contains("fps=10"));
-        assert!(cmd[fc + 1].contains("scale=640:480"));
-    }
-
-    #[test]
-    fn raw_tap_folds_the_orientation_transform_into_the_graph() {
-        // `-vf` is a SIMPLE filtergraph and ffmpeg refuses it on a stream fed
-        // by a complex one ("-vf/-filter_complex cannot be used together for
-        // the same stream"), so a rotated camera would abort the encoder. The
-        // transform moves inside the split instead, ahead of the fan-out, which
-        // also means the vision tap sees the same orientation as the operator.
-        let base = raw_tap_base(90);
-        assert!(has_pair(&base, "-vf", "transpose=1"), "base carries -vf");
-
-        let cmd = augment_encoder_with_raw_tap(&base, RTSP_OUT, 10, 640, 480, "rgb24", SINK);
-        assert!(
-            !cmd.iter().any(|t| t == "-vf"),
-            "no -vf may survive beside -filter_complex: {cmd:?}"
-        );
-        let fc = cmd.iter().position(|t| t == "-filter_complex").unwrap();
-        let graph = &cmd[fc + 1];
-        let rot = graph
-            .find("transpose=1")
-            .expect("transform is in the graph");
-        let split = graph.find("split=2").expect("split is in the graph");
-        assert!(rot < split, "the transform feeds the split: {graph}");
-        graph_termination_check(&cmd).expect("rotated graph must be fully terminated");
-    }
-
-    #[test]
-    fn raw_tap_is_a_noop_on_the_radio_fanout_form() {
-        // With the fan-out in force the last token is the tee spec, not the
-        // output URI, so the splice refuses to touch the command rather than
-        // corrupting an output stage it does not understand. A node that wants
-        // the pre-encode vision split therefore MUST be built without the
-        // fan-out — which is exactly what the orchestrator does.
-        let base = build_encoder_command(
-            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
-            "/dev/video1",
-            RTSP_OUT,
-            Some(&usb_mjpeg()),
-            &rockchip(),
-        )
-        .unwrap();
-        assert!(base.last().unwrap().starts_with("[f=rtsp:"), "fan-out form");
-        let augmented = augment_encoder_with_raw_tap(
-            &base,
-            RTSP_OUT,
-            10,
-            640,
-            480,
-            "rgb24",
-            "/run/ados/vision-tap-main.sock",
-        );
-        assert_eq!(augmented, base);
-    }
-
-    #[test]
-    fn raw_tap_leaves_bash_pipeline_unchanged() {
-        // The rpicam path is a `bash -c` pipeline: it cannot safely carry a
-        // second mapped output, so the augmentation is a no-op (the caller
-        // falls back to the decoupled tap).
-        let base = build_encoder_command(
-            &params(EncoderKind::RpicamVid, 1280, 720, 30, 4000),
-            "/dev/video0",
-            RTSP_OUT,
-            Some(&csi()),
-            &rockchip(),
-        )
-        .unwrap();
-        assert_eq!(base[0], "bash");
-        let augmented =
-            augment_encoder_with_raw_tap(&base, RTSP_OUT, 10, 640, 480, "rgb24", "/s.sock");
-        assert_eq!(augmented, base);
-    }
-
-    #[test]
-    fn raw_tap_leaves_mismatched_output_unchanged() {
-        // If the last token is not the expected output URI, do not risk
-        // perturbing the command — return it unchanged.
-        let base = build_encoder_command(
-            &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
-            "/dev/video1",
-            RTSP_OUT,
-            Some(&usb_mjpeg()),
-            &rockchip(),
-        )
-        .unwrap();
-        let augmented = augment_encoder_with_raw_tap(
-            &base,
-            "rtsp://wrong/output",
-            10,
-            640,
-            480,
-            "rgb24",
-            "/s.sock",
-        );
-        assert_eq!(augmented, base);
+        // A local device ignores the flag and still encodes.
+        let local =
+            build_encoder_command(&p, "/dev/video1", RTSP_OUT, Some(&usb_mjpeg()), &rockchip())
+                .unwrap();
+        assert!(!has_pair(&local, "-c:v", "copy"));
+        // And without the flag a network source is re-encoded as before.
+        let off = EncoderParams {
+            passthrough: false,
+            ..p
+        };
+        let encoded = build_encoder_command(&off, src, RTSP_OUT, None, &rockchip()).unwrap();
+        assert!(has_pair(&encoded, "-c:v", "libx264"));
     }
 
     // --- wire-codec gate ----------------------------------------------
@@ -3817,7 +3520,6 @@ mod tests {
         assert_eq!(sync.has_rtspclientsink, async_env.has_rtspclientsink);
         assert_eq!(sync.encoder_api, async_env.encoder_api);
         assert_eq!(sync.pi5_class, async_env.pi5_class);
-        assert_eq!(sync.python_executable, async_env.python_executable);
         assert_eq!(sync.cpu_threads, async_env.cpu_threads);
     }
 
@@ -4094,21 +3796,19 @@ mod tests {
         // that rebuild dropped the radio branch, enabling a measurement probe
         // would take the radio leg down — so the encode half must end at
         // stdout and the publish half must carry the identical tee spec.
-        let cmd = build(
+        let cmd = build_encoder_command(
             &params(EncoderKind::Ffmpeg, 1280, 720, 30, 4000),
             "/dev/video1",
             RTSP_OUT,
-            &usb_mjpeg(),
+            Some(&usb_mjpeg()),
             &rockchip(),
-            true,
-        );
-        assert_eq!(cmd[0], "bash");
-        let body = &cmd[2];
-        let (encode, publish) = body
-            .split_once("| /opt/ados/venv/bin/python3 -m ados.services.video.sei_injector |")
-            .expect("the injector is spliced between two ffmpeg stages");
+        )
+        .unwrap();
+        let split = wrap_with_sei_inject(&cmd, RTSP_OUT).expect("an ffmpeg publisher splits");
+        let encode = split.encode.join(" ");
+        let publish = split.publish.join(" ");
         // The encode half ends at stdout and carries no output-muxer leftovers.
-        assert!(encode.trim_end().ends_with("-f h264 -"));
+        assert!(encode.ends_with("-f h264 -"));
         assert!(
             !encode.contains("-f tee"),
             "no muxer left on the encode half"
@@ -4116,12 +3816,20 @@ mod tests {
         assert!(!encode.contains("-map 0:v"));
         assert!(!encode.contains("-rtsp_transport"));
         assert!(!encode.contains("-muxdelay"));
+        // No Python stage anywhere: the injector runs in-process.
+        assert!(!encode.contains("python") && !publish.contains("python"));
         // The publish half re-mounts BOTH destinations, through the same
         // output-stage builder the non-SEI path uses.
+        assert_eq!(split.publish[0], "ffmpeg");
+        assert!(publish.contains("-f h264 -i -"));
         assert!(publish.contains("-f tee"));
         assert!(publish.contains(RTSP_OUT));
         assert!(publish.contains(&crate::wfb_tee::rtp_destination_url()));
-        assert!(crate::wfb_tee::cmd_emits_wfb_rtp(&cmd));
+        assert!(crate::wfb_tee::cmd_emits_wfb_rtp(&split.render()));
+
+        // A GStreamer command is not split.
+        let gst = vec!["gst-launch-1.0".to_string(), "-e".to_string()];
+        assert_eq!(wrap_with_sei_inject(&gst, RTSP_OUT), None);
     }
 
     #[test]

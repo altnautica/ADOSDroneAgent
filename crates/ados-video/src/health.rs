@@ -11,13 +11,9 @@ use std::time::{Duration, Instant};
 
 // --- tunables ------------------------------------------------------------------
 
-/// Health-tick cadence, and with it the recovery cadence: every recovery ladder
-/// (the pipeline cold start, the wfb tap, the vision tap, the cloud push, the
-/// secondary-leg encoders) retries on the next tick, forever. There is no
-/// backoff and no attempt ceiling: a camera that comes back, a mediamtx that
-/// recovers or a relay that reappears is picked up within one tick, and an
-/// operator's hero switch is never queued behind a long in-tick sleep.
-pub const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+// The health tick's period, which is also every recovery ladder's fixed
+// retry interval, is `crate::recovery::RETRY_INTERVAL`.
+
 /// Max startup grace before a publisher-less pipeline is declared dead
 /// (`_STARTUP_GRACE_MAX_SECS`).
 pub const STARTUP_GRACE_MAX: Duration = Duration::from_secs(30);
@@ -195,6 +191,7 @@ pub fn inbound_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recovery::RETRY_INTERVAL;
 
     /// A one-shot with no session in flight is never wedged: `!is_running()`
     /// is the correct respawn trigger and this check must not double-fire.
@@ -257,15 +254,15 @@ mod tests {
     #[test]
     fn inbound_decision_seed_on_first_sample() {
         assert_eq!(
-            inbound_decision(-1, 1000, Duration::ZERO, HEALTH_CHECK_INTERVAL),
+            inbound_decision(-1, 1000, Duration::ZERO, RETRY_INTERVAL),
             InboundDecision::Seed
         );
     }
 
     #[test]
     fn inbound_decision_advanced_computes_rate() {
-        // 10000 bytes over a 5s floored interval → 2000 B/s.
-        let d = inbound_decision(0, 10_000, Duration::from_secs(5), HEALTH_CHECK_INTERVAL);
+        // 10000 bytes over 5 s (longer than the floor) → 2000 B/s.
+        let d = inbound_decision(0, 10_000, Duration::from_secs(5), RETRY_INTERVAL);
         match d {
             InboundDecision::Advanced { bytes_per_s } => {
                 assert!((bytes_per_s - 2000.0).abs() < 1e-6, "got {bytes_per_s}");
@@ -274,11 +271,12 @@ mod tests {
         }
         // A sub-interval elapsed is floored to the interval so the rate cannot
         // spike artificially.
-        let d = inbound_decision(0, 5_000, Duration::from_millis(100), HEALTH_CHECK_INTERVAL);
+        let d = inbound_decision(0, 5_000, Duration::from_millis(100), RETRY_INTERVAL);
         match d {
             InboundDecision::Advanced { bytes_per_s } => {
-                // floored to 5s → 1000 B/s, not 50000 B/s.
-                assert!((bytes_per_s - 1000.0).abs() < 1e-6, "got {bytes_per_s}");
+                // floored to the tick interval, not 50000 B/s over 100 ms.
+                let want = 5_000.0 / RETRY_INTERVAL.as_secs_f64();
+                assert!((bytes_per_s - want).abs() < 1e-6, "got {bytes_per_s}");
             }
             other => panic!("expected Advanced, got {other:?}"),
         }
@@ -288,20 +286,40 @@ mod tests {
     fn inbound_decision_within_and_past_stall() {
         // Flat counter inside the 12s stall window → still healthy.
         assert_eq!(
-            inbound_decision(1000, 1000, Duration::from_secs(11), HEALTH_CHECK_INTERVAL),
+            inbound_decision(1000, 1000, Duration::from_secs(11), RETRY_INTERVAL),
             InboundDecision::WithinStall
         );
         // Flat counter at exactly 12s → stalled.
         assert_eq!(
-            inbound_decision(1000, 1000, Duration::from_secs(12), HEALTH_CHECK_INTERVAL),
+            inbound_decision(1000, 1000, Duration::from_secs(12), RETRY_INTERVAL),
             InboundDecision::Stalled
         );
         // Counter went backwards (mediamtx path reset) is treated as flat →
         // stall logic applies.
         assert_eq!(
-            inbound_decision(2000, 1500, Duration::from_secs(20), HEALTH_CHECK_INTERVAL),
+            inbound_decision(2000, 1500, Duration::from_secs(20), RETRY_INTERVAL),
             InboundDecision::Stalled
         );
+    }
+
+    /// The stall window is wall-clock, not a tick count: sampling a flat
+    /// counter once per retry interval never trips it early, and trips it on
+    /// the first sample at or past the window.
+    #[test]
+    fn a_faster_tick_does_not_shorten_the_stall_window() {
+        for k in 0..20u32 {
+            let since = RETRY_INTERVAL * k;
+            let want = if since < INBOUND_FLOW_STALL {
+                InboundDecision::WithinStall
+            } else {
+                InboundDecision::Stalled
+            };
+            assert_eq!(
+                inbound_decision(1000, 1000, since, RETRY_INTERVAL),
+                want,
+                "flat for {since:?}"
+            );
+        }
     }
 
     #[test]

@@ -15,9 +15,34 @@
 //! per window with a single suppressed-count summary — the same shape as the
 //! Python `_drain_stderr`.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+
+/// Lower-cased fragments of ffmpeg / GStreamer lines that name a failure of
+/// the ENCODER itself (codec init, frame submission, a hardware encoder
+/// element), as opposed to the source (a camera or network input that
+/// delivers nothing) or the publish destination.
+const ENCODER_ERROR_MARKERS: &[&str] = &[
+    "error initializing output stream",
+    "error while opening encoder",
+    "could not open encoder",
+    "error submitting video frame",
+    "error encoding",
+    "error while encoding",
+];
+/// Hardware encoder names whose own error lines are encoder-side failures.
+const HW_ENCODER_NAMES: &[&str] = &["v4l2m2m", "mpph264enc", "omxh264", "v4l2h264enc"];
+
+/// Whether a stderr line reports a failure of the encoder itself. Only such a
+/// failure counts toward abandoning the hardware encoder for software.
+pub fn is_encoder_side_error(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    ENCODER_ERROR_MARKERS.iter().any(|m| l.contains(m))
+        || (HW_ENCODER_NAMES.iter().any(|n| l.contains(n))
+            && (l.contains("error") || l.contains("fail")))
+}
 
 /// The longest stderr line kept, in bytes; the rest of a longer line is
 /// discarded up to its terminator.
@@ -112,6 +137,25 @@ pub struct DrainStats {
 /// in the log lines. Runs until the stream closes (the child exited or the
 /// handle was dropped).
 pub async fn drain_plain<R: AsyncRead + Unpin>(stderr: R, label: &'static str) -> DrainStats {
+    drain_classified(stderr, label, None).await
+}
+
+/// [`drain_plain`] for the primary encoder: additionally counts every
+/// encoder-side error line ([`is_encoder_side_error`]) into `encoder_errors`,
+/// whether or not the rate limit let it reach the log.
+pub async fn drain_encoder<R: AsyncRead + Unpin>(
+    stderr: R,
+    label: &'static str,
+    encoder_errors: std::sync::Arc<AtomicU32>,
+) -> DrainStats {
+    drain_classified(stderr, label, Some(&*encoder_errors)).await
+}
+
+async fn drain_classified<R: AsyncRead + Unpin>(
+    stderr: R,
+    label: &'static str,
+    encoder_errors: Option<&AtomicU32>,
+) -> DrainStats {
     let mut lines = BoundedLines::new(stderr);
     let mut window_start = Instant::now();
     let mut logged: u32 = 0;
@@ -123,6 +167,11 @@ pub async fn drain_plain<R: AsyncRead + Unpin>(stderr: R, label: &'static str) -
         let text = raw.trim_end();
         if text.is_empty() {
             continue;
+        }
+        if let Some(counter) = encoder_errors {
+            if is_encoder_side_error(text) {
+                counter.fetch_add(1, Ordering::AcqRel);
+            }
         }
         let now = Instant::now();
         if now.duration_since(window_start) >= DRAIN_WINDOW {
@@ -217,6 +266,36 @@ mod tests {
              overflow must be accounted for rather than silently lost"
         );
         assert_eq!(stats.logged + stats.suppressed, over);
+    }
+
+    #[test]
+    fn encoder_side_errors_are_told_from_source_errors() {
+        for line in [
+            "Error initializing output stream 0:0 -- Error while opening encoder",
+            "[h264_v4l2m2m @ 0x55] Error opening the encoder device",
+            "[h264_v4l2m2m @ 0x55] Failed to set format",
+            "Error submitting video frame to the encoder",
+            "ERROR: from element /GstPipeline:pipeline0/GstMppH264Enc:mpph264enc0",
+        ] {
+            assert!(is_encoder_side_error(line), "{line}");
+        }
+        for line in [
+            "[rtsp @ 0x55] method DESCRIBE failed: 404 Not Found",
+            "rtsp://192.168.1.50/stream: Connection refused",
+            "[video4linux2,v4l2 @ 0x55] Cannot open video device /dev/video0",
+            "frame=  120 fps= 30 q=23.0 size= 512kB",
+        ] {
+            assert!(!is_encoder_side_error(line), "{line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_encoder_drain_counts_encoder_side_errors() {
+        let stream = b"frame=1\nError while opening encoder for output stream #0:0\n\
+[h264_v4l2m2m @ 0x1] Failed to set format\nConnection refused\n";
+        let counter = std::sync::Arc::new(AtomicU32::new(0));
+        drain_encoder(&stream[..], "test", counter.clone()).await;
+        assert_eq!(counter.load(Ordering::Acquire), 2);
     }
 
     #[tokio::test]

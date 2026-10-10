@@ -3,11 +3,12 @@
 //! This is the integration core that wires the leaf modules (camera
 //! discovery, the encoder command builder, mediamtx, the wfb radio tap, the
 //! camera-state sidecar) into the long-lived supervisor the drone runs on the
-//! air side. It owns the full lifecycle: cold start, the 5 s health tick whose
-//! cadence is also every ladder's fixed retry cadence (pipeline restart, cloud
-//! push, wfb tap, vision tap, secondary legs), the camera-hotplug-woken retry
-//! from the error state, and the RAII teardown of every child process on
-//! shutdown.
+//! air side. It owns the full lifecycle: cold start, the health tick whose
+//! period is every ladder's one fixed retry interval
+//! ([`crate::recovery::RETRY_INTERVAL`]: pipeline restart, encoder respawn,
+//! cloud push, wfb tap, vision tap, SEI tap, secondary legs), the
+//! camera-hotplug-woken retry from the error state, and the RAII teardown of
+//! every child process on shutdown.
 //!
 //! The sequencing follows the Python `VideoPipeline` orchestrator
 //! (`services/video/pipeline/pipeline.py`): the same start order and the same
@@ -23,6 +24,7 @@
 //! a progress tracker to the encoder would conflate two independent liveness
 //! signals.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,15 +36,60 @@ use crate::discover::{self, DiscoveryResult};
 use crate::encoder::{EncoderEnv, EncoderKind};
 use crate::health::{
     grace_decision, inbound_decision, sei_tap_session_wedged, should_fallback_to_software,
-    GraceDecision, InboundDecision, PipelineState, StartError, HEALTH_CHECK_INTERVAL,
-    SEI_TAP_SESSION_MAX,
+    GraceDecision, InboundDecision, PipelineState, StartError, SEI_TAP_SESSION_MAX,
 };
 use crate::mediamtx::{MediamtxManager, MAIN_PATH};
 use crate::process::ManagedProcess;
 use crate::profile::{EncoderControl, EncoderSettings, EncoderState, VideoProfile};
+use crate::recovery::{retry_ticker, tap_recovery, TapRecovery, RETRY_INTERVAL};
 use crate::wfb_tee::{
     wfb_tee_output_is_stalled, wfb_tee_progress_is_stale, ProgressTracker, WFB_TEE_PROGRESS_TIMEOUT,
 };
+
+/// How long the pipeline must stream healthily on the forced software encoder
+/// before the hardware path is re-armed for the next encoder start.
+pub const SOFTWARE_REARM_AFTER: Duration = Duration::from_secs(600);
+
+/// What made the primary pipeline unhealthy, so recovery can be scoped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthFailure {
+    /// No encoder process, or it exited.
+    EncoderExited,
+    /// mediamtx died: everything downstream of it is gone too.
+    MediamtxDied,
+    /// The encoder never published within the startup grace.
+    GraceExpired,
+    /// The publisher left the path after streaming.
+    PathLost,
+    /// The publisher is present but the inbound byte counter is flat.
+    InboundStalled,
+}
+
+impl HealthFailure {
+    /// A failure of the encoder alone, recoverable by respawning the encoder
+    /// while mediamtx (and every reader on it) keeps running.
+    pub fn is_encoder_side(self) -> bool {
+        matches!(
+            self,
+            Self::EncoderExited | Self::GraceExpired | Self::InboundStalled
+        )
+    }
+}
+
+/// Whether an unhealthy run that never produced a first packet counts toward
+/// abandoning the hardware encoder. Only a local V4L2 source whose encoder
+/// itself logged errors counts: a network camera that is unreachable, or a USB
+/// camera slow to deliver, is a SOURCE failure that software encoding would
+/// not fix.
+pub fn counts_toward_software_fallback(network_source: bool, encoder_error_lines: u32) -> bool {
+    !network_source && encoder_error_lines > 0
+}
+
+/// Whether a healthy stretch on the forced software encoder has lasted long
+/// enough to re-arm the hardware path.
+pub fn software_rearm_due(healthy_since: Option<Instant>, now: Instant) -> bool {
+    healthy_since.is_some_and(|since| now.saturating_duration_since(since) >= SOFTWARE_REARM_AFTER)
+}
 
 // --- orchestrator ------------------------------------------------------------
 
@@ -88,19 +135,12 @@ pub struct VideoOrchestrator {
     pub(crate) encoder_emits_wfb_rtp: bool,
     pub(crate) cloud_push: Option<ManagedProcess>,
     pub(crate) sei_tap: Option<ManagedProcess>,
-    /// The decoupled vision frame tap (a third ffmpeg → rawvideo → stdout).
-    /// Spawned only when `video.vision.enabled` and `raw_tap` is off. Additive:
-    /// a crash here never touches the encode or wfb path.
-    pub(crate) vision_tap: Option<ManagedProcess>,
-    /// The in-process reframer that reads the vision tap's raw frames, ADVT-
-    /// headers them (Contract F), and serves the connecting vision engine.
-    /// Bound to the same lifetime as `vision_tap`; aborted on stop/restart.
-    pub(crate) vision_tap_reframer: Option<tokio::task::JoinHandle<()>>,
+    /// The vision frame tap leg: the bound socket plus the decoder it runs
+    /// while a vision engine is attached (see [`crate::tap_lazy`]). Spawned
+    /// only when `video.vision.enabled`. Additive: a crash here never touches
+    /// the encode or wfb path.
+    pub(crate) vision_tap: Option<tokio::task::JoinHandle<()>>,
     pub(crate) wfb_tee_progress: ProgressTracker,
-    /// Output-progress clock for the decoupled vision tap (liveness
-    /// alone is never proof of work; the tap can hold the sink open while
-    /// pushing nothing).
-    pub(crate) vision_tap_progress: ProgressTracker,
     /// Output-progress clock for the cloud relay push. Process liveness is
     /// never proof of work: a cloud push wedged on a half-open relay socket
     /// holds its PID and pushes nothing, and the health check used to accept
@@ -156,10 +196,22 @@ pub struct VideoOrchestrator {
     /// cannot stream on this box is abandoned for ffmpeg libx264 rather than
     /// restarted against the same wall forever.
     pub(crate) no_first_packet_failures: u32,
-    /// Latched once the hardware / GStreamer encoder has been abandoned this
-    /// process lifetime, forcing the encoder command onto the software path. A
-    /// process restart / reboot clears it, so the hardware path is retried fresh.
+    /// Latched once the hardware / GStreamer encoder has been abandoned,
+    /// forcing the encoder command onto the software path. Cleared by a camera
+    /// hotplug and after [`SOFTWARE_REARM_AFTER`] of healthy streaming, which
+    /// re-arms the hardware path for the next encoder start.
     pub(crate) force_software: bool,
+    /// Start of the current healthy stretch on the forced software encoder.
+    pub(crate) software_healthy_since: Option<Instant>,
+    /// Encoder-side error lines the current primary encoder has logged
+    /// (reset at every spawn; fed by the encoder's stderr drain).
+    pub(crate) encoder_errors: Arc<AtomicU32>,
+    /// A hotplug asked for full camera discovery on the next start.
+    pub(crate) rediscover_requested: bool,
+    /// The sysfs video-device fingerprint at the last full discovery.
+    pub(crate) last_fingerprint: Option<String>,
+    /// When the last full discovery ran.
+    pub(crate) last_discovery_at: Option<Instant>,
 
     /// Serializes teardown+respawn across the cold start, the health-check
     /// restart and the attention-switch respawn. A runtime camera change is not
@@ -167,7 +219,7 @@ pub struct VideoOrchestrator {
     /// `camera_plugged` → the retry path, which re-runs the same locked
     /// teardown+respawn, so there is no separate switch lock.
     pub(crate) restart_lock: Arc<Mutex<()>>,
-    /// Fired by SIGUSR1 (a fresh `/dev/video*` node) so a pipeline parked in
+    /// Fired by SIGUSR1 (a fresh `/dev/video*` node) so a pipeline sitting in
     /// the error state retries at once instead of on the next health tick.
     pub(crate) camera_plugged: Arc<Notify>,
 
@@ -176,7 +228,7 @@ pub struct VideoOrchestrator {
 
     /// Override for the camera-state sidecar path. `None` ⇒ the canonical
     /// `/run/ados/camera-state.json` contract path. Set only in tests so the
-    /// wedge/park re-persist can be asserted against a temp file.
+    /// re-persist can be asserted against a temp file.
     pub(crate) camera_state_path: Option<std::path::PathBuf>,
 
     /// Override for the video-streams sidecar path. `None` ⇒ the canonical
@@ -264,11 +316,9 @@ impl VideoOrchestrator {
             cloud_push: None,
             sei_tap: None,
             vision_tap: None,
-            vision_tap_reframer: None,
             wfb_tee_progress: ProgressTracker::new(),
             cloud_push_progress: ProgressTracker::new(),
             sei_tap_started_at: None,
-            vision_tap_progress: ProgressTracker::new(),
             last_cameras: DiscoveryResult::empty(),
             encoder_type: None,
             encoder_label: None,
@@ -286,6 +336,11 @@ impl VideoOrchestrator {
             last_start_error: StartError::None,
             no_first_packet_failures: 0,
             force_software: false,
+            software_healthy_since: None,
+            encoder_errors: Arc::new(AtomicU32::new(0)),
+            rediscover_requested: false,
+            last_fingerprint: None,
+            last_discovery_at: None,
             restart_lock: Arc::new(Mutex::new(())),
             camera_plugged: Arc::new(Notify::new()),
             python_executable: discover::python_executable(),
@@ -317,7 +372,7 @@ impl VideoOrchestrator {
     /// self-heal check) see what the encoder is actually running.
     pub(crate) async fn publish_encoder_state(&self, state: &EncoderState) {
         let path = self.video_profile_path().to_path_buf();
-        if let Err(e) = crate::profile::write_sidecar_async(path, *state).await {
+        if let Err(e) = crate::profile::write_sidecar_async(path, state.clone()).await {
             tracing::warn!(error = %e, "video_profile_sidecar_write_failed");
         }
     }
@@ -389,7 +444,8 @@ impl VideoOrchestrator {
 
         if target == live {
             let state = self.encoder_state(desired.profile, desired.ceiling_kbps, target, false);
-            self.encoder_control
+            let state = self
+                .encoder_control
                 .note_applied(state, desired.generation, false);
             self.publish_encoder_state(&state).await;
             return;
@@ -407,7 +463,8 @@ impl VideoOrchestrator {
                 threshold_percent = CEILING_DEFER_PERCENT,
                 "video_ceiling_change_deferred: holding the rung instead of respawning the encoder"
             );
-            self.encoder_control
+            let state = self
+                .encoder_control
                 .note_applied(state, desired.generation, false);
             self.publish_encoder_state(&state).await;
             return;
@@ -432,19 +489,18 @@ impl VideoOrchestrator {
             false
         };
         let state = self.encoder_state(desired.profile, desired.ceiling_kbps, target, false);
-        self.encoder_control
+        let state = self
+            .encoder_control
             .note_applied(state, desired.generation, restarted);
         self.publish_encoder_state(&state).await;
     }
 
     /// Re-persist the camera-state sidecar from the last-known discovery
-    /// snapshot, stamped with the CURRENT pipeline outcome. Used both on a
-    /// healthy tick and across the wedge/park backoff sleeps so a
-    /// present-but-wedged camera does not read as `unknown` to the staleness
-    /// gate while the orchestrator is stuck.
+    /// snapshot, stamped with the CURRENT pipeline outcome. Run on every
+    /// healthy tick so the staleness gate always sees a fresh stamp.
     ///
     /// It goes through [`Self::persist_pipeline_outcome`] because this runs on
-    /// every 5 s health tick: rebuilding the snapshot from discovery alone
+    /// every health tick: rebuilding the snapshot from discovery alone
     /// yields `pipeline_state: unknown`, which erased the `streaming` stamp
     /// (and the circuit breaker's reason with it) one tick after the pipeline
     /// came up — a streaming drone then read as `not_initialized`, with no
@@ -530,7 +586,8 @@ impl VideoOrchestrator {
         }
     }
 
-    /// The Notify handle SIGUSR1 fires to wake the no-primary backoff sleep.
+    /// The Notify handle SIGUSR1 fires to retry an error-state pipeline at once
+    /// instead of on the next tick.
     pub fn camera_plugged_handle(&self) -> Arc<Notify> {
         self.camera_plugged.clone()
     }
@@ -613,19 +670,25 @@ impl VideoOrchestrator {
     /// side-effects (latching first-packet, recording bytes/s) are applied here against
     /// the pure decision helpers.
     pub async fn check_health(&mut self) -> bool {
+        self.check_health_detail().await.is_ok()
+    }
+
+    /// [`Self::check_health`] with the cause of a failure, so the recovery
+    /// can respawn only the encoder when only the encoder failed.
+    pub(crate) async fn check_health_detail(&mut self) -> Result<(), HealthFailure> {
         // Encoder liveness.
         let Some(enc) = self.encoder.as_mut() else {
-            return false;
+            return Err(HealthFailure::EncoderExited);
         };
         if !enc.is_running() {
             tracing::warn!("encoder_process_exited");
-            return false;
+            return Err(HealthFailure::EncoderExited);
         }
         // mediamtx liveness — a dead mediamtx leaves ffmpeg blocked on a dead
         // RTSP socket while still looking alive.
         if !self.mediamtx.is_running() {
             tracing::warn!("mediamtx_died_during_stream");
-            return false;
+            return Err(HealthFailure::MediamtxDied);
         }
 
         let elapsed = Instant::now().saturating_duration_since(self.started_at);
@@ -638,15 +701,15 @@ impl VideoOrchestrator {
                     self.first_packet_seen = true;
                     self.no_first_packet_failures = 0;
                     tracing::info!(elapsed_s = elapsed.as_secs_f64(), "pipeline_first_packet");
-                    return true;
+                    return Ok(());
                 }
-                GraceDecision::StillWaiting => return true,
+                GraceDecision::StillWaiting => return Ok(()),
                 GraceDecision::Expired => {
                     tracing::warn!(
                         elapsed_s = elapsed.as_secs_f64(),
                         "pipeline_grace_expired: no mediamtx publisher after grace window"
                     );
-                    return false;
+                    return Err(HealthFailure::GraceExpired);
                 }
             }
         }
@@ -654,11 +717,15 @@ impl VideoOrchestrator {
         // Live: the publisher must still be ready.
         if !path_ready {
             tracing::warn!("mediamtx_path_not_ready: encoder RTSP connection likely dead");
-            return false;
+            return Err(HealthFailure::PathLost);
         }
 
         // Inbound-flow watchdog: assert mediamtx's byte counter advances.
-        self.check_inbound_flow_healthy().await
+        if self.check_inbound_flow_healthy().await {
+            Ok(())
+        } else {
+            Err(HealthFailure::InboundStalled)
+        }
     }
 
     /// Inbound-byte stall watchdog. Reads mediamtx's per-path `bytesReceived`, applies
@@ -676,7 +743,7 @@ impl VideoOrchestrator {
             self.inbound_bytes_value,
             current,
             since_change,
-            HEALTH_CHECK_INTERVAL,
+            RETRY_INTERVAL,
         ) {
             InboundDecision::Seed => {
                 self.inbound_bytes_value = current;
@@ -807,45 +874,34 @@ impl VideoOrchestrator {
         true
     }
 
-    /// Is the vision frame tap alive AND producing? `true` when healthy or
-    /// never started. Same Rule-37 liveness-plus-work contract as the wfb tap
-    /// (a tap alive but pushing nothing is a zombie). Only the decoupled tap is
-    /// supervised here; the raw_tap split rides the encoder's own health.
+    /// Is the vision tap leg up? `true` when healthy or never started. The leg
+    /// supervises its own decoder (spawned on engine connect, stopped when the
+    /// engine is idle, respawned after an exit or a stall), so no engine
+    /// attached is healthy-idle; only a leg whose task ended (its listener
+    /// failed) needs the ladder.
     async fn check_vision_tap_health(&mut self) -> bool {
-        let Some(p) = self.vision_tap.as_mut() else {
-            // No tap yet: the first spawn is deferred until the RTSP source is
+        let Some(h) = self.vision_tap.as_ref() else {
+            // No leg yet: the first bind is deferred until the RTSP source is
             // ready, so report unhealthy WHILE THE PIPELINE IS RUNNING and let
             // the run-loop ladder bring it up. When the pipeline is not running
-            // the tap is correctly absent and this is healthy. Without this, a
-            // tap that was deferred at stream start stays None forever (healthy
-            // by the old rule) so the ladder never starts it.
+            // the leg is correctly absent and this is healthy.
             return self.state != PipelineState::Running;
         };
-        if !p.is_running() {
-            tracing::warn!("vision_tap_process_exited");
+        if h.is_finished() {
+            tracing::warn!("vision_tap_leg_ended");
             self.vision_tap = None;
-            // Unhealthy: route into the run-loop vision ladder so the tap gets
-            // respawned (the ladder defers when the RTSP source is down).
-            return false;
-        }
-        let last = self.vision_tap_progress.last_progress_at().await;
-        if wfb_tee_progress_is_stale(last, Instant::now()) {
-            tracing::warn!(
-                threshold_s = WFB_TEE_PROGRESS_TIMEOUT.as_secs(),
-                "vision_tap_zombie_detected: alive but progress flat; forcing restart"
-            );
             return false;
         }
         true
     }
 
-    /// The main service loop. Drives the 5 s health tick (every ladder's fixed
-    /// retry cadence) and the camera-hotplug-woken retry, terminating on
-    /// `shutdown` with a full teardown of every child process.
+    /// The main service loop. Drives the health tick (period
+    /// [`RETRY_INTERVAL`], every ladder's one fixed retry interval) and the
+    /// camera-hotplug-woken retry, terminating on `shutdown` with a full
+    /// teardown of every child process.
     pub async fn run(mut self, shutdown: Shutdown) {
         tracing::info!("video_pipeline_service_start");
-        let mut tick = tokio::time::interval(HEALTH_CHECK_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut tick = retry_ticker();
 
         // 1 Hz telemetry: aggregate the pipeline's encoder metrics once a second
         // (NOT per encoder tick) and ship them to the logging daemon. Best-effort
@@ -855,7 +911,7 @@ impl VideoOrchestrator {
         telemetry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         // Attention switches are applied the moment they are requested, not on
-        // the next 5 s health tick: a hero promotion racing a 5 s tick would
+        // the next health tick: a hero promotion waiting on the tick would
         // leave the operator staring at a 1 fps thumbnail of the aircraft they
         // just selected.
         let mut desired_rx = self.encoder_control.subscribe_desired();
@@ -863,8 +919,8 @@ impl VideoOrchestrator {
         // start, so a switch may already be pending. Subscribe first (so nothing
         // arriving from here on is missed), then reconcile once.
         self.apply_desired_encoder().await;
-        // A fresh `/dev/video*` node retries a parked pipeline at once rather
-        // than on the next tick. A local handle so the select arm borrows it,
+        // A fresh `/dev/video*` node retries an error-state pipeline at once
+        // rather than on the next tick. A local handle so the select arm borrows it,
         // not `self`.
         let camera_plugged = Arc::clone(&self.camera_plugged);
 
@@ -878,6 +934,10 @@ impl VideoOrchestrator {
                     self.tick_once().await;
                 }
                 _ = camera_plugged.notified() => {
+                    // A new video device: discover afresh and give the
+                    // hardware encoder another chance.
+                    self.rediscover_requested = true;
+                    self.rearm_hardware_encoder("camera_hotplug");
                     if self.state != PipelineState::Running {
                         tracing::info!("camera_plugged: retrying the pipeline now");
                         self.tick_retry_from_error().await;
@@ -962,12 +1022,13 @@ impl VideoOrchestrator {
         }
     }
 
-    /// The Running-state health ladder: health → cloud → wfb → vision → SEI.
-    /// Every ladder acts on this tick and retries on the next one; nothing in
-    /// here sleeps, so the run loop stays responsive to shutdown and to an
-    /// attention switch.
+    /// The Running-state ladder: the primary's health first, then every
+    /// consumer of `main` ([`Self::tick_consumers`]). Every ladder acts on this
+    /// tick and retries on the next one; nothing in here sleeps, so the run
+    /// loop stays responsive to shutdown and to an attention switch.
     async fn tick_running(&mut self) {
-        let health_ok = self.check_health().await;
+        let health = self.check_health_detail().await;
+        let health_ok = health.is_ok();
         // Sample per-leg liveness, then re-stamp the leg-list sidecar EVERY tick,
         // regardless of the PRIMARY's health: the advertised legs are static
         // (resolved at startup) and the secondary legs are served by mediamtx
@@ -977,6 +1038,7 @@ impl VideoOrchestrator {
         self.sample_leg_liveness().await;
         self.refresh_video_streams().await;
         if health_ok {
+            self.note_healthy_tick();
             self.refresh_camera_state().await;
         }
 
@@ -984,33 +1046,27 @@ impl VideoOrchestrator {
         // any dead one). Independent of the primary's health ladder below.
         self.supervise_secondary_encoders().await;
 
-        if !health_ok {
-            // A run that never produced a first packet is an encoder that cannot
-            // stream on this box (a hardware/GStreamer path that will not
-            // negotiate/publish here). After a few such failures, abandon it for
-            // the software ffmpeg path rather than restart the same encoder
-            // forever — the software path always runs, so a bad HW encoder can
-            // no longer brick video. A run that streamed then stalled has
-            // first_packet_seen set, so it resets the counter instead of
-            // tripping this.
-            if !self.first_packet_seen {
-                self.no_first_packet_failures += 1;
-                if should_fallback_to_software(self.no_first_packet_failures, self.force_software) {
-                    tracing::warn!(
-                        failures = self.no_first_packet_failures,
-                        "encoder_fallback_to_software: the hardware/GStreamer encoder never produced video; forcing the software libx264 path"
-                    );
-                    self.force_software = true;
-                    self.no_first_packet_failures = 0;
-                }
-            } else {
-                self.no_first_packet_failures = 0;
-            }
+        if let Err(failure) = health {
+            self.software_healthy_since = None;
+            self.note_failed_run();
             self.restart_count += 1;
             tracing::warn!(
                 attempt = self.restart_count,
+                cause = ?failure,
                 "pipeline_health_check_failed: restarting"
             );
+            // The encoder alone failed and mediamtx is up: re-discover (the
+            // camera may have renegotiated) and respawn only the encoder, so
+            // WHEP viewers, network-pull legs, recording segments and the cloud
+            // push keep their mediamtx session. Anything else, or a respawn
+            // that fails, takes the full restart.
+            if failure.is_encoder_side() && self.mediamtx.is_running() {
+                self.refresh_discovery(true).await;
+                if self.restart_encoder_only().await {
+                    self.restart_count = 0;
+                    return;
+                }
+            }
             let _guard = self.restart_lock.clone().lock_owned().await;
             self.stop_stream().await;
             let ok = self.start_stream().await;
@@ -1020,60 +1076,73 @@ impl VideoOrchestrator {
             }
             return;
         }
+        self.tick_consumers().await;
+    }
 
-        // Encoder healthy — check the cloud push. The cloud relay is the
-        // SECONDARY path and its re-arm is a bare spawn, so an unreachable relay
-        // costs one short-lived ffmpeg per tick and never delays the wfb-tee
-        // recovery below. This branch never `return`s.
+    /// The consumer ladders, run on every tick the primary is healthy: cloud
+    /// push → wfb tap → vision tap → SEI tap.
+    ///
+    /// The ladders are independent and none returns early, so on the tick
+    /// that first sees `main` published again every tap is respawned inside
+    /// that one tick; a tap respawn never holds the next tap over to a later
+    /// tick. An unhealthy tap is respawned at once when `main` has a publisher
+    /// and torn down to be looked at again next tick when it has none
+    /// ([`tap_recovery`]), so there is no hot-loop against a dead source.
+    pub(crate) async fn tick_consumers(&mut self) {
+        // The cloud relay is the SECONDARY path and its re-arm is a bare
+        // spawn, so an unreachable relay costs one short-lived ffmpeg per tick
+        // and never delays the tap recovery below.
         self.tick_cloud_push().await;
 
-        // Encoder + cloud fine — check the wfb tee ladder (video retries
-        // forever).
+        // The wfb tee ladder (video retries forever).
         if !self.check_wfb_tee_health().await {
-            if !self.mediamtx.path_ready(MAIN_PATH).await {
-                tracing::warn!("wfb_tee_source_down: RTSP source not ready; deferring tee respawn");
-                self.stop_wfb_tee().await;
-            } else {
-                self.wfb_tee_restart_count += 1;
-                tracing::warn!(attempt = self.wfb_tee_restart_count, "wfb_tee_restarting");
-                self.stop_wfb_tee().await;
-                self.start_wfb_tee().await;
-                if self.wfb_tee.is_some() {
-                    self.wfb_tee_restart_count = 0;
+            match tap_recovery(self.mediamtx.path_ready(MAIN_PATH).await) {
+                TapRecovery::Defer => {
+                    tracing::warn!(
+                        "wfb_tee_source_down: RTSP source not ready; deferring tee respawn"
+                    );
+                    self.stop_wfb_tee().await;
+                }
+                TapRecovery::Respawn => {
+                    self.wfb_tee_restart_count += 1;
+                    tracing::warn!(attempt = self.wfb_tee_restart_count, "wfb_tee_restarting");
+                    self.stop_wfb_tee().await;
+                    self.start_wfb_tee().await;
+                    if self.wfb_tee.is_some() {
+                        self.wfb_tee_restart_count = 0;
+                    }
                 }
             }
-            return;
         }
 
-        // Vision tap ladder (additive, lowest priority). Same shape as the wfb
-        // tap: defer the respawn when the RTSP source is down, otherwise
-        // restart. An additive consumer retries forever and never affects the
-        // encode/radio verdict above.
-        let vision_supervised = self.vision_enabled() && !self.config.vision.raw_tap;
-        if vision_supervised && !self.check_vision_tap_health().await {
-            if !self.mediamtx.path_ready(MAIN_PATH).await {
-                tracing::warn!(
-                    "vision_tap_source_down: RTSP source not ready; deferring tap respawn"
-                );
-                self.stop_vision_tap().await;
-            } else {
-                self.vision_tap_restart_count += 1;
-                tracing::warn!(
-                    attempt = self.vision_tap_restart_count,
-                    "vision_tap_restarting"
-                );
-                self.stop_vision_tap().await;
-                self.start_vision_tap().await;
-                if self.vision_tap.is_some() {
-                    self.vision_tap_restart_count = 0;
+        // Vision tap ladder (additive). Same shape as the wfb tap. An additive
+        // consumer retries forever and never affects the encode/radio verdict.
+        if self.vision_enabled() && !self.check_vision_tap_health().await {
+            match tap_recovery(self.mediamtx.path_ready(MAIN_PATH).await) {
+                TapRecovery::Defer => {
+                    tracing::warn!(
+                        "vision_tap_source_down: RTSP source not ready; deferring tap respawn"
+                    );
+                    self.stop_vision_tap().await;
+                }
+                TapRecovery::Respawn => {
+                    self.vision_tap_restart_count += 1;
+                    tracing::warn!(
+                        attempt = self.vision_tap_restart_count,
+                        "vision_tap_restarting"
+                    );
+                    self.stop_vision_tap().await;
+                    self.start_vision_tap().await;
+                    if self.vision_tap.is_some() {
+                        self.vision_tap_restart_count = 0;
+                    }
                 }
             }
-            return;
         }
 
-        // Healthy tick — if SEI latency is on and the one-shot tap exited (it
-        // runs a single read session), respawn it. Latency telemetry retries
-        // forever; deferred when the path is not ready so there is no hot-loop
+        // SEI latency tap: if the one-shot tap exited (it runs a single read
+        // session), respawn it. Latency telemetry retries forever; the spawn
+        // itself defers while the path is not ready, so there is no hot-loop
         // against a dead source.
         //
         // `!is_running()` alone is not sufficient even for a one-shot. The tap
@@ -1137,6 +1206,61 @@ impl VideoOrchestrator {
             self.restart_count = 0;
             tracing::info!("pipeline_recovered: stream started after retry");
         }
+    }
+
+    /// Count a run that never produced a first packet toward the software
+    /// fallback, but only when the encoder itself is to blame (see
+    /// [`counts_toward_software_fallback`]). A run that streamed then stalled
+    /// resets the count.
+    fn note_failed_run(&mut self) {
+        if self.first_packet_seen {
+            self.no_first_packet_failures = 0;
+            return;
+        }
+        let network = self.camera_cfg.network_source().is_some();
+        let errors = self.encoder_errors.load(Ordering::Acquire);
+        if !counts_toward_software_fallback(network, errors) {
+            tracing::info!(
+                network_source = network,
+                encoder_error_lines = errors,
+                "encoder_failure_not_attributed_to_encoder: software fallback not counted"
+            );
+            return;
+        }
+        self.no_first_packet_failures += 1;
+        if should_fallback_to_software(self.no_first_packet_failures, self.force_software) {
+            tracing::warn!(
+                failures = self.no_first_packet_failures,
+                "encoder_fallback_to_software: the hardware/GStreamer encoder failed to produce video; forcing the software libx264 path"
+            );
+            self.force_software = true;
+            self.no_first_packet_failures = 0;
+        }
+    }
+
+    /// Track a healthy tick on the forced software encoder and re-arm the
+    /// hardware path once the stretch is long enough.
+    fn note_healthy_tick(&mut self) {
+        if !self.force_software {
+            self.software_healthy_since = None;
+            return;
+        }
+        let now = Instant::now();
+        let since = *self.software_healthy_since.get_or_insert(now);
+        if software_rearm_due(Some(since), now) {
+            self.rearm_hardware_encoder("healthy_on_software");
+        }
+    }
+
+    /// Clear the software override so the next encoder start tries the
+    /// hardware path again.
+    pub(crate) fn rearm_hardware_encoder(&mut self, reason: &'static str) {
+        if self.force_software {
+            tracing::info!(reason, "encoder_hardware_rearmed");
+        }
+        self.force_software = false;
+        self.software_healthy_since = None;
+        self.no_first_packet_failures = 0;
     }
 }
 
@@ -1650,23 +1774,116 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vision_tap_health_unhealthy_after_exit() {
+    async fn vision_tap_health_unhealthy_after_the_leg_ends() {
         let mut o = test_orch();
         o.state = PipelineState::Running;
-        // A tap that has already exited must read unhealthy so the ladder
-        // respawns it. `true` exits immediately; wait for it to be reaped.
-        let mut p = ManagedProcess::spawn("test-vision-tap", "true", &[]).unwrap();
+        // A leg whose task ended (its listener failed) must read unhealthy so
+        // the ladder rebinds it.
+        let h = tokio::spawn(async {});
         for _ in 0..50 {
-            if !p.is_running() {
+            if h.is_finished() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(!p.is_running(), "test process should have exited");
-        o.vision_tap = Some(p);
+        o.vision_tap = Some(h);
         assert!(!o.check_vision_tap_health().await);
-        // The exited slot is cleared so the ladder can re-spawn cleanly.
+        // The ended slot is cleared so the ladder can rebind cleanly.
         assert!(o.vision_tap.is_none());
+    }
+
+    #[tokio::test]
+    async fn vision_tap_bind_failure_spawns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = AgentVideoConfig {
+            vision: crate::config::VisionTapConfig {
+                enabled: true,
+                // The parent directory does not exist, so the bind fails.
+                sink: dir
+                    .path()
+                    .join("missing/vision-tap.sock")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..crate::config::VisionTapConfig::default()
+            },
+            ..AgentVideoConfig::default()
+        };
+        let mut o = VideoOrchestrator::new(
+            cfg,
+            CameraConfig::default(),
+            std::path::Path::new("/tmp"),
+            EncoderEnv::detect(),
+        );
+        o.state = PipelineState::Running;
+        o.start_vision_tap().await;
+        // No leg and therefore no decoder: the ladder retries the bind on its
+        // next tick instead of respawning a decoder with nowhere to write.
+        assert!(o.vision_tap.is_none());
+    }
+
+    #[test]
+    fn only_encoder_side_failures_take_the_encoder_only_respawn() {
+        assert!(HealthFailure::EncoderExited.is_encoder_side());
+        assert!(HealthFailure::GraceExpired.is_encoder_side());
+        assert!(HealthFailure::InboundStalled.is_encoder_side());
+        assert!(!HealthFailure::MediamtxDied.is_encoder_side());
+        assert!(!HealthFailure::PathLost.is_encoder_side());
+    }
+
+    #[test]
+    fn source_failures_never_force_the_software_encoder() {
+        // A network camera that is down is not the encoder's fault.
+        assert!(!counts_toward_software_fallback(true, 5));
+        // A V4L2 run with no encoder-side error lines is a slow source.
+        assert!(!counts_toward_software_fallback(false, 0));
+        assert!(counts_toward_software_fallback(false, 1));
+
+        let mut o = test_orch();
+        o.camera_cfg.source = "rtsp://192.168.1.50:554/stream".into();
+        o.encoder_errors.store(3, Ordering::Release);
+        for _ in 0..10 {
+            o.note_failed_run();
+        }
+        assert!(!o.force_software, "a network source never latches software");
+
+        let mut o = test_orch();
+        o.encoder_errors.store(0, Ordering::Release);
+        for _ in 0..10 {
+            o.note_failed_run();
+        }
+        assert!(!o.force_software, "no encoder errors, no fallback");
+
+        o.encoder_errors.store(2, Ordering::Release);
+        for _ in 0..crate::health::ENCODER_FALLBACK_ATTEMPTS {
+            o.note_failed_run();
+        }
+        assert!(o.force_software, "encoder-side failures fall back");
+    }
+
+    #[test]
+    fn the_software_override_is_rearmed() {
+        let now = Instant::now();
+        assert!(!software_rearm_due(None, now));
+        assert!(!software_rearm_due(Some(now), now));
+        assert!(software_rearm_due(Some(now - SOFTWARE_REARM_AFTER), now));
+
+        // A long healthy stretch re-arms the hardware path.
+        let mut o = test_orch();
+        o.force_software = true;
+        o.software_healthy_since = Some(now - SOFTWARE_REARM_AFTER);
+        o.note_healthy_tick();
+        assert!(!o.force_software);
+        assert!(o.software_healthy_since.is_none());
+
+        // A short one does not.
+        o.force_software = true;
+        o.note_healthy_tick();
+        assert!(o.force_software);
+        assert!(o.software_healthy_since.is_some());
+
+        // A hotplug re-arms at once.
+        o.rearm_hardware_encoder("camera_hotplug");
+        assert!(!o.force_software);
     }
 
     #[tokio::test]
@@ -1899,6 +2116,30 @@ mod tests {
         );
         assert_eq!(o.last_start_error, StartError::NoPrimaryCamera);
     }
+
+    /// A camera-less node does not re-run the multi-second discovery on every
+    /// retry: only a sysfs change, a hotplug or the 60 s ceiling runs it.
+    #[tokio::test]
+    async fn camera_less_discovery_is_skipped_until_something_changes() {
+        let mut o = test_orch();
+        o.python_executable = "printf".to_string();
+        let earlier = Instant::now() - Duration::from_secs(5);
+        o.last_fingerprint = Some(crate::sysfs_fingerprint::fingerprint());
+        o.last_discovery_at = Some(earlier);
+
+        o.refresh_discovery(false).await;
+        assert_eq!(
+            o.last_discovery_at,
+            Some(earlier),
+            "unchanged node: skipped"
+        );
+
+        // A hotplug forces the probe and is consumed by it.
+        o.rediscover_requested = true;
+        o.refresh_discovery(false).await;
+        assert!(o.last_discovery_at.unwrap() > earlier, "hotplug: probed");
+        assert!(!o.rediscover_requested);
+    }
     // --- cloud push must re-arm after a full pipeline restart ---------------
 
     #[tokio::test]
@@ -1991,10 +2232,10 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_camera_state_writes_fresh_ready_snapshot_while_wedged() {
-        // The wedge/park paths call refresh_camera_state(). With a present
+        // Every healthy tick calls refresh_camera_state(). With a present
         // camera cached in last_cameras it must (re)write a `ready` snapshot so
-        // the staleness gate never drops the camera pill to `unknown` while the
-        // orchestrator is stuck. Target a temp path so the write is observable.
+        // the staleness gate never drops the camera pill to `unknown`. Target a
+        // temp path so the write is observable.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("camera-state.json");
         let mut o = test_orch();
@@ -2029,12 +2270,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_health_tick_preserves_the_streaming_stamp() {
-        // The P0 this closes: refresh_camera_state runs on EVERY healthy 5 s
+        // The P0 this closes: refresh_camera_state runs on EVERY healthy
         // tick, and while it rebuilt the snapshot from discovery alone it wrote
         // `pipeline_state: "unknown"` over the `streaming` stamp start_stream
         // had just made. The status surface has no arm for `unknown`, so a drone
         // that was actually streaming reported `not_initialized` with a null
-        // whep_url within 5 s of coming up.
+        // whep_url within one tick of coming up.
         //
         // start_stream itself is not driven here: it spawns mediamtx and a real
         // encoder. A pipeline past its first packet is its resolved encoder
