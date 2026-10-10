@@ -18,6 +18,7 @@
 #[cfg(feature = "bench-adapters")]
 mod bench;
 mod detect;
+mod info;
 mod monitor;
 mod reg;
 mod txpower;
@@ -26,6 +27,7 @@ pub use detect::{
     detect_and_select, detect_wfb_adapters, select_interface, usb_speed_degraded, SelectedAdapter,
     SelectionOutcome, WifiAdapterInfo,
 };
+pub use info::{parse_iface_channel, parse_iface_info, read_iface_info, IfaceInfo};
 pub use monitor::{
     get_interface_mode, restore_monitor_if_needed, set_managed_mode, set_monitor_mode_verified,
 };
@@ -33,8 +35,11 @@ pub use reg::{
     assert_reg_ready, dfs_channels, enabled_channels, read_reg_status, reconcile_reg_domain,
     set_reg_domain, ReassertOutcome, RegError, RegStatus,
 };
+#[cfg(test)]
+pub(crate) use txpower::ScriptedTxPower;
 pub use txpower::{
-    read_tx_power, set_tx_power, set_tx_power_modal, tx_power_ramp, MUTED_TX_POWER_DBM,
+    apply_tx_power_with, parse_iface_txpower, read_tx_power, set_tx_power_modal, tx_power_ramp,
+    IwTxPower, TxPowerIo, MUTED_TX_POWER_DBM,
 };
 
 /// Parse the iface carrying the kernel default route out of `ip route` output.

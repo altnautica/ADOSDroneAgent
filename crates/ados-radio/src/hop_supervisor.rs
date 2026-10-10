@@ -210,6 +210,10 @@ pub(crate) async fn proof_only_listener(
 /// (HopAck + the peer's PresenceBeacon) and drives the shared `HopState`; the
 /// hop loop announces a target, waits for the matching ACK, then executes the
 /// channel change. Writes `hop-supervisor.json` (5 s) + `peer-presence.json`.
+///
+/// `state` is process-lifetime (created above the respawn loop), so a
+/// whole-group respawn keeps the committed hop and the peer record instead of
+/// resetting to the rendezvous home.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_hop_supervisor(
     iface: &str,
@@ -223,12 +227,10 @@ pub(crate) async fn run_hop_supervisor(
     rx_proof: ados_radio::link_proof::RxProof,
     proof_reference: Instant,
     operating_channel: Arc<AtomicU64>,
+    state: Arc<tokio::sync::Mutex<HopState>>,
     mut manual_rx: tokio::sync::mpsc::Receiver<ManualHopRequest>,
     cancel: Shutdown,
 ) {
-    let state = Arc::new(tokio::sync::Mutex::new(HopState::new(
-        cfg.rendezvous_channel(),
-    )));
     // The unattended periodic-execution path is opt-in (off by default). The
     // reactive hop + the GS-coordinated follow run regardless; this only gates the
     // time-based periodic scan+hop and drives the honest sidecar `enabled` flag.

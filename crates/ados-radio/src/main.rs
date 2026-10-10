@@ -13,15 +13,10 @@
 // Focused sibling modules the orchestrator (`main` + `run_service`) drives.
 // Each groups one concern lifted out of this file; the binary behaves
 // identically — the helpers are simply re-homed and called through `use`.
-//
-// `backend` is the pluggable radio-backend seam. It is a
-// PURE-ADD: built + unit-tested but NOT yet wired into `run_service` (the live
-// bring-up still runs inline below), so declaring it here changes no behaviour.
-mod backend;
 mod bringup;
 mod hop_supervisor;
-mod reg_gate;
 mod sidecar;
+mod status_emit;
 mod txrate;
 
 use ados_protocol::shutdown::Shutdown;
@@ -39,7 +34,7 @@ use ados_radio::bitrate::{
 };
 use ados_radio::cmdsock::{self, CmdState, TxPowerState};
 use ados_radio::config::WfbConfig;
-use ados_radio::hop::pair_key_for;
+use ados_radio::hop::{pair_key_for, respawn_channel, HopState};
 use ados_radio::link_quality::LinkStats;
 use ados_radio::link_state::derive_link_state;
 use ados_radio::paths::{load_shared_key, read_bind_sentinel_active, SharedKey, WFB_TX_KEY};
@@ -49,11 +44,13 @@ use ados_radio::watchdog::{
     video_recvq_watchdog, CounterHandle, WatchdogCounters, WatchdogFired,
 };
 
-use bringup::{channel_from_iface, ensure_monitor_and_channel, ensure_radiating};
+use ados_radio::reg_gate::{
+    decide_reg_gate, Posture, RegGateDecision, BRINGUP_RETRY_SECS, STATE_REG_BLOCKED,
+};
+use bringup::{ensure_monitor_and_channel, ensure_radiating};
 use hop_supervisor::{
     emit_presence_beacons, proof_only_listener, run_hop_supervisor, write_hop_key_unavailable,
 };
-use reg_gate::{decide_reg_gate, RegGateDecision, BRINGUP_RETRY_SECS, STATE_REG_BLOCKED};
 use sidecar::{
     build_stats_value, json_object_to_fields, write_adapters_sidecar, write_stats_sidecar,
     AdapterInfo, ChannelTruth, RegPosture, RegSnapshot,
@@ -123,27 +120,24 @@ async fn main() {
         return;
     }
 
-    // Fleet identity gate. A drone that radiates on the wrong `link_id` shares a
-    // `channel_id` with whoever owns it — the ground station, or another drone —
-    // and the wfb-ng `Aggregator` re-inits its FEC decoder on every foreign
-    // session packet, so the two thrash each other roughly once a second. That
-    // presents as unexplained link loss, never as a config fault, so the radio
-    // REFUSES to come up on an unusable identity rather than defaulting one.
+    // Fleet identity gate (below, after the signal task). A drone that radiates
+    // on the wrong `link_id` shares a `channel_id` with whoever owns it — the
+    // ground station, or another drone — and the wfb-ng `Aggregator` re-inits
+    // its FEC decoder on every foreign session packet, so the two thrash each
+    // other roughly once a second. That presents as unexplained link loss, never
+    // as a config fault, so the radio REFUSES to come up on an unusable identity
+    // rather than defaulting one. Parking (rather than exiting) means a slot
+    // written by the pair flow is picked up on the next poll without a service
+    // restart: a freshly bound drone self-heals.
     //
-    // Parking (rather than exiting) means a slot written by the pair flow is
-    // picked up on the next poll without a service restart: a freshly bound
-    // drone self-heals.
-    let Some(cfg) = wait_for_fleet_identity(cfg).await else {
-        return;
-    };
-
     // Shutdown is a latching watch flag, not a one-shot `Notify`: once SIGTERM
     // flips it to `true` the value STAYS set, so a select arm that loses a race
     // on the first signal (e.g. a watchdog task finishing in the same poll) still
     // sees the shutdown on the next loop iteration, and any later SIGTERM is a
-    // no-op rather than a lost edge. The same latching-watch pattern the auto-pair
-    // supervisor uses for its own shutdown.
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // no-op rather than a lost edge. Created before the fleet-identity park so a
+    // SIGTERM that lands while the config is being re-read is never missed: the
+    // one signal task listens for the whole process lifetime.
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
     // ── Signal handler ────────────────────────────────────────────────────
     tokio::spawn(async move {
@@ -152,6 +146,10 @@ async fn main() {
         // returned there is nothing left to signal.
         let _ = shutdown_tx.send(true);
     });
+
+    let Some(cfg) = wait_for_fleet_identity(cfg, &mut shutdown_rx).await else {
+        return;
+    };
 
     run_service(&cfg, shutdown_rx).await;
     tracing::info!("wfb_service_stopped");
@@ -173,13 +171,16 @@ async fn run_list_adapters() {
 
 /// Park until this drone's configured fleet identity is usable, then return the
 /// config to bring the radio up with. `None` means SIGTERM/SIGINT arrived while
-/// parked.
+/// parked (the latched `shutdown` watch flipped).
 ///
 /// The first pass reuses the already-loaded `cfg` (the caller has folded the
 /// link preset onto it); every retry re-reads `/etc/ados/config.yaml` and
 /// re-applies the preset, so a slot written by the pair flow while this loop is
 /// parked is picked up without a service restart.
-async fn wait_for_fleet_identity(cfg: WfbConfig) -> Option<WfbConfig> {
+async fn wait_for_fleet_identity(
+    cfg: WfbConfig,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Option<WfbConfig> {
     let mut cfg = cfg;
     let mut logged = false;
     loop {
@@ -211,7 +212,8 @@ async fn wait_for_fleet_identity(cfg: WfbConfig) -> Option<WfbConfig> {
             logged = true;
         }
         tokio::select! {
-            _ = wait_for_shutdown() => return None,
+            biased;
+            _ = wait_for_shutdown_flag(shutdown) => return None,
             _ = tokio::time::sleep(KEY_WAIT_INTERVAL) => {}
         }
         cfg = WfbConfig::load_from(Path::new(CONFIG_YAML));
@@ -220,21 +222,20 @@ async fn wait_for_fleet_identity(cfg: WfbConfig) -> Option<WfbConfig> {
 }
 
 async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
-    // Operating-region posture, read once at service start. The default is
-    // unrestricted: the radio brings up + TX-enables on the home channel without
-    // a verified operating region, and the operator is responsible for local RF
-    // compliance. Pinning a region re-enables the strict regulatory gate for that
-    // jurisdiction. This is the higher-level switch that gates the underlying
-    // `reg_gate_strict` / `reg_domain` knobs; it never lifts the power-budget /
-    // brownout clamp (tx_power_dbm / the muted-readback rf_unverified detector
-    // stay armed in both postures).
-    let reg_cfg = ados_radio::config::RegulatoryConfig::load_from(Path::new(CONFIG_YAML));
-    let unrestricted = reg_cfg.mode.is_unrestricted();
+    // Operating-region posture, read once at service start through the same
+    // resolver the ground station uses, so both ends set the same domain and
+    // apply the same gate. The default is unrestricted: the radio brings up +
+    // TX-enables on the home channel without a verified operating region, and
+    // the operator is responsible for local RF compliance. Pinning a region
+    // re-enables the strict regulatory gate for that jurisdiction. It never
+    // lifts the power-budget / brownout clamp (tx_power_max_dbm / the
+    // muted-readback rf_unverified detector stay armed in both postures).
+    let posture = Posture::load(Path::new(CONFIG_YAML));
+    let unrestricted = posture.is_unrestricted();
     // The wanted domain the bring-up + global reconciler target. Region → the
     // pinned region code; unrestricted → the configured `reg_domain` fallback so
     // the global cfg80211 reconciler still keeps a sane domain (never `00`).
-    let reg_fallback = cfg.reg_domain.clone().unwrap_or_else(|| "US".to_string());
-    let region_domain = reg_cfg.wanted_domain(&reg_fallback).to_string();
+    let region_domain = posture.wanted_domain.clone();
     // The posture surfaced on every sidecar (even unpaired / no-adapter), so the
     // GCS / OLED / webapp always show the honest operating-region state.
     let reg_posture = RegPosture::new(unrestricted, &region_domain);
@@ -299,6 +300,15 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
     // `radio-aux.sock`'s `publish` op (see [`ados_radio::aux_cmd`]), which is
     // what feeds this channel.
     let (aux_app_tx, _) = tokio::sync::broadcast::channel::<(u8, Vec<u8>)>(256);
+    // The live operating channel and the hop state are process-lifetime too,
+    // like `retained_trio` and `tx_power`: a whole-group respawn after a
+    // committed hop must come back up on the hopped channel while the peer is
+    // there, not re-tune the rendezvous home and split the pair. The hop
+    // supervisor updates both on a committed move.
+    let operating_channel = Arc::new(AtomicU64::new(cfg.rendezvous_channel() as u64));
+    let hop_state = Arc::new(tokio::sync::Mutex::new(HopState::new(
+        cfg.rendezvous_channel(),
+    )));
     loop {
         // Latched shutdown gate at the top of the respawn loop: if SIGTERM flipped
         // the watch while we were tearing down a radio group below, never start
@@ -348,24 +358,21 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             use ados_radio::reg_event::{
                 is_eeprom_override, reg_gate_detail, RegGateResult, RegGateStage, REG_GATE_KIND,
             };
-            // Unrestricted → set an EMPTY domain (set_reg_domain no-ops on ""), so
-            // the bring-up does not force a country onto the injection PHY; the
-            // global cfg80211 reconciler in the supervisor keeps the GLOBAL domain
-            // sane independently. Region → the pinned region code.
-            let domain = if unrestricted {
-                ""
-            } else {
-                region_domain.as_str()
-            };
+            // Unrestricted → the posture sets an EMPTY domain (set_reg_domain
+            // no-ops on ""), so the bring-up does not force a country onto the
+            // injection PHY; the global cfg80211 reconciler in the supervisor
+            // keeps the GLOBAL domain sane independently. Region → the pinned
+            // region code.
+            let domain = posture.domain_to_set.as_str();
             let reg_result = ados_radio::adapter::set_reg_domain(domain).await;
             let eeprom_override = reg_result
                 .as_ref()
                 .err()
                 .map(is_eeprom_override)
                 .unwrap_or(false);
-            // Under the unrestricted posture the gate never blocks: strictness is
-            // off regardless of the raw `reg_gate_strict` flag (the mode gates it).
-            match decide_reg_gate(&reg_result, !unrestricted && cfg.reg_gate_strict) {
+            // Under the unrestricted posture the gate never blocks: the posture's
+            // strictness is off regardless of the raw `reg_gate_strict` flag.
+            match decide_reg_gate(&reg_result, posture.strict) {
                 RegGateDecision::Proceed => {
                     events.emit(
                         REG_GATE_KIND,
@@ -518,11 +525,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             use ados_radio::reg_event::{
                 reg_gate_detail, RegGateResult, RegGateStage, REG_GATE_KIND,
             };
-            let domain = if unrestricted {
-                ""
-            } else {
-                region_domain.as_str()
-            };
+            let domain = posture.domain_to_set.as_str();
             // Unrestricted → skip the channel-enabled / non-DFS assertion entirely
             // (the operator owns local compliance); the rendezvous channel is used
             // as-is. Region → today's strict channel readiness check.
@@ -531,7 +534,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             } else {
                 adapter::assert_reg_ready(rendezvous_ch, &gate_enabled, &gate_dfs, cfg.dfs_allowed)
             };
-            match decide_reg_gate(&ready, !unrestricted && cfg.reg_gate_strict) {
+            match decide_reg_gate(&ready, posture.strict) {
                 RegGateDecision::Proceed => {
                     events.emit(
                         REG_GATE_KIND,
@@ -621,6 +624,10 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                 }
             }
         }
+        // The channel this bring-up tunes: the rendezvous home on a fresh start,
+        // or the committed hop channel while the peer was heard recently, so a
+        // respawn after a hop never splits the pair.
+        let bringup_ch = respawn_channel(&*hop_state.lock().await, Instant::now());
         // Re-assert monitor mode and land on the channel before bring-up
         // proceeds. A self-managed injection PHY (the RTL family) — or a
         // concurrent regulatory-domain set on the same wiphy — can revert the
@@ -630,10 +637,10 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // station can decode (advancing tx_bytes with zero usable RF), so the
         // channel must land — verified — before TX starts. On total failure,
         // re-enter the selection loop rather than start a dead TX.
-        if !ensure_monitor_and_channel(iface, rendezvous_ch).await {
+        if !ensure_monitor_and_channel(iface, bringup_ch).await {
             tracing::error!(
                 iface,
-                channel = rendezvous_ch,
+                channel = bringup_ch,
                 note = "monitor mode + channel never landed (EBUSY); not starting TX, retrying bring-up",
                 "wfb_channel_set_unrecovered"
             );
@@ -691,15 +698,15 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
 
         // ── Clamp TX power BEFORE wfb_tx starts injecting ─────────────────
         // Critical on host-VBUS rigs: the driver default (~17-20 dBm) browns
-        // out the adapter. Ramps up from the configured floor on rejection. The
-        // power-budget clamp is NEVER lifted by the unrestricted posture — only
-        // the muted-readback handling differs (surface vs abort, see
-        // set_tx_power_modal): under unrestricted a muted PHY surfaces as
-        // rf_unverified rather than aborting bring-up.
+        // out the adapter. Ramps up from the configured floor on rejection, never
+        // past the configured ceiling. The power-budget clamp is NEVER lifted by
+        // the unrestricted posture — only the muted-readback handling differs
+        // (surface vs abort, see set_tx_power_modal).
         let effective_tx_dbm = match ensure_radiating(
             iface,
-            rendezvous_ch,
+            bringup_ch,
             tx_power.requested(),
+            tx_power.max_dbm(),
             unrestricted,
         )
         .await
@@ -709,15 +716,15 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                 dbm
             }
             None => {
-                // The PHY stayed pinned at the muted not-permitted floor through
-                // every recovery attempt. Starting wfb_tx now injects into a dead
-                // PHY (every sendmsg returns ENOBUFS, tx_bytes frozen) and the
-                // liveness watchdog kill-loops it forever with no effect. Park and
-                // re-enter bring-up instead of starting a TX that cannot radiate.
+                // No in-budget TX power was accepted, or the PHY stayed pinned at
+                // the muted not-permitted floor through every recovery attempt.
+                // Starting wfb_tx now either injects into a dead PHY (every
+                // sendmsg returns ENOBUFS) or radiates at the driver default.
+                // Park and re-enter bring-up instead.
                 tracing::error!(
                     iface,
-                    channel = rendezvous_ch,
-                    note = "PHY muted at txpower floor after recovery; not starting TX, retrying bring-up",
+                    channel = bringup_ch,
+                    note = "TX power not applied in budget or PHY muted after recovery; not starting TX, retrying bring-up",
                     "wfb_phy_muted_unrecovered"
                 );
                 tokio::select! {
@@ -764,11 +771,10 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // `reference` is the shared origin all observations are measured against.
         let rx_proof = ados_radio::link_proof::RxProof::new();
         let proof_reference = Instant::now();
-        // Runtime operating channel (tmpfs concept): equals the rendezvous home
-        // until a coordinated channel move commits. The hop supervisor updates it
-        // on a successful channel change; the heartbeat reads it for the
-        // `operating_channel` field. Seeded with the rendezvous home.
-        let operating_channel = Arc::new(AtomicU64::new(rendezvous_ch as u64));
+        // Runtime operating channel (process-lifetime, hoisted above the respawn
+        // loop): the channel this bring-up landed on. The hop supervisor updates
+        // it on a committed move; the heartbeat reads it for `operating_channel`.
+        operating_channel.store(bringup_ch as u64, Ordering::Relaxed);
         // The wanted regulatory domain, resolved once (constant for this bring-up)
         // so the heartbeat's cheap live read can report verified vs unverified.
         // Region → the pinned region; unrestricted → the configured fallback (the
@@ -820,7 +826,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         // surfaces, but seeded here so the first `connecting` sidecar is truthful.
         let reg_status = ados_radio::adapter::read_reg_status(&wanted_domain).await;
         let reg_snapshot = RegSnapshot {
-            domain: reg_status.domain,
+            domain: reg_status.domain.clone(),
             verified: reg_status.verified,
             enabled_channels: enabled_channels_vec.clone(),
             posture: reg_posture.clone(),
@@ -886,13 +892,17 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let hb_metrics = metrics.clone();
         let hb_usb_speed = adapter_info.usb_speed_mbps;
         let hb_tx_power = tx_power.clone();
+        let hb_reg_seed = reg_status;
         let mut heartbeat = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             let mut tx_live = TxLiveness::new();
-            // When the heartbeat last ran the regulatory reconcile. The
-            // reconcile's bounded retry can take ~10 s, so it runs at most once
-            // per REG_RECONCILE_INTERVAL and never holds up every sidecar write.
-            let mut last_reconcile: Option<Instant> = None;
+            // The cached live regulatory status: seeded by the bring-up read and
+            // refreshed with `iw reg get` at most once per REG_RECONCILE_INTERVAL
+            // (the reconcile, when the domain drifted, runs on the same
+            // cadence), so a 2 s tick forks one `iw` for the interface info and
+            // nothing else.
+            let mut reg_status = hb_reg_seed;
+            let mut last_reg_read = Instant::now();
             // Previous link-lock state, so a lock/unlock event fires only on a
             // real transition (not every heartbeat). `None` until the first tick.
             let mut prev_locked: Option<bool> = None;
@@ -901,10 +911,13 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             // the episode boundaries; the instantaneous flag still rides the
             // sidecar each tick. Bounded + self-clearing, no event while healthy.
             let mut rf_detector = ados_radio::rf_unverified::RfUnverifiedDetector::new();
+            // The `link.wfb_status` store event goes out on a change of a key
+            // field or every 10 s, not on every sidecar rewrite.
+            let mut status_gate = status_emit::StatusEmitGate::new();
             // Last successfully-read live channel; if `iw info` momentarily fails
             // we keep reporting the last-known live value rather than the
             // configured one (a transient read error is not a channel change).
-            let mut last_live_channel = hb_rendezvous;
+            let mut last_live_channel = bringup_ch;
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
@@ -913,19 +926,21 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                         // congested transmitter writes one line a second for as
                         // long as it runs; keep each under its cap.
                         ados_radio::process::cap_plane_logs().await;
-                        // Live PHY-mute readback: the TX PHY pinned at the muted
-                        // not-permitted floor injects frames but radiates nothing
-                        // (the RTL8812EU `set type monitor` mute). Surfaced on the
-                        // sidecar so Mission Control shows a "PHY muted" badge
-                        // instead of a silent dead link.
-                        let phy_muted = ados_radio::adapter::read_tx_power(&hb_iface)
-                            .await
+                        // One `iw dev <if> info` per tick, parsed into the live
+                        // channel and the TX-power readback. The readback drives
+                        // the PHY-mute flag (the TX PHY pinned at the muted
+                        // not-permitted floor injects frames but radiates nothing)
+                        // and is published as the measured TX power.
+                        let info = ados_radio::adapter::read_iface_info(&hb_iface).await;
+                        let readback = info.and_then(|i| i.txpower_dbm);
+                        let phy_muted = readback
                             .map(|dbm| dbm <= ados_radio::adapter::MUTED_TX_POWER_DBM)
                             .unwrap_or(false);
                         let stats = hb_link.lock().await.clone();
                         let wd = {
                             let mut c = hb_counters.lock().await;
                             c.phy_muted = phy_muted;
+                            c.tx_power_readback_dbm = readback;
                             *c
                         };
                         // Uplink valid-decode rate: the latest per-interval
@@ -1040,10 +1055,10 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
 
                         let bsnap = hb_bitrate.lock().await.clone();
 
-                        // Truthful channel: read the LIVE interface channel, not
-                        // the configured value. A momentary read failure keeps the
-                        // last-known live value.
-                        if let Some(live) = channel_from_iface(&hb_iface).await {
+                        // Truthful channel: the LIVE interface channel from this
+                        // tick's info read, not the configured value. A momentary
+                        // read failure keeps the last-known live value.
+                        if let Some(live) = info.and_then(|i| i.channel) {
                             last_live_channel = live;
                         }
                         let channels = ChannelTruth {
@@ -1090,75 +1105,73 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                             }
                             ados_radio::rf_unverified::RfUnverifiedEdge::None => {}
                         }
-                        // Live regulatory status (cheap `iw reg get`), so a domain
-                        // that changes under the radio surfaces remotely too.
-                        let reg_status =
-                            ados_radio::adapter::read_reg_status(&hb_wanted_domain).await;
-
-                        // ── Periodic regulatory reconcile (prevention) ────────
-                        // The injection PHY can re-assert its baked country as the
-                        // global domain on a later monitor/bind re-entry, long
-                        // after the bring-up reconcile. When the live domain drifts
-                        // off the wanted value, re-assert it so the onboard WiFi is
-                        // never left under a foreign domain. SAFETY: only re-assert
-                        // when the wanted domain permits the rendezvous channel —
-                        // the enabled set already excludes DFS / disabled channels,
-                        // so membership (or an empty/unknown set) is the same gate
-                        // the bring-up used; this can never cap the radio. Skipped
-                        // entirely while the live domain already matches (the cheap
-                        // common case), and run at most once per
-                        // REG_RECONCILE_INTERVAL: a domain that will not take costs
-                        // one bounded attempt per interval, never the sidecar
-                        // cadence.
-                        let reconcile_due = last_reconcile
-                            .is_none_or(|at| now.saturating_duration_since(at) >= REG_RECONCILE_INTERVAL);
-                        if !reg_status.verified && reconcile_due {
-                            last_reconcile = Some(now);
-                            let channel_ok = hb_enabled.is_empty()
-                                || hb_enabled.contains(&hb_rendezvous);
-                            if let ados_radio::adapter::ReassertOutcome::Reasserted {
-                                from,
-                                to,
-                                ..
-                            } = ados_radio::adapter::reconcile_reg_domain(
-                                &hb_wanted_domain,
-                                hb_rendezvous,
-                                channel_ok,
-                            )
-                            .await
-                            {
-                                hb_events.emit(
-                                    ados_radio::reg_reassert::REG_REASSERT_KIND,
-                                    ados_radio::reg_reassert::REG_REASSERT_SEVERITY,
-                                    ados_radio::reg_reassert::reg_reassert_detail(
-                                        &hb_iface,
-                                        from.as_deref(),
-                                        &to,
-                                        hb_rendezvous,
-                                        true,
-                                    ),
-                                );
+                        // ── Regulatory status + periodic reconcile ────────────
+                        // Refresh the cached live domain at most once per
+                        // REG_RECONCILE_INTERVAL. When it drifted off the wanted
+                        // value (the injection PHY can re-assert its baked country
+                        // as the global domain on a later monitor/bind re-entry),
+                        // re-assert it so the onboard WiFi is never left under a
+                        // foreign domain. SAFETY: only re-assert when the wanted
+                        // domain permits the rendezvous channel — the enabled set
+                        // already excludes DFS / disabled channels, so membership
+                        // (or an empty/unknown set) is the same gate the bring-up
+                        // used; this can never cap the radio.
+                        if now.saturating_duration_since(last_reg_read) >= REG_RECONCILE_INTERVAL {
+                            last_reg_read = now;
+                            reg_status =
+                                ados_radio::adapter::read_reg_status(&hb_wanted_domain).await;
+                            if !reg_status.verified {
+                                let channel_ok = hb_enabled.is_empty()
+                                    || hb_enabled.contains(&hb_rendezvous);
+                                if let ados_radio::adapter::ReassertOutcome::Reasserted {
+                                    from,
+                                    to,
+                                    ..
+                                } = ados_radio::adapter::reconcile_reg_domain(
+                                    &hb_wanted_domain,
+                                    hb_rendezvous,
+                                    channel_ok,
+                                )
+                                .await
+                                {
+                                    hb_events.emit(
+                                        ados_radio::reg_reassert::REG_REASSERT_KIND,
+                                        ados_radio::reg_reassert::REG_REASSERT_SEVERITY,
+                                        ados_radio::reg_reassert::reg_reassert_detail(
+                                            &hb_iface,
+                                            from.as_deref(),
+                                            &to,
+                                            hb_rendezvous,
+                                            true,
+                                        ),
+                                    );
+                                    reg_status = ados_radio::adapter::read_reg_status(
+                                        &hb_wanted_domain,
+                                    )
+                                    .await;
+                                }
                             }
                         }
 
                         let reg = RegSnapshot {
-                            domain: reg_status.domain,
+                            domain: reg_status.domain.clone(),
                             verified: reg_status.verified,
                             enabled_channels: hb_enabled.clone(),
                             posture: hb_reg_posture.clone(),
                         };
 
-                        // Build the full body once, write the sidecar (the live
-                        // fallback the REST route reads), and ship the SAME body
-                        // to the logging store as a single full-snapshot event
-                        // (the durable read source). Best-effort: an absent
-                        // logging daemon drops the event without disturbing the
-                        // radio loop.
+                        // Build the full body once and write the sidecar (the
+                        // live fallback the REST route reads) every tick. The
+                        // same body goes to the logging store as one snapshot
+                        // event only when a key field changed or 10 s passed.
+                        // Best-effort: an absent logging daemon drops the event
+                        // without disturbing the radio loop.
+                        let tx_dbm = hb_tx_power.effective().unwrap_or(effective_tx_dbm);
                         let body = build_stats_value(
                             state.as_str(),
                             &channels,
                             &reg,
-                            hb_tx_power.effective().unwrap_or(effective_tx_dbm),
+                            tx_dbm,
                             Some(&hb_adapter),
                             &stats,
                             &hb_cfg,
@@ -1172,11 +1185,22 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                             &body,
                         )
                         .ok();
-                        hb_metrics.emit_event(
-                            "link.wfb_status",
-                            ados_protocol::logd::Level::Info,
-                            json_object_to_fields(&body),
-                        );
+                        let key = status_emit::StatusKey {
+                            state: state.as_str().to_string(),
+                            actual_channel: channels.actual,
+                            operating_channel: channels.operating,
+                            reg_domain: reg.domain.clone(),
+                            reg_verified: reg.verified,
+                            tx_power_dbm: tx_dbm,
+                            tx_power_readback_dbm: readback,
+                        };
+                        if status_gate.should_emit(key, now) {
+                            hb_metrics.emit_event(
+                                "link.wfb_status",
+                                ados_protocol::logd::Level::Info,
+                                json_object_to_fields(&body),
+                            );
+                        }
                     }
                     _ = hb_cancel.wait() => break,
                 }
@@ -1282,6 +1306,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
             proc: proc.clone(),
             adaptive_enabled: adaptive_enabled.clone(),
             tx_power: tx_power.clone(),
+            unrestricted,
         };
         let cmd_cancel = task_cancel.clone();
         let cmd_sock_path = ados_radio::paths::run_path("wfb-cmd.sock");
@@ -1399,6 +1424,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
         let hop_proof = rx_proof.clone();
         let hop_proof_reference = proof_reference;
         let hop_operating = operating_channel.clone();
+        let hop_shared_state = hop_state.clone();
         let mut hop = tokio::spawn(async move {
             let Some(hop_key) = hop_key else {
                 // The key file exists but cannot be read. Refuse every hop
@@ -1423,6 +1449,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                     hop_proof,
                     hop_proof_reference,
                     hop_operating,
+                    hop_shared_state,
                     manual_hop_rx,
                     hop_cancel,
                 )
@@ -1503,6 +1530,7 @@ async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<bool>) {
                                 iface,
                                 live_ch,
                                 tx_power.requested(),
+                                tx_power.max_dbm(),
                                 unrestricted,
                             )
                             .await

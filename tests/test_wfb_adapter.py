@@ -8,7 +8,7 @@ from ados.services.wfb.adapter import (
     _parse_iw_dev,
     _parse_phy_info,
     control_interface,
-    detect_wfb_adapters,
+    detect_wfb_adapters_iw,
     set_managed_mode,
     set_monitor_mode,
 )
@@ -84,12 +84,13 @@ def test_parse_phy_info_empty():
     assert result == {}
 
 
-# --- detect_wfb_adapters ---
+# --- detect_wfb_adapters_iw (the in-process scan; the public resolver would
+# --- read the host's radio sidecar or binary first) ---
 
 @patch("ados.services.wfb.adapter.platform")
 def test_detect_non_linux(mock_platform):
     mock_platform.system.return_value = "Darwin"
-    result = detect_wfb_adapters()
+    result = detect_wfb_adapters_iw()
     assert result == []
 
 
@@ -124,7 +125,7 @@ def test_detect_linux_with_adapters(mock_platform, mock_usb, mock_subprocess):
 
     mock_subprocess.run.side_effect = [dev_result, phy_result, control_result, driver_result]
 
-    result = detect_wfb_adapters()
+    result = detect_wfb_adapters_iw()
     assert len(result) == 1
     assert result[0].interface_name == "wlan0"
     assert result[0].supports_monitor is True
@@ -142,7 +143,7 @@ def test_detect_iw_dev_fails(mock_platform, mock_usb, mock_subprocess):
     fail_result.returncode = 1
     mock_subprocess.run.return_value = fail_result
 
-    result = detect_wfb_adapters()
+    result = detect_wfb_adapters_iw()
     assert result == []
 
 
@@ -373,7 +374,7 @@ def test_multi_radio_does_not_tag_onboard_as_rtl(monkeypatch):
         adapter_mod, "_get_usb_id_for_interface", _fake_usb_id_for_interface
     )
 
-    adapters = detect_wfb_adapters()
+    adapters = detect_wfb_adapters_iw()
     by_name = {a.interface_name: a for a in adapters}
 
     assert "wlan0" in by_name and "wlxfc23cd1cf1a5" in by_name
@@ -421,7 +422,7 @@ def test_compat_via_driver_name_when_sysfs_walk_misses(monkeypatch):
         adapter_mod, "_get_usb_id_for_interface", lambda _iface: (0, 0)
     )
 
-    adapters = detect_wfb_adapters()
+    adapters = detect_wfb_adapters_iw()
     assert len(adapters) == 1
     assert adapters[0].is_wfb_compatible is True
 
@@ -482,7 +483,7 @@ def test_detect_excludes_control_interface(mock_platform, mock_usb, mock_subproc
     control_result.stdout = "default via 192.168.1.1 dev wlan0 proto dhcp metric 600\n"
     mock_subprocess.run.side_effect = [dev_result, phy_result, control_result]
 
-    assert detect_wfb_adapters() == []
+    assert detect_wfb_adapters_iw() == []
 
 
 @patch("ados.services.wfb.adapter.subprocess")

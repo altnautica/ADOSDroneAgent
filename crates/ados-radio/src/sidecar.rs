@@ -279,6 +279,10 @@ pub(crate) fn build_stats_value(
         "adapter_usb_speed_mbps": adapter_usb_speed_mbps,
         "adapter_usb_degraded": adapter_usb_degraded,
         "tx_power_dbm": effective_tx_dbm,
+        // The measured TX power (dBm) from the live `iw` readback; `null` when
+        // it was not read. Lets the panel show a driver that runs at another
+        // power than the one it accepted.
+        "tx_power_readback_dbm": counters.tx_power_readback_dbm,
         "tx_power_max_dbm": cfg.tx_power_max_dbm,
         "topology": cfg.topology,
         // LIVE radio rate + redundancy from the controller snapshot (seeded from
@@ -297,10 +301,10 @@ pub(crate) fn build_stats_value(
         // decode stats of its own, so this is true only when a verified return
         // signal (a control-plane ack or a peer beacon) was heard recently.
         "channel_locked": channels.locked,
-        // Which radio backend is driving the link. Always
-        // "kernel" today — the Linux monitor-mode + wfb_tx/wfb_rx backend — so
-        // Mission Control can badge the live radio path (additive).
-        "backend": crate::backend::BackendKind::KernelMonitor.as_wire(),
+        // Which radio backend is driving the link. Always "kernel": the Linux
+        // monitor-mode + wfb_tx/wfb_rx path, so Mission Control can badge the
+        // live radio path.
+        "backend": "kernel",
         "profile": "drone",
         // Count of radio-group respawns since service start (watchdog kills,
         // hop restarts, return-home restarts) — surfaces churn to the panel.
@@ -504,7 +508,7 @@ fn json_to_mpv(value: &serde_json::Value) -> ados_protocol::logd::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reg_gate::STATE_REG_BLOCKED;
+    use ados_radio::reg_gate::STATE_REG_BLOCKED;
 
     /// Build a stats body over an injected link reading + bitrate snapshot,
     /// with everything else at its default. Only the loss provenance is under
@@ -927,6 +931,33 @@ mod tests {
             body["adapter_usb_degraded"]
         );
         assert!(body["adapter_usb_speed_mbps"].is_null());
+    }
+
+    #[test]
+    fn stats_report_the_measured_tx_power_or_null() {
+        let body = |counters: &WatchdogCounters| {
+            build_stats_value(
+                "connected",
+                &ChannelTruth::configured(149),
+                &RegSnapshot::default(),
+                5,
+                None,
+                &LinkStats::default(),
+                &WfbConfig::default(),
+                0,
+                counters,
+                &TxRates::default(),
+                &BitrateSnapshot::default(),
+            )
+        };
+        assert!(body(&WatchdogCounters::default())["tx_power_readback_dbm"].is_null());
+        let measured = WatchdogCounters {
+            tx_power_readback_dbm: Some(9.0),
+            ..WatchdogCounters::default()
+        };
+        let v = body(&measured);
+        assert_eq!(v["tx_power_readback_dbm"], 9.0);
+        assert_eq!(v["tx_power_dbm"], 5);
     }
 
     #[test]

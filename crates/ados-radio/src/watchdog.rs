@@ -69,6 +69,9 @@ pub struct WatchdogCounters {
     /// nothing. Surfaced on the radio sidecar/heartbeat so Mission Control shows
     /// a "PHY muted" badge instead of a silent dead link.
     pub phy_muted: bool,
+    /// Live TX-power readback in dBm from the heartbeat's `iw dev <if> info`
+    /// read, or `None` when it was not read (no bring-up yet, unreadable).
+    pub tx_power_readback_dbm: Option<f32>,
 }
 
 /// Shared handle to the watchdog counters (mirrors the `LinkStats` share).

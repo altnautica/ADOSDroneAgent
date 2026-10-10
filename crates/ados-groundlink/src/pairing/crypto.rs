@@ -435,12 +435,24 @@ mod tests {
         .unwrap();
         assert_eq!(opened, b"payload");
         assert!(matches!(
-            open_from_peer(&secret, &sealed.eph_pub, &sealed.nonce, &sealed.ciphertext, b"ctx-b"),
+            open_from_peer(
+                &secret,
+                &sealed.eph_pub,
+                &sealed.nonce,
+                &sealed.ciphertext,
+                b"ctx-b"
+            ),
             Err(CryptoError::DecryptFailed)
         ));
         let other = generate_keypair().secret.to_bytes();
-        assert!(open_from_peer(&other, &sealed.eph_pub, &sealed.nonce, &sealed.ciphertext, b"ctx-a")
-            .is_err());
+        assert!(open_from_peer(
+            &other,
+            &sealed.eph_pub,
+            &sealed.nonce,
+            &sealed.ciphertext,
+            b"ctx-a"
+        )
+        .is_err());
         // An all-zero (low-order) peer key is refused rather than sealed to.
         assert!(matches!(
             seal_to_peer(&[0u8; 32], b"ctx-a", b"p"),

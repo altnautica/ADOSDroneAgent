@@ -56,6 +56,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use ados_radio::config::WfbConfig;
+use ados_radio::reg_gate::Posture;
 
 use crate::acquire::{ChannelAcquirer, ChannelSetter};
 use crate::presence::GsPresenceCache;
@@ -168,6 +169,9 @@ pub struct WfbRxManager {
     /// by `prepare_interface`, surfaced on every sidecar write so the panel sees
     /// the same regulatory truth as the drone. Default (unknown) until prepared.
     reg_snapshot: GsRegSnapshot,
+    /// The regulatory posture `prepare_interface` brought the interface up
+    /// under. `None` until it first runs.
+    posture: Option<Posture>,
 }
 
 impl WfbRxManager {
@@ -183,6 +187,7 @@ impl WfbRxManager {
             adapter: GsAdapterInfo::default(),
             enabled_channels: BTreeSet::new(),
             reg_snapshot: GsRegSnapshot::default(),
+            posture: None,
         }
     }
 
@@ -190,6 +195,12 @@ impl WfbRxManager {
     /// until that runs.
     pub fn reg_snapshot(&self) -> &GsRegSnapshot {
         &self.reg_snapshot
+    }
+
+    /// The regulatory posture resolved by the last `prepare_interface`, `None`
+    /// before it first ran.
+    pub fn posture(&self) -> Option<&Posture> {
+        self.posture.as_ref()
     }
 
     /// The rendezvous (meeting) channel for this receive plane — the operator's
@@ -238,27 +249,26 @@ impl WfbRxManager {
     /// Bring `iface` to the receive-ready state BEFORE the wfb_rx spawn, in the
     /// order the kernel requires:
     ///
-    ///  1. **Regulatory gate first** (`iw reg set` + verify). The kernel maps the
-    ///     permitted channel set and the per-channel TX-power ceiling when the
-    ///     driver initialises, so a domain set after monitor-mode bring-up is too
-    ///     late and leaves the home channel (149 / 5745 MHz) capped to the
-    ///     startup domain's limits — zero injected frames, the -100 dBm "not
-    ///     permitted" sentinel. This is a global per-phy call, so it needs no
-    ///     interface; an empty/None config value falls back to the safe default.
-    ///     Under the strict (default) gate a verify failure returns `Err` and the
-    ///     run loop parks in `reg_blocked` rather than spawning the receive chain
-    ///     on a capped radio; the lab escape hatch proceeds best-effort.
-    ///  2. **Channel readiness assertion**: once the wiphy is known, assert the
-    ///     rendezvous channel is in the enabled set and is non-DFS. A mismatch
-    ///     returns `Err` under the strict gate.
-    ///  3. **Monitor mode** on the interface the run loop resolved (the
-    ///     auto-detected RTL injection adapter or the operator's config
-    ///     override). `set_monitor_mode_verified` re-asserts it with the 4×
-    ///     verify retry and guards the operator's control path so it can never
-    ///     sever the management link.
-    ///  4. **TX power** on the monitor interface. Without it the dongle runs at
-    ///     the driver default (~17-20 dBm) and risks brownout on a host-VBUS USB
-    ///     topology — the same guard the air side applies.
+    ///  1. **Regulatory gate first** (`iw reg set` + verify) under the shared
+    ///     [`Posture`]: the same resolver the drone uses, so both ends set the
+    ///     same domain and apply the same strictness (the unrestricted default
+    ///     forces no domain and never blocks; a pinned region sets it and the
+    ///     raw `reg_gate_strict` knob applies). The kernel maps the permitted
+    ///     channel set and the per-channel TX-power ceiling when the driver
+    ///     initialises, so a domain set after monitor-mode bring-up is too late.
+    ///     A strict verify failure returns `Err` and the run loop parks in
+    ///     `reg_blocked` rather than spawning the receive chain on a capped radio.
+    ///  2. **Channel readiness assertion** (pinned region only): once the wiphy
+    ///     is known, assert the rendezvous channel is in the enabled set and is
+    ///     non-DFS. A mismatch returns `Err` under the strict gate. The
+    ///     unrestricted posture skips it, as the drone does.
+    ///  3. **Monitor mode** on the interface the run loop resolved.
+    ///     `set_monitor_mode_verified` re-asserts it with the 4× verify retry and
+    ///     guards the operator's control path so it can never sever the
+    ///     management link.
+    ///  4. **TX power** on the monitor interface, ramped only inside
+    ///     `tx_power_max_dbm`. Without it the dongle runs at the driver default
+    ///     (~17-20 dBm) and risks brownout on a host-VBUS USB topology.
     ///  5. **Channel set** to the rendezvous home. wfb_rx receives on whatever
     ///     channel the netdev is set to; it does not retune itself.
     ///
@@ -273,18 +283,15 @@ impl WfbRxManager {
     ) -> Result<(), ados_radio::adapter::RegError> {
         // 1. Regulatory domain set + verify, before anything touches monitor
         // mode. A global per-phy call; needs no interface.
-        let reg_domain = self
-            .config
-            .reg_domain
-            .clone()
-            .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| DEFAULT_REG_DOMAIN.to_string());
-        let strict = self.config.reg_gate_strict;
-        if let Err(e) = ados_radio::adapter::set_reg_domain(&reg_domain).await {
+        let posture = Posture::load(std::path::Path::new(crate::paths::CONFIG_YAML));
+        self.posture = Some(posture.clone());
+        let strict = posture.strict;
+        let unrestricted = posture.is_unrestricted();
+        if let Err(e) = ados_radio::adapter::set_reg_domain(&posture.domain_to_set).await {
             if strict {
                 tracing::error!(
                     interface = iface,
-                    domain = %reg_domain,
+                    domain = %posture.domain_to_set,
                     reason = e.reason_code(),
                     "ground_wfb_reg_gate_blocked"
                 );
@@ -292,7 +299,7 @@ impl WfbRxManager {
             }
             tracing::warn!(
                 interface = iface,
-                domain = %reg_domain,
+                domain = %posture.domain_to_set,
                 reason = e.reason_code(),
                 "ground_wfb_reg_gate_proceeding_best_effort"
             );
@@ -305,15 +312,20 @@ impl WfbRxManager {
         let dfs = ados_radio::adapter::dfs_channels(iface).await;
 
         // 2. Assert the rendezvous channel is enabled + non-DFS now the wiphy is
-        // known, before any monitor / channel operation. Both rigs derive the
-        // rendezvous channel identically from the operator config.
+        // known, before any monitor / channel operation. Skipped under the
+        // unrestricted posture (the operator owns local compliance).
         let rendezvous_ch = self.config.rendezvous_channel();
-        if let Err(e) = ados_radio::adapter::assert_reg_ready(
-            rendezvous_ch,
-            &self.enabled_channels,
-            &dfs,
-            self.config.dfs_allowed,
-        ) {
+        let ready = if unrestricted {
+            Ok(())
+        } else {
+            ados_radio::adapter::assert_reg_ready(
+                rendezvous_ch,
+                &self.enabled_channels,
+                &dfs,
+                self.config.dfs_allowed,
+            )
+        };
+        if let Err(e) = ready {
             if strict {
                 tracing::error!(
                     interface = iface,
@@ -341,15 +353,16 @@ impl WfbRxManager {
             );
         }
 
-        // Capture the regulatory picture (live domain + verified + permitted set)
-        // so every sidecar write surfaces the same truth as the drone side. The
-        // live read is a cheap `iw reg get`; the wanted domain is the resolved
-        // `reg_domain` the gate just applied.
-        let reg_status = ados_radio::adapter::read_reg_status(&reg_domain).await;
+        // Capture the regulatory picture (live domain + verified + permitted set
+        // + posture) so every sidecar write surfaces the same truth as the drone
+        // side. The live read is a cheap `iw reg get` against the posture's
+        // wanted domain.
+        let reg_status = ados_radio::adapter::read_reg_status(&posture.wanted_domain).await;
         self.reg_snapshot = GsRegSnapshot {
             domain: reg_status.domain,
             verified: reg_status.verified,
             enabled_channels: self.enabled_channels.iter().copied().collect(),
+            posture: Some(posture),
         };
 
         // 3. Monitor mode on the config-supplied interface (the Python override
@@ -358,14 +371,20 @@ impl WfbRxManager {
             tracing::warn!(interface = iface, "ground_wfb_monitor_not_verified");
         }
 
-        // 4. TX power, before the wfb_rx spawn.
-        if ados_radio::adapter::set_tx_power(iface, self.config.tx_power_dbm)
-            .await
-            .is_none()
+        // 4. TX power, before the wfb_rx spawn, held inside the ceiling.
+        if ados_radio::adapter::set_tx_power_modal(
+            iface,
+            self.config.tx_power_dbm,
+            self.config.tx_power_max_dbm,
+            unrestricted,
+        )
+        .await
+        .is_none()
         {
             tracing::warn!(
                 interface = iface,
                 requested = self.config.tx_power_dbm,
+                max_dbm = self.config.tx_power_max_dbm,
                 "ground_wfb_txpower_not_applied"
             );
         }

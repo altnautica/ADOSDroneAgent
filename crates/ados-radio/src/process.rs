@@ -996,11 +996,13 @@ impl RadioProcesses {
     /// Apply a TX power (dBm) to the live adapter via the kernel without a
     /// respawn — `iw dev <iface> set txpower` retunes the running radio in place.
     /// Returns the effective dBm the driver accepted (it can ramp UP from a
-    /// rejected low request), or `None` when every ramp step was rejected. The
-    /// retained iface is the same one the control planes are injecting on, so the
-    /// power change reaches the whole radio group at once.
-    pub async fn apply_tx_power(&self, dbm: i8) -> Option<i8> {
-        crate::adapter::set_tx_power(&self.iface, dbm).await
+    /// rejected low request, never past `max_dbm`), or `None` when no in-budget
+    /// step was accepted. `unrestricted` is the operating posture (it decides the
+    /// muted-readback handling). The retained iface is the same one the control
+    /// planes are injecting on, so the power change reaches the whole radio group
+    /// at once.
+    pub async fn apply_tx_power(&self, dbm: i8, max_dbm: i8, unrestricted: bool) -> Option<i8> {
+        crate::adapter::set_tx_power_modal(&self.iface, dbm, max_dbm, unrestricted).await
     }
 
     /// True while the auxiliary application stream is open (both halves running).

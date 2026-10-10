@@ -55,7 +55,6 @@ from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import (
     ADOS_RUN_DIR,
     MESH_GATEWAY_JSON,
-    MESH_ROLE_PATH,
     UPLINK_ACTIVE_FLAG,
 )
 from ados.core.paths import (
@@ -64,6 +63,7 @@ from ados.core.paths import (
 from ados.core.paths import (
     MESH_PSK_PATH as _MESH_PSK_PATH,
 )
+from ados.services.wfb.bind_client import SUPERVISOR_SOCK
 
 from .role_manager import get_current_role
 
@@ -218,8 +218,55 @@ def _modprobe_batman() -> bool:
 
 
 def _channel_freq_mhz(channel: int) -> int:
-    """2.4 GHz channel to centre frequency. Channel 1 is 2412 MHz."""
-    return 2407 + channel * 5 if 1 <= channel <= 13 else 2412
+    """2.4 GHz channel to centre frequency. Channel 1 is 2412 MHz.
+
+    Raises ``ValueError`` outside 1..13: mapping an unsupported channel to a
+    default would join a different channel than the one config and status
+    report.
+    """
+    if not 1 <= channel <= 13:
+        raise ValueError(f"mesh channel {channel} is not a 2.4 GHz channel (1-13)")
+    return 2407 + channel * 5
+
+
+# Bound on the supervisor role request. The supervisor may stop this unit as
+# part of the transition, so the reply is only waited on briefly.
+_ROLE_REQUEST_TIMEOUT_S = 5.0
+
+
+async def _request_direct_role(sock_path: str | None = None) -> None:
+    """Ask the supervisor to move this node to ``direct``.
+
+    Role transitions run in the supervisor, never in a role unit: it stops and
+    starts the role's units, flips the role sentinel and persists the role, so
+    the sentinel and ``ground_station.role`` stay in agreement. Best-effort: an
+    unreachable supervisor is logged and the caller still exits cleanly.
+    """
+    path = sock_path or SUPERVISOR_SOCK
+    request = {"op": "set_role", "role": "direct", "reason": "mesh_identity_missing"}
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_unix_connection(path), timeout=_ROLE_REQUEST_TIMEOUT_S
+        )
+    except (TimeoutError, OSError) as exc:
+        log.error("mesh_role_downgrade_unreachable", error=str(exc))
+        return
+    try:
+        writer.write((json.dumps(request) + "\n").encode("utf-8"))
+        await writer.drain()
+        try:
+            line = await asyncio.wait_for(
+                reader.readline(), timeout=_ROLE_REQUEST_TIMEOUT_S
+            )
+        except (TimeoutError, OSError):
+            line = b""
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except (OSError, ConnectionError):
+            pass
+    log.info("mesh_role_downgrade_requested", reply=line.decode("utf-8", "replace").strip())
 
 
 def _mesh_passphrase(psk: bytes) -> str:
@@ -656,17 +703,11 @@ async def main() -> None:
         ok = await manager.setup()
     except MeshIdentityMissing:
         # Relay role was active but no pairing invite bundle has been
-        # delivered yet. Crash-looping helps nobody, so we downgrade the
-        # role sentinel to `direct`, let systemd's ConditionPathExists
-        # keep us inactive until the role sentinel is re-armed (via
-        # pairing or explicit role changes), and exit cleanly.
-        try:
-            role_path = MESH_ROLE_PATH
-            role_path.parent.mkdir(parents=True, exist_ok=True)
-            role_path.write_text("direct\n", encoding="utf-8")
-        except OSError as exc:
-            slog.error("mesh_role_sentinel_write_failed", error=str(exc))
-        slog.warning("mesh_identity_missing_downgraded_to_direct")
+        # delivered yet. Crash-looping helps nobody, so ask the supervisor to
+        # move the node to `direct` (it owns the transition, the sentinel and
+        # the persisted role) and exit cleanly.
+        slog.warning("mesh_identity_missing_requesting_direct")
+        await _request_direct_role()
         sys.exit(0)
     if not ok:
         slog.error("mesh_setup_failed")

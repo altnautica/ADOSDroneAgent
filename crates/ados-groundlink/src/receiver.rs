@@ -1,22 +1,28 @@
 //! WFB receiver: FEC-combine fragments from the local NIC + remote relays.
 //!
-//! Ports `wfb_receiver.py`'s FEC supervision. `wfb_rx -p 0 -c 127.0.0.1 -u 5600
-//! -a <listen_port> [<drone_iface>]` aggregates fragments arriving on the local
-//! monitor adapter AND from relays forwarding over batman-adv into the
-//! aggregator UDP port, FEC-combines them, and emits the decoded stream to
-//! localhost UDP 5600 where the existing mediamtx-gs pipeline republishes it.
-//! The stderr stats line drives `fragments_after_dedup` / `fec_repaired` /
-//! `output_kbps`; `wfb-receiver.json` is written atomically.
+//! `wfb_rx -p 0 -c 127.0.0.1 -u 5600 -a <listen_port> [<drone_iface>]`
+//! aggregates fragments arriving on the local monitor adapter AND from relays
+//! forwarding over batman-adv into the aggregator UDP port, FEC-combines them,
+//! and emits the decoded stream to localhost UDP 5600 where the existing
+//! mediamtx-gs pipeline republishes it. The stdout `PKT` stats line drives
+//! `fragments_after_dedup` / `fec_repaired` / `output_kbps`; the `RX_ANT` lines
+//! before it drive the per-relay `fragments` (see [`rx_ant`]).
+//! `wfb-receiver.json` is written atomically.
 //!
 //! Discovery is Rust-native: the receiver advertises `_ados-receiver._tcp` on
 //! `bat0` via [`crate::mdns::advertise_receiver`] (held for the loop lifetime,
 //! unregistered on shutdown) so relays resolve it. The relay-churn task reads
 //! batman-adv neighbor MACs (`batctl n -H`) on the mesh interface to populate
 //! and age the per-relay map, emitting `relay_connected` on first sight and
-//! `relay_disconnected` past the grace window. The aggregator subprocess
+//! `relay_disconnected` past the grace window. A relay listed in the mesh
+//! revocation file is never shown as a relay. The aggregator subprocess
 //! lifecycle, the stats tail, the churn watcher, and the state file are all
 //! owned here.
 
+mod rx_ant;
+
+use std::collections::{BTreeSet, HashMap};
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -63,12 +69,14 @@ pub struct ReceiverState {
     pub up: bool,
 }
 
-/// Per-relay fragment stats (one entry in the `relays` list).
+/// Per-relay fragment stats (one entry in the `relays` list). `fragments` is
+/// the running count of packets the aggregator received from this relay, or
+/// `null` while the relay's mesh address has not been resolved (unmeasured).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RelayStats {
     pub mac: String,
     pub last_seen_ms: i64,
-    pub fragments: i64,
+    pub fragments: Option<i64>,
 }
 
 impl Default for ReceiverState {
@@ -245,6 +253,28 @@ fn fold_aggregator_pkt(state: &mut ReceiverState, pkt: AggregatorPkt) {
     state.output_kbps = pkt.bytes_out * 8 / 1000;
 }
 
+/// Fold one interval's per-source packet counts into the relay map. Each relay
+/// MAC is resolved to its mesh IPv4 through the neighbour table `arp`; a
+/// resolved relay adds this interval's count (zero when it forwarded nothing),
+/// an unresolved one keeps its previous value (`null` until first resolved).
+fn fold_relay_fragments(
+    state: &mut ReceiverState,
+    per_source: &HashMap<Ipv4Addr, u64>,
+    arp: &HashMap<Ipv4Addr, String>,
+) {
+    for relay in &mut state.relays {
+        let Some(ip) = arp
+            .iter()
+            .find(|(_, mac)| mac.eq_ignore_ascii_case(&relay.mac))
+            .map(|(ip, _)| ip)
+        else {
+            continue;
+        };
+        let added = per_source.get(ip).copied().unwrap_or(0) as i64;
+        relay.fragments = Some(relay.fragments.unwrap_or(0).saturating_add(added));
+    }
+}
+
 /// Upsert the relays seen this poll (by batman-neighbor MAC) into `state`, refreshing
 /// `last_seen_ms` and returning the MACs that were NOT present before (first sight →
 /// caller emits `relay_connected`). Pure over the serialized `Vec<RelayStats>`. This is
@@ -259,7 +289,7 @@ fn upsert_relays(state: &mut ReceiverState, macs: &[String], now_ms: i64) -> Vec
             state.relays.push(RelayStats {
                 mac: mac.clone(),
                 last_seen_ms: now_ms,
-                fragments: 0,
+                fragments: None,
             });
             newly.push(mac.clone());
         }
@@ -282,19 +312,32 @@ fn age_out_relays(state: &mut ReceiverState, now_ms: i64) -> Vec<String> {
 }
 
 /// Tail the aggregator's stdout, folding its stats into shared state and
-/// counting stats lines (the delta counter the stall window checks). Returns
-/// when the pipe closes.
+/// counting stats lines (the delta counter the stall window checks). The
+/// `RX_ANT` lines of an interval are buffered and folded into the per-relay
+/// counts when that interval's `PKT` line arrives. Returns when the pipe
+/// closes.
 async fn tail_aggregator_stats(
     stdout: tokio::process::ChildStdout,
     state: Arc<Mutex<ReceiverState>>,
     lines_seen: Arc<AtomicU64>,
 ) {
     use tokio::io::{AsyncBufReadExt, BufReader};
+    let mesh_iface = state.lock().await.mesh_iface.clone();
     let mut lines = BufReader::new(stdout).lines();
+    let mut interval_ant: Vec<String> = Vec::new();
     while let Ok(Some(line)) = lines.next_line().await {
         if let Some(pkt) = parse_receiver_stats_line(&line) {
             lines_seen.fetch_add(1, Ordering::Relaxed);
-            fold_aggregator_pkt(&mut *state.lock().await, pkt);
+            let per_source = rx_ant::per_source_packets(&rx_ant::parse_rx_ant(
+                interval_ant.iter().map(String::as_str),
+            ));
+            interval_ant.clear();
+            let arp = rx_ant::read_arp(&mesh_iface);
+            let mut s = state.lock().await;
+            fold_aggregator_pkt(&mut s, pkt);
+            fold_relay_fragments(&mut s, &per_source, &arp);
+        } else if rx_ant::parse_rx_ant_line(&line).is_some() {
+            interval_ant.push(line);
         }
     }
 }
@@ -315,32 +358,51 @@ async fn neighbor_macs(_mesh_iface: &str) -> Vec<String> {
         .collect()
 }
 
-/// One churn step over the relay map: upsert the neighbor MACs seen this poll
+/// One churn step over the relay map: drop revoked MACs (a revoked relay is
+/// never presented as one), upsert the neighbor MACs seen this poll
 /// (refreshing existing, adding new) and age out the silent ones. Returns the
-/// `(newly_connected, disconnected)` MACs the caller emits. Pure over the
-/// serialized state, so the upsert→emit decision is unit-testable without a
-/// running mesh or the cross-process event seam.
+/// `(newly_connected, disconnected)` MACs the caller emits; a revoked relay
+/// already in the map is reported as disconnected. Pure over the serialized
+/// state, so the upsert→emit decision is unit-testable without a running mesh
+/// or the cross-process event seam.
 fn churn_step(
     state: &mut ReceiverState,
     macs: &[String],
+    revoked: &BTreeSet<String>,
     now_ms: i64,
 ) -> (Vec<String>, Vec<String>) {
-    let newly = upsert_relays(state, macs, now_ms);
-    let removed = age_out_relays(state, now_ms);
+    let is_revoked = |mac: &str| revoked.iter().any(|r| r.eq_ignore_ascii_case(mac));
+    let mut removed = Vec::new();
+    state.relays.retain(|r| {
+        let gone = is_revoked(&r.mac);
+        if gone {
+            removed.push(r.mac.clone());
+        }
+        !gone
+    });
+    let allowed: Vec<String> = macs
+        .iter()
+        .filter(|m| !is_revoked(m.as_str()))
+        .cloned()
+        .collect();
+    let newly = upsert_relays(state, &allowed, now_ms);
+    removed.extend(age_out_relays(state, now_ms));
     (newly, removed)
 }
 
-/// The relay-churn watcher: each `POLL_INTERVAL`, read mesh neighbor MACs,
-/// upsert them into the relay map (emit `relay_connected` for new), and age out
-/// the silent ones (emit `relay_disconnected`). Runs until cancelled.
+/// The relay-churn watcher: each `POLL_INTERVAL`, read mesh neighbor MACs and
+/// the revocation list, upsert the non-revoked neighbors into the relay map
+/// (emit `relay_connected` for new), and age out the silent ones (emit
+/// `relay_disconnected`). Runs until cancelled.
 async fn watch_relay_churn(state: Arc<Mutex<ReceiverState>>, mesh_iface: String) {
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
         let macs = neighbor_macs(&mesh_iface).await;
+        let revoked = crate::pairing::revocations::load();
         let now = mesh_events::now_ms();
         let (newly, removed) = {
             let mut s = state.lock().await;
-            churn_step(&mut s, &macs, now)
+            churn_step(&mut s, &macs, &revoked, now)
         };
         for mac in newly {
             mesh_events::emit(
@@ -626,7 +688,7 @@ mod tests {
         s.relays.push(RelayStats {
             mac: "aa:bb:cc:dd:ee:ff".into(),
             last_seen_ms: 123,
-            fragments: 500,
+            fragments: Some(500),
         });
         let v = serde_json::to_value(&s).unwrap();
         for k in [
@@ -683,13 +745,14 @@ mod tests {
         // relay_disconnected) while the still-present one is neither.
         let mut s = ReceiverState::default();
 
-        let (newly, removed) = churn_step(&mut s, &["aa".into(), "bb".into()], 1_000);
+        let (newly, removed) =
+            churn_step(&mut s, &["aa".into(), "bb".into()], &BTreeSet::new(), 1_000);
         assert_eq!(newly, vec!["aa".to_string(), "bb".to_string()]);
         assert!(removed.is_empty());
 
         // Re-poll past "bb"'s grace window seeing only "aa".
         let later = 1_000 + RELAY_GRACE_MS + 1;
-        let (newly, removed) = churn_step(&mut s, &["aa".into()], later);
+        let (newly, removed) = churn_step(&mut s, &["aa".into()], &BTreeSet::new(), later);
         assert!(newly.is_empty(), "aa already known → not newly connected");
         assert_eq!(removed, vec!["bb".to_string()]);
         // Only the live relay remains in the map.
@@ -701,8 +764,8 @@ mod tests {
     fn churn_step_no_neighbors_ages_out_all() {
         // An empty neighbor list past the grace window disconnects every relay.
         let mut s = ReceiverState::default();
-        churn_step(&mut s, &["aa".into(), "bb".into()], 0);
-        let (newly, removed) = churn_step(&mut s, &[], RELAY_GRACE_MS + 1);
+        churn_step(&mut s, &["aa".into(), "bb".into()], &BTreeSet::new(), 0);
+        let (newly, removed) = churn_step(&mut s, &[], &BTreeSet::new(), RELAY_GRACE_MS + 1);
         assert!(newly.is_empty());
         assert_eq!(removed.len(), 2);
         assert!(removed.contains(&"aa".to_string()));
@@ -772,7 +835,7 @@ mod tests {
         assert_eq!(s.relays.len(), 1);
         assert_eq!(s.relays[0].mac, "aa:bb:cc:dd:ee:ff");
         assert_eq!(s.relays[0].last_seen_ms, 1_717_000_000_000);
-        assert_eq!(s.relays[0].fragments, 4096);
+        assert_eq!(s.relays[0].fragments, Some(4096));
         assert_eq!(s.fragments_after_dedup, 8000);
         assert_eq!(s.fec_repaired, 24);
         assert_eq!(s.output_kbps, 4200);
@@ -782,6 +845,65 @@ mod tests {
         let re = serde_json::to_value(&s).unwrap();
         let orig: serde_json::Value = serde_json::from_str(fixture).unwrap();
         assert_eq!(re, orig);
+    }
+
+    #[test]
+    fn unmeasured_relay_serializes_null() {
+        let mut s = ReceiverState::default();
+        upsert_relays(&mut s, &["aa:bb:cc:dd:ee:01".into()], 1);
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v["relays"][0]["fragments"].is_null());
+        assert!(v["relays"][0]
+            .as_object()
+            .unwrap()
+            .contains_key("fragments"));
+    }
+
+    #[test]
+    fn relay_fragments_count_only_resolved_relays() {
+        let mut s = ReceiverState::default();
+        upsert_relays(
+            &mut s,
+            &["aa:bb:cc:dd:ee:01".into(), "aa:bb:cc:dd:ee:02".into()],
+            1,
+        );
+        let relay_ip = Ipv4Addr::new(192, 168, 1, 50);
+        let arp = HashMap::from([(relay_ip, "aa:bb:cc:dd:ee:01".to_string())]);
+        let per_source = HashMap::from([(relay_ip, 40u64)]);
+        fold_relay_fragments(&mut s, &per_source, &arp);
+        fold_relay_fragments(&mut s, &per_source, &arp);
+        // A quiet interval still counts as measured: zero added.
+        fold_relay_fragments(&mut s, &HashMap::new(), &arp);
+        assert_eq!(s.relays[0].fragments, Some(80));
+        // No resolved address: stays unmeasured.
+        assert_eq!(s.relays[1].fragments, None);
+    }
+
+    #[test]
+    fn revoked_mac_excluded_from_relays() {
+        let mut s = ReceiverState::default();
+        churn_step(
+            &mut s,
+            &["aa:bb:cc:dd:ee:01".into(), "aa:bb:cc:dd:ee:02".into()],
+            &BTreeSet::new(),
+            0,
+        );
+        let revoked = BTreeSet::from(["AA:BB:CC:DD:EE:02".to_string()]);
+        let (newly, removed) = churn_step(
+            &mut s,
+            &["aa:bb:cc:dd:ee:01".into(), "aa:bb:cc:dd:ee:02".into()],
+            &revoked,
+            1_000,
+        );
+        assert!(newly.is_empty());
+        assert_eq!(removed, vec!["aa:bb:cc:dd:ee:02".to_string()]);
+        assert_eq!(s.relays.len(), 1);
+        assert_eq!(s.relays[0].mac, "aa:bb:cc:dd:ee:01");
+        // A revoked neighbour seen first never enters the map.
+        let mut fresh = ReceiverState::default();
+        let (newly, _) = churn_step(&mut fresh, &["aa:bb:cc:dd:ee:02".into()], &revoked, 0);
+        assert!(newly.is_empty());
+        assert!(fresh.relays.is_empty());
     }
 
     #[test]

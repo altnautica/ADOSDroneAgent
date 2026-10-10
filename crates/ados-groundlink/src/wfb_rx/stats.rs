@@ -7,6 +7,7 @@
 
 use ados_radio::config::WfbConfig;
 use ados_radio::link_quality::LinkStats;
+use ados_radio::reg_gate::Posture;
 
 use super::args::{
     STATE_BLOCKED_UNPAIRED, STATE_NO_ADAPTER, STATE_NO_INJECTION, STATE_REG_BLOCKED,
@@ -15,7 +16,9 @@ use super::args::{
 /// The regulatory picture the receive sidecar surfaces, symmetric with the
 /// drone side. `domain` is the LIVE global country (`None` when unreadable);
 /// `verified` is true only when it matched the wanted domain; `enabled_channels`
-/// is the domain's permitted set (empty = could not determine). Resolved by
+/// is the domain's permitted set (empty = could not determine); `posture` is
+/// the regulatory posture the receive plane runs under (the same resolver the
+/// drone uses), `None` when it was not resolved. Resolved by
 /// `prepare_interface` and stored on the manager so every sidecar write carries
 /// the same regulatory truth instead of nothing.
 #[derive(Debug, Clone, Default)]
@@ -23,6 +26,31 @@ pub struct GsRegSnapshot {
     pub domain: Option<String>,
     pub verified: bool,
     pub enabled_channels: Vec<u8>,
+    pub posture: Option<Posture>,
+}
+
+/// The `reg_posture` sidecar value: `{"domain", "strict"}` where `domain` is
+/// the domain the posture forces on the PHY (`null` under the unrestricted
+/// posture), or `null` when no posture was resolved.
+fn reg_posture_json(posture: Option<&Posture>) -> serde_json::Value {
+    match posture {
+        Some(p) => serde_json::json!({
+            "domain": (!p.is_unrestricted()).then(|| p.domain_to_set.clone()),
+            "strict": p.strict,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// The posture from the agent config, for the sidecar writers that run before
+/// `prepare_interface` resolved one.
+fn configured_posture() -> GsRegSnapshot {
+    GsRegSnapshot {
+        posture: Some(Posture::load(std::path::Path::new(
+            crate::paths::CONFIG_YAML,
+        ))),
+        ..GsRegSnapshot::default()
+    }
 }
 
 /// The truthful channel picture the receive sidecar surfaces, symmetric with the
@@ -169,8 +197,8 @@ pub fn write_reg_blocked_sidecar(
 /// stuck rather than a blank. Atomic via the Contract E writer.
 ///
 /// The regulatory gate has not run in this arm (it precedes `prepare_interface`),
-/// so the reg picture is the honest unknown default — never a stale claim from a
-/// prior generation.
+/// so the live reg picture is the honest unknown default — never a stale claim
+/// from a prior generation; only the configured posture rides.
 ///
 /// When an `IngestEmitter` is passed, the SAME body ships to the logging store as
 /// a single full-snapshot `link.wfb_status` event right after the file write, so
@@ -204,7 +232,7 @@ pub fn write_no_injection_sidecar(
         interface,
         &adapter,
         channels,
-        &GsRegSnapshot::default(),
+        &configured_posture(),
         cfg,
         STATE_NO_INJECTION,
         crate::acquire::AcquireState::Searching.as_str(),
@@ -282,7 +310,7 @@ fn write_unexamined_sidecar(
     state: &str,
     ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
 ) {
-    let v = unexamined_stats(interface, channel, cfg, state);
+    let v = unexamined_stats(interface, channel, cfg, state, &configured_posture());
     let _ = crate::sidecars::write_json_atomic(
         std::path::Path::new(crate::paths::WFB_STATS_JSON),
         &v,
@@ -302,6 +330,7 @@ fn unexamined_stats(
     channel: u8,
     cfg: &WfbConfig,
     state: &str,
+    reg: &GsRegSnapshot,
 ) -> serde_json::Value {
     let snap = LinkStats::default();
     // No chain, no adapter, no live channel: report the rendezvous home.
@@ -318,7 +347,7 @@ fn unexamined_stats(
         // this arm never looked at.
         &GsAdapterInfo::default(),
         channels,
-        &GsRegSnapshot::default(),
+        reg,
         cfg,
         state,
         crate::acquire::AcquireState::Searching.as_str(),
@@ -394,6 +423,10 @@ pub fn build_gs_stats(
         "reg_domain": reg.domain,
         "reg_verified": reg.verified,
         "enabled_channels": reg.enabled_channels,
+        // The regulatory posture this plane runs under, resolved from the same
+        // config by the same resolver as the drone, so both ends can be
+        // compared field for field.
+        "reg_posture": reg_posture_json(reg.posture.as_ref()),
         // The GS proves the link by its own valid-decode count, not by a TX
         // counter: the transmitting-zero-reception verdict is a transmit-side
         // measurement this plane never performs. The key rides for schema
@@ -534,6 +567,11 @@ mod tests {
             domain: Some("US".to_string()),
             verified: true,
             enabled_channels: vec![149, 153, 157, 161, 165],
+            posture: Some(Posture {
+                domain_to_set: "IN".to_string(),
+                wanted_domain: "IN".to_string(),
+                strict: true,
+            }),
         };
         let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), true, Some(480));
         let v = build_gs_stats(
@@ -564,6 +602,10 @@ mod tests {
         assert_eq!(
             v["enabled_channels"],
             serde_json::json!([149, 153, 157, 161, 165])
+        );
+        assert_eq!(
+            v["reg_posture"],
+            serde_json::json!({"domain": "IN", "strict": true})
         );
         // The GS proves the link by valid decodes and never measures a transmit
         // path, so it reports NO transmit-proof verdict: the key is present for
@@ -615,6 +657,7 @@ mod tests {
                 domain: Some("US".to_string()),
                 verified: true,
                 enabled_channels: vec![149],
+                posture: None,
             },
             &cfg,
             "active",
@@ -856,6 +899,7 @@ mod tests {
             domain: Some("BO".to_string()),
             verified: false,
             enabled_channels: vec![],
+            posture: None,
         };
         let adapter = GsAdapterInfo::new(Some("rtl88x2eu".to_string()), false, Some(480));
         let mut v = build_gs_stats(
@@ -1202,12 +1246,38 @@ mod tests {
     fn a_missing_adapter_replaces_an_active_body_with_no_adapter() {
         // The arm used to write nothing, so a pulled adapter left the last
         // generation's `active` body in place.
-        let v = unexamined_stats("", 149, &WfbConfig::default(), STATE_NO_ADAPTER);
+        let v = unexamined_stats(
+            "",
+            149,
+            &WfbConfig::default(),
+            STATE_NO_ADAPTER,
+            &GsRegSnapshot::default(),
+        );
         assert_eq!(v["state"], "no_adapter");
         assert_eq!(v["link_state"], "no_adapter");
         assert!(v["adapter_chipset"].is_null());
         assert!(v["rssi_dbm"].is_null());
         assert_eq!(v["packets_received"], 0);
+        // No posture resolved → null, not a fabricated one.
+        assert!(v["reg_posture"].is_null());
+        let unrestricted = unexamined_stats(
+            "",
+            149,
+            &WfbConfig::default(),
+            STATE_NO_ADAPTER,
+            &GsRegSnapshot {
+                posture: Some(Posture::resolve(
+                    &ados_radio::config::RegulatoryConfig::default(),
+                    None,
+                    true,
+                )),
+                ..GsRegSnapshot::default()
+            },
+        );
+        assert_eq!(
+            unrestricted["reg_posture"],
+            serde_json::json!({"domain": null, "strict": false})
+        );
     }
 
     #[tokio::test]

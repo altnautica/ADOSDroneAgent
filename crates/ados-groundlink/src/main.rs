@@ -899,16 +899,17 @@ async fn receive_loop(
             // Surface the live domain vs the wanted one (the manager's snapshot
             // may be partial when the gate failed before reading it), so the panel
             // shows the actual regulatory conflict, not a configured-channel lie.
-            let wanted = config
-                .reg_domain
-                .clone()
-                .filter(|d| !d.is_empty())
-                .unwrap_or_else(|| wfb_rx::DEFAULT_REG_DOMAIN.to_string());
+            let posture = manager.posture().cloned();
+            let wanted = posture
+                .as_ref()
+                .map_or(wfb_rx::DEFAULT_REG_DOMAIN, |p| p.wanted_domain.as_str())
+                .to_string();
             let status = ados_radio::adapter::read_reg_status(&wanted).await;
             let reg = wfb_rx::GsRegSnapshot {
                 domain: status.domain,
                 verified: status.verified,
                 enabled_channels: manager.enabled_channels().iter().copied().collect(),
+                posture,
             };
             wfb_rx::write_reg_blocked_sidecar(
                 &interface,

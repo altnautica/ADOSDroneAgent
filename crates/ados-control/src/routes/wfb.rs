@@ -103,12 +103,12 @@ pub async fn get_wfb_status(State(state): State<AppState>) -> Json<Value> {
 
 /// Pick the WFB status source.
 ///
-/// A fresh store row wins: the radio ships its full status body there each
-/// heartbeat. A store row older than the staleness window does not: the radio
-/// rewrites `wfb-stats.json` about once a second independently of the store, so
-/// when its event emission lags or stops the sidecar still carries the live
-/// link. The stale row is used only when there is no sidecar at all, where it
-/// reports `state: "stale"` rather than nothing.
+/// A fresh store row wins: the radio ships its full status body there on every
+/// change and at least every 8 s. A store row older than the staleness window
+/// does not: the radio rewrites `wfb-stats.json` every heartbeat independently
+/// of the store, so when its event emission lags or stops the sidecar still
+/// carries the live link. The stale row is used only when there is no sidecar at
+/// all, where it reports `state: "stale"` rather than nothing.
 pub(crate) fn choose_wfb_status(
     store: Option<(Map<String, Value>, i64)>,
     cfg: &WfbStatusConfig,
@@ -480,7 +480,7 @@ mod tests {
             );
         }
 
-        // The 28-field key set, pinned as a whole so a field cannot appear or
+        // The 29-field key set, pinned as a whole so a field cannot appear or
         // vanish from the served body unnoticed.
         let want = json!({
             "state": "disabled",
@@ -508,6 +508,8 @@ mod tests {
             "samples": 0,
             "tx_power_dbm": null,
             "tx_power_max_dbm": null,
+            // No live readback on a node with no radio.
+            "tx_power_readback_dbm": null,
             "topology": null,
             "mcs_index": null,
             "regulatory_domain": "unknown",
@@ -620,6 +622,35 @@ mod tests {
         std::fs::remove_file(&sidecar).unwrap();
         let only = choose_wfb_status(Some((detail, old)), &cfg, &sidecar, now);
         assert_eq!(only["state"], json!("stale"));
+    }
+
+    #[test]
+    fn the_measured_tx_power_rides_through_both_read_paths() {
+        // The radio publishes its live `iw` readback as `tx_power_readback_dbm`
+        // (null when unread). Both the store row and the sidecar fallback merge
+        // it over the base block unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("wfb-stats.json");
+        let cfg = WfbStatusConfig::default();
+        let now = now_unix_micros();
+        let mut detail = Map::new();
+        detail.insert("state".to_string(), json!("connected"));
+        detail.insert("tx_power_dbm".to_string(), json!(5));
+        detail.insert("tx_power_readback_dbm".to_string(), json!(9.0));
+        let from_store = choose_wfb_status(Some((detail, now)), &cfg, &sidecar, now);
+        assert_eq!(from_store["tx_power_readback_dbm"], json!(9.0));
+
+        std::fs::write(
+            &sidecar,
+            r#"{"state":"connected","tx_power_dbm":5,"tx_power_readback_dbm":null}"#,
+        )
+        .unwrap();
+        let from_sidecar = choose_wfb_status(None, &cfg, &sidecar, now);
+        assert!(from_sidecar["tx_power_readback_dbm"].is_null());
+        assert!(from_sidecar
+            .as_object()
+            .unwrap()
+            .contains_key("tx_power_readback_dbm"));
     }
 
     #[test]

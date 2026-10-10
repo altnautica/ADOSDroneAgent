@@ -59,6 +59,7 @@ from .invite_crypto import (
 from .mdns_announce import iface_ip, resolve_receiver
 from .pair_journal import publish_pair_event
 from .pairing_manager import PAIR_UDP_PORT
+from .relay_rekey import REKEY_STATE_FILE, RelayRekeyState, atomic_write
 
 log = get_logger("ground_station.pairing_client")
 
@@ -87,6 +88,9 @@ class JoinResult:
     receiver_host: str | None = None
     error_code: str | None = None
     error_message: str | None = None
+    # Key, window code and join port the receiver re-seals a rotated
+    # bundle to; the pairing daemon persists it and listens on that port.
+    rekey: RelayRekeyState | None = None
 
 
 def _join_timeout(unreadable: int) -> JoinResult:
@@ -125,7 +129,7 @@ async def _send_join_request(
 
 
 def _persist_bundle(bundle: InviteBundle) -> None:
-    """Write the decrypted bundle fields to disk.
+    """Write the decrypted bundle fields to disk, each file atomically.
 
     File layout:
         /etc/ados/mesh/id             mesh_id (one line)
@@ -136,13 +140,10 @@ def _persist_bundle(bundle: InviteBundle) -> None:
     MESH_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(MESH_DIR, 0o755)
 
-    # mesh id
-    MESH_ID_PATH.write_text(bundle.mesh_id + "\n", encoding="utf-8")
-    os.chmod(MESH_ID_PATH, 0o644)
+    atomic_write(MESH_ID_PATH, (bundle.mesh_id + "\n").encode("utf-8"), 0o644)
 
     # mesh PSK. 0o600 is mandatory; this is the deployment secret.
-    MESH_PSK_PATH.write_bytes(bundle.mesh_psk)
-    os.chmod(MESH_PSK_PATH, 0o600)
+    atomic_write(MESH_PSK_PATH, bundle.mesh_psk, 0o600)
 
     # Receiver mDNS hint. Used by wfb_relay + mesh_manager to resolve
     # the receiver on bat0 after the mesh is up.
@@ -152,16 +153,11 @@ def _persist_bundle(bundle: InviteBundle) -> None:
         "issued_at_ms": bundle.issued_at_ms,
         "expires_at_ms": bundle.expires_at_ms,
     }
-    RECEIVER_INFO_PATH.write_text(
-        json.dumps(receiver_info), encoding="utf-8"
-    )
-    os.chmod(RECEIVER_INFO_PATH, 0o644)
+    atomic_write(RECEIVER_INFO_PATH, json.dumps(receiver_info).encode("utf-8"), 0o644)
 
     # WFB rx key. Same path wfb_rx.py already reads via key_mgr.
     if bundle.wfb_rx_key:
-        _WFB_KEY_DIR.mkdir(parents=True, exist_ok=True)
-        _WFB_RX_KEY_PATH.write_bytes(bundle.wfb_rx_key)
-        os.chmod(_WFB_RX_KEY_PATH, 0o600)
+        atomic_write(_WFB_RX_KEY_PATH, bundle.wfb_rx_key, 0o600)
 
 
 async def request_join(
@@ -315,6 +311,7 @@ async def request_join(
                 ok=True,
                 mesh_id=bundle.mesh_id,
                 receiver_host=bundle.receiver_mdns_host,
+                rekey=RelayRekeyState.from_join(priv, code, int(sock.getsockname()[1]), bundle),
             )
     finally:
         try:
@@ -335,7 +332,7 @@ def has_persisted_identity() -> bool:
 
 def clear_persisted_identity() -> None:
     """Remove mesh identity files. Used by factory reset."""
-    for p in (MESH_ID_PATH, MESH_PSK_PATH, RECEIVER_INFO_PATH):
+    for p in (MESH_ID_PATH, MESH_PSK_PATH, RECEIVER_INFO_PATH, MESH_DIR / REKEY_STATE_FILE):
         try:
             if p.is_file():
                 p.unlink()

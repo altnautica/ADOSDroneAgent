@@ -392,6 +392,7 @@ pub fn wfb_base_block(cfg: &WfbStatusConfig) -> Map<String, Value> {
     block.insert("samples".to_string(), json!(0));
     block.insert("tx_power_dbm".to_string(), cfg.tx_power_dbm.clone());
     block.insert("tx_power_max_dbm".to_string(), cfg.tx_power_max_dbm.clone());
+    block.insert("tx_power_readback_dbm".to_string(), Value::Null);
     block.insert("topology".to_string(), cfg.topology.clone());
     block.insert("mcs_index".to_string(), cfg.mcs_index.clone());
     block.insert("regulatory_domain".to_string(), json!(regulatory_domain()));

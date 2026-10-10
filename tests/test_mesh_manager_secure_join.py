@@ -108,3 +108,18 @@ def test_failed_secure_join_refuses_without_an_open_join(
     conf = run_dir / "wpa_supplicant-wlan1.conf"
     assert stat.S_IMODE(conf.stat().st_mode) == 0o600
     assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+
+
+def test_channel_freq_maps_the_2g4_channels() -> None:
+    assert mm._channel_freq_mhz(1) == 2412
+    assert mm._channel_freq_mhz(6) == 2437
+    assert mm._channel_freq_mhz(13) == 2472
+
+
+def test_channel_freq_rejects_36() -> None:
+    # A 5 GHz channel must not silently join channel 1.
+    with pytest.raises(ValueError, match="mesh channel 36 is not a 2.4 GHz channel"):
+        mm._channel_freq_mhz(36)
+    for bad in (0, 14):
+        with pytest.raises(ValueError):
+            mm._channel_freq_mhz(bad)

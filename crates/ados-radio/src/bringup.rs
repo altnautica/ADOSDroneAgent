@@ -72,23 +72,76 @@ const PHY_RADIATE_MAX_ATTEMPTS: u32 = 4;
 /// attempt re-runs the proven down -> monitor -> up -> channel cycle right before
 /// the txpower set, then verifies both readbacks: the interface cycle can drop
 /// the channel, and a mis-tuned interface radiates nothing the peer can decode.
-/// Returns the effective dBm once both hold, or `None` if they do not after
-/// every attempt — the caller must NOT start (or keep) wfb_tx on a `None`.
+///
+/// Every ramp step stays at or below `max_dbm`. An attempt where the driver
+/// accepted no in-budget step is a failed attempt even when the readback is off
+/// the floor: the PHY is then running at its driver default, not at a power this
+/// service set. Returns the MEASURED dBm once both hold (the accepted step when
+/// the readback agrees within 1 dB, the rounded readback otherwise), or `None`
+/// after every attempt — the caller must NOT start (or keep) wfb_tx on a `None`.
 pub(crate) async fn ensure_radiating(
     iface: &str,
     channel: u8,
     dbm: i8,
+    max_dbm: i8,
+    unrestricted: bool,
+) -> Option<i8> {
+    ensure_radiating_with(&LiveRadiate, iface, channel, dbm, max_dbm, unrestricted).await
+}
+
+/// The three steps [`ensure_radiating`] drives, behind a seam so the
+/// accept/readback policy is testable without a radio.
+#[async_trait::async_trait]
+pub(crate) trait RadiateIo: Send + Sync {
+    /// Re-cycle the interface into monitor mode and land `channel`, verified.
+    async fn cycle_and_tune(&self, iface: &str, channel: u8) -> bool;
+    /// Apply the bounded TX-power ramp; the accepted dBm or `None`.
+    async fn apply(&self, iface: &str, dbm: i8, max_dbm: i8, unrestricted: bool) -> Option<i8>;
+    /// The live TX power readback.
+    async fn read(&self, iface: &str) -> Option<f32>;
+}
+
+/// The production [`RadiateIo`]: real `iw` calls.
+pub(crate) struct LiveRadiate;
+
+#[async_trait::async_trait]
+impl RadiateIo for LiveRadiate {
+    async fn cycle_and_tune(&self, iface: &str, channel: u8) -> bool {
+        // The un-stick: a fresh interface cycle (down -> monitor -> up) +
+        // channel right before the txpower set. set_monitor_mode_verified
+        // refuses the operator's control interface, so this can never sever
+        // management.
+        ados_radio::adapter::set_monitor_mode_verified(iface, 2).await;
+        set_channel(iface, channel).await
+    }
+
+    async fn apply(&self, iface: &str, dbm: i8, max_dbm: i8, unrestricted: bool) -> Option<i8> {
+        ados_radio::adapter::set_tx_power_modal(iface, dbm, max_dbm, unrestricted).await
+    }
+
+    async fn read(&self, iface: &str) -> Option<f32> {
+        ados_radio::adapter::read_tx_power(iface).await
+    }
+}
+
+/// Largest gap between the accepted step and the readback that still counts as
+/// the driver honouring the set.
+const READBACK_TOLERANCE_DB: f32 = 1.0;
+
+/// [`ensure_radiating`] over an explicit [`RadiateIo`].
+pub(crate) async fn ensure_radiating_with<I: RadiateIo + ?Sized>(
+    io: &I,
+    iface: &str,
+    channel: u8,
+    dbm: i8,
+    max_dbm: i8,
     unrestricted: bool,
 ) -> Option<i8> {
     for attempt in 0..PHY_RADIATE_MAX_ATTEMPTS {
         if attempt > 0 {
             tokio::time::sleep(Duration::from_millis(300 + 300 * attempt as u64)).await;
         }
-        // The un-stick: a fresh interface cycle (down -> monitor -> up) + channel
-        // right before the txpower set. set_monitor_mode_verified refuses the
-        // operator's control interface, so this can never sever management.
-        ados_radio::adapter::set_monitor_mode_verified(iface, 2).await;
-        if !set_channel(iface, channel).await {
+        if !io.cycle_and_tune(iface, channel).await {
             tracing::warn!(
                 iface,
                 channel,
@@ -97,8 +150,17 @@ pub(crate) async fn ensure_radiating(
             );
             continue;
         }
-        let applied = ados_radio::adapter::set_tx_power_modal(iface, dbm, unrestricted).await;
-        let live = ados_radio::adapter::read_tx_power(iface).await;
+        let Some(applied) = io.apply(iface, dbm, max_dbm, unrestricted).await else {
+            tracing::warn!(
+                iface,
+                requested = dbm,
+                max_dbm,
+                attempt,
+                "wfb_txpower_no_step_accepted_retry"
+            );
+            continue;
+        };
+        let live = io.read(iface).await;
         if let Some(dbm_live) = live {
             if dbm_live > ados_radio::adapter::MUTED_TX_POWER_DBM {
                 tracing::info!(
@@ -108,7 +170,7 @@ pub(crate) async fn ensure_radiating(
                     readback_dbm = dbm_live,
                     "wfb_phy_radiating"
                 );
-                return applied.or(Some(dbm));
+                return Some(measured_dbm(iface, applied, dbm_live));
             }
         }
         tracing::warn!(
@@ -120,6 +182,22 @@ pub(crate) async fn ensure_radiating(
         );
     }
     None
+}
+
+/// The power to report for an accepted step: the step itself when the live
+/// readback agrees within [`READBACK_TOLERANCE_DB`], else the rounded readback
+/// (what the PHY actually runs), with a warning.
+fn measured_dbm(iface: &str, applied: i8, live: f32) -> i8 {
+    if (live - applied as f32).abs() <= READBACK_TOLERANCE_DB {
+        return applied;
+    }
+    tracing::warn!(
+        iface,
+        applied,
+        readback_dbm = live,
+        "tx_power_readback_mismatch"
+    );
+    live.round().clamp(i8::MIN as f32, i8::MAX as f32) as i8
 }
 
 /// `iw <iface> set channel <ch>`, VERIFIED. Returns `true` only when the
@@ -169,8 +247,7 @@ pub(crate) async fn set_channel(iface: &str, channel: u8) -> bool {
 }
 
 /// Read the interface's current channel from `iw <iface> info`, or `None` when
-/// `iw` cannot be run or its output carries no channel. Split out so the
-/// readback parse is unit-testable independently of the subprocess.
+/// `iw` cannot be run or its output carries no channel.
 pub(crate) async fn channel_from_iface(iface: &str) -> Option<u8> {
     let out = tokio::time::timeout(
         SET_CHANNEL_TIMEOUT,
@@ -182,57 +259,88 @@ pub(crate) async fn channel_from_iface(iface: &str) -> Option<u8> {
     .await
     .ok()?
     .ok()?;
-    parse_iface_channel(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// Parse the `channel <N>` token out of an `iw <iface> info` body. The line
-/// reads e.g. `\tchannel 149 (5745 MHz), width: 20 MHz, …`; the first integer
-/// after the `channel` keyword is the channel number. Pure helper.
-pub(crate) fn parse_iface_channel(info: &str) -> Option<u8> {
-    for line in info.lines() {
-        let mut toks = line.split_whitespace();
-        while let Some(tok) = toks.next() {
-            if tok == "channel" {
-                if let Some(n) = toks.next() {
-                    if let Ok(ch) = n.parse::<u8>() {
-                        return Some(ch);
-                    }
-                }
-            }
-        }
-    }
-    None
+    ados_radio::adapter::parse_iface_channel(&String::from_utf8_lossy(&out.stdout))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parse_iface_channel_reads_channel_token() {
-        // The readback seam set_channel uses to verify the live channel. The
-        // verified-bool is `set_ok && parse == target`; here we exercise the
-        // parse half so a silent driver no-op (info still shows the old channel)
-        // is distinguishable from a real retune.
-        let info = "Interface wlan1\n\tifindex 5\n\ttype monitor\n\
-                    \tchannel 149 (5745 MHz), width: 20 MHz, center1: 5745 MHz\n";
-        assert_eq!(parse_iface_channel(info), Some(149));
-        // A different live channel parses to its own value, so a mismatch
-        // against the requested target records ok=false.
-        let other = "Interface wlan1\n\tchannel 36 (5180 MHz), width: 20 MHz\n";
-        assert_eq!(parse_iface_channel(other), Some(36));
+    /// Tunes fine; the TX-power apply runs the real bounded ramp over a
+    /// scripted driver; the readback is fixed.
+    struct FakeRadiate {
+        accept_from_mbm: Option<i32>,
+        readback: Option<f32>,
     }
 
-    #[test]
-    fn parse_iface_channel_no_channel_is_none() {
-        // No `channel` line (radio not on a channel, or unreadable info) → None,
-        // which set_channel treats as an unverified failure (ok=false).
+    #[async_trait::async_trait]
+    impl RadiateIo for FakeRadiate {
+        async fn cycle_and_tune(&self, _iface: &str, _channel: u8) -> bool {
+            true
+        }
+        async fn apply(&self, iface: &str, dbm: i8, max_dbm: i8, unrestricted: bool) -> Option<i8> {
+            let io = ScriptedSet {
+                accept_from_mbm: self.accept_from_mbm,
+                readback: self.readback,
+            };
+            ados_radio::adapter::apply_tx_power_with(&io, iface, dbm, max_dbm, unrestricted).await
+        }
+        async fn read(&self, _iface: &str) -> Option<f32> {
+            self.readback
+        }
+    }
+
+    struct ScriptedSet {
+        accept_from_mbm: Option<i32>,
+        readback: Option<f32>,
+    }
+
+    #[async_trait::async_trait]
+    impl ados_radio::adapter::TxPowerIo for ScriptedSet {
+        async fn set_fixed_mbm(&self, _iface: &str, mbm: i32) -> bool {
+            self.accept_from_mbm.is_some_and(|from| mbm >= from)
+        }
+        async fn read_dbm(&self, _iface: &str) -> Option<f32> {
+            self.readback
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ensure_radiating_rejects_all_steps_returns_none() {
+        // Every step is rejected while the PHY reads back 20 dBm (the driver
+        // default): that is not a power this service set, so no value.
+        let io = FakeRadiate {
+            accept_from_mbm: None,
+            readback: Some(20.0),
+        };
         assert_eq!(
-            parse_iface_channel("Interface wlan1\n\ttype managed\n"),
+            ensure_radiating_with(&io, "wlan1", 149, 5, 10, false).await,
             None
         );
-        assert_eq!(parse_iface_channel(""), None);
-        // A bare `channel` keyword with no number is also None, not a panic.
-        assert_eq!(parse_iface_channel("\tchannel\n"), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readback_mismatch_reports_live() {
+        // 5 dBm accepted, but the PHY reads back 10 dBm: report what it runs.
+        let io = FakeRadiate {
+            accept_from_mbm: Some(0),
+            readback: Some(10.0),
+        };
+        assert_eq!(
+            ensure_radiating_with(&io, "wlan1", 149, 5, 10, false).await,
+            Some(10)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn readback_within_tolerance_reports_the_step() {
+        let io = FakeRadiate {
+            accept_from_mbm: Some(0),
+            readback: Some(5.5),
+        };
+        assert_eq!(
+            ensure_radiating_with(&io, "wlan1", 149, 5, 10, false).await,
+            Some(5)
+        );
     }
 }

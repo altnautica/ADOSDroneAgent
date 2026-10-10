@@ -48,6 +48,7 @@ import structlog
 from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import MESH_ID_PATH, PAIRING_SOCK
 
+from . import mesh_rekey, pairing_client, relay_rekey
 from .invite_crypto import InviteBundle
 from .pairing_manager import get_pairing_manager
 from .pairing_manager import (
@@ -99,6 +100,41 @@ def _build_invite_bundle() -> InviteBundle | None:
         issued_at_ms=now_ms,
         expires_at_ms=now_ms + 120_000,
     )
+
+
+_relay_rekey_listener: relay_rekey.RelayRekeyListener | None = None
+
+
+async def _listen_for_rekey(state: relay_rekey.RelayRekeyState) -> None:
+    """(Re)start the relay's re-key listener on the join port the receiver
+    recorded, applying bundles through the join's own persist path and the
+    receiver's batman restart."""
+    global _relay_rekey_listener
+    if _relay_rekey_listener is not None:
+        _relay_rekey_listener.stop()
+        _relay_rekey_listener = None
+    receiver = relay_rekey.RelayRekeyReceiver(
+        pairing_client.MESH_DIR,
+        state,
+        persist=pairing_client._persist_bundle,
+        restart=mesh_rekey.restart_batman,
+    )
+    listener = relay_rekey.RelayRekeyListener(receiver)
+    try:
+        await listener.start()
+    except OSError as exc:
+        log.error("relay_rekey_listen_failed", port=state.port, error=str(exc))
+        return
+    _relay_rekey_listener = listener
+
+
+async def _arm_relay_rekey(state: relay_rekey.RelayRekeyState) -> None:
+    """Persist a fresh join's re-key state and listen for re-sealed bundles."""
+    try:
+        relay_rekey.save_state(pairing_client.MESH_DIR, state)
+    except OSError as exc:
+        log.error("relay_rekey_state_write_failed", error=str(exc))
+    await _listen_for_rekey(state)
 
 
 async def _handle_op(op: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +203,9 @@ async def _handle_op(op: str, args: dict[str, Any]) -> dict[str, Any]:
                     "error": result.error_message or "join failed",
                     "error_code": result.error_code or "E_JOIN_FAILED",
                 }
+            rekey_state = getattr(result, "rekey", None)
+            if rekey_state is not None:
+                await _arm_relay_rekey(rekey_state)
             return {
                 "ok": True,
                 "result": {
@@ -242,6 +281,9 @@ async def main() -> None:
     # matches the in-process behavior and avoids holding the port when
     # no operator has asked for pairing.
     server = await asyncio.start_unix_server(_serve_connection, path=str(SOCKET_PATH))
+    stored_rekey = relay_rekey.load_state(pairing_client.MESH_DIR)
+    if stored_rekey is not None:
+        await _listen_for_rekey(stored_rekey)
     # Root-only. The daemon and its sole in-process client (the REST
     # handler in ados-api.service) both run as root, so 0o600 is
     # sufficient and prevents an unprivileged local user from sending
@@ -265,6 +307,8 @@ async def main() -> None:
         await shutdown.wait()
 
     slog.info("pairing_daemon_stopping")
+    if _relay_rekey_listener is not None:
+        _relay_rekey_listener.stop()
     try:
         SOCKET_PATH.unlink()
     except OSError:

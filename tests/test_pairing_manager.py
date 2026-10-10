@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from ados.services.ground_station import pair_journal
+from ados.services.ground_station import mesh_rekey, pair_journal, pairing_daemon
 from ados.services.ground_station import pairing_manager as pm
 from ados.services.ground_station.invite_crypto import (
     INVITE_CONTEXT,
@@ -50,12 +50,22 @@ CODE = "482910"
 
 @pytest.fixture
 def tmp_revocations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Redirect the revocations JSON path to a tmp file and clear cache."""
+    """Redirect the revocations JSON path to a tmp file and clear cache.
+
+    A revocation also re-keys the mesh, so the identity files, the bundle
+    source and the batman restart are redirected too: no test touches the
+    real mesh directory or systemd."""
     target = tmp_path / "revocations.json"
     monkeypatch.setattr(pm, "REVOCATIONS_PATH", target)
     # Clear the in-memory cache so each test starts clean.
     monkeypatch.setattr(pm, "_REVOCATIONS_CACHE", None)
     monkeypatch.setattr(pm, "_REVOCATIONS_CACHE_TS_NS", 0)
+    monkeypatch.setattr(
+        pm, "mesh_identity_paths", lambda: (tmp_path / "psk.key", tmp_path / "id")
+    )
+    monkeypatch.setattr(pairing_daemon, "_build_invite_bundle", lambda: None)
+    monkeypatch.setattr(mesh_rekey, "restart_batman", lambda: True)
+    monkeypatch.setattr(mesh_rekey, "arp_mac", lambda ip, *a, **k: None)
     return target
 
 
@@ -235,6 +245,80 @@ def test_revocations_reload_handles_corrupt_file(tmp_revocations: Path) -> None:
     pm._REVOCATIONS_CACHE = None
     pm._REVOCATIONS_CACHE_TS_NS = 0
     assert load_revocations() == set()
+
+
+class _FakeInviteChannel:
+    def __init__(self) -> None:
+        self.sent: list[tuple[bytes, tuple[str, int]]] = []
+
+    def send(self, blob: bytes, addr: tuple[str, int]) -> None:
+        self.sent.append((blob, addr))
+
+
+def test_revoke_rotates_psk_and_reseals(
+    tmp_path: Path, tmp_revocations: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    psk_path, id_path = tmp_path / "psk.key", tmp_path / "id"
+    old_psk = bytes(range(32))
+    psk_path.write_bytes(old_psk)
+    id_path.write_text("ados-0123456789\n", encoding="utf-8")
+
+    # Two approved relays: one kept, one about to be revoked.
+    keep_priv, keep_pub = generate_keypair()
+    _gone_priv, gone_pub = generate_keypair()
+    mesh_dir = tmp_revocations.parent
+    mesh_rekey.record_paired_relay(
+        mesh_dir,
+        mesh_rekey.PairedRelay("relay-keep", keep_pub.hex(), "192.168.1.50", 40001, CODE),
+    )
+    mesh_rekey.record_paired_relay(
+        mesh_dir,
+        mesh_rekey.PairedRelay(
+            "relay-gone", gone_pub.hex(), "192.168.1.51", 40002, CODE, "AA:BB:CC:DD:EE:02"
+        ),
+    )
+
+    def bundle_from_disk() -> InviteBundle:
+        now_ms = int(time.time() * 1000)
+        return InviteBundle(
+            mesh_id=id_path.read_text(encoding="utf-8").strip(),
+            mesh_psk=psk_path.read_bytes(),
+            drone_channel=149,
+            wfb_rx_key=b"",
+            receiver_mdns_host="receiver.local",
+            receiver_mdns_port=5800,
+            issued_at_ms=now_ms,
+            expires_at_ms=now_ms + 120_000,
+        )
+
+    restarts: list[bool] = []
+    monkeypatch.setattr(pairing_daemon, "_build_invite_bundle", bundle_from_disk)
+    monkeypatch.setattr(mesh_rekey, "restart_batman", lambda: restarts.append(True) or True)
+    channel = _FakeInviteChannel()
+
+    assert revoke("relay-gone", invite_channel=channel) is True
+
+    # The PSK and mesh id rotated, owner-only key.
+    new_psk = psk_path.read_bytes()
+    assert len(new_psk) == 32 and new_psk != old_psk
+    assert stat.S_IMODE(os.stat(psk_path).st_mode) == 0o600
+    new_id = id_path.read_text(encoding="utf-8").strip()
+    assert new_id.startswith("ados-") and len(new_id) == 5 + 8
+    assert new_id != "ados-0123456789"
+    # The revoked relay's device id and mesh MAC are listed.
+    assert {"relay-gone", "aa:bb:cc:dd:ee:02"} <= load_revocations()
+    # Only the kept relay got the re-sealed bundle, and it opens to the new PSK.
+    assert [addr for _blob, addr in channel.sent] == [("192.168.1.50", 40001)]
+    opened = decrypt_invite(channel.sent[0][0], keep_priv, CODE)
+    assert opened.mesh_psk == new_psk
+    assert opened.mesh_id == new_id
+    assert opened.mesh_psk != old_psk
+    # The batman bring-up restarted, and the revoked relay is no longer paired.
+    assert restarts == [True]
+    assert [r.device_id for r in mesh_rekey.load_paired_relays(mesh_dir)] == ["relay-keep"]
+    # A repeat revoke is a no-op: no second rotation.
+    assert revoke("relay-gone", invite_channel=channel) is False
+    assert psk_path.read_bytes() == new_psk
 
 
 # ---------------------------------------------------------------------------

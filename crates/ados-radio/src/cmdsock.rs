@@ -18,7 +18,8 @@
 //!     -> {"ok":true,"mcs_index":3}
 //! {"op":"set_tx_power","tx_power_dbm":10}
 //!     -> {"ok":true,"effective_dbm":10}   (effective can ramp UP from a
-//!        rejected low request; null when every step was rejected)
+//!        rejected low request, never past the ceiling; null when no in-budget
+//!        step was accepted)
 //! {"op":"set_tier","mode":"auto"}
 //!     -> {"ok":true,"mode":"auto","adaptive_bitrate_enabled":true}
 //! {"op":"set_tier","mode":"manual","mcs_index":3,"fec_k":8,"fec_n":10}
@@ -36,6 +37,7 @@
 //! preference. The socket only mutates the radio it owns; it never round-trips
 //! the on-disk config (the REST layer owns persistence).
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
 use std::sync::Arc;
@@ -126,14 +128,17 @@ impl TxPowerState {
 
 /// The shared radio state the command handlers mutate: the live process group
 /// (for the FEC/MCS/TX-power/manual-tier knobs), the adaptive-controller enable
-/// flag (for the auto/manual toggle), and the TX power record. The flag and the
-/// power record outlive a single radio bring-up; the `proc` handle is the
-/// current bring-up's group.
+/// flag (for the auto/manual toggle), the TX power record, and the operating
+/// posture the TX-power apply runs under. The flag and the power record
+/// outlive a single radio bring-up; the `proc` handle is the current
+/// bring-up's group.
 #[derive(Clone)]
 pub struct CmdState {
     pub proc: Arc<Mutex<RadioProcesses>>,
     pub adaptive_enabled: Arc<AtomicBool>,
     pub tx_power: Arc<TxPowerState>,
+    /// The resolved regulatory posture: `true` under unrestricted.
+    pub unrestricted: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,25 +312,19 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
             }
         }
         Command::SetTxPower { tx_power_dbm } => {
-            // The budget is enforced here, not only by the REST route: any
-            // client of this socket reaches the adapter through this arm.
-            if !state.tx_power.admits(tx_power_dbm) {
-                return json!({
-                    "ok": false,
-                    "error": "E_TX_POWER_RANGE",
-                    "min": TX_POWER_MIN_DBM,
-                    "max": state.tx_power.max_dbm(),
-                });
-            }
-            // TX power retunes the live adapter in place (no respawn). A driver
-            // that rejects every ramp step yields null; the REST layer still
-            // persists the operator's preference on that path. The request is
-            // recorded either way so every later bring-up applies it, and the
-            // accepted value becomes what the heartbeat reports.
-            state.tx_power.record_request(tx_power_dbm);
-            let effective = state.proc.lock().await.apply_tx_power(tx_power_dbm).await;
-            state.tx_power.record_applied(effective);
-            json!({"ok": true, "effective_dbm": effective})
+            let proc = state.proc.clone();
+            set_tx_power_cmd(
+                &state.tx_power,
+                state.unrestricted,
+                tx_power_dbm,
+                |dbm, max_dbm, unrestricted| async move {
+                    proc.lock()
+                        .await
+                        .apply_tx_power(dbm, max_dbm, unrestricted)
+                        .await
+                },
+            )
+            .await
         }
         Command::TierAuto => {
             state.adaptive_enabled.store(true, Ordering::Relaxed);
@@ -389,9 +388,66 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
     }
 }
 
+/// The `set_tx_power` arm: enforce the budget (any client of this socket
+/// reaches the adapter through here, not only the REST route), record the
+/// request, run `apply(dbm, max_dbm, unrestricted)` against the live adapter,
+/// and record what the driver accepted.
+///
+/// TX power retunes the live adapter in place (no respawn). A driver that
+/// accepts no in-budget ramp step yields null; the REST layer still persists
+/// the operator's preference on that path. The request is recorded either way
+/// so every later bring-up applies it.
+async fn set_tx_power_cmd<F, Fut>(
+    tx_power: &TxPowerState,
+    unrestricted: bool,
+    tx_power_dbm: i8,
+    apply: F,
+) -> Value
+where
+    F: FnOnce(i8, i8, bool) -> Fut,
+    Fut: Future<Output = Option<i8>>,
+{
+    if !tx_power.admits(tx_power_dbm) {
+        return json!({
+            "ok": false,
+            "error": "E_TX_POWER_RANGE",
+            "min": TX_POWER_MIN_DBM,
+            "max": tx_power.max_dbm(),
+        });
+    }
+    tx_power.record_request(tx_power_dbm);
+    let effective = apply(tx_power_dbm, tx_power.max_dbm(), unrestricted).await;
+    tx_power.record_applied(effective);
+    json!({"ok": true, "effective_dbm": effective})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The socket arm over a scripted `iw` runner: a low request the driver
+    /// rejects must never be retried above the ceiling (`max * 100` mBm).
+    #[tokio::test]
+    async fn set_tx_power_never_sets_above_the_ceiling() {
+        let state = TxPowerState::new(1, 3);
+        let io = crate::adapter::ScriptedTxPower::new(None, Some(20.0));
+        let v = set_tx_power_cmd(&state, false, 1, |dbm, max_dbm, unrestricted| {
+            crate::adapter::apply_tx_power_with(&io, "wlan1", dbm, max_dbm, unrestricted)
+        })
+        .await;
+        assert_eq!(v, json!({"ok": true, "effective_dbm": null}));
+        assert!(io.max_requested() <= 3 * 100);
+        assert_eq!(io.set_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(state.effective(), None);
+
+        // A request above the ceiling never reaches the runner.
+        let v = set_tx_power_cmd(&state, false, 5, |dbm, max_dbm, unrestricted| {
+            crate::adapter::apply_tx_power_with(&io, "wlan1", dbm, max_dbm, unrestricted)
+        })
+        .await;
+        assert_eq!(v["error"], "E_TX_POWER_RANGE");
+        assert_eq!(io.set_calls.load(Ordering::Relaxed), 1);
+    }
 
     /// The request always moves (every later bring-up applies it); the reported
     /// power moves only when the driver accepted a value, because a fully

@@ -449,6 +449,21 @@ impl HopState {
     }
 }
 
+/// The channel a whole-group respawn brings the radio up on: the hopped
+/// channel while the peer was heard within [`PEER_STALE_SECS`] of `now` (it is
+/// waiting there, and tuning home would split the pair), otherwise the
+/// rendezvous home (the same return-home rule the hop loop applies).
+pub fn respawn_channel(hop: &HopState, now: Instant) -> u8 {
+    let peer_fresh = hop
+        .peer_last_seen
+        .is_some_and(|t| now.saturating_duration_since(t).as_secs_f64() <= PEER_STALE_SECS);
+    if peer_fresh {
+        hop.channel
+    } else {
+        hop.home_channel
+    }
+}
+
 /// Wall-clock unix milliseconds, the diagnostic stamp a PresenceBeacon carries.
 pub fn now_unix_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -602,6 +617,22 @@ mod tests {
         let cold = derive_pair_key(None);
         let bound = derive_pair_key(Some(&[0u8; 64]));
         assert_ne!(cold, bound);
+    }
+
+    #[test]
+    fn respawn_channel_hopped_fresh_vs_stale() {
+        let now = Instant::now();
+        let mut state = HopState::new(149);
+        // Never linked: home.
+        assert_eq!(respawn_channel(&state, now), 149);
+        state.was_linked = true;
+        state.channel = 157;
+        // Hopped with a fresh peer: stay on the hopped channel.
+        state.peer_last_seen = Some(now - Duration::from_secs(3));
+        assert_eq!(respawn_channel(&state, now), 157);
+        // Hopped but the peer went stale: return home.
+        state.peer_last_seen = Some(now - Duration::from_secs(30));
+        assert_eq!(respawn_channel(&state, now), 149);
     }
 
     #[test]

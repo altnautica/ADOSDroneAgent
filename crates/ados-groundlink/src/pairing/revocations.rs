@@ -1,9 +1,11 @@
 //! Mesh-pairing revocation list.
 //!
-//! Ports `pairing_manager`'s revocation primitives: a sorted JSON array of
-//! revoked device-ids persisted at `/etc/ados/mesh/revocations.json` with
-//! **0600** perms (owner-only). A revoked relay's join request is dropped.
-//! `save` writes atomically (tmp + rename) with the list sorted, matching
+//! A sorted JSON array persisted at `/etc/ados/mesh/revocations.json` with
+//! **0600** perms (owner-only). It holds the revoked relays' device-ids (a
+//! revoked relay's join request is dropped) and, when the pairing manager could
+//! resolve it at revoke time, the relay's mesh MAC: the receiver reads the list
+//! every churn poll and never presents a listed MAC as a relay. `save` writes
+//! atomically (tmp + rename) with the list sorted, matching
 //! `json.dumps(sorted(revoked))`.
 
 use std::collections::BTreeSet;
@@ -11,9 +13,9 @@ use std::path::Path;
 
 use crate::paths::MESH_REVOCATIONS_JSON;
 
-/// Read the current revocation set from disk. A missing/unreadable/malformed
-/// file is an empty set (matching the Python `_read_revocations_from_disk`
-/// tolerance). Reads from the canonical Contract-E path.
+/// Read the current revocation set (device-ids and relay MACs) from disk. A
+/// missing/unreadable/malformed file is an empty set (matching the Python
+/// `_read_revocations_from_disk` tolerance). Reads from the canonical path.
 pub fn load() -> BTreeSet<String> {
     load_from(Path::new(MESH_REVOCATIONS_JSON))
 }

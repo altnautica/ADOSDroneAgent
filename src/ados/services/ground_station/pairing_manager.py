@@ -31,7 +31,10 @@ State machine (per node)::
 
 Revocation list is persisted at `/etc/ados/mesh/revocations.json`
 (0o600). When a revoked relay attempts to join, the request is silently
-dropped and `revoked` event published.
+dropped and `revoked` event published. A new revocation also adds the
+relay's mesh MAC (so the receiver stops presenting it as a relay), rotates
+the mesh PSK and mesh id, re-seals the new bundle to every relay still
+paired, and restarts `ados-batman` (see `mesh_rekey`).
 
 The module provides library-level primitives only. The REST router and
 OLED screens drive the lifecycle.
@@ -45,13 +48,15 @@ import os
 import socket
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from ados.core.logging import get_logger
-from ados.core.paths import MESH_REVOCATIONS_JSON
+from ados.core.paths import MESH_ID_PATH, MESH_PSK_PATH, MESH_REVOCATIONS_JSON
 
+from . import mesh_rekey
 from .events import PairingEvent, get_pairing_event_bus
 from .invite_crypto import (
     InviteBundle,
@@ -174,19 +179,78 @@ def save_revocations(revoked: set[str]) -> None:
     _REVOCATIONS_CACHE_TS_NS = time.monotonic_ns()
 
 
-def revoke(device_id: str) -> bool:
-    """Add ``device_id`` to the revocation set.
+def mesh_identity_paths() -> tuple[Path, Path]:
+    """The (PSK, mesh id) files the receiver's mesh bring-up reads: the
+    configured `ground_station.mesh.shared_key_path`, else the default."""
+    psk_path = MESH_PSK_PATH
+    try:
+        from ados.core.config import load_config
+
+        psk_path = Path(load_config().ground_station.mesh.shared_key_path)
+    except Exception as exc:  # noqa: BLE001 — an unreadable config keeps the default
+        log.warning("pairing_config_unreadable_using_default_psk_path", error=str(exc))
+    return psk_path, MESH_ID_PATH
+
+
+def revoke(
+    device_id: str,
+    *,
+    invite_channel: mesh_rekey.InviteChannel | None = None,
+) -> bool:
+    """Add ``device_id`` to the revocation set and re-key the mesh.
 
     Returns True when this call revoked it, False when it was already revoked
-    (nothing written).
+    (nothing written, no re-key). On a new revocation the relay's mesh MAC is
+    listed too when known, the PSK and mesh id are rotated, the new bundle is
+    re-sealed to every relay still paired, and `ados-batman` is restarted.
     """
     rs = load_revocations()
     if device_id in rs:
         return False
+    mesh_dir = REVOCATIONS_PATH.parent
+    relays = mesh_rekey.load_paired_relays(mesh_dir)
+    target = next((r for r in relays if r.device_id == device_id), None)
     rs.add(device_id)
+    if target is not None:
+        mac = target.mac or mesh_rekey.arp_mac(target.ip)
+        if mac:
+            rs.add(mac.lower())
     save_revocations(rs)
     log.info("pairing_revoked", device_id=device_id)
+
+    remaining = [r for r in relays if r.device_id not in rs]
+    _rekey_mesh(mesh_dir, remaining, invite_channel or mesh_rekey.UdpInviteChannel())
     return True
+
+
+def _rekey_mesh(
+    mesh_dir: Path,
+    remaining: list[mesh_rekey.PairedRelay],
+    channel: mesh_rekey.InviteChannel,
+) -> None:
+    """Rotate the PSK + mesh id, re-seal the new bundle to ``remaining`` and
+    restart the batman-adv bring-up. Each step is logged; a failed step does
+    not undo the revocation."""
+    psk_path, mesh_id_path = mesh_identity_paths()
+    try:
+        mesh_rekey.rotate_identity(psk_path, mesh_id_path)
+    except OSError as exc:
+        log.error("mesh_identity_rotation_failed", error=str(exc))
+        return
+    try:
+        mesh_rekey.save_paired_relays(mesh_dir, remaining)
+    except OSError as exc:
+        log.warning("paired_relays_write_failed", error=str(exc))
+    # Imported here: the daemon imports this module, and owns the bundle
+    # assembly (mesh id, PSK, drone rx key, receiver host and port).
+    from . import pairing_daemon
+
+    bundle = pairing_daemon._build_invite_bundle()
+    if bundle is None:
+        log.error("mesh_reseal_skipped_no_bundle")
+    else:
+        mesh_rekey.reseal(bundle, remaining, channel)
+    mesh_rekey.restart_batman()
 
 
 def unrevoke(device_id: str) -> None:
@@ -580,6 +644,13 @@ class PairingManager:
             )
             self._window.approvals[device_id] = int(time.time() * 1000)
             remote_addr = match.remote_addr
+            paired = mesh_rekey.PairedRelay(
+                device_id=device_id,
+                relay_pubkey_hex=match.relay_pubkey.hex(),
+                ip=remote_addr[0],
+                port=int(remote_addr[1]),
+                code=self._window.code,
+            )
             await _publish_pair_event(
                 self._bus,
                 PairingEvent(
@@ -620,6 +691,13 @@ class PairingManager:
                 "pairing_invite_no_socket",
                 device_id=device_id,
             )
+        # Remember the relay so a later revocation can re-seal the rotated
+        # bundle to it. Best-effort: approval already happened.
+        paired.mac = mesh_rekey.arp_mac(paired.ip)
+        try:
+            mesh_rekey.record_paired_relay(REVOCATIONS_PATH.parent, paired)
+        except OSError as exc:
+            log.warning("paired_relay_record_failed", device_id=device_id, error=str(exc))
         return blob
 
     async def snapshot(self) -> dict[str, Any]:
